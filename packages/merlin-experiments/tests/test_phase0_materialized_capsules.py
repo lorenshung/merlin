@@ -246,3 +246,53 @@ def test_exact_conformance_cohort_cannot_borrow_unselected_siblings(tmp_path):
     interface.write_text("malformed IR")
     malformed = CC.observe_cohort(inputs, [members["selected"]], target="fixture")
     assert any(row["reason"] == "capsule program is not inventoried" for row in malformed["blockers"])
+
+
+def test_selected_memory_regime_uses_frozen_facts_not_ambient_target(tmp_path, monkeypatch):
+    from merlin.targetgen.rtl import facts as rtl_facts
+
+    binding = CorpusBinding("fixture", 4, "int8", "i32", True, ["L0"], "exact_int")
+    capsule, program = build(
+        {
+            "name": "selected",
+            "cat": "isa",
+            "kind": "isa",
+            "op": "matmul",
+            "label": "public",
+            "M": 4,
+            "K": 4,
+            "N": 4,
+            "source_role": "derived_sweep",
+            "source_reference": "fixture",
+        },
+        binding,
+    )
+    member = tmp_path / "isa" / "selected"
+    member.mkdir(parents=True)
+    (member / "capsule.yaml").write_text(yaml.safe_dump(capsule))
+    (member / "capsule.interface.mlir").write_text(program)
+    artifact = {
+        "schema_version": "2.0",
+        "inputs": {},
+        "facts": {
+            "arrays": [{"name": "mesh", "rows": 16, "cols": 16}],
+            "datapaths": [{"name": "input", "dtype": "i8", "evidence": "scratchpad smem"}],
+            "memories": [{"name": "scratchpad", "bytes": 4096, "depth": 64}],
+        },
+    }
+    raw = json.dumps(artifact, sort_keys=True).encode()
+    digest = hashlib.sha256(raw).hexdigest()
+    requirement = {
+        "target": "fixture",
+        "cells": [],
+        "memory_mapping": {"required": {"fits_double": ["model"]}},
+        "derivation": {"phase0_execution": {"raw_facts_sha256": digest}},
+    }
+    inputs = {"evidence": {"raw_facts_sha256": digest}, "raw_facts_utf8": raw.decode()}
+    monkeypatch.setattr(rtl_facts, "load_facts", lambda *_: pytest.fail("ambient RTL facts were read"))
+    coverage = selected_cohort_coverage(requirement, [member], inputs=inputs)
+    assert coverage["memory_mapping"]["status"] == "ok"
+    assert coverage["memory_mapping"]["n_covered"] == 1
+    assert coverage["memory_mapping"]["covered_by"]["fits_double"] == ["selected"]
+    with pytest.raises(ValueError, match="selected RTL facts differ"):
+        selected_cohort_coverage(requirement, [member], inputs={**inputs, "raw_facts_utf8": raw.decode() + " "})

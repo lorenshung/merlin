@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import yaml
@@ -13,12 +14,12 @@ from ..spec import SpecError
 from .preparation import _members, source_run
 
 
-def selected_cohort_coverage(spec_doc: dict, roots: list[Path]) -> dict:
+def selected_cohort_coverage(spec_doc: dict, roots: list[Path], *, inputs: dict | None = None) -> dict:
     """Measure pure capsule axes; never borrow ambient target facts for admission.
 
-    Legacy routing and memory observers resolve a live target provider. Their
-    diagnostic output cannot qualify this selected snapshot until those readers
-    accept the exact selected contract/facts explicitly.
+    Legacy routing observers resolve a live target provider. Their diagnostic
+    output cannot qualify this selected snapshot until they accept the exact
+    selected contract explicitly. Memory regimes use byte-bound selected facts.
     """
     from merlin.targetgen.contract.materialize import cert_capsule_cover
 
@@ -48,7 +49,7 @@ def selected_cohort_coverage(spec_doc: dict, roots: list[Path]) -> dict:
             if required is not None
             else {"status": "not_measured", "reason": "selected requirement predates this coverage axis"}
         )
-    for axis in ("composition", "host_lane", "memory_mapping", "host_only"):
+    for axis in ("composition", "host_lane", "host_only"):
         block = spec_doc.get(axis) or {}
         required = block.get("families" if axis == "host_only" else "required")
         result[axis] = (
@@ -60,6 +61,50 @@ def selected_cohort_coverage(spec_doc: dict, roots: list[Path]) -> dict:
                 "required": required,
             }
         )
+    memory = (spec_doc.get("memory_mapping") or {}).get("required")
+    if memory is None:
+        result["memory_mapping"] = {
+            "status": "not_measured",
+            "reason": "selected requirement predates the memory-mapping axis",
+        }
+    elif not memory:
+        result["memory_mapping"] = {"status": "not_applicable", "n_required": 0, "uncovered": []}
+    else:
+        selected = inputs or {}
+        raw = selected.get("raw_facts_utf8")
+        selected_digest = (selected.get("evidence") or {}).get("raw_facts_sha256")
+        required_digest = ((spec_doc.get("derivation") or {}).get("phase0_execution") or {}).get(
+            "raw_facts_sha256"
+        )
+        if not isinstance(raw, str) or not selected_digest or not required_digest:
+            result["memory_mapping"] = {
+                "status": "not_measured",
+                "reason": "exact selected RTL facts are absent from coverage inputs or requirement",
+                "required": memory,
+            }
+        else:
+            digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+            if digest != selected_digest or digest != required_digest:
+                raise ValueError("selected RTL facts differ from the frozen requirement or coverage inputs")
+            from merlin.targetgen import memory_regime as MR
+
+            corpus = MR.corpus_regimes(roots, str(spec_doc.get("target") or ""), labels=labels, facts=json.loads(raw))
+            if corpus["capacity_rows"] is None:
+                result["memory_mapping"] = {
+                    "status": "not_measured",
+                    "reason": "selected RTL facts did not resolve an operand-store capacity for the cohort",
+                    "required": memory,
+                    "facts_sha256": digest,
+                }
+            else:
+                gap = MR.uncovered_regimes({"by_regime": memory}, corpus)
+                gap.update(
+                    status="ok",
+                    covered_by=corpus["by_regime"],
+                    region_counts=(spec_doc.get("memory_mapping") or {}).get("region_counts") or {},
+                    facts_sha256=digest,
+                )
+                result["memory_mapping"] = gap
     return result
 
 

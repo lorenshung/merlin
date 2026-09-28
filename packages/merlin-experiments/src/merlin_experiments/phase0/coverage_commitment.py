@@ -53,6 +53,9 @@ def selected_inputs(selection, *, accounting: dict) -> dict:
         "software_spec": selection.software_spec,
         "capability_contract": selection.contract,
         "conformance": requirement,
+        # Preserve the exact selected bytes so memory coverage can be recomputed
+        # without asking a live target registry for a possibly different artifact.
+        "raw_facts_utf8": selection.raw_facts.decode("utf-8") if selection.raw_facts is not None else None,
         "evidence": {"status": selection.status, "raw_facts_sha256": selection.raw_facts_sha256},
         "qualification": "selected inputs only; hardware, compilation and numerical execution remain independent",
     }
@@ -745,7 +748,11 @@ def observe_cohort(
     requirement = (inputs or {}).get("conformance")
     if isinstance(requirement, dict):
         try:
-            coverage = selected_cohort_coverage(requirement, sorted({Path(capsule["__dir__"]) for capsule in capsules}))
+            coverage = selected_cohort_coverage(
+                requirement,
+                sorted({Path(capsule["__dir__"]) for capsule in capsules}),
+                inputs=inputs,
+            )
         except (OSError, ValueError, RuntimeError) as exc:
             coverage = {"status": "not_measured", "reason": f"{type(exc).__name__}: {str(exc)[:500]}"}
     return build_commitment(inputs, observations, phase=phase, conformance_coverage=coverage)

@@ -188,6 +188,10 @@ does not establish capsule coverage or target execution. Check
 inspect `phase1-capsule-coverage.json` and `phase2-capsule-coverage.json`
 separately. The derived micro-model composition test reads the run's frozen
 iteration captures, not an ambient `out/artifacts/recaptures` directory.
+The memory-mapping axis reads the exact CIRCT facts bytes recorded in
+`capsules/_phase0/coverage-inputs.json`; a missing or changed facts snapshot
+leaves that axis unmeasured. This is pre-compiler corpus coverage, not evidence
+that a compiled program used the on-chip store correctly.
 
 Verified admission also requires reviewed software and host semantics, complete
 capture source closure, independent numerical and compiler checks, resolved
