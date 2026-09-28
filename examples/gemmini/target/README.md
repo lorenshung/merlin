@@ -120,6 +120,13 @@ final result does not prove that intermediate partial sums avoided wrapping.
 
 The host manifest now lists only typed matmul/batch-matmul candidates found in
 its pinned schedule. No standalone normalization or activation is claimed.
+Exact `ops` selectors do not widen to a shared semantic family: a declaration
+for `linalg.matmul` does not cover a captured `linalg.generic` contraction.
+Inspect `coverage/operation-accounting.json` against the selected schedule
+before reviewing the host declaration. A transform-interpreter success alone
+does not establish that a selector matched. Even a native whole-program result
+matching its saved golden is finite host-execution evidence, not per-operation
+RVV support, accelerator execution, or a reviewed host numerical contract.
 Typed load/readout candidates describe bit-preserving crossings; they remain
 unreviewed and never imply that FP32-to-int8 quantization, dispatch, or DMA
 execution was already implemented. The selected hardware readout recipe supplies
