@@ -113,14 +113,22 @@ def capture_selections(selections: list[str]) -> dict[str, Path]:
 def _validate_capture_recipes(captures: dict[str, Path], selected_recipe_hashes: set[str]) -> None:
     """A realized quantized graph must use a recipe this provider actually derived."""
     for label, path in sorted(captures.items()):
-        meta = json.loads(path.with_name("meta.json").read_bytes())
+        meta_path = path.with_name("meta.json")
+        if meta_path.is_symlink():
+            raise ValueError(f"{label}: capture metadata may not be a symlink")
+        meta = json.loads(meta_path.read_bytes())
         if not isinstance(meta, dict):
             raise ValueError(f"{label}: capture metadata must be a mapping")
         stats = meta.get("quantization_stats") or {}
         if not isinstance(stats, dict):
             raise ValueError(f"{label}: quantization statistics must be a mapping")
         actual = stats.get("recipe_sha256")
-        if actual is not None and actual not in selected_recipe_hashes:
+        if actual is not None and (
+            not isinstance(actual, str)
+            or len(actual) != 64
+            or any(char not in "0123456789abcdef" for char in actual)
+            or actual not in selected_recipe_hashes
+        ):
             raise ValueError(
                 f"{label}: capture used a different quantization recipe from the selected provider; "
                 "regenerate the capture from its selected Phase 0 recipe"

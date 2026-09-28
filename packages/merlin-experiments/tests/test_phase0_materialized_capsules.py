@@ -160,6 +160,10 @@ def test_quantized_capture_recipe_must_match_selected_provider(tmp_path):
     with pytest.raises(ValueError, match="iteration.*different quantization recipe"):
         _validate_capture_recipes(captures, {"b" * 64})
     _validate_capture_recipes(captures, {"a" * 64})
+    meta["quantization_stats"]["recipe_sha256"] = []
+    (bundle / "meta.json").write_text(json.dumps(meta))
+    with pytest.raises(ValueError, match="iteration.*different quantization recipe"):
+        _validate_capture_recipes(captures, {"a" * 64})
 
 
 def test_integer_golden_bound_uses_concrete_reduction_and_internal_width():
