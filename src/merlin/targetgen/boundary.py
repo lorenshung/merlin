@@ -671,14 +671,23 @@ def host_lane_coverage(
             # because its operands are not its entry tensor; a single-region capsule does not, and for
             # one the entry tensor IS the operand.
             declared = str(((cap.get("operation") or {}).get("attributes") or {}).get("dtype") or "")
+            matching = []
+            for pair in sorted(pairs):
+                if declared and declared != pair[1]:
+                    entry_tensor.setdefault(f"{pair[0]}/{pair[1]}", []).append(name)
+                else:
+                    matching.append(pair)
+            # An entry tensor of a different dtype is not compute work in this pair. Avoid
+            # profiling its unrelated mixed-model boundary, whose unresolved result would
+            # otherwise turn a complete host-lane axis into an unreadable one.
+            if not matching:
+                continue
             prof = profile_capsule(cy.parent, target, capability_contract=capability_contract)
             if prof.kind == UNKNOWN:
                 unread[name] = prof.detail
-            for pair in sorted(pairs):
+            for pair in matching:
                 key = f"{pair[0]}/{pair[1]}"
-                if declared and declared != pair[1]:
-                    entry_tensor.setdefault(key, []).append(name)
-                elif prof.kind == HOST_ONLY:
+                if prof.kind == HOST_ONLY:
                     covered.setdefault(key, []).append(name)
                 elif HOST_ONLY in (prof.contains or ()):
                     incidental.setdefault(key, []).append(name)
