@@ -13,7 +13,7 @@ import json
 import os
 import subprocess
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 SCHEMA = "merlin.python_capture_preflight.v1"
@@ -173,6 +173,82 @@ def _elf_dependencies(binary: Path) -> dict[str, Any]:
     }
 
 
+def _receipt_audit(receipt: Path, loader: Path, m2m_root: Path) -> dict[str, Any]:
+    """Compare *current* direct source bytes only; never attest a past execution."""
+    result: dict[str, Any] = {
+        "scope": "receipt_declared_direct_sources_only",
+        "receipt": _path(receipt, hash_file=True),
+        "status": "invalid_receipt",
+        "historical_execution_verified": False,
+        "source_closure_verified": False,
+        "loader": None,
+        "tool_sources": [],
+        "errors": [],
+    }
+    if not receipt.is_file():
+        result["errors"].append("Selected capture receipt is absent")
+        return result
+    try:
+        payload = json.loads(receipt.read_text())
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        result["errors"].append("Selected capture receipt is not readable JSON")
+        return result
+    if not isinstance(payload, dict) or payload.get("schema") != "m2m.capture-receipt.v1":
+        result["errors"].append("Selected capture receipt has an unsupported schema")
+        return result
+    source = payload.get("source")
+    tool = payload.get("tool")
+    owner_hashes = tool.get("source_sha256") if isinstance(tool, dict) else None
+    if not isinstance(source, dict) or not isinstance(owner_hashes, dict) or not owner_hashes:
+        result["errors"].append("Receipt omits source or direct tool source hashes")
+        return result
+    selected_path = source.get("path")
+    expected = source.get("sha256")
+    if not isinstance(selected_path, str) or not Path(selected_path).is_absolute():
+        result["errors"].append("Receipt loader path is not absolute")
+        return result
+    if Path(selected_path).absolute() != loader.absolute():
+        result["errors"].append("Receipt loader path differs from the selected loader")
+        return result
+    if not isinstance(expected, str) or len(expected) != 64:
+        result["errors"].append("Receipt loader digest is invalid")
+        return result
+    observed = _sha(loader) if loader.is_file() else None
+    result["loader"] = {
+        "expected_sha256": expected,
+        "observed_sha256": observed,
+        "status": "match" if expected == observed else "drift_or_missing",
+    }
+    for name, digest in sorted(owner_hashes.items()):
+        if not isinstance(name, str) or not isinstance(digest, str):
+            result["errors"].append("Receipt direct source entry is not a string pair")
+            continue
+        relative = PurePosixPath(name)
+        if relative.is_absolute() or any(part in {".", ".."} for part in relative.parts) or "\\" in name:
+            result["errors"].append("Receipt direct source path is unsafe")
+            continue
+        path = m2m_root.joinpath(*relative.parts)
+        if not relative.parts or any(part.is_symlink() for part in (path, *path.parents) if part != Path("/")):
+            result["errors"].append("Receipt direct source path is empty or traverses a symlink")
+            continue
+        observed = _sha(path) if path.is_file() else None
+        result["tool_sources"].append(
+            {
+                "name": name,
+                "expected_sha256": digest,
+                "observed_sha256": observed,
+                "status": "match" if observed == digest else "drift_or_missing",
+            }
+        )
+    if result["errors"]:
+        return result
+    all_match = result["loader"]["status"] == "match" and all(
+        row["status"] == "match" for row in result["tool_sources"]
+    )
+    result["status"] = "current_direct_sources_match" if all_match else "current_direct_sources_drift"
+    return result
+
+
 def inspect(
     *,
     worker: Path,
@@ -181,11 +257,16 @@ def inspect(
     python: Path,
     selected_env: dict[str, str] | None = None,
     data_paths: list[Path] | None = None,
+    capture_receipt: Path | None = None,
+    required_env_names: list[str] | None = None,
 ) -> dict[str, Any]:
     """Read selected current state only; return no historical or sealed claim."""
     worker, loader, m2m_root, python = map(Path, (worker, loader, m2m_root, python))
     selected_env = dict(selected_env or {})
     data_paths = list(data_paths or [])
+    required_env_names = list(required_env_names or [])
+    if any(not name.isidentifier() for name in required_env_names):
+        raise ValueError("Required environment names must be identifiers")
     manifest = loader.parent / "capture.toml"
     declared: dict[str, Any] = {}
     if manifest.is_file():
@@ -211,14 +292,17 @@ def inspect(
     }
     editable = _editable_roots(site) if site.is_dir() else []
     loader_source = loader.read_text() if loader.is_file() else ""
-    env_names = sorted(_loader_env_reads(loader_source) | (set(selected_env) & _CACHE_ENV))
+    loader_env_names = _loader_env_reads(loader_source)
+    env_names = sorted(loader_env_names | set(required_env_names) | (set(selected_env) & _CACHE_ENV))
     env_inputs = []
     for name in env_names:
         value = selected_env.get(name)
-        path_like = name.endswith(("_NPZ", "_CKPT", "_CHECKPOINT", "_PATH", "_DIR")) or name in _CACHE_ENV
+        path_like = name.endswith(("_NPZ", "_CKPT", "_CHECKPOINT", "_PATH", "_DIR", "_TOKEN_IDS")) or name in _CACHE_ENV
         env_inputs.append(
             {
                 "name": name,
+                "found_in_loader_source": name in loader_env_names,
+                "declared_by_caller": name in required_env_names,
                 "selection": "explicit" if value is not None else "not_selected",
                 "path": _selected_path(value) if path_like and value else None,
             }
@@ -269,6 +353,14 @@ def inspect(
             f"Dynamic-library metadata inspection incomplete: "
             f"{[x for x in (python_elf['error'], torch_elf['error']) if x]}"
         )
+    receipt_audit = _receipt_audit(capture_receipt, loader, m2m_root) if capture_receipt else None
+    if receipt_audit:
+        blockers.append(
+            "A prior capture receipt can only compare its declared direct source hashes with current files; "
+            "it cannot attest historical execution or complete Python source/runtime closure."
+        )
+        if receipt_audit["status"] != "current_direct_sources_match":
+            blockers.append("Selected capture receipt's direct source bytes are absent, changed, or invalid")
     return {
         "schema": SCHEMA,
         "inspector_source_sha256": _sha(Path(__file__)),
@@ -279,10 +371,13 @@ def inspect(
         "inputs": inputs,
         "editable_and_startup_paths": editable,
         "loader_environment_reads": env_inputs,
+        "caller_required_environment_names": sorted(set(required_env_names)),
         "environment_values_redacted": True,
         "unselected_loader_environment": unselected,
+        "unselected_caller_required_environment": sorted(set(unselected) & set(required_env_names)),
         "explicit_data_paths": [_path(path, hash_file=True) for path in data_paths],
         "dynamic_libraries": {"python": python_elf, "torch_extension": torch_elf},
+        "capture_receipt_audit": receipt_audit,
         "missing_paths": missing,
         "blockers": blockers,
         "next_step": (
@@ -301,6 +396,8 @@ def main() -> int:
         parser.add_argument(f"--{name.replace('_', '-')}", type=Path, required=True)
     parser.add_argument("--env", action="append", default=[], metavar="NAME=VALUE")
     parser.add_argument("--data-path", action="append", default=[], type=Path)
+    parser.add_argument("--capture-receipt", type=Path)
+    parser.add_argument("--require-env", action="append", default=[], metavar="NAME")
     args = parser.parse_args()
     selected_env = {}
     for item in args.env:
@@ -308,6 +405,8 @@ def main() -> int:
         if not sep or not name.isidentifier():
             parser.error("--env requires NAME=VALUE")
         selected_env[name] = value
+    if any(not name.isidentifier() for name in args.require_env):
+        parser.error("--require-env requires an environment variable name")
     result = inspect(
         worker=args.worker,
         loader=args.loader,
@@ -315,6 +414,8 @@ def main() -> int:
         python=args.python,
         selected_env=selected_env,
         data_paths=args.data_path,
+        capture_receipt=args.capture_receipt,
+        required_env_names=args.require_env,
     )
     output = args.output.absolute()
     output.parent.mkdir(parents=True, exist_ok=True)

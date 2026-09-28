@@ -65,6 +65,7 @@ python -m merlin_experiments.capture_execution.python_preflight \
   --loader /selected/model2MLIR/workloads/model/loader.py \
   --m2m-root /selected/model2MLIR \
   --python /selected/model2MLIR/.venv/bin/python \
+  --capture-receipt /selected/old-capture/capture_receipt.json \
   --output /generated/private-evidence/model-preflight.json
 ```
 
@@ -80,3 +81,16 @@ filesystem is a private, immutable snapshot of the selected venv, CPython base,
 editable sources, OS/CUDA libraries, model inputs/checkpoints and capture worker,
 then a fresh empty-root, network-disabled bubblewrap run. None of the current
 materialized captures may be upgraded by this preflight.
+
+The static loader scan sees literal environment reads in the loader file, not
+reads inside imported helpers. For a known delegated requirement, add
+`--require-env NAME` (for example, a token corpus path) so an unselected value
+is reported. This is a caller declaration, clearly marked in the result; it
+does not establish a complete dynamic environment or file-read inventory.
+
+`--capture-receipt` is optional. It compares that older receipt's loader and named
+M2M direct-owner digests against the **current** selected checkout, reporting exact
+drift or missing files. A match only means those declared files match now: the
+receipt does not enumerate transitive Python imports, runtime libraries, or data
+reads, and the comparison does not authenticate the earlier process. Rerun a fresh
+capture after any drift; never relabel the older one as source-closed.
