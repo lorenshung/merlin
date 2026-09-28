@@ -177,6 +177,15 @@ class Phase0SupportAccounting(unittest.TestCase):
             self.assertEqual(graph["n_operations"], 4)
             self.assertEqual(graph["shape_domain"]["status"], "unknown")
             self.assertTrue(graph["shape_domain"]["dynamic_value_ids"])
+            support = accounting["applications"]["dynamic"]["completeness"]["operation_obligations"][0]
+            self.assertEqual(support["role"], "support_lowering")
+            self.assertEqual(support["support_lowering_evidence"]["status"], "not_available")
+            self.assertNotIn("numerical_contracts", support["precision"])
+            self.assertEqual(support["required_placement_choices"], [])
+            self.assertEqual(
+                next(node for node in graph["nodes"] if node["mlir_operation"] == "tensor.empty")["accounting"],
+                "support_lowering_obligation",
+            )
 
     def test_normalization_preserves_exact_source_metadata_on_support_operations(self):
         from merlin.targetgen.application_graph import application_graph_inventory
@@ -207,6 +216,33 @@ class Phase0SupportAccounting(unittest.TestCase):
             self.assertEqual(original["source_node_ids"], normalized["source_node_ids"])
             self.assertEqual(original["attributes"], normalized["attributes"])
             self.assertEqual(graph["normalization_correspondence"]["status"], "serialization_equivalent")
+
+    def test_support_to_support_ssa_use_is_not_an_independent_lane_transfer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "model.mlir"
+            path.write_text("""builtin.module {
+              func.func @main() -> tensor<2xf32> {
+                %zero = arith.constant 0.0 : f32
+                %value = tensor.splat %zero : tensor<2xf32>
+                func.return %value : tensor<2xf32>
+              }
+            }""")
+            inventory = application_demand_inventory(
+                {"support": path},
+                "test_device",
+                detailed=True,
+                capability_contract={"name": "test_device", "compute_units": []},
+                include_graph=True,
+            )
+            completeness = build_operation_accounting(inventory)["applications"]["support"]["completeness"]
+            graph = completeness["graph_accounting"]
+            assert graph["n_operations"] == 5
+            assert len(completeness["operation_obligations"]) == 2
+            assert all(row["role"] == "support_lowering" for row in completeness["operation_obligations"])
+            assert completeness["transfer_obligations"] == []
+            assert [edge["accounting"] for edge in graph["edges"] if edge["accounting"] == "support_dependency"] == [
+                "support_dependency"
+            ]
 
     def test_joined_typed_partitions_and_conditional_transfer_are_honest(self):
         with tempfile.TemporaryDirectory() as directory:

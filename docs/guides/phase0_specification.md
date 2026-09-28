@@ -269,6 +269,17 @@ contract and SW signature constraints; it is not proof that a compiler lowered t
 The declared support universe also retains operations absent from the selected workloads.
 Do not use the observed subset to claim support for an entire untested ATen overload.
 
+The exact normalized graph keeps separate obligations for independent computation and
+support lowering. A `tensor.empty`, reshape, slice, constant or copy-like node remains
+in the node/SSA denominator, but is not an independent accelerator arithmetic demand:
+it needs a compiler-owned typed lowering and shape/value-preservation receipt. Until
+that receipt is verified, `support_lowering` and support-mediated SSA dependencies stay
+open. They are not assigned a host/device lane or counted as direct transfers merely
+because their source signature appears in a capsule. This avoids adding every lowered
+helper operation to the target's SW spec or claiming a nonexistent host fallback.
+Historical v1 coverage reports remain inspectable, but verified admission requires a
+newly frozen v2 report with these role-specific checks.
+
 Host and accelerator admission are independent: both may accept an operation, or neither
 may have sufficient evidence. Requested placement and actual execution are separate
 records. `host_required` means a host obligation, not demonstrated host compilation.
@@ -349,9 +360,10 @@ host work, or an unresolved/unsupported obligation. A capsule count is not an op
 coverage proof. Inspect omissions, independent goldens and placement checks, then follow
 the [generation and reviewed-release guide](generating_capsules.md).
 
-Verified whole-workload admission checks exact source lineage, reviewed operation and
-precision declarations, typed transfer obligations and coverage in the **actual admitted
-cohort**. A larger generated source pool is not proof that a selected cohort covers them.
+Verified whole-workload admission checks exact source lineage, reviewed independent
+compute placement/numerics, support-lowering and shape receipts, typed transfer
+obligations, and coverage in the **actual admitted cohort**. A larger generated source
+pool is not proof that a selected cohort covers them.
 The completeness record establishes test obligations, not a working target compiler:
 Phase 1 still has to lower, execute and numerically qualify its generated implementation.
 Existing hardware-source and independent-reference qualification requirements remain

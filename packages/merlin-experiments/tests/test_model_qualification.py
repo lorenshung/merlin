@@ -253,6 +253,46 @@ def test_conditional_ssa_edge_becomes_transfer_only_after_reviewed_placements(mo
     assert any("typed transfer lowering" in reason for reason in blockers)
 
 
+def test_support_lowering_does_not_become_a_host_lane_or_transfer_endpoint(monkeypatch):
+    from merlin_experiments.phase1 import model_routes
+
+    monkeypatch.setattr(model_routes, "_graph_totality", lambda *_: ({}, []))
+    monkeypatch.setattr(model_routes, "_source_complete", lambda *_: True)
+    application = {
+        "capture_sha256": "exact",
+        "capture_receipt": {"status": "verified_materialized", "source_closure_verified": True},
+        "n_mlir_operations": 2,
+        "completeness": {
+            "source_trace": {},
+            "operation_obligations": [
+                {
+                    "operation_ids": ["op:compute"],
+                    "role": "compute_placement",
+                    "status": "resolved",
+                    "precision": {"status": "resolved", "numerical_contracts": {"accelerator": {"status": "resolved"}}},
+                    "accelerator_admission": {"status": "admitted", "reviewed": True},
+                    "host_admission": {"status": "unsupported", "reviewed": True},
+                },
+                {
+                    "operation_ids": ["op:support"],
+                    "role": "support_lowering",
+                    "status": "resolved",
+                    "precision": {"status": "resolved"},
+                    "support_lowering_evidence": {"status": "not_available"},
+                },
+            ],
+            "graph_accounting": {"edges": [{"accounting": "support_dependency"}]},
+            "transfer_obligations": [],
+        },
+    }
+    summary, blockers = model_routes._ledger_observation(application, "exact")
+    assert summary["candidate_lanes"] == {"accelerator": 1}
+    assert summary["support_lowering"] == {"pending": 1, "support_dependencies": 1}
+    assert summary["conditional_ssa_edges"]["count"] == 0
+    assert any("support-lowering/shape" in reason for reason in blockers)
+    assert any("support-mediated" in reason for reason in blockers)
+
+
 def test_unobserved_oot_route_is_unresolved_not_a_compiler_decline():
     from merlin_experiments.phase1.model_routes import summarize_model_routes
 
