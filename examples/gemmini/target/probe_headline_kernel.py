@@ -130,7 +130,32 @@ def generate(
     return projection, root
 
 
+def _verified_generation(projection: dict, root: Path) -> dict:
+    """Bind a native run to the exact diagnostic files it is about to execute."""
+    generation_path = root / "generation.json"
+    generation = json.loads(generation_path.read_text(encoding="utf-8"))
+    capsule_path = root / "capsule.yaml"
+    interface_path = root / "capsule.interface.mlir"
+    capsule = yaml.safe_load(capsule_path.read_text(encoding="utf-8"))
+    if (
+        generation.get("schema") != "merlin.gemmini-headline-window-generation.v1"
+        or generation.get("status") != "generated_not_executed"
+        or generation.get("source_kernel_window") != projection
+        or capsule.get("source_kernel_window") != projection
+        or capsule.get("diagnostic_limits") != generation.get("diagnostic_limits")
+        or generation.get("capsule_sha256") != _sha(capsule_path)
+        or generation.get("interface_sha256") != _sha(interface_path)
+    ):
+        raise ValueError("native probe inputs differ from their generated source binding")
+    return {
+        "generation_sha256": _sha(generation_path),
+        "capsule_sha256": generation["capsule_sha256"],
+        "interface_sha256": generation["interface_sha256"],
+    }
+
+
 def run_native(projection: dict, root: Path, *, rtl: bool) -> dict:
+    generated_evidence = _verified_generation(projection, root)
     support = Path(os.environ["MERLIN_TARGET_PATH"]).resolve()
     if not (support / "backend/gemmini.py").is_file():
         raise ValueError("selected OOT Gemmini support has no backend/gemmini.py")
@@ -170,6 +195,7 @@ def run_native(projection: dict, root: Path, *, rtl: bool) -> dict:
             "target_admission": False,
         },
         "source_kernel_window": projection,
+        "generated_evidence": generated_evidence,
         "compiled_c_sha256": _sha(work / "main.c"),
         "elf_sha256": _sha(elf),
         "scalar_output_sha256": hashlib.sha256(json.dumps(scalar, separators=(",", ":")).encode()).hexdigest(),
@@ -187,6 +213,8 @@ def run_native(projection: dict, root: Path, *, rtl: bool) -> dict:
         (root / "verilator_console.log").write_text(console, encoding="utf-8")
         result["status"] = "spike_and_verilator_passed"
         result["verilator_cycles"] = metrics.get("cycles")
+    if _verified_generation(projection, root) != generated_evidence:
+        raise ValueError("native probe inputs changed during execution")
     _write(root / "numerical_receipt.json", result)
     return result
 

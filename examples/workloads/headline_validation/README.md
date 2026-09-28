@@ -169,6 +169,14 @@ Its operands are synthetic; this does not execute the model's operand values,
 the full contraction, or the complete frontend-to-device route. The generated
 probe and numerical receipt live under the local `out/artifacts/probes/` tree.
 
+The SmolVLA `flow_denoise` gate-projection window also matched scalar arithmetic
+on Spike and Verilator, but its captured body is BF16 and the Gemmini probe
+projects it to synthetic i8. It is a source-identified geometry check, not a
+numerical check of SmolVLA's captured dtype or operands. The selected
+Merlin capture worker currently refuses a full int8 SmolVLA session until
+its shared-weight precision policy is explicit; the separate one-step int8
+diagnostic cannot fill that session gap.
+
 The earlier TinyLlama lowering proof covers captured prefill and recurrent
 decode programs, not compiled host or accelerator numerical execution. The
 W8A8 reference check above is PyTorch-side only. The SmolVLA prefix guard branches

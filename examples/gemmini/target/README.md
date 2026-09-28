@@ -276,6 +276,10 @@ pointing to the selected Chipyard toolchain/simulator build. The example's
 Phase 0 contract supplies the authored corpus issue order; the probe checks
 that its shared compute-unit and encoding declarations agree with the OOT
 provider contract and records both contract hashes.
+Before native execution, the probe checks that the source projection, capsule
+and interface still match `generation.json`. The numerical receipt records the
+SHA-256 of all three generated files, so a result cannot be silently reassigned
+to a different generated diagnostic.
 Each simulator has a 180-second wall timeout. The source capture supplies
 geometry only: FP32/BF16 model captures do not establish an int8 model path.
 An actual quantized capture and integerization evidence are required before
