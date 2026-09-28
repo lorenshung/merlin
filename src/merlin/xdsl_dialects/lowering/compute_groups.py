@@ -1486,31 +1486,7 @@ def _operand_sum_entry(group: Group, *, name: str | None) -> dict[str, Any]:
 
 
 def demand(groups: Sequence[Group], *, weight_args: Collection[int] | None = None) -> dict[str, Any]:
-    """Every distinct accelerator group of a model as capsule entries, with what could not be stated.
+    """Keep the group-formation API stable while capsule reporting lives separately."""
+    from . import compute_group_demand
 
-    Stated in DEVICE form (:mod:`.group_command`): the stored tensor on the right, a gathered
-    convolution as the unit's own convolution, the stages in the readout's order. A demand in the
-    capture's form asks a backend for the framework's lowering, not for the layer.
-    """
-    from . import group_command
-
-    entries: dict[str, dict[str, Any]] = {}
-    unstated: Counter = Counter()
-    for group in groups:
-        if group.placement == HOST:
-            continue
-        if group.root is None:
-            # A unit took a region with no contraction in it. The capsule vocabulary states
-            # contraction groups only, so nothing can demand this one; say so rather than skip it.
-            unstated["a region placed on a unit has no contraction root to state"] += 1
-            continue
-        try:
-            entry = group_command.program(group, weight_args=weight_args).entry
-        except NoCapsuleForm as error:
-            unstated[str(error)] += 1
-            continue
-        # A multiplier is a number the same program is run with, not a different program.
-        numbers = ("name", "acc_scale", "lhs_scale", "rhs_scale")
-        key = repr(sorted((k, repr(v)) for k, v in entry.items() if k not in numbers))
-        entries.setdefault(key, {**entry, "count": 0})["count"] += 1
-    return {"entries": sorted(entries.values(), key=lambda e: -e["count"]), "unstated": dict(unstated)}
+    return compute_group_demand.demand(groups, weight_args=weight_args)
