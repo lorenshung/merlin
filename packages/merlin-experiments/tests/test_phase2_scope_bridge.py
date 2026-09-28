@@ -65,6 +65,9 @@ def test_scope_sw_screen_checks_emitted_regions_without_inventing_device_maps() 
     assert all(row["status"] == "unsupported" for row in observed["decisions"][2:])
     assert all("placement" in row["reason"] for row in observed["decisions"][2:])
     assert "scope_chain" not in observed["reason"]
+    inconsistent = copy.deepcopy(capsule)
+    inconsistent["operation"]["attributes"]["scope_region_ops"][2] = "matmul"
+    assert screen_entry(spec, entry, capsule=inconsistent)["status"] == "unsupported"
     first = diagnostic_entry(entry, observed)
     again = diagnostic_entry(first, observed)
     assert again["source_reference"] == first["source_reference"]
