@@ -24,12 +24,25 @@ def _symbol_name(value: object) -> bool:
     )
 
 
+def _payload_name(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and ("A" <= value[0] <= "Z" or "a" <= value[0] <= "z" or "0" <= value[0] <= "9" or value[0] == "_")
+        and all(
+            "A" <= char <= "Z" or "a" <= char <= "z" or "0" <= char <= "9" or char in "_.-"
+            for char in value[1:]
+        )
+        and value.endswith(".bin")
+        and Path(value).name == value
+    )
+
+
 def render_blob_asm(symbol: str, payload_name: str, *, align: int, elems: int) -> str:
     """Define an aligned C-visible symbol from exact binary input bytes."""
     if not _symbol_name(symbol):
         raise ValueError(f"invalid harness blob symbol {symbol!r}")
-    if (not isinstance(payload_name, str) or Path(payload_name).name != payload_name
-            or not payload_name.endswith(".bin")):
+    if not _payload_name(payload_name):
         raise ValueError(f"invalid harness blob payload name {payload_name!r}")
     if (type(align) is not int or type(elems) is not int or
             align < 1 or align & (align - 1) or elems < 1):

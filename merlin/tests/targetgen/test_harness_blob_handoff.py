@@ -9,7 +9,7 @@ import subprocess
 
 import pytest
 
-from merlin.targetgen.contract.harness_blobs import stage_harness_blobs
+from merlin.targetgen.contract.harness_blobs import render_blob_asm, stage_harness_blobs
 
 
 def test_blob_sidecar_assembles_to_exact_aligned_bytes(tmp_path):
@@ -45,6 +45,12 @@ def test_blob_sidecar_assembles_to_exact_aligned_bytes(tmp_path):
 def test_invalid_blob_declarations_fail_closed(tmp_path, declaration):
     with pytest.raises(ValueError):
         stage_harness_blobs(tmp_path, declaration)
+
+
+def test_blob_assembler_rejects_unsafe_payload_names():
+    for name in ('weights".bin', "weights\n.global injected.bin", "../weights.bin", "weights\\escape.bin"):
+        with pytest.raises(ValueError, match="invalid harness blob payload name"):
+            render_blob_asm("T_W", name, align=16, elems=32)
 
 
 def test_generic_linker_passes_renderer_blobs_to_the_executable(tmp_path, monkeypatch):
