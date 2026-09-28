@@ -7,6 +7,7 @@ import hashlib
 import sys
 from types import SimpleNamespace
 
+import pytest
 import yaml
 from merlin_experiments.phase0 import sweeps as SW
 from merlin_experiments.phase0.writer import _write_capsule
@@ -107,20 +108,35 @@ def test_each_supported_signature_gets_a_separate_cohort_and_over_cap_is_recorde
 
 
 def test_scope_law_metric_follows_selected_l3_oracle(monkeypatch) -> None:
-    from merlin.targetgen import target_experiment
+    from merlin.targetgen import oracle_policy, target_experiment
 
     monkeypatch.setattr(target_experiment, "load_capability_manifest", lambda target: SimpleNamespace(
         contract={"runner": {"tier_sim": {"L2": "reference_sim", "L3": "fallback_rtl"}}},
     ))
-    monkeypatch.setitem(sys.modules, "merlin.targetgen.capsule_runner", SimpleNamespace(
-        describe_l3_engine=lambda target: {"available": True, "engine": "selected_rtl"},
-    ))
+    monkeypatch.setitem(sys.modules, "merlin.targetgen.capsule_runner", None)
+    monkeypatch.setattr(oracle_policy, "selected_l3_engine_report", lambda target: {
+        "available": True, "engine": "selected_rtl",
+    })
     performance = _sweep()["base"]["performance"]
     resolved = SW._resolve_target_oracle_evidence(performance, "fixture")
     acceptance = resolved["acceptance"]
     assert acceptance["evidence"]["correctness_simulator"] == "reference_sim"
     assert acceptance["evidence"]["timing_simulator"] == "selected_rtl"
     assert acceptance["fit"]["dependent_metric"] == "selected_rtl_L3_cycles"
+
+
+def test_scope_law_refuses_generic_l3_label_when_engine_unavailable(monkeypatch) -> None:
+    from merlin.targetgen import oracle_policy, target_experiment
+
+    monkeypatch.setattr(target_experiment, "load_capability_manifest", lambda target: SimpleNamespace(
+        contract={"runner": {"tier_sim": {"L2": "reference_sim", "L3": "elaborated_rtl"}}},
+    ))
+    monkeypatch.setitem(sys.modules, "merlin.targetgen.capsule_runner", None)
+    monkeypatch.setattr(oracle_policy, "selected_l3_engine_report", lambda target: {
+        "available": False, "reason": "no selected engine",
+    })
+    with pytest.raises(ValueError, match="does not resolve L3 to a concrete simulator"):
+        SW._resolve_target_oracle_evidence(_sweep()["base"]["performance"], "fixture")
 
 
 def test_scope_member_survives_phase2_discovery_and_freeze(tmp_path) -> None:

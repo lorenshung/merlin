@@ -487,11 +487,13 @@ def _resolve_target_oracle_evidence(performance: dict, target: str) -> dict:
         concrete = None
         if tier == "L3":
             # L3 is a fidelity and may have several implementations. Resolve it through the same
-            # target-neutral policy grading uses, so a faster available engine changes the frozen
-            # evidence by derivation rather than by editing the shared profile.
-            from merlin.targetgen.capsule_runner import describe_l3_engine
+            # target-neutral metadata policy grading uses. The evaluator imports optional AET;
+            # Phase 0's frozen derivation wheel does not and must not import that owner merely
+            # to name the engine. An unavailable metadata route still fails below rather than
+            # substituting the generic fidelity label for a concrete simulator.
+            from merlin.targetgen.oracle_policy import selected_l3_engine_report
 
-            selection = describe_l3_engine(target)
+            selection = selected_l3_engine_report(target)
             if selection.get("available") and selection.get("engine"):
                 concrete = str(selection["engine"])
         if concrete is None and declared.get(tier):
