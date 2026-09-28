@@ -142,7 +142,16 @@ def lower_quant_ext(module) -> int:
     """
     from xdsl.dialects import arith, tensor
     from xdsl.dialects import math as mathd
-    from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, FloatAttr, IntegerType, TensorType
+    from xdsl.dialects.builtin import (
+        AffineMapAttr,
+        ArrayAttr,
+        Float64Type,
+        FloatAttr,
+        IntegerType,
+        TensorType,
+        f32,
+        f64,
+    )
     from xdsl.dialects.linalg import ops as linalg_ops
     from xdsl.ir import Block, Region
     from xdsl.ir.affine import AffineMap
@@ -182,14 +191,34 @@ def lower_quant_ext(module) -> int:
         )
         iters = ArrayAttr([linalg_ops.IteratorTypeAttr(linalg_ops.IteratorType.PARALLEL) for _ in range(rank)])
 
-        elem = out_t.element_type  # f32 or bf16 — arithmetic in the output type
+        elem = out_t.element_type
+        scale_elem = scale.type.element_type
+        # PT2E may request a BF16/FP16 result while retaining an f32 scale. MLIR arithmetic
+        # requires same-type operands. Keep same-type captures unchanged; for mixed precision,
+        # compute at the wider precision and round exactly once to the result element type.
+        # In particular, truncating the scale *before* multiplication would add a rounding
+        # absent from the captured quantization expression.
+        if elem == scale_elem:
+            compute_elem = elem
+        elif isinstance(elem, Float64Type) or isinstance(scale_elem, Float64Type):
+            compute_elem = f64
+        else:
+            compute_elem = f32
         body = Block(arg_types=[w.type.element_type, scale.type.element_type, zp.type.element_type, elem])
         wv, sv, zv, _ = body.args
-        wf = arith.SIToFPOp(wv, elem)
-        zf = arith.SIToFPOp(zv, elem)
+        wf = arith.SIToFPOp(wv, compute_elem)
+        zf = arith.SIToFPOp(zv, compute_elem)
         sub = arith.SubfOp(wf.result, zf.result)
-        mul = arith.MulfOp(sub.result, sv)
-        body.add_ops([wf, zf, sub, mul, linalg_ops.YieldOp(mul.result)])
+        scale_cast = arith.ExtFOp(sv, compute_elem) if scale_elem != compute_elem else None
+        mul = arith.MulfOp(sub.result, scale_cast.result if scale_cast is not None else sv)
+        result_cast = arith.TruncFOp(mul.result, elem) if elem != compute_elem else None
+        body.add_ops([wf, zf, sub])
+        if scale_cast is not None:
+            body.add_op(scale_cast)
+        body.add_op(mul)
+        if result_cast is not None:
+            body.add_op(result_cast)
+        body.add_op(linalg_ops.YieldOp(result_cast.result if result_cast is not None else mul.result))
 
         generic = linalg_ops.GenericOp(
             inputs=(w, scale, zp),
@@ -221,6 +250,12 @@ def lower_quant_ext(module) -> int:
         )
         iters = ArrayAttr([linalg_ops.IteratorTypeAttr(linalg_ops.IteratorType.PARALLEL) for _ in range(rank)])
         elem = value.type.element_type
+        scale_elem = scale.type.element_type
+        # quantized_decomposed.quantize_per_tensor promotes half-precision activations to
+        # f32 before reciprocal-scale multiplication, round-even, zero point, and clamp.
+        # A captured BF16 activation with an f32 scale otherwise produces mixed-type
+        # arith.mulf (and rounds the quotient at BF16 precision).
+        compute_elem = f64 if isinstance(elem, Float64Type) or isinstance(scale_elem, Float64Type) else f32
         qelem = out_t.element_type
         qmin_attr = op.properties.get("quant_min") or op.attributes.get("quant_min")
         qmax_attr = op.properties.get("quant_max") or op.attributes.get("quant_max")
@@ -251,17 +286,26 @@ def lower_quant_ext(module) -> int:
         carry_provenance(inv_generic, op, "quant_reciprocal")
 
         empty = tensor.EmptyOp((), out_t)
-        qmin_c = arith.ConstantOp(FloatAttr(float(qmin), elem))
-        qmax_c = arith.ConstantOp(FloatAttr(float(qmax), elem))
+        qmin_c = arith.ConstantOp(FloatAttr(float(qmin), compute_elem))
+        qmax_c = arith.ConstantOp(FloatAttr(float(qmax), compute_elem))
         body = Block(arg_types=[elem, scale.type.element_type, zp.type.element_type, qelem])
         xv, inv_sv, zv, _ = body.args
-        scaled = arith.MulfOp(xv, inv_sv)
+        value_cast = arith.ExtFOp(xv, compute_elem) if elem != compute_elem else None
+        scale_cast = arith.ExtFOp(inv_sv, compute_elem) if scale_elem != compute_elem else None
+        scaled = arith.MulfOp(
+            value_cast.result if value_cast is not None else xv,
+            scale_cast.result if scale_cast is not None else inv_sv,
+        )
         rounded = mathd.RoundEvenOp(scaled.result)
-        zpf = arith.SIToFPOp(zv, elem)
+        zpf = arith.SIToFPOp(zv, compute_elem)
         shifted = arith.AddfOp(rounded.result, zpf.result)
         low = arith.MaximumfOp(shifted.result, qmin_c.results[0])
         high = arith.MinimumfOp(low.result, qmax_c.results[0])
         converted = arith.FPToSIOp(high.result, qelem)
+        if value_cast is not None:
+            body.add_op(value_cast)
+        if scale_cast is not None:
+            body.add_op(scale_cast)
         body.add_ops([scaled, rounded, zpf, shifted, low, high, converted, linalg_ops.YieldOp(converted.result)])
         generic = linalg_ops.GenericOp(
             inputs=(value, inv_generic.results[0], zp),
