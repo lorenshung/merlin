@@ -132,3 +132,64 @@ def test_phase2_guard_link_does_not_credit_missing_negative_lane(tmp_path, monke
     link = build_guard_link(corpus, inputs, phase1, phase2)
     assert link["status"] == "incomplete"
     assert link["coverage"]["host_lane"]["uncovered"] == ["movement/f32"]
+
+
+def test_fused_stages_and_carried_state_are_byte_bound_functional_guards(tmp_path, monkeypatch):
+    from merlin.targetgen import boundary
+
+    corpus, inputs, phase1, phase2 = _fixture(tmp_path)
+    stages = ("relu", "acc_scale", "bias_add")
+    members = ["model_slices/negative"]
+    for stage in stages:
+        member = f"layers/fused_{stage}"
+        directory = corpus / member
+        directory.mkdir(parents=True)
+        (directory / "capsule.mlir").write_text("module {}\n")
+        (directory / "capsule.yaml").write_text(yaml.safe_dump({
+            "name": directory.name, "label": "public", "source_role": "derived_sweep",
+            "linalg_mlir": "capsule.mlir", "semantic": {"generalization_axis": "epilogue"},
+            "operation": {"op": "matmul", "attributes": {"epilogue": [stage]}},
+        }))
+        members.append(member)
+    member = "layers/carried_relu"
+    directory = corpus / member
+    directory.mkdir(parents=True)
+    (directory / "capsule.mlir").write_text("module {}\n")
+    (directory / "capsule.yaml").write_text(yaml.safe_dump({
+        "name": directory.name, "label": "public", "source_role": "derived_sweep",
+        "linalg_mlir": "capsule.mlir", "semantic": {"generalization_axis": "carried_state"},
+        "operation": {"op": "resident_reuse", "attributes": {"matmuls": [
+            {"epilogue": ["relu"]}, {"epilogue": []},
+        ]}},
+        "stimulus_range": [-4, 3],
+    }))
+    members.append(member)
+    inputs["conformance"]["epilogue"] = {"required": [{"stage": stage} for stage in stages]}
+    inputs["conformance"]["carried_state"] = {"required": [{"stage": "relu"}]}
+    manifest_path = corpus / "MANIFEST.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text())
+    manifest["generated"] = members + ["_perf/throughput"]
+    manifest["phase_corpora"]["fixture"] = generate_phase_selections(
+        manifest["generated"], performance_category="_perf"
+    )
+    manifest_path.write_text(yaml.safe_dump(manifest))
+    phase1_rows = [{
+        "name": (corpus / member).name,
+        "sha256": fingerprint(corpus / member),
+        "program_sha256": hashlib.sha256((corpus / member / "capsule.mlir").read_bytes()).hexdigest(),
+    } for member in members]
+    phase1 = {"inputs_sha256": _digest(inputs), "cohort": {
+        "capsules": phase1_rows, "sha256": _digest(phase1_rows),
+    }}
+    phase2["inputs_sha256"] = _digest(inputs)
+    monkeypatch.setattr(boundary, "host_lane_coverage", lambda *args, **kwargs: {
+        "status": "ok", "n_required": 1, "n_covered": 1, "uncovered": [],
+    })
+    link = build_guard_link(corpus, inputs, phase1, phase2)
+    assert link["status"] == "axis_coverage_complete"
+    assert link["coverage"]["epilogue"]["n_covered"] == len(stages)
+    assert link["coverage"]["carried_state"]["n_covered"] == 1
+    assert {row["member"] for row in link["guards"]} == set(members)
+    assert all("performance" not in yaml.safe_load((corpus / member / "capsule.yaml").read_text())
+               for member in members[1:])
+    verify_guard_link(link, corpus, inputs, phase1, phase2)

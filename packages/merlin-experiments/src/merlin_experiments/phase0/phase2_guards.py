@@ -1,7 +1,7 @@
 """Byte-bound functional guard inputs for the separate Phase 2 performance cohort.
 
-Phase 2 performance capsules need real measurement claims. Host-only negative-lane
-capsules have no accelerator performance to claim, so they remain Phase 1 source
+Phase 2 performance capsules need real measurement claims. Negative-lane,
+epilogue-fusion, and carried-configuration witnesses remain Phase 1 source
 members and are referenced here as functional regression inputs, never recast as
 performance capsules or evidence that a Phase 2 compiler executed them.
 """
@@ -14,7 +14,7 @@ from pathlib import Path
 import yaml
 
 from merlin.common.digest import sha256_bytes
-from merlin.targetgen import boundary
+from merlin.targetgen import boundary, conformance
 
 from ..corpus.coverage import _selected_contract
 from ..corpus.phase_selection import validate_phase_selections
@@ -81,7 +81,7 @@ def _selected_members(corpus: Path, inputs: dict, phase1_report: dict, phase2_re
 
 
 def build_guard_link(corpus: Path, inputs: dict, phase1_report: dict, phase2_report: dict) -> dict:
-    """Reference only selected generated negative-lane capsules, with exact byte identity.
+    """Reference selected functional witnesses by exact bytes and requirement axis.
 
     This is Phase 0 source coverage, not proof of Phase 2 compiler behaviour. The
     guard inputs must be rerun after optimization to establish preservation.
@@ -92,13 +92,13 @@ def build_guard_link(corpus: Path, inputs: dict, phase1_report: dict, phase2_rep
     contract = _selected_contract(spec, inputs)
     if contract is None:
         raise ValueError("Phase 2 guard link lacks the exact selected capability contract")
-    guards = [
+    negative_guards = [
         (member, directory, row)
         for member, directory, descriptor, row in selected["phase1"]
         if descriptor.get("source_role") == "derived_sweep"
         and "on_mesh" in ((descriptor.get("lanes") or {}).get("forbid") or ())
     ]
-    roots = [directory for _, directory, _ in guards]
+    roots = [directory for _, directory, _ in negative_guards]
     host_lane = (
         boundary.host_lane_coverage(spec, roots, labels={"public", "dev"}, capability_contract=contract)
         if (spec.get("host_lane") or {}).get("required") is not None
@@ -113,7 +113,31 @@ def build_guard_link(corpus: Path, inputs: dict, phase1_report: dict, phase2_rep
             else {"status": "not_measured", "reason": "selected requirement lacks the host-only axis"}
         )
     )
-    coverage = {"host_lane": host_lane, "host_only": host_only}
+    functional_axes = {"epilogue": [], "carried_state": []}
+    for member, directory, descriptor, row in selected["phase1"]:
+        if descriptor.get("source_role") != "derived_sweep":
+            continue
+        axis = ((descriptor.get("semantic") or {}).get("generalization_axis"))
+        if axis in functional_axes:
+            functional_axes[axis].append((member, directory, row))
+    epilogue_required = (spec.get("epilogue") or {}).get("required")
+    carried_required = (spec.get("carried_state") or {}).get("required")
+    epilogue = (
+        conformance._epilogue_gap(epilogue_required, [directory for _, directory, _ in functional_axes["epilogue"]],
+                                  labels={"public", "dev"})
+        if epilogue_required is not None
+        else {"status": "not_applicable", "n_required": 0, "n_covered": 0, "uncovered": []}
+    )
+    carried_state = (
+        conformance._carried_state_gap(
+            carried_required, [directory for _, directory, _ in functional_axes["carried_state"]],
+            labels={"public", "dev"},
+        )
+        if carried_required is not None
+        else {"status": "not_applicable", "n_required": 0, "n_covered": 0, "uncovered": []}
+    )
+    coverage = {"host_lane": host_lane, "host_only": host_only,
+                "epilogue": epilogue, "carried_state": carried_state}
     complete = all(
         axis.get("status") in {"ok", "not_applicable"}
         and not axis.get("uncovered")
@@ -130,7 +154,11 @@ def build_guard_link(corpus: Path, inputs: dict, phase1_report: dict, phase2_rep
         "phase2_performance_cohort_sha256": phase2_report["cohort"]["sha256"],
         "guards": [
             {"member": member, "name": row["name"], "sha256": row["sha256"], "program_sha256": row["program_sha256"]}
-            for member, _, row in guards
+            for member, _, row in sorted(
+                {member: (member, directory, row) for member, directory, row in (
+                    negative_guards + functional_axes["epilogue"] + functional_axes["carried_state"]
+                )}.values()
+            )
         ],
         "coverage": copy.deepcopy(coverage),
         "qualification": (
