@@ -61,8 +61,9 @@ def exact_int_mm_generic_operation(op) -> bool:
 def verify_capture_receipt(path: str | Path) -> dict:
     """Verify the capture's materialized artifact bytes against its adjacent receipt.
 
-    This says nothing about source closure: the receipt records that separately. Older diagnostic
-    captures remain inventoryable and explicitly report ``unverified``.
+    This says nothing about source closure. A producer's self-declared closure flag
+    is not an independent execution attestation and must never be projected into
+    Phase 0 admission. Older diagnostic captures remain inventoryable.
     """
     capture = Path(path)
     receipt_path = capture.parent / "capture_receipt.json"
@@ -148,7 +149,9 @@ def verify_capture_receipt(path: str | Path) -> dict:
     result = {
         "status": "verified_materialized" if not errors else "unverified",
         "receipt_sha256": digest,
-        "source_closure_verified": doc.get("source_closure_verified") is True,
+        # Only a separately verified sealed-execution issuer may establish this.
+        # The materialized receipt is producer-authored, even when all its bytes match.
+        "source_closure_verified": False,
         "errors": errors,
     }
     if (

@@ -362,6 +362,15 @@ def test_static_integer_slices_require_saved_byte_bound_complete_finite_conversi
     observed = verify_capture_receipt(tmp_path / "model.mlir")
     projection = observed.pop("capture_integerization")
     assert observed["status"] == "verified_materialized" and observed["source_closure_verified"] is False
+    # A producer can edit its own receipt. Materialization verification must not
+    # upgrade that claim to independently verified source closure.
+    receipt["source_closure_verified"] = True
+    (tmp_path / "capture_receipt.json").write_text(json.dumps(receipt))
+    claimed = verify_capture_receipt(tmp_path / "model.mlir")
+    assert claimed["status"] == "verified_materialized"
+    assert claimed["source_closure_verified"] is False
+    receipt["source_closure_verified"] = False
+    (tmp_path / "capture_receipt.json").write_text(json.dumps(receipt))
     app = full["applications"]["app"]
     app.update(
         capture_sha256=artifacts["model.mlir"]["sha256"],
