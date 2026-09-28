@@ -242,3 +242,34 @@ On a read-only Chipyard tree, the attester copies the selected FIRRTL and projec
 only the two hierarchy-output annotation filenames into its ignored artifact;
 it records both annotation hashes and the exact path changes, then still requires
 byte-for-byte equality of generated core RTL, Verilator C++, and the executable.
+
+### Diagnose one headline-derived kernel window
+
+`probe_headline_kernel.py` takes a captured `frontend-trace.json` and its exact
+`model.mlir`, one prepared-graph source node ID, selected RTL facts, and a
+capability contract. It refuses a stale trace or ambiguous operation. The
+generated capsule records the original operation ordinal, operand types,
+model/trace hashes and full matrix geometry, then derives a small integer
+window from the RTL mesh edge. For example, TinyLlama's `k_proj` body
+`g:prepared:root:n280` in the 8-token prefill capture has source geometry
+8×2048×256; the selected 16-wide mesh gives an 8×32×16 diagnostic window.
+No dimensions are copied into the generator.
+
+```sh
+python examples/gemmini/target/probe_headline_kernel.py \
+  --capture "$HEADLINE_ROOT/tinyllama-prefill" \
+  --source-node-id g:prepared:root:n280 \
+  --rtl-facts "$RTL_ROOT/facts.json" \
+  --support-contract "$MERLIN_TARGET_PATH/contracts/target_contract.yaml" \
+  --output-root out/artifacts/probes/headline-tiny-kproj-1
+```
+
+The default generates `capsule.yaml`, `capsule.interface.mlir` and
+`generation.json` without running a simulator. Add `--native` for independent
+scalar-versus-Gemmini Spike output checks; add `--rtl` to execute the same ELF
+on Verilator. Native mode requires the explicitly selected OOT support contract.
+Each simulator has a 180-second wall timeout. The source capture supplies
+geometry only: FP32/BF16 model captures do not establish an int8 model path.
+An actual quantized capture and integerization evidence are required before
+claiming the model invokes a corresponding int8 contraction, though they are
+not required to check this synthetic Gemmini kernel's arithmetic.

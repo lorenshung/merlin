@@ -51,22 +51,22 @@ def literal_array(c_source: str, name: str) -> list[int]:
     return values
 
 
-def rounded(value: int) -> int:
-    return ((value + TILE - 1) // TILE) * TILE
+def rounded(value: int, tile: int = TILE) -> int:
+    return ((value + tile - 1) // tile) * tile
 
 
-def inputs_and_scalar(c_source: str, m: int, k: int, n: int):
+def inputs_and_scalar(c_source: str, m: int, k: int, n: int, *, tile: int = TILE):
     a_flat = literal_array(c_source, "A0")
     w_flat = literal_array(c_source, "W")
-    a_pitch, w_pitch = rounded(k), rounded(n)
-    if len(a_flat) != rounded(m) * a_pitch or len(w_flat) != rounded(k) * w_pitch:
+    a_pitch, w_pitch = rounded(k, tile), rounded(n, tile)
+    if len(a_flat) != rounded(m, tile) * a_pitch or len(w_flat) != rounded(k, tile) * w_pitch:
         raise ValueError("compiled input-array lengths differ from tile-padded capsule geometry")
     # Device loads the tile-padded arrays. Preserve exact row strides and require
     # every padding byte to be zero; a wrong stride/tail cannot be hidden by a
     # separately generated mathematical input.
-    if any(a_flat[i * a_pitch + j] for i in range(rounded(m)) for j in range(a_pitch) if i >= m or j >= k):
+    if any(a_flat[i * a_pitch + j] for i in range(rounded(m, tile)) for j in range(a_pitch) if i >= m or j >= k):
         raise ValueError("nonzero A padding")
-    if any(w_flat[i * w_pitch + j] for i in range(rounded(k)) for j in range(w_pitch) if i >= k or j >= n):
+    if any(w_flat[i * w_pitch + j] for i in range(rounded(k, tile)) for j in range(w_pitch) if i >= k or j >= n):
         raise ValueError("nonzero W padding")
     a = [[a_flat[i * a_pitch + t] for t in range(k)] for i in range(m)]
     w = [[w_flat[t * w_pitch + j] for j in range(n)] for t in range(k)]
