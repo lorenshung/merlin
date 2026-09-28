@@ -459,13 +459,15 @@ def _accum_for_encoding(target: str, operand: str, fallback: str | None) -> str:
     )
 
 
-def _resolve_target_oracle_evidence(performance: dict, target: str) -> dict:
+def _resolve_target_oracle_evidence(
+    performance: dict, target: str, *, oracle_selection: dict[str, str] | None = None
+) -> dict:
     """Resolve ``$target_oracle:<tier>`` evidence placeholders from the target's own oracle route.
 
-    The shared profile must not name one target's simulator binary.  At generation time the target is
-    known, so its contract supplies ordinary tiers and its RTL-engine policy supplies the concrete L3
-    implementation selected for an elaborated-RTL fidelity.  The resolved names are frozen into the
-    capsule acceptance contract together with the placeholders they came from.
+    The shared profile must not name one target's simulator binary. An explicit
+    recipe selects concrete engines without probing the build host; legacy
+    profiles use the target's contract and RTL-engine policy. Resolved engine,
+    metric and oracle-kind names are frozen with their source placeholders.
     """
     acceptance = performance.get("acceptance")
     evidence = acceptance.get("evidence") if isinstance(acceptance, dict) else None
@@ -473,7 +475,9 @@ def _resolve_target_oracle_evidence(performance: dict, target: str) -> dict:
         return performance
     prefix = "$target_oracle:"
     pending = {key: value for key, value in evidence.items() if isinstance(value, str) and value.startswith(prefix)}
-    if not pending:
+    kind_placeholder = evidence.get("timing_oracle_kind")
+    kind_pending = isinstance(kind_placeholder, str) and kind_placeholder.startswith("$target_oracle_kind:")
+    if not pending and not kind_pending:
         return performance
     from merlin.targetgen.target_experiment import load_capability_manifest
 
@@ -485,7 +489,16 @@ def _resolve_target_oracle_evidence(performance: dict, target: str) -> dict:
         if not tier:
             raise ValueError(f"{target}: empty tier in performance evidence placeholder {placeholder!r}")
         concrete = None
-        if tier == "L3":
+        if oracle_selection is not None:
+            concrete = oracle_selection.get(tier)
+            if not concrete or concrete == "elaborated_rtl":
+                raise ValueError(f"{target}: explicit Phase 0 oracle selection has no concrete {tier}")
+            declared_engine = declared.get(tier)
+            if declared_engine and declared_engine != "elaborated_rtl" and concrete != declared_engine:
+                raise ValueError(
+                    f"{target}: selected {tier} oracle {concrete!r} conflicts with target contract {declared_engine!r}"
+                )
+        elif tier == "L3":
             # L3 is a fidelity and may have several implementations. Resolve it through the same
             # target-neutral metadata policy grading uses. The evaluator imports optional AET;
             # Phase 0's frozen derivation wheel does not and must not import that owner merely
@@ -496,7 +509,7 @@ def _resolve_target_oracle_evidence(performance: dict, target: str) -> dict:
             selection = selected_l3_engine_report(target)
             if selection.get("available") and selection.get("engine"):
                 concrete = str(selection["engine"])
-        if concrete is None and declared.get(tier):
+        if oracle_selection is None and concrete is None and declared.get(tier):
             concrete = str(declared[tier])
         if not concrete or concrete == "elaborated_rtl":
             raise ValueError(
@@ -505,6 +518,20 @@ def _resolve_target_oracle_evidence(performance: dict, target: str) -> dict:
             )
         evidence[key] = concrete
         resolved_from[key] = placeholder
+    if kind_pending:
+        kind_tier = kind_placeholder.partition(":")[2]
+        simulator = evidence.get("timing_simulator")
+        if kind_tier != "L3" or evidence.get("timing_tier") != kind_tier:
+            raise ValueError(f"{target}: timing oracle kind must name the selected L3 tier")
+        if (
+            not isinstance(simulator, str)
+            or not simulator
+            or simulator.startswith("$")
+            or simulator == "elaborated_rtl"
+        ):
+            raise ValueError(f"{target}: selected L3 timing simulator cannot name an oracle kind")
+        evidence["timing_oracle_kind"] = f"rtl_{simulator}"
+        resolved_from["timing_oracle_kind"] = kind_placeholder
     evidence["resolved_from"] = resolved_from
     fit = acceptance.get("fit")
     if isinstance(fit, dict) and fit.get("dependent_metric") == "$target_oracle_metric:L3":
@@ -515,7 +542,9 @@ def _resolve_target_oracle_evidence(performance: dict, target: str) -> dict:
     return performance
 
 
-def _materialize_performance_entry(entry: dict, binding) -> dict:
+def _materialize_performance_entry(
+    entry: dict, binding, *, oracle_selection: dict[str, str] | None = None
+) -> dict:
     """Resolve a performance member onto a runnable direct corpus path.
 
     Dtypes come from workload_gen's capability-manifest accessor and must agree
@@ -559,7 +588,12 @@ def _materialize_performance_entry(entry: dict, binding) -> dict:
     entry["source"] = "direct"
     entry["operand_dtype"] = operand_dtype
     performance = copy.deepcopy(entry["performance"])
-    performance = _resolve_target_oracle_evidence(performance, target)
+    if oracle_selection is None:
+        performance = _resolve_target_oracle_evidence(performance, target)
+    else:
+        performance = _resolve_target_oracle_evidence(
+            performance, target, oracle_selection=oracle_selection
+        )
     performance["emitter"] = copy.deepcopy(performance["emitter"])
     performance["emitter"]["resolved"] = {
         "source": "direct",
@@ -984,7 +1018,12 @@ def expand_sweeps(
                 seen.add(entry["name"])
                 if is_performance:
                     try:
-                        _materialize_performance_entry(entry, binding)
+                        if "_performance_oracles" in profile:
+                            _materialize_performance_entry(
+                                entry, binding, oracle_selection=profile["_performance_oracles"]
+                            )
+                        else:
+                            _materialize_performance_entry(entry, binding)
                     except Exception as exc:  # noqa: BLE001 - persisted as a generation error
                         if errors is None:
                             raise

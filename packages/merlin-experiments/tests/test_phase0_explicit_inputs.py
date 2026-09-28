@@ -88,6 +88,16 @@ def test_omitted_sidecars_do_not_discover_siblings(inputs):
     assert [row["name"] for row in result["capsules"]] == ["public"]
 
 
+def test_explicit_performance_oracles_are_recipe_owned_and_validated(inputs):
+    _write(inputs["recipe"], {"performance_oracles": {"L2": "spike", "L3": "verilator"}})
+    result = profiles.load_profile("fixture", **inputs)
+    assert result["_performance_oracles"] == {"L2": "spike", "L3": "verilator"}
+    for invalid in (None, [], {"L3": "elaborated_rtl"}, {"LⅢ": "verilator"}, {"L3": "../../rtl"}):
+        _write(inputs["recipe"], {"performance_oracles": invalid})
+        with pytest.raises(ValueError, match="performance_oracles must map tiers to concrete simulator names"):
+            profiles.load_profile("fixture", **inputs)
+
+
 def test_explicit_missing_optional_sidecars_are_omitted(inputs, tmp_path):
     for name in ("synth_profile", "smt_profile", "hidden_profile"):
         inputs[name] = tmp_path / "absent" / name

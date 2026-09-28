@@ -287,6 +287,54 @@ def test_scope_law_refuses_generic_l3_label_when_engine_unavailable(monkeypatch)
         SW._resolve_target_oracle_evidence(_sweep()["base"]["performance"], "fixture")
 
 
+def test_explicit_phase0_oracles_do_not_probe_the_build_host(monkeypatch) -> None:
+    from merlin.targetgen import oracle_policy, target_experiment
+
+    monkeypatch.setattr(target_experiment, "load_capability_manifest", lambda target: SimpleNamespace(
+        contract={"runner": {"tier_sim": {"L2": "spike", "L3": "elaborated_rtl"}}},
+    ))
+
+    def unavailable(_target):
+        raise AssertionError("deterministic Phase 0 must not probe installed RTL engines")
+
+    monkeypatch.setattr(oracle_policy, "selected_l3_engine_report", unavailable)
+    selected = {"L2": "spike", "L3": "verilator"}
+    resolved = SW._resolve_target_oracle_evidence(
+        _sweep()["base"]["performance"], "fixture", oracle_selection=selected
+    )
+    acceptance = resolved["acceptance"]
+    assert acceptance["evidence"]["correctness_simulator"] == "spike"
+    assert acceptance["evidence"]["timing_simulator"] == "verilator"
+    assert acceptance["fit"]["dependent_metric"] == "verilator_L3_cycles"
+    with_kind = _sweep()["base"]["performance"]
+    with_kind["acceptance"]["evidence"]["timing_oracle_kind"] = "$target_oracle_kind:L3"
+    resolved_kind = SW._resolve_target_oracle_evidence(with_kind, "fixture", oracle_selection=selected)
+    assert resolved_kind["acceptance"]["evidence"]["timing_oracle_kind"] == "rtl_verilator"
+    assert resolved_kind["acceptance"]["evidence"]["resolved_from"]["timing_oracle_kind"] == (
+        "$target_oracle_kind:L3"
+    )
+    with pytest.raises(ValueError, match="explicit Phase 0 oracle selection has no concrete L3"):
+        SW._resolve_target_oracle_evidence(
+            _sweep()["base"]["performance"], "fixture", oracle_selection={"L2": "spike"}
+        )
+    with pytest.raises(ValueError, match="conflicts with target contract"):
+        SW._resolve_target_oracle_evidence(
+            _sweep()["base"]["performance"], "fixture",
+            oracle_selection={"L2": "different_sim", "L3": "verilator"},
+        )
+
+    monkeypatch.setattr(SW, "target_encodings", lambda *args, **kwargs: [])
+    signature = "movement -> contraction -> elementwise_map -> elementwise_map -> elementwise_map"
+    requirement = {"scope": _selected_scope([{"signature": signature, "length": 5, "occurrences": 13}])}
+    entries = SW.expand_sweeps(
+        {"capsules": [], "sweeps": [_sweep()], "_performance_oracles": selected},
+        _binding(), trait_facts=_facts(), selected_requirement=requirement,
+        requirement_sha256="frozen-digest",
+    )
+    assert len(entries) == 4
+    assert all(row["performance"]["acceptance"]["evidence"]["timing_simulator"] == "verilator" for row in entries)
+
+
 def test_scope_member_survives_phase2_discovery_and_freeze(tmp_path) -> None:
     root = tmp_path / "live"
     member = root / "_tuning" / "scope"

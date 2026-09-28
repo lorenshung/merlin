@@ -84,12 +84,16 @@ derivation, not a resumed corpus run. The selected Gemmini readout supports
 must remain an explicit rejected/host obligation rather than a fabricated
 accelerator capability.
 
-Before freezing the Phase 0 run, select `MERLIN_EXT_CHIPYARD` for the Chipyard
-tree containing the concrete Gemmini L3 simulator, and set
+The recipe declares stable performance oracle names (`spike` for L2 and
+`verilator` for L3). Capsule derivation does not probe which simulators happen
+to be installed; execution still verifies the selected engine and hardware
+revision. Before freezing a run that will execute those members, select
+`MERLIN_EXT_CHIPYARD` for the Chipyard tree containing the concrete Gemmini L3
+simulator, and set
 `MERLIN_M2M_DIR` to the selected Model2MLIR source tree and
 `MERLIN_M2M_PYTHON` to its pinned interpreter for generated
-PyTorch-sourced capsules. The L3 performance members fail if the simulator
-cannot be resolved; a missing exporter also leaves source capsules unwritten.
+PyTorch-sourced capsules. The L3 performance members cannot execute if the
+simulator cannot be resolved; a missing exporter also leaves source capsules unwritten.
 Static-int8 source capsules additionally require
 `m2m/capture/pt2e_integerize.py` in that selected tree. Check the exact
 module and interpreter together before freezing; a different checkout with
