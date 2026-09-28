@@ -583,7 +583,7 @@ def test_a_sibling_that_did_not_pass_deeper_carries_nothing(tmp_path):
             TARGET, _capsule(extends="S_failed"), "L2", declared_tiers=["L2", "L3"], roots=[root]
         )
         assert failed.verified is False and failed.claim == TP.CLAIM_EXTENDS_UNVERIFIED
-        assert "no PASSING tier deeper" in failed.reason
+        assert "no passing cycle-accurate tier deeper" in failed.reason
 
         shallow = TP.verify_extends(
             TARGET, _capsule(extends="S_shallow"), "L2", declared_tiers=["L2", "L3"], roots=[root]
@@ -591,6 +591,30 @@ def test_a_sibling_that_did_not_pass_deeper_carries_nothing(tmp_path):
         assert shallow.verified is False, "passing the cap tier is not certifying anything deeper"
     finally:
         CC.reset_cache()
+
+
+def test_a_functional_tier_or_failed_overall_grade_cannot_certify_a_sibling(tmp_path):
+    root = tmp_path / "mixed_fidelity"
+    for name, overall, cycle_accurate in (
+        ("functional_only", "pass", False),
+        ("failed_overall", "fail", True),
+    ):
+        slot = root / name
+        slot.mkdir(parents=True)
+        (slot / "capsule_result.json").write_text(
+            json.dumps(
+                {
+                    "capsule": name,
+                    "status": overall,
+                    "tiers": {"L3": {"status": "pass", "cycle_accurate": cycle_accurate}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        verdict = TP.verify_extends(
+            TARGET, _capsule(extends=name), "L2", declared_tiers=["L2", "L3"], roots=[root]
+        )
+        assert verdict.claim == TP.CLAIM_EXTENDS_UNVERIFIED
 
 
 def test_an_UNSTATED_cap_refuses_rather_than_verifying_against_anything(costly_history):

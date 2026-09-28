@@ -461,7 +461,7 @@ def verify_extends(
     """Did the sibling named by ``extends`` actually earn a tier deeper than ``cap_tier``?
 
     FAIL CLOSED. A perf capsule claiming to rest on a functional sibling is entitled to that claim only
-    if the sibling passed the deeper tier in the run being cited; anything else is recorded as
+    if the sibling passed a deeper cycle-accurate tier in the run being cited; anything else is recorded as
     UNVERIFIED, which is a weaker claim than naming nobody. The sibling's verdict is read from the same
     per-capsule results the cost model reads, so no new record has to be written for this to work.
     """
@@ -501,8 +501,14 @@ def verify_extends(
             if not isinstance(doc, Mapping) or str(doc.get("capsule") or "") != sibling:
                 continue
             found_any = True
+            if doc.get("status") != "pass":
+                continue
             for name, rec in (doc.get("tiers") or {}).items():
-                if not isinstance(rec, Mapping) or rec.get("status") != "pass":
+                if (
+                    not isinstance(rec, Mapping)
+                    or rec.get("status") != "pass"
+                    or not CC._is_cycle_accurate(dict(rec))
+                ):
                     continue
                 if cap_tier and _rank(str(name), universe + [str(name), str(cap_tier)]) <= cap_rank:
                     continue  # not DEEPER than the cap: it corroborates nothing
@@ -511,7 +517,7 @@ def verify_extends(
                     True,
                     tier=str(name),
                     reason=(
-                        f"sibling {sibling!r} passed {name}, deeper than the "
+                        f"sibling {sibling!r} passed cycle-accurate {name}, deeper than the "
                         f"{cap_tier} ceiling this capsule is screened at"
                     ),
                     source=str(path),
@@ -521,8 +527,8 @@ def verify_extends(
             sibling,
             False,
             reason=(
-                f"sibling {sibling!r} has a result on disk but no PASSING tier "
-                f"deeper than {cap_tier}, so it carries no certification for "
+                f"sibling {sibling!r} has a result on disk but no passing cycle-accurate tier "
+                f"deeper than {cap_tier} in an overall passing grade, so it carries no certification for "
                 f"this capsule to rest on"
             ),
         )
