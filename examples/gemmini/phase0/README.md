@@ -108,6 +108,15 @@ merlin experiment corpus derive gemmini-functional \
 
 Inspect `requirements.yaml`, `application-demands.json`, `synthesis-plan.json`,
 `synthesis.yaml` when a candidate plan is expressible, and `derivation.json`.
+For an output-memory check, follow
+`requirements.yaml` → `accumulator_output_boundary` → the generated
+`SY_accumulator_output_boundary` entry in `synthesis.yaml` → its `capsule.yaml`,
+`capsule.interface.mlir` and `golden.yaml` in the Phase 0 run. The bound comes
+from the selected RTL facts' addressable accumulator, not a model shape: the
+capsule writes one row through the first output tile beyond that capacity.
+Coverage checks the materialized operand shapes, so a missing boundary remains
+an uncovered obligation. A passing golden alone does not qualify the compiler;
+the Phase 1 grade must also execute that capsule against the selected oracle.
 The producer requires the complete declared roster and binds the selected SW spec,
 recipe, workload policy and requirement bytes. A successful diagnostic derivation
 is **not** a compiler certificate or reviewed corpus. Missing mappings remain
