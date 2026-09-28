@@ -46,6 +46,43 @@ def test_exact_raw_bytes_and_derived_hashes_are_distinct(monkeypatch, tmp_path):
     assert selected.loaded_facts["facts"]["arrays"][0]["rows"] == 4
 
 
+def test_selected_readout_scale_conflict_is_a_bound_diagnostic(monkeypatch, tmp_path):
+    body = {
+        "arrays": [{"rows": 4, "cols": 4}],
+        "memories": [],
+        "interfaces": [
+            {
+                "name": "register_bundle_layouts",
+                "bundles": {"StoreConfig": {"fields": {"acc_scale": {"width": 32}}}},
+                "unresolved": {},
+            }
+        ],
+    }
+    _, raw, code = _selection(monkeypatch, tmp_path, body=body)
+    contract = code.parent / "contracts/target_contract.yaml"
+    contract.write_text(
+        "name: fixture\ncompute_units:\n"
+        "- {name: unit, kind: systolic, dtypes: [int8], ops: [matmul], scaling: per_channel}\n"
+    )
+    selected = evidence.select_evidence("fixture", facts_path=raw)
+    (finding,) = [row for row in selected.diagnostics if row["component"] == "readout-scaling"]
+    assert finding["status"] == "contradiction"
+    assert finding["finding"]["kind"] == "scaling_exceeds_readout"
+    assert finding["finding"]["derived"] == ["tensor"]
+    assert finding["raw_facts_sha256"] == selected.raw_facts_sha256
+    assert finding["contract_sha256"] == evidence._canonical_digest(selected.contract)
+    assert finding["readout_facet_sha256"] == evidence._canonical_digest(selected.readout_facets[0])
+
+    contract.write_text(
+        "name: fixture\ncompute_units:\n"
+        "- {name: unit, kind: systolic, dtypes: [int8], ops: [matmul], scaling: per_tensor}\n"
+    )
+    corrected = evidence.select_evidence("fixture", facts_path=raw)
+    assert not [row for row in corrected.diagnostics if row["component"] == "readout-scaling"]
+    assert corrected.raw_facts_sha256 == selected.raw_facts_sha256
+    assert corrected.contract != selected.contract
+
+
 def test_derivation_identity_binds_provider_bytes_but_not_checkout_location(monkeypatch, tmp_path):
     selected, _, _ = _selection(monkeypatch, tmp_path)
     relocated = evidence.EvidenceSelection(

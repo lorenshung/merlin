@@ -286,7 +286,7 @@ def select_evidence(
     from merlin.targetgen.rtl import facts as rtl_facts
 
     sources: dict[Path, EvidenceSource] = {}
-    diagnostics: list[dict[str, str]] = []
+    diagnostics: list[dict[str, Any]] = []
     excluded = {".git", "__pycache__", "build", ".venv"}
     extensions = {".py", ".json", ".yaml", ".yml", ".h", ".hpp", ".cpp", ".c", ".inc", ".S"}
 
@@ -613,6 +613,24 @@ def select_evidence(
         readout_inputs = readout_facet.capture_inputs(target, facts=refreshed_facts, include_taxonomy=False)
     readout_inputs["taxonomy"] = taxonomy
     facets = readout_facet.for_target(target, contract=contract, facts=refreshed_facts, readout_inputs=readout_inputs)
+    # The selected contract's scale claim must agree with the selected RTL
+    # readout. Keep a mismatch diagnostic: narrowing a declaration or certifying
+    # the software semantics requires its own reviewed input and fresh run.
+    units = [unit for unit in contract.get("compute_units") or () if isinstance(unit, Mapping)]
+    selected_facets = facets if units else []
+    for unit, facet in zip(units, selected_facets, strict=True):
+        for finding in readout_facet.reconcile(unit, facet):
+            diagnostics.append(
+                {
+                    "component": "readout-scaling",
+                    "status": "contradiction" if finding["kind"] == "scaling_exceeds_readout" else "unknown",
+                    "reason": finding["why"],
+                    "finding": finding,
+                    "contract_sha256": _canonical_digest(contract),
+                    "raw_facts_sha256": _digest(raw_facts) if raw_facts is not None else None,
+                    "readout_facet_sha256": _canonical_digest(facet.to_dict()),
+                }
+            )
     from merlin.targetgen.quant_recipe import derive_candidates
 
     quantization_candidates = [candidate.to_dict() for candidate in derive_candidates(contract, facets)]
