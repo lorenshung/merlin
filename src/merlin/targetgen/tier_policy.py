@@ -666,6 +666,7 @@ def oracle_ceiling(
     functional_cycles: int | None = None,
     budget_s: float | None = None,
     cost_roots=None,
+    extends_roots=None,
 ) -> Ceiling:
     """May ``capsule`` spend ``tier`` on ``target``? Three outcomes, all recorded.
 
@@ -697,7 +698,13 @@ def oracle_ceiling(
         cap_rank = _rank(cap, universe + [cap])
         tier_rank = _rank(tier, universe + [cap])
         if tier_rank > cap_rank >= 0:
-            ev = verify_extends(target, capsule, cap, declared_tiers=universe, roots=cost_roots)
+            ev = verify_extends(
+                target,
+                capsule,
+                cap,
+                declared_tiers=universe,
+                roots=extends_roots if extends_roots is not None else cost_roots,
+            )
             field = TIMING_CEILING_FIELD if axis == AXIS_TIMING else CEILING_FIELD
             if axis == AXIS_TIMING:
                 why = (
@@ -753,7 +760,13 @@ def oracle_ceiling(
     if aff.verdict == CC.AFFORDABLE:
         return Ceiling(True, source=SOURCE_DERIVED_BUDGET, axis=axis)
 
-    ev = verify_extends(target, capsule, str(tier), declared_tiers=universe, roots=cost_roots)
+    ev = verify_extends(
+        target,
+        capsule,
+        str(tier),
+        declared_tiers=universe,
+        roots=extends_roots if extends_roots is not None else cost_roots,
+    )
     shared = {
         **base,
         "budget_s": budget,

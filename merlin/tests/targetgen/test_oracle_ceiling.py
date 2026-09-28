@@ -661,6 +661,21 @@ def test_an_unverified_extends_is_recorded_as_unverified_on_the_tier(costly_hist
     assert "resting on nothing until the sibling's deeper pass is on disk" in row["reason"]
 
 
+def test_sibling_certification_uses_selected_run_not_cost_history(tmp_path):
+    history, selected = tmp_path / "cost-history", tmp_path / "selected-suite"
+    sibling = "same_name_different_run"
+    _write_result(history, sibling, cycles=100, seconds=1.0, engine="rtl")
+    selected.mkdir()
+    cap = _capsule("capped", max_oracle_tier="L2", extends=sibling)
+    args = {"declared_tiers": ["L2", "L3"], "cost_roots": [history], "extends_roots": [selected]}
+    before = TP.oracle_ceiling(TARGET, cap, "L3", **args)
+    assert before.record["claim"] == TP.CLAIM_EXTENDS_UNVERIFIED
+    _write_result(selected, sibling, cycles=100, seconds=1.0, engine="rtl")
+    after = TP.oracle_ceiling(TARGET, cap, "L3", **args)
+    assert after.record["claim"] == TP.CLAIM_EXTENDS
+    assert after.record["extends"]["source"].startswith(str(selected))
+
+
 def test_the_timing_ceiling_field_is_schema_valid():
     from merlin.common.paths import merlin_dir
 

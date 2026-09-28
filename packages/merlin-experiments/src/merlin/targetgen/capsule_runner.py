@@ -5001,9 +5001,10 @@ def run_capsule(
                     capsule,
                     tier,
                     declared_tiers=_tier_seq,
-                    # roots left default: `verify_extends` reads the certificates this target has on
-                    # disk, which is exactly the evidence that decides whether the sibling really earned
-                    # the deeper tier. RunnerConfig carries no corpus roots to pass instead.
+                    # A named sibling must be present in this selected suite run, not an ambient
+                    # certificate under the checkout's default output roots. Cost history remains
+                    # separately selected by the affordability policy.
+                    extends_roots=[paths.run_path.parent],
                 )
                 if not _ceil.allowed:
                     tiers[tier] = TierResult(
