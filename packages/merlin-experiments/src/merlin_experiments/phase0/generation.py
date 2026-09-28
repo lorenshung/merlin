@@ -578,11 +578,13 @@ def generate_target(
         generated_manifest = yaml.safe_load((out_root / "MANIFEST.yaml").read_text()) or {}
         selections = (generated_manifest.get("phase_corpora") or {}).get(hardware_target) or {}
         cohort_reports = {}
+        selected_reports = {}
         for phase in ("phase1", "phase2"):
             members = (selections.get(phase) or {}).get("generated_members") or []
             report = observe_cohort(
                 coverage_inputs, [out_root / member for member in members], target=hardware_target, phase=phase
             )
+            selected_reports[phase] = report
             report_path = coverage_root / f"{phase}-capsule-coverage.json"
             raw = (json.dumps(report, sort_keys=True, indent=2) + "\n").encode()
             report_path.write_bytes(raw)
@@ -592,6 +594,20 @@ def generate_target(
                 "status": report["status"],
                 "n_capsules": report["cohort"]["n_capsules"],
             }
+        from .phase2_guards import build_guard_link
+
+        guard_link = build_guard_link(
+            out_root, coverage_inputs, selected_reports["phase1"], selected_reports["phase2"]
+        )
+        guard_path = coverage_root / "phase2-functional-guards.json"
+        guard_raw = (json.dumps(guard_link, sort_keys=True, indent=2) + "\n").encode()
+        guard_path.write_bytes(guard_raw)
+        guard_record = {
+            "path": str(guard_path),
+            "sha256": hashlib.sha256(guard_raw).hexdigest(),
+            "status": guard_link["status"],
+            "n_guards": len(guard_link["guards"]),
+        }
         receipt = {
             "schema": "merlin.phase0_generation.v1",
             "target": hardware_target,
@@ -611,6 +627,7 @@ def generate_target(
             "corpus_manifest": str(out_root / "MANIFEST.yaml"),
             "coverage_inputs": coverage_input_record,
             "cohort_coverage": cohort_reports,
+            "phase2_functional_guards": guard_record,
             "capsule_commitments": [
                 {"member": path.relative_to(out_root).as_posix(), "sha256": fingerprint(path)}
                 for path in sorted(written)
