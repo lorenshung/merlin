@@ -576,7 +576,7 @@ def _phase1_definition(fixture, sealed):
     return definition
 
 
-def test_public_coverage_reads_the_completed_phase0_run(release_fixture, capsys):
+def test_public_coverage_reads_the_completed_phase0_run(release_fixture, capsys, monkeypatch):
     fixture = release_fixture
     generated = fixture["baseline"] / "isa/generated_member/capsule.yaml"
     capsule = yaml.safe_load(generated.read_text())
@@ -595,6 +595,12 @@ def test_public_coverage_reads_the_completed_phase0_run(release_fixture, capsys)
             }
         )
     )
+    from merlin.targetgen import conformance
+
+    def ambient_coverage(*_args, **_kwargs):
+        pytest.fail("public coverage reopened ambient target facts instead of frozen inputs")
+
+    monkeypatch.setattr(conformance, "uncovered", ambient_coverage)
     assert main(["corpus", "coverage", str(fixture["run"]), "--spec", str(spec)]) == 0
     report = capsys.readouterr()
     result = json.loads(report.out)
@@ -602,6 +608,7 @@ def test_public_coverage_reads_the_completed_phase0_run(release_fixture, capsys)
     assert result["coverage"]["n_required"] == 1
     assert result["coverage"]["n_covered"] == 1
     assert result["coverage"]["uncovered"] == []
+    assert result["coverage"]["composition"]["phase"] == "phase0"
     assert "private_member_identity" not in report.out + report.err
 
 

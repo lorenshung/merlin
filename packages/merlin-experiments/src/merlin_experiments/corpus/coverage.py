@@ -26,7 +26,13 @@ def _selected_contract(spec_doc: dict, inputs: dict | None) -> dict | None:
     return contract
 
 
-def selected_cohort_coverage(spec_doc: dict, roots: list[Path], *, inputs: dict | None = None) -> dict:
+def selected_cohort_coverage(
+    spec_doc: dict,
+    roots: list[Path],
+    *,
+    inputs: dict | None = None,
+    labels: set[str] | None = None,
+) -> dict:
     """Measure pure capsule axes; never borrow ambient target facts for admission.
 
     Composition needs a compiler-owned, exact-source-bound emitted host/device
@@ -36,7 +42,7 @@ def selected_cohort_coverage(spec_doc: dict, roots: list[Path], *, inputs: dict 
     """
     from merlin.targetgen.contract.materialize import cert_capsule_cover
 
-    labels = {"public", "dev"}
+    labels = {"public", "dev"} if labels is None else set(labels)
     got = cert_capsule_cover(roots, labels=labels, tile_dim=(spec_doc.get("boundaries") or {}).get("tile_edge"))
     have = set(got.get("cells") or [])
     want = {row["cell"] for row in spec_doc.get("cells") or []}
@@ -45,6 +51,7 @@ def selected_cohort_coverage(spec_doc: dict, roots: list[Path], *, inputs: dict 
         "n_covered": len(want & have),
         "uncovered": sorted(want - have),
         "corpus_cells": sorted(have),
+        "extra_cells": sorted(have - want),
         "scope": "exact admitted capsule bytes and selected conformance requirements only",
     }
     readers = {
@@ -231,7 +238,12 @@ def inspect_run(run_dir: Path, spec_path: Path) -> dict:
     if edge is not None and (type(edge) is not int or edge < 1):
         raise SpecError("conformance spec tile_edge must be a positive integer or absent")
     category_roots, n_public = _public_category_roots(corpus)
-    result = conformance.uncovered(spec, category_roots, labels={"public"}, tile_dim=edge)
+    from merlin_experiments.phase0.coverage_commitment import read_inputs
+
+    inputs = read_inputs(corpus)
+    if inputs is not None and inputs.get("target") != target:
+        raise SpecError("frozen coverage inputs belong to a different target")
+    result = selected_cohort_coverage(spec, category_roots, inputs=inputs, labels={"public"})
     if not result["corpus_cells"]:
         raise SpecError("phase-0 public capsules yielded no classifiable coverage cells")
     return {
