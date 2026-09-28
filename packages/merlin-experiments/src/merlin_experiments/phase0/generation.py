@@ -583,6 +583,18 @@ def generate_target(
             )
             if evidence_mode == "verified":
                 failures.append((e.get("name", "?"), "required capsule writer produced no artifact"))
+    # A performance sweep can fail before it becomes an entry (for example,
+    # while resolving a selected oracle). Such failures are recorded in the
+    # manifest, but must also fail the run after the other capsules are written;
+    # otherwise the controller reports success while a required claim cohort
+    # has zero members. Writer failures already appear in both lists.
+    failed_names = {name for name, _ in failures}
+    for error in _performance_errors:
+        name = str(error.get("member") or error.get("family") or "<performance sweep>")
+        if name not in failed_names:
+            kind = str(error.get("error_type") or "unknown error")
+            failures.append((name, f"performance materialization failed ({kind}); inspect MANIFEST.yaml"))
+            failed_names.add(name)
     if failures:
         print(f"  [FAIL] {len(failures)} capsule(s) could not be written:")
         for name, why in failures:
@@ -710,6 +722,7 @@ def generate_target(
             "operation_admission": admission,
             "unprovable_forbids": unprovable_forbids,
             "failures": [{"capsule": n, "reason": why} for n, why in failures],
+            "performance_materialization_errors": len(_performance_errors),
             "qualification": "not_established",
             "corpus_manifest": str(out_root / "MANIFEST.yaml"),
             "coverage_inputs": coverage_input_record,
