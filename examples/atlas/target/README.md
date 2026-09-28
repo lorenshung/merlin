@@ -58,8 +58,21 @@ widths and the `ScalingFactorRegFile` port geometry: an `i5` write index, `i8`
 write data, and exactly 32 contiguous `i8` outputs. A changed/missing port
 fails this structural check. These ports do not prove register behavior, wiring
 through every command path, or any numerical scale interpretation.
-Consequently `software-spec.yaml` leaves scale encoding and block size unresolved;
-do not promote the diagnostic FP8 recipe into a realizable model format yet.
+In the selected Atlas source, `ScalarCore` reads that register for
+`MXU_POP_FP8`; both MXU sequencers use the byte when packing a BF16
+accumulator row to FP8. `VFP8PACK` has its own BF16-to-FP8 pack path. Matrix
+operand/weight push and compute do not establish an E8M0 scale applied to
+incoming FP8 values. The 32 scale registers are software-selectable entries,
+not evidence of a 32-element quantization block. The OOT backend's current
+`scaling: block_e8m0` declaration and `must_supply_e8m0_block_scales`
+obligation are intent to review, not an RTL-qualified operand format.
+Consequently `software-spec.yaml` leaves model-operand scale encoding and
+block size unresolved. To resolve them, review the intended tensor-to-FP8
+conversion and any scale compensation at each BF16/FP8 boundary, bind an
+executable backend route, and compare non-unit-scale cases with the selected
+RTL. The generated Phase 0 quantization contract may list a readout-derived
+candidate, but until those checks pass it emits no model capture recipe; do
+not promote the diagnostic FP8 candidate into a realizable model format.
 
 Produce evidence from one selected elaboration, not a mixture of standalone
 spec-generated hardware and Chipyard memory/hierarchy sources:
