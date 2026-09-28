@@ -233,6 +233,7 @@ Each new run writes the following beneath `<run>/phase0/`:
 | `software/frontend/`, `coverage/application-graphs/` | Original/quantized/prepared PyTorch graphs, exact lowering lineage and typed MLIR producer–consumer edges when available |
 | `software/host-capabilities.json` | Selected host compiler identities and explicit operation/precision declarations; a dtype profile alone is not operation support |
 | `coverage/operation-accounting.json` | Per-application and combined operation partitions, provenance groups, signature/ordinal traceability and declared-versus-observed support |
+| `coverage/phase1-capsule-coverage.json` → `phase1_witness_basis` | Finite source-operation and typed-edge witness universe, a compact inventoried selection from the selected cohort, uncovered obligations and the selection's minimum-proof status |
 | `coverage/README.md` | Automatically rendered summary of those same operation and quantization views |
 | `software/quantization-contract.json` | All authored formats, matching hardware recipes, parameter unknowns and operation-scoped quantization decisions |
 | `coverage/generation.json` | Written/omitted capsules, failures, synthesis input identity and diagnostic status |
@@ -378,6 +379,26 @@ Verified whole-workload admission checks exact source lineage, reviewed independ
 compute placement/numerics, support-lowering and shape receipts, typed transfer
 obligations, and coverage in the **actual admitted cohort**. A larger generated source
 pool is not proof that a selected cohort covers them.
+The Phase 0 `phase1_witness_basis` selects a small set of capsule witnesses for the
+finite source-operation signatures and conditional typed edges recorded in that
+report. It lists the complete scoped universe and obligations without a witness.
+When a distinct obligation uniquely requires each selected capsule and those
+capsules cover the witnessable universe, the report proves an exact minimum;
+otherwise its selected size is only an upper bound. The generated corpus is not
+pruned. For the Gemmini int8 r18 diagnostic, four source capsules are an exact
+minimum for the 1,106 source-operation and typed-edge witness records; all 43
+Phase 1 capsules remain in the selected cohort. This four-capsule calculation
+does not cover numerical, ISA, precision, tail, shape or other conformance axes,
+or establish that a compiler can execute even the selected four.
+
+This witness set is a plan for Phase 1 verification, not a correctness guarantee.
+Phase 0 freezes the finite support domain, selected input identities and open proof
+obligations. Phase 1 must discharge those obligations against emitted compiler
+artifacts and bound target execution, including operation placement, typed support
+routes, transfers and numerical behavior. Whole-module formal-proof eligibility is
+reported separately; witness coverage does not establish it. A universal claim
+also requires sound compositional proofs for the supported domain and hardware
+conformance, beyond any finite capsule selection.
 The completeness record establishes test obligations, not a working target compiler:
 Phase 1 still has to lower, execute and numerically qualify its generated implementation.
 Existing hardware-source and independent-reference qualification requirements remain

@@ -16,6 +16,8 @@ import yaml
 
 from merlin.common.digest import is_sha256, sha256_bytes
 
+from .witness_basis import build_witness_basis
+
 INPUT_SCHEMA = "merlin.phase0.coverage_inputs.v1"
 SCHEMA = "merlin.phase0.coverage_commitment.v2"
 INPUT_PATH = Path("_phase0/coverage-inputs.json")
@@ -683,6 +685,9 @@ def build_commitment(
             ],
         },
         "applications": application_reports,
+        "phase1_witness_basis": build_witness_basis(
+            application_reports, rows, coverage_status="complete" if not blockers else "incomplete"
+        ),
         "conformance": conformance_coverage,
         "blockers": blockers,
         "independent_evidence": document.get("evidence"),

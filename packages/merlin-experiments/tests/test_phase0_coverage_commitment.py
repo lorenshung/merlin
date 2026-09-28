@@ -181,6 +181,12 @@ def test_precompiler_completeness_is_independent_and_uses_only_admitted_capsules
     operation = complete["applications"]["application"]["operations"][0]
     assert operation["placement"] == "accelerator"
     assert operation["witnesses"] == ["functional"]
+    basis = complete["phase1_witness_basis"]
+    assert basis["universe"]["n_total"] == 1
+    assert basis["uncovered_obligations"] == []
+    assert basis["selection"]["claim"] == "exact_minimum"
+    assert [row["name"] for row in basis["selection"]["selected_capsules"]] == ["functional"]
+    assert "does not establish" in basis["qualification"]
     old_report = copy.deepcopy(complete)
     old_report["schema"] = "merlin.phase0.coverage_commitment.v1"
     with pytest.raises(ValueError, match="verified whole-workload"):
