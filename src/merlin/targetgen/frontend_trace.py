@@ -123,6 +123,7 @@ def join_frontend_trace(trace: dict | None, application_graph: dict | None, *, c
         "transition_obligations": [],
         "normalized_operations": {},
         "raw_mlir_correspondence": {"status": "unknown"},
+        "prepared_lowering_obligations": {"status": "unknown", "unresolved_calls": []},
         "normalization_correspondence": {"status": "unknown"},
     }
     if trace is None:
@@ -224,8 +225,8 @@ def join_frontend_trace(trace: dict | None, application_graph: dict | None, *, c
         raw_operations, recorded = raw.get("operations") or [], mlir.get("operations")
         prepared_nodes = graphs["prepared"]["nodes"]
         origin_nodes = {**graphs["original"]["nodes"], **graphs["quantized"]["nodes"]}
-        valid = isinstance(recorded, list) and len(recorded) == len(raw_operations)
-        if valid:
+        roster_valid = isinstance(recorded, list) and len(recorded) == len(raw_operations)
+        if roster_valid:
             for ordinal, (observed, record) in enumerate(zip(raw_operations, recorded, strict=True)):
                 expected_role = observed.get("trace_role") or (
                     "structural" if observed["mlir_operation"] in _STRUCTURAL else "unresolved"
@@ -242,27 +243,38 @@ def join_frontend_trace(trace: dict | None, application_graph: dict | None, *, c
                     or not set(record.get("source_node_ids") or []) <= set(prepared_nodes)
                     or not set(record.get("origin_node_ids") or []) <= set(origin_nodes)
                 ):
-                    valid = False
+                    roster_valid = False
                     break
-        if valid:
+        if roster_valid:
+            base["raw_mlir_correspondence"] = {
+                "status": "verified",
+                "sha256": capture_sha256,
+                "bytes": mlir["bytes"],
+                "n_operations": len(recorded),
+            }
             mapped = {
                 identity: [record["ordinal"] for record in recorded if identity in record["source_node_ids"]]
                 for identity in graphs["prepared"]["calls"]
             }
             correspondence = mlir.get("source_correspondence")
+            correspondence_valid = True
+            unresolved = set()
             if not isinstance(correspondence, list) or len(correspondence) != len(mapped):
-                valid = False
+                correspondence_valid = False
             else:
                 seen = set()
                 for receipt in correspondence:
+                    if not isinstance(receipt, dict):
+                        correspondence_valid = False
+                        break
                     identity = receipt.get("node_id")
                     if identity not in mapped or identity in seen or receipt.get("mlir_ordinals") != mapped[identity]:
-                        valid = False
+                        correspondence_valid = False
                         break
                     seen.add(identity)
                     if mapped[identity]:
                         if receipt.get("status") != "lowered":
-                            valid = False
+                            correspondence_valid = False
                             break
                     elif receipt.get("status") == "alias":
                         if (
@@ -270,22 +282,27 @@ def join_frontend_trace(trace: dict | None, application_graph: dict | None, *, c
                             or type(receipt.get("result_index")) is not int
                             or receipt["result_index"] < 0
                         ):
-                            valid = False
+                            correspondence_valid = False
                             break
                     elif receipt.get("status") == "eliminated":
                         if not receipt.get("reason"):
-                            valid = False
+                            correspondence_valid = False
                             break
+                    elif receipt.get("status") == "unresolved":
+                        unresolved.add(identity)
                     else:
-                        valid = False
+                        correspondence_valid = False
                         break
-        if valid:
-            base["raw_mlir_correspondence"] = {
-                "status": "verified",
-                "sha256": capture_sha256,
-                "bytes": mlir["bytes"],
-                "n_operations": len(recorded),
+            base["prepared_lowering_obligations"] = {
+                "status": "unknown" if not correspondence_valid else "unresolved" if unresolved else "verified",
+                "unresolved_calls": [
+                    _unresolved_call(graphs["prepared"], identity) for identity in sorted(unresolved)
+                ] if correspondence_valid else [],
             }
+            if not correspondence_valid:
+                errors.append("prepared call-site lowering receipt disagrees with exact MLIR source identities")
+            elif unresolved:
+                errors.append("prepared call-site lowering correspondence is incomplete")
             normalized = application_graph.get("normalization_correspondence") or {}
             normalization_valid = normalized.get("status") in {"identity", "serialization_equivalent"}
             base["normalization_correspondence"] = {

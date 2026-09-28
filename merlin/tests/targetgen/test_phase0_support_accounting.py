@@ -157,6 +157,38 @@ def _inputs(path):
 
 
 class Phase0SupportAccounting(unittest.TestCase):
+    def test_exact_mlir_roster_does_not_hide_unlowered_prepared_calls(self):
+        with tempfile.TemporaryDirectory() as directory:
+            inventory, _, _, trace, _ = _inputs(Path(directory) / "model.mlir")
+            selected = inventory["applications"]["iteration"]
+            prepared = trace["graphs"]["prepared"]
+            prepared["nodes"].append(
+                {
+                    "id": "g:prepared:root:n4",
+                    "ordinal": 4,
+                    "op": "call_function",
+                    "target": "aten.relu.default",
+                    "results": [],
+                }
+            )
+            prepared["call_count"] = 3
+            prepared["sha256"] = _sha({key: value for key, value in prepared.items() if key != "sha256"})
+            transition = trace["transformations"][1]
+            transition.update(status="diagnostic", unresolved_destination_ids=["g:prepared:root:n4"])
+            trace["mlir"]["source_correspondence"].append(
+                {"node_id": "g:prepared:root:n4", "mlir_ordinals": [], "status": "unresolved"}
+            )
+            trace.update(status="diagnostic", blockers=["prepared call has no final MLIR correspondence"])
+
+            joined = join_frontend_trace(trace, selected["operation_graph"], capture_sha256=selected["capture_sha256"])
+            self.assertEqual(joined["status"], "partial")
+            self.assertEqual(joined["raw_mlir_correspondence"]["status"], "verified")
+            self.assertEqual(joined["normalization_correspondence"]["status"], "verified")
+            obligations = joined["prepared_lowering_obligations"]
+            self.assertEqual(obligations["status"], "unresolved")
+            self.assertEqual(obligations["unresolved_calls"][0]["node_id"], "g:prepared:root:n4")
+            self.assertFalse(any("MLIR roster differs" in error for error in joined["errors"]))
+
     def test_unresolved_frontend_transition_exposes_typed_obligations(self):
         with tempfile.TemporaryDirectory() as directory:
             inventory, _, _, trace, _ = _inputs(Path(directory) / "model.mlir")
