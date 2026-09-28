@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 from merlin_experiments.phase0 import evidence, sweeps
+from merlin_experiments.phase0.provenance import _scrub_capsule_dir
 
 from merlin.perf import profile
 from merlin.runtime.backends import base
@@ -360,6 +361,34 @@ def test_frontend_graph_catalog_and_receipt_survive_source_deletion(monkeypatch,
     (output / index["frontend_trace"]).write_text("{}")
     with pytest.raises(ValueError, match="evidence member changed"):
         evidence.load_exported_evidence(output)
+
+
+def test_op_frontend_lineage_records_exact_no_sidecar_reference_omission(tmp_path):
+    from merlin.targetgen.capsule_source import _portable_weights_reference, _write_frontend_evidence
+
+    weight = str(tmp_path / "weights.safetensors")
+    raw = f'builtin.module attributes {{prov.weights_file = "{weight}", prov.level = "linalg"}} {{}}\n'
+    portable, edit = _portable_weights_reference(raw, weight, sidecar=False)
+    assert edit["kind"] == "weights_reference_omission" and edit["edit_count"] == 1
+    trace = tmp_path / "selected-trace.json"
+    trace.write_text(json.dumps({"mlir": {"sha256": hashlib.sha256(raw.encode()).hexdigest(), "bytes": len(raw)}}))
+    capsule = tmp_path / "capsule"
+    capsule.mkdir()
+    (capsule / "capsule.interface.mlir").write_text(portable)
+    (capsule / "capsule.linalg.mlir").write_text(portable)
+    artifact = SimpleNamespace(
+        linalg_mlir=raw,
+        weights_path=weight,
+        meta={"frontend_trace": {"path": str(trace), "sha256": hashlib.sha256(trace.read_bytes()).hexdigest()}},
+    )
+    receipt = _write_frontend_evidence(artifact, capsule, portable, packaged_path="capsule.linalg.mlir")
+    (capsule / "capsule.yaml").write_text(json.dumps({"frontend_trace": receipt}))
+    _scrub_capsule_dir(capsule)
+    assert receipt["source_mlir_sha256"] == hashlib.sha256((capsule / "frontend-source.mlir").read_bytes()).hexdigest()
+    assert receipt["raw_source_mlir_sha256"] == hashlib.sha256(raw.encode()).hexdigest()
+    assert receipt["raw_source_trace_bound"] is True
+    assert receipt["source_portability"]["kind"] == "weights_reference_omission"
+    assert receipt["packaged_mlir_sha256"] == hashlib.sha256((capsule / "capsule.linalg.mlir").read_bytes()).hexdigest()
 
 
 def test_absent_facts_are_diagnostic_without_regeneration(monkeypatch, tmp_path):

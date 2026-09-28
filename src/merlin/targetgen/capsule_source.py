@@ -2168,8 +2168,57 @@ def verify_exact_application_int_mm(linalg_mlir: str, match: dict) -> dict:
     }
 
 
-def _write_frontend_evidence(art: CapsuleArtifacts, directory: Path, packaged_mlir: str) -> dict | None:
-    """Carry producer bytes with a separate normalization/packaging receipt."""
+def _portable_weights_reference(mlir: str, original_weight: str | None, *, sidecar: bool) -> tuple[str, dict]:
+    """Make one captured weight-reference attribute portable, recording the exact edit.
+
+    Whole-model capsules copy the referenced weights and retain the attribute with a
+    relative filename. Op capsules have explicit tensor operands and no weight sidecar,
+    so only their non-load-bearing module reference is removed. Other MLIR bytes are
+    left intact; an ambiguous or unexpected reference refuses instead of redacting.
+    """
+    key = 'prov.weights_file = "'
+    start = mlir.find(key)
+    if start < 0:
+        return mlir, {"kind": "identity", "edit_count": 0}
+    if mlir.find(key, start + len(key)) >= 0:
+        raise M2MUnavailable("captured MLIR has multiple weights-file references")
+    end_quote = mlir.find('"', start + len(key))
+    if end_quote < 0:
+        raise M2MUnavailable("captured MLIR has an unterminated weights-file reference")
+    observed_reference = mlir[start + len(key) : end_quote]
+    if sidecar and (not original_weight or observed_reference != str(original_weight)):
+        raise M2MUnavailable("captured MLIR weight reference differs from selected weights")
+    if not Path(observed_reference).is_absolute():
+        raise M2MUnavailable("captured MLIR weight reference is not an absolute source path")
+    end = end_quote + 1
+    reference_hash = hashlib.sha256(observed_reference.encode()).hexdigest()
+    if sidecar:
+        portable = mlir[:start] + 'prov.weights_file = "capsule.weights.safetensors"' + mlir[end:]
+        return portable, {
+            "kind": "weights_reference_relocation",
+            "edit_count": 1,
+            "from_reference_sha256": reference_hash,
+            "to": "capsule.weights.safetensors",
+        }
+    cut_start, cut_end = start, end
+    if mlir[end : end + 2] == ", ":
+        cut_end += 2
+    elif mlir[start - 2 : start] == ", ":
+        cut_start -= 2
+    portable = mlir[:cut_start] + mlir[cut_end:]
+    return portable, {
+        "kind": "weights_reference_omission",
+        "edit_count": 1,
+        "from_reference_sha256": reference_hash,
+        "to": None,
+        "scope": "module provenance only; op tensors are explicit operands and no weights sidecar is shipped",
+    }
+
+
+def _write_frontend_evidence(
+    art: CapsuleArtifacts, directory: Path, packaged_mlir: str, *, packaged_path: str = "capsule.interface.mlir"
+) -> dict | None:
+    """Bind raw trace bytes and each portable emitted MLIR to an exact edit receipt."""
     meta = art.meta or {}
     selected = meta.get("frontend_trace")
     if not isinstance(selected, dict):
@@ -2193,29 +2242,37 @@ def _write_frontend_evidence(art: CapsuleArtifacts, directory: Path, packaged_ml
         raise M2MUnavailable("frontend trace does not match its exact source MLIR")
     if declared_mlir.get("bytes") is not None and declared_mlir["bytes"] != len(raw_source):
         raise M2MUnavailable("frontend trace source MLIR byte count changed")
-    packaging = "identity"
-    relocation = None
-    if packaged_mlir != art.linalg_mlir:
-        original_weight = meta.get("materialized_weights_reference") or getattr(art, "weights_path", None)
-        relocated = (
-            art.linalg_mlir.replace(
-                f'prov.weights_file = "{original_weight}"', 'prov.weights_file = "capsule.weights.safetensors"'
-            )
-            if meta.get("materialized_capture")
-            else art.linalg_mlir.replace(original_weight or "", "capsule.weights.safetensors")
-        )
-        if not original_weight or packaged_mlir != relocated:
-            raise M2MUnavailable("capsule MLIR change is not the declared weights-reference relocation")
-        packaging = "weights_reference_relocation"
-        # The original spelling is often an absolute, ephemeral capture-cache path. Its
-        # exact bytes are checked above, but serializing it into a released capsule
-        # would expose a checkout-local dependency. Bind the spelling without storing it.
-        relocation = {
-            "from_reference_sha256": hashlib.sha256(original_weight.encode("utf-8")).hexdigest(),
-            "to": "capsule.weights.safetensors",
+    original_weight = meta.get("materialized_weights_reference") or getattr(art, "weights_path", None)
+    has_sidecar = (directory / "capsule.weights.safetensors").is_file()
+    expected_package, packaging_edit = _portable_weights_reference(
+        art.linalg_mlir, original_weight, sidecar=has_sidecar
+    )
+    if packaged_mlir != expected_package:
+        raise M2MUnavailable("capsule MLIR change is not the declared weights-reference portability edit")
+    portable_source, source_edit = _portable_weights_reference(
+        raw_source.decode("utf-8"), original_weight, sidecar=has_sidecar
+    )
+    if raw_source != art.linalg_mlir.encode() and not meta.get("capture_normalization"):
+        raise M2MUnavailable("raw frontend and captured MLIR differ without a normalization receipt")
+    source_bytes = portable_source.encode("utf-8")
+    raw_hash = hashlib.sha256(raw_source).hexdigest()
+    source_hash = hashlib.sha256(source_bytes).hexdigest()
+    packaged_bytes = packaged_mlir.encode("utf-8")
+    interface_path = directory / "capsule.interface.mlir"
+    interface_hash = (
+        hashlib.sha256(packaged_bytes).hexdigest()
+        if packaged_path == interface_path.name
+        else hashlib.sha256(interface_path.read_bytes()).hexdigest()
+    )
+    sidecars = None
+    if has_sidecar:
+        sidecars = {
+            name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
+            for name in ("capsule.weights.safetensors", "capsule.weights.safetensors.manifest.json")
         }
+    capture_receipt_bytes = meta.get("materialized_receipt_bytes")
     (directory / "frontend-trace.json").write_bytes(raw_trace)
-    (directory / "frontend-source.mlir").write_bytes(raw_source)
+    (directory / "frontend-source.mlir").write_bytes(source_bytes)
     catalog = meta.get("framework_catalog") or {}
     if catalog:
         catalog_path = Path(catalog.get("path", ""))
@@ -2226,17 +2283,46 @@ def _write_frontend_evidence(art: CapsuleArtifacts, directory: Path, packaged_ml
             raise M2MUnavailable("selected capture framework catalog bytes changed")
         (directory / "pytorch-opset.json").write_bytes(raw_catalog)
     record = {
-        "schema": "merlin.capsule_frontend_evidence.v1",
+        "schema": "merlin.capsule_frontend_evidence.v2",
         "path": "frontend-trace.json",
         "sha256": hashlib.sha256(raw_trace).hexdigest(),
         "source_mlir": "frontend-source.mlir",
-        "source_mlir_sha256": hashlib.sha256(raw_source).hexdigest(),
+        "source_mlir_sha256": source_hash,
+        "source_mlir_bytes": len(source_bytes),
+        "raw_source_mlir_sha256": raw_hash,
+        "raw_source_mlir_bytes": len(raw_source),
+        "raw_source_trace_bound": (
+            declared_mlir.get("sha256") == raw_hash and declared_mlir.get("bytes") == len(raw_source)
+        ),
         "capture_mlir_sha256": hashlib.sha256(art.linalg_mlir.encode()).hexdigest(),
-        "packaged_mlir_sha256": hashlib.sha256(packaged_mlir.encode()).hexdigest(),
+        "packaged_mlir": packaged_path,
+        "packaged_mlir_sha256": hashlib.sha256(packaged_bytes).hexdigest(),
+        "packaged_mlir_bytes": len(packaged_bytes),
+        "interface_mlir": interface_path.name,
+        "interface_mlir_sha256": interface_hash,
+        "weights_sidecars": sidecars,
+        "capture_receipt": (
+            {"path": "source-capture-receipt.json", "sha256": hashlib.sha256(capture_receipt_bytes).hexdigest()}
+            if capture_receipt_bytes is not None
+            else None
+        ),
         "normalization": meta.get("capture_normalization"),
-        "packaging": packaging,
-        "weights_reference_relocation": relocation,
-        "qualification": "source bytes and declared transformation receipts; compiler execution unverified",
+        "packaging": packaging_edit["kind"],
+        "weights_reference_relocation": (
+            {"from_reference_sha256": packaging_edit["from_reference_sha256"], "to": packaging_edit["to"]}
+            if packaging_edit["kind"] == "weights_reference_relocation"
+            else None
+        ),
+        "source_portability": {
+            **source_edit,
+            "raw_sha256": raw_hash,
+            "emitted_sha256": source_hash,
+        },
+        "qualification": (
+            "trace-bound raw hash and exact portability edit; compiler execution unverified"
+            if declared_mlir.get("sha256") == raw_hash and declared_mlir.get("bytes") == len(raw_source)
+            else "raw digest observed without a complete trace byte declaration; compiler execution unverified"
+        ),
     }
     (directory / "frontend-evidence.json").write_text(json.dumps(record, sort_keys=True, indent=2) + "\n")
     return record
@@ -2340,10 +2426,11 @@ def write_pytorch_capsule(entry: dict, binding, out_root, *, source: "PytorchRef
     out_name = entry.get("out", "Y0")
     d = Path(out_root) / entry["cat"] / entry["name"]
     d.mkdir(parents=True, exist_ok=True)
+    portable_linalg, _ = _portable_weights_reference(art.linalg_mlir, art.weights_path, sidecar=False)
 
     if op in _OP_INPUT_NAMES:  # merlin_iface interface
         names = _OP_INPUT_NAMES[op]
-        cap, mlir = linalg_to_iface(art.linalg_mlir, entry, binding)  # derive-and-verify from the lowering
+        cap, mlir = linalg_to_iface(portable_linalg, entry, binding)  # derive-and-verify from the lowering
         if exact_match is not None:
             cap["application_signature_match"] = exact_match
         cap["source_role"] = entry.get("source_role", "pytorch_model_slice")
@@ -2370,14 +2457,14 @@ def write_pytorch_capsule(entry: dict, binding, out_root, *, source: "PytorchRef
             art, names, out_name, binding, interface="linalg_positional", arg_order=names + [out_name]
         )
         # the linalg module IS the interface the agent compiles
-        (d / "capsule.interface.mlir").write_text(art.linalg_mlir, encoding="utf-8")
+        (d / "capsule.interface.mlir").write_text(portable_linalg, encoding="utf-8")
     else:
         raise ValueError(
             f"write_pytorch_capsule: unknown op {op!r} "
             f"(mapped {sorted(_OP_INPUT_NAMES)}; fused {sorted(_FUSED_OP_INPUT_NAMES)})"
         )
 
-    frontend_evidence = _write_frontend_evidence(art, d, art.linalg_mlir)
+    frontend_evidence = _write_frontend_evidence(art, d, portable_linalg, packaged_path="capsule.linalg.mlir")
     if frontend_evidence is not None:
         cap["frontend_trace"] = frontend_evidence
     cap["capture_tool"] = _freeze_selected_m2m_tool(src.m2m_dir, d)
@@ -2386,7 +2473,7 @@ def write_pytorch_capsule(entry: dict, binding, out_root, *, source: "PytorchRef
         yaml.safe_dump(cap["expected"], sort_keys=False), encoding="utf-8"
     )
     (d / "capsule.pytorch.py").write_text(art.pytorch_src, encoding="utf-8")
-    (d / "capsule.linalg.mlir").write_text(art.linalg_mlir, encoding="utf-8")
+    (d / "capsule.linalg.mlir").write_text(portable_linalg, encoding="utf-8")
     (d / "golden.yaml").write_text(yaml.safe_dump(golden, sort_keys=False), encoding="utf-8")
     return d
 
@@ -3189,13 +3276,8 @@ def write_model_capsule(
     linalg = art.linalg_mlir
     d.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(wsrc, d / "capsule.weights.safetensors")
-    if artifact is None:
-        linalg = linalg.replace(str(wsrc), "capsule.weights.safetensors")
-    else:
-        linalg = linalg.replace(
-            f'prov.weights_file = "{art.meta["materialized_weights_reference"]}"',
-            'prov.weights_file = "capsule.weights.safetensors"',
-        )
+    original_weight = art.meta["materialized_weights_reference"] if artifact is not None else str(wsrc)
+    linalg, _ = _portable_weights_reference(linalg, original_weight, sidecar=True)
     shutil.copyfile(manifest_src, d / "capsule.weights.safetensors.manifest.json")
     if artifact is not None:
         for original, member in (

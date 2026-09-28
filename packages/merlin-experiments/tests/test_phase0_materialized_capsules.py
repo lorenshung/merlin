@@ -10,6 +10,7 @@ from merlin_experiments.corpus.coverage import selected_cohort_coverage
 from merlin_experiments.phase0 import coverage_commitment as CC
 from merlin_experiments.phase0 import writer
 from merlin_experiments.phase0.evidence import _materialize_evidence
+from merlin_experiments.phase0.provenance import _scrub_capsule_dir
 from merlin_experiments.phase0.requirements import _materialized_iteration_capsules, _validate_capture_recipes
 from merlin_experiments.phase0.writer import _integer_reference_bound, _write_capsule
 
@@ -96,7 +97,9 @@ def test_source_capsule_reuse_is_offline_exact_and_fail_closed(tmp_path, monkeyp
     assert capsule["expected"]["instruction_classes"] == []
     receipt = json.loads((result / "frontend-evidence.json").read_text())
     assert receipt["packaging"] == "weights_reference_relocation"
-    assert receipt["source_mlir_sha256"] == application["capture_sha256"]
+    assert receipt["raw_source_mlir_sha256"] == application["capture_sha256"]
+    assert receipt["raw_source_trace_bound"] is True
+    assert receipt["schema"] == "merlin.capsule_frontend_evidence.v2"
     relocation = receipt["weights_reference_relocation"]
     assert "from" not in relocation
     assert (
@@ -107,6 +110,42 @@ def test_source_capsule_reuse_is_offline_exact_and_fail_closed(tmp_path, monkeyp
     assert str(tmp_path / "original/weights.safetensors") not in (result / "capsule.yaml").read_text()
     assert str(tmp_path / "original/weights.safetensors") not in (result / "frontend-evidence.json").read_text()
     assert 'prov.weights_file = "capsule.weights.safetensors"' in (result / "capsule.interface.mlir").read_text()
+    _scrub_capsule_dir(result)
+    receipt = json.loads((result / "frontend-evidence.json").read_text())
+    assert receipt["raw_source_mlir_sha256"] == application["capture_sha256"]
+    assert receipt["source_mlir_sha256"] == hashlib.sha256((result / receipt["source_mlir"]).read_bytes()).hexdigest()
+    assert receipt["packaged_mlir_sha256"] == hashlib.sha256(
+        (result / receipt["packaged_mlir"]).read_bytes()
+    ).hexdigest()
+    assert receipt["interface_mlir_sha256"] == hashlib.sha256(
+        (result / receipt["interface_mlir"]).read_bytes()
+    ).hexdigest()
+    assert receipt["source_portability"]["kind"] == "weights_reference_relocation"
+    assert receipt["source_portability"]["edit_count"] == 1
+    assert 'prov.weights_file = "capsule.weights.safetensors"' in (result / "frontend-source.mlir").read_text()
+    for name in (
+        "frontend-source.mlir",
+        "capsule.interface.mlir",
+        "frontend-trace.json",
+        "capsule.weights.safetensors",
+        "capsule.weights.safetensors.manifest.json",
+        "source-capture-receipt.json",
+    ):
+        path = result / name
+        original = path.read_bytes()
+        path.write_bytes(original + b"\n")
+        with pytest.raises(ValueError, match="frontend evidence member changed"):
+            _scrub_capsule_dir(result)
+        path.write_bytes(original)
+    evidence_path = result / "frontend-evidence.json"
+    original_evidence = evidence_path.read_bytes()
+    modified_evidence = json.loads(original_evidence)
+    modified_evidence["source_mlir_sha256"] = "0" * 64
+    evidence_path.write_text(json.dumps(modified_evidence))
+    with pytest.raises(ValueError, match="differs from capsule declaration"):
+        _scrub_capsule_dir(result)
+    evidence_path.write_bytes(original_evidence)
+    _scrub_capsule_dir(result)  # idempotent after restoring the exact evidence-bearing bytes
     assert yaml.safe_load((result / "golden.yaml").read_text())["outputs"] == {"Y0": [1.0, 2.0]}
     with pytest.raises(source.M2MUnavailable, match="held-out validation"):
         source.materialized_model_artifacts({**selected["materialized_capture"], "workload_role": "validation"})
