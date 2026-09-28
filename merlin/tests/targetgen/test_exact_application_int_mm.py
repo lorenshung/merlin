@@ -12,7 +12,46 @@ import pytest
 import yaml
 
 from merlin.targetgen import capsule_inputs
-from merlin.targetgen.application_inventory import exact_int_mm_geometry, verify_capture_receipt
+from merlin.targetgen.application_inventory import (
+    exact_int_mm_geometry, verified_static_integerization, verify_capture_receipt,
+)
+
+
+def test_integer_reference_projection_requires_exact_accounted_artifact():
+    agreement = {
+        "status": "passed", "finite": True, "samples": 1, "reference": "pt2e_integer",
+        "max_abs": 0.0, "max_rel": 0.0, "atol": 0.0, "rtol": 0.0,
+        "source": {"sha256": "a" * 64},
+        "output": {"path": "integer-reference.json", "sha256": "b" * 64},
+        "executed_contractions": {"linear": 1, "conv2d": 0, "matmul": 0,
+                                  "total": 1, "selected": 1, "observed": 1},
+        "outputs": [{"finite": True, "within_tolerance": True,
+                     "max_abs": 0.0, "max_rel": 0.0, "atol": 0.0, "rtol": 0.0}],
+    }
+    projection = {
+        "schema": "merlin.capture_integerization.v1", "status": "byte_bound_metadata",
+        "source_quantization": "int8_static_act_int8_weight",
+        "software_numerical_engine": "integer_reference",
+        "capture_receipt_sha256": "c" * 64,
+        "metadata": {"sha256": "d" * 64, "bytes": 1},
+        "capture": {"sha256": "e" * 64, "bytes": 1},
+        "reference_artifact": {"sha256": "b" * 64, "bytes": 1},
+        "integerization_receipt": {
+            "schema": "m2m.pt2e-integerize.v1", "accumulator_bound_checked": True,
+            "quantized_contractions_seen": 1, "quantized_contractions_integerized": 1,
+            "quantized_contractions_remaining": 0, "exported_integer_mm_count": 1,
+            "integer_mm_emitted": 1, "refusals": [], "golden_agreement": agreement,
+            "quantized_by_kind": {"linear": {"seen": 1}, "conv2d": {"seen": 0},
+                                  "matmul": {"seen": 0}},
+        },
+    }
+    assert verified_static_integerization(projection)
+    broken = deepcopy(projection)
+    broken["reference_artifact"]["sha256"] = "f" * 64
+    assert not verified_static_integerization(broken)
+    broken = deepcopy(projection)
+    broken["integerization_receipt"]["golden_agreement"]["outputs"][0]["max_abs"] = 0.001
+    assert not verified_static_integerization(broken)
 from merlin.targetgen.capsule_common import load_capsule
 from merlin.targetgen.capsule_source import (
     M2MUnavailable,

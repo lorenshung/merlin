@@ -38,6 +38,7 @@ from urllib.parse import unquote, urlparse
 
 from merlin.common.paths import env as _env
 from merlin.common.paths import repo_root
+from merlin.common.digest import is_sha256
 from merlin.targetgen import capture_cache
 
 _MODEL_CAPTURE_ABI_VERSION = 6
@@ -189,14 +190,15 @@ def _static_pt2e_model(op: str, *, scheme: str | None, recipe: dict | None, alre
 
 
 def _require_pt2e_integerization_receipt(
-    program: str, meta: dict, *, agreement_tolerance: tuple[float, float] | None
+    program: str, meta: dict, *, agreement_tolerance: tuple[float, float] | None,
+    capture_root: Path | None = None,
 ) -> None:
     """Admit a static W8A8 model only if its whole PT2E region was integerized.
 
     Finding *one* integer matmul in the MLIR proves only an existential fact.
     This receipt additionally binds complete Q/DQ-fed linear/conv/matmul census,
-    safe accumulation and an original-versus-rewrite eager comparison to the
-    captured program. Missing fields are never treated as zero or as success.
+    safe accumulation and a selected numerical comparison to the captured
+    program. Missing fields are never treated as zero or as success.
     """
     receipt = meta.get("integerization_receipt")
     if not isinstance(receipt, dict) or receipt.get("schema") != "m2m.pt2e-integerize.v1":
@@ -248,7 +250,10 @@ def _require_pt2e_integerization_receipt(
     if receipt.get("accumulator_bound_checked") is not True or max_k < 1 or max_k * 128 * 128 > (1 << 31) - 1:
         raise M2MUnavailable("integerization receipt does not prove a safe i32 accumulator")
 
-    expected = agreement_tolerance or (_DEF_ATOL, _DEF_RTOL)
+    engine = (meta.get("recipe") or {}).get("software_numerical_engine")
+    if engine not in (None, "integer_reference"):
+        raise M2MUnavailable(f"unsupported static W8A8 numerical engine {engine!r}")
+    expected = (0.0, 0.0) if engine == "integer_reference" else agreement_tolerance or (_DEF_ATOL, _DEF_RTOL)
     agreement = receipt.get("golden_agreement")
     if not isinstance(agreement, dict) or agreement.get("status") != "passed":
         raise M2MUnavailable("integerization receipt has no passed original-vs-rewrite golden agreement")
@@ -270,6 +275,26 @@ def _require_pt2e_integerization_receipt(
         raise M2MUnavailable("integerization receipt has a golden agreement output outside tolerance")
     if any(row.get("atol") != expected[0] or row.get("rtol") != expected[1] for row in outputs):
         raise M2MUnavailable("integerization receipt has a golden agreement output with different tolerance")
+    if engine == "integer_reference":
+        if agreement.get("reference") != "pt2e_integer":
+            raise M2MUnavailable("integerization receipt did not use the selected independent integer reference")
+        source = agreement.get("source")
+        if not isinstance(source, dict) or not isinstance(source.get("path"), str) or not is_sha256(source.get("sha256")):
+            raise M2MUnavailable("integerization receipt lacks the integer reference source identity")
+        executed = agreement.get("executed_contractions")
+        if not isinstance(executed, dict) or any(
+            type(executed.get(kind)) is not int or executed[kind] != by_kind[kind]["seen"]
+            for kind in ("conv2d", "linear", "matmul")
+        ) or any(executed.get(key) != seen for key in ("total", "selected", "observed")):
+            raise M2MUnavailable("independent integer reference contraction census differs from PT2E")
+        pointer = agreement.get("output")
+        if not isinstance(pointer, dict) or pointer.get("path") != "integer-reference.json" or not is_sha256(pointer.get("sha256")):
+            raise M2MUnavailable("integerization receipt lacks a bundle-local independent reference artifact")
+        if capture_root is None:
+            raise M2MUnavailable("independent integer reference artifact has no capture directory")
+        reference_path = capture_root / "integer-reference.json"
+        if not reference_path.is_file() or reference_path.is_symlink() or hashlib.sha256(reference_path.read_bytes()).hexdigest() != pointer["sha256"]:
+            raise M2MUnavailable("independent integer reference artifact does not match its digest")
 
     emitted = count(receipt.get("integer_mm_emitted"), "emitted integer matmul count")
     if emitted < rewritten:
@@ -1046,7 +1071,7 @@ class PytorchRefSource:
                     _require_integer_contraction(cached_program, scheme=scheme, recipe=recipe)
                     if _static_pt2e_model(op, scheme=scheme, recipe=recipe, already_quantized=already_quantized):
                         _require_pt2e_integerization_receipt(
-                            cached_program, cached, agreement_tolerance=agreement_tolerance
+                            cached_program, cached, agreement_tolerance=agreement_tolerance, capture_root=cached_slot
                         )
                     if already_quantized:
                         _require_materialized_contraction(cached_program, dtype=dtype)
@@ -1191,7 +1216,9 @@ class PytorchRefSource:
         program = (workdir / "linalg.mlir").read_text(encoding="utf-8")
         _require_integer_contraction(program, scheme=scheme, recipe=recipe)
         if _static_pt2e_model(op, scheme=scheme, recipe=recipe, already_quantized=already_quantized):
-            _require_pt2e_integerization_receipt(program, meta, agreement_tolerance=agreement_tolerance)
+            _require_pt2e_integerization_receipt(
+                program, meta, agreement_tolerance=agreement_tolerance, capture_root=workdir
+            )
         if already_quantized:
             meta["materialized_contractions"] = _require_materialized_contraction(program, dtype=dtype)
             meta_p.write_text(json.dumps(meta), encoding="utf-8")
