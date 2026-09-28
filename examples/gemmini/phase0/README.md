@@ -137,6 +137,9 @@ merlin experiment corpus derive gemmini-functional \
 Preserve the bootstrap plan and FP32 bundles. For the next step, select
 `REALIZED_DERIVATION_ROOT`, not the initial FP32 derivation. New recipe, framework,
 source or calibration bytes require newly captured bundles and a fresh plan.
+Derivation checks each quantized capture's recorded recipe digest against the
+recipes derived from the *currently selected* provider and SW spec; captures
+from an older provider cannot be reused just because their MLIR parses.
 
 `evidence/evidence-manifest.json` links to the exact input bytes and consumer views:
 
