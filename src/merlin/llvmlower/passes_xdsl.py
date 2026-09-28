@@ -604,7 +604,7 @@ def preprocess_text(mlir_text: str, *, audit=None) -> tuple[str, dict]:
 
     module = parse_mlir_text(mlir_text)
     if audit is not None:
-        record_stage(audit, "xdsl-parsed", module)
+        record_stage(audit, "xdsl-parsed", module, generic=True)
     stats = {}
     for statistic, stage, transform in (
         ("dead_tensor_ops_pruned", "xdsl-pruned", prune_dead_pure_tensor_ops),
@@ -613,7 +613,7 @@ def preprocess_text(mlir_text: str, *, audit=None) -> tuple[str, dict]:
     ):
         stats[statistic] = transform(module)
         if audit is not None:
-            record_stage(audit, stage, module)
+            record_stage(audit, stage, module, generic=True)
     # Generic form preserves source attributes on every operation and avoids
     # custom-printer grammar skew at the upstream MLIR boundary (notably yield
     # and rank-changing tensor operations). This is serialization, not lowering.

@@ -123,6 +123,9 @@ def test_whole_model_xdsl_preprocessing_records_each_rewrite_without_changing_ou
     ]
     final = audit.record["stages"][-1]
     assert final["sha256"] == hashlib.sha256(observed[0].encode()).hexdigest()
+    assert final["bytes"] == len(observed[0].encode())
+    if mode != "compact":
+        assert (audit.directory / final["file"]).read_bytes() == observed[0].encode()
     for stage in audit.record["stages"]:
         if mode != "compact":
             assert (audit.directory / stage["file"]).is_file()
