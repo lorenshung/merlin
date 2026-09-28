@@ -304,4 +304,9 @@ must show measured passes for every mandatory tier. L2 is Spike's functional
 model, while L3 is elaborated RTL; L0/L1 or a generated ELF alone are not an RTL
 verdict. Record the selected simulator/build provenance separately: a passing
 kernel result with `UNKNOWN` hardware pins is diagnostic, not a pinned release
-claim. This check does not qualify a complete model or the Phase 0 corpus.
+claim. `testbench_timeout` at L3 means that tier is **unmeasured**, even when
+the same capsule passed L0–L2 with zero numerical mismatches. Use a measured
+small source-derived capsule to exercise RTL, and keep large model-derived
+shapes as separate functional-model checks when their RTL cost exceeds the
+budget; neither result substitutes for the other's coverage obligation. This
+check does not qualify a complete model or the Phase 0 corpus.
