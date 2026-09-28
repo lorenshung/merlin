@@ -683,6 +683,16 @@ def test_claim_evaluation_obligation_records_admitted_format_without_model_names
     assert not any(name in yaml.safe_dump(res["capsules"]) for name in _ws(target)["models"])
 
 
+def test_held_out_claim_cannot_be_a_public_derivation_capture_even_under_an_alias():
+    with pytest.raises(CS.SynthesisError, match="held-out claim model"):
+        CS.synthesize(
+            {"target": "fixture", "cells": []},
+            workload_spec={"models": ["Tiny-Llama"]},
+            application_inventory={"applications": {"tiny_llama": {}}},
+            capability_contract={"name": "fixture", "compute_units": []},
+        )
+
+
 def test_a_claim_whose_preference_names_nothing_admitted_records_unavailable_format():
     """A claim with no admitted model format is an explicit owner-side gap."""
     doc = _spec("gemmini")

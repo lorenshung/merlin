@@ -305,6 +305,9 @@ Select a generated detailed sidecar through the existing conformance requirement
 Its byte copy, parsed accounting, content digest and declared-roster comparison travel
 together. A missing sidecar is reported as `not_available`, never as zero uncovered work.
 Held-out claim models are not added to this derivation inventory.
+When a detailed inventory is selected, synthesis refuses a capture whose name
+matches a held-out claim model after case and punctuation normalization; use
+separate iteration workloads rather than renaming a validation capture.
 Public synthesized capsule descriptions report counts and signatures, not source
 model names. An exact integer-operation capsule uses a deterministic source ordinal
 within the digest-bound detailed inventory together with the capture hash, so the

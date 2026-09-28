@@ -1254,6 +1254,15 @@ def synthesize(
     cells = list(spec_doc.get("cells") or ())
     probes = list((spec_doc.get("boundaries") or {}).get("extent_probes") or ())
     ws = dict(workload_spec or {})
+    # A literal-name check misses ordinary aliases such as Tiny-Llama/tiny_llama.
+    # This is an admission guard, not an anonymizer: held-out claim workloads
+    # cannot become the source of the public derivation corpus in a verified run.
+    if isinstance(application_inventory, dict) and isinstance(application_inventory.get("applications"), dict):
+        roster_key = lambda name: "".join(ch for ch in str(name).casefold() if ch.isalnum())  # noqa: E731
+        claims = {roster_key(name) for name in (ws.get("models") or ())}
+        captures = {roster_key(name) for name in application_inventory["applications"]}
+        if (claims - {""}) & (captures - {""}):
+            raise SynthesisError("held-out claim model appears in the selected public derivation inventory")
     pool = available_ops()
     exact_entries, exact_refused = exact_int_mm_entries(spec_doc.get("application_demands"), application_inventory)
 
