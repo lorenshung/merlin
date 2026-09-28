@@ -96,6 +96,17 @@ recipe, workload policy and requirement bytes. A successful diagnostic derivatio
 is **not** a compiler certificate or reviewed corpus. Missing mappings remain
 obligations; an unexpressible plan is retained as a blocked artifact.
 
+For a concrete composition audit, inspect
+`requirements.yaml` → `scope.typed_required_instances.instances`. Each record
+names the originating capture, its SHA-256, exact MLIR operation IDs and the
+typed SSA edges between regions. Compare those operations with the selected
+software spec and each generated capsule's `capsule.interface.mlir` and
+`capsule.yaml` software-screen decision.
+Raw source adjacency is not device placement: a chain containing host-side
+casts or maps cannot become a Phase 2 performance obligation merely because a
+synthetic capsule has the same sequence of semantic families. Explicit SW
+admission, a matching implementation and measured execution are separate gates.
+
 ### Realize the selected precision, then derive again
 
 The first FP32 pass inventories source demand. Inspect the generated
