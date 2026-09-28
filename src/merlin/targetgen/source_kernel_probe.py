@@ -1,8 +1,8 @@
 """Bound a captured matrix body for a finite, source-identified kernel diagnostic.
 
 The source operation keeps its original geometry and dtype in the record. The
-window is a *new synthetic integer operation*: projecting a float or bf16
-capture does not establish that the model has an integerized contraction.
+window is a *new synthetic operation*: projecting its dtype or geometry does
+not establish that the original model executes the projected operation.
 """
 
 from __future__ import annotations
@@ -26,7 +26,13 @@ def _matrix_type(spelling: str) -> tuple[int, int, str]:
     return int(match[1]), int(match[2]), match[3]
 
 
-def derive_kernel_window(capture_dir: str | Path, source_node_id: str, *, tile_dim: int) -> dict:
+def derive_kernel_window(
+    capture_dir: str | Path,
+    source_node_id: str,
+    *,
+    tile_dim: int,
+    projection_types: tuple[str, str, str],
+) -> dict:
     """Select one exact traced ``linalg.matmul`` and derive one bounded test window.
 
     The selected trace's MLIR hash must match the model bytes. A caller selects a
@@ -36,6 +42,8 @@ def derive_kernel_window(capture_dir: str | Path, source_node_id: str, *, tile_d
     """
     if type(tile_dim) is not int or tile_dim < 1:
         raise ValueError("tile_dim must be a positive integer derived from selected hardware facts")
+    if len(projection_types) != 3 or any(not re.fullmatch(r"[a-z][a-z0-9]*", dtype) for dtype in projection_types):
+        raise ValueError("projection_types must name three MLIR scalar types")
     capture = Path(capture_dir)
     model_path = capture / "model.mlir"
     trace_path = capture / "frontend-trace.json"
@@ -71,8 +79,8 @@ def derive_kernel_window(capture_dir: str | Path, source_node_id: str, *, tile_d
     metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.is_file() else {}
     receipt_path = capture / "capture_receipt.json"
     return {
-        "schema": "merlin.source-kernel-window.v1",
-        "scope": "synthetic_i8_matrix_body_from_captured_geometry",
+        "schema": "merlin.source-kernel-window.v2",
+        "scope": "synthetic_matrix_body_from_captured_geometry",
         "source": {
             "model_mlir_sha256": model_sha,
             "frontend_trace_sha256": _sha(trace_path),
@@ -94,9 +102,9 @@ def derive_kernel_window(capture_dir: str | Path, source_node_id: str, *, tile_d
         "projection": {
             "tile_dim": tile_dim,
             "geometry": window,
-            "dtype": {"lhs": "i8", "rhs": "i8", "result": "i32"},
+            "dtype": dict(zip(("lhs", "rhs", "result"), projection_types)),
             "rule": "M,N=min(parent,tile); K=min(parent,tile+(parent_K%tile or tile))",
         },
-        "integer_body_observed": (lhs_dtype, rhs_dtype, result_dtype) == ("i8", "i8", "i32"),
-        "integer_model_claim": "none_capture_quantization_unverified",
+        "projected_type_body_observed": (lhs_dtype, rhs_dtype, result_dtype) == projection_types,
+        "model_equivalence_claim": "none_synthetic_operands",
     }

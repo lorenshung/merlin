@@ -40,16 +40,28 @@ def _capture(tmp_path, *, parent_k=147):
 
 def test_source_geometry_and_k_tail_survive_bounded_integer_projection(tmp_path):
     capture = _capture(tmp_path)
-    projected = derive_kernel_window(capture, "g:prepared:root:n7", tile_dim=16)
+    projected = derive_kernel_window(
+        capture, "g:prepared:root:n7", tile_dim=16, projection_types=("i8", "i8", "i32")
+    )
     assert projected["source"]["geometry"] == {"M": 64, "K": 147, "N": 12544}
     assert projected["source"]["operand_types"][0] == "tensor<64x147xf32>"
     assert projected["projection"]["geometry"] == {"M": 16, "K": 19, "N": 16}
-    assert projected["integer_body_observed"] is False
-    assert projected["integer_model_claim"] == "none_capture_quantization_unverified"
+    assert projected["projected_type_body_observed"] is False
+    assert projected["model_equivalence_claim"] == "none_synthetic_operands"
 
 
 def test_changed_model_bytes_refuse_stale_trace(tmp_path):
     capture = _capture(tmp_path)
     (capture / "model.mlir").write_text("changed", encoding="utf-8")
     with pytest.raises(ValueError, match="does not bind"):
-        derive_kernel_window(capture, "g:prepared:root:n7", tile_dim=16)
+        derive_kernel_window(capture, "g:prepared:root:n7", tile_dim=16, projection_types=("i8", "i8", "i32"))
+
+
+def test_projection_precision_is_selected_not_built_into_shared_geometry(tmp_path):
+    capture = _capture(tmp_path)
+    projected = derive_kernel_window(
+        capture, "g:prepared:root:n7", tile_dim=16, projection_types=("f32", "f32", "f32")
+    )
+    assert projected["projection"]["dtype"] == {"lhs": "f32", "rhs": "f32", "result": "f32"}
+    assert projected["projected_type_body_observed"] is True
+    assert projected["model_equivalence_claim"] == "none_synthetic_operands"

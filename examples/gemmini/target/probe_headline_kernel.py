@@ -68,7 +68,16 @@ def generate(
     if not root.is_relative_to(REPO / "out") or root.exists() or root.is_symlink():
         raise ValueError("output root must be a fresh path beneath this checkout's out/")
     binding = _selected_binding(facts_path, contract_path)
-    projection = derive_kernel_window(capture, source_node_id, tile_dim=binding.tile_dim)
+    projection = derive_kernel_window(
+        capture,
+        source_node_id,
+        tile_dim=binding.tile_dim,
+        projection_types=(
+            binding.mlir_dtype(binding.operand_dtype),
+            binding.mlir_dtype(binding.operand_dtype),
+            binding.mlir_dtype(binding.accum_dtype),
+        ),
+    )
     geometry = projection["projection"]["geometry"]
     identity = hashlib.sha256(
         json.dumps(projection, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -154,7 +163,7 @@ def run_native(projection: dict, root: Path, *, rtl: bool) -> dict:
     result = {
         "status": "spike_passed",
         "scope": "bounded_synthetic_i8_matrix_body_only",
-        "source_integer_model_claim": projection["integer_model_claim"],
+        "source_model_equivalence_claim": projection["model_equivalence_claim"],
         "diagnostic_limits": {
             "synthetic_integer_operands": True,
             "headline_numerical_equivalence": False,
