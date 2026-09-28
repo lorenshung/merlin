@@ -273,6 +273,7 @@ def _observed_imports(
         "meta": _path(receipt.parent / "meta.json", hash_file=True),
         "observed_dependency_count": None,
         "selected_m2m_sources": [],
+        "selected_checkout_sources": [],
         "foreign_m2m_modules": [],
         "errors": [],
     }
@@ -305,36 +306,39 @@ def _observed_imports(
             result["errors"].append("Malformed observed import fields")
             continue
         path = Path(source)
-        if module == "m2m" or module.startswith("m2m."):
-            if not path.is_absolute() or ".." in path.parts or not path.absolute().is_relative_to(root):
+        is_m2m_module = module == "m2m" or module.startswith("m2m.")
+        if not path.is_absolute() or ".." in path.parts or not path.absolute().is_relative_to(root):
+            if is_m2m_module:
                 result["foreign_m2m_modules"].append(module)
-                continue
-            name = path.absolute().relative_to(root).as_posix()
-            if _has_symlink_component(path):
-                result["errors"].append(f"Observed M2M source path traverses a symlink: {name}")
-                result["selected_m2m_sources"].append(
-                    {
-                        "module": module,
-                        "name": name,
-                        "observed_sha256": expected,
-                        "current_sha256": None,
-                        "named_direct_owner": name in owner_hashes,
-                        "status": "unsafe_path",
-                    }
-                )
-                continue
-            current = _sha(path) if path.is_file() else None
-            result["selected_m2m_sources"].append(
+            continue
+        name = path.absolute().relative_to(root).as_posix()
+        bucket = result["selected_m2m_sources" if is_m2m_module else "selected_checkout_sources"]
+        if _has_symlink_component(path):
+            result["errors"].append(f"Observed checkout source path traverses a symlink: {name}")
+            bucket.append(
                 {
                     "module": module,
                     "name": name,
                     "observed_sha256": expected,
-                    "current_sha256": current,
+                    "current_sha256": None,
                     "named_direct_owner": name in owner_hashes,
-                    "status": "match" if current == expected else "drift_or_missing",
+                    "status": "unsafe_path",
                 }
             )
+            continue
+        current = _sha(path) if path.is_file() else None
+        bucket.append(
+            {
+                "module": module,
+                "name": name,
+                "observed_sha256": expected,
+                "current_sha256": current,
+                "named_direct_owner": name in owner_hashes,
+                "status": "match" if current == expected else "drift_or_missing",
+            }
+        )
     result["selected_m2m_sources"].sort(key=lambda row: (row["name"], row["module"]))
+    result["selected_checkout_sources"].sort(key=lambda row: (row["name"], row["module"]))
     result["foreign_m2m_modules"].sort()
     result["status"] = "invalid_observed_imports" if result["errors"] else "observed_imports_inventoried"
     return result
@@ -499,6 +503,11 @@ def inspect(
         observed = receipt_audit["observed_imports"]
         if observed and any(not row["named_direct_owner"] for row in observed["selected_m2m_sources"]):
             blockers.append("Receipt's direct-owner list omits M2M sources observed by its capture metadata")
+        if observed and observed["selected_checkout_sources"]:
+            blockers.append(
+                "Capture metadata observed other selected-checkout sources; compare their bytes and include them "
+                "in any future sealed source snapshot"
+            )
         if package_inventory["unlisted_python_sources_by_receipt"]:
             blockers.append("Prior receipt omits Python files from the selected M2M package tree")
     return {

@@ -109,4 +109,25 @@ Those missing relations are not evidence that the operators are supported or
 semantically irrelevant. The model2MLIR trace must observe any legitimate
 elimination (including casts and guards) or preserve a lowering correspondence;
 until then, exact operator-coverage claims for TinyLlama and SmolVLA remain
-unresolved even though their MLIR reaches host LLVM IR.
+unresolved even though their MLIR reaches host LLVM IR. In the observed traces,
+one unresolved TinyLlama cast changes `i64` to `f32`, and one unresolved SmolVLA
+prefix cast changes `f32` to `bf16`; marking every missing cast as a no-op would
+be incorrect.
+
+Replay the graph-correspondence check on any selected bundle (or one SmolVLA
+stage) without recapturing or changing its evidence:
+
+```sh
+PYTHONPATH="$MODEL2MLIR_ROOT" "$CAPTURE_PYTHON" - "$CAPTURE/frontend-trace.json" <<'PY'
+import json
+import sys
+from m2m.capture.trace import graph_relation
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    trace = json.load(stream)
+observed = graph_relation(trace["graphs"]["quantized"], trace["graphs"]["prepared"])
+recorded = next(item for item in trace["transformations"] if item["from_stage"] == "quantized")
+assert observed == recorded, "selected model2MLIR implementation differs from the captured relation"
+print(observed["status"], len(observed["unresolved_source_ids"]), len(observed["unresolved_destination_ids"]))
+PY
+```

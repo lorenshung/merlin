@@ -111,3 +111,10 @@ after its observation point, so an empty observed-M2M list does **not** prove
 that no M2M modules were executed. Neither metadata nor the receipt authenticates
 the historical process. Observed paths with symlinked ancestors or parent
 traversal are rejected before their target bytes are read.
+
+The same comparison also lists observed non-package modules under the selected
+model2MLIR checkout, such as a workload loader imported by a thin Merlin example
+adapter. Those entries appear as `selected_checkout_sources` with observed and
+current hashes, separately from `selected_m2m_sources`. They are not silently
+absorbed into the receipt's direct-owner list, and a matching hash still does not
+prove a complete import or checkpoint-data closure.

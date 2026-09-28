@@ -181,6 +181,63 @@ def test_receipt_audit_reports_current_direct_source_drift_without_upgrading(tmp
     assert changed_meta["capture_receipt_audit"]["observed_imports"]["status"] == "meta_drift_or_missing"
 
 
+def test_preflight_reports_delegated_checkout_loader_observed_by_capture(tmp_path):
+    worker, delegated_loader, m2m, python, _ = _selection(tmp_path)
+    wrapper = tmp_path / "tiny_adapter.py"
+    wrapper.write_text("from workloads.example.loader import get_model_and_inputs\n")
+    owner = m2m / "m2m/__init__.py"
+
+    def sha(path):
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    meta = tmp_path / "meta.json"
+    meta.write_text(
+        json.dumps(
+            {
+                "loader_dependency_sources": [
+                    {
+                        "module": "workloads.example.loader",
+                        "path": str(delegated_loader),
+                        "sha256": sha(delegated_loader),
+                    }
+                ]
+            }
+        )
+    )
+    receipt = tmp_path / "capture_receipt.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema": "m2m.capture-receipt.v1",
+                "source": {"path": str(wrapper), "sha256": sha(wrapper)},
+                "tool": {"source_sha256": {"m2m/__init__.py": sha(owner)}},
+                "artifacts": {"meta.json": {"sha256": sha(meta)}},
+                "source_closure_verified": False,
+            }
+        )
+    )
+
+    result = inspect(worker=worker, loader=wrapper, m2m_root=m2m, python=python, capture_receipt=receipt)
+    observed = result["capture_receipt_audit"]["observed_imports"]
+    assert observed["selected_checkout_sources"] == [
+        {
+            "module": "workloads.example.loader",
+            "name": "workloads/example/loader.py",
+            "observed_sha256": sha(delegated_loader),
+            "current_sha256": sha(delegated_loader),
+            "named_direct_owner": False,
+            "status": "match",
+        }
+    ]
+    assert result["source_closure_verified"] is False
+    delegated_loader.write_text("CHANGED = True\n")
+    drifted = inspect(worker=worker, loader=wrapper, m2m_root=m2m, python=python, capture_receipt=receipt)
+    assert drifted["capture_receipt_audit"]["observed_imports"]["selected_checkout_sources"][0]["status"] == (
+        "drift_or_missing"
+    )
+    assert drifted["source_closure_verified"] is False
+
+
 def test_receipt_audit_rejects_escape_and_wrong_loader(tmp_path):
     worker, loader, m2m, python, _ = _selection(tmp_path)
     receipt = tmp_path / "untrusted-receipt.json"
