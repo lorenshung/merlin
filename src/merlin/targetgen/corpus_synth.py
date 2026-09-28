@@ -789,7 +789,9 @@ def _mark_source(entry: dict) -> None:
         entry["source"] = "pytorch"
 
 
-def _exact_int_mm_group_candidates(group: dict, entries: list[dict], inventory_digest: str | None) -> list[str]:
+def _exact_int_mm_group_candidates(
+    group: dict, entries: list[dict], inventory_digest: str | None, application_order: tuple[str, ...]
+) -> list[str]:
     """Name candidates only when every source occurrence has one digest-bound exact signature.
 
     Compact operation groups lose the individual tensor ABI. The entries retain each full sidecar
@@ -807,20 +809,24 @@ def _exact_int_mm_group_candidates(group: dict, entries: list[dict], inventory_d
         source_rows = raw_sources
     else:
         return []
-    expected: dict[tuple[str, str], int] = {}
+    source_index = {name: index for index, name in enumerate(application_order)}
+    expected: dict[tuple[int, str], int] = {}
     for source in source_rows:
         if not isinstance(source, dict):
             return []
-        key = (str(source.get("application") or ""), str(source.get("capture_sha256") or ""))
+        index = source_index.get(str(source.get("application") or ""))
+        if index is None:
+            return []
+        key = (index, str(source.get("capture_sha256") or ""))
         count = source.get("count")
-        if not all(key) or type(count) is not int or count < 1 or key in expected:
+        if not key[1] or type(count) is not int or count < 1 or key in expected:
             return []
         expected[key] = count
     if not expected or sum(expected.values()) != group.get("count"):
         return []
 
-    actual: dict[tuple[str, str], int] = {}
-    ordinals: dict[tuple[str, str], set[int]] = {}
+    actual: dict[tuple[int, str], int] = {}
+    ordinals: dict[tuple[int, str], set[int]] = {}
     names: list[str] = []
     for entry in entries:
         match = entry.get("application_signature_match") or {}
@@ -836,7 +842,10 @@ def _exact_int_mm_group_candidates(group: dict, entries: list[dict], inventory_d
             return []
         names.append(str(entry["name"]))
         for source in match["sources"]:
-            key = (str(source.get("application") or ""), str(source.get("capture_sha256") or ""))
+            index = source.get("source_index")
+            if type(index) is not int:
+                return []
+            key = (index, str(source.get("capture_sha256") or ""))
             count = source.get("count")
             indexes = source.get("ordinals")
             signature = source.get("signature_sha256")
@@ -944,7 +953,12 @@ def _application_operation_plan(demands: dict | None, *, exact_entries: list[dic
         if disposition == "hardware_admitted":
             row["lane"] = "accelerator"
             exact_candidates = (
-                _exact_int_mm_group_candidates(group, exact_entries, demands.get("full_inventory_sha256"))
+                _exact_int_mm_group_candidates(
+                    group,
+                    exact_entries,
+                    demands.get("full_inventory_sha256"),
+                    tuple(sorted((demands.get("applications") or {}).keys())),
+                )
                 if (
                     operation == "aten._int_mm.default"
                     and mlir_operation == "linalg.generic"
@@ -1098,7 +1112,7 @@ def exact_int_mm_entries(demands: dict | None, inventory: dict | None) -> tuple[
     # full-model quantization workflows that happen to have the same integer tensor ABI.
     by_geometry: dict[tuple[str, int, int, int], list[dict]] = {}
     refused: list[dict] = []
-    for label, app in sorted(inventory["applications"].items()):
+    for source_index, (label, app) in enumerate(sorted(inventory["applications"].items())):
         declared = compact_apps[label]
         if any(
             app.get(key) != declared.get(key)
@@ -1119,7 +1133,9 @@ def exact_int_mm_entries(demands: dict | None, inventory: dict | None) -> tuple[
             if row.get("operation") != "aten._int_mm.default" or row.get("mlir_operation") != "linalg.generic":
                 continue
             source = {
-                "application": label,
+                # The exact private inventory keeps the source name. Public capsules use its
+                # deterministic roster ordinal and capture hash, never a claim-model name.
+                "source_index": source_index,
                 "capture_sha256": app["capture_sha256"],
                 "signature_sha256": hashlib.sha256(
                     json.dumps(
@@ -1204,7 +1220,7 @@ def exact_int_mm_entries(demands: dict | None, inventory: dict | None) -> tuple[
             "source_reference": (
                 f"exact normalized application aten._int_mm.default i8×i8→i32, {m}×{k}×{n}; "
                 f"{sum(s['count'] for s in sources)} occurrence(s) in "
-                + ", ".join(sorted({s["application"] for s in sources}))
+                f"{len({s['source_index'] for s in sources})} selected capture(s)"
             ),
             "label": "public",
             "generalization": {"generalization_axis": "application_operation"},
@@ -1698,7 +1714,7 @@ def synthesize(
             "source_role": SOURCE_ROLE,
             "source_reference": (
                 f"synthesized for the epilogue axis: this target can fuse a {stage!r} stage onto a "
-                f"contraction (evidenced by {_st.get('evidenced_by')}), and a (family, dtype, "
+                "contraction (evidenced by the derived requirement), and a (family, dtype, "
                 f"alignment) cell cannot demand a particular stage -- so without this the capability is "
                 f"reported covered by whichever single stage the cell axis happened to pick"
             ),
@@ -1753,8 +1769,8 @@ def synthesize(
             **({"acc_scale": SYNTH_ACC_SCALE} if "acc_scale" in stages else {}),
             "source_role": SOURCE_ROLE,
             "source_reference": (
-                f"synthesized for the group axis: the captured models {_group.get('observed_in')} "
-                f"form {_group.get('groups')} compute group(s) with this stage combination on this "
+                f"synthesized for the group axis: selected captures form {_group.get('groups')} "
+                "compute group(s) with this stage combination on this "
                 f"target, and no per-stage member demands a combination"
             ),
             "label": "public",
@@ -1795,7 +1811,7 @@ def synthesize(
             "source_role": SOURCE_ROLE,
             "source_reference": (
                 f"synthesized for the carried-state axis: {stage!r} is configuration a unit stays in "
-                f"(evidenced by {_carried.get('evidenced_by')}), so the command after it, which does "
+                "(evidenced by the derived requirement), so the command after it, which does "
                 f"not ask for it, is where a backend that does not restore its configuration shows"
             ),
             "label": "public",
@@ -1880,7 +1896,7 @@ def synthesize(
             "source_role": SOURCE_ROLE,
             "source_reference": (
                 f"synthesized for the convolution-window axis: window {sig}, recovered structurally "
-                f"from {_cw.get('n_regions')} region(s) of {_cw.get('sources')}. torch-mlir emits "
+                f"from {_cw.get('n_regions')} region(s) in selected captures. torch-mlir emits "
                 f"im2col, so a captured convolution carries no padding/stride/dilation attribute at "
                 f"all and the geometry comes from the gather's affine map and its padding producer"
                 + (

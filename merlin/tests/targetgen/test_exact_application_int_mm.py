@@ -98,6 +98,8 @@ def test_exact_integer_matmul_bridge_refuses_weaker_signatures():
     assert (entry["M"], entry["K"], entry["N"]) == (2, 32, 64)
     assert entry["capture_op"] == "int_matmul" and entry["output_dtype"] == "i32"
     assert entry["application_signature_match"]["status"] == "candidate_unverified"
+    assert entry["application_signature_match"]["sources"][0]["source_index"] == 0
+    assert "application" not in entry["application_signature_match"]["sources"][0]
 
     row = full["applications"]["app"]["signatures"][0]
     assert exact_int_mm_geometry(row) == (2, 32, 64)
@@ -117,6 +119,30 @@ def test_exact_integer_matmul_bridge_refuses_weaker_signatures():
     partial = _application_operation_plan(demands, exact_entries=entries)
     assert partial["status"] == "blocked" and partial["blocked_operations"] == 1
     assert partial["obligations"][0]["status"] == "refused"
+
+
+def test_exact_integer_slice_uses_private_roster_ordinals_without_losing_group_identity():
+    demands, full = _demand_and_inventory()
+    private_name = "heldout_secret_model"
+    full["applications"][private_name] = deepcopy(full["applications"]["app"])
+    demands["applications"][private_name] = deepcopy(demands["applications"]["app"])
+    demands["operation_groups"][0]["count"] = 2
+    demands["operation_groups"][0]["sources"][private_name] = {
+        "capture_sha256": full["applications"][private_name]["capture_sha256"],
+        "count": 1,
+    }
+    demands["n_operations"] = 2
+    demands["full_inventory_sha256"] = hashlib.sha256(
+        json.dumps(full, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+    entries, refused = exact_int_mm_entries(demands, full)
+    assert len(entries) == 1 and not refused
+    assert [source["source_index"] for source in entries[0]["application_signature_match"]["sources"]] == [0, 1]
+    assert private_name not in yaml.safe_dump(entries)
+    plan = _application_operation_plan(demands, exact_entries=entries)
+    assert plan["blocked_operations"] == 0
+    assert plan["obligations"][0]["capsule_candidates"] == [entries[0]["name"]]
 
 
 def test_integer_matmul_capsule_has_matching_linalg_and_independent_golden(tmp_path, monkeypatch):
