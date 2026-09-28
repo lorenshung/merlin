@@ -21,6 +21,7 @@ from .declarations import from_definition
 from .evidence import _materialize_evidence, export_evidence, select_evidence
 from .profiles import selected_software_spec_path, synthesis_input_identity
 from .software_screen import diagnostic_entry, intersect_requirement, screen_entry
+from .typed_scope import typed_required_instances
 
 
 def _json(value) -> bytes:
@@ -205,6 +206,10 @@ def derive(
     digest = hashlib.sha256(json.dumps(full, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     if digest != requirement["application_demands"]["full_inventory_sha256"]:
         raise ValueError("capture bytes changed while deriving requirements")
+    # Retain the exact operation IDs and SSA types behind the family-only raw
+    # scope census. This is source evidence, not an accelerator-eligible Phase 2
+    # requirement; placement and compiler correspondence remain unresolved.
+    requirement["scope"]["typed_required_instances"] = typed_required_instances(requirement["scope"], full)
     from merlin.targetgen.quantization_spec import build_quantization_contract, capture_recipe_candidates
 
     quantization = build_quantization_contract(

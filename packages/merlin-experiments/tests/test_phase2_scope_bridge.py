@@ -11,6 +11,7 @@ import pytest
 import yaml
 from merlin_experiments.phase0 import sweeps as SW
 from merlin_experiments.phase0.software_screen import diagnostic_entry, screen_entry
+from merlin_experiments.phase0.typed_scope import typed_required_instances
 from merlin_experiments.phase0.writer import _write_capsule
 from merlin_experiments.phase2 import corpus as P
 from merlin_experiments.phase2.claims.affine import preflight_affine_claim
@@ -19,6 +20,7 @@ from merlin.common.paths import repo_root
 from merlin.targetgen import capsule_golden as CG
 from merlin.targetgen import conformance
 from merlin.targetgen import corpus_spec as CS
+from merlin.targetgen.application_graph import application_graph_inventory
 from merlin.targetgen.software_spec import load_software_spec
 
 
@@ -71,6 +73,43 @@ def test_scope_sw_screen_checks_emitted_regions_without_inventing_device_maps() 
     first = diagnostic_entry(entry, observed)
     again = diagnostic_entry(first, observed)
     assert again["source_reference"] == first["source_reference"]
+
+
+def test_required_scope_instances_bind_exact_source_ops_types_and_edges(tmp_path) -> None:
+    entry = {
+        "name": "scope", "kind": "model_slice", "source_role": "derived_sweep",
+        "source_reference": "source fixture", "op": "scope_chain", "M": 4, "K": 8, "N": 4,
+        "scope_families": ["movement", "contraction", "elementwise_map"],
+    }
+    _, mlir = CS.build(entry, _binding())
+    source = tmp_path / "model.mlir"
+    source.write_text(mlir.replace('prov.op = "add"', 'prov.op = "unsupported_custom"'))
+    graph = application_graph_inventory(source)
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    signature = "movement -> contraction -> elementwise_map"
+    scope = {"required": [{"signature": signature, "occurrences": 1, "length": 3}]}
+    inventory = {"applications": {"fixture": {
+        "capture_source_path": str(source), "capture_sha256": digest, "operation_graph": graph,
+    }}}
+    observed = typed_required_instances(scope, inventory)
+    assert observed == typed_required_instances(scope, inventory)
+    assert observed["status"] == "typed_source_only"
+    assert len(observed["instances"]) == 1
+    instance = observed["instances"][0]
+    assert instance["capture_sha256"] == digest
+    assert [row["source_op"] for row in instance["regions"]] == [
+        "linalg.transpose", "matmul", "unsupported_custom"
+    ]
+    assert [row["semantic_family"] for row in instance["regions"]] == entry["scope_families"]
+    assert [row["operation_id"] for row in instance["regions"]] == instance["operation_ids"]
+    assert all(row["operation_id"].startswith(f"mlir:{digest}:") for row in instance["regions"])
+    assert instance["regions"][1]["results"][0]["dtype"] == "i32"
+    assert instance["regions"][2]["operands"][0]["dtype"] == "i32"
+    assert len(instance["edges"]) == 2
+    assert all(edge["dtype"] in {"i8", "i32"} for edge in instance["edges"])
+    source.write_text(source.read_text() + "\n")
+    with pytest.raises(ValueError, match="capture bytes changed"):
+        typed_required_instances(scope, inventory)
 
 
 def test_selected_scope_derives_four_priceable_members_and_missing_scope_skips(monkeypatch) -> None:
