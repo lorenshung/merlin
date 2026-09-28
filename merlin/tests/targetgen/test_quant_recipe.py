@@ -227,8 +227,8 @@ def get_model_and_inputs():
 
 
 @pytest.mark.slow
-def test_static_fp8_recipe_reaches_model2mlir_capture(tmp_path: Path) -> None:
-    """A derived floating-point format must not be fed to an integer-only observer."""
+def test_static_fp8_recipe_records_projected_storage_as_diagnostic(tmp_path: Path) -> None:
+    """A valid FP8 recipe reaches capture but cannot claim native FP8 from projected f32 storage."""
     from merlin.common.paths import env
 
     python = env("MERLIN_M2M_PYTHON") or (
@@ -264,6 +264,7 @@ def test_static_fp8_recipe_reaches_model2mlir_capture(tmp_path: Path) -> None:
             "mode": "static",
         },
     }
+    recipe["recipe_sha256"] = QR.digest(recipe)
     (tmp_path / "recipe.json").write_text(json.dumps(recipe), encoding="utf-8")
     result = subprocess.run(
         [
@@ -285,9 +286,11 @@ def test_static_fp8_recipe_reaches_model2mlir_capture(tmp_path: Path) -> None:
         timeout=120,
         env={**os.environ, "TMPDIR": str(tmp_path)},
     )
-    assert result.returncode == 0, result.stderr[-3000:]
+    assert result.returncode == 3, result.stderr[-3000:]
     assert (tmp_path / "capture" / "linalg.mlir").is_file()
     meta = json.loads((tmp_path / "capture" / "meta.json").read_text())
+    assert meta["ok"] is False
+    assert meta["precision_realization"]["status"] == "projected"
     assert meta["scheme"] == "fp8_e4m3_static_act_weight"
     assert meta["quantization_stats"]["framework_capture_policy"]["activation_observer"] == "minmax"
 
