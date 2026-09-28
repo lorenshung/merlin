@@ -94,3 +94,20 @@ drift or missing files. A match only means those declared files match now: the
 receipt does not enumerate transitive Python imports, runtime libraries, or data
 reads, and the comparison does not authenticate the earlier process. Rerun a fresh
 capture after any drift; never relabel the older one as source-closed.
+
+The preflight also hashes every regular file and directory under the selected
+`m2m` package and reports `.py` members absent from the older receipt's named
+direct-owner list. It rejects links and special entries in that tree. This
+current-tree inventory exposes a concrete gap such as a loader-imported helper
+missing from the receipt, and supplies bytes for planning a private source
+snapshot. It is still neither a historical source claim nor a complete Python
+runtime/import closure.
+
+When the receipt binds a sibling `meta.json`, the preflight verifies those
+metadata bytes and cross-checks its observed M2M import-source hashes against
+current files and the receipt's direct-owner list. This can expose an imported
+helper omitted from that list. The worker records only modules newly imported
+after its observation point, so an empty observed-M2M list does **not** prove
+that no M2M modules were executed. Neither metadata nor the receipt authenticates
+the historical process. Observed paths with symlinked ancestors or parent
+traversal are rejected before their target bytes are read.
