@@ -53,6 +53,11 @@ structure and independent numerical characterization supply separate evidence.
 The selected HW-MLIR also exposes 8-bit `scaleE8M0` command ports, matching the
 source's E8M0-named pack/pop controls. That carrier observation does not establish
 the block scope, exponent transformation, or a TorchAO scale representation.
+The direct source audit now checks all three `ScalarCore` scale command port
+widths and the `ScalingFactorRegFile` port geometry: an `i5` write index, `i8`
+write data, and exactly 32 contiguous `i8` outputs. A changed/missing port
+fails this structural check. These ports do not prove register behavior, wiring
+through every command path, or any numerical scale interpretation.
 Consequently `software-spec.yaml` leaves scale encoding and block size unresolved;
 do not promote the diagnostic FP8 recipe into a realizable model format yet.
 
