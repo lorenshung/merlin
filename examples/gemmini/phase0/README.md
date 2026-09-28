@@ -192,6 +192,10 @@ The memory-mapping axis reads the exact CIRCT facts bytes recorded in
 `capsules/_phase0/coverage-inputs.json`; a missing or changed facts snapshot
 leaves that axis unmeasured. This is pre-compiler corpus coverage, not evidence
 that a compiled program used the on-chip store correctly.
+Host-only and host-lane coverage likewise classify each capsule against the
+selected capability contract, without consulting an ambient provider. Mixed
+host/device composition stays unmeasured until an emitted boundary is bound to
+that same selected source; a declared legal boundary is not an execution proof.
 
 Verified admission also requires reviewed software and host semantics, complete
 capture source closure, independent numerical and compiler checks, resolved

@@ -296,3 +296,56 @@ def test_selected_memory_regime_uses_frozen_facts_not_ambient_target(tmp_path, m
     assert coverage["memory_mapping"]["covered_by"]["fits_double"] == ["selected"]
     with pytest.raises(ValueError, match="selected RTL facts differ"):
         selected_cohort_coverage(requirement, [member], inputs={**inputs, "raw_facts_utf8": raw.decode() + " "})
+
+
+def test_selected_host_axes_do_not_resolve_an_ambient_contract(tmp_path, monkeypatch):
+    from merlin.targetgen import target_registry
+
+    member = tmp_path / "model_slices" / "host_matmul"
+    member.mkdir(parents=True)
+    (member / "capsule.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "host_matmul",
+                "kind": "model_slice",
+                "label": "public",
+                "linalg_mlir": "capsule.interface.mlir",
+                "semantic": {"semantic_family": "contraction"},
+                "inputs": [
+                    {"name": "A", "role": "input", "shape": [4, 4], "dtype": "f32"},
+                    {"name": "B", "role": "weight", "shape": [4, 4], "dtype": "f32"},
+                ],
+                "operation": {"op": "matmul", "attributes": {"dtype": "f32"}},
+            }
+        )
+    )
+    (member / "capsule.interface.mlir").write_text(
+        'module attributes {prov.level = "linalg-on-tensors"} { '
+        'func.func @forward(%a: tensor<4x4xf32>, %b: tensor<4x4xf32>) -> tensor<4x4xf32> { '
+        '%0 = tensor.empty() : tensor<4x4xf32> '
+        '%1 = linalg.matmul ins(%a, %b : tensor<4x4xf32>, tensor<4x4xf32>) '
+        'outs(%0 : tensor<4x4xf32>) -> tensor<4x4xf32> '
+        'return %1 : tensor<4x4xf32> } }'
+    )
+    contract = {"name": "fixture", "compute_units": []}
+    raw_contract = (json.dumps(contract, sort_keys=True, indent=2) + "\n").encode()
+    digest = hashlib.sha256(raw_contract).hexdigest()
+    requirement = {
+        "target": "fixture",
+        "cells": [],
+        "host_only": {"families": ["contraction"]},
+        "host_lane": {"required": [{"family": "contraction", "dtype": "f32"}]},
+        "derivation": {"phase0_execution": {"contract_sha256": digest}},
+    }
+    monkeypatch.setattr(target_registry, "load_contract", lambda *_: pytest.fail("ambient contract was read"))
+    coverage = selected_cohort_coverage(requirement, [member], inputs={"capability_contract": contract})
+    assert coverage["host_only"]["status"] == "ok"
+    assert coverage["host_only"]["covered_by"] == {"contraction": ["host_matmul"]}
+    assert coverage["host_lane"]["status"] == "ok"
+    assert coverage["host_lane"]["covered_by"] == {"contraction/f32": ["host_matmul"]}
+    with pytest.raises(ValueError, match="selected capability contract differs"):
+        selected_cohort_coverage(
+            requirement,
+            [member],
+            inputs={"capability_contract": {**contract, "compute_units": [{}]}},
+        )

@@ -14,12 +14,24 @@ from ..spec import SpecError
 from .preparation import _members, source_run
 
 
+def _selected_contract(spec_doc: dict, inputs: dict | None) -> dict | None:
+    """Return only a contract whose selected identity matches the requirement."""
+    contract = (inputs or {}).get("capability_contract")
+    expected = ((spec_doc.get("derivation") or {}).get("phase0_execution") or {}).get("contract_sha256")
+    if not isinstance(contract, dict) or not isinstance(expected, str):
+        return None
+    raw = (json.dumps(contract, sort_keys=True, indent=2, allow_nan=False) + "\n").encode()
+    if hashlib.sha256(raw).hexdigest() != expected:
+        raise ValueError("selected capability contract differs from the frozen requirement")
+    return contract
+
+
 def selected_cohort_coverage(spec_doc: dict, roots: list[Path], *, inputs: dict | None = None) -> dict:
     """Measure pure capsule axes; never borrow ambient target facts for admission.
 
-    Legacy routing observers resolve a live target provider. Their diagnostic
-    output cannot qualify this selected snapshot until they accept the exact
-    selected contract explicitly. Memory regimes use byte-bound selected facts.
+    Composition still needs an exact-source-bound emitted host/device seam;
+    do not credit it from a live provider. Host-only and host-lane placement
+    use the byte-bound selected contract, and memory regimes use selected facts.
     """
     from merlin.targetgen.contract.materialize import cert_capsule_cover
 
@@ -49,7 +61,7 @@ def selected_cohort_coverage(spec_doc: dict, roots: list[Path], *, inputs: dict 
             if required is not None
             else {"status": "not_measured", "reason": "selected requirement predates this coverage axis"}
         )
-    for axis in ("composition", "host_lane", "host_only"):
+    for axis in ("composition",):
         block = spec_doc.get(axis) or {}
         required = block.get("families" if axis == "host_only" else "required")
         result[axis] = (
@@ -61,6 +73,29 @@ def selected_cohort_coverage(spec_doc: dict, roots: list[Path], *, inputs: dict 
                 "required": required,
             }
         )
+    selected_contract = _selected_contract(spec_doc, inputs)
+    from merlin.targetgen import boundary
+
+    for axis, reader in (
+        ("host_lane", boundary.host_lane_coverage),
+        ("host_only", boundary.host_only_coverage),
+    ):
+        required = (spec_doc.get(axis) or {}).get("families" if axis == "host_only" else "required")
+        if required is not None and not required:
+            result[axis] = {"status": "not_applicable", "n_required": 0, "uncovered": []}
+        elif selected_contract is None:
+            result[axis] = {
+                "status": "not_measured",
+                "reason": "exact selected capability contract is absent from coverage inputs or requirement",
+                "required": required,
+            }
+        else:
+            result[axis] = reader(
+                spec_doc,
+                roots,
+                labels=labels,
+                capability_contract=selected_contract,
+            )
     memory = (spec_doc.get("memory_mapping") or {}).get("required")
     if memory is None:
         result["memory_mapping"] = {
