@@ -151,9 +151,12 @@ A separate full-checkpoint TinyLlama W8A8 prefill diagnostic selected and
 integerized all 155 linear contractions. Its fresh original-to-quantized and
 quantized-to-prepared traces have no unresolved call sites, and its output
 matched an independent PT2E integer reference exactly on the seeded eight-token
-input. A read-only Gemmini demand plan states all 155 accelerator groups as five
-distinct candidate programs, with no unstated group; those programs were not
-materialized or executed. The capture still records unverified source closure,
+input. A Gemmini demand plan states all 155 accelerator groups as five distinct
+candidate programs, with no unstated group. All five programs were materialized
+without generator refusal; a repeat generation produced identical capsule files
+(the summary manifest differs only in its output paths). The generated programs
+have not been executed against the selected target. The capture still records
+unverified source closure,
 and the portable Q/DQ diagnostic differs from the selected integer reference.
 Neither the trace nor the demand plan admits a Phase 0 corpus or certifies a
 Phase 1 compiler.
