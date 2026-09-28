@@ -29,11 +29,14 @@ import os
 import sys
 import time
 import traceback as _traceback
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any
 
 import yaml
-from aet.core.run_paths import RunPaths
+
+if TYPE_CHECKING:
+    from aet.core.run_paths import RunPaths
 
 from . import oracle_policy as _oracle_policy
 from . import tier_policy as _tier_policy
