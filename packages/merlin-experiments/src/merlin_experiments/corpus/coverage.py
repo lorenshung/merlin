@@ -77,6 +77,9 @@ def selected_cohort_coverage(
                     "reason": "selected requirement lacks exact SW/emitter-derived Phase 2 scope",
                 }
                 continue
+            from merlin_experiments.phase0.performance_scope import validate_performance_scope
+
+            performance = validate_performance_scope(spec_doc["scope"])
             if performance.get("status") == "unresolved":
                 result[axis] = {
                     "status": "not_measured",

@@ -7,6 +7,8 @@ them. Neither family adjacency nor a synthetic program is a placement proof.
 
 from __future__ import annotations
 
+from collections import Counter
+
 from merlin.targetgen.corpus_spec import scope_chain_region_ops
 from merlin.targetgen.software_spec import admit_operation
 
@@ -110,7 +112,7 @@ def derive_performance_scope(scope: dict, software_spec: dict) -> dict:
                 "reason": "standalone scope emitter has no exact source-body semantic correspondence",
             })
     required: list[dict] = []
-    return {
+    result = {
         "schema": "merlin.phase0.performance_scope.v1",
         "status": "unresolved" if unresolved else "ready" if required else "no_eligible_chain",
         "required": required,
@@ -121,3 +123,71 @@ def derive_performance_scope(scope: dict, software_spec: dict) -> dict:
             "performance measurement remain separate gates"
         ),
     }
+    validate_performance_scope({**scope, "performance": result})
+    return result
+
+
+def validate_performance_scope(scope: dict) -> dict:
+    """Reject a Phase 2 selection that silently drops exact source instances."""
+    typed, performance = scope.get("typed_required_instances") or {}, scope.get("performance") or {}
+    if typed.get("schema") != "merlin.phase0.typed_scope_instances.v1":
+        raise ValueError("Phase 2 scope lacks exact typed source instances")
+    if performance.get("schema") != "merlin.phase0.performance_scope.v1":
+        raise ValueError("Phase 2 scope lacks exact SW/emitter-derived selection")
+    instances = typed.get("instances")
+    if not isinstance(instances, list):
+        raise ValueError("typed source instance inventory is invalid")
+    index = {row.get("instance_id"): row for row in instances if isinstance(row, dict)}
+    if len(index) != len(instances) or None in index:
+        raise ValueError("typed source instance IDs are missing or repeated")
+    raw = scope.get("required") or []
+    if (
+        not isinstance(raw, list)
+        or any(not isinstance(row, dict) or not isinstance(row.get("signature"), str)
+               or type(row.get("occurrences")) is not int or row["occurrences"] < 1 for row in raw)
+        or len({row["signature"] for row in raw}) != len(raw)
+    ):
+        raise ValueError("raw source scope requirement is invalid or duplicated")
+    if Counter(row.get("signature") for row in instances) != Counter({
+        row["signature"]: row["occurrences"] for row in raw
+    }):
+        raise ValueError("typed source instances differ from raw scope demand")
+    selected: set[str] = set()
+
+    def take(identity: str, signature: str) -> None:
+        if identity not in index or index[identity].get("signature") != signature or identity in selected:
+            raise ValueError("Phase 2 scope loses, duplicates or mislabels a typed source instance")
+        selected.add(identity)
+
+    for key in ("excluded", "unresolved"):
+        rows = performance.get(key)
+        if not isinstance(rows, list):
+            raise ValueError(f"Phase 2 scope {key} inventory is invalid")
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError(f"Phase 2 scope {key} row is invalid")
+            take(row.get("instance_id"), row.get("signature"))
+    required = performance.get("required")
+    if not isinstance(required, list):
+        raise ValueError("Phase 2 required scope inventory is invalid")
+    signatures = set()
+    for row in required:
+        if not isinstance(row, dict) or row.get("signature") in signatures:
+            raise ValueError("Phase 2 required scope has duplicate or invalid signatures")
+        signature = row["signature"]
+        signatures.add(signature)
+        members = row.get("instance_ids")
+        if (
+            not isinstance(members, list)
+            or type(row.get("occurrences")) is not int
+            or len(members) != row["occurrences"]
+        ):
+            raise ValueError("Phase 2 required scope lacks exact source-instance witnesses")
+        for identity in members:
+            take(identity, signature)
+    if selected != set(index):
+        raise ValueError("Phase 2 scope leaves typed source instances unclassified")
+    expected_status = "unresolved" if performance["unresolved"] else "ready" if required else "no_eligible_chain"
+    if performance.get("status") != expected_status:
+        raise ValueError("Phase 2 scope status differs from exact classified source instances")
+    return performance

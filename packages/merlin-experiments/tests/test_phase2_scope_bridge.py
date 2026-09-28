@@ -50,6 +50,30 @@ def _sweep() -> dict:
     return next(row for row in document["sweeps"] if row["id"] == "PN")
 
 
+def _selected_scope(rows: list[dict], *, eligible: bool = True) -> dict:
+    instances = []
+    required = []
+    for row in rows:
+        identities = [f"instance-{len(instances) + index}" for index in range(row["occurrences"])]
+        instances.extend({"instance_id": identity, "signature": row["signature"]} for identity in identities)
+        if eligible:
+            required.append({**row, "instance_ids": identities})
+    return {
+        "required": rows,
+        "typed_required_instances": {"schema": "merlin.phase0.typed_scope_instances.v1", "instances": instances},
+        "performance": {
+            "schema": "merlin.phase0.performance_scope.v1",
+            "status": "ready" if required else "no_eligible_chain",
+            "required": required,
+            "excluded": [] if eligible else [
+                {"instance_id": row["instance_id"], "signature": row["signature"], "status": "software_refused"}
+                for row in instances
+            ],
+            "unresolved": [],
+        },
+    }
+
+
 def test_scope_sw_screen_checks_emitted_regions_without_inventing_device_maps() -> None:
     entry = {
         "name": "scope", "kind": "model_slice", "source_role": "derived_sweep",
@@ -110,7 +134,7 @@ def test_required_scope_instances_bind_exact_source_ops_types_and_edges(tmp_path
     assert len(instance["edges"]) == 2
     assert all(edge["dtype"] in {"i8", "i32"} for edge in instance["edges"])
     performance = derive_performance_scope(
-        {"typed_required_instances": observed},
+        {"required": scope["required"], "typed_required_instances": observed},
         load_software_spec(repo_root() / "examples/gemmini/target/software-spec.yaml"),
     )
     assert performance["required"] == []
@@ -124,7 +148,9 @@ def test_required_scope_instances_bind_exact_source_ops_types_and_edges(tmp_path
         {"id": family, "placement": "accelerator", "signature": {}}
         for family in ("movement", "contraction", "elementwise_map")
     ]}
-    not_proven = derive_performance_scope({"typed_required_instances": matching_names}, permissive)
+    not_proven = derive_performance_scope(
+        {"required": scope["required"], "typed_required_instances": matching_names}, permissive
+    )
     assert not_proven["required"] == []
     assert not_proven["status"] == "unresolved"
     assert "source-body semantic correspondence" in not_proven["unresolved"][0]["reason"]
@@ -138,9 +164,7 @@ def test_selected_scope_derives_four_priceable_members_and_missing_scope_skips(m
     monkeypatch.setattr(SW, "_resolve_target_oracle_evidence", lambda performance, target: performance)
     signature = "movement -> contraction -> elementwise_map -> elementwise_map -> elementwise_map"
     selected = {"signature": signature, "length": 5, "occurrences": 13}
-    requirement = {"scope": {"required": [selected], "performance": {
-        "schema": "merlin.phase0.performance_scope.v1", "status": "ready", "required": [selected],
-    }}}
+    requirement = {"scope": _selected_scope([selected])}
     digest = hashlib.sha256(yaml.safe_dump(requirement).encode()).hexdigest()
     profile = {"capsules": [], "sweeps": [_sweep()]}
     skipped = []
@@ -169,9 +193,7 @@ def test_selected_scope_derives_four_priceable_members_and_missing_scope_skips(m
     assert preflight_affine_claim(altered)["status"] == "REFUSED"
     absent = SW.expand_sweeps(
         profile, _binding(), trait_facts=_facts(), skipped=skipped,
-        selected_requirement={"scope": {"required": [], "performance": {
-            "schema": "merlin.phase0.performance_scope.v1", "status": "no_eligible_chain", "required": [],
-        }}}, requirement_sha256=digest,
+        selected_requirement={"scope": _selected_scope([])}, requirement_sha256=digest,
     )
     assert absent == []
     assert skipped[-1]["status"] == "skipped_inapplicable"
@@ -181,13 +203,9 @@ def test_raw_source_chain_does_not_select_phase2_scope_sweep(monkeypatch) -> Non
     monkeypatch.setattr(SW, "target_encodings", lambda *args, **kwargs: [])
     monkeypatch.setattr(SW, "_resolve_target_oracle_evidence", lambda performance, target: performance)
     signature = "movement -> contraction -> elementwise_map -> elementwise_map -> elementwise_map"
-    requirement = {
-        "scope": {
-            "required": [{"signature": signature, "length": 5, "occurrences": 13}],
-            "performance": {"schema": "merlin.phase0.performance_scope.v1", "required": [],
-                            "status": "no_eligible_chain"},
-        }
-    }
+    requirement = {"scope": _selected_scope(
+        [{"signature": signature, "length": 5, "occurrences": 13}], eligible=False
+    )}
     skipped = []
     entries = SW.expand_sweeps(
         {"capsules": [], "sweeps": [_sweep()]}, _binding(), trait_facts=_facts(),
@@ -201,6 +219,15 @@ def test_raw_source_chain_does_not_select_phase2_scope_sweep(monkeypatch) -> Non
     assert source["scope"]["n_covered"] == 0
     assert performance["scope"]["status"] == "not_applicable"
     assert performance["scope"]["n_required"] == 0
+    erased = copy.deepcopy(requirement)
+    erased["scope"]["performance"]["excluded"].pop()
+    with pytest.raises(ValueError, match="unclassified"):
+        SW.expand_sweeps(
+            {"capsules": [], "sweeps": [_sweep()]}, _binding(), trait_facts=_facts(),
+            selected_requirement=erased, requirement_sha256="erased",
+        )
+    with pytest.raises(ValueError, match="unclassified"):
+        selected_cohort_coverage({"cells": [], **erased}, [], phase="phase2")
 
 
 def test_each_supported_signature_gets_a_separate_cohort_and_over_cap_is_recorded(monkeypatch) -> None:
@@ -212,9 +239,7 @@ def test_each_supported_signature_gets_a_separate_cohort_and_over_cap_is_recorde
         {"signature": signature, "length": len(signature.split(" -> ")), "occurrences": index + 1}
         for index, signature in enumerate(signatures)
     ]
-    requirement = {"scope": {"required": required, "performance": {
-        "schema": "merlin.phase0.performance_scope.v1", "status": "ready", "required": required,
-    }}}
+    requirement = {"scope": _selected_scope(required)}
     skipped = []
     blocked = []
     entries = SW.expand_sweeps(

@@ -602,7 +602,8 @@ def _scope_requirement_sweeps(
         if pattern != {"prefix": ["movement", "contraction"],
                        "repeated_tail": "elementwise_map", "min_tail": 1}:
             raise ValueError(f"performance sweep {family}: unsupported scope pattern")
-        performance_scope = (((requirement or {}).get("scope") or {}).get("performance") or {})
+        scope = ((requirement or {}).get("scope") or {})
+        performance_scope = scope.get("performance") or {}
         if performance_scope.get("schema") != "merlin.phase0.performance_scope.v1":
             if blocked is not None:
                 blocked.append({
@@ -611,6 +612,9 @@ def _scope_requirement_sweeps(
                     "requirement_sha256": digest,
                 })
             continue
+        from .performance_scope import validate_performance_scope
+
+        performance_scope = validate_performance_scope(scope)
         required = performance_scope.get("required") or []
         matched = 0
         seen_families: set[str] = set()
