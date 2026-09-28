@@ -1095,6 +1095,9 @@ def build_attention_qk(entry: dict, binding: CorpusBinding) -> tuple[dict, str]:
     # axis name, and reading only `_tiles` turns a declared extent into the tile edge without a word.
     M = entry.get("M", entry.get("M_tiles", 1) * D)
     Kd = entry.get("K", entry.get("K_tiles", 1) * D)
+    # Queries and keys need not have the same sequence length (prefill against
+    # a carried KV cache is rectangular). Preserve the old square default.
+    N = entry.get("N", entry["N_tiles"] * D if "N_tiles" in entry else M)
     q, k, out = entry.get("q", "Q"), entry.get("k", "K"), entry.get("out", "Y0")
     idt, odt = binding.cap_dtype(binding.operand_dtype), binding.cap_dtype(binding.accum_dtype)
     midt, modt = binding.mlir_dtype(binding.operand_dtype), binding.mlir_dtype(binding.accum_dtype)
@@ -1108,7 +1111,7 @@ def build_attention_qk(entry: dict, binding: CorpusBinding) -> tuple[dict, str]:
         "interface_mlir": "capsule.interface.mlir",
         "inputs": [
             {"name": q, "role": "input", "shape": [M, Kd], "dtype": idt},
-            {"name": k, "role": "input", "shape": [M, Kd], "dtype": idt},
+            {"name": k, "role": "input", "shape": [N, Kd], "dtype": idt},
         ],
         "operation": {"op": "attention_qk", "attributes": attrs},
         "numeric_policy": _numeric_policy(binding, binding.accum_dtype, None),
@@ -1123,9 +1126,9 @@ def build_attention_qk(entry: dict, binding: CorpusBinding) -> tuple[dict, str]:
     L = _iface_prelude(binding.target, entry.get("comment", ""))
     L += [
         f'  %{q} = merlin_iface.tensor {{name = "{q}", role = "input"}} : tensor<{M}x{Kd}x{midt}>',
-        f'  %{k} = merlin_iface.tensor {{name = "{k}", role = "input"}} : tensor<{M}x{Kd}x{midt}>',
+        f'  %{k} = merlin_iface.tensor {{name = "{k}", role = "input"}} : tensor<{N}x{Kd}x{midt}>',
         f'  %{out} = merlin_iface.attention_qk %{q}, %{k} {{name = "{out}", output_dtype = "{odt}"}} '
-        f": (tensor<{M}x{Kd}x{midt}>, tensor<{M}x{Kd}x{midt}>) -> tensor<{M}x{M}x{modt}>",
+        f": (tensor<{M}x{Kd}x{midt}>, tensor<{N}x{Kd}x{midt}>) -> tensor<{M}x{N}x{modt}>",
         "}",
     ]
     return cap, "\n".join(L) + "\n"
