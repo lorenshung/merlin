@@ -96,6 +96,15 @@ def test_source_capsule_reuse_is_offline_exact_and_fail_closed(tmp_path, monkeyp
     receipt = json.loads((result / "frontend-evidence.json").read_text())
     assert receipt["packaging"] == "weights_reference_relocation"
     assert receipt["source_mlir_sha256"] == application["capture_sha256"]
+    relocation = receipt["weights_reference_relocation"]
+    assert "from" not in relocation
+    assert (
+        relocation["from_reference_sha256"]
+        == hashlib.sha256(str(tmp_path / "original/weights.safetensors").encode("utf-8")).hexdigest()
+    )
+    assert relocation["to"] == "capsule.weights.safetensors"
+    assert str(tmp_path / "original/weights.safetensors") not in (result / "capsule.yaml").read_text()
+    assert str(tmp_path / "original/weights.safetensors") not in (result / "frontend-evidence.json").read_text()
     assert 'prov.weights_file = "capsule.weights.safetensors"' in (result / "capsule.interface.mlir").read_text()
     assert yaml.safe_load((result / "golden.yaml").read_text())["outputs"] == {"Y0": [1.0, 2.0]}
     with pytest.raises(source.M2MUnavailable, match="held-out validation"):

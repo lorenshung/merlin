@@ -2154,7 +2154,13 @@ def _write_frontend_evidence(art: CapsuleArtifacts, directory: Path, packaged_ml
         if not original_weight or packaged_mlir != relocated:
             raise M2MUnavailable("capsule MLIR change is not the declared weights-reference relocation")
         packaging = "weights_reference_relocation"
-        relocation = {"from": original_weight, "to": "capsule.weights.safetensors"}
+        # The original spelling is often an absolute, ephemeral capture-cache path. Its
+        # exact bytes are checked above, but serializing it into a released capsule
+        # would expose a checkout-local dependency. Bind the spelling without storing it.
+        relocation = {
+            "from_reference_sha256": hashlib.sha256(original_weight.encode("utf-8")).hexdigest(),
+            "to": "capsule.weights.safetensors",
+        }
     (directory / "frontend-trace.json").write_bytes(raw_trace)
     (directory / "frontend-source.mlir").write_bytes(raw_source)
     catalog = meta.get("framework_catalog") or {}
