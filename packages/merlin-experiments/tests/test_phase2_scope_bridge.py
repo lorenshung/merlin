@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 from merlin_experiments.phase0 import sweeps as SW
+from merlin_experiments.phase0.software_screen import diagnostic_entry, screen_entry
 from merlin_experiments.phase0.writer import _write_capsule
 from merlin_experiments.phase2 import corpus as P
 from merlin_experiments.phase2.claims.affine import preflight_affine_claim
@@ -18,6 +19,7 @@ from merlin.common.paths import repo_root
 from merlin.targetgen import capsule_golden as CG
 from merlin.targetgen import conformance
 from merlin.targetgen import corpus_spec as CS
+from merlin.targetgen.software_spec import load_software_spec
 
 
 def _binding() -> CS.CorpusBinding:
@@ -42,6 +44,30 @@ def _facts() -> dict:
 def _sweep() -> dict:
     document = yaml.safe_load((repo_root() / "experiments/templates/phase0/performance.yaml").read_text())
     return next(row for row in document["sweeps"] if row["id"] == "PN")
+
+
+def test_scope_sw_screen_checks_emitted_regions_without_inventing_device_maps() -> None:
+    entry = {
+        "name": "scope", "kind": "model_slice", "source_role": "derived_sweep",
+        "source_reference": "selected scope.required", "op": "scope_chain",
+        "M": 4, "K": 8, "N": 4,
+        "scope_families": ["movement", "contraction", "elementwise_map", "elementwise_map"],
+        "operand_dtype": "int8", "accum_dtype": "i32",
+    }
+    capsule, _ = CS.build(entry, _binding())
+    spec = load_software_spec(repo_root() / "examples/gemmini/target/software-spec.yaml")
+    pending = screen_entry(spec, entry, defaults=spec["numerical_semantics"])
+    assert pending["status"] == "unknown"  # no emitted region inventory yet
+    observed = screen_entry(spec, entry, defaults=spec["numerical_semantics"], capsule=capsule)
+    assert [row["op"] for row in observed["decisions"]] == ["transpose", "matmul", "add", "add"]
+    assert [row["family"] for row in observed["decisions"]] == entry["scope_families"]
+    assert observed["status"] == "unsupported"
+    assert all(row["status"] == "unsupported" for row in observed["decisions"][2:])
+    assert all("placement" in row["reason"] for row in observed["decisions"][2:])
+    assert "scope_chain" not in observed["reason"]
+    first = diagnostic_entry(entry, observed)
+    again = diagnostic_entry(first, observed)
+    assert again["source_reference"] == first["source_reference"]
 
 
 def test_selected_scope_derives_four_priceable_members_and_missing_scope_skips(monkeypatch) -> None:

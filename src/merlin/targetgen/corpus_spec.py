@@ -2097,7 +2097,9 @@ def build_scope_chain(entry: dict, binding: CorpusBinding) -> tuple[dict, str]:
         raise ValueError("scope_chain extents must be positive")
     a, w, out = entry.get("lhs", "A0"), entry.get("weight", "W"), entry.get("out", "Y0")
     attrs = {"lhs": a, "weight": w, "out": out, "M": M, "K": K, "N": N,
-             "scope_families": list(families), "scope_signature": " -> ".join(families),
+             "scope_families": list(families),
+             "scope_region_ops": ["transpose", "matmul", *(["add"] * map_count)],
+             "scope_signature": " -> ".join(families),
              "map_count": map_count, "output_dtype": adt}
     cap = {
         "name": entry["name"], "kind": entry["kind"], "source_role": entry["source_role"],
