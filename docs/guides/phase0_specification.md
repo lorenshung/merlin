@@ -305,6 +305,13 @@ Select a generated detailed sidecar through the existing conformance requirement
 Its byte copy, parsed accounting, content digest and declared-roster comparison travel
 together. A missing sidecar is reported as `not_available`, never as zero uncovered work.
 Held-out claim models are not added to this derivation inventory.
+Public synthesized capsule descriptions report counts and signatures, not source
+model names. An exact integer-operation capsule uses a deterministic source ordinal
+within the digest-bound detailed inventory together with the capture hash, so the
+group matcher can still account for every occurrence. Keep the full name-to-ordinal
+mapping in that inventory; publishing the inventory itself still exposes its
+source names. An older frozen corpus that exposed names must be regenerated
+rather than relabeled after the fact.
 
 You can inspect a diagnostic subset before a complete requirement is ready, using
 the existing inventory producer. It automatically exports the evidence bundle and
