@@ -189,8 +189,7 @@ def derive(
         "oracle_tiers": "not constructed during derivation; establish in execution qualification",
         "historical_corpus": "not selected",
         "headline_workloads": "held out",
-        "contract_sha256": hashlib.sha256(_json(selected.contract)).hexdigest(),
-        "raw_facts_sha256": selected.raw_facts_sha256,
+        **selected.derivation_identity,
     }
     root = Path(output_root).absolute()
     outputs = {

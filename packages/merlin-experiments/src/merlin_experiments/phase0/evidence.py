@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import math
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -232,6 +233,27 @@ class EvidenceSelection:
     @property
     def raw_facts_sha256(self) -> str | None:
         return _digest(self.raw_facts) if self.raw_facts is not None else None
+
+    @property
+    def derivation_identity(self) -> dict[str, str | None]:
+        """Capability inputs that corpus derivation and capsule writing must share.
+
+        Support paths are relative to their selected package so an installed copy
+        with identical bytes has the same identity. Readout facets bind the
+        effective provider semantics, not just the target contract or raw RTL.
+        """
+        support = [source for source in self.source_snapshots if source.role == "support-source"]
+        root = Path(os.path.commonpath([str(source.path.absolute().parent) for source in support])) if support else None
+        support_rows = [
+            {"path": str(source.path.absolute().relative_to(root)), "sha256": source.sha256}
+            for source in support
+        ]
+        return {
+            "contract_sha256": _digest(_json(self.contract)),
+            "raw_facts_sha256": self.raw_facts_sha256,
+            "readout_facets_sha256": _canonical_digest(self.readout_facets),
+            "support_sources_sha256": _canonical_digest(sorted(support_rows, key=lambda row: row["path"])),
+        }
 
     def __getattr__(self, name: str) -> Any:
         # Every consumer receives a fresh value. The authoritative views are

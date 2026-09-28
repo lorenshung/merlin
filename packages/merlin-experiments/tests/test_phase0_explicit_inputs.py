@@ -1,5 +1,6 @@
 """Explicit Phase0 inputs never acquire ambient public or private siblings."""
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -172,6 +173,57 @@ def test_generation_forwards_paths_before_numerical_work(inputs, tmp_path, monke
             "profile-id", descriptor=tmp_path / "target.yaml", output_root=tmp_path / "output", **inputs
         )
     assert not (tmp_path / "output").exists()
+
+
+def test_generation_refuses_changed_readout_provider_before_writing_capsules(inputs, tmp_path, monkeypatch):
+    from merlin_experiments.phase0 import evidence as evidence_module
+
+    descriptor = tmp_path / "target.yaml"
+    descriptor.write_text("target: fixture\n")
+    software = tmp_path / "software.yaml"
+    software.write_text("target: fixture\n")
+    requirement = tmp_path / "requirements.yaml"
+    selected = evidence_module.EvidenceSelection(
+        "fixture",
+        (evidence_module.EvidenceSource(software, "software-spec", software.read_bytes()),),
+        json.dumps({"contract": {}, "readout_facets": [{"readouts": [{"selector": "i8", "applies": []}]}]}).encode(),
+        None,
+    )
+    requirement.write_text(
+        yaml.safe_dump(
+            {"derivation": {"phase0_execution": {**selected.derivation_identity, "readout_facets_sha256": "0" * 64}}}
+        )
+    )
+    monkeypatch.setattr(generation, "_ensure_contract_on_path", lambda *args: None)
+    monkeypatch.setattr(generation, "load_target_experiment", lambda *args: SimpleNamespace(target="fixture"))
+    monkeypatch.setattr(
+        generation,
+        "load_profile",
+        lambda *args, **kwargs: {
+            "capsule_policy": "derived_only",
+            "capsules": [],
+            "_synth_verification": {"status": "verified"},
+            "_software_spec_path": software,
+            "_software_spec_identity": {"sha256": selected.source_snapshots[0].sha256},
+        },
+    )
+    monkeypatch.setattr(evidence_module, "select_evidence", lambda *args, **kwargs: selected)
+    monkeypatch.setattr(
+        evidence_module, "export_evidence", lambda *args, **kwargs: pytest.fail("stale provider exported")
+    )
+    output = tmp_path / "output"
+    with pytest.raises(ValueError, match="readout.*changed|stale.*capability"):
+        generation.generate_target(
+            "fixture",
+            descriptor=descriptor,
+            output_root=output,
+            recipe=inputs["recipe"],
+            performance_template=inputs["performance_template"],
+            conformance_spec=requirement,
+            software_spec=software,
+            evidence_mode="diagnostic",
+        )
+    assert not output.exists()
 
 
 def test_single_explicit_recipe_cannot_discover_comparison_roster(inputs, tmp_path, monkeypatch):

@@ -46,6 +46,42 @@ def test_exact_raw_bytes_and_derived_hashes_are_distinct(monkeypatch, tmp_path):
     assert selected.loaded_facts["facts"]["arrays"][0]["rows"] == 4
 
 
+def test_derivation_identity_binds_provider_bytes_but_not_checkout_location(monkeypatch, tmp_path):
+    selected, _, _ = _selection(monkeypatch, tmp_path)
+    relocated = evidence.EvidenceSelection(
+        selected.target,
+        tuple(
+            evidence.EvidenceSource(
+                tmp_path / "elsewhere" / source.path.relative_to(tmp_path / "support"),
+                source.role,
+                source.content,
+            )
+            if source.role == "support-source"
+            else source
+            for source in selected.source_snapshots
+        ),
+        selected.views_json,
+        selected.raw_facts,
+    )
+    assert relocated.derivation_identity == selected.derivation_identity
+
+    changed = evidence.EvidenceSelection(
+        relocated.target,
+        tuple(
+            evidence.EvidenceSource(source.path, source.role, source.content + b"# changed\n")
+            if source.role == "support-source" and source.path.name == "backend.py"
+            else source
+            for source in relocated.source_snapshots
+        ),
+        relocated.views_json,
+        relocated.raw_facts,
+    )
+    assert (
+        changed.derivation_identity["support_sources_sha256"]
+        != selected.derivation_identity["support_sources_sha256"]
+    )
+
+
 def test_export_and_reload_never_reopen_original_inputs(monkeypatch, tmp_path):
     selected, raw, code = _selection(monkeypatch, tmp_path)
     explicit = tmp_path / "selected-contract.yaml"

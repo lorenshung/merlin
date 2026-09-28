@@ -91,6 +91,28 @@ def _ensure_contract_on_path(descriptor: Path) -> None:
         os.environ["MERLIN_TARGET_PATH"] = os.pathsep.join([str(pkg), cur]) if cur else str(pkg)
 
 
+def _verify_derivation_evidence(conformance_spec: str | Path, evidence) -> None:
+    """Refuse a derived corpus when its selected provider/facts changed."""
+    requirement = yaml.safe_load(Path(conformance_spec).read_text(encoding="utf-8")) or {}
+    if not isinstance(requirement, dict):
+        raise ValueError("derived conformance requirement must be a mapping")
+    execution = (requirement.get("derivation") or {}).get("phase0_execution") or {}
+    expected = evidence.derivation_identity
+    missing = sorted(key for key in expected if key not in execution)
+    if missing:
+        raise ValueError(
+            "derived requirement lacks selected capability identity "
+            f"({', '.join(missing)}); rerun corpus derive with the selected provider"
+        )
+    changed = sorted(key for key, value in expected.items() if execution[key] != value)
+    if changed:
+        raise ValueError(
+            "stale capability evidence: "
+            f"{', '.join(changed)} changed since corpus derivation; "
+            "rerun corpus derive with the selected provider and facts"
+        )
+
+
 def generate_target(
     target: str,
     *,
@@ -186,6 +208,8 @@ def generate_target(
                     str(row.get("reason", row)) if isinstance(row, dict) else str(row) for row in evidence.diagnostics
                 )
             )
+        if profile.get("capsule_policy") == "derived_only":
+            _verify_derivation_evidence(conformance_spec, evidence)
         artifact_root = Path(evidence_root) if evidence_root is not None else Path(output_root) / "_evidence"
         export_evidence(evidence, artifact_root)
     declared_claims = [str(model) for model in (getattr(te, "workload_spec", None) or {}).get("models") or ()]
