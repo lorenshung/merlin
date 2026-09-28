@@ -166,6 +166,28 @@ def test_cli_navigates_frozen_phase_handoffs_without_reading_live_inputs(tmp_pat
     assert "plan changed" in capsys.readouterr().err
 
 
+def test_lineage_uses_frozen_definition_path_not_mutable_source_path(tmp_path):
+    directory = record(tmp_path, "alpha", "functional", "run")
+    source = tmp_path / "examples/experiment.yaml"
+    frozen = directory / "phase0/private/source/experiment.yaml"
+    plan = json.loads((directory / "resolved-plan.json").read_text())
+    plan.update(
+        definition=str(source),
+        inputs={"definition": {"path": str(frozen), "sha256": "a" * 64}},
+    )
+    payload = json.dumps(plan).encode()
+    (directory / "resolved-plan.json").write_bytes(payload)
+    orchestration = json.loads((directory / "orchestration.json").read_text())
+    orchestration["plan_sha256"] = hashlib.sha256(payload).hexdigest()
+    (directory / "orchestration.json").write_text(json.dumps(orchestration))
+    assert lineage(directory)["definition"] == {
+        "path": str(frozen),
+        "sha256": "a" * 64,
+        "identity": "frozen_input",
+        "source_path": str(source),
+    }
+
+
 def test_phase0_descriptor_snapshot_is_bound_to_frozen_input_bytes(tmp_path):
     directory = record(tmp_path, "gemmini", "functional", "run")
     phase0 = directory / "phase0"

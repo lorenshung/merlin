@@ -135,6 +135,17 @@ def lineage(run_dir: Path) -> dict:
             },
         }
     definition = plan.get("definition")
+    definition_pin = pins.get("definition")
+    if isinstance(definition_pin, dict) and isinstance(definition_pin.get("path"), str):
+        # Fresh Phase 0 freezes the authored definition under its own input
+        # snapshot. The plan's `definition` field remains the original source
+        # location for navigation; comparing that mutable path to the frozen
+        # pin incorrectly labels a new run as historical/unverified.
+        definition_record = selected("definition", definition_pin["path"])
+        if definition != definition_pin["path"]:
+            definition_record["source_path"] = definition
+    else:
+        definition_record = selected("definition", definition) if definition is not None else None
     return {
         "scope": "frozen_orchestration_lineage",
         "run_dir": record["run_dir"],
@@ -142,7 +153,7 @@ def lineage(run_dir: Path) -> dict:
         "target": record["target"],
         "state": record["state"],
         "frozen_at": plan.get("frozen_at"),
-        "definition": selected("definition", definition) if definition is not None else None,
+        "definition": definition_record,
         "phases": phases,
         "evidence_authority": record["evidence_authority"],
         "qualification": "not_assessed_by_lineage",
