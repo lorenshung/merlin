@@ -179,6 +179,14 @@ The separate `phase1-capsule-coverage.json` and `phase2-capsule-coverage.json`
 reports inventory only each selected cohort's exact bytes. Interface-command
 observations and source-model MLIR witnesses remain distinct; a performance
 cohort cannot borrow functional source coverage or claim whole-model validation.
+Open `capsules/model/SY_micro_model/capsule.pytorch.py` to inspect the derived
+A→H→A layer order. Its header lists accelerator capabilities that the emitted
+standalone statements cannot exercise; for Gemmini, a float GELU, transpose or
+reduction must not be read as proof of an int8 fused epilogue, transfer or pool.
+`frontend-source.mlir`, `frontend-trace.json`, `capsule.interface.mlir`, and
+`capsule.weights.safetensors` beside it show the captured source, trace, selected
+interface and separate weights. The trace and host golden are capture evidence,
+not a receipt that the target compiler executed the mixed-lane model.
 
 ### Review and release
 
