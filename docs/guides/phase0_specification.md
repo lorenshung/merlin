@@ -167,9 +167,13 @@ calibration source/count and per-operation SW decisions. Observer defaults are
 framework transformation policy, not RTL semantics, and need not clutter the
 SW spec. The adapter defaults to min/max observation for FP8 because TorchAO PT2E's
 histogram observer requires an integer dtype; an explicit FP8 histogram request is
-refused. `integerization_receipt` records true integer contractions and comparison
-against the portable quantized graph; `recipe_agreement` separately compares
-against the original floating model. A single example-input calibration does not
+refused. `integerization_receipt` records true integer contractions. When the SW
+spec selects `integer_reference`, its `golden_agreement` compares the rewritten
+graph exactly against an independent PT2E integer interpreter; the
+`integer-reference.json` outputs and reference source identity are byte-bound by
+the capture receipt. `portable_agreement` separately compares with TorchAO's
+portable Q/DQ graph and may differ because its arithmetic is not integerized.
+`recipe_agreement` compares against the original floating model. A single example-input calibration does not
 establish model accuracy. Preserve the original FP32 capture as reference lineage,
 and derive a fresh corpus from the actual quantized capture before claiming its
 precision coverage. Scoped dynamic module transforms are not currently supported

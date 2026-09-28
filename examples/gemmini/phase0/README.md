@@ -163,9 +163,12 @@ Capture each iteration workload into a new scoped directory:
 Repeat for the other three loaders. The recipe scopes eligible contractions;
 normalization, embeddings and unsupported operations are not blanket-quantized.
 Inspect each `meta.json` for `quantization_stats`, calibration count/source,
-`recipe_agreement` and `integerization_receipt`. Integer realization, agreement
-with the portable quantized graph, and error against the original FP32 model
-are separate observations. A single synthetic calibration example is a smoke
+`recipe_agreement` and `integerization_receipt`. The generated recipe selects
+the SW spec's `integer_reference` engine: `golden_agreement` must exactly match
+the byte-bound independent integer output in `integer-reference.json`.
+`portable_agreement` against TorchAO's Q/DQ graph is diagnostic, and
+`recipe_agreement` measures error against the original FP32 model. These are
+separate observations. A single synthetic calibration example is a smoke
 input, not workload-accuracy validation or proof of accelerator execution.
 
 Derive a fresh corpus plan from these exact realized bundles:
