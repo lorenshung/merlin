@@ -465,7 +465,8 @@ def _resolve_target_oracle_evidence(
     """Resolve ``$target_oracle:<tier>`` evidence placeholders from the target's own oracle route.
 
     The shared profile must not name one target's simulator binary. An explicit
-    recipe selects concrete engines without probing the build host; legacy
+    recipe may select concrete engines over abstract contract tiers without
+    probing the build host; concrete contract tiers are used directly. Legacy
     profiles use the target's contract and RTL-engine policy. Resolved engine,
     metric and oracle-kind names are frozen with their source placeholders.
     """
@@ -490,9 +491,9 @@ def _resolve_target_oracle_evidence(
             raise ValueError(f"{target}: empty tier in performance evidence placeholder {placeholder!r}")
         concrete = None
         if oracle_selection is not None:
-            concrete = oracle_selection.get(tier)
-            if not concrete or concrete == "elaborated_rtl":
-                raise ValueError(f"{target}: explicit Phase 0 oracle selection has no concrete {tier}")
+            concrete = oracle_selection.get(tier) or declared.get(tier)
+            if not isinstance(concrete, str) or not concrete or concrete == "elaborated_rtl":
+                raise ValueError(f"{target}: explicit Phase 0 inputs have no concrete {tier} oracle")
             declared_engine = declared.get(tier)
             if declared_engine and declared_engine != "elaborated_rtl" and concrete != declared_engine:
                 raise ValueError(

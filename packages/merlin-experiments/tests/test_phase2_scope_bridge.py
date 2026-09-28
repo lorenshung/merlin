@@ -313,7 +313,7 @@ def test_explicit_phase0_oracles_do_not_probe_the_build_host(monkeypatch) -> Non
     assert resolved_kind["acceptance"]["evidence"]["resolved_from"]["timing_oracle_kind"] == (
         "$target_oracle_kind:L3"
     )
-    with pytest.raises(ValueError, match="explicit Phase 0 oracle selection has no concrete L3"):
+    with pytest.raises(ValueError, match="explicit Phase 0 inputs have no concrete L3 oracle"):
         SW._resolve_target_oracle_evidence(
             _sweep()["base"]["performance"], "fixture", oracle_selection={"L2": "spike"}
         )
@@ -322,6 +322,19 @@ def test_explicit_phase0_oracles_do_not_probe_the_build_host(monkeypatch) -> Non
             _sweep()["base"]["performance"], "fixture",
             oracle_selection={"L2": "different_sim", "L3": "verilator"},
         )
+
+    monkeypatch.setattr(target_experiment, "load_capability_manifest", lambda target: SimpleNamespace(
+        contract={"runner": {"tier_sim": {"L2": "reference_sim", "L3": "concrete_rtl"}}},
+    ))
+    inherited = SW._resolve_target_oracle_evidence(
+        _sweep()["base"]["performance"], "fixture", oracle_selection={}
+    )
+    assert inherited["acceptance"]["evidence"]["timing_simulator"] == "concrete_rtl"
+    assert inherited["acceptance"]["evidence"]["correctness_simulator"] == "reference_sim"
+
+    monkeypatch.setattr(target_experiment, "load_capability_manifest", lambda target: SimpleNamespace(
+        contract={"runner": {"tier_sim": {"L2": "spike", "L3": "elaborated_rtl"}}},
+    ))
 
     monkeypatch.setattr(SW, "target_encodings", lambda *args, **kwargs: [])
     signature = "movement -> contraction -> elementwise_map -> elementwise_map -> elementwise_map"

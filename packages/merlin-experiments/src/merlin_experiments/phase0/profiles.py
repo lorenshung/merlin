@@ -661,9 +661,9 @@ def load_profile(
     if not isinstance(prof, dict):
         raise ValueError(f"{public}: recipe must be a mapping")
     if recipe is not None:
-        # A frozen Phase 0 recipe must name its measurement implementations;
-        # probing the build host would make otherwise identical derivations
-        # produce different capsules (or fail when a simulator is not installed).
+        # Explicit overrides resolve abstract contract fidelities. Concrete
+        # contract tier names need no override; neither route probes the build
+        # host, which would make identical derivations depend on installation.
         oracles = prof.get("performance_oracles", {})
         if not isinstance(oracles, dict) or any(
             not isinstance(tier, str)
