@@ -473,6 +473,12 @@ def _tile_int(token, tile: int):
         return None
     if text == "tile":
         return int(tile)
+    if text.startswith("tile/"):
+        try:
+            divisor = int(text.partition("/")[2])
+            return tile // divisor if divisor > 0 and tile % divisor == 0 else None
+        except ValueError:
+            return None
     mult, sep, rest = text.partition("*tile")
     if sep and not rest:
         try:
@@ -693,11 +699,12 @@ def filtered_precision(preference: list[str], admitted: set[str]) -> tuple[list[
 def _exceeds_tile(token: str, tile: int) -> bool:
     """Does this extent token resolve to more than one tile edge?
 
-    ``2*tile`` and friends exceed the edge by construction; a resolved integer is compared directly.
-    A token that names no multiple and is not a plain integer (``tile``, ``tile-1``, ``tile/4``) is at
-    or below the edge, so it answers False without guessing an extent.
+    Resolve any supported multiplier, not just the first few common spellings:
+    a capacity-derived boundary may need ``65*tile``. Unknown tokens remain
+    non-evidence rather than being guessed larger than the edge.
     """
-    return token.startswith(("2*", "4*", "8*")) or (token.isdigit() and bool(tile) and int(token) > tile)
+    resolved = _tile_int(token, tile) if tile else None
+    return resolved is not None and resolved > tile
 
 
 def pass_requirements_for(entry: dict, spec_doc: dict) -> list[str]:
@@ -1433,6 +1440,54 @@ def synthesize(
             entry["source_reference"] += f". {_why}"
         entry["pass_requirements"] = pass_requirements_for(entry, spec_doc)
         entries.append(entry)
+
+    # ---- the ACCUMULATOR-OUTPUT boundary ----------------------------------------------------------
+    # Input residency and K depth do not bound the number of output tiles a
+    # backend keeps live. Derive the first output shape beyond one addressable
+    # accumulator buffer from RTL facts, without importing a held-out model's
+    # shape or baking a target's row count into shared code.
+    output_bound = spec_doc.get("accumulator_output_boundary") or {}
+    output_bound_refusal = ""
+    if output_bound.get("status") == "resolved":
+        output_dtype = regime_dtype
+        output_op = (
+            op_for_family("contraction", admitted_ops=ops_gradeable_at(output_dtype, pool), dtype=output_dtype)
+            if output_dtype
+            else None
+        )
+        sibling = f"{SYNTH_PREFIX}_contraction_{output_dtype}_aligned"
+        if not output_op or sibling not in {str(e.get("name")) for e in entries}:
+            output_bound_refusal = f"no gradeable contraction and certified sibling at {output_dtype!r}"
+        else:
+            n_tiles = int(output_bound["N_tiles"])
+            entry = {
+                "cat": "isa",
+                "kind": "isa",
+                "name": f"{SYNTH_PREFIX}_accumulator_output_boundary",
+                "op": output_op,
+                "operand_dtype": output_dtype,
+                "lhs": "A0",
+                "weight": "W",
+                "out": "Y0",
+                "M": f"tile/{int(output_bound['tile_edge'])}",
+                "K": "tile",
+                "N": f"{n_tiles}*tile",
+                "source_role": SOURCE_ROLE,
+                "source_reference": (
+                    "synthesized for the accumulator-output boundary: the RTL-derived addressable "
+                    f"store has {output_bound['capacity_rows']} rows, while one output row by {n_tiles} "
+                    f"N tiles requires {output_bound['output_rows_if_resident']} simultaneously "
+                    "resident output rows. A streaming schedule may pass; a full-output-resident "
+                    "schedule must not address beyond the store"
+                ),
+                "label": "public",
+                "generalization": {"generalization_axis": "accumulator_output_capacity"},
+            }
+            why = cap_to_affordable(entry, spec_doc, extends=sibling)
+            if why:
+                entry["source_reference"] += f". {why}"
+            entry["pass_requirements"] = pass_requirements_for(entry, spec_doc)
+            entries.append(entry)
 
     # ---- the NEGATIVE lane ------------------------------------------------------------------------
     # Families a real capture CONTAINS and this target's manifest does NOT admit. The compiler must leave
@@ -2398,6 +2453,8 @@ def synthesize(
                 "this'"
             ),
             "memory_regimes_status": "resolved" if regimes_resolved else "not_resolved",
+            "accumulator_output_boundary": output_bound,
+            "accumulator_output_boundary_refusal": output_bound_refusal,
             "memory_regimes_unreachable": unreachable_regimes,
             "memory_regime_note": (
                 "the spec carries no `regime_extents`; it predates the axis and must be regenerated "

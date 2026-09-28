@@ -76,6 +76,7 @@ def test_every_required_cell_becomes_an_entry(target):
     #: synthesizer writes into `source_reference`; an entry matching none of them is unattributable.
     axes = (
         "memory regime",
+        "accumulator-output boundary",
         "host-only family",
         "composition axis",
         "roster axis",
@@ -163,6 +164,20 @@ def test_alignment_decides_the_shape():
     partial = next(e for n, e in by.items() if n.endswith("_partial"))
     assert "tile" in str(aligned["N"]) and "-" not in str(aligned["N"])
     assert str(partial["N"]).endswith("-1"), "a partial cell must rag an axis off the boundary"
+
+
+def test_accumulator_output_capacity_is_a_derived_not_model_shaped_capsule():
+    doc = _spec("gemmini")
+    doc["accumulator_output_boundary"] = {
+        "status": "resolved", "capacity_rows": 1024, "tile_edge": 16, "M": 1, "K": 16,
+        "N": 1040, "N_tiles": 65, "output_rows_if_resident": 1040,
+    }
+    result = CS.synthesize(doc)
+    entry = next(e for e in result["capsules"] if e["name"] == "SY_accumulator_output_boundary")
+    assert (entry["M"], entry["K"], entry["N"]) == ("tile/16", "tile", "65*tile")
+    assert entry["extends"] == "SY_contraction_i8_aligned"
+    assert entry["max_oracle_tier"] == "L2"
+    assert "tile-schedule" in entry["pass_requirements"]
 
 
 def test_extents_are_tile_relative_not_baked_integers():

@@ -1795,6 +1795,43 @@ def regime_dtype_selection(cells: list[Cell]) -> tuple[str | None, dict]:
     return selected, evidence
 
 
+def _accumulator_output_boundary(target: str, tile: int) -> dict:
+    """Smallest-output contraction exceeding one addressable accumulator.
+
+    An output-capacity test is distinct from deep-K and operand-store tests: a
+    backend may tile both inputs correctly while keeping every output tile live.
+    The address-space resolver, not a target name or a hand-authored capacity,
+    decides whether this boundary exists.
+    """
+    from merlin.targetgen import address_space as AS
+
+    if tile <= 0:
+        return {"status": "unknown", "reason": "no derived compute tile edge"}
+    try:
+        kind = AS.accumulator_kind(AS.derive_address_space(target))
+    except Exception as exc:  # noqa: BLE001 -- preserve missing RTL evidence
+        return {"status": "unknown", "reason": f"{type(exc).__name__}: {exc}"}
+    if kind.kind == AS.IN_DATAPATH:
+        return {"status": "not_applicable", "reason": "no separately addressable accumulator rows"}
+    if kind.kind != AS.ADDRESSABLE or not kind.rows:
+        reason = kind.unknown.reason if kind.unknown else "accumulator row capacity is not derivable"
+        return {"status": "unknown", "reason": reason}
+    n_tiles = int(kind.rows) // tile + 1
+    return {
+        "status": "resolved",
+        "capacity_rows": int(kind.rows),
+        "store": kind.store.name if kind.store else None,
+        "buffers": int(kind.buffers),
+        "tile_edge": tile,
+        "M": 1,
+        "K": tile,
+        "N": n_tiles * tile,
+        "N_tiles": n_tiles,
+        "output_rows_if_resident": n_tiles * tile,
+        "basis": "one output row, the first whole N tile beyond one accumulator buffer's row capacity",
+    }
+
+
 def derive_spec(
     target: str,
     captures: dict[str, str | Path],
@@ -1925,6 +1962,10 @@ def derive_spec(
         # presents. See `geometry_axis` for why a corpus that is entirely square proves nothing about
         # the tall-skinny convolutions that carry a real vision model's work.
         "shape_geometry": geometry_axis(captures, target),
+        # A full-output-resident schedule can exceed the accumulator even when
+        # its input operands fit and K is shallow. This independent boundary is
+        # derived from the RTL-backed address-space role resolution.
+        "accumulator_output_boundary": _accumulator_output_boundary(target, bnd.tile_edge or 0),
         # THE ADJACENCY AXIS. Every axis above describes ONE region; the optimisation ladder's
         # upper rungs are about adjacent ones, and until this nothing observed adjacency at all,
         # so those rungs could not be required rather than merely being unpopulated.
@@ -2482,6 +2523,64 @@ def _scope_gap(required, corpus_roots, *, labels=None, exclude=None) -> dict:
     }
 
 
+def _accumulator_output_gap(bound: dict, corpus_roots, *, labels=None, exclude=None) -> dict:
+    """Measure the output boundary from actual capsule operand shapes."""
+    import yaml
+
+    status = bound.get("status")
+    if status != "resolved":
+        return {
+            "status": status or "not_measured",
+            "detail": bound.get("reason") or "regenerate the conformance requirement",
+            "n_required": 0,
+            "n_covered": 0,
+            "uncovered": [],
+        }
+    tile = int(bound["tile_edge"])
+    capacity = int(bound["capacity_rows"])
+    selected = set(labels or {"public"})
+    omitted = set(exclude or ())
+    roots = [corpus_roots] if isinstance(corpus_roots, (str, Path)) else list(corpus_roots)
+    covered_by = []
+    for root in roots:
+        for path in _capsule_paths(root):
+            try:
+                cap = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            except yaml.YAMLError:
+                continue
+            name = str(cap.get("name") or path.parent.name)
+            if name in omitted or cap.get("label") not in selected:
+                continue
+            op = cap.get("operation") or {}
+            if op.get("op") not in {"matmul", "linear", "fused_matmul_bias"}:
+                continue
+            inputs = {str(t.get("name")): t for t in (cap.get("inputs") or ()) if isinstance(t, dict)}
+            attrs = op.get("attributes") or {}
+            lhs = inputs.get(str(attrs.get("lhs"))) or {}
+            weight = inputs.get(str(attrs.get("weight"))) or {}
+            lhs_shape, weight_shape = lhs.get("shape") or (), weight.get("shape") or ()
+            if len(lhs_shape) != 2 or len(weight_shape) != 2:
+                continue
+            try:
+                m, k = map(int, lhs_shape)
+                wk, n = map(int, weight_shape)
+            except (TypeError, ValueError):
+                continue
+            if k != wk or min(m, k, n) <= 0:
+                continue
+            resident_rows = ((m + tile - 1) // tile) * ((n + tile - 1) // tile) * tile
+            if resident_rows > capacity:
+                covered_by.append(name)
+    return {
+        "status": "ok",
+        "n_required": 1,
+        "n_covered": int(bool(covered_by)),
+        "uncovered": [] if covered_by else ["accumulator_output_capacity"],
+        "capacity_rows": capacity,
+        "covered_by": sorted(set(covered_by)),
+    }
+
+
 def uncovered(spec_doc: dict, corpus_roots, *, labels=None, tile_dim: int | None = None, exclude=None) -> dict:
     """Which required cells the corpus does NOT cover — the gate's question.
 
@@ -2562,6 +2661,10 @@ def uncovered(spec_doc: dict, corpus_roots, *, labels=None, tile_dim: int | None
         }
     else:
         out["shape_geometry"] = _geometry_gap(geom_req, corpus_roots, labels=labels, exclude=exclude)
+
+    out["accumulator_output_boundary"] = _accumulator_output_gap(
+        spec_doc.get("accumulator_output_boundary") or {}, corpus_roots, labels=labels, exclude=exclude
+    )
 
     scope_req = (spec_doc.get("scope") or {}).get("required")
     if scope_req is None:

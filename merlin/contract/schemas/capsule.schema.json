@@ -361,6 +361,7 @@
             "fusion",
             "epilogue",
             "accumulation_depth",
+            "accumulator_output_capacity",
             "conv_window",
             "application",
             "application_operation",
