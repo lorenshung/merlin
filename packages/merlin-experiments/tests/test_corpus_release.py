@@ -675,6 +675,10 @@ def test_contracts_root_harness_is_staged_without_live_source_pointer(release_fi
     selected = fixture["root"] / "authored-contracts/harness"
     selected.mkdir(parents=True)
     (selected / "runtime.h").write_text("/* selected public harness */\n")
+    (selected / "env/p").mkdir(parents=True)
+    (selected / "env/v").mkdir()
+    (selected / "env/p/link.ld").write_text("SECTIONS {}\n")
+    (selected / "env/v/link.ld").symlink_to("../p/link.ld")
     source = fixture["root"] / "source-experiment"
     decoy = source / "contracts/harness"
     decoy.mkdir(parents=True)
@@ -690,12 +694,41 @@ def test_contracts_root_harness_is_staged_without_live_source_pointer(release_fi
     assert "contracts_root" not in yaml.safe_load(prepared.read_text())
     copied = prepared.parent / "contracts/harness"
     assert (copied / "runtime.h").read_bytes() == (selected / "runtime.h").read_bytes()
+    assert not (copied / "env/v/link.ld").is_symlink()
+    assert (copied / "env/v/link.ld").read_bytes() == (selected / "env/p/link.ld").read_bytes()
+    preparation = json.loads((fixture["release"] / "private/preparation.json").read_text())
+    assert preparation["scaffolding"]["contracts/harness"]["materialized_file_links"] == ["env/v/link.ld"]
     sealed = _seal(fixture, report, capsys)
     (selected / "runtime.h").write_text("/* changed after preparation */\n")
     assert curated_harness_dir(load_target_experiment(prepared)) == str(copied)
     assert (copied / "runtime.h").read_text() == "/* selected public harness */\n"
     definition = _phase1_definition(fixture, sealed)
     assert main(["run", str(definition), "--phase", "1", "--run-dir", str(fixture["root"] / "out/runs/contracts")]) == 0
+
+
+@pytest.mark.parametrize("kind", ["external_file", "directory", "broken"])
+def test_curated_harness_link_must_remain_inside_declared_tree(release_fixture, capsys, kind):
+    fixture = release_fixture
+    source = fixture["root"] / "source-experiment"
+    harness = source / "contracts/harness"
+    harness.mkdir(parents=True)
+    if kind == "external_file":
+        (harness / "external.h").symlink_to(fixture["root"] / "merlin/contract/VERSION")
+    elif kind == "directory":
+        (harness / "headers").mkdir()
+        (harness / "headers_alias").symlink_to("headers", target_is_directory=True)
+    else:
+        (harness / "missing.h").symlink_to("missing-target.h")
+    descriptor = source / "target_experiment.yaml"
+    document = yaml.safe_load(descriptor.read_text())
+    document["hardware_spec"] = {"curated_harness": "contracts/harness"}
+    descriptor.write_text(yaml.safe_dump(document))
+
+    assert main(["run", str(fixture["definition"]), "--phase", "0", "--run-dir", str(fixture["run"])]) == 0
+    capsys.readouterr()
+    assert main(["corpus", "prepare", str(fixture["run"]), "--output", str(fixture["release"])]) == 2
+    expected = "outside the declared harness" if kind == "external_file" else "directory or broken symlink"
+    assert expected in (fixture["release"] / "private/failure.json").read_text()
 
 
 def test_generated_prompt_release_needs_no_authored_task_directory(release_fixture, capsys):

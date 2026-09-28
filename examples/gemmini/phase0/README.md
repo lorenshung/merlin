@@ -166,6 +166,27 @@ reports inventory only each selected cohort's exact bytes. Interface-command
 observations and source-model MLIR witnesses remain distinct; a performance
 cohort cannot borrow functional source coverage or claim whole-model validation.
 
+### Diagnostic release-admission gap (r17)
+
+The local `gemmini-r17` direct-generator probe wrote 86 capsules with no writer
+failures, but it is **not** a releasable Phase 0 run: it has no frozen
+`resolved-plan.json`/successful run receipt, and its manifest records zero
+generated or hand-authored hidden members. Its functional coverage report is
+`incomplete` (4 source-closure, 972 operation-placement and 1,027 typed-edge
+blockers, plus unresolved axes/review). Those counts describe a selected
+diagnostic corpus, not a verified compiler or PyTorch operator population.
+
+Release preparation now materializes only file symlinks that resolve *inside*
+the declared curated harness, recording the original link-bound source digest
+and copied link paths; outside, directory and broken links still fail closed.
+This removes one staging obstacle, not an admission decision. The descriptor's
+current model resource policy still lists nine models absent from r17 and leaves
+four generated `SY_source_*` models unclassified. A reviewer must make an
+explicit per-model resource decision against a fresh frozen run; neither the
+policy nor hidden cohort may be inferred or synthesized from r17. Only then can
+the complete Phase 1/2 coverage and source/host/target-execution obligations be
+re-evaluated for a new release.
+
 Review coverage, placement and independent numerical checks before preparing
 [the reviewed Phase 0 handoff](../../../experiments/README.md#reviewed-phase-0-handoff).
 Changing a status field cannot qualify old artifacts. New inputs require newly

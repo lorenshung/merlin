@@ -59,6 +59,50 @@ def copy_input(source: Path, destination: Path, *, private: bool = False) -> str
     return before
 
 
+def copy_curated_harness(source: Path, destination: Path) -> tuple[str, list[str]]:
+    """Freeze contained file links as bytes while binding their authored spellings.
+
+    Some reviewed toolchain trees alias one linker script from several environment
+    directories. A release cannot retain live links, including a link outside its
+    declared harness. The source fingerprint binds each link target and its bytes;
+    the destination fingerprint binds the fully materialized ordinary tree.
+    """
+    from merlin.common import content_store
+    from merlin.common.digest import sha256_file
+
+    from ..runner import fingerprint
+
+    if source.is_symlink() or not source.is_dir():
+        raise SpecError("curated harness source is absent, symlinked or not a directory")
+    root = source.resolve(strict=True)
+    expected = hashlib.sha256()
+    links = []
+    for member in sorted(source.rglob("*")):
+        relative = member.relative_to(source).as_posix()
+        if member.is_symlink():
+            if not member.is_file():
+                raise SpecError("curated harness contains a directory or broken symlink")
+            if not member.resolve(strict=True).is_relative_to(root):
+                raise SpecError("curated harness file link points outside the declared harness")
+            links.append(relative)
+        elif not (member.is_file() or member.is_dir()):
+            raise SpecError("curated harness contains a nonregular entry")
+        row = [relative, sha256_file(member)] if member.is_file() else [relative, "directory"]
+        expected.update(json.dumps(row).encode())
+    before = fingerprint(source)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    def observe(_lexical: Path, canonical: Path, _destination: Path) -> None:
+        if not canonical.is_relative_to(root):
+            raise SpecError("curated harness file link points outside the declared harness")
+
+    content_store.place_tree(source, destination, content_store.store_root(), observe=observe)
+    ordinary_tree(destination)
+    if fingerprint(source) != before or fingerprint(destination) != expected.hexdigest():
+        raise SpecError("curated harness changed while copying; prepare a new release")
+    return before, links
+
+
 def source_run(run_dir: Path) -> tuple[dict, dict, Path]:
     from .. import runner
 
@@ -396,7 +440,8 @@ def scaffold(te, corpus: Path, experiment: Path, *, private: Path) -> dict:
         if relative.is_absolute() or ".." in relative.parts:
             raise SpecError("curated harness must be a declared contained experiment resource")
         source = te.resource_path(relative)
-        inputs[relative.as_posix()] = {"path": str(source), "sha256": copy_input(source, experiment / relative)}
+        digest, links = copy_curated_harness(source, experiment / relative)
+        inputs[relative.as_posix()] = {"path": str(source), "sha256": digest, "materialized_file_links": links}
     descriptor = experiment / "target_experiment.yaml"
     descriptor.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
     if te.graded_release_admission:
