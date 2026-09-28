@@ -15,8 +15,9 @@ needs the external ``specir`` refmodel, available only at generation time) — t
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from merlin.targetgen.capsule_dram import dtype_bits
 
@@ -989,7 +990,7 @@ def build_resident_reuse(entry: dict, binding: CorpusBinding) -> tuple[dict, str
     idt, adt = binding.cap_dtype(binding.operand_dtype), binding.cap_dtype(binding.accum_dtype)
     midt, madt = binding.mlir_dtype(binding.operand_dtype), binding.mlir_dtype(binding.accum_dtype)
     inputs = [{"name": weight, "role": "weight", "shape": [K, N], "dtype": idt}]
-    matmuls, mlir_mm = [], []
+    matmuls = []
     L = _iface_prelude(binding.target, entry.get("comment", ""))
     L.append(f'  %{weight} = merlin_iface.tensor {{name = "{weight}", role = "weight"}} : tensor<{K}x{N}x{midt}>')
     for idx, mm in enumerate(entry["matmuls"]):
@@ -2063,6 +2064,22 @@ def build_host_island_seam(entry: dict, binding: CorpusBinding) -> tuple[dict, s
     return cap, "\n".join(lines) + "\n"
 
 
+def scope_chain_region_ops(families: list[str]) -> list[str]:
+    """Exact operations emitted by the current standalone scope-chain writer.
+
+    This is an emitter inventory, not a semantic equivalence rule for captured
+    source operations. Phase 0 must compare against it before selecting a
+    source-derived performance cohort.
+    """
+    if not (
+        isinstance(families, list) and len(families) >= 3
+        and families[:2] == ["movement", "contraction"]
+        and all(family == "elementwise_map" for family in families[2:])
+    ):
+        raise ValueError("scope_chain needs a movement/contraction/elementwise-map+ family list")
+    return ["transpose", "matmul", *(["add"] * (len(families) - 2))]
+
+
 def build_scope_chain(entry: dict, binding: CorpusBinding) -> tuple[dict, str]:
     """A priced contraction in a requirement-selected movement/contraction/map chain.
 
@@ -2085,12 +2102,7 @@ def build_scope_chain(entry: dict, binding: CorpusBinding) -> tuple[dict, str]:
             f"binding declares {binding.operand_dtype!r}->{binding.accum_dtype!r}"
         )
     families = entry.get("scope_families")
-    if not (
-        isinstance(families, list) and len(families) >= 3
-        and families[:2] == ["movement", "contraction"]
-        and all(family == "elementwise_map" for family in families[2:])
-    ):
-        raise ValueError("scope_chain needs a selected movement/contraction/elementwise-map+ family list")
+    region_ops = scope_chain_region_ops(families)
     map_count = len(families) - 2
     M, K, N = (int(entry.get(axis, binding.tile_dim)) for axis in ("M", "K", "N"))
     if min(M, K, N) < 1:
@@ -2098,7 +2110,7 @@ def build_scope_chain(entry: dict, binding: CorpusBinding) -> tuple[dict, str]:
     a, w, out = entry.get("lhs", "A0"), entry.get("weight", "W"), entry.get("out", "Y0")
     attrs = {"lhs": a, "weight": w, "out": out, "M": M, "K": K, "N": N,
              "scope_families": list(families),
-             "scope_region_ops": ["transpose", "matmul", *(["add"] * map_count)],
+             "scope_region_ops": region_ops,
              "scope_signature": " -> ".join(families),
              "map_count": map_count, "output_dtype": adt}
     cap = {

@@ -164,7 +164,8 @@ def _performance_materialization(manifest: dict) -> dict:
         required_scope = {
             row.get("family")
             for row in record.get("families") or []
-            if isinstance(row, dict) and (row.get("requirement_basis") or {}).get("axis") == "scope.required"
+            if isinstance(row, dict)
+            and (row.get("requirement_basis") or {}).get("axis") == "scope.performance.required"
         }
         declared = {
             row.get("family") for row in record.get("families") or [] if isinstance(row, dict)

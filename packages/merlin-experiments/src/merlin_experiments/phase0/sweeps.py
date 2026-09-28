@@ -602,7 +602,16 @@ def _scope_requirement_sweeps(
         if pattern != {"prefix": ["movement", "contraction"],
                        "repeated_tail": "elementwise_map", "min_tail": 1}:
             raise ValueError(f"performance sweep {family}: unsupported scope pattern")
-        required = ((requirement or {}).get("scope") or {}).get("required") or []
+        performance_scope = (((requirement or {}).get("scope") or {}).get("performance") or {})
+        if performance_scope.get("schema") != "merlin.phase0.performance_scope.v1":
+            if blocked is not None:
+                blocked.append({
+                    "family": family, "sweep": family, "status": "blocked_unimplemented",
+                    "reason": "selected requirement lacks exact SW/emitter-derived Phase 2 scope",
+                    "requirement_sha256": digest,
+                })
+            continue
+        required = performance_scope.get("required") or []
         matched = 0
         seen_families: set[str] = set()
         for row in sorted(required, key=lambda item: str(item.get("signature")) if isinstance(item, dict) else ""):
@@ -636,18 +645,25 @@ def _scope_requirement_sweeps(
             performance = selected["base"]["performance"]
             performance["family"] = derived_family
             performance["requirement_basis"] = {
-                "sha256": digest, "axis": "scope.required", "pattern_family": family,
+                "sha256": digest, "axis": "scope.performance.required", "pattern_family": family,
                 "signature": signature,
                 "occurrences": row.get("occurrences"),
             }
             selected["source_reference"] = (
-                str(selected.get("source_reference") or "") + f"; selected scope.required: {signature}"
+                str(selected.get("source_reference") or "") + f"; selected scope.performance.required: {signature}"
             )
             expanded.append(selected)
-        if matched == 0 and skipped is not None:
-            skipped.append({"family": family, "sweep": family, "status": "skipped_inapplicable",
-                            "reason": "selected frozen requirement has no supported scope-chain signature",
-                            "required_pattern": pattern, "requirement_sha256": digest})
+        if matched == 0:
+            if performance_scope.get("status") == "unresolved" and blocked is not None:
+                blocked.append({
+                    "family": family, "sweep": family, "status": "blocked_unimplemented",
+                    "reason": "exact source/SW/emitter Phase 2 scope remains unresolved",
+                    "required_pattern": pattern, "requirement_sha256": digest,
+                })
+            elif skipped is not None:
+                skipped.append({"family": family, "sweep": family, "status": "skipped_inapplicable",
+                                "reason": "selected frozen requirement has no eligible scope-chain signature",
+                                "required_pattern": pattern, "requirement_sha256": digest})
     return expanded
 
 

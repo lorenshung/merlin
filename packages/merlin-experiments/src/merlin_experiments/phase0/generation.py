@@ -400,7 +400,7 @@ def generate_target(
         performance = entry.get("performance") or {}
         basis = performance.get("requirement_basis") or {}
         family = performance.get("family")
-        if basis.get("axis") == "scope.required" and family:
+        if basis.get("axis") == "scope.performance.required" and family:
             record = {
                 "family": family, "claim": performance.get("claim"),
                 "derived_from_pattern": basis.get("pattern_family"), "requirement_basis": copy.deepcopy(basis),

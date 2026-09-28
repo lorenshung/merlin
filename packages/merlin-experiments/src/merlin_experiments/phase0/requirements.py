@@ -19,6 +19,7 @@ from merlin_experiments.spec import load_spec
 
 from .declarations import from_definition
 from .evidence import _materialize_evidence, export_evidence, select_evidence
+from .performance_scope import derive_performance_scope
 from .profiles import selected_software_spec_path, synthesis_input_identity
 from .software_screen import diagnostic_entry, intersect_requirement, screen_entry
 from .typed_scope import typed_required_instances
@@ -225,6 +226,7 @@ def derive(
     _validate_capture_recipes(captures, {row["recipe"]["recipe_sha256"] for row in selected_recipes})
     requirement["application_demands"]["sidecar"] = "application-demands.json"
     requirement = intersect_requirement(requirement, selected.software_spec, selected.contract)
+    requirement["scope"]["performance"] = derive_performance_scope(requirement["scope"], selected.software_spec)
     requirement["derivation"]["phase0_execution"] = {
         "agentic": False,
         "policy": "deterministic from selected inputs",

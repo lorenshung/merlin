@@ -836,6 +836,7 @@ def observe_cohort(
                 requirement,
                 sorted({Path(capsule["__dir__"]) for capsule in capsules}),
                 inputs=inputs,
+                phase=phase,
             )
         except (OSError, ValueError, RuntimeError) as exc:
             coverage = {"status": "not_measured", "reason": f"{type(exc).__name__}: {str(exc)[:500]}"}

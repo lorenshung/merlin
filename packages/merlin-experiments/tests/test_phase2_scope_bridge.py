@@ -9,7 +9,9 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
+from merlin_experiments.corpus.coverage import selected_cohort_coverage
 from merlin_experiments.phase0 import sweeps as SW
+from merlin_experiments.phase0.performance_scope import derive_performance_scope
 from merlin_experiments.phase0.software_screen import diagnostic_entry, screen_entry
 from merlin_experiments.phase0.typed_scope import typed_required_instances
 from merlin_experiments.phase0.writer import _write_capsule
@@ -107,6 +109,25 @@ def test_required_scope_instances_bind_exact_source_ops_types_and_edges(tmp_path
     assert instance["regions"][2]["operands"][0]["dtype"] == "i32"
     assert len(instance["edges"]) == 2
     assert all(edge["dtype"] in {"i8", "i32"} for edge in instance["edges"])
+    performance = derive_performance_scope(
+        {"typed_required_instances": observed},
+        load_software_spec(repo_root() / "examples/gemmini/target/software-spec.yaml"),
+    )
+    assert performance["required"] == []
+    assert performance["status"] == "no_eligible_chain"
+    assert performance["excluded"][0]["status"] == "software_refused"
+    assert performance["excluded"][0]["source_operations"][-1] == "unsupported_custom"
+    matching_names = copy.deepcopy(observed)
+    for row, op in zip(matching_names["instances"][0]["regions"], ["transpose", "matmul", "add"], strict=True):
+        row["source_op"] = op
+    permissive = {"status": "reviewed", "operations": [
+        {"id": family, "placement": "accelerator", "signature": {}}
+        for family in ("movement", "contraction", "elementwise_map")
+    ]}
+    not_proven = derive_performance_scope({"typed_required_instances": matching_names}, permissive)
+    assert not_proven["required"] == []
+    assert not_proven["status"] == "unresolved"
+    assert "source-body semantic correspondence" in not_proven["unresolved"][0]["reason"]
     source.write_text(source.read_text() + "\n")
     with pytest.raises(ValueError, match="capture bytes changed"):
         typed_required_instances(scope, inventory)
@@ -116,7 +137,10 @@ def test_selected_scope_derives_four_priceable_members_and_missing_scope_skips(m
     monkeypatch.setattr(SW, "target_encodings", lambda *args, **kwargs: [])
     monkeypatch.setattr(SW, "_resolve_target_oracle_evidence", lambda performance, target: performance)
     signature = "movement -> contraction -> elementwise_map -> elementwise_map -> elementwise_map"
-    requirement = {"scope": {"required": [{"signature": signature, "length": 5, "occurrences": 13}]}}
+    selected = {"signature": signature, "length": 5, "occurrences": 13}
+    requirement = {"scope": {"required": [selected], "performance": {
+        "schema": "merlin.phase0.performance_scope.v1", "status": "ready", "required": [selected],
+    }}}
     digest = hashlib.sha256(yaml.safe_dump(requirement).encode()).hexdigest()
     profile = {"capsules": [], "sweeps": [_sweep()]}
     skipped = []
@@ -130,7 +154,7 @@ def test_selected_scope_derives_four_priceable_members_and_missing_scope_skips(m
     assert [entry["K"] for entry in entries] == [4, 8, 12, 16]
     assert all(entry["scope_families"] == signature.split(" -> ") for entry in entries)
     assert all(entry["performance"]["requirement_basis"] == {
-        "sha256": digest, "axis": "scope.required", "pattern_family": "PN",
+        "sha256": digest, "axis": "scope.performance.required", "pattern_family": "PN",
         "signature": signature, "occurrences": 13,
     } for entry in entries)
     assert all(entry["performance"]["member_class"] == "LAW" for entry in entries)
@@ -145,10 +169,38 @@ def test_selected_scope_derives_four_priceable_members_and_missing_scope_skips(m
     assert preflight_affine_claim(altered)["status"] == "REFUSED"
     absent = SW.expand_sweeps(
         profile, _binding(), trait_facts=_facts(), skipped=skipped,
-        selected_requirement={"scope": {"required": []}}, requirement_sha256=digest,
+        selected_requirement={"scope": {"required": [], "performance": {
+            "schema": "merlin.phase0.performance_scope.v1", "status": "no_eligible_chain", "required": [],
+        }}}, requirement_sha256=digest,
     )
     assert absent == []
     assert skipped[-1]["status"] == "skipped_inapplicable"
+
+
+def test_raw_source_chain_does_not_select_phase2_scope_sweep(monkeypatch) -> None:
+    monkeypatch.setattr(SW, "target_encodings", lambda *args, **kwargs: [])
+    monkeypatch.setattr(SW, "_resolve_target_oracle_evidence", lambda performance, target: performance)
+    signature = "movement -> contraction -> elementwise_map -> elementwise_map -> elementwise_map"
+    requirement = {
+        "scope": {
+            "required": [{"signature": signature, "length": 5, "occurrences": 13}],
+            "performance": {"schema": "merlin.phase0.performance_scope.v1", "required": [],
+                            "status": "no_eligible_chain"},
+        }
+    }
+    skipped = []
+    entries = SW.expand_sweeps(
+        {"capsules": [], "sweeps": [_sweep()]}, _binding(), trait_facts=_facts(),
+        skipped=skipped, selected_requirement=requirement, requirement_sha256="frozen-digest",
+    )
+    assert entries == []
+    assert skipped and skipped[-1]["status"] == "skipped_inapplicable"
+    source = selected_cohort_coverage({"cells": [], **requirement}, [])
+    performance = selected_cohort_coverage({"cells": [], **requirement}, [], phase="phase2")
+    assert source["scope"]["n_required"] == 1
+    assert source["scope"]["n_covered"] == 0
+    assert performance["scope"]["status"] == "not_applicable"
+    assert performance["scope"]["n_required"] == 0
 
 
 def test_each_supported_signature_gets_a_separate_cohort_and_over_cap_is_recorded(monkeypatch) -> None:
@@ -156,10 +208,13 @@ def test_each_supported_signature_gets_a_separate_cohort_and_over_cap_is_recorde
     monkeypatch.setattr(SW, "_resolve_target_oracle_evidence", lambda performance, target: performance)
     signatures = [" -> ".join(["movement", "contraction"] + ["elementwise_map"] * count)
                   for count in (1, 3, 7)]
-    requirement = {"scope": {"required": [
+    required = [
         {"signature": signature, "length": len(signature.split(" -> ")), "occurrences": index + 1}
         for index, signature in enumerate(signatures)
-    ]}}
+    ]
+    requirement = {"scope": {"required": required, "performance": {
+        "schema": "merlin.phase0.performance_scope.v1", "status": "ready", "required": required,
+    }}}
     skipped = []
     blocked = []
     entries = SW.expand_sweeps(
@@ -221,7 +276,7 @@ def test_scope_member_survives_phase2_discovery_and_freeze(tmp_path) -> None:
     cap["performance"] = {
         "family": "PN", "claim": "PREDICTS", "member_class": "LAW",
         "acceptance": _sweep()["base"]["performance"]["acceptance"],
-        "requirement_basis": {"sha256": "fixture-digest", "axis": "scope.required",
+        "requirement_basis": {"sha256": "fixture-digest", "axis": "scope.performance.required",
                               "signature": cap["operation"]["attributes"]["scope_signature"]},
     }
     (member / "capsule.yaml").write_text(yaml.safe_dump(cap))
@@ -245,7 +300,7 @@ def test_scope_member_survives_phase2_discovery_and_freeze(tmp_path) -> None:
         capsules_sha256=frozen.capsules_sha256, expected_target="fixture",
     )
     P.verify_frozen_performance_corpus(loaded)
-    assert loaded.capsules[0].descriptor["performance"]["requirement_basis"]["axis"] == "scope.required"
+    assert loaded.capsules[0].descriptor["performance"]["requirement_basis"]["axis"] == "scope.performance.required"
 
 
 def test_phase0_writer_materializes_scope_program_and_independent_golden(tmp_path) -> None:

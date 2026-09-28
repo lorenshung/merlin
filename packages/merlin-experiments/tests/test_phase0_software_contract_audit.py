@@ -27,7 +27,7 @@ def test_audit_binds_unknown_axes_to_frozen_manifest_without_promoting_review(tm
                 "performance_generation": {
                     "test_device": {
                         "families": [
-                            {"family": "PN_selected", "requirement_basis": {"axis": "scope.required"}}
+                            {"family": "PN_selected", "requirement_basis": {"axis": "scope.performance.required"}}
                         ],
                         "counts": {
                             "by_family": {"PN_selected": {"admitted_members": 2, "written_members": 0}}

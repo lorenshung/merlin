@@ -32,6 +32,7 @@ def selected_cohort_coverage(
     *,
     inputs: dict | None = None,
     labels: set[str] | None = None,
+    phase: str = "phase1",
 ) -> dict:
     """Measure pure capsule axes; never borrow ambient target facts for admission.
 
@@ -42,6 +43,8 @@ def selected_cohort_coverage(
     """
     from merlin.targetgen.contract.materialize import cert_capsule_cover
 
+    if phase not in {"phase1", "phase2"}:
+        raise ValueError("cohort coverage phase must be phase1 or phase2")
     labels = {"public", "dev"} if labels is None else set(labels)
     got = cert_capsule_cover(roots, labels=labels, tile_dim=(spec_doc.get("boundaries") or {}).get("tile_edge"))
     have = set(got.get("cells") or [])
@@ -63,7 +66,33 @@ def selected_cohort_coverage(
         "conv_geometry": conformance._conv_geometry_gap,
     }
     for axis, reader in readers.items():
-        required = (spec_doc.get(axis) or {}).get("required")
+        if axis == "scope" and phase == "phase2":
+            performance = ((spec_doc.get("scope") or {}).get("performance") or {})
+            result["source_scope_instances"] = len(
+                ((spec_doc.get("scope") or {}).get("typed_required_instances") or {}).get("instances") or []
+            )
+            if performance.get("schema") != "merlin.phase0.performance_scope.v1":
+                result[axis] = {
+                    "status": "not_measured",
+                    "reason": "selected requirement lacks exact SW/emitter-derived Phase 2 scope",
+                }
+                continue
+            if performance.get("status") == "unresolved":
+                result[axis] = {
+                    "status": "not_measured",
+                    "reason": "exact source/SW/emitter Phase 2 scope remains unresolved",
+                    "n_unresolved": len(performance.get("unresolved") or []),
+                }
+                continue
+            if performance.get("status") == "no_eligible_chain":
+                result[axis] = {
+                    "status": "not_applicable", "n_required": 0, "uncovered": [],
+                    "n_software_refused": len(performance.get("excluded") or []),
+                }
+                continue
+            required = performance.get("required")
+        else:
+            required = (spec_doc.get(axis) or {}).get("required")
         result[axis] = (
             reader(required, roots, labels=labels)
             if required is not None
