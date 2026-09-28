@@ -41,6 +41,7 @@ from merlin_experiments.phase2 import functional_inputs as FI
 from merlin_experiments.phase2 import gsim_gate as GATE
 from merlin_experiments.phase2 import gsim_workload as WORKLOAD
 from merlin_experiments.phase2 import holdout_corpus as HOLDOUT
+from merlin_experiments.phase2 import published_payload as PUBLISHED
 from merlin_experiments.phase2 import telemetry as TEL
 from merlin_experiments.phase2.chia_launch import PYTHON_SOURCE_ENVIRONMENT_KEYS
 from merlin_experiments.phase2.contracts import PerformanceExperimentError as ExperimentError
@@ -137,6 +138,7 @@ class Config:
     # Declared execution width per measurement cell, recorded in measured evidence.
     # One by default, because a formal campaign's width is DECLARED rather than inferred.
     sim_workers: int = 1
+    published_compiler_root: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -251,7 +253,7 @@ def _config_document(config: Config) -> dict[str, Any]:
         document[key] = str(document[key])
     if document["functional_gsim_certificate"] is not None:
         document["functional_gsim_certificate"] = str(document["functional_gsim_certificate"])
-    for key in ("telemetry_price_table", "chia_python"):
+    for key in ("telemetry_price_table", "chia_python", "published_compiler_root"):
         if document[key] is not None:
             document[key] = str(document[key])
     document["trials"] = list(TRIALS)
@@ -895,6 +897,11 @@ def preflight(config: Config, *, heldout_certificate_provider_available: bool = 
         config.functional_submission_sha256,
         waive=frozenset(config.waive_functional_gate or ()),
     )
+    published_compiler = (
+        PUBLISHED.inspect(functional, config.published_compiler_root, target=target.target).identity()
+        if config.published_compiler_root is not None
+        else None
+    )
     functional_cohort = FC.functional_grade_cohort_from_run(target, functional, source_root=config.context.source_root)
     # WHAT THIS SUBMISSION DECLINED, from the grade that recorded it. The names travel on the cohort so
     # the certificate BUILDER and the certificate VERIFIER derive one case set from one function;
@@ -1061,6 +1068,7 @@ def preflight(config: Config, *, heldout_certificate_provider_available: bool = 
         "functional_gsim_provenance": functional_provenance,
         "functional_descriptor_binding": functional_descriptor_binding,
         "functional_gsim_certificate_waiver": functional_certificate_waiver,
+        "published_compiler": published_compiler,
         "agent_telemetry": telemetry_preflight,
         "agent_treatment": telemetry_treatment,
         "orchestration": chia_preflight,
