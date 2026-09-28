@@ -607,5 +607,13 @@ def test_conformance_cannot_borrow_ambient_provider_evidence(monkeypatch):
     requirement = {"target": "fixture", "cells": [], "composition": {"required": {"routing": 1}}}
     coverage = selected_cohort_coverage(requirement, [])
     assert coverage["composition"]["status"] == "not_measured"
+    assert coverage["composition"]["phase"] == "phase0"
     assert coverage["composition"]["required"] == {"routing": 1}
+    assert set(coverage["composition"]["phase1_receipt_required"]) == {
+        "selected_capture",
+        "selected_capsule",
+        "compiler_execution",
+        "lowering_correspondence",
+        "execution",
+    }
     assert CC._conformance_blockers(coverage)

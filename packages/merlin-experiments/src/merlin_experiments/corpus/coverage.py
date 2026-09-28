@@ -29,9 +29,10 @@ def _selected_contract(spec_doc: dict, inputs: dict | None) -> dict | None:
 def selected_cohort_coverage(spec_doc: dict, roots: list[Path], *, inputs: dict | None = None) -> dict:
     """Measure pure capsule axes; never borrow ambient target facts for admission.
 
-    Composition still needs an exact-source-bound emitted host/device seam;
-    do not credit it from a live provider. Host-only and host-lane placement
-    use the byte-bound selected contract, and memory regimes use selected facts.
+    Composition needs a compiler-owned, exact-source-bound emitted host/device
+    seam and execution evidence. Phase 0 has no such observer. Host-only and
+    host-lane placement use the byte-bound selected contract, and memory regimes
+    use selected facts.
     """
     from merlin.targetgen.contract.materialize import cert_capsule_cover
 
@@ -61,18 +62,46 @@ def selected_cohort_coverage(spec_doc: dict, roots: list[Path], *, inputs: dict 
             if required is not None
             else {"status": "not_measured", "reason": "selected requirement predates this coverage axis"}
         )
-    for axis in ("composition",):
-        block = spec_doc.get(axis) or {}
-        required = block.get("families" if axis == "host_only" else "required")
-        result[axis] = (
-            {"status": "not_applicable", "n_required": 0, "uncovered": []}
-            if required is not None and not required
-            else {
-                "status": "not_measured",
-                "reason": "legacy observer lacks exact selected-source binding",
-                "required": required,
-            }
-        )
+    composition = (spec_doc.get("composition") or {}).get("required")
+    if composition is None:
+        result["composition"] = {
+            "status": "not_measured",
+            "phase": "phase0",
+            "reason": "selected conformance requirement predates the composition axis",
+            "required": None,
+        }
+    elif not composition:
+        result["composition"] = {"status": "not_applicable", "phase": "phase0", "n_required": 0, "uncovered": []}
+    else:
+        result["composition"] = {
+            "status": "not_measured",
+            "phase": "phase0",
+            "reason": (
+                "the Phase 0 source-pool observer has no compiler-owned receipt for emission and "
+                "execution of the required host/device composition"
+            ),
+            "required": composition,
+            "phase1_receipt_required": {
+                "selected_capture": (
+                    "exact captured MLIR bytes and digest bound to the selected application inventory "
+                    "and conformance requirement"
+                ),
+                "selected_capsule": (
+                    "admitted capsule label, descriptor-tree digest, and authoritative program bytes/digest"
+                ),
+                "compiler_execution": (
+                    "selected compiler and dependency identity, invocation, input program digest, "
+                    "and emitted host/device artifact bytes/digest"
+                ),
+                "lowering_correspondence": (
+                    "compiler-owned mapping from every source operation and typed SSA crossing to "
+                    "the emitted host/device routes, including shape, dtype, and value preservation"
+                ),
+                "execution": (
+                    "target-visible execution trace and functional verdict bound to that same emitted artifact"
+                ),
+            },
+        }
     selected_contract = _selected_contract(spec_doc, inputs)
     from merlin.targetgen import boundary
 

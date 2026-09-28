@@ -220,10 +220,16 @@ def test_exact_conformance_cohort_cannot_borrow_unselected_siblings(tmp_path):
         (directory / "capsule.yaml").write_text(yaml.safe_dump(capsule))
         (directory / "capsule.interface.mlir").write_text(program)
         members[name] = directory
-    requirement = {"cells": [{"cell": "contraction/i8/partial"}], "boundaries": {"tile_edge": 4}}
+    requirement = {
+        "cells": [{"cell": "contraction/i8/partial"}],
+        "boundaries": {"tile_edge": 4},
+        "composition": {"required": {"A": 1}},
+    }
     selected = selected_cohort_coverage(requirement, [members["selected"]])
     assert selected["n_covered"] == 0
     assert selected["uncovered"] == ["contraction/i8/partial"]
+    assert selected["composition"]["status"] == "not_measured"
+    assert selected["composition"]["phase"] == "phase0"
     broad = selected_cohort_coverage(requirement, [tmp_path / "isa"])
     assert broad["n_covered"] == 1
     inputs = {"schema": CC.INPUT_SCHEMA, "target": "fixture", "capability_contract": {}}
