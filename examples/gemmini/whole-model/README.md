@@ -178,6 +178,19 @@ numerical results, dispatch decisions and host fallbacks together. This is not
 native whole-model executable certification or application accuracy. A staged
 multi-program session is inventoried and each program is checked, but that
 runtime does not execute its stage bindings or recurrence; it reports the gap.
+The evaluator checks that mesh certification starts from the requested compiler
+package, then permits the certifier's byte-checked private build copy to run.
+The request records the selected Chipyard path and explicit mesh-engine policy;
+the selected OOT support provider is hashed before and after the run. Worker
+temporary and shape-keyed certification runs stay inside the generated
+qualification directory; each evaluation gets its own output root. A wall-budget
+exhaustion after a kernel ELF is built is still incomplete execution evidence;
+neither a host fallback nor an earlier successful compiler command upgrades it.
+For an FP32 capture routed to the integer mesh, this diagnostic runtime applies
+per-tensor symmetric boundary quantization and rescales each integer result. That
+is not a TorchAO-derived model quantization recipe. A successful Spike kernel
+trace can therefore coexist with a failed whole-model comparison; inspect the
+actual error and do not widen tolerances merely to make it pass.
 Full validation also needs original-source tracing, the full pretrained
 checkpoint, attributed real inputs and the correct complete application session.
 The evaluator does not download weights, derive capsules or change compiler code.

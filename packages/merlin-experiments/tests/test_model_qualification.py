@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import shutil
 from pathlib import Path
@@ -61,6 +62,8 @@ def test_offline_process_boundary_preserves_interpreter_and_refuses_scope_upgrad
     if not all(shutil.which(tool) for tool in ("bwrap", "prlimit", "taskset")):
         pytest.skip("bounded local compiler tools are unavailable")
     monkeypatch.setenv("PYTHONPATH", ":".join(str(Path(path).absolute()) for path in __import__("sys").path if path))
+    monkeypatch.setenv("MERLIN_CHIPYARD", str(tmp_path / "selected-chipyard"))
+    monkeypatch.setenv("MERLIN_MESH_SIM", "spike")
     bundle, package = _bundle(tmp_path / "capture"), _package(tmp_path / "compiler")
     output = tmp_path / "qualification"
     result = Q.qualify(
@@ -94,12 +97,41 @@ def test_offline_process_boundary_preserves_interpreter_and_refuses_scope_upgrad
     assert result["observations"]["native_lowerings"][0]["status"] == "failed"
     assert result["observations"]["workflow"]["application_validation_blockers"]
     assert result["observations"]["runtime"]["target_executed"] is False
+    assert result["request"]["tool_environment"]["MERLIN_CHIPYARD"] == str(tmp_path / "selected-chipyard")
+    assert result["request"]["tool_environment"]["MERLIN_MESH_SIM"] == "spike"
+    assert result["request"]["certification_output_root"] is None
+    assert (output / "worker-tmp").is_dir()
     assert json.loads((output / "qualification.json").read_bytes()) == result
     assert (output / "README.md").is_file()
     assert (output / "qualification.json").stat().st_mode & 0o222 == 0
     assert output.stat().st_mode & 0o222 == 0
     with pytest.raises(ValueError, match="fresh"):
         Q.qualify(bundle=bundle, package=package, target="fixture", output=output)
+
+
+def test_selected_certification_guards_source_but_allows_its_execution_copy(tmp_path):
+    selected = _package(tmp_path / "selected")
+    other = _package(tmp_path / "other")
+    active = contextvars.ContextVar("test_selected_certification", default=False)
+    called = []
+
+    def certify(source, *args, **kwargs):
+        copied = tmp_path / "compiler-execution-1" / "package"
+        copied.parent.mkdir()
+        shutil.copytree(source, copied)
+        assert active.get() is True
+        assert copied != selected
+        assert (copied / "manifest.yaml").read_bytes() == (selected / "manifest.yaml").read_bytes()
+        called.append((source, args, kwargs))
+        return {"status": "pass"}
+
+    checked = Q._selected_source_certifier(selected, certify, active)
+    with pytest.raises(ValueError, match="different compiler package"):
+        checked(other)
+    assert not called
+    assert checked(selected, "interface.mlir", target="fixture") == {"status": "pass"}
+    assert called == [(selected, ("interface.mlir",), {"target": "fixture"})]
+    assert active.get() is False
 
 
 def test_multi_program_roster_cannot_escape_or_become_one_forward(tmp_path):
