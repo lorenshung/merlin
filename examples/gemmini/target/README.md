@@ -267,7 +267,12 @@ python examples/gemmini/target/probe_headline_kernel.py \
 The default generates `capsule.yaml`, `capsule.interface.mlir` and
 `generation.json` without running a simulator. Add `--native` for independent
 scalar-versus-Gemmini Spike output checks; add `--rtl` to execute the same ELF
-on Verilator. Native mode requires the explicitly selected OOT support contract.
+on Verilator. Native mode requires the explicitly selected OOT support contract,
+`MERLIN_TARGET_PATH` pointing to that support package, and `MERLIN_CHIPYARD`
+pointing to the selected Chipyard toolchain/simulator build. The example's
+Phase 0 contract supplies the authored corpus issue order; the probe checks
+that its shared compute-unit and encoding declarations agree with the OOT
+provider contract and records both contract hashes.
 Each simulator has a 180-second wall timeout. The source capture supplies
 geometry only: FP32/BF16 model captures do not establish an int8 model path.
 An actual quantized capture and integerization evidence are required before

@@ -12,7 +12,6 @@ import json
 import re
 from pathlib import Path
 
-
 _MATRIX = re.compile(r"tensor<([1-9][0-9]*)x([1-9][0-9]*)x([a-z][a-z0-9]*)>")
 
 

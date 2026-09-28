@@ -15,14 +15,13 @@ import os
 from pathlib import Path
 
 import yaml
+from probe_native_kernel import inputs_and_scalar
 
 from merlin.runtime.backends.base import get_backend
 from merlin.targetgen import corpus_spec
 from merlin.targetgen.contract.interface_emit import parse_interface_mlir
 from merlin.targetgen.source_kernel_probe import derive_kernel_window
 from merlin.targetgen.target_experiment import load_target_experiment
-from probe_native_kernel import inputs_and_scalar
-
 
 REPO = Path(__file__).resolve().parents[3]
 
@@ -40,7 +39,19 @@ def _selected_binding(facts_path: Path, contract_path: Path):
     mesh = [row for row in facts.get("facts", {}).get("arrays", []) if row.get("name") == "mesh"]
     if len(mesh) != 1 or mesh[0].get("rows") != mesh[0].get("cols") or int(mesh[0].get("rows") or 0) < 1:
         raise ValueError("selected facts lack one positive square mesh")
-    contract = yaml.safe_load(contract_path.read_text(encoding="utf-8"))
+    # The example contract adds the Phase 0 corpus issue order. The out-of-tree
+    # provider contract owns the executable backend but need not repeat that
+    # authoring field. Require their shared machine declaration to agree.
+    binding_contract_path = REPO / "examples/gemmini/target/contracts/target_contract.yaml"
+    contract = yaml.safe_load(binding_contract_path.read_text(encoding="utf-8"))
+    support_contract = yaml.safe_load(contract_path.read_text(encoding="utf-8"))
+    if support_contract.get("name") != contract.get("name") or support_contract.get("compute_units") != contract.get(
+        "compute_units"
+    ):
+        raise ValueError("selected OOT support and example binding contracts disagree on compute units")
+    for key, value in support_contract.get("encoding", {}).items():
+        if key in contract.get("encoding", {}) and contract["encoding"][key] != value:
+            raise ValueError(f"selected OOT support and example binding contracts disagree on encoding.{key}")
     recipe = yaml.safe_load((REPO / "examples/gemmini/phase0/recipe.yaml").read_text(encoding="utf-8"))
     te = load_target_experiment(REPO / "examples/gemmini/target/descriptor.yaml")
     binding = corpus_spec.derive_binding(te, recipe["datapath"], contract=contract, facts=facts)
@@ -101,7 +112,8 @@ def generate(
             "source_kernel_window": projection,
             "diagnostic_limits": capsule["diagnostic_limits"],
             "facts_sha256": _sha(facts_path),
-            "contract_sha256": _sha(contract_path),
+            "binding_contract_sha256": _sha(REPO / "examples/gemmini/target/contracts/target_contract.yaml"),
+            "support_contract_sha256": _sha(contract_path),
             "capsule_sha256": _sha(capsule_path),
             "interface_sha256": _sha(interface_path),
         },
