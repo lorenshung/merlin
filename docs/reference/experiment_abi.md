@@ -110,6 +110,8 @@ Large constant operands may also appear in `generated/` as
 `harness_blob_<symbol>.bin` with a matching `.S` and `.o`. The target renderer
 supplies the exact padded operand bytes and alignment; the shared runner
 validates the declaration, assembles the blob and links it into the executable.
+`generated/harness_blobs.json` records each linked symbol, byte count, alignment
+and SHA-256 of the exact binary payload.
 `harness.c` then contains a small `extern` declaration instead of millions of
 numeric initializers. Small operands and renderers without this optional
 capability continue to use inline C. These executable-build sidecars are
