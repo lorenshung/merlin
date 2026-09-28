@@ -439,7 +439,11 @@ def _emit_micro_model_loader(entry: dict, target: str, out_root) -> bool:
     """
     from merlin.targetgen import micro_model as MM
 
-    captures = _roster_captures()
+    # Derived-only execution passes exact run-owned snapshots. Pop the internal
+    # selector before the entry becomes a public capsule or provenance record.
+    captures = entry.pop("_frozen_application_captures", None)
+    if captures is None:
+        captures = _roster_captures()
     if not captures:
         print(f"  [skip] {entry['name']}: no captured model is available to derive the inventory from")
         return False

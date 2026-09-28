@@ -113,6 +113,24 @@ def _verify_derivation_evidence(conformance_spec: str | Path, evidence) -> None:
         )
 
 
+def _frozen_application_captures(root: Path, manifest: dict) -> dict[str, Path]:
+    """Resolve saved capture bytes from this run's exported evidence only."""
+    captures = {}
+    for source in manifest.get("sources") or []:
+        role = source.get("role")
+        if not isinstance(role, str) or not role.startswith("application-capture:"):
+            continue
+        label = role.partition(":")[2]
+        member = Path(source["path"])
+        if not label or label in captures or member.is_absolute() or ".." in member.parts:
+            raise ValueError("invalid or duplicate frozen application capture")
+        path = root / member
+        if path.is_symlink() or not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != source["sha256"]:
+            raise ValueError(f"frozen application capture differs from exported evidence: {label}")
+        captures[label] = path
+    return captures
+
+
 def generate_target(
     target: str,
     *,
@@ -180,6 +198,7 @@ def generate_target(
         if authored:
             raise ValueError(f"derived-only Phase 0 refuses authored capsule membership: {authored}")
     evidence = None
+    evidence_manifest = None
     if evidence_input is not None or software_spec is not None or profile.get("_software_spec_path"):
         from .evidence import export_evidence, load_exported_evidence, select_evidence
 
@@ -211,7 +230,7 @@ def generate_target(
         if profile.get("capsule_policy") == "derived_only":
             _verify_derivation_evidence(conformance_spec, evidence)
         artifact_root = Path(evidence_root) if evidence_root is not None else Path(output_root) / "_evidence"
-        export_evidence(evidence, artifact_root)
+        evidence_manifest = export_evidence(evidence, artifact_root)
     declared_claims = [str(model) for model in (getattr(te, "workload_spec", None) or {}).get("models") or ()]
     claim_plan = profile.get("_claim_model_evaluation")
     if profile.get("_synth_verification", {}).get("status") == "verified":
@@ -318,6 +337,12 @@ def generate_target(
     for e in entries:
         family = (e.get("performance") or {}).get("family")
         try:
+            if evidence is not None and e.get("micro_model"):
+                captures = _frozen_application_captures(artifact_root, evidence_manifest)
+                declared = set((evidence.application_inventory or {}).get("applications") or {})
+                if set(captures) != declared:
+                    raise ValueError("micro-model capture roster differs from frozen application inventory")
+                e = {**e, "_frozen_application_captures": captures}
             if (
                 evidence is not None
                 and (e.get("kind") == "model" or e.get("op") == "model")

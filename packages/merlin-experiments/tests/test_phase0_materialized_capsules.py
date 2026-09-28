@@ -8,6 +8,7 @@ import pytest
 import yaml
 from merlin_experiments.corpus.coverage import selected_cohort_coverage
 from merlin_experiments.phase0 import coverage_commitment as CC
+from merlin_experiments.phase0 import writer
 from merlin_experiments.phase0.evidence import _materialize_evidence
 from merlin_experiments.phase0.requirements import _materialized_iteration_capsules
 from merlin_experiments.phase0.writer import _integer_reference_bound, _write_capsule
@@ -126,6 +127,27 @@ def test_source_capsule_reuse_is_offline_exact_and_fail_closed(tmp_path, monkeyp
     selected_model.write_text(selected_model.read_text() + "\n")
     with pytest.raises(source.M2MUnavailable, match="receipt"):
         source.materialized_model_artifacts(selected["materialized_capture"])
+
+
+def test_derived_micro_model_reads_only_explicit_frozen_captures(tmp_path, monkeypatch):
+    from merlin.targetgen import micro_model
+
+    saved = tmp_path / "frozen" / "model.mlir"
+    saved.parent.mkdir()
+    saved.write_text("module {}\n")
+    monkeypatch.setattr(writer, "_roster_captures", lambda: pytest.fail("ambient recaptures were read"))
+
+    def spec(target, captures):
+        assert target == "fixture"
+        assert captures == {"iteration": saved}
+        return micro_model.MicroModelSpec(target="fixture")
+
+    monkeypatch.setattr(micro_model, "spec", spec)
+    monkeypatch.setattr(micro_model, "emit_pytorch", lambda spec: "# frozen inventory\n")
+    entry = {"cat": "model", "name": "SY_micro_model", "_frozen_application_captures": {"iteration": saved}}
+    assert writer._emit_micro_model_loader(entry, "fixture", tmp_path / "out")
+    assert entry["loader"].endswith("capsule.pytorch.py")
+    assert "_frozen_application_captures" not in entry
 
 
 def test_integer_golden_bound_uses_concrete_reduction_and_internal_width():
