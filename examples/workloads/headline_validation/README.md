@@ -121,33 +121,30 @@ placement, precision, complete sessions and independent numerical results.
 
 ## Current diagnostic evidence
 
-The following checks used the selected local model2MLIR and compiler builds on
-2026-09-28. The model2MLIR source closure was **not** verified, all inputs were
-synthetic, and none of these rows is a target/compiler certificate. Each listed
-program produced `model.mlir`, separate safetensors, a capture receipt and an
-audited host LLVM IR file; each lowering audit completed 10 named stages and
-bound both external tensor sidecars.
+The checks below used selected local model2MLIR and compiler builds, full model
+checkpoints, and seeded synthetic inputs on 2026-09-28. Their capture receipts
+still say `source_closure_verified: false`,
+so none of these bundles is an admitted Phase 0 corpus or a target/compiler
+certificate. Keep producer trace status, Merlin's exact-byte join, LLVM lowering,
+and numerical execution as separate checks.
 
-| Capture | Frontend result | PyTorch → prepared → MLIR lineage |
+| Capture | Frontend correspondence | LLVM lowering observed |
 | --- | --- | --- |
-| ResNet50, full `IMAGENET1K_V2` checkpoint, one image | 0 opaque; LLVM lowering completed | `complete` trace |
-| TinyLlama, full 22-layer checkpoint, one prefill | 0 opaque; LLVM lowering completed | `diagnostic`: 119 quantized source nodes lack an explicit prepared relation/elimination, including 94 dtype casts and one matmul |
-| SmolVLA, full checkpoint, prefix/flow/action session | 0 opaque in each of three programs; all three LLVM lowerings completed | Prefix and flow `diagnostic`: 82 quantized source nodes lack a relation/elimination in each; prefix also has six symbolic-size/range-guard nodes with no final MLIR correspondence. Action decode is `complete`. |
+| ResNet50, full `IMAGENET1K_V2` checkpoint, one image | 0 opaque; producer trace and exact-byte Merlin join complete | Host LLVM IR from the selected diagnostic capture; no target execution claim |
+| TinyLlama, full 22-layer prefill/decode session | Both programs: 0 opaque, complete producer traces, complete exact-byte Merlin joins and verified materialized receipts | Both programs reached LLVM IR through `merlin lower`; each compact audit completed 10 named stages and bound the weights and manifest sidecars |
+| SmolVLA, full prefix/flow/action session | All three producer traces complete with 0 opaque calls | Fresh prefix LLVM IR retains its three runtime shape assertions; earlier flow/action LLVM lowerings do not replace a current-byte recheck |
 
-Those missing relations are not evidence that the operators are supported or
-semantically irrelevant. The model2MLIR trace must observe any legitimate
-elimination (including casts and guards) or preserve a lowering correspondence;
-until then, exact operator-coverage claims for TinyLlama and SmolVLA remain
-unresolved even though their MLIR reaches host LLVM IR. In the observed traces,
-one unresolved TinyLlama cast changes `i64` to `f32`, and one unresolved SmolVLA
-prefix cast changes `f32` to `bf16`; marking every missing cast as a no-op would
-be incorrect.
+The TinyLlama proof covers captured prefill and recurrent decode programs, not
+host or accelerator numerical execution. The SmolVLA prefix guard branches
+reached LLVM IR, but their runtime behavior has not been qualified. A complete
+frontend trace proves operation correspondence, not host/device placement,
+supported precision, target code generation or model accuracy.
 
 In a derived `coverage/operation-accounting.json`, inspect each application's
 `completeness.source_trace.transition_obligations`. It lists the exact uncovered
 call-site IDs, operators and observed input/result dtypes, and checks the
-producer's unresolved-ID roster against the relation edges. This is a diagnostic
-obligation, not an elimination or equivalence proof.
+producer's unresolved-ID roster against the relation edges. Any uncovered row is
+a diagnostic obligation, not an elimination or equivalence proof.
 
 Replay the graph-correspondence check on any selected bundle (or one SmolVLA
 stage) without recapturing or changing its evidence:
