@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 
 from merlin.perf import workload_gen as WG  # noqa: E402
 from merlin.perf.profile import TRAITS, derive_profile  # noqa: E402
@@ -503,6 +504,12 @@ def _resolve_target_oracle_evidence(performance: dict, target: str) -> dict:
         evidence[key] = concrete
         resolved_from[key] = placeholder
     evidence["resolved_from"] = resolved_from
+    fit = acceptance.get("fit")
+    if isinstance(fit, dict) and fit.get("dependent_metric") == "$target_oracle_metric:L3":
+        simulator = evidence.get("timing_simulator")
+        if not isinstance(simulator, str) or evidence.get("timing_tier") != "L3":
+            raise ValueError(f"{target}: selected L3 timing oracle cannot name an affine metric")
+        fit["dependent_metric"] = f"{simulator}_L3_cycles"
     return performance
 
 
@@ -570,6 +577,78 @@ def _materialize_performance_entry(entry: dict, binding) -> dict:
     return entry
 
 
+def _scope_requirement_sweeps(
+    sweeps: list[dict], requirement: dict | None, digest: str | None,
+    skipped: list | None, blocked: list | None,
+) -> list[dict]:
+    """Derive one exact claim cohort per supported captured scope signature.
+
+    The template declares a family *pattern*. Each requirement row becomes its
+    own digest-named family so an affine analyzer never mixes different chains.
+    Eight regions is this builder's current cost/census cap, not a device limit.
+    Unsupported rows are explicit debt, never silently truncated to one match.
+    """
+    expanded = []
+    for sweep in sweeps:
+        if not isinstance(sweep, dict):
+            raise ValueError(f"sweep entry {sweep!r} is not a mapping")
+        pattern = sweep.get("requires_scope_pattern")
+        if pattern is None:
+            expanded.append(sweep)
+            continue
+        family = str(sweep.get("id") or "")
+        if pattern != {"prefix": ["movement", "contraction"],
+                       "repeated_tail": "elementwise_map", "min_tail": 1}:
+            raise ValueError(f"performance sweep {family}: unsupported scope pattern")
+        required = ((requirement or {}).get("scope") or {}).get("required") or []
+        matched = 0
+        seen_families: set[str] = set()
+        for row in sorted(required, key=lambda item: str(item.get("signature")) if isinstance(item, dict) else ""):
+            if not isinstance(row, dict) or not isinstance(row.get("signature"), str):
+                continue
+            signature = row["signature"]
+            families = signature.split(" -> ")
+            if not (len(families) >= 3 and families[:2] == pattern["prefix"]
+                    and all(part == pattern["repeated_tail"] for part in families[2:])):
+                continue
+            matched += 1
+            if row.get("length") != len(families) or not digest:
+                reason = "scope requirement length or frozen digest is invalid"
+            elif len(families) > 8:
+                reason = "scope chain exceeds this builder's eight-region cost/census cap, not a hardware limit"
+            else:
+                reason = None
+            if reason is not None:
+                if blocked is not None:
+                    blocked.append({"family": family, "sweep": family, "status": "blocked_unimplemented",
+                                    "reason": reason, "signature": signature, "requirement_sha256": digest})
+                continue
+            derived_family = f"{family}_{hashlib.sha256(signature.encode()).hexdigest()[:12]}"
+            if derived_family in seen_families:
+                raise ValueError(f"scope sweep {family}: duplicate or colliding signature {signature!r}")
+            seen_families.add(derived_family)
+            selected = copy.deepcopy(sweep)
+            del selected["requires_scope_pattern"]
+            selected["id"] = derived_family
+            selected["base"]["scope_families"] = families
+            performance = selected["base"]["performance"]
+            performance["family"] = derived_family
+            performance["requirement_basis"] = {
+                "sha256": digest, "axis": "scope.required", "pattern_family": family,
+                "signature": signature,
+                "occurrences": row.get("occurrences"),
+            }
+            selected["source_reference"] = (
+                str(selected.get("source_reference") or "") + f"; selected scope.required: {signature}"
+            )
+            expanded.append(selected)
+        if matched == 0 and skipped is not None:
+            skipped.append({"family": family, "sweep": family, "status": "skipped_inapplicable",
+                            "reason": "selected frozen requirement has no supported scope-chain signature",
+                            "required_pattern": pattern, "requirement_sha256": digest})
+    return expanded
+
+
 def expand_sweeps(
     profile: dict,
     binding,
@@ -580,6 +659,8 @@ def expand_sweeps(
     errors: list | None = None,
     traits: dict | None = None,
     evidence=None,
+    selected_requirement: dict | None = None,
+    requirement_sha256: str | None = None,
 ) -> list[dict]:
     """Return the profile's capsule entries with any ``sweeps:`` block expanded.
 
@@ -611,7 +692,10 @@ def expand_sweeps(
             raise ValueError("selected evidence target differs from binding target")
         if trait_facts is None:
             trait_facts = evidence.performance_facts
-    sweeps = profile.get("sweeps") or []
+    sweeps = _scope_requirement_sweeps(
+        profile.get("sweeps") or [], selected_requirement, requirement_sha256,
+        skipped, blocked_unimplemented,
+    )
     if not sweeps:
         return entries
     # Compatibility for the public/holdout disjointness checker, which passes
@@ -647,6 +731,27 @@ def expand_sweeps(
         is_performance = base.get("cat") in {"perf", "_perf"} or performance is not None
         gate_decision = None
         if is_performance:
+            if base.get("op") == "scope_chain":
+                mlir_dtype = getattr(binding, "mlir_dtype", None)
+                operand = mlir_dtype(binding.operand_dtype) if callable(mlir_dtype) else ""
+                accumulator = mlir_dtype(binding.accum_dtype) if callable(mlir_dtype) else ""
+                if not (
+                    operand.startswith("i") and operand[1:].isdigit()
+                    and accumulator.startswith("i") and accumulator[1:].isdigit()
+                    and int(accumulator[1:]) > int(operand[1:])
+                ):
+                    if skipped is not None:
+                        skipped.append({
+                            "family": sweep_id, "sweep": sweep_id, "status": "skipped_inapplicable",
+                            "reason": (
+                                "scope-chain builder requires signed integer operands "
+                                "and a wider accumulator"
+                            ),
+                            "operand_dtype": getattr(binding, "operand_dtype", None),
+                            "accum_dtype": getattr(binding, "accum_dtype", None),
+                            "requirement_basis": performance.get("requirement_basis"),
+                        })
+                    continue
             if legacy_traits_supplied:
                 raise ValueError(
                     f"performance sweep {sweep_id}: legacy ad-hoc `traits` cannot gate performance; "

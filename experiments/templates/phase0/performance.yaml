@@ -1322,6 +1322,96 @@ sweeps:
     with one explicit scalar XOR map present only in the island member. Both execute as one submitted
     whole-program kernel after one unmeasured warm call; only the next complete call is measured.
 
+# A capture-derived adjacency, admitted only by the selected frozen
+# requirement. The movement and maps are real linalg regions but carry zero
+# MACs; only the one contraction is in the utilization numerator. A missing
+# whole-program backend is an execution skip, not evidence against the device.
+- id: PN
+  requires_scope_pattern:
+    prefix: [movement, contraction]
+    repeated_tail: elementwise_map
+    min_tail: 1
+  fit_axes: [K]
+  comparison_roles: [prediction, measurement]
+  base:
+    cat: _perf
+    kind: model_slice
+    op: scope_chain
+    out: Y0
+    label: dev
+    source_role: derived_sweep
+    performance:
+      level: L3_multi_region
+      family: PN
+      lever: capture_scope_contraction_depth
+      member_class: LAW
+      claim: PREDICTS
+      comparand:
+        kind: fitted_prediction
+        against: measured_cycles_same_member
+        cancels: [identical_parallel_extents, identical_region_chain, identical_datapath]
+        demand_equal: [operation, M, N, operand_dtype, accum_dtype]
+      falsifier:
+        observation: residual_cycles_by_contraction_depth
+        fires_when: residuals_are_not_bounded_after_rate_and_intercept_fit
+        negative_control: fixed_movement_and_selected_maps_across_all_points
+      gate:
+        traits: [structural_pipeline_depth]
+        execution_capabilities: [whole_program_kernel_abi, warm_single_counter_region_cycles]
+        instrument: cycle_count
+        capacity: four_depths_of_one_selected_multi_region_program_under_one_counter
+        on_missing: skip_with_evidence
+      regime:
+        separation: K_is_the_only_varied_shape_axis
+        layout: standard_linalg_on_tensors_whole_program
+      emitter:
+        status: existing
+        entry: merlin.targetgen.corpus_spec.build
+        knobs: {operation: scope_chain, varied_axis: K}
+      cost:
+        tier: 1
+        runs: 4
+        projected_cycles: unbounded
+        basis: four_exact_scope_members_before_repetition
+      acceptance:
+        schema_version: 1
+        analyzer: perf_affine_claim.analyze_affine_claim/v1
+        fit:
+          form: affine
+          method: ordinary_least_squares_all_L3_replicates
+          independent_variable: contraction_depth
+          variable_source: {kind: input_dim, input: A0, axis: 1}
+          dependent_metric: $target_oracle_metric:L3
+        cohort:
+          operation: scope_chain
+          fixed_fields: [operation, operand_dtype, accum_dtype, M, N, scope_signature]
+          exact_points: 4
+          note: requirement-selected region chain at four target-tile-derived reduction depths
+        replicates:
+          exact_count: 2
+          identities: [r000, r001]
+        evidence:
+          correctness_simulator: $target_oracle:L2
+          correctness_tier: L2
+          timing_simulator: $target_oracle:L3
+          timing_tier: L3
+          spike_cycles_citable: false
+        thresholds:
+          slope_min_exclusive: 0.0
+          r_squared_min_inclusive: 0.95
+          residual_bound:
+            predicate: abs_residual_le_max_of_floor_and_fraction_of_observed
+            absolute_floor_cycles: 64
+            observed_cycle_fraction: 0.1
+  axes:
+    M: [tile]
+    N: [tile]
+    K: [tile, 2*tile, 3*tile, 4*tile]
+  name: '{id}{i:02d}_k{K}'
+  source_reference: >-
+    selected frozen scope.required movement/contraction/map adjacency; its four
+    K points vary contraction work while preserving the selected region chain
+
 blocked_unimplemented:
 - family: PT
   status: blocked_unimplemented

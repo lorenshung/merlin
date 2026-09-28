@@ -334,6 +334,10 @@ def generate_target(
     _sweep_skips: list = []
     _runtime_blocked: list = []
     _performance_errors: list = []
+    requirement_bytes = Path(conformance_spec).read_bytes() if conformance_spec is not None else None
+    selected_requirement = yaml.safe_load(requirement_bytes) if requirement_bytes is not None else None
+    if selected_requirement is not None and not isinstance(selected_requirement, dict):
+        raise ValueError("selected conformance requirement must be a mapping")
     entries = expand_sweeps(
         profile,
         binding,
@@ -341,6 +345,8 @@ def generate_target(
         skipped=_sweep_skips,
         blocked_unimplemented=_runtime_blocked,
         errors=_performance_errors,
+        selected_requirement=selected_requirement,
+        requirement_sha256=hashlib.sha256(requirement_bytes).hexdigest() if requirement_bytes is not None else None,
         **({"evidence": evidence} if evidence is not None else {}),
     )
     assert_no_claim_capsules(entries, declared_claims)
@@ -389,6 +395,25 @@ def generate_target(
         print(f"  [skip] performance family {_s['family']}: {_why}")
     template = copy.deepcopy(profile.get("_performance_template") or {})
     declared_families = [dict(row) for row in (template.get("families") or [])]
+    # A requirement-selected pattern may derive several exact claim cohorts.
+    # Keep both identities: the shared template's digest-bound pattern and each
+    # concrete family with the frozen requirement row that produced it.
+    derived_families: dict[str, dict] = {}
+    for entry in entries:
+        performance = entry.get("performance") or {}
+        basis = performance.get("requirement_basis") or {}
+        family = performance.get("family")
+        if basis.get("axis") == "scope.required" and family:
+            record = {
+                "family": family, "claim": performance.get("claim"),
+                "derived_from_pattern": basis.get("pattern_family"), "requirement_basis": copy.deepcopy(basis),
+                "fit_axes": ["K"], "comparison_roles": ["prediction", "measurement"],
+            }
+            if family in derived_families and derived_families[family] != record:
+                raise ValueError(f"derived performance family {family!r} has divergent requirement provenance")
+            derived_families[family] = record
+    template["derived_families"] = [derived_families[name] for name in sorted(derived_families)]
+    declared_families.extend(template["derived_families"])
     family_counts = {row["family"]: {"admitted_members": 0, "written_members": 0} for row in declared_families}
     for entry in entries:
         family = (entry.get("performance") or {}).get("family")
