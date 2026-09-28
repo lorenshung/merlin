@@ -117,8 +117,12 @@ certificate. Native cohort admission is reused unchanged; oracle readiness and
 grading still happen in the native phase engine. No command approves data for you.
 `corpus coverage` verifies the completed run's input/output receipt and reports
 which public source-pool cells and other conformance axes its capsules present.
-Its explicit requirement is separately hashed. It does not establish numerical
-correctness, graded admission, or whole-model compilation.
+It reads the run's frozen facts and capability contract when those inputs exist;
+older runs without them report the affected axes as unmeasured, never by reopening
+ambient target tooling. Its explicit requirement is separately hashed. Source-pool
+coverage can include functional capsules, so it is not the selected Phase 2
+performance-cohort coverage. It does not establish numerical correctness, graded
+admission, or whole-model compilation.
 
 For Phase 1, the catalog examples require a reviewed release and a newly generated
 bundle. Keep the authored definition unchanged and select both inputs explicitly:
