@@ -197,7 +197,7 @@ recipe's integerization implementation; Phase 0 must fail instead of falling
 back to a different capture path.
 
 ```sh
-MERLIN_MODEL2MLIR="$MODEL2MLIR_ROOT" MERLIN_M2M_PYTHON="$CAPTURE_PYTHON" \
+MERLIN_M2M_DIR="$MODEL2MLIR_ROOT" MERLIN_M2M_PYTHON="$CAPTURE_PYTHON" \
   merlin experiment run gemmini-functional --phase 0 \
   --phase0-rtl-facts "$RTL_ROOT/facts.json" \
   --phase0-conformance-spec "$REALIZED_DERIVATION_ROOT/requirements.yaml" \
@@ -265,3 +265,34 @@ Changing a status field cannot qualify old artifacts. New inputs require newly
 frozen runs; preserve old outputs unchanged. See [the artifact map](../artifacts/README.md)
 and [whole-model walkthrough](../whole-model/README.md) for member MLIR, external
 tensors and intermediate lowering snapshots.
+
+### Check a generated kernel on the oracle ladder
+
+With `merlin-experiments` and its AET dependency installed, select the same
+support provider, example contract and exact facts used by derivation. The
+compiler interpreter and LLVM tools are independent of the PyTorch capture
+interpreter. An installed Merlin checkout does not imply they are installed or
+selected; check `python -c 'import aet'` and resolve these paths before grading.
+
+```sh
+MERLIN_TARGET_PATH="$TARGET_SUPPORT_ROOT" \
+MERLIN_TARGET_CONTRACT="$PWD/examples/gemmini/target/contracts/target_contract.yaml" \
+MERLIN_RTL_FACTS="$RTL_ROOT/facts.json" \
+MERLIN_EXT_CHIPYARD="$SIMULATOR_CHIPYARD_ROOT" \
+MERLIN_COMPILER_PYTHON="$COMPILER_PYTHON" \
+MERLIN_CLANG="$LLVM_BIN/clang-23" \
+MERLIN_MLIR_TRANSLATE="$LLVM_BIN/mlir-translate" \
+MERLIN_OBJDUMP="$LLVM_BIN/llvm-objdump" \
+python -m merlin.targetgen.capsule_runner \
+  --package "$COMPILER_PACKAGE" \
+  --capsule "$RUN_ROOT/phase0/capsules/layers/SY_int_mm_m8_k32_n32_1a2863611f" \
+  --runs-root "$CAPSULE_RUN_ROOT" --target gemmini --timeout 600
+```
+
+The member name above is an example from one realized capture, not a stable
+authored input; choose a member present in your run. Its `capsule_result.json`
+must show measured passes for every mandatory tier. L2 is Spike's functional
+model, while L3 is elaborated RTL; L0/L1 or a generated ELF alone are not an RTL
+verdict. Record the selected simulator/build provenance separately: a passing
+kernel result with `UNKNOWN` hardware pins is diagnostic, not a pinned release
+claim. This check does not qualify a complete model or the Phase 0 corpus.
