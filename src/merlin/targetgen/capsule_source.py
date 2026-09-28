@@ -837,11 +837,12 @@ class PytorchRefSource:
             from merlin.common.artifacts import cache_dir
             from merlin.common.digest import sha256_file
 
-            # The worker imports these upstream implementation owners from an
-            # out-of-tree model2MLIR checkout. A path alone is not a version:
-            # active development can replace their bytes in place. This is a
-            # deliberately named direct-owner set, not a claim that arbitrary
-            # framework/loader imports have a complete source closure.
+            # A path alone is not a version: active development can replace
+            # imported implementation bytes in place. Keep the required direct
+            # owners (including the optional static integerizer) as an
+            # availability check, and bind *all* Python modules in the selected
+            # m2m package. Helpers imported transitively must invalidate the
+            # slot too. This still does not close Torch, loader imports or data.
             upstream_files = [
                 "m2m/api.py",
                 "m2m/ir/import_fx.py",
@@ -857,12 +858,28 @@ class PytorchRefSource:
             # trace implementation invalidates their cache identity.
             trace_owner = self.m2m_dir / "m2m/capture/trace.py"
             upstream_identity["m2m/capture/trace.py"] = sha256_file(trace_owner) if trace_owner.is_file() else None
+            package_root = self.m2m_dir / "m2m"
+            if package_root.is_symlink() or not package_root.is_dir():
+                return None
+            package_sources = {}
+            for path in sorted(package_root.rglob("*")):
+                # A symlinked package subtree is not an inventory of the bytes
+                # Python may import from it; fail closed instead of omitting it.
+                if path.is_symlink():
+                    return None
+                if path.suffix != ".py":
+                    continue
+                if not path.is_file():
+                    return None
+                package_sources[path.relative_to(self.m2m_dir).as_posix()] = sha256_file(path)
+            if not package_sources:
+                return None
 
             # Structured encoding preserves field boundaries even when loader source or
             # environment values contain delimiter characters. Historical ambiguous-key
             # slots remain untouched, but are never admitted under this key version.
             request = {
-                "key_version": 3,
+                "key_version": 4,
                 "op": op,
                 "dtype": str(dtype),
                 "scheme": str(scheme or ""),
@@ -875,6 +892,7 @@ class PytorchRefSource:
                 "agreement_tolerance": list(agreement_tolerance) if agreement_tolerance else None,
                 "merlin_implementation": capture_cache.implementation_identity(),
                 "model2mlir_direct_owners": upstream_identity,
+                "model2mlir_python_tree": package_sources,
             }
             if already_quantized:
                 request["capture_quantization"] = "already_materialized"
