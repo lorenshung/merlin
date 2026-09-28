@@ -129,6 +129,7 @@
             "avgpool2d",
             "global_average",
             "movement",
+            "transpose",
             "attention_qk",
             "attention_pv",
             "attention_mx",

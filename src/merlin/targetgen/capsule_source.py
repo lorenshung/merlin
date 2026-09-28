@@ -376,6 +376,13 @@ def _r(*shape):
 
 # Each op body defines `Model(nn.Module)` and `get_model_and_inputs()`. Shapes come from the spec dict.
 _OP_BODIES: dict[str, str] = {
+    "transpose": """
+class Model(nn.Module):
+    def forward(self, x):
+        return x.transpose(-2, -1)
+def get_model_and_inputs():
+    return Model(), (_r({M}, {K}),)
+""",
     "matmul": """
 class Model(nn.Module):
     def forward(self, a, w):
@@ -1199,6 +1206,7 @@ _OP_INPUT_NAMES = {
 # FUSED ops have no merlin_iface builder: their interface is the m2m linalg module DIRECTLY (the agent
 # compiles the linalg), fed positionally. loader input order defines the func-arg order the harness passes.
 _FUSED_OP_INPUT_NAMES = {
+    "transpose": ["X"],
     "attention_full": ["Q", "K", "V"],
     "softmax": ["X"],
     "layernorm": ["X", "W", "B"],

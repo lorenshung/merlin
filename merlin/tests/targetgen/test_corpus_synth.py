@@ -565,6 +565,19 @@ def test_a_target_with_no_host_only_families_synthesizes_none():
     assert not any("host_only" in e["name"] for e in out["capsules"])
 
 
+def test_float_movement_host_lane_has_a_pytorch_representative():
+    spec = {
+        **_HOST_SPEC,
+        "host_only": {"families": [], "dtypes": {}},
+        "host_lane": {"required": [{"family": "movement", "dtype": "f32", "n_regions": 19}]},
+    }
+    result = CS.synthesize(spec, capability_contract={"name": "t", "compute_units": []})
+    entry = next(item for item in result["capsules"] if item["name"] == "SY_host_lane_movement_f32")
+    assert entry["op"] == "transpose"
+    assert entry["source"] == "pytorch"
+    assert result["provenance"]["host_only_unsynthesizable"] == []
+
+
 def test_op_choice_prefers_an_op_that_can_actually_be_written_at_the_dtype():
     """Ranking by cost alone picked the cheapest op in the ABSTRACT and then discovered no writer could
     express it: an elementwise cell chose `gelu` -- one operand, no direct-MLIR builder -- over
