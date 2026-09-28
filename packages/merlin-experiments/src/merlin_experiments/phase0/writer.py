@@ -53,8 +53,17 @@ def _integer_reference_bound(entry: dict, cap: dict) -> dict:
         return {"status": "unknown", "reason": "no selected full-operation internal-width bound policy"}
     operation = cap["operation"]
     op, attrs = operation["op"], operation.get("attributes") or {}
-    if op not in {"matmul", "linear", "matmul_bias", "residual_seam", "conv2d"}:
+    if op not in {"matmul", "linear", "matmul_bias", "residual_seam", "conv2d", "scope_chain"}:
         return {"status": "not_applicable", "reason": "this writer path is not a single integer contraction"}
+    if op == "scope_chain":
+        families = attrs.get("scope_families")
+        if (
+            not isinstance(families, list)
+            or len(families) < 3
+            or families[:2] != ["movement", "contraction"]
+            or any(family != "elementwise_map" for family in families[2:])
+        ):
+            raise ValueError("integer scope chain needs one selected contraction and only post-contraction maps")
     leaves = CG.materialize_capsule_leaves(cap)
 
     def name(role, declared):
@@ -64,6 +73,8 @@ def _integer_reference_bound(entry: dict, cap: dict) -> dict:
     if lhs_name not in leaves or rhs_name not in leaves:
         raise ValueError("integer contraction bound requires concrete lhs and weight operands")
     lhs, rhs = leaves[lhs_name], leaves[rhs_name]
+    if op == "scope_chain" and rhs.shape[-1] != lhs.shape[-1]:
+        raise ValueError("integer scope chain reduction extents differ between lhs and transposed weight")
     reduction_extent = rhs.shape[0] if op == "conv2d" else lhs.shape[-1]
     initial = [int(value) for key, tensor in leaves.items() if key not in {lhs_name, rhs_name} for value in tensor.data]
     result = integer_partial_sum_bound(

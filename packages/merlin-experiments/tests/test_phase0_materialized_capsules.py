@@ -198,6 +198,33 @@ def test_integer_golden_bound_uses_concrete_reduction_and_internal_width():
         _integer_reference_bound({"numerical_semantics": semantics}, capsule)
 
 
+def test_scope_chain_bounds_its_embedded_integer_contraction():
+    semantics = {
+        "internal_arithmetic": {
+            "full_operation_overflow_policy": "bounded_exact_requires_each_partial_sum",
+            "mac_result_bits": 20,
+            "signed_operand_bits": 8,
+        }
+    }
+    binding = CorpusBinding("fixture", 4, "int8", "i32", True, ["L0"], "exact_int")
+    entry = {
+        "name": "selected_scope", "kind": "model_slice", "source_role": "derived_sweep",
+        "source_reference": "selected requirement", "op": "scope_chain",
+        "M": 4, "K": 8, "N": 4,
+        "scope_families": ["movement", "contraction", "elementwise_map"],
+    }
+    capsule, _ = build(entry, binding)
+    proof = _integer_reference_bound({"numerical_semantics": semantics}, capsule)
+    assert proof["status"] == "proven_safe"
+    assert proof["reduction_extent"] == 8
+
+    capsule["stimulus_range"] = [127, 127]
+    capsule["inputs"][0]["shape"] = [4, 64]
+    capsule["inputs"][1]["shape"] = [4, 64]  # scope_chain stores W transposed
+    with pytest.raises(ValueError, match="may_overflow"):
+        _integer_reference_bound({"numerical_semantics": semantics}, capsule)
+
+
 def test_exact_conformance_cohort_cannot_borrow_unselected_siblings(tmp_path):
     binding = CorpusBinding("fixture", 4, "int8", "i32", True, ["L0"], "exact_int")
     members = {}
