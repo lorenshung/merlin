@@ -386,7 +386,20 @@ def test_reviewed_derivation_formal_freeze_and_phase2_admission_share_exact_byte
             git + ["clone", "-q", str(publisher), str(relocated)],
         )
         for command in commands:
-            subprocess.run(command, check=True, capture_output=True, env={**os.environ, "GIT_ALLOW_PROTOCOL": "file"})
+            subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                env={
+                    **os.environ,
+                    "GIT_ALLOW_PROTOCOL": "file",
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                    "GIT_CONFIG_GLOBAL": os.devnull,
+                    "GIT_CONFIG_COUNT": "1",
+                    "GIT_CONFIG_KEY_0": "core.hooksPath",
+                    "GIT_CONFIG_VALUE_0": os.devnull,
+                },
+            )
 
     # The checkpoint owner now consumes this exact formal submission as its
     # optimization baseline. Agent, simulator and OS-isolation observations above
