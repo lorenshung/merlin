@@ -50,6 +50,11 @@ qualification; the declaration deliberately keeps operation admission unreviewed
 and unsigned carrier widths. A `UInt<8>` carrier is not itself proof of E4M3, nor
 does it establish an unsigned integer arithmetic operation: the selected arithmetic
 structure and independent numerical characterization supply separate evidence.
+The selected HW-MLIR also exposes 8-bit `scaleE8M0` command ports, matching the
+source's E8M0-named pack/pop controls. That carrier observation does not establish
+the block scope, exponent transformation, or a TorchAO scale representation.
+Consequently `software-spec.yaml` leaves scale encoding and block size unresolved;
+do not promote the diagnostic FP8 recipe into a realizable model format yet.
 
 Produce evidence from one selected elaboration, not a mixture of standalone
 spec-generated hardware and Chipyard memory/hierarchy sources:

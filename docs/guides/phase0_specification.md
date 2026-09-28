@@ -149,6 +149,8 @@ format with the SW spec's eligible operations and typed constraints. Host-only
 operations are excluded; explicit signature refusals remain unquantized. Missing
 hardware scale parameters do not acquire a default recipe. These are diagnostic
 transformation inputs, not accelerator-admission certificates.
+An unknown block size does not obstruct a selected per-tensor or per-channel
+recipe, which has no block axis; the generated contract records it as not applicable.
 
 Select a recipe path from that index and use the existing capture worker:
 
@@ -163,7 +165,9 @@ Select a recipe path from that index and use the existing capture worker:
 Inspect `meta.json`'s `quantization_stats` for the observers, epsilon, actual
 calibration source/count and per-operation SW decisions. Observer defaults are
 framework transformation policy, not RTL semantics, and need not clutter the
-SW spec. `integerization_receipt` records true integer contractions and comparison
+SW spec. The adapter defaults to min/max observation for FP8 because TorchAO PT2E's
+histogram observer requires an integer dtype; an explicit FP8 histogram request is
+refused. `integerization_receipt` records true integer contractions and comparison
 against the portable quantized graph; `recipe_agreement` separately compares
 against the original floating model. A single example-input calibration does not
 establish model accuracy. Preserve the original FP32 capture as reference lineage,
@@ -329,6 +333,9 @@ a whole-model format automatically, or certify that a custom format is implement
 Keep generated facts, application inventories, conformance requirements, synthesis plans,
 capsules, goldens and weights under the configured output root, never committed in examples.
 The example's `artifacts/` folder is a navigation guide, not an output destination.
+Capsule MLIR references its copied `capsule.weights.safetensors` relatively. Its
+frontend relocation receipt records a hash of the capture's original weight-reference
+spelling, not the ephemeral absolute capture-cache path.
 
 Changing the software spec or recipe changes synthesis identity. Generate a new requirement
 and synthesis pair with the newly selected inputs. Legacy synthesis references without

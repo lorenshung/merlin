@@ -174,6 +174,10 @@ def _parameters(
         if key in _IDENTITY_FIELDS:
             continue
         prior = parameters.get(key)
+        if prior is not None and prior["status"] == "not_applicable" and _unknown(value):
+            # An authored unknown cannot make block geometry required after the
+            # selected per-tensor/per-channel recipe proved it has no block axis.
+            continue
         if prior is not None and prior["status"] == "known" and not _unknown(value) and value != prior["value"]:
             conflicts.append(f"{key}: authored value {value!r} differs from derived value {prior['value']!r}")
         parameters[key] = _record(value, "authored quantization parameter")
@@ -275,7 +279,7 @@ def capture_recipe_candidates(spec: Mapping, quantization_contract: Mapping) -> 
     from RTL or added to the authored SW spec. Actual calibration and transformed
     precision must still be observed by the capture producer.
     """
-    from merlin.targetgen._recipe_quantizer import DEFAULT_OBSERVER_EPSILON
+    from merlin.targetgen._recipe_quantizer import DEFAULT_OBSERVER_EPSILON, _observer_name
     from merlin.targetgen.quant_recipe import digest
     from merlin.targetgen.semantic_families import from_op
 
@@ -314,8 +318,11 @@ def capture_recipe_candidates(spec: Mapping, quantization_contract: Mapping) -> 
             unsupported = set(framework) - {"activation_observer", "weight_observer", "observer_epsilon"}
             if unsupported:
                 raise ValueError(f"capture adapter cannot enforce framework parameters: {sorted(unsupported)!r}")
-            for role, fallback in (("activation", "histogram"), ("weight", "minmax")):
-                recipe[role]["observer"] = framework.get(f"{role}_observer", fallback)
+            for role in ("activation", "weight"):
+                tensor = recipe[role]
+                tensor["observer"] = framework.get(
+                    f"{role}_observer", _observer_name(tensor, is_weight=role == "weight")
+                )
             recipe["framework_capture_policy"] = {
                 "observer_epsilon": framework.get("observer_epsilon", DEFAULT_OBSERVER_EPSILON),
                 "basis": "selected framework parameters or existing deterministic adapter policy; not RTL semantics",

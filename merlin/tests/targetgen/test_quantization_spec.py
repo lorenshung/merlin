@@ -252,3 +252,25 @@ def test_capture_recipe_is_scoped_without_manually_authored_framework_bookkeepin
     spec["quantization"]["formats"][0]["framework"] = {"calibration_dataset": "unbound"}
     with pytest.raises(ValueError, match="cannot enforce framework parameters"):
         capture_recipe_candidates(spec, build_quantization_contract(spec, _hardware()))
+
+
+def test_fp8_capture_recipe_uses_supported_observer_default():
+    spec = _spec()
+    spec["numerical_semantics"].update(operand_dtype="fp8_e4m3", accumulator_dtype="bf16", readout_dtype="bf16")
+    spec["operations"][0]["signature"].update(operand_dtypes=["fp8_e4m3"], accumulator_dtype="bf16")
+    spec["quantization"]["formats"] = [
+        {"operand_dtype": "fp8_e4m3", "accumulator_dtype": "bf16", "eligible_operations": ["matrix"]}
+    ]
+    hardware = _hardware(formats=["fp8_e4m3"], element="fp8_e4m3", accumulator="bf16")
+    recipes = capture_recipe_candidates(spec, build_quantization_contract(spec, hardware))
+    assert len(recipes) == 1
+    assert recipes[0]["recipe"]["activation"]["observer"] == "minmax"
+    assert recipes[0]["recipe"]["weight"]["observer"] == "minmax"
+
+
+def test_unknown_block_size_does_not_block_a_derived_per_tensor_format():
+    spec = _spec()
+    spec["quantization"]["formats"][0]["block_size"] = "unknown"
+    match = build_quantization_contract(spec, _hardware())["formats"][0]["hardware_matches"][0]
+    assert match["status"] == "candidate"
+    assert match["parameters"]["block_size"]["status"] == "not_applicable"
