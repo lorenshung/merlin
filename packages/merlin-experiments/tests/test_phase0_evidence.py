@@ -156,7 +156,9 @@ def test_selected_application_accounting_is_digest_bound_and_replayed_without_fr
     assert accounting["overall"]["pytorch_provenance"]["original_pytorch_invocation_count"] is None
     assert "coverage/operation-accounting.json" in manifest["consumers"]["operation_accounting"]
     assert "hardware/effective-views/isa-taxonomy.json" in manifest["consumers"]["corpus_binding"]
-    assert (output / "coverage/README.md").is_file()
+    coverage_readme = (output / "coverage/README.md").read_text()
+    assert "unreviewed inputs remain unknown" in coverage_readme
+    assert "reviewed declaration screens" not in coverage_readme
     sidecar.write_text("{}")
     with pytest.raises(ValueError, match="inventory differs"):
         evidence.select_evidence("fixture", descriptor=descriptor, facts_path=facts_path, conformance_spec=requirement)
