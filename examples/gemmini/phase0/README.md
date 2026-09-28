@@ -69,6 +69,17 @@ captures and layer frequencies do not select or tune the derivation corpus.
 
 With installed `merlin-experiments`, explicit captures and fresh facts:
 
+Select the *same* out-of-tree support package and capability contract for
+derivation and the subsequent Phase 0 run. For example, set
+`MERLIN_TARGET_PATH` to the Gemmini support directory and
+`MERLIN_TARGET_CONTRACT` to the reviewed selected contract before both
+commands. The generated requirement binds raw facts, the contract, effective
+readout facets and support-source bytes; changing a provider requires a fresh
+derivation, not a resumed corpus run. The selected Gemmini readout supports
+`acc_scale` but not the distinct integer-shift `requant` epilogue, so the latter
+must remain an explicit rejected/host obligation rather than a fabricated
+accelerator capability.
+
 ```sh
 merlin experiment corpus derive gemmini-functional \
   --application-capture "coverage_mlp=$CAPTURE_ROOT/coverage_mlp/model.mlir" \
