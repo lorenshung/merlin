@@ -11,6 +11,8 @@ import pytest
 import yaml
 from merlin_experiments import model_qualification as Q
 
+from merlin.targetgen.sandbox import preflight as PF
+
 
 def _bundle(root: Path):
     root.mkdir()
@@ -78,6 +80,18 @@ def test_offline_process_boundary_preserves_interpreter_and_refuses_scope_upgrad
     )
     assert result["status"] == "completed"
     statuses = {row["entrypoint"]: row["status"] for row in result["observations"]["compiler_observations"]}
+    if not PF.probe_sandbox(network_isolation=True).usable:
+        assert statuses == {name: "unavailable" for name in (
+            "parse", "lower_interface_to_target", "emit_command_buffer", "lower_target_to_llvm"
+        )}
+        assert all(
+            "sandbox inoperable" in row["reason"]
+            for row in result["observations"]["compiler_observations"]
+        )
+        assert result["observations"]["model_routes"][0]["status"] == "unresolved"
+        assert result["observations"]["runtime"]["target_executed"] is False
+        assert result["whole_workload_validation_verified"] is False
+        return
     assert statuses == {
         "parse": "accepted",
         "lower_interface_to_target": "unchanged",
@@ -107,6 +121,25 @@ def test_offline_process_boundary_preserves_interpreter_and_refuses_scope_upgrad
     assert output.stat().st_mode & 0o222 == 0
     with pytest.raises(ValueError, match="fresh"):
         Q.qualify(bundle=bundle, package=package, target="fixture", output=output)
+
+
+def test_compiler_preflight_requires_the_same_network_isolation_as_its_launch(tmp_path, monkeypatch):
+    bundle, package = _bundle(tmp_path / "capture"), _package(tmp_path / "compiler")
+    from merlin.targetgen.package_runtime import load_package
+
+    seen = []
+
+    def refuse(_binary=None, **kwargs):
+        seen.append(kwargs)
+        raise PF.SandboxUnavailable(
+            PF.SandboxProbe(status=PF.SANDBOX_INOPERABLE, reason="netns_denied"),
+            kwargs.get("context", ""),
+        )
+
+    monkeypatch.setattr(PF, "require_working_sandbox", refuse)
+    with pytest.raises(PF.SandboxUnavailable, match="netns_denied"):
+        Q._compiler_check(load_package(package), bundle / "model.mlir", "parse", tmp_path, timeout=5)
+    assert seen and seen[0]["network_isolation"] is True
 
 
 def test_selected_certification_guards_source_but_allows_its_execution_copy(tmp_path):

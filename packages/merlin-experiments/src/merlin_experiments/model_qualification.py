@@ -207,6 +207,12 @@ def _compiler_check(package, model: Path, name: str, output: Path, *, timeout: f
     """Use the existing bounded candidate executor and PID-isolated sandbox base."""
     from merlin.perf.analysis_worker import run_sandboxed_entrypoint
     from merlin.targetgen.sandbox.bwrap import base_argv
+    from merlin.targetgen.sandbox.preflight import require_working_sandbox
+
+    require_working_sandbox(
+        context="model compiler requires network-isolated bwrap",
+        network_isolation=True,
+    )
 
     scratch = output / "compiler-scratch"
     scratch.mkdir(exist_ok=True)
