@@ -60,8 +60,9 @@ Before lowering, require `ok: true`, `opaque: 0`, the intended checkpoint and
 scope, and `capture_receipt.json` in every selected bundle. The SmolVLA root
 `session-receipt.json` and `session_contract.yaml` must name all three programs
 and the prefix/cache/flow bindings. The receipt's
-`source_closure_verified: false` is a blocking fact for verified release, not a field to edit. A capture
-may still be useful for diagnostic compiler checks. Inspect each stage's
+`source_closure_verified: false` is a blocking fact for verified release, not
+a field to edit. A capture may still be useful for diagnostic compiler checks.
+Inspect each stage's
 `frontend-trace.json` separately: `ok: true` and zero opaque calls do not imply
 complete PyTorch-to-MLIR operation correspondence. A `diagnostic` trace leaves
 that lineage obligation open even if later LLVM lowering succeeds.
@@ -88,3 +89,24 @@ fresh output directory. Inspect the index and terminal `model.ll` for **each**
 program. Successful host LLVM lowering proves neither OOT accelerator codegen
 nor numerical execution. Phase 1 must still account for host/accelerator
 placement, precision, complete sessions and independent numerical results.
+
+## Current diagnostic evidence
+
+The following checks used the selected local model2MLIR and compiler builds on
+2026-09-28. The model2MLIR source closure was **not** verified, all inputs were
+synthetic, and none of these rows is a target/compiler certificate. Each listed
+program produced `model.mlir`, separate safetensors, a capture receipt and an
+audited host LLVM IR file; each lowering audit completed 10 named stages and
+bound both external tensor sidecars.
+
+| Capture | Frontend result | PyTorch → prepared → MLIR lineage |
+| --- | --- | --- |
+| ResNet50, full `IMAGENET1K_V2` checkpoint, one image | 0 opaque; LLVM lowering completed | `complete` trace |
+| TinyLlama, full 22-layer checkpoint, one prefill | 0 opaque; LLVM lowering completed | `diagnostic`: 119 quantized source nodes lack an explicit prepared relation/elimination, including 94 dtype casts and one matmul |
+| SmolVLA, full checkpoint, prefix/flow/action session | 0 opaque in each of three programs; all three LLVM lowerings completed | Prefix and flow `diagnostic`: 82 quantized source nodes lack a relation/elimination in each; prefix also has six symbolic-size/range-guard nodes with no final MLIR correspondence. Action decode is `complete`. |
+
+Those missing relations are not evidence that the operators are supported or
+semantically irrelevant. The model2MLIR trace must observe any legitimate
+elimination (including casts and guards) or preserve a lowering correspondence;
+until then, exact operator-coverage claims for TinyLlama and SmolVLA remain
+unresolved even though their MLIR reaches host LLVM IR.
