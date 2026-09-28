@@ -186,10 +186,11 @@ def test_generation_receipt_keeps_worker_exception_line(monkeypatch, tmp_path):
     monkeypatch.setattr(
         phase2_guards, "build_guard_link", lambda *args, **kwargs: {"status": "unverified", "guards": []}
     )
+    private_path = str(tmp_path / "private" / "capture.py")
     worker_error = (
         "m2m capture failed for op 'model'/int8: worker exited non-zero (rc=1)\n"
         "--- last traceback ---\n"
-        + "  File \"/scratch/private/capture.py\", line 1, in capture\n    capture()\n" * 30
+        + f'  File "{private_path}", line 1, in capture\n    capture()\n' * 30
         + "ModuleNotFoundError: No module named 'm2m.capture.pt2e_integerize'\n"
     )
 
@@ -203,5 +204,5 @@ def test_generation_receipt_keeps_worker_exception_line(monkeypatch, tmp_path):
     receipt = json.loads((tmp_path / "capsules/_evidence/coverage/generation.json").read_text())
     reason = receipt["failures"][0]["reason"]
     assert "ModuleNotFoundError: No module named 'm2m.capture.pt2e_integerize'" in reason
-    assert "/scratch/private" not in reason
+    assert private_path not in reason
     assert len(reason) <= 400
