@@ -14,6 +14,7 @@ Phase 1 develops the functional compiler; Phase 2 uses a separate performance co
 | [Host capabilities](../target/host-capabilities.yaml) | Separately pinned host compiler and reviewed operation/precision support |
 | [Recipe](recipe.yaml) | Derived-only policy, comparison tolerances and oracle tiers; no authored capsule list |
 | [Descriptor](../target/descriptor.yaml) | Independent iteration roster, held-out validation roster and experiment resources |
+| [Selected capability contract](../target/contracts/target_contract.yaml) | Example-specific command order and runner profile bound to the OOT support package |
 | Shared performance template | Phase 2 objectives and families, not additional functional capability |
 
 The selected configuration has signed 8-bit operands, a 20-bit MAC result and
@@ -72,13 +73,29 @@ With installed `merlin-experiments`, explicit captures and fresh facts:
 Select the *same* out-of-tree support package and capability contract for
 derivation and the subsequent Phase 0 run. For example, set
 `MERLIN_TARGET_PATH` to the Gemmini support directory and
-`MERLIN_TARGET_CONTRACT` to the reviewed selected contract before both
-commands. The generated requirement binds raw facts, the contract, effective
-readout facets and support-source bytes; changing a provider requires a fresh
+`MERLIN_TARGET_CONTRACT` to
+`examples/gemmini/target/contracts/target_contract.yaml` before both commands.
+The support package's raw contract alone omits the example's corpus command
+issue order and cannot materialize this corpus. The generated requirement binds
+raw facts, the contract, effective readout facets and support-source bytes;
+changing a provider requires a fresh
 derivation, not a resumed corpus run. The selected Gemmini readout supports
 `acc_scale` but not the distinct integer-shift `requant` epilogue, so the latter
 must remain an explicit rejected/host obligation rather than a fabricated
 accelerator capability.
+
+Before freezing the Phase 0 run, select `MERLIN_EXT_CHIPYARD` for the Chipyard
+tree containing the concrete Gemmini L3 simulator, and set
+`MERLIN_M2M_DIR` to the selected Model2MLIR source tree and
+`MERLIN_M2M_PYTHON` to its pinned interpreter for generated
+PyTorch-sourced capsules. The L3 performance members fail if the simulator
+cannot be resolved; a missing exporter also leaves source capsules unwritten.
+Static-int8 source capsules additionally require
+`m2m/capture/pt2e_integerize.py` in that selected tree. Check the exact
+module and interpreter together before freezing; a different checkout with
+the same project name is not interchangeable.
+Record these dependencies in the frozen run rather than relying on a later
+resume to supply them.
 
 ```sh
 merlin experiment corpus derive gemmini-functional \
@@ -106,6 +123,14 @@ Raw source adjacency is not device placement: a chain containing host-side
 casts or maps cannot become a Phase 2 performance obligation merely because a
 synthetic capsule has the same sequence of semantic families. Explicit SW
 admission, a matching implementation and measured execution are separate gates.
+The derived `scope.performance` section records eligible, SW-refused and
+unresolved exact chains separately. Phase 1 keeps `scope.required` as the raw
+source-demand census; Phase 2 selects only `scope.performance.required`.
+An unresolved chain blocks that performance claim instead of being counted as
+covered by a merely similar synthetic program.
+The current PN writer uses a synthetic scalar map, so even matching operation
+names and dtypes are not enough to establish source-body equivalence; a future
+source-bound emitter must supply that correspondence before PN is eligible.
 
 ### Realize the selected precision, then derive again
 

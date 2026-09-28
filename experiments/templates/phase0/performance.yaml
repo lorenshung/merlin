@@ -1409,8 +1409,8 @@ sweeps:
     K: [tile, 2*tile, 3*tile, 4*tile]
   name: '{id}{i:02d}_k{K}'
   source_reference: >-
-    selected frozen scope.required movement/contraction/map adjacency; its four
-    K points vary contraction work while preserving the selected region chain
+    selected frozen scope.performance.required exact SW/emitter-compatible chain;
+    its four K points vary contraction work while preserving that chain
 
 blocked_unimplemented:
 - family: PT
