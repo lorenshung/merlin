@@ -131,6 +131,72 @@ def _frozen_application_captures(root: Path, manifest: dict) -> dict[str, Path]:
     return captures
 
 
+def _with_selected_model_recipe(
+    entry: dict,
+    *,
+    evidence_root: Path | None,
+    target: str,
+    binding,
+) -> dict:
+    """Use the frozen SW-scoped recipe when an integer model has no explicit choice."""
+    if (
+        evidence_root is None
+        or (entry.get("kind") != "model" and entry.get("op") != "model")
+        or entry.get("materialized_capture")
+        or entry.get("quant_recipe")
+        or entry.get("quant_scheme")
+        or not binding.integer
+    ):
+        return entry
+    return {
+        **entry,
+        "quant_recipe": _selected_capture_recipe(
+            evidence_root,
+            target=target,
+            operand_dtype=str(entry.get("operand_dtype") or binding.operand_dtype),
+            accumulator_dtype=str(binding.accum_dtype),
+        ),
+    }
+
+
+def _prepare_model_capture_entry(
+    entry: dict,
+    *,
+    evidence_root: Path | None,
+    target: str,
+    binding,
+) -> dict:
+    """Check a selected static model capture tool before any capsule writer starts."""
+    if entry.get("kind") != "model" and entry.get("op") != "model":
+        return entry
+    if entry.get("materialized_capture"):
+        return entry
+
+    from merlin.targetgen import capsule_source as source
+
+    try:
+        selected = _with_selected_model_recipe(entry, evidence_root=evidence_root, target=target, binding=binding)
+    except Exception:  # noqa: BLE001 -- the writer records this entry's recipe failure as before
+        return entry
+    recipe = selected.get("quant_recipe") or source.derived_recipe(
+        getattr(binding, "target", None), str(selected.get("operand_dtype") or binding.operand_dtype)
+    )
+    if source._static_pt2e_model(
+        "model",
+        scheme=None if recipe is not None else selected.get("quant_scheme"),
+        recipe=recipe,
+        already_quantized=selected.get("capture_quantization") == "already_materialized",
+    ):
+        capture = source.PytorchRefSource()
+        integerizer = capture.m2m_dir / "m2m/capture/pt2e_integerize.py"
+        if capture.available() and not integerizer.is_file():
+            raise ValueError(
+                f"selected model2MLIR checkout {capture.m2m_dir} lacks {integerizer}; "
+                "static int8 model capture requires m2m.capture.pt2e_integerize"
+            )
+    return selected
+
+
 def generate_target(
     target: str,
     *,
@@ -309,6 +375,15 @@ def generate_target(
             )
             screened.append(diagnostic_entry(entry, decision) if decision["status"] == "unsupported" else entry)
         entries = screened
+    entries = [
+        _prepare_model_capture_entry(
+            entry,
+            evidence_root=artifact_root if evidence is not None else None,
+            target=hardware_target,
+            binding=binding,
+        )
+        for entry in entries
+    ]
     for _s in _sweep_skips:
         _why = _s.get("reason") or f"gate {(_s.get('gate') or {}).get('outcome')}"
         print(f"  [skip] performance family {_s['family']}: {_why}")
@@ -343,23 +418,12 @@ def generate_target(
                 if set(captures) != declared:
                     raise ValueError("micro-model capture roster differs from frozen application inventory")
                 e = {**e, "_frozen_application_captures": captures}
-            if (
-                evidence is not None
-                and (e.get("kind") == "model" or e.get("op") == "model")
-                and not e.get("materialized_capture")
-                and not e.get("quant_recipe")
-                and not e.get("quant_scheme")
-                and binding.integer
-            ):
-                e = {
-                    **e,
-                    "quant_recipe": _selected_capture_recipe(
-                        artifact_root,
-                        target=hardware_target,
-                        operand_dtype=str(e.get("operand_dtype") or binding.operand_dtype),
-                        accumulator_dtype=str(binding.accum_dtype),
-                    ),
-                }
+            e = _with_selected_model_recipe(
+                e,
+                evidence_root=artifact_root if evidence is not None else None,
+                target=hardware_target,
+                binding=binding,
+            )
             if evidence is not None and evidence.software_spec:
                 decision = screen_entry(
                     evidence.software_spec,
@@ -390,7 +454,7 @@ def generate_target(
                 ):
                     w = _write_capsule(e, binding, out_root, facts.get("sha256", ""))
         except Exception as exc:  # noqa: BLE001 — reported, never swallowed
-            detail = f"{type(exc).__name__}: {str(exc)[:300]}"
+            detail = _capture_failure_reason(exc)
             if isinstance(exc, UnprovableForbid) and str(e.get("source_role") or "") == SYNTH_ROLE:
                 # See `UnprovableForbid`. The capsule is removed rather than left on disk: a directory
                 # the corpus does not list is exactly the kind of half-written state the seal cannot
