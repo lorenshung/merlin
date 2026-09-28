@@ -96,7 +96,7 @@ def merlin_dir() -> Path:
     return repo_root() / "merlin"
 
 
-def resolve_grant(rel: str) -> Path:
+def resolve_grant(rel: str, *, root: Path | None = None) -> Path:
     """Resolve a bundle-convention grant path string to an absolute host path.
 
     Grant paths in target descriptors / bundle manifests are repo-root-relative by convention, with
@@ -106,14 +106,17 @@ def resolve_grant(rel: str) -> Path:
     returns ``<repo>/<rel>`` (the caller's existence check then treats it as missing). Keeps the sandbox
     binder (``bwrap``) and the workspace assembler in lockstep so a granted path is never silently
     dropped by one but honored by the other.
+    Pass ``root`` to resolve within an explicitly selected or frozen input owner,
+    without switching to an ambient checkout.
     """
-    root = repo_root() / rel
-    if root.exists():
-        return root
-    under_merlin = merlin_dir() / rel
+    owner = root if root is not None else repo_root()
+    direct = owner / rel
+    if direct.exists():
+        return direct
+    under_merlin = owner / "merlin" / rel
     if under_merlin.exists():
         return under_merlin
-    return root
+    return direct
 
 
 def data_path(*parts: str) -> Path:

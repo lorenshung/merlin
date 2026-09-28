@@ -135,6 +135,20 @@ class TestACellThatCarriesARowPerPort:
         assert rec.operand_dtype is None and rec.accum_dtype is None
         assert "no format NAME" in rec.accum_dtype_why
 
+    def test_declared_signed_carriers_survive_without_inventing_quantization_formats(self):
+        signed, _ = DP.cell_datapath(self._ROW_CELL, "Cell")
+        records = signed.to_facts()
+        assert [
+            (record["declared_carrier"]["signedness"], record["declared_carrier"]["element_bits"]) for record in records
+        ] == [("signed", 8), ("signed", 20)]
+        assert records[0]["declared_carrier"]["declarations"] == [
+            {"port": "in_a", "firrtl_type": "SInt<8>[1]", "signed": True, "direction": "input"}
+        ]
+        assert all(record["dtype"] is None for record in records)
+        unsigned, _ = DP.cell_datapath(_UNNAMED_CELL, "Cell")
+        assert all(record["declared_carrier"]["signedness"] == "unsigned" for record in unsigned.to_facts())
+        assert all(record["dtype"] is None for record in unsigned.to_facts())
+
 
 class TestTheNameDisambiguatesTheWidth:
     def test_the_instance_closure_names_both_formats(self):
@@ -306,8 +320,8 @@ class TestFactAssembly:
         assert dps == [] and notes
 
 
-class TestACensusTargetIsUntouched:
-    """A target whose facts already carry datapaths must come out of the fact assembly bit-identical."""
+class TestComputeAndStorageQuantitySeparation:
+    """Keep compatibility storage roles while recording compute evidence separately."""
 
     def _facts_with_census_datapaths(self) -> dict:
         return {
@@ -321,12 +335,18 @@ class TestACensusTargetIsUntouched:
     def test_existing_datapaths_are_not_displaced(self, monkeypatch, tmp_path):
         facts = self._facts_with_census_datapaths()
         before = [dict(d) for d in facts["datapaths"]]
-        # Point the elaboration walk at a cell that WOULD derive a different reading, so the no-op is
-        # proven against a live alternative rather than against an empty directory.
+        # The cell derives a different quantity. Existing storage roles must not
+        # be displaced, but suppressing the compute observation would lose evidence.
+        from merlin.targetgen.rtl import mlc_bridge
+
         monkeypatch.setattr(CI, "elaborated_firrtl", lambda t: [_fir(tmp_path, _MAC_CELL)])
+        monkeypatch.setattr(mlc_bridge, "compute_unit_kinds", lambda t: ("systolic",))
         sourced = CI._datapaths_from_cells("t", facts)
-        assert sourced == []
+        assert sourced == ["datapaths(2 from cell geometry)"]
         assert facts["datapaths"] == before
+        assert facts["storage_datapaths"] == before
+        assert [row["dtype"] for row in facts["compute_datapaths"]] == ["fp8_e4m3", "bf16"]
+        assert all(row["declared_carrier"]["signedness"] == "unsigned" for row in facts["compute_datapaths"])
         assert "datapaths_undeterminable" not in facts
 
     def test_a_target_with_no_elaboration_records_the_gap(self, monkeypatch):

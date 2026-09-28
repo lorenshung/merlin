@@ -49,6 +49,12 @@ def main(argv: list[str] | None = None) -> int:
             type=Path,
             help="operator-owned private Phase 0 profile; never put it in examples",
         )
+        child.add_argument("--phase0-rtl-facts", type=Path, help="select exact extracted facts for a new Phase 0 run")
+        child.add_argument(
+            "--phase0-evidence-mode",
+            choices=("diagnostic", "verified"),
+            help="diagnostic preserves unknowns; verified refuses unresolved required evidence",
+        )
     commands.add_parser("status").add_argument("run_dir", type=Path)
     commands.add_parser("lineage", help="read frozen phase inputs and handoffs without executing engines").add_argument(
         "run_dir", type=Path
@@ -60,6 +66,20 @@ def main(argv: list[str] | None = None) -> int:
         "corpus", help="derive capsule groups, inspect run coverage, or prepare and review a corpus release"
     )
     operations = corpus.add_subparsers(dest="operation", required=True)
+    derive = operations.add_parser("derive", help="deterministic requirements and complete census; no agent execution")
+    derive.add_argument("definition", help="explicit experiment definition or catalog id")
+    derive.add_argument("--application-capture", action="append", required=True, metavar="LABEL=PATH")
+    derive.add_argument(
+        "--native-qualification",
+        action="append",
+        default=[],
+        metavar="LABEL=PATH",
+        help="optional exact generated native-host qualification receipt; never grants RVV support",
+    )
+    derive.add_argument(
+        "--rtl-facts", type=Path, required=True, help="exact extraction artifact; never re-extract implicitly"
+    )
+    derive.add_argument("--output", type=Path, required=True, help="new immutable artifact root")
     from merlin.targetgen import group_capsules
 
     groups = operations.add_parser(
@@ -77,6 +97,11 @@ def main(argv: list[str] | None = None) -> int:
     prepare = operations.add_parser("prepare")
     prepare.add_argument("run_dir", type=Path)
     prepare.add_argument("--output", type=Path, required=True)
+    prepare.add_argument(
+        "--generated-only",
+        action="store_true",
+        help="use only the selected Phase-0 output for public capsules; never read the historical corpus",
+    )
     prepare.add_argument(
         "--private-baseline",
         type=Path,
@@ -96,6 +121,21 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.verb == "corpus":
+            if args.operation == "derive":
+                from .phase0.requirements import capture_selections, derive
+
+                try:
+                    result = derive(
+                        _source(args.definition, args.catalog),
+                        capture_selections(args.application_capture),
+                        rtl_facts=args.rtl_facts,
+                        output_root=args.output,
+                        native_qualifications=capture_selections(args.native_qualification),
+                    )
+                except ValueError as exc:
+                    raise SpecError(str(exc)) from exc
+                print(json.dumps(result, indent=2))
+                return 0
             if args.operation == "groups":
                 return group_capsules.run_from_args(args)
             if args.operation == "compare":
@@ -117,6 +157,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.output,
                     private_baseline=args.private_baseline,
                     retirements=args.retirements,
+                    generated_only=args.generated_only,
                 )
             elif args.operation == "inspect":
                 result = corpus_release.inspect_release(args.release)
@@ -167,6 +208,8 @@ def main(argv: list[str] | None = None) -> int:
                 bundle_manifest=args.bundle_manifest,
                 phase0_conformance_spec=args.phase0_conformance_spec,
                 phase0_synth_profile=args.phase0_synth_profile,
+                phase0_rtl_facts=args.phase0_rtl_facts,
+                phase0_evidence_mode=args.phase0_evidence_mode,
                 phase0_hidden_profile=args.phase0_hidden_profile,
             )
             if args.verb == "inspect":

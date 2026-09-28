@@ -168,7 +168,7 @@ def discovered_timing(target: str) -> list[dict[str, Any]] | None:
     hw = mlc_bridge.core_hw_mlir(target)
     if hw is None:
         return None
-    from mlc.discover import irgraph
+    from .hw_graph import load_hw_graph
 
-    graph = irgraph.load_hw_graph(hw, circt_opt=mlc_bridge.circt_opt_bin())
+    graph = load_hw_graph(hw, circt_opt=mlc_bridge.circt_opt_bin())
     return [module_timing(graph, m) for m in graph.modules.values()]

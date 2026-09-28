@@ -362,6 +362,7 @@
             "accumulation_depth",
             "conv_window",
             "application",
+            "application_operation",
             "host_lane",
             "carried_state",
             "roster",

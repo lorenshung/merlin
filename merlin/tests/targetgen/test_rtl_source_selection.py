@@ -1,0 +1,110 @@
+"""Coarse source production, hierarchy, precision and immutable-selection checks."""
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from merlin.targetgen.rtl.extract_module import extract
+from merlin.targetgen.rtl.introspect import census_facts
+from merlin.targetgen.rtl.source_selection import (
+    SCHEMA,
+    active_selection,
+    circuit_root,
+    derive_hierarchy,
+    digest,
+    firrtl_hierarchy_audit,
+    load_selection,
+    prepare_firtool_input,
+    selected_sources,
+)
+
+
+class SourceSelectionTests(unittest.TestCase):
+    def test_exact_hierarchy_and_memory_copy_banks(self):
+        source = """FIRRTL version 3.3.0
+circuit Top :%[[]]
+  module Buffer : @[generators/demo/Buffer.scala 1:1]
+    smem mem : UInt<16>[4] [8] @[generators/demo/Buffer.scala 3:1]
+  module Buffer_1 : @[generators/demo/Buffer.scala 1:1]
+    smem mem : UInt<16>[4] [8] @[generators/demo/Buffer.scala 3:1]
+  module Unit : @[generators/demo/Unit.scala 1:1]
+    inst buffer of Buffer
+  module Unit_1 : @[generators/demo/Unit.scala 1:1]
+    inst buffer of Buffer_1
+  module RegisterFile : @[generators/demo/RegisterFile.scala 1:1]
+    smem banks_0 : UInt<8>[4] [8] @[generators/demo/RegisterFile.scala 3:1]
+    smem banks_1 : UInt<8>[4] [8] @[generators/demo/RegisterFile.scala 3:1]
+  module Top : @[generators/demo/Top.scala 1:1]
+    inst u0 of Unit
+    inst u1 of Unit_1
+    inst rf of RegisterFile
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fir, hierarchy = root / "source.fir", root / "hierarchy.json"
+            fir.write_text(source)
+            hierarchy.write_text(json.dumps(derive_hierarchy(fir, "Top")))
+            self.assertEqual(circuit_root(fir), "Top")
+            self.assertEqual(derive_hierarchy(fir), derive_hierarchy(fir, "Top"))
+            with self.assertRaises(ValueError):
+                derive_hierarchy(fir, "UnrelatedConfig")
+            self.assertEqual(firrtl_hierarchy_audit(fir, hierarchy)["status"], "verified")
+            facts = census_facts(fir, hierarchy, generator="demo")
+            memories = {row["name"]: row for row in facts["memories"]}
+            self.assertEqual((memories["buffer.mem"]["banks"], memories["buffer.mem"]["copies"]), (1, 2))
+            self.assertEqual(memories["registerfile.banks"]["banks"], 2)
+            self.assertEqual(memories["registerfile.banks"]["bytes"], 64)
+
+    def test_explicit_metadata_preparation_preserves_circuit(self):
+        enum_class = "chisel3.experimental.EnumAnnotations$EnumComponentAnnotation"
+        source = 'FIRRTL version 3.3.0\ncircuit T :%[[{"class":"' + enum_class + '"},{"class":"keep"}]]\n  module T :\n'
+        prepared, count = prepare_firtool_input(source, [enum_class])
+        self.assertEqual(count, 1)
+        self.assertIn('"class":"keep"', prepared)
+        self.assertTrue(prepared.endswith("\n  module T :\n"))
+        with self.assertRaises(ValueError):
+            prepare_firtool_input(source, ["semantic.annotation"])
+
+    def test_verbatim_module_source_dependency_is_retained(self):
+        source = """module {
+  sv.verbatim.source private @external.v attributes {content = "module external; endmodule"}
+  sv.verbatim.module private @external(out out : i32) attributes {source = @external.v}
+  hw.module @Top(out result : i32) {
+    %r = hw.instance "external" @external() -> (out: i32)
+    hw.output %r : i32
+  }
+}
+"""
+        result, included, missing = extract(source, "Top")
+        self.assertEqual(missing, [])
+        self.assertIn("external.v", included)
+        self.assertIn("sv.verbatim.source", result)
+
+    def test_selection_is_exact_and_context_does_not_leak(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            member, bundle = root / "member", root / "selection.json"
+            member.write_text("immutable")
+            document = {
+                "schema": SCHEMA,
+                "target": "demo",
+                "sources": {
+                    role: {"path": str(member), "sha256": digest(member)}
+                    for role in ("core_hw", "soc_hw", "firrtl", "hierarchy")
+                },
+            }
+            bundle.write_text(json.dumps(document))
+            selected = load_selection(bundle, target="demo")
+            with selected_sources(selected):
+                self.assertIs(active_selection("demo"), selected)
+                with self.assertRaises(ValueError):
+                    active_selection("foreign")
+            self.assertIsNone(active_selection())
+            member.write_text("changed")
+            with self.assertRaises(ValueError):
+                load_selection(bundle, target="demo")
+
+
+if __name__ == "__main__":
+    unittest.main()

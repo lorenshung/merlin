@@ -17,19 +17,20 @@ import importlib.util
 import logging
 import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
-from merlin.kernels.framework_contracts import load_contract, load_feature_contract
+from merlin.kernels.framework_contracts import load_contract, load_feature_contract, selected_feature_contract
 from merlin.kernels.types import NormalizedKernel
 
 log = logging.getLogger("merlin.kernels.ingest.exo")
 
 
 def _platform_targets() -> list[tuple[str, str]]:
-    """Exo platform-import -> ISA-family pairs, read from ``framework_contracts/exo.yaml`` so no
-    target-name literal lives here. Insertion order (document order) is the match precedence."""
-    return list((load_contract("exo").get("platform_targets") or {}).items())
+    """Selected target platform imports precede generic Exo ISA-class mappings."""
+    selected = selected_feature_contract()
+    owned = (load_feature_contract(selected["family"]).get("platform_targets") or {}) if selected else {}
+    return list(owned.items()) + list((load_contract("exo").get("platform_targets") or {}).items())
 
 
 def _detect_target(source_text: str, default: str | None) -> str:

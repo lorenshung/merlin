@@ -64,7 +64,7 @@ def test_dequant_lowering_emits_pure_upstream():
     from merlin.llvmlower.passes_xdsl import preprocess_text
 
     out, stats = preprocess_text(SLICE)
-    assert stats["dequantize_lowered"] == 1
+    assert stats["quant_ext_lowered"] == 1
     assert "quant_ext" not in out
     assert "linalg.generic" in out
     assert "llvm.emit_c_interface" in out

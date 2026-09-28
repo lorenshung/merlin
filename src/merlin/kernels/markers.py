@@ -10,10 +10,8 @@ hypothetical Exo-RVV share another.
 We deliberately match *decisions* (a packed-weight pointer advance, an accumulator address
 flag, a vector-length-agnostic loop) and never *constants* (tile sizes, LMUL values).
 
-The table is DATA. Each ISA family's patterns (``markers``) and the ``kernel.target`` spellings that
-select it (``targets``) live in ``framework_contracts/feature_extraction/<family>.yaml``, beside the
-family's other feature-extraction facts; this module only loads, merges and compiles them. Adding an ISA
-family is a new data file, not an edit here.
+The table is DATA. Generic ISA-class files ship in core; target-specific patterns and
+target spellings require an explicitly selected target-owned feature contract.
 
 ``markers_for(target)`` resolves a kernel's ``target`` to its family and returns the compiled
 regex table for that family, merged over the ``generic`` baseline.
@@ -22,9 +20,9 @@ regex table for that family, merged over the ``generic`` baseline.
 from __future__ import annotations
 
 import re  # regex-ok: compiles the motif patterns each family declares as data (feature_extraction/)
-from functools import lru_cache
+from functools import cache
 
-from merlin.kernels.framework_contracts import feature_families, load_feature_contract
+from merlin.kernels.framework_contracts import _SELECTED_FEATURE, feature_families, load_feature_contract
 
 # Canonical motif vocabulary (also the keys produced by classify.py). A family file may declare markers
 # for these motifs only.
@@ -52,14 +50,17 @@ MOTIFS = (
 GENERIC_FAMILY = "generic"
 
 
-@lru_cache(maxsize=None)
+@cache
 def _target_families() -> dict[str, str]:
     """``{kernel.target spelling: ISA family}``, built from every family file's ``targets`` list.
 
     A spelling claimed by two families raises: resolving it by file order would make a kernel's evidence
     depend on which file happened to sort first."""
     out: dict[str, str] = {}
+    selected = _SELECTED_FEATURE.get()
     for family in feature_families():
+        if selected is not None and family == selected[0]["family"]:
+            continue
         for spelling in load_feature_contract(family).get("targets") or []:
             key = str(spelling).lower()
             owner = out.setdefault(key, family)
@@ -69,6 +70,9 @@ def _target_families() -> dict[str, str]:
 
 
 def target_family(target: str) -> str:
+    selected = _SELECTED_FEATURE.get()
+    if selected is not None and (target or "").lower() in {str(t).lower() for t in selected[0]["targets"]}:
+        return selected[0]["family"]
     return _target_families().get((target or "").lower(), GENERIC_FAMILY)
 
 
@@ -87,8 +91,7 @@ def _raw(family: str) -> dict[str, list[str]]:
     return {motif: [str(p) for p in (pats or [])] for motif, pats in table.items()}
 
 
-@lru_cache(maxsize=None)
-def _compiled_for_family(family: str) -> tuple[tuple[str, tuple[re.Pattern, ...]], ...]:
+def _compile_for_family(family: str) -> tuple[tuple[str, tuple[re.Pattern, ...]], ...]:
     base = _raw(GENERIC_FAMILY)
     fam = _raw(family)
     merged: dict[str, list[str]] = {}
@@ -102,9 +105,18 @@ def _compiled_for_family(family: str) -> tuple[tuple[str, tuple[re.Pattern, ...]
     return tuple(compiled)
 
 
+_compiled_for_family = cache(_compile_for_family)
+
+
 def markers_for(target: str) -> dict[str, tuple[re.Pattern, ...]]:
     """Return ``{motif: (compiled_regex, ...)}`` for the ISA family of ``target``."""
-    return dict(_compiled_for_family(target_family(target)))
+    family = target_family(target)
+    selected = _SELECTED_FEATURE.get()
+    if selected is not None and (
+        family == selected[0]["family"] or family in (selected[0].get("feature_extensions") or {})
+    ):
+        return dict(_compile_for_family(family))
+    return dict(_compiled_for_family(family))
 
 
 def fired_markers(text: str, target: str) -> dict[str, list[str]]:

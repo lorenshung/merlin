@@ -1,0 +1,42 @@
+# Separate declaration beside the immutable host compiler, not a compiler payload edit.
+schema: merlin.host_capabilities.v1
+status: unreviewed
+compiler:
+  package_sha256: 41686d25e8d9787cd592aa972ee03b4ce6750f56f0025e4db3d07ac0d2e5ac4e
+  dtype_strategy: fp32
+# The host package's fp32 strategy does not imply BF16 or FP8 operation support.
+# These explicit schedule-derived candidates remain unreviewed until executed.
+operations:
+  - id: fp32_contraction_candidate
+    ops: [linalg.matmul, linalg.batch_matmul]
+    families: [contraction]
+    placement: host
+    signature:
+      ordered_operand_dtypes: [f32, f32, f32]
+      ordered_result_dtypes: [f32]
+      compute_dtypes: [f32]
+      accumulator_dtype: f32
+      readout_dtype: f32
+      ranks: [2, 3]
+      layouts: [row_major_contiguous]
+      aliasing: [disjoint_inputs_outputs]
+    numerical_contract:
+      status: unreviewed
+      semantics: {operand_dtype: f32, accumulator_dtype: f32, rounding: rne, reduction_order: selected_lowering}
+      evidence: {basis: Exact pinned outer-product vectorization schedule; RVV execution and FMA order need a new receipt.}
+evidence:
+  source: Content identity of the host package selected by descriptor.yaml.
+  inspected_package:
+    declared_schedule_ops: [linalg.matmul, linalg.batch_matmul]
+    lowering_patterns: [lower_contraction, lower_masked_transfers, lower_transpose, lower_shape_cast]
+    target_architecture: rv64gcv
+    historical_validation: spike_verified
+    qualification: historical package status and schedule selectors are not independently executed per-operation support receipts
+  qualification:
+    status: not_available
+    execution_receipts: []
+  unknowns:
+    - The populated signatures are schedule-derived candidates, not admitted host support.
+    - Contraction dtype legality and numerical execution need independent receipts.
+    - There are no candidate declarations for normalization, softmax, activation or general reduction in this selected package.
+    - Host lowering and numerical qualification require their own execution receipts.

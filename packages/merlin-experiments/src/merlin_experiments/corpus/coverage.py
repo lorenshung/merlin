@@ -13,6 +13,56 @@ from ..spec import SpecError
 from .preparation import _members, source_run
 
 
+def selected_cohort_coverage(spec_doc: dict, roots: list[Path]) -> dict:
+    """Measure pure capsule axes; never borrow ambient target facts for admission.
+
+    Legacy routing and memory observers resolve a live target provider. Their
+    diagnostic output cannot qualify this selected snapshot until those readers
+    accept the exact selected contract/facts explicitly.
+    """
+    from merlin.targetgen.contract.materialize import cert_capsule_cover
+
+    labels = {"public", "dev"}
+    got = cert_capsule_cover(roots, labels=labels, tile_dim=(spec_doc.get("boundaries") or {}).get("tile_edge"))
+    have = set(got.get("cells") or [])
+    want = {row["cell"] for row in spec_doc.get("cells") or []}
+    result = {
+        "n_required": len(want),
+        "n_covered": len(want & have),
+        "uncovered": sorted(want - have),
+        "corpus_cells": sorted(have),
+        "scope": "exact admitted capsule bytes and selected conformance requirements only",
+    }
+    readers = {
+        "shape_geometry": conformance._geometry_gap,
+        "scope": conformance._scope_gap,
+        "epilogue": conformance._epilogue_gap,
+        "groups": conformance._group_gap,
+        "carried_state": conformance._carried_state_gap,
+        "conv_geometry": conformance._conv_geometry_gap,
+    }
+    for axis, reader in readers.items():
+        required = (spec_doc.get(axis) or {}).get("required")
+        result[axis] = (
+            reader(required, roots, labels=labels)
+            if required is not None
+            else {"status": "not_measured", "reason": "selected requirement predates this coverage axis"}
+        )
+    for axis in ("composition", "host_lane", "memory_mapping", "host_only"):
+        block = spec_doc.get(axis) or {}
+        required = block.get("families" if axis == "host_only" else "required")
+        result[axis] = (
+            {"status": "not_applicable", "n_required": 0, "uncovered": []}
+            if required is not None and not required
+            else {
+                "status": "not_measured",
+                "reason": "legacy observer lacks exact selected-source binding",
+                "required": required,
+            }
+        )
+    return result
+
+
 def _public_category_roots(corpus: Path) -> tuple[list[Path], int]:
     """Resolve the category roots understood by the shared capsule scanners.
 

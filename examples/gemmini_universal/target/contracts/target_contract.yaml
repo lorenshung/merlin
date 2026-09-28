@@ -68,14 +68,14 @@ runner:
   # resolve by default. Those resolve $MERLIN_CHIPYARD/.conda-env/riscv-tools/{bin/spike,lib/libgemmini.so}
   # -- the extension built for the OTHER gemmini. Running this target's programs on that model would put
   # a gemmini verdict on a gemmini_universal submission, which is the whole failure this target exists to
-  # avoid, so the extension is named here with its digest rather than inherited from an env var.
+  # avoid, so the extension's bytes are pinned here by digest. The operator supplies their location.
   #
   # ✅ READ BY CODE, DIGEST-VERIFIED, FAIL-CLOSED (2026-09-09). `merlin.targetgen.spike_extension`
   # resolves this block for ANY target: `spike_invocation(target, default_library_dir=...,
   # default_extension_name=...)` returns `("--extlib=<this .so>", "--extension=gemmini")` plus this .so's
   # OWN parent as the library directory, after hashing the file and comparing it to the `sha256` below.
   # Every way of not getting exactly these bytes RAISES `SpikeExtensionError` -- absent file, digest
-  # mismatch, incomplete declaration, relative path -- and it never falls back to another target's
+  # mismatch, missing operator path, incomplete declaration, relative path -- and it never falls back to another target's
   # extension, because that fallback IS the params-skew failure (memory
   # `libgemmini-driver-allzeros-header-skew`). A target that declares nothing keeps its caller's default
   # byte for byte; asserted for the reference backend in merlin/tests/gemmini/test_spike_extension.py.
@@ -86,7 +86,7 @@ runner:
   spike_extension:
     # `spike --extlib=<so> --extension=gemmini <elf>`
     extension_name: gemmini
-    extlib: /scratch/jack/experiments/universal_resnet50_gemmini_20260906/spike_qualification/extension/libgemmini.so
+    extlib_env: MERLIN_GEMMINI_UNIVERSAL_SPIKE_EXTLIB
     sha256: f3de40ced95c6697e5b27acf938803c4a961d811ab0fa04000f992cb45a2b124
     read_only: true
     built_from_abi: >-
@@ -107,7 +107,7 @@ encoding:
   addr_len: 32
   # DERIVED, 2026-09-09, from the elaboration itself -- not from `OpcodeSet.custom3` in the Scala, which
   # is a declaration. In
-  #   /scratch/jack/chipyard/sims/verilator/generated-src/
+  #   <selected universal Chipyard>/sims/verilator/generated-src/
   #     chipyard.harness.TestHarness.UniversalResNet50GemminiRocketConfig/
   #     chipyard.harness.TestHarness.UniversalResNet50GemminiRocketConfig.fir
   # module `RoccCommandRouter` (declared at :483955) contains EXACTLY ONE opcode comparison:

@@ -54,6 +54,7 @@ WHAT THIS MODULE REFUSES TO DO
   The consumer-side rule is ``if depth is None:``; ``if not depth:`` is the bug, and it is the same
   bug as reading UNKNOWN as ``0.0`` one level up.
 """
+
 from __future__ import annotations
 
 import json
@@ -84,10 +85,10 @@ __all__ = [
 # derives operand placement and address translation; this module reads the same facts for the
 # performance questions rather than growing a second vocabulary.
 # --------------------------------------------------------------------------------------------
-_IFACE_DECODE = "funct_decode_table"      # an instruction/command decode table was discovered
-_IFACE_HOST_QUEUE = "rocc_cmd"            # a host co-processor command queue (decoupled dispatch)
-_IFACE_DMA = "dma_tlb"                    # a data-movement engine with its own address translation
-_IFACE_SELF_HOSTED = "self_hosted_isa"    # the device carries its own instruction encoding
+_IFACE_DECODE = "funct_decode_table"  # an instruction/command decode table was discovered
+_IFACE_HOST_QUEUE = "rocc_cmd"  # a host co-processor command queue (decoupled dispatch)
+_IFACE_DMA = "dma_tlb"  # a data-movement engine with its own address translation
+_IFACE_SELF_HOSTED = "self_hosted_isa"  # the device carries its own instruction encoding
 
 #: Every trait this module derives. The order is the order they are reported in.
 TRAITS: tuple[str, ...] = (
@@ -114,11 +115,11 @@ TRAITS: tuple[str, ...] = (
 
 #: Evidence tier tokens for :attr:`TargetProfile.trait_tier`. What a term built on this trait may
 #: claim as its provenance kind depends on which of these settled it.
-TIER_FACTS = "rtl_facts"                  # extracted from the target's own RTL
-TIER_RESIDUAL = "residual_declared"       # declared by a human in the residual; intent, not evidence
-TIER_CONTRACT = "contract_declared"       # declared in the target's own contract; the BASE declaration
-TIER_FAMILY = "family_default"            # the compute-unit kind's default, nothing target-specific
-TIER_NONE = "not_established"             # nothing settled it
+TIER_FACTS = "rtl_facts"  # extracted from the target's own RTL
+TIER_RESIDUAL = "residual_declared"  # declared by a human in the residual; intent, not evidence
+TIER_CONTRACT = "contract_declared"  # declared in the target's own contract; the BASE declaration
+TIER_FAMILY = "family_default"  # the compute-unit kind's default, nothing target-specific
+TIER_NONE = "not_established"  # nothing settled it
 
 
 # --------------------------------------------------------------------------------------------
@@ -153,12 +154,17 @@ class Elaboration:
         # reports having read is the better witness than an input nobody can show was opened.
         what = self.dialect if self.evidenced else (self.read_path or self.dialect)
         digest = self.digest if self.evidenced else "digest NOT recorded"
-        return (f"the elaboration {what} ({digest}) as extracted by "
-                f"{self.extractor or 'an unrecorded extractor'}")
+        return f"the elaboration {what} ({digest}) as extracted by {self.extractor or 'an unrecorded extractor'}"
 
     def to_dict(self) -> dict[str, Any]:
-        return {"dialect": self.dialect, "digest": self.digest, "extractor": self.extractor,
-                "read_path": self.read_path, "evidenced": self.evidenced, "note": self.note}
+        return {
+            "dialect": self.dialect,
+            "digest": self.digest,
+            "extractor": self.extractor,
+            "read_path": self.read_path,
+            "evidenced": self.evidenced,
+            "note": self.note,
+        }
 
 
 @dataclass(frozen=True)
@@ -214,11 +220,17 @@ class TimingWalk:
         return int(depth), evidence
 
     def to_dict(self) -> dict[str, Any]:
-        return {"status": self.status, "modules_walked": len(self.modules),
-                "resolved_modules": self.resolved, "refused_modules": self.refused,
-                "note": ("resolved/refused are MODULE COUNTS, not coverage: the walk resolves "
-                         "combinational leaves and refuses sequenced units, so it is biased away "
-                         "from where the cycles are spent")}
+        return {
+            "status": self.status,
+            "modules_walked": len(self.modules),
+            "resolved_modules": self.resolved,
+            "refused_modules": self.refused,
+            "note": (
+                "resolved/refused are MODULE COUNTS, not coverage: the walk resolves "
+                "combinational leaves and refuses sequenced units, so it is biased away "
+                "from where the cycles are spent"
+            ),
+        }
 
 
 @dataclass(frozen=True)
@@ -235,6 +247,7 @@ class Sources:
     #: The target's own contract, as read. NOT a fourth source of TRAITS -- it is consulted for one
     #: thing only (see :meth:`units`), and it never overrides a residual or a fact.
     contract: dict[str, Any] = field(default_factory=dict)
+    external_reads: bool = True
 
     def interfaces(self) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
@@ -265,12 +278,10 @@ class Sources:
         about the machine: the contract declares its kinds plainly. An absent OVERRIDE was being read
         as an absent DECLARATION, which is the same collapse as reading UNKNOWN as False one level up.
         """
-        declared = [dict(u) for u in (self.residual.get("compute_units") or [])
-                    if isinstance(u, Mapping)]
+        declared = [dict(u) for u in (self.residual.get("compute_units") or []) if isinstance(u, Mapping)]
         if declared:
             return declared
-        return [dict(u) for u in (self.contract.get("compute_units") or [])
-                if isinstance(u, Mapping)]
+        return [dict(u) for u in (self.contract.get("compute_units") or []) if isinstance(u, Mapping)]
 
     def units_source(self) -> str:
         """Which source supplied :meth:`units` -- ``residual`` / ``contract`` / ``none``."""
@@ -289,8 +300,7 @@ class Sources:
         analysis" and "the target ships this in its contract" are different claims, and a reader who
         wants to check one goes to a different file than a reader checking the other.
         """
-        return {"residual": TIER_RESIDUAL, "contract": TIER_CONTRACT}.get(self.units_source(),
-                                                                          TIER_NONE)
+        return {"residual": TIER_RESIDUAL, "contract": TIER_CONTRACT}.get(self.units_source(), TIER_NONE)
 
     def unit_kinds(self) -> tuple[str, ...]:
         seen: list[str] = []
@@ -309,11 +319,13 @@ def _residual_path(target: str) -> Path:
     that moves brings its residual with it and nothing here holds a per-target path.
     """
     from merlin.targetgen.rtl.facts import target_base
+
     return target_base(target) / "contracts" / "residual.yaml"
 
 
 def _read_residual(target: str) -> dict[str, Any]:
     import yaml
+
     p = _residual_path(target)
     if not p.is_file():
         return {}
@@ -332,8 +344,9 @@ def _read_contract(target: str) -> dict[str, Any]:
     """
     try:
         from merlin.targetgen.target_registry import load_contract
+
         doc = load_contract(target)
-    except Exception:                       # noqa: BLE001 -- no contract == no base declaration
+    except Exception:  # noqa: BLE001 -- no contract == no base declaration
         return {}
     return dict(doc) if isinstance(doc, Mapping) else {}
 
@@ -347,25 +360,35 @@ def _read_facts(target: str, *, allow_extraction: bool) -> dict[str, Any]:
     ("uncached"), not a failure. Pass ``allow_extraction=True`` to accept the cost.
     """
     from merlin.targetgen.rtl import facts as _facts
+
     if allow_extraction:
         try:
             return dict(_facts.load_facts(target) or {})
-        except Exception:                       # noqa: BLE001 -- absent facts are an answer
+        except Exception:  # noqa: BLE001 -- absent facts are an answer
             return {}
-    for path in (_facts.rtl_facts_path(target), _facts.target_base(target) / "contracts"
-                 / "rtl_facts" / "facts.json"):
-        try:
-            if Path(path).is_file():
-                return dict(json.loads(Path(path).read_text(encoding="utf-8")))
-        except Exception:                       # noqa: BLE001 -- unreadable == absent, and said so
-            continue
-    return {}
+    try:
+        path = _facts.find_facts(target)
+    except FileNotFoundError:
+        return {}
+    if path is None:
+        return {}
+    # Use the common selector: a same-name cache must never override selected
+    # support evidence. Parsing failures are invalid evidence, not a second
+    # opportunity to discover a different provider's facts.
+    document = json.loads(path.read_bytes())
+    if not isinstance(document, dict):
+        raise ValueError(f"{path}: RTL facts must be a mapping")
+    return document
 
 
-def load_sources(target: str, *, facts: Mapping[str, Any] | None = None,
-                 residual: Mapping[str, Any] | None = None,
-                 contract: Mapping[str, Any] | None = None,
-                 allow_extraction: bool = False) -> Sources:
+def load_sources(
+    target: str,
+    *,
+    facts: Mapping[str, Any] | None = None,
+    residual: Mapping[str, Any] | None = None,
+    contract: Mapping[str, Any] | None = None,
+    allow_extraction: bool = False,
+) -> Sources:
     """Read the three sources for ``target``.
 
     ``facts`` / ``residual`` override the on-disk reads, which is how a caller supplies a target
@@ -389,8 +412,16 @@ def load_sources(target: str, *, facts: Mapping[str, Any] | None = None,
     (present if body else missing).append("rtl_facts")
     (present if res else missing).append("residual")
     (present if con else missing).append("contract")
-    return Sources(target=target, facts=doc, residual=res, body=dict(body or {}),
-                   present=tuple(present), missing=tuple(missing), contract=con)
+    return Sources(
+        target=target,
+        facts=doc,
+        residual=res,
+        body=dict(body or {}),
+        present=tuple(present),
+        missing=tuple(missing),
+        contract=con,
+        external_reads=facts is None and allow_extraction,
+    )
 
 
 def elaboration_of(sources: Sources) -> Elaboration:
@@ -421,12 +452,22 @@ def elaboration_of(sources: Sources) -> Elaboration:
         if itf.get("hw_source"):
             read_path = str(itf["hw_source"])
             break
-    note = "" if evidenced else (
-        f"inputs record dialect {dialect!r} with digest {digest!r}: the elaboration is ASSERTED, "
-        "not evidenced -- a term derived from it cannot name the bytes it was read from")
-    return Elaboration(dialect=(str(dialect) if dialect else None),
-                       digest=(str(digest) if digest else None), extractor=extractor,
-                       read_path=read_path, evidenced=evidenced, note=note)
+    note = (
+        ""
+        if evidenced
+        else (
+            f"inputs record dialect {dialect!r} with digest {digest!r}: the elaboration is ASSERTED, "
+            "not evidenced -- a term derived from it cannot name the bytes it was read from"
+        )
+    )
+    return Elaboration(
+        dialect=(str(dialect) if dialect else None),
+        digest=(str(digest) if digest else None),
+        extractor=extractor,
+        read_path=read_path,
+        evidenced=evidenced,
+        note=note,
+    )
 
 
 def timing_walk(sources: Sources) -> TimingWalk:
@@ -446,8 +487,7 @@ def timing_walk(sources: Sources) -> TimingWalk:
     if not mods:
         return TimingWalk(status="empty")
     resolved = sum(1 for r in mods.values() if r.get("pipeline_depth") is not None)
-    return TimingWalk(status="present", modules=mods, resolved=resolved,
-                      refused=len(mods) - resolved)
+    return TimingWalk(status="present", modules=mods, resolved=resolved, refused=len(mods) - resolved)
 
 
 # --------------------------------------------------------------------------------------------
@@ -460,15 +500,24 @@ def timing_walk(sources: Sources) -> TimingWalk:
 _QUESTIONS_FOR_DISPATCH: dict[str, tuple[str, ...]] = {
     # The host issues an instruction the device decodes: the device runs behind a queue, holds
     # configuration across host instructions, and moves its own operands.
-    "host_instruction": ("host_dispatched_queue", "persistent_configuration_state", "explicit_dma",
-                         "managed_scratchpad"),
+    "host_instruction": (
+        "host_dispatched_queue",
+        "persistent_configuration_state",
+        "explicit_dma",
+        "managed_scratchpad",
+    ),
     # The device fetches and decodes its own stream: the program itself carries the schedule, so
     # what matters is whether it can see its engines finish and whether they are separate at all.
-    "device_native": ("self_hosted_program", "explicit_completion", "multiple_engine_groups",
-                      "independent_engine_ports", "explicit_dma", "managed_scratchpad"),
+    "device_native": (
+        "self_hosted_program",
+        "explicit_completion",
+        "multiple_engine_groups",
+        "independent_engine_ports",
+        "explicit_dma",
+        "managed_scratchpad",
+    ),
     # No command ISA at all; a buffer is handed over.
-    "command_buffer": ("explicit_dma", "managed_scratchpad", "persistent_configuration_state",
-                       "explicit_completion"),
+    "command_buffer": ("explicit_dma", "managed_scratchpad", "persistent_configuration_state", "explicit_completion"),
 }
 
 #: Which traits a compute-unit KIND makes worth asking about, on top of the dispatch questions.
@@ -503,9 +552,14 @@ class Archetype:
         return f"{self.dispatch or 'unknown-dispatch'}/{self.datapath_kind or 'unknown-datapath'}"
 
     def to_dict(self) -> dict[str, Any]:
-        return {"label": self.label, "dispatch": self.dispatch,
-                "datapath_kind": self.datapath_kind, "endpoint_kind": self.endpoint_kind,
-                "questions": list(self.questions), "evidence": dict(self.evidence)}
+        return {
+            "label": self.label,
+            "dispatch": self.dispatch,
+            "datapath_kind": self.datapath_kind,
+            "endpoint_kind": self.endpoint_kind,
+            "questions": list(self.questions),
+            "evidence": dict(self.evidence),
+        }
 
 
 def _endpoint_kind(sources: Sources) -> tuple[str | None, str, str]:
@@ -518,12 +572,16 @@ def _endpoint_kind(sources: Sources) -> tuple[str | None, str, str]:
     so the funct-width constant lives in exactly one place.
     """
     from merlin.targetgen import capability_manifests as _cm
+
     derived = _cm._endpoint_from_facts(sources.body)
     if derived:
         itf = sources.interfaces().get(_IFACE_DECODE, {})
         legal = list(itf.get("legal_funct") or [])
-        detail = (f"{len(legal)} legal opcodes, widest 0x{max(legal):x}" if legal
-                  else f"a {_IFACE_SELF_HOSTED} interface declaring its own encoding")
+        detail = (
+            f"{len(legal)} legal opcodes, widest 0x{max(legal):x}"
+            if legal
+            else f"a {_IFACE_SELF_HOSTED} interface declaring its own encoding"
+        )
         return derived, TIER_FACTS, f"facts.interfaces: {detail} -> endpoint {derived}"
     declared = sources.residual.get("endpoint_kind")
     if declared:
@@ -532,11 +590,11 @@ def _endpoint_kind(sources: Sources) -> tuple[str | None, str, str]:
     if kinds:
         try:
             from merlin.targetgen import families as _families
+
             prof = _families.family_profile(kinds[0])
-        except Exception:                       # noqa: BLE001 -- unknown kind: no family default
+        except Exception:  # noqa: BLE001 -- unknown kind: no family default
             return None, TIER_NONE, f"no decode facts, no declared endpoint, unknown kind {kinds[0]!r}"
-        return (prof.endpoint_kind_default, TIER_FAMILY,
-                f"family default for compute-unit kind {kinds[0]!r}")
+        return (prof.endpoint_kind_default, TIER_FAMILY, f"family default for compute-unit kind {kinds[0]!r}")
     return None, TIER_NONE, "no decode facts, no declared endpoint, no declared compute unit"
 
 
@@ -551,20 +609,26 @@ def archetype_of(sources: Sources) -> Archetype:
     kinds = sources.unit_kinds()
     kind = kinds[0] if kinds else None
     questions: list[str] = []
-    for name in (*_QUESTIONS_FOR_DISPATCH.get(dispatch or "", ()),
-                 *_QUESTIONS_FOR_KIND.get(kind or "", ())):
+    for name in (*_QUESTIONS_FOR_DISPATCH.get(dispatch or "", ()), *_QUESTIONS_FOR_KIND.get(kind or "", ())):
         if name not in questions:
             questions.append(name)
     ev = {
         "endpoint_kind": f"{evidence} [{tier}]",
-        "dispatch": (f"endpoint_kind={endpoint!r} -> transport {dispatch!r}" if dispatch
-                     else f"endpoint_kind={endpoint!r} implies no distinct transport"),
-        "datapath_kind": (f"the {sources.units_source()}'s compute_units declare kinds "
-                          f"{list(kinds)}; the primary is {kind!r} [{sources.units_tier()}]"
-                          if kinds else "no compute unit is declared in the residual or the contract"),
+        "dispatch": (
+            f"endpoint_kind={endpoint!r} -> transport {dispatch!r}"
+            if dispatch
+            else f"endpoint_kind={endpoint!r} implies no distinct transport"
+        ),
+        "datapath_kind": (
+            f"the {sources.units_source()}'s compute_units declare kinds "
+            f"{list(kinds)}; the primary is {kind!r} [{sources.units_tier()}]"
+            if kinds
+            else "no compute unit is declared in the residual or the contract"
+        ),
     }
-    return Archetype(dispatch=dispatch, datapath_kind=kind, endpoint_kind=endpoint,
-                     questions=tuple(questions), evidence=ev)
+    return Archetype(
+        dispatch=dispatch, datapath_kind=kind, endpoint_kind=endpoint, questions=tuple(questions), evidence=ev
+    )
 
 
 # --------------------------------------------------------------------------------------------
@@ -575,15 +639,23 @@ def archetype_of(sources: Sources) -> Archetype:
 def _t_self_hosted_program(sources: Sources) -> tuple[Trait, str]:
     endpoint, tier, evidence = _endpoint_kind(sources)
     if endpoint is None:
-        return Trait("self_hosted_program", None, evidence=evidence,
-                     missing=("a decode table in facts.interfaces, or a declared endpoint_kind",)), TIER_NONE
+        return Trait(
+            "self_hosted_program",
+            None,
+            evidence=evidence,
+            missing=("a decode table in facts.interfaces, or a declared endpoint_kind",),
+        ), TIER_NONE
     # ``external_backend`` is precisely "the device fetches and decodes its own instruction stream".
     satisfied = endpoint == "external_backend"
     if tier != TIER_FACTS:
         # A declaration can say which endpoint is emitted; it cannot establish the decode width that
         # makes the machine self-hosted. Report the weaker tier rather than borrowing the strong one.
-        return Trait("self_hosted_program", None, evidence=evidence,
-                     missing=("RTL decode facts (facts.interfaces.funct_decode_table)",)), tier
+        return Trait(
+            "self_hosted_program",
+            None,
+            evidence=evidence,
+            missing=("RTL decode facts (facts.interfaces.funct_decode_table)",),
+        ), tier
     return Trait("self_hosted_program", satisfied, evidence=evidence), TIER_FACTS
 
 
@@ -591,51 +663,68 @@ def _t_host_dispatched_queue(sources: Sources) -> tuple[Trait, str]:
     ifaces = sources.interfaces()
     if _IFACE_HOST_QUEUE in ifaces:
         ev = ifaces[_IFACE_HOST_QUEUE].get("evidence") or _IFACE_HOST_QUEUE
-        return Trait("host_dispatched_queue", True,
-                     evidence=f"facts.interfaces[{_IFACE_HOST_QUEUE}]: {ev}"), TIER_FACTS
-    return Trait("host_dispatched_queue", None,
-                 evidence=f"facts declare interfaces {sorted(ifaces) or 'none'}",
-                 missing=("a host command-queue interface in facts.interfaces",)), TIER_NONE
+        return Trait("host_dispatched_queue", True, evidence=f"facts.interfaces[{_IFACE_HOST_QUEUE}]: {ev}"), TIER_FACTS
+    return Trait(
+        "host_dispatched_queue",
+        None,
+        evidence=f"facts declare interfaces {sorted(ifaces) or 'none'}",
+        missing=("a host command-queue interface in facts.interfaces",),
+    ), TIER_NONE
 
 
 def _t_explicit_dma(sources: Sources) -> tuple[Trait, str]:
     ifaces = sources.interfaces()
     if _IFACE_DMA in ifaces:
         ev = ifaces[_IFACE_DMA].get("evidence") or _IFACE_DMA
-        return Trait("explicit_dma", True,
-                     evidence=f"facts.interfaces[{_IFACE_DMA}]: {ev}"), TIER_FACTS
-    return Trait("explicit_dma", None,
-                 evidence=f"facts declare interfaces {sorted(ifaces) or 'none'}",
-                 missing=("a data-movement interface in facts.interfaces",
-                          "or DMA-roled mnemonics in the ISA model: a role census that cannot "
-                          "separate an asynchronous channel move from a local operand load answers "
-                          "this question about an engine it has never seen")), TIER_NONE
+        return Trait("explicit_dma", True, evidence=f"facts.interfaces[{_IFACE_DMA}]: {ev}"), TIER_FACTS
+    return Trait(
+        "explicit_dma",
+        None,
+        evidence=f"facts declare interfaces {sorted(ifaces) or 'none'}",
+        missing=(
+            "a data-movement interface in facts.interfaces",
+            "or DMA-roled mnemonics in the ISA model: a role census that cannot "
+            "separate an asynchronous channel move from a local operand load answers "
+            "this question about an engine it has never seen",
+        ),
+    ), TIER_NONE
 
 
 def _t_managed_scratchpad(sources: Sources) -> tuple[Trait, str]:
     mems = [m for m in sources.memories() if m.get("name")]
     if mems:
         named = ", ".join(f"{m['name']}" for m in mems)
-        return Trait("managed_scratchpad", True,
-                     evidence=f"facts.memories discovered {len(mems)} explicitly sized on-chip "
-                              f"memories ({named})"), TIER_FACTS
+        return Trait(
+            "managed_scratchpad",
+            True,
+            evidence=f"facts.memories discovered {len(mems)} explicitly sized on-chip memories ({named})",
+        ), TIER_FACTS
     mm = sources.residual.get("memory_model") or {}
     declared = [k for k, v in mm.items() if v is True]
     if declared:
-        return Trait("managed_scratchpad", True,
-                     evidence=f"residual memory_model DECLARES {sorted(declared)} (intent, not "
-                              "RTL-grounded: no memory is discovered in these facts)"), TIER_RESIDUAL
-    return Trait("managed_scratchpad", None,
-                 evidence="facts discovered no memories and the residual declares no memory model",
-                 missing=("a memory in facts.memories, or a residual memory_model",)), TIER_NONE
+        return Trait(
+            "managed_scratchpad",
+            True,
+            evidence=f"residual memory_model DECLARES {sorted(declared)} (intent, not "
+            "RTL-grounded: no memory is discovered in these facts)",
+        ), TIER_RESIDUAL
+    return Trait(
+        "managed_scratchpad",
+        None,
+        evidence="facts discovered no memories and the residual declares no memory model",
+        missing=("a memory in facts.memories, or a residual memory_model",),
+    ), TIER_NONE
 
 
 def _t_banked_memory(sources: Sources) -> tuple[Trait, str]:
     mems = sources.memories()
     if not mems:
-        return Trait("banked_memory", None,
-                     evidence="no memory is discovered in these facts",
-                     missing=("a memory fact carrying a bank count",)), TIER_NONE
+        return Trait(
+            "banked_memory",
+            None,
+            evidence="no memory is discovered in these facts",
+            missing=("a memory fact carrying a bank count",),
+        ), TIER_NONE
     # THE BANK COUNT IS DERIVABLE, and this trait used to say it was not.
     #
     # The old reasoning -- "bytes and depth give a row WIDTH, which is not a bank count" -- was sound
@@ -658,54 +747,77 @@ def _t_banked_memory(sources: Sources) -> tuple[Trait, str]:
     have = sorted({k for m in mems for k in m})
     try:
         from merlin.targetgen.address_space import derive_address_space
-        space = derive_address_space(sources.target)
-    except Exception as e:                                     # noqa: BLE001 — unresolvable target
-        return Trait("banked_memory", None,
-                     evidence=f"facts.memories record {have}, but the address space could not be "
-                              f"derived to turn a capacity into a bank count: "
-                              f"{type(e).__name__}: {str(e)[:120]}",
-                     missing=("a derivable row width (an array column count and a datapath element "
-                              "width) so capacity/depth resolves to banks",)), TIER_NONE
 
-    counted = {s.name: int(s.banks) for s in (getattr(space, "stores", ()) or ())
-               if getattr(s, "banks", None) and not getattr(s, "bank_residue_rows", 0)}
-    inexact = sorted(s.name for s in (getattr(space, "stores", ()) or ())
-                     if getattr(s, "bank_residue_rows", 0))
+        space = derive_address_space(sources.target, facts=sources.facts)
+    except Exception as e:  # noqa: BLE001 — unresolvable target
+        return Trait(
+            "banked_memory",
+            None,
+            evidence=f"facts.memories record {have}, but the address space could not be "
+            f"derived to turn a capacity into a bank count: "
+            f"{type(e).__name__}: {str(e)[:120]}",
+            missing=(
+                "a derivable row width (an array column count and a datapath element "
+                "width) so capacity/depth resolves to banks",
+            ),
+        ), TIER_NONE
+
+    counted = {
+        s.name: int(s.banks)
+        for s in (getattr(space, "stores", ()) or ())
+        if getattr(s, "banks", None) and not getattr(s, "bank_residue_rows", 0)
+    }
+    inexact = sorted(s.name for s in (getattr(space, "stores", ()) or ()) if getattr(s, "bank_residue_rows", 0))
     if not counted:
         undecidable = sorted(s.name for s in (getattr(space, "stores", ()) or ()))
-        return Trait("banked_memory", None,
-                     evidence=f"facts.memories record {have}; no store's bank count divides exactly "
-                              f"(stores {undecidable or 'none'}"
-                              + (f", inexact {inexact}" if inexact else "") + ")",
-                     missing=("a store whose capacity divides exactly into rows of the derived width, "
-                              "and those rows into its declared per-bank depth",)), TIER_NONE
+        return Trait(
+            "banked_memory",
+            None,
+            evidence=f"facts.memories record {have}; no store's bank count divides exactly "
+            f"(stores {undecidable or 'none'}" + (f", inexact {inexact}" if inexact else "") + ")",
+            missing=(
+                "a store whose capacity divides exactly into rows of the derived width, "
+                "and those rows into its declared per-bank depth",
+            ),
+        ), TIER_NONE
     banked = {n: b for n, b in counted.items() if b > 1}
     detail = ", ".join(f"{n}={b}" for n, b in sorted(counted.items()))
     if banked:
-        return Trait("banked_memory", True,
-                     evidence=f"derived from facts.memories capacity and declared per-bank depth "
-                              f"against the row width the compute array and datapath element imply: "
-                              f"{detail} bank(s)"
-                              + (f"; {inexact} did not divide exactly and are excluded" if inexact
-                                 else "")), TIER_FACTS
-    return Trait("banked_memory", False,
-                 evidence=f"every derived store resolves to a single bank ({detail}), so there is no "
-                          f"banking to exploit -- a fact about this target, not missing evidence"), \
-        TIER_FACTS
+        return Trait(
+            "banked_memory",
+            True,
+            evidence=f"derived from facts.memories capacity and declared per-bank depth "
+            f"against the row width the compute array and datapath element imply: "
+            f"{detail} bank(s)" + (f"; {inexact} did not divide exactly and are excluded" if inexact else ""),
+        ), TIER_FACTS
+    return Trait(
+        "banked_memory",
+        False,
+        evidence=f"every derived store resolves to a single bank ({detail}), so there is no "
+        f"banking to exploit -- a fact about this target, not missing evidence",
+    ), TIER_FACTS
 
 
 def _t_persistent_configuration_state(sources: Sources) -> tuple[Trait, str]:
     enc = sources.residual.get("encoding") or {}
     subtypes = enc.get("config_subtype") or {}
     if subtypes:
-        return Trait("persistent_configuration_state", True,
-                     evidence=f"residual encoding DECLARES a configuration command with "
-                              f"{len(subtypes)} sub-types {sorted(subtypes.values())}: state set by "
-                              "one command and read by later ones"), TIER_RESIDUAL
-    return Trait("persistent_configuration_state", None,
-                 evidence=f"the residual's encoding block declares {sorted(enc) or 'nothing'}",
-                 missing=("a configuration op class in the encoding ABI (config_subtype), or a "
-                          "roled configuration mnemonic in the ISA model",)), TIER_NONE
+        return Trait(
+            "persistent_configuration_state",
+            True,
+            evidence=f"residual encoding DECLARES a configuration command with "
+            f"{len(subtypes)} sub-types {sorted(subtypes.values())}: state set by "
+            "one command and read by later ones",
+        ), TIER_RESIDUAL
+    return Trait(
+        "persistent_configuration_state",
+        None,
+        evidence=f"the residual's encoding block declares {sorted(enc) or 'nothing'}",
+        missing=(
+            "a configuration op class in the encoding ABI (config_subtype), or a "
+            "roled configuration mnemonic in the ISA model",
+        ),
+    ), TIER_NONE
 
 
 def _engine_groups(sources: Sources) -> tuple[list[str], Trait, str]:
@@ -718,36 +830,54 @@ def _engine_groups(sources: Sources) -> tuple[list[str], Trait, str]:
 def _t_multiple_engine_groups(sources: Sources) -> tuple[Trait, str]:
     groups, dma, dma_tier = _engine_groups(sources)
     if dma.satisfied is True:
-        return Trait("multiple_engine_groups", True,
-                     evidence=f"{len(groups)} declared compute-unit kind(s) {groups} plus a "
-                              f"data-movement engine grounded by {dma.evidence}"), TIER_FACTS
+        return Trait(
+            "multiple_engine_groups",
+            True,
+            evidence=f"{len(groups)} declared compute-unit kind(s) {groups} plus a "
+            f"data-movement engine grounded by {dma.evidence}",
+        ), TIER_FACTS
     if len(groups) >= 2:
-        return Trait("multiple_engine_groups", True,
-                     evidence=f"the {sources.units_source()} DECLARES {len(groups)} compute-unit "
-                              f"kinds {groups}"), sources.units_tier()
-    return Trait("multiple_engine_groups", None,
-                 evidence=f"{len(groups)} declared compute-unit kind(s) {groups}; no second engine "
-                          f"group is evidenced ({dma.evidence})",
-                 missing=("a second engine group: a second declared compute unit, or a movement "
-                          "engine in facts.interfaces",)), TIER_NONE
+        return Trait(
+            "multiple_engine_groups",
+            True,
+            evidence=f"the {sources.units_source()} DECLARES {len(groups)} compute-unit kinds {groups}",
+        ), sources.units_tier()
+    return Trait(
+        "multiple_engine_groups",
+        None,
+        evidence=f"{len(groups)} declared compute-unit kind(s) {groups}; no second engine "
+        f"group is evidenced ({dma.evidence})",
+        missing=("a second engine group: a second declared compute unit, or a movement engine in facts.interfaces",),
+    ), TIER_NONE
 
 
 def _t_independent_engine_ports(sources: Sources) -> tuple[Trait, str]:
     groups, dma, _ = _engine_groups(sources)
     if groups and dma.satisfied is True:
-        return Trait("independent_engine_ports", True,
-                     evidence=f"a compute datapath ({groups[0]}) and a data-movement engine "
-                              f"({dma.evidence}) are different kinds of unit reached through "
-                              "different interfaces, so they cannot be one issue port"), TIER_FACTS
+        return Trait(
+            "independent_engine_ports",
+            True,
+            evidence=f"a compute datapath ({groups[0]}) and a data-movement engine "
+            f"({dma.evidence}) are different kinds of unit reached through "
+            "different interfaces, so they cannot be one issue port",
+        ), TIER_FACTS
     if len(groups) >= 2:
-        return Trait("independent_engine_ports", None,
-                     evidence=f"the {sources.units_source()} declares {len(groups)} unit kinds "
-                              f"{groups}, but declaring two units is not observing two ports",
-                     missing=("evidence that two engines issue independently (a movement interface, "
-                              "or a workload showing both carrying work in one run)",)), TIER_NONE
-    return Trait("independent_engine_ports", None,
-                 evidence=f"declared kinds {groups}; {dma.evidence}",
-                 missing=("a second engine group at all",)), TIER_NONE
+        return Trait(
+            "independent_engine_ports",
+            None,
+            evidence=f"the {sources.units_source()} declares {len(groups)} unit kinds "
+            f"{groups}, but declaring two units is not observing two ports",
+            missing=(
+                "evidence that two engines issue independently (a movement interface, "
+                "or a workload showing both carrying work in one run)",
+            ),
+        ), TIER_NONE
+    return Trait(
+        "independent_engine_ports",
+        None,
+        evidence=f"declared kinds {groups}; {dma.evidence}",
+        missing=("a second engine group at all",),
+    ), TIER_NONE
 
 
 def _t_explicit_completion(sources: Sources) -> tuple[Trait, str]:
@@ -777,20 +907,30 @@ def _t_explicit_completion(sources: Sources) -> tuple[Trait, str]:
     # ready/valid handshake carries a tag and lets a consumer attribute the completion to a command,
     # which is the difference between knowing a unit is done and knowing WHICH work it finished.
     try:
-        from merlin.targetgen.rtl.ports import port_facts
-        pf = port_facts(sources.target, fields=("completed",))
-    except Exception as e:                                     # noqa: BLE001
+        if sources.external_reads:
+            from merlin.targetgen.rtl.ports import port_facts
+
+            pf = port_facts(sources.target, fields=("completed",))
+        else:
+            pf = sources.facts.get("port_facts") or {
+                "status": "unavailable",
+                "why": "selected snapshot supplies no completion-port facts",
+                "fields": {},
+            }
+    except Exception as e:  # noqa: BLE001
         pf = {"status": "unavailable", "why": f"{type(e).__name__}: {str(e)[:120]}", "fields": {}}
     if pf.get("status") == "derived":
         got = (pf.get("fields") or {}).get("completed") or {}
         handshaken = list(got.get("decoupled") or ())
         if handshaken:
-            return Trait("explicit_completion", True,
-                         evidence=f"{len(handshaken)} module(s) in this target's own elaborated FIRRTL "
-                                  f"expose a DECOUPLED completion channel ({', '.join(handshaken)}); "
-                                  f"read from the .fir the facts name, so it describes what this "
-                                  f"configuration emitted rather than what the generator can emit"), \
-                TIER_FACTS
+            return Trait(
+                "explicit_completion",
+                True,
+                evidence=f"{len(handshaken)} module(s) in this target's own elaborated FIRRTL "
+                f"expose a DECOUPLED completion channel ({', '.join(handshaken)}); "
+                f"read from the .fir the facts name, so it describes what this "
+                f"configuration emitted rather than what the generator can emit",
+            ), TIER_FACTS
         named = list(got.get("modules") or ())
         # ⚠️ THE DECIDING RUNG RAN, SO SILENCE IS ABSENT -- not UNKNOWN. This returned None either way,
         # which is the collapse `capability_discovery._FAMILY_DECIDED_BY` exists to prevent in the
@@ -804,64 +944,93 @@ def _t_explicit_completion(sources: Sources) -> tuple[Trait, str]:
         n_read = int(pf.get("n_modules") or 0)
         dialect = pf.get("dialect") or "fir"
         if not named:
-            return Trait("explicit_completion", False,
-                         evidence=f"{n_read} module(s) of this target's own elaboration were read "
-                                  f"({dialect} dialect) and NONE exposes a completion field, so no "
-                                  f"engine signals that its work finished; the elaboration is the "
-                                  f"authority for what this configuration emitted, and it was read "
-                                  f"rather than missing"), TIER_FACTS
-        return Trait("explicit_completion", False,
-                     evidence=f"{len(named)} module(s) of {n_read} read ({dialect} dialect) expose a "
-                              f"completion field {named}, none of them a ready/valid handshake, so a "
-                              f"completion cannot be attributed to a particular command -- the bar "
-                              f"this trait sets, measured and not met",
-                     missing=("a decoupled (ready/valid) completion channel, or an activity source "
-                              "declaring completion_observable "
-                              "(merlin.perf.decompose.ActivitySource)",)), TIER_FACTS
-    return Trait("explicit_completion", None,
-                 evidence=f"the facts declare interfaces {ifaces or 'none'} and carry no port list, and "
-                          f"the elaborated FIRRTL could not be read to recover one "
-                          f"({pf.get('why', 'unavailable')}). UNKNOWN, not absent",
-                 missing=("the elaborated .fir this target's facts name, so module ports can be read; "
-                          "or an activity source declaring completion_observable "
-                          "(merlin.perf.decompose.ActivitySource) -- headroom.concurrency_traits "
-                          "never defaults this",)), TIER_NONE
+            return Trait(
+                "explicit_completion",
+                False,
+                evidence=f"{n_read} module(s) of this target's own elaboration were read "
+                f"({dialect} dialect) and NONE exposes a completion field, so no "
+                f"engine signals that its work finished; the elaboration is the "
+                f"authority for what this configuration emitted, and it was read "
+                f"rather than missing",
+            ), TIER_FACTS
+        return Trait(
+            "explicit_completion",
+            False,
+            evidence=f"{len(named)} module(s) of {n_read} read ({dialect} dialect) expose a "
+            f"completion field {named}, none of them a ready/valid handshake, so a "
+            f"completion cannot be attributed to a particular command -- the bar "
+            f"this trait sets, measured and not met",
+            missing=(
+                "a decoupled (ready/valid) completion channel, or an activity source "
+                "declaring completion_observable "
+                "(merlin.perf.decompose.ActivitySource)",
+            ),
+        ), TIER_FACTS
+    return Trait(
+        "explicit_completion",
+        None,
+        evidence=f"the facts declare interfaces {ifaces or 'none'} and carry no port list, and "
+        f"the elaborated FIRRTL could not be read to recover one "
+        f"({pf.get('why', 'unavailable')}). UNKNOWN, not absent",
+        missing=(
+            "the elaborated .fir this target's facts name, so module ports can be read; "
+            "or an activity source declaring completion_observable "
+            "(merlin.perf.decompose.ActivitySource) -- headroom.concurrency_traits "
+            "never defaults this",
+        ),
+    ), TIER_NONE
 
 
 def _t_structural_pipeline_depth(sources: Sources) -> tuple[Trait, str]:
     walk = timing_walk(sources)
     if walk.status == "present":
         satisfied = walk.resolved > 0
-        return Trait("structural_pipeline_depth", satisfied,
-                     evidence=f"the RTL timing walk resolved a finite pipeline_depth for "
-                              f"{walk.resolved} of {len(walk.modules)} walked hw.modules and "
-                              f"refused {walk.refused} (a MODULE COUNT, not coverage: the walk "
-                              "resolves combinational leaves and refuses sequenced units, so it is "
-                              "biased away from where the cycles are)"), TIER_FACTS
+        return Trait(
+            "structural_pipeline_depth",
+            satisfied,
+            evidence=f"the RTL timing walk resolved a finite pipeline_depth for "
+            f"{walk.resolved} of {len(walk.modules)} walked hw.modules and "
+            f"refused {walk.refused} (a MODULE COUNT, not coverage: the walk "
+            "resolves combinational leaves and refuses sequenced units, so it is "
+            "biased away from where the cycles are)",
+        ), TIER_FACTS
     if walk.status == "empty":
-        return Trait("structural_pipeline_depth", False,
-                     evidence="the RTL timing walk ran and reported no modules"), TIER_FACTS
-    return Trait("structural_pipeline_depth", None,
-                 evidence=f"the timing fact class is {walk.status} for this target",
-                 missing=("a facts artifact carrying a timing block -- UNCACHED is not the same as "
-                          "absent, and this fact class exists: re-extract to answer",)), TIER_NONE
+        return Trait(
+            "structural_pipeline_depth", False, evidence="the RTL timing walk ran and reported no modules"
+        ), TIER_FACTS
+    return Trait(
+        "structural_pipeline_depth",
+        None,
+        evidence=f"the timing fact class is {walk.status} for this target",
+        missing=(
+            "a facts artifact carrying a timing block -- UNCACHED is not the same as "
+            "absent, and this fact class exists: re-extract to answer",
+        ),
+    ), TIER_NONE
 
 
 def _t_feedback_sequenced_units(sources: Sources) -> tuple[Trait, str]:
     walk = timing_walk(sources)
     if walk.status != "present":
-        return Trait("feedback_sequenced_units", None,
-                     evidence=f"the timing fact class is {walk.status} for this target",
-                     missing=("a facts artifact carrying a timing block",)), TIER_NONE
+        return Trait(
+            "feedback_sequenced_units",
+            None,
+            evidence=f"the timing fact class is {walk.status} for this target",
+            missing=("a facts artifact carrying a timing block",),
+        ), TIER_NONE
     if walk.refused:
         sample = sorted(m for m, r in walk.modules.items() if r.get("pipeline_depth") is None)[:5]
-        return Trait("feedback_sequenced_units", True,
-                     evidence=f"{walk.refused} of {len(walk.modules)} modules reach an output "
-                              f"through feedback (e.g. {sample}): their latency is a function of "
-                              "state and operands, so it must come from the sequencer's own limits "
-                              "or from measurement, never from a wiring depth"), TIER_FACTS
-    return Trait("feedback_sequenced_units", False,
-                 evidence=f"all {len(walk.modules)} walked modules resolved a finite depth"), TIER_FACTS
+        return Trait(
+            "feedback_sequenced_units",
+            True,
+            evidence=f"{walk.refused} of {len(walk.modules)} modules reach an output "
+            f"through feedback (e.g. {sample}): their latency is a function of "
+            "state and operands, so it must come from the sequencer's own limits "
+            "or from measurement, never from a wiring depth",
+        ), TIER_FACTS
+    return Trait(
+        "feedback_sequenced_units", False, evidence=f"all {len(walk.modules)} walked modules resolved a finite depth"
+    ), TIER_FACTS
 
 
 def _t_multiple_operand_encodings(sources: Sources) -> tuple[Trait, str]:
@@ -876,27 +1045,44 @@ def _t_multiple_operand_encodings(sources: Sources) -> tuple[Trait, str]:
     Derived from the contraction family's declared dtypes, which is where the choice actually lives.
     """
     try:
-        from merlin.targetgen.eligibility import capability_map_for_target
-        cap = (capability_map_for_target(sources.target) or {}).get("contraction")
-    except Exception as exc:                       # noqa: BLE001 -- an unresolvable map is not a format
-        return Trait("multiple_operand_encodings", None,
-                     evidence=f"no capability map resolved ({type(exc).__name__}: {exc})",
-                     missing=("a capability manifest declaring the contraction family's dtypes",),
-                     ), TIER_NONE
+        if sources.external_reads:
+            from merlin.targetgen.eligibility import capability_map_for_target
+
+            cap = (capability_map_for_target(sources.target) or {}).get("contraction")
+        else:
+            from merlin.targetgen.compute_units import compute_units, semantic_capability_map
+
+            cap = semantic_capability_map(compute_units({"compute_units": sources.units()})).get("contraction")
+    except Exception as exc:  # noqa: BLE001 -- an unresolvable map is not a format
+        return Trait(
+            "multiple_operand_encodings",
+            None,
+            evidence=f"no capability map resolved ({type(exc).__name__}: {exc})",
+            missing=("a capability manifest declaring the contraction family's dtypes",),
+        ), TIER_NONE
     if cap is None:
-        return Trait("multiple_operand_encodings", None,
-                     evidence="the capability map declares no contraction family, so there is no "
-                              "operand encoding to choose between",
-                     missing=("a declared contraction family",)), TIER_NONE
+        return Trait(
+            "multiple_operand_encodings",
+            None,
+            evidence="the capability map declares no contraction family, so there is no "
+            "operand encoding to choose between",
+            missing=("a declared contraction family",),
+        ), TIER_NONE
     dtypes = tuple(getattr(cap, "dtypes", ()) or ())
     if len(dtypes) >= 2:
-        return Trait("multiple_operand_encodings", True,
-                     evidence=f"the contraction family declares {len(dtypes)} operand encoding(s) "
-                              f"{sorted(dtypes)}, so an encoding choice exists"), TIER_CONTRACT
-    return Trait("multiple_operand_encodings", False,
-                 evidence=f"the contraction family declares {sorted(dtypes) or 'no'} operand "
-                          f"encoding(s); with fewer than two there is no encoding to choose, so an "
-                          f"encoding lever cannot be exercised here"), TIER_CONTRACT
+        return Trait(
+            "multiple_operand_encodings",
+            True,
+            evidence=f"the contraction family declares {len(dtypes)} operand encoding(s) "
+            f"{sorted(dtypes)}, so an encoding choice exists",
+        ), TIER_CONTRACT
+    return Trait(
+        "multiple_operand_encodings",
+        False,
+        evidence=f"the contraction family declares {sorted(dtypes) or 'no'} operand "
+        f"encoding(s); with fewer than two there is no encoding to choose, so an "
+        f"encoding lever cannot be exercised here",
+    ), TIER_CONTRACT
 
 
 #: One deriver per trait, in :data:`TRAITS` order. Written out rather than discovered from the
@@ -944,8 +1130,7 @@ class TargetProfile:
         try:
             return self.traits[name]
         except KeyError:
-            raise KeyError(f"{self.target}: no trait {name!r}; derived traits are "
-                           f"{sorted(self.traits)}") from None
+            raise KeyError(f"{self.target}: no trait {name!r}; derived traits are {sorted(self.traits)}") from None
 
     def has(self, name: str) -> bool | None:
         """Tri-state. ``None`` means not established and must not be read as ``False``."""
@@ -963,17 +1148,25 @@ class TargetProfile:
     def worklist(self) -> tuple[tuple[str, tuple[str, ...]], ...]:
         """The traits the ARCHETYPE says matter and the evidence has not settled, with what is
         missing. This is the measurement backlog for this target, computed rather than chosen."""
-        return tuple((n, self.traits[n].missing) for n in self.archetype.questions
-                     if n in self.traits and self.traits[n].satisfied is None)
+        return tuple(
+            (n, self.traits[n].missing)
+            for n in self.archetype.questions
+            if n in self.traits and self.traits[n].satisfied is None
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "target": self.target,
             "archetype": self.archetype.to_dict(),
-            "traits": {n: {"satisfied": self.traits[n].satisfied,
-                           "tier": self.trait_tier.get(n, TIER_NONE),
-                           "evidence": self.traits[n].evidence,
-                           "missing": list(self.traits[n].missing)} for n in TRAITS},
+            "traits": {
+                n: {
+                    "satisfied": self.traits[n].satisfied,
+                    "tier": self.trait_tier.get(n, TIER_NONE),
+                    "evidence": self.traits[n].evidence,
+                    "missing": list(self.traits[n].missing),
+                }
+                for n in TRAITS
+            },
             "elaboration": self.elaboration.to_dict(),
             "timing": self.timing.to_dict(),
             "sources_present": list(self.sources.present),
@@ -982,26 +1175,35 @@ class TargetProfile:
         }
 
 
-def derive_profile(target: str, *, facts: Mapping[str, Any] | None = None,
-                   residual: Mapping[str, Any] | None = None,
-                   contract: Mapping[str, Any] | None = None,
-                   allow_extraction: bool = False) -> TargetProfile:
+def derive_profile(
+    target: str,
+    *,
+    facts: Mapping[str, Any] | None = None,
+    residual: Mapping[str, Any] | None = None,
+    contract: Mapping[str, Any] | None = None,
+    allow_extraction: bool = False,
+) -> TargetProfile:
     """Derive ``target``'s profile from RTL facts + family defaults + its residual.
 
     The same code path for every target. What differs between two targets is what their own sources
     say, which is the whole point: a profile that had to be edited to onboard a second machine would
     be a hand-written description wearing a deriver's clothes.
     """
-    src = load_sources(target, facts=facts, residual=residual, contract=contract,
-                       allow_extraction=allow_extraction)
+    src = load_sources(target, facts=facts, residual=residual, contract=contract, allow_extraction=allow_extraction)
     traits: dict[str, Trait] = {}
     tiers: dict[str, str] = {}
     for name in TRAITS:
         trait, tier = _DERIVERS[name](src)
         traits[name], tiers[name] = trait, tier
-    return TargetProfile(target=target, archetype=archetype_of(src), traits=traits,
-                         trait_tier=tiers, elaboration=elaboration_of(src),
-                         timing=timing_walk(src), sources=src)
+    return TargetProfile(
+        target=target,
+        archetype=archetype_of(src),
+        traits=traits,
+        trait_tier=tiers,
+        elaboration=elaboration_of(src),
+        timing=timing_walk(src),
+        sources=src,
+    )
 
 
 def profile_table(profiles: Sequence[TargetProfile]) -> str:
@@ -1011,15 +1213,15 @@ def profile_table(profiles: Sequence[TargetProfile]) -> str:
     (``f`` RTL facts, ``r`` residual declaration, ``c`` contract declaration, ``F`` family default),
     so a trait that is True because somebody wrote it down never reads like one the RTL grounded.
     """
-    tier_mark = {TIER_FACTS: "f", TIER_RESIDUAL: "r", TIER_CONTRACT: "c", TIER_FAMILY: "F",
-                 TIER_NONE: " "}
+    tier_mark = {TIER_FACTS: "f", TIER_RESIDUAL: "r", TIER_CONTRACT: "c", TIER_FAMILY: "F", TIER_NONE: " "}
     mark = {True: "+", False: "-", None: "?"}
     width = max([len(t) for t in TRAITS] + [len("trait")])
     head = "trait".ljust(width) + "".join(f"  {p.target:>18}" for p in profiles)
     rows = [head, "-" * len(head)]
     for name in TRAITS:
-        cells = "".join(f"  {mark[p.traits[name].satisfied] + tier_mark[p.trait_tier.get(name, TIER_NONE)]:>18}"
-                        for p in profiles)
+        cells = "".join(
+            f"  {mark[p.traits[name].satisfied] + tier_mark[p.trait_tier.get(name, TIER_NONE)]:>18}" for p in profiles
+        )
         rows.append(name.ljust(width) + cells)
     rows.append("")
     rows.append("archetype".ljust(width) + "".join(f"  {p.archetype.label:>18}" for p in profiles))

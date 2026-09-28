@@ -4,6 +4,9 @@ Start here for the public inputs and phase handoffs. The single functional
 definition is [`experiment.yaml`](experiment.yaml), registered as
 `gemmini-functional` in the [experiment catalog](../../experiments/catalog.yaml).
 This example is not a prequalified compiler or a self-contained hardware setup.
+The authored [software spec](target/software-spec.yaml) and
+[hardware selection](target/hardware.yaml) are separate inputs. Phase 0 explicitly
+uses diagnostic mode until evidence, semantics and coverage are qualified.
 
 | Step | Authored inputs and instructions | Generated result |
 | --- | --- | --- |

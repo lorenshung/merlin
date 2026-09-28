@@ -20,8 +20,8 @@ from .provenance import _document_digest
 #: was added to the SIMT engine and an attention statement to the composed micro model. A cache keyed
 #: on the entry alone would have served the pre-change goldens straight through both edits -- and a
 #: stale golden does not fail loudly, it grades a backend against the wrong answer, which is precisely
-#: the failure class this corpus exists to catch. Four things move a golden and all four are in the
-#: key: the entry, the binding, the engine, and the operand synthesis.
+#: the failure class this corpus exists to catch. The key binds the entry, binding, engine, operand
+#: synthesis, selected external oracle source, Phase 0 source closure, and device facts.
 #:
 #: The store is a PURGEABLE cache namespace: deleting it costs time, never correctness.
 _GOLDEN_CACHE_DISABLED = os.environ.get("MERLIN_NO_GOLDEN_CACHE", "").strip() not in ("", "0")
@@ -69,10 +69,11 @@ def source_digest() -> str:
         record = {
             path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in source_files()
         }
-        helper = module_source_path("merlin.integrations.specir")
-        if helper.is_symlink() or not helper.is_file():
-            return "unresolvable"
-        record["merlin.integrations.specir"] = hashlib.sha256(helper.read_bytes()).hexdigest()
+        for name in ("merlin.integrations.specir", "merlin.targetgen.software_spec"):
+            helper = module_source_path(name)
+            if helper.is_symlink() or not helper.is_file():
+                return "unresolvable"
+            record[name] = hashlib.sha256(helper.read_bytes()).hexdigest()
     except (ImportError, ValueError, OSError):
         return "unresolvable"
     return _document_digest(record)
@@ -92,10 +93,11 @@ def _source_digest_of(obj) -> str:
         return "unresolvable"
 
 
-def _golden_cache_key(fn, entry, binding, facts_sha: str = "") -> str:
+def _golden_cache_key(fn, entry, binding, facts_sha: str = "", *, oracle_source: dict | None = None) -> str:
     """Digest of everything that determines the answer.
 
-    ``facts_sha`` is the target's RTL-facts digest -- the same one the corpus manifest records. The
+    ``facts_sha`` is the derived performance-document digest the corpus manifest records,
+    not a hash of raw CIRCT extraction bytes. The
     goldens are deliberately INDEPENDENT of the RTL (an oracle derived from the device would be the
     device grading itself), but the RTL still reaches them INDIRECTLY: the binding's tile edge, dtypes
     and subnormal handling are derived from the capability manifest, and an entry's extents come from
@@ -115,28 +117,42 @@ def _golden_cache_key(fn, entry, binding, facts_sha: str = "") -> str:
     h.update(_source_digest_of(CO).encode("utf-8"))  # how its operands are synthesized
     h.update(source_digest().encode("utf-8"))  # all extracted generation helpers, not just the numerical engine
     h.update(str(facts_sha).encode("utf-8"))  # WHICH DEVICE this corpus is about
+    h.update(_document_digest(oracle_source or {}).encode("utf-8"))  # external numerical implementation, if selected
     return h.hexdigest()
 
 
-def _golden_cached(fn, entry, binding, facts_sha: str = ""):
+def _golden_cached(fn, entry, binding, facts_sha: str = "", *, oracle_source: dict | None = None):
     """``fn(entry, binding)``, answered from the cache when every input digest matches."""
+    from .numerics import _float_golden
+
+    if fn is _float_golden and (
+        not isinstance(oracle_source, dict)
+        or oracle_source.get("schema") != "merlin.specir_oracle_source.v1"
+        or set((oracle_source.get("modules") or {}).keys()) != {"specir.oracle.dtypes", "specir.oracle.refmodel"}
+        or any(
+            not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value)
+            for value in (oracle_source.get("modules") or {}).values()
+        )
+    ):
+        raise ValueError("selected external SpecIR oracle source identity is required for float golden cache")
     if _GOLDEN_CACHE_DISABLED or _source_digest_of(fn) == "unresolvable" or source_digest() == "unresolvable":
         return fn(entry, binding)
     from merlin.common.artifacts import cache_dir
 
-    key = _golden_cache_key(fn, entry, binding, facts_sha)
+    key = _golden_cache_key(fn, entry, binding, facts_sha, oracle_source=oracle_source)
     path = Path(cache_dir("capsule_goldens")) / key[:2] / f"{key}.json"
     if path.is_file():
         try:
             rec = json.loads(path.read_text(encoding="utf-8"))
-            return rec["outputs"], rec["prov"]
+            if rec.get("oracle_source") == oracle_source:
+                return rec["outputs"], rec["prov"]
         except Exception:  # noqa: BLE001 -- a damaged entry is a MISS, never a wrong answer
             pass
     outputs, prov = fn(entry, binding)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps({"outputs": outputs, "prov": prov}), encoding="utf-8")
+        tmp.write_text(json.dumps({"outputs": outputs, "prov": prov, "oracle_source": oracle_source}), encoding="utf-8")
         tmp.replace(path)  # atomic: a concurrent reader never sees a half-written entry
     except OSError:  # an unwritable cache must not fail a generation
         pass

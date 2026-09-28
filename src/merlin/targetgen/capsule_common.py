@@ -8,7 +8,9 @@ experiment harness, since the library runners are the consumers.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -18,6 +20,60 @@ if TYPE_CHECKING:
     from aet.core.run_paths import RunPaths
 
 from .contract import schemas
+
+
+def verify_capture_tool(directory: Path, capsule: dict) -> None:
+    """Verify an optional frozen capture package without claiming loader closure.
+
+    Older capsules do not carry this receipt. A capsule that does claim a
+    selected installed package must carry both its exact record and wheel.
+    """
+    selected = capsule.get("capture_tool")
+    if selected is None:
+        return
+    if not isinstance(selected, dict):
+        raise ValueError("capsule capture-tool identity is malformed")
+    if selected.get("status") == "not_available":
+        return
+    if selected.get("status") != "verified_selected_package":
+        raise ValueError("capsule capture-tool status is unsupported")
+
+    def member(name: object) -> Path:
+        if not isinstance(name, str) or not name or Path(name).name != name:
+            raise ValueError("capsule capture-tool member path is unsafe")
+        path = directory / name
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"capsule capture-tool member is absent or indirect: {name}")
+        return path
+
+    sidecar = member(selected.get("path"))
+    raw = sidecar.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != selected.get("sha256"):
+        raise ValueError("capsule capture-tool record bytes changed")
+    try:
+        record = json.loads(raw)
+        wheel_identity = record["wheel"]
+        module_identity = record["modules"]
+        if record.get("schema") != "merlin.capsule_capture_tool.v1" or record.get("status") != selected["status"]:
+            raise ValueError("capsule capture-tool record identity changed")
+        wheel = member(wheel_identity["path"])
+        payload = wheel.read_bytes()
+        if len(payload) != wheel_identity["bytes"] or hashlib.sha256(payload).hexdigest() != wheel_identity["sha256"]:
+            raise ValueError("capsule capture-tool wheel bytes changed")
+        if not isinstance(module_identity, dict) or not module_identity:
+            raise ValueError("capsule capture-tool module inventory is absent")
+        with zipfile.ZipFile(wheel) as archive:
+            modules = sorted(name for name in archive.namelist() if name.startswith("m2m/") and name.endswith(".py"))
+            if modules != sorted(module_identity):
+                raise ValueError("capsule capture-tool wheel module set changed")
+            for name in modules:
+                source = archive.read(name)
+                identity = module_identity[name]
+                if len(source) != identity["bytes"] or hashlib.sha256(source).hexdigest() != identity["sha256"]:
+                    raise ValueError(f"capsule capture-tool wheel module changed: {name}")
+    except (OSError, KeyError, TypeError, json.JSONDecodeError, zipfile.BadZipFile) as exc:
+        raise ValueError(f"capsule capture-tool cannot be verified: {exc}") from exc
+
 
 #: Statuses that are NOT a measurement of the submission, and so belong in neither the numerator nor
 #: the denominator of a score. Each is a different reason the capsule produced no verdict:
@@ -153,6 +209,7 @@ def load_capsule(capsule_dir: str | Path, *, contract: str | Path | None = None)
         # Fail closed on a schema-invalid capsule (a corpus bug must surface, never be silently dropped),
         # but name the offending capsule so a discovery-time crash is instantly diagnosable.
         raise schemas.ContractViolation(f"capsule '{d.name}' ({d}): {e}") from e
+    verify_capture_tool(d, cap)
     cap["__dir__"] = str(d)
     return cap
 

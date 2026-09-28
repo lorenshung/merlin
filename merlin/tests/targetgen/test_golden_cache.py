@@ -3,17 +3,19 @@
 Goldens are derived and deterministic -- operands come from a name-salted fill with no RNG -- so the
 engines are memoizable. They are also deliberately slow: ``fp_reduce`` accumulates in the device's own
 order, one step at a time, in pure Python, because a numpy dot product rounds differently from the
-hardware. Measured 2026-09-05: an atlas regeneration spends ~90 minutes in those engines and a radiance
-one ~40, nearly all of it recomputing capsules nothing changed.
+hardware. A repeated generation must reuse an answer only when every numerical source is identical.
 
 ⚠️ The risk is not a slow cache, it is a STALE one. A stale golden does not fail loudly -- it grades a
 backend against the wrong answer, the exact failure class this corpus exists to catch. So these tests
-check INVALIDATION by mutation rather than checking that a hit is fast: each of the four inputs that
-determines a golden (entry, binding, engine, operand synthesis) must move the key, and an engine edit
-must be caught from the bytes ON DISK so that work in progress invalidates its own cached results.
+check INVALIDATION by mutation rather than checking that a hit is fast: entry, binding, engine,
+operand synthesis, external oracle, Phase 0 source, and device facts must move the key when changed.
 """
 
 from __future__ import annotations
+
+import os
+import types
+from functools import cache
 
 import pytest
 from merlin_experiments.phase0 import numerics as NUMERICS
@@ -248,3 +250,112 @@ def test_unknown_source_closure_recomputes_without_reading_or_writing_cache(gen,
     assert gen._golden_cached(engine, _entry(), _Binding())[0] == {"result": 1}
     assert gen._golden_cached(engine, _entry(), _Binding())[0] == {"result": 2}
     assert len(calls) == 2
+
+
+def test_selected_external_specir_source_mutation_invalidates_float_golden_key(gen, monkeypatch, tmp_path):
+    """The independent oracle is external: either edited module must move the key."""
+    dtypes_path = tmp_path / "dtypes.py"
+    refmodel_path = tmp_path / "refmodel.py"
+    dtypes_path.write_text("# codec v1\n", encoding="utf-8")
+    refmodel_path.write_text("def fp_reduce(): return 1\n", encoding="utf-8")
+    dtypes = types.ModuleType("specir.oracle.dtypes")
+    dtypes.__file__ = str(dtypes_path)
+    namespace = {}
+    exec(compile(refmodel_path.read_bytes(), str(refmodel_path), "exec"), namespace)
+    monkeypatch.setattr(NUMERICS, "_specir", lambda **_kw: (dtypes, namespace["fp_reduce"]))
+    selected = {
+        "model": {"engine": "specir_fp_reduce", "source_root_path": str(tmp_path)},
+        "selection_status": "explicit",
+    }
+
+    first_identity = NUMERICS.specir_oracle_source_identity(selected)
+    first = gen._golden_cache_key(NUMERICS._float_golden, _entry(), _Binding(), oracle_source=first_identity)
+    dtypes_path.write_text("# codec v2\n", encoding="utf-8")
+    second_identity = NUMERICS.specir_oracle_source_identity(selected)
+    second = gen._golden_cache_key(NUMERICS._float_golden, _entry(), _Binding(), oracle_source=second_identity)
+    assert first != second
+
+    refmodel_path.write_text("def fp_reduce(): return 2\n", encoding="utf-8")
+    third_identity = NUMERICS.specir_oracle_source_identity(selected)
+    third = gen._golden_cache_key(NUMERICS._float_golden, _entry(), _Binding(), oracle_source=third_identity)
+    assert second != third
+    assert set(third_identity["modules"]) == {"specir.oracle.dtypes", "specir.oracle.refmodel"}
+
+
+def test_selected_external_specir_source_unavailable_fails_closed(gen, monkeypatch, tmp_path):
+    dtypes_path = tmp_path / "dtypes.py"
+    refmodel_path = tmp_path / "refmodel.py"
+    dtypes_path.write_text("# codec\n", encoding="utf-8")
+    refmodel_path.write_text("def fp_reduce(): return 1\n", encoding="utf-8")
+    dtypes = types.ModuleType("specir.oracle.dtypes")
+    dtypes.__file__ = str(dtypes_path)
+    namespace = {}
+    exec(compile(refmodel_path.read_bytes(), str(refmodel_path), "exec"), namespace)
+    monkeypatch.setattr(NUMERICS, "_specir", lambda **_kw: (dtypes, namespace["fp_reduce"]))
+    selected = {
+        "model": {"engine": "specir_fp_reduce", "source_root_path": str(tmp_path)},
+        "selection_status": "explicit",
+    }
+    refmodel_path.unlink()
+    with pytest.raises(OSError, match="source.*unavailable"):
+        NUMERICS.specir_oracle_source_identity(selected)
+    with pytest.raises(ValueError, match="source identity is required"):
+        gen._golden_cached(NUMERICS._float_golden, _entry(), _Binding())
+
+
+@pytest.mark.parametrize("rm", ["rne", "rmm", "rtz", "rdn", "rup"])
+@pytest.mark.parametrize(
+    "order,cadence",
+    [
+        ("index_sequential", "per_step"),
+        ("tree", "per_step"),
+        ("index_sequential", "single_final"),
+    ],
+)
+def test_exact_pair_fold_preserves_specir_special_values_and_rounding(rm, order, cadence):
+    try:
+        D, fp_reduce = NUMERICS._specir()
+    except ImportError:
+        pytest.skip("independent SpecIR oracle is not installed")
+    reduce, clear = NUMERICS._float_reducer(fp_reduce, D.BF16, order=order, cadence=cadence, rm=rm)
+    sequences = [
+        [],
+        [0x8000],
+        [0x8000, 0x0000],
+        [0x0000, 0x8000],
+        [0x7FC1, 0x0000],
+        [0x7F80, 0xFF80, 0x0000],
+        [0x3F80, 0xBF80, 0x8000, 0x0000],
+        [0x3F80, 0x0001, 0xBF80],
+    ]
+    for values in sequences:
+        assert reduce(values) == fp_reduce(values, D.BF16, order=order, cadence=cadence, rm=rm)
+    clear()
+
+
+def test_exact_pair_fold_matches_full_selected_32x32_tile():
+    """Opt-in long differential check over a real full-tile deterministic stimulus."""
+    if os.environ.get("MERLIN_TEST_FULL_FLOAT_TILE") != "1":
+        pytest.skip("set MERLIN_TEST_FULL_FLOAT_TILE=1 for the 32x32x4096 differential check")
+    try:
+        D, fp_reduce = NUMERICS._specir()
+    except ImportError:
+        pytest.skip("independent SpecIR oracle is not installed")
+    m = n = 32
+    k = 4096
+    name = "PR01_fits_double_k4096"
+    a, _ = NUMERICS._det_fp8(D, "A0", (m, k), name, "fp8_e4m3", D.FP8_E4M3)
+    w, _ = NUMERICS._det_fp8(D, "W", (k, n), name, "fp8_e4m3", D.FP8_E4M3)
+    decode = NUMERICS._operand_decoder(D, D.FP8_E4M3, flush_subnormals=True)
+
+    @cache
+    def product(x, y):
+        return D.round_to_format(decode(x) * decode(y), D.BF16, "rne")
+
+    reduce, clear = NUMERICS._float_reducer(fp_reduce, D.BF16, order="index_sequential", cadence="per_step", rm="rne")
+    for i in range(m):
+        for j in range(n):
+            values = [product(a[i * k + p], w[p * n + j]) for p in range(k)]
+            expected = fp_reduce(values, D.BF16, order="index_sequential", cadence="per_step", rm="rne")
+            assert reduce(values) == expected, f"mismatched full-tile output ({i}, {j})"
+    clear()

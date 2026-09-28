@@ -1,0 +1,34 @@
+schema: merlin.hardware_selection.v1
+target: atlas
+required_fields:
+  - facts.arrays
+  - facts.memories
+  - facts.timing
+  - source_consistency
+source_production:
+  method: firrtl_to_hw_then_exact_module_closure
+  core_root: AtlasTile
+  hierarchy: derive_exact_instance_graph_from_selected_firrtl
+  drop_annotation_classes: []
+audit_checks:
+  - id: matrix_operand_carrier
+    kind: hw_port_type
+    module: E4M3FMA
+    port: io_a
+    expected_type: i8
+    extraction: {collection: compute_datapaths, name: input, field: elem_bits}
+    qualification: Eight bits alone does not identify E4M3; selected arithmetic child structure supplies format evidence.
+  - id: matrix_accumulation_input
+    kind: hw_port_type
+    module: E4M3FMA
+    port: io_addend16
+    expected_type: i16
+    extraction: {collection: compute_datapaths, name: accumulator, field: elem_bits}
+  - id: exact_product_carrier
+    kind: hw_port_type
+    module: E4M3ProdAddBF16
+    port: io_prod13
+    expected_type: i13
+    extraction: {collection: datapaths, name: accumulator, field: elem_bits}
+    comparison: distinct_quantity
+    gap: The 13-bit custom product carrier is neither BF16 storage nor a selectable tensor quantization format.

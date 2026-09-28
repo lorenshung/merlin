@@ -39,7 +39,6 @@ directory is derived from it, and the digests come from the bytes on disk.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -397,8 +396,10 @@ def _validate_receipt(target: str, binary: Path, digest: str, receipt: Path) -> 
     return "bound", f"lineage bound by {receipt.name}", _receipt_block(doc, receipt, digest)
 
 
-def _resolve_wrapper(target: str, engine: str = "gsim") -> Resolution | None:
-    """The wrapper flavour's resolution, or ``None`` if this home does not hold one.
+def resolve_wrapper(
+    target: str, engine: str = "gsim", *, home: Path | None = None, source: str = "derived"
+) -> Resolution | None:
+    """Resolve the exact selected wrapper home, or ``None`` if no wrapper is present.
 
     Answers the same question as the binary branch and to the same standard. The bytes identified are the
     WRAPPER's, because that is the file a caller executes; what the wrapper drives is named by the lineage
@@ -407,11 +408,11 @@ def _resolve_wrapper(target: str, engine: str = "gsim") -> Resolution | None:
     evidence and is reported as its own status — weaker than a bound receipt, and not silently equated
     with one.
     """
-    path = wrapper_path(target, engine)
+    home = Path(home) if home is not None else engine_home(target, engine)
+    path = home / wrapper_name(engine)
     if not path.is_file():
         return None
     digest = _digest(path)
-    home = engine_home(target, engine)
 
     # A receipt in a wrapper home normally binds the ENGINE BINARY the wrapper drives, not the wrapper
     # itself, so a non-binding receipt here is the expected case and must not be read as a refusal — that
@@ -426,7 +427,7 @@ def _resolve_wrapper(target: str, engine: str = "gsim") -> Resolution | None:
         return Resolution(
             target,
             path,
-            "derived",
+            source,
             False,
             f"GSIM wrapper ({engine}) at {path} REFUSED: {note} and {REQUIRE_RECEIPT_ENV} is set",
             refused=True,
@@ -437,9 +438,9 @@ def _resolve_wrapper(target: str, engine: str = "gsim") -> Resolution | None:
     return Resolution(
         target,
         path,
-        "derived",
+        source,
         True,
-        f"GSIM wrapper ({engine}) {path} (derived, {digest[:12]}); {note}",
+        f"GSIM wrapper ({engine}) {path} ({source}, {digest[:12]}); {note}",
         receipt=block,
         receipt_status=status,
         digest=digest,
@@ -492,6 +493,11 @@ def resolve(target: str, *, env_var: str | None = None) -> Resolution:
         # did NOT point an override at a specific binary — an env var names bytes, and answering with
         # a different file than the one named would be the wrong kind of helpful.
         if source == "derived":
+            # Home precedence does not depend on whether the engine takes
+            # program words or a linked ELF.
+            wrapped = resolve_wrapper(target)
+            if wrapped is not None:
+                return wrapped
             installed = installed_engine_home(target) / BINARY_NAME
             if installed != path and installed.is_file():
                 path, source = installed, "installed"
@@ -499,9 +505,10 @@ def resolve(target: str, *, env_var: str | None = None) -> Resolution:
         # The binary flavour is absent in both homes — but one may hold the WRAPPER flavour instead,
         # which is just as much a built engine.
         if source == "derived":
-            wrapped = _resolve_wrapper(target)
-            if wrapped is not None:
-                return wrapped
+            for home, origin in ((engine_home(target), "derived"), (installed_engine_home(target), "installed")):
+                wrapped = resolve_wrapper(target, home=home, source=origin)
+                if wrapped is not None:
+                    return wrapped
         where = f"{source} -> {path}" if source != "derived" else str(path)
         homes = {str(gsim_home(target) / BINARY_NAME), str(installed_engine_home(target) / BINARY_NAME)}
         return Resolution(
@@ -588,11 +595,11 @@ def citation(target: str, *, env_var: str | None = None) -> dict[str, Any]:
 
 def install(
     target: str,
-    binary: "str | Path",
+    binary: str | Path,
     *,
-    receipt: "str | Path | None" = None,
+    receipt: str | Path | None = None,
     note: str = "",
-    extra: "dict[str, Any] | None" = None,
+    extra: dict[str, Any] | None = None,
 ) -> Resolution:
     """Adopt ``binary`` as ``target``'s canonical GSIM emulator under the derived home.
 
@@ -634,7 +641,7 @@ def install(
     record = {
         "schema_version": "merlin.gsim-emulator-adoption.v1",
         "target": str(target),
-        "installed_utc": _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+        "installed_utc": _dt.datetime.now(_dt.UTC).strftime("%Y%m%dT%H%M%SZ"),
         "source_binary": str(src.resolve()),
         "source_receipt": str(Path(receipt).resolve()) if receipt is not None else None,
         "binary_sha256": digest,
@@ -651,9 +658,9 @@ def record_adoption(
     target: str,
     engine: str = "gsim",
     *,
-    sources: "dict[str, str] | None" = None,
+    sources: dict[str, str] | None = None,
     note: str = "",
-    extra: "dict[str, Any] | None" = None,
+    extra: dict[str, Any] | None = None,
 ) -> Path:
     """Write the adoption record for an engine home whose files were installed by other means.
 
@@ -678,7 +685,7 @@ def record_adoption(
         "schema_version": "merlin.gsim-emulator-adoption.v1",
         "target": str(target),
         "engine": str(engine),
-        "installed_utc": _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+        "installed_utc": _dt.datetime.now(_dt.UTC).strftime("%Y%m%dT%H%M%SZ"),
         "sources": dict(sources or {}),
         "files": files,
         "note": note,

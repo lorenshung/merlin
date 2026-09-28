@@ -123,6 +123,38 @@ def cmd_lattice(args) -> int:
     return lattice_main(argv)
 
 
+def cmd_capture_coverage(args) -> int:
+    """Inventory the source-side SMT subset without treating it as a proof."""
+    from .model_coverage import audit_capture
+
+    print(json.dumps([audit_capture(path) for path in args.captures], indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_compile_receipt(args) -> int:
+    """Recheck one exact interface→command-buffer pair and write a replayable receipt."""
+    from .receipts import verify_transformation
+
+    source = _load_interface(Path(args.interface))
+    target = json.loads(Path(args.command_buffer).read_text(encoding="utf-8"))
+    receipt = verify_transformation(
+        "interface_to_command_buffer",
+        source,
+        target,
+        translator=args.translator,
+        expected_translator_sha256=args.translator_sha256,
+        acc_width=args.acc_width,
+        timeout_ms=args.timeout_ms,
+    )
+    rendered = json.dumps(receipt.to_dict(), indent=2, sort_keys=True) + "\n"
+    if args.output:
+        with Path(args.output).open("x", encoding="utf-8") as stream:
+            stream.write(rendered)
+    else:
+        print(rendered, end="")
+    return EXIT_VERIFIED if receipt.verified else EXIT_REFUTED if receipt.status == "refuted" else EXIT_ABSTAINED
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="merlin-verify", description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -143,12 +175,28 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--write", action="store_true")
     f.set_defaults(fn=cmd_faults)
 
-    l = sub.add_parser("lattice", help="verify a target's derived extent lattice")
-    l.add_argument("--target", required=True)
-    l.add_argument("--timeout-ms", type=int, default=300_000)
-    l.add_argument("--json", action="store_true")
-    l.add_argument("--write", action="store_true")
-    l.set_defaults(fn=cmd_lattice)
+    lattice = sub.add_parser("lattice", help="verify a target's derived extent lattice")
+    lattice.add_argument("--target", required=True)
+    lattice.add_argument("--timeout-ms", type=int, default=300_000)
+    lattice.add_argument("--json", action="store_true")
+    lattice.add_argument("--write", action="store_true")
+    lattice.set_defaults(fn=cmd_lattice)
+
+    coverage = sub.add_parser("capture-coverage", help="inventory captured MLIR against the bounded SMT subset")
+    coverage.add_argument("captures", nargs="+", type=Path)
+    coverage.set_defaults(fn=cmd_capture_coverage)
+
+    receipt = sub.add_parser(
+        "compile-receipt", help="verify an exact interface/command-buffer pair with a pinned translator"
+    )
+    receipt.add_argument("--interface", required=True)
+    receipt.add_argument("--command-buffer", required=True)
+    receipt.add_argument("--translator", required=True)
+    receipt.add_argument("--translator-sha256")
+    receipt.add_argument("--acc-width", type=int, default=32)
+    receipt.add_argument("--timeout-ms", type=int, default=60_000)
+    receipt.add_argument("--output", help="write a new receipt file; omit for stdout")
+    receipt.set_defaults(fn=cmd_compile_receipt)
 
     args = ap.parse_args(argv)
     return args.fn(args)

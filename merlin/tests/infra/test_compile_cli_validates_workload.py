@@ -16,12 +16,10 @@ gemmini. A status that cannot be false is not a status.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 import yaml
-
-from merlin.common.paths import repo_root
-
-CORPUS = repo_root() / "merlin/contract/capsules/isa"
 
 
 @pytest.fixture
@@ -47,14 +45,29 @@ def compiler_package(tmp_path, monkeypatch):
     (package / "compiler.py").write_text("raise RuntimeError('this unit fixture must never be executed')\n")
     built = []
     monkeypatch.setattr(oot_runner, "build_package", lambda pkg, **kwargs: built.append((pkg, kwargs)))
-    return package, built
+    corpus = tmp_path / "fixture-corpus" / "isa"
+    capsule = corpus / "A0_config_smoke"
+    capsule.mkdir(parents=True)
+    (capsule / "capsule.yaml").write_text(yaml.safe_dump({"name": "A0_config_smoke", "kind": "isa", "label": "public"}))
+    (capsule / "capsule.interface.mlir").write_text("module {}\n")
+    descriptor = tmp_path / "fixture-descriptor.yaml"
+    descriptor.write_text(yaml.safe_dump({"target": "fixture", "capsule_corpus": str(corpus)}))
+    return package, built, descriptor
 
 
 def _compile_oot(workload: str, compiler_package, run: str = "none"):
     from merlin.compile_cli import compile_oot
 
-    package, _ = compiler_package
-    return compile_oot(workload, target="fixture", run=run, verify=False, package=str(package), timeout=600)
+    package, _, descriptor = compiler_package
+    return compile_oot(
+        workload,
+        target="fixture",
+        run=run,
+        verify=False,
+        package=str(package),
+        timeout=600,
+        corpus_descriptor=descriptor,
+    )
 
 
 def test_a_nonexistent_workload_is_not_reported_as_compiled(compiler_package):
@@ -69,27 +82,108 @@ def test_a_whole_model_name_is_refused_and_says_where_to_go(compiler_package):
     out = _compile_oot("tiny_llama", compiler_package)
     assert out["status"] == "not_run"
     assert "whole models" in out["reason"]
-    assert "bundle-pack" in out["reason"]
+    assert "--model-preflight" in out["reason"]
 
 
 def test_the_refusal_happens_before_any_package_build(compiler_package):
     """The check must precede the build: validating after it wastes a full toolchain build to
     produce a refusal, and (the original defect) never runs at all on the compile-only path."""
-    _, built = compiler_package
+    _, built, _ = compiler_package
     out = _compile_oot("definitely_not_a_real_workload_xyz", compiler_package)
     assert out["status"] == "not_run"
     assert "no capsule" in out["reason"], "an absent default package must not short-circuit this test"
     assert built == [], "the backend package was built before the workload was validated"
 
 
-@pytest.mark.skipif(
-    not (CORPUS / "A0_config_smoke").is_dir(), reason="isa corpus capsule A0_config_smoke not present in this checkout"
-)
-def test_a_real_capsule_still_compiles(compiler_package):
-    """A valid workload reaches the package build, without requiring a real compiler toolchain."""
-    package, built = compiler_package
-    out = _compile_oot("A0_config_smoke", compiler_package)
+def test_non_gem_selected_corpus_compiles_without_legacy_tree(compiler_package, tmp_path, capsys):
+    """An explicit non-Gem descriptor, not the checkout's Gem ISA tree, owns selection."""
+    from merlin.compile_cli import main
+
+    package, built, _ = compiler_package
+    corpus = tmp_path / "saturn-corpus" / "isa"
+    capsule = corpus / "SAT_fixture"
+    capsule.mkdir(parents=True)
+    (capsule / "capsule.yaml").write_text(yaml.safe_dump({"name": "SAT_fixture", "kind": "isa", "label": "public"}))
+    (capsule / "capsule.interface.mlir").write_text("module {}\n")
+    descriptor = tmp_path / "saturn-descriptor.yaml"
+    descriptor.write_text(yaml.safe_dump({"target": "saturn", "capsule_corpus": str(corpus)}))
+
+    assert (
+        main(
+            [
+                "--target",
+                "saturn",
+                "--workload",
+                "SAT_fixture",
+                "--corpus-descriptor",
+                str(descriptor),
+                "--package",
+                str(package),
+                "--run",
+                "none",
+                "--timeout",
+                "600",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    out = json.loads(capsys.readouterr().out)
     assert out["status"] == "compiled"
     assert len(built) == 1
     assert built[0][0].directory == package
     assert built[0][1] == {"timeout": 600}
+
+
+def test_oot_cli_refuses_missing_corpus_selection_before_build(compiler_package, capsys):
+    from merlin.compile_cli import main
+
+    package, built, _ = compiler_package
+    assert (
+        main(
+            [
+                "--target",
+                "saturn",
+                "--workload",
+                "A0_config_smoke",
+                "--package",
+                str(package),
+                "--run",
+                "none",
+                "--json",
+            ]
+        )
+        == 1
+    )
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "not_run"
+    assert "--corpus-descriptor" in out["reason"]
+    assert built == []
+
+
+def test_oot_cli_refuses_foreign_target_descriptor_before_build(compiler_package, capsys):
+    from merlin.compile_cli import main
+
+    package, built, descriptor = compiler_package
+    assert (
+        main(
+            [
+                "--target",
+                "saturn",
+                "--workload",
+                "A0_config_smoke",
+                "--corpus-descriptor",
+                str(descriptor),
+                "--package",
+                str(package),
+                "--run",
+                "none",
+                "--json",
+            ]
+        )
+        == 1
+    )
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "not_run"
+    assert "differs from requested target" in out["reason"]
+    assert built == []

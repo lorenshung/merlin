@@ -50,6 +50,8 @@ def _repo_root() -> Path:
 REPO = _repo_root()
 sys.path.insert(0, str(REPO / "merlin" / "python"))
 
+import _track as T  # noqa: E402
+
 from merlin.common import provenance as PROV  # noqa: E402
 from merlin.common.artifacts import new_product  # noqa: E402
 from merlin.perf.linear_cost import LinearCostModel, cost_model_artifact  # noqa: E402
@@ -179,6 +181,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--version", type=int, default=1)
     ap.add_argument("--no-product", action="store_true", help="print only; do not mint an out/artifacts product dir")
     args = ap.parse_args(argv)
+    T.assert_frozen_intact()
 
     dim, spad_rows = machine_facts(args.target)
     model = LinearCostModel.for_target(args.target)
@@ -298,11 +301,12 @@ def main(argv: list[str] | None = None) -> int:
     # from bytes: the calibrated coefficients, and the FROZEN lowering whose loop nest the closed-form
     # counts above transcribe. Digesting `isa.py` is the load-bearing part -- if that file moves, the
     # formulas are stale and the CSV is wrong while still looking right.
-    frozen_isa = REPO / "out/artifacts/targets" / args.target / "gemmini_xdsl_rtl_v0/mlir_oot/lowering/isa.py"
+    frozen_isa = T.FROZEN / "mlir_oot/lowering/isa.py"
     coefficients = cost_model_artifact(args.target)
-    sources = [
-        p for p in (frozen_isa, coefficients, coefficients.with_name("vocabulary.json"), Path(__file__)) if p.exists()
-    ]
+    sources = [frozen_isa, coefficients, coefficients.with_name("vocabulary.json"), Path(__file__)]
+    missing = [str(path) for path in sources if not path.is_file()]
+    if missing:
+        raise SystemExit("cost-model provenance source(s) missing: " + ", ".join(missing))
     pins = {}
     try:
         pins["gemmini_rtl"] = PROV.verify("gemmini_rtl")

@@ -570,7 +570,10 @@ def preprocess_text(mlir_text: str, *, audit=None) -> tuple[str, dict]:
         stats[statistic] = transform(module)
         if audit is not None:
             record_stage(audit, stage, module)
-    return module_to_text(module), stats
+    # Generic form preserves source attributes on every operation and avoids
+    # custom-printer grammar skew at the upstream MLIR boundary (notably yield
+    # and rank-changing tensor operations). This is serialization, not lowering.
+    return module_to_text(module, generic=True), stats
 
 
 # --- textual variant -----------------------------------------------------------

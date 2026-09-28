@@ -1097,15 +1097,6 @@ def _accumulator_resident(decoded, loop_spans) -> bool | None:
     return not any(inside(d) for d in out)
 
 
-def particularities() -> dict:
-    """Load the per-target runtime/ABI particularities (bf16 ABI reg class, VLEN, vsetvl
-    semantics, fp-contract default) so the comparator can normalize runtime artifacts out."""
-    import yaml
-
-    p = Path(__file__).resolve().parent / "runtime_particularities.yaml"
-    return yaml.safe_load(p.read_text()) if p.is_file() else {}
-
-
 def lift_graph(record, *, source: str = "graph", backend: str = "rvv") -> CCA:
     """Flat-graph analyzer: compose a PARTIAL CCA from a model2MLIR ``MatmulRecord`` (the flattened
     exported graph + ``prov.*``). Reads only what the graph determines — the op and the dtype-derived

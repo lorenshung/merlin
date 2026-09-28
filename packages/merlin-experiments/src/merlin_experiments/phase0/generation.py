@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import os
 import shutil
 from pathlib import Path
@@ -15,8 +17,56 @@ from merlin.targetgen.target_experiment import load_target_experiment  # noqa: E
 from .claim_boundary import assert_no_claim_capsules
 from .profiles import load_profile, validate_profile_inputs
 from .provenance import _capture_failure_reason, _scrub_capsule_dir, update_provenance_manifest
+from .software_screen import diagnostic_entry, screen_entry
 from .sweeps import _performance_facts, _resolve_flat_extents, expand_sweeps
 from .writer import SYNTH_ROLE, UnprovableForbid, _write_capsule
+
+
+def _selected_capture_recipe(evidence_root: Path, *, target: str, operand_dtype: str, accumulator_dtype: str) -> dict:
+    """Read exactly one frozen SW-scoped recipe for a live integer model capture.
+
+    Hardware-only recipe derivation is intentionally not a fallback: it can quantize families
+    the selected software spec explicitly left on the host.
+    """
+    from merlin.common import quant_formats
+    from merlin.targetgen import quant_recipe
+
+    index_path = evidence_root / "software" / "quantization-recipes.json"
+    index = json.loads(index_path.read_bytes())
+    if index.get("schema") != "merlin.phase0.capture_recipes.v1" or index.get("target") != target:
+        raise ValueError("frozen capture-recipe index has wrong schema or target")
+    wanted_operand = quant_formats.get(operand_dtype).name
+    wanted_accumulator = quant_formats.get(accumulator_dtype).name
+    matches = []
+    for row in index.get("recipes") or []:
+        rel = Path(str(row.get("path") or ""))
+        if rel.is_absolute() or not rel.parts or ".." in rel.parts or rel.parts[0] != "software":
+            raise ValueError("frozen capture recipe has an unsafe relative path")
+        path = evidence_root / rel
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("frozen capture recipe is absent or symlinked")
+        raw = path.read_bytes()
+        actual = hashlib.sha256(raw).hexdigest()
+        if actual != row.get("sha256") or path.stem != actual:
+            raise ValueError("frozen capture recipe bytes differ from their index")
+        recipe = json.loads(raw)
+        if recipe.get("target") != target or recipe.get("status") != quant_recipe.DERIVED:
+            raise ValueError("frozen capture recipe has wrong target or unresolved status")
+        digest = quant_recipe.digest(recipe)
+        if recipe.get("recipe_sha256") != digest or row.get("recipe_sha256") != digest:
+            raise ValueError("frozen capture recipe semantic digest differs from its index")
+        if (
+            quant_formats.get(recipe["weight"]["dtype"]).name == wanted_operand
+            and quant_formats.get(recipe["activation"]["dtype"]).name == wanted_operand
+            and quant_formats.get(recipe["accumulator_dtype"]).name == wanted_accumulator
+        ):
+            matches.append(recipe)
+    if len(matches) != 1:
+        raise ValueError(
+            f"frozen evidence has {len(matches)} unambiguous SW-scoped recipes for "
+            f"{wanted_operand}/{wanted_accumulator}; refusing a hardware-only default"
+        )
+    return matches[0]
 
 
 def _descriptor_for(target: str) -> Path:
@@ -48,6 +98,12 @@ def generate_target(
     output_root: str | Path | None = None,
     profiles_root: str | Path | None = None,
     recipe: str | Path | None = None,
+    software_spec: str | Path | None = None,
+    hardware_spec: str | Path | None = None,
+    rtl_facts: str | Path | None = None,
+    evidence_root: str | Path | None = None,
+    evidence_input: str | Path | None = None,
+    evidence_mode: str | None = None,
     performance_template: str | Path | None = None,
     conformance_spec: str | Path | None = None,
     synth_profile: str | Path | None = None,
@@ -67,6 +123,8 @@ def generate_target(
         smt_profile=smt_profile,
         hidden_profile=hidden_profile,
     )
+    if software_spec is not None:
+        profile_inputs["software_spec"] = software_spec
     validate_profile_inputs(**profile_inputs)
     if profiles_root is None and recipe is None:
         raise ValueError("Phase 0 requires explicit recipe inputs or profiles_root before descriptor setup")
@@ -76,12 +134,60 @@ def generate_target(
     # a profile can be reused with an explicitly supplied out-of-tree target.
     explicit_descriptor = descriptor is not None
     descriptor = Path(descriptor).expanduser().resolve() if descriptor is not None else _descriptor_for(target)
-    _ensure_contract_on_path(descriptor)
+    if evidence_input is None:
+        _ensure_contract_on_path(descriptor)
     te = load_target_experiment(descriptor)
     hardware_target = te.target if explicit_descriptor else target
     profile = load_profile(
         target, descriptor=descriptor, **{key: value for key, value in profile_inputs.items() if value is not None}
     )
+    if profile.get("capsule_policy") == "derived_only":
+        # Never substitute the old authored/reference corpus for a missing
+        # derivation. Functional membership must come from new byte-bound inputs.
+        if conformance_spec is None or profile.get("_synth_verification", {}).get("status") != "verified":
+            raise ValueError(
+                "derived-only Phase 0 requires fresh digest-bound conformance and synthesis inputs; "
+                "run merlin experiment corpus derive first"
+            )
+        authored = [
+            e.get("name")
+            for e in profile.get("capsules", [])
+            if e.get("source_role")
+            not in {"derived_sweep", "model_derived", "solver_derived", "materialized_iteration_capture"}
+        ]
+        if authored:
+            raise ValueError(f"derived-only Phase 0 refuses authored capsule membership: {authored}")
+    evidence = None
+    if evidence_input is not None or software_spec is not None or profile.get("_software_spec_path"):
+        from .evidence import export_evidence, load_exported_evidence, select_evidence
+
+        if evidence_input is not None:
+            evidence = load_exported_evidence(Path(evidence_input))
+            if evidence.target != hardware_target:
+                raise ValueError("frozen hardware evidence target differs from the descriptor")
+            captured_specs = {source.sha256 for source in evidence.source_snapshots if source.role == "software-spec"}
+            if profile.get("_software_spec_identity", {}).get("sha256") not in captured_specs:
+                raise ValueError("selected software spec differs from the exact captured evidence")
+        else:
+            evidence = select_evidence(
+                hardware_target,
+                descriptor=descriptor,
+                facts_path=rtl_facts,
+                software_spec=software_spec or profile.get("_software_spec_path"),
+                hardware_spec=hardware_spec,
+                conformance_spec=conformance_spec,
+            )
+        if evidence_mode not in (None, "diagnostic", "verified"):
+            raise ValueError("evidence_mode must be diagnostic or verified")
+        if evidence_mode != "diagnostic" and evidence.status != "verified":
+            raise ValueError(
+                "verified Phase 0 requires reviewed, coherent evidence: "
+                + "; ".join(
+                    str(row.get("reason", row)) if isinstance(row, dict) else str(row) for row in evidence.diagnostics
+                )
+            )
+        artifact_root = Path(evidence_root) if evidence_root is not None else Path(output_root) / "_evidence"
+        export_evidence(evidence, artifact_root)
     declared_claims = [str(model) for model in (getattr(te, "workload_spec", None) or {}).get("models") or ()]
     claim_plan = profile.get("_claim_model_evaluation")
     if profile.get("_synth_verification", {}).get("status") == "verified":
@@ -93,17 +199,29 @@ def generate_target(
             or claim_plan.get("public_capsules_emitted") != 0
         ):
             raise ValueError("verified synthesis lacks an owner-only claim-model evaluation obligation")
-    if profile.get("_synth_verification", {"status": "absent"})["status"] == "unverified_legacy":
+    if (
+        profile.get("_synth_verification", {"status": "absent"})["status"] == "unverified_legacy"
+        and evidence_mode != "diagnostic"
+    ):
         raise ValueError(
             "selected synthesized profile has no digest-bound conformance/recipe/workload inputs; "
             "regenerate, review, and select a new sidecar before verified Phase 0 execution"
         )
-    binding = CS.derive_binding(te, profile.get("datapath", {}))
+    selected = (
+        {"contract": evidence.contract, "facts": evidence.loaded_facts, "taxonomy": evidence.isa_taxonomy}
+        if evidence is not None
+        else {}
+    )
+    binding = CS.derive_binding(te, profile.get("datapath", {}), **selected)
     out_root = Path(output_root).expanduser().resolve()
     out_root.mkdir(parents=True, exist_ok=True)
     # `sweeps:` (if any) expand into the same flat entries `capsules:` holds, so
     # everything downstream — builders, goldens, coverage — is unchanged.
-    facts = _performance_facts(hardware_target)
+    facts = (
+        _performance_facts(hardware_target, evidence=evidence)
+        if evidence is not None
+        else _performance_facts(hardware_target)
+    )
     _sweep_skips: list = []
     _runtime_blocked: list = []
     _performance_errors: list = []
@@ -114,9 +232,40 @@ def generate_target(
         skipped=_sweep_skips,
         blocked_unimplemented=_runtime_blocked,
         errors=_performance_errors,
+        **({"evidence": evidence} if evidence is not None else {}),
     )
     assert_no_claim_capsules(entries, declared_claims)
     entries = [_resolve_flat_extents(e, binding) for e in entries]
+    semantics = (profile.get("datapath") or {}).get("numerical_semantics")
+    if semantics is not None:
+        semantics = copy.deepcopy(semantics)
+        if evidence is not None:
+            import hashlib
+            import json
+
+            model_sources = [
+                (str(source.path), source.sha256)
+                for source in evidence.source_snapshots
+                if source.role == "software-reference:numerical_model"
+            ]
+            semantics["model"]["source_bundle_sha256"] = hashlib.sha256(
+                json.dumps(sorted(model_sources), separators=(",", ":")).encode()
+            ).hexdigest()
+        entries = [{**entry, "numerical_semantics": copy.deepcopy(semantics)} for entry in entries]
+    if evidence is not None and evidence.software_spec:
+        screened = []
+        for entry in entries:
+            decision = screen_entry(
+                evidence.software_spec,
+                entry,
+                defaults={
+                    "operand_dtype": binding.operand_dtype,
+                    "accumulator_dtype": binding.accum_dtype,
+                },
+                host_capabilities=evidence.host_capabilities,
+            )
+            screened.append(diagnostic_entry(entry, decision) if decision["status"] == "unsupported" else entry)
+        entries = screened
     for _s in _sweep_skips:
         _why = _s.get("reason") or f"gate {(_s.get('gate') or {}).get('outcome')}"
         print(f"  [skip] performance family {_s['family']}: {_why}")
@@ -125,7 +274,7 @@ def generate_target(
     family_counts = {row["family"]: {"admitted_members": 0, "written_members": 0} for row in declared_families}
     for entry in entries:
         family = (entry.get("performance") or {}).get("family")
-        if family:
+        if family and entry.get("cat") == "_perf":
             family_counts.setdefault(family, {"admitted_members": 0, "written_members": 0})
             family_counts[family]["admitted_members"] += 1
     # SCRUB EACH CAPSULE AS IT IS WRITTEN, not after the whole corpus succeeds. Scrubbing at the end
@@ -141,11 +290,56 @@ def generate_target(
     # registered) aborted the run before any of the tail-path sweep capsules were written, so a coverage
     # gap stayed open for a reason that had nothing to do with it. Failures are COLLECTED, reported by
     # name, and re-raised at the end -- the run still fails, it just fails after doing the work it could.
-    written, failures, unbuilt_roster, unprovable_forbids = [], [], [], []
+    written, failures, unbuilt_roster, unprovable_forbids, omitted, admission = [], [], [], [], [], []
     for e in entries:
         family = (e.get("performance") or {}).get("family")
         try:
-            w = _write_capsule(e, binding, out_root, facts.get("sha256", ""))
+            if (
+                evidence is not None
+                and (e.get("kind") == "model" or e.get("op") == "model")
+                and not e.get("materialized_capture")
+                and not e.get("quant_recipe")
+                and not e.get("quant_scheme")
+                and binding.integer
+            ):
+                e = {
+                    **e,
+                    "quant_recipe": _selected_capture_recipe(
+                        artifact_root,
+                        target=hardware_target,
+                        operand_dtype=str(e.get("operand_dtype") or binding.operand_dtype),
+                        accumulator_dtype=str(binding.accum_dtype),
+                    ),
+                }
+            if evidence is not None and evidence.software_spec:
+                decision = screen_entry(
+                    evidence.software_spec,
+                    e,
+                    defaults={
+                        "operand_dtype": binding.operand_dtype,
+                        "accumulator_dtype": binding.accum_dtype,
+                    },
+                    host_capabilities=evidence.host_capabilities,
+                )
+                admission.append({"capsule": e.get("name"), **decision})
+                if evidence_mode != "diagnostic" and decision["status"] != "admitted":
+                    raise ValueError("SW operation admission: " + decision["reason"])
+                if decision["status"] == "unsupported":
+                    e = diagnostic_entry(e, decision)
+            if evidence is None:
+                w = _write_capsule(e, binding, out_root, facts.get("sha256", ""))
+            else:
+                from merlin.targetgen.rtl.facts import observed_facts
+                from merlin.targetgen.target_registry import observed_contract
+
+                captured_path = artifact_root / "hardware" / "circt" / "facts.json"
+                with (
+                    observed_contract(hardware_target, evidence.contract),
+                    observed_facts(
+                        hardware_target, evidence.refreshed_facts, captured_path if captured_path.is_file() else None
+                    ),
+                ):
+                    w = _write_capsule(e, binding, out_root, facts.get("sha256", ""))
         except Exception as exc:  # noqa: BLE001 — reported, never swallowed
             detail = f"{type(exc).__name__}: {str(exc)[:300]}"
             if isinstance(exc, UnprovableForbid) and str(e.get("source_role") or "") == SYNTH_ROLE:
@@ -199,9 +393,35 @@ def generate_target(
                 )
             continue
         if w:
+            if evidence is not None and evidence.software_spec:
+                actual = yaml.safe_load((Path(w) / "capsule.yaml").read_bytes())
+                observed = screen_entry(
+                    evidence.software_spec,
+                    e,
+                    defaults={
+                        "operand_dtype": binding.operand_dtype,
+                        "accumulator_dtype": binding.accum_dtype,
+                    },
+                    capsule=actual,
+                    host_capabilities=evidence.host_capabilities,
+                )
+                admission.append({"capsule": e.get("name"), "observation": "emitted_capsule", **observed})
+                if observed["status"] == "unsupported" and Path(w).parent.name != "_diagnostic":
+                    diagnostic = out_root / "_diagnostic" / Path(w).name
+                    diagnostic.parent.mkdir(parents=True, exist_ok=True)
+                    if diagnostic.exists():
+                        raise ValueError("diagnostic capsule destination already exists")
+                    Path(w).rename(diagnostic)
+                    w = diagnostic
+                actual["software_screen"] = observed
+                if observed["status"] == "unsupported":
+                    actual["source_reference"] = diagnostic_entry(actual, observed)["source_reference"]
+                (Path(w) / "capsule.yaml").write_text(yaml.safe_dump(actual, sort_keys=False))
+                if evidence_mode != "diagnostic" and observed["status"] != "admitted":
+                    failures.append((e.get("name", "?"), "emitted SW operation admission: " + observed["reason"]))
             _scrub_capsule_dir(w)
             written.append(w)
-            if family:
+            if family and Path(w).parent.name == "_perf":
                 family_counts[family]["written_members"] += 1
         elif family:
             _performance_errors.append(
@@ -213,6 +433,17 @@ def generate_target(
                     "detail": "capsule writer returned no output",
                 }
             )
+        else:
+            omitted.append(
+                {
+                    "capsule": e.get("name", "?"),
+                    "source": e.get("source"),
+                    "status": "not_built",
+                    "reason": "required writer source or lowering input unavailable",
+                }
+            )
+            if evidence_mode == "verified":
+                failures.append((e.get("name", "?"), "required capsule writer produced no artifact"))
     if failures:
         print(f"  [FAIL] {len(failures)} capsule(s) could not be written:")
         for name, why in failures:
@@ -233,7 +464,12 @@ def generate_target(
     generated_members = sum(row["written_members"] for row in family_counts.values())
     performance_record = {
         "shared_template": {"path": template.get("path"), "sha256": template.get("sha256")},
-        "facts": {"target": hardware_target, "sha256": facts["sha256"]},
+        "facts": {
+            "target": hardware_target,
+            "sha256": facts["sha256"],
+            "digest_kind": "derived_performance_document",
+            **({"raw_facts_sha256": evidence.raw_facts_sha256} if evidence is not None else {}),
+        },
         "phase": {
             "category": "_perf",
             "label": "dev",
@@ -277,6 +513,73 @@ def generate_target(
         unprovable_forbids=unprovable_forbids,
         superseded=superseded,
     )
+    if evidence is not None:
+        import hashlib
+        import json
+
+        from merlin_experiments.phase1.source_inputs import fingerprint
+
+        from .coverage_commitment import observe_cohort, selected_inputs, write_inputs
+
+        coverage_root = artifact_root / "coverage"
+        coverage_root.mkdir(parents=True, exist_ok=True)
+        accounting = json.loads((coverage_root / "operation-accounting.json").read_bytes())
+        coverage_inputs = selected_inputs(evidence, accounting=accounting)
+        coverage_input_record = write_inputs(out_root, coverage_inputs)
+        generated_manifest = yaml.safe_load((out_root / "MANIFEST.yaml").read_text()) or {}
+        selections = (generated_manifest.get("phase_corpora") or {}).get(hardware_target) or {}
+        cohort_reports = {}
+        for phase in ("phase1", "phase2"):
+            members = (selections.get(phase) or {}).get("generated_members") or []
+            report = observe_cohort(
+                coverage_inputs, [out_root / member for member in members], target=hardware_target, phase=phase
+            )
+            report_path = coverage_root / f"{phase}-capsule-coverage.json"
+            raw = (json.dumps(report, sort_keys=True, indent=2) + "\n").encode()
+            report_path.write_bytes(raw)
+            cohort_reports[phase] = {
+                "path": str(report_path),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "status": report["status"],
+                "n_capsules": report["cohort"]["n_capsules"],
+            }
+        receipt = {
+            "schema": "merlin.phase0_generation.v1",
+            "target": hardware_target,
+            "evidence_status": evidence.status,
+            "mode": evidence_mode or "verified",
+            "software_spec": profile.get("_software_spec_identity"),
+            "synthesis": profile.get("_synth_verification"),
+            "operation_accounting": str(artifact_root / "coverage/operation-accounting.json"),
+            "quantization_contract": str(artifact_root / "software/quantization-contract.json"),
+            "capsules_written": len(written),
+            "omitted": omitted,
+            "unbuilt_roster": unbuilt_roster,
+            "operation_admission": admission,
+            "unprovable_forbids": unprovable_forbids,
+            "failures": [{"capsule": n, "reason": why} for n, why in failures],
+            "qualification": "not_established",
+            "corpus_manifest": str(out_root / "MANIFEST.yaml"),
+            "coverage_inputs": coverage_input_record,
+            "cohort_coverage": cohort_reports,
+            "capsule_commitments": [
+                {"member": path.relative_to(out_root).as_posix(), "sha256": fingerprint(path)}
+                for path in sorted(written)
+            ],
+        }
+        (coverage_root / "generation.json").write_text(json.dumps(receipt, sort_keys=True, indent=2) + "\n")
+        manifest_path = out_root / "MANIFEST.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text()) or {}
+        manifest["coverage_inputs"] = coverage_input_record
+        manifest["phase0_evidence"] = {
+            "status": evidence.status,
+            "mode": evidence_mode or "verified",
+            "raw_facts_sha256": evidence.raw_facts_sha256,
+            "software_spec": profile.get("_software_spec_identity"),
+            "manifest": str(artifact_root / "evidence-manifest.json"),
+            "generation_receipt": str(coverage_root / "generation.json"),
+        }
+        manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
     if failures:
         raise RuntimeError(
             f"{len(failures)} capsule(s) failed to generate: {', '.join(n for n, _ in failures)}; the "

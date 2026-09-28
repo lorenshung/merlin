@@ -1,5 +1,11 @@
 # Phase 1: functional compiler
 
+Select the reviewed Phase 0 manifest's `phase_corpora.phase1` functional members
+and retain its evidence-manifest identity, SW spec and hardware selection.
+The example's current diagnostic derivation is not an admission release; required
+source consistency, semantics and coverage must be resolved in a fresh run first.
+Do not substitute Phase 2's performance membership for the functional population.
+
 Start from [the experiment definition](../experiment.yaml). Its
 [target descriptor](../target/descriptor.yaml) selects the authored prompts in
 `task/`, independently of retained harness and bundle resources.
@@ -46,6 +52,56 @@ Before attempting that claim, inspect an explicit capture with the
 compares declared target routes with the operand formats and accelerator groups
 in the captured graph. It cannot produce a compiler certificate: a requested
 `int8` deployment format does not quantize an FP32 or BF16 model by itself.
+
+### Exact-capture coverage check (diagnostic)
+
+The Phase 0 handoff now checks a closed ledger of normalized MLIR operations and
+typed SSA uses. Each independent compute node must have one placement obligation;
+structural and nested nodes remain explicitly counted. Every compute-to-compute
+SSA use must have a conditional transfer obligation. Missing or duplicate rows,
+unknown dynamic extents, absent graph identities, and unverified capture source
+closures block the precompiler
+coverage commitment. This ledger checks the *captured graph*, not all PyTorch
+operators or unseen models; reviewed declarations, lowering and numerical
+execution remain separate requirements.
+
+A read-only check of retained captures used the prototype Gemmini capability
+view SHA256 `9d93adb81b1a1f9c7866251dae57e9318acbdfc1699a6a32cebcc02e37a36b4b`,
+authored software spec SHA256 `d88278e321b0650296f6d34aff35f2b01e7995a5e0ca2ed45cd3a73397f9fc1f`,
+and host manifest SHA256 `74a614e86bf27b0e290d06b9b0d7b6c5035b6cb8a1f0a471e5c37eca2275d8c0`.
+This combination is a diagnostic screen, not a reviewed frozen Phase 0 selection.
+
+| Exact retained capture | MLIR nodes / SSA uses | Ledger result |
+| --- | ---: | --- |
+| `coverage-mlp-r5`, `34a57374…` | 134 / 161 | Total |
+| `residual_cnn-r5`, `8ee18181…` | 411 / 465 | Total |
+| `causal_decoder-r5`, `a2c61d7f…` | 414 / 481 | Total |
+| `multimodal_policy-r5`, `ebcd809e…` | 485 / 572 | Total |
+| SmolVLA r3 `prefix_encode`, `c9d344cc…` | 13,396 / 15,892 | Dynamic shape unproved |
+| SmolVLA r3 `flow_denoise`, `3d672bde…` | 8,724 / 10,156 | Ledger total; source trace incomplete |
+| SmolVLA r3 `action_decode`, `cb553c11…` | 3 / 1 | Ledger total; trivial stage only |
+
+The four iteration captures have complete static frontend correspondence, but
+their materialized receipts all report `source_closure_verified: false`. Both
+large SmolVLA stages report incomplete quantized-to-prepared correspondence;
+`prefix_encode` additionally has prepared nodes `n552`–`n557` without final
+lowering correspondence. The host manifest is `unreviewed`, leaving all host
+admissions unknown. No target execution or whole-model numerical match follows
+from these counts. The selected Gemmini compiler's retained whole-model
+`emit_command_buffer` observations explicitly decline routing upstream Linalg
+regions, even where parse and native LLVM lowering accepted the model.
+
+The SmolVLA dynamic value is a data-dependent `aten.index.Tensor` mask gather in
+vision embeddings (`mask_gather_0`, prepared node `n551`). A 1,024-element mask
+is summed to allocate `tensor<?xi64>` for selected positions; a later
+`aten.index_put.default` (`mask_scatter_0`, node `n559`) reads those positions.
+Its length can vary from 0 to 1,024, so one static-shape guard cannot establish
+the needed semantics. A compiler route could carry a fixed 1,024-element scratch
+tensor plus `valid_count`, prove the count bound and guarded read invariant, and
+test equivalence of the transformed scatter. Alternatively, a reviewed host
+island needs a bounded dynamic-buffer ABI, explicit transfer contract and
+independent numerical execution receipt. Either route also needs repaired
+frontend correspondence before a complete Phase 1 claim.
 
 This is deliberately separate from [Phase 2](../phase2/README.md): Phase 1
 establishes functional compiler capability and a frozen submission; Phase 2

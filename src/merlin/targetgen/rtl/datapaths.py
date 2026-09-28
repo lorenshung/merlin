@@ -61,10 +61,11 @@ too. Every dtype token that comes out of here is a name the format registry
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from merlin.common import quant_formats as qf
 
@@ -284,6 +285,7 @@ class CellDatapath:
     operand_dtype_why: str = ""
     accum_dtype_why: str = ""
     naming: dict = field(default_factory=dict)  # bits -> (format, module that names it)
+    declared_carriers: dict = field(default_factory=dict)  # role -> exact typed port observations
 
     def key(self) -> tuple:
         """What two readings of the same cell must agree on to be folded into one."""
@@ -328,6 +330,8 @@ class CellDatapath:
             }
             if dtype is None:
                 rec["dtype_unknown"] = why
+            if role in self.declared_carriers:
+                rec["declared_carrier"] = self.declared_carriers[role]
             out.append(rec)
         return out
 
@@ -413,6 +417,27 @@ def cell_datapath(source: str | Elaboration, module: str) -> tuple[CellDatapath 
 
     op_dtype, op_why = _resolve(operand_bits)
     ac_dtype, ac_why = _resolve(accum_bits)
+
+    def carrier(ports: list[str], bits: int) -> dict:
+        declarations = [
+            {
+                "port": member.name,
+                "firrtl_type": member.type_text,
+                "signed": member.type_text.strip().startswith("SInt<"),
+                "direction": "input" if member.is_input() else "output",
+            }
+            for member in mp.fields
+            if member.name in ports
+        ]
+        signs = {member["signed"] for member in declarations}
+        return {
+            "status": "observed",
+            "element_bits": bits,
+            "signedness": "mixed" if len(signs) != 1 else "signed" if True in signs else "unsigned",
+            "declarations": declarations,
+            "qualification": "FIRRTL carrier type only; arithmetic semantics and tensor quantization are not inferred",
+        }
+
     return CellDatapath(
         module=module,
         operand_bits=operand_bits,
@@ -426,6 +451,10 @@ def cell_datapath(source: str | Elaboration, module: str) -> tuple[CellDatapath 
         operand_dtype_why=op_why,
         accum_dtype_why=ac_why,
         naming={b: naming[b] for b in (operand_bits, accum_bits) if b in naming},
+        declared_carriers={
+            OPERAND_ROLE: carrier(inward[operand_bits], operand_bits),
+            ACCUM_ROLE: carrier(inward[accum_bits] + outward[accum_bits], accum_bits),
+        },
     ), ""
 
 

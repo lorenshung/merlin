@@ -227,3 +227,28 @@ def test_a_capsule_whose_program_contains_the_chain_witnesses_it(tmp_path):
     gap = C._scope_gap([{"signature": "contraction -> contraction -> contraction"}], [root])
     assert gap["n_covered"] == 1 and gap["uncovered"] == []
     assert gap["witnessed_by"]["contraction -> contraction -> contraction"] == ["A"]
+
+
+def test_scope_uses_declared_interface_program_without_claiming_target_execution(tmp_path):
+    from merlin.targetgen import conformance as C
+
+    root = tmp_path / "corpus"
+    (root / "A").mkdir(parents=True)
+    (root / "A" / "capsule.yaml").write_text("name: A\nlabel: public\nlinalg_mlir: capsule.interface.mlir\n")
+    (root / "A" / "capsule.interface.mlir").write_text(_CHAIN)
+    gap = C._scope_gap([{"signature": "contraction -> contraction -> contraction"}], [root])
+    assert gap["witnessed_by"]["contraction -> contraction -> contraction"] == ["A"]
+    assert gap["capsules_without_a_program"] == 0
+    assert "target compilation and execution are not observed" in gap["qualification"]
+
+
+def test_scope_refuses_declared_program_escape(tmp_path):
+    from merlin.targetgen import conformance as C
+
+    root = tmp_path / "corpus"
+    (root / "A").mkdir(parents=True)
+    (root / "A" / "capsule.yaml").write_text("name: A\nlabel: public\nlinalg_mlir: ../foreign.mlir\n")
+    (root / "foreign.mlir").write_text(_CHAIN)
+    gap = C._scope_gap([{"signature": "contraction -> contraction -> contraction"}], [root])
+    assert gap["uncovered"] == ["contraction -> contraction -> contraction"]
+    assert gap["capsules_unreadable"] == 1

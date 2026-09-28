@@ -3,9 +3,10 @@ interface candidates (4 variants), runtime candidates, Stage-D validation, Exo s
 
 import os
 
-from merlin.common.paths import merlin_dir
+from merlin.common.paths import merlin_dir, repo_root
 from merlin.kernels import policy, validate
 from merlin.kernels.emit.kernel_record import emit_kernel_record
+from merlin.kernels.framework_contracts import use_feature_contract
 from merlin.kernels.ingest.generic import ingest_generic
 
 DATA = str(merlin_dir() / "tests" / "data" / "kernels")
@@ -28,7 +29,10 @@ def test_memory_behavior_and_measured_reuse():
 
 
 def test_dispatch_metrics_present_for_gemmini():
-    r = _rec("autocomp_gemmini_matmul.c", "autocomp", "gemmini", "matmul", "i8")
+    bare = _rec("autocomp_gemmini_matmul.c", "autocomp", "gemmini", "matmul", "i8")
+    assert "dispatch_metrics" not in bare["features"]
+    with use_feature_contract(repo_root() / "examples/gemmini/target/feature-extraction.yaml"):
+        r = _rec("autocomp_gemmini_matmul.c", "autocomp", "gemmini", "matmul", "i8")
     dm = r["features"]["dispatch_metrics"]
     assert dm["n_dispatches"] > 0
     assert dm["small_dispatch_fraction"] > 0.5
@@ -110,7 +114,8 @@ def test_exo_schedule_markers_fire():
         "gemmini = tile_outer_loops(gemmini)\n"
         "gemmini = replace_gemmini_calls(gemmini)\n"
     )
-    fired = fired_markers(sched, "exo_schedule")
+    with use_feature_contract(repo_root() / "examples/gemmini/target/feature-extraction.yaml"):
+        fired = fired_markers(sched, "exo_schedule")
     assert "accumulator_lifetime" in fired  # GEMM_ACCUM
     assert "packed_rhs" in fired  # GEMM_SCRATCH staging
     assert "weight_stationary_dataflow" in fired

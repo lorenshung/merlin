@@ -2,10 +2,11 @@
 
 import os
 
-from merlin.common.paths import merlin_dir
+from merlin.common.paths import merlin_dir, repo_root
 from merlin.kernels import policy, report
 from merlin.kernels.classify import classify_motifs
 from merlin.kernels.emit.kernel_record import emit_kernel_record
+from merlin.kernels.framework_contracts import use_feature_contract
 from merlin.kernels.ingest.generic import ingest_generic
 
 DATA = str(merlin_dir() / "tests" / "data" / "kernels")
@@ -13,6 +14,9 @@ DATA = str(merlin_dir() / "tests" / "data" / "kernels")
 
 def _rec(name, source, target, op, dtype):
     nk = list(ingest_generic(os.path.join(DATA, name), source=source, target=target, op=op, dtype=dtype))[0]
+    if target == "gemmini":
+        with use_feature_contract(repo_root() / "examples/gemmini/target/feature-extraction.yaml"):
+            return emit_kernel_record(nk)
     return emit_kernel_record(nk)
 
 

@@ -106,7 +106,7 @@ def _purpose(rel: str) -> str:
 
 
 def _status(rel: str) -> str:
-    """An experiment declares `Status: active|frozen|reference` in its AGENT.md (merlin/experiments)."""
+    """An experiment declares `Status: active|blocked|frozen|reference` in its AGENT.md (merlin/experiments)."""
     agent = ROOT / rel / "AGENT.md"
     if not agent.is_file():
         return ""

@@ -1,7 +1,4 @@
-# Framework contract for Autocomp-generated kernels. Autocomp emits Gemmini C (RoCC tiled_matmul /
-# conv calls via the gemmini.h library), so its declared ISA target is gemmini — this `isa:` field is
-# the single source of truth the kernel-index CLI reads for autocomp's default target (no target-name
-# literal in core Python). Hand-authored; refine as the caller-side contract is verified.
+# Caller-side assumptions for Autocomp-generated Gemmini C kernels.
 framework: autocomp
 isa: gemmini
 layout:

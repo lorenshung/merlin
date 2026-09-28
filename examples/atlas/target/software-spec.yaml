@@ -1,0 +1,60 @@
+# Authored software semantics. RTL geometry/protocol and qualification are generated evidence.
+schema: merlin.software_spec.v1
+target: atlas
+numerical_semantics:
+  model:
+    engine: specir_fp_reduce
+    source_root_env: SPECIR_ROOT
+  operand_dtype: fp8_e4m3
+  accumulator_dtype: bf16
+  readout_dtype: bf16
+  product_rounding: accumulator_format
+  rounding: rne
+  reduction_order: index_sequential
+  reduction_cadence: per_step
+  subnormal_operand_flush: true
+  internal_arithmetic:
+    operand_domain:
+      exponent_range: [1, 14]
+      signed_zero: true
+    addend_domain: finite_normal_or_zero
+    output_overflow: finite_bf16_clamp
+operations:
+  contraction:
+    placement: accelerator
+    operand_dtypes: [fp8_e4m3]
+    accumulator_dtype: bf16
+    ranks: [2, 3]
+    layouts: [row_major_contiguous]
+    tails: [zero_pad_valid_window]
+    broadcasting: [none, independent_batches]
+    aliasing: [disjoint_inputs_outputs]
+  elementwise_map:
+    placement: unknown
+    dtypes: [bf16]
+  movement:
+    placement: accelerator
+    dtypes: [fp8_e4m3, bf16]
+    layouts: [row_major_contiguous]
+    aliasing: [disjoint_inputs_outputs]
+  host_fallback:
+    families: [reduction, normalization, attention, softmax]
+    placement: unknown
+    dtypes: [f32]
+quantization:
+  formats:
+    - operand_dtype: fp8_e4m3
+      accumulator_dtype: bf16
+      eligible_operations: [contraction]
+      scale_encoding: unknown
+      block_size: unknown
+transfer_contracts:
+  operand_load:
+    from: host
+    to: accelerator
+    copy: {dtype: fp8_e4m3, layout: row_major_contiguous}
+  accumulator_readout:
+    from: accelerator
+    to: host
+    copy: {dtype: bf16, layout: row_major_contiguous}
+    valid_window: required

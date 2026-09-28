@@ -33,8 +33,8 @@ def _gate():
     return mod
 
 
-def test_the_declaration_names_the_four_claim_models():
-    assert set(CM.claim_models()) == {"resnet50_v1_5", "lstmnetvit", "smolvla", "tiny_llama"}
+def test_the_declaration_names_the_three_headline_validation_models():
+    assert set(CM.claim_models()) == {"resnet50", "smolvla", "tiny_llama"}
     assert CM.exclusion_rule(), "the standard a reviewer applies must be stated, not implied"
     assert "claim_captures" in CM.forbidden_sources(), (
         "a name is not enough to exclude a model; the artifact classes carrying its facts must be named"
@@ -49,11 +49,12 @@ def test_matching_is_on_token_boundaries_not_substrings():
     Too tight is the mirror: a bundle whose model matches must be caught however it is suffixed.
     """
     assert CM.model_of("tiny_llama_fp32_full") == "tiny_llama"
-    assert CM.model_of("lstmnetvit_int8_consistent") == "lstmnetvit"
-    assert CM.model_of("resnet50_v1_5_fp32_consistent") == "resnet50_v1_5"
+    assert CM.model_of("smolvla_int8_consistent") == "smolvla"
+    assert CM.model_of("resnet50_v1_5_fp32_consistent") == "resnet50"
 
     assert CM.model_of("small_llama_fp32_consistent") is None, "shares a token, is not a claim model"
     assert CM.model_of("gemma2_2b_int8_full") is None
+    assert CM.model_of("lstmnetvit_int8_consistent") is None
     assert CM.model_of("lstmnetvit2_fp32") is None, "a longer first token is a different model"
     assert CM.model_of("tiny_llamaX_fp32") is None
 

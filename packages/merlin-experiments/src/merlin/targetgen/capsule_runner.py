@@ -2708,7 +2708,12 @@ def resolve_numeric_policy(
     frozen = None
     if declared is not None and snapshot is not None:
         frozen = _model_frozen_input(declared, snapshot)
-    policy, identity = load_declared_numeric_policy(experiment, repo=original_repo, frozen_profile=frozen)
+    policy, identity = load_declared_numeric_policy(
+        experiment,
+        repo=original_repo,
+        frozen_profile=frozen,
+        frozen_resolver=(lambda source: _model_frozen_input(source, snapshot)) if snapshot is not None else None,
+    )
     return policy, identity, experiment
 
 
@@ -4499,8 +4504,9 @@ def run_capsule(
             }
 
         # --- golden + L0/L1 -----------------------------------------------------------------
-        # The golden is the INDEPENDENT oracle's answer. For an integer capsule (gemmini / exact_int /
-        # golden_source merlin_tensor_int) it is RECOMPUTED on the Tensor engine (byte-identical). For a
+        # The golden is the INDEPENDENT oracle's answer. An exact source-bound PyTorch integer
+        # slice is recomputed on its captured typed operands and cross-checked against host eager.
+        # Other integer capsules recompute on their declared synthetic stimulus. For a
         # float capsule that ships an independent golden.yaml (atlas fp8-e4m3 -> bf16, golden_source
         # specir_refmodel_fp8_bf16), the integer engine cannot reproduce the float datapath, so the golden
         # is READ from golden.yaml — resolved by policy+source, never a target name.
@@ -4558,8 +4564,8 @@ def run_capsule(
 
         _vals = CG.canonical_input_values(capsule, capsule_dir)
         if whole_program and not independent_float:
-            # A recomputed integer golden is defined over deterministic leaf materialization, even if
-            # a historical golden.yaml also happens to record a DIFFERENT decoded operand payload.
+            # Materialize the golden's exact leaf stimulus: captured host-eager bytes for an
+            # exact source-bound integer slice, deterministic leaves for synthetic capsules.
             # Whole-program lowering may rename leaves positionally (A0 -> arg0), so attach the exact
             # semantic stimulus before re-keying it below; otherwise the harness materializes from the
             # new positional names and evaluates the right program on different data.
@@ -4591,6 +4597,14 @@ def run_capsule(
 
                         for _leaf, _rb in zip(_leaves, list(_raws.values())):
                             _tensors[_leaf]["preload_b64"] = _b64.b64encode(_rb).decode()
+
+        if CG.is_exact_pytorch_integer_source(capsule):
+            # Reference, simulator, RTL and whole-program harness all consume the same
+            # captured bytes as the independently checked Torch output.
+            try:
+                CG.bind_exact_integer_stimulus(capsule, cb)
+            except ValueError as exc:
+                raise CertFailure("canonical_input_binding", _cat("PROTOCOL_VIOLATION"), str(exc)) from exc
 
         # Stamp the HARNESS-owned canonical DRAM layout onto every cb tensor (inputs+output), matched by
         # name. The agent's kernel was told these exact addresses (see the emit contract), so preload,

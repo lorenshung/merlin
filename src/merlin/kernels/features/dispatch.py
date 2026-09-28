@@ -20,7 +20,7 @@ def extract_dispatch(nk: NormalizedKernel, fired: dict[str, list[str]]) -> dict:
     # `fam == "gemmini"` branch. A family with no dispatch contract has no dispatch metric.
     spec = load_feature_contract(target_family(nk.target)).get("dispatch")
     if not spec:
-        return {"dispatch_metrics": {"n_dispatches": 0, "small_dispatch_fraction": 0.0}}
+        return {}  # no declared opcode vocabulary: a zero count would masquerade as a measurement
     config_prefix = spec.get("config_prefix", "")
     compute_token = spec.get("compute_token", "")
     calls = match_opcodes(nk.raw_text, spec.get("opcodes", ()))

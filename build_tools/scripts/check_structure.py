@@ -218,7 +218,7 @@ def check_agent_md(errors):
                     require(f"merlin/{area}/{sub}")
 
 
-EXPERIMENT_STATUSES = ("active", "frozen", "reference")
+EXPERIMENT_STATUSES = ("active", "blocked", "frozen", "reference")
 
 
 def check_experiment_status(errors):
@@ -227,7 +227,8 @@ def check_experiment_status(errors):
     Measured 2026-09-14: an audit classed experiments as abandoned from commit age alone; two were cited
     by live guides and one was under development on another branch. A ``Status:`` line in the first 15
     lines of the experiment's AGENT.md says which: ``active``, ``frozen`` (finished; results in its
-    FINDINGS.md, which must exist) or ``reference`` (a scaffold others copy, with no runs of its own).
+    FINDINGS.md, which must exist), ``blocked`` (work or replay awaits a declared external input), or
+    ``reference`` (a scaffold others copy, with no runs of its own).
     Retiring an experiment means deleting it -- git history is the archive -- so no status names that.
     """
     exp = os.path.join(ROOT, "merlin", "experiments")

@@ -27,19 +27,36 @@ to the wrong device.
 from __future__ import annotations
 
 import contextlib
+import contextvars
+import copy
 import json
 import os
 import warnings
 from pathlib import Path
 from typing import Any
 
-from merlin.common.digest import is_sha256, sha256_file
+from merlin.common.digest import sha256_file
 from merlin.common.paths import artifacts_dir
 
 # Re-entrancy guard: ``ensure_facts`` regenerates by importing ``circt_introspect`` (which imports
 # this module) — the guard makes a regeneration that transitively re-asks for the same target fail
 # loud instead of recursing forever.
 _REGENERATING: set[str] = set()
+_OBSERVED = contextvars.ContextVar("merlin_observed_rtl_facts", default={})
+
+
+@contextlib.contextmanager
+def observed_facts(target: str, document: dict, path: Path | None = None):
+    """Route nested legacy consumers to one explicit observation without extraction.
+
+    New consumers pass facts directly. This scoped bridge keeps OOT hooks that
+    use the shared accessor on the same captured bytes; it is not qualification.
+    """
+    token = _OBSERVED.set({**_OBSERVED.get(), target: (copy.deepcopy(document), path)})
+    try:
+        yield
+    finally:
+        _OBSERVED.reset(token)
 
 
 def target_base(target: str) -> Path:
@@ -477,68 +494,10 @@ def _has_facts(doc) -> bool:
 
 
 def _declared_cache_pins_match(doc: dict) -> bool:
-    """Check existing extractor/FIR/feature commitments before reusing a cache.
+    """Check consumed-source commitments through the shared receipt verifier."""
+    from .source_receipts import cache_pins_match
 
-    This is not hardware qualification. Artifacts without these optional pins
-    remain legacy, unverified evidence. A declared pin whose source cannot be
-    resolved or no longer matches is not a reusable cache entry.
-    """
-    from merlin.common.paths import module_source_path
-
-    inputs = doc.get("inputs") or {}
-    if not isinstance(inputs, dict):
-        return False
-
-    checked = {}
-
-    def matches(path, digest):
-        if not is_sha256(digest) or not isinstance(path, (str, Path)) or not path:
-            return False
-        try:
-            if path not in checked:
-                checked[path] = sha256_file(path)
-            return checked[path] == digest
-        except OSError:
-            return False
-
-    extractor = inputs.get("extractor_sha256")
-    if extractor is not None:
-        generator = doc.get("generator") or {}
-        # Only the core extractor currently declares this commitment. Do not
-        # import arbitrary generator names from an evidence document.
-        if not isinstance(generator, dict) or generator.get("name") != "merlin.targetgen.rtl.circt_introspect":
-            return False
-        if not matches(module_source_path("merlin.targetgen.rtl.circt_introspect"), extractor):
-            return False
-    reader = inputs.get("extraction_reader_sha256")
-    if reader is not None and not matches(module_source_path("merlin.targetgen.rtl.extraction_contract"), reader):
-        return False
-    extraction_contract = inputs.get("extraction_contract_sha256")
-    if extraction_contract is not None:
-        target = inputs.get("target")
-        if not isinstance(target, str) or not target or not matches(target_contract_path(target), extraction_contract):
-            return False
-    body = doc.get("facts") or {}
-    if not isinstance(body, dict):
-        return False
-    interfaces = body.get("interfaces") or []
-    fir_sources = []
-    for item in interfaces:
-        if not isinstance(item, dict):
-            continue
-        digest = item.get("source_sha256")
-        if digest in (None, "unresolved", "missing", "n/a"):
-            continue
-        if not matches(item.get("source"), digest):
-            return False
-        if item.get("name") == "elaborated_rtl_features":
-            fir_sources.append(item.get("source"))
-    fir_digest = inputs.get("fir_sha256")
-    if fir_digest not in (None, "unresolved", "missing", "n/a"):
-        sources = [inputs["fir_path"]] if inputs.get("fir_path") else fir_sources
-        if not sources or not all(matches(path, fir_digest) for path in sources):
-            return False
-    return True
+    return cache_pins_match(doc, contract_path=target_contract_path, file_digest=sha256_file)
 
 
 def ensure_facts(target: str, *, explicit: str | Path | None = None) -> Path:
@@ -579,6 +538,12 @@ def find_facts(target: str, *, explicit: str | Path | None = None) -> Path | Non
 
 
 def _resolve_facts(target: str, *, explicit: str | Path | None, regenerate: bool) -> Path | None:
+    captured = _OBSERVED.get().get(target)
+    if captured is not None and explicit is None:
+        path = captured[1]
+        if path is None and regenerate:
+            raise FileNotFoundError(f"{target}: the explicit observation has no RTL artifact; never regenerated")
+        return path
     if explicit is None and not os.environ.get("MERLIN_RTL_FACTS"):
         selected, pin = _selected_external_facts(target)
         if selected:
@@ -1125,6 +1090,9 @@ def load_facts(target: str, *, explicit: str | Path | None = None) -> dict[str, 
     left no trace would make the variant's facts indistinguishable from its base's, which is exactly the
     confusion "a result attributed to the wrong device" describes. The stamp lives OUTSIDE ``facts``, so
     the body every consumer reads is byte-identical to the base's."""
+    captured = _OBSERVED.get().get(target)
+    if captured is not None and explicit is None:
+        return copy.deepcopy(captured[0])
     doc = json.loads(ensure_facts(target, explicit=explicit).read_text(encoding="utf-8"))
     # Explicit evidence and selected support pins must not inherit an unrelated
     # descriptor/residual alias merely because it shares the requested name.

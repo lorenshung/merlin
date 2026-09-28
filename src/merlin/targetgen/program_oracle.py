@@ -113,6 +113,10 @@ def _run_emit_helper(
     """Run the selected support emitter in the model venv and read its JSON bundle."""
     helper, options = _program_emitter(target)
     py = _model_venv_python(model_ext)
+    # The model's assembler needs its own cwd. Pin the output against the
+    # caller's cwd first, so a relative run directory stays a run artifact.
+    workdir = Path(workdir).absolute()
+    workdir.mkdir(parents=True, exist_ok=True)
     out = workdir / out_name
     cmd = [str(py), str(helper), *options, "--out", str(out), *extra_args]
     cwd = ext_path(model_ext)  # ASM_FOLDER is cwd-relative in the model

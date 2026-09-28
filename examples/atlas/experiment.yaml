@@ -7,10 +7,12 @@ phases:
     adapter: capsule_derivation
     config:
       recipe: phase0/recipe.yaml
+      software_spec: target/software-spec.yaml
+      hardware_spec: target/hardware.yaml
+      # Diagnostic only: review and production-source consistency are not established.
+      evidence_mode: diagnostic
       performance_template: ../../experiments/templates/phase0/performance.yaml
-      synth_profile: ../../experiments/reference-data/phase0/atlas.synth.yaml
-      smt_profile: ../../merlin/contract/capsules/profiles/atlas.smt.yaml
-      hidden_profile: ../../merlin/contract/capsules/profiles/atlas.hidden.yaml
+      # Select freshly derived conformance/synthesis artifacts with CLI overrides.
       descriptor: target/descriptor.yaml
   1:
     adapter: capsule_bench

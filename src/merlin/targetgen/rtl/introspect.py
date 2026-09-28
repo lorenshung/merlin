@@ -116,6 +116,10 @@ class RtlSourceUndeclared(RuntimeError):
     """
 
 
+class RtlSourceInvalid(RtlSourceUndeclared):
+    """A selected declaration exists but is unusable; an ambient cache cannot replace it."""
+
+
 def _yaml_doc(path: Path) -> dict[str, Any]:
     """A yaml mapping at ``path``, or ``{}``. Never raises — an unreadable declaration is "none"."""
     try:
@@ -188,15 +192,20 @@ def declared_rtl_source(target: str) -> RtlSource:
         ext = block.get("ext_root")
         root = block.get("root")
         if ext:
-            root = ext_path(str(ext))
+            try:
+                root = ext_path(str(ext))
+            except KeyError as exc:
+                raise RtlSourceInvalid(
+                    f"{target}: selected RTL declaration {path} cannot resolve {ext!r}: {exc}"
+                ) from exc
         if not root:
-            raise RtlSourceUndeclared(
+            raise RtlSourceInvalid(
                 f"{target}: {path} declares an RTL source with neither `ext_root` (a .env "
                 f"MERLIN_EXT_<NAME> key) nor `root`, so the checkout it means is not resolvable"
             )
         config = block.get("config")
         if not config:
-            raise RtlSourceUndeclared(
+            raise RtlSourceInvalid(
                 f"{target}: {path} declares an RTL source with no `config`, so WHICH elaboration it "
                 f"means is not resolvable — an SoC checkout holds many, and picking one would be a "
                 f"guess about the hardware"
@@ -524,7 +533,9 @@ def census_facts(fir: str | Path, hierarchy: str | Path, *, generator: str) -> d
                 continue
             kw, decl, typ, site = parsed
             key = (site, _store_name(site, decl), typ)
-            rec = groups.setdefault(key, {"banks": 0, "copies": 1, "modules": set(), "kind": kw, "line": line})
+            rec = groups.setdefault(
+                key, {"banks": 0, "copies": 1, "modules": set(), "kind": kw, "line": line, "module_declarations": {}}
+            )
             # BANKS ARE SIBLINGS, COPIES ARE NOT. Instances of the declaring module that sit side by side
             # under one parent are the banks of one store (a register file built from N bank modules);
             # instances under DIFFERENT parents are separate stores of separate devices (the same buffer
@@ -536,11 +547,31 @@ def census_facts(fir: str | Path, hierarchy: str | Path, *, generator: str) -> d
             rec["banks"] += group
             rec["copies"] = max(rec["copies"], instances // group)
             rec["modules"].add(module)
+            rec["module_declarations"][module] = rec["module_declarations"].get(module, 0) + 1
     undeterminable: list[dict[str, Any]] = []
     for (site, name, typ), rec in sorted(groups.items(), key=lambda kv: -kv[1]["banks"]):
         shape = _mem_shape(typ)
-        banks = rec["banks"]
         mods = sorted(rec["modules"])
+        # Elaboration may specialize one source memory into several module
+        # variants. Group their instances by actual parent before deciding banks:
+        # variants under different compute units are copies, not a larger store.
+        declarations = rec["module_declarations"]
+        unit_stack = [tree]
+        while unit_stack and unit_stack[-1]["module_name"] != root:
+            node = unit_stack.pop()
+            unit_stack.extend(reversed(node.get("instances") or []))
+        bank_groups = list(declarations.values())
+        unit_stack = unit_stack[-1:]  # Exactly one selected accelerator unit.
+        while unit_stack:
+            node = unit_stack.pop()
+            children = node.get("instances") or []
+            bank_groups.append(sum(declarations.get(child["module_name"], 0) for child in children))
+            unit_stack.extend(children)
+        banks = max(bank_groups, default=1)
+        total_instances = sum(counts.get(module, 0) * declarations[module] for module in mods)
+        if total_instances % banks:
+            banks = 1
+        rec["copies"] = max(total_instances // banks, 1)
         if shape is None:
             undeterminable.append(
                 {
@@ -811,6 +842,9 @@ def extract_facts(
             "fir": fir.name,
             "hierarchy": hierarchy.name,
             "fir_path": str(fir),
+            "fir_sha256": _sha256(fir),
+            "hierarchy_path": str(hierarchy),
+            "hierarchy_sha256": _sha256(hierarchy),
         },
         "arrays": [],
         "memories": [],
@@ -975,11 +1009,19 @@ def validate_against_contract(facts: dict[str, Any], contract: dict[str, Any]) -
     compute_units. Mesh geometry, scratchpad capacity and datapath dtypes are no longer hand-declared
     in the contract — they ARE these facts — so there is nothing to cross-check for them; the only
     surviving check is that the contract's compute_units cover the discovered datapath dtype(s)."""
-    dt = {d["name"]: d["dtype"] for d in facts["datapaths"]}
+    records = facts.get("datapaths") or []
+    if not records:
+        return ["UNKNOWN: no RTL datapath evidence is available"]
+    if not contract.get("compute_units"):
+        return ["UNKNOWN: contract declares no compute_units to cross-check"]
+    dt = {d["name"]: d.get("dtype") for d in records if isinstance(d, dict) and d.get("name")}
+    unknown = [f"UNKNOWN: datapath {name} has no resolved dtype" for name, dtype in dt.items() if not dtype]
+    if not dt:
+        unknown.append("UNKNOWN: no named RTL datapath evidence is available")
     # If the contract declares compute_units, the RTL datapaths must be covered by them: the input
     # datapath dtype by some unit's declared formats, and the accumulator by some accumulate rule
     # (when a unit still declares one).
-    return _check_compute_units(dt, contract)
+    return unknown + _check_compute_units(dt, contract)
 
 
 def _check_compute_units(datapaths: dict[str, str], contract: dict[str, Any]) -> list[str]:
@@ -1065,6 +1107,12 @@ CENSUS_VERSION = "rtl-introspect-firrtl-census-v1"
 
 def _sha256_16(path: Path) -> str:
     """A digest of the BYTES actually read, or ``missing`` — never a silently absent provenance field."""
+    digest = _sha256(path)
+    return digest if digest == "missing" else digest[:16]
+
+
+def _sha256(path: Path) -> str:
+    """Full identity of a consumed source, not a human-facing digest prefix."""
     import hashlib
 
     if not Path(path).is_file():
@@ -1073,7 +1121,7 @@ def _sha256_16(path: Path) -> str:
     with Path(path).open("rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             h.update(chunk)
-    return h.hexdigest()[:16]
+    return h.hexdigest()
 
 
 def _checkout_sha(path: str | Path) -> str:
@@ -1127,12 +1175,22 @@ def build_facts_record(target: str) -> dict[str, Any]:
             "declared_by": str(src.origin),
             "rtl_root": str(src.root),
             "fir": fir.name,
+            "fir_path": str(fir.resolve()),
+            "fir_sha256": _sha256(fir),
             "fir_sha": _sha256_16(fir),
             "hierarchy": hier.name,
+            "hierarchy_path": str(hier.resolve()),
+            "hierarchy_sha256": _sha256(hier),
             "hierarchy_sha": _sha256_16(hier),
             "rtl_sha": _checkout_sha(src.root),
             "generator_sha": _checkout_sha(Path(src.root) / "generators" / src.generator),
             "extractor_sha": _sha256_16(Path(__file__)),
+            "extractor_sha256": _sha256(Path(__file__)),
+        },
+        "source_consistency": {
+            "status": "unverified",
+            "reason": "selected FIRRTL and hierarchy have no shared production receipt or reviewed equivalence",
+            "config": src.config,
         },
         "facts": facts,
     }

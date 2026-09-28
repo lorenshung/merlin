@@ -21,15 +21,9 @@ schema_version: 1
 # Held out from derivation; used ONLY to measure coverage. These are the models the experiment claims
 # to support end to end.
 #
-# ⚠️ WHY THIS SET SHRANK FROM FOUR TO TWO. Holding out all four left the corpus with no model-shaped
-# evidence to derive FROM, and a corpus derived from nothing model-shaped cannot contain a layer, a
-# chunk, or a model -- measured, `workload_spec.applications` produced zero capsules on every target and
-# every spec on disk read `declared_applications: 0`. The claim is only as broad as the models it is
-# MEASURED on, so the two we grade against stay held out and the other two became derivation sources:
-# `smolvla` and `lstmnetvit` now drive the requirement (nine bundles already in the store), and the
-# corpus is built from them. Narrowing the claim set is the honest direction -- it makes the claim
-# smaller and the evidence real, rather than leaving a wide claim resting on a corpus that never saw
-# a model.
+# TinyLlama, SmolVLA and ResNet50 are headline validation workloads. Independent
+# iteration workloads must supply derivation evidence instead. Existing frozen
+# runs retain their original roster; adopting this roster requires fresh derivation.
 #
 # ⚠️ DECLARE THE NETWORK, NOT A VARIANT OF IT. `model_of` matches on a whole-token PREFIX, so a claim
 # model named after one variant holds out only that variant's bundles and silently admits every other
@@ -48,6 +42,7 @@ schema_version: 1
 claim_models:
   - resnet50
   - tiny_llama
+  - smolvla
 
 # Everything else under `out/artifacts/recaptures/` derives the requirement. Named as a policy rather
 # than a list so a newly captured model joins derivation by default -- the safe direction, since the

@@ -12,7 +12,15 @@ from merlin.targetgen import corpus_spec as CS  # noqa: E402
 from merlin.targetgen import numeric_falsifiability as NF  # noqa: E402
 
 from .golden_cache import _golden_cached
-from .numerics import _float_golden, _mx_attention_golden, _mx_gemv_batched_golden, _mx_golden, _simt_golden
+from .numerics import (
+    _float_golden,
+    _mx_attention_golden,
+    _mx_gemv_batched_golden,
+    _mx_golden,
+    _simt_golden,
+    float_semantics,
+    specir_oracle_source_identity,
+)
 
 
 def _entry_regime(entry, binding):
@@ -33,6 +41,41 @@ def _entry_regime(entry, binding):
         compare=("exact_int" if regime == "int" else "tolerance_float"),
     )
     return regime, eb
+
+
+def _integer_reference_bound(entry: dict, cap: dict) -> dict:
+    """Screen concrete integer contraction stimuli against selected internal width."""
+    from merlin.targetgen.operation_numerics import integer_partial_sum_bound
+
+    semantics = entry.get("numerical_semantics") or {}
+    policy = (semantics.get("internal_arithmetic") or {}).get("full_operation_overflow_policy")
+    if policy != "bounded_exact_requires_each_partial_sum":
+        return {"status": "unknown", "reason": "no selected full-operation internal-width bound policy"}
+    operation = cap["operation"]
+    op, attrs = operation["op"], operation.get("attributes") or {}
+    if op not in {"matmul", "linear", "matmul_bias", "residual_seam", "conv2d"}:
+        return {"status": "not_applicable", "reason": "this writer path is not a single integer contraction"}
+    leaves = CG.materialize_capsule_leaves(cap)
+
+    def name(role, declared):
+        return attrs.get(declared) or next((row["name"] for row in cap["inputs"] if row.get("role") == role), None)
+
+    lhs_name, rhs_name = name("input", "ifm" if op == "conv2d" else "lhs"), name("weight", "weight")
+    if lhs_name not in leaves or rhs_name not in leaves:
+        raise ValueError("integer contraction bound requires concrete lhs and weight operands")
+    lhs, rhs = leaves[lhs_name], leaves[rhs_name]
+    reduction_extent = rhs.shape[0] if op == "conv2d" else lhs.shape[-1]
+    initial = [int(value) for key, tensor in leaves.items() if key not in {lhs_name, rhs_name} for value in tensor.data]
+    result = integer_partial_sum_bound(
+        semantics,
+        reduction_extent=reduction_extent,
+        lhs_values=[int(v) for v in lhs.data],
+        rhs_values=[int(v) for v in rhs.data],
+        initial_values=initial,
+    )
+    if result["status"] != "proven_safe":
+        raise ValueError(f"integer mathematical golden cannot qualify selected internal MAC width: {result}")
+    return result
 
 
 # ------------------------------------------------------------------------------------------------
@@ -427,6 +470,9 @@ def _write_capsule_inner(entry, binding, out_root, facts_sha: str = ""):
     if entry.get("kind") == "model" or entry.get("op") == "model":
         from merlin.targetgen import capsule_source as CSRC
 
+        if entry.get("materialized_capture"):
+            artifact = CSRC.materialized_model_artifacts(entry["materialized_capture"])
+            return CSRC.write_model_capsule(entry, eb, out_root, artifact=artifact)
         src = CSRC.PytorchRefSource()
         if not src.available():
             print(f"  [skip] {entry['name']}: model capsule needs the m2m venv (set MERLIN_M2M_PYTHON)")
@@ -442,16 +488,19 @@ def _write_capsule_inner(entry, binding, out_root, facts_sha: str = ""):
     # interface; int/MX datapaths keep the direct-MLIR engines below (the endorsed fallback for the
     # dtypes torch/torchAO does not faithfully model, e.g. int8xint8 systolic or block-scaled MX).
     if entry.get("source") == "pytorch" or entry.get("pytorch_ref"):
+        from merlin.targetgen.application_inventory import int_mm_source_is_qualified
+
         # AN ENTRY THAT NAMES A QUANTIZATION SCHEME has said which arithmetic its program must contain,
         # so the float-regime restriction below does not apply to it. The restriction exists because a
         # host-eager float reference cannot grade an int/MX datapath -- but that is a statement about
         # the DEFAULT weight-only capture, which emits a float matmul over dequantized weights. A W8A8
         # scheme emits `aten._int_mm` accumulating in i32, which IS the mesh's arithmetic, and torch
         # eager then computes the same quantized math, so the golden is right by construction.
+        # For operation-derived slices, the source's exact digest-bound integer arithmetic is checked
+        # independently. Static and dynamic whole-model quantization remain distinct source schemes.
         if entry.get("quant_scheme") or (
             entry.get("capture_op") == "int_matmul"
-            and (entry.get("application_signature_match") or {}).get("source_quantization")
-            == "int8_dyn_act_int8_weight"
+            and int_mm_source_is_qualified(entry.get("application_signature_match") or {})
         ):
             pass
         elif regime != "simt":
@@ -494,28 +543,46 @@ def _write_capsule_inner(entry, binding, out_root, facts_sha: str = ""):
         yaml.safe_dump(cap["expected"], sort_keys=False), encoding="utf-8"
     )
     if regime == "int":
+        bound = _integer_reference_bound(entry, cap)
+        cap["integer_partial_sum_bound"] = bound
+        (d / "capsule.yaml").write_text(yaml.safe_dump(cap, sort_keys=False), encoding="utf-8")
         (d / "golden.yaml").write_text(
             yaml.safe_dump(
-                {"golden_source": "merlin_tensor_int", "outputs": CG.golden({**cap, "__dir__": ""})}, sort_keys=False
+                {
+                    "golden_source": "merlin_tensor_int",
+                    "integer_partial_sum_bound": bound,
+                    "qualification": "mathematical reference; target execution and full-mesh ordering unverified",
+                    "outputs": CG.golden({**cap, "__dir__": ""}),
+                },
+                sort_keys=False,
             ),
             encoding="utf-8",
         )
     elif regime == "specir":
-        outputs, prov = _golden_cached(_float_golden, entry, eb, facts_sha)
+        selected_semantics = float_semantics(entry, eb)
+        oracle_source = specir_oracle_source_identity(selected_semantics)
+        outputs, prov = _golden_cached(_float_golden, entry, eb, facts_sha, oracle_source=oracle_source)
+        if specir_oracle_source_identity(selected_semantics) != oracle_source:
+            raise OSError("selected SpecIR oracle source changed while computing the golden")
         (d / "golden.yaml").write_text(
             yaml.safe_dump(
                 {
-                    "golden_source": "specir_refmodel_fp8_bf16",
+                    "golden_source": (
+                        "specir_refmodel_float"
+                        if selected_semantics["selection_status"] == "explicit"
+                        else "specir_refmodel_fp8_e4m3_bf16"
+                    ),
                     "oracle_provenance": {
                         "engine": "specir.oracle.dtypes + specir.oracle.refmodel.fp_reduce",
-                        "datapath": "acc <- round_bf16(acc + round_bf16(a*w)); k index_sequential; per_step; rne",
+                        "source_identity": oracle_source,
+                        "datapath": selected_semantics,
                         # How the datapath decodes an operand code. A unit that admits only normal operands
                         # reads a zero exponent field as zero; the golden decodes it the same way, so the two
                         # references implement ONE datapath (see the target's profile ``datapath`` block).
                         "operand_decode": ("subnormal_flush_to_zero" if eb.subnormal_operand_flush else "exact"),
                         "operand_dtype": eb.cap_dtype(eb.operand_dtype),
                         "accum_dtype": eb.cap_dtype(eb.accum_dtype),
-                        "output_dtype": "bf16",
+                        "output_dtype": selected_semantics["readout_dtype"],
                         "note": "INDEPENDENT of the target RTL (not self-oracle); specir refmodel is the reference.",
                         "grade_policy": {"compare": eb.compare, "atol": eb.atol, "rtol": eb.rtol},
                         "inputs": prov,

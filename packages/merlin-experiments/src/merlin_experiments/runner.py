@@ -135,6 +135,14 @@ def _verify_phase0_sources(plan: dict) -> None:
             continue  # Historical script receipts keep their original source validation.
         if command["module"] != PHASE0_MODULE or command["argv"][1:3] != ["-m", PHASE0_MODULE]:
             raise SpecError("phase-0 module binding is not the supported derivation implementation")
+        if plan.get("phase0_source_snapshot"):
+            from .phase0.freeze import verify
+
+            try:
+                verify(plan)
+            except (OSError, ValueError) as exc:
+                raise SpecError(f"frozen Phase 0 sources changed: {exc}") from exc
+            continue
         entrypoint, expected = _phase0_source_inputs()
         if command["env"].get("PYTHONSAFEPATH") != "1" or command["env"].get("PYTHONPATH", "").split(os.pathsep)[
             0
@@ -153,7 +161,17 @@ def _verify_phase0_sources(plan: dict) -> None:
                     raise SpecError("phase-0 implementation lacks its frozen source closure")
 
 
-_PHASE0_OPTIONAL_INPUTS = frozenset({"conformance_spec", "synth_profile", "smt_profile", "hidden_profile"})
+_PHASE0_OPTIONAL_INPUTS = frozenset(
+    {
+        "conformance_spec",
+        "synth_profile",
+        "smt_profile",
+        "hidden_profile",
+        "software_spec",
+        "hardware_spec",
+        "rtl_facts",
+    }
+)
 
 
 def _phase0_input_paths(membership: dict) -> dict[str, str]:
@@ -221,6 +239,7 @@ def _phase0_synthesis_status(plan: dict) -> dict:
                 conformance_spec=selected.get("conformance_spec"),
                 recipe=selected.get("recipe"),
                 descriptor=selected.get("descriptor"),
+                **({"software_spec": selected["software_spec"]} if selected.get("software_spec") else {}),
             )
         except (OSError, ValueError, YAMLError) as exc:
             raise SpecError(f"phase-0 selected synthesis is invalid: {exc}") from exc
@@ -369,6 +388,8 @@ def resolve_plan(
     phase0_conformance_spec: Path | None = None,
     phase0_synth_profile: Path | None = None,
     phase0_hidden_profile: Path | None = None,
+    phase0_rtl_facts: Path | None = None,
+    phase0_evidence_mode: str | None = None,
 ) -> dict:
     from merlin.common.paths import out_dir, repo_root
 
@@ -385,7 +406,16 @@ def resolve_plan(
     if (phase0_conformance_spec is None) != (phase0_synth_profile is None):
         raise SpecError("select both --phase0-conformance-spec and --phase0-synth-profile")
     if (
-        any(path is not None for path in (phase0_conformance_spec, phase0_synth_profile, phase0_hidden_profile))
+        any(
+            path is not None
+            for path in (
+                phase0_conformance_spec,
+                phase0_synth_profile,
+                phase0_hidden_profile,
+                phase0_rtl_facts,
+                phase0_evidence_mode,
+            )
+        )
         and phase != "0"
     ):
         raise SpecError("Phase 0 artifact selection requires --phase 0")
@@ -394,6 +424,7 @@ def resolve_plan(
         ("conformance_spec", phase0_conformance_spec),
         ("synth_profile", phase0_synth_profile),
         ("hidden_profile", phase0_hidden_profile),
+        ("rtl_facts", phase0_rtl_facts),
     ):
         if path is None:
             continue
@@ -401,6 +432,10 @@ def resolve_plan(
         if candidate.is_symlink() or not candidate.is_file():
             raise SpecError(f"selected Phase 0 {name} is not an existing ordinary file: {candidate}")
         phase0_selection[name] = str(candidate)
+    if phase0_evidence_mode is not None:
+        if phase0_evidence_mode not in ("diagnostic", "verified"):
+            raise SpecError("Phase 0 evidence mode must be diagnostic or verified")
+        phase0_selection["evidence_mode"] = phase0_evidence_mode
     commands = {}
     corpus_closures = {}
     phase1_operator_inputs = None
@@ -441,6 +476,14 @@ def resolve_plan(
                     continue  # Membership and present bytes are pinned below, not absent paths.
             inputs[f"phase{number}:{name}"] = value
         if adapter.name == "capsule_derivation":
+            if command["inputs"].get("software_spec"):
+                from .phase0.freeze import selected_inputs
+
+                try:
+                    evidence_inputs, command["phase0_evidence"] = selected_inputs(command, spec.target)
+                except (OSError, ValueError) as exc:
+                    raise SpecError(f"invalid Phase 0 evidence selection: {exc}") from exc
+                inputs.update(evidence_inputs)
             if "recipe" in command["inputs"]:
                 phase0_operator_inputs = _phase0_operator_inputs(command)
                 inputs.update(_phase0_input_paths(phase0_operator_inputs))
@@ -538,8 +581,18 @@ def preflight(plan: dict) -> dict:
 
         verify_portfolio_plan(plan)
         synthesis = _phase0_synthesis_status(plan)
+        for command in plan["phases"].values():
+            if command.get("phase0_evidence") and command["phase0_evidence"]["status"] != "verified":
+                diagnostic = (
+                    "--evidence-mode" in command["argv"] and _command_value(command, "--evidence-mode") == "diagnostic"
+                )
+                if not diagnostic:
+                    errors.append("Phase 0 evidence is not qualified; select explicit diagnostic mode for inspection")
         for number, result in synthesis.items():
-            if result["status"] == "unverified_legacy":
+            if result["status"] == "unverified_legacy" and not (
+                "--evidence-mode" in plan["phases"][number]["argv"]
+                and _command_value(plan["phases"][number], "--evidence-mode") == "diagnostic"
+            ):
                 errors.append(
                     f"phase {number} selected synthesis is unverified_legacy; "
                     "regenerate and review a digest-bound profile, then freeze a new run"
@@ -648,6 +701,13 @@ def run(plan: dict) -> int:
     except FileExistsError as exc:
         raise SpecError(f"run directory already exists; use resume: {root}") from exc
     frozen = dict(plan, frozen_at=_now(), inputs=check["inputs"])
+    if any(command.get("phase0_evidence") for command in frozen["phases"].values()):
+        from .phase0.freeze import stage
+
+        try:
+            frozen = stage(frozen)
+        except (OSError, ValueError) as exc:
+            raise SpecError(f"Phase 0 freezing failed: {exc}; retained partial run at {root}") from exc
     _write_json(root / "resolved-plan.json", frozen)
     record = {"schema_version": 1, "state": "pending", "attempts": [], "plan_sha256": _sha(root / "resolved-plan.json")}
     _write_json(root / "orchestration.json", record)
@@ -825,7 +885,7 @@ def _execute(root: Path, plan: dict, record: dict, *, checkpoint: Path | None = 
                     from .measured_launch import execution_environment
 
                     process = subprocess.Popen(
-                        argv,
+                        command.get("frozen_launch", argv),
                         cwd=command["cwd"],
                         env=execution_environment(command),
                         stdout=output,

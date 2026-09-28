@@ -3777,11 +3777,9 @@ register(
             "model / e-graph and passed in, so enabling this feature without a selector routes nothing. "
             "Coverage on spectformer int8: 90 of 106 contractions are legal (the 16 batch_matmuls are "
             "gapped by a matmul-only contract), and a tile-filling selector at edge 32 moves 41 of them, "
-            # target-ok: names the hardware_pins.yaml entry this feature requires at build time — a pin
-            # reference in prose, not a target this code routes on (selection is passed in, see above).
-            "which is the shapes carrying ~88% of the arithmetic. Requires the pinned saturn revision "
-            "carrying the unit (hardware_pins.yaml: saturn_opu_int8) at build time, because the "
-            "instruction encodings are derived from its RTL rather than written down. Default-off."
+            "which is the shapes carrying ~88% of the arithmetic. Requires a pinned implementation "
+            "revision carrying the unit at build time, because the instruction encodings are derived "
+            "from its RTL rather than written down. Default-off."
         ),
     )
 )

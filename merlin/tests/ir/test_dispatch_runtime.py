@@ -9,12 +9,11 @@ the captured model. (~40 s: it compiles ~160 kernels.)
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-from merlin.common.paths import merlin_dir, repo_root
+from merlin.common.paths import repo_root
 from merlin.xdsl_dialects import _common
 
 pytestmark = pytest.mark.skipif(not _common.HAS_XDSL, reason="xDSL not installed")
@@ -78,9 +77,22 @@ def test_scalar_arg_kernel_is_passed_by_value(tmp_path):
     mask = np.ones((1, 4), np.int8)  # i1 all-ones
     acc = np.zeros((1, 4), np.int64)
     init = np.int64(0)
-    (out,) = execute(outlined, [mask, acc, init], tmp_path)
+    counters = {}
+    (out,) = execute(outlined, [mask, acc, init], tmp_path, counters=counters)
     # cumsum of ones along the causal triangle -> [1, 2, 3, 4]
     assert out.ravel().tolist() == [1, 2, 3, 4]
+    import platform
+
+    assert counters["native_host_executed"] is True and counters["target_executed"] is False
+    assert counters["dispatch_ledger"]
+    for call in counters["dispatch_ledger"]:
+        assert call["lane"] == "native_cpu" and call["placement"] == "host"
+        assert call["executor"] == "native_cpu" and call["target_executed"] is False
+        assert call["runtime_architecture"] == {
+            "machine": platform.machine(),
+            "system": platform.system(),
+            "basis": "executing_process",
+        }
 
 
 @pytest.mark.skipif(not (MODEL / "model.mlir").is_file(), reason="small_llama capture not present")

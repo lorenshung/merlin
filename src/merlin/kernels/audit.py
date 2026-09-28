@@ -20,7 +20,10 @@ import glob
 import json
 import random
 import sys
+from contextlib import nullcontext
 from pathlib import Path
+
+from merlin.kernels.framework_contracts import use_feature_contract, verify_index_feature_contract
 
 # What each motif *claims*; shown in the audit and used verbatim in the judge prompt.
 MOTIF_CLAIMS: dict[str, str] = {
@@ -42,7 +45,7 @@ MOTIF_CLAIMS: dict[str, str] = {
 }
 
 
-def load_indexed(patterns: list[str]) -> list[tuple[dict, str | None]]:
+def load_indexed(patterns: list[str], selected_contract: dict | None = None) -> list[tuple[dict, str | None]]:
     """Return ``(record, repo_root)`` pairs from index files (repo may be absent)."""
     paths: list[str] = []
     for pat in patterns:
@@ -52,6 +55,8 @@ def load_indexed(patterns: list[str]) -> list[tuple[dict, str | None]]:
     out: list[tuple[dict, str | None]] = []
     for p in paths:
         data = json.loads(Path(p).read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            verify_index_feature_contract(data, selected_contract)
         repo = data.get("repo") if isinstance(data, dict) else None
         recs = data.get("records", data if isinstance(data, list) else [])
         out.extend((r, repo) for r in recs)
@@ -201,6 +206,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--n", type=int, default=8, help="samples per motif")
     ap.add_argument("--seed", type=int, default=0, help="sampling seed (deterministic)")
     ap.add_argument("--context", type=int, default=3, help="context lines around the marker")
+    ap.add_argument("--feature-contract", type=Path, help="explicit target-owned feature YAML used by the index")
     ap.add_argument("--out", default=None, help="audit markdown output path")
     ap.add_argument(
         "--llm-judge", action="store_true", help="one bounded LLM verdict per sample (needs ANTHROPIC_API_KEY)"
@@ -208,10 +214,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="print a machine-readable summary JSON to stdout")
     args = ap.parse_args(argv)
 
-    pairs = load_indexed(args.inputs)
-    observed = collections.Counter(m for rec, _ in pairs for m in (rec.get("evidence", {}) or {}).get("motifs", []))
-    motifs = args.motif or [m for m, _ in observed.most_common()]
-    md, summary = audit(pairs, motifs, args.n, args.seed, args.context, args.llm_judge)
+    scope = use_feature_contract(args.feature_contract) if args.feature_contract else nullcontext(None)
+    with scope as selected_contract:
+        pairs = load_indexed(args.inputs, selected_contract)
+        observed = collections.Counter(m for rec, _ in pairs for m in (rec.get("evidence", {}) or {}).get("motifs", []))
+        motifs = args.motif or [m for m, _ in observed.most_common()]
+        md, summary = audit(pairs, motifs, args.n, args.seed, args.context, args.llm_judge)
 
     out = Path(args.out) if args.out else Path("out/artifacts/kernel-index/audit_samples.md")
     out.parent.mkdir(parents=True, exist_ok=True)

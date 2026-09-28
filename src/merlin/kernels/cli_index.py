@@ -13,10 +13,11 @@ import json
 import logging
 import os
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 
 from merlin.kernels.emit.kernel_record import emit_kernel_record
-from merlin.kernels.framework_contracts import load_contract
+from merlin.kernels.framework_contracts import load_contract, use_feature_contract, use_framework_contract
 from merlin.kernels.ingest.autocomp import ingest_autocomp
 from merlin.kernels.ingest.exo import ingest_exo, ingest_exo_schedules
 from merlin.kernels.ingest.openblas import ingest_openblas
@@ -25,16 +26,15 @@ from merlin.kernels.ingest.xnnpack import ingest_xnnpack
 
 # Per-source fallback ISA when the source has no framework contract. These are generic ISA-*class*
 # names (not shipped accelerator targets); ``exo`` stays None so its platform is auto-detected during
-# ingest. A shipped target default (e.g. autocomp -> gemmini) is never listed here — it is derived
-# from the source's ``framework_contracts/<source>.yaml: isa`` field by ``_default_target``.
+# ingest. A target default requires an explicitly selected caller contract or --target.
 _FALLBACK_ISA = {"triton": "triton", "triton_cpu": "triton", "exo": None}
 
 
 def _default_target(source: str) -> str | None:
     """Default ISA target for a source when ``--target`` is unset.
 
-    Derived from the source's framework contract (``framework_contracts/<source>.yaml: isa``) so no
-    shipped-target name literal lives in this module; sources without a contract use ``_FALLBACK_ISA``.
+    Derived from a selected caller contract when one declares ``isa``; sources without one
+    use only target-neutral class fallbacks.
     """
     return load_contract(source).get("isa") or _FALLBACK_ISA.get(source)
 
@@ -82,6 +82,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--repo", default=None, help="path to source repo (or MERLIN_<SRC>_REPO)")
     ap.add_argument("--target", default=None, help="ISA target (default per source)")
+    ap.add_argument("--feature-contract", type=Path, help="explicit target-owned feature-extraction YAML")
+    ap.add_argument("--framework-contract", type=Path, help="explicit target-owned caller-side framework YAML")
     ap.add_argument("--out", required=True, help="output index json path")
     ap.add_argument("--limit", type=int, default=None, help="cap kernels (dev runs)")
     ap.add_argument("--json", action="store_true", help="print a machine-readable summary JSON to stdout")
@@ -93,19 +95,29 @@ def main(argv: list[str] | None = None) -> int:
 
     source = args.source
     repo = _resolve_repo(source, args.repo)
-    target = args.target if args.target is not None else _default_target(source)
     out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    gen, diagnostics = _ingest(source, repo, target, args.limit, out_path)
     records = []
     errors = 0
-    for nk in gen:
-        try:
-            records.append(emit_kernel_record(nk))
-        except Exception as e:  # never let one bad kernel kill the run
-            errors += 1
-            logging.warning("skip record for %s (%s)", nk.path, e)
+    with ExitStack() as stack:
+        selected_framework = (
+            stack.enter_context(use_framework_contract(args.framework_contract)) if args.framework_contract else None
+        )
+        selected_contract = (
+            stack.enter_context(use_feature_contract(args.feature_contract)) if args.feature_contract else None
+        )
+        if selected_framework is not None and source != selected_framework["framework"]:
+            raise SystemExit("selected framework contract does not belong to indexed source")
+        target = args.target if args.target is not None else _default_target(source)
+        if source == "autocomp" and target is None:
+            raise SystemExit("Autocomp indexing requires --target or an explicit --framework-contract with isa")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        gen, diagnostics = _ingest(source, repo, target, args.limit, out_path)
+        for nk in gen:
+            try:
+                records.append(emit_kernel_record(nk))
+            except Exception as e:  # never let one bad kernel kill the run
+                errors += 1
+                logging.warning("skip record for %s (%s)", nk.path, e)
     payload = {
         "source": source,
         "target": target,
@@ -113,6 +125,8 @@ def main(argv: list[str] | None = None) -> int:
         "count": len(records),
         "errors": errors,
         "diagnostics": diagnostics,
+        "feature_contract": selected_contract,
+        "framework_contract": selected_framework,
         "records": records,
     }
     out_path.write_text(json.dumps(payload, indent=1, default=str), encoding="utf-8")
@@ -128,6 +142,8 @@ def main(argv: list[str] | None = None) -> int:
                     "count": len(records),
                     "errors": errors,
                     "diagnostics": diagnostics,
+                    "feature_contract": selected_contract,
+                    "framework_contract": selected_framework,
                     "out": str(out_path),
                 },
                 indent=1,

@@ -12,6 +12,8 @@ from merlin.targetgen import capture_cache
 
 
 def test_worker_observes_top_level_and_input_builder_imports(tmp_path, monkeypatch):
+    pytest.importorskip("numpy")  # Initialize native module before isolating the module table.
+
     top = tmp_path / "synthetic_top_level_dependency.py"
     call = tmp_path / "synthetic_input_dependency.py"
     top.write_text("value = 1\n")
@@ -30,6 +32,7 @@ def test_worker_observes_top_level_and_input_builder_imports(tmp_path, monkeypat
     monkeypatch.setattr(sys, "modules", dict(sys.modules))
     torch = ModuleType("torch")
     torch.manual_seed = lambda seed: None
+    torch.use_deterministic_algorithms = lambda enabled: None
     coverage = ModuleType("m2m.coverage")
     coverage.opaque_report = lambda *args: None
     monkeypatch.setitem(sys.modules, "torch", torch)
@@ -110,6 +113,10 @@ def test_cache_rechecks_observed_loader_sources_before_reuse(tmp_path, monkeypat
     attempt.mkdir(parents=True)
     weights_manifest = attempt / "weights.manifest.json"
     weights_manifest.write_text("{}")
+    trace = attempt / "frontend-trace.json"
+    trace.write_text('{"status": "unavailable"}')
+    catalog = attempt / "pytorch-opset.json"
+    catalog.write_text('{"status": "unavailable"}')
     meta = {
         "ok": True,
         "opaque": 0,
@@ -118,6 +125,8 @@ def test_cache_rechecks_observed_loader_sources_before_reuse(tmp_path, monkeypat
         "output_abi": [],
         "weights_manifest": str(weights_manifest),
         "loader_dependency_sources": records,
+        "frontend_trace": {"path": str(trace), "sha256": hashlib.sha256(trace.read_bytes()).hexdigest()},
+        "framework_catalog": {"path": str(catalog), "sha256": hashlib.sha256(catalog.read_bytes()).hexdigest()},
     }
     if change == "legacy":
         del meta["loader_dependency_sources"]

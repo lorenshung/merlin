@@ -15,6 +15,8 @@ Two levels:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -122,39 +124,82 @@ def test_default_mesh_lane_still_runs_on_engine():
 
 
 def test_int8_chain_reference_is_deterministic_and_saturating():
-    """The host int8-chain reference (i32 matmul, round-half-even acc_scale, i8 saturate) is deterministic
-    and stays in i8 range — a no-oracle sanity check on the golden the on-mesh chain is gated against."""
+    """A synthetic, explicitly declared chain has a deterministic checked golden."""
     from merlin import compile_cli
 
+    synthetic_policy = {
+        "numerical_semantics": {
+            "operand_dtype": "int8",
+            "accumulator_dtype": "i32",
+            "readout_dtype": "i32",
+            "overflow": "wrap_internal_mac",
+            "internal_arithmetic": {
+                "signed_operand_bits": 8,
+                "mac_result_bits": 20,
+                "mac_result_overflow": "wrap_to_20_bits",
+                "full_operation_overflow_policy": "bounded_exact_requires_each_partial_sum",
+            },
+            "readout": {
+                "acc_scale_product_dtype": "f32",
+                "acc_scale_rounding": "half_even",
+                "narrowing": "saturate_to_declared_dtype",
+            },
+        }
+    }
     rng = np.random.default_rng(0)
     A0 = np.rint(rng.standard_normal((4, 4)) * 4).clip(-8, 7).astype(int).tolist()
     Ws = [np.rint(rng.standard_normal((4, 4)) * 4).clip(-8, 7).astype(int).tolist() for _ in range(3)]
-    r1 = compile_cli._int8_chain_reference(A0, Ws, 0.25)
-    r2 = compile_cli._int8_chain_reference(A0, Ws, 0.25)
+    r1 = compile_cli._int8_chain_reference(A0, Ws, 0.25, numeric_policy=synthetic_policy)
+    r2 = compile_cli._int8_chain_reference(A0, Ws, 0.25, numeric_policy=synthetic_policy)
     assert np.array_equal(r1, r2)
     assert r1.min() >= -128 and r1.max() <= 127  # requant kept every layer in i8 range
+    assert np.array_equal(
+        compile_cli._int8_chain_reference([[1, 2]], [[[3], [4]]], 0.5, numeric_policy=synthetic_policy), [[6]]
+    )  # 11 * 0.5 = 5.5, half-even -> 6
+    assert np.array_equal(
+        compile_cli._int8_chain_reference([[127]], [[[127]]], 0.5, numeric_policy=synthetic_policy), [[127]]
+    )
+    with pytest.raises(ValueError, match="acc_scale_product_dtype"):
+        incomplete = {
+            "numerical_semantics": {
+                **synthetic_policy["numerical_semantics"],
+                "readout": {"acc_scale_rounding": "half_even", "narrowing": "saturate_to_declared_dtype"},
+            }
+        }
+        compile_cli._int8_chain_reference(A0, Ws, 0.25, numeric_policy=incomplete)
+    with pytest.raises(ValueError, match="partial-sum bound"):
+        compile_cli._int8_chain_reference(
+            [[127] * 64], [[[127] for _ in range(64)]], 0.25, numeric_policy=synthetic_policy
+        )
 
 
 @pytest.mark.slow
 def test_int8_chain_on_gemmini_mesh_bit_exact():
-    """A 3-layer int8 matmul CHAIN runs end-to-end on the real gemmini mesh with the per-layer acc_scale
-    requant handoff — each layer's i8 output feeds the next mesh layer — and matches the host int8-chain
-    reference bit-exact at EVERY layer. This is the inter-layer int8 handoff a real quantized model needs
-    (a single independent matmul does not exercise it). Skips honestly if the mesh oracle is unavailable."""
+    """The selected Gemmini declaration cannot certify its opaque scale product."""
     from merlin import compile_cli
+    from merlin.targetgen.software_spec import load_software_spec, numerical_datapath
+
+    software = load_software_spec(
+        Path(__file__).resolve().parents[3] / "examples/gemmini/target/software-spec.yaml", "gemmini"
+    )
+    numeric_policy = numerical_datapath(software)
 
     rng = np.random.default_rng(7)
     A0 = np.rint(rng.standard_normal((4, 4)) * 4).clip(-8, 7).astype(int).tolist()
     Ws = [np.rint(rng.standard_normal((4, 4)) * 4).clip(-8, 7).astype(int).tolist() for _ in range(3)]
 
-    res = compile_cli.run_int8_chain_on_mesh(
-        "gemmini", A0, Ws, acc_scale=0.25, operand_dtype="i8", accum_dtype="i32", simulator="spike", timeout=900
-    )
-    if res["status"] == "oracle_unavailable":
-        pytest.skip(res.get("reason", "mesh oracle unavailable"))
-    assert res["status"] == "pass", res
-    assert res["exact"] is True and res["n_layers"] == 3
-    assert all(layer["matches_ref"] for layer in res["per_layer"])
+    with pytest.raises(ValueError, match="acc_scale_product_dtype"):
+        compile_cli.run_int8_chain_on_mesh(
+            "gemmini",
+            A0,
+            Ws,
+            acc_scale=0.25,
+            operand_dtype="i8",
+            accum_dtype="i32",
+            numeric_policy=numeric_policy,
+            simulator="spike",
+            timeout=900,
+        )
 
 
 @pytest.mark.slow

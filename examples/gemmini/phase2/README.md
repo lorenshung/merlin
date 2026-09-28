@@ -1,5 +1,11 @@
 # Phase 2: performance optimization
 
+Use the reviewed derivation's `phase_corpora.phase2` selection, not Phase 1's
+functional or Phase 0-only diagnostic members. Carry the same selected SW-spec
+and hardware-evidence identities with the exact frozen functional compiler.
+Changing operation admission, formats or hardware selection requires renewed
+functional qualification; it is not merely another performance knob.
+
 Phase 2 consumes a frozen functional compiler; it does not tune Merlin's shared
 implementation for Gemmini. Target-specific generated compiler code stays in the
 run's candidate payload and may later be published to the target's OOT repository.

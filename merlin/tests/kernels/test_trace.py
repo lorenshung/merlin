@@ -64,8 +64,9 @@ def test_lowering_trace_roundtrips_and_renders():
     md = lt.to_markdown()
     assert "LoweringTrace: matmul_f32_64" in md
     assert "Transformation steps" in md and "Asm region" in md
-    # the edit-point (entry) surfaces so an LLM/engineer sees WHERE to change each step
-    assert "merlin.llvmlower.passes_xdsl" in md
+    # Every selected pass's actual edit point surfaces; the first three passes need not
+    # include a specific LLVM pass as the pipeline evolves.
+    assert all(step.entry in md for step in steps if step.entry)
 
 
 def test_asm_region_from_expert_fixture(monkeypatch):

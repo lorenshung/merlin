@@ -42,7 +42,7 @@ rtl:
 #                                                               is closer to this device than to
 #                                                               gemmini's. It is still not an attested
 #                                                               artifact of this build.
-#       rtl/                        -> /scratch/jack/chipyard/generators/gemmini/src/main/scala
+#       rtl/                        -> <selected universal Chipyard>/generators/gemmini/src/main/scala
 #                                                               THIS device's Chisel, read-only, in
 #                                                               another user's tree. Same
 #                                                               absolute-symlink-to-a-checkout
@@ -373,13 +373,10 @@ host:
   board: chipyard_riscv64
 
 workload_spec:
-  # The model this configuration was BUILT for (the config is named for it) plus tiny_llama, kept so the
-  # generalization roster is comparable with gemmini's.
-  models: [resnet50, tiny_llama]
+  # Shared headline validation roster, separate from independent iteration models.
+  models: [resnet50, tiny_llama, smolvla]
   applications:
-    - smolvla_fp32_consistent
-    - smolvla_int8_consistent
-    - smolvla_denoise_step_fp32_app
+    - deepjscc_int8_consistent
     - lstmnetvit_fp8_consistent
     - lstmnetvit_int8_consistent
     - lstmnetvit_int8_w8a8_consistent

@@ -55,6 +55,7 @@ class PerformanceCorpus:
     provenance_sha256: str
     performance_generation: dict[str, Any]
     capsules: tuple[PerformanceCapsule, ...]
+    test_justification: dict[str, Any] | None = None
 
 
 def _selected_names(value: str | Sequence[str] | None, *, label: str) -> tuple[str, ...]:
@@ -171,17 +172,32 @@ def discover_performance_corpus(
     )
     if not selected:
         raise StageGateError("performance selection contains zero capsules")
+    identity = CONTRACTS.sha256_file(provenance)
+    justification = None
+    from merlin_experiments.phase2 import test_justification as TJ
+
+    if TJ.requires_justification(manifest):
+        complete = PerformanceCorpus(
+            target, corpus_root, phase_root, provenance, identity, dict(generation), tuple(found)
+        )
+        justification = TJ.derive_justification(complete)
     return PerformanceCorpus(
-        target, corpus_root, phase_root, provenance, CONTRACTS.sha256_file(provenance), dict(generation), selected
+        target, corpus_root, phase_root, provenance, identity, dict(generation), selected, justification
     )
 
 
 def freeze_performance_corpus(corpus: PerformanceCorpus, snapshot_root: Path) -> FrozenPerformanceCorpus:
+    from merlin_experiments.phase2 import test_justification as TJ
+
     snapshot_root = Path(snapshot_root).resolve()
     if snapshot_root.exists() or snapshot_root.is_symlink():
         raise StageGateError(f"performance snapshot is not fresh: {snapshot_root}")
     if CONTRACTS.sha256_file(corpus.provenance_manifest) != corpus.provenance_sha256:
         raise StageGateError("performance provenance changed before freeze")
+    if corpus.test_justification is not None:
+        TJ.verify_live_justification(corpus, corpus.test_justification)
+    elif TJ.requires_justification(CONTRACTS.mapping_file(corpus.provenance_manifest, yaml_file=True)):
+        raise StageGateError("current generated performance corpus lacks its test justification")
     capsules_root = snapshot_root / "capsules"
     capsules_root.mkdir(parents=True)
     frozen: list[PerformanceCapsule] = []
@@ -233,6 +249,27 @@ def freeze_performance_corpus(corpus: PerformanceCorpus, snapshot_root: Path) ->
         "capsules_sha256": aggregate["sha256"],
         "capsules": rows,
     }
+    if corpus.test_justification is not None:
+        receipt_path = snapshot_root / "test_justification.json"
+        CONTRACTS.write_json(receipt_path, corpus.test_justification)
+        copied = snapshot_root / "test_justification_inputs"
+        copied.mkdir()
+        source_root = corpus.corpus_root / "_evidence"
+        for name, relative in (
+            ("evidence-manifest.json", "evidence-manifest.json"),
+            ("performance-facts.json", "hardware/effective-views/performance-facts.json"),
+            ("operation-accounting.json", "coverage/operation-accounting.json"),
+        ):
+            shutil.copyfile(source_root / relative, copied / name)
+        document["test_justification"] = {
+            "path": receipt_path.name,
+            "sha256": CONTRACTS.sha256_file(receipt_path),
+            "inputs": {
+                "evidence-manifest.json": corpus.test_justification["source"]["manifest_sha256"],
+                "performance-facts.json": corpus.test_justification["source"]["performance_facts_sha256"],
+                "operation-accounting.json": corpus.test_justification["source"]["operation_accounting_sha256"],
+            },
+        }
     manifest = snapshot_root / "performance_corpus_manifest.json"
     CONTRACTS.write_json(manifest, document)
     for path in sorted(snapshot_root.rglob("*"), key=lambda item: len(item.parts), reverse=True):
@@ -307,6 +344,45 @@ def verify_frozen_performance_corpus(corpus: FrozenPerformanceCorpus) -> None:
             "snapshot_sha256"
         ):
             raise StageGateError(f"frozen performance member changed: {identity}")
+    justification = document.get("test_justification")
+    if justification is not None:
+        if not isinstance(justification, Mapping) or justification.get("path") != "test_justification.json":
+            raise StageGateError("frozen performance test justification is malformed")
+        receipt_path = corpus.root / "test_justification.json"
+        if CONTRACTS.sha256_file(receipt_path) != justification.get("sha256"):
+            raise StageGateError("frozen performance test justification bytes changed")
+        receipt = CONTRACTS.mapping_file(receipt_path)
+        if (
+            receipt.get("schema") != "merlin.phase2.test_justification.v1"
+            or receipt.get("status") != "diagnostic_unmeasured"
+        ):
+            raise StageGateError("frozen performance test justification claims an invalid status")
+        if receipt.get("target") != document.get("target") or receipt.get("source", {}).get(
+            "provenance_sha256"
+        ) != document.get("source", {}).get("provenance_sha256"):
+            raise StageGateError("frozen performance test justification identity differs")
+        source = receipt.get("source") or {}
+        inputs = justification.get("inputs") or {}
+        for name, field in (
+            ("evidence-manifest.json", "manifest_sha256"),
+            ("performance-facts.json", "performance_facts_sha256"),
+            ("operation-accounting.json", "operation_accounting_sha256"),
+        ):
+            digest = CONTRACTS.sha256_file(corpus.root / "test_justification_inputs" / name)
+            if digest != inputs.get(name) or digest != source.get(field):
+                raise StageGateError(f"frozen performance test justification input changed: {name}")
+        planned = {str(row.get("relative_path")): row for row in receipt.get("members") or []}
+        if not planned or len(planned) != len(receipt.get("members") or []):
+            raise StageGateError("frozen performance test justification has duplicate or empty members")
+        for member in corpus.capsules:
+            plan = planned.get(member.source_relative_path)
+            if (
+                not isinstance(plan, Mapping)
+                or plan.get("capsule_tree_sha256") != member.source_sha256
+                or plan.get("performance_sha256") != CONTRACTS.document_sha256(member.descriptor["performance"])
+                or (plan.get("measurement") or {}).get("status") != "unmeasured"
+            ):
+                raise StageGateError(f"frozen performance member lacks an unmeasured test plan: {member.capsule}")
 
 
 def expected_perf_cells(

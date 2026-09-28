@@ -18,6 +18,7 @@ Two properties, and the FIRST one is the reason this file exists at the same tim
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
@@ -37,15 +38,18 @@ def _declared_block() -> dict:
     return (doc.get("runner") or {}).get("spike_extension") or {}
 
 
-def test_the_declaring_target_declares_a_complete_digested_extension():
-    """The contract carries name + absolute path + a 64-hex digest. An undigested path could not be
-    told apart from a sibling elaboration's build sitting in the same directory."""
+def test_the_declaring_target_declares_a_complete_digested_extension(monkeypatch):
+    """The target pins bytes, while the operator supplies the location explicitly."""
     block = _declared_block()
     assert block, f"{UNIVERSAL_CONTRACT} declares no runner.spike_extension"
     assert block.get("extension_name")
-    assert Path(str(block["extlib"])).is_absolute()
+    assert block.get("extlib_env") == "MERLIN_GEMMINI_UNIVERSAL_SPIKE_EXTLIB"
+    assert "extlib" not in block
     sha = str(block["sha256"]).lower()
     assert len(sha) == 64 and all(c in "0123456789abcdef" for c in sha)
+    monkeypatch.delenv(block["extlib_env"], raising=False)
+    with pytest.raises(SX.SpikeExtensionError, match=block["extlib_env"]):
+        SX.resolve("gemmini_universal", default_library_dir="/other-model", default_extension_name="other")
 
 
 def test_declared_extension_is_read_from_the_contract_not_from_the_environment():
@@ -57,7 +61,7 @@ def test_declared_extension_is_read_from_the_contract_not_from_the_environment()
 
 
 @pytest.mark.skipif(
-    not Path(str(_declared_block().get("extlib", "/nonexistent"))).is_file(),
+    not Path(str(os.environ.get(_declared_block().get("extlib_env", ""), "/nonexistent"))).is_file(),
     reason="the declared extension .so is not present on this host",
 )
 def test_the_declared_extension_resolves_to_its_own_verified_bytes():
@@ -153,6 +157,25 @@ def test_matching_bytes_are_accepted(monkeypatch, tmp_path):
     call = _resolve_with(monkeypatch, {"extension_name": "x", "extlib": str(so), "sha256": good})
     ext = call()
     assert ext.declared and ext.sha256 == good and ext.library_dir == tmp_path
+
+
+def test_declared_environment_location_is_exactly_digest_bound(monkeypatch, tmp_path):
+    so = tmp_path / "lib.so"
+    so.write_bytes(b"operator supplied exact model")
+    good = hashlib.sha256(so.read_bytes()).hexdigest()
+    block = {"extension_name": "x", "extlib_env": "TEST_SPIKE_EXTLIB", "sha256": good}
+    call = _resolve_with(monkeypatch, block)
+    monkeypatch.delenv("TEST_SPIKE_EXTLIB", raising=False)
+    with pytest.raises(SX.SpikeExtensionError, match="TEST_SPIKE_EXTLIB"):
+        call()
+    monkeypatch.setenv("TEST_SPIKE_EXTLIB", "relative/lib.so")
+    with pytest.raises(SX.SpikeExtensionError, match="must be an absolute path"):
+        call()
+    monkeypatch.setenv("TEST_SPIKE_EXTLIB", str(so))
+    assert call().extlib == so
+    so.write_bytes(b"wrong model")
+    with pytest.raises(SX.SpikeExtensionError, match="sha256"):
+        call()
 
 
 def test_an_edited_so_is_re_hashed_rather_than_carried_by_the_cache(monkeypatch, tmp_path):

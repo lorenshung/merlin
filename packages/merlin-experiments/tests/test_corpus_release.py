@@ -220,6 +220,133 @@ def test_external_private_baseline_is_explicit_and_receipted(release_fixture, ca
     assert private_source.is_dir()
 
 
+def test_generated_only_assembly_needs_no_legacy_corpus(release_fixture, tmp_path):
+    import shutil
+
+    from merlin.targetgen.target_experiment import load_target_experiment
+
+    fixture = release_fixture
+    te = load_target_experiment(fixture["root"] / "source-experiment/target_experiment.yaml")
+    generated = tmp_path / "generated"
+    _member(generated, "isa", "generated_member", "public")
+    (generated / "MANIFEST.yaml").write_text(
+        yaml.safe_dump({"generated": ["isa/generated_member"], "held_out": {"n_generated": 0}})
+    )
+    private_source = tmp_path / "operator-private"
+    (fixture["baseline"] / "hidden").rename(private_source)
+    shutil.rmtree(fixture["baseline"])
+
+    destination = tmp_path / "release-corpus"
+    receipt = assemble(te, generated, destination, private_baseline=private_source, generated_only=True)
+    assert receipt["mode"] == "generated_only"
+    assert set(receipt["baseline"]) == {"hidden"}
+    assert sorted(path.parent.relative_to(destination).as_posix() for path in destination.glob("*/*/capsule.yaml")) == [
+        "hidden/private_member_identity",
+        "isa/generated_member",
+    ]
+    promoted = yaml.safe_load((destination / "MANIFEST.yaml").read_text())
+    assert promoted["hand_authored"] == []
+    assert promoted["held_out"] == {"n_generated": 0, "n_hand_authored": 1}
+
+
+def test_generated_only_release_cli_ignores_removed_legacy_public_corpus(release_fixture, capsys, monkeypatch):
+    import shutil
+
+    from merlin_experiments.phase1 import corpus_inputs
+
+    from merlin.common.paths import data_path
+    from merlin.targetgen import capsule_runner
+    from merlin.targetgen.sandbox import bwrap
+    from merlin.targetgen.target_experiment import load_target_experiment
+
+    fixture = release_fixture
+    descriptor = fixture["root"] / "source-experiment/target_experiment.yaml"
+    authored = yaml.safe_load(descriptor.read_text())
+    authored["grading"]["expected_cohort"] = {"source_capsules": 1, "admitted_capsules": 1}
+    descriptor.write_text(yaml.safe_dump(authored))
+    assert main(["run", str(fixture["definition"]), "--phase", "0", "--run-dir", str(fixture["run"])]) == 0
+    capsys.readouterr()
+    private_source = fixture["root"] / "operator-private-corpus"
+    (fixture["baseline"] / "hidden").rename(private_source)
+    shutil.rmtree(fixture["baseline"])
+
+    assert (
+        main(
+            [
+                "corpus",
+                "prepare",
+                str(fixture["run"]),
+                "--output",
+                str(fixture["release"]),
+                "--generated-only",
+                "--private-baseline",
+                str(private_source),
+            ]
+        )
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["counts"]["public_source"] == 1
+    assert report["counts"]["hidden_source"] == 1
+    sealed = corpus_release.seal(
+        fixture["release"],
+        expected_digest=report["review_digest"],
+        reviewed_by="fixture operator",
+        review_note="synthetic release handoff test",
+    )
+    assert sealed["state"] == "sealed"
+    preparation = json.loads((fixture["release"] / "private/preparation.json").read_text())
+    assert preparation["assembly"]["mode"] == "generated_only"
+    assert set(preparation["assembly"]["baseline"]) == {"hidden"}
+    promoted = load_target_experiment(Path(report["descriptor"]))
+    monkeypatch.setattr(capsule_runner, "qa_loop_adapters", lambda *args, **kwargs: {"L0": object()})
+    monkeypatch.setattr(capsule_runner, "oracle_adapters", lambda *args, **kwargs: {"L0": object()})
+    phase1_run = fixture["root"] / "phase1-run"
+    phase1_run.mkdir()
+    bundle = yaml.safe_load(
+        (
+            Path(report["descriptor"]).parent / "input_bundles/raw_baseline_public_v0/input_bundle_manifest.yaml"
+        ).read_text()
+    )
+    effective, record = corpus_inputs.stage(phase1_run, promoted, bundle, contract=data_path("contract"))
+    workspace = fixture["root"] / "phase1-workspace"
+    bwrap.materialize_bundle_inputs(workspace, effective, repo=fixture["root"])
+    corpus_release.verify_snapshot(
+        fixture["release"] / "private/seal.json", Path(report["descriptor"]), workspace, effective, repo=fixture["root"]
+    )
+    view = corpus_inputs.resolve(
+        workspace, effective, record, repo=fixture["root"], reviewed_roots=tuple(promoted.graded_roots())
+    )
+    assert (view.public / "generated_member/capsule.yaml").is_file()
+    assert (view.policy / "0/generated_member/capsule.yaml").is_file()
+
+
+def test_generated_only_release_refuses_implicit_legacy_hidden_corpus(release_fixture, capsys):
+    fixture = release_fixture
+    descriptor = fixture["root"] / "source-experiment/target_experiment.yaml"
+    authored = yaml.safe_load(descriptor.read_text())
+    authored["grading"]["expected_cohort"] = {"source_capsules": 1, "admitted_capsules": 1}
+    descriptor.write_text(yaml.safe_dump(authored))
+    assert main(["run", str(fixture["definition"]), "--phase", "0", "--run-dir", str(fixture["run"])]) == 0
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "corpus",
+                "prepare",
+                str(fixture["run"]),
+                "--output",
+                str(fixture["release"]),
+                "--generated-only",
+            ]
+        )
+        == 2
+    )
+    failure = json.loads((fixture["release"] / "private/failure.json").read_text())
+    assert "private corpus" in failure["error"] or "hidden grading cohorts" in failure["error"]
+
+
 def test_retired_generated_member_requires_exact_review_and_is_removed_from_copy(release_fixture, tmp_path):
     from merlin.targetgen.target_experiment import load_target_experiment
 

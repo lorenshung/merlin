@@ -17,7 +17,6 @@ tested against the originating framework.
 
 from __future__ import annotations
 
-import hashlib
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -99,7 +98,10 @@ def normalize_capture_mlir(
             if rewrites:
                 applied.append({"identity": normalizer.identity, "rewrites": rewrites})
         module.verify()
-        normalized = module_text(module)
+        # Custom dialect printers can omit unknown attributes (tensor.empty does
+        # so on the pinned xDSL), silently severing exact frontend lineage. This
+        # boundary serializes generic form so every attribute/property survives.
+        normalized = module_text(module, generic=True)
         # Reparse the serialized artifact: this is what the cache and every backend will consume.
         serialized = parse_mlir_text(normalized)
         serialized.verify()

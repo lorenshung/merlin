@@ -69,6 +69,8 @@ def _shape(mlir_type) -> tuple[int, int]:
     shape = [int(d) for d in mlir_type.get_shape()]
     if len(shape) != 2:
         raise UnsupportedSemantics(f"only rank-2 tensors are encoded; got shape {shape}")
+    if any(extent <= 0 for extent in shape):
+        raise UnsupportedSemantics(f"only concrete positive extents are encoded; got shape {shape}")
     return shape[0], shape[1]
 
 
@@ -357,17 +359,21 @@ def encode_interface(enc: Encoder, module, acc_width: int = 32, shared: list[Ten
     outputs: dict[str, Tensor] = {}
     inputs: list[Tensor] = []
     n_commit = 0
+    commits: list[Any] = []
+    saw_return = False
 
-    func = None
-    for op in module.walk():
-        if op.name == "func.func":
-            func = op
-            break
-    if func is None:
-        raise UnsupportedSemantics("no func.func in module")
+    funcs = [op for op in module.walk() if op.name == "func.func"]
+    if len(funcs) != 1:
+        raise UnsupportedSemantics(f"expected exactly one func.func; found {len(funcs)}")
+    func = funcs[0]
+    if len(func.body.blocks) != 1:
+        raise UnsupportedSemantics(f"interface function has {len(func.body.blocks)} blocks; only one is encoded")
 
     # Block arguments are the symbolic inputs.
     block = func.body.block
+    operations = list(block.ops)
+    if not operations or operations[-1].name != "func.return":
+        raise UnsupportedSemantics("interface function must end in func.return")
     if shared is not None and len(shared) != len(block.args):
         raise UnsupportedSemantics(
             f"the interface module has {len(block.args)} block arguments but {len(shared)} shared "
@@ -406,9 +412,21 @@ def encode_interface(enc: Encoder, module, acc_width: int = 32, shared: list[Ten
             acc = env[op.operands[0]]
             env[op.results[0]] = acc
             outputs[f"commit{n_commit}"] = acc
+            commits.append(op.results[0])
             n_commit += 1
-        elif name in ("interface.resident_evict", "func.return"):
+        elif name == "func.return":
+            if saw_return:
+                raise UnsupportedSemantics("multiple func.return operations are not encoded")
+            saw_return = True
+            if list(op.operands) != commits:
+                raise UnsupportedSemantics(
+                    "func.return must deliver every interface.commit result in commit order; "
+                    "the returned function is otherwise different from the values compared"
+                )
+        elif name == "interface.resident_evict":
             continue
         else:
             raise UnsupportedSemantics(f"no semantics for {name!r}")
+    if not saw_return:
+        raise UnsupportedSemantics("interface function has no func.return")
     return Encoded(outputs=outputs, inputs=inputs)

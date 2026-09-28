@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import inspect
 import os
 from fractions import Fraction
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -16,15 +19,54 @@ from merlin.targetgen import corpus_spec as CS  # noqa: E402
 # ------------------------------------------------------------------------------------------------
 # float golden engine (generation-time only; needs the external specir refmodel)
 # ------------------------------------------------------------------------------------------------
-def _specir():
+def _specir(*, root: str | Path | None = None, use_legacy_environment: bool = True):
     from merlin.integrations.specir import importable
 
-    root = os.environ.get("SPECIR_ROOT") or _dotenv().get("SPECIR_ROOT")
+    if root is None and use_legacy_environment:
+        root = os.environ.get("SPECIR_ROOT") or _dotenv().get("SPECIR_ROOT")
     with importable(root):
         from specir.oracle import dtypes as D
         from specir.oracle.refmodel import fp_reduce
 
     return D, fp_reduce
+
+
+def _selected_specir_root(selected: dict) -> tuple[str | Path | None, bool]:
+    """Resolve the same external oracle checkout for identity and evaluation."""
+    model = selected["model"]
+    root = model.get("source_root_path")
+    from merlin_experiments.frozen_python import active_source_identity
+
+    frozen_root = os.environ.get("MERLIN_PHASE0_NUMERICAL_MODEL_ROOT") if active_source_identity() else None
+    if frozen_root:
+        root = frozen_root
+    elif "source_root_env" in model:
+        root = os.environ.get(model["source_root_env"])
+        if not root:
+            raise ValueError(f"selected independent model requires {model['source_root_env']}")
+    return root, selected["selection_status"] == "legacy_compatibility"
+
+
+def specir_oracle_source_identity(selected: dict) -> dict:
+    """Bind float goldens to the *external* numerical code actually selected.
+
+    The Merlin writer and cache sources do not own SpecIR's arithmetic. A changed
+    ``fp_reduce`` or codec must invalidate a golden even when every Merlin byte
+    and every target fact is unchanged. Unreadable/non-source modules are fatal,
+    never an excuse to serve an earlier cached numerical answer.
+    """
+    root, legacy = _selected_specir_root(selected)
+    D, fp_reduce = _specir(root=root, use_legacy_environment=legacy)
+    paths = {
+        "specir.oracle.dtypes": Path(inspect.getfile(D)),
+        "specir.oracle.refmodel": Path(inspect.getfile(fp_reduce)),
+    }
+    modules = {}
+    for name, path in sorted(paths.items()):
+        if path.suffix != ".py" or path.is_symlink() or not path.is_file():
+            raise OSError(f"selected SpecIR oracle source for {name} is unavailable")
+        modules[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return {"schema": "merlin.specir_oracle_source.v1", "modules": modules}
 
 
 # specir fp8 format handle per canonical operand dtype token (fail closed if the refmodel lacks it).
@@ -86,11 +128,83 @@ def _operand_decoder(D, fmt, *, flush_subnormals: bool):
     return decode
 
 
-def _float_golden(entry, binding):
-    """A capsule's fp8->bf16 golden + input provenance from the specir refmodel (independent of the RTL)."""
-    D, fp_reduce = _specir()
+def float_semantics(entry, binding, *, semantics=None):
+    """Resolve an explicit selection, or label the preserved historical arithmetic.
+
+    Legacy callers retain their old answer, not an implied newly reviewed spec.
+    New recipes carry this mapping on the entry, so cache identities bind it.
+    """
+    from merlin.targetgen.software_spec import validate_numerical_semantics
+
+    selected = semantics if semantics is not None else entry.get("numerical_semantics")
+    if selected is None:
+        return {
+            "model": {"engine": "specir_fp_reduce"},
+            "operand_dtype": binding.operand_dtype,
+            "accumulator_dtype": "bf16",
+            "readout_dtype": "bf16",
+            "product_rounding": "accumulator_format",
+            "rounding": "rne",
+            "reduction_order": "index_sequential",
+            "reduction_cadence": "per_step",
+            "subnormal_operand_flush": binding.subnormal_operand_flush,
+            "selection_status": "legacy_compatibility",
+        }
+    resolved = validate_numerical_semantics(selected)
+    if resolved["model"]["engine"] != "specir_fp_reduce":
+        raise ValueError("float golden requires the selected independent float model")
+    if resolved["operand_dtype"] != binding.operand_dtype or resolved["accumulator_dtype"] != binding.accum_dtype:
+        raise ValueError("selected float semantics disagree with the corpus operand/accumulator binding")
+    if resolved["subnormal_operand_flush"] != binding.subnormal_operand_flush:
+        raise ValueError("selected float semantics disagree with the corpus subnormal handling")
+    resolved["selection_status"] = "explicit"
+    return resolved
+
+
+def _float_reducer(fp_reduce, fmt, *, order: str, cadence: str, rm: str):
+    """Return an exact reducer and its bounded, capsule-local cache cleanup.
+
+    Sequential per-step reduction is a fold over the *same* two-term SpecIR
+    operation. Memoizing that operation on raw accumulator/addend bits preserves
+    order, rounding, signed zero, NaN payload handling, and infinities; skipping
+    zero or using a vector dot product would not. Other declared schedules go
+    straight to SpecIR unchanged. The cache is scoped to one golden, not shared
+    across different formats or oracle implementations.
+    """
+
+    def original(addends):
+        return fp_reduce(addends, fmt, order=order, cadence=cadence, rm=rm)
+
+    if order != "index_sequential" or cadence != "per_step":
+        return original, lambda: None
+
+    @lru_cache(maxsize=1 << 20)
+    def step(acc: int, addend: int) -> int:
+        return fp_reduce([acc, addend], fmt, order=order, cadence=cadence, rm=rm)
+
+    def reduce(addends):
+        if not addends:
+            return original(addends)
+        acc = addends[0]
+        for addend in addends[1:]:
+            acc = step(acc, addend)
+        return acc
+
+    return reduce, step.cache_clear
+
+
+def _float_golden(entry, binding, *, semantics=None):
+    """Independent float golden in the explicitly selected numerical format and order."""
+    selected = float_semantics(entry, binding, semantics=semantics)
+    root, legacy = _selected_specir_root(selected)
+    D, fp_reduce = _specir(root=root, use_legacy_environment=legacy)
     fmt_token = binding.operand_dtype  # e.g. "fp8_e4m3" — DERIVED, not assumed
-    FP8, BF16 = _specir_fp8(D, fmt_token), D.BF16
+    attr = {"bf16": "BF16", "fp16": "FP16", "f16": "FP16", "f32": "FP32", "fp32": "FP32"}.get(
+        selected["accumulator_dtype"]
+    )
+    if attr is None or not hasattr(D, attr):
+        raise ValueError(f"selected independent model lacks accumulator format {selected['accumulator_dtype']!r}")
+    FP8, ACC = _specir_fp8(D, fmt_token), getattr(D, attr)
     dec = _operand_decoder(D, FP8, flush_subnormals=binding.subnormal_operand_flush)
     salt, dim = entry["name"], binding.tile_dim
     prov, outputs = {}, {}
@@ -127,7 +241,7 @@ def _float_golden(entry, binding):
         from merlin.targetgen import corpus_operands as CO
 
         if len(shape) == 2:
-            _, vals = _det_fp8(D, name, shape, salt, fmt_token, BF16)
+            _, vals = _det_fp8(D, name, shape, salt, fmt_token, ACC)
         else:
             # A bias is a VECTOR, and `operand_values` shapes a matrix. Ask it for one row and flatten.
             # The per-row/per-column rigor `_det_fp8` enforces is not the right check for a vector --
@@ -146,19 +260,26 @@ def _float_golden(entry, binding):
         return vals
 
     def rnd(x):
-        return D.round_to_format(x, BF16, "rne")
+        return D.round_to_format(x, ACC, selected["rounding"])
 
     #: MEMOIZED PRODUCT. ``rnd(dec(a) * dec(b))`` is a pure function of the OPERAND CODE PAIR, so
     #: caching it on that pair is bit-identical by construction -- same inputs, same function, same
     #: answer -- rather than an approximation traded for speed. It is worth doing because the operand
     #: fill draws from a small deterministic alphabet, so a deep-K contraction re-derives the same few
-    #: products millions of times: measured, this engine ran ~33.7 ms per unit of K, which is ~37
-    #: minutes for the single k65536 residency member and ~86 minutes across the four deep-K ones.
+    #: products millions of times.
     #:
-    #: THE REDUCTION IS DELIBERATELY NOT TOUCHED. ``fp_reduce`` accumulates in the device's own order,
-    #: one step at a time, and that sequencing is the whole reason this engine is not a numpy dot
-    #: product. Only the per-element product -- which carries no order -- is cached.
+    #: THE REDUCTION ORDER IS DELIBERATELY NOT TOUCHED. The selected sequential/per-step schedule
+    #: remains an ordered fold of SpecIR's own two-term transition, memoized on raw bits. A numpy dot
+    #: product or a skipped zero would change IEEE behavior; other schedules use SpecIR unchanged.
     _prod_cache: dict = {}
+
+    reduce, clear_reduce_cache = _float_reducer(
+        fp_reduce,
+        ACC,
+        order=selected["reduction_order"],
+        cadence=selected["reduction_cadence"],
+        rm=selected["rounding"],
+    )
 
     def _prod(a_code, b_code):
         key = (a_code, b_code)
@@ -176,11 +297,11 @@ def _float_golden(entry, binding):
             a_row = a_raw[i * k : (i + 1) * k]
             for j in range(n):
                 prods = [_prod(a_row[p], w_raw[p * n + j]) for p in range(k)]
-                out[i][j] = fp_reduce(prods, BF16, order="index_sequential", cadence="per_step", rm="rne")
+                out[i][j] = reduce(prods)
         return out
 
     def floats(y):
-        return [[D.decode_float(v, BF16) for v in row] for row in y]
+        return [[D.decode_float(v, ACC) for v in row] for row in y]
 
     op = entry.get("op", "matmul")
     if op in ("matmul", "linear"):
@@ -193,9 +314,9 @@ def _float_golden(entry, binding):
         epi = entry.get("epilogue", [])
         if "acc_scale" in epi:
             s = Fraction(entry["acc_scale"]).limit_denominator(1 << 20)
-            y = [[rnd(D.decode_float_exact(v, BF16) * s) for v in row] for row in y]
+            y = [[rnd(D.decode_float_exact(v, ACC) * s) for v in row] for row in y]
         if "relu" in epi:
-            y = [[v if D.decode_float(v, BF16) > 0 else 0 for v in row] for row in y]
+            y = [[v if D.decode_float(v, ACC) > 0 else 0 for v in row] for row in y]
         outputs[entry.get("out", "Y0")] = floats(y)
     elif op == "fused_matmul_bias":
         # The matmul branch above with the bias stage, which is where the op name says it happens. The
@@ -210,9 +331,9 @@ def _float_golden(entry, binding):
         # bf16 palette value is a dyadic rational, so Fraction(v) is exact -- no limit_denominator,
         # which would perturb the very addend whose effect the golden has to record.
         b = [Fraction(v) for v in reg_acc(entry.get("bias", "B"), (N,))]
-        y = [[rnd(D.decode_float_exact(v, BF16) + b[j]) for j, v in enumerate(row)] for row in y]
+        y = [[rnd(D.decode_float_exact(v, ACC) + b[j]) for j, v in enumerate(row)] for row in y]
         if "relu" in entry.get("epilogue", []):
-            y = [[v if D.decode_float(v, BF16) > 0 else 0 for v in row] for row in y]
+            y = [[v if D.decode_float(v, ACC) > 0 else 0 for v in row] for row in y]
         outputs[entry.get("out", "Y0")] = floats(y)
     elif op == "bias_add":
         # The same addition standing alone. Both operands are in the accumulator format, because this op
@@ -318,12 +439,13 @@ def _float_golden(entry, binding):
         epi = entry.get("epilogue", [])
         if "acc_scale" in epi:
             s = Fraction(entry["acc_scale"]).limit_denominator(1 << 20)
-            y = [[rnd(D.decode_float_exact(v, BF16) * s) for v in row] for row in y]
+            y = [[rnd(D.decode_float_exact(v, ACC) * s) for v in row] for row in y]
         if "relu" in epi:
-            y = [[v if D.decode_float(v, BF16) > 0 else 0 for v in row] for row in y]
+            y = [[v if D.decode_float(v, ACC) > 0 else 0 for v in row] for row in y]
         outputs[entry.get("out", "Y0")] = floats(y)
     else:
         raise ValueError(f"no float golden for op {op!r}")
+    clear_reduce_cache()
     return outputs, prov
 
 

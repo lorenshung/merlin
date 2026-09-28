@@ -9,7 +9,7 @@
 # which is why the pin refused the same digest when it was only known as "a header whose #define set
 # matches".
 #
-# The bytes are carried IN THIS TREE (not symlinked into /scratch/jack) so a verdict about this device
+# The bytes are carried IN THIS TREE (not symlinked into the original build tree) so a verdict about this device
 # cites a file this repo can hash, and so nothing here depends on another user's directory staying put.
 abi_id: gemmini_universal_elaborated_v1
 header: gemmini_params.h
@@ -19,24 +19,25 @@ bytes: 2686
 source:
   # The FPGA build's own elaborated header. NOT `hardware/include/gemmini_params.h`, which is a hardlink
   # into a TVM build tree -- byte-identical, but not the artifact the build attested.
-  path: /scratch/jack/experiments/universal_resnet50_gemmini_20260906/hardware/fpga_build/gemmini_params.elaborated.h
+  artifact: hardware/fpga_build/gemmini_params.elaborated.h
+  path_basis: original universal ResNet-50 Gemmini experiment, not a live filesystem grant
   read_only: true
-  owner: another user's experiment tree; merlin reads it and never writes it
+  owner: original FPGA experiment; Merlin preserves only the attested header bytes
 
 corroboration:
   # The Spike extension for this device was built from these exact bytes. Same digest, different
   # directory, different consumer.
-  - artifact: /scratch/jack/experiments/universal_resnet50_gemmini_20260906/spike_qualification/extension/gemmini_params.h
+  - artifact: spike_qualification/extension/gemmini_params.h
     sha256: d6db18f8edbfeb854780286d8c2afb81ae3b9103224522478a9047d5550272e5
     relation: byte-identical
-  - artifact: /scratch/jack/experiments/universal_resnet50_gemmini_20260906/spike_qualification/extension/libgemmini.so
+  - artifact: spike_qualification/extension/libgemmini.so
     sha256: f3de40ced95c6697e5b27acf938803c4a961d811ab0fa04000f992cb45a2b124
     relation: >-
       the L2 functional oracle, linked against the header above (its sibling gemmini_params.h in the
       same directory is the byte-identical copy)
   # The frozen config contract's `expected_generated_header` block predicted every #define below,
   # including the ABSENCE of ACC_READ_FULL_WIDTH. It agrees field for field.
-  - artifact: /scratch/jack/experiments/universal_resnet50_gemmini_20260906/hardware/UNIVERSAL_GEMMINI_U250.yaml
+  - artifact: hardware/UNIVERSAL_GEMMINI_U250.yaml
     sha256: 5d4aa1e286d83783f782bf0beac1f5042324432b18bd774faf076f9e40c06497
     relation: expected_generated_header agrees on DIM/ADDR_LEN/BANK_NUM/BANK_ROWS/ACC_ROWS/MAX_BYTES/
       elem_t/acc_t/scale_t/acc_scale_t/scale_acc_t/HAS_MVIN_SCALE and on ACC_READ_FULL_WIDTH being absent

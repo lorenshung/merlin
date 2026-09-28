@@ -1,43 +1,173 @@
-# Atlas target inputs
+# Target inputs and source qualification
 
-`descriptor.yaml` declares target policy, workload requirements and external inputs.
-`tooling.env.example` lists the machine-specific tool locations used by this example.
-The template is documentation: Merlin never loads it automatically.
+`software-spec.yaml` is authored software-visible semantics, not generated tests.
+`hardware.yaml` selects deterministic source production and direct audit questions.
+`host-capabilities.yaml` is separately bound to immutable host compiler bytes.
+Neither an ISA name nor the host package's FP32 strategy certifies FP8/BF16
+operation support.
 
-Named-program oracle checks and explicit input-tensor layout require the Atlas OOT
-support package selected through `MERLIN_TARGET_PATH=/path/to/atlas-mlir/merlin-support`.
-Its contract declares `runner.program_emitter`, including the model-specific encoding
-option. Merlin runs that provider-owned helper in the configured model environment;
-there is no bundled assembler patch or same-name fallback. The support package is
-host-private evidence, never a compiler-candidate input. The former Python keyword
-`fix_itype_rd` is removed; encoding policy belongs in the support declaration.
-Local migration/schema tests do not certify the upstream model or its ISA patch.
+The minimal software spec describes selected numerical/domain rules, operation
+placement/signature constraints, unresolved quantization parameters and explicit
+transfer candidates. It intentionally does not repeat backend configuration,
+opcode tables, memory sizes, calibration history, RTL-audit hashes or test counts.
+The selected OOT provider owns protocol/runtime policy; deterministic tools produce
+the source, coverage and numerical qualification records alongside generated
+artifacts. Choosing FP8/BF16 is not proof of block scaling or whole-network support.
 
-Check machine-specific prerequisites from the repository root with:
+Operation constraints sit directly under their names. A bit-preserving crossing
+uses `copy: {dtype: bf16, layout: row_major_contiguous}` rather than repeating
+source/result dtype and layout. Generated artifacts retain the expanded consumer
+contract and exact input bytes. Unknown quantization fields are not filled by
+this shorthand. See the [authoring guide](../../../docs/guides/phase0_specification.md).
+
+Legacy v1 inline `capability_contract` files still load. New minimal files require
+an explicitly selected same-target backend contract; there is no filesystem lookup
+or guessed protocol inside the software-spec reader. Typed SW admission is screened
+independently from that provider's compatibility declarations.
+
+[`descriptor.yaml`](descriptor.yaml) declares policy, workloads and external
+resources; [`tooling.env.example`](tooling.env.example) lists local tool locations
+without loading them automatically. Runtime implementation and named-program
+oracles belong to the OOT support package. Select that provider and ModelIR
+explicitly before extraction:
 
 ```sh
-.venv/bin/python examples/atlas/target/setup.py
+export MERLIN_TARGET_PATH=/path/to/atlas-mlir/merlin-support
+export MERLIN_MLC_DIR=/path/to/ModelIR
 ```
 
-The default only reports availability. Use `--write-env` to append absent local
-checkout settings, `--sync-npu-model` to synchronize that checkout's environment,
-or `--materialize-target-package` to derive a target definition. Supplying
-`--target-package-dir PATH` also explicitly requests derivation. These actions are
-opt-in; deriving a contract does not install the OOT oracle support above or certify
-the target. The former `build_tools/scripts/setup_atlas.py` entrypoint is retired.
+The provider's `runner.program_emitter` owns model-specific encoding policy;
+Merlin has no bundled assembler patch or same-name fallback. See the selected
+companion revision in
+[`target_support.json`](../../../build_tools/upstreams/target_support.json).
 
-For the descriptor's current `resources_root`, copy it from the repository root:
+The selected matrix cell contains E4M3 operands, an exact 13-bit custom product
+carrier, and BF16 add-and-round output. The product carrier is not another tensor
+quantization format. Operand exponent-zero handling, finite overflow clamping,
+special values, addend subnormals and reduction order need independent numerical
+qualification; the declaration deliberately keeps operation admission unreviewed.
+`compute_datapaths[].declared_carrier` separately records exact FIRRTL port types
+and unsigned carrier widths. A `UInt<8>` carrier is not itself proof of E4M3, nor
+does it establish an unsigned integer arithmetic operation: the selected arithmetic
+structure and independent numerical characterization supply separate evidence.
+
+Produce evidence from one selected elaboration, not a mixture of standalone
+spec-generated hardware and Chipyard memory/hierarchy sources:
 
 ```sh
-cp -n examples/atlas/target/tooling.env.example merlin/experiments/capsule_bench/targets/atlas/experiment.env
+python -m merlin.targetgen.rtl.source_selection \
+  --target atlas --generator atlas --config AtlasRocketConfig \
+  --core-root AtlasTile --firrtl /selected/elaboration/design.fir \
+  --hierarchy /selected/elaboration/top_module_hierarchy.json \
+  --firtool /selected/circt/bin/firtool --output /generated/atlas/source-1
+python -m merlin.targetgen.rtl.circt_introspect --target atlas \
+  --source-bundle /generated/atlas/source-1/source-selection.json \
+  --out /generated/atlas/source-1/facts.json
+merlin-target-tools rtl-source-audit \
+  --source-bundle /generated/atlas/source-1/source-selection.json \
+  --facts /generated/atlas/source-1/facts.json \
+  --hardware-spec examples/atlas/target/hardware.yaml \
+  --output /generated/atlas/source-1/validation.json
 ```
 
-Edit the destination's placeholder paths before running. Existing process environment
-variables take precedence. The destination is ignored by Git; never commit local paths
-or credentials. If you change `resources_root`, put `experiment.env` in that selected
-directory instead. A missing selected file does not fall back to another target's file.
+The producer records exact source/tool digests, emits SoC and core HW dialect
+artifacts, and derives the hierarchy from actual FIRRTL instances. It retains
+the supplied old hierarchy as a diagnostic comparison without inventing module
+aliases. Per-unit accumulation-buffer copies are separate address spaces, not
+extra banks of one larger store. `compute_datapaths` and `storage_datapaths`
+preserve arithmetic formats and physical storage widths separately.
 
-The live environment file and retained contract resources have not moved. Frozen runs
-retain their recorded inputs; changing tooling requires a newly frozen run for verified
-execution. Start from [the experiment definition](../experiment.yaml) and the
-[Phase 0 guide](../phase0/README.md).
+Inspect `source-selection.json`, `firtool.log`, `hierarchy.json`, `soc.hw.mlir`,
+`core.hw.mlir`, `facts.json`, and `validation.json`. A verified source-consistency
+record is not numerical, transfer, simulator or compiler certification. Regenerate
+a fresh frozen Phase 0 run with these facts; do not rewrite old receipts.
+See the [Phase 0 walkthrough](../phase0/README.md).
+
+### Independently characterize the arithmetic cell
+
+The example drives the exact selected `E4M3FMA` through CIRCT-generated
+SystemVerilog and Verilator, comparing raw output bits against SpecIR's independent
+exact-rational product/add with one BF16 nearest-even rounding. The deterministic
+domain comprises all 51,076 pairs of signed-zero or finite-normal FP8 operands
+with exponents 1–14, plus 8,192 seeded finite-normal BF16 addends. FP8 exponent
+15, BF16 addend subnormals, NaNs and infinities are deliberately outside this
+qualification. `--domain multiply` selects only the zero-addend census.
+
+```sh
+python examples/atlas/target/characterize_cell.py \
+  --hw-source /generated/atlas/source-1/core.hw.mlir \
+  --specir-root /selected/SpecIR \
+  --circt-opt /selected/circt/bin/circt-opt \
+  --verilator /selected/bin/verilator \
+  --output /generated/atlas/cell-1 --domain accumulate
+```
+
+Inspect the generated `characterization.json`, raw `cases.json`/`vectors.txt`,
+`cell.hw.mlir`, `verilog/`, `harness.cpp`, executed binary and stage logs. The
+shared producer generates every harness and records byte identities; nothing is
+manually written in an output directory. `verify_characterization` from
+`merlin_experiments.phase0.cell_probe` detects saved-artifact tampering and failed
+native execution. Its finite cell scope does not establish mesh reduction order,
+block scaling, VPU semantics, host conversion, dispatch or full-model lowering.
+
+The separate host manifest lists only FP32 matmul/batch-matmul candidates from
+the pinned RVV schedule. BF16 readout needs an explicit host conversion before an
+FP32 host operation; the bit-preserving transfer candidates do not silently add
+that conversion. The FP8 quantization declaration remains unresolved where block
+size/scale behavior is not yet independently qualified.
+
+### Observe one selected-core program numerically
+
+[probe_native_program.py](probe_native_program.py) runs an explicit 32×32
+finite E4M3 matrix program through an ARC library built from the selected
+AtlasCore subtree. It re-extracts that subtree from the selected AtlasTile
+HW file, independently derives the BF16 golden, checks all 1,024 output
+values and the real TileLink DMA/halt observations, then freezes the source,
+build intermediates, tools, OOT ModeLIR driver, program and results. Use
+--help to supply exact selected source and ARC artifact paths; outputs go
+under a new generated artifact root. The driver needs an explicit,
+source-checked scalar/halt_now manifest path when the public io_halted port
+is optimized away. It never guesses that the reset-true scalar/halted
+register means completion.
+
+```sh
+python -I /generated/atlas/native-1/runner.py \
+  --replay-bundle /generated/atlas/native-1
+```
+
+Replay verifies frozen bytes and re-executes without reopening the original
+RTL checkout. This finite AtlasCore result is not a GSIM, whole-SoC,
+full-precision-domain, or whole-network certificate.
+
+For a broader numerical check of that same frozen 32×32 instruction stream,
+[`probe_native_numerics.py`](probe_native_numerics.py) preloads three new FP8
+matrix pairs and compares all 3,072 BF16 output elements bit-for-bit to
+SpecIR's exact-rational, per-step RNE reference. The cases cover both signs,
+all E4M3 mantissas, finite-normal exponents 1–14, dense nonzero accumulation,
+and asserted positive/negative BF16 ties. It records the selected ARC binary,
+program, RTL, ModeLIR driver, SpecIR and input/output SHA-256 values in a fresh
+ignored `result.json`.
+
+The probe models the observed physical program ABI: raw weight rows are output
+columns (`C[i,j] = sum_k A[i,k] * W[j,k]`), and BF16 output is the two 32×16
+column halves. The diagonal-only case cannot distinguish this from a logical
+untransposed matrix multiply or from a four-quadrant output packing.
+
+```sh
+PYTHONPATH=src python examples/atlas/target/probe_native_numerics.py \
+  --bundle /generated/atlas/native-1 \
+  --specir-root /selected/SpecIR \
+  --output out/artifacts/probes/atlas-native-numerics/new-run
+```
+
+This reuses a frozen native build; it does not recompile it. The fixed program
+cannot qualify tail or batched shapes, a compiler-selected program, or an
+application model. A mismatch remains recorded in the output and returns 2.
+
+`python examples/atlas/target/setup.py` only reports machine prerequisites by
+default. `--write-env`, `--sync-npu-model` and `--materialize-target-package`
+explicitly request local changes; target derivation does not certify a simulator
+or install the OOT provider. Keep local paths and credentials in the descriptor's
+selected ignored `experiment.env`, never in these inputs. Existing environment
+variables take precedence, and a missing selected file has no cross-target fallback.
+Tooling changes require a fresh frozen run for verified execution.

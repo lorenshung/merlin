@@ -1,0 +1,35 @@
+# Gemmini kernel-mining features. Pass explicitly with kernel-index --feature-contract.
+family: gemmini
+targets: [gemmini]
+platform_targets:
+  platforms.gemmini: gemmini
+# Add only the target vocabulary to core's generic Exo schedule class.
+feature_extensions:
+  exo_schedule:
+    schedule_directives: [replace_gemmini_calls]
+    markers:
+      packed_rhs: ['set_memory\s*\([^)]*\bGEMM_SCRATCH\b']
+      accumulator_lifetime: ['set_memory\s*\([^)]*\bGEMM_ACCUM\b']
+      weight_stationary_dataflow: ['replace_gemmini_calls', '\bGEMM_ACCUM\b']
+      intrinsic_lowering: ['replace_gemmini_calls']
+rhs_reuse:
+  method: compute_per_wload
+  compute_token: compute_preloaded
+  wload_tokens: [mvin2, mvin3]
+  label: compute per weight load
+dispatch:
+  opcodes: [mvin, mvin2, mvin3, mvout, preload, compute_preloaded,
+            config_ex, config_ld, config_st, fence]
+  config_prefix: config
+  compute_token: compute_preloaded
+loops:
+  tiling_is_directive: true
+markers:
+  packed_rhs: ['\bmvin[23]\b', 'gemmini_extended\d*_mvin[23]?', 'sp_tiled_matmul']
+  accumulator_lifetime: ['1u?\s*<<\s*31', '0x40000000',
+                         'compute_preloaded', 'gemmini_extended_compute_preloaded']
+  epilogue_before_commit: ['mvin\s*\(\s*&?\s*bias',
+                           'config_ex\([^)]*,\s*(?:RELU|GELU|IGELU)\b']
+  double_buffering: ['\balt_wbuf\b', '\bcur_wbuf\b', '\bdb_sel\b']
+  weight_stationary_dataflow: ['WEIGHT_STATIONARY', 'OUTPUT_STATIONARY']
+  intrinsic_lowering: ['config_(?:ex|ld|st)\b', '\bpreload\b', 'compute_preloaded', '\bmvout\b']

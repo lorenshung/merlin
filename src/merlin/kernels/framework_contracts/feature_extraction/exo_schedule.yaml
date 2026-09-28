@@ -4,8 +4,7 @@ family: exo_schedule
 targets: [exo_schedule]
 # ingest/exo.py: a .py spec is a schedule file (mined with this family) only if it invokes at least one
 # of these scheduling directives.
-schedule_directives: [set_memory, stage_mem, divide_loop, replace_all, replace_gemmini_calls,
-                      tile_outer_loops]
+schedule_directives: [set_memory, stage_mem, divide_loop, replace_all, tile_outer_loops]
 # roles.py: an Exo schedule stages weights explicitly (set_memory/stage_mem), so reuse is asserted
 # as a small constant when the packed_rhs marker fired.
 rhs_reuse:
@@ -20,17 +19,16 @@ loops:
 markers:
   packed_rhs:
     - 'stage_mem\s*\([^)]*[\"''][AB]?_?[Ww]?[^\"'']*[\"'']'
-    - 'set_memory\s*\([^)]*(GEMM_SCRATCH|SCRATCH)'
+    - 'set_memory\s*\([^)]*\bSCRATCH\b'
     - '\bpack\w*\b'
     - '_reg\b'
   accumulator_lifetime:
-    - 'set_memory\s*\([^)]*(GEMM_ACCUM|ACCUM)'
+    - 'set_memory\s*\([^)]*\bACCUM\b'
     - 'lift_alloc\s*\([^)]*res'
     - 'stage_mem\s*\([^)]*[\"'']C'
   epilogue_before_commit: ['\bacc_scale\b', '\bclamp\b', '\brelu\b']
   tiling_blocking: ['\bdivide_loop\b', '\btile_outer_loops\b', '\btile\b',
                     '\breorder_loops\b', '\bsplit\b']
   vector_length_polymorphic: ['\bvectorize\b.*sve', '\brvm\b']
-  weight_stationary_dataflow: ['replace_gemmini_calls', 'GEMM_ACCUM']
-  intrinsic_lowering: ['\breplace_all\b', 'replace_gemmini_calls',
+  intrinsic_lowering: ['\breplace_all\b',
                        'mm256_\w+', 'mm512_\w+', '\bNeon\b']

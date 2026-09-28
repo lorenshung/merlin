@@ -1,5 +1,12 @@
 # Atlas: Phase 2 handoff
 
+Select `phase_corpora.phase2` from the reviewed derivation manifest, separately
+from Phase 1 functional conformance. Preserve the SW-spec/hardware-evidence
+identity and exact frozen functional compiler; new formats, operations or source
+selection require renewed functional qualification, not only a performance run.
+Phase 0 diagnostic members and unresolved source-consistency claims cannot be
+promoted to measured optimization inputs by renaming their selection.
+
 Start with the [functional workflow](../phase1/README.md). Retain the exact
 frozen submission, functional run identity, descriptor and grading evidence;
 an authoring exit code or a changed compiler with a freshly computed hash is

@@ -33,7 +33,7 @@ def out_root(monkeypatch, tmp_path):
     return tmp_path
 
 
-def _install_binary(target: str, *, executable: bool = True) -> "object":
+def _install_binary(target: str, *, executable: bool = True) -> object:
     home = GE.gsim_home(target)
     home.mkdir(parents=True, exist_ok=True)
     emu = home / GE.BINARY_NAME
@@ -307,7 +307,7 @@ def test_the_engine_home_is_derived_per_target_and_per_engine(out_root):
 # working engine is the same defect as an env var nobody exported.
 
 
-def _install_wrapper(target: str, *, engine: str = "gsim") -> "object":
+def _install_wrapper(target: str, *, engine: str = "gsim") -> object:
     home = GE.engine_home(target, engine)
     home.mkdir(parents=True, exist_ok=True)
     wrapper = home / GE.wrapper_name(engine)
@@ -435,6 +435,42 @@ def test_an_installed_engine_is_found_from_a_run_root_that_has_none(monkeypatch,
     assert resolved.ok, resolved.reason
     assert resolved.source == "installed", "found where it is installed, and said so"
     assert GE.probe("phantomsim")[0] is True
+
+
+def test_installed_program_wrapper_and_explicit_home_obey_the_same_lineage_gate(monkeypatch, tmp_path, installed_home):
+    """Program-driven builds remain reachable from a fresh run root, without a gate bypass."""
+    from merlin.targetgen import program_engine_policy as program
+
+    target = "fixture_installed_wrapper"
+    monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "run"))
+    home = GE.installed_engine_home(target)
+    home.mkdir(parents=True)
+    wrapper = home / GE.wrapper_name()
+    wrapper.write_text("def run_program(words, **kw):\n    return {}\n")
+    resolved = GE.resolve(target)
+    assert resolved.ok and resolved.flavour == "wrapper", resolved.reason
+    assert resolved.source == "installed" and resolved.path == wrapper
+    assert program._rtl_engine_dir(target, "gsim") == home
+    assert program._rtl_engine_probe(target, "gsim")()[0]
+
+    # An empty per-run directory is not a new engine selection.
+    GE.engine_home(target).mkdir(parents=True)
+    assert program._rtl_engine_dir(target, "gsim") == home
+
+    monkeypatch.setenv(GE.REQUIRE_RECEIPT_ENV, "1")
+    assert GE.resolve(target).refused
+    assert not program._rtl_engine_probe(target, "gsim")()[0]
+    monkeypatch.setenv(f"MERLIN_EXT_{target.upper()}_GSIM", str(home))
+    assert not program._rtl_engine_probe(target, "gsim")()[0]
+
+
+def test_run_program_wrapper_wins_over_an_installed_elf_engine(monkeypatch, tmp_path, installed_home):
+    target = "fixture_shape_precedence"
+    installed_home(target)
+    monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "run"))
+    wrapper = _install_wrapper(target)
+    result = GE.resolve(target)
+    assert result.ok and result.source == "derived" and result.path == wrapper
 
 
 def test_the_run_relative_home_still_wins_when_it_has_one(monkeypatch, tmp_path, installed_home):

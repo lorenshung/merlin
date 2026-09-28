@@ -394,6 +394,11 @@ def core_hw_mlir(target: str) -> Path | None:
     """The version-matched CORE HW dialect (the module carrying the command decoder) for ANY target,
     from mlc's per-target arc outputs (``runs/circt-arc/<target>/outputs``). Prefers ``*_core_hw.mlir``
     (the core parses cleanly; the SoC dialect carries unparseable sv.verbatim blobs)."""
+    from .source_selection import active_selection
+
+    selected = active_selection(target)
+    if selected is not None:
+        return Path(selected["sources"]["core_hw"]["path"])
     d = mlc_dir()
     if d is None:
         return None
@@ -597,9 +602,11 @@ def discover_legal_opcodes(target: str, *, opcode_width: int | None = None) -> d
             "method": "decoder_icmp_fanout(mlc)",
             "evidence": f"no core HW dialect for target {target!r} under mlc runs/circt-arc",
         }
-    from mlc.discover import decode, irgraph
+    from mlc.discover import decode
 
-    graph = irgraph.load_hw_graph(hw, circt_opt=circt_opt_bin())
+    from .hw_graph import load_hw_graph
+
+    graph = load_hw_graph(hw, circt_opt=circt_opt_bin())
     sig = decode.discover_opcode_set(graph, expected_width=opcode_width)
     if sig is None:
         return {
@@ -653,9 +660,10 @@ def discover_config_subtype_field(target: str, *, sub_width: int = 2, low_bit: i
             "method": "config_subtype_icmp_extract(mlc)",
             "evidence": f"no core HW dialect for target {target!r}",
         }
-    from mlc.discover import irgraph
 
-    graph = irgraph.load_hw_graph(hw, circt_opt=circt_opt_bin())
+    from .hw_graph import load_hw_graph
+
+    graph = load_hw_graph(hw, circt_opt=circt_opt_bin())
     _EQ = 0  # comb.ICmpPredicate eq
     mask = (1 << sub_width) - 1
     by_value: dict[int, set[str]] = {}
@@ -1108,7 +1116,10 @@ def _classify_role(regions: dict, busy: int, drive_cycles: int) -> str:
     is compute even when a macro (LOOP_CONV) also spawns a stalled DMA; store beats load (both stall on
     the absent memory system) because only a store lights the store engine; a light mesh touch is the
     weight-load PRELOAD (compute-adjacent)."""
-    g = lambda k: regions.get(k, 0)
+
+    def g(key):
+        return regions.get(key, 0)
+
     stalled = busy >= int(drive_cycles * 0.9)
     if g("mesh") > 50:
         return "compute"  # heavy systolic-array datapath
@@ -1253,6 +1264,10 @@ def _first_segments(rep_name: str | None) -> str | None:
 def discovered_memory_map(target: str) -> dict | None:
     """The target's operand-scratchpad / accumulator bank map, DISCOVERED from the RTL by mlc (row
     widths, not hand paths). None if unavailable. Target-agnostic."""
+    from .source_selection import active_selection
+
+    if active_selection(target) is not None:
+        return None  # No manifest tied to this explicit hardware; FIRRTL census supplies stores.
     if mlc_dir() is None:
         return None
     try:
@@ -1268,6 +1283,11 @@ def discovered_memory_map(target: str) -> dict | None:
 def discovered_dim(target: str) -> int | None:
     """The target's systolic mesh DIM, DISCOVERED from the RTL by mlc (not a hand literal). None if the
     target has no mesh / is unavailable. Target-agnostic."""
+    from .source_selection import active_selection
+
+    if active_selection(target) is not None:
+        mesh = discovered_mesh(target)
+        return mesh.get("dim") if mesh else None
     if mlc_dir() is None:
         return None
     try:
@@ -1290,6 +1310,34 @@ def discovered_mesh(target: str) -> dict | None:
     downstream, and an unrefutable number is exactly how a SIMT cluster came to publish a 17x17 mesh that
     was 289 flip-flops in a divide/sqrt unit. None when the target has no mesh / mlc is unavailable.
     Target-agnostic."""
+    from .source_selection import active_selection
+
+    selected = active_selection(target)
+    if selected is not None:
+        if "_mesh_discovery" not in selected:
+            with _modelir.discovery_imports(mlc_dir()):
+                from mlc.discover.compute_idiom import recognize_mac_mesh
+
+                from .hw_graph import load_hw_graph
+
+                graph = load_hw_graph(core_hw_mlir(target), circt_opt=circt_opt_bin())
+                mesh = recognize_mac_mesh(graph)
+                selected["_mesh_discovery"] = (
+                    None
+                    if mesh is None
+                    else {
+                        "dim": mesh.dim,
+                        "parent": mesh.parent,
+                        "child": mesh.child,
+                        "count": mesh.count,
+                        "muls": mesh.muls,
+                        "adds": mesh.adds,
+                        "regs": mesh.regs,
+                        "elements": [list(element) for element in mesh.elements],
+                        "corroborated": True,
+                    }
+                )
+        return copy.deepcopy(selected["_mesh_discovery"])
     if mlc_dir() is None:
         return None
     try:
@@ -1305,6 +1353,10 @@ def discovered_mesh(target: str) -> dict | None:
 
 def discovered_memories(target: str) -> list[dict] | None:
     """The target's SRAM banks (name/depth/row_bytes), DISCOVERED from the RTL by mlc. Target-agnostic."""
+    from .source_selection import active_selection
+
+    if active_selection(target) is not None:
+        return None
     if mlc_dir() is None:
         return None
     try:

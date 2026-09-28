@@ -1,0 +1,301 @@
+"""Deterministic, installed requirement derivation from explicit iteration captures.
+
+No agent, candidate compiler or headline evaluation is involved. Authored inputs
+are declarations; generated inventories and synthesis plans are not certificates.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+
+import yaml
+
+from merlin.targetgen import application_inventory, conformance, corpus_synth, target_registry
+from merlin.targetgen.rtl.facts import observed_facts
+from merlin.targetgen.target_experiment import load_target_experiment
+from merlin_experiments.spec import load_spec
+
+from .declarations import from_definition
+from .evidence import _materialize_evidence, export_evidence, select_evidence
+from .profiles import selected_software_spec_path, synthesis_input_identity
+from .software_screen import diagnostic_entry, intersect_requirement, screen_entry
+
+
+def _json(value) -> bytes:
+    return (json.dumps(value, sort_keys=True, indent=2) + "\n").encode()
+
+
+def _materialized_iteration_capsules(full: dict, digest: str) -> tuple[list[dict], dict[str, bytes]]:
+    """Select full iteration programs, not a family representative or a held-out model.
+
+    Save all producer-receipt members before exposing entries. Reopening the
+    source loader or claiming the target executes the program is not involved.
+    """
+    from merlin.targetgen.capsule_source import materialized_model_artifacts
+
+    entries, outputs = [], {}
+    for label, application in sorted(full["applications"].items()):
+        if not label or Path(label).name != label or label in {".", ".."}:
+            raise ValueError("application identity must be a single safe path component")
+        source = Path(application["capture_source_path"])
+        selection = {
+            "path": str(source),
+            "capture_sha256": application["capture_sha256"],
+            "receipt_sha256": application["capture_receipt"]["receipt_sha256"],
+            "workload_id": label,
+            "workload_role": "iteration",
+            "coverage_scope": "full_capture",
+            "full_inventory_sha256": digest,
+            "operation_count": application["n_operations"],
+        }
+        artifact = materialized_model_artifacts(selection)
+        receipt_raw = (source.parent / "capture_receipt.json").read_bytes()
+        if hashlib.sha256(receipt_raw).hexdigest() != selection["receipt_sha256"]:
+            raise ValueError(f"capture receipt changed while copying {label}")
+        receipt = json.loads(receipt_raw)
+        members = set(receipt["artifacts"]) | {"capture_receipt.json"}
+        if artifact.meta.get("framework_catalog"):
+            members.add("pytorch-opset.json")
+        for member in sorted(members):
+            path = source.parent / member
+            if path.is_symlink() or not path.is_file():
+                raise ValueError(f"materialized member missing or symlinked: {path}")
+            outputs[f"materialized/{label}/{member}"] = path.read_bytes()
+        # Independent recheck closes a producer mutation during the copy.
+        copied = outputs[f"materialized/{label}/model.mlir"]
+        if hashlib.sha256(copied).hexdigest() != selection["capture_sha256"]:
+            raise ValueError(f"capture bytes changed while copying {label}")
+        for member, identity in receipt["artifacts"].items():
+            raw = outputs[f"materialized/{label}/{member}"]
+            if len(raw) != identity["bytes"] or hashlib.sha256(raw).hexdigest() != identity["sha256"]:
+                raise ValueError(f"receipt-bound bytes changed while copying {label}/{member}")
+        if (
+            artifact.meta.get("framework_catalog")
+            and hashlib.sha256(outputs[f"materialized/{label}/pytorch-opset.json"]).hexdigest()
+            != artifact.meta["framework_catalog"]["sha256"]
+        ):
+            raise ValueError(f"framework catalog changed while copying {label}")
+        entries.append(
+            {
+                "name": f"SY_source_{label}",
+                "cat": "model",
+                "kind": "model",
+                "op": "model",
+                "model": label,
+                "label": "public",
+                "operand_dtype": artifact.dtype,
+                "source_role": "materialized_iteration_capture",
+                "source_reference": "full saved iteration capture; target compile and execution unverified",
+                "materialized_capture": {**selection, "path": f"materialized/{label}/model.mlir"},
+                "generalization": {"generalization_axis": "composition"},
+            }
+        )
+    return entries, outputs
+
+
+def capture_selections(selections: list[str]) -> dict[str, Path]:
+    result = {}
+    for item in selections:
+        label, separator, location = item.partition("=")
+        if not separator or not label or not location or label in result:
+            raise ValueError(f"invalid/duplicate capture selection {item!r}; use LABEL=PATH")
+        path = Path(location).expanduser().absolute()
+        if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
+            raise ValueError(f"capture selection traverses a symlink: {path}")
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        result[label] = path
+    return result
+
+
+def derive(
+    definition: str | Path,
+    captures: dict[str, Path],
+    *,
+    rtl_facts: str | Path,
+    output_root: str | Path,
+    native_qualifications: dict[str, Path] | None = None,
+) -> dict:
+    """Write a byte-bound requirement, complete census and diagnostic candidate plan.
+
+    All declared iteration applications must be supplied. Old synthesis/private
+    profiles and historical corpus members are deliberately not inputs. Repeating
+    the same selection produces identical bytes; changed inputs need a new root.
+    """
+    declaration = from_definition(definition)
+    te = load_target_experiment(declaration.descriptor)
+    declared = (te.workload_spec or {}).get("applications")
+    if not isinstance(declared, (list, tuple)) or not declared or len(declared) != len(set(declared)):
+        raise ValueError("deterministic derivation needs an explicit nonempty, unique application roster")
+    if set(captures) != set(declared):
+        raise ValueError(
+            f"iteration roster mismatch: missing={sorted(set(declared) - set(captures))}, "
+            f"extra={sorted(set(captures) - set(declared))}"
+        )
+    if len({str(path.resolve()) for path in captures.values()}) != len(captures):
+        raise ValueError("distinct application labels cannot select the same capture path")
+    spec = load_spec(definition)
+    config = spec.document["phases"]["0"]["config"]
+    software = selected_software_spec_path(
+        declaration.recipe, spec.resolve(config["software_spec"]) if config.get("software_spec") else None
+    )
+    hardware = spec.resolve(config["hardware_spec"]) if config.get("hardware_spec") else None
+    if software is None:
+        raise ValueError("deterministic derivation requires an explicit software spec in the recipe")
+    selected = select_evidence(
+        te.target,
+        descriptor=declaration.descriptor,
+        software_spec=software,
+        hardware_spec=hardware,
+        facts_path=rtl_facts,
+    )
+    options = {
+        "capability_contract": selected.contract,
+        "include_graph": True,
+        "application_metadata": {
+            label: {"workload_id": label, "workload_role": "iteration", "coverage_scope": "full_capture"}
+            for label in captures
+        },
+    }
+    # Legacy readers use target names; these scopes prevent a second live
+    # contract/facts selection or silent extraction from an ambient cache.
+    with (
+        target_registry.observed_contract(te.target, selected.contract),
+        observed_facts(te.target, selected.refreshed_facts, Path(rtl_facts)),
+    ):
+        full = application_inventory.application_demand_inventory(captures, te.target, detailed=True, **options)
+        requirement = conformance.derive_spec(
+            te.target,
+            captures,
+            applications=captures,
+            oracle_tiers=[],
+            corpus_roots=[],
+            cert_budget_s=(te.workload_spec or {}).get("cert_budget_s"),
+            application_inventory_options=options,
+        )
+    if full["status"] != "inventoried":
+        raise ValueError("one or more declared iteration captures could not be fully inventoried")
+    digest = hashlib.sha256(json.dumps(full, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    if digest != requirement["application_demands"]["full_inventory_sha256"]:
+        raise ValueError("capture bytes changed while deriving requirements")
+    requirement["application_demands"]["sidecar"] = "application-demands.json"
+    requirement = intersect_requirement(requirement, selected.software_spec, selected.contract)
+    requirement["derivation"]["phase0_execution"] = {
+        "agentic": False,
+        "policy": "deterministic from selected inputs",
+        "definition_sha256": hashlib.sha256(spec.path.read_bytes()).hexdigest(),
+        "oracle_tiers": "not constructed during derivation; establish in execution qualification",
+        "historical_corpus": "not selected",
+        "headline_workloads": "held out",
+        "contract_sha256": hashlib.sha256(_json(selected.contract)).hexdigest(),
+        "raw_facts_sha256": selected.raw_facts_sha256,
+    }
+    root = Path(output_root).absolute()
+    outputs = {
+        "requirements.yaml": yaml.safe_dump(requirement, sort_keys=False).encode(),
+        "application-demands.json": _json(full),
+    }
+    # Save the census even when an exact writer cannot express every signature.
+    # Such a plan is diagnostic and must not become a selectable verified corpus.
+    try:
+        plan = corpus_synth.synthesize(
+            requirement,
+            workload_spec=te.workload_spec,
+            application_inventory=full,
+            capability_contract=selected.contract,
+        )
+    except corpus_synth.SynthesisError as exc:
+        plan = {"status": "blocked", "reason": str(exc), "capsules": [], "provenance": {}}
+    screens = []
+    for index, entry in enumerate(plan.get("capsules") or []):
+        decision = screen_entry(
+            selected.software_spec,
+            entry,
+            defaults=selected.software_spec["numerical_semantics"],
+            host_capabilities=selected.host_capabilities,
+        )
+        screens.append({"capsule": entry.get("name"), **decision})
+        if decision["status"] == "unsupported":
+            plan["capsules"][index] = diagnostic_entry(entry, decision)
+    plan.setdefault("provenance", {})["software_intersection"] = {
+        **requirement["software_intersection"],
+        "candidate_screens": screens,
+    }
+    # Exact source obligations are covered by complete materialized source
+    # programs, independently of the target capability-axis representatives.
+    source_entries, source_outputs = _materialized_iteration_capsules(full, digest)
+    outputs.update(source_outputs)
+    plan.setdefault("provenance", {})["materialized_iteration_captures"] = {
+        "status": "byte_verified",
+        "applications": sorted(captures),
+        "full_inventory_sha256": digest,
+        "scope": "full capture, not headline validation",
+        "qualification": "host reference and source coverage only; target support and execution unverified",
+    }
+    if plan.get("status") != "blocked":
+        plan["capsules"] = [*plan.get("capsules", []), *source_entries]
+    outputs["synthesis-plan.json"] = _json(plan)
+    _materialize_evidence(root, outputs)
+    selected = select_evidence(
+        te.target,
+        descriptor=declaration.descriptor,
+        software_spec=software,
+        hardware_spec=hardware,
+        facts_path=rtl_facts,
+        conformance_spec=root / "requirements.yaml",
+        native_qualifications=native_qualifications,
+    )
+    manifest = export_evidence(selected, root / "evidence")
+    identity = synthesis_input_identity(
+        conformance_spec=root / "requirements.yaml",
+        recipe=declaration.recipe,
+        descriptor=declaration.descriptor,
+        software_spec=software,
+    )
+    if plan.get("status") != "blocked":
+        profile = {
+            "provenance": {
+                **plan.get("provenance", {}),
+                "selected_inputs": identity,
+                "qualification": "diagnostic candidate generation, not a reviewed corpus",
+            },
+            "capsules": plan.get("capsules", []),
+        }
+        _materialize_evidence(root, {"synthesis.yaml": yaml.safe_dump(profile, sort_keys=False).encode()})
+    accounting = json.loads((root / "evidence/coverage/operation-accounting.json").read_bytes())
+    operation_plan = plan.get("provenance", {}).get("application_operation_plan") or {}
+    report = {
+        "schema": "merlin.phase0_derivation.v1",
+        "target": te.target,
+        "status": "diagnostic",
+        "agentic": False,
+        "selected_inputs": identity,
+        "raw_facts_sha256": selected.raw_facts_sha256,
+        "evidence_artifacts": len(manifest["artifacts"]),
+        "applications": sorted(captures),
+        "native_baseline_observations": {
+            label: {
+                key: value
+                for key, value in observation.items()
+                if key
+                in {"status", "executor", "capture_sha256", "receipt_sha256", "max_absolute_error", "target_executed"}
+            }
+            for label, observation in selected.native_baseline_observations.items()
+        },
+        "mlir_operations": full["n_operations"],
+        "source_trace_statuses": {
+            label: app.get("pytorch_provenance", {}).get("source_trace_status", "unknown")
+            for label, app in accounting.get("applications", {}).items()
+        },
+        "candidate_capsules": len(plan.get("capsules", [])),
+        "synthesis_profile": "synthesis.yaml" if plan.get("status") != "blocked" else None,
+        "application_operation_plan": {
+            key: value for key, value in operation_plan.items() if key not in {"obligations", "missing_mapping"}
+        },
+        "blockers": [*selected.qualification_blockers, *([plan["reason"]] if plan.get("status") == "blocked" else [])],
+        "qualification": "derivation only; no compiler execution, oracle or release approval",
+    }
+    _materialize_evidence(root, {"derivation.json": _json(report)})
+    return report

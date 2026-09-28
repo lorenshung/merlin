@@ -215,6 +215,9 @@ def create(
     target_name: str | None = None,
     provider: dict | None = None,
     declared_inputs: dict[str, Path] | None = None,
+    declared_input_layout: dict[str, str] | None = None,
+    root_files: tuple[str, ...] = ROOT_FILES,
+    runtime_links: bool = True,
 ) -> Path:
     """Publish a private snapshot. An interrupted destination cannot masquerade as a seal.
 
@@ -266,6 +269,12 @@ def create(
         if path.is_symlink() or not path.is_file():
             raise SnapshotError(f"declared input is not an ordinary file: {path}")
         input_sources[name] = path
+    input_layout = dict(declared_input_layout or {})
+    if set(input_layout) - set(input_sources):
+        raise SnapshotError("input layout names an undeclared input")
+    for relative in input_layout.values():
+        if PurePosixPath(_relative(relative)).parts[0] != INPUT_ROOT:
+            raise SnapshotError("declared input layout must stay inside its private input root")
     provider_record = None
     if provider is not None:
         if set(provider) != {"target", "resolved_target", "kind", "source"} or provider["target"] != target_name:
@@ -316,6 +325,7 @@ def create(
         def provider_ignore(directory, names):
             current = Path(directory)
             omitted = set(names) & {"__pycache__", ".git"}
+            omitted.update(name for name in names if name == ".env" or name.startswith(".env."))
             for name in names:
                 if name in omitted:
                     continue
@@ -336,13 +346,19 @@ def create(
         elif canonical.is_relative_to(source):
             relative = canonical.relative_to(source)
         if relative is None or not (destination / relative).is_file():
-            relative = Path(INPUT_ROOT) / name / path.name
+            relative = Path(input_layout[name]) if name in input_layout else Path(INPUT_ROOT) / name / path.name
             target = destination / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(path, target)
+            if target.exists():
+                if not target.is_file() or sha_file(target) != sha_file(path):
+                    raise SnapshotError(f"conflicting declared input layout: {relative}")
+            else:
+                shutil.copy2(path, target)
             copied_inputs[relative.as_posix()] = path
         input_records[name] = {"source": str(path), "snapshot": relative.as_posix()}
-    for relative in ROOT_FILES:
+    for relative in root_files:
+        if len(PurePosixPath(_relative(relative)).parts) != 1:
+            raise SnapshotError("snapshot root files must be basenames")
         src = source / relative
         if src.is_file():
             shutil.copy2(src, destination / relative)
@@ -398,7 +414,7 @@ def create(
         (".venv", source / ".venv"),
         ("third_party", source / "third_party"),
     ):
-        if target.exists():
+        if runtime_links and target.exists():
             (destination / relative).symlink_to(target.resolve(), target_is_directory=True)
             links[relative] = str(target.resolve())
     document = {
@@ -411,6 +427,17 @@ def create(
         "directories": directories,
         "selected_provider": provider_record,
         "declared_inputs": input_records,
+        **(
+            {
+                "declared_input_layout": {
+                    name: row["snapshot"]
+                    for name, row in input_records.items()
+                    if name in input_layout and PurePosixPath(row["snapshot"]).parts[0] == INPUT_ROOT
+                }
+            }
+            if input_layout
+            else {}
+        ),
         **metadata,
         "limits": "External tools and outputs are not immutable source; campaign pins verify engines.",
     }
@@ -528,10 +555,18 @@ def _validate_layout(receipt: dict) -> None:
         }
         if mapped_inputs != {relative for relative in files if PurePosixPath(relative).parts[0] == INPUT_ROOT}:
             raise SnapshotError("declared input files disagree with mapping")
+        layouts = receipt.get("declared_input_layout", {})
+        if not isinstance(layouts, dict) or set(layouts) - set(inputs):
+            raise SnapshotError("invalid declared input layout inventory")
+        for name, relative in layouts.items():
+            path = PurePosixPath(_relative(relative))
+            if len(path.parts) < 3 or path.parts[0] != INPUT_ROOT or inputs[name]["snapshot"] != relative:
+                raise SnapshotError("declared input layout disagrees with mapping")
         for name, row in inputs.items():
             relative = PurePosixPath(row["snapshot"])
             if relative.parts[0] == INPUT_ROOT and (
-                len(relative.parts) != 3 or relative.parts[1] != name or relative.name != Path(row["source"]).name
+                (name not in layouts and (len(relative.parts) != 3 or relative.parts[1] != name))
+                or relative.name != Path(row["source"]).name
             ):
                 raise SnapshotError("invalid copied input mapping")
         provider = receipt.get("selected_provider")

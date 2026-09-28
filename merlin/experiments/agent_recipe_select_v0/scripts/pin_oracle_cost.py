@@ -48,7 +48,7 @@ from merlin.common import provenance as PROV  # noqa: E402
 from merlin.common.artifacts import new_product  # noqa: E402
 from merlin.targetgen import oot_runner as OOT  # noqa: E402
 
-FROZEN = REPO / "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0"
+FROZEN = T.FROZEN
 
 #: Two shapes inside the GSIM certificate's own covered set (m=n=16), so a cycles disagreement here
 #: cannot be blamed on running outside what was certified. Both are single-output-tile, which is also

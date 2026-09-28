@@ -376,7 +376,9 @@ def _register_bundles(facts: Mapping[str, Any]) -> Mapping[str, Any] | None:
     return None
 
 
-def with_current_register_layouts(facts: Mapping[str, Any]) -> Mapping[str, Any]:
+def with_current_register_layouts(
+    facts: Mapping[str, Any], *, source_bytes: Mapping[str, bytes] | None = None
+) -> Mapping[str, Any]:
     """``facts`` with its register layouts re-read by the CURRENT reader, when they predate it.
 
     A cached fact bundle outlives the reader that wrote it. One written before parametric Bundles
@@ -394,11 +396,17 @@ def with_current_register_layouts(facts: Mapping[str, Any]) -> Mapping[str, Any]
     if record is None or "unresolved" in record:
         return facts
     source = Path(str(record.get("source") or ""))
-    if not source.is_file():
-        return facts
+    if source_bytes is not None:
+        raw = source_bytes.get(str(source), source_bytes.get(str(source.absolute())))
+        if raw is None:
+            return facts
+    else:
+        if not source.is_file():
+            return facts
+        raw = source.read_bytes()
     from merlin.targetgen.rtl.circt_introspect import _bundle_layouts
 
-    text = source.read_text(encoding="utf-8", errors="replace")
+    text = raw.decode("utf-8", errors="replace")
     layouts, unresolved = _bundle_layouts(text)
     refreshed = {
         **record,
@@ -406,7 +414,7 @@ def with_current_register_layouts(facts: Mapping[str, Any]) -> Mapping[str, Any]
         "unresolved": unresolved,
         "refreshed": {
             "why": "the cached layouts predate the parametric-bundle reader",
-            "source_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "source_sha256": hashlib.sha256(raw).hexdigest(),
         },
     }
     interfaces = [refreshed if item is record else item for item in body.get("interfaces") or ()]
@@ -691,8 +699,37 @@ def epilogue_readouts(target: str):
     ]
 
 
+def capture_inputs(target: str, *, facts: Mapping[str, Any], include_taxonomy: bool = True) -> dict[str, Any]:
+    """Observe optional readout declarations once, without loading RTL facts."""
+    inputs: dict[str, Any] = {}
+    for field_name, hook_name in (
+        ("scalar_abi", "readout_scalar_abi"),
+        ("readouts", "readout_epilogue_capability"),
+        ("operand_sum", "readout_operand_sum"),
+    ):
+        hook = _backend_hook(target, hook_name)
+        try:
+            inputs[field_name] = hook() if hook is not None else None
+        except Exception as exc:  # noqa: BLE001 -- an unreadable declaration is unknown
+            inputs[field_name] = None
+            inputs.setdefault("unknown", {})[field_name] = f"{type(exc).__name__}: {exc}"
+    inputs["taxonomy"] = None
+    if include_taxonomy and _register_bundles(facts.get("facts", facts)) is None:
+        try:
+            from merlin.targetgen import isa_taxonomy
+
+            inputs["taxonomy"] = isa_taxonomy.taxonomy_for_target(target)
+        except Exception as exc:  # noqa: BLE001 -- no ISA evidence is an unknown rung
+            inputs.setdefault("unknown", {})["taxonomy"] = f"{type(exc).__name__}: {exc}"
+    return inputs
+
+
 def for_target(
-    target: str, *, contract: Mapping[str, Any] | None = None, facts: Mapping[str, Any] | None = None
+    target: str,
+    *,
+    contract: Mapping[str, Any] | None = None,
+    facts: Mapping[str, Any] | None = None,
+    readout_inputs: Mapping[str, Any] | None = None,
 ) -> list[ReadoutFacet]:
     """One facet per compute unit the target declares (one unit-less facet if it declares none)."""
     if contract is None:
@@ -706,42 +743,17 @@ def for_target(
             facts = with_current_register_layouts(rtl_facts.load_facts(target))
         except Exception:  # noqa: BLE001 -- underivable facts leave every RTL rung silent
             facts = {}
-    abi_hook, readout_hook = (
-        _backend_hook(target, "readout_scalar_abi"),
-        _backend_hook(target, "readout_epilogue_capability"),
-    )
-    scalar_abi = None
-    if abi_hook is not None:
-        try:
-            scalar_abi = abi_hook()
-        except Exception:  # noqa: BLE001 -- an unreadable header is an absent rung
-            scalar_abi = None
-    readouts = readout_hook() if readout_hook is not None else None
-    sum_hook, operand_sum = _backend_hook(target, "readout_operand_sum"), None
-    if sum_hook is not None:
-        try:
-            operand_sum = sum_hook()
-        except Exception:  # noqa: BLE001 -- an unreadable header is an absent rung
-            operand_sum = None
-    taxonomy = None
-    if _register_bundles(facts.get("facts", facts) if isinstance(facts, Mapping) else {}) is None:
-        # Only a target with no command registers can be a self-hosted ISA worth a role census.
-        try:
-            from merlin.targetgen import isa_taxonomy
-
-            taxonomy = isa_taxonomy.taxonomy_for_target(target)
-        except Exception:  # noqa: BLE001 -- no ISA definition: the rung is silent
-            taxonomy = None
+    inputs = capture_inputs(target, facts=facts) if readout_inputs is None else readout_inputs
     units = [u for u in contract.get("compute_units") or () if isinstance(u, Mapping)] or [None]
     return [
         derive(
             target,
             facts=facts,
             unit=u,
-            scalar_abi=scalar_abi,
-            readouts=readouts,
-            taxonomy=taxonomy,
-            operand_sum=operand_sum,
+            scalar_abi=inputs.get("scalar_abi"),
+            readouts=inputs.get("readouts"),
+            taxonomy=inputs.get("taxonomy"),
+            operand_sum=inputs.get("operand_sum"),
         )
         for u in units
     ]

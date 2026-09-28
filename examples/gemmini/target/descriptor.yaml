@@ -1,8 +1,5 @@
-# Gemmini experiment setup and workload intent. Structural hardware facts come
-# from the selected MLC/CIRCT elaboration, not this file. The `grading` block
-# declares model resource decisions; the reviewed Phase 0 release derives
-# capability exclusions and source/admitted cohort seals from generated files.
-# See ../phase0/README.md for current verification status.
+# Experiment resources and workload policy; hardware facts are extracted inputs.
+# See ../phase0/README.md for deterministic derivation and evidence selection.
 target: gemmini
 resources_root: merlin/experiments/capsule_bench/targets/gemmini
 task_root: examples/gemmini/phase1/task
@@ -12,29 +9,15 @@ numeric_profile: examples/gemmini/phase0/recipe.yaml
 rtl:
   via: mlc            # RTL facts are DERIVED from mlc discovery (MERLIN_MLC_DIR, the target above)
 
-# The shared hardware spec given to ALL arms (a correct backend needs the target's defined ISA — this is
-# a constant input, not Merlin assistance). Repo-root-relative.
-# Path strings are given EXACTLY as the arm bundles grant them (the bundle-stager convention:
-# tmp/... is repo-root-relative, experiments/... resolves under merlin/). This lets the descriptor be
-# the single source of truth the bundle-consistency check compares against.
 hardware_spec:
   isa_headers:
     - experiments/capsule_bench/targets/gemmini/contracts/hwbringup_gemmini_v0/isa_include/gemmini.h
     - experiments/capsule_bench/targets/gemmini/contracts/hwbringup_gemmini_v0/isa_include/gemmini_params.h
   hwbringup_set: experiments/capsule_bench/targets/gemmini/contracts/hwbringup_gemmini_v0
-  # Curated baremetal C harness (linker/crt/headers only, NO kernels) the agent's rv64 compiler links
-  # against — per-target setup, relative to this experiment dir. arc/cyclotron targets omit it.
   curated_harness: contracts/harness_curated/gemmini-rocc-tests
 
-# The capsule corpus the arms author against and are graded on. Sibling corpora (layers/model_slices)
-# and the hidden set are discovered beside it (globbed), not hardcoded.
 capsule_corpus: merlin/contract/capsules/isa
 
-# Phase 0 derives capability exclusions and exact source/admitted counts from the
-# staged corpus and hardware contract. The reviewed release owns those seals.
-# Resource decisions remain authored until each model has comparable measured
-# certification and compilation costs. New model members fail release preparation
-# until assigned to one of these two explicit policy groups.
 grading:
   release_admission: derive_from_corpus_v1
   resource_bound:
@@ -52,183 +35,56 @@ grading:
       - M3_host_island_seam_gemmini
       - SY_micro_model
 
-# Prior backends / reference exemplars the agent must NOT read or copy (denied answer surfaces).
-#
-# THIS LIST IS NO LONGER WHAT DENIES THEM. The whole of `out/artifacts/targets/gemmini/` is withheld
-# wholesale (merlin/python/merlin/targetgen/sandbox/answer_surfaces.py), because an enumeration of
-# finished backends is stale the next time a mining/autotune/targetgen run mints one, not the next time
-# somebody edits this file. Measured 2026-09-21: this list named 4 of the 40 packages present under that
-# directory, and a hand-authored `hand_v0` was covered by no answer surface at all.
-#
-# What remains here is a NAMED subset, kept so those four keep their own labels in the coverage report.
-# Adding a name here withholds nothing that was not already withheld; removing one grants nothing.
-# Names resolve under artifacts/targets/<target>/.
 answer_surfaces:
   prior_backends: [merlin_native_v0, hand_smoke_oot, agent_spec_v0_mlir_oot, agent_spec_v1_mlir_oot]
-  # Packages under this target's own artifacts/targets/<target>/ that an arm MAY read, despite the
-  # wholesale withholding above. Empty is the correct default and the safe one: a way into a denied
-  # surface exists only where something declares one, and declaring one here is a reviewed edit rather
-  # than a bundle grant nobody reads. An entry naming a package that does not exist is reported as a
-  # dropped declaration and blocks the launch, so this list cannot rot into a silent no-op either.
   prior_backend_exemptions: []
 
-# Phase 2 must optimize an honest complete model already certified by the immutable 92/96 Phase 1
-# snapshot. M2 is that run's deliberately reduced (~4 s L3) full-model representative. This explicit
-# declaration prevents a size-based selector from substituting the smaller M3 host-island seam. A future
-# Phase 1 snapshot containing a capsule-level global objective must agree with this declaration.
 performance:
   global_objective_capsule: M2_microvit_gemmini
 
-# How the simulator runs (correctness L2 / RTL L3). spike + verilator come from the chipyard conda env.
 toolchain:
   sim_via: chipyard
 
-# ---------------------------------------------------------------------------------------------------
-# WHICH ORACLE TIERS COST A SHARED, EXCLUSIVE RESOURCE.
-#
-# Everything from L0 to L3 runs on this host: a capsule buys its own oracle, in its own process, and the
-# only contention is CPU. L5 is not like that. There is one FPGA, one job runs on it at a time, and a
-# queue in front of it whose scheduling is a PERSON's decision. No RTL fact states that, and no
-# capability manifest can: it is a property of the lab, not of the design — which is exactly the
-# irreducible SETUP this descriptor exists to carry.
-#
-# `batched: true` is the load-bearing half. It says a capsule may not buy this tier alone; it accumulates
-# into a round-group and the group is measured as N windows of ONE queue job. The runner reads this
-# rather than knowing that "L5" means "FireSim", so a target whose L5 is a second local simulator
-# declares nothing here and nothing about its grading changes.
-#
-# `queue_wall_limit_s` is the wall ONE job may occupy — the bound a batch is sized against, from OBSERVED
-# per-window wall times. Absent would mean UNKNOWN (a batch would then refuse to size itself), not
-# unlimited.
 oracle_resources:
   L5:
     exclusive_resource: firesim_fpga_queue
     batched: true
     queue_wall_limit_s: 43200
 
-# ---------------------------------------------------------------------------------------------------
-# THE FROZEN HOST LANE — pinned INFRASTRUCTURE, never a thing under test.
-#
-# This experiment measures the TARGET lane: the target dialect, the target transforms, the partitioning
-# decision and the boundary/dispatch across it. It does not measure, and must never reward, a second CPU
-# backend. A submission that wins by rewriting the host compiler has moved the work off the accelerator
-# and off the question, and its score would be read as a compiler result about the target.
-#
-# So the host lane is declared here, beside `hardware_spec`, and for the same reason: it is irreducible
-# SETUP a run needs and cannot derive. It is granted to every arm READ-ONLY (an agent that cannot see
-# what the host lane does cannot reason about where the boundary should fall), and the surface that
-# would let it be CHANGED is denied to every arm.
-#
-# VERIFIED BY CONTENT, NOT BY BRANCH NAME — the same discipline as merlin/contract/hardware_pins.yaml.
-# `branch` is informational: branches move, and the same branch name on a fork and on upstream are
-# different histories. `requires_paths` names the files whose PRESENCE is what the lane actually is, so
-# a checkout that is the right repo on a plausible branch and missing the schedule is caught.
-# THE HOST THIS TARGET'S LANE COMPILES FOR, a key of merlin.runtime.boards.
-#
-# Declared because nothing derives it: the board is a fact about the SoC the accelerator sits in, not
-# about the accelerator. Its absence was silent -- `system_for` yields host=None, `place.host_units`
-# then synthesizes a SCALAR-ONLY host, and work that belongs on the host vector lane lands on a scalar
-# one with no error, because "no board declared" and "a board with no vector unit" were the same value.
-#
-# chipyard_kodiak, not chipyard_riscv64, on this target's own evidence: `toolchain.sim_via: chipyard`
-# says the SoC is chipyard, and `host_lane` below pins an RVV package -- so the host must have a vector
-# unit, and chipyard_kodiak is the chipyard board that declares vector harts (2 of 3, VLEN 512).
 host:
   board: chipyard_kodiak
 
-# AUTHORED WORKLOAD INTENT. Hardware facts cannot say which application families matter, which
-# captures may derive public tests, or which models are reserved for evaluation. The recipe still
-# owns software-visible semantics and oracle policy; the derived requirement and synthesis plan
-# must record exactly which of these authored inputs and hardware facts they used.
-#
-# `models` names which workloads this target is FOR -- the requirement's `observed` half is a census of
-# real captures, and without a declared roster the denominator of a tracked requirement is an untracked
-# directory listing. `precision_preference` RANKS the dtypes the target already admits, to break ties on
-# axes no required cell pins; it is filtered against the admitted set and can never widen it, and a
-# token that does not survive is reported rather than silently ignored.
 workload_spec:
-  # THE GRADED ROSTER — the models this target's generalization CLAIM is measured on, and the
-  # denominator `report_generalization_claim` computes over. Both are claim models: held out of
-  # derivation entirely, so the corpus is never built from what it is then said to generalize to.
-  # `smolvla` and `lstmnetvit` left this list when they became derivation sources below; counting a
-  # model you derived FROM as a model you generalize TO is the circularity the holdout exists to stop.
-  #
-  # ⚠️ `smolvla` WAS IN BOTH, which is the contradiction the comment above describes. It sits in
-  # `applications` below as a derivation source, and it sat here as a model the claim is measured on --
-  # so the corpus was built from it and then said to generalize to it. The comment already recorded
-  # that it "left this list"; the list had not been edited to match. Removed here rather than from
-  # `applications`, because dropping it as a derivation source would take `smolvla` out of the
-  # requirement entirely and the corpus needs the evidence more than the claim needs the breadth.
-  models: [resnet50, tiny_llama]
-  # THE DERIVATION APPLICATIONS — the exported models this target is FOR, whose real contraction shapes
-  # the corpus is built from. Named as bundles in the recapture store rather than as a directory, so the
-  # statement is reviewable here instead of depending on which subdirectories a generated tree happens
-  # to hold. `check_conformance_coverage._applications` raises if any of these is a claim model.
-  #
-  # The pretransposed variants are deliberately absent: they are layout rewrites of the captures below,
-  # not separate applications, and the layout they differ in is already a class axis.
-  #
-  # ⚠️ A CONVOLUTIONAL APPLICATION IS REQUIRED HERE, and until 2026-09-21 there was none. `smolvla` and
-  # `lstmnetvit` are the only two model families on this list and neither is convolution-dominated, so
-  # the application axis -- the one that decides which capsules exist at real shapes -- derived its
-  # conv geometry from nothing. That is the corpus-side half of the measured whole-model conv defects:
-  # 53 convolutions declining to the host lane, with the accelerator idle 96.84% of the window.
-  #
-  # `deepjscc_int8_consistent` supplies it: 178 convolution regions, already a legal derivation source
-  # under `claim_models.yaml`, and NOT a claim model -- so the requirement gains real conv geometry
-  # while ResNet-50 stays held out and the generalization claim stays intact. Adding the claim model
-  # itself would have been the easy version of this and would have cost the claim.
+  models: [resnet50, tiny_llama, smolvla]
   applications:
-    - deepjscc_int8_consistent
-    - smolvla_fp32_consistent
-    - smolvla_int8_consistent
-    - smolvla_denoise_step_fp32_app
-    - lstmnetvit_fp8_consistent
-    - lstmnetvit_int8_consistent
-    - lstmnetvit_int8_w8a8_consistent
-  # Seconds one cycle-accurate certification may take. DECLARED, so the application axis records
-  # `budget_source: declared` rather than silently inheriting a default nobody chose.
+    - coverage_mlp
+    - residual_cnn
+    - causal_decoder
+    - multimodal_policy
+  historical_application_suites:
+    model_scale: [deepjscc_int8_consistent, lstmnetvit_fp8_consistent,
+                  lstmnetvit_int8_consistent, lstmnetvit_int8_w8a8_consistent]
   cert_budget_s: 300
   precision_preference: [int8, fp8_e4m3, mxfp8, fp16, bf16, fp32]
   max_synthesized_capsules: 160
 
 host_lane:
+  capability_spec: examples/gemmini/target/host-capabilities.yaml
   description: >-
-    The int8 RVV host compiler: the scalar/vector lane every partitioned Gemmini model capsule falls
-    back to for the work the accelerator does not admit (normalization, reduction, activation tails).
-    All of this experiment's whole-model capstones declare compile_dtype=int8, so the frozen package
-    must declare dtype_strategy=int8_w8a8. Frozen for the duration of the experiment.
+    Candidate int8 RVV host lane for operations not admitted to Gemmini. The selected
+    capability manifest is unreviewed; normalization, reduction and activation tails
+    require exact per-operation lowering and numerical receipts before any partitioned
+    model may claim a verified host fallback. The experiment selects
+    dtype_strategy=int8_w8a8; that selection alone does not establish host support.
   repo_canonical: https://github.com/ucb-bar/rvv-mlir.git
-  # UNKNOWN, and recorded as UNKNOWN rather than defaulted: this repo publishes TO that remote (see
-  # merlin/targets/publish.yaml) and does not vendor a checkout of it, so no commit sha for the branch
-  # is readable here. The pin is therefore carried by `package` + `requires_paths` below, which is a
-  # CONTENT check over the bytes this experiment actually reads. Fill the sha in the moment a checkout
-  # exists; never invent one.
-  # The pinned artifact as it exists in this tree: the transform schedule + knobs that ARE the host
-  # lane's codegen. Repo-root-relative.
-  # WHICH PRECISION LANE THIS IS, declared so the profile key is checkable at load time. `resolve`
-  # cross-checks it against the package's own knobs, so a package filed under the wrong precision is
-  # refused instead of quietly grading a submission against arithmetic it cannot produce.
   dtype_strategy: int8_w8a8
-  # NOT `published`, and `branch: UNKNOWN` was the honest answer to a question that should not have
-  # been asked. This package never existed upstream: its manifest records
-  # `authoring.mode: deterministic_generated_from_spec` and
-  # `publication.promoted_by: merlin.rvvgen.promote_champion` at 20260726T121824Z, certified by
-  # k1_board on run k1_int8_wholemodel_ab_tiny_llama. A branch name here would be a fiction; the pin
-  # is the package tree digest, which is a content check and strictly stronger than a name.
   provenance: in_tree_minted
   package: out/artifacts/targets/rvv/impr_tuned_wholemodel_vf_int8
   requires_paths:
     - manifest.yaml
     - schedule.mlir
     - knobs.yaml
-  # Granted READ-ONLY to every arm. Reading the frozen lane is necessary; it is how an agent knows what
-  # the host side costs and therefore where to put the boundary.
   read_only:
     - out/artifacts/targets/rvv/impr_tuned_wholemodel_vf_int8/
-  # DENIED to every arm: the host compiler's implementation. This is the surface a submission would have
-  # to touch to become a second CPU backend. It is deliberately a DIFFERENT path from the read-only
-  # grant above — deny wins in the sandbox binder, so a path listed on both sides grants nothing at all,
-  # and "read-only" would silently become "invisible".
   deny_modification:
     - merlin/python/merlin/llvmlower/

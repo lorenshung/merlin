@@ -167,6 +167,7 @@ def paths(
         ("rtl_check_compiler", "merlin.targetgen.rtl_check_compiler"),
         ("rtl_checks", "merlin.targetgen.rtl_checks"),
         ("circt_gate", "merlin.targetgen.circt_gate"),
+        ("software_spec", "merlin.targetgen.software_spec"),
     ):
         inputs[f"phase1:startup:{key}"] = str(_source(module).resolve())
     try:
@@ -180,6 +181,7 @@ def paths(
     if descriptor is not None and Path(descriptor).is_file():
         import yaml
 
+        from merlin.targetgen.software_spec import software_spec_path_for_recipe
         from merlin_experiments.corpus.numeric_policy import numeric_profile_path
 
         document = yaml.safe_load(Path(descriptor).read_bytes())
@@ -191,6 +193,10 @@ def paths(
             # Membership binds absence of this declaration too: introducing one
             # on resume changes the input set rather than borrowing live policy.
             inputs["phase1:startup:numeric_profile"] = str(profile)
+            if profile.is_file():
+                selected_spec = software_spec_path_for_recipe(profile)
+                if selected_spec is not None:
+                    inputs["phase1:startup:numeric_software_spec"] = str(selected_spec)
     native_paths = {(root / relative).resolve() for relative in relatives}
     if any(not path.is_relative_to(root) for path in native_paths):
         raise SpecError("phase-1 native entrypoint binding escapes its checkout")

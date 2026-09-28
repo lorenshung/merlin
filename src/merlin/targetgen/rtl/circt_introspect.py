@@ -1,32 +1,17 @@
-"""merlin-rtl circt-introspect (v2) — deterministic, TARGET-AGNOSTIC RTL fact extraction.
+"""Deterministic, target-agnostic CIRCT/FIRRTL structural fact extraction.
 
-Where the grep-over-FIRRTL v1 (:mod:`introspect`) stops, this picks up. It PREFERS mlc's
-target-agnostic RTL discovery (the version-matched core HW dialect: the decoder-derived legal-opcode
-set + the discovered mesh DIM + memory capacities) and falls back to a legacy chipyard/FIRRTL grep +
-HW-port parse only for a target that actually ships those artifacts (gemmini). Nothing here bakes one
-target's paths at import: every path is resolved *from the ``target`` argument* —
+Prefer the version-matched ModelIR HW discovery for decoded opcodes, geometry,
+memory and timing. Use declared FIRRTL for census and arithmetic-cell evidence;
+legacy HW-port/ISA parsing is available only when its source is selected.
+Instruction codes come from RTL. Their names are declared ISA vocabulary, not
+additional hardware observations.
 
-  * the HW dialect / accumulator capacity                    (per-target purgeable ``<t>_soc.hw.mlir``
-    cache — the ``@AccumulatorMem`` port widths, superseded by discovery when mlc is available);
-  * scratchpad + mesh + accumulator capacities               (mlc discovery, target-agnostic);
-  * the legal command **funct decode table** + custom opcode (mlc's decoder ``comb.icmp-eq`` fan-out;
-    the CODES are the fact). The funct NAMES are ISA vocabulary sourced generically: a chipyard
-    target's Chisel ISA source (``<T>ISA.scala``, resolved by the generator convention) when present,
-    else the target's DECLARED ISA headers (``target_experiment.yaml`` -> ``#define k_<NAME> <N>``),
-    else a generic ``funct_<code>`` label.
+Record exact source-byte commitments and report missing evidence as unknown.
+Source consistency requires a separate production/equivalence receipt; matching
+configuration names alone cannot establish it. ``validate`` reports contradictions
+against software declarations instead of reconciling them silently.
 
-Every fact carries ``evidence`` (the exact RTL/source token it came from). The result is cached to a
-per-target ``facts.json`` keyed by the hashes of its inputs; re-extraction is a no-op cache hit.
-``validate(...)`` cross-checks the facts against the target's hand-curated ``target_contract.yaml`` +
-``rocc.decode`` — a disagreement is *surfaced*, not silently reconciled.
-
-Deterministic, no LLM: the hardware is the source of truth. (Extraction still needs mlc to KNOW the
-target's RTL — a novel accelerator registers its RTL with mlc first; that is mlc's coverage, not a
-gemmini assumption baked here.)
-
-CLI::
-
-    python -m merlin.targetgen.rtl.circt_introspect [--target <t>] [--out facts.json] [--hw <t.hw.mlir>]
+CLI: ``python -m merlin.targetgen.rtl.circt_introspect --target <t> --out facts.json``.
 """
 
 from __future__ import annotations
@@ -34,8 +19,9 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from merlin.common.facts_view import interface as _facts_interface
 from merlin.common.paths import repo_root
@@ -46,10 +32,13 @@ from .extraction_contract import accumulator_layout as _accumulator_layout
 from .extraction_contract import boolean_feature_gate as _boolean_feature_gate
 from .extraction_contract import scala_funct_block as _scala_funct_block
 from .facts import rtl_cache_dir
+from .feature_gates import extract_boolean_feature_gate
+from .port_geometry import _module_port_sig as _module_port_sig
+from .port_geometry import extract_accumulator, memories_from_port_geometry
 
 _REPO = repo_root()  # the repo root (contains merlin/)
 
-GENERATOR_VERSION = "rtl-introspect-v10-declared-feature-gates"
+GENERATOR_VERSION = "rtl-introspect-v11-selected-source-receipts"
 # RISC-V ISA STANDARD custom-N major opcodes — fixed by the base ISA for EVERY RISC-V chip, NOT a
 # per-target fact. WHICH custom slot a RoCC accelerator is wired to IS target-specific; it is resolved
 # from the target's own reviewed encoding (contract ``encoding.rocc_custom_slot``) — never a baked
@@ -108,97 +97,6 @@ def isa_scala_path(target: str, chipyard_root: str | Path | None = None) -> Path
     root = Path(chipyard_root) if chipyard_root is not None else Path(V1.default_chipyard())
     cap = target[:1].upper() + target[1:]
     return root / "generators" / target / "src" / "main" / "scala" / target / f"{cap}ISA.scala"
-
-
-# --------------------------------------------------------------- HW-dialect accumulator extraction
-def _int_width(typ: str) -> int | None:
-    """Bit width of an ``iN`` HW/MLIR integer type token (``i9`` -> 9), else None."""
-    typ = typ.strip()
-    return int(typ[1:]) if typ.startswith("i") and typ[1:].isdigit() else None
-
-
-def _paren_span(line: str, open_idx: int) -> int:
-    """Index of the ``)`` that closes the ``(`` at ``open_idx`` (balanced), or -1."""
-    depth = 0
-    for j in range(open_idx, len(line)):
-        if line[j] == "(":
-            depth += 1
-        elif line[j] == ")":
-            depth -= 1
-            if depth == 0:
-                return j
-    return -1
-
-
-def _module_port_sig(hw_text: str, module: str) -> str | None:
-    """The port-list text of ``hw.module ... @<module>( ... )`` — the ports between the balanced
-    parens after the module name. None if the module is absent."""
-    marker = f"@{module}("
-    for line in hw_text.splitlines():
-        if "hw.module" not in line or marker not in line:
-            continue
-        open_idx = line.find(marker) + len(marker) - 1  # the '(' itself
-        close = _paren_span(line, open_idx)
-        if close != -1:
-            return line[open_idx + 1 : close]
-    return None
-
-
-def extract_accumulator(hw_text: str, *, layout: dict[str, str]) -> dict[str, Any] | None:
-    """Accumulator capacity from a declared HW-module port layout, scaled by bank count.
-
-    Per bank: depth = 2**addr_width (the declared address port); a row is ``lanes`` words of the
-    port-derived bit width; the byte mask confirms bytes/row. ``banks`` counts module instantiations.
-    Total bytes = banks * per-bank.
-
-    The signature is read *structurally* — the module's port list is enumerated and each ``name : type``
-    port is matched by exact identity and its integer type width parsed — not pattern-matched, so a
-    port rename or reorder cannot silently mis-derive a capacity."""
-    module = layout["module"]
-    sig = _module_port_sig(hw_text, module)
-    if sig is None:
-        return None
-    addr_w = None
-    lane_bits_seen: list[int] = []
-    mask_bits = 0
-    for decl in (d.strip() for d in sig.split(",")):  # ports have no nested parens in their types
-        if " : " not in decl:
-            continue
-        lhs, typ = decl.rsplit(" : ", 1)
-        name = lhs.split()[-1].lstrip("%")  # drop the `in`/`out` dir + `%`
-        if name == layout["address_port"]:
-            addr_w = _int_width(typ)
-        elif name.startswith(layout["data_prefix"]) and name.endswith(layout["data_suffix"]):
-            w = _int_width(typ)
-            if w is not None:
-                lane_bits_seen.append(w)
-        elif name.startswith(layout["mask_prefix"]):
-            mask_bits += 1
-    if addr_w is None or not lane_bits_seen or len(set(lane_bits_seen)) != 1:
-        return None
-    depth = 1 << addr_w
-    lane_bits = lane_bits_seen[0]
-    n_lanes = len(lane_bits_seen)
-    row_bytes = mask_bits or (n_lanes * (lane_bits // 8))
-    banks = sum(1 for ln in hw_text.splitlines() if "hw.instance" in ln and f"@{module}" in ln) or 1
-    per_bank = depth * row_bytes
-    return {
-        "name": layout["memory_name"],
-        "banks": banks,
-        "addr_width": addr_w,
-        "depth": depth,
-        "lanes": n_lanes,
-        "lane_bits": lane_bits,
-        "row_bytes": row_bytes,
-        "bytes": banks * per_bank,
-        "bytes_per_bank": per_bank,
-        "elem_bits": lane_bits,
-        "evidence": (
-            f"{banks}x @{module} instance; per-bank {layout['address_port']}:i{addr_w} "
-            f"(depth={depth}); {n_lanes}x {layout['data_prefix']}*{layout['data_suffix']}:i{lane_bits}; "
-            f"{mask_bits} byte-mask bits -> {row_bytes} B/row; total={banks * per_bank} B"
-        ),
-    }
 
 
 # ------------------------------------------------------------------ Chisel funct decode-table extract
@@ -786,7 +684,12 @@ def _core_hw_input(target: str) -> dict[str, str]:
     if path is None:
         return {"core_hw_mlir": "unresolved", "core_hw_sha": "unresolved", "core_hw_sha256": "unresolved"}
     core = Path(path)
-    return {"core_hw_mlir": core.name, "core_hw_sha": _sha(core), "core_hw_sha256": _sha256(core)}
+    return {
+        "core_hw_mlir": core.name,
+        "core_hw_path": str(core.resolve()),
+        "core_hw_sha": _sha(core),
+        "core_hw_sha256": _sha256(core),
+    }
 
 
 def _facts_from_discovery(target: str, facts: dict) -> list[str]:
@@ -861,84 +764,6 @@ def elaborated_firrtl(target: str) -> list[Path]:
     return sorted(p for p in d.glob("*.fir")) if d.is_dir() else []
 
 
-def memories_from_port_geometry(fir_paths: Iterable[Path | str]) -> list[dict[str, Any]]:
-    """Memory facts derived from BANKED WRITE PORTS, in the same shape a census emits.
-
-    ⚠️ THIS IS THE CENSUS'S BLIND SPOT, not a second opinion about the same memory. A ``cmem``/``smem``
-    census can only see an SRAM DECLARED inside a module the elaboration contains; a store instantiated
-    at a tile level a standalone repo cannot elaborate produces NO memories at all, and every
-    memory-regime question about that target then reports ``0 / 0`` cells -- unanswerable, while the
-    module below the store declares its geometry on its own ports in full.
-
-    ``source`` is ``firrtl_port_geometry`` so a reader can tell these apart from ``firrtl_census``
-    entries: the two are read from different evidence and a port-derived row is a WRITE-GRANULARITY
-    decomposition (the byte enable), not the SRAM's declared element type.
-
-    Ports that agree on geometry are folded into ONE store, because the same store seen from two ports
-    is far likelier than two distinct stores that happen to match -- and the other reading would publish
-    twice the capacity the device has, which is the direction in which a schedule silently overcommits.
-    """
-    from .ports import banked_store_ports
-
-    merged: dict[tuple, dict[str, Any]] = {}
-    for path in fir_paths:
-        p = Path(path)
-        try:
-            text = p.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue  # an unreadable elaboration contributes nothing; it lies about nothing
-        for rec in banked_store_ports(text):
-            key = (rec["row_bits"], rec["row_addr_bits"], rec["bank_id_bits"], rec["banks"])
-            seen = merged.setdefault(key, {"records": [], "files": []})
-            seen["records"].append(rec)
-            if p.name not in seen["files"]:
-                seen["files"].append(p.name)
-    out: list[dict[str, Any]] = []
-    for _key, seen in sorted(merged.items(), key=lambda kv: -(kv[0][0] or 0)):
-        recs = sorted(seen["records"], key=lambda r: (r["module"], r["field"]))
-        rec = recs[0]
-        sites = [f"{r['module']}.{r['port']}.{r['field']}" for r in recs]
-        mem: dict[str, Any] = {
-            "name": f"{rec['module']}.{rec['field']}".casefold(),
-            "banks": rec["banks"],
-            "depth": rec["rows_per_bank"],
-            # The byte enable proves the row is written in BYTE LANES. That is the store's write
-            # granularity and it is stated as such; it is NOT a claim about the datapath element the
-            # values in it belong to, which a port does not declare (hence no `datapaths` entry).
-            "row_elems": rec["row_bytes"],
-            "elem_bits": 8,
-            "row_bits_rtl": rec["row_bits"],
-            "bytes": rec["bytes"],
-            "source": "firrtl_port_geometry",
-            "modules": sorted({r["module"] for r in recs}),
-            "ports": sites,
-            "row_element_note": (
-                "row_elems x elem_bits is the WRITE GRANULARITY the byte enable "
-                "declares (one lane per byte of the row), not a datapath element "
-                "width -- a port does not declare what type the stored value has"
-            ),
-            "evidence": f"{rec['evidence']} [{', '.join(seen['files'])}]",
-        }
-        if not rec["banks_exact"]:
-            # FAIL CLOSED. The geometry bounds the bank count and the bound is what gets published; a
-            # capacity is withheld rather than computed from a guessed bank count, because a capacity
-            # that is wrong by the bank factor reads as a fit and aborts three layers away.
-            mem["banks_min"], mem["banks_max"] = rec["banks_min"], rec["banks_max"]
-            mem["banks_unknown"] = rec.get("banks_unknown", "the bank count is bounded, not pinned")
-            mem["bytes_unknown"] = (
-                "the bank count is not pinned by this elaboration, so a byte "
-                "capacity would be a guess multiplied by the bank factor"
-            )
-        if len(sites) > 1:
-            mem["ports_note"] = (
-                f"{len(sites)} ports declare this geometry ({sites}); folded into one "
-                "store, since two distinct stores of identical geometry would publish "
-                "twice the capacity the device has"
-            )
-        out.append(mem)
-    return out
-
-
 def _memories_from_declared_elaboration(target: str, facts: dict) -> list[str]:
     """Fill ``facts['memories']`` from the SRAM declarations in the elaboration the target DECLARES.
 
@@ -963,9 +788,6 @@ def _memories_from_declared_elaboration(target: str, facts: dict) -> list[str]:
     if not fir.is_file() or not hierarchy.is_file():
         return []
     census = V1.census_facts(fir, hierarchy, generator=source.generator)
-    if not census.get("memories"):
-        return []
-    facts["memories"] = census["memories"]
     facts.setdefault("census", census.get("census"))
     facts.setdefault(
         "source",
@@ -975,12 +797,45 @@ def _memories_from_declared_elaboration(target: str, facts: dict) -> list[str]:
             "generator": source.generator,
             "fir": fir.name,
             "hierarchy": hierarchy.name,
+            "fir_path": str(fir.resolve()),
             "fir_sha256": _sha256(fir),
+            "hierarchy_path": str(hierarchy.resolve()),
+            "hierarchy_sha256": _sha256(hierarchy),
             "declared_by": str(source.origin),
             "note": "memories from the SRAM declarations of the elaboration this target's descriptor names",
         },
     )
+    if not census.get("memories"):
+        return []
+    facts["memories"] = census["memories"]
     return [f"memories({len(census['memories'])} from the declared elaboration's census)"]
+
+
+def _selected_firrtl(target: str, facts: dict) -> list[Path]:
+    """Use the selected census elaboration, not unrelated ambient cache files.
+
+    An explicit declaration remains authoritative even when missing. Only a
+    target with no resolvable declaration may use legacy cached elaborations.
+    """
+    source = facts.get("source") or {}
+    if source.get("fir_path"):
+        return [Path(source["fir_path"])]
+    try:
+        return [Path(V1.declared_rtl_source(target).artifacts()["fir"])]
+    except V1.RtlSourceInvalid as exc:
+        facts.setdefault("datapaths_undeterminable", []).append(str(exc))
+        return []
+    except (V1.RtlSourceUndeclared, KeyError, FileNotFoundError):
+        return elaborated_firrtl(target)
+
+
+def _record_firrtl_reads(facts: dict, paths: Iterable[Path]) -> None:
+    """Record the exact bytes consumed by the port and compute-cell readers."""
+    reads = facts.setdefault("source", {"kind": "firrtl_reader_inputs"}).setdefault("firrtl_inputs", [])
+    for path in paths:
+        receipt = {"path": str(path.resolve()), "sha256": _sha256(path)}
+        if receipt not in reads:
+            reads.append(receipt)
 
 
 def _memories_from_ports(target: str, facts: dict) -> list[str]:
@@ -992,7 +847,9 @@ def _memories_from_ports(target: str, facts: dict) -> list[str]:
     """
     if facts.get("memories"):
         return []
-    mems = memories_from_port_geometry(elaborated_firrtl(target))
+    paths = _selected_firrtl(target, facts)
+    _record_firrtl_reads(facts, paths)
+    mems = memories_from_port_geometry(paths)
     if not mems:
         return []
     facts["memories"] = mems
@@ -1021,24 +878,31 @@ def _datapaths_from_cells(target: str, facts: dict) -> list[str]:
     ``facts['datapaths_undeterminable']`` so the gap is visible instead of reading as "this design has
     no datapath".
     """
-    if facts.get("datapaths"):
-        return []
     from . import mlc_bridge
     from .datapaths import datapaths_from_compute_cells
 
-    fir = elaborated_firrtl(target)
+    fir = _selected_firrtl(target, facts)
     if not fir:
         facts.setdefault("datapaths_undeterminable", []).append(
-            "no elaborated FIRRTL is cached for this target, so its compute element's port geometry "
+            "no elaborated FIRRTL is selected for this target, so its compute element's port geometry "
             "could not be read (UNKNOWN, not absent)"
         )
         return []
+    _record_firrtl_reads(facts, fir)
     dps, notes = datapaths_from_compute_cells(facts, fir, mlc_bridge.compute_unit_kinds(target))
     if notes:
         facts.setdefault("datapaths_undeterminable", []).extend(notes)
     if not dps:
         return []
-    facts["datapaths"] = dps
+    facts["compute_datapaths"] = dps
+    if facts.get("datapaths"):
+        facts["storage_datapaths"] = facts["datapaths"]
+        # Arithmetic format evidence is distinct from storage width. Preserve
+        # existing named compatibility roles and add only missing input/accumulator.
+        names = {row.get("name") for row in facts["datapaths"]}
+        facts["datapaths"] = [*facts["datapaths"], *(row for row in dps if row.get("name") not in names)]
+    else:
+        facts["datapaths"] = dps
     return [f"datapaths({len(dps)} from cell geometry)"]
 
 
@@ -1067,82 +931,6 @@ def _timing_from_discovery(target: str, facts: dict) -> list[str]:
     facts["timing"] = recs
     resolved = sum(1 for r in recs if r.get("pipeline_depth") is not None)
     return [f"timing({resolved}/{len(recs)} modules)"]
-
-
-def _firrtl_bool_literal(expr: str) -> bool | None:
-    """A FIRRTL one-bit UInt literal, parsed exactly (not substring/regex matched)."""
-    expr = expr.strip()
-    prefix = "UInt<1>("
-    if not expr.startswith(prefix) or not expr.endswith(")"):
-        return None
-    token = expr[len(prefix) : -1].strip().lower()
-    try:
-        value = int(token[2:], 16) if token.startswith("0h") else int(token, 10)
-    except ValueError:
-        return None
-    return bool(value) if value in (0, 1) else None
-
-
-def _firrtl_call_args(expr: str, callee: str) -> list[str] | None:
-    """Top-level operands of one FIRRTL primitive call, preserving nested expressions."""
-    expr = expr.strip()
-    head = f"{callee}("
-    if not expr.startswith(head) or not expr.endswith(")"):
-        return None
-    body = expr[len(head) : -1]
-    args: list[str] = []
-    depth = 0
-    start = 0
-    for i, char in enumerate(body):
-        if char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-            if depth < 0:
-                return None
-        elif char == "," and depth == 0:
-            args.append(body[start:i].strip())
-            start = i + 1
-    if depth != 0:
-        return None
-    args.append(body[start:].strip())
-    return args
-
-
-def extract_boolean_feature_gate(fir_text: str, *, gate: dict[str, str]) -> dict[str, Any] | None:
-    """Read a declared FIRRTL ``and`` build gate with one literal and one dynamic operand.
-
-    Missing, duplicate or differently-shaped nodes are unknown, not inferred from adjacent ISA fields.
-    """
-    found: list[dict[str, Any]] = []
-    prefix = f"node {gate['node']} = "
-    module: str | None = None
-    for line_no, raw in enumerate(fir_text.splitlines(), 1):
-        code = raw.split("@[", 1)[0].strip()
-        if code.startswith("module ") and " :" in code:
-            module = code[len("module ") : code.index(" :")].strip()
-            continue
-        if module != gate["module"]:
-            continue
-        if not code.startswith(prefix):
-            continue
-        expr = code[len(prefix) :].strip()
-        args = _firrtl_call_args(expr, "and")
-        if args is None or len(args) != 2:
-            continue
-        literals = [(idx, _firrtl_bool_literal(arg)) for idx, arg in enumerate(args)]
-        literals = [(idx, val) for idx, val in literals if isinstance(val, bool)]
-        if len(literals) != 1:
-            continue
-        literal_index, value = literals[0]
-        dynamic = args[1 - literal_index]
-        # The other operand must be the target-declared dynamic enable, not merely a second literal.
-        if gate["dynamic_operand_contains"].lower() not in dynamic.lower():
-            continue
-        found.append({"value": value, "line": line_no, "expression": expr})
-    if len(found) != 1:
-        return None
-    return found[0]
 
 
 def extract_elaborated_rtl_features(target: str, facts: dict, fir_path: Path | str | None = None) -> dict[str, Any]:
@@ -1208,6 +996,39 @@ def build_facts(
     isa_path: Path | str | None = None,
     chipyard_root: str | Path | None = None,
     target: str | None = None,
+    source_bundle: Path | str | None = None,
+) -> dict[str, Any]:
+    """Extract selected sources; an explicit source bundle is authoritative."""
+    if source_bundle is None:
+        return _build_facts(hw_path, isa_path, chipyard_root, target)
+    if hw_path is not None:
+        raise ValueError("source_bundle and hw_path are mutually exclusive")
+    from merlin.integrations.modelir import discovery_imports
+
+    from . import mlc_bridge
+    from .source_selection import load_selection, production_consistency, selected_sources
+
+    selected = load_selection(source_bundle, target=target)
+    consistency = production_consistency(selected)
+    with selected_sources(selected), discovery_imports(mlc_bridge.mlc_dir()):
+        record = _build_facts(Path(selected["sources"]["soc_hw"]["path"]), isa_path, chipyard_root, target)
+    record["inputs"]["source_bundle_path"] = selected["selection_path"]
+    record["inputs"]["source_bundle_sha256"] = selected["selection_sha256"]
+    genericization = selected.get("_genericization")
+    if genericization is not None:
+        record["inputs"]["generic_hw_path"] = genericization["output"]["path"]
+        record["inputs"]["generic_hw_sha256"] = genericization["output"]["sha256"]
+        consistency["genericization"] = genericization
+        consistency["sources"].append({"role": "core_hw_generic", **genericization["output"]})
+    record["source_consistency"] = consistency
+    return record
+
+
+def _build_facts(
+    hw_path: Path | str | None = None,
+    isa_path: Path | str | None = None,
+    chipyard_root: str | Path | None = None,
+    target: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the RTL facts for ``target``. PREFERS mlc RTL discovery (target-agnostic: mesh DIM +
     memory capacities + the decoder-derived ISA); the chipyard FIRRTL grep + HW-port parse is the
@@ -1222,20 +1043,84 @@ def build_facts(
     loud error, never a silent gemmini fallback."""
     if target is None:
         raise ValueError("build_facts requires an explicit target (no default is assumed)")
+    from . import datapaths as datapath_reader
+    from . import feature_gates as feature_reader
+    from . import hw_graph, mlc_bridge, source_selection, timing
     from .facts import target_contract_path
+
+    readers = [
+        {"path": str(Path(module.__file__).resolve()), "sha256": _sha256(Path(module.__file__))}
+        for module in (
+            V1,
+            extraction_contract,
+            datapath_reader,
+            feature_reader,
+            source_selection,
+            hw_graph,
+            mlc_bridge,
+            timing,
+        )
+    ]
+    extractor_digest = _sha256(Path(__file__))
 
     try:
         extraction_contract_path = target_contract_path(target)
     except (KeyError, FileNotFoundError):
         extraction_contract_path = None
-    chipyard_root = V1.default_chipyard() if chipyard_root is None else chipyard_root
+    if chipyard_root is None:
+        try:
+            chipyard_root = V1.declared_rtl_source(target).root
+        except V1.RtlSourceInvalid:
+            raise
+        except (V1.RtlSourceUndeclared, KeyError, FileNotFoundError):
+            chipyard_root = V1.default_chipyard()
     hw_path = _soc_hw_path(target) if hw_path is None else Path(hw_path)
     isa_path = isa_scala_path(target, chipyard_root) if isa_path is None else Path(isa_path)
 
+    from .source_selection import active_selection
+
+    selected = active_selection(target)
     fir_sha = fir_sha256 = isa_sha = "n/a"
     elaborated_fir: Path | None = None
     v1: dict[str, Any] = {}
-    if isa_path.is_file():  # a chipyard target with a Chisel ISA source -> legacy FIRRTL grep + HW-port
+    if selected is not None:
+        elaborated_fir = Path(selected["sources"]["firrtl"]["path"])
+        selected_hierarchy = Path(selected["sources"]["hierarchy"]["path"])
+        v1 = V1.census_facts(elaborated_fir, selected_hierarchy, generator=selected["generator"])
+        # Legacy declared role probes are supplemental readers of the same bytes,
+        # never an alternate selected elaboration.
+        if extraction_contract.firrtl_role_probe(target) is not None:
+            probes = V1.extract_facts(elaborated_fir, selected_hierarchy, role_target=target, config=selected["config"])
+            for field in ("arrays", "datapaths", "interfaces"):
+                if probes.get(field):
+                    v1[field] = probes[field]
+        v1["source"] = {
+            "kind": "explicit_source_bundle",
+            "config": selected["config"],
+            "generator": selected["generator"],
+            "fir_path": str(elaborated_fir),
+            "fir_sha256": _sha256(elaborated_fir),
+            "hierarchy_path": str(selected_hierarchy),
+            "hierarchy_sha256": _sha256(selected_hierarchy),
+            "declared_by": selected["selection_path"],
+        }
+        layout = _accumulator_layout(target)
+        if layout is not None:
+            address_space = extract_accumulator(hw_path.read_text(), layout=layout)
+            if address_space is not None:
+                address_space.update(
+                    {
+                        "source": "selected_hw_port_geometry",
+                        "view_kind": "address_space",
+                        "physical_aliases_status": "unknown",
+                        "accounting_note": "logical address-space view; do not sum with physical census stores",
+                    }
+                )
+                v1["memory_address_spaces"] = [address_space]
+                # Preserve the named compatibility view consumed by profiles,
+                # alongside the physical inventory with an explicit view tag.
+                v1.setdefault("memories", []).append(address_space)
+    elif isa_path.is_file():  # a chipyard target with a Chisel ISA source -> legacy FIRRTL grep + HW-port
         accumulator_layout = _accumulator_layout(target)
         try:
             # the elaboration the target's own simulators are built from (runtime.rtl_sim_config)
@@ -1337,6 +1222,33 @@ def build_facts(
         except Exception:  # noqa: BLE001 — undeclared/unresolvable: leave `source` absent, never guess
             pass
 
+    # Byte identity is not production identity. The independently selected HW
+    # dialect and census elaboration have no shared build receipt today. Record
+    # that gap explicitly; matching names, configurations or timestamps cannot
+    # qualify the combined evidence as one hardware revision.
+    source = v1.get("source") or {}
+    core_input = _core_hw_input(target)
+    if elaborated_fir is None and source.get("fir_path"):
+        elaborated_fir = Path(source["fir_path"])
+    hierarchy = Path(source["hierarchy_path"]) if source.get("hierarchy_path") else None
+    fir_sha = _sha(elaborated_fir) if elaborated_fir is not None else fir_sha
+    fir_sha256 = _sha256(elaborated_fir) if elaborated_fir is not None else fir_sha256
+    inputs = {
+        "hw_path": str(hw_path.resolve()),
+        **core_input,
+        "fir_path": str(elaborated_fir.resolve()) if elaborated_fir is not None else None,
+        "hierarchy_path": str(hierarchy.resolve()) if hierarchy is not None else None,
+        "hierarchy_sha256": _sha256(hierarchy) if hierarchy is not None else "unresolved",
+        "firrtl_inputs": source.get("firrtl_inputs", []),
+        "isa_path": str(isa_path.resolve()),
+        "isa_sha256": _sha256(isa_path),
+        "reader_sources": readers,
+    }
+    if _sha256(Path(__file__)) != extractor_digest or any(
+        _sha256(Path(reader["path"])) != reader["sha256"] for reader in readers
+    ):
+        raise RuntimeError("RTL extraction source changed during the observation; retry against stable source bytes")
+
     return {
         "schema_version": "2.0",
         "generator": {
@@ -1359,16 +1271,36 @@ def build_facts(
             # kept distinct: a digest, ``missing`` for a resolved-but-absent file, and ``unresolved``
             # when mlc cannot resolve one at all. A term's validity domain cannot name its elaboration
             # unless this field does.
-            **_core_hw_input(target),
+            **inputs,
             "fir_sha": fir_sha,
             "fir_sha256": fir_sha256,
             "isa_sha": isa_sha,
-            "extractor_sha": _sha(Path(__file__)),
-            "extractor_sha256": _sha256(Path(__file__)),
+            "extractor_sha": extractor_digest[:16],
+            "extractor_sha256": extractor_digest,
             "extraction_contract_sha256": (
                 _sha256(extraction_contract_path) if extraction_contract_path is not None else "unresolved"
             ),
             "extraction_reader_sha256": _sha256(Path(extraction_contract.__file__)),
+        },
+        "source_consistency": {
+            "status": "unverified",
+            "reason": "no shared production receipt or reviewed equivalence binds the selected HW/FIRRTL/hierarchy",
+            "config": source.get("config"),
+            "sources": [
+                {"role": role, "path": inputs[path_key], "sha256": digest}
+                for role, path_key, digest in (
+                    ("core_hw", "core_hw_path", core_input.get("core_hw_sha256")),
+                    ("soc_hw", "hw_path", _sha256(hw_path)),
+                    ("firrtl", "fir_path", fir_sha256),
+                    ("hierarchy", "hierarchy_path", inputs["hierarchy_sha256"]),
+                )
+                if inputs.get(path_key) and digest not in ("missing", "unresolved", "n/a", None)
+            ]
+            + [
+                {"role": "firrtl_reader", **receipt}
+                for receipt in inputs["firrtl_inputs"]
+                if receipt["path"] != inputs["fir_path"] and receipt["sha256"] != "missing"
+            ],
         },
         "facts": v1,
     }
@@ -1399,19 +1331,20 @@ def dump_facts(out_path: Path | str | None = None, **kw) -> dict[str, Any]:
 def validate(
     facts_rec: dict, contract: dict | None = None, rocc_funct_class: dict | None = None
 ) -> dict[str, list[str]]:
-    """Cross-check RTL facts against the hand-curated sources. Returns {'agree':[...], 'diverge':[...]}.
+    """Cross-check selected evidence, distinguishing agreement, divergence and unknown checks.
 
     Divergence is information (e.g. an unconfirmed contract capacity), not a hard error — the whole
     point of RTL extraction is to *correct* curated guesses."""
     facts = facts_rec["facts"]
-    agree, diverge = [], []
+    agree, diverge, unknown = [], [], []
 
     if contract:
         # reuse v1's compute_units-coverage check (mesh/scratchpad/dtype/accumulator capacities are
         # no longer hand-declared in the contract — they ARE these facts, so nothing to cross-check).
-        for p in V1.validate_against_contract(facts, contract):
-            diverge.append(f"contract: {p}")
-        if not [d for d in diverge if "contract" in d]:
+        problems = V1.validate_against_contract(facts, contract)
+        for p in problems:
+            (unknown if p.startswith("UNKNOWN:") else diverge).append(f"contract: {p}")
+        if not problems:
             agree.append("contract: RTL datapaths covered by declared compute_units")
 
     if rocc_funct_class is not None:
@@ -1427,7 +1360,12 @@ def validate(
                     f"rocc_decode funct classifier {sorted(classifier)} ⊆ RTL legal "
                     f"{funct['legal_funct'][0]}..{funct['legal_funct'][-1]}"
                 )
-    return {"agree": agree, "diverge": diverge}
+        else:
+            unknown.append("rocc_decode: RTL funct decode table unavailable")
+    consistency = facts_rec.get("source_consistency") or {}
+    if consistency.get("status") != "verified":
+        unknown.append(f"source consistency: {consistency.get('reason', 'legacy evidence has no production receipt')}")
+    return {"agree": agree, "diverge": diverge, "unknown": unknown}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1441,10 +1379,11 @@ def main(argv: list[str] | None = None) -> int:
         help="output path (default: purgeable artifacts/cache/rtl_introspect/<target>/facts.json)",
     )
     ap.add_argument("--hw", default=None, help="override the SoC HW-dialect input (default: per-target cache)")
+    ap.add_argument("--source-bundle", default=None, help="authoritative byte-bound FIRRTL/HW/hierarchy selection")
     ap.add_argument("--validate", action="store_true", help="cross-check vs contract + rocc_decode")
     a = ap.parse_args(argv)
     out = a.out or str(rtl_cache_dir(a.target) / "facts.json")
-    rec = dump_facts(out, target=a.target, hw_path=(Path(a.hw) if a.hw else None))
+    rec = dump_facts(out, target=a.target, hw_path=(Path(a.hw) if a.hw else None), source_bundle=a.source_bundle)
     facts = rec["facts"]
     acc = next((m for m in facts.get("memories", []) if m.get("name") == "accumulator"), {})
     funct = _facts_interface(facts, "funct_decode_table") or {}
@@ -1456,7 +1395,12 @@ def main(argv: list[str] | None = None) -> int:
 
         from .facts import target_contract_path
 
-        contract = yaml.safe_load(target_contract_path(a.target).read_text())
+        contract_unknown = None
+        try:
+            contract = yaml.safe_load(target_contract_path(a.target).read_text())
+        except (FileNotFoundError, KeyError) as exc:
+            contract = None
+            contract_unknown = f"contract: selected contract is unavailable ({exc})"
         rocc_class = None
         try:
             from ..rocc import decode as rocc_decode  # RoCC classifier; best-effort cross-check
@@ -1465,10 +1409,14 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:  # noqa: BLE001 — no classifier for this target: skip that cross-check
             pass
         res = validate(rec, contract, rocc_class)
+        if contract_unknown is not None:
+            res["unknown"].append(contract_unknown)
         print("  AGREE:")
         [print(f"    + {x}") for x in res["agree"]]
         print("  DIVERGE:")
         [print(f"    ! {x}") for x in res["diverge"]] or print("    (none)")
+        print("  UNKNOWN:")
+        [print(f"    ? {x}") for x in res["unknown"]] or print("    (none)")
     return 0
 
 

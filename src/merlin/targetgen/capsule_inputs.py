@@ -13,6 +13,8 @@ from pathlib import Path
 from merlin.runtime.tensor import Tensor
 
 __all__ = [
+    "is_exact_pytorch_integer_source",
+    "bind_exact_integer_stimulus",
     "capsule_stimulus_range",
     "materialize_capsule_leaves",
     "canonical_input_raws",
@@ -22,6 +24,65 @@ __all__ = [
     "selected_canonical_input_raws",
     "selected_materialize_capsule_leaves",
 ]
+
+
+def is_exact_pytorch_integer_source(capsule: dict) -> bool:
+    """Only a verified, source-bound isolated integer operation uses captured host inputs."""
+    match = capsule.get("application_signature_match")
+    if not isinstance(match, dict) or match.get("status") != "verified_capture_match":
+        return False
+    if (capsule.get("numeric_policy") or {}).get("compare") != "exact_int":
+        return False
+    from merlin.targetgen.application_inventory import int_mm_source_is_qualified
+
+    return int_mm_source_is_qualified(match)
+
+
+def _exact_integer_leaves(capsule: dict) -> dict[str, Tensor]:
+    """Decode typed capture bytes and independently check the saved numeric projection."""
+    from merlin.targetgen.golden_provenance import selected_golden_source
+
+    directory = capsule.get("__dir__")
+    if not directory or selected_golden_source(capsule, directory) != "host_torch_eager":
+        raise ValueError("exact PyTorch integer slice requires a host-torch-eager golden document")
+    provenance = _input_provenance(directory)
+    if not isinstance(provenance, dict) or not provenance:
+        raise ValueError("exact PyTorch integer slice has no saved typed input provenance")
+    leaves = [spec for spec in capsule.get("inputs", []) if spec.get("role") in ("input", "weight", "bias")]
+    names = [spec.get("name") for spec in leaves]
+    if not names or len(names) != len(set(names)) or set(provenance) != set(names):
+        raise ValueError("exact PyTorch integer slice input names differ from saved provenance")
+    env: dict[str, Tensor] = {}
+    for spec in leaves:
+        name = spec["name"]
+        saved = provenance[name]
+        if not isinstance(saved, dict) or spec.get("dtype") != "i8" or saved.get("dtype") != "i8":
+            raise ValueError(f"exact PyTorch integer input {name} has no matching captured i8 dtype")
+        shape = spec.get("shape")
+        if saved.get("shape") != shape or not isinstance(shape, list) or not shape:
+            raise ValueError(f"exact PyTorch integer input {name} has no matching captured shape")
+        encoded = saved.get("integer_bytes_hex")
+        if not isinstance(encoded, str):
+            raise ValueError(f"exact PyTorch integer input {name} has no captured bytes")
+        try:
+            raw = bytes.fromhex(encoded)
+        except ValueError as exc:
+            raise ValueError(f"exact PyTorch integer input {name} has malformed captured bytes") from exc
+        count = 1
+        for dim in shape:
+            if type(dim) is not int or dim < 1:
+                raise ValueError(f"exact PyTorch integer input {name} has invalid shape")
+            count *= dim
+        decoded = saved.get("decoded")
+        if len(raw) != count or not isinstance(decoded, list) or len(decoded) != count:
+            raise ValueError(f"exact PyTorch integer input {name} has incomplete captured values")
+        values = [value - 256 if value >= 128 else value for value in raw]
+        if any(
+            type(value) not in (int, float) or value != actual for value, actual in zip(decoded, values, strict=True)
+        ):
+            raise ValueError(f"exact PyTorch integer input {name} numeric projection differs from its bytes")
+        env[name] = _context().Tensor(tuple(shape), values, "i8")
+    return env
 
 
 def _context():
@@ -69,6 +130,8 @@ def materialize_capsule_leaves(capsule: dict) -> dict[str, Tensor]:
     capsule that needs signed operands -- to make a ReLU actually bind, for instance -- declares them
     once and both the golden and the device get them.
     """
+    if is_exact_pytorch_integer_source(capsule):
+        return _exact_integer_leaves(capsule)
     lo, hi = _context().capsule_stimulus_range(capsule)
     env: dict[str, Tensor] = {}
     for spec in capsule.get("inputs", []):
@@ -95,7 +158,13 @@ def canonical_input_raws(capsule: dict, capsule_dir: str | Path | None = None) -
     sub-byte format whose packing is the caller's choice, yields nothing (fail closed) rather than a
     guessed byte image.
 
-    Empty for integer capsules (which record no raws and are reproduced on the Tensor engine)."""
+    Empty for synthetic integer capsules. A source-bound exact integer slice instead returns its
+    captured typed bytes, so a byte-preload oracle consumes the same operands as Torch eager."""
+    if is_exact_pytorch_integer_source(capsule):
+        return {
+            name: bytes(value & 0xFF for value in tensor.data)
+            for name, tensor in _exact_integer_leaves(capsule).items()
+        }
     ins = _input_provenance(capsule_dir)
     if ins is None:
         return {}
@@ -182,7 +251,10 @@ def canonical_input_values(capsule: dict, capsule_dir: str | Path | None = None)
     of numbers, plus ``shape``). Unlike :func:`canonical_input_raws` (byte-level ``fp8_raw_hex`` for the
     palette-preload program oracle), this returns the actual numeric operands a self-contained kernel harness
     embeds. Each value is ``{"shape": [r, c], "values": [...]}``. Empty when the golden records no decoded
-    inputs (e.g. an integer capsule reproduced on the Tensor engine)."""
+    inputs (e.g. a synthetic integer capsule reproduced on the Tensor engine). Exact source-bound
+    integer slices return the byte-checked captured operands."""
+    if is_exact_pytorch_integer_source(capsule):
+        return materialized_input_values(capsule)
     ins = _input_provenance(capsule_dir)
     if ins is None:
         return {}
@@ -218,6 +290,27 @@ def materialized_input_values(capsule: dict) -> dict[str, dict]:
         vals = [int(v) if integral else float(v) for v in t.data]
         out[name] = {"shape": list(t.shape), "values": vals}
     return out
+
+
+def bind_exact_integer_stimulus(capsule: dict, command_buffer: dict) -> None:
+    """Pin a source slice's checked host bytes on every command-buffer execution path.
+
+    The caller has already attached ``canonical_inputs`` (possibly renamed positionally) for
+    whole-program kernels. This also pins the reference, simulator and native backend leaf data.
+    """
+    if not is_exact_pytorch_integer_source(capsule):
+        return
+    source_values = materialized_input_values(capsule)
+    bound = command_buffer.get("canonical_inputs") or {}
+    if not isinstance(bound, dict) or list(bound.values()) != list(source_values.values()):
+        raise ValueError("exact PyTorch integer slice has an incomplete or changed input binding")
+    for name, value in bound.items():
+        spec = (command_buffer.get("tensors") or {}).get(name)
+        if not isinstance(spec, dict) or spec.get("role") not in ("input", "weight", "bias"):
+            raise ValueError(f"exact PyTorch integer input {name} is not a declared command-buffer leaf")
+        if spec.get("dtype") != "i8" or spec.get("shape") != value.get("shape"):
+            raise ValueError(f"exact PyTorch integer input {name} disagrees with its command-buffer ABI")
+        spec["data"] = list(value["values"])
 
 
 def _flatten_row_major(x: object) -> list:

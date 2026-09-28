@@ -28,8 +28,14 @@ def implementation_identity() -> dict:
         "merlin.targetgen.capsule_source",
         "merlin.targetgen.capture_cache",
         "merlin.targetgen._m2m_capture_worker",
+        "merlin.targetgen._aten_opset_worker",
         "merlin.targetgen._recipe_quantizer",
         "merlin.targetgen.quant_layer_plan",
+        "merlin.targetgen.software_spec",
+        "merlin.targetgen.transfer_contracts",
+        "merlin.targetgen.semantic_families",
+        "merlin.common.quant_formats",
+        "merlin.runtime.commandbuffer",
         "merlin.frontends.capture_normalization",
         "merlin.frontends.linalg_mlir",
         "merlin.llvmlower.torchao_affine",
@@ -60,6 +66,51 @@ def observed_sources_match(meta: dict) -> bool:
             if not path.is_absolute() or path.is_symlink() or sha256_file(path) != record.get("sha256"):
                 return False
     except (OSError, ValueError):
+        return False
+    return True
+
+
+def frontend_trace_matches(meta: dict, attempt: Path) -> bool:
+    """Do not reuse a capture whose recorded frontend evidence disappeared or changed."""
+    documents = {}
+    for name in ("frontend_trace", "framework_catalog"):
+        record = meta.get(name)
+        if not isinstance(record, dict) or not isinstance(record.get("path"), str):
+            return False
+        selected = Path(record["path"])
+        try:
+            if selected.is_symlink() or not selected.resolve().is_relative_to(attempt.resolve()):
+                return False
+            if hashlib.sha256(selected.read_bytes()).hexdigest() != record.get("sha256"):
+                return False
+            documents[name] = json.loads(selected.read_bytes())
+        except (OSError, ValueError):
+            return False
+    trace = documents["frontend_trace"]
+    if not isinstance(trace, dict):
+        return False
+    declared = trace.get("mlir") or {}
+    if not isinstance(declared, dict):
+        return False
+    try:
+        source = Path(meta.get("frontend_raw_mlir_path") or attempt / "linalg.mlir")
+        if source.is_symlink() or not source.resolve().is_relative_to(attempt.resolve()):
+            return False
+        raw = source.read_bytes()
+        if declared.get("sha256") is not None and hashlib.sha256(raw).hexdigest() != declared["sha256"]:
+            return False
+        if declared.get("bytes") is not None and len(raw) != declared["bytes"]:
+            return False
+        normalization = meta.get("capture_normalization") or {}
+        if normalization:
+            if hashlib.sha256(raw).hexdigest() != normalization.get("input_sha256"):
+                return False
+            normalized = attempt / "linalg.mlir"
+            if normalized.is_symlink() or hashlib.sha256(normalized.read_bytes()).hexdigest() != normalization.get(
+                "output_sha256"
+            ):
+                return False
+    except (OSError, ValueError, TypeError):
         return False
     return True
 

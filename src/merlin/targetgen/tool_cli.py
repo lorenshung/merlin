@@ -92,6 +92,24 @@ def _spike_extension(args: argparse.Namespace) -> int:
     return 0
 
 
+def _rtl_source_audit(args: argparse.Namespace) -> int:
+    """Compare selected source ports with extracted facts and authored audit questions."""
+    from .rtl import source_audit
+
+    return source_audit.main(
+        [
+            "--source-bundle",
+            args.source_bundle,
+            "--facts",
+            args.facts,
+            "--hardware-spec",
+            args.hardware_spec,
+            "--output",
+            args.output,
+        ]
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="merlin-target-tools", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -129,6 +147,13 @@ def build_parser() -> argparse.ArgumentParser:
     spike.add_argument("--default-library-dir", required=True)
     spike.add_argument("--default-extension-name", required=True)
     spike.set_defaults(func=_spike_extension)
+
+    audit = sub.add_parser("rtl-source-audit", help="audit extracted facts against exact selected RTL ports")
+    audit.add_argument("--source-bundle", required=True)
+    audit.add_argument("--facts", required=True)
+    audit.add_argument("--hardware-spec", required=True)
+    audit.add_argument("--output", required=True)
+    audit.set_defaults(func=_rtl_source_audit)
     return parser
 
 

@@ -95,6 +95,10 @@ _STALE_LITERAL_ALLOW = {
     "merlin/tests/infra/test_artifact_layout.py:artifacts/plots/foo.png",  # deny-test fixture
     'merlin/experiments/capsule_bench/harness/gen_fullsuite_report.py:.glob("runs/',
     "merlin/experiments/capsule_bench/harness/abc_watchdog.sh:runs/${",
+    # These probes package an external ModeLIR checkout, whose own cache lives at
+    # <modelir>/runs/ (not at Merlin's retired generated-artifact root).
+    'examples/atlas/target/probe_native_program.py:args.modelir / "runs/circt-arc/',  # target-ok: target example path
+    'examples/gemmini/target/probe_native_dma.py:support / "runs/circt-arc/',  # target-ok: target example path
 }
 
 

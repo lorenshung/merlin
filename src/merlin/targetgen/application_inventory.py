@@ -8,9 +8,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
+import math
 from collections import Counter
 from pathlib import Path
+
+from merlin.common.digest import is_sha256
+
+# A separate, versioned addition preserves existing frozen v1 inventory bytes.
+from merlin.targetgen.application_graph import application_graph_inventory
 
 _INT_MM_MAPS = [
     "affine_map<(d0, d1, d2) -> (d0, d2)>",
@@ -52,6 +57,8 @@ def verify_capture_receipt(path: str | Path) -> dict:
             "errors": [f"capture receipt is unreadable: {exc}"],
         }
     errors = []
+    metadata = None
+    metadata_identity = None
     if doc.get("schema") != "m2m.capture-receipt.v1":
         errors.append("unsupported capture receipt schema")
     if (doc.get("materialized_abi") or {}).get("complete") is not True:
@@ -70,12 +77,7 @@ def verify_capture_receipt(path: str | Path) -> dict:
             errors.append(f"receipt artifact missing or symlinked: {name}")
             continue
         size, expected = record.get("bytes"), record.get("sha256")
-        if (
-            type(size) is not int
-            or size < 0
-            or not isinstance(expected, str)
-            or not re.fullmatch(r"[0-9a-f]{64}", expected)
-        ):
+        if type(size) is not int or size < 0 or not is_sha256(expected):
             errors.append(f"invalid size/digest for receipt artifact {name}")
             continue
         if artifact.stat().st_size != size:
@@ -87,12 +89,140 @@ def verify_capture_receipt(path: str | Path) -> dict:
                 hasher.update(chunk)
         if hasher.hexdigest() != expected:
             errors.append(f"receipt artifact digest differs: {name}")
-    return {
+        elif name == "meta.json":
+            # Project the same bytes whose membership was verified, not an ambient metadata read.
+            raw_meta = artifact.read_bytes()
+            if len(raw_meta) != size or hashlib.sha256(raw_meta).hexdigest() != expected:
+                errors.append("receipt metadata changed during observation")
+            else:
+                try:
+                    metadata = json.loads(raw_meta)
+                    metadata_identity = {"sha256": expected, "bytes": size}
+                except (ValueError, UnicodeDecodeError):
+                    pass
+    result = {
         "status": "verified_materialized" if not errors else "unverified",
         "receipt_sha256": digest,
         "source_closure_verified": doc.get("source_closure_verified") is True,
         "errors": errors,
     }
+    if (
+        not errors
+        and isinstance(metadata, dict)
+        and metadata_identity is not None
+        and isinstance(metadata.get("integerization_receipt"), dict)
+        and capture.name == "model.mlir"
+        and not capture.is_symlink()
+        and not receipt_path.is_symlink()
+        and not any(parent.is_symlink() for parent in capture.parents)
+    ):
+        result["capture_integerization"] = {
+            "schema": "merlin.capture_integerization.v1",
+            "status": "byte_bound_metadata",
+            "metadata": metadata_identity,
+            "capture": dict(artifacts["model.mlir"]),
+            "capture_receipt_sha256": digest,
+            "source_quantization": metadata.get("scheme"),
+            "integerization_receipt": metadata.get("integerization_receipt"),
+        }
+    return result
+
+
+def verified_static_integerization(projection: dict | None, *, receipt_sha256: str | None = None) -> bool:
+    """Screen a saved, byte-bound static conversion observation without reopening its sources.
+
+    This qualifies only the post-integerization arithmetic for an isolated operation slice. It is
+    neither static/dynamic quantization equivalence nor target/compiler numerical qualification.
+    """
+    if not isinstance(projection, dict) or (
+        projection.get("schema") != "merlin.capture_integerization.v1"
+        or projection.get("status") != "byte_bound_metadata"
+        or projection.get("source_quantization") != "int8_static_act_int8_weight"
+        or not is_sha256(projection.get("capture_receipt_sha256"))
+        or (receipt_sha256 is not None and projection.get("capture_receipt_sha256") != receipt_sha256)
+    ):
+        return False
+    metadata = projection.get("metadata") or {}
+    if (
+        not isinstance(metadata, dict)
+        or not is_sha256(metadata.get("sha256"))
+        or type(metadata.get("bytes")) is not int
+        or metadata["bytes"] <= 0
+    ):
+        return False
+    capture = projection.get("capture") or {}
+    if (
+        not isinstance(capture, dict)
+        or not is_sha256(capture.get("sha256"))
+        or type(capture.get("bytes")) is not int
+        or capture["bytes"] <= 0
+    ):
+        return False
+    receipt = projection.get("integerization_receipt") or {}
+    if not isinstance(receipt, dict) or receipt.get("schema") != "m2m.pt2e-integerize.v1":
+        return False
+    count = receipt.get("quantized_contractions_seen")
+    if (
+        type(count) is not int
+        or count <= 0
+        or type(receipt.get("quantized_contractions_integerized")) is not int
+        or receipt.get("quantized_contractions_integerized") != count
+        or type(receipt.get("quantized_contractions_remaining")) is not int
+        or receipt["quantized_contractions_remaining"] != 0
+        or receipt.get("accumulator_bound_checked") is not True
+        or receipt.get("refusals") != []
+        or type(receipt.get("exported_integer_mm_count")) is not int
+        or receipt["exported_integer_mm_count"] <= 0
+        or type(receipt.get("integer_mm_emitted")) is not int
+        or receipt.get("integer_mm_emitted") != receipt["exported_integer_mm_count"]
+    ):
+        return False
+    agreement = receipt.get("golden_agreement") or {}
+    if not isinstance(agreement, dict):
+        return False
+    outputs = agreement.get("outputs")
+    if (
+        agreement.get("status") != "passed"
+        or agreement.get("finite") is not True
+        or type(agreement.get("samples")) is not int
+        or agreement["samples"] <= 0
+        or not isinstance(outputs, list)
+        or not outputs
+    ):
+        return False
+    for row in [agreement, *outputs]:
+        if not isinstance(row, dict) or row.get("finite") is not True:
+            return False
+        if row is not agreement and row.get("within_tolerance") is not True:
+            return False
+        values = [row.get(key) for key in ("max_abs", "max_rel", "atol", "rtol")]
+        if any(type(value) not in (int, float) or not math.isfinite(value) or value < 0 for value in values):
+            return False
+    return True
+
+
+def int_mm_source_is_qualified(match: dict) -> bool:
+    """Keep each source quantization identity distinct while screening isolated integer arithmetic."""
+    scheme = match.get("source_quantization")
+    if scheme == "int8_dyn_act_int8_weight":
+        return True  # Legacy candidates retain their existing per-operation weight-origin screen.
+    if scheme != "int8_static_act_int8_weight":
+        return False
+    sources = match.get("sources")
+    return (
+        isinstance(sources, list)
+        and bool(sources)
+        and all(
+            isinstance(source, dict)
+            and source.get("source_quantization") == scheme
+            and is_sha256(source.get("capture_receipt_sha256"))
+            and verified_static_integerization(
+                source.get("capture_integerization"), receipt_sha256=source["capture_receipt_sha256"]
+            )
+            and source["capture_integerization"]["capture"]["sha256"] == source.get("capture_sha256")
+            for source in sources
+        )
+    )
 
 
 def exact_int_mm_geometry(row: dict, *, require_quant_origin: bool = True) -> tuple[int, int, int] | None:
@@ -173,7 +303,9 @@ def operation_structure(op) -> dict:
     }
 
 
-def _application_operation_inventory(path: str | Path, target: str, cap_map: dict) -> dict:
+def _application_operation_inventory(
+    path: str | Path, target: str, cap_map: dict, *, include_graph: bool = False
+) -> dict:
     """Answer-free, operation-complete inventory for one application capture.
 
     A provenance tag names the frontend source; it is not the operation's computation. In particular,
@@ -386,10 +518,19 @@ def _application_operation_inventory(path: str | Path, target: str, cap_map: dic
     if n_operations == 0 or sum(row["count"] for row in grouped.values()) != n_operations:
         raise ValueError(f"declared application capture {p}: parsed operations were not fully inventoried")
     rows = [grouped[key] for key in sorted(grouped)]
-    return {
+    trace_path = p.parent / "frontend-trace.json"
+    capture_receipt = verify_capture_receipt(p)
+    integerization = capture_receipt.pop("capture_integerization", None)
+    result = {
         "capture": f"{p.parent.name}/{p.name}",
+        "capture_source_path": str(p.absolute()),
         "capture_sha256": hashlib.sha256(data).hexdigest(),
-        "capture_receipt": verify_capture_receipt(p),
+        "frontend_trace": (
+            {"source_path": str(trace_path.absolute()), "sha256": hashlib.sha256(trace_path.read_bytes()).hexdigest()}
+            if trace_path.is_file() and not trace_path.is_symlink()
+            else None
+        ),
+        "capture_receipt": capture_receipt,
         "capture_normalization": normalization,
         "capture_quantization": module_quantization,
         "n_operations": n_operations,
@@ -402,9 +543,52 @@ def _application_operation_inventory(path: str | Path, target: str, cap_map: dic
             "is not compiler lowering or model execution"
         ),
     }
+    if integerization is not None and integerization.get("source_quantization") == module_quantization:
+        result["capture_integerization"] = integerization
+    if include_graph:
+        result["operation_graph"] = application_graph_inventory(p)
+    return result
 
 
-def application_demand_inventory(applications: dict[str, str | Path], target: str, *, detailed: bool = False) -> dict:
+def application_operation_inventory(
+    path: str | Path,
+    target: str,
+    *,
+    capability_contract: dict,
+    workload_id: str,
+    workload_role: str = "validation",
+) -> dict:
+    """Observe one complete validation program without deriving any capsule.
+
+    Unlike ``application_demand_inventory``, this evaluator entrypoint can read
+    held-out models. Its result labels the role explicitly; it cannot certify
+    compiler support or make a validation capture a legal derivation source.
+    """
+    if not isinstance(workload_id, str) or not workload_id or workload_role != "validation":
+        raise ValueError("evaluation inventory requires an explicit validation workload identity")
+    from merlin.targetgen.eligibility import capability_map_from_contract
+
+    result = _application_operation_inventory(
+        path, target, capability_map_from_contract(capability_contract), include_graph=True
+    )
+    result["workload_identity"] = {
+        "workload_id": workload_id,
+        "workload_role": workload_role,
+        "coverage_scope": "full_capture",
+    }
+    result["purpose"] = "evaluation_only; not a Phase 0 derivation input"
+    return result
+
+
+def application_demand_inventory(
+    applications: dict[str, str | Path],
+    target: str,
+    *,
+    detailed: bool = False,
+    capability_contract: dict | None = None,
+    include_graph: bool = False,
+    application_metadata: dict[str, dict] | None = None,
+) -> dict:
     """Inventory declared derivation applications; keep exact operation rows in a generated sidecar.
 
     The default is a reviewable requirement summary. ``detailed=True`` retains all grouped signatures
@@ -419,16 +603,39 @@ def application_demand_inventory(applications: dict[str, str | Path], target: st
             "n_operations": 0,
         }
     from merlin.targetgen import claim_models as cm
-    from merlin.targetgen.eligibility import capability_map_for_target
+    from merlin.targetgen.eligibility import capability_map_for_target, capability_map_from_contract
 
-    cap_map = capability_map_for_target(target)
+    cap_map = (
+        capability_map_from_contract(capability_contract)
+        if capability_contract is not None
+        else capability_map_for_target(target)
+    )
     output: dict[str, dict] = {}
     for label, path in sorted(applications.items()):
         if cm.is_claim_bundle(label) or cm.is_claim_bundle(Path(path).resolve().parent.name):
             raise ValueError(f"application {label!r} is a held-out claim model and cannot derive Phase 0 demands")
-        output[str(label)] = _application_operation_inventory(path, target, cap_map)
+        output[str(label)] = _application_operation_inventory(path, target, cap_map, include_graph=include_graph)
+        identity = (application_metadata or {}).get(str(label))
+        if identity is not None:
+            if not isinstance(identity, dict) or identity.get("workload_role", "unknown") not in {
+                "iteration",
+                "validation",
+                "unknown",
+            }:
+                raise ValueError("application metadata requires an explicit iteration/validation/unknown workload role")
+            if identity.get("coverage_scope", "unknown") not in {"full_capture", "representative_subset", "unknown"}:
+                raise ValueError("application metadata requires an explicit full/representative/unknown coverage scope")
+            if identity.get("workload_role") == "validation":
+                raise ValueError("held-out validation captures cannot derive Phase 0 iteration demands")
+            for field in ("workload_id", "source_workload_id"):
+                source = identity.get(field)
+                if source is not None and (not isinstance(source, str) or not source):
+                    raise ValueError(f"application metadata {field} must be a nonempty source identity")
+                if source is not None and cm.is_claim_bundle(source):
+                    raise ValueError(f"application metadata {field} names a held-out validation source")
+            output[str(label)]["workload_identity"] = dict(identity)
     full = {
-        "schema_version": 1,
+        "schema_version": 2 if include_graph else 1,
         "status": "incomplete" if any(row["status"] == "incomplete" for row in output.values()) else "inventoried",
         "coverage_status": "unverified",
         "applications": output,

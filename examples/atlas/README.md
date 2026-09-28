@@ -5,12 +5,16 @@ Start with [experiment.yaml](experiment.yaml), registered as `atlas-functional` 
 target `atlas`; provider identity and hardware configuration are separate inputs.
 
 - [Target descriptor](target/descriptor.yaml): target policy and declared external resources.
+- [Software spec](target/software-spec.yaml) and [hardware selection](target/hardware.yaml): separate authored semantics from selected structural evidence.
 - [Phase 0 guide](phase0/README.md) and [public recipe](phase0/recipe.yaml): derive tests, then prepare and review the resulting corpus.
 - [Phase 1 guide](phase1/README.md): supplied compiler-authoring inputs and functional experiment requirements.
 - [Phase 2 handoff](phase2/README.md): select frozen compiler evidence and the existing optimization templates.
 - [Whole-model entrypoints](whole-model/README.md): capture/lowering inspection and separate deployment prerequisites.
+- [Artifact navigation](artifacts/README.md): raw CIRCT facts, actual consumer views, coverage and capsule lineage.
 
 [Target setup](target/README.md) describes explicit OOT support and local tooling prerequisites.
+Phase 0 is explicitly diagnostic until source consistency, software semantics and
+coverage are qualified. Generated files remain outside the example.
 
 Inspect the definition and discover retained runs without launching an experiment:
 

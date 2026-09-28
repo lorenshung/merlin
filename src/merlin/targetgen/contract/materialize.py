@@ -48,6 +48,11 @@ _CAPSULE_FILES = (
     "golden.yaml",
     "expected_instruction_coverage.yaml",
     "README.md",
+    "frontend-trace.json",
+    "frontend-source.mlir",
+    "frontend-evidence.json",
+    "pytorch-opset.json",
+    "source-capture-receipt.json",
 )
 _TIER_ORDER = ["L0", "L1", "L2", "L3", "L4", "L5"]
 _DEFAULT_CEILING = "L2"  # bwrap sandbox: numerics + spike, no VCS/FireSim (L3+).
@@ -305,12 +310,21 @@ def materialize_public_capsules(
         name = src.name
         d = dest / name
         d.mkdir(parents=True, exist_ok=True)
+        from merlin.targetgen.capsule_common import verify_capture_tool
+
+        source_capsule = yaml.safe_load((src / "capsule.yaml").read_text(encoding="utf-8")) or {}
+        verify_capture_tool(src, source_capsule)
         for f in _CAPSULE_FILES:
             sp = src / f
             if not sp.is_file():
                 continue
             if f == "capsule.yaml":
                 cap = yaml.safe_load(sp.read_text(encoding="utf-8")) or {}
+                # The selected capture package belongs to the owner-side
+                # frozen source identity, not the candidate's public grant.
+                # It was verified above and is copied unchanged by the
+                # private Phase 1 policy snapshot.
+                cap.pop("capture_tool", None)
                 # This is an EXECUTION ceiling, not merely documentation of how required tiers were
                 # rewritten below.  Without it an L2 search view still ran every configured adapter;
                 # Radiance consequently launched GSIM L3 before Cyclotron because the never-measured
@@ -699,8 +713,10 @@ def cert_capsule_cover(
     # reach RTL, for a reason nothing reported.
     exclude = set(exclude or ())
     rows = []
+    from merlin.targetgen.conformance import _capsule_paths
+
     for root in [corpus_roots] if isinstance(corpus_roots, (str, Path)) else corpus_roots:
-        for cy in sorted(Path(root).glob("*/capsule.yaml")):
+        for cy in _capsule_paths(root):
             try:
                 cap = yaml.safe_load(cy.read_text(encoding="utf-8")) or {}
             except yaml.YAMLError:

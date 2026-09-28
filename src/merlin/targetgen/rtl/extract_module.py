@@ -38,6 +38,7 @@ cannot read raises :class:`ExtractModuleError` naming the line, instead of silen
 
 CLI: python -m merlin.targetgen.rtl.extract_module <soc.hw.mlir> --root Top --out top.hw.mlir
 """
+
 from __future__ import annotations
 
 import argparse
@@ -49,8 +50,7 @@ _INST_OP = "hw.instance"
 _MOD_SUFFIXES = (".extern", ".generated")
 # MLIR bare-identifier characters, the symbol-name alphabet. Wider than the retired
 # `[A-Za-z0-9_]+`, which truncated any symbol carrying `$`, `.` or `-`.
-_SYM_CHARS = frozenset(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$.-")
+_SYM_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$.-")
 _WS = " \t"
 # Top-level `hw.module` indentation as CIRCT emits it: column 0, or 2 inside `module { ... }`.
 # (Kept from the retired implementation, which required `ln.startswith("hw.module")` or
@@ -85,7 +85,7 @@ def _read_symbol(s: str, i: int) -> tuple[str, int] | None:
                 j += 2
                 continue
             if s[j] == '"':
-                return s[i + 1:j], j + 1
+                return s[i + 1 : j], j + 1
             j += 1
         return None
     j = i
@@ -123,13 +123,24 @@ def _parse_module_decl(line: str) -> tuple[str, bool] | None:
     if indent not in _TOP_LEVEL_INDENTS:
         return None
     i = indent
+    # CIRCT models blackbox SystemVerilog sources using this module-like
+    # declaration. It is a real referenced symbol, not an unresolved instance.
+    verbatim = next((op for op in ("sv.verbatim.module", "sv.verbatim.source") if line.startswith(op, i)), None)
+    if verbatim is not None:
+        i = _skip_ws(line, i + len(verbatim))
+        if line.startswith("private", i):
+            i = _skip_ws(line, i + len("private"))
+        read = _read_symbol(line, i)
+        if read is None:
+            raise ExtractModuleError(f"verbatim module has no readable symbol: {line.rstrip()!r}")
+        return read[0], True
     if not line.startswith(_MOD_OP, i):
         return None
     i += len(_MOD_OP)
     is_extern = False
     for suffix in _MOD_SUFFIXES:
         if line.startswith(suffix, i):
-            is_extern = True                   # a body-less module: nothing to recurse into
+            is_extern = True  # a body-less module: nothing to recurse into
             i += len(suffix)
             break
     else:
@@ -145,8 +156,7 @@ def _parse_module_decl(line: str) -> tuple[str, bool] | None:
         i = _skip_ws(line, i + 7)
     read = _read_symbol(line, i)
     if read is None:
-        raise ExtractModuleError(
-            f"`{_MOD_OP}` declaration with no readable `@symbol`: {line.rstrip()!r}")
+        raise ExtractModuleError(f"`{_MOD_OP}` declaration with no readable `@symbol`: {line.rstrip()!r}")
     return read[0], is_extern
 
 
@@ -169,21 +179,19 @@ def _instances_in_line(line: str) -> set[str]:
             i = k + 1
             continue
         p = _skip_ws(line, after)
-        p = _read_quoted_or_bare(line, p)       # instance name
+        p = _read_quoted_or_bare(line, p)  # instance name
         p = _skip_ws(line, p)
         if line.startswith("sym", p) and _skip_ws(line, p + 3) > p + 3:
             p = _skip_ws(line, p + 3)
-            inner = _read_symbol(line, p)       # optional inner symbol
+            inner = _read_symbol(line, p)  # optional inner symbol
             if inner is None:
-                raise ExtractModuleError(
-                    f"`{_INST_OP} ... sym` with no readable inner `@symbol`: {line.rstrip()!r}")
+                raise ExtractModuleError(f"`{_INST_OP} ... sym` with no readable inner `@symbol`: {line.rstrip()!r}")
             p = _skip_ws(line, inner[1])
         read = _read_symbol(line, p)
         if read is None:
             # FAIL CLOSED: this instance would vanish from the closure and the slice would be
             # quietly missing a subtree.
-            raise ExtractModuleError(
-                f"`{_INST_OP}` with no readable target `@symbol`: {line.rstrip()!r}")
+            raise ExtractModuleError(f"`{_INST_OP}` with no readable target `@symbol`: {line.rstrip()!r}")
         refs.add(read[0])
         i = read[1]
 
@@ -197,8 +205,16 @@ def _module_spans(text: str) -> dict[str, tuple[int, int, bool]]:
         if decl is not None:
             starts.append((i, decl[0], decl[1]))
     spans = {}
+    # The enclosing builtin.module terminator is not part of its last child.
+    # Copying it into a final-cell slice produced a second unmatched terminator.
+    content_end = len(lines)
+    if lines and lines[0].startswith("module"):
+        while content_end and not lines[content_end - 1].strip():
+            content_end -= 1
+        if content_end and lines[content_end - 1] == "}":
+            content_end -= 1
     for k, (i, name, ext) in enumerate(starts):
-        end = starts[k + 1][0] if k + 1 < len(starts) else len(lines)
+        end = starts[k + 1][0] if k + 1 < len(starts) else content_end
         spans[name] = (i, end, ext)
     return spans
 
@@ -208,6 +224,13 @@ def _instances_in(lines: list[str], span: tuple[int, int, bool]) -> set[str]:
     refs: set[str] = set()
     for ln in lines[s:e]:
         refs.update(_instances_in_line(ln))
+        if ln.lstrip().startswith("sv.verbatim.module"):
+            marker = ln.find("source = ")
+            if marker >= 0:
+                read = _read_symbol(ln, marker + len("source = "))
+                if read is None:
+                    raise ExtractModuleError("verbatim module source has no readable symbol")
+                refs.add(read[0])
     return refs
 
 
@@ -256,8 +279,10 @@ def main(argv=None):
     text = Path(a.src).read_text()
     out, included, missing = extract(text, a.root)
     Path(a.out).write_text(out)
-    print(f"root=@{a.root}: {len(included)} modules, {len(missing)} unresolved refs "
-          f"(externs/intrinsics: {missing[:8]}{'...' if len(missing) > 8 else ''})")
+    print(
+        f"root=@{a.root}: {len(included)} modules, {len(missing)} unresolved refs "
+        f"(externs/intrinsics: {missing[:8]}{'...' if len(missing) > 8 else ''})"
+    )
     print(f"wrote {a.out} ({out.count(chr(10))} lines)")
     return 0
 

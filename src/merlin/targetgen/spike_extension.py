@@ -14,7 +14,7 @@ It is a property of THE TARGET, and a target that has its own model declares it 
     runner:
       spike_extension:
         extension_name: <the extension class the .so registers>
-        extlib: /abs/path/to/lib<name>.so
+        extlib_env: <operator-provided absolute artifact path variable>
         sha256: <64 hex>
 
 STRICTLY ADDITIVE, AND THAT IS LOAD-BEARING. A target that declares no ``runner.spike_extension`` is
@@ -25,14 +25,15 @@ no ``--extlib`` flag. Nothing about such a target's invocation changes, byte for
 FAIL CLOSED, NEVER SUBSTITUTE. When a target DOES declare one, every way of not getting exactly those
 bytes raises :class:`SpikeExtensionError`:
 
-* the declaration is incomplete (no ``extlib``, no ``extension_name``, no ``sha256``);
+* the declaration is incomplete (neither ``extlib`` nor ``extlib_env``, no
+  ``extension_name`` or ``sha256``);
 * the file is absent or unreadable;
 * the bytes on disk do not hash to the declared ``sha256``.
 
-The one thing this must never do is fall back to another target's ``.so``, because that is the
-mis-attribution above wearing a success's clothes. An operator who wants a different model changes the
-contract (and its digest), which is reviewable; nothing here reads an env var that could silently
-re-point the model a verdict was earned on.
+The one thing this must never do is fall back to another target's ``.so``. A target may
+declare an ``extlib_env`` location so the operator can place the artifact outside any
+particular user's checkout, but the SHA-256 remains target-owned: the environment can
+relocate identical bytes, never authorize different model bytes.
 """
 
 from __future__ import annotations
@@ -198,18 +199,33 @@ def resolve(target: str, *, default_library_dir: str | Path, default_extension_n
         )
     name = block.get("extension_name")
     extlib = block.get("extlib")
+    extlib_env = block.get("extlib_env")
     sha = block.get("sha256")
     missing = [
         field
-        for field, value in (("extension_name", name), ("extlib", extlib), ("sha256", sha))
+        for field, value in (("extension_name", name), ("sha256", sha))
         if not isinstance(value, str) or not value.strip()
     ]
+    if not extlib and not extlib_env:
+        missing.append("extlib")
     if missing:
         raise SpikeExtensionError(
             f"{target}: runner.spike_extension is declared but incomplete — missing {missing}. A model "
             f"a verdict cites must be named AND digested; an undigested path cannot be told apart from "
             f"a sibling elaboration's build sitting in the same directory"
         )
+    if extlib and extlib_env:
+        raise SpikeExtensionError(f"{target}: runner.spike_extension cannot declare both extlib and extlib_env")
+    if extlib_env:
+        if not isinstance(extlib_env, str) or not extlib_env.isidentifier():
+            raise SpikeExtensionError(f"{target}: runner.spike_extension.extlib_env must name one environment variable")
+        selected = os.environ.get(extlib_env, "").strip()
+        if not selected:
+            raise SpikeExtensionError(
+                f"{target}: runner.spike_extension requires {extlib_env} with the absolute path to its "
+                "SHA-pinned .so; refusing to fall back to the default Spike extension"
+            )
+        extlib = selected
     so = Path(str(extlib).strip()).expanduser()
     if not so.is_absolute():
         raise SpikeExtensionError(
@@ -249,7 +265,7 @@ def spike_invocation(
     return ext.spike_flags(), ext.library_dir
 
 
-def library_path_with(library_dir: str | Path, env: "dict[str, str] | None" = None) -> str:
+def library_path_with(library_dir: str | Path, env: dict[str, str] | None = None) -> str:
     """``library_dir`` prepended to ``LD_LIBRARY_PATH`` — the same string shape callers already build,
     factored out so the extension directory and the search path cannot drift apart."""
     existing = (env or os.environ).get("LD_LIBRARY_PATH", "")

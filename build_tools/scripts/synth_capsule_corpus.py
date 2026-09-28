@@ -16,6 +16,9 @@ Modes, mirroring the sibling gates in this directory:
 
   --target NAME   synthesize one target (repeatable); default: every target with a conformance spec
   --conformance-spec PATH  explicit newly derived requirement (one target only)
+  --software-spec PATH    authored numerical/operation semantics (otherwise the recipe reference)
+  --evidence-input PATH   exact exported Phase 0 evidence; no live facts refresh
+  --rtl-facts PATH        explicit extracted facts for a fresh diagnostic evidence selection
   --write         create a versioned synthesis artifact under out/artifacts/verification/<target>/
   --check         re-derive and diff against the tracked file; non-zero on drift
   --json          machine-readable
@@ -79,7 +82,7 @@ def _gradeable_candidates(entries: list[dict]) -> list[dict]:
     return [e for e in entries if e.get("op")]
 
 
-def _ungradeable(entries: list[dict], target: str) -> list[dict]:
+def _ungradeable(entries: list[dict], target: str, *, binding=None) -> list[dict]:
     """Entries whose (op, dtype) pair no golden engine can grade -- reported, never written.
 
     ⚠️ AN OP BEING MATERIALIZABLE IS NOT THE SAME AS BEING GRADEABLE. `corpus_synth` chooses the
@@ -102,7 +105,7 @@ def _ungradeable(entries: list[dict], target: str) -> list[dict]:
     from merlin_experiments.phase0 import writer
 
     out = []
-    binding = _binding(target) if entries else None
+    binding = (binding if binding is not None else _binding(target)) if entries else None
     for entry in entries:
         regime, _ = writer._entry_regime(entry, binding)
         source = entry.get("source")
@@ -151,7 +154,7 @@ def _ungradeable(entries: list[dict], target: str) -> list[dict]:
 _MX_ONLY_GOLDEN = frozenset({"attention_mx"})
 
 
-def _binding(target: str):
+def _binding(target: str, *, software_spec: Path | None = None, evidence=None):
     from merlin_experiments.phase0 import profiles
 
     from merlin.targetgen import corpus_spec as CSPEC
@@ -161,18 +164,57 @@ def _binding(target: str):
     inputs = declaration.profile_inputs()
     # The output being regenerated cannot depend on a previously selected sidecar.
     inputs["synth_profile"] = None
+    if software_spec is not None:
+        inputs["software_spec"] = software_spec
     prof = profiles.load_profile(
         declaration.profile, include_holdouts=False, descriptor=declaration.descriptor, **inputs
     )
     te = load_target_experiment(declaration.descriptor)
-    return CSPEC.derive_binding(te, prof.get("datapath") or {})
+    selected = (
+        {"contract": evidence.contract, "facts": evidence.loaded_facts, "taxonomy": evidence.isa_taxonomy}
+        if evidence is not None
+        else {}
+    )
+    return CSPEC.derive_binding(te, prof.get("datapath") or {}, **selected)
 
 
-def synth_for(target: str, *, conformance_spec: Path | None = None) -> dict:
+def synth_for(
+    target: str,
+    *,
+    conformance_spec: Path | None = None,
+    software_spec: Path | None = None,
+    evidence_input: Path | None = None,
+    rtl_facts: Path | None = None,
+) -> dict:
     import yaml
-    from merlin_experiments.phase0.profiles import synthesis_input_identity
+    from merlin_experiments.phase0.profiles import selected_software_spec_path, synthesis_input_identity
 
     declaration = for_target(target)
+    try:
+        selected_spec = selected_software_spec_path(declaration.recipe, software_spec)
+        evidence = None
+        if evidence_input is not None:
+            from merlin_experiments.phase0.evidence import load_exported_evidence
+
+            evidence = load_exported_evidence(evidence_input)
+            if evidence.target != declaration.target:
+                raise ValueError("selected hardware evidence names a different target")
+            if selected_spec is not None:
+                from merlin.targetgen.software_spec import load_software_spec
+
+                if load_software_spec(selected_spec, target=declaration.target) != evidence.software_spec:
+                    raise ValueError("selected software spec differs from captured hardware evidence")
+        elif selected_spec is not None or rtl_facts is not None:
+            from merlin_experiments.phase0.evidence import select_evidence
+
+            evidence = select_evidence(
+                declaration.target,
+                descriptor=declaration.descriptor,
+                software_spec=selected_spec,
+                facts_path=rtl_facts,
+            )
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        return {"target": target, "status": "invalid_synthesis_inputs", "detail": str(exc)}
     spec_path = conformance_spec or declaration.conformance_spec or conformance_reference(declaration.target)
     if not spec_path.is_file():
         return {
@@ -231,7 +273,12 @@ def synth_for(target: str, *, conformance_spec: Path | None = None) -> dict:
         }
 
     try:
-        bad = _ungradeable(_gradeable_candidates(list(out.get("capsules") or ())), target)
+        entries = _gradeable_candidates(list(out.get("capsules") or ()))
+        if selected_spec is not None or evidence is not None:
+            binding = _binding(target, software_spec=selected_spec, evidence=evidence) if entries else None
+            bad = _ungradeable(entries, target, binding=binding)
+        else:
+            bad = _ungradeable(entries, target)
     except Exception as exc:  # noqa: BLE001 -- cannot check is not "all fine"
         return {
             "target": target,
@@ -264,17 +311,47 @@ def synth_for(target: str, *, conformance_spec: Path | None = None) -> dict:
         return {"target": target, "status": "invalid_synthesis_policy", "detail": str(exc)}
     try:
         out["provenance"]["selected_inputs"] = synthesis_input_identity(
-            conformance_spec=spec_path, recipe=declaration.recipe, descriptor=declaration.descriptor
+            conformance_spec=spec_path,
+            recipe=declaration.recipe,
+            descriptor=declaration.descriptor,
+            software_spec=selected_spec,
         )
+        if selected_spec is not None:
+            from merlin.targetgen.software_spec import software_spec_identity
+
+            out["provenance"]["software_spec"] = software_spec_identity(selected_spec)
+        if evidence is not None:
+            import hashlib
+
+            out["provenance"]["hardware_evidence"] = {
+                "status": evidence.status,
+                "raw_facts_sha256": evidence.raw_facts_sha256,
+                "effective_views_sha256": hashlib.sha256(evidence.views_json).hexdigest(),
+            }
     except (OSError, ValueError, yaml.YAMLError) as exc:
         return {"target": target, "status": "invalid_synthesis_inputs", "detail": str(exc)}
-    return {"target": target, "status": "ok", "source_conformance_spec": str(spec_path), **out}
+    return {
+        "target": target,
+        "status": "ok",
+        "source_conformance_spec": str(spec_path),
+        **({"source_software_spec": str(selected_spec)} if selected_spec is not None else {}),
+        **({"source_evidence_input": str(evidence_input)} if evidence_input is not None else {}),
+        **({"source_rtl_facts": str(rtl_facts)} if rtl_facts is not None else {}),
+        **out,
+    }
 
 
 def _render(target: str, res: dict) -> str:
     import yaml
 
     spec_arg = f" --conformance-spec {res['source_conformance_spec']}" if res.get("source_conformance_spec") else ""
+    for field, option in (
+        ("source_software_spec", "--software-spec"),
+        ("source_evidence_input", "--evidence-input"),
+        ("source_rtl_facts", "--rtl-facts"),
+    ):
+        if res.get(field):
+            spec_arg += f" {option} {res[field]}"
     return _HEADER.format(target=target, spec_arg=spec_arg) + yaml.safe_dump(
         {"provenance": res["provenance"], "capsules": res["capsules"]}, sort_keys=False, width=100
     )
@@ -288,6 +365,11 @@ def main(argv=None) -> int:
         type=Path,
         help="explicit generated requirement to synthesize; required for a new verified selection",
     )
+    ap.add_argument(
+        "--software-spec", type=Path, help="explicit authored software spec; otherwise use the recipe declaration"
+    )
+    ap.add_argument("--evidence-input", type=Path, help="exact exported Phase 0 evidence selection")
+    ap.add_argument("--rtl-facts", type=Path, help="explicit raw extracted facts when selecting fresh evidence")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--write", action="store_true")
     mode.add_argument("--check", action="store_true")
@@ -297,6 +379,10 @@ def main(argv=None) -> int:
     targets = _targets(a.target)
     if a.conformance_spec and len(targets) != 1:
         ap.error("--conformance-spec requires exactly one --target")
+    if any((a.software_spec, a.evidence_input, a.rtl_facts)) and len(targets) != 1:
+        ap.error("explicit software/hardware evidence requires exactly one --target")
+    if a.evidence_input and a.rtl_facts:
+        ap.error("--evidence-input and --rtl-facts are mutually exclusive selections")
     if not targets:
         print(
             "no --target given and no tracked conformance spec found; write one with "
@@ -305,9 +391,12 @@ def main(argv=None) -> int:
         )
         return 2
 
-    results = [
-        synth_for(t, conformance_spec=a.conformance_spec) if a.conformance_spec else synth_for(t) for t in targets
-    ]
+    selections = {
+        name: getattr(a, name)
+        for name in ("conformance_spec", "software_spec", "evidence_input", "rtl_facts")
+        if getattr(a, name) is not None
+    }
+    results = [synth_for(t, **selections) for t in targets]
 
     rc = 0
     for res in results:
@@ -348,6 +437,11 @@ def main(argv=None) -> int:
                     str(
                         a.conformance_spec or declaration.conformance_spec or conformance_reference(declaration.target)
                     ),
+                ]
+                + [
+                    str(res[field])
+                    for field in ("source_software_spec", "source_evidence_input", "source_rtl_facts")
+                    if res.get(field)
                 ],
                 notes="Phase 0 synthesized capsule entries; review before selecting as an experiment input",
             )

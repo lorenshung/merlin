@@ -6,9 +6,9 @@ wrong assumption, both are wrong together and the query still returns ``unsat``.
 that gap by encoding the ACTUAL ``linalg`` module the pass consumed, so the only artifacts in the
 query are the two the compiler handled.
 
-The negative controls are the load-bearing tests. A validator that has never rejected anything has
-not been shown to work, and the zero-point control in particular exists because "assume the zero
-points are zero" is the single easiest way to make this check silently vacuous.
+The source used for positive controls explicitly fills each accumulator with zero. A bare
+``tensor.empty`` init has unspecified contents in MLIR and must abstain. The zero-point negative
+control also ensures the source encoder reads the actual operand rather than assuming zero.
 """
 
 from __future__ import annotations
@@ -36,10 +36,24 @@ _TIMEOUT_MS = 60_000
 
 
 def _lowered(m=2, k=2, n=2, reuse=_REUSE):
-    """Run the REAL pass. The modules under test are what it consumed and what it emitted."""
+    """Run the real pass on a source whose accumulation starts from a defined zero."""
+    from xdsl.dialects import arith
+    from xdsl.dialects.builtin import IntegerAttr, i32
+    from xdsl.dialects.linalg import ops as linalg_ops
+
     from merlin.xdsl_dialects.lowering import pipeline
 
-    return pipeline.lower_repeated_rhs_matmul(reuse=reuse, m=m, k=k, n=n)
+    source = pipeline.build_input_module(reuse=reuse, m=m, k=k, n=n)
+    func = next(op for op in source.walk() if op.name == "func.func")
+    block = func.body.block
+    for matmul in [op for op in block.ops if op.name == "linalg.quantized_matmul"]:
+        init = matmul.operands[-1]
+        zero = arith.ConstantOp(IntegerAttr(0, i32))
+        fill = linalg_ops.FillOp(inputs=(zero.result,), outputs=(init,), res=(matmul.results[0].type,))
+        block.insert_op_before(zero, matmul)
+        block.insert_op_before(fill, matmul)
+        matmul.operands = (*matmul.operands[:-1], fill.results[0])
+    return pipeline.lower_module(source)
 
 
 def _func_ops(module, name):
@@ -69,8 +83,7 @@ def _assert_refuted(verdict, label):
 def test_the_real_pass_is_semantics_preserving_on_its_own_source():
     """unsat = source and output agree on EVERY integer input at this shape.
 
-    This is the per-compilation theorem VER-25 is about: not "the output computes the workload we
-    think we asked for", but "the output computes what the input program says".
+    The explicit ``linalg.fill`` makes the source accumulator's starting value defined.
     """
     from merlin.verify.refine import validate_pass
 
@@ -78,6 +91,16 @@ def test_the_real_pass_is_semantics_preserving_on_its_own_source():
     v = validate_pass(r.input_module, r.interface_module, timeout_ms=_TIMEOUT_MS)
     assert v.status == "unsat", f"expected unsat, got {v.status}"
     assert v.verified
+
+
+def test_bare_tensor_empty_accumulator_abstains_under_mlir_semantics():
+    from merlin.verify.refine import validate_pass
+    from merlin.verify.smt_semantics import UnsupportedSemantics
+    from merlin.xdsl_dialects.lowering.pipeline import lower_repeated_rhs_matmul
+
+    legacy = lower_repeated_rhs_matmul(reuse=2, m=2, k=2, n=2)
+    with pytest.raises(UnsupportedSemantics, match="tensor.empty with unspecified contents"):
+        validate_pass(legacy.input_module, legacy.interface_module, timeout_ms=_TIMEOUT_MS)
 
 
 @pytest.mark.parametrize("shape", [(2, 2, 2), (2, 3, 2), (3, 2, 2)])
@@ -153,6 +176,20 @@ def test_a_non_zero_zero_point_is_read_from_the_source_not_assumed():
     const.properties["value"] = IntegerAttr(7, i32)
     v = validate_pass(r.input_module, r.interface_module, timeout_ms=_TIMEOUT_MS)
     _assert_refuted(v, "source zero point changed to 7 while the output implements zp=0")
+
+
+def test_a_nonzero_explicit_fill_is_not_silently_treated_as_zero():
+    from xdsl.dialects.builtin import IntegerAttr, i32
+
+    from merlin.verify.refine import validate_pass
+
+    r = _lowered()
+    fill_zero = _func_ops(r.input_module, "arith.constant")[1]
+    fill_zero.properties["value"] = IntegerAttr(7, i32)
+    v = validate_pass(r.input_module, r.interface_module, timeout_ms=_TIMEOUT_MS)
+    assert v.refuted, (v.status, v.reason)
+    # Every input differs by seven, so Z3 can refute the obligation without assigning a leaf.
+    assert v.model is not None
 
 
 # --- abstentions ----------------------------------------------------------------------------------

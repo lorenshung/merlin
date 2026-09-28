@@ -60,6 +60,59 @@ def test_fullsuite_view_uses_frozen_bytes_and_preserves_nested_resources(tmp_pat
     assert "PRIVATE_SENTINEL" not in str(BW.snapshot_record(ws))
 
 
+def test_explicit_corpus_stages_policy_without_legacy_descriptor_payload(corpus_fixture, tmp_path):
+    import shutil
+
+    from merlin_experiments.phase1 import corpus_inputs as CI
+
+    te, _, run, bundle, contract = corpus_fixture
+    selected = tmp_path / "reviewed-release" / "isa"
+    _capsule(selected, "selected_member")
+    shutil.rmtree(te.capsule_corpus)
+
+    effective, record = CI.stage(run, te, bundle, contract=contract, capsules_root=selected)
+    ws = tmp_path / "workspace"
+    BW.materialize_bundle_inputs(ws, effective, repo=tmp_path)
+    view = CI.resolve(ws, effective, record, repo=tmp_path)
+    assert (view.policy / "0/selected_member/capsule.yaml").is_file()
+    assert (view.public / "selected_member/capsule.yaml").is_file()
+    assert not (view.policy / "0/member").exists()
+    assert record["mode"] == "public_dev_override"
+
+
+def test_explicit_corpus_refuses_empty_or_missing_source(corpus_fixture, tmp_path):
+    from merlin_experiments.phase1 import corpus_inputs as CI
+
+    te, _, run, bundle, contract = corpus_fixture
+    empty = tmp_path / "empty-corpus"
+    empty.mkdir()
+    with pytest.raises(ValueError, match="no capsules"):
+        CI.stage(run, te, bundle, contract=contract, capsules_root=empty)
+    missing_run = tmp_path / "missing-run"
+    missing_run.mkdir()
+    with pytest.raises(ValueError, match="absent or symlinked"):
+        CI.stage(missing_run, te, bundle, contract=contract, capsules_root=tmp_path / "missing")
+
+
+def test_explicit_corpus_refuses_source_drift_during_staging(corpus_fixture, tmp_path, monkeypatch):
+    from merlin_experiments.phase1 import corpus_inputs as CI
+
+    te, _, run, bundle, contract = corpus_fixture
+    selected = tmp_path / "selected"
+    member = _capsule(selected, "selected_member")
+    copy = CI.copy_input
+
+    def copy_then_change(source, destination, **kwargs):
+        result = copy(source, destination, **kwargs)
+        if source == selected:
+            (member / "golden.yaml").write_text("outputs: {value: DRIFTED}\n")
+        return result
+
+    monkeypatch.setattr(CI, "copy_input", copy_then_change)
+    with pytest.raises(RuntimeError, match="changed during preparation"):
+        CI.stage(run, te, bundle, contract=contract, capsules_root=selected)
+
+
 @pytest.fixture
 def corpus_fixture(tmp_path, monkeypatch):
     from merlin.targetgen import capsule_runner
@@ -322,8 +375,26 @@ def test_reviewed_binding_does_not_approve_override_by_broad_snapshot_grant(corp
     ws = tmp_path / "workspace"
     BW.materialize_bundle_inputs(ws, effective, repo=tmp_path)
     assert CI.resolve(ws, effective, record, repo=tmp_path).public.is_dir()
-    with pytest.raises(RuntimeError, match="outside its reviewed original roots"):
+    with pytest.raises(RuntimeError, match="complete descriptor cohort"):
         CI.resolve(ws, effective, record, repo=tmp_path, reviewed_roots=tuple(te.graded_roots()))
+
+
+def test_reviewed_release_cannot_grade_only_one_category(corpus_fixture, tmp_path):
+    from merlin_experiments.phase1 import corpus_inputs as CI
+
+    te, _, run, bundle, contract = corpus_fixture
+    _capsule(te.capsule_corpus.parent / "layers", "second_category")
+    reviewed = tuple(te.graded_roots())
+    assert len(reviewed) == 2
+    bundle["host_inputs"] = [{"path": str(root)} for root in reviewed]
+    effective, record = CI.stage(run, te, bundle, contract=contract, capsules_root=te.capsule_corpus)
+    ws = tmp_path / "workspace"
+    BW.materialize_bundle_inputs(ws, effective, repo=tmp_path)
+    assert CI.resolve(ws, effective, record, repo=tmp_path).public.is_dir()
+    with pytest.raises(RuntimeError, match="complete descriptor cohort"):
+        CI.resolve(ws, effective, record, repo=tmp_path, reviewed_roots=reviewed)
+    with pytest.raises(RuntimeError, match="complete descriptor cohort"):
+        CI.resolve(ws, effective, {**record, "mode": "descriptor_cohort"}, repo=tmp_path, reviewed_roots=reviewed)
 
 
 def test_reviewed_originals_match_and_resume_after_live_sources_change(corpus_fixture, tmp_path):
@@ -332,7 +403,7 @@ def test_reviewed_originals_match_and_resume_after_live_sources_change(corpus_fi
     te, member, run, bundle, contract = corpus_fixture
     reviewed = tuple(te.graded_roots())
     bundle["host_inputs"] = [{"path": str(root)} for root in reviewed]
-    effective, record = CI.stage(run, te, bundle, contract=contract, capsules_root=te.capsule_corpus)
+    effective, record = CI.stage(run, te, bundle, contract=contract)
     ws = tmp_path / "workspace"
     BW.materialize_bundle_inputs(ws, effective, repo=tmp_path)
     (member / "golden.yaml").write_text("later live source")

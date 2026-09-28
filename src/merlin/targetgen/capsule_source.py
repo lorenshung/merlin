@@ -24,20 +24,23 @@ venv. Precision is a parameter (``dtype``): the SAME token a target's ``compute_
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import math
 import os
 import subprocess
 import sys
 import tempfile
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from merlin.common.paths import env as _env
 from merlin.common.paths import repo_root
 from merlin.targetgen import capture_cache
 
-_MODEL_CAPTURE_ABI_VERSION = 3
+_MODEL_CAPTURE_ABI_VERSION = 6
 
 
 # ------------------------------------------------------------------------------------------------
@@ -837,10 +840,16 @@ class PytorchRefSource:
                 "m2m/ir/import_fx.py",
                 "m2m/capture/torchao_pipeline.py",
                 "m2m/capture/torchao_schemes.py",
+                "m2m/capture/torch_export.py",
+                "m2m/capture/torch_mlir_bridge.py",
             ]
             if static_pt2e:
                 upstream_files.append("m2m/capture/pt2e_integerize.py")
             upstream_identity = {relative: sha256_file(self.m2m_dir / relative) for relative in upstream_files}
+            # Absence is explicit for older diagnostic producers; adding the
+            # trace implementation invalidates their cache identity.
+            trace_owner = self.m2m_dir / "m2m/capture/trace.py"
+            upstream_identity["m2m/capture/trace.py"] = sha256_file(trace_owner) if trace_owner.is_file() else None
 
             # Structured encoding preserves field boundaries even when loader source or
             # environment values contain delimiter characters. Historical ambiguous-key
@@ -1006,6 +1015,7 @@ class PytorchRefSource:
                     and isinstance(cached.get("output_abi"), list)
                     and Path(cached.get("weights_manifest", "")).is_file()
                     and capture_cache.observed_sources_match(cached)
+                    and capture_cache.frontend_trace_matches(cached, cached_slot)
                 ):
                     cached_program = (cached_slot / "linalg.mlir").read_text(encoding="utf-8")
                     _require_integer_contraction(cached_program, scheme=scheme, recipe=recipe)
@@ -1044,6 +1054,9 @@ class PytorchRefSource:
         env = dict(os.environ)
         env.update(declared_env)
         env["MERLIN_M2M_DIR"] = str(self.m2m_dir)
+        # Live micro-model loaders live under the generated corpus. Importing
+        # them must not add interpreter cache files to the immutable artifact.
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         cmd = [
             str(interpreter),
             str(worker),
@@ -1113,9 +1126,16 @@ class PytorchRefSource:
 
             linalg_p = workdir / "linalg.mlir"
             if linalg_p.is_file():
+                # Preserve the exact frontend output behind its source trace.
+                # Canonical normalization has a separate byte identity and is
+                # not silently relabeled as the frontend's lowering receipt.
+                raw_linalg = linalg_p.read_text(encoding="utf-8")
+                raw_path = workdir / "frontend-source.mlir"
+                raw_path.write_text(raw_linalg, encoding="utf-8")
+                meta["frontend_raw_mlir_path"] = str(raw_path)
                 try:
                     normalized, normalization = normalize_capture_mlir(
-                        linalg_p.read_text(encoding="utf-8"),
+                        raw_linalg,
                         reported_opaque=meta.get("opaque_detail") or {},
                     )
                 except CaptureNormalizationError as exc:
@@ -1322,11 +1342,36 @@ def _capture_spec(entry: dict, binding) -> dict:
     return spec
 
 
-def _host_eager_golden(art, names, out_name, binding, *, interface: str, arg_order):
+def _host_eager_golden(art, names, out_name, binding, *, interface: str, arg_order, exact_integer: bool = False):
     """The host torch-eager golden.yaml payload shared by the mapped and fused paths."""
     if len(art.inputs) < len(names):
         raise M2MUnavailable(f"op {art.op!r} produced {len(art.inputs)} inputs, expected {len(names)}")
     prov = {nm: {"shape": _shape_of(art.inputs[i]), "decoded": _flatten(art.inputs[i])} for i, nm in enumerate(names)}
+    if exact_integer:
+        # The source operation's torch-eager operands, not a second seeded stimulus, are the
+        # byte-level grading inputs. The worker recorded their dtype before JSON conversion.
+        abi = (art.meta or {}).get("input_abi")
+        if not isinstance(abi, list) or len(abi) != len(names):
+            raise M2MUnavailable("exact integer source capture has no complete typed input ABI")
+        for i, name in enumerate(names):
+            declared = abi[i]
+            if (
+                not isinstance(declared, dict)
+                or declared.get("dtype") != "i8"
+                or declared.get("shape") != prov[name]["shape"]
+            ):
+                raise M2MUnavailable(f"exact integer source input {name} disagrees with captured i8 ABI")
+            values = prov[name]["decoded"]
+            if any(
+                type(value) not in (int, float)
+                or not math.isfinite(value)
+                or int(value) != value
+                or not -128 <= value <= 127
+                for value in values
+            ):
+                raise M2MUnavailable(f"exact integer source input {name} has invalid i8 values")
+            prov[name]["dtype"] = "i8"
+            prov[name]["integer_bytes_hex"] = bytes(int(value) & 0xFF for value in values).hex()
     return {
         "golden_source": "host_torch_eager",
         "oracle_provenance": {
@@ -2001,9 +2046,13 @@ def verify_exact_application_int_mm(linalg_mlir: str, match: dict) -> dict:
     body and geometry. It deliberately does not claim that a whole model compiles or executes.
     """
     from merlin.common import mlir_query as mq
-    from merlin.targetgen.application_inventory import exact_int_mm_geometry, operation_structure
+    from merlin.targetgen.application_inventory import (
+        exact_int_mm_geometry,
+        int_mm_source_is_qualified,
+        operation_structure,
+    )
 
-    if match.get("status") != "candidate_unverified" or match.get("source_quantization") != "int8_dyn_act_int8_weight":
+    if match.get("status") != "candidate_unverified" or not int_mm_source_is_qualified(match):
         raise M2MUnavailable("exact application slice lacks a digest-bound W8A8 source declaration")
     if not isinstance(match.get("full_inventory_sha256"), str) or len(match["full_inventory_sha256"]) != 64:
         raise M2MUnavailable("exact application slice lacks a full inventory digest")
@@ -2066,6 +2115,144 @@ def verify_exact_application_int_mm(linalg_mlir: str, match: dict) -> dict:
     }
 
 
+def _write_frontend_evidence(art: CapsuleArtifacts, directory: Path, packaged_mlir: str) -> dict | None:
+    """Carry producer bytes with a separate normalization/packaging receipt."""
+    meta = art.meta or {}
+    selected = meta.get("frontend_trace")
+    if not isinstance(selected, dict):
+        return None  # Historical diagnostic captures have no source-call proof.
+    trace_path = Path(selected.get("path", ""))
+    if trace_path.is_symlink() or not trace_path.is_file():
+        raise M2MUnavailable("selected capture frontend trace is missing or symlinked")
+    raw_trace = trace_path.read_bytes()
+    if hashlib.sha256(raw_trace).hexdigest() != selected.get("sha256"):
+        raise M2MUnavailable("selected capture frontend trace bytes changed")
+    raw_path = meta.get("frontend_raw_mlir_path")
+    if raw_path is not None:
+        source_path = Path(raw_path)
+        if source_path.is_symlink() or not source_path.is_file():
+            raise M2MUnavailable("raw frontend MLIR is missing or symlinked")
+        raw_source = source_path.read_bytes()
+    else:
+        raw_source = art.linalg_mlir.encode()
+    declared_mlir = json.loads(raw_trace).get("mlir") or {}
+    if declared_mlir.get("sha256") is not None and declared_mlir["sha256"] != hashlib.sha256(raw_source).hexdigest():
+        raise M2MUnavailable("frontend trace does not match its exact source MLIR")
+    if declared_mlir.get("bytes") is not None and declared_mlir["bytes"] != len(raw_source):
+        raise M2MUnavailable("frontend trace source MLIR byte count changed")
+    packaging = "identity"
+    relocation = None
+    if packaged_mlir != art.linalg_mlir:
+        original_weight = meta.get("materialized_weights_reference") or getattr(art, "weights_path", None)
+        relocated = (
+            art.linalg_mlir.replace(
+                f'prov.weights_file = "{original_weight}"', 'prov.weights_file = "capsule.weights.safetensors"'
+            )
+            if meta.get("materialized_capture")
+            else art.linalg_mlir.replace(original_weight or "", "capsule.weights.safetensors")
+        )
+        if not original_weight or packaged_mlir != relocated:
+            raise M2MUnavailable("capsule MLIR change is not the declared weights-reference relocation")
+        packaging = "weights_reference_relocation"
+        relocation = {"from": original_weight, "to": "capsule.weights.safetensors"}
+    (directory / "frontend-trace.json").write_bytes(raw_trace)
+    (directory / "frontend-source.mlir").write_bytes(raw_source)
+    catalog = meta.get("framework_catalog") or {}
+    if catalog:
+        catalog_path = Path(catalog.get("path", ""))
+        if catalog_path.is_symlink() or not catalog_path.is_file():
+            raise M2MUnavailable("selected capture framework catalog is missing or symlinked")
+        raw_catalog = catalog_path.read_bytes()
+        if hashlib.sha256(raw_catalog).hexdigest() != catalog.get("sha256"):
+            raise M2MUnavailable("selected capture framework catalog bytes changed")
+        (directory / "pytorch-opset.json").write_bytes(raw_catalog)
+    record = {
+        "schema": "merlin.capsule_frontend_evidence.v1",
+        "path": "frontend-trace.json",
+        "sha256": hashlib.sha256(raw_trace).hexdigest(),
+        "source_mlir": "frontend-source.mlir",
+        "source_mlir_sha256": hashlib.sha256(raw_source).hexdigest(),
+        "capture_mlir_sha256": hashlib.sha256(art.linalg_mlir.encode()).hexdigest(),
+        "packaged_mlir_sha256": hashlib.sha256(packaged_mlir.encode()).hexdigest(),
+        "normalization": meta.get("capture_normalization"),
+        "packaging": packaging,
+        "weights_reference_relocation": relocation,
+        "qualification": "source bytes and declared transformation receipts; compiler execution unverified",
+    }
+    (directory / "frontend-evidence.json").write_text(json.dumps(record, sort_keys=True, indent=2) + "\n")
+    return record
+
+
+def _freeze_selected_m2m_tool(m2m_root: Path, directory: Path) -> dict:
+    """Keep the exact selected installed M2M package beside a live capture.
+
+    A package receipt is not a proof about Torch, arbitrary loader imports, or
+    runtime data.  Source checkouts without a wheel remain explicitly unverified.
+    Installed distributions must match their originating wheel byte for byte;
+    a missing or changed wheel is a failed capture, not an anonymous version.
+    """
+    distributions = sorted(m2m_root.glob("m2m-*.dist-info"))
+    if not distributions:
+        return {
+            "status": "not_available",
+            "reason": "selected M2M source has no installed-wheel identity",
+            "scope": "selected M2M package only; Torch, loaders and data are not covered",
+        }
+    if len(distributions) != 1 or distributions[0].is_symlink():
+        raise M2MUnavailable("selected M2M installation has ambiguous distribution identity")
+    direct = distributions[0] / "direct_url.json"
+    if direct.is_symlink() or not direct.is_file():
+        raise M2MUnavailable("selected installed M2M distribution has no wheel origin")
+    try:
+        origin = json.loads(direct.read_text(encoding="utf-8"))
+        url = urlparse(origin["url"])
+        if url.scheme != "file" or url.netloc not in ("", "localhost"):
+            raise ValueError("M2M wheel origin must be a local file")
+        wheel = Path(unquote(url.path))
+        if wheel.suffix != ".whl" or wheel.is_symlink() or not wheel.is_file():
+            raise ValueError("M2M wheel origin is missing or not a regular wheel")
+        payload = wheel.read_bytes()
+        with zipfile.ZipFile(wheel) as archive:
+            names = archive.namelist()
+            modules = sorted(name for name in names if name.startswith("m2m/") and name.endswith(".py"))
+            if not modules or len(names) != len(set(names)):
+                raise ValueError("M2M wheel has no unique module inventory")
+            for name in modules:
+                if Path(name).is_absolute() or ".." in Path(name).parts:
+                    raise ValueError("M2M wheel contains an unsafe module path")
+            installed = sorted(path.relative_to(m2m_root).as_posix() for path in (m2m_root / "m2m").rglob("*.py"))
+            if installed != modules:
+                raise ValueError("installed M2M module set differs from its selected wheel")
+            module_identity = {}
+            for name in modules:
+                path = m2m_root / name
+                if path.is_symlink() or not path.is_file():
+                    raise ValueError(f"installed M2M module is missing or symlinked: {name}")
+                source = path.read_bytes()
+                if source != archive.read(name):
+                    raise ValueError(f"installed M2M module differs from its selected wheel: {name}")
+                module_identity[name] = {"bytes": len(source), "sha256": hashlib.sha256(source).hexdigest()}
+    except (OSError, KeyError, ValueError, zipfile.BadZipFile) as exc:
+        raise M2MUnavailable(f"cannot prove selected installed M2M wheel identity: {exc}") from exc
+    directory.mkdir(parents=True, exist_ok=True)
+    wheel_member = directory / "capture-tool.whl"
+    wheel_member.write_bytes(payload)
+    record = {
+        "schema": "merlin.capsule_capture_tool.v1",
+        "status": "verified_selected_package",
+        "wheel": {"path": wheel_member.name, "bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()},
+        "modules": module_identity,
+        "scope": "selected M2M package only; Torch, loaders and data are not covered",
+    }
+    sidecar = directory / "capture-tool.json"
+    sidecar.write_text(json.dumps(record, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    return {
+        "status": record["status"],
+        "path": sidecar.name,
+        "sha256": hashlib.sha256(sidecar.read_bytes()).hexdigest(),
+    }
+
+
 def write_pytorch_capsule(entry: dict, binding, out_root, *, source: "PytorchRefSource | None" = None):
     """Materialize a full capsule dir from a PyTorch-defined op. For a merlin_iface-mapped op (matmul/
     linear/attention_qk/rmsnorm) the agent-facing interface + expected coverage are DERIVED-AND-VERIFIED
@@ -2107,7 +2294,15 @@ def write_pytorch_capsule(entry: dict, binding, out_root, *, source: "PytorchRef
             "loader": "capsule.pytorch.py",
         }
         cap["linalg_mlir"] = "capsule.linalg.mlir"
-        golden = _host_eager_golden(art, names, out_name, binding, interface="merlin_iface", arg_order=names)
+        golden = _host_eager_golden(
+            art,
+            names,
+            out_name,
+            binding,
+            interface="merlin_iface",
+            arg_order=names,
+            exact_integer=exact_match is not None,
+        )
         (d / "capsule.interface.mlir").write_text(mlir, encoding="utf-8")
     elif op in _FUSED_OP_INPUT_NAMES:  # linalg interface (positional)
         names = _FUSED_OP_INPUT_NAMES[op]
@@ -2123,6 +2318,10 @@ def write_pytorch_capsule(entry: dict, binding, out_root, *, source: "PytorchRef
             f"(mapped {sorted(_OP_INPUT_NAMES)}; fused {sorted(_FUSED_OP_INPUT_NAMES)})"
         )
 
+    frontend_evidence = _write_frontend_evidence(art, d, art.linalg_mlir)
+    if frontend_evidence is not None:
+        cap["frontend_trace"] = frontend_evidence
+    cap["capture_tool"] = _freeze_selected_m2m_tool(src.m2m_dir, d)
     (d / "capsule.yaml").write_text(yaml.safe_dump(cap, sort_keys=False), encoding="utf-8")
     (d / "expected_instruction_coverage.yaml").write_text(
         yaml.safe_dump(cap["expected"], sort_keys=False), encoding="utf-8"
@@ -2693,7 +2892,146 @@ def _checked_lanes(entry: dict, binding) -> list[str]:
     return want
 
 
-def write_model_capsule(entry: dict, binding, out_root, *, source: "PytorchRefSource | None" = None):
+def materialized_model_artifacts(selection: dict) -> CapsuleArtifacts:
+    """Read a receipt-bound model bundle without importing or rerunning its loader.
+
+    Materialization proves byte identity only. The original source/tool closure,
+    input attribution and host reference retain their recorded qualification.
+    """
+    import io
+
+    import numpy as np
+
+    from merlin.targetgen.application_inventory import verify_capture_receipt
+
+    if selection.get("workload_role") != "iteration" or selection.get("coverage_scope") != "full_capture":
+        raise M2MUnavailable(
+            "materialized derivation requires an explicit full iteration capture, never held-out validation"
+        )
+    path = Path(selection.get("path", "")).absolute()
+    if path.name != "model.mlir" or path.is_symlink() or any(p.is_symlink() for p in path.parents):
+        raise M2MUnavailable("materialized capture must select a nonsymlink model.mlir bundle")
+    if (path.parent / "capture_receipt.json").is_symlink():
+        raise M2MUnavailable("materialized capture receipt cannot be symlinked")
+    observed = verify_capture_receipt(path)
+    if observed["status"] != "verified_materialized" or observed["receipt_sha256"] != selection.get("receipt_sha256"):
+        raise M2MUnavailable(f"materialized capture receipt is absent, changed or invalid: {observed['errors']}")
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != selection.get("capture_sha256"):
+        raise M2MUnavailable("materialized model bytes differ from the selected source inventory")
+    directory = path.parent
+    receipt_raw = (directory / "capture_receipt.json").read_bytes()
+    if hashlib.sha256(receipt_raw).hexdigest() != selection.get("receipt_sha256"):
+        raise M2MUnavailable("materialized capture receipt changed during selection")
+    receipt = json.loads(receipt_raw)
+    from merlin.targetgen.claim_models import is_claim_bundle
+
+    declared_source = receipt.get("source") or {}
+    identities = [
+        selection.get("workload_id"),
+        selection.get("source_workload_id"),
+        declared_source.get("workload_id"),
+        declared_source.get("model"),
+        *Path(str(declared_source.get("path") or "")).parts,
+    ]
+    if declared_source.get("workload_role") == "validation" or any(
+        isinstance(identity, str) and is_claim_bundle(identity) for identity in identities if identity
+    ):
+        raise M2MUnavailable(
+            "materialized source is declared held-out validation even if its selected bundle was renamed"
+        )
+    required = {"meta.json", "inputs.npz", "input_order.json", "golden.npy", "frontend-trace.json"}
+    if not required <= set(receipt["artifacts"]):
+        raise M2MUnavailable("materialized bundle lacks receipt-bound metadata, inputs, golden or source trace")
+    if receipt.get("lifted_constants"):
+        raise M2MUnavailable("materialized model has lifted runtime constants without a capsule input binding")
+
+    def read_bound(name):
+        selected = directory / name
+        if selected.is_symlink() or not selected.is_file():
+            raise M2MUnavailable(f"materialized input disappeared or became symlinked: {name}")
+        value = selected.read_bytes()
+        declared = receipt["artifacts"].get(name) or {}
+        if declared.get("bytes") != len(value) or declared.get("sha256") != hashlib.sha256(value).hexdigest():
+            raise M2MUnavailable(f"materialized input changed during selection: {name}")
+        return value
+
+    meta = json.loads(read_bound("meta.json"))
+    if not meta.get("ok") or meta.get("opaque", -1) != 0:
+        raise M2MUnavailable("materialized model metadata does not declare a clean capture")
+    output_abi = meta.get("output_abi") or []
+    # The existing bundle format records only the first eager tensor as golden.npy.
+    # fp16/BF16 values lift losslessly into f32; integer/f64 references do not.
+    # Never silently certify a multi-result or integer-result ABI with that file.
+    if len(output_abi) != 1 or output_abi[0].get("dtype") not in {"f32", "f16", "bf16"}:
+        raise M2MUnavailable(
+            "materialized golden.npy needs one losslessly represented floating result; other ABIs need complete references"
+        )
+    with np.load(io.BytesIO(read_bound("inputs.npz")), allow_pickle=False) as archive:
+        count = len(meta.get("input_abi") or [])
+        names = [f"in{i}" for i in range(count)]
+        if set(archive.files) != set(names):
+            raise M2MUnavailable("materialized input leaves differ from the declared input ABI")
+        inputs = [archive[name].tolist() for name in names]
+    order = json.loads(read_bound("input_order.json"))
+    if not isinstance(order, dict) or sorted(order.values()) != list(range(count)):
+        raise M2MUnavailable("materialized input-order mapping is not a complete positional ABI")
+    golden_array = np.load(io.BytesIO(read_bound("golden.npy")), allow_pickle=False)
+    if list(golden_array.shape) != output_abi[0].get("shape") or str(golden_array.dtype) != "float32":
+        raise M2MUnavailable("materialized golden shape/dtype differs from the output ABI")
+    if output_abi[0]["dtype"] == "f16" and not np.array_equal(
+        golden_array, golden_array.astype(np.float16).astype(np.float32), equal_nan=True
+    ):
+        raise M2MUnavailable("materialized golden is not an exact fp16 value lifted to f32")
+    if output_abi[0]["dtype"] == "bf16" and np.any(
+        (golden_array.view(np.uint32) & 0xFFFF != 0) & np.isfinite(golden_array)
+    ):
+        raise M2MUnavailable("materialized golden is not an exact BF16 value lifted to f32")
+    trace = dict(meta.get("frontend_trace") or {})
+    trace["path"] = str(directory / "frontend-trace.json")
+    meta["frontend_trace"] = trace
+    catalog = dict(meta.get("framework_catalog") or {})
+    if catalog:
+        catalog["path"] = str(directory / "pytorch-opset.json")
+        catalog_path = Path(catalog["path"])
+        if (
+            catalog_path.is_symlink()
+            or not catalog_path.is_file()
+            or hashlib.sha256(catalog_path.read_bytes()).hexdigest() != catalog.get("sha256")
+        ):
+            raise M2MUnavailable("materialized same-process framework catalog is absent or changed")
+        meta["framework_catalog"] = catalog
+    meta["frontend_raw_mlir_path"] = str(path)
+    weights = directory / "weights.safetensors"
+    meta["weights"] = str(weights)
+    meta["weights_manifest"] = str(directory / "weights.safetensors.manifest.json")
+    meta["materialized_capture"] = {
+        **selection,
+        "path": str(path),
+        "source_closure_verified": observed["source_closure_verified"],
+        "scope": "full saved source program and host-eager reference; target execution unverified",
+    }
+    meta["materialized_artifact_identities"] = receipt["artifacts"]
+    meta["materialized_receipt_bytes"] = receipt_raw
+    # Retain original source bytes. The writer records the one known relocation.
+    source_weights = json.loads(read_bound("meta.json")).get("weights")
+    program = raw.decode("utf-8")
+    if not isinstance(source_weights, str) or f'prov.weights_file = "{source_weights}"' not in program:
+        raise M2MUnavailable("materialized model lacks its exact recorded weights-location attribute")
+    meta["materialized_weights_reference"] = source_weights
+    return CapsuleArtifacts(
+        "model", meta.get("dtype", "fp32"), "", program, inputs, golden_array.tolist(), str(weights), meta
+    )
+
+
+def write_model_capsule(
+    entry: dict,
+    binding,
+    out_root,
+    *,
+    source: "PytorchRefSource | None" = None,
+    artifact: CapsuleArtifacts | None = None,
+):
     """Materialize a whole-model capsule: the model is lowered end-to-end via model2MLIR (the linalg IS
     the interface), weights are externalized alongside, and the golden is the host torch-eager output.
     A ``gate`` (default ``after_op_pass_fraction: 0.8``) defers scheduling until the op suite passes."""
@@ -2710,16 +3048,16 @@ def write_model_capsule(entry: dict, binding, out_root, *, source: "PytorchRefSo
             f"kind={entry.get('kind')!r} op={entry.get('op')!r} cat={entry.get('cat')!r} "
             f"— weights ship only for whole-model capsules"
         )
-    src = source or PytorchRefSource()
     dtype = entry.get("operand_dtype") or binding.operand_dtype
-    loader = resolve_model_loader(entry, src.m2m_dir)
+    src = (source or PytorchRefSource()) if artifact is None else None
+    loader = resolve_model_loader(entry, src.m2m_dir) if src is not None else None
     # THE MODEL'S OWN CAPTURE DECLARATION. A roster model states next to its loader how it must be
     # captured -- which input stream to read, which checkpoint, which interpreter its dependencies live
     # in -- and this path used to invoke the loader with none of it. Every loader that declines to
     # invent its inputs then raised, and the corpus recorded the model as one it could not build: a
     # fact about the invocation, published as a fact about the compiler's reach.
-    workload = resolve_model_workload(entry, src.m2m_dir)
-    capture_env = model_capture_env(workload)
+    workload = resolve_model_workload(entry, src.m2m_dir) if src is not None else None
+    capture_env = model_capture_env(workload) if src is not None else {}
     capture_quantization = entry.get("capture_quantization")
     if capture_quantization not in (None, "already_materialized"):
         raise ValueError(f"unknown model capture_quantization {capture_quantization!r}")
@@ -2733,19 +3071,23 @@ def write_model_capsule(entry: dict, binding, out_root, *, source: "PytorchRefSo
     # and the recipe's are what this hardware's readout holds. It is resolved HERE, at capture, and
     # not written into the synthesized profile: whether it can be derived depends on the target's
     # extracted facts, and a committed profile must not change with what a machine has extracted.
-    art = src.capture_loader(
-        loader,
-        dtype,
-        scheme=entry.get("quant_scheme"),
-        env=capture_env,
-        python=model_capture_python(workload),
-        recipe=(
-            None
-            if already_quantized
-            else entry.get("quant_recipe") or derived_recipe(getattr(binding, "target", None), dtype)
-        ),
-        already_quantized=already_quantized,
-        agreement_tolerance=_tol(binding),
+    art = (
+        artifact
+        if artifact is not None
+        else src.capture_loader(
+            loader,
+            dtype,
+            scheme=entry.get("quant_scheme"),
+            env=capture_env,
+            python=model_capture_python(workload),
+            recipe=(
+                None
+                if already_quantized
+                else entry.get("quant_recipe") or derived_recipe(getattr(binding, "target", None), dtype)
+            ),
+            already_quantized=already_quantized,
+            agreement_tolerance=_tol(binding),
+        )
     )
     # WHERE THE INPUTS CAME FROM -- recorded unconditionally, tri-state, and never inferred here.
     provenance = input_provenance_record(workload, capture_env, art.meta)
@@ -2788,9 +3130,24 @@ def write_model_capsule(entry: dict, binding, out_root, *, source: "PytorchRefSo
     linalg = art.linalg_mlir
     d.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(wsrc, d / "capsule.weights.safetensors")
-    linalg = linalg.replace(str(wsrc), "capsule.weights.safetensors")
+    if artifact is None:
+        linalg = linalg.replace(str(wsrc), "capsule.weights.safetensors")
+    else:
+        linalg = linalg.replace(
+            f'prov.weights_file = "{art.meta["materialized_weights_reference"]}"',
+            'prov.weights_file = "capsule.weights.safetensors"',
+        )
     shutil.copyfile(manifest_src, d / "capsule.weights.safetensors.manifest.json")
-    loader_dependencies = freeze_model_loader_dependencies(workload, d, art.meta or {})
+    if artifact is not None:
+        for original, member in (
+            ("weights.safetensors", "capsule.weights.safetensors"),
+            ("weights.safetensors.manifest.json", "capsule.weights.safetensors.manifest.json"),
+        ):
+            payload = (d / member).read_bytes()
+            declared = art.meta["materialized_artifact_identities"][original]
+            if len(payload) != declared["bytes"] or hashlib.sha256(payload).hexdigest() != declared["sha256"]:
+                raise M2MUnavailable(f"materialized external payload changed during capsule copying: {original}")
+    loader_dependencies = freeze_model_loader_dependencies(workload, d, art.meta or {}) if artifact is None else []
 
     # What this model owes the accelerator, derived from its own captured linalg and this target's role
     # census. Without it the capstone is vacuous: no required classes and no must_accelerate means a
@@ -2801,7 +3158,8 @@ def write_model_capsule(entry: dict, binding, out_root, *, source: "PytorchRefSo
     cap = {
         "name": entry["name"],
         "kind": "model",
-        "source_role": "pytorch_model_slice",
+        **({"materialized_capture": art.meta["materialized_capture"]} if artifact is not None else {}),
+        "source_role": "model_derived" if artifact is not None else entry.get("source_role", "pytorch_model_slice"),
         "source_reference": entry.get("source_reference", f"whole model {entry.get('model', '')}"),
         "label": entry.get("label", "public"),
         "interface_mlir": "capsule.interface.mlir",
@@ -2865,7 +3223,7 @@ def write_model_capsule(entry: dict, binding, out_root, *, source: "PytorchRefSo
         # target also owns -- so host-lane work is the behaviour under test rather than a fallback
         # failure, and must_accelerate is withheld below for the same reason.
         **({"lanes": {"require": _checked_lanes(entry, binding)}} if (entry.get("lanes") or {}).get("require") else {}),
-        "pytorch_ref": {"op": "model", "dtype": idt, "loader": "capsule.pytorch.py"},
+        "pytorch_ref": {"op": "model", "dtype": idt, **({"loader": "capsule.pytorch.py"} if artifact is None else {})},
         # WHAT THIS CAPSULE'S INPUTS WERE. On the capsule rather than only in the golden, because the
         # capsule is what a reader has in hand when they quote the result, and a pass on seeded
         # synthetic inputs proves the compiler reproduces the reference -- not that the model is
@@ -2889,7 +3247,7 @@ def write_model_capsule(entry: dict, binding, out_root, *, source: "PytorchRefSo
             "grade_policy": {"compare": binding.compare, "atol": _tol(binding)[0], "rtol": _tol(binding)[1]},
             "interface": "linalg_positional",
             "arg_order": in_names + out_names,
-            "pytorch_source": "capsule.pytorch.py",
+            **({"pytorch_source": "capsule.pytorch.py"} if artifact is None else {}),
             "linalg_mlir": "capsule.interface.mlir",
             # The same record the capsule carries, on the oracle side too: what the reference was
             # computed over is part of where the reference came from, and a grader reading only the
@@ -2899,12 +3257,20 @@ def write_model_capsule(entry: dict, binding, out_root, *, source: "PytorchRefSo
         },
         "outputs": dict(zip(out_names, golden_values, strict=True)),
     }
+    frontend_evidence = _write_frontend_evidence(art, d, linalg)
+    if frontend_evidence is not None:
+        cap["frontend_trace"] = frontend_evidence
+    if src is not None:
+        cap["capture_tool"] = _freeze_selected_m2m_tool(src.m2m_dir, d)
     (d / "capsule.yaml").write_text(yaml.safe_dump(cap, sort_keys=False), encoding="utf-8")
     (d / "capsule.interface.mlir").write_text(linalg, encoding="utf-8")
     (d / "expected_instruction_coverage.yaml").write_text(
         yaml.safe_dump(cap["expected"], sort_keys=False), encoding="utf-8"
     )
-    (d / "capsule.pytorch.py").write_text(art.pytorch_src, encoding="utf-8")
+    if artifact is None:
+        (d / "capsule.pytorch.py").write_text(art.pytorch_src, encoding="utf-8")
+    else:
+        (d / "source-capture-receipt.json").write_bytes(art.meta["materialized_receipt_bytes"])
     (d / "golden.yaml").write_text(yaml.safe_dump(golden, sort_keys=False), encoding="utf-8")
     return d
 
@@ -2926,8 +3292,7 @@ def _specir_root() -> str:
 
 
 class SpecProgramUnavailable(RuntimeError):
-    """specir cannot emit a compiler-consumable program for this gen:op (only the RoCC/command-buffer
-    families expose ``emit_command_buffer`` today; others provide golden + coverage only)."""
+    """The selected SpecIR source cannot emit a compiler-consumable program for this gen:op."""
 
 
 @dataclass
@@ -2949,6 +3314,38 @@ class SpecArtifacts:
     opcode_backing: dict  # merlin opcode -> [authored RoCC commands backing it] (RoCC gens only)
     workload: tuple
     compare: str = "exact_int"  # "exact_int" for a RoCC int datapath, "tolerance_float" for fp8/simt
+    program_emitter: dict[str, str] | None = None
+
+
+def _selected_spec_program_emitter(value: object) -> dict[str, str] | None:
+    """Validate a recipe's explicit SpecIR float-program adapter without importing arbitrary modules."""
+    if value is None:
+        return None
+    if (
+        not isinstance(value, dict)
+        or not {"module", "function"} <= set(value)
+        or set(value) - {"module", "function", "composed_from"}
+    ):
+        raise SpecProgramUnavailable(
+            "spec_program_emitter must declare module and function, with only optional composed_from"
+        )
+    module = value["module"]
+    function = value["function"]
+    if (
+        not isinstance(module, str)
+        or not module.startswith("specir.interface.")
+        or not all(part.isidentifier() for part in module.split("."))
+        or not isinstance(function, str)
+        or not function.isidentifier()
+    ):
+        raise SpecProgramUnavailable("spec_program_emitter must name a function in a specir.interface submodule")
+    selected = {"module": module, "function": function}
+    if "composed_from" in value:
+        leaf = value["composed_from"]
+        if not isinstance(leaf, str) or not leaf.startswith("op.") or not leaf[3:].isidentifier():
+            raise SpecProgramUnavailable("spec_program_emitter composed_from must name one op.<identifier> leaf")
+        selected["composed_from"] = leaf
+    return selected
 
 
 def _parse_spec_ref(spec_ref: str) -> tuple[str, str]:
@@ -3062,7 +3459,9 @@ def _decode_program_tensors(program: dict) -> dict:
     return out
 
 
-def _float_program_artifacts(gen: str, op: str, program: dict, cov: list, workload) -> "SpecArtifacts":
+def _float_program_artifacts(
+    gen: str, op: str, program: dict, cov: list, workload, program_emitter: dict[str, str]
+) -> "SpecArtifacts":
     """Normalize an fp8/simt program (atlas MXU sequence / radiance warp schedule) into SpecArtifacts:
     role-keyed decoded operands + the already-decoded golden + the program as grounding (float compare)."""
     return SpecArtifacts(
@@ -3076,15 +3475,15 @@ def _float_program_artifacts(gen: str, op: str, program: dict, cov: list, worklo
         opcode_backing={},
         workload=tuple(workload),
         compare="tolerance_float",
+        program_emitter=program_emitter,
     )
 
 
 class SpecRefSource:
     """Capture a capsule from a ``specir`` verification spec: the spec's own PROGRAM + the golden its refmodel
-    computes + the declared coverage. ``specir`` imports in-process (pure xDSL). Program emitters exist for
-    the RoCC/command-buffer family (systolic int, e.g. gemmini), the atlas MXU family (fp8->bf16), and the
-    radiance SIMT-warp family; the emitters are tried in turn and the one that produces a program wins. A
-    gen no emitter supports fails closed with :class:`SpecProgramUnavailable` (never a faked program)."""
+    computes + the declared coverage. ``specir`` imports in-process (pure xDSL). Without a selected
+    emitter, only the generic RoCC command-buffer adapter runs. Other SpecIR program shapes require an
+    explicit recipe-owned ``spec_program_emitter`` and fail closed if it cannot produce a program."""
 
     def __init__(self, root: str | None = None):
         self.root = root or _specir_root()
@@ -3092,15 +3491,21 @@ class SpecRefSource:
     def available(self) -> bool:
         return (Path(self.root) / "specir" / "__init__.py").exists()
 
-    def capture(self, spec_ref: str, *, workload=(16, 16, 16), tile_dim: int = 16) -> SpecArtifacts:
+    def capture(
+        self,
+        spec_ref: str,
+        *,
+        workload=(16, 16, 16),
+        tile_dim: int = 16,
+        program_emitter: dict[str, str] | None = None,
+    ) -> SpecArtifacts:
         if not self.available():
             raise SpecProgramUnavailable(f"specir root {self.root} missing; set SPECIR_ROOT")
         from merlin.integrations.specir import importable
 
+        selected_emitter = _selected_spec_program_emitter(program_emitter)
         with importable(self.root):
             from specir.gate import load_targets
-            from specir.interface.emit_capsule import emit_command_buffer
-            from specir.interface.rocc_lower import lower_buffer
             from specir.loading import parse_spec_file
             from specir.registry import _SPEC_ROOT
 
@@ -3121,57 +3526,101 @@ class SpecRefSource:
             # emitted. (The emitter's own indifference to `op` is an upstream defect; this makes it
             # unreachable from here rather than pretending it is fixed.)
             ops = declared_ops(module)
-            if op not in ops:
+            composed_from = selected_emitter.get("composed_from") if selected_emitter else None
+            if composed_from is not None and composed_from not in ops:
+                raise SpecProgramUnavailable(
+                    f"{gen} declares no composed_from leaf {composed_from!r}; it declares {sorted(ops)}"
+                )
+            if op not in ops and composed_from is None:
                 raise SpecProgramUnavailable(
                     f"{gen} declares no {op!r}; it declares {sorted(ops)}. The program emitter does not "
                     f"read the op token, so an unchecked ref here would emit a DIFFERENT op's program "
                     f"under this name"
                 )
-            cov = _coverage_goals(module, op)
+            cov = _coverage_goals(module, composed_from or op)
 
-            # (1) RoCC command-buffer program (systolic int datapath, e.g. gemmini) — bit-exact int golden.
-            from specir.interface.rocc_lower import RoccLoweringError
+            if selected_emitter is None:
+                # Generic RoCC class: an actual command buffer and successful lowering are required.
+                from specir.interface.emit_capsule import emit_command_buffer
+                from specir.interface.rocc_lower import RoccLoweringError, lower_buffer
 
-            cb, prov = emit_command_buffer(module, gen, op, gen_dir, workload=tuple(workload))
-            if cb is not None:
-                try:
-                    p = lower_buffer(module, cb, dim=tile_dim)
-                    return SpecArtifacts(
-                        gen=gen,
-                        op=op,
-                        command_buffer=cb,
-                        operands=_cb_role_operands(cb, dict(p.operands)),
-                        golden={"out": next(iter(p.golden.values()))}
-                        if len(p.golden) == 1
-                        else {"out": p.golden.get("Y0") or next(iter(p.golden.values()))},
-                        instructions=list(p.instructions),
-                        coverage_goal=cov,
-                        opcode_backing=prov.get("opcode_backed_by_spec_rocc", {}),
-                        workload=tuple(workload),
-                        compare="exact_int",
+                cb, prov = emit_command_buffer(module, gen, op, gen_dir, workload=tuple(workload))
+                if cb is not None:
+                    try:
+                        p = lower_buffer(module, cb, dim=tile_dim)
+                        return SpecArtifacts(
+                            gen=gen,
+                            op=op,
+                            command_buffer=cb,
+                            operands=_cb_role_operands(cb, dict(p.operands)),
+                            golden={"out": next(iter(p.golden.values()))}
+                            if len(p.golden) == 1
+                            else {"out": p.golden.get("Y0") or next(iter(p.golden.values()))},
+                            instructions=list(p.instructions),
+                            coverage_goal=cov,
+                            opcode_backing=prov.get("opcode_backed_by_spec_rocc", {}),
+                            workload=tuple(workload),
+                            compare="exact_int",
+                            program_emitter={
+                                "module": "specir.interface.emit_capsule",
+                                "function": "emit_command_buffer",
+                            },
+                        )
+                    except RoccLoweringError:
+                        pass
+                raise SpecProgramUnavailable(
+                    f"no generic RoCC program for {gen}:{op}; select a spec_program_emitter in the recipe "
+                    "for another SpecIR program interface"
+                )
+
+            try:
+                selected_module = importlib.import_module(selected_emitter["module"])
+            except ImportError as exc:
+                raise SpecProgramUnavailable(
+                    f"selected spec_program_emitter module {selected_emitter['module']!r} is unavailable"
+                ) from exc
+            emit = getattr(selected_module, selected_emitter["function"], None)
+            if not callable(emit):
+                raise SpecProgramUnavailable(
+                    f"selected spec_program_emitter function {selected_emitter['function']!r} is unavailable"
+                )
+            result = emit(module, op, gen_dir, workload=tuple(workload))
+            if not isinstance(result, tuple) or len(result) != 2:
+                raise SpecProgramUnavailable("selected spec_program_emitter must return (program, provenance)")
+            program, provenance = result
+            if program is None:
+                raise SpecProgramUnavailable(f"selected spec_program_emitter produced no program for {gen}:{op}")
+            if (
+                not isinstance(program, dict)
+                or not isinstance(program.get("tensors"), dict)
+                or not isinstance(program.get("golden"), dict)
+                or not isinstance(program["golden"].get("out"), dict)
+                or not isinstance(program["golden"]["out"].get("values"), list)
+            ):
+                raise SpecProgramUnavailable(
+                    "selected spec_program_emitter must produce a float program with tensors and golden.out.values"
+                )
+            if composed_from is not None:
+                kernel = program.get("kernel")
+                if (
+                    program.get("target") != gen
+                    or program.get("composed_from") != composed_from
+                    or not isinstance(provenance, dict)
+                    or provenance.get("composed_from") != composed_from
+                    or not isinstance(kernel, list)
+                    or not kernel
+                    or any(not isinstance(step, dict) or step.get("op") != composed_from for step in kernel)
+                ):
+                    raise SpecProgramUnavailable(
+                        "selected spec_program_emitter's target, composed_from provenance and kernel "
+                        "must match the declared composed_from leaf"
                     )
-                except RoccLoweringError:
-                    pass  # not a RoCC gen — fall through to the fp8/simt emitters
-
-            # (2) atlas MXU program (fp8 -> bf16); (3) radiance SIMT-warp program. Each returns None for a gen
-            # it does not author — try both, use the one that produces a program, else fail closed.
-            from specir.interface.emit_atlas_program import (  # target-ok: additive upstream emitter
-                emit_atlas_program,
-            )
-            from specir.interface.emit_radiance_program import (  # target-ok: additive upstream emitter
-                emit_radiance_program,
-            )
-
-            aprog, _ = emit_atlas_program(module, op, gen_dir, workload=tuple(workload))
-            if aprog is not None:
-                return _float_program_artifacts(gen, op, aprog, cov, workload)
-            rprog, _ = emit_radiance_program(module, op, gen_dir, workload=tuple(workload))
-            if rprog is not None:
-                return _float_program_artifacts(gen, op, rprog, cov, workload)
-            raise SpecProgramUnavailable(
-                f"no specir program emitter (RoCC command-buffer / MXU command-sequence / SIMT-warp) produced "
-                f"a program for {gen}:{op} — this op/gen is golden+coverage only"
-            )
+            try:
+                return _float_program_artifacts(gen, op, program, cov, workload, selected_emitter)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise SpecProgramUnavailable(
+                    "selected spec_program_emitter produced a malformed float program"
+                ) from exc
 
 
 def write_spec_capsule(entry: dict, binding, out_root, *, source: "SpecRefSource | None" = None):
@@ -3190,10 +3639,16 @@ def write_spec_capsule(entry: dict, binding, out_root, *, source: "SpecRefSource
     M = entry.get("M", entry.get("M_tiles", 1) * D)
     K = entry.get("K", entry.get("K_tiles", 1) * D)
     N = entry.get("N", entry.get("N_tiles", 1) * D)
-    art = src.capture(entry["spec_ref"], workload=(M, N, K), tile_dim=D)
+    art = src.capture(
+        entry["spec_ref"],
+        workload=(M, N, K),
+        tile_dim=D,
+        program_emitter=entry.get("spec_program_emitter"),
+    )
 
     cap, mlir = CS.build(entry, binding)  # merlin_iface interface for the op (names align)
     cap["spec_ref"] = entry["spec_ref"]
+    cap["spec_program_emitter"] = art.program_emitter
     out_name = entry.get("out", "Y0")
     d = Path(out_root) / entry["cat"] / entry["name"]
     d.mkdir(parents=True, exist_ok=True)
@@ -3209,6 +3664,7 @@ def write_spec_capsule(entry: dict, binding, out_root, *, source: "SpecRefSource
             "engine": "specir spec program + refmodel golden (INDEPENDENT of the target RTL; the spec is "
             "the reference)",
             "spec_ref": entry["spec_ref"],
+            "program_emitter": art.program_emitter,
             "workload": list(art.workload),
             "compare": art.compare,
             "coverage_goal": art.coverage_goal,

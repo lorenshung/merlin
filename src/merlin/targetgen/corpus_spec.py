@@ -175,7 +175,7 @@ def _scale_block_elems(contract: dict) -> int | None:
     return _group(contract)
 
 
-def _tile_dim(target: str, contract: dict, *, operand: str | None = None) -> int:
+def _tile_dim(target: str, contract: dict, *, operand: str | None = None, facts: dict | None = None) -> int:
     """Tile dim for sizing capsule shapes. When the target has a FIXED HARDWARE mesh, it is DERIVED
     (``capabilities.mesh.rows`` / ``.tile.rows`` from the manifest, else the CIRCT ``arrays[mesh].rows``
     fact) — so gemmini's 16 comes from its RTL facts, never a literal. A target with NO fixed hardware
@@ -202,7 +202,7 @@ def _tile_dim(target: str, contract: dict, *, operand: str | None = None) -> int
     if selected and not any(u.get("kind") in {"systolic", "spatial"} for u in selected):
         return _DEFAULT_SW_TILE
     unit, config = _declared_matrix_unit(contract), _declared_hardware_config(contract)
-    if unit and config:
+    if unit and config and facts is None:
         from merlin.targetgen.plugins import load_declared
 
         return int(load_declared(target, "matrix_lowering").geometry(unit=unit, config=config)[0])
@@ -213,14 +213,14 @@ def _tile_dim(target: str, contract: dict, *, operand: str | None = None) -> int
     try:
         from merlin.targetgen.rtl.facts import load_facts
 
-        facts = load_facts(target).get("facts") or {}
-        arrays = facts.get("arrays") or []
+        body = (load_facts(target) if facts is None else facts).get("facts") or {}
+        arrays = body.get("arrays") or []
         m = next((a for a in arrays if a.get("name") == "mesh"), {})
         if m.get("rows"):
             return int(m["rows"])
         # Spatial tile extractors publish a field bundle, not a systolic
         # arrays[] record. Keep the two fact shapes distinct.
-        spatial_rows = (((facts.get("fields") or {}).get("tile_dim") or {}).get("value") or {}).get("rows")
+        spatial_rows = (((body.get("fields") or {}).get("tile_dim") or {}).get("value") or {}).get("rows")
         if spatial_rows:
             return int(spatial_rows)
     except Exception:  # noqa: BLE001 — handled below according to the declared compute-unit kind
@@ -292,7 +292,7 @@ def _declared_matrix_unit(contract: dict) -> str | None:
     return None
 
 
-def _classes_source(te, contract: dict) -> Callable[..., list[str]]:
+def _classes_source(te, contract: dict, *, taxonomy: dict | None = None) -> Callable[..., list[str]]:
     """The instruction-class deriver for a matmul-family op. Two regimes, chosen by what the target ships:
     a self-hosted-ISA target (an ``isa_definition.py`` is present) derives its classes from the taxonomy;
     a RoCC/command target derives the RoCC semantic classes from its ``encoding`` map. Never hardcoded."""
@@ -305,12 +305,15 @@ def _classes_source(te, contract: dict) -> Callable[..., list[str]]:
     # allowed to raise: a declared unit whose classes cannot be derived must stop corpus generation, not
     # quietly produce an unfalsifiable corpus.
     unit = _declared_matrix_unit(contract)
-    if unit:
+    if unit and taxonomy is None:
         return IT.matrix_unit_classes_for(unit, support_target=te.target)
-    try:
-        tax = IT.derive_isa_taxonomy(te)
-    except Exception:  # noqa: BLE001
-        tax = {}
+    if taxonomy is None:
+        try:
+            tax = IT.derive_isa_taxonomy(te)
+        except Exception:  # noqa: BLE001
+            tax = {}
+    else:
+        tax = taxonomy
     if tax.get("by_class"):
 
         def _from_taxonomy(*, op="matmul", output_dtype=None, epilogue=(), movement=False):
@@ -396,14 +399,15 @@ def profile_datapath(profile: dict, *, numeric_only: bool = False) -> dict:
     return block
 
 
-def derive_binding(te, datapath: dict) -> CorpusBinding:
+def derive_binding(
+    te, datapath: dict, *, contract: dict | None = None, facts: dict | None = None, taxonomy: dict | None = None
+) -> CorpusBinding:
     """Derive the per-target binding from the descriptor + the profile's ``datapath`` block (compare +
     tolerances + optional requant-output dtype — the numeric contract the manifest does not yet carry)."""
     from merlin.targetgen.oracle_policy import inferred_oracle_tiers
     from merlin.targetgen.target_experiment import load_capability_manifest
 
-    m = load_capability_manifest(te.target)
-    c = m.contract
+    c = load_capability_manifest(te.target).contract if contract is None else contract
     cu = (c.get("compute_units") or [{}])[0]
     # The profile may pin the DEFAULT operand/accumulate dtypes (a target with several compute units — e.g.
     # radiance's simt_cluster + contained mx_pe — needs the profile to say which regime a capsule set drives);
@@ -424,7 +428,7 @@ def derive_binding(te, datapath: dict) -> CorpusBinding:
     tiers = datapath.get("required_oracle_tiers") or sorted(inferred_oracle_tiers(te.target, te.sim_via))
     return CorpusBinding(
         target=te.target,
-        tile_dim=_tile_dim(te.target, c, operand=operand),
+        tile_dim=_tile_dim(te.target, c, operand=operand, facts=facts),
         operand_dtype=operand,
         accum_dtype=accum,
         integer=integer,
@@ -439,7 +443,7 @@ def derive_binding(te, datapath: dict) -> CorpusBinding:
         subnormal_operand_flush=bool(datapath.get("subnormal_operand_flush", False)),
         inapplicable_tiers=_inapplicable_tiers(datapath, tiers),
         semantic_defaults=dict(datapath.get("semantic_defaults") or {}),
-        classes_for=_classes_source(te, c),
+        classes_for=_classes_source(te, c, taxonomy=taxonomy),
     )
 
 

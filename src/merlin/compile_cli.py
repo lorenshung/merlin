@@ -81,7 +81,9 @@ from .compile.mesh_backend import (  # noqa: F401 -- re-exported
     _resolve_oot_mesh_simulator,
 )
 from .compile.mesh_model import (  # noqa: F401 -- re-exported
+    _int8_chain_policy,
     _int8_chain_reference,
+    _int8_chain_step,
     run_int8_chain_on_mesh,
     run_whole_model_on_mesh,
 )
@@ -89,6 +91,7 @@ from .compile.mesh_reference import (  # noqa: F401 -- re-exported
     _accum_rel_tolerance,
     _reference_on_datapath,
 )
+from .compile.model_preflight import preflight_model  # noqa: F401 -- re-exported
 
 # Workloads that ship as model2MLIR capture bundles (RVV whole-model path). Not exhaustive — any
 # workloads/<name> with a loader can be captured; this is the "known-good" convenience set for --list.
@@ -537,7 +540,7 @@ def compile_rvv(
             sim = zm.verilator_sim()
             if sim is None:
                 out["status"] = "not_run"
-                out["reason"] = "no multicore Saturn Verilator sim built (see docs/guides/tinyllama_int8_rvv_zephyr.md)"
+                out["reason"] = "no compatible multicore Verilator simulator is available for the selected target"
                 return out
             res = zm.run_on_verilator(b["elf"], timeout=timeout, references=refs or None)
         else:
@@ -949,17 +952,52 @@ def compile_model(
     return out
 
 
-def compile_oot(workload: str, *, target: str, run: str, verify: bool, package: str | None, timeout: int) -> dict:
+def compile_oot(
+    workload: str,
+    *,
+    target: str,
+    run: str,
+    verify: bool,
+    package: str | None,
+    timeout: int,
+    corpus_descriptor: str | Path | None = None,
+) -> dict:
     """OOT target: build the backend package and run a capsule through it, three-way gated.
 
     Serves any registered out-of-tree target (gemmini and beyond). ``--workload`` names a capsule
     (e.g. A2_single_tile_matmul) and ``--package`` the OOT backend. Accelerators run capsules/kernels,
     not whole VLA models."""
-    from .common.paths import repo_root, runs_root
+    from .common.paths import runs_root
     from .targetgen import oot_runner
+    from .targetgen.target_experiment import load_target_experiment
 
-    corpus = repo_root() / "merlin/contract/capsules/isa"
     out: dict = {"tool": "merlin-compile", "target": target, "workload": workload, "package": package, "run": run}
+    if corpus_descriptor is None:
+        out["status"] = "not_run"
+        out["reason"] = (
+            "an OOT capsule compile requires an explicit --corpus-descriptor; no checkout corpus is selected"
+        )
+        return out
+    descriptor = Path(corpus_descriptor).expanduser().absolute()
+    if descriptor.is_symlink() or not descriptor.is_file():
+        out["status"] = "not_run"
+        out["reason"] = f"selected corpus descriptor is absent or indirect: {descriptor}"
+        return out
+    te = load_target_experiment(descriptor)
+    if te.target != target:
+        out["status"] = "not_run"
+        out["reason"] = f"selected corpus descriptor target {te.target!r} differs from requested target {target!r}"
+        return out
+    roots = te.graded_roots()
+    if not roots or any(root.is_symlink() or not root.is_dir() for root in roots):
+        out["status"] = "not_run"
+        out["reason"] = "selected corpus descriptor has an absent or indirect public capsule category"
+        return out
+    if Path(workload).name != workload or workload in ("", ".", ".."):
+        out["status"] = "not_run"
+        out["reason"] = "workload must name one capsule, not a path"
+        return out
+    matches = [root / workload for root in roots if (root / workload / "capsule.yaml").is_file()]
 
     # compile-only: build the OOT package (board-free, needs the OOT/clang toolchain).
     # VALIDATE THE WORKLOAD BEFORE ANYTHING REPORTS SUCCESS. This check used to live below the
@@ -969,16 +1007,25 @@ def compile_oot(workload: str, *, target: str, run: str, verify: bool, package: 
     # `compiled`, and so did `--workload tiny_llama`, which is a whole MODEL and never was a capsule
     # (see this function's own docstring). A caller reading that status believed a model had been
     # compiled for gemmini when nothing of the kind had happened.
-    cap_dir = corpus / workload
-    if not cap_dir.is_dir():
+    if len(matches) != 1 or any(
+        (
+            match.is_symlink()
+            or (match / "capsule.yaml").is_symlink()
+            or (match / "capsule.interface.mlir").is_symlink()
+            or not (match / "capsule.interface.mlir").is_file()
+        )
+        for match in matches
+    ):
         out["status"] = "not_run"
         out["reason"] = (
-            f"no capsule {workload!r} under {corpus} (use a capsule name). This target "
+            f"no capsule {workload!r} resolves uniquely as an ordinary member of the selected descriptor corpus "
+            f"({len(matches)} found). This target "
             "command compiles capsules, not target-native whole models. "
             "Use --model-preflight with an explicit capture bundle and deployment dtype "
             "to inspect model readiness; preflight does not compile a target binary."
         )
         return out
+    cap_dir = matches[0]
 
     # Resolve the backend only after checking that this interface can compile the
     # requested workload. A missing package must not conceal a whole-model request
@@ -1077,6 +1124,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--package", default=None, help="override the codegen/OOT package dir")
     ap.add_argument(
+        "--corpus-descriptor",
+        type=Path,
+        help="explicit OOT corpus descriptor; prefer a released descriptor (this CLI does not verify its seal)",
+    )
+    ap.add_argument(
         "--model-preflight",
         action="store_true",
         help="read-only OOT model analysis: compare declared routes with groups in a captured program",
@@ -1089,6 +1141,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--json", action="store_true", help="emit the result dict as JSON")
     a = ap.parse_args(argv)
+
+    if a.corpus_descriptor is not None and (a.target == "rvv" or a.model_preflight):
+        ap.error("--corpus-descriptor applies only to OOT capsule compilation")
 
     if a.model_preflight and (a.target == "rvv" or not a.capture_bundle or not a.deployment_dtype):
         ap.error("--model-preflight requires an OOT --target, --capture-bundle, and --deployment-dtype")
@@ -1119,7 +1174,13 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             res = compile_oot(
-                a.workload, target=a.target, run=run, verify=a.verify, package=a.package, timeout=a.timeout
+                a.workload,
+                target=a.target,
+                run=run,
+                verify=a.verify,
+                package=a.package,
+                timeout=a.timeout,
+                corpus_descriptor=a.corpus_descriptor,
             )
     except SystemExit:
         raise

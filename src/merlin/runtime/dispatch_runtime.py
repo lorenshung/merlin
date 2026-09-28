@@ -693,6 +693,7 @@ def execute(
     bisection hook.
     """
     import hashlib
+    import platform
 
     from ..llvmlower.abi import HostModel
     from ..llvmlower.kernel_backend import compile_host, extract_kernel
@@ -759,6 +760,9 @@ def execute(
         return _host_kfn_cache.get(sym)
 
     mesh_counts: dict = counters if counters is not None else {}  # per-CALL, not
+    native_architecture = {"machine": platform.machine(), "system": platform.system(), "basis": "executing_process"}
+    if kernel_backend != "mesh":
+        mesh_counts.setdefault("target_executed", False)
     # a module-global function attribute: run_suite grades capsules on a thread pool.
     if kernel_backend == "mesh":
         if not mesh_target:
@@ -839,8 +843,6 @@ def execute(
         ledger is owned by the runtime, populated only after the selected lane completes, and returned
         with this invocation's counters (never a module-global shared across concurrent grades).
         """
-        if kernel_backend != "mesh":
-            return
         ledger = mesh_counts.setdefault("dispatch_ledger", [])
         ledger.append({"ordinal": len(ledger), "symbol": symbol, "lane": lane, "status": "pass", **evidence})
 
@@ -881,7 +883,6 @@ def execute(
             return
         import concurrent.futures
         import os as _os
-        import shutil
 
         from xdsl.dialects.builtin import ModuleOp, StringAttr
 
@@ -935,7 +936,7 @@ def execute(
 
     def run_call(op):
         symbol, outs = _kernel_io(op)
-        host_lane = "scalar_rvv_lane"
+        host_lane = "native_cpu"
         host_evidence: dict = {}
         route = xnn_routes.get(symbol)
         if route is not None:
@@ -945,7 +946,15 @@ def execute(
             b = np.ascontiguousarray(env[id(op.operands[route["b"]])], np.float32)
             out = xnnpack_host.gemm_f32(a, b).reshape(outs[0][0]).astype(outs[0][1])
             env[id(op.results[0])] = out
-            _record_dispatch(symbol, "scalar_rvv_lane", executor="xnnpack_host")
+            mesh_counts["native_host_executed"] = True
+            _record_dispatch(
+                symbol,
+                "xnnpack_host",
+                placement="host",
+                executor="xnnpack_host",
+                runtime_architecture=native_architecture,
+                target_executed=False,
+            )
             if tap is not None:
                 tap(op, [out])
             return
@@ -1158,14 +1167,23 @@ def execute(
         #
         # Into the per-call `counters` dict, never onto a module-global: run_suite grades on a thread
         # pool and concurrent grades clobber module attributes -- and this count now feeds a verdict.
+        model(args)
+        mesh_counts["native_host_executed"] = True
         mesh_counts["host_kernels_ran"] = mesh_counts.get("host_kernels_ran", 0) + 1
         _hostfn = _host_kernel_fn(symbol)
         if _hostfn is not None and _has_contraction(_hostfn):
             mesh_counts["host_contractions_ran"] = mesh_counts.get("host_contractions_ran", 0) + 1
-        model(args)
         for r, o in zip(op.results, out_arrays):
             env[id(r)] = o
-        _record_dispatch(symbol, host_lane, **host_evidence)
+        _record_dispatch(
+            symbol,
+            host_lane,
+            placement="host",
+            executor="native_cpu",
+            runtime_architecture=native_architecture,
+            target_executed=False,
+            **host_evidence,
+        )
         if tap is not None:
             tap(op, out_arrays)
 
@@ -1284,7 +1302,7 @@ def run_model(
     cache_dir: str | Path | None = None,
     tap=None,
     int8_compute: bool = False,
-    quant_passes: "list[str] | None" = None,
+    quant_passes: list[str] | None = None,
     quant_select=None,
     prequant_gather: bool = False,
     kernel_backend: str | None = None,
@@ -1297,7 +1315,7 @@ def run_model(
     Returns ``{output, golden, cos, rel, ok, n_kernels, n_unique_kernels}``.
 
     ``int8_compute=True`` runs the integer (W8A8) datapath: each ``dequant(weight)→f32 matmul``
-    becomes ``quantize(act)→ i8×i8→i32 matmul → requant`` (real integer contraction on RVV),
+    becomes ``quantize(act)→ i8×i8→i32 matmul → requant`` (native integer reference contraction),
     instead of dequantizing the weight to f32 (the default weight-only path).
 
     ``prequant_gather=True`` additionally moves each gathered activation's quantization to BEFORE

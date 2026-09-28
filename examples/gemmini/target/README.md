@@ -1,76 +1,205 @@
-# Gemmini target setup
+# Target inputs and source qualification
 
-[`descriptor.yaml`](descriptor.yaml) declares experiment inputs and resource ownership.
-[`contracts/target_contract.yaml`](contracts/target_contract.yaml) and
-[`contracts/residual.yaml`](contracts/residual.yaml) are the authored prototype
-capability inputs; [`evidence_concepts.yaml`](evidence_concepts.yaml) supplies the
-target's evidence vocabulary. These are public source inputs, not generated
-capsules, extracted RTL facts or a certified compiler. The checkout registry can
-inspect this example as reference metadata; it does not load a backend from it.
+`software-spec.yaml` is authored software-visible semantics, not generated tests.
+`hardware.yaml` selects the deterministic production policy and direct audit
+questions. `host-capabilities.yaml` is a separate declaration bound to immutable
+host compiler bytes; its precision strategy is not an operation support claim.
 
-[`probe_oracles.py`](probe_oracles.py) checks the configured Chipyard tools and prebuilt
-simulator paths without building or running anything by default:
+The software spec is a small authored input: selected arithmetic/overflow and
+readout semantics, typed operation placement constraints, quantization parameters,
+and explicit transfer candidates. It contains no backend, ISA table, mesh size,
+calibration history or generated qualification records. Those come from the
+explicitly selected OOT provider and generated RTL/characterization artifacts.
+The twenty-bit partial-sum bound is a numerical contract, not thirty-two-bit SRAM
+geometry. Review/unknown states prevent those choices being mistaken for working
+compiler support. Missing host support is not silently filled in.
 
-Runtime implementation lives in the OOT `gemmini-mlir` support package, not
-Merlin's retained reference metadata. Select the provider explicitly:
+Name an operation once and write its typed constraints directly underneath it.
+For unchanged lane crossings, `copy: {dtype: int8, layout: row_major_contiguous}`
+states both endpoint types/layouts and bit-preserving semantics once. The generator
+expands these into the full consumer contract in artifacts; no target-specific
+defaults or review claims are added. See the [authoring guide](../../../docs/guides/phase0_specification.md).
+
+Merlin's v1 reader also accepts old inline `capability_contract` documents, but
+new minimal specs require a separately selected same-target backend contract.
+Loading the YAML never discovers one or imports its runtime. A selected provider's
+broader legacy operation list cannot override the spec's typed SW admission screen.
+
+[`descriptor.yaml`](descriptor.yaml) owns experiment resources;
+[`evidence_concepts.yaml`](evidence_concepts.yaml) names evidence concepts.
+Runtime backends, reference-program helpers and calibration live in the selected
+OOT support package, not these example inputs. Select it and the extraction tools
+explicitly before the commands below:
 
 ```sh
 export MERLIN_TARGET_PATH=/path/to/gemmini-mlir/merlin-support
+export MERLIN_MLC_DIR=/path/to/ModelIR
 ```
 
-Use the companion revision recorded in `build_tools/upstreams/target_support.json`.
-Those local companion commits have not been pushed; an arbitrary upstream checkout
-may not contain this support package yet. Its `backend/` and `build_support/` are
-the single implementation owners. Its `tools/` owns reference-program corroboration,
-and `cost_model/` owns the calibration driver, inputs, vocabulary and coefficients.
-Shared Merlin resolves these through the selected provider; there are no in-tree copies.
-Calibration executes configured compiler/simulator tools unless explicitly using the
-driver's offline refit mode. Historical coefficients are screening estimates, not new
-hardware measurements or certification.
+Use the companion revision recorded in
+[`target_support.json`](../../../build_tools/upstreams/target_support.json).
+Calibration coefficients are screening estimates, not new measurements.
 
-The provider currently lacks a reviewed default RTL-facts pin and its contract
-lacks `legality`; backend import or pure tests do not certify it. A provisioned
-Chipyard elaboration and mlc/CIRCT source tree can produce an **explicit,
-generated** facts artifact for the dynamic kernel-ABI harness check:
+The selected integer RTL has 8-bit signed operands, a 20-bit MAC result and
+32-bit accumulator storage. Those are different quantities. A mathematical
+int32 golden needs proof that internal partial sums cannot overflow, or an
+independent width-aware model. The software requantization rounding parameter
+also must not be confused with the RTL's integer rounding shift.
+Compute datapath facts also preserve `declared_carrier`: exact FIRRTL port types,
+directions, signedness and element widths, including row-vector declarations.
+This keeps an explicit `SInt<20>` observation inspectable even when no tensor
+quantization format exists for twenty bits. Carrier signedness alone does not
+establish a quantizer scale/zero-point or whole-operation overflow policy.
+
+Produce a new source bundle from the exact selected FIRRTL:
 
 ```sh
-# Run from Merlin's checkout after selecting the OOT support provider above.
-facts_dir="${MERLIN_OUT_ROOT:-$PWD/out}/artifacts/audits/rtl-facts/gemmini"
-mkdir -p "$facts_dir"
-.venv/bin/python -m merlin.targetgen.rtl.circt_introspect \
-  --target gemmini --out "$facts_dir/facts.json" --validate
-MERLIN_RTL_FACTS="$facts_dir/facts.json" \
-  .venv/bin/python build_tools/scripts/check_kernel_abi_arg_order.py --verbose
+python -m merlin.targetgen.rtl.source_selection \
+  --target gemmini --generator gemmini --config GemminiRocketConfig \
+  --core-root Gemmini --firrtl /selected/elaboration/design.fir \
+  --hierarchy /selected/elaboration/top_module_hierarchy.json \
+  --firtool /selected/circt/bin/firtool --output /generated/gemmini/source-1 \
+  --drop-annotation-class 'chisel3.experimental.EnumAnnotations$EnumComponentAnnotation' \
+  --drop-annotation-class 'chisel3.experimental.EnumAnnotations$EnumDefAnnotation' \
+  --drop-annotation-class 'chisel3.experimental.EnumAnnotations$EnumVecAnnotation'
+python -m merlin.targetgen.rtl.circt_introspect --target gemmini \
+  --source-bundle /generated/gemmini/source-1/source-selection.json \
+  --out /generated/gemmini/source-1/facts.json
+merlin-target-tools rtl-source-audit \
+  --source-bundle /generated/gemmini/source-1/source-selection.json \
+  --facts /generated/gemmini/source-1/facts.json \
+  --hardware-spec examples/gemmini/target/hardware.yaml \
+  --output /generated/gemmini/source-1/validation.json
 ```
 
-The extractor records source, contract and implementation hashes in `facts.json`;
-inspect and verify those commitments against the selected RTL revision before
-using the result. The ABI gate compares the emitted harness's pointer order with
-the shared command-shape contract. Its success does not review or install the
-generated facts as the provider's default pin, repair `legality`, or certify
-compiler correctness or hardware behavior. Target-policy tests likewise require
-explicit support selection.
+The producer preserves original FIRRTL, records a separate generation input
+when explicitly removing non-functional Chisel enum metadata, runs the selected
+`firtool`, extracts an exact HW module closure, and derives hierarchy from actual
+FIRRTL instances. It never substitutes watchdog or datapath behavior. Old
+hierarchy files may precede specialization/deduplication; discrepancies remain
+diagnostics, not guessed aliases. `validation.json` compares direct source slices
+with extracted values and records the storage-versus-compute precision gap.
 
-For the status-only tool check:
+Source consistency verifies provenance, not compiler or numerical conformance.
+Operation, quantization, transfer and host support stay unreviewed until their
+own execution receipts exist. Use fresh facts for a fresh frozen Phase 0 run;
+preserve old artifacts unchanged. See the [Phase 0 walkthrough](../phase0/README.md).
+
+### Independently characterize the arithmetic cell
+
+The example provides deterministic vectors for the exact selected `MacUnit` and
+an independent SpecIR signed multiply-add reference. All 65,536 input pairs are
+checked at zero addend, then 11,520 accumulator-boundary cases check truncation,
+overflow and signed interpretation. This checks the cell's 20-bit wrapping result;
+it does not qualify a complete mesh, DMA transaction, readout or compiler.
 
 ```sh
-python examples/gemmini/target/probe_oracles.py
+python examples/gemmini/target/characterize_cell.py \
+  --hw-source /generated/gemmini/source-1/core.hw.mlir \
+  --specir-root /selected/SpecIR \
+  --circt-opt /selected/circt/bin/circt-opt \
+  --verilator /selected/bin/verilator \
+  --output /generated/gemmini/cell-1
 ```
 
-Set `MERLIN_CHIPYARD` to your own checkout. Optional overrides are
-`MERLIN_GEMMINI_SPIKE`, `MERLIN_GEMMINI_VERILATOR`, `MERLIN_RISCV_GCC`, and
-`MERLIN_GEMMINI_HARNESS_DIR`. The script's default `/path/to/chipyard` is a placeholder.
+Inspect `characterization.json`, `cases.json`, `vectors.txt`, `cell.hw.mlir`,
+`verilog/`, `harness.cpp`, and `execute.stdout.log`. The harness is generated by
+the shared producer, never hand-authored in the output folder. The receipt binds
+the original HW source, independent reference sources, vectors, tool binaries,
+emitted files and executed native binary. `verify_characterization` from
+`merlin_experiments.phase0.cell_probe` checks a saved or moved artifact's hashes
+and zero failed outputs without reopening live RTL. Selecting the receipt for a
+frozen run still requires separately pinning its bytes; it is not a compiler
+certificate or proof that the finite vector set covers every possible addend.
 
-**`--run` executes a simulator** against an existing prebuilt test binary; it is not
-a status-only check. Run only on explicitly provisioned, owned resources:
+Mathematical integer capsule goldens are valid only in a bounded domain. The
+shared `integer_partial_sum_bound` requires actual operand/initial-addend values
+and the reduction extent. For unrestricted signed int8 inputs, K=31 passes its
+conservative i20 bound and K=32 does not. Wider accumulator storage or a small
+final result does not prove that intermediate partial sums avoided wrapping.
+
+The host manifest now lists only typed matmul/batch-matmul candidates found in
+its pinned schedule. No standalone normalization or activation is claimed.
+Typed load/readout candidates describe bit-preserving crossings; they remain
+unreviewed and never imply that FP32-to-int8 quantization, dispatch, or DMA
+execution was already implemented. The selected hardware readout recipe supplies
+symmetric, per-tensor W8A8 to the generated quantization contract; the authored
+spec limits that format to contractions. Per-channel software epilogues need a
+separate route and qualification rather than being inferred from a format name.
+The spec explicitly declares an FP32 scale encoding: the selected Gemmini
+configuration's `gemmini_params.h` defines `acc_scale_t` as `float`, while CIRCT
+alone sees only a 32-bit command carrier. This software-visible fact makes a
+scoped diagnostic capture recipe derivable; it does not review the format or
+qualify quantization on a model.
+
+For a status-only check of configured tools and prebuilt simulator files, run
+`python examples/gemmini/target/probe_oracles.py`. Set `MERLIN_CHIPYARD` to your
+checkout; optional overrides are `MERLIN_GEMMINI_SPIKE`,
+`MERLIN_GEMMINI_VERILATOR`, `MERLIN_RISCV_GCC` and `MERLIN_GEMMINI_HARNESS_DIR`.
+Status mode runs nothing and is not a provenance or executable-validity check.
+`--run spike` or `--run verilator` explicitly executes the selected prebuilt
+test on provisioned resources; its exit status does not certify a generated compiler.
+The generated harness ABI can separately be checked with
+`MERLIN_RTL_FACTS=/generated/gemmini/source-1/facts.json python
+build_tools/scripts/check_kernel_abi_arg_order.py --verbose`.
+
+### Observe one selected-core DMA matmul numerically
+
+[probe_native_dma.py](probe_native_dma.py) uses ModeLIR's existing Gemmini
+DMA driver with an ARC library built from the selected core. It compares
+every byte of one 16×16 INT8 matmul with an independent NumPy golden, then
+freezes RTL, intermediate HW/Arc/LLVM files, the native library, tools,
+driver source, inputs and outputs. Supply the exact artifact paths shown by
+--help; the output directory is produced by the example, not hand-edited.
 
 ```sh
-python examples/gemmini/target/probe_oracles.py --run spike --timeout 300
-python examples/gemmini/target/probe_oracles.py --run verilator --timeout 300
+python -I /generated/gemmini/native-1/runner.py \
+  --replay-bundle /generated/gemmini/native-1
 ```
 
-Status reports file availability, not executable validity, revision provenance,
-compiler correctness, or certification. Status-only mode returns zero even when tools
-are missing. An explicitly requested unavailable oracle is not executed and contributes
-exit status 2. An optional probe run reports the prebuilt binary's exit status, not a certificate for a generated
-compiler. Preserve the normal provenance and numerical grading gates for experiments.
+That command verifies all frozen bytes and re-executes independently of the
+original source checkout. The tested mvout_acc command saturates its INT32
+accumulator to INT8 DRAM output; it does not qualify bit-preserving INT32
+readout, the full Rocket SoC, or all shapes and values.
+
+### Check generated contraction kernels on native simulators
+
+[probe_native_kernel.py](probe_native_kernel.py) checks two generated Phase 0
+contraction capsules against an independent scalar integer matmul, the capsules'
+goldens, native Gemmini Spike, and native Gemmini Verilator. First produce a
+corpus with `isa/SY_contraction_i8_aligned` and
+`isa/SY_contraction_i8_partial`, and a selected source bundle whose hashes are
+bound by that corpus's `_evidence/evidence-manifest.json`. Select the OOT
+Gemmini support and Chipyard toolchain explicitly:
+
+```sh
+export MERLIN_TARGET_PATH=/selected/gemmini-mlir/merlin-support
+export MERLIN_CHIPYARD=/selected/chipyard
+python examples/gemmini/target/probe_native_kernel.py \
+  --corpus /generated/gemmini/corpus-1 \
+  --source-evidence /generated/gemmini/source-1 \
+  --output-root out/artifacts/probes/gemmini-kernel-1
+```
+
+The output root must resolve beneath this checkout's ignored `out/` tree and
+must not overlap either input bundle. `receipt.json` binds the selected source,
+corpus manifest, probe, support files, tool binaries, and per-case program,
+input and output hashes. Each case directory contains `command_buffer.json`,
+`inputs.json`, `outputs.json`, `spike/main.c`,
+`spike/merlin_gemmini_c0.elf`, `spike_console.log`,
+`verilator_console.log`, and `spike_disassembly.txt`. For an existing output
+root, add `--audit-existing` to re-execute the saved ELF on Spike; a saved
+Verilator console is reused only when its hash and the ELF hash match the prior
+receipt. Without that flag, both engines execute the newly compiled program.
+
+The current check covers exactly two fixed int8-input/int32-output shapes:
+16×32 by 32×16 (256 outputs) and 16×31 by 31×15 (240 outputs). Their generated
+stimuli use operand values 0–3, zero initial accumulator, and no epilogue. The
+probe requires zero tile padding, compares all 496 outputs exactly, and checks
+that the same ELF contains custom-3 RoCC instructions and runs on both engines.
+Each simulator execution has a 180-second wall timeout. The selected Verilator
+binary rejects the tested cycle-cap flags, so there is no independent simulated
+cycle limit; `receipt.json` records those rejections. This is finite numerical
+evidence, not a proof for every input, model, or operator. The generated
+capsules' software admission remains `unknown`, and the receipt does not prove
+that the selected Verilator binary was built from the exact selected RTL source.

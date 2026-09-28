@@ -534,7 +534,7 @@ references:
     status: external_claim
     how: >-
       "Voyager 5.81x faster than Merlin" on U250 FireSim ResNet-50, quoted in the 2026-09-06
-      handoff (out/artifacts/perf-bench/gemmini/CLOSING_THE_GAP_CURRENT_20260908.md section 1.1)
+      historical handoff (section 1.1; the internal report is no longer shipped in this repository)
       next to TVM 59.60x and AutoComp 102.66x. That report states that no artifact contains these
       numbers. Recorded so it stops being re-cited: it is RETIRED, to be replaced by a clean-room
       same-hardware measurement under the frozen five-way ResNet-50 contract.

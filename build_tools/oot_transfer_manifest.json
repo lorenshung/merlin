@@ -3,7 +3,7 @@
   "kind": "oot-transfer-inventory",
   "status": "inventory_only_no_transfer_performed",
   "source_revision": "6b83c05a7ea7e7eb50fc688670cfa547f16f315c",
-  "scope": "Tracked payload under out/artifacts/targets and Radiance capsule-bench audits. Generated untracked evidence, machines, private answers, and remote repository creation are excluded.",
+  "scope": "Tracked technical fixtures under out/artifacts/targets and Radiance capsule-bench audits. Generated compiler packages and narrative reports remain local or in their OOT repositories; machines, private answers, and remote repository creation are excluded.",
   "coverage_limit": "Literal reference scan covers src/merlin, merlin/tests, merlin/contract, build_tools, docs and experiments/definitions. Composed paths, dynamic discovery and historical outputs require separate review; this is not a complete dependency closure.",
   "before_transfer": [
     "Choose and authorize destination target repositories; no destination URL is inferred.",
@@ -12,12 +12,12 @@
     "Update target registry lookup and explicit consumer paths; keep historical readers working during staged cutover.",
     "Update hardware_pins and phase2 edit contracts with exact migrated package identities and verify fingerprints.",
     "Replay package loading and affected compiler/capsule tests without silently skipping missing reference packages.",
-    "Audit omitted external/untracked dependencies. Radiance L3 README cites cases, SHA256SUMS and replay scripts not included in this tracked payload.",
+    "Audit omitted external/untracked dependencies. Retained Radiance technical receipts do not imply a complete L3 replay tree.",
     "Keep frozen vendored source intact in evidence packages; a dependency-managed redistribution is a different artifact."
   ],
   "counts": {
-    "files": 92,
-    "python_files": 26,
+    "files": 61,
+    "python_files": 9,
     "groups": 10
   },
   "groups": [
@@ -28,10 +28,6 @@
       "status": "not_moved",
       "destination_repository": null,
       "files": [
-        {
-          "path": "out/artifacts/capsule-bench/radiance/application_family_coverage_v2_20260908/README.md",
-          "sha256": "9924143963bf1910dcf949d5d3995ff0d8cd6dab1f66d9f6cfca1aadf3fd1f52"
-        },
         {
           "path": "out/artifacts/capsule-bench/radiance/application_family_coverage_v2_20260908/audit.py",
           "sha256": "0309efb679f5ae55189eb343660c99a84959c5b1ac62927f221d5e81dafe728b"
@@ -90,10 +86,6 @@
       "destination_repository": null,
       "files": [
         {
-          "path": "out/artifacts/capsule-bench/radiance/l3_result_page_v2_20260908/README.md",
-          "sha256": "304e659f1cf65700b1b71bad92ab67d86d6a1ed07b38f8e8b5ab0eb26f6c740c"
-        },
-        {
           "path": "out/artifacts/capsule-bench/radiance/l3_result_page_v2_20260908/verify.py",
           "sha256": "b2bb76eb4012660988ed2648263304908ce2398aa17d04a9720f10f787d752d4"
         }
@@ -129,122 +121,6 @@
       "status": "not_moved",
       "destination_repository": null,
       "files": [
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/PROVENANCE.md",
-          "sha256": "37b585be6c97f4d9695c333739d2ebc91d5c605af8ebdd813ed3eb8dea66499a"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/REPORT.md",
-          "sha256": "234c09c575a3f714f5a70add26f53856156fdc986ae844d8a655ba7b65ec183e"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/SHA256SUMS",
-          "sha256": "c2650f3f6910310eb46c54902985e37c6026c4c7d6b7fe620a694c96e92d57a2"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/docs/PLAN.md",
-          "sha256": "01f61d4ac59b0a33d2aa15e51d9c8f2ca3d1107269a661c49c8e84bbd8055bd9"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/docs/isa_probe.ops",
-          "sha256": "eebbd17a614fd11e4ab0855c14534ee4c77a8c6a42a727c5d15983dcd9ba0df5"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/docs/iteration_notes.md",
-          "sha256": "131aa3d58e3e0ff50cde65fdd2ea2d91201e814726f5b7c8995cf0eca953cd02"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/docs/merlin_provenance.md",
-          "sha256": "059d519603cdd625a42f340fd43dfacefea6ff05982d97bba3af385ab17f4bab"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/docs/public_facts_used.md",
-          "sha256": "8a91de311601e3c2f0f883abaae599c4492c4b6978980fccb69c535ed2e1141f"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/manifest.yaml",
-          "sha256": "cc5f5e127e373ed6bee8d7ede71b2cbc40d9b3661cdb8240d389a38847beb444"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/mlir_oot/__init__.py",
-          "sha256": "2486d00c3bc40597795332aa62dbd6cc5fb2f173e60a55c4da182bf86a6c9df9"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/mlir_oot/gemmini-opt",
-          "sha256": "3bdefb4edfdf485a42332835ac5a79c9abc1fdc4e594269d5a45be24f6dc202d"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/mlir_oot/gemmini_opt.py",
-          "sha256": "3ae836a54cebec877ed64807918f2645c6f1a537d38b3e847b61dd861d71226a"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/mlir_oot/immutabledict/__init__.py",
-          "sha256": "7ac43f32fc5a4403600263055dca00f644a41238cf5d50e8040acbd8391d472b"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/mlir_oot/immutabledict/py.typed",
-          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/mlir_oot/ir_ingest.py",
-          "sha256": "e0ee9b550fd55226f616fdcce1dea8a172a47b91b35a029c502829faf3788976"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/mlir_oot/lowering/__init__.py",
-          "sha256": "be247002f62865a87698fd1cf1b217035d46777925f3fe5c955488ed01265f8d"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/mlir_oot/lowering/isa.py",
-          "sha256": "a5954568453d93a36994b4ad86e627fc7b96f05521dea975a227c5fcb348c494"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/mlir_oot/ordered_set/__init__.py",
-          "sha256": "cad6b380ab3204a8bdb85b41b7ddfcc97c50b5d6add55082ebcd6cf6cd0232a8"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/mlir_oot/ordered_set/py.typed",
-          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/mlir_oot/targetgen/__init__.py",
-          "sha256": "8864b59168b6668e1c36ec5aa0176eb84b355a851c1c471d5542ebabaca038eb"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/mlir_oot/targetgen/generate/__init__.py",
-          "sha256": "24babf10638a0593b12035c5be5b479e50bb2b67e9b24226991584bb7ec076cf"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/mlir_oot/targetgen/generate/llvm_artifact.py",
-          "sha256": "10fe573c0dd1beb244e14cc9781e622e5ae527fbf3291c63927e68ad2f796ccf"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/mlir_oot/targetgen/synthesize/__init__.py",
-          "sha256": "3bd75b314b2b745e56963f24689d99dd0ce9cd07e0044e22017c670da9f53839"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/mlir_oot/targetgen/synthesize/tiling.py",
-          "sha256": "ace614c95330565ef858ea6c54a7bbc99f2dc5b15a28ac7c361ae74e24f3af0a"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/mlir_oot/transforms.py",
-          "sha256": "157e006a3c7c731d0a87afe572b8effec142adea13a6f918157a913fbed1907c"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/mlir_oot/typing_extensions.py",
-          "sha256": "433d11d170d3a24d2eb065ebc1bfe848cea7e3d7ce68567ab52bea2d4c2f7ed8"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/mlir_oot/xdsl_dialects/__init__.py",
-          "sha256": "5f5377c67d2a0e04cbebf07b69b5c956e970f9fb218032d0b38b0a57620ff62b"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/mlir_oot/xdsl_dialects/gemmini.py",
-          "sha256": "aeb505f170f79fd1fb451fe98ebaddd8dd8439f76b8f3d096de09e4254ed294e"
-        },
-        {
-          "path": "out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/mlir_oot/xdsl_dialects/merlin_iface.py",
-          "sha256": "566dd746be2763014d30cb8da9f6e470e5f4cfb3d83c43b700794fea12b03adf"
-        },
         {
           "path": "out/artifacts/targets/gemmini/hand_v0/contracts/dialect_plan.yaml",
           "sha256": "4195a07284997cf96e59d2d88faf396e5a6f115376fe8904403a4c7793ba939b"

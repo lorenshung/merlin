@@ -249,7 +249,7 @@ def graph_region_from_record(rec, recognized_op: str | None = None) -> GraphRegi
     )
 
 
-def op_agree(graph_region: GraphRegion, asm_cca) -> "object":
+def op_agree(graph_region: GraphRegion, asm_cca) -> object:
     """Cross-check the graph's FINE op against the op the asm CCA was lifted as, reusing the CCA
     validity gate (``cca.cca_agree``). Disagreement means the asm region was decoded under an op
     inconsistent with the graph — the trace is then quarantined (the op flowed unverified before).
@@ -343,9 +343,15 @@ def expert_steps_from_contract(framework: str) -> list[TransformStep]:
     from the hand-authored ``framework_contracts/<framework>.yaml`` (reusing ``load_contract``). Honestly
     labeled ``plane="framework"`` — these are the contract's declared caller-side transformations
     (packing/accumulator/epilogue/layout), not a trace of the framework's internal IR."""
-    from .framework_contracts import load_contract
+    from .framework_contracts import load_contract, selected_framework_contract
 
     contract = load_contract(framework)
+    selected = selected_framework_contract()
+    contract_ref = (
+        selected["path"]
+        if selected is not None and selected["framework"] == framework
+        else f"kernels/framework_contracts/{framework}.yaml"
+    )
     steps: list[TransformStep] = []
     for key, name, stage, phase in _CONTRACT_STEP_SPECS:
         section = contract.get(key)
@@ -357,7 +363,7 @@ def expert_steps_from_contract(framework: str) -> list[TransformStep]:
                 plane="framework",
                 stage=stage,
                 summary=_contract_summary(section),
-                entry=f"kernels/framework_contracts/{framework}.yaml:{key}",
+                entry=f"{contract_ref}:{key}",
                 phase=phase,
             )
         )
@@ -460,7 +466,7 @@ def expert_trace(
     build_cmd=None,
     tool: str = "",
     version: str = "",
-    obj: "str | Path | None" = None,
+    obj: str | Path | None = None,
     hand_written: bool = False,
     endpoint=None,
     geometry: dict | None = None,

@@ -1,5 +1,4 @@
-# Framework contract for saturn-vectors benchmarks (standalone C, ship their own harness; the
-# closest to "plain" kernels — no framework prepack contract). Hand-authored, agent-refined.
+# Caller-side assumptions for Saturn RVV standalone benchmarks.
 framework: saturn
 isa: rvv
 layout:

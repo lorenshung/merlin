@@ -110,6 +110,7 @@ def prepare(
     *,
     private_baseline: Path | None = None,
     retirements: Path | None = None,
+    generated_only: bool = False,
 ) -> dict:
     """Assemble a fresh complete source pool; neither canonical inputs nor approval change."""
     from merlin.common.paths import out_dir
@@ -152,10 +153,11 @@ def prepare(
                 payload / "corpus",
                 private_baseline=private_baseline,
                 retirements=retirements,
+                generated_only=generated_only,
             )
             scaffolding = scaffold(te, payload / "corpus", payload / "experiment", private=root / "private")
             descriptor = payload / "experiment" / "target_experiment.yaml"
-            checked = admission(descriptor)
+            checked = admission(descriptor, coverage_output=root / "private" / "workload-coverage.json")
             source_run(source)  # derivation/input drift during preparation is not accepted
             private_json(
                 root / "private" / "preparation.json",
@@ -202,6 +204,7 @@ def seal(path: Path, *, expected_digest: str, reviewed_by: str, review_note: str
         if report["review_digest"] != expected_digest:
             raise SpecError("review digest does not match the prepared release")
         prepared = _read(root / "private" / "preparation.json")
+        _verify_workload_coverage(root, prepared)
         # Preparation remains available for historical/diagnostic runs, but an
         # operator review must not upgrade them to verified corpus provenance.
         # source_run rechecks the frozen plan, source/output receipts and every
@@ -210,6 +213,12 @@ def seal(path: Path, *, expected_digest: str, reviewed_by: str, review_note: str
 
         plan, _, _ = source_run(Path(prepared["source_run"]))
         phase = plan["phases"]["0"]
+        if phase.get("phase0_evidence"):
+            from ..phase0.evidence import load_exported_evidence
+
+            observed = load_exported_evidence(plan["phase0_evidence_bundle"])
+            if observed.status != "verified":
+                raise SpecError("diagnostic Phase 0 evidence cannot be promoted to a verified corpus release")
         if phase.get("module") or phase["inputs"].get("synth_profile"):
             required = {f"phase0:operator:{name}" for name in ("recipe", "conformance_spec", "synth_profile")}
             frozen = plan.get("phase0_operator_inputs") or {}
@@ -261,6 +270,7 @@ def verify(seal_path: Path, descriptor: Path) -> dict:
     if descriptor.resolve() != expected_descriptor:
         raise SpecError("functional descriptor is not the one bound by the corpus seal")
     prepared = _read(root / "private" / "preparation.json")
+    workload = _verify_workload_coverage(root, prepared)
     sealed = _read(path)
     identity = _content(root, prepared)
     if any(member.stat().st_mode & 0o222 for member in [root / "payload", *(root / "payload").rglob("*")]):
@@ -276,7 +286,39 @@ def verify(seal_path: Path, descriptor: Path) -> dict:
         "release": str(root),
         "review_digest": sealed["review_digest"],
         "payload_sha256": identity["payload_sha256"],
+        "whole_workload_phase1": workload,
     }
+
+
+def _verify_workload_coverage(root: Path, prepared: dict) -> dict:
+    """Do not let a corpus-review seal silently become whole-workload approval."""
+    from merlin.targetgen.target_experiment import load_target_experiment
+
+    from ..phase0.coverage_commitment import read_inputs, require_complete, requires_workload_coverage
+    from ..runner import _read_json
+
+    descriptor = root / "payload" / "experiment" / "target_experiment.yaml"
+    te = load_target_experiment(descriptor)
+    selected = read_inputs(te.capsule_corpus.parent)
+    required = requires_workload_coverage(te, selected)
+    summary = (prepared.get("admission") or {}).get("whole_workload_phase1")
+    if not isinstance(summary, dict):
+        if required:
+            raise SpecError("historical corpus release has no verified whole-workload completeness commitment")
+        return {"required": False, "status": "not_established"}
+    path = root / "private" / "workload-coverage.json"
+    ordinary_tree(path)
+    if path.stat().st_mode & 0o077:
+        raise SpecError("workload coverage metadata must be owner-only")
+    report = _read_json(path)
+    if _digest(report) != summary.get("report_sha256") or summary.get("required") != required:
+        raise SpecError("workload coverage report differs from prepared corpus admission")
+    if required:
+        try:
+            require_complete(report)
+        except ValueError as exc:
+            raise SpecError(str(exc)) from exc
+    return summary
 
 
 def verify_snapshot(seal_path: Path, descriptor: Path, ws: Path, bundle: dict, *, repo: Path | None = None) -> dict:
@@ -290,6 +332,8 @@ def verify_snapshot(seal_path: Path, descriptor: Path, ws: Path, bundle: dict, *
     te = load_target_experiment(descriptor)
     sources = [*te.graded_roots(), *te.hidden_roots()]
     sources += [te.resource_path("task"), te.resource_path("scripts/agent_selfcheck.py")]
+    if (te.capsule_corpus.parent / "_phase0").is_dir():
+        sources += [te.capsule_corpus.parent / "_phase0"]
     sources += [Path(identity["release"]) / "private"]
     snapshots = snapshot_input_paths(ws, bundle, sources, repo=repo)
     for source, snapshot in zip(sources, snapshots, strict=True):

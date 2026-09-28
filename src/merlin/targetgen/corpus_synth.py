@@ -796,6 +796,8 @@ def _exact_int_mm_group_candidates(group: dict, entries: list[dict], inventory_d
     signature hash and ordinal, so compare their complete occurrence multiset with the compact group.
     Equal family/dtype or a partial geometry match is insufficient.
     """
+    from merlin.targetgen.application_inventory import int_mm_source_is_qualified
+
     if not inventory_digest or not entries:
         return []
     raw_sources = group.get("sources") or {}
@@ -827,7 +829,7 @@ def _exact_int_mm_group_candidates(group: dict, entries: list[dict], inventory_d
             or entry.get("capture_op") != "int_matmul"
             or match.get("status") != "candidate_unverified"
             or match.get("full_inventory_sha256") != inventory_digest
-            or match.get("source_quantization") != "int8_dyn_act_int8_weight"
+            or not int_mm_source_is_qualified(match)
         ):
             return []
         if not match.get("expected_signature") or not match.get("sources"):
@@ -1083,15 +1085,18 @@ def exact_int_mm_entries(demands: dict | None, inventory: dict | None) -> tuple[
     digest = hashlib.sha256(json.dumps(inventory, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     if digest != demands["full_inventory_sha256"]:
         raise SynthesisError("exact application inventory digest differs from the selected conformance spec")
-    if inventory.get("schema_version") != 1 or not isinstance(inventory.get("applications"), dict):
+    if inventory.get("schema_version") not in (1, 2) or not isinstance(inventory.get("applications"), dict):
         raise SynthesisError("exact application inventory has an unsupported schema")
     compact_apps = demands.get("applications") or {}
     if set(inventory["applications"]) != set(compact_apps):
         raise SynthesisError("exact application inventory roster differs from the selected conformance spec")
 
-    from merlin.targetgen.application_inventory import exact_int_mm_geometry
+    from merlin.common.digest import is_sha256
+    from merlin.targetgen.application_inventory import exact_int_mm_geometry, verified_static_integerization
 
-    by_geometry: dict[tuple[int, int, int], list[dict]] = {}
+    # The arithmetic slice can be shared within one source scheme, never by aliasing two different
+    # full-model quantization workflows that happen to have the same integer tensor ABI.
+    by_geometry: dict[tuple[str, int, int, int], list[dict]] = {}
     refused: list[dict] = []
     for label, app in sorted(inventory["applications"].items()):
         declared = compact_apps[label]
@@ -1102,6 +1107,14 @@ def exact_int_mm_entries(demands: dict | None, inventory: dict | None) -> tuple[
             raise SynthesisError(f"exact application capture identity differs for {label!r}")
         scheme = app.get("capture_quantization")
         materialized = (app.get("capture_receipt") or {}).get("status") == "verified_materialized"
+        static_proof = app.get("capture_integerization")
+        receipt_sha = (app.get("capture_receipt") or {}).get("receipt_sha256")
+        static_qualified = (
+            materialized
+            and is_sha256(receipt_sha)
+            and verified_static_integerization(static_proof, receipt_sha256=receipt_sha)
+            and static_proof["capture"]["sha256"] == app.get("capture_sha256")
+        )
         for row in app.get("signatures") or ():
             if row.get("operation") != "aten._int_mm.default" or row.get("mlir_operation") != "linalg.generic":
                 continue
@@ -1117,13 +1130,19 @@ def exact_int_mm_entries(demands: dict | None, inventory: dict | None) -> tuple[
                 ).hexdigest(),
                 "count": int(row.get("count") or 0),
                 "ordinals": list(row.get("ordinals") or ()),
+                "source_quantization": scheme,
             }
+            if scheme == "int8_static_act_int8_weight":
+                source.update(capture_receipt_sha256=receipt_sha, capture_integerization=static_proof)
             # A sealed model capture proves the operation's bytes and module-level quantization
             # identity. Older captures can still serve diagnostics when m2m supplied the per-op
             # quantized-weight origin; absence of both receipts is a refusal.
             geometry = exact_int_mm_geometry(row, require_quant_origin=not materialized)
             if (
-                scheme != "int8_dyn_act_int8_weight"
+                not (
+                    scheme == "int8_dyn_act_int8_weight"
+                    or (scheme == "int8_static_act_int8_weight" and static_qualified)
+                )
                 or row.get("disposition") != "hardware_admitted"
                 or geometry is None
             ):
@@ -1132,8 +1151,9 @@ def exact_int_mm_entries(demands: dict | None, inventory: dict | None) -> tuple[
                         **source,
                         "reason": (
                             "requires admitted rank-2 signed i8×i8→i32 with exact matmul maps/body, "
-                            "TorchAO int8_dyn_act_int8_weight and a verified materialization receipt "
-                            "or per-op weight-origin evidence"
+                            "a supported source scheme and a verified materialization receipt or "
+                            "per-op weight-origin evidence; static sources additionally require "
+                            "byte-bound finite integerization agreement with zero remaining contractions"
                         ),
                     }
                 )
@@ -1157,10 +1177,10 @@ def exact_int_mm_entries(demands: dict | None, inventory: dict | None) -> tuple[
                     "body_operations",
                 )
             }
-            by_geometry.setdefault(geometry, []).append({**source, "signature": signature})
+            by_geometry.setdefault((scheme, *geometry), []).append({**source, "signature": signature})
 
     entries = []
-    for (m, k, n), sources in sorted(by_geometry.items()):
+    for (scheme, m, k, n), sources in sorted(by_geometry.items()):
         identity = hashlib.sha256(json.dumps(sources, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         entry = {
             "cat": "layers",
@@ -1191,7 +1211,7 @@ def exact_int_mm_entries(demands: dict | None, inventory: dict | None) -> tuple[
             "application_signature_match": {
                 "status": "candidate_unverified",
                 "full_inventory_sha256": digest,
-                "source_quantization": "int8_dyn_act_int8_weight",
+                "source_quantization": scheme,
                 "expected_signature": sources[0]["signature"],
                 "sources": [{key: value for key, value in source.items() if key != "signature"} for source in sources],
             },
@@ -1206,11 +1226,13 @@ def synthesize(
     workload_spec: dict | None = None,
     budget: int | None = None,
     application_inventory: dict | None = None,
+    capability_contract: dict | None = None,
 ) -> dict:
     """``{"capsules": [entry...], "provenance": {...}}`` for one target's derived requirement.
 
-    Pure: no I/O, no target name in the control flow. The spec is the derived conformance document, so
-    everything about the target reaches this function as data.
+    Pass ``capability_contract`` for explicit-input derivation without ambient
+    target-contract selection. Omitting it retains the legacy registry reader;
+    callers freezing a new experiment must supply the selected contract.
     """
     target = str(spec_doc.get("target") or "")
     cells = list(spec_doc.get("cells") or ())
@@ -1234,9 +1256,13 @@ def synthesize(
 
     cap_map: dict[str, Any] = {}
     try:
-        from merlin.targetgen.eligibility import capability_map_for_target
+        from merlin.targetgen.eligibility import capability_map_for_target, capability_map_from_contract
 
-        cap_map = capability_map_for_target(target) or {}
+        cap_map = (
+            capability_map_from_contract(capability_contract)
+            if capability_contract is not None
+            else capability_map_for_target(target)
+        ) or {}
     except Exception:  # noqa: BLE001 -- no map means no composed-with facts
         cap_map = {}
 

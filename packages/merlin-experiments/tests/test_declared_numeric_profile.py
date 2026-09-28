@@ -81,6 +81,7 @@ def test_absent_declaration_never_discovers_profile(tmp_path):
 def test_existing_experiments_load_their_complete_authored_policy(target):
     from merlin.common.paths import repo_root
     from merlin.targetgen.corpus_spec import profile_datapath
+    from merlin.targetgen.software_spec import load_software_spec, numerical_datapath, software_spec_path_for_recipe
     from merlin.targetgen.target_experiment import load_target_experiment
 
     repo = repo_root()
@@ -88,7 +89,12 @@ def test_existing_experiments_load_their_complete_authored_policy(target):
     experiment = load_target_experiment(descriptor)
     policy, identity = load_declared_numeric_policy(experiment, repo=repo)
     authored = yaml.safe_load((repo / experiment.numeric_profile).read_bytes())
-    assert policy == profile_datapath(authored, numeric_only=True)
+    expected = profile_datapath(authored, numeric_only=True)
+    selected = software_spec_path_for_recipe(repo / experiment.numeric_profile, document=authored)
+    if selected is not None:
+        expected.update(numerical_datapath(load_software_spec(selected, target=experiment.target)))
+        assert identity["software_spec"]["target"] == experiment.target
+    assert policy == expected
     assert identity["hardware_verified"] is False
     if target == "atlas":
         assert policy["subnormal_operand_flush"] is True

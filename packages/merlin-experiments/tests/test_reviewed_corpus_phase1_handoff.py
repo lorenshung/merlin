@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 from merlin_experiments.corpus import release
+from merlin_experiments.phase0.profiles import synthesis_input_identity
 from merlin_experiments.phase1 import controller as PHASE1
 from merlin_experiments.phase1 import corpus_inputs as CI
 from merlin_experiments.phase1 import session as PHASE1_SESSION
@@ -70,6 +71,40 @@ def bridge(tmp_path, monkeypatch, request):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     fixture = helper.build_phase0_handoff(tmp_path, copy_sources=False)
+    # Reviewed handoff uses a new explicit, byte-bound selection. Legacy
+    # directory-only derivation remains diagnostic and must not bypass sealing.
+    definition = yaml.safe_load(fixture["definition"].read_bytes())
+    config = definition["phases"]["0"]["config"]
+    del config["profiles_root"]
+    recipe = fixture["profiles"] / "fixture-device.yaml"
+    conformance = fixture["profiles"] / "conformance.yaml"
+    conformance.write_text("cells: []\n")
+    synthesis = fixture["profiles"] / "selected-synthesis.yaml"
+    synthesis.write_text(
+        yaml.safe_dump(
+            {
+                "capsules": [],
+                "provenance": {
+                    "selected_inputs": synthesis_input_identity(
+                        conformance_spec=conformance, recipe=recipe, descriptor=config["descriptor"]
+                    ),
+                    "claim_model_evaluation": {
+                        "schema": "claim_model_evaluation_v1",
+                        "model_count": 0,
+                        "visibility": "owner_only_after_phase1_freeze",
+                        "public_capsules_emitted": 0,
+                    },
+                },
+            }
+        )
+    )
+    config.update(
+        recipe=str(recipe),
+        performance_template=str(fixture["profiles"] / "_perf.yaml"),
+        conformance_spec=str(conformance),
+        synth_profile=str(synthesis),
+    )
+    fixture["definition"].write_text(yaml.safe_dump(definition))
     hook = fixture["hooks"] / "sitecustomize.py"
     hook.write_text(CHILD_GUARD + hook.read_text())
     result = fixture["cli"]("run", fixture["definition"], "--phase", "0", "--run-dir", fixture["run"])

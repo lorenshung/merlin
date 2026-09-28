@@ -43,7 +43,7 @@ import sys
 from pathlib import Path
 
 _HERE = Path(__file__).resolve()
-for _p in (_HERE.parents[2] / "merlin" / "python",):
+for _p in (_HERE.parents[2] / "src",):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
@@ -606,12 +606,26 @@ def main(argv=None) -> int:
         help="explicit capture; --write requires the full declared roster; --inventory-out is diagnostic",
     )
     ap.add_argument("--json", action="store_true")
+    ap.add_argument(
+        "--software-spec",
+        type=Path,
+        default=None,
+        help="select authored operation/quantization semantics for --inventory-out",
+    )
+    ap.add_argument(
+        "--rtl-facts",
+        type=Path,
+        default=None,
+        help="select exact extracted hardware facts for --inventory-out; never regenerates RTL",
+    )
     ap.add_argument("--ratchet", type=Path, default=None)
     ap.add_argument("--fail-on-uncovered", action="store_true")
     ap.add_argument(
         "--fail-on-unverifiable", action="store_true", help="exit 2 when a target could not be audited at all"
     )
     a = ap.parse_args(argv)
+    if (a.software_spec is not None or a.rtl_facts is not None) and not a.inventory_out:
+        ap.error("--software-spec and --rtl-facts currently require --inventory-out")
 
     # DEFAULT TARGET SET IS DISCOVERED, not named: every target that already has a tracked conformance
     # spec. A hardcoded default here would make this gate silently about one target forever, which is the
@@ -635,11 +649,20 @@ def main(argv=None) -> int:
                 file=sys.stderr,
             )
             return 2
+        from merlin_experiments.phase0.declarations import for_target
+        from merlin_experiments.phase0.evidence import export_evidence, select_evidence
+        from merlin_experiments.phase0.profiles import selected_software_spec_path
+
         from merlin.targetgen.application_inventory import application_demand_inventory
         from merlin.targetgen.corpora import descriptor_path
         from merlin.targetgen.target_experiment import load_target_experiment
 
         try:
+            descriptor = descriptor_path(targets[0])
+            selected_spec = a.software_spec or selected_software_spec_path(for_target(targets[0]).recipe)
+            selected = select_evidence(
+                _contract_target(targets[0]), descriptor=descriptor, software_spec=selected_spec, facts_path=a.rtl_facts
+            )
             if a.application_capture:
                 paths = {}
                 for item in a.application_capture:
@@ -651,16 +674,39 @@ def main(argv=None) -> int:
                 paths = _applications(load_target_experiment(descriptor_path(targets[0])))
             if not paths:
                 raise ValueError("no declared application captures to inventory")
-            full = application_demand_inventory(paths, _contract_target(targets[0]), detailed=True)
-        except (FileNotFoundError, ValueError) as exc:
+            full = application_demand_inventory(
+                paths, _contract_target(targets[0]), detailed=True, capability_contract=selected.contract
+            )
+            raw = (json.dumps(full, indent=2, sort_keys=True) + "\n").encode()
+            if a.inventory_out.is_symlink() or any(
+                parent.is_symlink() for parent in a.inventory_out.absolute().parents
+            ):
+                raise ValueError("inventory output may not traverse a symlink")
+            if a.inventory_out.exists() and a.inventory_out.read_bytes() != raw:
+                raise FileExistsError(
+                    f"changed inventory output already exists; select a new version: {a.inventory_out}"
+                )
+            a.inventory_out.parent.mkdir(parents=True, exist_ok=True)
+            if not a.inventory_out.exists():
+                with a.inventory_out.open("xb") as handle:
+                    handle.write(raw)
+            selected = select_evidence(
+                _contract_target(targets[0]),
+                descriptor=descriptor,
+                software_spec=selected_spec,
+                facts_path=a.rtl_facts,
+                inventory_path=a.inventory_out,
+            )
+            report_root = a.inventory_out.with_name(a.inventory_out.stem + ".evidence")
+            export_evidence(selected, report_root)
+        except (OSError, ValueError) as exc:
             print(f"cannot inventory declared applications: {exc}", file=sys.stderr)
             return 2
-        a.inventory_out.parent.mkdir(parents=True, exist_ok=True)
-        a.inventory_out.write_text(json.dumps(full, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(
             f"wrote diagnostic inventory {a.inventory_out}: {full['n_operations']} parsed op(s), "
             f"status={full['status']} (not a conformance spec)"
         )
+        print(f"operation/quantization views: {report_root / 'coverage/README.md'}")
         return 2 if full["status"] != "inventoried" else 0
     if a.application_capture and not a.write:
         print("--application-capture requires --inventory-out or --write", file=sys.stderr)

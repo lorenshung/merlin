@@ -1,6 +1,8 @@
 # AGENT.md — agent_recipe_select_v0
 
-Status: active
+Status: blocked
+
+Historical replay requires an externally supplied, byte-verified compiler package.
 
 ## Purpose
 
@@ -19,8 +21,11 @@ everywhere is a wrong default, not a selection opportunity — see `FINDINGS.md`
 
 ## ⚠️ This is a PARALLEL track — read before touching anything
 
-The certified backend and the agentic perf experiment are live work owned by other sessions in this
-shared checkout. The rule:
+The historical certified backend is no longer shipped in this repository. An ignored copy in a
+developer checkout is not distribution evidence. Replay is blocked unless
+`MERLIN_RECIPE_FROZEN_PACKAGE_ROOT` explicitly names a complete external package whose
+`SHA256SUMS` matches the pinned manifest and whose listed files match their digests. If those exact
+bytes cannot be obtained, this experiment remains historical rather than reproducible. The rule:
 
 > READ the frozen artifacts. COPY anything that has to change. WRITE only under paths this
 > experiment owns exclusively.
@@ -31,7 +36,7 @@ drifted champion fails loudly instead of silently invalidating the equivalence g
 
 | | path | mode |
 |---|---|---|
-| certified champion | `out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/` | **read-only**, byte-pinned by its own `SHA256SUMS` |
+| certified champion | `$MERLIN_RECIPE_FROZEN_PACKAGE_ROOT` | **read-only**, manifest digest pinned in `_track.py` and every listed file verified |
 | our fork | `out/artifacts/targets/gemmini/gemmini_xdsl_recipe_v0/` | owned (a copy) |
 | runs | `out/runs/gemmini/recipe-select/` | owned, via `benchharness.runs_root(target, suite)` |
 | products | `out/artifacts/recipe-select/gemmini/v<N>/` | owned, via `new_product` |

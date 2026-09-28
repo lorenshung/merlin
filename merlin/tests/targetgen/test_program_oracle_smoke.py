@@ -12,8 +12,10 @@ the model venv / cosim is absent.
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,6 +23,34 @@ from merlin.common.paths import merlin_dir
 from merlin.targetgen import capsule_runner as CR
 from merlin.targetgen import program_oracle as PO
 from merlin.targetgen.target_experiment import load_target_experiment
+
+
+def test_model_emitter_keeps_relative_output_under_the_callers_run_root(monkeypatch, tmp_path):
+    """Changing cwd for an external model must not redirect generated artifacts into its checkout."""
+    caller, model = tmp_path / "caller", tmp_path / "model"
+    caller.mkdir()
+    model.mkdir()
+    monkeypatch.chdir(caller)
+    monkeypatch.setattr(PO, "_program_emitter", lambda _: (model / "emit.py", []))
+    monkeypatch.setattr(PO, "_model_venv_python", lambda _: model / "python")
+    monkeypatch.setattr(PO, "ext_path", lambda _: model)
+
+    def run(argv, *, cwd, **kwargs):
+        output = Path(argv[argv.index("--out") + 1])
+        assert output.is_absolute() and output.parent == caller / "run"
+        assert Path(cwd) == model and output.parent.is_dir()
+        output.write_text(json.dumps({"words": [0], "inputs": []}))
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(PO.subprocess, "run", run)
+    result = PO.emit_bundle(
+        target="fixture_device",
+        model_ext="fixture_model",
+        program="Smoke",
+        workdir=Path("run"),
+        timeout=1,
+    )
+    assert result["words"] == [0]
 
 
 def _external_backend_descriptor() -> Path | None:

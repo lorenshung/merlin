@@ -19,8 +19,8 @@ matches too much or too little is the failure this repo's parsing rule exists to
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 _CONTRACT = ("contract", "claim_models.yaml")
 
@@ -28,9 +28,9 @@ _CONTRACT = ("contract", "claim_models.yaml")
 def _doc() -> dict:
     import yaml
 
-    from merlin.common.paths import merlin_dir
+    from merlin.targetgen.contract.schemas import contract_dir
 
-    p = merlin_dir().joinpath(*_CONTRACT)
+    p = contract_dir() / _CONTRACT[-1]
     if not p.is_file():
         raise FileNotFoundError(
             f"no claim-model declaration at {p}; the derivation/claim split cannot be applied, and "

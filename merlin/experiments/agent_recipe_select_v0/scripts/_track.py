@@ -52,8 +52,12 @@ from merlin.common.paths import artifacts_dir  # noqa: E402
 TARGET = "gemmini"
 SUITE = "recipe-select"
 
-#: READ-ONLY. The certified champion. Never opened for writing by anything in this experiment.
-FROZEN = artifacts_dir() / f"targets/{TARGET}/gemmini_xdsl_rtl_v0"
+#: READ-ONLY historical compiler. Its exact bytes are no longer distributed in
+#: this repository. Replay requires an explicit external package root; the old
+#: output path is only an import-time placeholder, never an implicit authority.
+_FROZEN_ROOT_ENV = "MERLIN_RECIPE_FROZEN_PACKAGE_ROOT"
+_FROZEN_MANIFEST_SHA256 = "c2650f3f6910310eb46c54902985e37c6026c4c7d6b7fe620a694c96e92d57a2"
+FROZEN = Path(os.environ.get(_FROZEN_ROOT_ENV) or artifacts_dir() / f"targets/{TARGET}/gemmini_xdsl_rtl_v0")
 #: OWNED. A copy of the above with a recipe surface added.
 FORK = artifacts_dir() / f"targets/{TARGET}/gemmini_xdsl_recipe_v0"
 
@@ -98,32 +102,45 @@ def assert_frozen_intact() -> None:
     Cheap, and it protects the one thing this track must not break: if the frozen backend drifts, the
     fork's equivalence gate is comparing against something that is no longer certified.
     """
+    explicit = os.environ.get(_FROZEN_ROOT_ENV)
+    if not explicit:
+        raise SystemExit(
+            "historical recipe experiment cannot replay without an explicit external compiler package; "
+            f"set {_FROZEN_ROOT_ENV} to the package root and see compiler/AGENT.md"
+        )
+    if not Path(explicit).is_absolute():
+        raise SystemExit(f"{_FROZEN_ROOT_ENV} must be an absolute package root")
     sums = FROZEN / "SHA256SUMS"
     if not sums.exists():
-        raise SystemExit(f"{sums} is missing: cannot establish that the frozen package is intact")
+        raise SystemExit(f"{sums} is missing: cannot establish historical package identity")
+    manifest = sums.read_bytes()
+    if hashlib.sha256(manifest).hexdigest() != _FROZEN_MANIFEST_SHA256:
+        raise SystemExit("external compiler SHA256SUMS differs from the historical pinned manifest")
     recorded: dict[str, str] = {}
-    for line in sums.read_text(encoding="utf-8").splitlines():
+    for line in manifest.decode("utf-8").splitlines():
         if not line.strip():
             continue
         digest, _, rel = line.partition("  ")
-        recorded[rel.strip().lstrip("./")] = digest.strip()
+        name = rel.strip().removeprefix("./")
+        if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest) or not name:
+            raise SystemExit("external compiler SHA256SUMS contains a malformed entry")
+        path = Path(name)
+        if path.is_absolute() or ".." in path.parts or not (FROZEN / path).resolve().is_relative_to(FROZEN.resolve()):
+            raise SystemExit("external compiler SHA256SUMS names a path outside the package")
+        recorded[name] = digest
     drift = []
-    for rel in (
-        "mlir_oot/lowering/isa.py",
-        "mlir_oot/ir_ingest.py",
-        "mlir_oot/gemmini_opt.py",
-        "mlir_oot/transforms.py",
-    ):
-        want = recorded.get(rel)
+    for rel, want in sorted(recorded.items()):
         p = FROZEN / rel
-        if want is None or not p.exists():
-            drift.append(f"{rel}: not declared in SHA256SUMS or absent")
+        if not p.is_file():
+            drift.append(f"{rel}: absent")
             continue
         got = hashlib.sha256(p.read_bytes()).hexdigest()
         if got != want:
             drift.append(f"{rel}: {got[:12]} != pinned {want[:12]}")
     if drift:
-        raise SystemExit("the FROZEN package is not its pinned bytes; refusing to run:\n  " + "\n  ".join(drift))
+        raise SystemExit(
+            "the external package is not its pinned bytes; refusing to replay:\n  " + "\n  ".join(drift[:20])
+        )
 
 
 def gsim_env() -> dict[str, str]:
@@ -364,3 +381,8 @@ def py_env(extra: "dict[str, str] | None" = None) -> dict:
     if extra:
         env.update(extra)
     return env
+
+
+if __name__ == "__main__":
+    assert_frozen_intact()
+    print("historical compiler package: pinned manifest and listed files verified")

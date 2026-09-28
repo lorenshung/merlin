@@ -5,7 +5,6 @@
 # source text wins, so keep the most specific platforms first.
 framework: exo
 platform_targets:
-  platforms.gemmini: gemmini
   platforms.x86: avx
   platforms.avx: avx
   platforms.aarch64: neon

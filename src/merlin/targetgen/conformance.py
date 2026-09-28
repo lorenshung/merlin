@@ -54,6 +54,18 @@ DECLARED = "declared"
 OBSERVED_VIA_PRIMITIVES = "observed_via_primitives"
 
 
+def _capsule_paths(root: str | Path) -> list[Path]:
+    """Accept an exact capsule directory without broadening it to its siblings."""
+    directory = Path(root)
+    if directory.is_symlink() or any(parent.is_symlink() for parent in directory.parents):
+        raise ValueError("capsule coverage selection cannot traverse symlinks")
+    direct = directory / "capsule.yaml"
+    paths = [direct] if direct.is_file() else sorted(directory.glob("*/capsule.yaml"))
+    if any(path.is_symlink() or path.parent.is_symlink() for path in paths):
+        raise ValueError("capsule coverage members cannot be symlinked")
+    return paths
+
+
 def _sf():
     """:mod:`merlin.targetgen.semantic_families`, imported lazily to keep this module import-light."""
     from merlin.targetgen import semantic_families
@@ -327,7 +339,7 @@ def corpus_presented_pairs(corpus_roots, *, labels=None) -> Counter:
     out: Counter = Counter()
     roots = [corpus_roots] if isinstance(corpus_roots, (str, Path)) else list(corpus_roots or ())
     for root in roots:
-        for cy in sorted(Path(root).glob("*/capsule.yaml")):
+        for cy in _capsule_paths(root):
             try:
                 cap = yaml.safe_load(cy.read_text(encoding="utf-8")) or {}
             except yaml.YAMLError:
@@ -733,9 +745,9 @@ def host_only_dtypes(captures: dict, families) -> dict:
 
     A host-only family has no admitted dtype by construction -- the hardware declares no capability for
     it -- so the dtype cannot come from the manifest the way a cell's does. It comes from the real
-    captures instead: the dtype those regions actually carry, most frequent first. A family nobody could
-    size is ABSENT from the result rather than defaulted, because a host capsule emitted at a dtype no
-    model uses tests a program nobody runs.
+    captures instead: the dtype those regions actually carry, most frequent first and lexical token on
+    a tie. A family nobody could size is ABSENT from the result rather than defaulted, because a host
+    capsule emitted at a dtype no model uses tests a program nobody runs.
     """
     from collections import Counter
 
@@ -744,7 +756,7 @@ def host_only_dtypes(captures: dict, families) -> dict:
     want = {str(f) for f in families}
     if not want:
         return {}
-    seen: dict[str, Counter] = {f: Counter() for f in want}
+    seen: dict[str, Counter] = {f: Counter() for f in sorted(want)}
     for path in captures.values():
         try:
             regions = mc.regions_from_module(mc.load_module(Path(path)))
@@ -758,7 +770,7 @@ def host_only_dtypes(captures: dict, families) -> dict:
     for fam, counts in seen.items():
         if counts:
             try:
-                out[fam] = capsule_dtype(counts.most_common(1)[0][0])
+                out[fam] = capsule_dtype(min(counts, key=lambda dtype: (-counts[dtype], dtype)))
             except Exception:  # noqa: BLE001 -- an unmappable spelling is not a dtype
                 continue
     return out
@@ -1192,7 +1204,7 @@ def _geometry_gap(required, corpus_roots, *, labels=None, exclude=None) -> dict:
     have: dict[str, list[str]] = {}
     roots = [corpus_roots] if isinstance(corpus_roots, (str, Path)) else list(corpus_roots)
     for root in roots:
-        for cy in sorted(Path(root).glob("*/capsule.yaml")):
+        for cy in _capsule_paths(root):
             try:
                 cap = yaml.safe_load(cy.read_text(encoding="utf-8")) or {}
             except yaml.YAMLError:
@@ -1741,6 +1753,48 @@ def _cert_affordability(target: str, *, budget_s: float | None) -> dict:
     }
 
 
+def regime_dtype_selection(cells: list[Cell]) -> tuple[str | None, dict]:
+    """Choose the most represented required-cell dtype with a stable width tie-break.
+
+    Cell frequency remains the primary evidence. Equal counts are resolved by the
+    registered operand storage width, then by token spelling. Unknown widths sort
+    after known widths; they remain visible in the provenance rather than vanishing.
+    No target name, preference, or inferred capability enters this choice.
+    """
+    from merlin.targetgen.capsule_dram import dtype_bits
+
+    counts = Counter(cell.dtype for cell in cells)
+    widths: dict[str, int | None] = {}
+    for dtype in sorted(counts):
+        try:
+            widths[dtype] = int(dtype_bits(dtype))
+        except (KeyError, ValueError):
+            widths[dtype] = None
+
+    selected = min(
+        counts,
+        key=lambda dtype: (
+            -counts[dtype],
+            widths[dtype] is None,
+            widths[dtype] if widths[dtype] is not None else 0,
+            dtype,
+        ),
+        default=None,
+    )
+    greatest_count = max(counts.values(), default=0)
+    evidence = {
+        "policy": (
+            "highest required-cell frequency, then narrowest registered storage width, "
+            "then lexical dtype token; unknown widths last"
+        ),
+        "counts": dict(sorted(counts.items())),
+        "storage_bits": widths,
+        "tied_by_count": sorted(dtype for dtype, count in counts.items() if count == greatest_count),
+        "selected": selected,
+    }
+    return selected, evidence
+
+
 def derive_spec(
     target: str,
     captures: dict[str, str | Path],
@@ -1751,6 +1805,7 @@ def derive_spec(
     applications: dict[str, str | Path] | None = None,
     corpus_roots=None,
     cert_budget_s: float | None = None,
+    application_inventory_options: dict | None = None,
 ) -> dict:
     """Derive a conformance spec from explicitly supplied tier evidence.
 
@@ -1772,8 +1827,7 @@ def derive_spec(
     # The extents that REACH each required regime, resolved here because the search needs the target's
     # address space -- exactly the I/O `corpus_synth` is not allowed to do. Emitting them into the spec
     # keeps the synthesizer pure and keeps one definition of what a regime costs.
-    _dtypes = [c.dtype for c in cells]
-    _regime_dtype = max(set(_dtypes), key=_dtypes.count) if _dtypes else None
+    _regime_dtype, _regime_dtype_selection = regime_dtype_selection(list(cells))
     HL = host_lane_cells(captures, target, corpus_roots=corpus_roots)
     try:
         _reduction_depth = MR.reduction_depth_regimes(
@@ -1855,7 +1909,9 @@ def derive_spec(
         # All operations in each DECLARED derivation application, including host and unknown work.
         # Grouping identical signatures keeps the tracked requirement reviewable; `ordinals` still
         # accounts for every parsed operation. Claim/held-out models never enter this input mapping.
-        "application_demands": application_demand_inventory(applications or {}, target),
+        "application_demands": application_demand_inventory(
+            applications or {}, target, **(application_inventory_options or {})
+        ),
         # WHAT A CERTIFICATION COSTS HERE, so an axis can size against it instead of assuming every
         # capsule it derives is affordable at the deepest tier.
         "cert_affordability": _cert_affordability(target, budget_s=cert_budget_s),
@@ -1892,6 +1948,7 @@ def derive_spec(
             # coincide and the regime that separates them cannot arise from inputs alone.
             "regime_extents": _regime_extents,
             "regime_dtype": _regime_dtype,
+            "regime_dtype_selection": _regime_dtype_selection,
             # ACCUMULATION DEPTH, per regime. `regime_extents` gives ONE shape that reaches each
             # residency band; this gives the deepest K within it. They are different questions: a
             # regime capsule proves the store is loaded to that level, a deep-K capsule proves the
@@ -1994,7 +2051,7 @@ def _conv_geometry_gap(required, corpus_roots, *, labels=None, exclude=None) -> 
 
     have: dict[str, list[str]] = {}
     for root in roots:
-        for cy in sorted(Path(root).glob("*/capsule.yaml")):
+        for cy in _capsule_paths(root):
             try:
                 cap = yaml.safe_load(cy.read_text(encoding="utf-8")) or {}
             except yaml.YAMLError:
@@ -2188,7 +2245,7 @@ def _carried_state_gap(required, corpus_roots, *, labels=None, exclude=None) -> 
     shown: dict[str, list[str]] = {}
     wrong_order: dict[str, list[str]] = {}
     for root in roots:
-        for cy in sorted(Path(root).glob("*/capsule.yaml")):
+        for cy in _capsule_paths(root):
             try:
                 cap = yaml.safe_load(cy.read_text(encoding="utf-8")) or {}
             except yaml.YAMLError:
@@ -2236,7 +2293,7 @@ def _group_gap(required, corpus_roots, *, labels=None, exclude=None) -> dict:
     want = {str(r["signature"]): r for r in (required or []) if r.get("signature")}
     demanded: dict[str, list[str]] = {}
     for root in roots:
-        for cy in sorted(Path(root).glob("*/capsule.yaml")):
+        for cy in _capsule_paths(root):
             try:
                 cap = yaml.safe_load(cy.read_text(encoding="utf-8")) or {}
             except yaml.YAMLError:
@@ -2295,7 +2352,7 @@ def _epilogue_gap(required, corpus_roots, *, labels=None, exclude=None) -> dict:
     fused: dict[str, list[str]] = {}
     standalone: dict[str, list[str]] = {}
     for root in roots:
-        for cy in sorted(Path(root).glob("*/capsule.yaml")):
+        for cy in _capsule_paths(root):
             try:
                 cap = yaml.safe_load(cy.read_text(encoding="utf-8")) or {}
             except yaml.YAMLError:
@@ -2361,7 +2418,7 @@ def _scope_gap(required, corpus_roots, *, labels=None, exclude=None) -> dict:
     unreadable = 0
     no_program = 0
     for root in roots:
-        for cy in sorted(Path(root).glob("*/capsule.yaml")):
+        for cy in _capsule_paths(root):
             try:
                 cap = yaml.safe_load(cy.read_text(encoding="utf-8")) or {}
             except yaml.YAMLError:
@@ -2371,15 +2428,30 @@ def _scope_gap(required, corpus_roots, *, labels=None, exclude=None) -> dict:
             name = str(cap.get("name") or cy.parent.name)
             if name in exclude:
                 continue
-            linalg = cy.parent / "capsule.linalg.mlir"
-            if not linalg.is_file():
-                no_program += 1
-                continue
-            try:
-                for chain in SC.chains(mq.parse(linalg), max_length=64):
-                    have.setdefault(chain.signature, []).append(name)
-            except Exception:  # noqa: BLE001
+            selected = cap.get("linalg_mlir", "capsule.linalg.mlir")
+            if not isinstance(selected, str) or not selected:
                 unreadable += 1
+                continue
+            relative = Path(selected)
+            if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+                unreadable += 1
+                continue
+            linalg = cy.parent
+            for part in relative.parts:
+                linalg = linalg / part
+                if linalg.is_symlink():
+                    unreadable += 1
+                    break
+            else:
+                if not linalg.is_file():
+                    no_program += 1
+                    continue
+                try:
+                    for chain in SC.chains(mq.parse(linalg), max_length=64):
+                        have.setdefault(chain.signature, []).append(name)
+                except Exception:  # noqa: BLE001
+                    unreadable += 1
+                continue
     want = [r["signature"] for r in (required or [])]
     missing = [sig for sig in want if sig not in have]
     # ONE VOCABULARY ACROSS EVERY AXIS. This function used to answer in its own words -- `required`,
@@ -2401,6 +2473,7 @@ def _scope_gap(required, corpus_roots, *, labels=None, exclude=None) -> dict:
         # it as containing nothing.
         "capsules_without_a_program": no_program,
         "capsules_unreadable": unreadable,
+        "qualification": "declared graph-input adjacency only; target compilation and execution are not observed",
         "note": (
             "an uncovered signature is an adjacency chain real captures present that no capsule "
             "contains: the corpus is built one region at a time, so a compiler that mishandles a "
@@ -2531,7 +2604,7 @@ def uncovered(spec_doc: dict, corpus_roots, *, labels=None, tile_dim: int | None
         labelset = set(labels or {"public"})
         skip = set(exclude or ())
         for root in roots:
-            for cy in sorted(_P(root).glob("*/capsule.yaml")):
+            for cy in _capsule_paths(root):
                 try:
                     cap = _yaml.safe_load(cy.read_text(encoding="utf-8")) or {}
                 except _yaml.YAMLError:

@@ -182,9 +182,23 @@ def test_a_capture_is_keyed_by_its_recipe_and_refuses_an_underived_one(tmp_path:
 
     source = CS.PytorchRefSource.__new__(CS.PytorchRefSource)
     source.m2m_dir, source.python, source.timeout = tmp_path, tmp_path / "python", 5
+    # Without owned upstream files caching deliberately returns None; exercise
+    # request identities with a complete direct-owner fixture, not an empty path.
+    for relative in (
+        "m2m/api.py",
+        "m2m/ir/import_fx.py",
+        "m2m/capture/torchao_pipeline.py",
+        "m2m/capture/torchao_schemes.py",
+        "m2m/capture/torch_export.py",
+        "m2m/capture/torch_mlir_bridge.py",
+    ):
+        owner = tmp_path / relative
+        owner.parent.mkdir(parents=True, exist_ok=True)
+        owner.write_text("# owned test implementation\n")
     plain = source._cache_slot("model", "int8", "src", None)
     keyed = source._cache_slot("model", "int8", "src", None, recipe_sha256="abc")
     other = source._cache_slot("model", "int8", "src", None, recipe_sha256="abd")
+    assert all(slot is not None for slot in (plain, keyed, other))
     assert len({str(plain), str(keyed), str(other)}) == 3
     underived = QR.derive(RF.derive("t", facts={})).to_dict()
     with pytest.raises(CS.M2MUnavailable, match="not derived"):
@@ -200,6 +214,82 @@ def get_model_and_inputs():
     model = nn.Sequential(nn.Conv2d(3, 8, 3, padding=1), nn.ReLU(), nn.Conv2d(8, 4, 1))
     return model.eval(), (torch.randn(1, 3, 8, 8),)
 """
+
+
+_FP8_LOADER = """
+import torch
+from torch import nn
+
+def get_model_and_inputs():
+    torch.manual_seed(0)
+    return nn.Sequential(nn.Linear(4, 4), nn.ReLU(), nn.Linear(4, 4)).eval(), (torch.randn(1, 4),)
+"""
+
+
+@pytest.mark.slow
+def test_static_fp8_recipe_reaches_model2mlir_capture(tmp_path: Path) -> None:
+    """A derived floating-point format must not be fed to an integer-only observer."""
+    from merlin.common.paths import env
+
+    python = env("MERLIN_M2M_PYTHON") or (
+        str(Path(env("MERLIN_M2M_VENV") or "") / "bin/python") if env("MERLIN_M2M_VENV") else ""
+    )
+    m2m_dir = env("MERLIN_M2M_DIR")
+    if not python or not Path(python).is_file() or not m2m_dir:
+        pytest.skip("no capture interpreter is configured")
+    worker = Path(QR.__file__).with_name("_m2m_capture_worker.py")
+    (tmp_path / "loader.py").write_text(_FP8_LOADER, encoding="utf-8")
+    recipe = {
+        "schema": "quant_recipe_v1",
+        "target": "synthetic",
+        "unit": "tensor_core",
+        "status": "derived",
+        "families": ["contraction"],
+        "weight": {
+            "dtype": "fp8_e4m3",
+            "granularity": "tensor",
+            "symmetric": True,
+            "quant_min": None,
+            "quant_max": None,
+            "block": None,
+            "mode": "static",
+        },
+        "activation": {
+            "dtype": "fp8_e4m3",
+            "granularity": "tensor",
+            "symmetric": True,
+            "quant_min": None,
+            "quant_max": None,
+            "block": None,
+            "mode": "static",
+        },
+    }
+    (tmp_path / "recipe.json").write_text(json.dumps(recipe), encoding="utf-8")
+    result = subprocess.run(
+        [
+            python,
+            str(worker),
+            "--loader",
+            str(tmp_path / "loader.py"),
+            "--dtype",
+            "fp8_e4m3",
+            "--out",
+            str(tmp_path / "capture"),
+            "--m2m-dir",
+            m2m_dir,
+            "--recipe",
+            str(tmp_path / "recipe.json"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env={**os.environ, "TMPDIR": str(tmp_path)},
+    )
+    assert result.returncode == 0, result.stderr[-3000:]
+    assert (tmp_path / "capture" / "linalg.mlir").is_file()
+    meta = json.loads((tmp_path / "capture" / "meta.json").read_text())
+    assert meta["scheme"] == "fp8_e4m3_static_act_weight"
+    assert meta["quantization_stats"]["framework_capture_policy"]["activation_observer"] == "minmax"
 
 
 _RESIDUAL_LOADER = """
@@ -319,8 +409,8 @@ def test_a_residual_is_captured_as_an_integer_sum_only_under_a_recipe_that_lists
 
 
 @pytest.mark.slow
-def test_the_generic_quantizer_realises_the_recipe_in_the_capture_venv(tmp_path: Path) -> None:
-    """End to end in the interpreter that has torch: recipe JSON in, the recipe's arithmetic out."""
+def test_the_generic_quantizer_realises_tensor_and_channel_integer_capture(tmp_path: Path) -> None:
+    """A realized TorchAO format is not automatically a supported integer lowering."""
     from merlin.common.paths import env
 
     python = env("MERLIN_M2M_PYTHON") or (
@@ -359,15 +449,20 @@ def test_the_generic_quantizer_realises_the_recipe_in_the_capture_venv(tmp_path:
             timeout=900,
             env={**os.environ, "TMPDIR": str(tmp_path)},
         )
-        assert result.returncode == 0, result.stderr[-2000:]
         meta = json.loads((out / "meta.json").read_text())
+        assert result.returncode == 0, result.stdout[-2000:] + result.stderr[-2000:]
+        assert meta["integerization_receipt"]["quantized_contractions_remaining"] == 0
+        assert meta["integerization_receipt"]["golden_agreement"]["status"] == "passed"
+        assert meta["integerization_receipt"]["exported_integer_mm_count"] == 2
+        assert meta["determinism"]["deterministic_algorithms"] == "required"
         assert meta["recipe_sha256"] == body["recipe_sha256"] and meta["scheme"] is None
         assert meta["quantization_stats"]["annotated_contractions"] == 2
         assert meta["recipe_agreement"]["samples"] >= 1
         seen[granularity] = (out / "linalg.mlir").read_text()
-    # The recipe decides the program: per-tensor weights dequantize per tensor, per-channel per axis.
+    # Both paths perform integer contractions; channel scales remain explicit
+    # output-side reconstruction, never floating-point weight dequantization.
     assert "dequantize_per_channel" not in seen["tensor"]
-    assert "dequantize_per_channel" in seen["channel"]
+    assert "dequantize_per_channel" not in seen["channel"]
 
 
 def test_a_capture_takes_the_targets_recipe_only_when_it_is_derived_for_that_format(monkeypatch):

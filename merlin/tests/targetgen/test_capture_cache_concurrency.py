@@ -3,6 +3,7 @@
 Synthetic workers only: no framework imports, model downloads or hardware.
 """
 
+import hashlib
 import json
 import multiprocessing
 import os
@@ -26,6 +27,8 @@ def _upstream_source_fixture(root: Path) -> Path:
         "m2m/capture/torchao_pipeline.py",
         "m2m/capture/torchao_schemes.py",
         "m2m/capture/pt2e_integerize.py",
+        "m2m/capture/torch_export.py",
+        "m2m/capture/torch_mlir_bridge.py",
     ):
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -51,6 +54,35 @@ def test_cache_owner_import_does_not_load_capture_or_frameworks():
         timeout=15,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_cache_reconciles_trace_catalog_and_program_bytes(tmp_path):
+    program = tmp_path / "linalg.mlir"
+    program.write_bytes(b"source MLIR\n")
+    trace = tmp_path / "frontend-trace.json"
+    trace.write_text(
+        json.dumps(
+            {"mlir": {"sha256": hashlib.sha256(program.read_bytes()).hexdigest(), "bytes": len(program.read_bytes())}}
+        )
+    )
+    catalog = tmp_path / "pytorch-opset.json"
+    catalog.write_text('{"torch": "captured version"}')
+    metadata = {
+        name: {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        for name, path in (("frontend_trace", trace), ("framework_catalog", catalog))
+    }
+    assert capture_cache.frontend_trace_matches(metadata, tmp_path)
+    catalog.write_text("{}")
+    assert not capture_cache.frontend_trace_matches(metadata, tmp_path)
+    catalog.write_text('{"torch": "captured version"}')
+    program.write_bytes(b"different MLIR\n")
+    assert not capture_cache.frontend_trace_matches(metadata, tmp_path)
+    program.write_bytes(b"source MLIR\n")
+    metadata["capture_normalization"] = {
+        "input_sha256": hashlib.sha256(program.read_bytes()).hexdigest(),
+        "output_sha256": "f" * 64,
+    }
+    assert not capture_cache.frontend_trace_matches(metadata, tmp_path)
 
 
 def test_cache_request_preserves_environment_boundaries_and_order(tmp_path, monkeypatch):
@@ -150,6 +182,10 @@ def _capture(slot, entered, written, release, finished, results, failure=False):
         weights.write_bytes(b"synthetic weights")
         manifest = output / "weights.safetensors.manifest.json"
         manifest.write_text("{}")
+        trace = output / "frontend-trace.json"
+        trace.write_text('{"status": "unavailable"}')
+        catalog = output / "pytorch-opset.json"
+        catalog.write_text('{"status": "unavailable"}')
         (output / "meta.json").write_text(
             json.dumps(
                 {
@@ -161,6 +197,11 @@ def _capture(slot, entered, written, release, finished, results, failure=False):
                     "output_abi": [],
                     "weights_manifest": str(manifest),
                     "weights": str(weights),
+                    "frontend_trace": {"path": str(trace), "sha256": hashlib.sha256(trace.read_bytes()).hexdigest()},
+                    "framework_catalog": {
+                        "path": str(catalog),
+                        "sha256": hashlib.sha256(catalog.read_bytes()).hexdigest(),
+                    },
                 }
             )
         )

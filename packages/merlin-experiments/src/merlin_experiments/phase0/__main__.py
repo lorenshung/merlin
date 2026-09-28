@@ -20,6 +20,21 @@ def main(argv=None) -> int:
     )
     ap.add_argument("--recipe", type=Path, help="explicit public authored recipe; never discover sibling files")
     ap.add_argument(
+        "--software-spec", type=Path, help="selected software-visible semantics; overrides the recipe's path"
+    )
+    ap.add_argument("--hardware-spec", type=Path, help="selected hardware source and extraction declarations")
+    ap.add_argument("--rtl-facts", type=Path, help="exact pre-extracted hardware facts; never silently regenerate")
+    ap.add_argument("--evidence-root", type=Path, help="run-owned hardware/software evidence destination")
+    ap.add_argument(
+        "--evidence-input", type=Path, help="previously frozen evidence bundle; do not reselect live evidence"
+    )
+    ap.add_argument(
+        "--evidence-mode",
+        choices=("diagnostic", "verified"),
+        default=None,
+        help="diagnostic preserves unknowns; verified refuses required unresolved evidence",
+    )
+    ap.add_argument(
         "--performance-template", type=Path, help="sole shared performance template; required with --recipe"
     )
     ap.add_argument(
@@ -54,6 +69,7 @@ def main(argv=None) -> int:
         for name in (
             "profiles_root",
             "recipe",
+            "software_spec",
             "performance_template",
             "conformance_spec",
             "synth_profile",
@@ -91,6 +107,13 @@ def main(argv=None) -> int:
         if a.output_root is not None:
             options["output_root"] = a.output_root
         options.update({name: value for name, value in profile_inputs.items() if value is not None})
+        options.update(
+            {
+                name: getattr(a, name)
+                for name in ("hardware_spec", "rtl_facts", "evidence_root", "evidence_input", "evidence_mode")
+                if getattr(a, name) is not None
+            }
+        )
         written = generate_target(t, **options)
         print(f"{t}: wrote {len(written)} capsules -> {written[0].parent.parent if written else '(none)'}")
     if a.comparison_manifest or not a.target:

@@ -1,0 +1,64 @@
+# Authored software semantics. RTL geometry/protocol and qualification are generated evidence.
+schema: merlin.software_spec.v1
+target: gemmini
+numerical_semantics:
+  model:
+    engine: integer_reference
+  operand_dtype: int8
+  accumulator_dtype: i32
+  readout_dtype: i32
+  subnormal_operand_flush: false
+  overflow: wrap_internal_mac
+  internal_arithmetic:
+    signed_operand_bits: 8
+    mac_result_bits: 20
+    mac_result_overflow: wrap_to_20_bits
+    full_operation_overflow_policy: bounded_exact_requires_each_partial_sum
+  readout:
+    acc_scale_rounding: half_even
+    narrowing: saturate_to_declared_dtype
+    requant_rounding: half_up
+    hardware_integer_shift_rounding: rne
+    shift: operation_parameter
+operations:
+  contraction:
+    placement: accelerator
+    operand_dtypes: [int8]
+    accumulator_dtype: i32
+    ranks: [2, 3, 4]
+    layouts: [row_major_contiguous]
+    tails: [zero_pad_valid_window]
+    broadcasting: [none, independent_batches]
+    aliasing: [disjoint_inputs_outputs]
+  elementwise_map:
+    placement: fused_accelerator
+    dtypes: [int8, i32]
+    composed_with: [contraction]
+    epilogues: [bias, relu, acc_scale, requant]
+    scale_granularity: [tensor]
+  movement:
+    placement: accelerator
+    dtypes: [int8]
+    layouts: [row_major_contiguous]
+    aliasing: [disjoint_inputs_outputs]
+  host_only:
+    families: [reduction, normalization, attention, softmax]
+    placement: host
+    dtypes: [f32]
+quantization:
+  formats:
+    - operand_dtype: int8
+      accumulator_dtype: i32
+      # CIRCT extracts a 32-bit command carrier, not its software-visible encoding.
+      scale_encoding: fp32
+      eligible_operations: [contraction]
+transfer_contracts:
+  operand_load:
+    from: host
+    to: accelerator
+    copy: {dtype: int8, layout: row_major_contiguous}
+  accumulator_readout:
+    from: accelerator
+    to: host
+    copy: {dtype: i32, layout: row_major_contiguous}
+    valid_window: required

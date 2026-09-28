@@ -78,9 +78,9 @@ _DECLARATION = ("contract", "gate_phases.yaml")
 
 @lru_cache(maxsize=1)
 def _declared() -> dict[str, str]:
-    from ..common.paths import merlin_dir
+    from merlin.targetgen.contract.schemas import contract_dir
 
-    return _read_declared(merlin_dir().joinpath(*_DECLARATION))
+    return _read_declared(contract_dir() / _DECLARATION[-1])
 
 
 def _read_declared(path: Path) -> dict[str, str]:

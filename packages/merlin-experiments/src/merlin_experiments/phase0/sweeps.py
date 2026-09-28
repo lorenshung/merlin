@@ -84,7 +84,7 @@ def _resolve_flat_extents(entry: dict, binding) -> dict:
     return resolved
 
 
-def target_encodings(target: str) -> list[str]:
+def target_encodings(target: str, *, contract: dict | None = None) -> list[str]:
     """The operand encodings this target can compute a contraction in, in capsule spelling.
 
     The axis an ``L6_global`` (encoding / packing / layout) family sweeps. Derived from the same place
@@ -99,7 +99,12 @@ def target_encodings(target: str) -> list[str]:
         from merlin.targetgen.conformance import capsule_dtype
         from merlin.targetgen.eligibility import capability_map_for_target
 
-        cap = (capability_map_for_target(target) or {}).get("contraction")
+        if contract is None:
+            cap = (capability_map_for_target(target) or {}).get("contraction")
+        else:
+            from merlin.targetgen.compute_units import compute_units, semantic_capability_map
+
+            cap = semantic_capability_map(compute_units(contract)).get("contraction")
     except Exception:  # noqa: BLE001 -- an unresolvable map is no choice
         return []
     out = []
@@ -210,7 +215,14 @@ class AxisDerivationUnavailable(ValueError):
 
 
 def _memory_regime_axis(
-    spec: dict, *, owner: str, target: str, tile: int, dtype: str | None, fixed: dict[str, list[int]]
+    spec: dict,
+    *,
+    owner: str,
+    target: str,
+    tile: int,
+    dtype: str | None,
+    fixed: dict[str, list[int]],
+    evidence=None,
 ) -> tuple[list[int], dict, dict]:
     """``(K extents, {extent: regime}, derivation record)`` for a residency-banded reduction sweep.
 
@@ -241,6 +253,13 @@ def _memory_regime_axis(
         if extent % tile:
             raise ValueError(f"{owner}: {axis}={extent} is not a whole number of {tile}-wide tiles")
         tiles[axis] = extent // tile
+    selected_store = {}
+    if evidence is not None:
+        from merlin.targetgen import address_space as AS
+
+        space = AS.derive_address_space(target, facts=evidence.refreshed_facts)
+        resolved_store = AS.operand_store(space, dtype=dtype)
+        selected_store = {"store": resolved_store.store, "capacity": resolved_store.capacity_rows(dtype) or 0}
     record = MR.reduction_depth_regimes(
         target,
         regimes,
@@ -250,6 +269,7 @@ def _memory_regime_axis(
         n_tiles=tiles["N"],
         points_per_regime=points_per_regime,
         spills_max_fraction=ceiling,
+        **selected_store,
     )
     values: list[int] = []
     labels: dict[int, str] = {}
@@ -270,7 +290,15 @@ def _memory_regime_axis(
 
 
 def _resolve_derived_axis(
-    spec: dict, *, owner: str, axis: str, target: str, tile: int, dtype: str | None, fixed: dict[str, list[int]]
+    spec: dict,
+    *,
+    owner: str,
+    axis: str,
+    target: str,
+    tile: int,
+    dtype: str | None,
+    fixed: dict[str, list[int]],
+    evidence=None,
 ):
     """Dispatch one ``axes: {<name>: {derive: ...}}`` declaration to its derivation."""
     kind = str(spec.get("derive") or "")
@@ -283,12 +311,18 @@ def _resolve_derived_axis(
             raise ValueError(
                 f"{owner}: {kind!r} derives the REDUCTION depth, so it must be declared on K, not {axis!r}"
             )
-        return _memory_regime_axis(spec, owner=owner, target=target, tile=tile, dtype=dtype, fixed=fixed)
+        return _memory_regime_axis(
+            spec, owner=owner, target=target, tile=tile, dtype=dtype, fixed=fixed, evidence=evidence
+        )
     raise ValueError(f"{owner}: axis derivation {kind!r} has no resolver")  # unreachable; fail closed
 
 
-def _performance_facts(target: str) -> dict:
+def _performance_facts(target: str, *, evidence=None) -> dict:
     """Canonical hardware-trait and backend-execution facts, derived once for this target."""
+    if evidence is not None:
+        if evidence.target != target:
+            raise ValueError("selected evidence target differs from sweep target")
+        return evidence.performance_facts
     profile = derive_profile(target).to_dict()
     execution = execution_capability_facts(target)
     document = {"target_profile": profile, "execution_capabilities": execution}
@@ -545,6 +579,7 @@ def expand_sweeps(
     blocked_unimplemented: list | None = None,
     errors: list | None = None,
     traits: dict | None = None,
+    evidence=None,
 ) -> list[dict]:
     """Return the profile's capsule entries with any ``sweeps:`` block expanded.
 
@@ -571,6 +606,11 @@ def expand_sweeps(
     profile can mix a sweep with cases whose prose is worth writing by hand.
     """
     entries = list(profile.get("capsules") or [])
+    if evidence is not None:
+        if evidence.target != binding.target:
+            raise ValueError("selected evidence target differs from binding target")
+        if trait_facts is None:
+            trait_facts = evidence.performance_facts
     sweeps = profile.get("sweeps") or []
     if not sweeps:
         return entries
@@ -655,7 +695,10 @@ def expand_sweeps(
         axes = sweep.get("axes") or {}
         if not isinstance(axes, dict) or not axes:
             raise ValueError(f"sweep {sweep_id!r} declares no axes")
-        encodings = target_encodings(str(getattr(binding, "target", "") or ""))
+        encodings = target_encodings(
+            str(getattr(binding, "target", "") or ""),
+            **({"contract": evidence.contract} if evidence is not None else {}),
+        )
 
         # Resolve each axis to concrete extents, preserving declaration order so
         # the generated corpus is reproducible.
@@ -684,6 +727,7 @@ def expand_sweeps(
                     tile=tile,
                     dtype=getattr(binding, "operand_dtype", None),
                     fixed=resolved,
+                    evidence=evidence,
                 )
             except AxisDerivationUnavailable as exc:
                 unhostable = {"axis": axis, "derive": str(spec.get("derive")), "detail": str(exc)}

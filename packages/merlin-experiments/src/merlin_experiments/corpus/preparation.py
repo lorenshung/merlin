@@ -151,14 +151,17 @@ def assemble(
     *,
     private_baseline: Path | None = None,
     retirements: Path | None = None,
+    generated_only: bool = False,
 ) -> dict:
-    """Copy one target's baseline and overlay only receipt-declared generated members."""
+    """Assemble a historical baseline or an explicit Phase-0-only public corpus."""
     from merlin.targetgen.sandbox.bwrap import _validate_host_sources
 
     from ..runner import fingerprint
 
     source_parent = te.capsule_corpus.parent
-    private_roots = te.hidden_roots()
+    if generated_only and retirements is not None:
+        raise SpecError("generated-only release has no historical members to retire")
+    private_roots = [] if generated_only else te.hidden_roots()
     if private_baseline is not None:
         if private_roots:
             raise SpecError("private baseline is already present in the descriptor corpus; do not replace it")
@@ -166,7 +169,11 @@ def assemble(
         if not private_baseline.is_dir():
             raise SpecError("private baseline must be a directory")
         private_roots = [private_baseline]
-    roots = list(dict.fromkeys([*te.graded_roots(), *private_roots, *te.perf_roots(), *te.model_layer_roots()]))
+    roots = (
+        list(private_roots)
+        if generated_only
+        else list(dict.fromkeys([*te.graded_roots(), *private_roots, *te.perf_roots(), *te.model_layer_roots()]))
+    )
     # Copying private files into independent inodes must not launder an existing
     # public alias. Reuse the native snapshot's authoritative privacy admission.
     generated_private = generated / "hidden"
@@ -188,7 +195,7 @@ def assemble(
             "path": str(root),
             "sha256": copy_input(root, destination / category, private=root in private_roots),
         }
-    before = _members(destination)
+    before = _members(destination) if roots else {}
     emitted = _members(generated)
     provenance = read_yaml(generated / "MANIFEST.yaml")
     declared = set(provenance.get("generated") or [])
@@ -209,8 +216,15 @@ def assemble(
             )
         except ValueError as exc:
             raise SpecError(f"phase-0 corpus selections do not match emitted capsules: {exc}") from exc
-    original_manifest = source_parent / "MANIFEST.yaml"
-    original = read_yaml(original_manifest)
+    original = (
+        {
+            "generated": [],
+            "hand_authored": [],
+            "held_out": {"n_generated": 0, "n_hand_authored": len(before)},
+        }
+        if generated_only
+        else read_yaml(source_parent / "MANIFEST.yaml")
+    )
     prior_generated = set(original.get("generated") or [])
     classified = prior_generated | set(original.get("hand_authored") or [])
     if {key for key in before if not key.startswith("hidden/")} - classified:
@@ -249,6 +263,12 @@ def assemble(
         digest = copy_input(source, target, private=key.startswith("hidden/"))
         replacements.append({"member": key, "previous_sha256": previous_sha, "sha256": digest})
     final_members = _members(destination)
+    # Only this derivation may supply new completeness inputs. A historical
+    # baseline sidecar cannot fill an absent source trace in the selected run.
+    from ..phase0.coverage_commitment import INPUT_PATH, read_inputs
+
+    if read_inputs(generated, provenance) is not None:
+        copy_input(generated / INPUT_PATH, destination / INPUT_PATH, private=True)
     # The promoted descriptor points at this release, so Phase 2 must see the
     # same generated provenance as Phase 0, not a live checkout's MANIFEST.
     # Functional grading still discovers only non-underscore categories.
@@ -273,6 +293,7 @@ def assemble(
         raise SpecError("promoted hidden corpus count disagrees with provenance")
     (destination / "MANIFEST.yaml").write_text(yaml.safe_dump(merged, sort_keys=False), encoding="utf-8")
     return {
+        "mode": "generated_only" if generated_only else "historical_overlay",
         "baseline": baseline,
         "retirements": {
             "source": str(retirements) if retirements else None,
@@ -406,14 +427,14 @@ def scaffold(te, corpus: Path, experiment: Path, *, private: Path) -> dict:
             promoted,
             experiment / "input_bundles",
             variants=("public_v0", "realistic_v0", "hwbringup_v0"),
-            host_inputs=(str(private),),
+            host_inputs=(str(private), *([str(corpus / "_phase0")] if (corpus / "_phase0").is_dir() else [])),
             python_source_root=python_source_dir(),
         )
     inputs["bundle_generation"] = {"diagnostics": diagnostics.getvalue()}
     return inputs
 
 
-def admission(descriptor: Path) -> dict:
+def admission(descriptor: Path, *, coverage_output: Path | None = None) -> dict:
     """Reuse native discovery/admission without launching an oracle or changing policy."""
     from merlin.targetgen import capsule_runner
     from merlin.targetgen.contract.materialize import (
@@ -427,6 +448,13 @@ def admission(descriptor: Path) -> dict:
     capsule_runner.discover_capsules(te.graded_roots(), labels={"public", "dev"})
     materialized = materialize_public_cohort(te, tier_ceiling=_TIER_ORDER[-1])
     public = validate_materialized_cohort(materialized, te)
+    from ..phase0.coverage_commitment import observe_cohort, read_inputs, requires_workload_coverage
+
+    coverage_inputs = read_inputs(te.capsule_corpus.parent)
+    completeness = observe_cohort(coverage_inputs, materialized, target=te.target)
+    workload_required = requires_workload_coverage(te, coverage_inputs)
+    if coverage_output is not None:
+        private_json(coverage_output, completeness)
     hidden = capsule_runner.discover_capsules(te.hidden_roots(), labels={"hidden"})
     _, withheld = capsule_runner._split_ineligible([cap for cap in hidden if cap.get("kind") != "model"], te.target)
     excluded = {row["capsule"] for row in withheld}
@@ -445,4 +473,14 @@ def admission(descriptor: Path) -> dict:
         "hidden_admitted": admitted,
         "public_commitment": public["admitted_name_set_sha256"],
         "scope": "native cohort admission only; numerical and hardware readiness not executed",
+        "whole_workload_phase1": {
+            "status": completeness["status"],
+            "cohort_sha256": completeness["cohort"]["sha256"],
+            "inputs_sha256": completeness["inputs_sha256"],
+            "n_blockers": len(completeness["blockers"]),
+            "required": workload_required,
+            "report_sha256": hashlib.sha256(
+                json.dumps(completeness, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+        },
     }

@@ -22,6 +22,11 @@ import yaml
 
 from merlin.common.paths import repo_root
 
+from .capability_manifest import CapabilityManifest as CapabilityManifest
+from .capability_manifest import _derived_dtype_token as _derived_dtype_token
+from .capability_manifest import _primary_kind as _primary_kind
+from .capability_manifest import load_capability_manifest as load_capability_manifest
+
 
 def _safe_relative(value: str, *, field: str) -> Path:
     """Parse one descriptor path without letting it escape the repository/package it names."""
@@ -123,6 +128,9 @@ class HostLane:
     #: HERE (promote_champion) and never existed upstream -- for which a branch name would be a
     #: fiction, so one is not required and the pin is carried by the package digest instead.
     provenance: str = "published"
+    #: Separate operation-support declaration, never appended to the immutable compiler payload.
+    capability_spec: str | None = None
+    capability_spec_sha256: str | None = None
 
     #: The provenance values a descriptor may declare.
     PROVENANCE = ("published", "in_tree_minted")
@@ -148,6 +156,17 @@ class HostLane:
         missing = [name for name in required if name not in value]
         if missing:
             raise ValueError(f"{descriptor}: host_lane is missing required field(s) {missing}")
+        capability_spec = value.get("capability_spec")
+        capability_digest = value.get("capability_spec_sha256")
+        if capability_spec is not None:
+            if not isinstance(capability_spec, str) or not capability_spec.strip():
+                raise ValueError("host_lane.capability_spec must be an explicit repo-relative path")
+            _safe_relative(capability_spec, field="capability_spec")
+        if capability_digest is not None:
+            from merlin.common.digest import is_sha256
+
+            if capability_spec is None or not is_sha256(capability_digest):
+                raise ValueError("host_lane.capability_spec_sha256 requires a referenced spec and SHA256")
 
         def paths(name: str) -> tuple[str, ...]:
             raw = value[name]
@@ -166,6 +185,8 @@ class HostLane:
             deny_modification=paths("deny_modification"),
             dtype_strategy=(lambda v: str(v) if v else None)(value.get("dtype_strategy")),
             provenance=provenance,
+            capability_spec=capability_spec,
+            capability_spec_sha256=capability_digest,
         )
 
     def resolve(self, *, root: Path | None = None, descriptor: Path | None = None) -> tuple[Path, dict[str, Any]]:
@@ -271,6 +292,53 @@ class HostLane:
             )
         return package, identity
 
+    def resolve_capabilities(
+        self, *, root: Path | None = None, descriptor: Path | None = None
+    ) -> tuple[Path | None, dict | None, dict]:
+        """Pin a separate support declaration to the existing frozen package identity."""
+        selected_root = (root or repo_root()).resolve()
+        package, identity = self.resolve(root=selected_root, descriptor=descriptor)
+        if self.capability_spec is None:
+            return (
+                None,
+                None,
+                {
+                    **identity,
+                    "status": "unknown",
+                    "capability_spec_sha256": None,
+                    "reason": "no per-operation host capability declaration",
+                },
+            )
+        relative = _safe_relative(self.capability_spec, field="capability_spec")
+        lexical = selected_root / relative
+        prefixes = (selected_root.joinpath(*relative.parts[:index]) for index in range(1, len(relative.parts) + 1))
+        if any(path.is_symlink() for path in prefixes) or not lexical.is_file():
+            raise ValueError("host_lane capability spec must be a regular file without symlinked ownership")
+        path = lexical.resolve(strict=True)
+        if not _is_within(path, selected_root) or _is_within(path, package):
+            raise ValueError(
+                "host_lane capability spec must be outside the immutable package and inside its owner root"
+            )
+        raw = path.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        if self.capability_spec_sha256 is not None and self.capability_spec_sha256 != digest:
+            raise ValueError("host_lane capability spec differs from its declared SHA256")
+        from merlin.targetgen.host_capabilities import validate_host_capabilities
+
+        document = validate_host_capabilities(
+            yaml.safe_load(raw), package_sha256=identity["package_sha256"], dtype_strategy=identity["dtype_strategy"]
+        )
+        return (
+            path,
+            document,
+            {
+                **identity,
+                "status": document["status"],
+                "capability_spec_sha256": digest,
+                "capability_spec": relative.as_posix(),
+            },
+        )
+
 
 @dataclass(frozen=True)
 class HostLaneMatrix:
@@ -322,13 +390,20 @@ class HostLaneMatrix:
         if dtype is None:
             return self.profiles[self.default]
         try:
-            from merlin.compile_cli import _DTYPE_STRATEGY
+            from merlin.compile.host_lane import _DTYPE_STRATEGY
 
             strategy = _DTYPE_STRATEGY.get(dtype)
+            if strategy is None:
+                from merlin.common import quant_formats
+
+                if quant_formats.has(dtype):
+                    strategy = _DTYPE_STRATEGY.get(quant_formats.get(dtype).name)
         except Exception:  # noqa: BLE001 -- no mapping is not a wrong mapping
             strategy = None
         if strategy is None:
-            return self.profiles[self.default]
+            raise ValueError(
+                f"no host precision strategy is known for explicit dtype {dtype!r}; refusing the default lane"
+            )
         if strategy in self.profiles:
             return self.profiles[strategy]
         raise ValueError(
@@ -1331,103 +1406,3 @@ def bundles_match_descriptor(te: TargetExperiment, manifest_paths) -> list[str]:
         if list(doc.get("source_pins") or ()) != expected_pins:
             drift.append(f"{Path(mp).parent.name}: source_pins {doc.get('source_pins')!r} != {expected_pins!r}")
     return drift
-
-
-# --------------------------------------------------------------------------- capability manifest
-@dataclass(frozen=True)
-class CapabilityManifest:
-    """The per-target capability model that drives GENERATION — a human-reviewed cache derived from RTL
-    facts + the designer's docs (the committed ``target_contract.yaml``), NOT hand-invented for merlin.
-
-    It resolves the target's PRIMARY compute-unit ``kind`` (the unit not embedded in another) and, via
-    the family registry, the generation defaults (codegen endpoint, RTL tiers, perf fields, whether an
-    op->``.insn`` encoding derivation + trace gate apply). Any default may be overridden by an optional
-    ``runner``/``endpoint_kind`` block in the contract. Core generators consult this by ``kind`` so they
-    never branch on a target name."""
-
-    target: str
-    kind: str  # primary compute-unit kind (systolic|simt|vector|scalar)
-    endpoint_kind: str  # inline_asm_insn (default) | upstream_target | external_backend | command_buffer
-    suite: str
-    dtype: str  # run-identity dtype token (e.g. i8xi8_i32, f32)
-    fourth_output_name: str | None  # None -> the runner derives it from endpoint_kind
-    tier_sim: dict  # tier -> sim name (empty -> family/arc default)
-    rtl_tiers: tuple[str, ...]
-    perf_fields: tuple[str, ...]
-    trace_gate: str | None  # trace-gate plugin name (e.g. "rocc_insn") or None
-    force_match_policy: dict | None  # optional oracle output-equality override (float target -> {compare,atol})
-    encoding_required: bool
-    encoding: dict  # the ABI encoding surface RTL can't ground (readout_bits/semantic_class/...)
-    contract: dict  # the full target_contract.yaml (for consumers that need more)
-
-
-def _primary_kind(units) -> str:
-    """The kind of the target's primary compute unit = the one NOT contained by any other."""
-    contained = {c for u in units for c in u.contains}
-    primary = [u for u in units if u.name not in contained]
-    return (primary[0] if primary else units[0]).kind
-
-
-def _derived_dtype_token(units) -> str:
-    """A run-identity dtype token DERIVED from the primary compute unit's first accumulate rule
-    (``<in>x<weight>_<acc>``). Replaces the former gemmini ``i8xi8_i32`` fail-open default so a target
-    that omits ``runner.dtype`` (e.g. an mx target) is labeled by its OWN datapath, never mislabeled as
-    gemmini int8. Falls back to ``"unknown"`` (fail-closed, surfaced in the run label) if no rule."""
-    for u in units:
-        if u.accumulate:
-            a = u.accumulate[0]
-            if a.inp and a.acc:
-                return f"{a.inp}x{a.weight or a.inp}_{a.acc}"
-    return "unknown"
-
-
-def load_capability_manifest(target: str, *, contract_path: str | Path | None = None) -> CapabilityManifest:
-    """Load a target's capability manifest from its committed ``target_contract.yaml`` + fill the family
-    defaults. Raises if the target has no contract or no compute_units (fail-closed: no fabricated kind).
-
-    ``contract_path`` reads that file instead of asking the registry. It exists for the case where the
-    registry resolves NOTHING and a descriptor names the contract explicitly — the alternative there is
-    not "use the resolved one", it is "render no prompt at all", which is what used to happen. It is not
-    a general override: when the registry does resolve a contract, callers pass nothing and any
-    disagreement with the declaration is reported by :func:`declared_vs_resolved_contract`."""
-    from . import compute_units, families, target_registry  # lazy: avoid import-order cycles
-
-    if contract_path is not None:
-        contract = yaml.safe_load(Path(contract_path).read_text(encoding="utf-8"))
-    else:
-        contract = target_registry.resolve(target).load_contract()
-    units = compute_units.compute_units(contract)
-    if not units:
-        raise ValueError(f"{target}: target_contract has no compute_units — cannot derive a kind")
-    kind = _primary_kind(units)
-    prof = families.family_profile(kind)
-    runner = contract.get("runner") or {}
-    endpoint = contract.get("endpoint_kind") or prof.endpoint_kind_default
-    if endpoint not in families.ENDPOINT_KINDS:
-        raise ValueError(f"{target}: endpoint_kind {endpoint!r} not in {families.ENDPOINT_KINDS}")
-    encoding = dict(contract.get("encoding") or {})
-    # An address width does not imply any accelerator's flag layout. This loader
-    # returns declared data; target-specific derivation belongs to OOT support.
-    return CapabilityManifest(
-        target=target,
-        kind=kind,
-        endpoint_kind=endpoint,
-        suite=runner.get("suite") or f"{target}-capsule-bench",
-        dtype=runner.get("dtype") or _derived_dtype_token(units),
-        fourth_output_name=runner.get("fourth_output_name"),
-        tier_sim=dict(runner.get("tier_sim") or {}),
-        rtl_tiers=tuple(runner.get("rtl_tiers") or prof.default_rtl_tiers),
-        perf_fields=tuple(runner.get("perf_fields") or prof.perf_fields),
-        # The RoCC-.insn trace gate applies ONLY to an inline_asm_insn (RoCC) endpoint — it decodes a
-        # host `.insn` stream from lowered.llvm.mlir. A self-hosted-ISA (external_backend, emits kernel.S)
-        # or ISA-less (command_buffer) target has no such stream, so it defaults to no trace gate (unless
-        # the contract explicitly declares one). Keys on the endpoint, never a target name.
-        trace_gate=runner.get("trace_gate", prof.trace_gate if endpoint == "inline_asm_insn" else None),
-        # Optional oracle output-equality override (a float target declares {compare: float, atol: ...}
-        # so its oracle comparison is tolerant regardless of the per-capsule numeric_policy). None ->
-        # the capsule's own numeric_policy governs (integer capsules -> exact).
-        force_match_policy=runner.get("force_match_policy"),
-        encoding_required=prof.encoding_required,
-        encoding=encoding,
-        contract=contract,
-    )

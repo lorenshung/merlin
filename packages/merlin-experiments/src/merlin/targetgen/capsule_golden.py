@@ -36,9 +36,11 @@ from .capsule_inputs import (  # noqa: F401 — stable legacy input/helper expor
     _encode_leaf,
     _flatten_row_major,
     _leaf_dtype,
+    bind_exact_integer_stimulus,
     canonical_input_raws,
     canonical_input_values,
     capsule_stimulus_range,
+    is_exact_pytorch_integer_source,
     materialize_capsule_leaves,
     materialized_input_values,
     mx_scale_codes,
@@ -430,6 +432,24 @@ def golden(capsule: dict, capsule_dir: str | Path | None = None) -> dict[str, li
                 f"({Path(capsule_dir) / 'golden.yaml' if capsule_dir else '<no dir>'})"
             )
         return outs
+    if is_exact_pytorch_integer_source(capsule):
+        if capsule_dir is None or golden_source(capsule, capsule_dir) != "host_torch_eager":
+            raise ValueError("exact PyTorch integer slice lacks its host-eager golden")
+        recomputed = _recompute_golden(capsule)
+        observed = (_load_golden_yaml(capsule_dir) or {}).get("outputs")
+
+        def _exact_integers(value):
+            if isinstance(value, list):
+                return [_exact_integers(item) for item in value]
+            if type(value) not in (int, float) or not math.isfinite(value) or int(value) != value:
+                raise ValueError("host-eager integer golden contains a non-integral value")
+            return int(value)
+
+        if not isinstance(observed, dict) or set(observed) != set(recomputed):
+            raise ValueError("exact PyTorch integer slice has missing host-eager outputs")
+        if {name: _exact_integers(value) for name, value in observed.items()} != recomputed:
+            raise ValueError("exact PyTorch integer slice host-eager output differs from captured-input recomputation")
+        return recomputed
     return _recompute_golden(capsule)
 
 

@@ -1,5 +1,12 @@
 # Phase 1: functional compiler
 
+Select the reviewed Phase 0 manifest's `phase_corpora.phase1` functional members;
+retain its evidence-manifest identity and selected software/hardware declarations.
+The example's current diagnostic derivation is not that admission release.
+Resolve required semantics and source consistency, regenerate a fresh run, and
+complete independent coverage/numerical review before verified execution.
+The Phase 2 selection is distinct and must not replace the functional population.
+
 The [catalog definition](../experiment.yaml) uses the installed RTLchecks
 treatment with an explicit bundle identity, manifest and timing path. These
 retained inputs must be regenerated and reviewed for the selected corpus before

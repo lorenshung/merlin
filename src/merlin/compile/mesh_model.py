@@ -166,16 +166,92 @@ def run_whole_model_on_mesh(
     }
 
 
-def _int8_chain_reference(A0, weights: list, acc_scale: float):
-    """Host int8 matmul-chain reference matching the mesh's per-layer requant EXACTLY: i32 accumulate,
-    gemmini-faithful ``acc_scale`` (round-half-even of the f32 product), saturating i8 cast; each layer's
-    i8 output is the next layer's activation. This is the golden the on-mesh chain is gated against."""
+def _int8_chain_policy(numeric_policy: dict | None) -> dict:
+    """Require an explicit, enforceable arithmetic declaration for an i8 chain.
+
+    The selected target owns these semantics. A missing field is not filled from
+    the target name, and a model with an opaque scale reference cannot receive
+    a fabricated bit-exact golden.
+    """
+    if not isinstance(numeric_policy, dict) or not isinstance(numeric_policy.get("numerical_semantics"), dict):
+        raise ValueError("int8 mesh-chain reference requires selected numerical_semantics")
+    semantics = numeric_policy["numerical_semantics"]
+    internal = semantics.get("internal_arithmetic") or {}
+    readout = semantics.get("readout") or {}
+    bits = internal.get("mac_result_bits")
+    required = {
+        "operand_dtype": (semantics.get("operand_dtype"), {"int8", "i8"}),
+        "accumulator_dtype": (semantics.get("accumulator_dtype"), {"i32", "int32"}),
+        "readout_dtype": (semantics.get("readout_dtype"), {"i32", "int32"}),
+        "overflow": (semantics.get("overflow"), {"wrap_internal_mac"}),
+        "signed_operand_bits": (internal.get("signed_operand_bits"), {8}),
+        "full_operation_overflow_policy": (
+            internal.get("full_operation_overflow_policy"),
+            {"bounded_exact_requires_each_partial_sum"},
+        ),
+        "acc_scale_product_dtype": (readout.get("acc_scale_product_dtype"), {"f32"}),
+        "acc_scale_rounding": (readout.get("acc_scale_rounding"), {"half_even"}),
+        "narrowing": (readout.get("narrowing"), {"saturate_to_declared_dtype"}),
+    }
+    for field, (actual, supported) in required.items():
+        if not isinstance(actual, (str, int)) or actual not in supported:
+            raise ValueError(f"int8 mesh-chain reference requires supported {field}: {sorted(supported)!r}")
+    if numeric_policy.get("operand_dtype", "int8") not in {"int8", "i8"} or numeric_policy.get(
+        "accum_dtype", "i32"
+    ) not in {"i32", "int32"}:
+        raise ValueError("int8 mesh-chain numeric policy disagrees with its declared i8/i32 semantics")
+    if type(bits) is not int or not 2 <= bits <= 64 or internal.get("mac_result_overflow") != f"wrap_to_{bits}_bits":
+        raise ValueError("int8 mesh-chain reference requires a matching signed mac_result_bits/overflow policy")
+    return semantics
+
+
+def _int8_chain_step(lhs, rhs, acc_scale: float, semantics: dict):
+    """One checked integer contraction and declared f32/RNE/saturating readout."""
+    import math
+
     import numpy as np
 
-    x = np.asarray(A0, dtype=np.int64)
-    for w in weights:
-        acc = x @ np.asarray(w, dtype=np.int64)
-        x = np.clip(np.rint(acc.astype(np.float32) * np.float32(acc_scale)), -128, 127).astype(np.int64)
+    from ..targetgen.operation_numerics import integer_partial_sum_bound
+
+    left, right = np.asarray(lhs), np.asarray(rhs)
+    if (
+        left.ndim != 2
+        or right.ndim != 2
+        or left.shape[1] != right.shape[0]
+        or left.dtype.kind not in "iu"
+        or right.dtype.kind not in "iu"
+    ):
+        raise ValueError("int8 mesh-chain reference requires compatible rank-2 integral operands")
+    if not isinstance(acc_scale, (int, float)) or not math.isfinite(acc_scale) or acc_scale <= 0:
+        raise ValueError("int8 mesh-chain reference requires a finite positive acc_scale")
+    scale = np.float32(acc_scale)
+    if not np.isfinite(scale) or scale <= 0:
+        raise ValueError("int8 mesh-chain acc_scale is not representable as positive f32")
+    bound = integer_partial_sum_bound(
+        semantics,
+        reduction_extent=int(left.shape[1]),
+        lhs_values=left.reshape(-1).tolist(),
+        rhs_values=right.reshape(-1).tolist(),
+    )
+    if bound["status"] != "proven_safe":
+        raise ValueError(f"int8 mesh-chain internal partial-sum bound is {bound['status']}")
+    accumulator = left.astype(np.int64) @ right.astype(np.int64)
+    product = accumulator.astype(np.float32) * scale
+    if not np.isfinite(product).all():
+        raise ValueError("int8 mesh-chain f32 acc_scale product is non-finite")
+    return np.clip(np.rint(product), -128, 127).astype(np.int64)
+
+
+def _int8_chain_reference(A0, weights: list, acc_scale: float, *, numeric_policy: dict | None = None):
+    """Reference a chain only when selected arithmetic and every partial sum are checked."""
+    import numpy as np
+
+    semantics = _int8_chain_policy(numeric_policy)
+    if not weights:
+        raise ValueError("int8 mesh-chain reference requires at least one layer")
+    x = np.asarray(A0)
+    for weight in weights:
+        x = _int8_chain_step(x, weight, acc_scale, semantics)
     return x
 
 
@@ -197,7 +273,8 @@ def run_int8_chain_on_mesh(
     oracle (``run_matmul_on_mesh`` with an ``acc_scale`` epilogue that commits the i32 accumulator back to
     i8), and ``Y_l`` becomes ``A_{l+1}`` — so the activation stays device-native i8 across the whole chain
     rather than round-tripping through a wider host dtype. The final tensor (and every layer) is gated
-    bit-exact vs :func:`_int8_chain_reference`.
+    bit-exact vs :func:`_int8_chain_reference` only when the selected policy
+    explicitly declares the supported product precision, rounding and narrow.
 
     This closes the int8 inter-layer handoff that a single independent matmul does not exercise: a real
     model is a CHAIN, and each mesh layer's output must be requantized to the operand dtype to feed the
@@ -208,13 +285,18 @@ def run_int8_chain_on_mesh(
 
     import numpy as np
 
-    a = np.asarray(A0, dtype=np.int64)  # device activation, threaded layer to layer
-    r = np.asarray(A0, dtype=np.int64)  # independent host reference, advanced in lockstep
+    semantics = _int8_chain_policy(numeric_policy)
+    if operand_dtype not in {"i8", "int8"} or accum_dtype not in {"i32", "int32"}:
+        raise ValueError("int8 mesh-chain execution requires explicit i8 operands and i32 readout")
+    if not weights:
+        raise ValueError("int8 mesh-chain execution requires at least one layer")
+    a = np.asarray(A0)  # device activation, threaded layer to layer
+    r = np.asarray(A0)  # independent host reference, advanced in lockstep
     per_layer: list = []
     for i, w in enumerate(weights):
-        wl = np.asarray(w, dtype=np.int64)
-        # advance the reference prefix (i32 matmul, gemmini-faithful acc_scale requant, i8 saturate)
-        r = np.clip(np.rint((r @ wl).astype(np.float32) * np.float32(acc_scale)), -128, 127).astype(np.int64)
+        wl = np.asarray(w)
+        # Refuse an unproven internal partial sum before running a device layer.
+        r = _int8_chain_step(r, wl, acc_scale, semantics)
         out = run_matmul_on_mesh(
             target,
             a.tolist(),
@@ -238,7 +320,15 @@ def run_int8_chain_on_mesh(
                 "reason": f"mesh layer {i} ({a.shape[0]}x{a.shape[1]}x{wl.shape[1]}) has no reachable "
                 f"oracle in this env",
             }
-        a = np.asarray(out, dtype=np.int64)
+        observed = np.asarray(out)
+        if (
+            observed.shape != r.shape
+            or observed.dtype.kind not in "iu"
+            or np.any(observed < -128)
+            or np.any(observed > 127)
+        ):
+            raise ValueError("int8 mesh-chain oracle returned an incompatible i8 readout")
+        a = observed.astype(np.int64)
         per_layer.append(
             {"layer": i, "m": int(a.shape[0]), "n": int(wl.shape[1]), "matches_ref": bool(np.array_equal(a, r))}
         )

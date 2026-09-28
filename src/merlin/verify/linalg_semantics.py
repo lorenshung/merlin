@@ -1,6 +1,6 @@
 """A semantics for the ``linalg`` SOURCE module, given by the same lowering-to-``smt`` idea.
 
-This is the missing half of translation validation. :mod:`merlin.verify.smt_semantics` encodes the
+This is the source half of translation validation. :mod:`merlin.verify.smt_semantics` encodes the
 ``interface`` program a pass *produced*; this module encodes the ``linalg`` program that pass
 *consumed*. With both, :func:`merlin.verify.refine.validate_pass` states a per-compilation theorem
 about the pass itself — *this source and this output compute the same function on every integer
@@ -17,6 +17,12 @@ from the loop: the only inputs are the two artifacts.
 extents taken from the IR's own types (so every query stays quantifier-free), no poison, no memory
 model, no float. Anything outside it raises :class:`UnsupportedSemantics` naming the construct —
 never skipped, because a skipped op is a silently weakened theorem.
+
+An accumulator initialized directly from ``tensor.empty`` is *not* in this domain. MLIR specifies
+its contents as unspecified, and a contraction reads its ``outs`` accumulator. Treating that value as
+zero would prove equivalence to an invented source program. An explicit ``linalg.fill`` of an integer
+constant defines every element and is encoded; the usual zero fill makes the source-to-interface
+claim unconditional at the supported shape.
 
 **Fail closed on zero points in particular.** ``linalg.quantized_matmul`` computes
 ``out[m][n] += (a[m][k] - zp_a) * (w[k][n] - zp_w)``. Reading the zero points off the actual operands
@@ -37,6 +43,7 @@ ENCODABLE_OPS = frozenset(
     {
         "linalg.quantized_matmul",
         "linalg.matmul",
+        "linalg.fill",
         "tensor.empty",
         "arith.constant",
         "func.return",
@@ -61,15 +68,7 @@ def _const_int(op) -> int:
 
 
 class _Uninitialized:
-    """Marker for a ``tensor.empty`` result: a destination-passing init with no value.
-
-    ``linalg`` adds into its ``outs`` operand, so the init genuinely participates in the arithmetic
-    when it holds a value. ``tensor.empty`` holds none — it is an allocation, and MLIR gives its
-    contents no definition — so the contraction's accumulator starts from nothing, which is
-    additively the same as starting from zero. That is a definition this module makes explicitly
-    rather than a fact it reads off the IR, and it is the ONE place here where the encoding is a
-    choice; it is named so a reviewer can see it instead of having to find it.
-    """
+    """Marker for ``tensor.empty``: a shape with unspecified contents, never implicit zero."""
 
     __slots__ = ("rows", "cols", "width")
 
@@ -132,7 +131,10 @@ def _contract(enc: Encoder, lhs: Tensor, rhs: Tensor, zp_lhs: int, zp_rhs: int, 
 def _add_init(enc: Encoder, acc: Tensor, init) -> Tensor:
     """Fold the destination-passing ``outs`` operand into the contraction result."""
     if isinstance(init, _Uninitialized):
-        return acc
+        raise UnsupportedSemantics(
+            "contraction accumulates into tensor.empty with unspecified contents; "
+            "an explicit linalg.fill of zero is required for an unconditional equivalence proof"
+        )
     if (init.rows, init.cols) != (acc.rows, acc.cols):
         raise UnsupportedSemantics(f"init is {init.rows}x{init.cols} but the contraction is {acc.rows}x{acc.cols}")
     if init.width != acc.width:
@@ -165,15 +167,17 @@ def encode_linalg(enc: Encoder, module, *, acc_width: int = 32) -> Encoded:
     outputs: dict[str, Tensor] = {}
     inputs: list[Tensor] = []
 
-    func = None
-    for op in module.walk():
-        if op.name == "func.func":
-            func = op
-            break
-    if func is None:
-        raise UnsupportedSemantics("no func.func in module")
+    funcs = [op for op in module.walk() if op.name == "func.func"]
+    if len(funcs) != 1:
+        raise UnsupportedSemantics(f"expected exactly one func.func; found {len(funcs)}")
+    func = funcs[0]
+    if len(func.body.blocks) != 1:
+        raise UnsupportedSemantics(f"source function has {len(func.body.blocks)} blocks; only one is encoded")
 
     block = func.body.block
+    operations = list(block.ops)
+    if not operations or operations[-1].name != "func.return":
+        raise UnsupportedSemantics("source function must end in func.return")
     for i, arg in enumerate(block.args):
         if getattr(arg.type, "get_shape", None) is None:
             # A scalar leaf is legal linalg (a runtime zero point is exactly this) but it is not a
@@ -211,6 +215,26 @@ def encode_linalg(enc: Encoder, module, *, acc_width: int = 32) -> Encoded:
         elif name == "tensor.empty":
             rows, cols = _shape(op.results[0].type)
             env[op.results[0]] = _Uninitialized(rows, cols, _elem_width(op.results[0].type))
+        elif name == "linalg.fill":
+            if len(op.operands) != 2 or len(op.results) != 1:
+                raise UnsupportedSemantics("linalg.fill must have one scalar, one destination, and one result")
+            scalar, destination = op.operands
+            if scalar not in consts:
+                raise UnsupportedSemantics("linalg.fill scalar is not a resolvable integer constant")
+            if destination not in env:
+                raise UnsupportedSemantics("linalg.fill destination is undefined here")
+            rows, cols = _shape(op.results[0].type)
+            width = _elem_width(op.results[0].type)
+            dest = env[destination]
+            if (dest.rows, dest.cols, dest.width) != (rows, cols, width):
+                raise UnsupportedSemantics("linalg.fill result and destination have different shape or element type")
+            if str(scalar.type) != str(op.results[0].type.element_type):
+                raise UnsupportedSemantics(
+                    f"linalg.fill scalar type {scalar.type} differs from output element type "
+                    f"{op.results[0].type.element_type}"
+                )
+            literal = enc.const(consts[scalar], width)
+            env[op.results[0]] = Tensor(rows, cols, width, {(r, c): literal for r in range(rows) for c in range(cols)})
         elif name in ("linalg.quantized_matmul", "linalg.matmul"):
             res_width = _elem_width(op.results[0].type)
             if res_width != acc_width:

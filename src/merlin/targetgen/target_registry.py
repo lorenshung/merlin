@@ -15,6 +15,9 @@ Two kinds of target:
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import copy
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,6 +51,22 @@ from .rtl.facts import rtl_facts_path
 #   4. ``out/artifacts/targets/<name>/``  — legacy generated location (fallback).
 # To pin a specific version/location, put it first on ``MERLIN_TARGET_PATH``; it wins over every default.
 _ENV_TARGET_PATH = "MERLIN_TARGET_PATH"
+_OBSERVED_CONTRACTS = contextvars.ContextVar("merlin_observed_contracts", default={})
+
+
+@contextlib.contextmanager
+def observed_contract(name: str, contract: dict[str, Any]):
+    """Bind deterministic derivation to selected bytes without changing providers.
+
+    This scoped bridge is for existing name-based readers. It does not grant
+    support code, select a compiler, or certify an authored capability claim.
+    Readers receive detached copies so a consumer cannot mutate the selection.
+    """
+    token = _OBSERVED_CONTRACTS.set({**_OBSERVED_CONTRACTS.get(), name: copy.deepcopy(contract)})
+    try:
+        yield
+    finally:
+        _OBSERVED_CONTRACTS.reset(token)
 
 
 def generated_target_home() -> Path:
@@ -79,6 +98,12 @@ class TargetInfo:
         return read_provider(self.base)
 
     def load_contract(self) -> dict[str, Any]:
+        if self.name in _OBSERVED_CONTRACTS.get():
+            return copy.deepcopy(_OBSERVED_CONTRACTS.get()[self.name])
+        return self._load_provider_contract()
+
+    def _load_provider_contract(self) -> dict[str, Any]:
+        """Read support-owned metadata, independently of an observed capability view."""
         if not self.contract_path.is_file():
             # The fallback branch in `resolve` promises this surfaces the absence honestly; a bare
             # FileNotFoundError from deep inside a caller's stack is not that. Say which target, which
@@ -100,7 +125,9 @@ class TargetInfo:
         is the caller's job, guarded — so nothing target-specific runs at resolution time. The OOT
         package root is injected as ``path`` so a caller can put it on ``sys.path``.
         """
-        block = dict(self.load_contract().get("plugin", {}))
+        # Capability observations must never remove or inject executable plugin
+        # references. Provider resolution and support-code ownership stay fixed.
+        block = dict(self._load_provider_contract().get("plugin", {}))
         if self.external_root is not None:
             block.setdefault("path", str(self.external_root))
         return block
@@ -392,6 +419,8 @@ def all_targets() -> list[str]:
 
 
 def load_contract(name: str) -> dict[str, Any]:
+    if name in _OBSERVED_CONTRACTS.get():
+        return copy.deepcopy(_OBSERVED_CONTRACTS.get()[name])
     return resolve(name).load_contract()
 
 

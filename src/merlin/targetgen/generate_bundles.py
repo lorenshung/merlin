@@ -249,6 +249,28 @@ def _arm_manifest(
         raise ValueError(f"unknown arm {arm!r}")
     if add_tools or drop_tools:
         allow, deny = _apply_ablation(te, allow, deny, add_tools, drop_tools)
+    numerical_inputs = []
+    if te.numeric_profile:
+        from merlin.targetgen.software_spec import software_spec_path_for_recipe
+
+        numerical_inputs.append(
+            {"path": te.numeric_profile, "note": "declared numerical assumptions; not hardware evidence"}
+        )
+        root = te._source_root().absolute()
+        recipe = Path(te.numeric_profile)
+        recipe = recipe if recipe.is_absolute() else root / recipe
+        # Template generation may precede materialization of a legacy recipe.
+        # Execution still requires every declared input to be present and sealed.
+        if recipe.is_file():
+            selected_spec = software_spec_path_for_recipe(recipe)
+            if selected_spec is not None:
+                try:
+                    declaration = str(selected_spec.relative_to(root))
+                except ValueError:
+                    declaration = str(selected_spec)
+                numerical_inputs.append(
+                    {"path": declaration, "note": "selected software semantics; not hardware evidence"}
+                )
     return {
         "bundle_id": bundle_id,
         "variant": variant,
@@ -264,11 +286,7 @@ def _arm_manifest(
             if te.hidden_corpus()
             else []
         )
-        + (
-            [{"path": te.numeric_profile, "note": "declared numerical assumptions; not hardware evidence"}]
-            if te.numeric_profile
-            else []
-        ),
+        + numerical_inputs,
         "tools": list(tools),
         "integrity_required": True,
     }

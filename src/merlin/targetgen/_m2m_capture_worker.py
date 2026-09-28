@@ -13,7 +13,8 @@ token, and an output dir) it:
   6. writes ``linalg.mlir``, ``weights.safetensors`` and its argument manifest,
      ``inputs.json``, ``golden.json``, ``meta.json``.
 
-This file carries no target-name literal and no merlin import — it is a pure m2m/torch worker.
+This file carries no target-name dispatch. Scoped quantization recipes use the
+selected worker package's shared Merlin admission screen inside the m2m/torch process.
 """
 
 from __future__ import annotations
@@ -21,9 +22,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.util
+import inspect
 import json
 import math
 import os
+import random
 import sys
 from pathlib import Path
 
@@ -41,7 +44,28 @@ _SCHEME = {
     "fp8_e4m3": ("float8_weight_only_e4m3", None),
 }
 
-_CAPTURE_ABI_VERSION = 3
+_CAPTURE_ABI_VERSION = 6
+
+
+def _seed_capture(seed: int, torch) -> dict:
+    """Seed loader imports as well as construction; refuse nondeterministic kernels.
+
+    This binds the numerical capture policy, not reproducibility across different
+    framework builds or unrecorded external data sources. A loader must still
+    declare its data/source ownership separately.
+    """
+    import numpy as np
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.use_deterministic_algorithms(True)
+    return {
+        "seed": seed,
+        "rngs": ["python", "numpy", "torch"],
+        "deterministic_algorithms": "required",
+        "scope": "selected framework build and inputs",
+    }
 
 
 def _load_loader(loader_py: Path):
@@ -300,6 +324,138 @@ def _exported_integer_mm_count(module) -> int:
     return count
 
 
+def _framework_catalog(torch) -> dict:
+    """Observe the registry in this exact capture interpreter, never another build."""
+    owner = Path(__file__).with_name("_aten_opset_worker.py")
+    try:
+        spec = importlib.util.spec_from_file_location("_capture_opset", owner)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.core_opset()
+    except Exception as exc:  # noqa: BLE001 -- unavailable is not an empty registry
+        return {
+            "schema": "merlin.pytorch_opset.v1",
+            "status": "not_available",
+            "torch": str(torch.__version__),
+            "n_all_aten": None,
+            "reason": f"capture framework catalog unavailable: {type(exc).__name__}: {exc}",
+        }
+
+
+def _materialize_session(model, inputs, args, out: Path, *, determinism: dict, dependencies: list, torch) -> int:
+    """Capture an explicit multi-program protocol; do not infer stages by model name."""
+    if not args.materialize_bundle:
+        raise ValueError("deferred multi-program capture requires --materialize-bundle")
+    if args.dtype not in {"fp32", "f32"} or args.recipe or args.scheme or args.already_quantized:
+        raise ValueError(
+            "multi-program capture currently requires an unquantized FP32 selection; "
+            "shared-weight precision/quantization needs its own explicit session policy"
+        )
+    from m2m.capture.bundle import write_multi_program_bundle
+    from m2m.capture.external_runtime import external_runtime_session
+    from m2m.coverage import opaque_report
+
+    session = external_runtime_session(model, tuple(inputs))
+    if session.version != 2:
+        raise ValueError("deferred capture must supply the explicit version-2 multi-program protocol")
+    catalog = _framework_catalog(torch)
+    catalog_bytes = (json.dumps(catalog, sort_keys=True, indent=2) + "\n").encode()
+    metadata = {
+        "capture_abi_version": _CAPTURE_ABI_VERSION,
+        "dtype": args.dtype,
+        "torch_seed": int(args.seed),
+        "determinism": determinism,
+        "loader_dependency_sources": dependencies,
+        "loader_provenance": _scalars(dict(session.metadata.get("provenance") or {})),
+        "loader_provenance_status": "declared",
+        "loader_provenance_error": None,
+        "loader_paper_ready": session.metadata.get("paper_ready"),
+    }
+    # Observe every stage's real tensor ABI before export can mutate Python-side
+    # caches. Do not infer result cardinality or precision from golden.npy, which
+    # intentionally stores only result zero and widens floating outputs to f32.
+    stage_abis = {}
+    with torch.no_grad():
+        for program in session.programs:
+            _, input_abi = _input_abi(program.inputs)
+            program.module.eval()
+            _, output_abi = _output_abi(program.module(*program.inputs))
+            stage_abis[program.name] = {"input_abi": input_abi, "output_abi": output_abi}
+    # The existing writer owns exported ABI resolution, carried state, goldens
+    # and cross-stage bindings; this adapter adds capture-process observations.
+    summary = write_multi_program_bundle(
+        session.bundle_programs(),
+        dict(session.metadata),
+        out,
+        capture_trace=True,
+        source_path=Path(args.loader),
+        metadata=metadata,
+    )
+    stages = []
+    for program in session.programs:
+        stage = out / "stages" / program.name
+        catalog_path = stage / "pytorch-opset.json"
+        catalog_path.write_bytes(catalog_bytes)
+        trace = json.loads((stage / "frontend-trace.json").read_bytes())
+        opaque = opaque_report((stage / "model.mlir").read_text())
+        precision = trace.get("precision") or {}
+        projected = precision.get("status") == "projected" or bool(precision.get("projections"))
+        count = sum(opaque.values())
+        meta_path = stage / "meta.json"
+        meta = json.loads(meta_path.read_bytes())
+        meta.update(stage_abis[program.name])
+        meta.update(
+            ok=count == 0 and not projected,
+            opaque=count,
+            opaque_detail=opaque,
+            precision_realization=precision,
+            framework_catalog={
+                "path": catalog_path.name,
+                "sha256": hashlib.sha256(catalog_bytes).hexdigest(),
+                "torch": catalog.get("torch"),
+                "status": catalog.get("status", "unknown"),
+            },
+        )
+        meta_path.write_text(json.dumps(meta, sort_keys=True, indent=2) + "\n")
+        # Metadata/catalog additions must be committed by the producer receipt,
+        # not leave stale hashes from the writer's earlier materialization.
+        from m2m.capture.provenance import write_capture_receipt
+
+        receipt = write_capture_receipt(stage, source_path=Path(args.loader))
+        stages.append(
+            {
+                "name": program.name,
+                "ok": meta["ok"],
+                "opaque": count,
+                "trace_status": trace.get("status", "unknown"),
+                "receipt_sha256": hashlib.sha256((stage / "capture_receipt.json").read_bytes()).hexdigest(),
+                "materialized_abi": receipt["materialized_abi"],
+            }
+        )
+    report = {
+        "schema": "merlin.model_session_capture.v1",
+        "programs": stages,
+        "determinism": determinism,
+        "agentic": False,
+        "session_contract_sha256": hashlib.sha256((out / "session_contract.yaml").read_bytes()).hexdigest(),
+        "qualification": "capture only; no target lowering, execution or application accuracy claim",
+    }
+    (out / "session-receipt.json").write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
+    ok = all(stage["ok"] for stage in stages)
+    print(
+        "__M2M_CAPTURE__ "
+        + json.dumps(
+            {
+                "ok": ok,
+                "opaque": sum(stage["opaque"] for stage in stages),
+                "session": summary["session_kind"],
+                "programs": len(stages),
+            }
+        )
+    )
+    return 0 if ok else 3
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="m2m capsule capture worker (runs in the m2m venv).")
     ap.add_argument("--loader", required=True, help="path to a .py exposing get_model_and_inputs()")
@@ -329,11 +485,18 @@ def main(argv=None) -> int:
         help="capture the loader's own materialized numeric graph without applying a TorchAO recipe or scheme",
     )
     ap.add_argument(
-        "--seed", type=int, default=0, help="torch RNG seed applied before the frozen loader constructs model/inputs"
+        "--seed", type=int, default=0, help="Python/NumPy/Torch RNG seed applied before loader import and construction"
     )
     ap.add_argument("--agreement-atol", type=float, default=1e-3)
     ap.add_argument("--agreement-rtol", type=float, default=1e-3)
+    ap.add_argument(
+        "--materialize-bundle",
+        action="store_true",
+        help="also emit the full model2MLIR runtime bundle from this exact conversion and model instance",
+    )
     a = ap.parse_args(argv)
+    if not 0 <= a.seed < 2**32:
+        ap.error("--seed must be an unsigned 32-bit integer")
     if not all(math.isfinite(value) and value >= 0 for value in (a.agreement_atol, a.agreement_rtol)):
         ap.error("agreement tolerances must be finite and nonnegative")
     if a.already_quantized and (a.recipe or a.scheme):
@@ -341,6 +504,10 @@ def main(argv=None) -> int:
 
     if a.m2m_dir and a.m2m_dir not in sys.path:
         sys.path.insert(0, a.m2m_dir)
+    # Shared software admission belongs to the selected worker's own Merlin
+    # package, in both source and wheel layouts, never another editable checkout.
+    if a.recipe:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
     import m2m
     import torch
@@ -348,22 +515,62 @@ def main(argv=None) -> int:
 
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
+    determinism = _seed_capture(a.seed, torch)
     modules_before_loader = set(sys.modules)
     loader = _load_loader(Path(a.loader))
-
-    torch.manual_seed(int(a.seed))
     mdl, inputs = loader.get_model_and_inputs()
     loader_dependency_sources = _loader_dependency_sources(modules_before_loader, Path(a.loader))
+    if not isinstance(mdl, torch.nn.Module) and callable(getattr(mdl, "external_runtime_session", None)):
+        return _materialize_session(
+            mdl, inputs, a, out, determinism=determinism, dependencies=loader_dependency_sources, torch=torch
+        )
     # BEFORE any cast/quantization: what the loader says about the data it just built. Recorded for
     # every capture, so the capsule can never be silent about whether its inputs were real.
     provenance = _loader_provenance(loader, mdl, inputs)
-    _scheme, cast = _SCHEME.get(a.dtype, (None, None))
-    if cast is not None:
-        mdl = mdl.to(getattr(torch, cast))
-        inputs = tuple(
-            x.to(getattr(torch, cast)) if isinstance(x, torch.Tensor) and x.is_floating_point() else x for x in inputs
-        )
     mdl = mdl.eval()
+    original_snapshot = {
+        "status": "unavailable",
+        "stage": "original",
+        "reason": "selected model2MLIR does not expose frontend capture tracing",
+    }
+    trace_supported = "capture_trace" in inspect.signature(m2m.convert).parameters
+    if trace_supported and not a.already_quantized:
+        try:
+            from m2m.capture.trace import capture_frontend_snapshot
+
+            original_snapshot = capture_frontend_snapshot(mdl, tuple(inputs), stage="original")
+        except Exception as exc:  # noqa: BLE001 -- unknown source counts are not fabricated
+            original_snapshot = {
+                "status": "unavailable",
+                "stage": "original",
+                "reason": f"original frontend capture failed: {type(exc).__name__}: {exc}",
+            }
+    elif a.already_quantized:
+        original_snapshot["reason"] = "loader supplies an already-quantized graph; the original model was not captured"
+    _scheme, cast = _SCHEME.get(a.dtype, (None, None))
+    precision_conversion = None
+    if cast is not None:
+        try:
+            from m2m.capture.trace import materialize_frontend_precision
+
+            mdl, inputs, original_snapshot, precision_conversion = materialize_frontend_precision(
+                mdl, tuple(inputs), dtype=getattr(torch, cast), original_frontend_snapshot=original_snapshot
+            )
+        except Exception as exc:  # noqa: BLE001 -- compatibility output retains unknown lineage
+            precision_conversion = {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
+            original_snapshot = {
+                "stage": "original",
+                "status": "unavailable",
+                "reason": "precision conversion lacks exact original source ownership",
+            }
+            mdl = mdl.to(getattr(torch, cast))
+            inputs = tuple(
+                x.to(getattr(torch, cast)) if isinstance(x, torch.Tensor) and x.is_floating_point() else x
+                for x in inputs
+            )
+    # PyTorch's public exported-model train/eval helper may return None.
+    # The owned GraphModule remains the conversion source.
+    mdl.eval()
 
     weights_path = str(out / "weights.safetensors")
     recipe = json.loads(Path(a.recipe).read_text(encoding="utf-8")) if a.recipe else None
@@ -395,14 +602,28 @@ def main(argv=None) -> int:
             import copy
 
             reference = copy.deepcopy(mdl)  # quantize_ mutates in place
-        mdl = RQ.apply_recipe(mdl, recipe, example_inputs=tuple(inputs), calibration_inputs=calibration)
+        mdl = RQ.apply_recipe(
+            mdl,
+            recipe,
+            example_inputs=tuple(inputs),
+            calibration_inputs=calibration,
+            original_frontend_snapshot=original_snapshot if trace_supported else None,
+        )
         quant_stats = getattr(mdl, "_recipe_quantization_stats", None)
         # The receipt: the recipe-quantized model against the floating-point one, on the
         # calibration stream and the capture input. Recorded, not judged here.
         agreement = RQ.agreement(reference, mdl, [tuple(inputs), *(calibration or [])])
         # The capture library is told which lowering family this graph is, and that the
         # quantization is already applied; the numbers are the recipe's.
-        q = QuantizationConfig(scheme="int8_static_act_int8_weight" if static else "int8_dyn_act_int8_weight")
+        formats = {str(recipe[part]["dtype"]) for part in ("activation", "weight")}
+        if formats == {"int8"}:
+            provenance_scheme = "int8_static_act_int8_weight" if static else "int8_dyn_act_int8_weight"
+        elif len(formats) == 1 and next(iter(formats)).startswith("fp8_"):
+            fmt = next(iter(formats))
+            provenance_scheme = f"{fmt}_{'static' if static else 'dynamic'}_act_weight"
+        else:
+            raise ValueError(f"no capture provenance scheme for mixed recipe formats {sorted(formats)}")
+        q = QuantizationConfig(scheme=provenance_scheme)
     elif q is not None:
         # Apply quantization explicitly so both conversion and the golden run consume
         # the SAME returned module.  Most TorchAO quantize_ schemes mutate in place,
@@ -415,7 +636,12 @@ def main(argv=None) -> int:
             # public model2MLIR apply_quantization(model, config) API does not
             # derive.  The recipe path above performs calibrated PT2E instead.
             raise RuntimeError("named static W8A8 requires a calibrated --recipe")
-        mdl = apply_quantization(mdl, q)
+        quant_trace_options = (
+            {"original_frontend_snapshot": original_snapshot}
+            if "original_frontend_snapshot" in inspect.signature(apply_quantization).parameters
+            else {}
+        )
+        mdl = apply_quantization(mdl, q, **quant_trace_options)
         quant_stats = getattr(mdl, "_m2m_quantization_stats", None)
     integerization_receipt = None
     if q is not None and q.scheme == "int8_static_act_int8_weight" and not a.already_quantized:
@@ -432,6 +658,7 @@ def main(argv=None) -> int:
         integerization_receipt["golden_agreement"] = _integerized_agreement(
             portable_output, integer_output, atol=a.agreement_atol, rtol=a.agreement_rtol
         )
+    trace_options = {"capture_trace": True, "original_frontend_snapshot": original_snapshot} if trace_supported else {}
     res = m2m.convert(
         mdl,
         inputs,
@@ -441,13 +668,66 @@ def main(argv=None) -> int:
         level="linalg-on-tensors",
         func_name=a.func_name,
         weights_path=weights_path,
+        **trace_options,
     )
     opaque = opaque_report(res.mlir_text)
     n_opaque = sum(opaque.values())
     if integerization_receipt is not None:
         integerization_receipt["exported_integer_mm_count"] = _exported_integer_mm_count(res.module)
+    integerization_ok = integerization_receipt is None or (
+        integerization_receipt["quantized_contractions_seen"] > 0
+        and integerization_receipt["quantized_contractions_remaining"] == 0
+        and not integerization_receipt["refusals"]
+        and integerization_receipt.get("accumulator_bound_checked") is True
+        and integerization_receipt["exported_integer_mm_count"] > 0
+        and integerization_receipt["integer_mm_emitted"] <= integerization_receipt["exported_integer_mm_count"]
+        and integerization_receipt["golden_agreement"]["status"] == "passed"
+    )
+    # A recipe requests a format; only the applied transform and its emitted
+    # arithmetic establish the captured scheme. In particular, an already-
+    # integer graph that skipped observers must not inherit the request's label.
+    realized_scheme = (
+        None if a.already_quantized else (a.scheme or _SCHEME.get(a.dtype, (None, None))[0] if recipe is None else None)
+    )
+    if recipe is not None and q is not None and quant_stats is not None:
+        if (
+            q.scheme == "int8_static_act_int8_weight"
+            and quant_stats.get("api") == "pt2e"
+            and integerization_receipt is not None
+            and integerization_ok
+        ):
+            realized_scheme = q.scheme
+        elif (
+            q.scheme == "int8_dyn_act_int8_weight"
+            and quant_stats.get("api") == "quantize_"
+            and quant_stats.get("layers_quantized", 0) > 0
+        ):
+            realized_scheme = q.scheme
+        elif (
+            q.scheme.startswith("fp8_")
+            and quant_stats.get("api") == "pt2e"
+            and quant_stats.get("annotated_contractions", 0) > 0
+        ):
+            realized_scheme = q.scheme
 
     (out / "linalg.mlir").write_text(res.mlir_text, encoding="utf-8")
+    frontend_trace = getattr(res, "capture_trace", None)
+    if frontend_trace is None:
+        frontend_trace = {
+            "schema": "m2m.capture_trace.v1",
+            "status": "unavailable",
+            "reason": "selected conversion did not return a frontend trace",
+            "original": original_snapshot,
+        }
+    trace_path = out / "frontend-trace.json"
+    trace_bytes = (json.dumps(frontend_trace, sort_keys=True, indent=2) + "\n").encode()
+    trace_path.write_bytes(trace_bytes)
+    # Ask the existing catalog implementation in this very capture process.
+    # A workload-specific environment must not inherit another venv's denominator.
+    catalog = _framework_catalog(torch)
+    catalog_path = out / "pytorch-opset.json"
+    catalog_bytes = (json.dumps(catalog, sort_keys=True, indent=2) + "\n").encode()
+    catalog_path.write_bytes(catalog_bytes)
 
     # host torch-eager reference — THE golden. Run the (cast/quantized) model the compiler must reproduce.
     with torch.no_grad():
@@ -462,15 +742,17 @@ def main(argv=None) -> int:
 
     (out / "inputs.json").write_text(json.dumps(input_prov), encoding="utf-8")
     (out / "golden.json").write_text(json.dumps(outputs), encoding="utf-8")
+    precision = frontend_trace.get("precision") or {}
+    precision_exact = precision.get("status") != "projected" and not precision.get("projections")
     meta = {
-        "ok": bool(res.ok),
+        "ok": bool(res.ok) and precision_exact,
+        "precision_realization": precision if precision else {"status": "unknown"},
+        "precision_conversion": precision_conversion,
         "opaque": int(n_opaque),
         "opaque_detail": opaque,
         # WHICH quantization actually produced this program. Without it a weight-only capture and a
         # W8A8 one are indistinguishable after the fact, and they are different arithmetic.
-        "scheme": (
-            None if (recipe is not None or a.already_quantized) else a.scheme or _SCHEME.get(a.dtype, (None, None))[0]
-        ),
+        "scheme": realized_scheme,
         **({"capture_quantization": "already_materialized"} if a.already_quantized else {}),
         # The recipe a capture ran under, by content digest, and how far its outputs sit from the
         # floating-point model's. Both absent on a scheme-named capture.
@@ -491,7 +773,19 @@ def main(argv=None) -> int:
         # quantization expands parameters into inner tensors).
         "weights_manifest": weights_path + ".manifest.json",
         "capture_abi_version": _CAPTURE_ABI_VERSION,
+        "frontend_trace": {
+            "path": str(trace_path),
+            "sha256": hashlib.sha256(trace_bytes).hexdigest(),
+            "status": frontend_trace.get("status", "unknown"),
+        },
+        "framework_catalog": {
+            "path": str(catalog_path),
+            "sha256": hashlib.sha256(catalog_bytes).hexdigest(),
+            "torch": catalog.get("torch"),
+            "status": catalog.get("status", "unknown"),
+        },
         "torch_seed": int(a.seed),
+        "determinism": determinism,
         "loader_dependency_sources": loader_dependency_sources,
         # The only authoritative dtype record that survives JSON serialization. The parent verifies this
         # independently against the captured @forward signature before declaring capsule inputs.
@@ -503,16 +797,26 @@ def main(argv=None) -> int:
         **provenance,
     }
     (out / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    if a.materialize_bundle:
+        from m2m.capture.bundle import write_bundle
+
+        # Reuse the actual typed conversion and its prepared ExportedProgram.
+        # A second export can reorder lifted constants or sever source lineage.
+        session = loader.get_session_spec(mdl, tuple(inputs)) if hasattr(loader, "get_session_spec") else None
+        write_bundle(
+            mdl,
+            tuple(inputs),
+            out,
+            quant=q,
+            quantization_preapplied=(q is not None),
+            session=session,
+            source_path=Path(a.loader),
+            capture_trace=True,
+            conversion_result=res,
+        )
     # a machine-readable tail line the parent greps for, even if warnings precede it
     print("__M2M_CAPTURE__ " + json.dumps({"ok": meta["ok"], "opaque": meta["opaque"]}))
-    integerization_ok = integerization_receipt is None or (
-        integerization_receipt["quantized_contractions_seen"] > 0
-        and integerization_receipt["quantized_contractions_remaining"] == 0
-        and not integerization_receipt["refusals"]
-        and integerization_receipt["integer_mm_emitted"] <= integerization_receipt["exported_integer_mm_count"]
-        and integerization_receipt["golden_agreement"]["status"] == "passed"
-    )
-    return 0 if (res.ok and n_opaque == 0 and integerization_ok) else 3
+    return 0 if (res.ok and n_opaque == 0 and integerization_ok and precision_exact) else 3
 
 
 if __name__ == "__main__":

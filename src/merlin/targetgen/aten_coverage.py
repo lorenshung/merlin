@@ -47,12 +47,61 @@ from typing import Any
 #: Where a resolved opset is cached. Keyed by torch version: a torch bump legitimately changes the
 #: denominator, and silently reusing the old one would move a claim without anyone deciding to.
 _CACHE_DIR = "aten_opset"
+_OPSET_SCHEMA = "merlin.pytorch_opset.v1"
 
 
 def _m2m_python() -> Path:
     from merlin.targetgen.capsule_source import _m2m_python as _p
 
     return _p()
+
+
+def observe_opset(*, python: str | Path | None = None, timeout: float = 30) -> dict:
+    """Read the selected capture environment's catalog without writing a cache.
+
+    This is an explicit live observation, not a frozen-replay dependency. Missing
+    frameworks/interpreters return ``not_available`` with unknown denominators;
+    they never fall back to the compiler interpreter or pretend an empty registry.
+    """
+    unavailable = {
+        "schema": _OPSET_SCHEMA,
+        "status": "not_available",
+        "torch": None,
+        "n_all_aten": None,
+        "all_ops": [],
+        "n_core": None,
+        "ops": [],
+        "n_decomposed": None,
+        "decomposed": [],
+        "components": {
+            key: {"status": "not_available", "count": None} for key in ("registered_aten", "core", "decompositions")
+        },
+        "support_proven": False,
+    }
+    try:
+        executable = Path(python) if python is not None else _m2m_python()
+        worker = Path(__file__).with_name("_aten_opset_worker.py")
+        unavailable["observation"] = {"python": str(executable), "worker": str(worker)}
+        if not executable.is_file() or not os.access(executable, os.X_OK):
+            unavailable["diagnostics"] = [f"capture Python is missing or not executable: {executable}"]
+            return unavailable
+        if not worker.is_file():
+            unavailable["diagnostics"] = [f"ATen observation worker is missing: {worker}"]
+            return unavailable
+        proc = subprocess.run(
+            [str(executable), str(worker)], capture_output=True, text=True, timeout=timeout, env=dict(os.environ)
+        )
+        if proc.returncode != 0:
+            unavailable["diagnostics"] = [f"ATen observer exited {proc.returncode}: {proc.stderr[-1000:]}"]
+            return unavailable
+        doc = json.loads(proc.stdout)
+        if not isinstance(doc, dict) or doc.get("schema") != _OPSET_SCHEMA:
+            raise ValueError("ATen observer returned an unrecognized catalog schema")
+        doc["observation"] = unavailable["observation"]
+        return doc
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+        unavailable["diagnostics"] = [f"{type(exc).__name__}: {str(exc)[:1000]}"]
+        return unavailable
 
 
 def core_opset(*, refresh: bool = False) -> dict:
@@ -63,18 +112,9 @@ def core_opset(*, refresh: bool = False) -> dict:
     """
     from merlin.common.paths import build_dir
 
-    worker = Path(__file__).with_name("_aten_opset_worker.py")
-    python = _m2m_python()
-    if not python.exists():
-        raise RuntimeError(
-            f"no m2m venv python at {python}; the Core ATen opset is a property of torch and torch "
-            f"lives only there. Set MERLIN_M2M_PYTHON / MERLIN_M2M_DIR"
-        )
-    env = dict(os.environ)
-    proc = subprocess.run([str(python), str(worker)], capture_output=True, text=True, timeout=300, env=env)
-    if proc.returncode != 0 or not proc.stdout.strip():
-        raise RuntimeError(f"could not resolve the Core ATen opset: {proc.stderr[-400:]}")
-    doc = json.loads(proc.stdout)
+    doc = observe_opset(timeout=300)
+    if doc.get("status") != "available" or doc.get("components", {}).get("core", {}).get("status") != "available":
+        raise RuntimeError(f"could not resolve the Core ATen opset: {doc.get('diagnostics') or doc.get('components')}")
     cache = Path(build_dir()) / _CACHE_DIR
     cache.mkdir(parents=True, exist_ok=True)
     (cache / f"core_{doc['torch']}.json").write_text(json.dumps(doc, indent=2), encoding="utf-8")

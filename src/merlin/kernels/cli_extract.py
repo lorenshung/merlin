@@ -13,15 +13,17 @@ import glob
 import json
 import logging
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 import yaml
 
 from merlin.kernels import invariants as invariants_mod
 from merlin.kernels import policy, report, validate
+from merlin.kernels.framework_contracts import use_feature_contract, verify_index_feature_contract
 
 
-def _load_indexes(patterns: list[str]) -> tuple[list[dict], dict]:
+def _load_indexes(patterns: list[str], selected_contract: dict | None = None) -> tuple[list[dict], dict]:
     records: list[dict] = []
     diagnostics: dict = {}
     paths: list[str] = []
@@ -32,6 +34,7 @@ def _load_indexes(patterns: list[str]) -> tuple[list[dict], dict]:
     for p in paths:
         data = json.loads(Path(p).read_text(encoding="utf-8"))
         if isinstance(data, dict):
+            verify_index_feature_contract(data, selected_contract)
             records.extend(data.get("records", []))
             for k, v in (data.get("diagnostics") or {}).items():
                 diagnostics[k] = v
@@ -102,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--plots", action="store_true", help="write evaluation PNGs under <out_dir>/plots (needs matplotlib)"
     )
+    ap.add_argument("--feature-contract", type=Path, help="explicit target-owned feature YAML used by the index")
     ap.add_argument("--json", action="store_true", help="print a machine-readable summary JSON to stdout")
     ap.add_argument("--strict", action="store_true", help="exit 2 when a consistency invariant is violated")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -110,7 +114,14 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.INFO if args.verbose else logging.WARNING, format="%(levelname)s %(name)s: %(message)s"
     )
 
-    records, diagnostics = _load_indexes(args.inputs)
+    scope = use_feature_contract(args.feature_contract) if args.feature_contract else nullcontext(None)
+    with scope as selected_contract:
+        return _run(args, selected_contract)
+
+
+def _run(args: argparse.Namespace, selected_contract: dict | None) -> int:
+
+    records, diagnostics = _load_indexes(args.inputs, selected_contract)
     records, dedup_diag = policy.dedupe_records(records)
     if dedup_diag["duplicates_skipped"]:
         diagnostics["dedup"] = dedup_diag

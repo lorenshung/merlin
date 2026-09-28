@@ -1,5 +1,10 @@
 # Examples
 
+For target-independent frontend iteration, start with the small
+[workloads](workloads/README.md). The [native-host example](native-host/README.md)
+shows full capture, inspected LLVM lowering and numerical comparison without
+claiming accelerator offload or a deployed RVV runtime.
+
 ## Target experiment inputs
 
 Start with a target's workflow map. Each map links to its single definition;

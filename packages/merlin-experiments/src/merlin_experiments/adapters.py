@@ -192,6 +192,10 @@ class Adapter:
                 "synth_profile",
                 "smt_profile",
                 "hidden_profile",
+                "software_spec",
+                "hardware_spec",
+                "rtl_facts",
+                "evidence_mode",
             }
             if explicit & config.keys():
                 if not {"recipe", "performance_template"} <= config.keys():
@@ -251,6 +255,8 @@ class Adapter:
                     "phase-0 orchestration requires explicit recipe inputs or an explicit profiles_root input"
                 )
             argv += ["--target", profile, "--output-root", str(run_dir / "phase0" / "capsules")]
+            if any(name in values for name in ("software_spec", "hardware_spec", "rtl_facts", "evidence_mode")):
+                argv += ["--evidence-root", str(run_dir / "phase0")]
         elif self.name == "capsule_bench":
             env["MERLIN_TARGET_EXPERIMENT"] = values["descriptor"]
             env["MERLIN_CORPUS_SEAL"] = values.get("corpus_seal", "")
@@ -322,6 +328,10 @@ ADAPTERS = {
             "profile": Option(flag=""),
             "profiles_root": Option("input"),
             "recipe": Option("input"),
+            "software_spec": Option("input"),
+            "hardware_spec": Option("input"),
+            "rtl_facts": Option("input"),
+            "evidence_mode": Option(choices=("diagnostic", "verified")),
             "performance_template": Option("input"),
             "conformance_spec": Option("input"),
             "synth_profile": Option("input"),

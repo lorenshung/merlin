@@ -12,16 +12,22 @@ import yaml
 from merlin.common.paths import repo_root  # noqa: E402
 from merlin.perf.profile import TRAITS  # noqa: E402
 from merlin.runtime.backends.base import EXECUTION_CAPABILITIES  # noqa: E402
+from merlin.targetgen.software_spec import (
+    load_software_spec,
+    numerical_datapath,
+    software_spec_identity,
+    software_spec_path_for_recipe,
+)
 
 from .provenance import _document_digest
 
 _SYNTHESIS_INPUT_KEYS = frozenset({"conformance_spec_sha256", "recipe_sha256", "workload_spec_sha256"})
 
 
-def application_inventory_path(conformance_spec: str | Path) -> Path | None:
+def application_inventory_path(conformance_spec: str | Path, *, document: dict | None = None) -> Path | None:
     """Resolve only the requirement's adjacent generated sidecar, never an arbitrary path."""
     spec = Path(conformance_spec)
-    document = yaml.safe_load(spec.read_text(encoding="utf-8")) or {}
+    document = document if document is not None else yaml.safe_load(spec.read_text(encoding="utf-8")) or {}
     if not isinstance(document, dict):
         raise ValueError(f"{spec}: conformance spec must be a mapping")
     demands = document.get("application_demands") or {}
@@ -45,7 +51,21 @@ def application_inventory_path(conformance_spec: str | Path) -> Path | None:
     return path
 
 
-def synthesis_input_identity(*, conformance_spec: str | Path, recipe: str | Path, descriptor: str | Path) -> dict:
+def selected_software_spec_path(recipe: str | Path, override: str | Path | None = None) -> Path | None:
+    """Resolve the recipe's explicit declaration or a frozen-input path override."""
+    selected = software_spec_path_for_recipe(recipe)
+    if override is not None:
+        return Path(override).expanduser().absolute()
+    return selected
+
+
+def synthesis_input_identity(
+    *,
+    conformance_spec: str | Path,
+    recipe: str | Path,
+    descriptor: str | Path,
+    software_spec: str | Path | None = None,
+) -> dict:
     """The exact requirement and authored software inputs a synthesis used.
 
     The requirement and recipe are byte identities. ``workload_spec`` is a parsed
@@ -55,11 +75,15 @@ def synthesis_input_identity(*, conformance_spec: str | Path, recipe: str | Path
     source = yaml.safe_load(Path(descriptor).read_text(encoding="utf-8")) or {}
     if not isinstance(source, dict) or not isinstance(source.get("workload_spec") or {}, dict):
         raise ValueError(f"{descriptor}: workload_spec must be a mapping")
-    return {
+    identity = {
         "conformance_spec_sha256": hashlib.sha256(Path(conformance_spec).read_bytes()).hexdigest(),
         "recipe_sha256": hashlib.sha256(Path(recipe).read_bytes()).hexdigest(),
         "workload_spec_sha256": _document_digest(source.get("workload_spec") or {}),
     }
+    selected = selected_software_spec_path(recipe, software_spec)
+    if selected is not None:
+        identity["software_spec_sha256"] = software_spec_identity(selected)["sha256"]
+    return identity
 
 
 def verify_selected_synthesis(
@@ -68,6 +92,7 @@ def verify_selected_synthesis(
     conformance_spec: str | Path | None = None,
     recipe: str | Path | None = None,
     descriptor: str | Path | None = None,
+    software_spec: str | Path | None = None,
     document: dict | None = None,
 ) -> dict:
     """Verify a reviewed synth sidecar against its selected, frozen inputs.
@@ -81,6 +106,7 @@ def verify_selected_synthesis(
     selected = document if document is not None else yaml.safe_load(Path(synth_profile).read_text(encoding="utf-8"))
     if not isinstance(selected, dict):
         raise ValueError(f"{synth_profile}: synthesized profile must be a mapping")
+    profile_document = selected
     provenance = selected.get("provenance") or {}
     if not isinstance(provenance, dict):
         raise ValueError(f"{synth_profile}: provenance must be a mapping")
@@ -92,19 +118,24 @@ def verify_selected_synthesis(
         }
     if (
         not isinstance(identity, dict)
-        or set(identity) != _SYNTHESIS_INPUT_KEYS
+        or set(identity) not in (_SYNTHESIS_INPUT_KEYS, _SYNTHESIS_INPUT_KEYS | {"software_spec_sha256"})
         or any(
             not isinstance(value, str) or len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value)
             for value in identity.values()
         )
     ):
-        raise ValueError(f"{synth_profile}: selected_inputs must contain three SHA-256 digests")
+        raise ValueError(f"{synth_profile}: selected_inputs must contain selected-input SHA-256 digests")
     if conformance_spec is None or recipe is None or descriptor is None:
         raise ValueError(
             f"{synth_profile}: verified synthesis requires explicit conformance_spec, recipe, and descriptor inputs"
         )
-    expected = synthesis_input_identity(conformance_spec=conformance_spec, recipe=recipe, descriptor=descriptor)
-    changed = sorted(key for key in _SYNTHESIS_INPUT_KEYS if identity[key] != expected[key])
+    expected = synthesis_input_identity(
+        conformance_spec=conformance_spec,
+        recipe=recipe,
+        descriptor=descriptor,
+        software_spec=software_spec,
+    )
+    changed = sorted(key for key in set(identity) | set(expected) if identity.get(key) != expected.get(key))
     if changed:
         raise ValueError(
             f"{synth_profile}: stale selected synthesis ({', '.join(changed)} changed); "
@@ -153,6 +184,29 @@ def verify_selected_synthesis(
             )
             if invalid:
                 raise ValueError(f"{sidecar}: declared applications lack verified materialization receipts: {invalid}")
+        source_entries = [entry for entry in profile_document.get("capsules", []) if entry.get("materialized_capture")]
+        seen_sources = set()
+        for entry in source_entries:
+            binding = entry["materialized_capture"]
+            label = binding.get("workload_id") if isinstance(binding, dict) else None
+            source_row = (detailed.get("applications") or {}).get(label)
+            if not isinstance(source_row, dict) or label in seen_sources:
+                raise ValueError(f"{synth_profile}: duplicate or unknown materialized iteration identity")
+            seen_sources.add(label)
+            expected_source = {
+                "capture_sha256": source_row["capture_sha256"],
+                "receipt_sha256": source_row["capture_receipt"]["receipt_sha256"],
+                "full_inventory_sha256": actual,
+                "operation_count": source_row["n_operations"],
+                "workload_role": "iteration",
+                "coverage_scope": "full_capture",
+            }
+            if entry.get("source_role") != "materialized_iteration_capture" or any(
+                binding.get(key) != value for key, value in expected_source.items()
+            ):
+                raise ValueError(
+                    f"{synth_profile}: materialized source does not bind its exact full iteration inventory"
+                )
     if applications and demands.get("status") != "inventoried":
         raise ValueError(
             f"{conformance_spec}: declared applications require an inventoried operation-demand requirement; "
@@ -532,6 +586,7 @@ def validate_profile_inputs(
     synth_profile=None,
     smt_profile=None,
     hidden_profile=None,
+    software_spec=None,
 ) -> None:
     """Reject mixed ownership modes without touching any input, especially private sidecars."""
     if recipe is not None:
@@ -541,7 +596,7 @@ def validate_profile_inputs(
             raise ValueError("explicit recipe requires performance_template")
     elif any(
         value is not None
-        for value in (performance_template, conformance_spec, synth_profile, smt_profile, hidden_profile)
+        for value in (performance_template, conformance_spec, synth_profile, smt_profile, hidden_profile, software_spec)
     ):
         raise ValueError("explicit performance_template and sidecar paths require recipe")
 
@@ -558,6 +613,7 @@ def load_profile(
     smt_profile: str | Path | None = None,
     hidden_profile: str | Path | None = None,
     descriptor: str | Path | None = None,
+    software_spec: str | Path | None = None,
 ) -> dict:
     """The target's functional profile plus shared perf and the private holdout sidecar.
 
@@ -583,6 +639,7 @@ def load_profile(
         synth_profile=synth_profile,
         smt_profile=smt_profile,
         hidden_profile=hidden_profile,
+        software_spec=software_spec,
     )
     if recipe is None:
         profiles = _profiles_root(profiles_root)
@@ -601,6 +658,27 @@ def load_profile(
             if optional is not None and (optional.exists() or optional.is_symlink()) and not optional.is_file():
                 raise ValueError(f"declared optional profile is not a file: {optional}")
     prof = yaml.safe_load(public.read_text(encoding="utf-8")) or {}
+    if not isinstance(prof, dict):
+        raise ValueError(f"{public}: recipe must be a mapping")
+    if prof.get("capsule_policy", "compatibility") not in {"compatibility", "derived_only"}:
+        raise ValueError(f"{public}: capsule_policy must be compatibility or derived_only")
+    if prof.get("capsule_policy") == "derived_only" and (prof.get("capsules") or prof.get("sweeps")):
+        raise ValueError(f"{public}: derived-only recipes cannot author capsule membership or sweeps")
+    selected_spec = selected_software_spec_path(public, software_spec)
+    if selected_spec is not None:
+        declaration = load_software_spec(selected_spec, target=target)
+        axes = numerical_datapath(declaration)
+        datapath = prof.get("datapath") or {}
+        if not isinstance(datapath, dict):
+            raise ValueError(f"{public}: datapath must be a mapping")
+        conflicting = sorted(key for key, value in axes.items() if key in datapath and datapath[key] != value)
+        if conflicting:
+            raise ValueError(f"{public}: recipe conflicts with selected software spec: {conflicting}")
+        prof["datapath"] = {**datapath, **axes}
+        prof["_software_spec_identity"] = software_spec_identity(selected_spec, declaration)
+        prof["_software_spec_path"] = str(selected_spec)
+    else:
+        prof["_software_spec_identity"] = {"status": "unverified_legacy", "reason": "no selected software spec"}
     _normalize_public_capsules(prof, source=public)
     _merge_shared_perf(prof, source=public, performance_template=shared)
     # SYNTHESIZED ENTRIES, appended after the hand-authored ones. They come from the target's own
@@ -616,9 +694,19 @@ def load_profile(
             conformance_spec=conformance_spec,
             recipe=public,
             descriptor=descriptor,
+            software_spec=selected_spec,
             document=doc,
         )
         extra = list(doc.get("capsules") or ())
+        for entry in extra:
+            selection = entry.get("materialized_capture")
+            if selection is not None:
+                if not isinstance(selection, dict) or not isinstance(selection.get("path"), str):
+                    raise ValueError(f"{synth}: materialized capture must declare a path and exact identities")
+                location = Path(selection["path"])
+                if location.is_absolute() or ".." in location.parts:
+                    raise ValueError(f"{synth}: materialized capture must remain inside its selected profile bundle")
+                entry["materialized_capture"] = {**selection, "path": str(synth.parent / location)}
         prof["_claim_model_evaluation"] = (doc.get("provenance") or {}).get("claim_model_evaluation")
         if extra:
             prof["capsules"] = list(prof.get("capsules") or []) + extra

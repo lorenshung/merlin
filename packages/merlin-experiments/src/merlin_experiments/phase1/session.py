@@ -148,13 +148,17 @@ class PreparedRun:
             )
         corpus_record = self.environment.get("public_corpus_input")
         if corpus_record is not None:
-            CI.resolve(
+            view = CI.resolve(
                 self.workspace,
                 self.bundle,
                 corpus_record,
                 repo=self.request.context.repo,
                 reviewed_roots=self.reviewed_roots,
             )
+            if (self.environment.get("corpus_review") or {}).get("whole_workload_phase1", {}).get("required"):
+                from ..phase0.coverage_commitment import require_complete
+
+                require_complete(view.workload_coverage or {})
 
 
 def task_scope(
@@ -350,6 +354,10 @@ def prepare(
             _reviewed_corpus_roots = tuple(_te().graded_roots())
         _bundle_snapshot_record = _BWS.snapshot_record(ws)
         _corpus_view = CI.resolve(ws, bundle, _corpus_record, repo=context.repo, reviewed_roots=_reviewed_corpus_roots)
+        if (_corpus_review or {}).get("whole_workload_phase1", {}).get("required"):
+            from ..phase0.coverage_commitment import require_complete
+
+            require_complete(_corpus_view.workload_coverage or {})
         _public_root, _policy_root = _corpus_view.public, _corpus_view.policy
         _contract_root = _corpus_view.contract
         _te_setup = _te()
@@ -364,7 +372,17 @@ def prepare(
             [_numeric_profile] = _BWS.snapshot_input_paths(
                 ws, bundle, [numeric_profile_path(_te_setup.numeric_profile, repo=context.repo)], repo=context.repo
             )
-            load_declared_numeric_policy(_te_setup, repo=context.repo, frozen_profile=_numeric_profile)
+            load_declared_numeric_policy(
+                _te_setup,
+                repo=context.repo,
+                frozen_profile=_numeric_profile,
+                frozen_resolver=lambda source: _BWS.snapshot_input_paths(
+                    ws,
+                    bundle,
+                    [source],
+                    repo=context.repo,
+                )[0],
+            )
         _hidden_dir = RI.hidden_snapshot_dir(_snapshot_root, _te_setup, context.repo)
         _hidden_snapshot_record = RI.subtree_snapshot_record(_hidden_dir)
         if _hidden_snapshot_record["n_capsules"] <= 0:

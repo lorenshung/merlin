@@ -49,14 +49,14 @@ if HAS_XDSL:
             ctx.load_dialect(d)
         return ctx
 
-    def text(module) -> str:
-        """Print a module to a string."""
+    def text(module, *, generic: bool = False) -> str:
+        """Print a module; generic form preserves every attribute and property."""
         import io
 
         from xdsl.printer import Printer
 
         s = io.StringIO()
-        Printer(stream=s).print_op(module)
+        Printer(stream=s, print_generic_format=generic).print_op(module)
         return s.getvalue()
 
     def roundtrip(module, *dialects):
@@ -71,7 +71,7 @@ else:  # pragma: no cover - exercised only when xDSL is absent
     def make_context(*dialects):
         return None
 
-    def text(module) -> str:
+    def text(module, *, generic: bool = False) -> str:
         return ""
 
     def roundtrip(module, *dialects):

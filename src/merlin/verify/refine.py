@@ -26,6 +26,9 @@ computes the declared workload", not as "the pass preserved its input".
 :func:`validate_pass` closes that gap: it encodes the ACTUAL ``linalg`` module the pass consumed
 (:mod:`merlin.verify.linalg_semantics`) and validates ``source -> interface`` over shared leaves. Its
 ``unsat`` is a per-compilation theorem about the pass on that one program at that one shape.
+The source encoder requires a defined contraction accumulator, such as an explicit integer
+``linalg.fill``; a bare ``tensor.empty`` accumulator abstains because MLIR leaves its contents
+unspecified.
 
 Extents are concrete, taken from the IR's own types, so every query is quantifier-free (QF_BV).
 """
@@ -33,6 +36,7 @@ Extents are concrete, taken from the IR's own types, so every query is quantifie
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from . import HAS_XDSL
 from .smt_export import Verdict, check_module
@@ -62,7 +66,9 @@ class RefinementResult:
         return f"{self.status:7s} m={self.m} k={self.k} n={self.n} reuse={self.reuse} outputs={self.n_outputs}"
 
 
-def validate_interface_module(module, *, acc_width: int = 32, timeout_ms: int = 60_000) -> Verdict:
+def validate_interface_module(
+    module, *, acc_width: int = 32, timeout_ms: int = 60_000, translator: str | Path | None = None
+) -> Verdict:
     """Check every ``interface.commit`` against the workload's declared contraction."""
     if not HAS_XDSL:
         raise UnsupportedSemantics("xDSL is not installed")
@@ -101,10 +107,17 @@ def validate_interface_module(module, *, acc_width: int = 32, timeout_ms: int = 
         smt.YieldOp()
 
     mod = builtin.ModuleOp([SolverOp.from_region(Region([blk]))])
-    return check_module(mod, timeout_ms=timeout_ms)
+    return check_module(mod, timeout_ms=timeout_ms, translator=translator)
 
 
-def validate_pass(source_module, interface_module, *, acc_width: int = 32, timeout_ms: int = 60_000) -> Verdict:
+def validate_pass(
+    source_module,
+    interface_module,
+    *,
+    acc_width: int = 32,
+    timeout_ms: int = 60_000,
+    translator: str | Path | None = None,
+) -> Verdict:
     """Does the emitted ``interface`` program compute the same function as its ``linalg`` SOURCE?
 
     This is source-to-target translation validation, and it is a strictly stronger statement than
@@ -128,8 +141,8 @@ def validate_pass(source_module, interface_module, *, acc_width: int = 32, timeo
 
     Three verdicts, and the middle one is load-bearing:
 
-        unsat   the pass is semantics-preserving on THIS program at THIS shape, for every integer
-                input the shape admits
+        unsat   the pass is semantics-preserving on THIS supported program at THIS shape, for every
+                integer input the shape admits; accumulated inits must have defined contents
         sat     refuted, with a concrete counterexample in the model
         unknown the solver ran out of budget, or an op had no encoding — an ABSTENTION, never a pass
 
@@ -175,10 +188,17 @@ def validate_pass(source_module, interface_module, *, acc_width: int = 32, timeo
         smt.YieldOp()
 
     mod = builtin.ModuleOp([SolverOp.from_region(Region([blk]))])
-    return check_module(mod, timeout_ms=timeout_ms)
+    return check_module(mod, timeout_ms=timeout_ms, translator=translator)
 
 
-def validate_compilation(interface_module, cb: dict, *, acc_width: int = 32, timeout_ms: int = 60_000) -> Verdict:
+def validate_compilation(
+    interface_module,
+    cb: dict,
+    *,
+    acc_width: int = 32,
+    timeout_ms: int = 60_000,
+    translator: str | Path | None = None,
+) -> Verdict:
     """Does the emitted COMMAND BUFFER compute what the ``interface`` program specified?
 
     This is the check that covers a compiler we did not write. ``interface`` is the input a backend
@@ -228,7 +248,7 @@ def validate_compilation(interface_module, cb: dict, *, acc_width: int = 32, tim
         smt.YieldOp()
 
     mod = builtin.ModuleOp([SolverOp.from_region(Region([blk]))])
-    return check_module(mod, timeout_ms=timeout_ms)
+    return check_module(mod, timeout_ms=timeout_ms, translator=translator)
 
 
 def _bind_outputs(spec_outputs: dict, got: dict, cb: dict) -> list:

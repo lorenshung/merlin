@@ -30,6 +30,7 @@ class CorpusView:
     public: Path
     policy: Path
     contract: Path
+    workload_coverage: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -108,13 +109,32 @@ def _resources(capsules: list[dict]) -> None:
 
 
 def stage(run_dir: Path, te, bundle: dict, *, contract: Path, capsules_root: Path | None = None) -> tuple[dict, dict]:
-    """Prepare a fresh private input; preserve evaluated policy and optional raw override."""
+    """Prepare a fresh private input from either the descriptor or one explicit corpus."""
     stage_root = Path(run_dir).absolute() / "private_corpus_input"
     stage_root.mkdir(mode=0o700, exist_ok=False)
     schema_source = Path(contract).absolute() / "schemas"
     copy_input(schema_source, stage_root / "contract/schemas", private=True)
     contract = stage_root / "contract"
-    sources = list(te.graded_roots())
+    source_root = Path(capsules_root).absolute() if capsules_root is not None else None
+    source_before = None
+    if source_root is None:
+        sources = list(te.graded_roots())
+        coverage_root = te.capsule_corpus.parent
+    else:
+        ordinary_tree(source_root)
+        source_before = fingerprint(source_root)
+        categories = [
+            child
+            for child in sorted(source_root.iterdir())
+            if child.is_dir()
+            and not child.name.startswith(("_", "."))
+            and child.name != "hidden"
+            and next(child.glob("*/capsule.yaml"), None) is not None
+        ]
+        sources = categories or [source_root]
+        coverage_root = source_root.parent if source_root == te.capsule_corpus else source_root
+        if not discover_capsules(sources, labels={"public", "dev"}, contract=contract):
+            raise ValueError("explicit public/dev corpus contains no capsules")
     staged_sources = []
     commitments = [{"original": str(schema_source), "staged": "contract/schemas", "role": "host_schema"}]
     for index, source in enumerate(sources):
@@ -122,7 +142,7 @@ def stage(run_dir: Path, te, bundle: dict, *, contract: Path, capsules_root: Pat
         copy_input(Path(source), destination, private=True)
         staged_sources.append(destination)
         commitments.append({"original": str(Path(source).absolute()), "staged": f"policy/{index}", "role": "corpus"})
-    if list(te.graded_roots()) != sources:
+    if source_root is None and list(te.graded_roots()) != sources:
         raise RuntimeError("descriptor corpus root membership changed during preparation")
     _resources(discover_capsules(staged_sources, labels={"public", "dev"}, contract=contract))
     public = stage_root / "public"
@@ -130,26 +150,53 @@ def stage(run_dir: Path, te, bundle: dict, *, contract: Path, capsules_root: Pat
         public_capsules_for(te, corpus_roots=staged_sources, destination=public)
         mode = "descriptor_cohort"
     else:
-        source_root = Path(capsules_root).absolute()
-        ordinary_tree(source_root)
-        before = fingerprint(source_root)
-        selected = discover_capsules(source_root, labels={"public", "dev"}, contract=contract)
+        selected = discover_capsules(staged_sources, labels={"public", "dev"}, contract=contract)
         _resources(selected)
         if not selected:
             raise ValueError("public/dev override contains no capsules")
         public.mkdir(mode=0o700)
         for capsule in selected:
             source = Path(capsule["__dir__"])
-            relative = source.relative_to(source_root)
+            # The copied policy view is the authority for both grading and the
+            # raw override. Never re-read live source capsule bytes here.
+            policy_relative = source.relative_to(stage_root / "policy")
+            original = sources[int(policy_relative.parts[0])] / Path(*policy_relative.parts[1:])
+            relative = original.relative_to(source_root)
             copy_input(source, public / relative, private=True)
             commitments.append(
-                {"original": str(source.absolute()), "staged": (Path("public") / relative).as_posix(), "role": "corpus"}
+                {
+                    "original": str(original.absolute()),
+                    "staged": (Path("public") / relative).as_posix(),
+                    "role": "corpus",
+                }
             )
-        if fingerprint(source_root) != before:
+        if fingerprint(source_root) != source_before:
             raise RuntimeError("public/dev override changed during preparation")
         mode = "public_dev_override"
     _resources(discover_capsules(public, labels={"public", "dev"}, contract=contract))
-    private_json(stage_root / "source_commitments.json", {"version": 1, "sources": commitments})
+    from ..phase0.coverage_commitment import (
+        INPUT_PATH,
+        _digest,
+        observe_cohort,
+        read_inputs,
+        requires_workload_coverage,
+    )
+
+    selected_inputs = read_inputs(coverage_root)
+    if selected_inputs is not None:
+        if selected_inputs.get("target") != te.target:
+            raise ValueError("selected coverage inputs belong to a different target")
+        copy_input(coverage_root / INPUT_PATH.parent, stage_root / "coverage", private=True)
+        commitments.append(
+            {
+                "original": str((coverage_root / "_phase0").absolute()),
+                "staged": "coverage",
+                "role": "coverage_inputs",
+            }
+        )
+    completeness = observe_cohort(selected_inputs, public, target=te.target, contract=contract)
+    private_json(stage_root / "coverage-report.json", completeness)
+    private_json(stage_root / "source_commitments.json", {"version": 1, "mode": mode, "sources": commitments})
     record = {
         "version": 1,
         "staging_path": str(stage_root),
@@ -157,6 +204,13 @@ def stage(run_dir: Path, te, bundle: dict, *, contract: Path, capsules_root: Pat
         "mode": mode,
         "authority": "private_preparation_bound_to_native_snapshot_not_operator_approval",
         "descriptor_sha256": te.descriptor_sha256,
+        "workload_coverage": {
+            "required": requires_workload_coverage(te, selected_inputs),
+            "status": completeness["status"],
+            "report_sha256": _digest(completeness),
+            "inputs_sha256": completeness["inputs_sha256"],
+            "cohort_sha256": completeness["cohort"]["sha256"],
+        },
     }
     # The native snapshot copies private bytes with independent inodes, never public CAS.
     # Seal the staging copy too; setup never modifies it after recording its identity.
@@ -185,6 +239,10 @@ def resolve(
     if fingerprint(frozen) != record.get("content_sha256"):
         raise RuntimeError("run corpus input differs from its prepared native snapshot identity")
     commitment = json.loads((frozen / "source_commitments.json").read_text())
+    if reviewed_roots is not None and (
+        record.get("mode") != "descriptor_cohort" or commitment.get("mode") != "descriptor_cohort"
+    ):
+        raise RuntimeError("reviewed run corpus requires the complete descriptor cohort; raw overrides are unverified")
     manifest = bwrap.verify_bundle_snapshot(ws, bundle, repo=repo)
     declared = [Path(row["destination"]) for row in [*manifest["grants"], *manifest.get("host_records", [])]]
     covered = []
@@ -208,4 +266,20 @@ def resolve(
     public, policy, contract = frozen / "public", frozen / "policy", frozen / "contract"
     if not public.is_dir() or not policy.is_dir() or not (contract / "schemas").is_dir():
         raise RuntimeError("run corpus snapshot is missing a declared view")
-    return CorpusView(public=public, policy=policy, contract=contract)
+    from ..phase0.coverage_commitment import _digest, verify_cohort_binding
+
+    completeness = None
+    commitment_record = record.get("workload_coverage")
+    if commitment_record is not None:
+        selected_path = frozen / "coverage/coverage-inputs.json"
+        selected_inputs = json.loads(selected_path.read_bytes()) if selected_path.is_file() else None
+        saved = json.loads((frozen / "coverage-report.json").read_bytes())
+        verify_cohort_binding(saved, selected_inputs, public, contract=contract)
+        completeness = saved
+        if (
+            _digest(saved) != commitment_record.get("report_sha256")
+            or saved.get("inputs_sha256") != commitment_record.get("inputs_sha256")
+            or saved["cohort"]["sha256"] != commitment_record.get("cohort_sha256")
+        ):
+            raise RuntimeError("frozen whole-workload coverage differs from its actual admitted-cohort commitment")
+    return CorpusView(public=public, policy=policy, contract=contract, workload_coverage=completeness)

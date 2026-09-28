@@ -74,9 +74,9 @@ def lower_model(
     ``ir_audit="compact"`` requests native inspection-only views and exact hashes;
     ``"both"`` also retains exact snapshots. Text-only stages have no compact printer.
 
-    ``textual=True`` uses the pure-text preprocessing (no xDSL round-trip) —
-    required for whole-model artifacts until xDSL prints rank-reducing
-    extract_slice correctly.
+    ``textual=True`` uses compatibility pure-text preprocessing without an xDSL
+    round-trip. The default route emits generic MLIR at the upstream seam to
+    preserve attributes and avoid custom-printer grammar skew.
 
     ``vectorize=True`` bakes native RVV (fixed-width vector ops) into the IR instead of
     relying on clang auto-vectorization — for the rv64gcv / Saturn-tile target.

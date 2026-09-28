@@ -62,10 +62,11 @@ _RTL_ENGINES: dict[str, tuple[str, str]] = {
 def _rtl_engine_dir(target: str, engine: str) -> Path | None:
     """Where ``engine``'s build for ``target`` lives, or None when nothing registers one.
 
-    Two sources, in precedence order:
+    Three sources, in precedence order:
 
     1. ``MERLIN_EXT_<TARGET>_<SUFFIX>`` (process env or ``.env``) — the machine-specific registration.
-    2. The DERIVED home ``out/build/rtl_engines/<target>/<engine>/``.
+    2. The run's derived home ``out/build/rtl_engines/<target>/<engine>/``.
+    3. The installed home under the repository-anchored build root.
 
     (2) is new and it is the point. Registration by env var alone means an engine that IS BUILT AND
     WORKING on this machine is invisible to the policy until somebody adds a line to a gitignored file
@@ -79,10 +80,15 @@ def _rtl_engine_dir(target: str, engine: str) -> Path | None:
         return Path(_context().ext_path(f"{target}_{suffix}"))
     except KeyError:
         pass
-    from .gsim_emulator import engine_home
+    from .gsim_emulator import engine_home, installed_engine_home
 
-    derived = engine_home(target, engine)
-    return derived if derived.is_dir() else None
+    # Mirror binary discovery: a preinstalled simulator is a machine asset,
+    # not something that must be rebuilt under each invocation's output root.
+    homes = (engine_home(target, engine), installed_engine_home(target, engine))
+    for home in homes:
+        if (home / _context()._RTL_ENGINES[engine][1]).is_file():
+            return home
+    return next((home for home in homes if home.is_dir()), None)
 
 
 def _rtl_engine_probe(target: str, engine: str):
@@ -137,15 +143,19 @@ def _rtl_engine_probe(target: str, engine: str):
         # answer False and STILL certified on it, because this probe asked only whether a file existed.
         # A provenance gate that the selection path routes around is not a gate.
         #
-        # Only asked of the engine whose home this module describes, and only when the dir IS that
-        # derived home: an engine registered elsewhere, or laid out by someone else, is not this
-        # module's to judge, and a refusal it did not author would be worse than none.
+        # The same lineage gate applies to this engine's explicitly selected
+        # wrapper directory, not only its conventional derived home.
         if engine == _LINEAGE_ENGINE:
-            from .gsim_emulator import resolve as _resolve
+            from .gsim_emulator import resolve_wrapper
 
-            r = _resolve(target)
-            if r.refused:
+            # Validate the wrapper we actually selected, including explicit
+            # external homes. A separately registered ELF-driven binary cannot
+            # confer provenance on this program-driven engine.
+            r = resolve_wrapper(target, home=d, source=f"selected:{d}")
+            if r is not None and r.refused:
                 return False, r.reason
+            if r is not None:
+                return r.ok, r.reason
         return True, f"{fname} at {d}"
 
     return probe

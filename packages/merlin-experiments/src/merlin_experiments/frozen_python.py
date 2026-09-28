@@ -117,7 +117,7 @@ def _sealed_transport(receipt: dict, layout: dict, owner: str) -> bool:
     return any(f"{value}/{suffix}" in receipt["files"] for value in roots)
 
 
-def _context(snapshot: Path, verifier_source: Path | None) -> dict:
+def _context(snapshot: Path, verifier_source: Path | None, *, instrumentation_from_snapshot: bool = False) -> dict:
     inherited = os.environ.get(CONTEXT)
     if inherited:
         instruments = json.loads(inherited)
@@ -138,6 +138,18 @@ def _context(snapshot: Path, verifier_source: Path | None) -> dict:
     receipt = snap.verify(snapshot)
     seal, _ = snap.load_seal(snapshot, "snapshot")
     layout = snap.import_layout(snapshot, receipt)
+    if instrumentation_from_snapshot:
+        # A newly frozen launch must not depend on instrumentation remaining in
+        # the original checkout. Choose only files admitted by this same seal.
+        for key, suffix in {
+            "bootstrap": "merlin_experiments/frozen_python.py",
+            "verifier": "merlin_experiments/source_snapshot.py",
+            "resolver": "merlin/common/frozen_imports.py",
+        }.items():
+            choices = [f"{root}/{suffix}" for root in layout["python_roots"] if f"{root}/{suffix}" in receipt["files"]]
+            if len(choices) != 1:
+                raise RuntimeError(f"snapshot lacks one authoritative {key} owner")
+            instruments[key] = _pin(snapshot / choices[0])
     # Reject historical external selection before building a launch command.
     if hasattr(snap, "provider_environment"):
         snap.provider_environment(snapshot, receipt)
@@ -178,14 +190,22 @@ def _command(context: dict, native_argv: Sequence[str]) -> list[str]:
     return [argv[0], "-I", "-S", "-B", *flags, str(bootstrap), "--execute", json.dumps(document, separators=(",", ":"))]
 
 
-def python_command(snapshot: Path, native_argv: Sequence[str], *, verifier_source: Path | None = None) -> list[str]:
+def python_command(
+    snapshot: Path,
+    native_argv: Sequence[str],
+    *,
+    verifier_source: Path | None = None,
+    instrumentation_from_snapshot: bool = False,
+) -> list[str]:
     """Build host transport; retain native argv separately in the existing receipt.
 
     Root launches must explicitly name trusted verifier source. Descendants always
     retain their already-pinned verifier, including historical callers using the
     former two-argument API; no neighboring live native source is discovered.
     """
-    return _command(_context(snapshot, verifier_source), native_argv)
+    return _command(
+        _context(snapshot, verifier_source, instrumentation_from_snapshot=instrumentation_from_snapshot), native_argv
+    )
 
 
 def inherited_python_command(native_argv: Sequence[str]) -> list[str]:

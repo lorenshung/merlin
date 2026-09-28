@@ -13,8 +13,9 @@ generic half that turns that data into the framework's extension points:
   so a layer the target cannot run in its numeric form is mapped to ``None`` rather than being
   quantized because it happened to be a Linear.
 
-There is one quantizer for every target. A target changes the recipe, never this file, which
-carries no target name, no scheme name and no merlin import.
+There is one quantizer for every target. A target changes the recipe, never this file.
+Scoped recipes reuse Merlin's shared SW admission screen; no target-name dispatch
+or framework source patch is involved.
 
 WHOSE LIMIT REFUSED A LAYER. :mod:`quant_layer_plan` decides what the TARGET absorbs; this file
 adds what this FRAMEWORK BUILD can express of that decision, and the two are recorded under
@@ -25,10 +26,12 @@ dispatch table.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Mapping
 from typing import Any
 
 RECIPE_SCHEMA = "quant_recipe_v1"
+DEFAULT_OBSERVER_EPSILON = 2**-12
 
 #: Recipe dtype -> the torch dtype a spec is built with. A dtype absent here is refused, not mapped
 #: to a neighbour: the recipe states the hardware's element format and a near miss is a different
@@ -61,6 +64,12 @@ def _torch_dtype(name: str):
     return dtype
 
 
+def _observer_name(tensor: Mapping[str, Any], *, is_weight: bool) -> str:
+    floating_format = str(tensor.get("dtype", "")).startswith("fp8_")
+    default = "minmax" if is_weight or floating_format else "histogram"
+    return str(tensor.get("observer") or default)
+
+
 def _spec(tensor: Mapping[str, Any], *, is_weight: bool, eps: float):
     """One ``QuantizationSpec`` from one recipe tensor spec."""
     import torch
@@ -68,13 +77,18 @@ def _spec(tensor: Mapping[str, Any], *, is_weight: bool, eps: float):
     from torchao.quantization.pt2e.quantizer import QuantizationSpec
 
     granularity, symmetric = tensor.get("granularity"), bool(tensor.get("symmetric"))
+    dtype = _torch_dtype(tensor.get("dtype"))
+    floating_format = str(tensor.get("dtype", "")).startswith("fp8_")
     if granularity == "tensor":
         qscheme = torch.per_tensor_symmetric if symmetric else torch.per_tensor_affine
         # A weight is observed once, so its range is its min and max; an activation is observed
-        # over a calibration stream, where a histogram is robust to a rare outlier.
-        observer = {"minmax": MinMaxObserver, "histogram": HistogramObserver}.get(
-            str(tensor.get("observer") or ("minmax" if is_weight else "histogram"))
-        )
+        # over a calibration stream, where a histogram is robust to a rare outlier. TorchAO's
+        # HistogramObserver uses torch.iinfo and cannot observe an FP8 dtype; its MinMaxObserver
+        # explicitly supports float8. Never silently replace an explicitly requested observer.
+        observer_name = _observer_name(tensor, is_weight=is_weight)
+        if floating_format and observer_name == "histogram":
+            raise RecipeError("FP8 histogram observation is unavailable in TorchAO PT2E; use minmax")
+        observer = {"minmax": MinMaxObserver, "histogram": HistogramObserver}.get(observer_name)
         if observer is None:
             raise RecipeError(f"recipe observer {tensor.get('observer')!r} is not one this quantizer builds")
         axis = None
@@ -88,7 +102,7 @@ def _spec(tensor: Mapping[str, Any], *, is_weight: bool, eps: float):
             f"path cannot express"
         )
     return QuantizationSpec(
-        dtype=_torch_dtype(tensor.get("dtype")),
+        dtype=dtype,
         observer_or_fake_quant_ctr=observer.with_args(eps=eps),
         quant_min=tensor.get("quant_min"),
         quant_max=tensor.get("quant_max"),
@@ -145,7 +159,7 @@ def _has_floating_recipe_work(exported: Any, recipe: Mapping[str, Any]) -> bool:
     )
 
 
-def build_quantizer(recipe: Mapping[str, Any], *, layer_plan: Mapping[str, Any], eps: float = 2**-12):
+def build_quantizer(recipe: Mapping[str, Any], *, layer_plan: Mapping[str, Any], eps: float = DEFAULT_OBSERVER_EPSILON):
     """The PT2E quantizer a static recipe describes, limited to placed operations.
 
     ATen operator names alone cannot license quantization: an unsupported module may call
@@ -191,6 +205,32 @@ def build_quantizer(recipe: Mapping[str, Any], *, layer_plan: Mapping[str, Any],
     }
 
     decisions = {str(d.get("fqn")): d for d in layer_plan.get("layers") or ()}
+    software_decisions = []
+
+    def software_allows(node: Any, family: str) -> bool:
+        selected = recipe.get("software_admission")
+        if selected is None:
+            return True  # Compatibility recipes retain their recorded policy.
+        from merlin.targetgen.software_spec import admit_operation
+
+        value = node.args[0].meta.get("val") if node.args and isinstance(node.args[0], torch.fx.Node) else None
+        prospective = {
+            "family": family,
+            "operand_dtype": activation["dtype"],
+            "accum_dtype": recipe["accumulator_dtype"],
+            "rank": len(value.shape) if isinstance(value, torch.Tensor) else None,
+            "layout": "row_major_contiguous" if isinstance(value, torch.Tensor) and value.is_contiguous() else None,
+            "scale_granularity": activation["granularity"],
+        }
+        decision = admit_operation(selected, str(node.target), prospective, "accelerator")
+        software_decisions.append(
+            {
+                "node": node.name,
+                **decision,
+                "scope": "prospective quantization screen; not realized precision or target admission",
+            }
+        )
+        return decision["status"] != "unsupported"
 
     def owner(node: Any) -> str | None:
         stack = node.meta.get("nn_module_stack")
@@ -213,6 +253,8 @@ def build_quantizer(recipe: Mapping[str, Any], *, layer_plan: Mapping[str, Any],
         )
 
     def eligible(node: Any, family: str) -> bool:
+        if not software_allows(node, family):
+            return False
         if family == "contraction":
             if len(node.args) < 2 or not stored_floating_weight(node.args[1]):
                 return False
@@ -308,6 +350,7 @@ def build_quantizer(recipe: Mapping[str, Any], *, layer_plan: Mapping[str, Any],
             self.annotated_means = 0
             self.left_in_float = 0
             self.refused_by_placement: list[dict[str, str | None]] = []
+            self.software_decisions = software_decisions
 
         def annotate(self, graph_module: Any) -> Any:
             nodes = list(graph_module.graph.nodes)
@@ -509,6 +552,7 @@ def apply_recipe(
     example_inputs: tuple,
     calibration_inputs: Iterable[Any] | None = None,
     calibration_samples: int = 100,
+    original_frontend_snapshot: dict[str, Any] | None = None,
 ) -> Any:
     """Quantize ``model`` under ``recipe`` and return the module the capture should lower."""
     import torch
@@ -532,6 +576,8 @@ def apply_recipe(
         return model
 
     if activation.get("mode") == "dynamic":
+        if recipe.get("software_admission") is not None:
+            raise RecipeError("scoped SW admission is currently supported by static PT2E recipes only")
         # Dynamic TorchAO transforms floating Linear modules rather than observing the external
         # input. Integer token IDs must not suppress those internal projections either.
         if integral_inputs and not any(
@@ -568,11 +614,30 @@ def apply_recipe(
 
     if not example_inputs:
         raise RecipeError("a static recipe needs example inputs to export the model")
-    exported = torch.export.export(model.eval(), tuple(example_inputs)).module()
+    exported_program = torch.export.export(model.eval(), tuple(example_inputs))
+    if original_frontend_snapshot is not None:
+        from m2m.capture.trace import (
+            attach_original_identity,
+            snapshot_exported_program,
+            tuple_selection_trace_program,
+        )
+
+        actual = snapshot_exported_program(exported_program, stage="quantization_input")
+        attach_original_identity(exported_program, original_frontend_snapshot, actual)
+        # PT2E replays this exact ExportedProgram. Its proxy interpreter may
+        # alias tuple selections onto the producer's result proxies; preserve
+        # the selecting call-site lineage at that replay, not by guessing from
+        # node order or tensor shape after quantization.
+        exported_program = tuple_selection_trace_program(exported_program)
+    exported = exported_program.module()
     if integral_inputs and not _has_floating_recipe_work(exported, recipe):
         return skip_already_integer()
     layer_plan = _plan_layers(recipe, model)
-    quantizer = build_quantizer(recipe, layer_plan=layer_plan)
+    policy = recipe.get("framework_capture_policy") or {}
+    epsilon = policy.get("observer_epsilon", DEFAULT_OBSERVER_EPSILON)
+    if type(epsilon) not in (int, float) or not math.isfinite(epsilon) or epsilon <= 0:
+        raise RecipeError("observer epsilon must be finite and positive")
+    quantizer = build_quantizer(recipe, layer_plan=layer_plan, eps=epsilon)
     prepared = prepare_pt2e(exported, quantizer)
     samples = calibration_inputs if calibration_inputs is not None else (tuple(example_inputs),)
     calibrated = 0
@@ -585,6 +650,12 @@ def apply_recipe(
     if calibrated == 0:
         raise RecipeError("static calibration saw no input sample")
     quantized = convert_pt2e(prepared, use_reference_representation=False, fold_quantize=True)
+    if original_frontend_snapshot is not None:
+        from m2m.capture.trace import attach_quantization_boundaries
+
+        operators = _recipe_operators(torch)
+        selected = {op for family in recipe.get("families") or () for op in operators.get(family, ())}
+        attach_quantization_boundaries(quantized, selected)
     pruned = None
     try:  # the capture library's own dead-state sweep, when present
         from m2m.capture.torchao_pipeline import _drop_unused_graph_state
@@ -613,6 +684,14 @@ def apply_recipe(
         "pruned_dead_state_tensors": pruned,
         "weight_granularity": recipe["weight"]["granularity"],
         "activation_granularity": recipe["activation"]["granularity"],
+        "software_admission": quantizer.software_decisions,
+        "framework_capture_policy": {
+            "activation_observer": _observer_name(recipe["activation"], is_weight=False),
+            "weight_observer": _observer_name(recipe["weight"], is_weight=True),
+            "observer_epsilon": epsilon,
+            "calibration_source": "explicit_calibration_stream" if calibration_inputs is not None else "example_inputs",
+            "calibration_count": calibrated,
+        },
     }
     return quantized
 
