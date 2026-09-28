@@ -528,6 +528,16 @@ def main(argv=None) -> int:
     # every capture, so the capsule can never be silent about whether its inputs were real.
     provenance = _loader_provenance(loader, mdl, inputs)
     mdl = mdl.eval()
+    # A PT2E recipe returns a new GraphModule. Loader-owned streams such as
+    # ResNet's session_images live on the original module, while write_bundle
+    # must still receive the integerized graph. Freeze the loader's session
+    # declaration before replacing the module; its tensor values are the same
+    # inputs whose conversion and golden this worker records below.
+    session = (
+        loader.get_session_spec(mdl, tuple(inputs))
+        if a.materialize_bundle and hasattr(loader, "get_session_spec")
+        else None
+    )
     original_snapshot = {
         "status": "unavailable",
         "stage": "original",
@@ -802,7 +812,6 @@ def main(argv=None) -> int:
 
         # Reuse the actual typed conversion and its prepared ExportedProgram.
         # A second export can reorder lifted constants or sever source lineage.
-        session = loader.get_session_spec(mdl, tuple(inputs)) if hasattr(loader, "get_session_spec") else None
         write_bundle(
             mdl,
             tuple(inputs),
