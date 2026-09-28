@@ -107,11 +107,17 @@ def write(target: str, stated: Mapping[str, Any], out_root: Path, *, declaration
     experiment, selected = _experiment(target, declaration)
     profile = profiles.load_profile(selected.profile, include_holdouts=False, **selected.profile_inputs())
     binding = corpus_spec.derive_binding(experiment, profile.get("datapath", {}))
+    semantics = (profile.get("datapath") or {}).get("numerical_semantics")
     built: dict[str, str] = {}
     refused: dict[str, str] = {}
     for row in stated["entries"]:
         try:
-            built[row["name"]] = str(writer._write_capsule(dict(row["entry"]), binding, Path(out_root)))
+            entry = dict(row["entry"])
+            if semantics is not None:
+                if entry.get("numerical_semantics") not in (None, semantics):
+                    raise ValueError("group entry numerical semantics differ from the selected software spec")
+                entry["numerical_semantics"] = semantics
+            built[row["name"]] = str(writer._write_capsule(entry, binding, Path(out_root)))
         except Exception as error:  # noqa: BLE001 -- reported per capsule, never swallowed
             refused[row["name"]] = f"{type(error).__name__}: {str(error)[:300]}"
     return {"built": built, "refused_by_generator": refused}
@@ -238,6 +244,7 @@ def run_from_args(args: argparse.Namespace) -> int:
     from merlin.common import mlir_query as mq
     from merlin.common.digest import sha256_file
     from merlin.targetgen.rtl.facts import find_facts, target_contract_path
+    from merlin.targetgen.software_spec import software_spec_path_for_recipe
     from merlin.targetgen.target_registry import resolve
     from merlin.xdsl_dialects.lowering import stream_plan
 
@@ -256,6 +263,7 @@ def run_from_args(args: argparse.Namespace) -> int:
     selected_inputs = {
         "capture": Path(args.capture),
         "definition": selected.definition,
+        "software_spec": software_spec_path_for_recipe(selected.recipe),
         "capability_contract": target_contract_path(args.target),
         "provider_contract": resolve(args.target).contract_path,
         "rtl_facts": find_facts(args.target),

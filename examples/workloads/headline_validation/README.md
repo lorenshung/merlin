@@ -85,13 +85,16 @@ Inspect `group_capsules.json`: `accelerator_groups` is the routed denominator;
 `stated` and `unstated` say whether those groups can be expressed in the shared
 capsule vocabulary; `entries` names each distinct program and its source groups.
 `inputs` records SHA-256 of the capture, manifest, experiment definition,
-selected capability contract, OOT provider contract and RTL facts actually
+selected software spec, capability contract, OOT provider contract and RTL facts actually
 read, while `missing_input_receipts` exposes any
 selection that could not be byte-bound. `materialization: not_requested` means
 none of these entries has yet been built or graded. A complete plan is neither
 capsule conformance nor whole-model numerical validation. Omit `--plan-only` to
 materialize diagnostic capsules under a separate output directory; never use
-`--promote` with the held-out validation models.
+`--promote` with the held-out validation models. For an integer contraction,
+inspect `integer_partial_sum_bound` in the built capsule: an `unknown` or
+`may_overflow` mathematical golden does not qualify the selected internal MAC
+width. The bound itself is not full-kernel execution evidence.
 
 ## Lower and inspect every program
 
