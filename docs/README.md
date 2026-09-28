@@ -36,6 +36,7 @@ predates the newest change to the code it documents (see `check_docs_freshness.p
 - [Runtime](reference/runtime.md) — `current`, verified 2026-09-07 · owner: runtime — see also: [zephyr](guides/zephyr.md)
 - [RVV kernel-mining methodology](reference/rvv_kernel_mining_methodology.md) — `current`, verified 2026-07-19 · owner: kernels — see also: [kernel_mining](guides/kernel_mining.md), [dse](guides/dse.md)
 - [Schema reference](reference/schemas.md) — `generated` · owner: tooling
+- [Typed preprocessing correspondence](reference/preprocessing_correspondence.md) — `current`, verified 2026-09-28 · owner: ir — see also: [lowering_pipeline](reference/lowering_pipeline.md), [architecture](reference/architecture.md)
 - [xDSL prototyping plane](reference/xdsl.md) — `current`, verified 2026-07-14 · owner: ir — see also: [dialects](reference/dialects.md), [core_dialects](reference/core_dialects.md)
 
 ## Guides
@@ -129,7 +130,7 @@ predates the newest change to the code it documents (see `check_docs_freshness.p
 - **frontends** — [model2MLIR frontend](guides/model2mlir.md)
 - **gemmini-perf-bench** — [Design: wiring phase 2 — what the performance search can measure, ask, and refuse](design/perf_phase2_wiring.md)
 - **infra** — [Disk under out/ — why it grows and what is safe to reclaim](guides/storage.md)
-- **ir** — [Compiling Triton kernels with Merlin](guides/triton_kernels.md), [Contracts](reference/contracts.md), [Core dialects](reference/core_dialects.md), [Design: Triton as a target-independent kernel frontend](design/triton_frontend.md), [Dialects](reference/dialects.md), [Inspecting whole-model MLIR lowering](guides/model_lowering.md), [Lowering pipeline](reference/lowering_pipeline.md), [xDSL prototyping plane](reference/xdsl.md)
+- **ir** — [Compiling Triton kernels with Merlin](guides/triton_kernels.md), [Contracts](reference/contracts.md), [Core dialects](reference/core_dialects.md), [Design: Triton as a target-independent kernel frontend](design/triton_frontend.md), [Dialects](reference/dialects.md), [Inspecting whole-model MLIR lowering](guides/model_lowering.md), [Lowering pipeline](reference/lowering_pipeline.md), [Typed preprocessing correspondence](reference/preprocessing_correspondence.md), [xDSL prototyping plane](reference/xdsl.md)
 - **kernels** — [Integrations](guides/integrations.md), [Kernel abstraction mining](guides/kernel_mining.md), [RVV kernel-mining methodology](reference/rvv_kernel_mining_methodology.md)
 - **plotting** — [Generate RVV paper figures](guides/paper-figures.md), [Plotting house style](reference/plot_style.md)
 - **runtime** — [Building the pinned LLVM/MLIR toolchain (third_party/llvm-install)](guides/llvm_toolchain.md), [FireSim — whole-model cycle truth on the FPGA](guides/firesim.md), [LLVM integration](guides/llvm_integration.md), [Runtime](reference/runtime.md), [RVV end-to-end — lower a model through model2MLIR and run it on the Merlin runtime](guides/rvv_e2e.md), [Selecting and checking a simulator](guides/simulator_selection.md), [TinyLlama int8 on multicore RVV under Zephyr — end to end](guides/tinyllama_int8_rvv_zephyr.md), [Vision, audio and control workloads on Kodiak — multicore RVV under Zephyr](guides/vision_workloads_rvv_zephyr.md), [Zephyr runtime backend](guides/zephyr.md)
