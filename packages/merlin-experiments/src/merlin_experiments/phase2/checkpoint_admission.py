@@ -41,6 +41,7 @@ from merlin_experiments.phase2 import functional_inputs as FI
 from merlin_experiments.phase2 import gsim_gate as GATE
 from merlin_experiments.phase2 import gsim_workload as WORKLOAD
 from merlin_experiments.phase2 import holdout_corpus as HOLDOUT
+from merlin_experiments.phase2 import measurement_evidence as ME
 from merlin_experiments.phase2 import published_payload as PUBLISHED
 from merlin_experiments.phase2 import telemetry as TEL
 from merlin_experiments.phase2.chia_launch import PYTHON_SOURCE_ENVIRONMENT_KEYS
@@ -594,6 +595,10 @@ def _verify_tuning_certificate(
     family_selection = None if families in (None, "", "all") else families
     selected = capsule_selection is not None or family_selection is not None
     corpus = P2_CORPUS.discover_performance_corpus(target, capsules=capsule_selection, families=family_selection)
+    try:
+        ME.require_supported_oracle_selection(corpus.capsules)
+    except ME.MeasurementEvidenceError as exc:
+        raise ExperimentError(str(exc)) from exc
     # MANY MEMBERS MAY SHARE ONE IDENTITY, exactly as the docstring above describes. This grouped
     # form replaces a 1:1 map that raised on the first repeat -- which contradicted the documented
     # design and refused a launch over it. Measured 2026-09-06: PK00_k16, PM00_m16n16 and
