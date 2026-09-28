@@ -1,4 +1,4 @@
-"""Bound a captured matrix body for a finite, source-identified kernel diagnostic.
+"""Bound a captured float or verified integer matrix body for a finite diagnostic.
 
 The source operation keeps its original geometry and dtype in the record. The
 window is a *new synthetic operation*: projecting its dtype or geometry does
@@ -33,7 +33,7 @@ def derive_kernel_window(
     tile_dim: int,
     projection_types: tuple[str, str, str],
 ) -> dict:
-    """Select one exact traced ``linalg.matmul`` and derive one bounded test window.
+    """Select one exact traced float or integer matrix body and derive one bounded test window.
 
     The selected trace's MLIR hash must match the model bytes. A caller selects a
     source node ID, not a shape; ambiguous nodes fail closed. The K window has
@@ -54,10 +54,35 @@ def derive_kernel_window(
     nodes = [node for node in trace["graphs"]["prepared"]["nodes"] if node.get("id") == source_node_id]
     if len(nodes) != 1:
         raise ValueError(f"source node {source_node_id!r} is absent or ambiguous in the prepared graph")
-    operations = [
+    candidates = [
         op for op in trace["mlir"]["operations"]
-        if op.get("operation") == "linalg.matmul" and source_node_id in op.get("source_node_ids", [])
+        if op.get("operation") in {"linalg.matmul", "linalg.generic"}
+        and source_node_id in op.get("source_node_ids", [])
     ]
+    integer_candidates = [row for row in candidates if row["operation"] == "linalg.generic"]
+    if integer_candidates:
+        from merlin.common import mlir_query as query
+        from merlin.targetgen.application_inventory import exact_int_mm_generic_operation
+
+        parsed = list(query.walk(query.parse(model_path)))
+        verified = []
+        for row in integer_candidates:
+            ordinal = row.get("ordinal")
+            if type(ordinal) is not int or ordinal < 0 or ordinal >= len(parsed):
+                raise ValueError("integer matmul trace ordinal is absent from the captured MLIR")
+            actual = parsed[ordinal]
+            source_ids = actual.attributes.get("prov.source_node_ids")
+            if (
+                source_ids is None
+                or source_node_id not in [getattr(value, "data", None) for value in source_ids]
+                or [str(value.type) for value in actual.operands] != row.get("operand_types")
+                or [str(value.type) for value in actual.results] != row.get("result_types")
+                or not exact_int_mm_generic_operation(actual)
+            ):
+                raise ValueError("traced generic is not the exact integer matmul in captured MLIR")
+            verified.append(row)
+        candidates = [row for row in candidates if row["operation"] == "linalg.matmul"] + verified
+    operations = candidates
     if len(operations) != 1:
         raise ValueError(f"source node {source_node_id!r} has {len(operations)} matrix bodies; expected one")
     op = operations[0]

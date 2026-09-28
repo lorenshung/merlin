@@ -30,6 +30,34 @@ _INT_MM_ITERATORS = [
 _INT_MM_BODY = ["arith.extsi", "arith.extsi", "arith.muli", "arith.addi", "linalg.yield"]
 
 
+def exact_int_mm_generic_operation(op) -> bool:
+    """Recognize the actual signed i8×i8→i32 reduction body, not a generic-op label."""
+    from merlin.common import mlir_query as query
+
+    if query.op_name(op) != "linalg.generic" or query.attr_str(op, "prov.op") != "int_matmul":
+        return False
+    maps = op.properties.get("indexing_maps")
+    iterators = op.properties.get("iterator_types")
+    if (
+        maps is None or [str(value) for value in maps] != _INT_MM_MAPS
+        or iterators is None or [str(value) for value in iterators] != _INT_MM_ITERATORS
+        or [query.op_name(child) for child in op.walk()][1:] != _INT_MM_BODY
+        or len(op.operands) != 3 or len(op.results) != 1
+    ):
+        return False
+    operands = [query.type_shape_dtype(value.type) for value in op.operands]
+    results = [query.type_shape_dtype(value.type) for value in op.results]
+    if [dtype for _shape, dtype in [*operands, *results]] != ["i8", "i8", "i32", "i32"]:
+        return False
+    a, weight, out = (shape for shape, _dtype in operands)
+    result = results[0][0]
+    return (
+        len(a) == len(weight) == len(out) == len(result) == 2
+        and all(dim > 0 for shape in (a, weight, out, result) for dim in shape)
+        and a[1] == weight[0] and out == result == [a[0], weight[1]]
+    )
+
+
 def verify_capture_receipt(path: str | Path) -> dict:
     """Verify the capture's materialized artifact bytes against its adjacent receipt.
 
