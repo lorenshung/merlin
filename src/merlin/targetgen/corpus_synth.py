@@ -533,12 +533,15 @@ def cap_to_affordable(entry: dict, spec_doc: dict, *, extends: str = "") -> str 
     elements = dims["M"] * dims["N"]
     if elements <= int(ceiling):
         return None
-    # THE LOOP TIER IS WHATEVER THIS TARGET HAS, not the name "L2". A target declaring `[L3]` alone has
-    # no cheaper tier to fall back to, and capping onto one it does not declare is refused downstream --
-    # correctly, because "a cap onto a tier that does not exist would silently leave the capsule
-    # demanding everything". Where there is no cheaper tier the honest outcome is to leave the tier
-    # alone and say the capsule is unaffordable, not to invent a tier for it.
-    tiers = [str(t) for t in (spec_doc.get("oracle_tiers") or ())]
+    # Constructed tiers are authoritative. During deterministic Phase 0
+    # derivation no oracle is constructed yet, but the selected recipe still
+    # declares which tiers MAY be used. That declaration can size a candidate;
+    # Phase 1 must establish actual availability before treating a pass as
+    # verified. Never invent a cheaper tier on a target declaring only one.
+    observed = list(spec_doc.get("oracle_tiers") or ())
+    declared = list(spec_doc.get("oracle_tiers_declared") or ())
+    source = "constructed" if observed else "declared"
+    tiers = [str(t) for t in (observed or declared) if str(t) not in ("L0", "L1")]
     loop_tier = tiers[0] if len(tiers) > 1 else None
     if loop_tier is None:
         return (
@@ -557,13 +560,14 @@ def cap_to_affordable(entry: dict, spec_doc: dict, *, extends: str = "") -> str 
     # years apart cannot tell a corpus that got more expensive from a corpus priced on a faster
     # machine -- which is exactly what the mixed fit this ceiling used to come from was hiding.
     on = f" on {aff['engine']}" if aff.get("engine") else ""
+    tier_note = " (declared in the selected recipe; execution must verify availability)" if source == "declared" else ""
     return (
         f"{elements} written output elements exceeds the {int(ceiling)} a {aff.get('budget_s')}s "
-        f"certification budget affords{on} on this target, so it is graded at {loop_tier} and "
+        f"certification budget affords{on} on this target, so it is graded at {loop_tier}{tier_note} and "
         f"rests on {extends!r}"
         if extends
         else f"{elements} written output elements exceeds the {int(ceiling)} a {aff.get('budget_s')}s "
-        f"certification budget affords{on} on this target, so it is graded at {loop_tier}"
+        f"certification budget affords{on} on this target, so it is graded at {loop_tier}{tier_note}"
     )
 
 

@@ -172,11 +172,14 @@ def test_accumulator_output_capacity_is_a_derived_not_model_shaped_capsule():
         "status": "resolved", "capacity_rows": 1024, "tile_edge": 16, "M": 1, "K": 16,
         "N": 1040, "N_tiles": 65, "output_rows_if_resident": 1040,
     }
+    doc["oracle_tiers"] = []  # derivation has not constructed an oracle yet
+    doc["oracle_tiers_declared"] = ["L0", "L1", "L2", "L3"]
     result = CS.synthesize(doc)
     entry = next(e for e in result["capsules"] if e["name"] == "SY_accumulator_output_boundary")
     assert (entry["M"], entry["K"], entry["N"]) == ("tile/16", "tile", "65*tile")
     assert entry["extends"] == "SY_contraction_i8_aligned"
     assert entry["max_oracle_tier"] == "L2"
+    assert "execution must verify availability" in entry["source_reference"]
     assert "tile-schedule" in entry["pass_requirements"]
 
 

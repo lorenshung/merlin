@@ -226,6 +226,23 @@ def derive(
     _validate_capture_recipes(captures, {row["recipe"]["recipe_sha256"] for row in selected_recipes})
     requirement["application_demands"]["sidecar"] = "application-demands.json"
     requirement = intersect_requirement(requirement, selected.software_spec, selected.contract)
+    # The recipe's tier ladder is an authored PLAN, not evidence that an oracle
+    # was constructed. Keep it separate from ``oracle_tiers`` (which remains
+    # observed-only) so synthesis can cap unaffordable members to a declared
+    # functional screen without claiming that screen executed at derivation.
+    recipe_doc = yaml.safe_load(declaration.recipe.read_text(encoding="utf-8")) or {}
+    planned_tiers = (
+        (recipe_doc.get("datapath") or {}).get("required_oracle_tiers") if isinstance(recipe_doc, dict) else None
+    )
+    if planned_tiers is not None and (
+        not isinstance(planned_tiers, list)
+        or any(
+            not isinstance(tier, str) or not tier.startswith("L") or not tier[1:].isdigit()
+            for tier in planned_tiers
+        )
+    ):
+        raise ValueError("selected recipe required_oracle_tiers must be a list of fidelity tiers")
+    requirement["oracle_tiers_declared"] = list(planned_tiers or [])
     requirement["scope"]["performance"] = derive_performance_scope(requirement["scope"], selected.software_spec)
     requirement["derivation"]["phase0_execution"] = {
         "agentic": False,
