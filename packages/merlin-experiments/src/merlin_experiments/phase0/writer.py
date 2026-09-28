@@ -428,27 +428,26 @@ def _roster_captures() -> dict:
     return out
 
 
-def _emit_micro_model_loader(entry: dict, target: str, out_root) -> bool:
+def _emit_micro_model_loader(entry: dict, target: str, out_root, *, capture_dtype: str | None = None) -> bool:
     """Write the derived micro model's loader into its capsule directory, or say why not.
 
-    `micro_model.spec` states what a target's minimal whole-model capsule must contain -- one layer per
-    admitted family, one per family real captures contain that the manifest does not admit, sized to the
-    target's own tile edge, host layers interleaved into the INTERIOR. `emit_pytorch` turns that into the
-    loader. Doing it here rather than in `corpus_synth` is deliberate: the spec needs the captures, which
-    is I/O, and the synthesizer is pure.
+    `micro_model.spec` selects operations whose standalone placement is supported by the selected
+    hardware and software contracts, and puts the others on the host. The run passes its frozen capture
+    and software-spec snapshots, so the loader cannot drift with an ambient target file.
     """
     from merlin.targetgen import micro_model as MM
 
     # Derived-only execution passes exact run-owned snapshots. Pop the internal
     # selector before the entry becomes a public capsule or provenance record.
     captures = entry.pop("_frozen_application_captures", None)
+    software_spec = entry.pop("_frozen_software_spec", None)
     if captures is None:
         captures = _roster_captures()
     if not captures:
         print(f"  [skip] {entry['name']}: no captured model is available to derive the inventory from")
         return False
     try:
-        spec = MM.spec(target, captures)
+        spec = MM.spec(target, captures, software_spec=software_spec, capture_dtype=capture_dtype)
         src = MM.emit_pytorch(spec)
     except MM.UnwritableLayer as exc:
         print(f"  [skip] {entry['name']}: {exc}")
@@ -483,7 +482,9 @@ def _write_capsule_inner(entry, binding, out_root, facts_sha: str = ""):
             return None
         # A DERIVED micro model writes its own loader first. Without this the entry names a loader that
         # does not exist, and the capsule that the composition axis exists to produce cannot be built.
-        if entry.get("micro_model") and not _emit_micro_model_loader(entry, eb.target, out_root):
+        if entry.get("micro_model") and not _emit_micro_model_loader(
+            entry, eb.target, out_root, capture_dtype=entry.get("capture_dtype") or eb.operand_dtype
+        ):
             return None
         return CSRC.write_model_capsule(entry, eb, out_root, source=src)
     # PREFERRED source: a capsule defined in PyTorch (frontend-faithful), lowered to linalg via model2MLIR

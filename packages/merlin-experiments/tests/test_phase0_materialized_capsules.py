@@ -137,17 +137,25 @@ def test_derived_micro_model_reads_only_explicit_frozen_captures(tmp_path, monke
     saved.write_text("module {}\n")
     monkeypatch.setattr(writer, "_roster_captures", lambda: pytest.fail("ambient recaptures were read"))
 
-    def spec(target, captures):
+    def spec(target, captures, *, software_spec, capture_dtype):
         assert target == "fixture"
         assert captures == {"iteration": saved}
+        assert software_spec == {"frozen": "selected"}
+        assert capture_dtype == "fp32"
         return micro_model.MicroModelSpec(target="fixture")
 
     monkeypatch.setattr(micro_model, "spec", spec)
     monkeypatch.setattr(micro_model, "emit_pytorch", lambda spec: "# frozen inventory\n")
-    entry = {"cat": "model", "name": "SY_micro_model", "_frozen_application_captures": {"iteration": saved}}
-    assert writer._emit_micro_model_loader(entry, "fixture", tmp_path / "out")
+    entry = {
+        "cat": "model",
+        "name": "SY_micro_model",
+        "_frozen_application_captures": {"iteration": saved},
+        "_frozen_software_spec": {"frozen": "selected"},
+    }
+    assert writer._emit_micro_model_loader(entry, "fixture", tmp_path / "out", capture_dtype="fp32")
     assert entry["loader"].endswith("capsule.pytorch.py")
     assert "_frozen_application_captures" not in entry
+    assert "_frozen_software_spec" not in entry
 
 
 def test_quantized_capture_recipe_must_match_selected_provider(tmp_path):

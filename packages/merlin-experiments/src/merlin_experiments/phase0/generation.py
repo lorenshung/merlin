@@ -417,7 +417,11 @@ def generate_target(
                 declared = set((evidence.application_inventory or {}).get("applications") or {})
                 if set(captures) != declared:
                     raise ValueError("micro-model capture roster differs from frozen application inventory")
-                e = {**e, "_frozen_application_captures": captures}
+                e = {
+                    **e,
+                    "_frozen_application_captures": captures,
+                    "_frozen_software_spec": copy.deepcopy(evidence.software_spec),
+                }
             e = _with_selected_model_recipe(
                 e,
                 evidence_root=artifact_root if evidence is not None else None,
