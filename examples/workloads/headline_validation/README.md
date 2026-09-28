@@ -147,8 +147,20 @@ synthetic i8 window derived from one source-identified ResNet contraction
 matched scalar arithmetic on Gemmini Spike; that check does not use the
 model's actual operand values or prove RTL-simulator execution.
 
-The TinyLlama proof covers captured prefill and recurrent decode programs, not
-host or accelerator numerical execution. The SmolVLA prefix guard branches
+A separate full-checkpoint TinyLlama W8A8 prefill diagnostic selected and
+integerized all 155 linear contractions. Its fresh original-to-quantized and
+quantized-to-prepared traces have no unresolved call sites, and its output
+matched an independent PT2E integer reference exactly on the seeded eight-token
+input. A read-only Gemmini demand plan states all 155 accelerator groups as five
+distinct candidate programs, with no unstated group; those programs were not
+materialized or executed. The capture still records unverified source closure,
+and the portable Q/DQ diagnostic differs from the selected integer reference.
+Neither the trace nor the demand plan admits a Phase 0 corpus or certifies a
+Phase 1 compiler.
+
+The earlier TinyLlama lowering proof covers captured prefill and recurrent
+decode programs, not compiled host or accelerator numerical execution. The
+W8A8 reference check above is PyTorch-side only. The SmolVLA prefix guard branches
 reached LLVM IR, but their runtime behavior has not been qualified. A complete
 frontend trace proves operation correspondence, not host/device placement,
 supported precision, target code generation or model accuracy.
