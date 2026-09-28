@@ -114,6 +114,12 @@ one unresolved TinyLlama cast changes `i64` to `f32`, and one unresolved SmolVLA
 prefix cast changes `f32` to `bf16`; marking every missing cast as a no-op would
 be incorrect.
 
+In a derived `coverage/operation-accounting.json`, inspect each application's
+`completeness.source_trace.transition_obligations`. It lists the exact uncovered
+call-site IDs, operators and observed input/result dtypes, and checks the
+producer's unresolved-ID roster against the relation edges. This is a diagnostic
+obligation, not an elimination or equivalence proof.
+
 Replay the graph-correspondence check on any selected bundle (or one SmolVLA
 stage) without recapturing or changing its evidence:
 

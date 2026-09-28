@@ -8,6 +8,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from merlin.targetgen.application_inventory import application_demand_inventory
+from merlin.targetgen.frontend_trace import join_frontend_trace
 from merlin.targetgen.operation_accounting import build_operation_accounting
 from merlin.targetgen.software_spec import admit_operation, screen_transfer_contract
 from merlin.targetgen.target_experiment import HostLane, HostLaneMatrix
@@ -156,6 +157,61 @@ def _inputs(path):
 
 
 class Phase0SupportAccounting(unittest.TestCase):
+    def test_unresolved_frontend_transition_exposes_typed_obligations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            inventory, _, _, trace, _ = _inputs(Path(directory) / "model.mlir")
+            selected = inventory["applications"]["iteration"]
+            graph = trace["graphs"]["quantized"]
+            graph["nodes"][0]["results"] = [{"id": "g:quantized:root:n2:v0", "dtype": "int64", "shape": [1]}]
+            graph["nodes"][1].update(
+                target="aten.to.dtype",
+                results=[{"id": "g:quantized:root:n3:v0", "dtype": "float32", "shape": [1]}],
+            )
+            graph["edges"] = [
+                {
+                    "producer_node_id": "g:quantized:root:n2",
+                    "consumer_node_id": "g:quantized:root:n3",
+                    "producer_value_id": "g:quantized:root:n2:v0",
+                    "dtype": "int64",
+                    "shape": [1],
+                }
+            ]
+            graph["sha256"] = _sha({key: value for key, value in graph.items() if key != "sha256"})
+            transition = trace["transformations"][1]
+            transition["relations"] = transition["relations"][:1]
+            transition.update(
+                status="diagnostic",
+                unresolved_source_ids=["g:quantized:root:n3"],
+                unresolved_destination_ids=["g:prepared:root:n3"],
+            )
+            trace.update(status="diagnostic", blockers=["quantized -> prepared correspondence incomplete"])
+            joined = join_frontend_trace(trace, selected["operation_graph"], capture_sha256=selected["capture_sha256"])
+            self.assertEqual(joined["status"], "partial")
+            unresolved = joined["transition_obligations"][1]
+            self.assertEqual(unresolved["producer_unresolved_ids_status"], "matched")
+            self.assertEqual(
+                unresolved["unresolved_source_calls"],
+                [
+                    {
+                        "node_id": "g:quantized:root:n3",
+                        "op": "call_function",
+                        "target": "aten.to.dtype",
+                        "input_dtypes": ["int64"],
+                        "result_dtypes": ["float32"],
+                    }
+                ],
+            )
+            self.assertEqual(unresolved["unresolved_destination_calls"][0]["node_id"], "g:prepared:root:n3")
+            self.assertNotIn("eliminated", json.dumps(unresolved))
+
+            # A producer's claimed uncovered set cannot contradict the relation roster.
+            transition["unresolved_source_ids"] = []
+            mismatch = join_frontend_trace(
+                trace, selected["operation_graph"], capture_sha256=selected["capture_sha256"]
+            )
+            self.assertEqual(mismatch["transition_obligations"][1]["producer_unresolved_ids_status"], "mismatch")
+            self.assertTrue(any("producer unresolved call IDs disagree" in error for error in mismatch["errors"]))
+
     def test_dynamic_ssa_extent_is_explicitly_unproved(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "model.mlir"
