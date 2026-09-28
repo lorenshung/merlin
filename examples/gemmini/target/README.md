@@ -181,6 +181,12 @@ python examples/gemmini/target/probe_native_kernel.py \
   --output-root out/artifacts/probes/gemmini-kernel-1
 ```
 
+When refreshed, independently validated facts are stored outside the selected
+source bundle, pass `--facts-evidence /generated/gemmini/facts-1`. The probe
+checks that the facts validation binds the selected source hash and that the
+Phase 0 manifest binds both facts and source/core HW bytes. Without the option,
+the existing flat source bundle layout remains supported.
+
 The output root must resolve beneath this checkout's ignored `out/` tree and
 must not overlap either input bundle. `receipt.json` binds the selected source,
 corpus manifest, probe, support files, tool binaries, and per-case program,

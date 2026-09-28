@@ -146,13 +146,84 @@ def phase0_manifest_path(corpus: Path) -> Path:
     return existing[0]
 
 
-def run(*, corpus: Path, source_evidence: Path, output_root: Path, audit_existing: bool = False) -> None:
+def checked_source_binding(
+    phase0_manifest: dict, source_evidence: Path, facts_evidence: Path | None = None
+) -> dict:
+    """Bind selected RTL, current facts, and their validation before executing a kernel."""
+    facts_root = facts_evidence if facts_evidence is not None else source_evidence
+    selection_path = source_evidence / "source-selection.json"
+    core_hw_path = source_evidence / "core.hw.mlir"
+    facts_path = facts_root / "facts.json"
+    validation_path = facts_root / "validation.json"
+    selection = json.loads(selection_path.read_text(encoding="utf-8"))
+    validation = json.loads(validation_path.read_text(encoding="utf-8"))
+    selection_sha = sha(selection_path)
+    facts_sha = sha(facts_path)
+    core_hw_sha = sha(core_hw_path)
+    if selection["hierarchy_correspondence"]["status"] != "verified" or validation["status"] != "verified":
+        raise RuntimeError("selected source record is not structurally verified")
+    if phase0_manifest["raw_facts_sha256"] != facts_sha or not any(
+        artifact.get("sha256") == selection_sha for artifact in phase0_manifest["artifacts"].values()
+    ):
+        raise RuntimeError("generated corpus does not bind selected Gemmini source/facts bytes")
+    if facts_evidence is not None:
+        if validation.get("facts_sha256") != facts_sha or validation.get("source_selection_sha256") != selection_sha:
+            raise RuntimeError("facts validation does not bind selected Gemmini source/facts bytes")
+        if selection["sources"]["core_hw"]["sha256"] != core_hw_sha:
+            raise RuntimeError("selected core HW bytes differ from source selection")
+        for role, expected in (
+            ("rtl-facts", facts_sha),
+            ("rtl-source:source_bundle_path", selection_sha),
+            ("rtl-source:core_hw_path", core_hw_sha),
+        ):
+            recorded = [row["sha256"] for row in phase0_manifest["sources"] if row["role"] == role]
+            if recorded != [expected]:
+                raise RuntimeError(f"generated corpus does not bind {role} bytes")
+    return {
+        "selection": {"path": str(selection_path), "sha256": selection_sha},
+        "facts": {"path": str(facts_path), "sha256": facts_sha},
+        "core_hw": {"path": str(core_hw_path), "sha256": core_hw_sha},
+        "validation": {"path": str(validation_path), "sha256": sha(validation_path)},
+        "validation_status": validation["status"],
+        "hierarchy_correspondence_status": selection["hierarchy_correspondence"]["status"],
+    }
+
+
+def checked_declared_inputs(phase0_manifest: dict, software_spec: Path, support_contract: Path) -> dict:
+    """Require selected software and OOT contract bytes in the frozen Phase 0 source list."""
+    binding = {}
+    for name, role, path in (
+        ("software_spec", "software-spec", software_spec),
+        ("support_contract", "support-source", support_contract),
+    ):
+        actual_sha = sha(path)
+        recorded = [
+            row["sha256"]
+            for row in phase0_manifest["sources"]
+            if row["role"] == role and row["source"] == str(path)
+        ]
+        if recorded != [actual_sha]:
+            raise RuntimeError(f"generated corpus does not bind {name} bytes")
+        binding[name] = {"path": str(path), "sha256": actual_sha, "manifest_role": role}
+    return binding
+
+
+def run(
+    *,
+    corpus: Path,
+    source_evidence: Path,
+    output_root: Path,
+    facts_evidence: Path | None = None,
+    audit_existing: bool = False,
+) -> None:
     corpus = corpus.resolve()
     source_evidence = source_evidence.resolve()
+    facts_evidence = facts_evidence.resolve() if facts_evidence is not None else None
     output_root = checked_output_root(output_root)
     if any(
         output_root.is_relative_to(input_root) or input_root.is_relative_to(output_root)
-        for input_root in (corpus, source_evidence)
+        for input_root in (corpus, source_evidence, facts_evidence)
+        if input_root is not None
     ):
         raise ValueError("--output-root must not overlap an input evidence bundle")
     corpus_isa = corpus / "isa"
@@ -161,17 +232,18 @@ def run(*, corpus: Path, source_evidence: Path, output_root: Path, audit_existin
     backend = get_backend("gemmini")
     if not backend.available("spike"):
         raise RuntimeError("selected native Gemmini Spike unavailable")
-    source_selection = json.loads((source_evidence / "source-selection.json").read_text())
-    validation = json.loads((source_evidence / "validation.json").read_text())
     manifest_path = phase0_manifest_path(corpus)
     phase0_manifest = json.loads(manifest_path.read_text())
-    source_selection_sha = sha(source_evidence / "source-selection.json")
-    if source_selection["hierarchy_correspondence"]["status"] != "verified" or validation["status"] != "verified":
-        raise RuntimeError("selected source record is not structurally verified")
-    if phase0_manifest["raw_facts_sha256"] != sha(source_evidence / "facts.json") or not any(
-        artifact.get("sha256") == source_selection_sha for artifact in phase0_manifest["artifacts"].values()
-    ):
-        raise RuntimeError("generated corpus does not bind selected Gemmini source/facts bytes")
+    selected_source = checked_source_binding(phase0_manifest, source_evidence, facts_evidence)
+    declared_inputs = (
+        checked_declared_inputs(
+            phase0_manifest,
+            REPO / "examples/gemmini/target/software-spec.yaml",
+            support / "contracts/target_contract.yaml",
+        )
+        if facts_evidence is not None
+        else None
+    )
     objdump = chipyard / ".conda-env/riscv-tools/bin/riscv64-unknown-elf-objdump"
     tool_files = {
         "spike": backend.spike_path(),
@@ -187,6 +259,7 @@ def run(*, corpus: Path, source_evidence: Path, output_root: Path, audit_existin
         "evidence_roots": {
             "corpus": str(corpus),
             "source_evidence": str(source_evidence),
+            **({"facts_evidence": str(facts_evidence)} if facts_evidence is not None else {}),
             "output_root": str(output_root),
         },
         "phase0_evidence_manifest": {
@@ -194,23 +267,16 @@ def run(*, corpus: Path, source_evidence: Path, output_root: Path, audit_existin
             "sha256": sha(manifest_path),
             "status": phase0_manifest["status"],
         },
-        "selected_source": {
-            "selection": {
-                "path": str(source_evidence / "source-selection.json"),
-                "sha256": source_selection_sha,
-            },
-            "facts": {"path": str(source_evidence / "facts.json"), "sha256": sha(source_evidence / "facts.json")},
-            "core_hw": {"path": str(source_evidence / "core.hw.mlir"), "sha256": sha(source_evidence / "core.hw.mlir")},
-            "validation_status": validation["status"],
-            "hierarchy_correspondence_status": source_selection["hierarchy_correspondence"]["status"],
-        },
+        "selected_source": selected_source,
         "software_spec": {
             "path": str(REPO / "examples/gemmini/target/software-spec.yaml"),
             "sha256": sha(REPO / "examples/gemmini/target/software-spec.yaml"),
+            **({"phase0_source_role": "software-spec"} if declared_inputs is not None else {}),
         },
         "support": {
             "path": str(support),
             "contract_sha256": sha(support / "contracts/target_contract.yaml"),
+            **({"contract_phase0_source_role": "support-source"} if declared_inputs is not None else {}),
             "backend_sha256": sha(support / "backend/gemmini.py"),
             "codegen_sha256": sha(support / "backend/gemmini_codegen.py"),
         },
@@ -362,6 +428,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--corpus", required=True, type=Path, help="generated Phase 0 corpus root containing isa/")
     parser.add_argument("--source-evidence", required=True, type=Path, help="selected source evidence bundle root")
+    parser.add_argument(
+        "--facts-evidence", type=Path, help="separate verified facts/validation root bound to the selected source"
+    )
     parser.add_argument("--output-root", required=True, type=Path, help="ignored checkout out/ evidence directory")
     parser.add_argument(
         "--audit-existing",
@@ -373,5 +442,6 @@ if __name__ == "__main__":
         corpus=args.corpus,
         source_evidence=args.source_evidence,
         output_root=args.output_root,
+        facts_evidence=args.facts_evidence,
         audit_existing=args.audit_existing,
     )
