@@ -425,6 +425,7 @@ def test_the_generic_quantizer_realises_tensor_and_channel_integer_capture(tmp_p
     for granularity in ("tensor", "channel"):
         body = QR.derive(_facet()).to_dict()
         body["weight"]["granularity"] = granularity
+        body["software_numerical_engine"] = "integer_reference"
         body["recipe_sha256"] = QR.digest(body)
         recipe = tmp_path / f"{granularity}.json"
         recipe.write_text(json.dumps(body), encoding="utf-8")
@@ -453,9 +454,12 @@ def test_the_generic_quantizer_realises_tensor_and_channel_integer_capture(tmp_p
         assert result.returncode == 0, result.stdout[-2000:] + result.stderr[-2000:]
         assert meta["integerization_receipt"]["quantized_contractions_remaining"] == 0
         assert meta["integerization_receipt"]["golden_agreement"]["status"] == "passed"
+        assert meta["integerization_receipt"]["golden_agreement"]["reference"] == "pt2e_integer"
+        assert meta["integerization_receipt"]["portable_agreement"]["status"] == "passed"
         assert meta["integerization_receipt"]["exported_integer_mm_count"] == 2
         assert meta["determinism"]["deterministic_algorithms"] == "required"
-        assert meta["recipe_sha256"] == body["recipe_sha256"] and meta["scheme"] is None
+        assert meta["recipe_sha256"] == body["recipe_sha256"]
+        assert meta["scheme"] == "int8_static_act_int8_weight"
         assert meta["quantization_stats"]["annotated_contractions"] == 2
         assert meta["recipe_agreement"]["samples"] >= 1
         seen[granularity] = (out / "linalg.mlir").read_text()
