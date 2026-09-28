@@ -134,6 +134,19 @@ and numerical execution as separate checks.
 | TinyLlama, full 22-layer prefill/decode session | Both programs: 0 opaque, complete producer traces, complete exact-byte Merlin joins and verified materialized receipts | Both programs reached LLVM IR through `merlin lower`; each compact audit completed 10 named stages and bound the weights and manifest sidecars |
 | SmolVLA, full prefix/flow/action session | All three programs: 0 opaque, complete producer traces, complete exact-byte Merlin joins and verified materialized receipts | All three reached LLVM IR from the current captured bytes; each compact audit completed 10 stages and bound both sidecars. Prefix retains three runtime shape assertions. |
 
+A separate ResNet50 W8A8 diagnostic capture selected the SW spec's independent
+integer reference. All 54 PT2E-selected contractions were integerized (53
+convolutions and one linear); its reference comparison was exact, while the
+portable Q/DQ comparison differed. Its frontend trace was complete. Against
+the selected Gemmini contract and RTL facts, the held-out capture stated all
+54 accelerator groups and materialized their 21 distinct capsule programs
+without generator refusals. This tests vocabulary and capsule generation, not
+corpus admission: the capture's source closure is still unverified, and no
+whole-model OOT command buffer or numerical execution is claimed. A bounded
+synthetic i8 window derived from one source-identified ResNet contraction
+matched scalar arithmetic on Gemmini Spike; that check does not use the
+model's actual operand values or prove RTL-simulator execution.
+
 The TinyLlama proof covers captured prefill and recurrent decode programs, not
 host or accelerator numerical execution. The SmolVLA prefix guard branches
 reached LLVM IR, but their runtime behavior has not been qualified. A complete

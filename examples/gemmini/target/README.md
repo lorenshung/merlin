@@ -250,7 +250,10 @@ byte-for-byte equality of generated core RTL, Verilator C++, and the executable.
 capability contract. It refuses a stale trace or ambiguous operation. The
 generated capsule records the original operation ordinal, operand types,
 model/trace hashes and full matrix geometry, then derives a small integer
-window from the RTL mesh edge. For example, TinyLlama's `k_proj` body
+window from the RTL mesh edge. It accepts a traced `linalg.matmul`, or a
+traced `linalg.generic` only when the exact captured MLIR has the signed
+i8×i8→i32 matmul maps, iterators, provenance and reduction body. Other generic
+loops are not treated as contractions. For example, TinyLlama's `k_proj` body
 `g:prepared:root:n280` in the 8-token prefill capture has source geometry
 8×2048×256; the selected 16-wide mesh gives an 8×32×16 diagnostic window.
 No dimensions are copied into the generator.
@@ -278,3 +281,14 @@ geometry only: FP32/BF16 model captures do not establish an int8 model path.
 An actual quantized capture and integerization evidence are required before
 claiming the model invokes a corresponding int8 contraction, though they are
 not required to check this synthetic Gemmini kernel's arithmetic.
+
+For an integerized capture, inspect `frontend-trace.json`'s
+`mlir.operations` for an `linalg.generic` with a prepared-graph source ID and
+`tensor<...xi8>` operands. Pass that ID to `--source-node-id`; the probe checks
+the parsed operation, not just those trace labels. For the selected ResNet50
+W8A8 diagnostic capture, `g:prepared:root:n361` names a 12544×147×64
+body; the 16-wide RTL mesh derives a 16×19×16 synthetic window. A native
+Spike run of that window matched scalar arithmetic, but neither the model's
+own values nor a whole-model accelerator route were executed. The selected
+local Chipyard build did not expose Verilator or GSIM, so this is a functional
+Spike check, not an RTL-simulator certificate.
