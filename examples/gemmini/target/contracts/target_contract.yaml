@@ -140,7 +140,10 @@ compute_units:
     kind: systolic
     dtypes: [int8]
     ops: [matmul]
-    scaling: per_channel
+    # The elaborated command register carries one bounded acc_scale value per
+    # store command. The derived readout facet therefore admits tensor-wide
+    # scaling, not an independent scale for each output channel.
+    scaling: per_tensor
     requant: {ref: gemmini.accumulator_scale}
     # Semantic-family capability (ARR denominator): a GEMM accelerator — int8 contraction on the mesh
     # (matmul + conv2d via im2col), fused relu/acc-scale/bias on readout,
