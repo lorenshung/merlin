@@ -53,7 +53,7 @@ def _integer_reference_bound(entry: dict, cap: dict) -> dict:
         return {"status": "unknown", "reason": "no selected full-operation internal-width bound policy"}
     operation = cap["operation"]
     op, attrs = operation["op"], operation.get("attributes") or {}
-    if op not in {"matmul", "linear", "matmul_bias", "residual_seam", "conv2d", "scope_chain"}:
+    if op not in {"matmul", "linear", "matmul_bias", "residual_seam", "conv2d", "scope_chain", "attention_qk"}:
         return {"status": "not_applicable", "reason": "this writer path is not a single integer contraction"}
     if op == "scope_chain":
         families = attrs.get("scope_families")
@@ -69,10 +69,15 @@ def _integer_reference_bound(entry: dict, cap: dict) -> dict:
     def name(role, declared):
         return attrs.get(declared) or next((row["name"] for row in cap["inputs"] if row.get("role") == role), None)
 
-    lhs_name, rhs_name = name("input", "ifm" if op == "conv2d" else "lhs"), name("weight", "weight")
+    if op == "attention_qk":
+        lhs_name, rhs_name = attrs.get("q"), attrs.get("k")
+    else:
+        lhs_name, rhs_name = name("input", "ifm" if op == "conv2d" else "lhs"), name("weight", "weight")
     if lhs_name not in leaves or rhs_name not in leaves:
         raise ValueError("integer contraction bound requires concrete lhs and weight operands")
     lhs, rhs = leaves[lhs_name], leaves[rhs_name]
+    if op == "attention_qk" and rhs.shape[-1] != lhs.shape[-1]:
+        raise ValueError("attention score reduction extents differ between query and key")
     if op == "scope_chain" and rhs.shape[-1] != lhs.shape[-1]:
         raise ValueError("integer scope chain reduction extents differ between lhs and transposed weight")
     reduction_extent = rhs.shape[0] if op == "conv2d" else lhs.shape[-1]

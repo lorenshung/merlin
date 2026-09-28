@@ -198,6 +198,28 @@ def test_integer_golden_bound_uses_concrete_reduction_and_internal_width():
         _integer_reference_bound({"numerical_semantics": semantics}, capsule)
 
 
+def test_rectangular_attention_score_uses_the_selected_internal_width():
+    semantics = {
+        "internal_arithmetic": {
+            "full_operation_overflow_policy": "bounded_exact_requires_each_partial_sum",
+            "mac_result_bits": 20,
+            "signed_operand_bits": 8,
+        }
+    }
+    capsule = {
+        "operation": {"op": "attention_qk", "attributes": {"q": "Q", "k": "K"}},
+        "inputs": [
+            {"name": "Q", "role": "input", "shape": [16, 32], "dtype": "i8"},
+            {"name": "K", "role": "input", "shape": [1040, 32], "dtype": "i8"},
+        ],
+    }
+    proof = _integer_reference_bound({"numerical_semantics": semantics}, capsule)
+    assert proof["status"] == "proven_safe" and proof["reduction_extent"] == 32
+    capsule["inputs"][1]["shape"] = [1040, 31]
+    with pytest.raises(ValueError, match="reduction extents differ"):
+        _integer_reference_bound({"numerical_semantics": semantics}, capsule)
+
+
 def test_scope_chain_bounds_its_embedded_integer_contraction():
     semantics = {
         "internal_arithmetic": {
