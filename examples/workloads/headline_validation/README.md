@@ -67,6 +67,32 @@ Inspect each stage's
 complete PyTorch-to-MLIR operation correspondence. A `diagnostic` trace leaves
 that lineage obligation open even if later LLVM lowering succeeds.
 
+## Inspect target demand without admitting the held-out models
+
+For each captured program, inspect the groups the selected target would route to
+an accelerator. This writes a small derivation report without creating goldens,
+running a compiler, or adding validation shapes to the Phase 0 corpus:
+
+```sh
+merlin experiment corpus groups \
+  --target "$TARGET" --definition "$DEFINITION" \
+  --capture "$CAPTURE/model.mlir" \
+  --manifest "$CAPTURE/weights.safetensors.manifest.json" \
+  --model "$MODEL" --out "$REPORT" --plan-only
+```
+
+Inspect `group_capsules.json`: `accelerator_groups` is the routed denominator;
+`stated` and `unstated` say whether those groups can be expressed in the shared
+capsule vocabulary; `entries` names each distinct program and its source groups.
+`inputs` records SHA-256 of the capture, manifest, experiment definition,
+selected capability contract, OOT provider contract and RTL facts actually
+read, while `missing_input_receipts` exposes any
+selection that could not be byte-bound. `materialization: not_requested` means
+none of these entries has yet been built or graded. A complete plan is neither
+capsule conformance nor whole-model numerical validation. Omit `--plan-only` to
+materialize diagnostic capsules under a separate output directory; never use
+`--promote` with the held-out validation models.
+
 ## Lower and inspect every program
 
 `merlin lower` consumes one complete `model.mlir` at a time. Run it with the
