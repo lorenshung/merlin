@@ -10,7 +10,7 @@ from merlin_experiments.corpus.coverage import selected_cohort_coverage
 from merlin_experiments.phase0 import coverage_commitment as CC
 from merlin_experiments.phase0 import writer
 from merlin_experiments.phase0.evidence import _materialize_evidence
-from merlin_experiments.phase0.requirements import _materialized_iteration_capsules
+from merlin_experiments.phase0.requirements import _materialized_iteration_capsules, _validate_capture_recipes
 from merlin_experiments.phase0.writer import _integer_reference_bound, _write_capsule
 
 from merlin.targetgen import capsule_source as source
@@ -148,6 +148,18 @@ def test_derived_micro_model_reads_only_explicit_frozen_captures(tmp_path, monke
     assert writer._emit_micro_model_loader(entry, "fixture", tmp_path / "out")
     assert entry["loader"].endswith("capsule.pytorch.py")
     assert "_frozen_application_captures" not in entry
+
+
+def test_quantized_capture_recipe_must_match_selected_provider(tmp_path):
+    bundle = tmp_path / "capture"
+    _bundle(bundle)
+    meta = json.loads((bundle / "meta.json").read_text())
+    meta["quantization_stats"] = {"recipe_sha256": "a" * 64}
+    (bundle / "meta.json").write_text(json.dumps(meta))
+    captures = {"iteration": bundle / "model.mlir"}
+    with pytest.raises(ValueError, match="iteration.*different quantization recipe"):
+        _validate_capture_recipes(captures, {"b" * 64})
+    _validate_capture_recipes(captures, {"a" * 64})
 
 
 def test_integer_golden_bound_uses_concrete_reduction_and_internal_width():

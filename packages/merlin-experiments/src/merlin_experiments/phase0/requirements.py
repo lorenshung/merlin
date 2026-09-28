@@ -110,6 +110,23 @@ def capture_selections(selections: list[str]) -> dict[str, Path]:
     return result
 
 
+def _validate_capture_recipes(captures: dict[str, Path], selected_recipe_hashes: set[str]) -> None:
+    """A realized quantized graph must use a recipe this provider actually derived."""
+    for label, path in sorted(captures.items()):
+        meta = json.loads(path.with_name("meta.json").read_bytes())
+        if not isinstance(meta, dict):
+            raise ValueError(f"{label}: capture metadata must be a mapping")
+        stats = meta.get("quantization_stats") or {}
+        if not isinstance(stats, dict):
+            raise ValueError(f"{label}: quantization statistics must be a mapping")
+        actual = stats.get("recipe_sha256")
+        if actual is not None and actual not in selected_recipe_hashes:
+            raise ValueError(
+                f"{label}: capture used a different quantization recipe from the selected provider; "
+                "regenerate the capture from its selected Phase 0 recipe"
+            )
+
+
 def derive(
     definition: str | Path,
     captures: dict[str, Path],
@@ -180,6 +197,19 @@ def derive(
     digest = hashlib.sha256(json.dumps(full, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     if digest != requirement["application_demands"]["full_inventory_sha256"]:
         raise ValueError("capture bytes changed while deriving requirements")
+    from merlin.targetgen.quantization_spec import build_quantization_contract, capture_recipe_candidates
+
+    quantization = build_quantization_contract(
+        selected.software_spec,
+        {
+            "contract": selected.contract,
+            "quantization_candidates": selected.quantization_snapshot.get("quantization_candidates", []),
+            "readout_facets": selected.readout_facets,
+            "readout_numerics": selected.readout_numerics,
+        },
+    )
+    selected_recipes = capture_recipe_candidates(selected.software_spec, quantization)
+    _validate_capture_recipes(captures, {row["recipe"]["recipe_sha256"] for row in selected_recipes})
     requirement["application_demands"]["sidecar"] = "application-demands.json"
     requirement = intersect_requirement(requirement, selected.software_spec, selected.contract)
     requirement["derivation"]["phase0_execution"] = {
