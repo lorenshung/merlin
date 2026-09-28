@@ -161,6 +161,14 @@ and the portable Q/DQ diagnostic differs from the selected integer reference.
 Neither the trace nor the demand plan admits a Phase 0 corpus or certifies a
 Phase 1 compiler.
 
+For a bounded device check, prepared node `g:prepared:root:n283` in that
+TinyLlama capture is an i8×i8→i32 contraction with source geometry 8×2048×256.
+The Gemmini probe derived an 8×32×16 window from the selected mesh, compiled one
+ELF, and matched independent scalar arithmetic on both Spike and Verilator.
+Its operands are synthetic; this does not execute the model's operand values,
+the full contraction, or the complete frontend-to-device route. The generated
+probe and numerical receipt live under the local `out/artifacts/probes/` tree.
+
 The earlier TinyLlama lowering proof covers captured prefill and recurrent
 decode programs, not compiled host or accelerator numerical execution. The
 W8A8 reference check above is PyTorch-side only. The SmolVLA prefix guard branches
