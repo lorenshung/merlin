@@ -191,6 +191,15 @@ per-tensor symmetric boundary quantization and rescales each integer result. Tha
 is not a TorchAO-derived model quantization recipe. A successful Spike kernel
 trace can therefore coexist with a failed whole-model comparison; inspect the
 actual error and do not widen tolerances merely to make it pass.
+For an integer iteration check, first recapture the small
+[`coverage_mlp`](../phase0/README.md#4-derive-requirements-and-candidate-capsules)
+with the generated Phase 0 recipe and `--materialize-bundle`. Confirm
+`meta.json` records integerized contractions, calibrated quantization parameters,
+and which layers stayed on the host, then evaluate that *same* captured graph and
+golden here. A matching host result does not establish accelerator execution:
+read `mesh_ran`, `mesh_fell_back`, `mesh_unavailable`, and `target_executed` together.
+A worker that denies bubblewrap's NETLINK setup cannot reach the compiler or
+simulator; Merlin reports those layers as unmeasured, not backend fallbacks.
 Full validation also needs original-source tracing, the full pretrained
 checkpoint, attributed real inputs and the correct complete application session.
 The evaluator does not download weights, derive capsules or change compiler code.
