@@ -38,12 +38,12 @@ sweeps:
         negative_control: fixed_M_and_N_across_all_K_points
       acceptance:
         schema_version: 2
-        analyzer: perf_pk_claim.analyze_pk_claim/v3
+        analyzer: perf_pk_claim.analyze_pk_claim/v4
         fit:
           form: affine
           method: ordinary_least_squares_all_L3_replicates
           independent_variable: K
-          dependent_metric: gsim_L3_cycles
+          dependent_metric: $target_oracle_metric:L3
         cohort:
           operation: matmul
           fixed_shape_axes:
@@ -66,12 +66,12 @@ sweeps:
           - r000
           - r001
         evidence:
-          correctness_simulator: spike
+          correctness_simulator: $target_oracle:L2
           correctness_tier: L2
-          timing_simulator: gsim
+          timing_simulator: $target_oracle:L3
           timing_tier: L3
-          spike_cycles_citable: false
-          timing_oracle_kind: rtl_gsim
+          correctness_cycles_citable: false
+          timing_oracle_kind: $target_oracle_kind:L3
           timing_fidelity: elaborated_rtl
           required_identity_sha256_fields:
           - simulator_binary_sha256
@@ -201,9 +201,9 @@ sweeps:
           declared_constant: null
           predicate: a_difference_counts_iff_it_exceeds_the_pair_s_own_replicate_dispersion
         evidence:
-          timing_simulator: gsim
+          timing_simulator: $target_oracle:L3
           timing_tier: L3
-          correctness_simulator: spike
+          correctness_simulator: $target_oracle:L2
           correctness_tier: L2
   axes:
     M:
@@ -285,9 +285,9 @@ sweeps:
           declared_constant: null
           predicate: a_difference_counts_iff_it_exceeds_the_pair_s_own_replicate_dispersion
         evidence:
-          timing_simulator: gsim
+          timing_simulator: $target_oracle:L3
           timing_tier: L3
-          correctness_simulator: spike
+          correctness_simulator: $target_oracle:L2
           correctness_tier: L2
   variants:
   - matmuls:
@@ -447,9 +447,9 @@ sweeps:
           declared_constant: null
           predicate: a_difference_counts_iff_it_exceeds_the_pair_s_own_replicate_dispersion
         evidence:
-          timing_simulator: gsim
+          timing_simulator: $target_oracle:L3
           timing_tier: L3
-          correctness_simulator: spike
+          correctness_simulator: $target_oracle:L2
           correctness_tier: L2
   variants:
   - matmuls:
@@ -549,9 +549,9 @@ sweeps:
           declared_constant: null
           predicate: a_difference_counts_iff_it_exceeds_the_pair_s_own_replicate_dispersion
         evidence:
-          timing_simulator: gsim
+          timing_simulator: $target_oracle:L3
           timing_tier: L3
-          correctness_simulator: spike
+          correctness_simulator: $target_oracle:L2
           correctness_tier: L2
   variants:
   - op: matmul
@@ -642,12 +642,12 @@ sweeps:
           an unbounded sweep
       acceptance:
         schema_version: 1
-        analyzer: perf_pr_claim.analyze_pr_claim/v1
+        analyzer: perf_pr_claim.analyze_pr_claim/v2
         fit:
           form: affine_per_residency_band
           method: ordinary_least_squares_over_the_replicate_agreed_cycles_of_one_band
           independent_variable: K
-          dependent_metric: verilator_L3_cycles
+          dependent_metric: $target_oracle_metric:L3
           comparands: the_fitted_rate_of_one_band_against_the_fitted_rate_of_another
         cohort:
           operation: matmul
@@ -669,11 +669,17 @@ sweeps:
             is read from; one replicate leaves it UNDETERMINABLE, and assuming it zero on a deterministic
             simulator is the assumption this contract refuses
         evidence:
-          correctness_simulator: spike
+          correctness_simulator: $target_oracle:L2
           correctness_tier: L2
-          timing_simulator: verilator
+          timing_simulator: $target_oracle:L3
           timing_tier: L3
-          spike_cycles_citable: false
+          correctness_cycles_citable: false
+          timing_oracle_kind: $target_oracle_kind:L3
+          timing_fidelity: elaborated_rtl
+          required_identity_sha256_fields:
+          - simulator_binary_sha256
+          - elaborated_firrtl_sha256
+          - program_elf_sha256
           overlap_instrument: target_derived_combination_counters
           overlap_required_per_member: true
         noise_band:
@@ -819,9 +825,9 @@ sweeps:
           declared_constant: null
           predicate: a_difference_counts_iff_it_exceeds_the_pair_s_own_replicate_dispersion
         evidence:
-          timing_simulator: gsim
+          timing_simulator: $target_oracle:L3
           timing_tier: L3
-          correctness_simulator: spike
+          correctness_simulator: $target_oracle:L2
           correctness_tier: L2
   variants:
   - jobs: 1
@@ -1014,7 +1020,7 @@ sweeps:
             kind: output_elements
             lhs: A0
             weight: W
-          dependent_metric: gsim_L3_cycles
+          dependent_metric: $target_oracle_metric:L3
         cohort:
           operation: matmul
           fixed_fields:
@@ -1029,11 +1035,11 @@ sweeps:
           - r000
           - r001
         evidence:
-          correctness_simulator: spike
+          correctness_simulator: $target_oracle:L2
           correctness_tier: L2
-          timing_simulator: gsim
+          timing_simulator: $target_oracle:L3
           timing_tier: L3
-          spike_cycles_citable: false
+          correctness_cycles_citable: false
         thresholds:
           slope_min_exclusive: 0.0
           r_squared_min_inclusive: 0.95
@@ -1157,7 +1163,7 @@ sweeps:
             kind: input_dim
             input: IFM
             axis: 3
-          dependent_metric: gsim_L3_cycles
+          dependent_metric: $target_oracle_metric:L3
         cohort:
           operation: conv2d
           fixed_fields:
@@ -1174,11 +1180,11 @@ sweeps:
           - r000
           - r001
         evidence:
-          correctness_simulator: spike
+          correctness_simulator: $target_oracle:L2
           correctness_tier: L2
-          timing_simulator: gsim
+          timing_simulator: $target_oracle:L3
           timing_tier: L3
-          spike_cycles_citable: false
+          correctness_cycles_citable: false
         thresholds:
           slope_min_exclusive: 0.0
           r_squared_min_inclusive: 0.95
@@ -1194,10 +1200,8 @@ sweeps:
     - 4*tile
   name: '{id}{i:02d}_c{ci}'
   source_reference: 'window-reuse amplification: convolution at a fixed 3x3 window and 8x8 image over
-    four input channel depths. Conv is the family with headroom on this machine -- measured at 3.3% of
-    the achievable ceiling against deep-K matmul''s ~100% -- so it is where a schedule change has room
-    to show. Channel depth is varied and everything else held fixed, so the fitted rate is cycles per
-    unit of contraction depth and nothing else moves under it.'
+    four input channel depths. Channel depth is varied and everything else held fixed, so the fitted
+    rate is cycles per unit of contraction depth without assuming any target-specific headroom.'
 # Host-island placement is measured as one whole program under one target counter. Both members use
 # the same standard linalg program shape, operands, contractions, and saturating requant epilogue; only
 # the island member carries the explicit host-required scalar map. Software execution support is gated
@@ -1395,7 +1399,7 @@ sweeps:
           correctness_tier: L2
           timing_simulator: $target_oracle:L3
           timing_tier: L3
-          spike_cycles_citable: false
+          correctness_cycles_citable: false
         thresholds:
           slope_min_exclusive: 0.0
           r_squared_min_inclusive: 0.95
@@ -1455,7 +1459,7 @@ blocked_unimplemented:
         form: affine
         method: ordinary_least_squares_all_L3_replicates
         independent_variable: K
-        dependent_metric: verilator_L3_cycles
+        dependent_metric: $target_oracle_metric:L3
       cohort:
         operation: matmul
         fixed_shape_axes:
@@ -1475,11 +1479,11 @@ blocked_unimplemented:
         - r000
         - r001
       evidence:
-        correctness_simulator: spike
+        correctness_simulator: $target_oracle:L2
         correctness_tier: L2
-        timing_simulator: verilator
+        timing_simulator: $target_oracle:L3
         timing_tier: L3
-        spike_cycles_citable: false
+        correctness_cycles_citable: false
       thresholds:
         slope_cycles_per_K_element_min_exclusive: 0.0
         r_squared_min_inclusive: 0.995
