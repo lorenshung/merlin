@@ -2,7 +2,6 @@
 
 import argparse
 import json
-import re
 from pathlib import Path
 
 import yaml
@@ -25,10 +24,22 @@ def _register_bank_geometry(text: str, check: dict) -> tuple[str, dict]:
         if len(words) == 2 and words[0] in {"in", "out"}:
             ports[words[1].lstrip("%")] = {"direction": words[0], "type": typ}
     prefix = check["output_prefix"]
-    outputs = {name: value for name, value in ports.items() if re.fullmatch(re.escape(prefix) + r"[0-9]+", name)}
+    outputs = {
+        name: value for name, value in ports.items()
+        if name.startswith(prefix)
+        and bool(name[len(prefix) :])
+        and all("0" <= char <= "9" for char in name[len(prefix) :])
+    }
     expected_count = check["expected_entries"]
     index_type = check["expected_index_type"]
-    if not isinstance(expected_count, int) or not re.fullmatch(r"i[1-9][0-9]*", index_type):
+    if (
+        not isinstance(expected_count, int)
+        or not isinstance(index_type, str)
+        or not index_type.startswith("i")
+        or not index_type[1:]
+        or not "1" <= index_type[1] <= "9"
+        or not all("0" <= char <= "9" for char in index_type[1:])
+    ):
         raise ValueError("invalid register-bank audit expectation")
     if expected_count != 1 << int(index_type[1:]):
         raise ValueError("register-bank entry count must match index width")

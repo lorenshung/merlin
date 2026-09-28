@@ -9,10 +9,22 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from pathlib import Path
 
-_MATRIX = re.compile(r"tensor<([1-9][0-9]*)x([1-9][0-9]*)x([a-z][a-z0-9]*)>")
+
+def _ascii_decimal(value: str, *, positive: bool = False) -> bool:
+    return bool(value) and (not positive or "1" <= value[0] <= "9") and all(
+        "0" <= char <= "9" for char in value
+    )
+
+
+def _scalar_type(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and "a" <= value[0] <= "z"
+        and all("a" <= char <= "z" or "0" <= char <= "9" for char in value[1:])
+    )
 
 
 def _sha(path: Path) -> str:
@@ -20,10 +32,17 @@ def _sha(path: Path) -> str:
 
 
 def _matrix_type(spelling: str) -> tuple[int, int, str]:
-    match = _MATRIX.fullmatch(spelling)
-    if match is None:
+    if not spelling.startswith("tensor<") or not spelling.endswith(">"):
         raise ValueError(f"expected a static rank-2 tensor, got {spelling!r}")
-    return int(match[1]), int(match[2]), match[3]
+    parts = spelling[len("tensor<") : -1].split("x")
+    if (
+        len(parts) != 3
+        or not _ascii_decimal(parts[0], positive=True)
+        or not _ascii_decimal(parts[1], positive=True)
+        or not _scalar_type(parts[2])
+    ):
+        raise ValueError(f"expected a static rank-2 tensor, got {spelling!r}")
+    return int(parts[0]), int(parts[1]), parts[2]
 
 
 def derive_kernel_window(
@@ -42,7 +61,7 @@ def derive_kernel_window(
     """
     if type(tile_dim) is not int or tile_dim < 1:
         raise ValueError("tile_dim must be a positive integer derived from selected hardware facts")
-    if len(projection_types) != 3 or any(not re.fullmatch(r"[a-z][a-z0-9]*", dtype) for dtype in projection_types):
+    if len(projection_types) != 3 or any(not _scalar_type(dtype) for dtype in projection_types):
         raise ValueError("projection_types must name three MLIR scalar types")
     capture = Path(capture_dir)
     model_path = capture / "model.mlir"

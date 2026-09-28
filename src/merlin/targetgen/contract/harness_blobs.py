@@ -8,16 +8,25 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from pathlib import Path
 from typing import Mapping
 
-_SYMBOL = re.compile(r"[A-Za-z_][A-Za-z_0-9]*\Z")
+
+def _symbol_name(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and ("A" <= value[0] <= "Z" or "a" <= value[0] <= "z" or value[0] == "_")
+        and all(
+            "A" <= char <= "Z" or "a" <= char <= "z" or "0" <= char <= "9" or char == "_"
+            for char in value[1:]
+        )
+    )
 
 
 def render_blob_asm(symbol: str, payload_name: str, *, align: int, elems: int) -> str:
     """Define an aligned C-visible symbol from exact binary input bytes."""
-    if not isinstance(symbol, str) or not _SYMBOL.fullmatch(symbol):
+    if not _symbol_name(symbol):
         raise ValueError(f"invalid harness blob symbol {symbol!r}")
     if (not isinstance(payload_name, str) or Path(payload_name).name != payload_name
             or not payload_name.endswith(".bin")):
