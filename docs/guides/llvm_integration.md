@@ -14,6 +14,13 @@ This page is about **modifying** LLVM for a target. To *build* the LLVM/MLIR 23 
 on (`third_party/llvm-install`, which no clone ships), see
 [Building the pinned LLVM/MLIR toolchain](llvm_toolchain.md).
 
+For the existing model → MLIR LLVM dialect → LLVM IR → object/link route, start
+with [Extending the compiler stack](extending_the_stack.md#understand-the-two-lowering-routes)
+and [Inspecting whole-model lowering](model_lowering.md). MLIR LLVM dialect is
+not assembly, and native host lowering is not accelerator execution. Scheduling
+and delay extensions must define a consumer that preserves and honors their
+constraints; see [the timing boundary](extending_the_stack.md#extend-scheduling-and-delay-handling).
+
 LLVM-project modifications are **optional and late-stage**. The MVP requires no LLVM backend
 patches. TargetGen emits an `llvm_extension_plan.yaml` first; real changes come only when a
 target needs genuine instruction/register/codegen support.

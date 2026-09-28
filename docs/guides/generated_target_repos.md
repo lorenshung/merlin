@@ -3,7 +3,7 @@ title: Generated target repos
 kind: guide
 status: current
 owner: targetgen
-last_verified: 2026-08-28
+last_verified: 2026-09-27
 related: [targetgen, adding_a_target, reproducibility, target_resolution]
 code_refs: [src/merlin/targetgen/publish.py, src/merlin/targetgen/oot_runner.py, merlin/targets/publish.yaml]
 ---
@@ -53,8 +53,9 @@ tool is still `<target>-opt`.
 
 ## Publishing
 
-Certification comes first. A certify run records its verdict into its own run dir; carry it onto the
-package, then promote, then publish:
+Certification comes first. A certify run records its verdict and package-input identity in its
+own run directory. Record certification and promotion **alongside** the immutable compiler
+payload, then publish:
 
 ```sh
 # 1. certify — one run per rung. --simulator verilator is the cycle-accurate oracle;
@@ -66,7 +67,7 @@ for r in $P/rungs/*.interface.mlir; do
     --simulator verilator
 done
 
-# 2. record the verdicts onto the package manifest
+# 2. record producer-bound verdicts alongside the immutable package payload
 .venv/bin/python -m merlin.targetgen.publish record-cert \
   --target gemmini --champion <package_id> \
   --results out/runs/gemmini_contract/runs/gemmini-contract/vcert_*/results.yaml
@@ -76,11 +77,10 @@ done
 .venv/bin/python -m merlin.targetgen.publish publish --target gemmini --dry-run
 ```
 
-Step 2 is not bookkeeping. Without it nothing can ever be promoted: `promote` writes
-`publication.certification` only when the gate passes, and the gate reads that same field. Until
-`record_certification` existed, the loop was unsatisfiable, so a package carrying a real out-of-tree
-dialect could never be published and the only eligible champion was a hand baseline with no dialect
-— whose published repo builds a stub. If a clone builds a stub `<target>-opt`, this is why.
+Step 2 is not bookkeeping. A passing status alone is insufficient: each result must bind its
+producer input identity to the exact immutable package bytes. Older embedded certification
+fields do not grant new publication authority. The separate record preserves the original
+manifest and makes a changed compiler a different package identity.
 
 ### Pushing
 

@@ -1,7 +1,7 @@
 ---
 title: "Design note: teaching a compiler to fit real models, and measuring an agent against a code writer"
 kind: design
-status: current
+status: superseded
 owner: core
 last_verified: 2026-09-03
 related: [target_publishing, performance_levers_per_archetype]
@@ -10,14 +10,16 @@ code_refs: [merlin/experiments/agent_recipe_select_v0/scripts/census_workloads.p
 
 # Teaching a compiler to fit real models, and measuring an agent against a code writer
 
-This note is the running account of one experiment: give an LLM a *frozen, RTL-certified* Gemmini
+This is a historical account of one experiment: give an LLM a *frozen, RTL-certified* Gemmini
 backend and a small set of compiler knobs, point it at the kernels ResNet-50 and TinyLlama actually
 need, and compare it against an agent that writes Gemmini C by hand (AutoComp). It is written as a
 narrative because most of what it has produced so far is not the headline number — it is a sequence
 of measurements that contradicted what we believed when we started, and each contradiction changed
 the instrument.
 
-Point-in-time results live in `out/artifacts/recipe-select/`; this note keeps the reasoning.
+Point-in-time results were generated under `out/artifacts/recipe-select/`; those local run
+artifacts are not distributed with a fresh Merlin clone. The certified backend is published
+separately, and these historical measurements do not re-qualify current source or workloads.
 
 ## The setup, and the two limits it inherited
 
@@ -214,11 +216,11 @@ structure is the same failure the repo's no-regex rule exists to prevent.
 
 ## The failure that would have been invisible
 
-The AutoComp arm tiers two models: planning on `gpt-5.6-sol` at high effort, implementation on
-`gpt-5.3-codex-spark` at low. Spark hit its own usage limit. codex reports that on **stdout**, as:
+The AutoComp arm uses separate planning and implementation models. During this run, the
+implementation provider hit a usage limit and reported it as a structured error on **stdout**:
 
 ```json
-{"type":"error","message":"You've hit your usage limit for GPT-5.3-Codex-Spark. ..."}
+{"type":"error","message":"Usage limit reached"}
 ```
 
 Our parser reads only `item.completed` and `turn.completed`, so that line was dropped on the floor.
@@ -233,11 +235,10 @@ plausible-looking measurement.* Fixes required before that arm is rerun: parse `
 `turn.failed`, record the reason and rc on the usage row, and fail loudly rather than emitting empty
 candidates.
 
-A related earlier error is worth recording because it removed an entire experimental axis: the API
-answers *any* unknown model slug with "The 'x' model is not supported when using Codex with a ChatGPT
-account". Reading that as an entitlement statement led to the conclusion that the seat served only
-one model. It serves seven; the probed slugs were simply misspelled. Confirmed by sending an invented
-control name and getting the identical message.
+A related selection error removed an experimental axis: an unsupported-model response was read as
+an account entitlement restriction when the requested model identifiers were misspelled. A known
+invalid control identifier produced the same response. Model-selection probes must distinguish
+identifier validation from account permissions.
 
 ## Isolation, because a programme is not one run
 

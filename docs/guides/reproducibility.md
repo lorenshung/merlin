@@ -75,14 +75,18 @@ you need to customize a stage.
 ```bash
 # RVV — compile a whole captured model, build, run on the K1, verify vs golden (auto-captures if absent):
 merlin-compile --workload bitvla --dtype int8 --target rvv --run k1        # --run none = compile only
-# Gemmini — build the OOT backend package + run a capsule on spike, three-way gated:
-merlin-compile --target gemmini --workload A2_single_tile_matmul --run spike
+# OOT target — select the released corpus descriptor explicitly; no checkout capsule fallback:
+merlin-compile --target gemmini --workload A2_single_tile_matmul --run spike \
+  --corpus-descriptor /configured/out/artifacts/protocols/REVIEW/payload/experiment/target_experiment.yaml \
+  --package /absolute/path/to/oot-package
 ```
 
 `--target rvv` treats the workload as a captured MODEL (`lower_model_file → build_k1_binary →
 run_on_k1 → gate`); `--target gemmini` treats it as a capsule run through an OOT package
-(`oot_runner` build + certify) — the accelerator runs kernels, not whole VLA models. `--run`
-∈ `none|host|k1|spike|verilator` (default rvv→k1, gemmini→spike); `--no-capture` fails with the capture
+(`oot_runner` build + certify) — the accelerator runs kernels, not whole VLA models. The descriptor
+selects the target-specific capsule cohort; this standalone command does not verify a corpus review
+seal. Use the reviewed Phase 1 handoff for that admission. `--run` ∈
+`none|host|k1|spike|verilator` (default rvv→k1, gemmini→spike); `--no-capture` fails with the capture
 command instead of auto-capturing; `--json` for machine output. Fail-closed: a missing toolchain/board/
 sim reports a clear `status`, never a fake pass. Prereqs: [getting_started](getting_started.md) (the RVV
 run needs the K1 board or spike; the Gemmini run needs the sim toolchain). This CLI only orchestrates

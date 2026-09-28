@@ -1,14 +1,19 @@
 ---
-title: Running the certified gemmini OOT backend on a fresh machine
+title: Historical Gemmini OOT backend qualification
 kind: guide
-status: current
+status: superseded
 owner: compiler
-last_verified: 2026-09-06
+last_verified: 2026-09-27
 related: [whole_model_on_accelerator, reproducing_whole_model_on_rtl, gemmini_experiment, reproducibility, adding_a_target]
 code_refs: [packages/merlin-experiments/src/merlin/targetgen/capsule_grade.py, packages/merlin-experiments/src/merlin/targetgen/capsule_runner.py, src/merlin/targetgen/rtl_engine_policy.py, src/merlin/targetgen/contract/compile.py, src/merlin/targetgen/publish.py, src/merlin/targetgen/oot_runner.py, packages/merlin-experiments/src/merlin/targetgen/_capsule_bundle_worker.py, src/merlin/perf/hw_counters.py, merlin/contract/hardware_pins.yaml]
 ---
 
-# Running the certified gemmini OOT backend on a fresh machine
+# Historical Gemmini OOT backend qualification
+
+This page records a historical compiler and cohort. It is not a current verified-execution
+runbook: the old embedded certification does not satisfy today's producer-bound input-identity
+gate. The legacy compiler payload is no longer tracked inside Merlin. For the current phase
+inputs and qualification boundaries, start at the [Gemmini example](../../examples/gemmini/README.md).
 
 There is a gemmini out-of-tree MLIR backend that certified **33/33 capsules at L3** (elaborated RTL) on
 2026-09-02. This page is what a second person needs to re-run it somewhere else and read the result
@@ -162,18 +167,12 @@ and it has not been graded. See [Grading the excluded capstones](#grading-the-ex
 
 ## The package
 
-Tracked at `out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/`, with per-file checksums:
+The historical Merlin-local payload is not distributed in a fresh clone. Obtain the
+independently consumable compiler from the OOT branch below and verify the revision you intend
+to use. The branch's `.merlin/` records are historical provenance, not renewed certification of
+today's inputs. It does not ship the Merlin-local `SHA256SUMS` file.
 
-```bash
-cd out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0
-sha256sum -c SHA256SUMS --quiet && echo OK
-```
-
-`PROVENANCE.md` beside it records the run, the candidate, and what the verdict covers. ~1,100 lines of
-original code; the rest is vendored `xdsl`/`typing_extensions`/`immutabledict`/`ordered_set`, kept as-is
-so the directory *is* the graded artifact.
-
-Its contract is one tool with four commands (`manifest.yaml`):
+Its contract is one tool with four commands (`.merlin/manifest.yaml`):
 
 | command | argv |
 |---|---|
@@ -190,12 +189,12 @@ Merlin, which consumes it.
 ```bash
 # 1. the driver
 git clone git@github.com:ucb-bar/merlin.git && cd merlin
-git checkout feat/target-generalization
 cp .env.example .env                                  # then point MERLIN_EXT_* at your toolchain/sims
 ln -s <llvm-23-install> third_party/llvm-install       # see the trap below -- do this first
 
-# 2. the certified backend
-merlin-target-fetch gemmini --champion stable/gemmini_xdsl_rtl_v0
+# 2. the historical backend (this older branch predates the target-fetch root contract)
+git clone --branch stable/gemmini_xdsl_rtl_v0 \
+  https://github.com/ucb-bar/gemmini-mlir.git /absolute/path/to/gemmini-mlir
 ```
 
 The backend is published at **`ucb-bar/gemmini-mlir`**, branch **`stable/gemmini_xdsl_rtl_v0`**, tag
@@ -241,8 +240,9 @@ published package:   476 source files
   digest 815d3885d82b6820 == 815d3885d82b6820
 ```
 
-Not a rebuild and not a repackage. Verify your own clone with `sha256sum -c SHA256SUMS` against the
-copy tracked in Merlin at `out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/`.
+Not a rebuild and not a repackage in the historical comparison. A new run must bind the
+published branch's exact commit and its current input closure independently; there is no
+tracked Merlin copy to compare against.
 
 ## Prerequisites
 
@@ -271,15 +271,19 @@ copy tracked in Merlin at `out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0/`.
   same-ELF it reports **0 to +2 cycles per kernel invocation, ≤ +9 per capsule window** against
   Verilator. Fine for a functional verdict; **never mix the two in one comparison.**
 
-## Grade it
+## Historical grading invocation
+
+The command below documents how the archived score was produced. It is **not** a setup recipe
+for a fresh checkout: that run used a separately prepared capsule corpus and toolchain. For a
+current run, install both Merlin distributions in an isolated environment and use the Phase 0
+cohort and frozen experiment recorded for that run.
 
 ```bash
 export TMPDIR=/path/with/space                       # not /tmp; whole-model builds need room
-export PYTHONPATH=$PWD/merlin/python                 # pin it — a shared venv can shadow the tree
 export MERLIN_GEMMINI_GSIM_EMU=/path/to/emu_gemmini_gsim   # or leave unset for Verilator
 
 .venv/bin/python -m merlin.targetgen.capsule_grade \
-    --package out/artifacts/targets/gemmini/gemmini_xdsl_rtl_v0 \
+    --package /absolute/path/to/gemmini-mlir \
     --target gemmini --labels public \
     --runs-root out/runs/gemmini/verify --score out/runs/gemmini/verify/score.json \
     --timeout 21600 --workers 6
@@ -457,7 +461,8 @@ obtained.
   `ln -s <llvm-23-install> third_party/llvm-install`, then confirm `third_party/llvm-install/bin/clang-23`
   resolves. With it in place the same package graded 17/17 on the same commit.
 - **A shared venv can shadow the tree.** `import merlin` may resolve to a *different* worktree than
-  your `cwd`. Always pin `PYTHONPATH`, and check `merlin.__file__` if a result surprises you.
+  your `cwd`. Use an isolated environment with the intended Merlin packages installed, and check
+  `merlin.__file__` if a result surprises you. The former `merlin/python` path is obsolete.
 - **`TMPDIR=/tmp` is not enough space** for whole-model builds, and an empty `TMPDIR` fails oddly.
 - **Hardware provenance.** A cycle count without the RTL revision it came from is not citable. Check
   `gemmini_rtl` in `hardware_pins.yaml` by content, not by branch name — branches move and forks share

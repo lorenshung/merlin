@@ -82,6 +82,7 @@ module docstring. **Do not edit by hand** — run the generator (it's `--check`e
 | `merlin.xdsl_dialects.targets` | Generic xDSL target-dialect construction. Target plans and implementations live in examples/OOT. |
 | `merlin_dse` | Separately installable DSE distribution; stable implementations use merlin.*. |
 | `merlin_experiments` | Experiment definitions over Merlin's existing phase engines. |
+| `merlin_experiments.capture_execution` | Fresh, isolated capture execution and replay verification. |
 | `merlin_experiments.corpus` | Cross-phase corpus preparation, evaluated admission and operator-reviewed releases. |
 | `merlin_experiments.execution` | Explicitly managed host execution; importing this package starts no service. |
 | `merlin_experiments.phase0` | Host-owned capsule derivation; profiles remain explicit external inputs. |

@@ -1,0 +1,82 @@
+---
+title: Capture execution attestation boundary
+kind: design
+status: current
+owner: targetgen
+last_verified: 2026-09-27
+related: [phase0_specification, model2mlir, reproducibility]
+code_refs:
+  - packages/merlin-experiments/src/merlin_experiments/phase0/capture_execution_attestation.py
+  - packages/merlin-experiments/src/merlin_experiments/capture_execution/sealed_static.py
+  - packages/merlin-experiments/src/merlin_experiments/capture_execution/python_preflight.py
+  - src/merlin/targetgen/application_inventory.py
+---
+
+# Capture execution attestation boundary
+
+A model2MLIR `m2m.capture-receipt.v1` verifies the materialized bundle members against
+recorded byte digests. Its `source_closure_verified: false` is a distinct result: the
+receipt does not prove which loader, importer, framework, checkpoint, dependency or
+ambient file the capture process read. A later digest of today's checkout cannot
+prove what an earlier process executed. Existing captures must retain that status.
+
+Merlin reserves `merlin.capture_execution_attestation.v1` for this separate claim.
+The diagnostic implementation inventories explicitly selected source bytes and reports
+the adjacent materialized receipt. It always writes
+`status: diagnostic_only`, `fresh_execution: false`, and
+`source_closure_verified: false` to a new evidence path outside the capture and
+source trees. Its Phase 0 admission function accepts no verified issuer yet. Editing
+these fields or copying an old receipt cannot make a capture admissible.
+
+The separate `merlin.sealed-static-capture.v1` issuer exercises the isolation boundary
+for a self-contained static ELF payload. It copies complete selected source and
+runtime trees into a private run, rejects links and dynamic executables, and runs
+with bubblewrap namespaces and a cleared environment. Only the snapshots are
+visible read-only; only a new capture directory is writable. Its replay verifier
+checks exact file and directory membership, issuer and bubblewrap bytes, reconstructs
+the fixed sandbox policy, and reruns the payload to demand byte-identical output.
+Its receipt says `local_sealed_static_execution`; replay returns
+`replay_verified_static`. Both keep the generic `source_closure_verified: false`,
+because unsigned JSON and replay cannot prove the historical issuing process.
+The observed scope is `static_elf_process_only`. This is not a model2MLIR or
+PyTorch capture attestation and is not wired into Phase 0 admission.
+
+A future verified issuer must perform a *fresh* capture in a new output directory.
+It must privately snapshot the complete loader/importer source, Python runtime and
+packages, checkpoint and preprocessing inputs; bind their membership and bytes;
+execute only those snapshots with the source and runtime read-only, no network, and
+no ambient checkout, home or cache; then verify the source and output bytes again.
+The issuer must bind the exact command, environment, isolation controls, fresh run
+identity, capture artifact inventory, and materialized receipt into its result.
+Only then may a reviewed Python/model issuer be added to the Phase 0 admission gate.
+
+Bubblewrap being installed is insufficient: an ordinary Python virtual environment
+may read dependencies and caches outside the declared source selection. Without
+a sealed runtime/checkpoint root for the selected model capture, the diagnostic
+path must not claim verified source closure. Phase 0's existing
+coverage commitment remains blocked on `source_closure_verified: false` until a new
+capture and independent verifier are ready.
+
+For a proposed Python capture, run the separate preflight with explicit paths:
+
+```sh
+python -m merlin_experiments.capture_execution.python_preflight \
+  --worker /selected/merlin/_m2m_capture_worker.py \
+  --loader /selected/model2MLIR/workloads/model/loader.py \
+  --m2m-root /selected/model2MLIR \
+  --python /selected/model2MLIR/.venv/bin/python \
+  --output /generated/private-evidence/model-preflight.json
+```
+
+The write-once result inventories the selected interpreter and its symlink target,
+venv startup hooks and editable imports, direct source files, loader environment
+reads, and directly declared Python/Torch ELF dependencies. Supply exact data paths with
+`--data-path` and declared loader settings with `--env NAME=VALUE`; the tool does
+not inherit ambient environment variables. It always exits 2 with
+`blocked_unsealed_python_capture`, `fresh_execution: false`, and
+`source_closure_verified: false`. Missing paths and unselected loader inputs are
+remediation data, not a closure proof. A feasible next build on a spacious
+filesystem is a private, immutable snapshot of the selected venv, CPython base,
+editable sources, OS/CUDA libraries, model inputs/checkpoints and capture worker,
+then a fresh empty-root, network-disabled bubblewrap run. None of the current
+materialized captures may be upgraded by this preflight.

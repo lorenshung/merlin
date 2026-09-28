@@ -223,7 +223,7 @@ $Q/bin/firesim-queue runworkload-full \
     --priority 5 --project my-project --timeout 900
 ```
 
-The final promoted ResNet-50 measurement on the Agustin host pins the raw client path to
+The final promoted ResNet-50 measurement pins the raw client path to
 `$MERLIN_EXT_FIRESIM_QUEUE/bin/firesim-queue`. Submit exactly one `runworkload-full` job. The
 ELF performs its unmeasured warm invocation and its one measured invocation internally; submitting
 separate warm and measured queue jobs would discard the warmed process state. The final receipt must

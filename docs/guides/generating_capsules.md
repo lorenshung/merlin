@@ -3,8 +3,8 @@ title: Generating capsules for a target
 kind: guide
 status: current
 owner: targetgen
-last_verified: 2026-09-21
-related: [adding_a_target, gemmini_experiment, capsule_bench, integrations]
+last_verified: 2026-09-26
+related: [adding_a_target, gemmini_experiment, capsule_bench, integrations, phase0_specification]
 code_refs:
   - experiments/catalog.yaml
   - packages/merlin-experiments/src/merlin_experiments/phase0/__main__.py
@@ -24,15 +24,22 @@ alone does not make them available. See [integrations](integrations.md).
 
 The [examples index](../../examples/README.md) maps targets to definitions and phase inputs.
 [Gemmini's Phase 0 example](../../examples/gemmini/phase0/README.md) is one concrete starting point.
+The matching [Atlas example](../../examples/atlas/phase0/README.md) follows the
+same input/artifact structure. Read [the SW-spec guide](phase0_specification.md)
+to separate authored behavior from extracted RTL and workload policy.
 
 | Input or output | Owner |
 | --- | --- |
 | Public target recipe | `examples/<target>/phase0/recipe.yaml` |
+| Software semantics and operation signatures | Explicit `target/software-spec.yaml`; selected by recipe and experiment |
+| Required hardware evidence | Explicit `target/hardware.yaml`, selected OOT support and exact extracted facts |
 | Target descriptor and input selection | The example's `target/` directory and `experiment.yaml` |
 | Shared performance-family policy | `experiments/templates/phase0/performance.yaml` |
 | Synthesis/SMT profiles | Explicit definition inputs; retained locations vary during migration |
 | Hidden profiles, holdouts and answers | Host-private inputs, never public examples or candidate grants |
 | Generated capsules and generation receipts | `<run-dir>/phase0/capsules/` |
+| Raw facts and exact consumer views | `<run-dir>/phase0/hardware/` and `evidence-manifest.json` |
+| Selected SW inputs and generation gaps | `<run-dir>/phase0/software/` and `coverage/generation.json` |
 | Prepared grading release and review evidence | A fresh operator-selected artifact directory |
 
 The installed generator lives in `merlin_experiments.phase0`; shared derivation primitives
@@ -58,6 +65,15 @@ recipe, shared performance template and optional profiles. Explicit recipe mode 
 discover sibling profiles; frozen runs bind optional input absence as well as present bytes.
 The adapter supplies the output destination, never the descriptor's source corpus.
 
+Both target examples select `evidence_mode: diagnostic`. Pass
+`--phase0-rtl-facts /absolute/generated/facts.json` to select exact extraction bytes
+and inspect `evidence-manifest.json` for the actual raw/derived consumer inputs.
+Unresolved evidence cannot be promoted by selecting verified mode. A changed
+software spec or recipe requires new synthesis commitments; legacy references
+remain diagnostic, while genuine digest-bound mismatches refuse generation.
+Regenerate and explicitly select the new requirement/synthesis pair, never edit
+old evidence to match new input bytes.
+
 For standalone invocation, `python -m merlin_experiments.phase0 --help` describes the
 installed generator's explicit inputs, including required `--output-root`. Do not use the
 legacy native command to regenerate every target.
@@ -80,10 +96,19 @@ merlin experiment corpus prepare /configured/out/runs/gemmini/phase0/example-1 \
 merlin experiment corpus inspect /configured/out/artifacts/protocols/gemmini-review-1
 ```
 
-Preparation combines the descriptor-selected source pool with receipt-declared generated
-members, retains classified hand-authored members, and stages selected resources. It refuses
-unresolved provenance, removals, collisions and admission-count changes; it does not edit
-the source corpus or silently approve a different grading population.
+The default preparation mode is historical: it combines the descriptor-selected source pool
+with receipt-declared generated members and retains classified hand-authored members. For a
+generated-only public release, select `--generated-only` explicitly. That mode copies public
+capsules only from the selected, immutable Phase 0 run output; it never falls back to the
+descriptor's legacy capsule tree. If Phase 0 emitted no hidden cohort, provide a separate
+operator-owned `--private-baseline /absolute/hidden-category` or preparation refuses the
+empty hidden grade. A `--retirements` review is incompatible with generated-only mode.
+Neither mode edits the source corpus or silently approves a different grading population.
+Generated-only preparation still requires nonempty native admission and an operator seal;
+it does not assert numerical, model-wide, or hardware correctness.
+For a sealed Phase 1 run, select the released descriptor and use its complete descriptor
+cohort. A raw capsule-root override is diagnostic only and cannot inherit the review,
+even when its files are under the reviewed release.
 
 Inspection reports aggregate counts and commitments. Detailed diagnostics and review records
 are owner-only under `private/`. Keep hidden capsules, goldens and private weights out of public

@@ -30,8 +30,9 @@ merlin lower /path/to/capture/model.mlir \
 
 The output directory must not exist, including as a symlink. Use a fresh directory
 for every invocation; failures preserve any completed intermediate evidence.
-The example uses the text preprocessing route for a model2MLIR capture; other
-input formats may use the default xDSL route.
+The default xDSL preprocessing route serializes generic MLIR at the native-tool
+seam, preserving source attributes and avoiding custom-printer grammar skew.
+`--textual` is a compatibility route, not a requirement for whole-model capture.
 Successful output is JSON with `ll_path`, optional native outputs, lowering statistics,
 and `audit_index`: the exact index for this invocation, not a guessed latest directory.
 Configure the upstream MLIR toolchain as described in [LLVM integration](llvm_integration.md).

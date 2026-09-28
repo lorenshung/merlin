@@ -3,190 +3,169 @@ title: model2MLIR frontend
 kind: guide
 status: current
 owner: frontends
-last_verified: 2026-07-22
-related: [getting_started, lowering_pipeline, reproducibility, rvv_e2e]
-code_refs: [src/merlin/frontends]
+last_verified: 2026-09-27
+related: [getting_started, extending_the_stack, phase0_specification, model_lowering, reproducibility]
+code_refs: [src/merlin/frontends, src/merlin/capture/bundle.py, src/merlin/targetgen/_m2m_capture_worker.py, src/merlin/targetgen/frontend_trace.py]
 ---
 
-# model2MLIR frontend (smolVLA)
+# model2MLIR frontend
 
-[model2MLIR](https://github.com/ucb-bar/model2MLIR) (`m2m`) converts PyTorch models to
-**standard linalg-on-tensors MLIR** (`tensor`/`linalg`/`arith`/`scf`/`func`, weights
-externalized to safetensors, `prov.*` provenance on every op). Merlin treats it as a
-frontend: `src/merlin/frontends/` parses its artifacts and lifts matmul
-facts into the contract → schedule → interface → target → runtime pipeline.
+Merlin consumes model2MLIR's typed linalg-on-tensors MLIR and external tensor
+payloads. Framework capture and importer/decomposition extensions belong in the
+selected model2MLIR environment. Target encoding and drivers belong in OOT support
+packages. Parsing a capture or inventorying its matmuls is not proof of complete
+model lowering, numerical agreement, or accelerator execution.
 
-## Prerequisites
+For the complete model → kernel → MLIR → machine-code distinction, start with
+[Extending the compiler stack](extending_the_stack.md#understand-the-two-lowering-routes).
+For the independent iteration loaders and held-out TinyLlama, SmolVLA and ResNet50
+policy, see [Iteration workloads and headline validation](../../examples/workloads/README.md).
 
-**Shared base:** complete the base install + `.env` setup in [Getting started](getting_started.md)
-first (`uv sync --all-extras`, `cp .env.example .env`).
+## Configure an isolated capture environment
 
-**Workflow-specific prerequisites:**
+Complete [Getting started](getting_started.md), then select the external
+model2MLIR checkout with `MERLIN_M2M_DIR` and its interpreter with
+`MERLIN_M2M_VENV` where the integration requires it. Keep machine-specific paths
+in local configuration. PyTorch, TorchAO and model-specific dependencies live in
+that capture environment; Merlin's artifact consumers do not need to import them.
 
-- **Required — a model2MLIR checkout**: clone
-  [`ucb-bar/model2MLIR`](https://github.com/ucb-bar/model2MLIR) and point `MERLIN_M2M_DIR` (and
-  `MODEL2MLIR_DIR`) at it; the compile path runs inside `MERLIN_M2M_VENV` (defaults to
-  `$MERLIN_M2M_DIR/.venv`). The setup script below creates both m2m's torch/torch-mlir venv and a
-  dedicated capture venv.
-- **Required for capturing (not for ingesting committed bundles)** — the model's own weights/repo,
-  reachable from the capture venv. A full smolVLA capture is RAM-heavy (~80 GB peak); the committed
-  bundle artifacts ingest without re-capture.
-- Confirm the `llvm_m2m_toolchain` capability with `check_repro_env.py`.
+`build_tools/scripts/setup_model2mlir.sh` is an optional setup helper for an
+existing checkout. It accepts `MODEL2MLIR_DIR` and `SMOLVLA_CAPTURE_DIR` and can
+install framework/nightly dependencies. Inspect its choices before running it;
+record the resulting repository revisions and package versions for each capture.
+An installed dependency or a filename alone does not establish a reproducible
+toolchain or a supported model precision.
 
-## Setup
+Weights and model loaders are separate inputs. Select the intended checkpoint,
+revision, representative input source and preprocessing explicitly. Loading a
+randomly initialized architecture, truncating a graph, or capturing one denoising
+step must be recorded as that scope, not complete checkpoint/session validation.
 
-```bash
-build_tools/scripts/setup_model2mlir.sh
-# env overrides: MODEL2MLIR_DIR=/path/to/model2MLIR  SMOLVLA_CAPTURE_DIR=/path/to/capture
-```
+## Start from PyTorch and inspect the frontend trace
 
-## Capturing full smolVLA
-
-The capture unit is one flow-matching denoise step (SmolVLM2-500M prefix + action
-expert). From the capture venv:
-
-```bash
-cd $SMOLVLA_CAPTURE_DIR
-.venv/bin/python $MODEL2MLIR_DIR/workloads/capture.py smolvla --formats fp32 int8 fp8
-```
-
-Produces `workloads/smolvla/smolvla{,_int8,_fp8}.mlir` (25–29k lines, 0 opaque ops) +
-weights `*.safetensors` (fp32 1.2 GB / int8 506 MB) + manifest JSONs.
-
-## Adding a new model — the capture bundle (the shared baseline input)
-
-A model enters Merlin as a **capture bundle**: the single, framework-neutral input that every
-baseline (ours, Buddy, TVM, ExecuTorch, ggml, …) ingests, so each arm starts from identical bytes
-and the comparison is apples-to-apples. Bundles are resolved by
-`src/merlin/baselines/bundle.py` (`resolve(model, variant)` →
-`CaptureBundle`) and live under `merlin.common.artifacts.recaptures_dir()`, i.e.
-
-```
-out/artifacts/recaptures/<model>_<variant>_consistent/
-  model.mlir                       # linalg-on-tensors export (Buddy / TVM-via-relax ingest directly)
-  weights.safetensors              # HF weights …
-  weights.safetensors.manifest.json #   … + arg-index map
-  inputs.npz / input_order.json    # the seeded inputs
-  golden.npy                       # torch reference output — the correctness gate
-  extra.npz                        # registered buffers + lifted constants
-```
-
-`bundle.resolve()` prefers a full-fidelity `<model>_<variant>_full` recapture (real/native
-architecture) over the older truncated `_consistent` bundle when present. `variant ∈ {fp32, int8,
-fp8}`. The essential inputs are `model.mlir` + `golden.npy`; `.require()` fails closed if either is
-missing so a runner can report a clean `gap_reason` instead of a crash. Per-model correctness
-tolerances (`min_cos`, `max_rel`) live in `bundle.TOLERANCES`, mirroring
-`merlin/tests/rvv/test_vla_models_rvv.py` so a baseline is gated exactly as our own runtime is.
-
-The PyTorch loader for frameworks that ingest torch directly (ExecuTorch export, TVM `from_pytorch`)
-lives **outside** this repo at `$MERLIN_MODEL2MLIR/workloads/<model>/loader.py` (default
-`/path/to/model2MLIR`) — it is not vendored.
-
-So "add a model" = **capture it in model2MLIR to produce this bundle, then point Merlin at it.**
-The recaptures tree is regenerable (PURGEABLE) and gitignored; do not hand-build a bundle path — go
-through `recaptures_dir()`.
-
-## Quantization (torchAO) — what works, what's planned
-
-There are two capture routes. For standalone model bundles, **model2MLIR owns quantization**: its
-capture pipeline calls `m2m.capture.torchao_pipeline.apply_quantization` before export, and Merlin
-consumes the resulting bundle. Merlin's TVM baseline also calls that external function to match a
-live-loaded model to its bundle. To add a standalone quantized model, capture it there and ingest the
-bundle:
-
-```bash
-# in the model2MLIR capture venv (see build_tools/scripts/setup_model2mlir.sh for m2m setup)
-.venv/bin/python $MODEL2MLIR_DIR/workloads/capture.py <model> --formats fp32 int8 ...
-```
-
-For **Phase 0 model capsules**, Merlin derives a target recipe from the capability/readout facts and
-uses TorchAO's public quantizer interface in its capture worker before handing the graph to
-model2MLIR for import. The [Gemmini Phase 0 example](../../examples/gemmini/phase0/README.md)
-identifies the derived-recipe M4 model and the separately authored already-integer M2/M3 models.
-Only supported, module-owned contractions with floating stored weights are annotated; unsupported
-layers such as LSTM stay floating/host. A declared additional format is a candidate, not a working
-mixed-format capture. Neither route modifies TorchAO source.
-
-**Working and tested today — int8 only.** The int8 path is **weight-only / W8A8**
-(`int8_dynamic_activation_int8_weight`) and is the one format with a *measured* accuracy gate:
-int8 passes **5/5** (see the accuracy-gate report referenced from
-`packages/merlin-analysis/src/merlin/baselines/`). This is the only quantized path you should treat as real.
-
-**Aspirational — not a working path.** `fp8` (`float8_dynamic_activation_float8_weight`),
-`int4_weight_only`, and `int4-weight + fp8-activation` are a documented **plan**, not a sweep. Their
-accuracy status is `unavailable` (no quantization run is executed and no accuracy number is asserted
-for them). The plan is emitted verbatim by
-`packages/merlin-dse/src/merlin/dse_guidance/numerical_contract.py::torchao_integration_plan_md()`, which
-states which format informs which DSE candidate and what must be measured (accuracy gate, packed
-layout + scale metadata preserved through capture, low-bit kernel cost) before each becomes
-DSE-legal. Treat fp8/int4 as **planned/unmeasured**, never as an available format.
-
-**Honest gap even for int8.** Per `packages/merlin-dse/src/merlin/dse_guidance/quant_metadata.py`, the int8
-qdq capture is *torchao int8 weight-only*, which is **not necessarily a model's native scheme** — for
-example bitvla's native format is W1.58 ternary (packed int2 + absmean scale) BitLinear, so a
-torchao-int8 bundle is a stand-in, not the native datapath. This gap is recorded per workload (never
-hidden); a separate native capture (`recaptures_native/bitvla`) is what actually exposes the packed
-ternary storage + scale when present.
-
-## Merlin ingestion
+The trace-capable model2MLIR public API provides a small inspection loop:
 
 ```python
-from merlin.frontends import linalg_mlir as fl, facts as ff
+import torch
+from m2m import convert
 
-mod = fl.parse_mlir_file("workloads/smolvla/smolvla.mlir")        # ~5 s
-inv = fl.matmul_inventory(mod, fl.load_manifest(".../smolvla.safetensors.manifest.json"))
-# 302 linalg.matmul ops; weights resolved via the manifest.
-facts = ff.lift_weight_reuse(inv, invocations=10)  # reuse across denoise steps
-rec = ff.select_gemm(inv, max_macs=2_000_000)      # action_out_proj: 50x720x32
-res = ff.drive_pipeline(rec, reuse=2, target="saturn")
-# -> run on spike via merlin.runtime.backends.spike; dse records via ff.record_dse
+torch.manual_seed(0)
+model = torch.nn.Sequential(torch.nn.Linear(8, 4), torch.nn.ReLU()).eval()
+inputs = (torch.arange(16, dtype=torch.float32).reshape(2, 8) / 16,)
+result = convert(model, inputs, backend="fx_importer", capture_trace=True)
+assert result.ok, result.diagnostics
+assert result.capture_trace is not None
+print(result.path_taken)
+print(result.mlir_text)
 ```
 
-The integer pipeline executes a layer's i8 deployment GEMM with the model's real
-(M, K, N); capture dtype is preserved as provenance.
+This returns conversion evidence, not a complete deployment bundle. To retain
+external weights, inputs, goldens and the selected PyTorch catalog, use the
+existing capture worker from Merlin's checkout:
 
-## Whole-model lowering (`src/merlin/llvmlower/`)
+```sh
+"$CAPTURE_PYTHON" src/merlin/targetgen/_m2m_capture_worker.py \
+  --m2m-dir "$MODEL2MLIR_ROOT" \
+  --loader examples/workloads/coverage_mlp/loader.py \
+  --dtype fp32 --seed 0 --materialize-bundle \
+  --out out/artifacts/workloads/iteration/mixed-mlp/fp32
+```
 
-The `llvmlower` package compiles an entire model2MLIR module to native code via the
-**MLIR → llvm-dialect → LLVM IR → clang** path (LLVM 23, from the IREE/torch-mlir
-install), targeting x86 (correctness oracle) or rv64gcv (deployment). Merlin-authored
-passes (`passes_xdsl.py`) handle `quant_ext.dequantize_per_channel` → `linalg.generic`,
-`emit_c_interface`, and textual normalization of printer quirks; the upstream pipeline
-(`pipeline.py`) does bufferize → loops → llvm dialect; `translate` emits LLVM IR;
-`codegen.py` runs clang. Many-arg models use a generated C trampoline (`abi.py`).
+Use a fresh output directory. The worker seeds construction before importing the
+loader and requires deterministic framework algorithms. It retains the exact
+conversion/model instance instead of recapturing a second model. Inspect:
 
-Validated end-to-end on host (== PyTorch, consistent-capture golden):
-- **tiny_llama** (full transformer): cos 1.0000, argmax exact.
-- **smolVLA int8** (full VLM + action expert, 1 denoise step): cos 0.943 (the residual is
-  bf16 matmuls accumulating in bf16 vs torch's f32 accumulation — a bounded precision gap).
-The whole tiny_llama also compiles to a real RVV `rv64gcv` object (auto-vectorized:
-`vsetvli`/`vle32`/`vfmul`). `truncate.py` provides subgraph truncation for per-op
-bisection (it found the bug below).
+| Artifact | Purpose |
+| --- | --- |
+| `frontend-trace.json` | Original → quantized → prepared graphs and exact MLIR correspondence |
+| `pytorch-opset.json` | The selected interpreter's versioned ATen/Core ATen/decomposition catalog |
+| `linalg.mlir` | The exact capture used for demand and lowering analysis |
+| `model.mlir`, `weights.safetensors`, argument manifest | Executable model input and separate tensor payloads |
+| Inputs, golden and `capture_receipt.json` | Invocation data, independent framework reference and byte-bound capture identity |
 
-## model2MLIR correctness fixes (made at source)
+Original frontend call counts, prepared calls, MLIR operations and runtime
+invocations are different denominators. Inspect the trace and typed SSA edges;
+do not infer a source operation from a final MLIR name. Missing original snapshots
+remain unknown. For an external quantizer, retain the original frontend snapshot
+before mutation and pass `original_frontend_snapshot` through the conversion API.
 
-- **Uninitialized matmul accumulators** (`m2m/ir/import_fx.py::_zero_fill_contraction_accumulators`):
-  `linalg.matmul`/`quantized_matmul` compute `out += A·B`, but m2m fed an unfilled
-  `tensor.empty` as `outs` — undefined memory, read as garbage/NaN whenever the allocator
-  returned dirty pages. Now every contraction accumulator gets an explicit `linalg.fill 0`.
-  This was the root cause of NaN/uncorrelated whole-model output.
-- **slice_scatter step arg** (`m2m/ir/decompositions.py::decompose_slice_scatter`): read
-  `step` from the `end` arg slot (index 4 vs 5), corrupting RoPE strides. Fixed.
+## Quantization is operation-scoped
 
-## Known upstream issues
+Standalone model2MLIR captures and Merlin Phase 0 recipe captures are separate
+routes. A standalone bundle records the quantization actually performed by its
+external capture pipeline. Its storage dtype does not prove that the selected
+accelerator implements that scheme, scale layout, accumulator precision or readout.
 
-- m2m's section splitter emitted use-before-def SSA references (values captured
-  inside `linalg.generic` bodies — e.g. the embedding table — were never added as
-  section inputs; `%2034` in `sections/smolvla.model.mlir` was undefined). **Fixed in
-  the local checkout** (`m2m/transforms/sections.py::_free_values`, uncommitted);
-  both sections re-parse cleanly after re-splitting. Re-run the capture to refresh
-  the committed `sections/*.mlir` artifacts, which still predate the fix.
-- xDSL 0.65 rejects MLIR's parenthesized multi-result `linalg.generic` tail
-  (`} -> (T1, T2)`); the frontend normalizes the text before parsing.
-- m2m's `backend="torch_mlir"` path emits MLIR custom assembly xDSL cannot fully
-  parse (`tensor.extract_slice` has no custom-format parser in xDSL). For Merlin
-  ingestion, convert with `backend="fx_importer"` — verified end-to-end (tiny_llama:
-  155 matmuls inventoried from a fresh capture).
-- A full smolVLA capture needs more free RAM than this shared box typically has
-  (~80 GB peak); two attempts were OOM-killed at the worst case. The committed
-  artifacts are valid and ingest cleanly.
+For Phase 0, Merlin derives recipes from selected datapath/readout facts and the
+reviewed software/quantization declarations. The capture worker uses public
+TorchAO interfaces: static PT2E `Quantizer`/`QuantizationSpec` with calibration, or
+dynamic `AOBaseConfig`-derived configurations with per-module `FqnToConfig`.
+Neither route edits PyTorch or TorchAO source.
+
+Inspect the derived recipe, per-layer eligibility/refusals, actual annotations,
+scale axes/values, storage tensors and numerical outputs. A supported contraction
+format is not permission to quantize LSTM, normalization or every `Linear`.
+FP16/BF16 capture, integer quantization and multiple low-bit formats have different
+obligations. An authored format or recipe candidate is not a working framework
+adapter or target compiler. Unsupported formats must fail explicitly; no blanket
+claim of available or unavailable formats replaces per-run evidence.
+
+See [TorchAO extension interfaces](extending_the_stack.md#extend-quantization-through-public-torchao-interfaces)
+for the extension seam and [Phase 0 specification](phase0_specification.md)
+for operation partitions, precision contracts and exact generated evidence.
+
+## Consume complete capture bundles
+
+`merlin.capture.bundle.CaptureBundle` is the canonical capture-bundle interface.
+`merlin.baselines.bundle` retains a compatibility import. Legacy roster resolution
+uses `merlin.common.artifacts.recaptures_dir()` and recorded variant/scope metadata;
+prefer explicit freshly produced bundles when qualifying a new workflow.
+
+The bundle format keeps `model.mlir`, `weights.safetensors` and its argument-index
+manifest, `inputs.npz`/`input_order.json`, `golden.npy`, and lifted buffers/constants
+separate. Session bundles may contain multiple programs and a session contract.
+`CaptureBundle.require()` checks essential MLIR/golden presence, including selected
+session programs; it does not validate every external payload or certify outputs.
+Consumers must also check their required argument order, shapes, payload hashes,
+precision and complete entrypoint/state interface.
+
+For matmul inventory inspection:
+
+```python
+from merlin.frontends import linalg_mlir
+
+module = linalg_mlir.parse_mlir_file("/absolute/capture/model.mlir")
+manifest = linalg_mlir.load_manifest(
+    "/absolute/capture/weights.safetensors.manifest.json"
+)
+inventory = linalg_mlir.matmul_inventory(module, manifest)
+for operation in inventory:
+    print(operation.kind, operation.m, operation.k, operation.n, operation.dtype)
+```
+
+This is a contraction inventory, not whole-PyTorch operator coverage. Use Phase 0's
+frontend/operation accounting for the complete captured graph and its host,
+accelerator-candidate and unresolved partitions. Preserve unknown shapes and
+missing lineage instead of treating them as supported operations.
+
+## Lower and audit the model
+
+[Inspecting whole-model MLIR lowering](model_lowering.md) documents the existing
+`merlin lower --ir-audit both --audit-sidecar ...` workflow. It retains inspectable
+named stages from preprocessing through MLIR LLVM dialect and LLVM IR. Host shared
+libraries and RISC-V objects are separate code-generation outputs; an object is
+not a linked platform executable and lowering alone does not execute a model.
+
+MLIR parsing may normalize known printer differences or reprint custom assembly
+to generic form through the configured toolchain. Parse failures must remain
+actionable; an empty inventory is not an acceptable substitute. Check section
+free-value/argument capture before compiling a split subgraph, and check explicit
+initialization of contraction accumulators when auditing importer changes.
+For an unsupported ATen operator, extend the actual importer/decomposition
+boundary in model2MLIR and compare outputs with the independent framework reference.
+
+Close a change with one joined capture → accounting → lowering → execution check
+on an independent iteration workload, including a refusal case. Evaluate held-out
+headline models separately with their exact checkpoints, invocation/session scope,
+observed host/accelerator placement and numerical receipts. Historical local runs
+do not certify a new capture, checkout or accelerator configuration.

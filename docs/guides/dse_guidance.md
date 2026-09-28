@@ -248,20 +248,17 @@ must therefore be charged component-specifically:
 - `autonomous_K_loop` removes the per-step host launches **inside** the loop — the head's
   repeated dispatch/sync, with the backbone's once-per-replan dispatch excluded.
 
-## Calibration finding (read this before trusting magnitudes)
+## Calibration boundary (read this before trusting magnitudes)
 
-Calibrating against the real FireSim FASED cycle sweep (6 models, `out/artifacts/compare/results.md`) gives a
-fitted **≈ 99 cycles/MAC** (median over the 4 parseable, consistent models — tiny_llama, rdt2,
-openvla, small_llama), at **MAPE ≈ 32 %**. See
-`out/artifacts/dse-guidance/study_models/cost_calibration.md`. Two honest takeaways:
+The historical FireSim FASED sweep and its fitted cost report live under generated `out/`
+artifacts and are **not distributed in a fresh source clone**. Reproduce and inspect their
+input and run identities before using their numbers as release evidence. The prior exploratory
+fit established two useful cautions:
 
 - A single cycles/MAC constant is a *crude* whole-model predictor — usable as analytical ordering,
-  not as a validated magnitude (32 % error, and small_llama is 88 % off because fixed overheads
-  dominate a tiny model).
-- **xr0 is a 1123× outlier** the matmul-only predictor cannot explain — its capture has 1.3 M MACs
-  but the run measured 146 G cycles. This *explains* the earlier "10⁵× off" anomaly: it was an
-  xr0 capture/run inconsistency (a partial capture or a non-matmul/repeated-body-dominated run),
-  not a uniform model failure.
+  not as a validated magnitude; fixed overheads can dominate small models.
+- A large outlier cannot be explained by a matmul-only predictor without checking capture and
+  execution scope. Do not infer a uniform hardware-model failure from that mismatch.
 
 **Per-component calibration attempt (P1-a).** A multi-feature regression (MACs / activation-bytes /
 matmul-count) over the consistent measured points, with leave-one-out CV, shows the features are
@@ -269,12 +266,11 @@ collinear (condition number ~10⁹) and multi-feature fits do **not** beat singl
 CV — **per-component coefficients are not identifiable from whole-model totals**. Cycle-exact
 per-component calibration needs isolated microbenchmarks (compute-bound matmul, memory/repeated-RHS
 matmul, dispatch-heavy tiny-kernel sequence, `matmul_bias_requant_relu`, `no_reuse_matmul`) measured
-on the chipyard/spike or FireSim toolchain — which is **unavailable in this environment**
-(`MERLIN_CHIPYARD` unset, `spike` not on PATH), so it is the precise scoped remaining measurement,
-not a fabricated coefficient. See `cost_calibration.md`.
+on a qualified target toolchain. An unavailable local toolchain is not a fabricated coefficient;
+keep the generated calibration receipt with the run that produced it.
 
 **Consequence:** cross-workload `gap_closure` *magnitudes* remain analytical (the per-component
-cost model is still uncalibrated; the fits above are whole-model sanity anchors, not a per-component
+cost model is still uncalibrated; historical whole-model fits are not a per-component
 model). What stands on its own is the **structural / legality** result, the *ordering* within a
 single baseline, the **measured dispatch count + host-dispatch-bound finding**, and the numerical
 contract. Evidence tags make the distinction visible.
@@ -298,8 +294,8 @@ executor), not the deployable C runtime — so no speedup is claimed.
 | Quantity | Status |
 |---|---|
 | Which axes flat hides (legality flip) | structural — robust, definitional given the K-loop |
-| FASED cycle totals (6 models) | **measured** (FireSim, `out/artifacts/compare/results.md`) |
-| cycles/MAC fit (≈99, MAPE 32%) | **calibrated** — crude whole-model anchor; xr0 a 1123× outlier |
+| Historical FASED cycle totals | Local generated evidence, not part of a fresh source clone |
+| Historical cycles/MAC fit | Exploratory; reproduce its measurements before citing a magnitude |
 | Per-model cost components | analytical (placeholder constants, uncalibrated) |
 | Region roles (backbone/head) | **recovered from `prov.fqn`** for freshly-captured models; operator-mapped or `unknown` for pre-`prov.fqn` captures |
 | Loop counts K | assumed / reference (architecture values, overridable) |
@@ -360,12 +356,10 @@ molmoact, bitvla, xr0, the llama LMs):
 merlin-dse-guidance --study --models --out out/artifacts/dse-guidance/study_models/
 ```
 
-This is the headline demonstration. `out/artifacts/compare/results.md` records that **whole-model captures use
-each weight once — they emit 0 contract facts**: the capture is flat and hides the host-side
+This is the structural demonstration. A flat forward capture can use each weight once and hide the host-side
 decode/denoise loop. The model study reads each `model.mlir` for aggregate structural facts
 (matmul count, MACs, weight vs activation bytes — `analytical`), applies the architecture's
-loop count K (a reference value, tagged `assumed`, overridable), anchors xr0's total to its
-measured FireSim cycles (`146.2 G`, `measured`/`calibrated`), and shows that residency and the
+loop count K (a reference value, tagged `assumed`, overridable), and shows that residency and the
 autonomous K-loop **become legal only under the multi-rate view** — for every model, including
 the autoregressive ones (they reuse weights across action-token decode). Captures that do not
 parse with stock xDSL still show the structural legality flip (magnitudes reported as `n/a`,

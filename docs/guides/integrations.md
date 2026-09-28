@@ -3,7 +3,7 @@ title: Integrations
 kind: guide
 status: current
 owner: kernels
-last_verified: 2026-09-23
+last_verified: 2026-09-27
 related: [kernel_mining, architecture, repo_structure]
 code_refs: [src/merlin/kernels/ingest, packages/merlin-experiments/pyproject.toml, packages/merlin-analysis/pyproject.toml, packages/merlin-experiments/src/merlin/benchharness/chia_bridge.py, packages/merlin-experiments/src/merlin/benchharness/chia_tasks.py, packages/merlin-experiments/src/merlin/targetgen/aet_bridge.py, packages/merlin-experiments/src/merlin_experiments/phase2/telemetry.py]
 ---
@@ -37,13 +37,13 @@ code resolves inputs and translates contracts across those seams. LLVM/CIRCT and
 versions retain their own build, regression and numerical qualification requirements; package
 relocation does not certify a new upstream version.
 
-## Release compatibility snapshot (2026-09-23)
+## Historical compatibility snapshot (2026-09-23)
 
 Read-only upstream branch checks found official [Chia](https://github.com/ucb-bar/chia)
 `main` at `16c35e92aaaf9511c6453bf94cd5cf589698f4e3` and official
 [AET](https://github.com/ucb-bar/agentic-eval-tool) `main` at
-`903d4def8995e4697c6f214cc26c60a5a38d0554`, exactly the experiments
-package's selected revisions. Built core and experiments wheels were installed
+`903d4def8995e4697c6f214cc26c60a5a38d0554`, the experiments package's
+selected revisions at the time. Built core and experiments wheels were installed
 in an isolated Python 3.13 environment and imported from outside the checkout.
 The Chia contract tests passed (5 pass, 1 opt-in skip); bridge/lifecycle/task
 tests passed (69 pass, 2 opt-in skips). Four additional managed-Ray tests passed
@@ -302,10 +302,17 @@ single-node integration nor its tests qualify deployed multinode scheduling, cle
 after service/host loss, or the complete frozen execution/accounting contract. In
 particular, ordinary Ray worker imports are not certified frozen by this adapter.
 
-The Chia extra pins official [ucb-bar/chia main at `16c35e92`](https://github.com/ucb-bar/chia/commit/16c35e92aaaf9511c6453bf94cd5cf589698f4e3),
-verified as that branch's tip on 2026-09-23 (commit date 2026-09-04). This replaces the earlier
-fork submission revision `9bf0bbb9`; it is not a claim about every development branch.
-AET remains pinned independently to official main `903d4def`. Merlin uses the public profiler
+The Chia extra pins official [ucb-bar/chia main at `e85318e`](https://github.com/ucb-bar/chia/commit/e85318e465718ccc382a72bd3a0bab58ba11a174),
+verified as that branch's tip on 2026-09-27. It is four commits newer than the
+previous `16c35e92` pin; the intervening changes address quickstart YAML quoting
+and Vertex malformed-function-call handling, not the managed-worker lifecycle.
+Fresh core and experiments wheels with this pin installed outside the checkout;
+the joined Phase 0/1/2 admission test passed 7 cases, and the installed Chia
+envelope/launch/public-hook suite passed 47 cases with 2 opt-in live-Ray cases
+skipped. Those passes do not establish live worker-loss cleanup on the new pin:
+the opt-in Ray test requires a loopback-only network namespace, unavailable in
+this release host. AET remains pinned independently to official main `903d4def`,
+also confirmed as upstream `main` on 2026-09-27. Merlin uses the public profiler
 module's collector lifecycle, directly constructs its public `MetricsBackend` subclass, and
 resolves batches through ordered public scalar `get` calls under one timeout budget.
 No private result envelopes, metrics registries or fork-only AET sink are imported.

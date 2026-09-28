@@ -229,7 +229,7 @@ replaced a measured failure.
    indistinguishable from a satisfied one.
 2. **Scrub per capsule, not per corpus.** Scrubbing at the end means one unrelated failure aborts the
    run with every capsule so far still carrying its absolute `prov.weights_file`. Measured: a run that
-   died on the last entry left `/scratch/.../weights.safetensors` in tracked MLIR across six capsules,
+   died on the last entry left an absolute weights-file path in tracked MLIR across six capsules,
    in a repo that is published. Hygiene that only holds on the happy path is not hygiene.
 3. **One failing capsule must not destroy the corpus.** Failures are collected, reported by name, and
    re-raised at the end. A capture `torch.export` refuses used to take every later entry down with it,
