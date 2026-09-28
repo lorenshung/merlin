@@ -135,6 +135,17 @@ def checked_output_root(path: Path) -> Path:
     return output_root
 
 
+def phase0_manifest_path(corpus: Path) -> Path:
+    """Resolve the frozen controller layout or the retained standalone-corpus layout."""
+    candidates = [corpus / "_evidence/evidence-manifest.json"]
+    if corpus.name == "capsules":
+        candidates.append(corpus.parent / "evidence-manifest.json")
+    existing = [path for path in candidates if path.is_file()]
+    if len(existing) != 1:
+        raise ValueError(f"Phase 0 corpus has {'ambiguous' if existing else 'no'} evidence manifest: {corpus}")
+    return existing[0]
+
+
 def run(*, corpus: Path, source_evidence: Path, output_root: Path, audit_existing: bool = False) -> None:
     corpus = corpus.resolve()
     source_evidence = source_evidence.resolve()
@@ -152,8 +163,8 @@ def run(*, corpus: Path, source_evidence: Path, output_root: Path, audit_existin
         raise RuntimeError("selected native Gemmini Spike unavailable")
     source_selection = json.loads((source_evidence / "source-selection.json").read_text())
     validation = json.loads((source_evidence / "validation.json").read_text())
-    phase0_manifest_path = corpus / "_evidence/evidence-manifest.json"
-    phase0_manifest = json.loads(phase0_manifest_path.read_text())
+    manifest_path = phase0_manifest_path(corpus)
+    phase0_manifest = json.loads(manifest_path.read_text())
     source_selection_sha = sha(source_evidence / "source-selection.json")
     if source_selection["hierarchy_correspondence"]["status"] != "verified" or validation["status"] != "verified":
         raise RuntimeError("selected source record is not structurally verified")
@@ -179,8 +190,8 @@ def run(*, corpus: Path, source_evidence: Path, output_root: Path, audit_existin
             "output_root": str(output_root),
         },
         "phase0_evidence_manifest": {
-            "path": str(phase0_manifest_path),
-            "sha256": sha(phase0_manifest_path),
+            "path": str(manifest_path),
+            "sha256": sha(manifest_path),
             "status": phase0_manifest["status"],
         },
         "selected_source": {

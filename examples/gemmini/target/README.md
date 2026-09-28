@@ -191,6 +191,9 @@ input and output hashes. Each case directory contains `command_buffer.json`,
 root, add `--audit-existing` to re-execute the saved ELF on Spike; a saved
 Verilator console is reused only when its hash and the ELF hash match the prior
 receipt. Without that flag, both engines execute the newly compiled program.
+For a frozen experiment run, point `--corpus` at its `phase0/capsules` directory;
+the probe binds the adjacent `phase0/evidence-manifest.json`. Standalone corpora
+with `capsules/_evidence/evidence-manifest.json` remain readable.
 
 The current check covers exactly two fixed int8-input/int32-output shapes:
 16×32 by 32×16 (256 outputs) and 16×31 by 31×15 (240 outputs). Their generated
@@ -229,3 +232,7 @@ not a proof of RTL behavior. Spike's `libgemmini.so` is a separately hashed
 functional model: neither this build check nor agreement with its output makes
 Spike RTL-derived. A different Chipyard build, toolchain, or kernel receipt
 requires a new attestation.
+On a read-only Chipyard tree, the attester copies the selected FIRRTL and projects
+only the two hierarchy-output annotation filenames into its ignored artifact;
+it records both annotation hashes and the exact path changes, then still requires
+byte-for-byte equality of generated core RTL, Verilator C++, and the executable.
