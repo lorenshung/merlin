@@ -132,7 +132,7 @@ and numerical execution as separate checks.
 | --- | --- | --- |
 | ResNet50, full `IMAGENET1K_V2` checkpoint, one image | 0 opaque; producer trace and exact-byte Merlin join complete | Host LLVM IR from the selected diagnostic capture; no target execution claim |
 | TinyLlama, full 22-layer prefill/decode session | Both programs: 0 opaque, complete producer traces, complete exact-byte Merlin joins and verified materialized receipts | Both programs reached LLVM IR through `merlin lower`; each compact audit completed 10 named stages and bound the weights and manifest sidecars |
-| SmolVLA, full prefix/flow/action session | All three producer traces complete with 0 opaque calls | Fresh prefix LLVM IR retains its three runtime shape assertions; earlier flow/action LLVM lowerings do not replace a current-byte recheck |
+| SmolVLA, full prefix/flow/action session | All three programs: 0 opaque, complete producer traces, complete exact-byte Merlin joins and verified materialized receipts | All three reached LLVM IR from the current captured bytes; each compact audit completed 10 stages and bound both sidecars. Prefix retains three runtime shape assertions. |
 
 The TinyLlama proof covers captured prefill and recurrent decode programs, not
 host or accelerator numerical execution. The SmolVLA prefix guard branches
