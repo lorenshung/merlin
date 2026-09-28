@@ -19,6 +19,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
+from .harness_blobs import stage_harness_blobs
+
 
 def llvm_mlir_to_object(lowered_mlir_text: str, workdir: Path, *, target: str | None = None,
                         _build_service=None) -> Path:
@@ -330,7 +332,6 @@ def link_elf(cb: dict[str, Any], obj: Path, workdir: Path, *, target: str,
             kwargs["warm_profile"] = warm_profile
         harness = _render(cb, **kwargs, **blob_kwargs)
     (workdir / "harness.c").write_text(harness, encoding="utf-8")
-    from .harness_blobs import stage_harness_blobs
     blob_sources = stage_harness_blobs(workdir, blob_payloads)
     # Linker load address DERIVED from the RTL memory map (platform DRAM base), reusing the curated
     # script's proven section layout but replacing its BAKED origin — so the base is a HW fact, not a

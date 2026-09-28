@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-import subprocess
+import hashlib
+import json
 import shutil
+import subprocess
 
 import pytest
 
@@ -16,6 +18,14 @@ def test_blob_sidecar_assembles_to_exact_aligned_bytes(tmp_path):
     payload = bytes(range(32))
     (source,) = stage_harness_blobs(tmp_path, {"T_W": {"bytes": payload, "align": 16, "elems": 32}})
     assert (tmp_path / "harness_blob_T_W.bin").read_bytes() == payload
+    receipt = json.loads((tmp_path / "harness_blobs.json").read_text())
+    assert receipt["schema"] == "merlin.harness_blobs.v1"
+    assert receipt["blobs"] == [{
+        "symbol": "T_W", "file": "harness_blob_T_W.bin",
+        "assembly": "harness_blob_T_W.S", "object": "harness_blob_T_W.o",
+        "sha256": hashlib.sha256(payload).hexdigest(), "bytes": 32,
+        "alignment": 16, "elements": 32,
+    }]
     assert '.incbin "harness_blob_T_W.bin"' in source.read_text()
     result = subprocess.run(["cc", "-c", source.name, "-o", "blob.o"], cwd=tmp_path,
                             capture_output=True, text=True)
@@ -72,3 +82,27 @@ def test_generic_linker_passes_renderer_blobs_to_the_executable(tmp_path, monkey
     elf = compiler.link_elf({}, kernel, tmp_path, target="synthetic")
     assert subprocess.run([str(elf)], check=False).returncode == 0
     assert (tmp_path / "harness_blob_T_W.bin").read_bytes() == b"\x07\x08\x09\x0a"
+
+
+def test_build_only_requires_an_explicit_sidecar_capability(monkeypatch):
+    from merlin.targetgen.contract.build_service import BuildOnlyService
+
+    monkeypatch.setattr(BuildOnlyService, "verify", lambda self, target: None)
+    seen = []
+
+    def legacy_wrapper(_cb, **kwargs):
+        seen.append(kwargs)
+        return "legacy"
+
+    legacy = BuildOnlyService("synthetic", object(), legacy_wrapper, ())
+    assert legacy.render({}, target="synthetic", inputs={"W": [1]}, blobs={}) == "legacy"
+    assert seen == [{"inputs": {"W": [1]}}]
+
+    def blob_renderer(_cb, *, inputs, blobs):
+        blobs["T_W"] = {"bytes": b"\x07", "align": 1, "elems": 1}
+        return "sidecar"
+
+    offered = {}
+    opt_in = BuildOnlyService("synthetic", object(), blob_renderer, ())
+    assert opt_in.render({}, target="synthetic", inputs={"W": [1]}, blobs=offered) == "sidecar"
+    assert offered["T_W"]["bytes"] == b"\x07"

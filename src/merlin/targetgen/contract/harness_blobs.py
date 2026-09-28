@@ -6,6 +6,8 @@ assembly, and linking so no target-specific source is needed in the core.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from pathlib import Path
 from typing import Mapping
@@ -37,6 +39,7 @@ def render_blob_asm(symbol: str, payload_name: str, *, align: int, elems: int) -
 def stage_harness_blobs(workdir: Path, blobs: Mapping[str, Mapping]) -> tuple[Path, ...]:
     """Validate and materialize a renderer's sidecars for the current build."""
     sources = []
+    records = []
     for symbol, spec in sorted(blobs.items()):
         if not isinstance(spec, Mapping) or set(spec) != {"bytes", "align", "elems"}:
             raise ValueError(f"invalid harness blob declaration for {symbol!r}")
@@ -55,4 +58,22 @@ def stage_harness_blobs(workdir: Path, blobs: Mapping[str, Mapping]) -> tuple[Pa
         blob_path.write_bytes(payload)
         source.write_text(asm, encoding="utf-8")
         sources.append(source)
+        records.append({
+            "symbol": symbol,
+            "file": name,
+            "assembly": source.name,
+            "object": source.with_suffix(".o").name,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "bytes": len(payload),
+            "alignment": align,
+            "elements": elems,
+        })
+    receipt = workdir / "harness_blobs.json"
+    if receipt.is_symlink():
+        raise ValueError("harness blob receipt path is a symlink")
+    if records:
+        receipt.write_text(json.dumps({"schema": "merlin.harness_blobs.v1", "blobs": records},
+                                      sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    else:
+        receipt.unlink(missing_ok=True)
     return tuple(sources)
