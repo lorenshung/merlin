@@ -177,62 +177,32 @@ reports inventory only each selected cohort's exact bytes. Interface-command
 observations and source-model MLIR witnesses remain distinct; a performance
 cohort cannot borrow functional source coverage or claim whole-model validation.
 
-### Diagnostic release-admission gap (r17–r21)
+### Review and release
 
-The local `gemmini-r17` direct-generator probe wrote 86 capsules with no writer
-failures, but it is **not** a releasable Phase 0 run: it has no frozen
-`resolved-plan.json`/successful run receipt, and its manifest records zero
-generated or hand-authored hidden members. Its functional coverage report is
-`incomplete` (4 source-closure, 972 operation-placement and 1,027 typed-edge
-blockers, plus unresolved axes/review). Those counts describe a selected
-diagnostic corpus, not a verified compiler or PyTorch operator population.
+A successful controller receipt proves that the selected generator finished; it
+does not establish capsule coverage or target execution. Check
+`coverage/generation.json` for zero writer failures **and** zero omissions, then
+inspect `phase1-capsule-coverage.json` and `phase2-capsule-coverage.json`
+separately. The derived micro-model composition test reads the run's frozen
+iteration captures, not an ambient `out/artifacts/recaptures` directory.
 
-A later controller rehearsal first rejected the old derived application inventory:
-the four raw capture hashes still matched, but their normalized graph hashes no
-longer matched the selected sidecar. Re-deriving requirements and synthesis from
-those exact captures fixed that provenance mismatch. Launching without the
-declared model2MLIR checkout/interpreter then omitted 19 source-backed
-writers in diagnostic mode, despite a configuration-ready preflight. With the
-matching checkout/interpreter explicitly selected, the fresh r21 controller run
-has a run-owned output receipt and wrote all 86 capsules (zero omissions or
-writer failures). Always inspect `coverage/generation.json`, not just process
-success. The r21 functional cohort still has 43 capsules, zero hidden members
-and `incomplete` coverage: 972 unresolved operation placements/numerics, four
-unverified source closures, four conditional transfer adjacencies, four
-unmeasured axes and one unreviewed software declaration. The receipt verifies
-the run's bytes, not those semantic obligations. The model2MLIR writer selection
-is ambient in this diagnostic run rather than an independently reviewed source
-closure; its availability must not be mistaken for an attested compiler input.
-
-Release preparation now materializes only file symlinks that resolve *inside*
-the declared curated harness, recording the original link-bound source digest
-and copied link paths; outside, directory and broken links still fail closed.
-This removes one staging obstacle, not an admission decision. The descriptor's
-current model resource policy still lists nine models absent from r17 and leaves
-four generated `SY_source_*` models unclassified. A reviewer must make an
-explicit per-model resource decision against a fresh frozen run; neither the
-policy nor hidden cohort may be inferred or synthesized from either probe. Only then can
-the complete Phase 1/2 coverage and source/host/target-execution obligations be
-re-evaluated for a new release.
-
-The next handoff is to review the generated model inventory and cost/resource
-evidence, edit `grading.resource_bound` for the *selected* cohort, then run Phase 0
-again under a new `--run-dir` so its input receipt freezes that policy. Do not
-edit the descriptor after the run and expect the old receipt to remain valid.
-With a separately supplied operator-owned hidden capsule category, the
-generated-only preparation route is:
+Verified admission also requires reviewed software and host semantics, complete
+capture source closure, independent numerical and compiler checks, resolved
+operation/transfer obligations, and an operator-owned hidden cohort. These
+cannot be inferred from a diagnostic run or supplied by changing a status
+field. Review the generated model inventory and `grading.resource_bound` for
+the *selected* cohort; if policy changes, freeze a new run rather than editing
+an old receipt. With a separately selected private hidden category, prepare a
+candidate release using:
 
 ```sh
 merlin experiment corpus prepare "$NEW_RUN_ROOT" --generated-only \
   --private-baseline "$PRIVATE_HIDDEN_ROOT" --output "$NEW_RELEASE_ROOT"
 ```
 
-Preparation reports all unmatched public model names and a missing/entirely
-withheld hidden cohort together; it does not choose exclusions for the operator.
-This example still selects diagnostic evidence. A successful preparation or
-operator acknowledgement seal alone would not resolve the incomplete coverage,
-unreviewed software semantics, or missing compiler/numerical/hardware execution
-receipts needed for verified Phase 1 or Phase 2 use.
+Preparation reports unmatched public models and a missing or withheld hidden
+cohort; it does not choose exclusions for the operator. Acknowledging a seal
+does not repair incomplete coverage or missing execution receipts.
 
 Review coverage, placement and independent numerical checks before preparing
 [the reviewed Phase 0 handoff](../../../experiments/README.md#reviewed-phase-0-handoff).
