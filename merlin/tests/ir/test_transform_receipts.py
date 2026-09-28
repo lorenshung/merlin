@@ -6,6 +6,8 @@ import copy
 import hashlib
 import json
 import os
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -241,3 +243,61 @@ def test_float_source_is_explicitly_unsupported():
     )
     assert receipt.status == "unsupported", (receipt.status, receipt.reason)
     assert "f32" in (receipt.reason or "")
+
+
+def test_compile_receipt_cli_reports_verified_refuted_and_abstained(tmp_path):
+    """The published CLI consumes saved compiler artifacts and preserves all three verdicts."""
+    from merlin.verify.faults import CB_CORPUS
+    from merlin.verify.smt_export import module_text
+
+    interface, command_buffer = _backend_pair()
+    interface_path = tmp_path / "interface.mlir"
+    interface_path.write_text(module_text(interface), encoding="utf-8")
+    translator, digest = _tool()
+
+    cases = {
+        "verified": (command_buffer, 0, "verified"),
+        "refuted": (copy.deepcopy(command_buffer), 1, "refuted"),
+        "abstained": (copy.deepcopy(command_buffer), 2, "unsupported"),
+    }
+    next(f for f in CB_CORPUS if f.name == "cb_swapped_matmul_operands").mutate(cases["refuted"][0])
+    cases["abstained"][0]["commands"][0]["opcode"] = "CONV2D"
+
+    for name, (buffer, expected_exit, expected_status) in cases.items():
+        buffer_path = tmp_path / f"{name}-command-buffer.json"
+        receipt_path = tmp_path / f"{name}-receipt.json"
+        buffer_path.write_text(json.dumps(buffer), encoding="utf-8")
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "merlin.verify.cli",
+                "compile-receipt",
+                "--interface",
+                str(interface_path),
+                "--command-buffer",
+                str(buffer_path),
+                "--translator",
+                translator,
+                "--translator-sha256",
+                digest,
+                "--timeout-ms",
+                "60000",
+                "--output",
+                str(receipt_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+        assert result.returncode == expected_exit, (name, result.stdout, result.stderr)
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        assert receipt["status"] == expected_status
+        assert receipt["source"]["sha256"]
+        assert receipt["target"]["sha256"]
+        assert receipt["toolchain"]["mlir_translate_sha256"] == digest
+        if expected_status == "refuted":
+            assert receipt["counterexample"]["inputs"]
+        else:
+            assert receipt["counterexample"] is None

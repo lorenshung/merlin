@@ -203,3 +203,29 @@ cycle limit; `receipt.json` records those rejections. This is finite numerical
 evidence, not a proof for every input, model, or operator. The generated
 capsules' software admission remains `unknown`, and the receipt does not prove
 that the selected Verilator binary was built from the exact selected RTL source.
+
+To check that missing build link, run
+[attest_native_simulator.py](attest_native_simulator.py) against a fresh ignored
+output directory. It re-lowers the selected FIRRTL with the explicitly selected
+Chipyard firtool, checks the Gemmini core RTL files byte-for-byte, regenerates
+and compares the Verilator C++ model, then rebuilds and compares the entire
+simulator executable to the one hashed in the kernel receipt:
+
+```sh
+python examples/gemmini/target/attest_native_simulator.py \
+  --source-evidence /generated/gemmini/source-1 \
+  --chipyard /selected/chipyard \
+  --firtool /selected/chipyard/.conda-env/riscv-tools/bin/firtool \
+  --verilator /selected/chipyard/.conda-env/bin/verilator \
+  --kernel-receipt out/artifacts/probes/gemmini-kernel-1/receipt.json \
+  --output-root out/artifacts/probes/gemmini-verilator-build-1
+```
+
+`receipt.json` in that output records input and tool hashes, the rebuild steps,
+core RTL and C++ file counts, and the exact binary equality. The fresh RTL,
+Verilated model, and rebuilt simulator remain alongside it. This is
+reproducible build provenance for the selected core inside one full SoC binary,
+not a proof of RTL behavior. Spike's `libgemmini.so` is a separately hashed
+functional model: neither this build check nor agreement with its output makes
+Spike RTL-derived. A different Chipyard build, toolchain, or kernel receipt
+requires a new attestation.
