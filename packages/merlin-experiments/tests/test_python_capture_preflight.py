@@ -65,6 +65,12 @@ def test_preflight_names_missing_editable_and_env_without_execution(tmp_path):
     assert delegated["caller_required_environment_names"] == ["MODEL_TOKEN_IDS"]
     assert "MODEL_TOKEN_IDS" in delegated["unselected_loader_environment"]
 
+    optional_manifest = loader.parent / "capture.toml"
+    optional_manifest.unlink()
+    without_manifest = inspect(worker=worker, loader=loader, m2m_root=m2m, python=python)
+    assert without_manifest["inputs"]["loader_manifest"]["kind"] == "missing"
+    assert str(optional_manifest) not in without_manifest["missing_paths"]
+
 
 def test_preflight_cli_writes_once_and_returns_blocked(tmp_path):
     worker, loader, m2m, python, _ = _selection(tmp_path)

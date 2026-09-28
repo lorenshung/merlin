@@ -451,7 +451,7 @@ def inspect(
         else {"needed_sonames": [], "interpreter": None, "error": "Torch extension is absent"}
     )
     required_paths = [
-        *inputs.values(),
+        *(value for name, value in inputs.items() if name != "loader_manifest" or value["kind"] != "missing"),
         *editable,
         *(row["path"] for row in env_inputs),
         python_elf["interpreter"],
