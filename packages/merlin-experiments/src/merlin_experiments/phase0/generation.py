@@ -355,9 +355,6 @@ def generate_target(
     if semantics is not None:
         semantics = copy.deepcopy(semantics)
         if evidence is not None:
-            import hashlib
-            import json
-
             model_sources = [
                 (str(source.path), source.sha256)
                 for source in evidence.source_snapshots
@@ -656,9 +653,6 @@ def generate_target(
         superseded=superseded,
     )
     if evidence is not None:
-        import hashlib
-        import json
-
         from merlin_experiments.phase1.source_inputs import fingerprint
 
         from .coverage_commitment import observe_cohort, selected_inputs, write_inputs
