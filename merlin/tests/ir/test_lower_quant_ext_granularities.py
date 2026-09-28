@@ -62,6 +62,7 @@ def test_dequant_granularity_lowers_generically(kind):
     text = str(mod)
     assert "quant_ext." not in text  # fully rewritten to standard dialects
     gen = next(o for o in mod.walk() if o.name == "linalg.generic")
+    assert gen.attributes["prov.transforms"].data == f"dequant_{kind}"
     # scale operand (2nd input) indexing map encodes the granularity
     assert str(gen.indexing_maps.data[1]) == expected_scale_map
     # dequant body: (sitofp(w) - sitofp(zp)) * scale
