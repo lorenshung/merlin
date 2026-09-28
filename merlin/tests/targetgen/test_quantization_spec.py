@@ -261,6 +261,7 @@ def test_capture_recipe_is_scoped_without_manually_authored_framework_bookkeepin
     assert recipe["software_admission"]["operations"][0]["ops"] == ["matmul"]
     assert recipe["activation"]["observer"] == "histogram"
     assert recipe["weight"]["observer"] == "minmax"
+    assert recipe["software_numerical_engine"] == "integer_reference"
     assert recipe["framework_capture_policy"]["observer_epsilon"] > 0
     assert recipe["recipe_sha256"] == quant_recipe.digest(recipe)
     spec["quantization"]["formats"][0]["activation_zero_point"] = 1

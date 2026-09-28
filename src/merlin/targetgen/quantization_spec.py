@@ -324,6 +324,10 @@ def capture_recipe_candidates(spec: Mapping, quantization_contract: Mapping) -> 
                 "status": spec["status"],
                 "operations": copy.deepcopy(rows),
             }
+            # This authored numerical choice determines which independent
+            # framework reference may judge the integer rewrite. Hardware
+            # facts derive the format, not the reference semantics.
+            recipe["software_numerical_engine"] = spec["numerical_semantics"]["model"]["engine"]
             framework = selected.get("framework") or {}
             unsupported = set(framework) - {"activation_observer", "weight_observer", "observer_epsilon"}
             if unsupported:
