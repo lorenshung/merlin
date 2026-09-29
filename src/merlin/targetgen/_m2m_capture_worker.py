@@ -690,6 +690,7 @@ def main(argv=None) -> int:
                     raise RuntimeError("selected integer reference lacks complete contraction accounting")
             except Exception as exc:  # noqa: BLE001 -- record a failed selected reference, never substitute portable
                 independent_error = f"{type(exc).__name__}: {exc}"[:2000]
+                independent = None
         mdl, integerization_receipt = integerize_pt2e(mdl, tuple(inputs))
         with torch.no_grad():
             integer_output = mdl(*inputs)
@@ -713,7 +714,9 @@ def main(argv=None) -> int:
                 seen = integerization_receipt["quantized_contractions_seen"]
                 if executed != seen or selected != seen:
                     golden_agreement["status"] = "failed"
-                    golden_agreement["reason"] = "selected, observed and independently executed contraction counts differ"
+                    golden_agreement["reason"] = (
+                        "selected, observed and independently executed contraction counts differ"
+                    )
                 reference_leaves, reference_abi = _output_abi(independent.output)
                 reference_bytes = (
                     json.dumps(
