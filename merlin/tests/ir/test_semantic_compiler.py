@@ -19,6 +19,7 @@ from merlin.semantic_compiler import search as native_search
 from merlin.semantic_compiler.allocate import (
     AllocationResult,
     CandidateGraph,
+    Reservation,
     StorageBank,
     Value,
     allocate,
@@ -1113,6 +1114,14 @@ def test_native_target_snapshots_rebuild_offline_and_bind_target_identity(
     with pytest.raises(ValueError, match="Python sources differ"):
         original.select(_request(), fixed_inputs={"x": 0})
     original.manifest["compiler_sources"] = saved_sources
+    reserved_result = original.select(_request(), fixed_inputs={"x": 0}, reservations=(Reservation("a", 0, 1),))
+    assert reserved_result.status == "selected"
+    assert reserved_result.graph is not None and reserved_result.allocation is not None
+    assert all(
+        reserved_result.allocation.addresses[value.id] != 0
+        for value in reserved_result.graph.values
+        if value.storage == "a"
+    )
     smaller = NativeTargetProfile(
         "synthetic-revision-2",
         _descriptors(),
@@ -1689,11 +1698,106 @@ def test_input_retention_survives_rule_generation_and_controls_allocation(bridge
     assert not checked.valid and "input retention" in checked.reason
 
 
+def test_reserved_scratch_and_register_aliases_are_checked() -> None:
+    banks = (
+        StorageBank("fp8_view", "tensor_registers", 4, "register"),
+        StorageBank("bf16_view", "tensor_registers", 4, "register", alignment=2),
+    )
+    reserved = (Reservation("fp8_view", 1, 2),)
+    single = CandidateGraph((Value(0, "copy", "fp8_view", 1, (), None, "instruction"),), (0,))
+    result = allocate(single, (0,), banks, reservations=reserved)
+    assert result.status == "feasible"
+    assert result.addresses[0] in {0, 3}
+    checked, reason = check_assignment(single, (0,), {0: 1}, banks, reservations=reserved)
+    assert not checked and "reserved" in reason
+
+    pair = CandidateGraph((Value(0, "wide", "bf16_view", 2, (), None, "instruction"),), (0,))
+    assert allocate(pair, (0,), banks, reservations=reserved).status == "infeasible_candidate"
+    checked, reason = check_assignment(pair, (0,), {0: 0}, banks, reservations=reserved)
+    assert not checked and "reserved" in reason
+    bad = (Reservation("fp8_view", 2, 2), Reservation("bf16_view", 2, 1))
+    assert allocate(single, (0,), banks, reservations=bad).status == "unqualified_target"
+    assert allocate(single, (0,), banks, reservations=(Reservation("fp8_view", 4, 1),)).status == "unqualified_target"
+    with pytest.raises(ValueError, match="reservation"):
+        Reservation("fp8_view", True, 1)
+
+
+def test_final_replay_checks_reservations_and_binds_them_to_fingerprint(bridge: Path) -> None:
+    request = _request()
+    reserved = (Reservation("a", 0, 1),)
+    result = select_and_allocate(
+        request,
+        _descriptors(),
+        _banks(),
+        bridge=bridge,
+        fixed_inputs={"x": 0},
+        reservations=reserved,
+    )
+    assert result.status == "selected", result.reason
+    assert result.graph is not None and result.allocation is not None
+    assert result.rules is not None and result.exploration is not None and result.candidate is not None
+    value_id = next(value.id for value in result.graph.values if value.storage == "a")
+    assert result.allocation.addresses[value_id] == 1
+    checked = check_selection(
+        request,
+        _descriptors(),
+        result.rules,
+        result.exploration,
+        result.candidate,
+        result.graph,
+        result.allocation,
+        _banks(),
+        fixed_inputs={"x": 0},
+        reservations=reserved,
+    )
+    assert checked.valid and checked.fingerprint == result.check_fingerprint
+    without_reservation = check_selection(
+        request,
+        _descriptors(),
+        result.rules,
+        result.exploration,
+        result.candidate,
+        result.graph,
+        result.allocation,
+        _banks(),
+        fixed_inputs={"x": 0},
+    )
+    assert without_reservation.valid and without_reservation.fingerprint != checked.fingerprint
+    tampered_addresses = dict(result.allocation.addresses)
+    tampered_addresses[value_id] = 0
+    tampered = check_selection(
+        request,
+        _descriptors(),
+        result.rules,
+        result.exploration,
+        result.candidate,
+        result.graph,
+        replace(result.allocation, addresses=tampered_addresses),
+        _banks(),
+        fixed_inputs={"x": 0},
+        reservations=reserved,
+    )
+    assert not tampered.valid and "reserved" in tampered.reason
+
+
+def test_search_preserves_invalid_resource_contract_status(bridge: Path) -> None:
+    result = select_and_allocate(
+        _request(),
+        _descriptors(),
+        _banks(),
+        bridge=bridge,
+        reservations=(Reservation("missing_store", 0, 1),),
+    )
+    assert result.status == "unqualified_target"
+    assert "unknown storage bank" in result.reason
+
+
 def _reference_feasible(
     graph: CandidateGraph,
     order: tuple[int, ...],
     banks: tuple[StorageBank, ...],
     fixed: dict[str, int],
+    reservations: tuple[Reservation, ...] = (),
     fixed_outputs: tuple[int | None, ...] | None = None,
     trials: list[int] | None = None,
 ) -> bool:
@@ -1727,6 +1831,14 @@ def _reference_feasible(
     for assignment in itertools.product(*domains):
         if trials is not None:
             trials[0] += 1
+        if any(
+            bank_by_name[value.storage].backing == bank_by_name[reserved.storage].backing
+            and assignment[value.id] < reserved.start + reserved.extent
+            and reserved.start < assignment[value.id] + value.extent
+            for value in graph.values
+            for reserved in reservations
+        ):
+            continue
         if any(
             value.kind == "input" and value.source_node in fixed and assignment[value.id] != fixed[value.source_node]
             for value in graph.values
@@ -1889,22 +2001,31 @@ def test_200_bounded_allocations_agree_with_independent_enumerator() -> None:
         fixed_outputs = (
             (1,) if index == 7 else (tuple(pinned) if any(address is not None for address in pinned) else None)
         )
+        reservations = (Reservation("a", capacity_a - 1, 1),) if index % 4 == 0 else ()
         conditions = tuple(condition for value in values for condition in value.validity)
         offset_values.update(condition.value for condition in conditions if condition.kind == "eq_offset")
         delayed_cases += any(value.input_read_offsets for value in values)
         for order in orders:
             checked_orders += 1
             trials = [0]
-            expected = _reference_feasible(graph, order, banks, fixed, fixed_outputs, trials)
+            expected = _reference_feasible(graph, order, banks, fixed, reservations, fixed_outputs, trials)
             enumerated_assignments += trials[0]
             max_assignments_in_one_order = max(max_assignments_in_one_order, trials[0])
             if conditions:
                 constrained_outcomes.add(expected)
             if len(values) == 3 and values[-1].in_place_inputs and expected:
                 ordinary = CandidateGraph((*values[:2], replace(values[-1], in_place_inputs=())), graph.outputs)
-                if not _reference_feasible(ordinary, order, banks, fixed, fixed_outputs):
+                if not _reference_feasible(ordinary, order, banks, fixed, reservations, fixed_outputs):
                     in_place_only += 1
-            result = allocate(graph, order, banks, fixed_inputs=fixed, fixed_outputs=fixed_outputs, timeout_ms=5000)
+            result = allocate(
+                graph,
+                order,
+                banks,
+                fixed_inputs=fixed,
+                reservations=reservations,
+                fixed_outputs=fixed_outputs,
+                timeout_ms=5000,
+            )
             assert result.status in outcomes, (index, order, result)
             outcomes[result.status] += 1
             assert (result.status == "feasible") == expected, (index, order, graph, banks, fixed, fixed_outputs, result)

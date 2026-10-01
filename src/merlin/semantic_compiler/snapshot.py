@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .allocate import StorageBank
+from .allocate import Reservation, StorageBank
 from .model import KernelRequest
 from .rules import InstructionDescriptor
 from .search import SearchAblations, SearchLimits, SearchResult, select_and_allocate
@@ -127,6 +127,7 @@ class NativeSnapshot:
         request: KernelRequest,
         *,
         fixed_inputs: dict[str, int] | None = None,
+        reservations: tuple[Reservation, ...] = (),
         fixed_outputs: tuple[int | None, ...] | None = None,
         limits: SearchLimits = SearchLimits(),
         ablations: SearchAblations = SearchAblations(),
@@ -144,6 +145,7 @@ class NativeSnapshot:
             self.profile.banks,
             bridge=self.bridge,
             fixed_inputs=fixed_inputs,
+            reservations=reservations,
             fixed_outputs=fixed_outputs,
             limits=limits,
             ablations=ablations,

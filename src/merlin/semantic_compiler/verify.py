@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from .allocate import (
     AllocationResult,
     CandidateGraph,
+    Reservation,
     StorageBank,
     check_assignment,
     instruction_schedule,
@@ -71,6 +72,7 @@ def check_selection(
     banks: tuple[StorageBank, ...],
     *,
     fixed_inputs: dict[str, int] | None = None,
+    reservations: tuple[Reservation, ...] = (),
     fixed_outputs: tuple[int | None, ...] | None = None,
 ) -> SelectionCheck:
     def fail(reason: str) -> SelectionCheck:
@@ -211,6 +213,7 @@ def check_selection(
         allocation.addresses,
         banks,
         fixed_inputs=fixed_inputs,
+        reservations=reservations,
         fixed_outputs=fixed_outputs,
     )
     if not checked:
@@ -226,6 +229,7 @@ def check_selection(
         "candidate": candidate.digest(),
         "target": [descriptor.record() for descriptor in descriptors],
         "banks": [bank.record() for bank in banks],
+        "reservations": [vars(reservation) for reservation in reservations],
         "order": list(allocation.order),
         "issue_times": list(allocation.issue_times),
         "addresses": sorted(allocation.addresses.items()),

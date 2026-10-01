@@ -14,6 +14,7 @@ from typing import Any
 from .allocate import (
     AllocationResult,
     CandidateGraph,
+    Reservation,
     StorageBank,
     allocate,
     interference_edges,
@@ -108,6 +109,7 @@ def select_and_allocate(
     *,
     bridge: Path,
     fixed_inputs: dict[str, int] | None = None,
+    reservations: tuple[Reservation, ...] = (),
     fixed_outputs: tuple[int | None, ...] | None = None,
     limits: SearchLimits = SearchLimits(),
     ablations: SearchAblations = SearchAblations(),
@@ -236,6 +238,7 @@ def select_and_allocate(
                     order,
                     banks,
                     fixed_inputs=fixed_inputs,
+                    reservations=reservations,
                     fixed_outputs=fixed_outputs,
                     timeout_ms=min(limits.solver_timeout_ms, max(1, int(remaining * 1000))),
                 )
@@ -252,6 +255,7 @@ def select_and_allocate(
                         result,
                         banks,
                         fixed_inputs=fixed_inputs,
+                        reservations=reservations,
                         fixed_outputs=fixed_outputs,
                     )
                     if not checked.valid:

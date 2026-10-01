@@ -37,6 +37,33 @@ class StorageBank:
 
 
 @dataclass(frozen=True)
+class Reservation:
+    """Physical interval unavailable to every typed view of one backing store.
+
+    The target contract names the storage view and supplies the interval in its
+    explicit address unit. Reservations last for this entire candidate. Shorter
+    lifetimes require a qualified temporal model, not an assumed issue order.
+    """
+
+    storage: str
+    start: int
+    extent: int
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.storage, str)
+            or not self.storage
+            or not isinstance(self.start, int)
+            or isinstance(self.start, bool)
+            or self.start < 0
+            or not isinstance(self.extent, int)
+            or isinstance(self.extent, bool)
+            or self.extent <= 0
+        ):
+            raise ValueError("reservation needs a storage, nonnegative start and positive extent")
+
+
+@dataclass(frozen=True)
 class Value:
     id: int
     symbol: str
@@ -261,6 +288,23 @@ def _address_unit_problem(graph: CandidateGraph, bank_map: dict[str, StorageBank
     return ""
 
 
+def _reservation_problem(reservations: tuple[Reservation, ...], bank_map: dict[str, StorageBank]) -> str:
+    for index, reservation in enumerate(reservations):
+        bank = bank_map.get(reservation.storage)
+        if bank is None:
+            return "reservation names an unknown storage bank"
+        if reservation.start + reservation.extent > bank.capacity:
+            return "reservation exceeds its physical storage bank"
+        for earlier in reservations[:index]:
+            other = bank_map[earlier.storage]
+            if bank.backing == other.backing and (
+                reservation.start < earlier.start + earlier.extent
+                and earlier.start < reservation.start + reservation.extent
+            ):
+                return "reservations overlap through physical aliases"
+    return ""
+
+
 def _boundary_problem(
     graph: CandidateGraph,
     banks: dict[str, StorageBank],
@@ -300,6 +344,7 @@ def check_assignment(
     banks: tuple[StorageBank, ...],
     *,
     fixed_inputs: dict[str, int] | None = None,
+    reservations: tuple[Reservation, ...] = (),
     fixed_outputs: tuple[int | None, ...] | None = None,
 ) -> tuple[bool, str]:
     """Recompute original geometry/lifetimes without consulting Z3 expressions."""
@@ -307,6 +352,9 @@ def check_assignment(
     unit_problem = _address_unit_problem(graph, bank_map)
     if unit_problem:
         return False, unit_problem
+    reservation_problem = _reservation_problem(reservations, bank_map)
+    if reservation_problem:
+        return False, reservation_problem
     fixed_inputs = fixed_inputs or {}
     boundary_problem = _boundary_problem(graph, bank_map, fixed_inputs, fixed_outputs)
     if boundary_problem:
@@ -331,6 +379,11 @@ def check_assignment(
             return False, "non-integer address"
         if address < 0 or address + value.extent > bank.capacity or address % bank.alignment:
             return False, "out-of-range or misaligned address"
+        for reservation in reservations:
+            if bank.backing != bank_map[reservation.storage].backing:
+                continue
+            if address < reservation.start + reservation.extent and reservation.start < address + value.extent:
+                return False, "assignment overlaps reserved physical storage"
         if value.source_node in fixed_inputs and value.kind == "input":
             if address != fixed_inputs[value.source_node]:
                 return False, "input moved from fixed external address"
@@ -385,6 +438,7 @@ def allocate(
     banks: tuple[StorageBank, ...],
     *,
     fixed_inputs: dict[str, int] | None = None,
+    reservations: tuple[Reservation, ...] = (),
     fixed_outputs: tuple[int | None, ...] | None = None,
     timeout_ms: int = 5000,
 ) -> AllocationResult:
@@ -398,6 +452,9 @@ def allocate(
     unit_problem = _address_unit_problem(graph, bank_map)
     if unit_problem:
         return AllocationResult("unqualified_target", order, {}, unit_problem)
+    reservation_problem = _reservation_problem(reservations, bank_map)
+    if reservation_problem:
+        return AllocationResult("unqualified_target", order, {}, reservation_problem)
     fixed_inputs = fixed_inputs or {}
     boundary_problem = _boundary_problem(graph, bank_map, fixed_inputs, fixed_outputs)
     if boundary_problem:
@@ -419,6 +476,14 @@ def allocate(
             return AllocationResult("unqualified_target", order, {}, "unknown storage bank")
         addr = variables[value.id]
         solver.add(addr >= 0, addr + value.extent <= bank.capacity, addr % bank.alignment == 0)
+        for reservation in reservations:
+            if bank.backing == bank_map[reservation.storage].backing:
+                solver.add(
+                    z3.Or(
+                        addr + value.extent <= reservation.start,
+                        addr >= reservation.start + reservation.extent,
+                    )
+                )
         if value.kind == "input" and value.source_node in fixed_inputs:
             solver.add(addr == fixed_inputs[value.source_node])
         ports = {"out": addr, **{f"in{index}": variables[child] for index, child in enumerate(value.children)}}
@@ -454,7 +519,13 @@ def allocate(
     model = solver.model()
     addresses = {value_id: model[variable].as_long() for value_id, variable in variables.items()}
     checked, reason = check_assignment(
-        graph, order, addresses, banks, fixed_inputs=fixed_inputs, fixed_outputs=fixed_outputs
+        graph,
+        order,
+        addresses,
+        banks,
+        fixed_inputs=fixed_inputs,
+        reservations=reservations,
+        fixed_outputs=fixed_outputs,
     )
     if not checked:
         return AllocationResult("modeling_failure", order, addresses, reason)
