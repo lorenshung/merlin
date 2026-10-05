@@ -11,6 +11,19 @@
     "description": {"type": "string"},
     "kind": {"enum": ["experiment", "template"]},
     "inputs": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}},
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Experiment-wide declared policy, carried into every phase contract.",
+      "properties": {
+        "prohibited_instruction_roles": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[a-z][a-z_]*$"},
+          "description": "Closed-vocabulary instruction roles (merlin.kernels.roles) no candidate program may emit anywhere in its linked ELF, in Phase 1 and in the Phase 2 candidate arm; Phase 0 resolves them to the target's own instructions."
+        }
+      }
+    },
     "phases": {
       "type": "object",
       "minProperties": 1,
@@ -29,7 +42,7 @@
       "required": ["adapter", "config"],
       "properties": {
         "adapter": {"type": "string"},
-        "mode": {"enum": ["measured_claims", "model_portfolio"]},
+        "mode": {"enum": ["measured_claims", "model_portfolio", "whole_model_measured"]},
         "config": {"type": "object"}
       }
     }

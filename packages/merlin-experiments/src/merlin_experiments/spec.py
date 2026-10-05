@@ -65,6 +65,11 @@ class ExperimentSpec:
     def resolve(self, value: str) -> Path:
         return (self.path.parent / Path(value).expanduser()).resolve()
 
+    @property
+    def prohibited_instruction_roles(self) -> list[str]:
+        """The declared roles no candidate program may emit; an empty list when none is declared."""
+        return list((self.document.get("policy") or {}).get("prohibited_instruction_roles") or ())
+
 
 def catalog(path: Path | None = None) -> dict[str, Path]:
     """Resolve the shared definition catalog without importing execution or CLI code."""
@@ -101,6 +106,16 @@ def load_spec(path: str | Path) -> ExperimentSpec:
         jsonschema.Draft202012Validator(schema).validate(document)
     except jsonschema.ValidationError as exc:
         raise SpecError(f"{source}: {exc.message}") from exc
+    roles = (document.get("policy") or {}).get("prohibited_instruction_roles")
+    if roles is not None:
+        from merlin.kernels.roles import ROLES
+
+        unknown = sorted(set(roles) - set(ROLES))
+        if unknown:
+            raise SpecError(
+                f"{source}: policy.prohibited_instruction_roles names unknown role(s) {unknown}; "
+                f"the closed vocabulary is {sorted(ROLES)}"
+            )
     for number, phase in document["phases"].items():
         adapter = ADAPTERS.get(phase["adapter"])
         if adapter is None or adapter.phase != number:
