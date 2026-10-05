@@ -10,6 +10,14 @@ Optimization** (Phase 2). Definitions select experiments; phase tooling and engi
 live in `packages/merlin-experiments/src/merlin_experiments/phase{0,1,2}/`.
 Shared compiler infrastructure and generated target backends are separate owners.
 
+Phase 1 comparisons use the same names across targets: **EL1** raw baseline,
+**EL2** C++ infrastructure, **EL3** Merlin-assisted, and **EL4** RTL-informed
+Merlin. `merlin experiment levels` prints their exact bundle-arm and runner-arm
+compatibility keys, plus the opt-in EL3-E and EL4-V branches. A level describes
+an information treatment, not functional success or a Phase 2 performance mode.
+New definitions select `level: EL4` (or another level); frozen bundles and run
+records keep their original machine IDs so existing evidence remains auditable.
+
 ## Where inputs and results live
 
 For a target's phase-by-phase starting points, use the
@@ -78,7 +86,8 @@ directory is selected implicitly. Start with the
 capsule workflow through the same command surface:
 
 ```sh
-merlin experiment corpus groups --target TARGET --capture /absolute/capture.mlir \
+merlin experiment corpus groups --target TARGET --rtl-facts /absolute/facts.json \
+  --capture /absolute/capture.mlir \
   --out /configured/out/artifacts/group-capsules/example
 ```
 
@@ -134,17 +143,28 @@ bundle. Keep the authored definition unchanged and select both inputs explicitly
 ```sh
 merlin experiment preflight TARGET_FUNCTIONAL_ID --phase 1 \
   --corpus-seal /configured/out/artifacts/protocols/review-1/private/seal.json \
-  --bundle-manifest /configured/out/artifacts/targets/TARGET/BUNDLE/input_bundle_manifest.yaml
+  --bundle-manifest /configured/out/artifacts/protocols/review-1/payload/experiment/input_bundles/BUNDLE/input_bundle_manifest.yaml
 ```
 
-The seal selects its immutable release descriptor. The replacement bundle must
-not grant the historical `merlin/contract/capsules` tree or an ancestor;
-preflight refuses it. The bundle identity comes from the selected manifest and
-both paths are frozen for resume. `inspect` and `run` accept the same flags.
+The seal selects its immutable release descriptor. The manifest must be the
+bundle generated inside **that same release**; copying a retained manifest to
+another path does not qualify it. The selected bundle must not grant the
+historical `merlin/contract/capsules` tree or an ancestor. Preflight and native
+admission refuse either mismatch. The bundle identity comes from the selected
+manifest and both paths are frozen for resume. `inspect` and `run` accept the
+same flags.
+
+For a new Phase 1-only run, `--phase1-driver`, `--phase1-model`,
+`--phase1-effort`, and `--phase1-provider` select the agent transport without
+editing the authored definition. Pass the same selection to `inspect`,
+`preflight`, and `run`; the resolved values and native command are frozen in the
+run plan. `resume` accepts no new selection and rejects a changed plan. These
+flags do not change the experiment level, corpus, bundle, or grading policy.
+
 Alternatively, copy the definition and set `config.descriptor` to the
 reported released descriptor and `config.corpus_seal` to the reported seal path,
-plus a new `config.bundle_manifest` and matching `config.bundle` (also update
-any `inputs.target` descriptor pin):
+plus that release's `config.bundle_manifest` and matching `config.bundle`
+(also update any `inputs.target` descriptor pin):
 
 ```yaml
 phases:
@@ -225,6 +245,32 @@ historical evidence. Existing launchers still require explicitly selected bundle
 they do not automatically consume the newest generated product.
 
 ## Definitions and execution
+
+Phase 1 comparisons use readable experiment levels. Put `level: EL1` through
+`level: EL4` in a new Phase 1 definition; use `EL3-E` or `EL4-V` only for those
+optional branches. Run `merlin experiment levels` to see the mapping;
+`merlin experiment list` labels each declared Phase 1 definition. These are
+*comparison names*, not compiler-capability grades. The frozen arm, bundle,
+and treatment identifiers remain the execution contract:
+
+| Level | Meaning | Stable bundle arm |
+| --- | --- | --- |
+| EL1 | raw baseline, no Merlin tools | `raw_baseline` |
+| EL2 | C++ infrastructure | `cpp_merlininfra` |
+| EL3 | Merlin-assisted authoring tools | `merlin_assisted` |
+| EL4 | EL3 plus RTL-derived generators/facts and advisory checks | `merlin_rtlchecks` |
+| EL3-E | opt-in EGraph variant branching from EL3 | `merlin_eqsat` |
+| EL4-V | opt-in EL4 tool grants plus verification tools; currently baseline feedback, not the EL4 RTL-check treatment | `merlin_verify` |
+
+The last two are branches, not higher rungs in a monotonic ladder. In particular,
+EL4-V changes the feedback treatment as well as the tool grant, so it is **not**
+an isolated measurement of verification tools versus EL4. A definition's
+`level` expands to the runner's existing `arm` and `treatment` keys; a contradictory
+explicit legacy key or recognized bundle is rejected. The Phase 1 runner still uses
+`--arm merlin_assisted` for EL3 and EL4; EL4 requires the
+`merlin_assisted_rtlchecks_*` bundle and `rtlchecks` treatment. Do not rename
+historical bundles or frozen runs to change their displayed level. Phase 0
+derivation and Phase 2 optimization are separate phases, **not** EL0 or EL5.
 
 Agent transports live in `merlin_experiments.phase1.providers`; baseline Phase 1
 uses the installed `python -m merlin_experiments.phase1` controller with explicit

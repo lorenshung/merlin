@@ -3,7 +3,7 @@ title: Generating capsules for a target
 kind: guide
 status: current
 owner: targetgen
-last_verified: 2026-09-29
+last_verified: 2026-10-05
 related: [adding_a_target, gemmini_experiment, capsule_bench, integrations, phase0_specification]
 code_refs:
   - experiments/catalog.yaml
@@ -11,7 +11,14 @@ code_refs:
   - packages/merlin-experiments/src/merlin_experiments/phase0/generation.py
   - packages/merlin-experiments/src/merlin_experiments/phase0/writer.py
   - packages/merlin-experiments/src/merlin_experiments/corpus/preparation.py
+  - packages/merlin-experiments/src/merlin_experiments/corpus/release.py
+  - packages/merlin-experiments/src/merlin_experiments/phase0/freeze.py
+  - packages/merlin-experiments/src/merlin_experiments/runner.py
   - src/merlin/targetgen/corpus_spec.py
+  - src/merlin/targetgen/group_capsule_entries.py
+  - packages/merlin-experiments/src/merlin_experiments/phase0/model_forms.py
+  - packages/merlin-experiments/src/merlin_experiments/phase0/form_perf.py
+  - packages/merlin-experiments/src/merlin_experiments/phase0/instruction_roles.py
 ---
 
 # Generating capsules for a target
@@ -102,6 +109,34 @@ Preparation requires a successful attempt with matching immutable output identit
 failed inputs and use a fresh run rather than copying answer files into public directories
 or relabeling an outcome.
 
+## Stages derived from the iteration captures
+
+`merlin experiment corpus derive` also groups each declared ITERATION capture with the one
+compute-group pass (`compute_groups` + `group_command`, stated by `group_capsule_entries`) and
+writes two derived stages into the byte-bound plan:
+
+- **Model forms** (`MF_<workload>_...`, Phase 1): one capsule per distinct op-form at the
+  workload's own multipliers, reduction depth and features, positions reduced to two tiles;
+  host-region trailing-window sums (row sums, window means) are offered in their device form.
+  A member too large to certify is capped at the loop tier and `extends` a certified sibling.
+- **Form-perf scope** (`requirements.yaml` → `scope.performance.forms`, Phase 2): every form class
+  with its per-workload predicted issue-cycle share. The shared template's `PW` family mints one
+  `_perf` member per class, at its costliest group's extents, with a candidate arm held to the
+  experiment's `prohibited_instruction_roles` and an unrestricted vendor-reference arm.
+  `phase2-capsule-coverage.json` → `form_perf_coverage` lists every class at or above the
+  template's share threshold and whether it has a member and a vendor bar.
+
+Both stages refuse held-out models by name (the descriptor's claim roster and the reviewed
+evaluation-only models in `merlin/contract/claim_models.yaml`). A group capsule reaches disk only
+through `phase0.group_forms.write_group_capsule`, under `group_binding` -- the corpus binding with an
+accumulator the recipe, contract or RTL facts state, never a literal.
+
+An experiment's `policy.prohibited_instruction_roles` names closed-vocabulary roles
+(`merlin.kernels.roles`). Phase 0 resolves them against the target's derived instruction taxonomy
+and records the result as `instruction_policy` in `MANIFEST.yaml` and `coverage/generation.json`;
+Phase 1 receives it in `MERLIN_PROHIBITED_INSTRUCTION_ROLES` and every phase command carries it.
+Declaring a role does not by itself scan a program; enforcement is a separate whole-ELF check.
+
 ## Review before Phase 1
 
 A completed generation run does not automatically become the grading corpus. Prepare a
@@ -123,9 +158,29 @@ empty hidden grade. A `--retirements` review is incompatible with generated-only
 Neither mode edits the source corpus or silently approves a different grading population.
 Generated-only preparation still requires nonempty native admission and an operator seal;
 it does not assert numerical, model-wide, or hardware correctness.
+Preparation may reuse a completed, dedicated frozen Phase 0 run after its historical host
+capture environment changes: it checks the recorded successful attempt and output digest,
+run-owned frozen inputs, copied producer/provider source, generation lineage, and selected
+capture attestations. This
+consumes the historical producer's bytes; it neither reruns Phase 0 nor requalifies that old
+environment. New execution or resume still requires the selected live runtime to match its
+freeze. A newly prepared Phase 1 bundle separately freezes the **current** installed compiler
+and tool sources while retaining the Phase 0 producer's historical identity. The unsigned run
+receipt establishes recorded byte consistency, not cryptographic proof of execution; operator
+review and sealing remain separate. Combined plans with non-run-owned input pins remain
+outside this artifact-only admission path.
 For a sealed Phase 1 run, select the released descriptor and use its complete descriptor
 cohort. A raw capsule-root override is diagnostic only and cannot inherit the review,
 even when its files are under the reviewed release.
+
+Preparation also copies the exact effective capability view exported by Phase 0
+(`software/contract.json`) into the release's `experiment/contracts/target_contract.yaml`.
+The released descriptor selects it, every experiment level receives a read-only
+grant, and Phase 1 automatically binds it as `MERLIN_TARGET_CONTRACT`. Support plugins
+still come from the separately selected OOT provider: changing a capability view
+cannot inject executable support code. Conflicting contract selections or changed
+bytes refuse launch/resume. Older releases lacking this handoff need a newly frozen
+run for verified execution; do not edit their manifests.
 
 Inspection reports aggregate counts and commitments. Detailed diagnostics and review records
 are owner-only under `private/`. Keep hidden capsules, goldens and private weights out of public

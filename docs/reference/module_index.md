@@ -96,3 +96,4 @@ module docstring. **Do not edit by hand** — run the generator (it's `--check`e
 | `merlin_experiments.phase1.tools` | Public standalone Phase 1 clients, copied individually into candidate workspaces. |
 | `merlin_experiments.phase2` | Performance experiment contracts and frozen functional admission. |
 | `merlin_experiments.phase2.claims` | Measured-claim decisions; frozen declaration identities are not Python import APIs. |
+| `merlin_experiments.phase2.whole_model_measured` | Phase 2 ``whole_model_measured`` mode: a candidate compiler measured as a WHOLE MODEL on hardware. |

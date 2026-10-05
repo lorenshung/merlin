@@ -21,6 +21,7 @@ Core console-scripts are installed with `pip install -e .` from the repo root. O
 | `merlin-liveness` | `merlin.liveness.cli:main` |
 | `merlin-onboard` | `merlin.targetgen.onboard:main` |
 | `merlin-opt` | `merlin.xdsl_dialects.opt:main` |
+| `merlin-semantic-facts` | `merlin.targetgen.rtl.semantic_facts:main` |
 | `merlin-storage` | `merlin.common.storage_cli:main` |
 | `merlin-surface` | `merlin.kernels.cli_surface:main` |
 | `merlin-target-fetch` | `merlin.targetgen.oot_fetch:main` |
@@ -28,6 +29,8 @@ Core console-scripts are installed with `pip install -e .` from the repo root. O
 | `merlin-target-tools` | `merlin.targetgen.tool_cli:main` |
 | `merlin-targetgen` | `merlin.targetgen.cli:main` |
 | `merlin-verify` | `merlin.verify.cli:main` |
+| `merlin-whole-model-gate` | `merlin.perf.whole_model_gate:main` |
+| `merlin-whole-model-gsim` | `merlin.perf.whole_model_gsim:main` |
 
 ## merlin-analysis
 

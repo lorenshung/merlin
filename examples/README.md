@@ -23,6 +23,13 @@ honoring an already selected `MERLIN_BOARD_CATALOG`.
 
 Start with a target's workflow map. Each map links to its single definition;
 the [experiment catalog](../experiments/catalog.yaml) owns the stable command IDs.
+Phase 1 has four named information levels: **EL1** (raw baseline), **EL2**
+(C++ infrastructure), **EL3** (Merlin-assisted), and **EL4** (RTL-informed Merlin).
+Run `merlin experiment levels` for the exact tool/bundle mapping. These labels
+describe what a Phase 1 authoring agent can see; they are not Phase 0 or Phase 2
+levels, nor claims that a compiler passed its gates. Existing bundle names, `arm`
+keys, and stored run IDs retain their historical spellings so frozen evidence
+remains reproducible.
 
 | Workflow | Catalog ID | Declared target |
 | --- | --- | --- |

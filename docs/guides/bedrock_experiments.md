@@ -58,7 +58,7 @@ MERLIN_AET_SINK=1 \
   --max-rounds 1 --round-timeout 600 --sandbox bwrap
 ```
 
-`run_rtlchecks_qa_loop.py` is arm-4 (CIRCT/RTL checks); it reuses the baseline QA loop. `--no-oracle`
+`run_rtlchecks_qa_loop.py` is the retained EL4 (CIRCT/RTL checks) launcher; it reuses the baseline QA loop. `--no-oracle`
 skips the sim/verilator grade (faster/cheaper for pipeline debugging). Use a capable model (Sonnet/Opus)
 for real runs — a weak model (haiku) tends to author a schema-invalid submission manifest and the grader
 correctly rejects it.
@@ -92,7 +92,7 @@ models cost-unavailable. Dollar figures are estimates; reconcile against AWS Cos
 Bedrock token metrics for billing-accurate accounting. Token counts are exact.
 
 Cost signal: a single trivial Sonnet call is ≈ $0.12 (dominated by the ~32k-token Claude Code system
-prompt written to cache on first call; cache-**reads** are cheap after). A one-round haiku arm-4 debug run
+prompt written to cache on first call; cache-**reads** are cheap after). A one-round haiku EL4 debug run
 was ≈ $0.76.
 
 ## Caveats

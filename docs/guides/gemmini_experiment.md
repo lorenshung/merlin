@@ -1,7 +1,7 @@
 ---
 title: Gemmini target-dialect-generation experiment (case study)
 kind: guide
-status: current
+status: superseded
 owner: targetgen
 last_verified: 2026-08-30
 related: [getting_started, reproducibility, targetgen, adding_a_target, target_publishing, experiment_abi]
@@ -15,29 +15,41 @@ code_refs:
   - packages/merlin-experiments/src/merlin/benchharness
 ---
 
-# Gemmini target-dialect-generation experiment
+# Gemmini target-dialect-generation experiment (historical workflow)
+
+This page records the original launcher and its stable bundle IDs. It is **not**
+the launch procedure for a new verified Phase 1 run. Use the
+[Gemmini example](../../examples/gemmini/README.md), its
+[Phase 0 release guide](../../examples/gemmini/phase0/README.md), and its
+[installed Phase 1 guide](../../examples/gemmini/phase1/README.md). A new EL4
+run requires a reviewed Phase 0 seal, a bundle generated for that release, a
+measured oracle-timing receipt, and an explicitly selected OOT support provider.
+The retained example alone is not ready to run.
 
 Gemmini is the **case study** for the target-dialect-generation tool: it asks *how well can an agent
 author a correct, RTL-conformant Gemmini MLIR OOT backend*, under increasing amounts of Merlin help,
-in a cheat-proof sandbox — then certifies and publishes the result. This guide is the runnable
-end-to-end pipeline. It documents **how to run it**, not any particular result.
+in a cheat-proof sandbox — then certifies and publishes the result. The commands
+below document the retained historical pipeline, not the installed release workflow.
 
 Every step is fail-closed: correctness gates first, a missing sim/toolchain records `not_run` (never a
 false pass), and the answer surfaces (goldens, hidden capsules, the reference oracle) are masked from
 the agent and re-verified before any spend.
 
-## The four arms (same task, capsules, hidden set, grader)
+## The four Phase 1 experiment levels (same task, capsules, hidden set, grader)
 
-| arm | `--arm` | what it gets | driver |
+| level | retained `--arm` / treatment | what it gets | driver |
 |---|---|---|---|
-| C++ scaffold (raw) | `raw_baseline` | public spec + ISA headers, no Merlin tools | `run_baseline_qa_loop.py` |
-| C++ + Merlin infra | `cpp_merlininfra` | + Merlin build/runtime infra | `run_baseline_qa_loop.py` |
-| xDSL + Merlin tooling | `merlin_assisted` | + xDSL dialect/scaffold generators, starter kit | `run_baseline_qa_loop.py` |
-| Merlin + CIRCT | (rtlchecks) | + CIRCT-compiled-from-RTL checks as advisory feedback | `run_rtlchecks_qa_loop.py` |
+| EL1 — raw baseline | `raw_baseline` / baseline | public spec + ISA headers, no Merlin tools | `run_baseline_qa_loop.py` |
+| EL2 — C++ infrastructure | `cpp_merlininfra` / baseline | + Merlin build/runtime infra | `run_baseline_qa_loop.py` |
+| EL3 — Merlin-assisted | `merlin_assisted` / baseline | + xDSL dialect/scaffold generators, starter kit | `run_baseline_qa_loop.py` |
+| EL4 — RTL-informed Merlin | `merlin_assisted` / rtlchecks | + CIRCT-compiled-from-RTL checks as advisory feedback | `run_rtlchecks_qa_loop.py` |
 
-Convergence bar = **all 20 public capsules pass** (spike L2, then a verilator L3 barrier); the 5 hidden
-capsules are graded only in the final audit. (`A0/A2/A4/B0` is a round-0 quick-check subset, NOT the
-target.) The same four submissions are re-profiled as perf-bench backends (§4).
+New catalog definitions use `level: ELn`; the historical commands below retain
+arm IDs only because frozen bundle and run identities must remain reproducible.
+
+The historical cohort used 20 public capsules and 5 hidden capsules. Those
+counts are not a current Phase 0 coverage claim; a reviewed release defines the
+exact cohort for a new run.
 
 ## 0. Prerequisites (all resolve via `.env` — never hard-code)
 

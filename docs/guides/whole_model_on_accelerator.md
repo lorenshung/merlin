@@ -3,267 +3,158 @@ title: Compiling a whole model onto an accelerator
 kind: guide
 status: current
 owner: compiler
-last_verified: 2026-08-29
+last_verified: 2026-10-05
 related: [compilation_strategies, targetgen, adding_a_target, gemmini_experiment, reproducing_whole_model_on_rtl, firesim]
-code_refs: [src/merlin/compile_cli.py, src/merlin/runtime/dispatch_runtime.py, src/merlin/targetgen/routing.py, src/merlin/system, src/merlin/llvmlower/device_offload.py, src/merlin/llvmlower/device_build.py]
+code_refs: [src/merlin/compile_cli.py, src/merlin/compile/baremetal_model.py, src/merlin/compile/model_execution_inputs.py, src/merlin/llvmlower/group_offload.py, src/merlin/llvmlower/device_build.py, src/merlin/targetgen/coverage_certificate.py, packages/merlin-experiments/src/merlin/targetgen/native_model_execution.py]
 ---
 
 # Compiling a whole model onto an accelerator
 
-To actually reproduce these results on a fresh machine — the build flags, the two simulators, and the traps — see [reproducing_whole_model_on_rtl](reproducing_whole_model_on_rtl.md).
+A whole-model ELF, a correct whole-model output, and proof that source work ran on an accelerator
+are three different results. The saved-model CLI can build and run a bare-metal ELF on a selected
+board, including a matching native RTL engine. By default it builds the **host baseline**; it does
+not silently choose an accelerator placement. Even a complete native output match is a numerical
+diagnostic for that ELF, not certification of an agent-generated backend or proof that all operations
+were accelerated.
 
-Three different things get called "compiling a model with Merlin", and they carry very different
-evidence. Keep them apart; conflating them is the easiest way to overstate what the compiler does.
-
-| Path | Unit | Runs on | Entrypoint |
-|---|---|---|---|
-| whole-model, CPU/vector | a captured model | RISC-V CPU + RVV | `merlin-compile --target rvv` |
-| accelerator, per capsule | a capsule | the accelerator, graded up the oracle ladder | `merlin-compile --target <t>` |
-| **whole model ON an accelerator** | a captured model | accelerator mesh + host scalar/RVV lane | `compile_model(...)`, Python only |
-| capsule corpus, agent-generated OOT backend | a capsule | the accelerator, graded up the oracle ladder | `capsule_grade --package <pkg>` |
-
-This guide covers the third. The fourth is a different artifact with a different flow and its own
-runbook — see [gemmini_oot_package](gemmini_oot_package.md) for the backend that certified 33/33 at
-L3, what that cohort does and does not cover, and how to re-run it elsewhere. For the first two see `rvv_e2e.md` and `gemmini_experiment.md`.
-
-## Two ways to run a model on a device
-
-They are genuinely different, and the difference is what a result means.
-
-**Interpreted** (`compile_model(..., run="mesh")`). The host side is a Python tree-walking interpreter
-over the driver function; each matmul layer becomes an interface capsule, is shipped out of process to
-the target's oracle, and the result is read back as a numpy array. Nothing is emitted into a host
-binary. This is the path the L3 capsule results were measured on, and it is the right one for grading:
-the oracle is the same one the capsule ladder certifies against.
-
-**Compiled** (`device=` on the whole-model build). The contractions are rewritten into calls to private
-symbols, the target's own package emits a kernel per distinct extent, a generated shim adapts the MLIR
-calling convention to the device's kernel ABI, and the objects are linked beside the model object. The
-output is one artifact that runs on a board with no Python and no simulator in the loop.
-
-There is no CLI for either: `merlin-compile` dispatches to exactly two places — `compile_rvv` for
-`--target rvv` and `compile_oot` for a per-capsule accelerator run. `--run` offers
-`{none,host,k1,spike,zephyr,verilator}` with **no `mesh` choice**. Both paths are reached from Python.
-
-## Compiling a model onto the mesh
-
-```python
-from merlin.compile_cli import compile_model
-
-out = compile_model("small_llama", "int8", target="gemmini", run="mesh",
-                    verify=True, package=None, auto_capture=True, timeout=1800,
-                    routing_dtype="int8")
-
-print(out["mesh_execution"])   # per-layer: on-mesh vs host fallback vs oracle-unavailable
-print(out["verify"])           # the numeric gate
-```
-
-To run against a specific backend package (a graded submission, say) pass `mesh_package=<path>`.
-
-Environment:
-
-- `MERLIN_MESH_SIM=spike` selects the mesh oracle;
-- `MERLIN_MESH_VERIFY=1` additionally certifies a synthesized `DxD` tile per mesh-routed matmul,
-  gated bit-exact against the declared accumulator.
-
-`run="mesh"` routes each op across the target's compute units (matmul/systolic tiles to the mesh;
-norms, activations and elementwise to the vector/scalar lane), then executes each mesh matmul layer on
-the target's own oracle with the real operands injected, handing every layer's on-device output to the
-op that consumes it. An op no unit supports is an honest scalar/RVV fallback, never a silent drop.
-
-## The compiled path
-
-Measured end to end: a single ELF carrying host code and four device kernels — 33 custom instructions
-in `.text` — ran `small_llama` int8 to completion on spike, with 15 contractions executing on the
-accelerator across 4 distinct extents.
-
-| | cos vs fp32 | cos vs W8A8 | max\|d\|/max\|g\| | argmax |
-|---|---|---|---|---|
-| **compiled ELF** | 0.999929 | 0.999908 | 0.01308 / 0.01480 | match |
-| interpreted path | 0.99993 | 0.99991 | 0.0131 / 0.0148 | match |
-
-The two agree to five decimal places, which is the check that matters: the compiled artifact is not
-merely *a* result, it is the same result the graded path produces.
-
-One fix stood between those two rows and it is worth repeating, because it is the failure mode this
-whole path is most exposed to. The kernel ABI requires operands zero-padded to the mesh tile edge, and
-every offloaded layer here has M=8 against a 16-wide mesh. Handing over raw buffers does not fault —
-the kernel strides by the padded width through unpadded data, reads a neighbouring row as its own, and
-returns **cos 0.9847**: plausible, and wrong. Nothing catches that except comparing against a path
-already known to be right.
-
-
-```python
-from merlin.llvmlower.device_build import DeviceRouting
-from merlin.runtime.backends import spike_model
-
-routing = DeviceRouting(device="<target>", package_dir="<backend package>",
-                        operand_dtype="int8", accum_dtype="i32",
-                        select=lambda shape: True)   # the placement decision, made elsewhere
-spike_model.build(model_dir, work, device=routing, int8_compute=True)
-```
-
-What happens, and where to look when it does not:
-
-1. `prepare_for_lowering` rewrites each selected contraction into a call to a private symbol and
-   writes `device_signatures.json` beside the prepared module. One symbol per distinct `(M,N,K)` —
-   MLIR function types are monomorphic, so two extents cannot share a callee.
-2. The build reads that sidecar, runs the target's package once per signature to emit a device kernel,
-   renames each kernel to a distinct symbol, generates the shim, and links them with the model object.
-3. `select=None` (or `device=None`) makes the whole path inert. The placement decision belongs to
-   `merlin.system.place`, and a build that took it for itself would disagree with the router.
-
-**Why the rename matters.** Every emitted kernel carries the single entry name the backend contract
-declares. Linking several without renaming is not an error — the linker binds every call to whichever
-object it resolved first, so the model runs one layer's kernel for every layer, produces numbers, and
-is wrong.
-
-**Fail-closed points.** A device whose datapath cannot be derived offloads nothing rather than
-assuming a precision. A signature whose dtype has no MLIR type, or a sub-byte format whose element
-offset is not a byte count, is declined and reported rather than approximated. A sidecar carrying
-signatures with no `device=` routing to build them against is refused with that stated, rather than
-failing later as an unresolved symbol.
-
-## What is RTL-backed, and what is not
-
-A whole-model image cannot run on the Verilator harness (below), so the compiled artifact's RTL
-evidence is obtained by asking a narrower question. The artifact's device side is a fixed set of
-kernels at fixed extents — the offload mints one per distinct `(M,N,K)` — and those are
-scratchpad-resident, with no sub-word DRAM traffic. They therefore certify on exactly the harness the
-capsule ladder uses, at the extents the model actually calls.
-
-Measured for `small_llama` int8, whose compiled ELF carries four kernels:
-
-| kernel | M×N×K | oracle | derived_from_rtl | cycle-accurate | cycles |
-|---|---|---|---|---|---|
-| k0 | 8×128×128 | rtl_verilator | yes | yes | 2837 |
-| k1 | 8×344×128 | rtl_verilator | yes | yes | 7363 |
-| k2 | 8×128×344 | rtl_verilator | yes | yes | 7159 |
-| k3 | 8×256×128 | rtl_verilator | yes | yes | 5339 |
-
-All four pass, including `reference_outputs_vs_simulate`.
-
-**State the claim at its real scope.** This certifies the DEVICE CODE the artifact contains, on
-elaborated RTL, at the extents it runs. It is not a whole-model RTL run, and the host↔device
-integration is not what it measures — that is what the spike numbers above cover. The two together
-are: correct device code (RTL), assembled into a correct whole-model result (functional). A
-whole-model RTL run remains unavailable on the substrates here.
-
-## Which substrates can run a compiled whole model
-
-| substrate | whole-model artifact | why |
+| Workflow | What it exercises | Evidence boundary |
 |---|---|---|
-| spike (`--extension=<target>`) | **yes** | measured; the numbers above |
-| chipyard Verilator | **yes**, once the image is fitted | completed on `GemminiRocketConfig`: 22,024,854 cycles, clean `$finish`. Hours per run. |
-| FireSim | **kernels yes; whole model not yet tried** | a capsule ELF ran on the gemmini bitstream 2026-08-29, byte-identical to Verilator |
-| GSIM | not yet, but unblocked | DRAM path works; needs a loader + result readback |
+| `merlin-compile --model-build` | one byte-verified saved capture, selected host package and board | one host-baseline ELF by default; optional complete-output check |
+| `compile_saved_model(..., device=routing)` | the same build with an explicit `DeviceRouting` | a static device sidecar and optional complete-output check; dispatch still unproved |
+| `compile_model(..., run="mesh")` | Python-driven whole-model dispatch to per-layer oracles | interpreted mesh/host composition, not one bare-metal ELF |
+| OOT capsule grader | candidate command buffer and emitted artifact against frozen corpus/oracles | independent eligibility, transform, execution and numerical verdicts |
 
-### Correction: the Verilator block was the image, not the harness
+The older [whole-model RTL reproduction](reproducing_whole_model_on_rtl.md) documents a specific
+Gemmini experiment, including an unresolved spike-versus-Verilator numerical difference. Its historical
+kernel and model measurements must not be promoted into a current saved-model or candidate certification.
 
-An earlier version of this page said Verilator "rejects sub-word writes" and that a whole-model image
-could not run there. **That was wrong, and it is recorded here because the wrong theory survived a
-control experiment.** The monitor abort (`'A' channel carries PutPartial type which is unexpected`)
-was real, but its cause was not the harness memory: the image was built with `dram_bytes=None`, which
-puts the arena at `0xC0000000` — memory that config does not have. A padded-image experiment aborted
-at exactly the same point, which is what disproved the sub-word-write theory.
+## Select and reuse the inputs
 
-Two settings, both derived from the target rather than defaulted, are what make it run:
+Select an existing capture bundle with a materialized, byte-verified `capture_receipt.json`; the build
+does not recapture a workload. Select the host package separately from any candidate device package.
+Its `knobs.yaml` flags must supply one `-march` and an ABI compatible with the runner-owned harness;
+the board's byte-pinned elaborated DTS must describe that CPU ISA, DRAM and hart. The current executor
+requires a bare-metal HTIF board, one hart, a code reserve and one inference. It checks the linked
+ELF ISA against the DTS rather than assuming the build machine's ISA.
 
-- **`dram_bytes` from the design's own DTS.** `GemminiRocketConfig` is 256 MB at `0x80000000`.
-- **`-march` from the DTS's `riscv,isa` string.** That core declares no `v`, and the default
-  `-march=rv64gcv` traps on the first `vsetvli` about 45 M cycles in.
+Select target support explicitly with `MERLIN_TARGET_PATH` pointing at the intended trusted provider.
+The core's target name or a generated candidate package is not a substitute for that provider. For
+native `gsim` or `verilator`, also select `--rtl-facts` from the same elaborated target/config as the
+board and the selected L3 engine. The executor binds the facts to their FIRRTL bytes and revalidates
+the concrete engine provenance. The provider must expose a public `run_elf` implementation for the
+selected engine; merely having an emulator somewhere on disk is insufficient. A target with another
+selected L3 engine cannot use these two native choices through this command.
 
-Both are in [reproducing_whole_model_on_rtl](reproducing_whole_model_on_rtl.md), with the pre-flight
-checks that catch each in seconds.
+Keep the saved bundle, host package, board catalog, DTS, RTL facts and provider selection stable
+across diagnostics. Each `--output` must be a **fresh directory below `MERLIN_OUT_ROOT`**; the receipt
+pins input tree hashes, selected engine, ELF hash and console. Reuse a prior artifact as evidence only
+with its identity and provenance intact. In particular, rebuilding separately for gSIM and Verilator
+does not establish a *same-ELF* comparison unless their ELF byte hashes agree. Do not recapture or
+replace a reference between runs and present the results as one comparison.
 
-**What the completed run showed is not agreement.** The same artifact is bit-identical to the host-only
-build on spike + `libgemmini`, and on RTL it diverges: `cos = 0.973`, every one of 2048 elements
-differing, mean `|diff|` 0.096. All elements differing rules out a single wrong layer — this is a
-systematic arithmetic difference between the spike extension and the gemmini RTL (accumulation order,
-rounding, or requant scaling), and it is **unexplained**. The device kernels are separately L3-certified
-on that same RTL, so the individual kernels are right. Never cite the spike bit-exactness as an RTL
-result.
+## Host-baseline diagnostic: build, then optionally run
 
-A host-only RTL control is not a practical discriminator: without offload the model needs ~336 M cycles
-against the offloaded 13.5 M — days of Verilator. Estimate the cycle budget before launching one.
+Set each variable to an explicitly selected path or value. `REFERENCE_FILE` is the basename of a
+receipt-bound `.npy` file **inside** `MODEL_CAPTURE`, not an arbitrary external golden. Choose it for
+the arithmetic actually built; a capture's default `golden.npy` is not necessarily the right W8A8
+reference. A compile-only run needs no reference.
 
-### Where each target actually stands
+```sh
+export MERLIN_TARGET_PATH=/absolute/path/to/trusted-target-support
+export MERLIN_OUT_ROOT=/absolute/path/to/generated-out
 
-The compiled path is not equally far along on every target. Read this before planning work.
-
-| target | compiled whole-model artifact | RTL / hardware | what "pass" means today |
-|---|---|---|---|
-| **gemmini** | **yes** — one archive, host + device, 15 contractions offloaded across 4 signatures | spike bit-exact; Verilator completes (cos 0.973); kernels L3-certified; capsule ELF runs on FPGA | a compiled artifact executed |
-| **radiance** | **no** | none for whole models | `run: host` — the Python interpreter, `tiers: {}`, no oracle tier ran |
-
-Radiance's whole-model capsules report `pass` with `cos = 0.9999999`, and that number is real — but the
-`operation` block reads `"run": "host"`, which is the tree-walking interpreter over the driver function,
-and the tier map is **empty**. Nothing was compiled into a host binary and nothing touched RTL. Its
-declared ladder is `tier_sim: {L2: cyclotron, L3: verilator}` for *kernels*; there is also **no radiance
-bitstream in `config_hwdb.yaml`**, so FireSim is not an option for it at all. Bringing radiance onto the
-compiled path is Stage B work (see the host+device plan), not a documentation gap.
-
-## Reading the result
-
-Two questions decide whether a whole-model result means anything, and they are separate.
-
-**Did the work reach the accelerator?** `mesh_execution` counts
-`matmul_layers_on_mesh` / `matmul_layers_host_fallback` / `matmul_layers_oracle_unavailable`. A model
-that produced the right answer entirely on the CPU is not an accelerator result, which is what the
-`must_accelerate` gate exists to catch. Note that *unavailable* is distinct from *wrong*: a layer whose
-oracle could not run was never measured, and `NOT_RUN_IS_NOT_PASS` means it cannot count as a pass.
-
-**Was the arithmetic checked, and how strongly?** In the gate block:
-
-| field | meaning |
-|---|---|
-| `per_element_guarded` | whether any per-element bound actually applied; `false` means the verdict rests on aggregate cosine alone |
-| `per_element_basis` | which bound vetted it: `relative` (strict tiers) or `quantization_excess` (derived) |
-| `quant_excess` | the run's worst deviation over the deviation a correct host int8 reference already costs on that same output; ~1 is indistinguishable from correct quantized arithmetic, bound 4 |
-
-The per-element bound is derived rather than fixed for a measured reason: across the tracked
-recaptures the deviation of a **correct** host int8 reference from the fp32 golden spans 0.027 to 1.88
-of the output RMS and 1.3 to 99.0 in per-element relative terms. No constant satisfies all of them, so
-a fixed threshold is necessarily fitted to whichever model it was chosen against. Comparing a run to
-its own model's quantization floor (`golden_w8a8` vs `golden`) needs no such choice, and where that
-floor is unmeasurable the veto stays off and the verdict reports itself unguarded rather than
-manufacturing a bound. See `src/merlin/runtime/backends/zephyr_model.py::_gate`.
-
-## Residency and composition are different claims
-
-**Residency** is "every routed matmul layer ran on the mesh". **Composition** is "the compiler split
-the network across the mesh and the host lane and still got the right answer".
-
-A real network on a matmul-only mesh *cannot* run entirely on the accelerator — norms and activations
-have nowhere else to go. That is why interop capsules withhold `must_accelerate` and instead declare
-`lanes.require`, so each named lane having carried work is the behaviour under test rather than a
-violation. Quoting one claim as the other overstates both.
-
-## Grading a package
-
-Pass the target's **own** capsule roots, never their common parent:
-
-```python
-from merlin.targetgen.corpora import graded_capsule_roots
-from merlin.targetgen.capsule_grade import grade
-
-r = grade("<package>", capsules_root=[str(x) for x in graded_capsule_roots("gemmini")],
-          runs_root="<runs>", target="gemmini", labels={"public"})
-print(r["headline"])
+merlin-compile --target "$TARGET" --model-build \
+  --capture-bundle "$MODEL_CAPTURE" --package "$HOST_PACKAGE" \
+  --board-catalog "$BOARD_CATALOG" --board "$BOARD_NAME" --host-dts "$HOST_DTS" \
+  --arena-mb "$ARENA_MB" --output "$MERLIN_OUT_ROOT/model-build-only" \
+  --run none --json
 ```
 
-A target's capsules are split across sibling category directories (`isa/`, `layers/`, `model/`,
-`model_slices/`), and different targets keep them in different places. Passing the parent pulls in
-every target's corpus at once: grading a gemmini package against `merlin/contract/capsules` reports
-`22/84` with 89 capsules marked "outside this target's declared capability" — a number that reads like
-a catastrophic regression and means nothing.
+`--run none` produces `baremetal_model.json` with status `compiled` and an ELF. It claims neither
+execution nor numerical agreement. It can build a model whose output exceeds the execution gate's
+current 4096-element limit.
 
-## Capacity obligations
+To run a **separate fresh build** on the selected native engine:
 
-Two on-chip stores bound a contraction and they bind different dimensions: the operand store holds the
-weight tile plus the activation tile (growing as `K*(M+N)`), the accumulator holds the output tile
-(growing as `M*N`). `capacity_fit` evaluates both and reports `operands_hold` / `output_holds`
-separately, because they fail on different layers — a wide-output layer sits well inside a 256 KiB
-scratchpad while overrunning a 64 KiB accumulator. Both bounds are derived from the target's own
-RTL-discovered capacities; a store that cannot be classified leaves the obligation undecidable rather
-than assumed to hold.
+```sh
+merlin-compile --target "$TARGET" --model-build \
+  --capture-bundle "$MODEL_CAPTURE" --package "$HOST_PACKAGE" \
+  --board-catalog "$BOARD_CATALOG" --board "$BOARD_NAME" --host-dts "$HOST_DTS" \
+  --arena-mb "$ARENA_MB" --output "$MERLIN_OUT_ROOT/model-native-diagnostic" \
+  --run "$RTL_ENGINE" --rtl-facts "$RTL_FACTS" \
+  --reference-file "$REFERENCE_FILE" --timeout "$TIMEOUT_SECONDS" --json
+```
+
+Here `RTL_ENGINE` is the selected `gsim` or `verilator`; `spike` is also supported without
+`--rtl-facts`, but is not RTL evidence. Native availability and completion depend on the exact
+provider/engine, ELF and cycle/time budget; the presence of this API is not a claim that a particular
+whole model has passed. Execution currently requires one finite float32 output of at most 4096
+elements and checks the **entire** `OUT` against the explicit reference, plus completion and build
+identity. Status `verified_complete_output` means exactly that for this ELF/reference/engine.
+Partial or timed-out simulator output is retained as diagnostic bytes in a failed receipt and never
+counts as a numerical pass. `--no-verify` is not an execution escape hatch.
+
+Both commands above omit `device`, so their receipt says `execution_route: host_baseline`. A correct
+host baseline is useful for isolating the host ABI, memory map and native runner. It says nothing
+about device dispatch. The `--model-build` CLI has no device-placement flag and does not consume an
+OOT candidate's command buffer.
+
+## Candidate model diagnostic is a separate artifact
+
+A candidate device route must be an explicit input to the Python
+`merlin.compile.baremetal_model.compile_saved_model` API via `device=DeviceRouting(...)`. Derive the
+routing from a placement and the saved capture (for example, `routing_for_placement`), with a selected
+device package and declared granularity; do not manufacture `select=lambda shape: True` to make a
+coverage number. The build records a device sidecar, but labels it
+`device_requested_dispatch_unverified`: static calls or nonzero opcodes do not prove a completed
+accelerator dispatch. The host baseline ELF cannot be relabeled as a candidate ELF.
+
+The OOT whole-program route is different again. The grader's candidate diagnostic links the
+candidate-emitted whole-program LLVM and command buffer against the frozen capture, rather than
+substituting a core-generated host baseline. Its `numeric_match_diagnostic` status records a native
+numerical comparison, **not** a final grade or device-execution proof. Keep the candidate artifact,
+capture, selected provider, board and facts byte-identical when comparing engines or resuming a run.
+Use the reviewed corpus and grader workflow for a verdict; a manually invoked native run is only a
+diagnostic.
+
+## Grouping and fail-closed routing
+
+`compile_model(..., offload=True, offload_granularity="contraction")` moves only the contraction;
+bias, requantization, activation and other readout remain host work. `"group"` requests one closed
+compute group per device call. It must be built from that group's stated program, not just its
+`(M,N,K)` extents. These are different programs and must not share a coverage label.
+
+The group planner inventories source operations and reports each group as accepted or declined by
+name; `require_every_group_accounted` rejects an incomplete census. A saved capture's weight manifest
+is needed where operand roles cannot otherwise be distinguished. Missing data, unsupported dtype or
+transport, absent program entries, or a missing backend package must remain named refusals, not
+implicit accelerator successes. A route plan is a prediction; only a build with the selected routing
+can emit the calls, and only completed runtime dispatches can establish their lane.
+
+For an OOT whole-program backend, preserve each source `prov.region_id` and map source operations
+exactly once through `params.global_program_plan.tasks` (`task_index`, `kind`, source indices) into
+LLVM operations tagged `merlin.global_task`. These declarations help the independent grader join
+source regions, outlined symbols and completed dispatch ledger entries. They do not self-certify:
+missing or mixed provenance, unexecuted eligible siblings, failed/fallback calls and unaccounted host
+work remain vetoes. A complete output match, a static sidecar, or an instruction count cannot waive
+those obligations. See the shared [OOT backend contract](../../merlin/contract/mlir_oot_backend_contract.yaml)
+and [target generation guide](targetgen.md) for the authoring boundary.
+
+## What a full claim needs
+
+Treat the following as separate evidence, joined on the **same saved inputs and candidate bytes**:
+
+1. The selected board, DTS, host package and trusted target provider agree on ISA, ABI, memory and
+   concrete RTL engine; the ELF and execution receipts remain byte-bound.
+2. The whole candidate model completes and its entire output passes the declared numerical policy.
+3. The independent grader accounts for every eligible source operation through transform replay,
+   exact source-region/outline identity and completed device dispatch, while naming host fallback and
+   unsupported work. `NOT_RUN` is not a pass.
+4. The required oracle tiers, corpus, release and review policy for the intended claim have passed.
+   A diagnostic command or a pending human review cannot grant that authority.
+
+Even a fully graded heterogeneous program need not accelerate every operation: a matmul unit does
+not automatically execute norms or elementwise work. State which regions ran on which lane, which
+were declined, and what numerical and RTL tier actually measured them. For the older experimental
+Gemmini commands and their limitations, use the [reproduction guide](reproducing_whole_model_on_rtl.md);
+do not use its historical spike result as an RTL result.

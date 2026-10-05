@@ -99,6 +99,30 @@ source, target, query, verifier implementation, translator binary, solver versio
 IR parser or syntax verifier can establish well-formedness but cannot produce a semantic receipt.
 Generated receipts should be kept with run artifacts, not substituted for the input artifacts.
 
+Phase 1 whole-model capsule grading enables the exact transform audit automatically. For a
+standalone whole-model dispatch run, set `MERLIN_MODEL_TRANSFORM_AUDIT=exact` before invoking
+the compiler. The result's `mesh_execution.transform_audit_index` points to an invocation-local
+`index.json` and exact `captured-model`, `normalized-model`, and `outlined-model` MLIR files.
+Each stage, the normalization recipe, and the original capture are hash-bound and rechecked when the audit closes. The
+coverage certificate separately joins the captured operation inventory to the runtime's
+outlined dispatch symbols and completed-call ledger; missing, extra, or unexecuted operations
+remain incomplete. An integer contraction rewrite must account for both its contraction and
+requantization children; the former must execute on the accelerator, while a completed host-side
+requantization is not misclassified as fallback. These artifacts make the transformations inspectable
+and provide the exact
+inputs for a validator. Matching hashes, types, and dispatch identities do **not** establish
+value equivalence. A semantic claim still needs a replay-qualified receipt for a supported
+boundary, or an explicitly bounded independent numerical check; unsupported boundaries abstain.
+To recheck an archived model outline locally, call
+`merlin.runtime.dispatch_runtime.qualify_model_transform_audit(Path(index_path))`.
+It verifies all three exact stage hashes and MLIR modules, reruns the declared normalization
+sequence from the saved capture, reruns outlining from the resulting normalized module, and
+requires byte-identical output at both boundaries. A custom Python operation-selection callback
+cannot be serialized as a recipe and is reported as `unsupported_custom_selection`; target-model
+grading refuses that status. Older archives without a recipe report `not_recorded`. The reported
+semantic-equivalence status remains `not_proven`: replay checks determinism and provenance, not
+whether a transformation preserves values or whether target execution matches the source.
+
 Each receipt records SHA-256 identities of the generic xDSL IR text and canonical command-buffer
 JSON, both sides' typed signatures, the verifier's source digest, translator path/version/hash,
 xDSL and Z3 versions, timeout, assumptions, solver-query digest, outcome, and any counterexample.

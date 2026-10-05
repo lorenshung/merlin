@@ -215,24 +215,23 @@ is never promoted; whole-model int8/fp16 have no XNNPACK e2e column (harness lim
 
 ## 6. Gemmini target-dialect-generation experiment (agentic case study)
 
-**Purpose.** The case study for the target-gen tool: how well an agent authors a correct,
-RTL-conformant Gemmini MLIR OOT backend under increasing Merlin help, in a cheat-proof sandbox — then
-certify and publish it. Four arms (raw C++ → +Merlin infra → +xDSL tooling → +CIRCT checks), all graded
-to 20/20 public capsules.
+**Purpose.** Compare four Phase 1 experiment levels: EL1 raw baseline, EL2 C++
+infrastructure, EL3 Merlin-assisted, and EL4 RTL-informed Merlin. Frozen records
+retain their older arm and bundle IDs. The historical 20-capsule cohort is not a
+current release or a claim that a new EL4 run is ready.
 
 ```bash
-S=merlin/experiments/capsule_bench/targets/gemmini/scripts
-.venv/bin/python $S/preflight_sandbox.py --arm merlin_rtlchecks   # MANDATORY pre-spend gate (21/21 GO)
-.venv/bin/python $S/verify_no_cheat.py                        # static cheat-clean gate
-.venv/bin/python $S/launch_ab_batch.py --tag <tag> --arms baseline,cpp_merlininfra,merlin,merlin_rtlchecks --mode sequential
-# RTL conformance now belongs to the selected OOT support checkout.
-GEMMINI_SUPPORT=/absolute/path/to/gemmini-mlir/merlin-support
-MERLIN_TARGET_PATH="$GEMMINI_SUPPORT" PYTHONPATH="$GEMMINI_SUPPORT" \
-  .venv/bin/python "$GEMMINI_SUPPORT/examples/conformance/run.py" --simulators spike,verilator
+merlin experiment levels
+merlin experiment inspect gemmini-functional --phase 1
+merlin experiment preflight gemmini-functional --phase 1
 ```
-Do NOT set a tight `--round-timeout` (default 4h; a short cap is net-detrimental). The rate-limit
-watchdog + `--resume` carry it across session limits. **Full detail** — arms, sandbox mechanics, cert,
-perf-bench, publish, honesty invariants — in [Gemmini experiment](gemmini_experiment.md).
+Preflight on the example intentionally reports missing operator-owned inputs.
+Select a reviewed Phase 0 release, its newly generated bundle, measured timing,
+LLVM toolchain, and explicit OOT support provider before launch. The current
+[Gemmini example](../../examples/gemmini/README.md) and
+[Phase 1 guide](../../examples/gemmini/phase1/README.md) give the installed path;
+the [historical experiment](gemmini_experiment.md) retains the old launcher and
+bundle IDs for interpreting archived runs.
 
 ## 7. Run a model on real hardware / simulators + external baselines
 
