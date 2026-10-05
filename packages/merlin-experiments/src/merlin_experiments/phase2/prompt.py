@@ -184,7 +184,10 @@ def validate_prompt_inputs(inputs: PerfPromptInputs) -> None:
         raise PerfPromptContractError("performance prompt inputs must be PerfPromptInputs")
     _simple_name(inputs.target, label="target")
     if inputs.approach != "arm4":
-        raise PerfPromptContractError("the performance campaign evaluates only approach='arm4'")
+        raise PerfPromptContractError(
+            "the performance campaign evaluates only an EL4-produced compiler "
+            "(frozen approach='arm4' compatibility key)"
+        )
     _simple_name(inputs.functional_run_id, label="functional run id")
     functional_digest = _sha256(inputs.functional_submission_sha256, label="functional submission digest")
     if _sha256(inputs.frozen_functional_sha256, label="frozen functional digest") != functional_digest:

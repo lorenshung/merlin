@@ -97,6 +97,8 @@ _MODULE_OWNERS = {
     "perf_pr_claim": "merlin_experiments.phase2.claims.pr",
     "perf_affine_claim": "merlin_experiments.phase2.claims.affine",
     "perf_paired_claim": "merlin_experiments.phase2.claims.paired",
+    "merlin.perf.group_arithmetic_claim": "merlin_experiments.phase2.claims.group_arithmetic",
+    "perf_vendor_reference_claim": "merlin_experiments.phase2.claims.vendor_reference",
 }
 
 
@@ -204,12 +206,34 @@ def _registry() -> dict[str, Callable[..., dict]]:
     except Exception:  # noqa: BLE001
         pass
     try:
+        # A fused whole decided against the SUM of the parts it replaces (the PF family): one whole and
+        # a declared number of parts per group, the band the sum of their measured dispersions.
+        from . import group_arithmetic as GA
+
+        table[GA.ANALYZER] = GA.analyze_group_arithmetic_claim
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        # A form-perf member against its vendor-reference bar (the form-perf family): the candidate
+        # arm held to the declared instruction policy, the vendor bar unrestricted.
+        from . import vendor_reference as VR
+
+        table[VR.ANALYZER] = VR.analyze_vendor_reference_claim
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         # This analyzer keeps its identity inside its acceptance template rather than as a module
         # constant, so it is read from there -- never re-spelled here, which would let the registry
         # and the contract drift apart silently.
         from . import pr as PR
 
-        for attr in ("_CURRENT_ACCEPTANCE_BASE", "_ACCEPTANCE_BASE", "ACCEPTANCE_BASE", "_ACCEPTANCE", "_PROPOSED_ACCEPTANCE"):
+        for attr in (
+            "_CURRENT_ACCEPTANCE_BASE",
+            "_ACCEPTANCE_BASE",
+            "ACCEPTANCE_BASE",
+            "_ACCEPTANCE",
+            "_PROPOSED_ACCEPTANCE",
+        ):
             base = getattr(PR, attr, None)
             if isinstance(base, dict) and isinstance(base.get("analyzer"), str):
                 table[base["analyzer"]] = PR.analyze_pr_claim
