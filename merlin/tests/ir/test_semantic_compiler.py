@@ -120,6 +120,20 @@ def _banks() -> tuple[StorageBank, ...]:
     )
 
 
+def test_allocator_chooses_canonical_addresses_for_replay() -> None:
+    graph = CandidateGraph(
+        values=(
+            Value(0, "first", "register", 1, (), None, "instruction"),
+            Value(1, "second", "register", 1, (), None, "instruction"),
+        ),
+        outputs=(0, 1),
+    )
+    bank = (StorageBank("register", "physical_registers", 2, "register"),)
+    results = [allocate(graph, (0, 1), bank) for _ in range(12)]
+    assert all(result.status == "feasible" for result in results)
+    assert all(result.addresses == {0: 0, 1: 1} for result in results)
+
+
 def test_typed_graph_rejects_unknown_initialization_and_policy_merges() -> None:
     with pytest.raises(ValueError, match="positive static"):
         TensorType((0, 2), "i8", "exact")

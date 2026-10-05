@@ -357,7 +357,11 @@ def _cmd_native_compile(args: argparse.Namespace) -> int:
     """Invoke a selected target binding with typed source and an explicit ABI."""
     from merlin.semantic_compiler.linalg_bridge import LinalgBridgeError
     from merlin.semantic_compiler.snapshot import open_native_snapshot
-    from merlin.semantic_compiler.target_binding import load_native_target_binding, verify_native_publication
+    from merlin.semantic_compiler.target_binding import (
+        NativeCompilationError,
+        load_native_target_binding,
+        verify_native_publication,
+    )
 
     try:
         binding = load_native_target_binding(args.support)
@@ -420,12 +424,24 @@ def _cmd_native_compile(args: argparse.Namespace) -> int:
             "source_identity": request.source_identity,
             "source_operations": list(source_operations),
             "search_limits": limits.record(),
-            "binary_sha256": manifest.get("binary_sha256"),
+            "artifact_kind": manifest.get("artifact_kind", "program"),
         }
+        if manifest.get("artifact_kind") == "program_set":
+            report["program_count"] = len(manifest["segments"])
+            report["segment_binary_sha256"] = [row["binary_sha256"] for row in manifest["segments"]]
+        else:
+            report["binary_sha256"] = manifest["binary_sha256"]
     except (OSError, ValueError, RuntimeError, KeyError, TypeError, ImportError, UnicodeError) as error:
+        status = (
+            "unsupported_semantics"
+            if isinstance(error, LinalgBridgeError)
+            else error.status
+            if isinstance(error, NativeCompilationError)
+            else "compile_error"
+        )
         report = {
             "schema": "merlin.native_compilation_status.v1",
-            "status": "unsupported_semantics" if isinstance(error, LinalgBridgeError) else "compile_error",
+            "status": status,
             "engine": args.engine,
             "support": args.support,
             "out": str(args.out),

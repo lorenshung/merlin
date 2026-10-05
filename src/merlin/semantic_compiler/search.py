@@ -32,7 +32,7 @@ from .verify import check_selection
 class SearchLimits:
     iterations: int = 8
     egraph_nodes: int = 5000
-    candidate_nodes: int = 12
+    candidate_nodes: int = 24
     candidates: int = 256
     orders_per_candidate: int = 32
     solver_timeout_ms: int = 5000

@@ -16,7 +16,7 @@ from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
 from merlin.semantic_compiler.model import ConstantBinding, KernelRequest, SemanticNode, TensorType
 from merlin.semantic_compiler.rules import AxisEquality, InstructionDescriptor
 from merlin.semantic_compiler.snapshot import NativeTargetProfile
-from merlin.semantic_compiler.target_binding import verify_native_publication
+from merlin.semantic_compiler.target_binding import NativeCompilationError, verify_native_publication
 
 
 def _invoke(*arguments: object) -> subprocess.CompletedProcess[str]:
@@ -48,6 +48,66 @@ def test_native_publication_refuses_changed_execution_plan(tmp_path: Path) -> No
     (tmp_path / "execution_plan.json").unlink()
     with pytest.raises(ValueError, match="plan and manifest identity disagree"):
         verify_native_publication(tmp_path, manifest, **kwargs)
+
+
+def test_native_publication_checks_every_program_set_segment(tmp_path: Path) -> None:
+    rows = []
+    for index in range(2):
+        root = tmp_path / "segments" / f"{index:03d}"
+        root.mkdir(parents=True)
+        binary = bytes((index, 0, 0, 0))
+        plan = json.dumps({"output": index}).encode()
+        (root / "program.bin").write_bytes(binary)
+        (root / "execution_plan.json").write_bytes(plan)
+        detail = {
+            "engine": "merlin_native",
+            "request_digest": f"segment-{index}",
+            "target_identity": "target-1",
+            "binary_sha256": hashlib.sha256(binary).hexdigest(),
+            "execution_plan_sha256": hashlib.sha256(plan).hexdigest(),
+        }
+        serialized = json.dumps(detail).encode()
+        (root / "manifest.json").write_bytes(serialized)
+        rows.append(
+            {
+                "index": index,
+                "path": f"segments/{index:03d}",
+                "request_digest": f"segment-{index}",
+                "manifest_sha256": hashlib.sha256(serialized).hexdigest(),
+                "binary_sha256": detail["binary_sha256"],
+            }
+        )
+    manifest = {
+        "artifact_kind": "program_set",
+        "engine": "merlin_native",
+        "request_digest": "source-1",
+        "target_identity": "target-1",
+        "segments": rows,
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    kwargs = {"engine": "merlin_native", "request_digest": "source-1", "target_identity": "target-1"}
+    verify_native_publication(tmp_path, manifest, **kwargs)
+    binary_path = tmp_path / "segments/001/program.bin"
+    binary_path.write_bytes(b"\x13\x00\x00\x00")
+    with pytest.raises(ValueError, match="native emitted binary differs"):
+        verify_native_publication(tmp_path, manifest, **kwargs)
+    binary_path.write_bytes(bytes((1, 0, 0, 0)))
+    (tmp_path / "segments/extra").mkdir()
+    with pytest.raises(ValueError, match="unaccounted segment"):
+        verify_native_publication(tmp_path, manifest, **kwargs)
+    (tmp_path / "segments/extra").rmdir()
+    rows[1]["path"] = "segments/../001"
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="unsafe or repeated segment path"):
+        verify_native_publication(tmp_path, manifest, **kwargs)
+
+
+def test_native_compilation_failure_keeps_search_status() -> None:
+    failure = NativeCompilationError("resource_limit", "bounded search exhausted")
+    assert failure.status == "resource_limit"
+    assert failure.reason == "bounded search exhausted"
+    with pytest.raises(ValueError, match="known status"):
+        NativeCompilationError("selected", "cannot be a failure")
 
 
 def test_installed_native_build_select_and_failure_replace_stale_result(tmp_path: Path) -> None:

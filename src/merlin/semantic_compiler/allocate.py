@@ -392,8 +392,11 @@ def allocate(
     if boundary_problem:
         return AllocationResult("modeling_failure", order, {}, boundary_problem)
     ranges = live_ranges(graph, order)
-    solver = z3.Solver()
-    solver.set(timeout=timeout_ms)
+    # A plain SAT model may select different valid physical registers on
+    # repeated invocations. Lexicographic minimization fixes one canonical
+    # assignment in value-ID order, so replayed emission has stable bytes.
+    solver = z3.Optimize()
+    solver.set(timeout=timeout_ms, priority="lex")
     variables = {value.id: z3.Int(f"address_{value.id}") for value in graph.values}
     if fixed_outputs is not None:
         for value_id, address in zip(graph.outputs, fixed_outputs):
@@ -427,6 +430,8 @@ def allocate(
                 if _qualified_in_place_pair(graph, left, right):
                     alternatives.append(variables[left.id] == variables[right.id])
                 solver.add(z3.Or(*alternatives))
+    for value_id in sorted(variables):
+        solver.minimize(variables[value_id])
     status = solver.check()
     if status == z3.unsat:
         return AllocationResult("infeasible_candidate", order, {}, "bounded placement formula is UNSAT")
