@@ -47,6 +47,20 @@ def claim_models() -> tuple[str, ...]:
     return tuple(str(m) for m in _doc()["claim_models"])
 
 
+def evaluation_only_models() -> tuple[str, ...]:
+    """Held-out models used ONLY to evaluate generality after the compiler is frozen.
+
+    They are not headline claims, but they are held out from derivation on exactly the same terms: a
+    form derived from one would be a corpus built from the model it later checks.
+    """
+    return tuple(str(m) for m in _doc().get("evaluation_only_models") or ())
+
+
+def held_out_models() -> tuple[str, ...]:
+    """Every model barred from derivation: the claim models and the evaluation-only models."""
+    return tuple(dict.fromkeys((*claim_models(), *evaluation_only_models())))
+
+
 def exclusion_rule() -> str:
     """The prose standard a reviewer applies. Returned rather than paraphrased at call sites."""
     return str((_doc().get("exclusion") or {}).get("rule") or "")
@@ -72,7 +86,7 @@ def _tokens(name: str) -> tuple[str, ...]:
 
 
 def model_of(bundle: str) -> str | None:
-    """The claim model a bundle name belongs to, or ``None``.
+    """The held-out model (claim or evaluation-only) a bundle name belongs to, or ``None``.
 
     Whole-token prefix, longest match first: ``tiny_llama`` and a hypothetical ``tiny`` must not both
     claim ``tiny_llama_fp32_full``, and the more specific declaration is the one that means it.
@@ -80,7 +94,7 @@ def model_of(bundle: str) -> str | None:
     bt = _tokens(bundle)
     best: str | None = None
     best_len = 0
-    for m in claim_models():
+    for m in held_out_models():
         mt = _tokens(m)
         if len(mt) > len(bt) or bt[: len(mt)] != mt:
             continue
@@ -116,6 +130,6 @@ def covered_claim_models(captures: Iterable[str]) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {m: [] for m in claim_models()}
     for name in captures:
         m = model_of(name)
-        if m is not None:
+        if m in out:
             out[m].append(str(name))
     return {k: sorted(v) for k, v in out.items()}

@@ -175,6 +175,26 @@ def _elem_dtype(op) -> str | None:
     return None
 
 
+def _captured_input_formats(op) -> tuple[str | None, ...]:
+    """Observe every linalg input role, never its accumulator/output initializer.
+
+    Missing or dynamic types remain explicit unknown slots. A stored weights
+    precision cannot change the format the captured computation actually reads.
+    """
+    getter = getattr(op, "get_inputs", None)
+    inputs = tuple(getter()) if callable(getter) else tuple(op.operands[:len(op.operands) - len(op.results)])
+    formats: list[str | None] = []
+    for value in inputs:
+        typ = value.type
+        shape = typ.get_shape() if hasattr(typ, "get_shape") else None
+        if shape is not None and any(type(dim) is not int or dim <= 0 for dim in shape):
+            formats.append(None)
+            continue
+        spelling = str(getattr(typ, "element_type", typ))
+        formats.append(_ELEM_DTYPE.get(spelling, f"unsupported_mlir:{spelling}"))
+    return tuple(formats)
+
+
 def region_family(op, short: str | None = None) -> str | None:
     """Classify an emitted linalg region, checking structure before source-op provenance.
 
@@ -209,6 +229,23 @@ def _is_region_op(op) -> bool:
     if not name.startswith("linalg."):
         return False
     return _short_op(name) not in ("yield", "index", "init_tensor")
+
+
+def region_sources(module):
+    """``(family, element dtype, prov.op, prov.aten)`` for every computation-carrying region.
+
+    The same regions and the same family/dtype resolution as :func:`regions_from_module`, plus the
+    capture's own provenance naming the operation that produced each region. ``None`` stays ``None``.
+    """
+    for op in module.walk():
+        if not _is_region_op(op):
+            continue
+        yield (
+            region_family(op, _short_op(op.name)),
+            _elem_dtype(op),
+            _attr_str(op, "prov.op"),
+            _attr_str(op, "prov.aten"),
+        )
 
 
 def weight_precisions(manifest_path: str | Path) -> dict[str, str]:
@@ -300,13 +337,13 @@ def regions_from_module(module, *, precisions: dict[str, str] | None = None) -> 
             continue
         short = _short_op(op.name)
         family = region_family(op, short)
-        # Precision from the weights manifest when we have one, joined on the region's owning module.
-        # Element type is the FALLBACK, not the authority: it under-reports quantization badly.
-        precision = None
-        if precisions:
+        observed = _captured_input_formats(op)
+        precision = observed[0] if observed else None
+        # A manifest is weaker diagnostic input, never evidence of a conversion.
+        # Captured unknown slots remain unknown even when this fallback is present.
+        if precision is None and precisions:
             precision = precisions.get(_attr_str(op, "prov.fqn") or "")
-        if precision is None:
-            precision = _elem_dtype(op)
+        weight_precision = observed[1] if family == "contraction" and len(observed) == 2 else None
         # Extents and config come from the op itself. The descriptor declared m/k/n/rank/batch/layout
         # and this walk filled NONE of them, so every consumer that read a shape axis off a capture read
         # None and reported it as "the capture does not present one" -- a declared-and-unfilled field is
@@ -318,10 +355,13 @@ def regions_from_module(module, *, precisions: dict[str, str] | None = None) -> 
                 op=short,
                 family=family,
                 in_dtype=precision,
+                weight_dtype=weight_precision,
+                captured_input_formats=observed,
                 m=m,
                 k=k,
                 n=n,
                 rank=rank,
+                form=sf.operation_form(_attr_str(op, "prov.op") or short, carrier_op=op.name),
                 config=_declared_config(op),
             )
         )

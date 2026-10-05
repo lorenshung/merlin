@@ -34,11 +34,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["ReadoutCapability", "StageVerdict", "Assessment", "assess", "STATUSES", "REFUSING_STATUSES"]
+__all__ = ["ReadoutCapability", "StageRoute", "StageVerdict", "Assessment", "assess", "selectors_applying", "STATUSES", "REFUSING_STATUSES"]
 
 #: Every verdict this module can reach.
 STATUSES: tuple[str, ...] = (
-    "applied",  # every declared stage is applied by the readout the program selected
+    "applied",  # every declared stage is applied by its readout or a witnessed stage route
     "discarded",  # the readout does NOT apply a declared stage: the program computes something else
     "unknown",  # the target described no readout matching this program's; refuse, never assume
     "not_applicable",  # the program declares no epilogue, so there is nothing to apply
@@ -71,8 +71,81 @@ class ReadoutCapability:
 
 
 @dataclass(frozen=True)
+class StageRoute:
+    """A non-readout stage applied on a particular composition path.
+
+    The target declares the command-buffer producer and consumer spellings. A route never changes
+    what a readout applies: it only licenses the stated stage when the program carries its operand
+    and the nearest writer of the committed accumulator is an eligible producer.
+    """
+
+    stage: str
+    site: str
+    composed_with: str
+    readouts: frozenset[str]
+    producer_opcodes: frozenset[str]
+    consumer_opcodes: frozenset[str]
+    operand_attribute: str
+    operand_role: str
+    evidence: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "stages": [self.stage], "site": self.site, "composed_with": self.composed_with,
+            "readouts": sorted(self.readouts), "producer_opcodes": sorted(self.producer_opcodes),
+            "consumer_opcodes": sorted(self.consumer_opcodes),
+            "operand_attribute": self.operand_attribute, "operand_role": self.operand_role,
+            "evidence": self.evidence,
+        }
+
+
+def _route_for(
+    routes: Sequence[StageRoute], stage: str, selector: str, composition: str
+) -> StageRoute | None:
+    return next(
+        (
+            route for route in routes
+            if route.stage == stage and route.composed_with == composition
+            and selector in route.readouts and route.site == "accumulator_seed"
+        ),
+        None,
+    )
+
+
+def _route_witness(
+    route: StageRoute, command: Mapping[str, Any], earlier: Sequence[Any], tensors: Mapping[str, Any]
+) -> bool:
+    if str(command.get("opcode") or "") not in route.consumer_opcodes:
+        return False
+    if not _epilogue_of(command) or _epilogue_of(command)[0] != route.stage:
+        return False  # a seed precedes all compute/readout stages, so stage order is observable
+    attrs = command.get("attributes") or {}
+    operands = command.get("operands") or {}
+    if not isinstance(attrs, Mapping) or not isinstance(operands, Mapping):
+        return False
+    name = attrs.get(route.operand_attribute)
+    tensor = tensors.get(name) if isinstance(name, str) else None
+    if not isinstance(tensor, Mapping) or tensor.get("role") != route.operand_role:
+        return False
+    if str(command.get("opcode") or "") in route.producer_opcodes:
+        return True  # a fused operation both produces and reads out its accumulator
+    source = operands.get("src")
+    if not isinstance(source, str) or not source:
+        return False
+    # A later operand sum writing the same accumulator supersedes an earlier contraction. Looking
+    # for *any* contraction would falsely grant its bias route to that sum.
+    for previous in reversed(earlier):
+        if not isinstance(previous, Mapping):
+            continue
+        previous_operands = previous.get("operands") or {}
+        if isinstance(previous_operands, Mapping) and previous_operands.get("dst") == source:
+            return str(previous.get("opcode") or "") in route.producer_opcodes
+    return False
+
+
+@dataclass(frozen=True)
 class StageVerdict:
-    """One declared stage on one command, and whether the selected readout applies it."""
+    """One declared stage on one command, and whether its selected application path applies it."""
 
     command_index: int
     opcode: str
@@ -133,7 +206,10 @@ def _readout_of(command: Mapping[str, Any]) -> str | None:
     return str(value) if isinstance(value, str) and value else None
 
 
-def selectors_applying(readouts: Sequence[ReadoutCapability], stages: Sequence[str]) -> tuple[str, ...]:
+def selectors_applying(
+    readouts: Sequence[ReadoutCapability], stages: Sequence[str],
+    *, routes: Sequence[StageRoute] = (), composition: str | None = None,
+) -> tuple[str, ...]:
     """The readout selectors that apply EVERY stage in ``stages``, in the target's declaration order.
 
     The inverse of :func:`assess`, and the one a capsule GENERATOR needs. ``assess`` answers "the
@@ -150,12 +226,23 @@ def selectors_applying(readouts: Sequence[ReadoutCapability], stages: Sequence[s
     Order is the target's own: when more than one readout qualifies, the first one it declared wins, so
     the tie-break lives with the target rather than in a rule that cannot know which is preferable.
     """
-    want = {str(s) for s in stages if str(s)}
-    return tuple(r.selector for r in readouts if want <= set(r.applies))
+    ordered = tuple(str(s) for s in stages if str(s))
+    want = set(ordered)
+    return tuple(
+        r.selector for r in readouts
+        if all(stage in r.applies or (
+            composition is not None and ordered[0] == stage
+            and _route_for(routes, stage, r.selector, composition)
+        )
+               for stage in want)
+    )
 
 
-def assess(command_buffer: Mapping[str, Any], readouts: Sequence[ReadoutCapability]) -> Assessment:
-    """Whether every epilogue stage this program declares is applied by the readout it selected.
+def assess(
+    command_buffer: Mapping[str, Any], readouts: Sequence[ReadoutCapability],
+    *, routes: Sequence[StageRoute] = (),
+) -> Assessment:
+    """Whether every epilogue stage this program declares is applied by a witnessed path.
 
     ``readouts`` is the target's own declaration. Required and never defaulted: a program whose
     readout is undescribed gets ``unknown``, because the alternative -- assuming a readout applies
@@ -170,6 +257,9 @@ def assess(command_buffer: Mapping[str, Any], readouts: Sequence[ReadoutCapabili
         )
 
     stages: list[StageVerdict] = []
+    tensors = command_buffer.get("tensors") or {}
+    if not isinstance(tensors, Mapping):
+        tensors = {}
     unknown_readouts: set[str] = set()
     for index, command in enumerate(commands):
         if not isinstance(command, Mapping):
@@ -211,7 +301,12 @@ def assess(command_buffer: Mapping[str, Any], readouts: Sequence[ReadoutCapabili
             )
             continue
         for stage in epilogue:
-            applied = stage in capability.applies
+            route = next(
+                (r for r in routes if r.stage == stage and r.site == "accumulator_seed"
+                 and readout in r.readouts and _route_witness(r, command, commands[:index], tensors)),
+                None,
+            )
+            applied = stage in capability.applies or route is not None
             stages.append(
                 StageVerdict(
                     index,
@@ -219,7 +314,7 @@ def assess(command_buffer: Mapping[str, Any], readouts: Sequence[ReadoutCapabili
                     readout,
                     stage,
                     applied,
-                    ""
+                    (f"{route.site} route: {route.evidence}" if route is not None else "")
                     if applied
                     else (
                         f"readout {readout!r} does not apply {stage!r} (it applies "
@@ -253,8 +348,8 @@ def assess(command_buffer: Mapping[str, Any], readouts: Sequence[ReadoutCapabili
             stages=stages,
             readouts_declared=declared,
             detail=(
-                f"{len(dropped)} declared epilogue stage(s) are not applied by the readout the "
-                f"program selected; first at command {first.command_index} "
+                f"{len(dropped)} declared epilogue stage(s) are not applied by the readout or a "
+                f"witnessed route; first at command {first.command_index} "
                 f"({first.opcode}): {first.why}"
             ),
         )
@@ -262,5 +357,5 @@ def assess(command_buffer: Mapping[str, Any], readouts: Sequence[ReadoutCapabili
         status="applied",
         stages=stages,
         readouts_declared=declared,
-        detail=f"all {len(stages)} declared stage(s) are applied by their readout",
+        detail=f"all {len(stages)} declared stage(s) are applied by their readout or a witnessed route",
     )

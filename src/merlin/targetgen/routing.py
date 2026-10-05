@@ -63,14 +63,14 @@ class OpDemand:
     family: str | None = None
     #: The element format THIS op's own operands carry, as a canonical registry name, when the producer
     #: could read it. ``in_fmt`` is a different fact and both are real: ``in_fmt`` is the format the
-    #: compile was ASKED for (a whole-model capture is routed under one declared datapath), while this is
+    #: compile was ASKED for (a whole-model compile requests one datapath), while this is
     #: the format the captured program actually computes the op in.
     #:
     #: They diverge on a MIXED capture, and a whole-model capture is routinely mixed -- torchAO quantizes
     #: Linear weights and leaves Conv2d alone, so ``M2_microvit_gemmini`` captures 12 contractions in i8
-    #: and its one convolution in f32, and ``SY_model_resnet50`` captures 53 in f32 and its one classifier
-    #: contraction in i8. Synthesizing either capsule's odd op out as a tile in the model's declared format
-    #: certifies arithmetic the op does not perform.
+    #: and one in f32. The current ``SY_model_resnet50`` capture has 54 f32 matmuls. Synthesizing a
+    #: mixed capture's op as a tile in the model's declared format can certify arithmetic it does not
+    #: perform.
     #:
     #: ``None`` means UNKNOWN, and unknown never widens: see :attr:`tile_fmt`, which falls back to the
     #: declared format so an op whose own type could not be read behaves exactly as it did before.
@@ -84,6 +84,42 @@ class OpDemand:
     #: the program does not contain. The extents describe the repeating unit; this says how often it
     #: repeats, so neither fact is lost.
     batch: int | None = None
+    #: Stable provenance of the source region, carried to outlined kernel symbols.
+    #: None means execution cannot be joined to this demand by source identity.
+    region_id: str | None = None
+    #: The capture's unnormalized ``prov.family``; ``family`` is canonical.
+    source_family: str | None = None
+    #: Exact operation carrying this demand in the captured MLIR. A provenance
+    #: region may contain several operations, so region identity alone cannot
+    #: prove that each one survived outlining and executed.
+    carrier_op: str | None = None
+    #: Structural operation form, independent of both family and storage layout.
+    form: str | None = None
+    #: Exact captured ``ins`` slots, in source order; ``None`` means this is a direct non-capture
+    #: demand. A tuple containing ``None`` is source evidence of an unreadable slot, NOT permission
+    #: to substitute the requested format. The latter remains in ``in_fmt``/``weight_fmt`` for diagnostics.
+    captured_input_formats: tuple[str | None, ...] | None = None
+
+    @property
+    def source_formats_complete(self) -> bool:
+        observed = self.captured_input_formats
+        if observed is None:
+            return True  # a directly constructed demand uses its declared format
+        if self.weight_fmt is not None:
+            return len(observed) == 2 and all(observed)
+        return bool(observed) and all(observed) and len(set(observed)) == 1
+
+    @property
+    def admission_input_fmt(self) -> str | None:
+        if self.captured_input_formats is None:
+            return self.routing_fmt
+        return self.captured_input_formats[0] if self.source_formats_complete else None
+
+    @property
+    def admission_weight_fmt(self) -> str | None:
+        if self.captured_input_formats is None:
+            return self.weight_fmt
+        return self.captured_input_formats[1] if self.weight_fmt is not None and self.source_formats_complete else None
 
     @property
     def has_shape(self) -> bool:
@@ -94,7 +130,22 @@ class OpDemand:
         """The format a single tile of this op must be synthesized in: the op's OWN element format when
         it could be read, else the declared one. Unknown never widens -- an op whose captured type is
         unreadable keeps exactly the format it had before this field existed."""
+        if self.captured_input_formats is not None and self.source_formats_complete:
+            return self.captured_input_formats[0]  # type: ignore[return-value]
         return self.elem_fmt or self.in_fmt
+
+    @property
+    def routing_fmt(self) -> str:
+        """The format the compiler can currently place this operation in.
+
+        The captured operand type is authoritative for every operation,
+        including contractions. A request for int8 does not prove that the
+        importer emitted an int8 contraction; only a visible transformed IR
+        operation can do that. Unknown captured formats retain the declared
+        format for compatibility, and are separately marked as unknown in the
+        coverage certificate rather than accepted as verification.
+        """
+        return self.tile_fmt
 
     @property
     def is_batched(self) -> bool | None:
@@ -159,19 +210,24 @@ def _shape_envelope_ok(unit: _cu.ComputeUnit, demand: OpDemand) -> bool:
 
 def _legal_on(unit: _cu.ComputeUnit, demand: OpDemand) -> tuple[bool, str | None]:
     """Is ``demand`` legal on ``unit``? Returns (legal, accumulator token)."""
+    if not demand.source_formats_complete:
+        return False, None
     if not unit.supports_op(demand.op, family=demand.family):
+        return False, None
+    form_caps = [c for c in unit.semantic_capabilities if c.family == demand.family]
+    if form_caps and not any(not c.forms or demand.form in c.forms for c in form_caps):
         return False, None
     if not _shape_envelope_ok(unit, demand):
         return False, None
-    if not _fmt_ok(demand.in_fmt, unit.dtypes):
+    if not _fmt_ok(demand.admission_input_fmt, unit.dtypes):
         return False, None
-    if demand.weight_fmt is not None and not _fmt_ok(demand.weight_fmt, unit.dtypes):
+    if demand.weight_fmt is not None and not _fmt_ok(demand.admission_weight_fmt, unit.dtypes):
         return False, None
     if not unit.accumulate:
         return True, None
     for rule in unit.accumulate:
-        if _fmt_ok(demand.in_fmt, (rule.inp,)) and (
-            demand.weight_fmt is None or _fmt_ok(demand.weight_fmt, (rule.weight,))
+        if _fmt_ok(demand.admission_input_fmt, (rule.inp,)) and (
+            demand.weight_fmt is None or _fmt_ok(demand.admission_weight_fmt, (rule.weight,))
         ):
             return True, rule.acc
     return False, None
@@ -216,9 +272,11 @@ class RouteCandidates:
 
 
 def _gap_text(d: OpDemand) -> str:
-    wf = f" weight={d.weight_fmt}" if d.weight_fmt is not None else ""
+    wf = f" weight={d.admission_weight_fmt}" if d.weight_fmt is not None else ""
     site = f" [{d.site}]" if d.site else ""
-    return f"no compute unit supports op={d.op} in={d.in_fmt}{wf}{site}"
+    form = f" form={d.form}" if d.form else ""
+    observed = " (captured input format unverified)" if not d.source_formats_complete else ""
+    return f"no compute unit supports op={d.op}{form} in={d.admission_input_fmt}{wf}{site}{observed}"
 
 
 def route_candidates(

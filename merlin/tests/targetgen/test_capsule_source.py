@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from merlin.targetgen import capsule_source as CSrc
+from merlin.targetgen.golden_store import load_golden
 
 
 def test_explicit_model_loader_is_repository_relative(monkeypatch, tmp_path):
@@ -236,7 +237,6 @@ def test_write_pytorch_capsule_is_schema_valid(entry, dtype, tmp_path):
     """A PyTorch op is materialized into a complete, schema-valid capsule dir: the merlin_iface interface
     (what the agent compiles) plus the pytorch loader + linalg (visible grounding) plus a host-eager
     golden whose recorded input shapes match the interface, plus expected coverage."""
-    import yaml
 
     from merlin.targetgen import capsule_common as CC
 
@@ -245,7 +245,7 @@ def test_write_pytorch_capsule_is_schema_valid(entry, dtype, tmp_path):
     assert cap["source_role"] == entry.get("source_role", "pytorch_model_slice")
     for f in ("capsule.interface.mlir", "capsule.pytorch.py", "capsule.linalg.mlir", "golden.yaml"):
         assert (d / f).exists(), f
-    g = yaml.safe_load((d / "golden.yaml").read_text())
+    g = load_golden(d)
     assert g["golden_source"] == "host_torch_eager"
     prov = g["oracle_provenance"]["inputs"]
     # every declared capsule input has a recorded golden operand of the same shape
@@ -317,7 +317,6 @@ def test_write_pytorch_capsule_rejects_unknown_op(tmp_path):
 def test_write_fused_pytorch_capsule_linalg_interface(entry, tmp_path):
     """A FUSED op (softmax/layernorm/geglu/rope/attention_full) ships the linalg module AS the interface
     (positional), schema-valid, with a host-eager golden and an arg_order the harness can feed."""
-    import yaml
 
     from merlin.targetgen import capsule_common as CC
 
@@ -326,7 +325,7 @@ def test_write_fused_pytorch_capsule_linalg_interface(entry, tmp_path):
     assert cap["operation"]["op"] == entry["op"]
     iface = (d / "capsule.interface.mlir").read_text()
     assert "func.func" in iface and "linalg." in iface  # the interface IS standard-dialect linalg
-    g = yaml.safe_load((d / "golden.yaml").read_text())
+    g = load_golden(d)
     assert g["oracle_provenance"]["interface"] == "linalg_positional"
     order = g["oracle_provenance"]["arg_order"]
     assert order[-1] == entry.get("out", "Y0") and len(order) >= 2
@@ -374,7 +373,6 @@ def test_model_gate_satisfied():
 def test_write_model_capsule_small_llama(tmp_path):
     """A whole-model capsule lowers small_llama end-to-end (0-opaque), externalizes weights alongside the
     linalg interface, records a host-eager golden, and carries the schedule gate. Schema-valid kind=model."""
-    import yaml
 
     from merlin.targetgen import capsule_common as CC
 
@@ -394,7 +392,7 @@ def test_write_model_capsule_small_llama(tmp_path):
     assert (d / "capsule.weights.safetensors").exists()
     iface = (d / "capsule.interface.mlir").read_text()
     assert "linalg." in iface and "capsule.weights.safetensors" in iface  # weights path made relative
-    g = yaml.safe_load((d / "golden.yaml").read_text())
+    g = load_golden(d)
     out = list(g["outputs"].values())[0]
     assert isinstance(out, list) and isinstance(out[0], list) and isinstance(out[0][0], list)  # rank-3 logits
 
@@ -455,10 +453,9 @@ def test_pytorch_golden_matches_reference_math(entry, dtype, op, tmp_path):
     torch-eager golden must equal a plain numpy reference recomputed on the capsule's OWN recorded inputs.
     Proves the PyTorch source did not change the operation's semantics."""
     import numpy as np
-    import yaml
 
     d = CSrc.write_pytorch_capsule(entry, _float_binding(dtype), tmp_path)
-    g = yaml.safe_load((d / "golden.yaml").read_text())
+    g = load_golden(d)
     prov = g["oracle_provenance"]["inputs"]
 
     def arr(name):
@@ -531,7 +528,6 @@ def test_generate_corpus_pytorch_skips_when_m2m_absent(tmp_path, monkeypatch):
 @_needs_m2m
 def test_generate_corpus_routes_pytorch_source(tmp_path):
     """A profile entry with ``source: pytorch`` on a float dtype routes to the host-eager PyTorch source."""
-    import yaml
 
     GC = _load_generate_corpus()
     entry = {
@@ -547,7 +543,7 @@ def test_generate_corpus_routes_pytorch_source(tmp_path):
         "N": 16,
     }
     d = GC._write_capsule(entry, _float_binding(), tmp_path)
-    g = yaml.safe_load((d / "golden.yaml").read_text())
+    g = load_golden(d)
     assert g["golden_source"] == "host_torch_eager"
     assert (d / "capsule.linalg.mlir").exists()
 

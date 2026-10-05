@@ -24,14 +24,10 @@ def _declared_source(capsule_dir: str | Path | None) -> Any:
     """Project one provenance field; preserve the legacy parser and failure behavior."""
     if not capsule_dir:
         return None
-    import yaml
+    from merlin.targetgen.golden_store import read_document
 
-    path = Path(capsule_dir) / "golden.yaml"
-    if not path.is_file():
-        return None
-    # Parsing a string (not an open stream) preserves PyYAML's legacy diagnostic
-    # source labels. Do not suppress malformed YAML or normalize its shape here.
-    return (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("golden_source")
+    # Metadata only: the document, never its archived arrays. Malformed YAML still raises here.
+    return (read_document(capsule_dir) or {}).get("golden_source")
 
 
 def golden_source(

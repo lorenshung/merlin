@@ -24,25 +24,17 @@ import pathlib
 import pytest
 
 from merlin.common.paths import repo_root
-from merlin.targetgen.readout_facet import epilogue_readouts
-from merlin.verify.epilogue_applicability import selectors_applying
+from merlin.targetgen.readout_facet import epilogue_readouts, epilogue_stage_routes
+from merlin.targetgen.contract.interface_emit import parse_interface_mlir
+from merlin.verify.epilogue_applicability import assess, selectors_applying
+
+pytestmark = pytest.mark.target("gemmini")
 
 CORPUS = repo_root() / "merlin/contract/capsules"
 
 #: Targets whose corpora live under this root but whose readouts are their own. A capsule for another
 #: target must never be judged against this one's declaration.
 OTHER_TARGET_DIRS = ("/radiance/", "/atlas/", "/saturn_opu/")
-
-#: Known stale artifacts of `group_capsules.promote`, which writes outside `generate_corpus`. Neither
-#: is in the graded cohort (they are model-layer inputs to the whole-model capstone), and the generator
-#: now fails closed on this, so a re-promote fixes or refuses them. This list may only SHRINK.
-STALE = frozenset(
-    {
-        "G_conv2d_c1024x14x14_k1x1s2_n2048_bias_add",
-        "G_matmul_m1k2048n1000_bias_add",
-    }
-)
-
 
 def _commit_sites(path: pathlib.Path):
     """``(stages, committed_dtype)`` for every commit in one interface that declares an epilogue."""
@@ -65,37 +57,26 @@ def _gemmini_interfaces():
 
 def test_every_declared_epilogue_is_applied_by_the_readout_it_commits_at():
     readouts = epilogue_readouts("gemmini")
+    routes = epilogue_stage_routes("gemmini")
     assert readouts, "gemmini declares no readouts; this check would be vacuous"
 
     violations, scanned = [], 0
     for f in _gemmini_interfaces():
-        for stages, odt in _commit_sites(f):
-            scanned += 1
-            if odt not in selectors_applying(readouts, stages):
-                violations.append((f.parent.name, stages, odt))
+        sites = list(_commit_sites(f))
+        if not sites:
+            continue
+        scanned += len(sites)
+        verdict = assess(parse_interface_mlir(f.read_text(encoding="utf-8")), readouts, routes=routes)
+        if verdict.refusing:
+            violations.append((f.parent.name, verdict.status, [s.stage for s in verdict.discarded]))
 
     # Commit sites carrying a NON-EMPTY epilogue. Measured at 40 for the gemmini corpus; the floor
     # guards against a parse change silently scanning nothing and reporting a clean sweep.
     assert scanned >= 30, f"only {scanned} epilogue-bearing commit sites scanned; the parse changed shape"
-    unexpected = [v for v in violations if v[0] not in STALE]
-    assert not unexpected, (
-        "these capsules declare an epilogue no readout applies at the width they commit — the grade "
-        f"will refuse them as protocol violations: {unexpected}"
+    assert not violations, (
+        "these capsules declare an epilogue that neither readout nor a witnessed, composition-scoped "
+        f"route applies — the grade will refuse them as protocol violations: {violations}"
     )
-
-
-def test_the_stale_allowance_only_shrinks():
-    """Every name in STALE must still be violating; a fixed one has to leave the list."""
-    readouts = epilogue_readouts("gemmini")
-    still = set()
-    for f in _gemmini_interfaces():
-        if f.parent.name not in STALE:
-            continue
-        for stages, odt in _commit_sites(f):
-            if odt not in selectors_applying(readouts, stages):
-                still.add(f.parent.name)
-    gone = STALE - still
-    assert not gone, f"these no longer violate and must be removed from STALE: {sorted(gone)}"
 
 
 @pytest.mark.parametrize("stage", ["relu", "acc_scale", "bias_add", "maxpool"])
@@ -106,9 +87,56 @@ def test_the_target_applies_the_stages_its_requirement_demands(stage):
     must be one some readout applies. If this fails, the spec is asking for something unbuildable.
     """
     readouts = epilogue_readouts("gemmini")
-    assert selectors_applying(readouts, [stage]), (
-        f"the requirement demands a fused {stage!r} but no declared readout applies it"
+    routes = epilogue_stage_routes("gemmini")
+    assert selectors_applying(readouts, [stage], routes=routes, composition="contraction"), (
+        f"the requirement demands a fused {stage!r} but no readout or contraction route applies it"
     )
+
+
+def test_bias_route_selects_a_contraction_commit_width_without_narrow_readout_bias():
+    from merlin.targetgen.corpus_spec import CorpusBinding, _resolve_output_dtype, build_matmul
+
+    binding = CorpusBinding(
+        target="gemmini", tile_dim=16, operand_dtype="int8", accum_dtype="i32",
+        integer=True, tiers=[], compare="exact_int",
+    )
+    roles = frozenset({"bias"})
+    assert _resolve_output_dtype(binding, ["bias_add"], {}, available_operand_roles=roles) == "i8"
+    assert _resolve_output_dtype(
+        binding, ["bias_add"], {"output_dtype": "i32"}, available_operand_roles=roles
+    ) == "i32"
+    assert _resolve_output_dtype(binding, ["bias_add", "relu"], {}, available_operand_roles=roles) == "i8"
+    with pytest.raises(ValueError, match="no readout or contraction route"):
+        _resolve_output_dtype(binding, ["bias_add"], {})
+    with pytest.raises(ValueError, match="no readout or contraction route"):
+        _resolve_output_dtype(
+            binding, ["relu", "bias_add"], {}, available_operand_roles=roles
+        )
+    assert not selectors_applying(epilogue_readouts("gemmini"), ["bias_add"])
+    capsule, interface = build_matmul(
+        {
+            "name": "derived_bias_probe", "kind": "layer", "source_role": "derived_sweep",
+            "source_reference": "contraction stage route", "op": "matmul", "epilogue": ["bias_add"],
+            "M": 16, "K": 16, "N": 16,
+        },
+        binding,
+    )
+    [bias] = [row for row in capsule["inputs"] if row["role"] == "bias"]
+    assert bias["dtype"] == "i32" and bias["shape"] == [16]
+    cb = parse_interface_mlir(interface)
+    commit = next(command for command in cb["commands"] if command["opcode"] == "COMMIT")
+    assert commit["attributes"]["bias"] == bias["name"]
+    assert assess(cb, epilogue_readouts("gemmini"), routes=epilogue_stage_routes("gemmini")).status == "applied"
+
+
+def test_captured_readout_facet_keeps_bias_outside_readout_applies():
+    from merlin.targetgen.readout_facet import capture_inputs, derive
+
+    inputs = capture_inputs("gemmini", facts={}, include_taxonomy=False)
+    facet = derive("gemmini", facts={}, readouts=inputs["readouts"], stage_routes=inputs["stage_routes"])
+    record = facet.to_dict()
+    assert all("bias_add" not in row["applies"] for row in record["readouts"])
+    assert any("bias_add" in row["stages"] for row in record["stage_routes"])
 
 
 def test_no_capsule_declares_its_output_dtype_twice_in_disagreement():

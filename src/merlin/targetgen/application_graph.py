@@ -16,9 +16,11 @@ def _program_graph(module, digest: str) -> dict:
     operation_ids = {id(op): f"mlir:{digest}:{ordinal}" for ordinal, op in enumerate(operations)}
     values, blocks, block_ids = {}, [], {}
 
+    from merlin.targetgen.access_observations import type_layout
+
     def typed(value) -> dict:
         shape, dtype = mq.type_shape_dtype(value.type)
-        return {"type": str(value.type), "shape": shape, "dtype": dtype}
+        return {"type": str(value.type), "shape": shape, "dtype": dtype, "layout": type_layout(value.type)}
 
     for op in operations:
         operation_id = operation_ids[id(op)]

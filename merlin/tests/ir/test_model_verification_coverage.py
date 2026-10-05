@@ -12,7 +12,9 @@ from merlin.verify.model_coverage import audit_capture
     ("model", "required_op", "required_dtype"),
     [
         ("SY_model_tiny_llama", "quant_ext.dequantize_per_tensor", "f32"),
-        ("SY_model_smolvla", "linalg.generic", "bf16"),
+        # The verifier can encode a restricted linalg.generic; this capture's
+        # linalg.reduce and mixed floating tensor types still force abstention.
+        ("SY_model_smolvla", "linalg.reduce", "bf16"),
         ("SY_model_resnet50", "quant_ext.quantize_per_tensor", "f32"),
     ],
 )

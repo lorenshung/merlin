@@ -1,0 +1,272 @@
+"""Export a phase-2 champion from its ``best`` tag into ``out/artifacts/targets/<target>/champions/``.
+
+The champion is the tree the harness committed and measured, not whatever a workspace holds now:
+the ``best`` commit is exported with ``git archive`` semantics (:func:`merlin.common.oot_repo.export`)
+and its tree digest must equal the digest the measurements were recorded against. The standalone
+layout is the one the publish bridge already produces -- :func:`publish.assemble_repo_tree` preserves
+the payload bytes and :func:`publish.embed_provenance` adds ``.merlin/{manifest.yaml,provenance.yaml,
+certification.yaml,CHAMPION}`` -- so a champion directory is exactly what ``merlin-target-publish``
+would push. This module adds the four JSON records the payload-scoped publish layer cannot know:
+
+* ``provenance.json`` -- lineage to the phase-1 run and its ``frozen`` commit, the phase-2 run and
+  ``best`` commit, the corpus seal digest and the phase-0 evidence digest;
+* ``measurements.json`` -- FireSim cycles with the machine, the parameter header and the vendor
+  control measured in the same batch;
+* ``certification.json`` -- the GSIM certification;
+* ``isa_prohibition.json`` -- the whole-ELF prohibited-instruction scan.
+
+Every field listed in :data:`REQUIRED` is required and checked, never defaulted: a champion whose
+cycles came without their machine, or whose scan was not clean, is refused rather than exported with
+a gap a later reader would fill in by assumption. The export is retention-pinned.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+from pathlib import Path
+from typing import Any
+
+from ..common import oot_repo, paths
+from ..common.jsonio import write_pretty_json
+from ..common.tree_hash import hash_tree
+from ..common.yaml import load_yaml
+from . import package_records
+from . import publish as pub
+
+SCHEMA = "merlin_champion_v1"
+CHAMPIONS_DIR = "champions"
+#: The storage contract's ``product_roots`` entry for the champions' concern.
+CHAMPIONS_HOME = "target-champions"
+RECORDS = ("provenance", "certification", "measurements", "isa_prohibition")
+#: The publish layer's own files, which make the export the standalone layout.
+PUBLISH_LAYER = (".merlin/manifest.yaml", ".merlin/provenance.yaml", ".merlin/certification.yaml", ".merlin/CHAMPION")
+PUBLICATION_NOTE = "MERLIN_PUBLICATION.md"
+
+#: ``record -> dotted field -> predicate name``; see :func:`_check`.
+REQUIRED: dict[str, dict[str, str]] = {
+    "provenance": {
+        "phase1.run": "text",
+        "phase1.frozen_commit": "commit",
+        "corpus_seal_digest": "sha256",
+        "phase0_evidence_digest": "sha256",
+    },
+    "measurements": {
+        "package_digest": "sha256",
+        "firesim.cycles": "positive",
+        "firesim.machine": "text",
+        "firesim.header": "text",
+        "firesim.control.in_batch": "true",
+    },
+    "certification": {"gsim.verdict": "pass"},
+    "isa_prohibition": {"scope": "whole_elf", "verdict": "clean", "prohibited_roles": "list"},
+}
+
+
+class ChampionError(RuntimeError):
+    """A champion could not be exported: missing evidence, a digest mismatch or a broken lineage."""
+
+
+def champions_root(target: str, *, artifacts_root: str | Path | None = None) -> Path:
+    from ..common.artifacts import declared_home
+
+    home = declared_home(CHAMPIONS_HOME, artifacts_root=artifacts_root)
+    return home / package_records.component(target) / CHAMPIONS_DIR
+
+
+def champion_dir(target: str, package_id: str, *, artifacts_root: str | Path | None = None) -> Path:
+    return champions_root(target, artifacts_root=artifacts_root) / package_records.component(package_id)
+
+
+def _field(document: dict, dotted: str):
+    value: Any = document
+    for key in dotted.split("."):
+        if not isinstance(value, dict) or key not in value:
+            return None
+        value = value[key]
+    return value
+
+
+def _hex(value, length: int) -> bool:
+    return isinstance(value, str) and len(value) == length and all(c in "0123456789abcdef" for c in value)
+
+
+def _check(rule: str, value) -> bool:
+    if rule == "text":
+        return isinstance(value, str) and bool(value.strip())
+    if rule == "commit":
+        return _hex(value, 40)
+    if rule == "sha256":
+        return _hex(value, 64)
+    if rule == "positive":
+        return type(value) is int and value > 0
+    if rule == "true":
+        return value is True
+    if rule == "list":
+        return isinstance(value, list) and all(isinstance(v, str) and v for v in value)
+    return value == rule  # a literal the field must equal (a verdict, a scope)
+
+
+def missing_evidence(records: dict[str, dict]) -> list[str]:
+    """Every required field that is absent or does not hold what it must, as ``record.field``."""
+    problems = []
+    for record, rules in REQUIRED.items():
+        document = records.get(record)
+        if not isinstance(document, dict):
+            problems.append(f"{record}: not supplied")
+            continue
+        problems += [f"{record}.{name}" for name, rule in rules.items() if not _check(rule, _field(document, name))]
+    return problems
+
+
+def layout_problems(root: Path) -> list[str]:
+    """What keeps ``root`` from being a standalone champion tree (empty when it is one)."""
+    root = Path(root)
+    problems = []
+    manifest = load_yaml(root / "manifest.yaml") if (root / "manifest.yaml").is_file() else None
+    if not isinstance(manifest, dict):
+        return ["manifest.yaml is missing or not a mapping"]
+    tool = (manifest.get("entrypoints") or {}).get("tool") if isinstance(manifest.get("entrypoints"), dict) else None
+    if not isinstance(tool, str) or not (root / tool).is_file():
+        problems.append(f"entry point {tool!r} is not a file at the root")
+    for rel in (*PUBLISH_LAYER, *(f".merlin/{name}.json" for name in RECORDS), PUBLICATION_NOTE):
+        if not (root / rel).is_file():
+            problems.append(f"{rel} is missing")
+    if (root / ".git").exists():
+        problems.append(".git must not be exported")
+    return problems
+
+
+def export_champion(
+    target: str,
+    repo: str | Path,
+    *,
+    package_id: str,
+    provenance: dict[str, Any],
+    certification: dict[str, Any],
+    measurements: dict[str, Any],
+    isa_prohibition: dict[str, Any],
+    rev: str = oot_repo.BEST_TAG,
+    phase2_run: str | Path | None = None,
+    stage_root: str | Path | None = None,
+    artifacts_root: str | Path | None = None,
+    pin: bool = True,
+    update_index: bool = True,
+) -> Path:
+    """Export ``rev`` (default ``best``) of a phase-2 OOT repo as a retention-pinned champion.
+
+    ``repo`` is the phase-2 run's ``oot/``; ``phase2_run`` defaults to its parent. The payload is
+    staged under ``<phase2 run>/exports/<commit12>/`` (``stage_root`` overrides), which is also the
+    ``source_package`` the publish layer records.
+    """
+    for name, value in (("target", target), ("package_id", package_id)):
+        try:
+            package_records.component(value)
+        except ValueError as exc:
+            raise ChampionError(f"{name} must be a single path component: {value!r}") from exc
+    repo = Path(repo).absolute()
+    try:
+        commit = oot_repo.resolve(repo, rev)
+        digest = oot_repo.tree_digest(repo, commit)
+    except oot_repo.OotRepoError as exc:
+        raise ChampionError(str(exc)) from exc
+    records = {
+        "provenance": dict(provenance),
+        "certification": dict(certification),
+        "measurements": dict(measurements),
+        "isa_prohibition": dict(isa_prohibition),
+    }
+    problems = missing_evidence(records)
+    if problems:
+        raise ChampionError(f"champion evidence is incomplete or not passing: {', '.join(problems)}")
+    if measurements["package_digest"] != digest:
+        raise ChampionError(
+            f"{rev} holds package {digest}, but the measurements are of {measurements['package_digest']}"
+        )
+    frozen = provenance["phase1"]["frozen_commit"]
+    try:
+        if not oot_repo.is_ancestor(repo, frozen, commit):
+            raise ChampionError(f"{rev} does not descend from the phase-1 frozen commit {frozen}")
+        origin = oot_repo.origin(repo)
+    except oot_repo.OotRepoError as exc:
+        raise ChampionError(f"lineage to the phase-1 frozen commit cannot be established: {exc}") from exc
+    if origin is not None and origin.get("commit") != frozen:
+        raise ChampionError(f"the repo was started from {origin.get('commit')}, not the declared frozen {frozen}")
+
+    destination = champion_dir(target, package_id, artifacts_root=artifacts_root)
+    if destination.exists() or destination.is_symlink():
+        raise ChampionError(f"champion already exported: {destination}")
+    run_dir = Path(phase2_run).absolute() if phase2_run else repo.parent
+    payload = Path(stage_root or run_dir / "exports").absolute() / commit[:12]
+    if payload.exists():
+        if hash_tree(payload).get("sha256") != digest:
+            raise ChampionError(f"existing export {payload} is not {rev}'s tree")
+    else:
+        oot_repo.export(repo, commit, payload)
+    manifest = load_yaml(payload / "manifest.yaml") if (payload / "manifest.yaml").is_file() else None
+    if not isinstance(manifest, dict):
+        raise ChampionError(f"{rev} has no manifest.yaml mapping at its root")
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = destination.parent / f".{package_id}.staging-{os.urandom(4).hex()}"
+    try:
+        try:
+            selection = pub._build_selection(target, payload, manifest)
+            pub.assemble_repo_tree(selection, staging, layout_version=pub.LAYOUT_VERSION)
+            pub.embed_provenance(staging, selection)
+        except pub.PublishError as exc:
+            raise ChampionError(f"publish layer refused the champion: {exc}") from exc
+        lineage = {
+            **records["provenance"],
+            "schema": SCHEMA,
+            "target": target,
+            "package_id": package_id,
+            "package_digest": digest,
+            "phase2": {
+                **(records["provenance"].get("phase2") or {}),
+                "run": _out_relative(run_dir),
+                "rev": rev,
+                "best_commit": commit,
+                "tree": oot_repo.history(repo, commit)[-1].tree,
+                "origin": origin,
+            },
+            "merlin_git_sha": pub._git_sha_full(),
+            "exported_payload_sha256": package_records.payload_inventory(payload)["sha256"],
+        }
+        write_pretty_json(staging / ".merlin" / "provenance.json", lineage)
+        for name in ("certification", "measurements", "isa_prohibition"):
+            write_pretty_json(staging / ".merlin" / f"{name}.json", {**records[name], "schema": SCHEMA})
+        problems = layout_problems(staging)
+        if problems:
+            raise ChampionError(f"export is not the standalone layout: {problems}")
+        staging.rename(destination)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)  # only the staging tree this call created
+    if pin:
+        from ..common.storage_lifecycle import pin as retention_pin
+
+        retention_pin(destination, reason=f"phase-2 champion {target}/{package_id} from {commit[:12]}")
+    if update_index:
+        from .target_index import write_index
+
+        write_index(target, artifacts_root=artifacts_root)
+    return destination
+
+
+def _out_relative(path: Path) -> str:
+    try:
+        return Path(path).resolve().relative_to(paths.out_dir().resolve()).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def read_champion(root: Path) -> dict[str, dict]:
+    """The four JSON records of an exported champion (missing ones are empty mappings)."""
+    import json
+
+    out = {}
+    for name in RECORDS:
+        member = Path(root) / ".merlin" / f"{name}.json"
+        out[name] = json.loads(member.read_text(encoding="utf-8")) if member.is_file() else {}
+    return out

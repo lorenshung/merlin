@@ -17,18 +17,18 @@ direction — a region routed to the accelerator that the oracle says is *not* e
 This module consumes the routing output (numerator) and the eligibility oracle (denominator); it is NOT
 the oracle, so it may legitimately reference both.
 
-⚠️ BOTH SIDES OF THE RATIO ARE BUILT FROM THE ROUTING DEMANDS, so a contraction the matcher never
-recognised is in neither. It is not a false fallback and not an ineligible acceleration; it is simply
-absent, and the recall it never entered reads high because of it. Measured on ``spectformer_int8_full``:
-16 ``linalg.generic`` ops are attention's Q·Kᵀ and scores·V — 157.4 MMAC against 1702.2 MMAC of matched
-work, so **8.5% of that model's contraction MACs were invisible to every number here**. ``linalg_mlir``
-therefore lets the certificate price what the demands could not see and report it as
-``denominator_completeness``, alongside a LOWER BOUND for BOTH recalls -- region and flop -- each
-charging the whole unmatched mass to its own denominator. Every recall here is therefore a bracket, and
-quoting only the upper half of one is the error this block exists to stop.
+⚠️ BOTH SIDES OF THE RATIO ARE BUILT FROM THE ROUTING DEMANDS, so a contraction absent from those
+demands is in neither. Earlier captures lost generic attention contractions this way; a generic op is
+not, however, inherently unmatched. When the plan's contraction identities equal an independently
+parsed inventory, ``denominator_completeness`` records that proof of inventory completeness and does
+not charge the same generic work a second time. Without that check, the historical conservative
+lower bound remains, and neither the upper recall nor its bound should be quoted alone.
 """
 
 from __future__ import annotations
+
+import hashlib
+import json
 
 from merlin.targetgen import eligibility as _el
 from merlin.targetgen import semantic_families as _sf
@@ -59,7 +59,7 @@ def _ratio(num: int, den: int):
     return (num / den) if den else None
 
 
-def denominator_completeness(linalg_mlir: str | None) -> dict | None:
+def denominator_completeness(linalg_mlir: str | None, *, demands: list | None = None) -> dict | None:
     """Price the contraction work the ROUTING DEMANDS could not see, from the module itself.
 
     ``None`` when there is no module to read. On a module that will not parse this returns an ``error``
@@ -83,12 +83,57 @@ def denominator_completeness(linalg_mlir: str | None) -> dict | None:
             "recall below is an upper bound with no stated floor",
         }
 
+    # A generic contraction is not intrinsically unmatched: the demand reader
+    # now recognizes structurally shaped generics.  Only an exact, independently
+    # checked correspondence with the actual route plan may discharge the old
+    # pessimistic bound.  A missing tag or an incomplete plan keeps that bound.
+    inventory_verified = False
+    incomplete_formats: list[str] = []
+    if demands is not None:
+        from collections import Counter
+
+        from merlin.targetgen.capsule_source import ModelDemandIncomplete, model_op_demands_checked
+
+        try:
+            fmt = demands[0].in_fmt if demands else "unknown"
+            checked = model_op_demands_checked(linalg_mlir, fmt)
+            identity = lambda d: (d.op, d.batch, d.m, d.k, d.n, d.captured_input_formats)
+            inventory_verified = Counter(identity(d) for d in checked if d.family == "contraction") == Counter(
+                identity(d) for d in demands if d.family == "contraction"
+            )
+            incomplete_formats = [d.site or d.op for d in checked
+                                  if d.family == "contraction" and not d.source_formats_complete]
+        except ModelDemandIncomplete:
+            pass
+
     caveats: list[str] = []
+    if inventory_verified:
+        return {
+            "matched_contraction_macs": rep.total_macs,
+            "unmatched_contraction_macs": 0,
+            "unmatched_contraction_share": 0.0,
+            "n_unmatched_contractions": 0,
+            "n_unpriceable_contractions": len(rep.unpriceable),
+            "unpriceable_result_types": list(rep.unpriceable),
+            "unmatched": [],
+            "generic_labels": dict(rep.labels),
+            "inventory_status": (
+                "verified_structure_operand_formats_incomplete"
+                if incomplete_formats else "verified_against_parsed_contractions"
+            ),
+            "unverified_operand_format_contractions": incomplete_formats[:8],
+            "caveats": (
+                [f"{len(rep.unpriceable)} contraction(s) could not be priced from loop extents"]
+                if rep.unpriceable
+                else []
+            ) + ([f"{len(incomplete_formats)} contraction(s) have incomplete captured operand formats; "
+                  "they are excluded from the eligible denominator"] if incomplete_formats else []),
+        }
     if rep.unlowered:
         caveats.append(
-            f"{len(rep.unlowered)} contraction(s) worth {rep.unlowered_macs} MAC "
-            f"({rep.unlowered_share:.1%} of all contraction MACs) stayed linalg.generic, so they never "
-            f"became routing demands and appear in NEITHER side of the recall above"
+            f"{len(rep.unlowered)} generic contraction(s) worth {rep.unlowered_macs} MAC "
+            f"({rep.unlowered_share:.1%} of all contraction MACs) cannot be certified as matched "
+            "to this route plan; the lower bound charges them as unmatched"
         )
     if rep.unpriceable:
         caveats.append(
@@ -107,6 +152,7 @@ def denominator_completeness(linalg_mlir: str | None) -> dict | None:
             for u in rep.unlowered
         ],
         "generic_labels": dict(rep.labels),
+        "inventory_status": "not_verified_against_route_plan",
         "caveats": caveats,
     }
 
@@ -151,6 +197,190 @@ def executed_false_fallbacks(execution: dict | None) -> dict:
     }
 
 
+def source_region_execution(regions: list[dict], execution: dict | None) -> dict:
+    """Join eligible source regions to completed runtime calls by provenance identity.
+
+    A plan and a module census are both predictions. An outlined kernel's
+    ``prov.region_id`` is encoded in its symbol by the core outliner, and the
+    runtime records that exact symbol only after the call completes. The
+    static outline inventory must also account for every captured linalg
+    operation in an eligible provenance region; one completed operation cannot
+    certify its unexecuted siblings. Unknown, failed, mixed, or missing calls
+    cannot be credited as accelerator execution. This is operation accounting
+    and a lane observation, not a proof of numerical equivalence.
+    """
+    from collections import Counter, defaultdict
+
+    from merlin.xdsl_dialects.lowering.outline import region_id_of_symbol
+
+    wanted = {r["region_id"] for r in regions if r["target_eligible"] and r["region_id"]}
+    unattributed = sum(1 for r in regions if r["target_eligible"] and not r["region_id"])
+    ledger = (execution or {}).get("dispatch_ledger")
+    if not isinstance(ledger, list):
+        return {"status": "not_measured", "n_eligible_source_regions": len(wanted), "unattributed_demands": unattributed}
+
+    # A region id is NOT an operation id: one frontend operation can yield
+    # several linalg roots with the same provenance. Match the complete source
+    # operation multiset to the exact runtime outline before crediting a lane.
+    # Non-linalg eligible work is not outlined by this runner and therefore
+    # remains an unverified obligation, not a free accelerator success.
+    source_keys = Counter(
+        (r["region_id"], r.get("carrier_op"), r["op"])
+        for r in regions
+        if r["region_id"] in wanted and str(r.get("carrier_op") or "").startswith("linalg.")
+    )
+    unoutlined_eligible = sum(
+        1
+        for r in regions
+        if r["target_eligible"]
+        and r["region_id"] in wanted
+        and not str(r.get("carrier_op") or "").startswith("linalg.")
+    )
+    manifest = (execution or {}).get("outlined_dispatches")
+
+    def content_hash(value: object) -> str:
+        canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
+        return hashlib.sha256(canonical).hexdigest()
+
+    direct_keys: Counter[tuple[str, str, str]] = Counter()
+    contraction_keys: Counter[tuple[str, str, str]] = Counter()
+    requant_keys: Counter[tuple[str, str, str]] = Counter()
+    outlined_symbols: set[str] = set()
+    primary_symbols: dict[str, set[str]] = defaultdict(set)
+    auxiliary_symbols: set[str] = set()
+    invalid_outlined_rows = 0
+    source_families: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+    source_eligibility: dict[tuple[str, str, str], set[bool]] = defaultdict(set)
+    for row in regions:
+        key = (row["region_id"], row.get("carrier_op"), row["op"])
+        if key in source_keys:
+            source_families[key].add(row["semantic_family"])
+            source_eligibility[key].add(bool(row["target_eligible"]))
+    if isinstance(manifest, list):
+        for row in manifest:
+            if not isinstance(row, dict):
+                invalid_outlined_rows += 1
+                continue
+            sym, rid, root, op = (row.get(key) for key in ("symbol", "region_id", "root_op", "prov_op"))
+            if not isinstance(sym, str) or not sym or sym in outlined_symbols:
+                invalid_outlined_rows += 1
+                continue
+            outlined_symbols.add(sym)
+            if rid not in wanted:
+                continue
+            if (
+                not isinstance(rid, str)
+                or region_id_of_symbol(sym) != rid
+                or not isinstance(root, str)
+                or not isinstance(op, str)
+            ):
+                invalid_outlined_rows += 1
+                continue
+            key = (rid, root, op)
+            role = row.get("prov_role")
+            if role is None:
+                direct_keys[key] += 1
+                primary_symbols[rid].add(sym)
+            elif role == "contraction":
+                contraction_keys[key] += 1
+                primary_symbols[rid].add(sym)
+            elif role == "requant":
+                requant_keys[key] += 1
+                auxiliary_symbols.add(sym)
+            else:
+                invalid_outlined_rows += 1
+
+    def named_counts(counts: Counter) -> dict[str, int]:
+        return {"|".join(str(part) for part in key): count for key, count in sorted(counts.items())}
+
+    primary_keys = direct_keys + contraction_keys
+    unmatched = source_keys - primary_keys
+    unexpected = primary_keys - source_keys
+    # The integer quantization rewrite expands one captured contraction into
+    # a contraction and its requantization. Both children are mandatory, but
+    # only the contraction is an accelerator-placement obligation. An unknown
+    # or partial expansion cannot make the source operation appear covered.
+    invalid_split_keys = sorted(
+        key for key in set(contraction_keys) | set(requant_keys)
+        if contraction_keys[key] != requant_keys[key]
+        or source_families.get(key) != {"contraction"}
+    )
+    ambiguous_source_keys = sorted(key for key, values in source_eligibility.items() if len(values) != 1)
+    completed_symbols = {
+        entry["symbol"]
+        for entry in ledger
+        if isinstance(entry, dict) and isinstance(entry.get("symbol"), str) and entry.get("status") == "pass"
+    }
+    expected_symbols = (
+        {
+            row["symbol"]
+            for row in manifest
+            if isinstance(row, dict) and row.get("region_id") in wanted and isinstance(row.get("symbol"), str)
+        }
+        if isinstance(manifest, list)
+        else set()
+    )
+    unexecuted = sorted(expected_symbols - completed_symbols)
+
+    host_lanes = frozenset(("native_cpu", "xnnpack_host", "scalar_rvv_lane", "host_fallback"))
+    observed: dict[str, list[str]] = defaultdict(list)
+    auxiliary_host_symbols: set[str] = set()
+    for entry in ledger:
+        if not isinstance(entry, dict) or not isinstance(entry.get("symbol"), str):
+            continue
+        sym = entry["symbol"]
+        rid = region_id_of_symbol(sym)
+        if rid not in wanted or sym not in outlined_symbols:
+            continue
+        lane = entry.get("lane") if entry.get("status") == "pass" else None
+        if sym in auxiliary_symbols:
+            if lane in host_lanes:
+                auxiliary_host_symbols.add(sym)
+            continue
+        if sym in primary_symbols[rid]:
+            observed[rid].append(
+                "accelerator" if lane == "on_mesh" else "host" if lane in host_lanes else "unverified"
+            )
+
+    unobserved = sorted(wanted - observed.keys())
+    host = sorted(rid for rid, lanes in observed.items() if lanes and all(lane == "host" for lane in lanes))
+    accelerator = sorted(rid for rid, lanes in observed.items() if lanes and all(lane == "accelerator" for lane in lanes))
+    mixed = sorted(rid for rid, lanes in observed.items() if "accelerator" in lanes and "host" in lanes)
+    unresolved = sorted(wanted - set(host) - set(accelerator) - set(mixed) - set(unobserved))
+    outline_complete = (
+        isinstance(manifest, list)
+        and not (
+            invalid_outlined_rows or unmatched or unexpected or invalid_split_keys
+            or ambiguous_source_keys or unoutlined_eligible or unexecuted
+        )
+    )
+    return {
+        "status": "measured" if outline_complete and not (unattributed or unobserved or unresolved) else "incomplete",
+        "n_eligible_source_regions": len(wanted),
+        "n_source_operations_in_eligible_regions": sum(source_keys.values()),
+        "n_eligible_executed_on_accelerator": len(accelerator),
+        "eligible_accelerator_region_ids": accelerator,
+        "eligible_host_region_ids": host,
+        "eligible_mixed_region_ids": mixed,
+        "unobserved_region_ids": unobserved,
+        "unresolved_region_ids": unresolved,
+        "unattributed_demands": unattributed,
+        "unoutlined_eligible_demands": unoutlined_eligible,
+        "unmatched_source_operation_counts": named_counts(unmatched),
+        "unexpected_outlined_operation_counts": named_counts(unexpected),
+        "invalid_split_source_keys": ["|".join(key) for key in invalid_split_keys],
+        "ambiguous_source_keys": ["|".join(key) for key in ambiguous_source_keys],
+        "auxiliary_host_symbols": sorted(auxiliary_host_symbols),
+        "unexecuted_outlined_symbols": unexecuted,
+        "invalid_outlined_rows": invalid_outlined_rows,
+        "outline_inventory_status": "matched" if outline_complete else "incomplete",
+        "outlined_dispatches_sha256": content_hash(manifest) if isinstance(manifest, list) else None,
+        "dispatch_ledger_sha256": content_hash(ledger),
+        "evidence": "source_operation_inventory_to_runtime_outline_to_completed_dispatch_ledger",
+        "scope": "static operation accounting and lane execution only; no arithmetic or transformation equivalence proof",
+    }
+
+
 def build(
     plan: dict,
     cap_map: dict,
@@ -184,10 +414,28 @@ def build(
 
     for r in plan.get("results", []):
         d = r.demand
+        observed = d.captured_input_formats
+        captured_input = observed[0] if observed else d.elem_fmt
+        captured_weight = observed[1] if observed is not None and len(observed) > 1 else None
         desc = _el.RegionDescriptor(
-            source=d.site or d.op, op=d.op, in_dtype=d.in_fmt, weight_dtype=d.weight_fmt, m=d.m, k=d.k, n=d.n
+            source=d.site or d.op,
+            op=d.op,
+            family=d.family,
+            in_dtype=d.admission_input_fmt,
+            weight_dtype=d.admission_weight_fmt,
+            m=d.m,
+            k=d.k,
+            n=d.n,
+            rank=d.rank,
+            batch=d.batch or 1,
+            form=d.form,
         )
-        verdict = _el.is_eligible(desc, cap_map)
+        verdict = (
+            _el.is_eligible(desc, cap_map)
+            if d.source_formats_complete else _el.EligibilityVerdict(
+                False, desc.resolved_family(), "captured operand formats incomplete; eligibility unverified",
+                undetermined=True, refusal="input_dtype")
+        )
         family = verdict.family or _sf.from_op(d.op)
         decision = dec.get(id(r), "cpu_fallback")
         accelerated = decision == "accelerator"
@@ -197,7 +445,29 @@ def build(
             {
                 "source": d.site or d.op,
                 "op": d.op,
+                "region_id": d.region_id,
+                "source_family": d.source_family,
+                "carrier_op": d.carrier_op,
+                "form": d.form,
                 "semantic_family": family,
+                "requested_input_format": d.in_fmt,
+                "captured_input_format": captured_input,
+                "captured_weight_format": captured_weight,
+                "eligibility_input_format": d.admission_input_fmt,
+                "eligibility_weight_format": d.admission_weight_fmt,
+                "requested_format_mismatch": bool(
+                    (captured_input is not None and not _el._dtype_ok(captured_input, (d.in_fmt,)))
+                    or (captured_weight is not None and d.weight_fmt is not None
+                        and not _el._dtype_ok(captured_weight, (d.weight_fmt,)))
+                ),
+                "precision_transform_required": (
+                    None
+                    if (observed is not None and not d.source_formats_complete)
+                    or (observed is None and d.elem_fmt is None
+                        and str(d.carrier_op or "").startswith("linalg."))
+                    else bool(captured_input is not None
+                              and not _el._dtype_ok(captured_input, (d.admission_input_fmt,)))
+                ),
                 "target_eligible": verdict.eligible,
                 "eligibility_reason": verdict.reason,
                 "decision": decision,
@@ -222,7 +492,7 @@ def build(
 
     # Work the matcher never turned into a demand. A MAC is a multiply AND an add, so it is 2 flops on
     # the same scale `_flops` uses -- mixing the two units would understate the correction by half.
-    completeness = denominator_completeness(linalg_mlir)
+    completeness = denominator_completeness(linalg_mlir, demands=[r.demand for r in plan.get("results", [])])
     unmatched_flops = 2 * int(completeness.get("unmatched_contraction_macs") or 0) if completeness else 0
     unmatched_regions = int(completeness.get("n_unmatched_contractions") or 0) if completeness else 0
 
@@ -254,13 +524,31 @@ def build(
     # than replacing them: the recalls are per-region and this is per-kernel-symbol, so they are not the
     # same denominator and collapsing them would invent a number neither record supports.
     executed = executed_false_fallbacks(execution)
+    source_execution = source_region_execution(regions, execution)
 
     return {
         "target": target,
+        "source_mlir_sha256": (
+            hashlib.sha256(linalg_mlir.encode("utf-8")).hexdigest() if linalg_mlir is not None else None
+        ),
         "denominator_source": "semantic_capabilities (independent eligibility oracle)",
         "arr_evidence": "routing_plan",
         "execution_crosscheck": xcheck,
         "executed_false_fallbacks": executed,
+        "source_region_execution": source_execution,
+        "n_precision_transform_obligations": sum(r["precision_transform_required"] is True for r in regions),
+        "n_requested_format_mismatches": sum(r["requested_format_mismatch"] for r in regions),
+        "n_unknown_capture_formats": sum(r["precision_transform_required"] is None for r in regions),
+        "precision_transform_verification": {
+            "status": (
+                "not_verified"
+                if any(r["precision_transform_required"] is True for r in regions)
+                else "unknown_capture_format"
+                if any(r["precision_transform_required"] is None for r in regions)
+                else "not_required"
+            ),
+            "scope": "capture operand format versus effective routing format; no conversion proof is supplied by placement",
+        },
         "n_regions": len(regions),
         "n_eligible": n_eligible,
         "n_accelerated": n_accelerated,

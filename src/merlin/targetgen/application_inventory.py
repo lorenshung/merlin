@@ -39,10 +39,13 @@ def exact_int_mm_generic_operation(op) -> bool:
     maps = op.properties.get("indexing_maps")
     iterators = op.properties.get("iterator_types")
     if (
-        maps is None or [str(value) for value in maps] != _INT_MM_MAPS
-        or iterators is None or [str(value) for value in iterators] != _INT_MM_ITERATORS
+        maps is None
+        or [str(value) for value in maps] != _INT_MM_MAPS
+        or iterators is None
+        or [str(value) for value in iterators] != _INT_MM_ITERATORS
         or [query.op_name(child) for child in op.walk()][1:] != _INT_MM_BODY
-        or len(op.operands) != 3 or len(op.results) != 1
+        or len(op.operands) != 3
+        or len(op.results) != 1
     ):
         return False
     operands = [query.type_shape_dtype(value.type) for value in op.operands]
@@ -78,7 +81,8 @@ def exact_int_mm_generic_operation(op) -> bool:
     return (
         len(a) == len(weight) == len(out) == len(result) == 2
         and all(dim > 0 for shape in (a, weight, out, result) for dim in shape)
-        and a[1] == weight[0] and out == result == [a[0], weight[1]]
+        and a[1] == weight[0]
+        and out == result == [a[0], weight[1]]
     )
 
 
@@ -321,17 +325,20 @@ def verified_static_integerization(projection: dict | None, *, receipt_sha256: s
         if (
             agreement.get("reference") != "pt2e_integer"
             or any(row.get(key) != 0.0 for row in [agreement, *outputs] for key in ("atol", "rtol", "max_abs"))
-            or not isinstance(source, dict) or not is_sha256(source.get("sha256"))
-            or not isinstance(pointer, dict) or pointer.get("path") != "integer-reference.json"
-            or not isinstance(reference, dict) or pointer.get("sha256") != reference.get("sha256")
+            or not isinstance(source, dict)
+            or not is_sha256(source.get("sha256"))
+            or not isinstance(pointer, dict)
+            or pointer.get("path") != "integer-reference.json"
+            or not isinstance(reference, dict)
+            or pointer.get("sha256") != reference.get("sha256")
             or not is_sha256(reference.get("sha256"))
-            or type(reference.get("bytes")) is not int or reference["bytes"] <= 0
+            or type(reference.get("bytes")) is not int
+            or reference["bytes"] <= 0
             or not isinstance(executed, dict)
             or any(executed.get(key) != count for key in ("total", "selected", "observed"))
             or not isinstance(by_kind, dict)
             or any(
-                not isinstance(by_kind.get(kind), dict)
-                or executed.get(kind) != by_kind[kind].get("seen")
+                not isinstance(by_kind.get(kind), dict) or executed.get(kind) != by_kind[kind].get("seen")
                 for kind in ("conv2d", "linear", "matmul")
             )
         ):
@@ -441,8 +448,79 @@ def operation_structure(op) -> dict:
     }
 
 
+def quantization_parameters(op) -> dict[str, int | None] | None:
+    """Read per-tensor quantization operands/properties from parsed SSA, not provenance.
+
+    A dynamic zero point or an unrecognized producer stays unknown. In particular,
+    a dtype-compatible capture is not evidence for a symmetric quantization rule.
+    """
+    from merlin.common import mlir_query as mq
+
+    if mq.op_name(op) not in {"quant_ext.quantize_per_tensor", "quant_ext.dequantize_per_tensor"}:
+        return None
+
+    def integer_attribute(attribute) -> int | None:
+        value = getattr(getattr(attribute, "value", None), "data", None)
+        return value if type(value) is int else None
+
+    def attribute(owner, field):
+        return owner.properties[field] if field in owner.properties else owner.attributes.get(field)
+
+    def constant_integer(value) -> int | None:
+        owner = getattr(value, "owner", None)
+        if owner is None or not hasattr(owner, "properties"):
+            return None
+        if mq.op_name(owner) == "tensor.splat" and len(owner.operands) == 1:
+            owner = getattr(owner.operands[0], "owner", None)
+        if owner is None or not hasattr(owner, "properties") or mq.op_name(owner) != "arith.constant":
+            return None
+        return integer_attribute(attribute(owner, "value"))
+
+    zero_point = constant_integer(op.operands[2]) if len(op.operands) == 3 else None
+    parameters = {"zero_point": zero_point}
+    for field in ("quant_min", "quant_max"):
+        parameters[field] = integer_attribute(attribute(op, field))
+    return parameters
+
+
+def _reduction_provenance_hint(op, mq) -> tuple[dict, dict | None]:
+    """Suggest a missing tag from adjacent operations without inventing source provenance.
+
+    Even agreeing tags cannot prove this reduction's frontend semantics. The source tag
+    remains absent for admission; the hint only helps diagnose capture metadata loss.
+    """
+    provenance = mq.provenance(op)
+    if mq.op_name(op) != "linalg.reduce" or provenance.get("prov.aten") or len(op.operands) < 2 or not op.results:
+        return provenance, None
+    # The tag on a fill can name this reduction only when that fill initializes THIS reduction
+    # exclusively. Two reductions may share one tagged zero while both have agreeing tagged
+    # consumers; agreement on either side alone does not identify which reduction owns the tag.
+    init_uses = tuple(op.operands[-1].uses)
+    if len(init_uses) != 1 or init_uses[0].operation is not op:
+        return provenance, None
+    initializer = op.operands[-1].owner
+    init_prov = mq.provenance(initializer) if hasattr(initializer, "attributes") else {}
+    identity = (init_prov.get("prov.region_id"), init_prov.get("prov.aten"))
+    users = [use.operation for result in op.results for use in result.uses]
+    if not all(identity) or not users or any(
+        (mq.provenance(user).get("prov.region_id"), mq.provenance(user).get("prov.aten")) != identity
+        for user in users
+    ):
+        return provenance, None
+    return provenance, {
+        "method": "reduction_initializer_and_consumers_agree_v1",
+        "status": "unverified",
+        "suggested_frontend_op": identity[1],
+        "region_id": identity[0],
+        "consumer_count": len(users),
+    }
+
+
 def _application_operation_inventory(
-    path: str | Path, target: str, cap_map: dict, *, include_graph: bool = False
+    path: str | Path, target: str, cap_map: dict, *, include_graph: bool = False,
+    capability_contract: dict | None = None,
+    software_spec: dict | None = None,
+    host_capabilities: dict | None = None,
 ) -> dict:
     """Answer-free, operation-complete inventory for one application capture.
 
@@ -481,7 +559,7 @@ def _application_operation_inventory(
     for ordinal, op in enumerate(mq.walk(module)):
         n_operations += 1
         name = mq.op_name(op)
-        provenance = mq.provenance(op)
+        provenance, provenance_hint = _reduction_provenance_hint(op, mq)
         frontend = provenance.get("prov.aten")
         source_op = provenance.get("prov.op")
         callee_attr = op.properties.get("callee") if name == "func.call" else None
@@ -536,6 +614,8 @@ def _application_operation_inventory(
         # Keep the ordered ABI and linalg access pattern in the digest-bound sidecar. A dtype set plus
         # a family/shape class cannot distinguish this matmul from another generic of the same size.
         structure = operation_structure(op)
+        from merlin.targetgen import access_observations
+
         result_shapes = [shape for shape, _dtype in result_types if shape]
         operand_shapes = [shape for shape, _dtype in operand_types if shape]
         m, k, n, rank = extents.get(id(op), (None, None, None, None))
@@ -598,7 +678,10 @@ def _application_operation_inventory(
         else:
             verdict = is_eligible(
                 RegionDescriptor(
-                    op=name.rpartition(".")[2], family=family, in_dtype=input_format, m=m, k=k, n=n, rank=rank
+                    op=name.rpartition(".")[2], family=family, in_dtype=input_format,
+                    out_dtype=result_dtypes[0] if len(result_dtypes) == 1 else None,
+                    m=m, k=k, n=n, rank=rank,
+                    form=sf.operation_form(source_op or frontend or name.rpartition(".")[2], carrier_op=name),
                 ),
                 cap_map,
             )
@@ -621,6 +704,7 @@ def _application_operation_inventory(
             "operation": canonical,
             "mlir_operation": name,
             "frontend_op": frontend,
+            **({"provenance_hint": provenance_hint} if provenance_hint is not None else {}),
             "provenance_op": source_op,
             "callee": callee,
             "semantic_family": family,
@@ -639,10 +723,39 @@ def _application_operation_inventory(
             "shape_confidence": shape_confidence,
             "quant_evidence": quant_evidence or None,
             "layout_evidence": layout_evidence or None,
+            # Graph-derived access observations in the software declarations' vocabulary; None = unknown.
+            **access_observations.observe(op, family),
             "disposition": disposition,
             "reason": reason,
             "provenance_present": bool(frontend or source_op),
         }
+        parameters = quantization_parameters(op)
+        if parameters is not None:
+            signature["quantization_parameters"] = parameters
+        if disposition == "unclassified" and software_spec is not None and host_capabilities is not None:
+            # Independent hardware eligibility remains unknown for dtype-changing operations.
+            # A separately pinned and reviewed host declaration can nevertheless resolve their
+            # placement. Use the same exact-signature screen as whole-program admission.
+            from merlin.targetgen.operation_accounting import admit_operation_row
+
+            admission = admit_operation_row(
+                signature,
+                software_spec=software_spec,
+                capability_contract=capability_contract,
+                capability_map=cap_map,
+                host_capabilities=host_capabilities,
+            )
+            if (
+                admission["host_admission"]["status"] == "admitted"
+                and admission["host_admission"]["reviewed"]
+                and admission["accelerator_admission"]["status"] != "admitted"
+                and any(
+                    row["status"] == "admitted" and row["placement"] == "host"
+                    for row in admission["software_admissions"]
+                )
+            ):
+                disposition = signature["disposition"] = "host_required"
+                signature["reason"] = "exact reviewed software and pinned host declarations admit this signature"
         key = json.dumps(signature, sort_keys=True, separators=(",", ":"))
         slot = grouped.setdefault(key, {**signature, "count": 0, "ordinals": []})
         slot["count"] += 1
@@ -724,6 +837,8 @@ def application_demand_inventory(
     *,
     detailed: bool = False,
     capability_contract: dict | None = None,
+    software_spec: dict | None = None,
+    host_capabilities: dict | None = None,
     include_graph: bool = False,
     application_metadata: dict[str, dict] | None = None,
 ) -> dict:
@@ -752,7 +867,12 @@ def application_demand_inventory(
     for label, path in sorted(applications.items()):
         if cm.is_claim_bundle(label) or cm.is_claim_bundle(Path(path).resolve().parent.name):
             raise ValueError(f"application {label!r} is a held-out claim model and cannot derive Phase 0 demands")
-        output[str(label)] = _application_operation_inventory(path, target, cap_map, include_graph=include_graph)
+        output[str(label)] = _application_operation_inventory(
+            path, target, cap_map, include_graph=include_graph,
+            capability_contract=capability_contract,
+            software_spec=software_spec,
+            host_capabilities=host_capabilities,
+        )
         identity = (application_metadata or {}).get(str(label))
         if identity is not None:
             if not isinstance(identity, dict) or identity.get("workload_role", "unknown") not in {

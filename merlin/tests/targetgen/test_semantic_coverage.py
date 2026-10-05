@@ -253,9 +253,9 @@ def test_a_declined_offload_is_reported_rather_than_silently_permitted():
     assert "GC5_fused_matmul_bias_bf16_pt" in declined, ac["declined_offload"]
     assert declined["GC5_fused_matmul_bias_bf16_pt"]["semantic_family"] == "contraction"
     assert "bf16" in declined["GC5_fused_matmul_bias_bf16_pt"]["reason"]
-    # A family the target does not declare AT ALL is a different report (declared_unexercised /
-    # unclassified), not a declined offload -- otherwise every unsupported op would land here.
-    assert "GF2_attn_full_bf16_pt" not in declined
+    # The composite's primitive contraction is declared for int8, not bf16;
+    # this is a typed decline, not a silently permitted host fallback.
+    assert declined["GF2_attn_full_bf16_pt"]["declined_on"] == "dtype"
     # And nothing that passed before starts failing: this state is reported, never scored.
     assert ac["must_accelerate_violations"] == []
     assert ac["must_accelerate_pass"] is True
@@ -366,7 +366,12 @@ def test_semantic_capabilities_differ_across_targets():
     mx = _residual_caps("out/artifacts/targets/mx_gemmini/contracts/residual.yaml")
     rad = _residual_caps("out/artifacts/targets/radiance/contracts/residual.yaml")
 
-    assert set(gem) == {"contraction", "elementwise_map", "movement"}  # int8 GEMM accelerator
+    # int8 GEMM accelerator. Pooling is real hardware here and composed-only (a mode of the store
+    # path); the elementwise map is standalone, licensed by evidence paths that name their roles.
+    assert set(gem) == {"contraction", "elementwise_map", "movement", "reduction"}
+    assert gem["reduction"].composed_with == ("contraction", "movement")
+    assert gem["elementwise_map"].composed_with == ()
+    assert {p.fact for p in gem["elementwise_map"].standalone_evidence} == {"accumulate_on_load"}
     assert gem["contraction"].dtypes == ("int8",)
     assert set(mx) == {"contraction"}  # matmul-only MX tile
     assert "mxfp8" in mx["contraction"].dtypes
@@ -518,6 +523,18 @@ def test_gemmini_denominator_is_not_empty():
     assert out["acceleratable_region_recall"] is not None
 
 
+def test_gemmini_transfer_capsule_is_a_copy_not_an_arbitrary_permute():
+    from merlin.targetgen.semantic_families import operation_form
+
+    cap = _cap("isa/A1_mvin_mvout")
+    assert operation_form(cap["operation"]["op"]) == "copy"
+    assert cov._capsule_region(cap).form == "copy"
+    assert el.is_eligible(cov._capsule_region(cap), el.capability_map_for_target("gemmini")).eligible
+    permutation = el.RegionDescriptor(op="permute", family="movement", in_dtype="int8", form="permutation")
+    verdict = el.is_eligible(permutation, el.capability_map_for_target("gemmini"))
+    assert not verdict.eligible and verdict.refusal == "form"
+
+
 # --- capability DERIVATION: the denominator is evidence, not assertion ---------------------------
 
 
@@ -665,9 +682,17 @@ def test_recall_reports_its_per_family_denominator():
 
 
 def test_a_fused_only_family_is_named_as_a_hardware_exclusion():
-    """A family the device runs ONLY as an epilogue is real hardware whose standalone regions are
-    correctly ineligible. That exclusion is invisible in the ratio, so it is reported by name — the
-    alternative is a reader inferring the compiler covers an elementwise lane that does not exist."""
+    """A family the device runs ONLY attached to a producer is real hardware whose standalone regions
+    are correctly ineligible. That exclusion is invisible in the ratio, so it is reported by name — the
+    alternative is a reader inferring the compiler covers a lane that does not exist.
+
+    The subject is ``reduction``: a pool is a mode of the store path armed by its configuration, so it
+    always reads values a contraction or a movement already put there. It used to be
+    ``elementwise_map``, until the reviewed contract declared that family standalone from RTL evidence
+    that needs no hardware loop descriptor -- a plain load into an accumulator address with the
+    address's accumulate bit set adds into the accumulator (the ``accumulate_on_load`` semantic fact),
+    so a standalone elementwise map is work this device does and belongs in the denominator.
+    """
     import yaml
 
     caps = {}
@@ -680,12 +705,13 @@ def test_a_fused_only_family_is_named_as_a_hardware_exclusion():
             caps[c["name"]] = c
     results = [{"capsule": n, "tiers": {"L2": {"status": "pass"}}} for n in caps]
     arr = cov._acceleratable_coverage(results, caps, "gemmini")
-    assert "elementwise_map" in arr["fused_only_families"], (
-        "the mesh's readout epilogue is not a standalone elementwise engine; the contract says so"
+    assert "reduction" in arr["fused_only_families"], (
+        "max pooling is a mode of the store path, not a standalone reduction engine; the contract says so"
     )
     assert arr["n_fused_only_ineligible"] >= 1, (
         "regions excluded by that hardware fact must be counted, not merely implied"
     )
+    assert "elementwise_map" not in arr["fused_only_families"]
 
 
 def test_the_rendered_report_carries_the_family_table_and_the_caveat():
