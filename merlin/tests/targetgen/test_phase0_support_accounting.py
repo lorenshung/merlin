@@ -384,6 +384,8 @@ class Phase0SupportAccounting(unittest.TestCase):
             edge = completeness["transfer_obligations"][0]
             self.assertEqual(edge["source_type"], "f32")
             self.assertEqual(edge["status"], "conditional")
+            # A scalar SSA value has no tensor layout: the observation stays unknown, never assumed.
+            self.assertIsNone(edge["operand_layout"])
             self.assertEqual(edge["conversion"]["status"], "not_applicable")
             decomposed = deepcopy(trace)
             original = decomposed["graphs"]["original"]

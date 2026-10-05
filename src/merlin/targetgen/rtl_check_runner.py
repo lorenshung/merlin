@@ -226,7 +226,9 @@ def screen_run(
             res["filecheck"]["kernel"] = {"ok": ok, "diag": diag}
             res["verdict"] = "reject" if ok is False else "ok"
         else:
-            res["verdict"] = "ok"
+            # No FileCheck means no self-hosted structural assertion ran. A
+            # decoded kernel alone cannot turn unavailable checking into a pass.
+            res["verdict"] = RC.CheckReport.VACUOUS
         res["kernel_decode"] = decode_txt
         if write:
             (run_capsule_dir / "rtl_checks.json").write_text(json.dumps(res, indent=2))
@@ -273,7 +275,15 @@ def screen_run(
     # stream — the target's actual emitted commands) + the Python numeric screen. The decoded trace is
     # canonical and format-independent, so it never false-positives on a legal MLIR surface form.
     fc_fail = (res["filecheck"].get("trace") or {}).get("ok") is False
-    res["verdict"] = "reject" if (fc_fail or rep.verdict == "reject") else ("warn" if rep.verdict == "warn" else "ok")
+    # A successful structural FileCheck does not turn an all-skipped numeric
+    # screen into measured evidence. The combined advisory must preserve that
+    # uncertainty; the scientific oracle still runs for anything but reject.
+    res["verdict"] = (
+        "reject" if fc_fail or rep.verdict == "reject"
+        else "warn" if rep.verdict == "warn"
+        else RC.CheckReport.VACUOUS if rep.verdict == RC.CheckReport.VACUOUS
+        else "ok"
+    )
     if write:
         (run_capsule_dir / "rtl_checks.json").write_text(json.dumps(res, indent=2))
     return res

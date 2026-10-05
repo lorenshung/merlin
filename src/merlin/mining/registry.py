@@ -48,6 +48,7 @@ class RvvPackage:
     compiler_features: list[str] = field(default_factory=list)
     manifest: dict[str, Any] = field(default_factory=dict)
     knobs: dict[str, Any] = field(default_factory=dict)
+    backend: str = "rvv"
 
     @property
     def provider(self) -> Provider | None:
@@ -94,13 +95,31 @@ def load_rvv_package(package_dir: str | Path) -> RvvPackage:
     validate_or_raise(manifest, "rvv_package_manifest")
 
     knobs = load_yaml(d / "knobs.yaml")
-    sched_path = d / knobs.get("schedule_file", "schedule.mlir")
-    schedule_text = sched_path.read_text(encoding="utf-8")
+    backend = knobs.get("backend", "rvv")
+    if backend not in {"rvv", "scalar"}:
+        raise ValueError(f"host package {d.name} has unknown backend {backend!r}")
+    if backend == "scalar":
+        if knobs.get("schedule_file") or knobs.get("op_match") or knobs.get("compiler_features"):
+            raise ValueError("scalar host package cannot select an RVV schedule, op matcher, or compiler features")
+        schedule_text = ""
+    else:
+        sched_path = d / knobs.get("schedule_file", "schedule.mlir")
+        schedule_text = sched_path.read_text(encoding="utf-8")
 
     cflags = list(knobs.get("cflags", []))
     problems = _check_cflags(cflags)
     if problems:
         raise ValueError(f"rvv package {d.name} integrity failed: {'; '.join(problems)}")
+    if backend == "scalar":
+        from merlin.compile.host_lane import _isa_parts
+
+        marches = [flag.removeprefix("-march=") for flag in cflags if flag.startswith("-march=")]
+        required = _isa_parts(marches[0])[1] if len(marches) == 1 else set()
+        if len(marches) != 1 or any(
+            extension == "v" or extension.startswith(("zve", "zvl", "zv"))
+            for extension in required
+        ):
+            raise ValueError("scalar host package requires exactly one non-vector -march flag")
 
     return RvvPackage(
         name=manifest["target"],
@@ -116,6 +135,7 @@ def load_rvv_package(package_dir: str | Path) -> RvvPackage:
         compiler_features=_resolve_features(knobs, manifest),
         manifest=manifest,
         knobs=knobs,
+        backend=backend,
     )
 
 

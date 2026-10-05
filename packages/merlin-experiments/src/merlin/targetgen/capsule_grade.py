@@ -36,6 +36,7 @@ from .capsule_common import NOT_MEASURED_STATUSES
 from .capsule_common import tier_field as _tier_field
 from .capsule_common import tier_status as _tier_status
 from .corpora import source_experiment_env
+from .elf_lanes import native_host_execution
 from .oot_runner import INFRASTRUCTURE_PLANE as OOT_INFRASTRUCTURE_PLANE
 from .oot_runner import CertFailure, build_package, integrity_scan, load_package
 
@@ -114,7 +115,107 @@ def _lane_scope(lane_report: dict, observed_lanes: set) -> set:
     return observed_lanes & {str(ln) for ln in scope}
 
 
-def model_execution_check(result: dict, capsule: dict | None = None) -> dict:
+def candidate_native_model_check(result: dict, *, target: str) -> dict:
+    """Grade only the submitted whole-program artifact, never the legacy host graph.
+
+    This is a distinct diagnostic/qualification surface. It requires the
+    source-only frozen denominator, actual emitted task-scoped host audit,
+    candidate-built native ELF/full-output evidence, and a source-bound
+    mandatory dispatch join. It does not borrow the old host-dispatch ledger
+    or claim full transformation semantics from a numerical comparison.
+    """
+    from .native_model_execution import (
+        audit_candidate_completed_dispatch, audit_candidate_source_placement,
+        audit_candidate_tiers, audit_emitted_host_compute,
+    )
+
+    violations: list[str] = []
+    try:
+        from merlin.runtime.backends.base import harness_build_recipe
+
+        if not isinstance(target, str) or not target:
+            raise ValueError("model result has no selected target")
+        entry = harness_build_recipe(target).require_kernel_stack_frame().entry_symbol
+        host = audit_emitted_host_compute(result.get("candidate_emission"), entry_symbol=entry)
+    except Exception as exc:  # noqa: BLE001 -- absent target build authority is not clean
+        entry = ""
+        host = {"status": "unverified", "detail": f"{type(exc).__name__}: {exc}"}
+    if host["status"] == "violation":
+        violations.append("candidate_host_tensor_compute_violation")
+    elif host["status"] != "clean":
+        violations.append("candidate_emitted_host_compute_unverified")
+
+    placement = audit_candidate_source_placement(
+        result.get("candidate_emission"), result.get("candidate_source_eligibility"), target=target)
+    if placement["status"] == "violation":
+        violations.append("candidate_source_placement_violation")
+    elif placement["status"] != "clean":
+        violations.append("candidate_source_placement_unverified")
+
+    native = result.get("candidate_native_execution")
+    expected = host.get("candidate") or {}
+    native_candidate = native.get("candidate") if isinstance(native, dict) else None
+    if (not isinstance(native, dict)
+            or native.get("status") != "numeric_match_diagnostic"
+            or (native.get("numeric") or {}).get("status") != "pass"
+            or not isinstance(native_candidate, dict)
+            or any(not isinstance(expected.get(key), str)
+                   or native_candidate.get(key) != expected[key]
+                   for key in ("command_buffer_sha256", "lowered_mlir_sha256"))
+            or not isinstance(native.get("elf"), dict)
+            or not isinstance(native.get("console"), dict)):
+        violations.append("candidate_full_model_native_unverified")
+    required_engine = os.environ.get("MERLIN_REQUIRED_RTL_ENGINE", "").strip()
+    if required_engine and (not isinstance(native, dict) or native.get("simulator") != required_engine):
+        violations.append("candidate_required_rtl_engine_mismatch")
+    dispatch = audit_candidate_completed_dispatch(
+        result.get("candidate_emission"), result.get("candidate_source_eligibility"), native,
+        target=target, entry_symbol=entry)
+    if dispatch.get("status") != "verified":
+        violations.append("candidate_completed_dispatch_unverified")
+    source_coverage: dict = {"status": "unverified", "scope": "candidate-only eligible source operations"}
+    if placement.get("status") == "clean" and dispatch.get("status") == "verified":
+        eligible = set(placement["eligible_source_op_indices"])
+        completed = {index for task in dispatch.get("eligible_tasks", [])
+                     for index in task.get("source_op_indices", []) if index in eligible}
+        if (completed == eligible and eligible
+                and dispatch.get("source_sha256") == placement.get("source_sha256")):
+            source_coverage = {
+                "status": "verified", "source_sha256": placement["source_sha256"],
+                "n_source_operations": placement["n_source_operations"],
+                "eligible_source_op_indices": sorted(eligible),
+                "completed_eligible_source_op_indices": sorted(completed),
+                "n_eligible": len(eligible), "n_completed_eligible": len(completed),
+                "scope": "independent frozen-source eligibility joined to mandatory candidate ELF commands; "
+                         "no claim for unsupported glue, transformed semantics or performance",
+            }
+    if source_coverage["status"] != "verified":
+        violations.append("candidate_source_coverage_unverified")
+    tier_check = audit_candidate_tiers(
+        result.get("candidate_emission"), result.get("candidate_source_eligibility"), native,
+        target=target, entry_symbol=entry, completed_dispatch=dispatch)
+    if tier_check.get("status") != "pass":
+        violations.append("candidate_required_tiers_unverified")
+    known = any(name in violations for name in (
+        "candidate_host_tensor_compute_violation", "candidate_source_placement_violation",
+        "candidate_required_rtl_engine_mismatch"))
+    return {
+        "schema": "merlin_candidate_native_model_check_v1",
+        "status": "fail" if known else "incomplete" if violations else "pass",
+        "violations": violations,
+        "emitted_host_compute": host,
+        "source_placement": placement,
+        "completed_dispatch": dispatch,
+        "candidate_source_coverage": source_coverage,
+        "candidate_required_tiers": tier_check,
+        "native_status": native.get("status") if isinstance(native, dict) else None,
+        "scope": "submitted whole-program ELF, independent frozen source denominator, "
+                 "mandatory family-matched dispatch, frozen ISA policy and every required tier; "
+                 "not a hardware commit trace or general transform-equivalence theorem",
+    }
+
+
+def model_execution_check(result: dict, capsule: dict | None = None, *, target: str | None = None) -> dict:
     """Return the model capsule's honest structural/effect evidence.
 
     Operator capsules have one emitted kernel, so their decoded instruction trace is the appropriate
@@ -125,6 +226,36 @@ def model_execution_check(result: dict, capsule: dict | None = None) -> dict:
     Missing/malformed evidence fails closed.
     """
     violations: list[str] = []
+    emitted_host_compute: dict | None = None
+    candidate_source_placement: dict | None = None
+    candidate_completed_dispatch: dict | None = None
+    candidate_check = None
+    if bool(((capsule or {}).get("semantic") or {}).get("must_accelerate")):
+        # Keep candidate proof independent from this legacy host-dispatch
+        # model check. The old ledger cannot certify a different program.
+        effective_target = target or (result.get("operation") or {}).get("target")
+        candidate_check = candidate_native_model_check(
+            result, target=effective_target if isinstance(effective_target, str) else "")
+        violations.extend(candidate_check["violations"])
+        emitted_host_compute = candidate_check["emitted_host_compute"]
+        candidate_source_placement = candidate_check["source_placement"]
+        candidate_completed_dispatch = candidate_check["completed_dispatch"]
+        if candidate_check["status"] == "pass":
+            # This is a separate candidate-only proof. The older mesh ledger
+            # was produced by a runner-owned host graph with separately built
+            # tiles; requiring it here would reject an independently proven
+            # submitted whole-program ELF, while borrowing it would falsely
+            # attest to a different program. Keep it as a diagnostic only.
+            return {
+                "status": "pass", "kind": "candidate_whole_program_execution",
+                "candidate_native_model_check": candidate_check,
+                "candidate_required_tiers": candidate_check["candidate_required_tiers"],
+                "emitted_host_compute": emitted_host_compute,
+                "candidate_source_placement": candidate_source_placement,
+                "candidate_completed_dispatch": candidate_completed_dispatch,
+                "legacy_scope": "diagnostic_only_distinct_runner_owned_program",
+                "violations": [],
+            }
     execution = result.get("mesh_execution")
     tiles = result.get("mesh_tile_verification")
     requested_engine = execution.get("simulator_requested") if isinstance(execution, dict) else None
@@ -273,6 +404,7 @@ def model_execution_check(result: dict, capsule: dict | None = None) -> dict:
     fallback_entries: list[dict] = []
     unavailable_entries: list[dict] = []
     scalar_entries: list[dict] = []
+    native_host_entries: list[dict] = []
     if not isinstance(ledger, list) or not ledger:
         violations.append("dynamic_dispatch_ledger_missing_or_malformed")
         ledger = []
@@ -285,7 +417,7 @@ def model_execution_check(result: dict, capsule: dict | None = None) -> dict:
                 or entry.get("ordinal") != ordinal
                 or not isinstance(entry.get("symbol"), str)
                 or not entry.get("symbol")
-                or entry.get("lane") not in allowed
+                or (entry.get("lane") not in allowed and not native_host_execution(entry))
                 or entry.get("status") != "pass"
             ):
                 violations.append("dynamic_dispatch_ledger_entry_missing_or_malformed")
@@ -308,8 +440,10 @@ def model_execution_check(result: dict, capsule: dict | None = None) -> dict:
                 fallback_entries.append(entry)
             elif lane == "mesh_unavailable":
                 unavailable_entries.append(entry)
-            else:
+            elif lane == "scalar_rvv_lane":
                 scalar_entries.append(entry)
+            else:
+                native_host_entries.append(entry)
     if on_mesh is not None and len(mesh_entries) != on_mesh:
         violations.append("model_mesh_counter_ledger_mismatch")
     if fallback is not None and len(fallback_entries) != fallback:
@@ -361,6 +495,7 @@ def model_execution_check(result: dict, capsule: dict | None = None) -> dict:
             (_LOWERING_COVERAGE.HOST, fallback_entries),
             (_LOWERING_COVERAGE.HOST, unavailable_entries),
             (_LOWERING_COVERAGE.HOST, scalar_entries),
+            (_LOWERING_COVERAGE.HOST, native_host_entries),
         )
         for entry in bucket
     ]
@@ -389,7 +524,7 @@ def model_execution_check(result: dict, capsule: dict | None = None) -> dict:
         )
     _offload_rows += [
         {"placement": _LOWERING_COVERAGE.HOST, "off_accelerator_cause": _LOWERING_COVERAGE.ELIGIBILITY_UNKNOWN}
-        for _ in unavailable_entries + scalar_entries
+        for _ in unavailable_entries + scalar_entries + native_host_entries
     ]
     # PHASE COMES FROM THE DECLARATION, not from a literal here. It was `PHASE_REPORT` written
     # inline, which made "this gate blocks nothing" a property of this line rather than a decision
@@ -536,6 +671,10 @@ def model_execution_check(result: dict, capsule: dict | None = None) -> dict:
         "simulator_requested": requested_engine,
         "required_rtl_engine": required_engine,
         "dispatch_ledger_sha256": ledger_digest,
+        "emitted_host_compute": emitted_host_compute,
+        "candidate_source_placement": candidate_source_placement,
+        "candidate_completed_dispatch": candidate_completed_dispatch,
+        "candidate_native_model_check": candidate_check,
         # Coverage as a number, the reason census for everything that went elsewhere, and the calls
         # that went elsewhere with no reason at all. See the census block above for why it reports
         # rather than gates.
@@ -561,9 +700,47 @@ def enforce_model_execution_check(result: dict, capsule: dict | None, *, target:
     so those durable readers false-accepted it.  A wrong/missing required engine is ``incomplete`` (the
     requested evidence did not run), while malformed evidence from the requested engine is a real fail.
     """
-    check = model_execution_check(result, capsule)
+    check = model_execution_check(result, capsule, target=target)
     result["model_execution_check"] = check
+    if check.get("candidate_native_model_check") is not None:
+        result["candidate_native_model_check"] = check["candidate_native_model_check"]
     if check.get("status") == "pass":
+        if check.get("kind") == "candidate_whole_program_execution":
+            # Promote only after all frozen mandatory candidate tiers, source
+            # attribution, host veto and independent full output passed.
+            # Never present legacy host-graph tier receipts as this ELF's runs.
+            native = result["candidate_native_execution"]
+            tier_check = check["candidate_required_tiers"]
+            legacy = result.get("legacy_model_diagnostic")
+            if not isinstance(legacy, dict):
+                legacy = {"status": result.get("status"), "failure": result.get("failure"),
+                          "scope": "runner-owned host-dispatch graph; not candidate whole-program evidence"}
+                result["legacy_model_diagnostic"] = legacy
+            legacy_keys = (
+                "coverage_certificate", "placement_census", "placement", "routing_plan",
+                "mesh_execution", "mesh_tile_verification", "mesh_route_symbols",
+                "planned_outlined_alignment", "boundary_expectation", "boundary_execution",
+                "lane_report", "host_execution", "host_reference", "provenance",
+                "contract_obligations", "tiers_unexercised", "advisories", "metrics",
+                "timing", "cycles", "numeric", "tiers",
+            )
+            moved = {key: result.pop(key) for key in legacy_keys if key in result}
+            if moved:
+                legacy.setdefault("artifacts", {}).update(moved)
+            result["status"] = "pass"
+            result.pop("failure", None)
+            result["numeric"] = native["numeric"]
+            result["candidate_source_coverage"] = check["candidate_native_model_check"]["candidate_source_coverage"]
+            result["tiers"] = {
+                tier: {
+                    "tier": tier, "status": "pass", "mandatory": True,
+                    "evidence": "candidate_whole_program_same_elf" if tier in {"L2", "L3"}
+                    else "candidate_whole_program_structural_legality",
+                    "derived_from_rtl": tier == "L3", "cycle_accurate": False,
+                    "candidate_evidence": tier_check["tiers"][tier],
+                }
+                for tier in tier_check["required_tiers"]
+            }
         return result
 
     violations = [str(v) for v in (check.get("violations") or [])]
@@ -574,7 +751,13 @@ def enforce_model_execution_check(result: dict, capsule: dict | None, *, target:
         for v in violations
     )
     alignment_unmeasured = "planned_outlined_alignment_unverified" in violations
-    evidence_unmeasured = engine_unmeasured or alignment_unmeasured
+    candidate_unmeasured = any(v in violations for v in (
+        "candidate_emitted_host_compute_unverified", "candidate_source_placement_unverified",
+        "candidate_full_model_native_unverified", "candidate_completed_dispatch_unverified",
+        "candidate_required_tiers_unverified"))
+    known_candidate_violation = any(v in violations for v in (
+        "candidate_host_tensor_compute_violation", "candidate_source_placement_violation"))
+    evidence_unmeasured = (engine_unmeasured or alignment_unmeasured or candidate_unmeasured) and not known_candidate_violation
     status = "unavailable" if evidence_unmeasured else "fail"
     detail = "whole-model execution proof failed: " + ", ".join(violations)
     for tier in CR._rtl_tiers_of(target):
@@ -590,7 +773,10 @@ def enforce_model_execution_check(result: dict, capsule: dict | None, *, target:
             "plane": (
                 "required_rtl_engine"
                 if engine_unmeasured
-                else "model_placement" if alignment_unmeasured else "model_execution"
+                else "model_host_compute" if "candidate_host_tensor_compute_violation" in violations
+                else "model_source_placement" if "candidate_source_placement_violation" in violations
+                else "model_placement" if alignment_unmeasured
+                else "candidate_model_execution" if candidate_unmeasured else "model_execution"
             ),
             "category": "NOT_RUN_IS_NOT_PASS" if evidence_unmeasured else "PROTOCOL_VIOLATION",
             "detail": detail,
@@ -743,6 +929,23 @@ def default_grade_workers(n_capsules: int | None = None) -> int:
             footprint = int(raw) if raw.isdigit() and int(raw) > 0 else GRADE_WORKER_BYTES
             w = max(1, min(w, available // footprint))
     return max(1, min(w, n_capsules)) if n_capsules else w
+
+
+def _bounded_grade_workers(requested: int, oracle_adapters: dict | None) -> int:
+    """Keep direct self-check and scheduled grades inside the selected engine's cost cap.
+
+    A host-load estimate cannot coordinate grades launched at nearly the same
+    instant. The adapter carries its engine identity; an unmarked target-owned
+    oracle is unchanged rather than being guessed to be Verilator.
+    """
+    from .rtl_engine_policy import capsule_worker_cap
+
+    engines = {
+        str(engine)
+        for adapter in (oracle_adapters or {}).values()
+        if (engine := getattr(adapter, "_merlin_simulator_engine", None))
+    }
+    return min(requested, *(capsule_worker_cap(engine) for engine in engines)) if engines else requested
 
 
 def grade(
@@ -905,6 +1108,7 @@ def grade(
             "admitted_name_set_sha256": _name_set_sha256(c.get("name") for c in caps),
         }
     workers = max_workers if max_workers and max_workers > 0 else default_grade_workers(len(caps))
+    workers = _bounded_grade_workers(workers, oracle_adapters)
     import time as _time
 
     _suite_t0 = _time.perf_counter()

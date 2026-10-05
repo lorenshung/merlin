@@ -70,6 +70,24 @@ def test_selected_support_root_masks_siblings_without_importing_them(support):
     assert not any(token in str(contract) for token in surfaces.audit_tokens(te)["answer"])
 
 
+def test_installed_reference_alias_masks_both_spelling_and_owner(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    physical = repo / "examples/device/target"
+    contract = physical / "contracts/target_contract.yaml"
+    contract.parent.mkdir(parents=True)
+    contract.write_text("name: device\n")
+    alias = repo / "merlin/targets/device"
+    (alias / "contracts").mkdir(parents=True)
+    (alias / "contracts/target_contract.yaml").symlink_to(contract)
+    monkeypatch.setenv("MERLIN_REPO_ROOT", str(repo))
+    monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "out"))
+    monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)
+    monkeypatch.delenv("MERLIN_TARGETS_DIR", raising=False)
+    monkeypatch.setattr(target_registry, "checkout_root", lambda: None)
+    monkeypatch.setattr(target_registry, "targets_dir", lambda: repo / "merlin/targets")
+    assert surfaces._support_package_dirs() == [physical, alias]
+
+
 def test_descriptor_location_remains_masked_after_provider_selection(support):
     root, repo, te = support
     native = repo / "legacy-support"

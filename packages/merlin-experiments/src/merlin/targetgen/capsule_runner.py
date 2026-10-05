@@ -551,11 +551,20 @@ def simulator_adapter(sim: str, target: str, selection: dict | None = None) -> C
         backend = _backends.get_backend(target)
         if not backend.available(sim):
             raise OracleUnavailable(f"{sim} not available")
+        if sim == "gsim":
+            from . import gsim_emulator
+
+            exact, reason = gsim_emulator.selected_firrtl_status(
+                target, env_var=getattr(backend, "GSIM_EMU_ENV", None)
+            )
+            if not exact:
+                raise OracleUnavailable(reason)
         res = oot_compile.run_on_oracle(cb, llvm_text, simulator=sim, target=target, workdir=workdir, timeout=timeout)
         if selection and isinstance(res.get("oracle"), dict):
             res["oracle"]["selection"] = dict(selection)
         return res
 
+    run._merlin_simulator_engine = sim
     return run
 
 
@@ -1971,6 +1980,7 @@ def credit_executed_required_lanes(report: dict | None, capsule: dict, lane_exec
 def dispatch_boundary_report(mesh_execution: dict | None) -> dict:
     """Classify the *executed* host/accelerator sequence from the runtime ledger."""
     from . import boundary as _bd
+    from .elf_lanes import native_host_execution
 
     ledger = (mesh_execution or {}).get("dispatch_ledger")
     if not isinstance(ledger, list):
@@ -1986,7 +1996,7 @@ def dispatch_boundary_report(mesh_execution: dict | None) -> dict:
         lane = entry.get("lane") if isinstance(entry, dict) else None
         if lane == "on_mesh":
             sequence.append(_bd.ACCEL)
-        elif lane in ("scalar_rvv_lane", "host_fallback", "mesh_unavailable"):
+        elif lane in ("scalar_rvv_lane", "host_fallback", "mesh_unavailable") or native_host_execution(entry):
             sequence.append(_bd.HOST)
         else:
             unresolved += 1
@@ -2577,10 +2587,13 @@ def _grade_model_capsule_unlocked(
 
     with _tf.TemporaryDirectory(prefix="model_grade_") as _td:
         spec_p, out_p = Path(_td) / "spec.json", Path(_td) / "result.json"
+        # The child may outlive the materializer's cache generation. Keep the
+        # capsule bytes under the grade's own lifetime before handing it a path.
+        child_capsule = _pin_model_capsule(capsule, Path(_td) / "capsule")
         spec_p.write_text(
             json.dumps(
                 {
-                    "capsule": capsule,
+                    "capsule": child_capsule,
                     "target": target,
                     "timeout": timeout,
                     "package_dir": str(package_dir) if package_dir else None,
@@ -2975,6 +2988,10 @@ def _model_runtime_bundle(capsule: dict, *, timeout: int):
         }
         if manifest_asset is not None:
             source_files["capture_manifest"] = manifest_asset
+        from merlin.targetgen import golden_store as _GS
+
+        if (root / _GS.ARRAYS).exists() or (root / _GS.ARRAYS).is_symlink():
+            source_files["independent_golden_arrays"] = _model_asset(root, _GS.ARRAYS, "independent golden arrays")
         if dependency_root is not None:
             for dependency in sorted(dependency_root.rglob("*.py")):
                 if dependency.is_symlink() or not dependency.is_file():
@@ -2982,7 +2999,7 @@ def _model_runtime_bundle(capsule: dict, *, timeout: int):
                 source_files[f"loader_dependency::{dependency.relative_to(dependency_root)}"] = dependency
         source_before = _content_identity(source_files, root=root)
 
-        golden_doc = yaml.safe_load(golden_yaml.read_text(encoding="utf-8"))
+        golden_doc = _GS.load_golden(root)
         if not isinstance(golden_doc, dict):
             raise ValueError("model capsule golden.yaml is not a mapping")
         prov = golden_doc.get("oracle_provenance") or {}
@@ -3188,6 +3205,72 @@ def _model_runtime_bundle(capsule: dict, *, timeout: int):
     return _materialized()
 
 
+def _source_region_execution_verdict(certificate: dict) -> tuple[str, str, str] | None:
+    """Fail closed on the completed source-region/dispatch join for a required device model."""
+    observed = certificate.get("source_region_execution")
+    if not isinstance(observed, dict):
+        return (
+            "incomplete",
+            "SOURCE_REGION_EXECUTION_NOT_MEASURED",
+            "no complete source-region-to-completed-dispatch join was recorded; a routing plan "
+            "or module census cannot establish which eligible operations actually ran on the accelerator",
+        )
+    host = observed.get("eligible_host_region_ids")
+    mixed = observed.get("eligible_mixed_region_ids")
+    accel = observed.get("eligible_accelerator_region_ids")
+    total = observed.get("n_eligible_source_regions")
+    if isinstance(host, list) and isinstance(mixed, list) and (host or mixed):
+        return (
+            "fail",
+            "FALLBACK_ON_ELIGIBLE_REGION",
+            "completed runtime calls placed eligible source regions on the host; "
+            f"host={host[:8]}, mixed={mixed[:8]}. This is execution evidence, not merely a planned route.",
+        )
+    if observed.get("status") != "measured":
+        return (
+            "incomplete",
+            "SOURCE_REGION_EXECUTION_NOT_MEASURED",
+            "some eligible source regions could not be joined to completed dispatches; "
+            "a planned route or a partial ledger is not execution evidence for the missing regions",
+        )
+    if observed.get("outline_inventory_status") != "matched":
+        return (
+            "incomplete",
+            "SOURCE_REGION_EXECUTION_NOT_MEASURED",
+            "the exact source-operation inventory did not reconcile with the runtime outline; "
+            "a completed call for one operation cannot certify other operations in its region",
+        )
+    if not isinstance(host, list) or not isinstance(mixed, list) or not isinstance(accel, list) or not isinstance(total, int) or total <= 0:
+        return (
+            "incomplete",
+            "SOURCE_REGION_EXECUTION_NOT_MEASURED",
+            "the source-region execution join has no well-formed, nonempty eligible population",
+        )
+    if len(accel) != total:
+        return (
+            "incomplete",
+            "SOURCE_REGION_EXECUTION_NOT_MEASURED",
+            "the source-region execution join does not account for every eligible region",
+        )
+    return None
+
+
+def _model_transform_audit_verdict(model_exec: dict) -> tuple[str, str, str] | None:
+    """A target model grade needs replayed captured→normalized→outlined IR."""
+    qualification = model_exec.get("transform_audit_qualification")
+    if not isinstance(qualification, dict) or (
+        qualification.get("status") != "structural_replay_matched"
+        or qualification.get("normalization_replay") != "matched"
+    ):
+        return (
+            "incomplete",
+            "TRANSFORM_REPLAY_NOT_VERIFIED",
+            "the exact captured model was not deterministically replayed through normalization "
+            "and outlining; hashes or a green numerical result alone cannot verify the pass sequence",
+        )
+    return None
+
+
 def _grade_model_capsule_inline(
     capsule: dict,
     *,
@@ -3386,6 +3469,7 @@ def _grade_model_capsule_inline(
                 routing_dtype=_attrs.get("dtype"),
                 capture_bundle=_capture_bundle,
                 numeric_policy=numeric_policy,
+                transform_audit="exact",
             )
             _verify_bundle_unchanged()
     except SystemExit as e:  # toolchain/bundle unavailable — honest skip
@@ -3546,6 +3630,11 @@ def _grade_model_capsule_inline(
     declared = [str(x) for x in (capsule.get("required_oracle_tiers") or [])]
     mesh_exec = out.get("mesh_tile_verification") or {}
     model_exec = out.get("mesh_execution") or {}
+    _transform_verdict = _model_transform_audit_verdict(model_exec)
+    if _transform_verdict is not None:
+        _status, _category, _detail = _transform_verdict
+        result.update(status=_status, failure={"plane": "model", "category": _category, "detail": _detail})
+        return result
     n_tiles = int(mesh_exec.get("n_tiles") or 0) if isinstance(mesh_exec, dict) else 0
     # Set BEFORE the fail-closed branches below, every one of which returns early: a refusal must still
     # say which tier refused it, and this block used to be attached only on the success path.
@@ -3828,6 +3917,18 @@ def _grade_model_capsule_inline(
                     "eligibility oracle were left on the host without a hardware refusal; "
                     f"first regions: {_silent[:8]}",
                 },
+            )
+            return result
+        _source_verdict = _source_region_execution_verdict(_cert)
+        if _source_verdict is not None:
+            _status, _category, _detail = _source_verdict
+            if _status == "fail":
+                result["numeric"] = _numeric_when_not_accelerated(
+                    st, gate, _v, _cos, engine, measured_on="host_lane_fallback"
+                )
+            result.update(
+                status=_status,
+                failure={"plane": "model", "category": _category, "detail": _detail},
             )
             return result
         if isinstance(_false_fb, int) and _false_fb > 0:
@@ -4428,6 +4529,63 @@ def run_capsule(
         result = _grade_model_capsule(
             capsule, target=eff_target, timeout=timeout, package_dir=package_dir, budget_s=_budget
         )
+        if bool((capsule.get("semantic") or {}).get("must_accelerate")):
+            # The historical model path compiles a trusted host-dispatch graph
+            # and checks candidate tiles separately. Its status, including a
+            # failure before its own model compile, is not authority over the
+            # submitted whole-program artifact. Collect candidate evidence
+            # independently and keep the old verdict as a diagnostic.
+            from .native_model_execution import (
+                _digest, execute_candidate_model, independent_frozen_source_eligibility,
+            )
+
+            result["legacy_model_diagnostic"] = {
+                "status": result.get("status"), "failure": result.get("failure"),
+                "scope": "runner-owned host-dispatch graph and separately compiled tiles",
+            }
+            try:
+                result["candidate_source_eligibility"] = independent_frozen_source_eligibility(
+                    capsule, target=eff_target)
+            except Exception as exc:  # noqa: BLE001 -- source census failure cannot stop diagnostics
+                result["candidate_source_eligibility_failure"] = {
+                    "type": type(exc).__name__, "detail": str(exc)[:2000],
+                }
+
+            try:
+                _, candidate_cb, candidate_llvm = run_entrypoints(
+                    pkg, package_dir, capsule, paths, contract=contract,
+                    timeout=timeout, fourth_output_name=cfg.fourth_output_name,
+                )
+                source_interface = Path(capsule["__dir__"]) / capsule.get(
+                    "interface_mlir", "capsule.interface.mlir")
+                if source_interface.is_symlink():
+                    raise ValueError("frozen model interface cannot be a symlink")
+                result["candidate_emission"] = {
+                    "capsule_declaration": _digest(
+                        (Path(capsule["__dir__"]) / "capsule.yaml").resolve(strict=True)),
+                    "source_interface": _digest(source_interface.resolve(strict=True)),
+                    "command_buffer": _digest((paths.generated / "command_buffer.json").resolve(strict=True)),
+                    "lowered_mlir": _digest((paths.generated / cfg.fourth_output_name).resolve(strict=True)),
+                }
+                with _model_runtime_bundle(capsule, timeout=timeout) as (bundle, provenance, verify):
+                    result["candidate_capture"] = provenance
+                    result["candidate_native_execution"] = execute_candidate_model(
+                        command_buffer=candidate_cb, lowered_mlir_text=candidate_llvm,
+                        capsule_dir=capsule["__dir__"], capture_bundle=bundle,
+                        target=eff_target, out_dir=paths.run_path / "candidate_native",
+                        simulator=os.environ.get("MERLIN_MODEL_NATIVE_SIMULATOR") or None,
+                        rtl_facts=os.environ.get("MERLIN_MODEL_NATIVE_RTL_FACTS") or None,
+                        board_config=os.environ.get("MERLIN_MODEL_NATIVE_BOARD_CONFIG") or None,
+                        timeout=timeout,
+                    )
+                    verify()
+            except Exception as exc:  # noqa: BLE001 -- absence cannot inherit the host-dispatch pass
+                result["candidate_emission_failure"] = {
+                    "type": type(exc).__name__, "detail": str(exc)[:2000],
+                }
+            from .capsule_grade import enforce_model_execution_check
+
+            enforce_model_execution_check(result, capsule, target=eff_target)
         # A whole model is compiled as many buffers, not one, so there is no single command buffer to
         # price it from. Say that explicitly rather than leaving the keys off: a performance consumer
         # reading an absent key concludes the compute axis does not apply, and would then attribute
@@ -4532,6 +4690,7 @@ def run_capsule(
         # than refusing every capsule -- an undeclared target is not a broken one, and the reason is
         # recorded so "not checked" never reads as "checked and fine".
         from merlin.verify import epilogue_applicability as _EPI
+        from merlin.targetgen.readout_facet import epilogue_stage_routes
 
         _declared = _readout_epilogue_capabilities(eff_target)
         if _declared:
@@ -4545,6 +4704,7 @@ def run_capsule(
                     )
                     for r in _declared
                 ],
+                routes=epilogue_stage_routes(eff_target),
             )
             epilogue_applicability = _epi.to_dict()
             if _epi.refusing:
@@ -5782,9 +5942,56 @@ def run_suite(*args, **kwargs) -> list[dict]:
     describes.
     """
     from ..common import provenance as PROV
+    import tempfile as _tf
 
     with PROV.observation_scope():
-        return _run_suite(*args, **kwargs)
+        # Freeze every model BEFORE package build and the op phase. A staged
+        # corpus generation can otherwise be collected while those run, long
+        # before the first model child starts. The suite owns the copies until
+        # all model results have landed, including in the budgeted-child path.
+        capsules = args[0] if args else kwargs["capsules"]
+        if not any(c.get("kind") == "model" and c.get("__dir__") for c in capsules):
+            return _run_suite(*args, **kwargs)
+        with _tf.TemporaryDirectory(prefix="merlin-model-suite-") as temp:
+            frozen = [
+                _pin_model_capsule(c, Path(temp) / str(i)) if c.get("kind") == "model" else c
+                for i, c in enumerate(capsules)
+            ]
+            if args:
+                return _run_suite(frozen, *args[1:], **kwargs)
+            return _run_suite(**{**kwargs, "capsules": frozen})
+
+
+def _pin_model_capsule(capsule: dict, destination: Path) -> dict:
+    """Give one grade its own byte-frozen, GC-independent capsule directory."""
+    raw = capsule.get("__dir__")
+    if not raw:
+        return capsule
+    from merlin.common import content_store
+
+    lexical_root = Path(raw)
+    if lexical_root.is_symlink() or not lexical_root.is_dir():
+        raise ValueError(f"model capsule source directory is missing or a symlink: {raw}")
+    source = lexical_root.resolve(strict=True)
+
+    def require_local_source(lexical: Path, canonical: Path, _destination: Path) -> None:
+        # The generic store dereferences aliases. A model grade must not turn an
+        # asset that the runtime bundle rejects into an apparently local file.
+        if lexical.is_symlink() or not canonical.is_relative_to(source):
+            raise ValueError(f"model capsule snapshot source is a symlink or escapes its directory: {lexical}")
+
+    content_store.place_tree(
+        source, destination, content_store.store_root(), observe=require_local_source
+    )
+    # We own these directory entries, not the shared file inodes. Keeping the
+    # private directories owner-writable lets cleanup unlink read-only assets
+    # without tempfile's permission repair chmodding a shared store object.
+    for directory in [destination, *destination.rglob("*")]:
+        if directory.is_dir():
+            directory.chmod(directory.stat().st_mode | 0o700)
+    if not (destination / "capsule.yaml").is_file():
+        raise ValueError(f"model capsule snapshot has no capsule.yaml: {raw}")
+    return {**capsule, "__dir__": str(destination)}
 
 
 def _run_suite(

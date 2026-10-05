@@ -1207,15 +1207,21 @@ def run_program_verilator_oracle(
         _derived_trace = Path(workdir) / "per_cycle_trace.csv"
         _derived_trace.parent.mkdir(parents=True, exist_ok=True)
         _kw["per_cycle_csv"] = str(_derived_trace)
-    _t0 = time.monotonic()
-    res = runner.run_program(
-        words,
-        preload=preload,
-        reads=[(int(s["base"]), _out_nbytes(s)) for s in specs.values()],
-        max_cycles=max_cycles,
-        timeout=timeout,
-        **_kw,
-    )
+    from contextlib import nullcontext
+
+    from merlin.targetgen.rtl_engine_policy import gsim_runtime_slot
+
+    slot = gsim_runtime_slot(wait_timeout_s=timeout) if engine == "gsim" else nullcontext()
+    with slot:
+        _t0 = time.monotonic()
+        res = runner.run_program(
+            words,
+            preload=preload,
+            reads=[(int(s["base"]), _out_nbytes(s)) for s in specs.values()],
+            max_cycles=max_cycles,
+            timeout=timeout,
+            **_kw,
+        )
     if not res.get("halted"):
         raise ProgramDidNotHalt(f"{target} program did not halt within {max_cycles} cycles (verilator)")
     outs = res.get("outputs") or []

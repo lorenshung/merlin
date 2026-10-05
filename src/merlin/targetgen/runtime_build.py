@@ -85,9 +85,9 @@ def platform_dram_base(target: str, sim_via: str | None) -> int:
 
 def compiler_smoke(sim_via: str | None) -> tuple[bool, str]:
     """Pre-spend check that the RTL-oracle COMPILE toolchain actually WORKS — not merely that its binaries
-    exist. It compiles a trivial LLVM-IR module to a riscv object with the oracle's own clang, so a missing
-    or broken compiler is caught as a NO_GO before a paid run tool-crashes on every capsule (the retired-
-    clang lesson: ``available()`` passed because the binaries were present, then the compile step failed).
+    exist. It compiles a trivial LLVM-IR module to a riscv object with the oracle's own clang and, when
+    the simulator declares an MLIR Python dependency, imports its required bindings in that interpreter.
+    Missing or broken tools become NO_GO before a paid run tool-crashes on every capsule.
     Only for a compile-based sim (its ``_SimOracle.is_compile_based`` capability); other oracles return
     n/a. Keyed on the capability, not the engine NAME."""
     from .oracle_policy import sim_oracle_caps
@@ -121,7 +121,26 @@ def compiler_smoke(sim_via: str | None) -> tuple[bool, str]:
             return False, f"compile smoke could not run: {str(e)[-160:]}"
         if r.returncode != 0 or not obj.is_file():
             return False, f"oracle clang failed to compile a riscv object: {(r.stderr or '')[-200:]}"
-    return True, f"oracle clang compiles riscv objects ({cp.name})"
+    if caps.requires_mlir_python:
+        python = _tc.compiler_python()
+        if not python.is_file():
+            return False, (
+                f"oracle MLIR Python not found at {python}; select MERLIN_COMPILER_PYTHON "
+                "or MERLIN_COMPILER_VENV before launching"
+            )
+        try:
+            result = subprocess.run(
+                [str(python), "-I", "-c", "from torch_mlir import ir, passmanager"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, f"oracle MLIR Python could not start: {exc}"
+        if result.returncode != 0:
+            return False, f"oracle MLIR Python cannot import torch-mlir bindings: {(result.stderr or '')[-200:]}"
+    detail = f"oracle clang compiles riscv objects ({cp.name})"
+    return True, f"{detail}; MLIR Python ready" if caps.requires_mlir_python else detail
 
 
 def _rebase_ld(text: str, base: int) -> str | None:

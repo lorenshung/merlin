@@ -10,7 +10,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 SCHEMA = "rtl_checks/v0"
 
@@ -35,6 +35,8 @@ class Check:
 
 @dataclasses.dataclass
 class CheckReport:
+    VACUOUS: ClassVar[str] = "vacuous"
+
     capsule: str | None
     source_trace: str | None
     rtl_facts: dict
@@ -49,9 +51,20 @@ class CheckReport:
         return sum(1 for c in self.checks if c.severity == "warn" and c.status == "fail")
 
     @property
+    def n_ran(self) -> int:
+        return sum(1 for c in self.checks if c.status in {"pass", "fail"})
+
+    @property
+    def n_skipped(self) -> int:
+        return sum(1 for c in self.checks if c.status == "skipped")
+
+    @property
     def verdict(self) -> str:
+        """An all-skipped report is unchecked, never a clean RTL result."""
         if self.n_error:
             return "reject"
+        if self.n_ran == 0:
+            return self.VACUOUS
         if self.n_warn:
             return "warn"
         return "ok"
@@ -65,6 +78,8 @@ class CheckReport:
             "verdict": self.verdict,
             "n_error": self.n_error,
             "n_warn": self.n_warn,
+            "n_ran": self.n_ran,
+            "n_skipped": self.n_skipped,
             "checks": [c.to_dict() for c in self.checks if c.status != "skipped"],
             "skipped": [{"id": c.id, "reason": c.message} for c in self.checks if c.status == "skipped"],
         }

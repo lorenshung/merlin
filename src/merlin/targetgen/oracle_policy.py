@@ -166,6 +166,15 @@ def chipyard_l3_selection(target: str) -> dict:
             detail = getattr(backend, f"{engine}_status", None)
             if callable(detail):
                 ok, why = detail()
+                if ok and engine == "gsim":
+                    from . import gsim_emulator
+
+                    exact, source_reason = gsim_emulator.selected_firrtl_status(
+                        target, env_var=getattr(backend, "GSIM_EMU_ENV", None)
+                    )
+                    if not exact:
+                        return False, source_reason
+                    why = f"{why}; {source_reason}"
                 return bool(ok), str(why or "")
             ok = bool(backend.available(engine))  # may raise; the policy records that as a reason
             return (
@@ -207,6 +216,7 @@ class _SimOracle:
     exclusive: bool  # replaces (True) vs augments (False) the arc default
     has_memmap: bool = False  # exposes an SoC memory map (DRAM base derivable from the build)
     is_compile_based: bool = False  # lowers the kernel via an oracle-side compile toolchain (smoke-testable)
+    requires_mlir_python: bool = False  # oracle lowering runs torch-mlir bindings in a selected Python runtime
     l3_selection: Callable[[str], dict] | None = None
     tier_plan: Callable[[str], OracleTierPlan] | None = None
     # Target -> exact executable/config receipt for the selected L2 engine.
@@ -252,6 +262,7 @@ _SIM_ORACLES: dict[str, _SimOracle] = {
         exclusive=False,
         has_memmap=True,
         is_compile_based=True,
+        requires_mlir_python=True,
         tier_plan=chipyard_tier_plan,
     ),
 }
@@ -274,6 +285,7 @@ def register_sim_oracle(
     exclusive: bool,
     has_memmap: bool = False,
     is_compile_based: bool = False,
+    requires_mlir_python: bool = False,
     l3_selection: Callable[[str], dict] | None = None,
     tier_plan: Callable[[str], OracleTierPlan] | None = None,
     l2_binding: Callable[[str], dict] | None = None,
@@ -290,6 +302,7 @@ def register_sim_oracle(
         exclusive=exclusive,
         has_memmap=has_memmap,
         is_compile_based=is_compile_based,
+        requires_mlir_python=requires_mlir_python,
         l3_selection=l3_selection,
         tier_plan=tier_plan,
         l2_binding=l2_binding,

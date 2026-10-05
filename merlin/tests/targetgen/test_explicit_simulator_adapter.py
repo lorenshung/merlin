@@ -1,5 +1,6 @@
 """Explicit simulator construction must not select another target or engine."""
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -46,3 +47,77 @@ def test_explicit_unavailable_engine_never_substitutes(monkeypatch, tmp_path):
     monkeypatch.setattr(CR.oot_compile, "run_on_oracle", lambda *a, **kw: pytest.fail("unavailable engine executed"))
     with pytest.raises(CR.OracleUnavailable, match="verilator not available"):
         CR.simulator_adapter("verilator", "synthetic")({}, "ir", tmp_path, 1)
+
+
+def test_gsim_cannot_certify_against_different_selected_firrtl(monkeypatch, tmp_path):
+    from merlin.targetgen import gsim_emulator
+
+    facts = tmp_path / "facts.json"
+    facts.write_text(json.dumps({"inputs": {"fir_sha256": "a" * 64}}), encoding="utf-8")
+    monkeypatch.setenv("MERLIN_RTL_FACTS", str(facts))
+    monkeypatch.setattr(
+        base,
+        "get_backend",
+        lambda target: SimpleNamespace(available=lambda sim: True, GSIM_EMU_ENV="TEST_GSIM"),
+    )
+    monkeypatch.setattr(
+        gsim_emulator,
+        "resolve",
+        lambda target, *, env_var: SimpleNamespace(
+            ok=True, receipt_status="bound", receipt={"firrtl_sha256": "b" * 64}
+        ),
+    )
+    monkeypatch.setattr(CR.oot_compile, "run_on_oracle", lambda *a, **kw: pytest.fail("mismatched GSIM ran"))
+    with pytest.raises(CR.OracleUnavailable, match="selected FIRRTL"):
+        CR.simulator_adapter("gsim", "synthetic")({}, "ir", tmp_path, 1)
+
+
+def test_gsim_with_matching_selected_firrtl_can_run(monkeypatch, tmp_path):
+    from merlin.targetgen import gsim_emulator
+
+    facts = tmp_path / "facts.json"
+    facts.write_text(json.dumps({"inputs": {"fir_sha256": "a" * 64}}), encoding="utf-8")
+    monkeypatch.setenv("MERLIN_RTL_FACTS", str(facts))
+    monkeypatch.setattr(
+        base,
+        "get_backend",
+        lambda target: SimpleNamespace(available=lambda sim: True, GSIM_EMU_ENV="TEST_GSIM"),
+    )
+    monkeypatch.setattr(
+        gsim_emulator,
+        "resolve",
+        lambda target, *, env_var: SimpleNamespace(
+            ok=True, receipt_status="bound", receipt={"firrtl_sha256": "a" * 64}
+        ),
+    )
+    monkeypatch.setattr(CR.oot_compile, "run_on_oracle", lambda *a, **kw: {"outputs": {"result": 7}})
+    assert CR.simulator_adapter("gsim", "synthetic")({}, "ir", tmp_path, 1)["outputs"] == {"result": 7}
+
+
+def test_engine_selection_skips_gsim_with_wrong_firrtl(monkeypatch, tmp_path):
+    from merlin.targetgen import gsim_emulator, oracle_policy
+
+    facts = tmp_path / "facts.json"
+    facts.write_text(json.dumps({"inputs": {"fir_sha256": "a" * 64}}), encoding="utf-8")
+    monkeypatch.setenv("MERLIN_RTL_FACTS", str(facts))
+    monkeypatch.delenv("MERLIN_REQUIRED_RTL_ENGINE", raising=False)
+    monkeypatch.setattr(
+        base,
+        "get_backend",
+        lambda target: SimpleNamespace(
+            gsim_status=lambda: (True, "receipted binary"),
+            available=lambda engine: engine == "verilator",
+            GSIM_EMU_ENV="TEST_GSIM",
+        ),
+    )
+    monkeypatch.setattr(
+        gsim_emulator,
+        "resolve",
+        lambda target, *, env_var: SimpleNamespace(
+            ok=True, receipt_status="bound", receipt={"firrtl_sha256": "b" * 64}
+        ),
+    )
+    selected = oracle_policy.chipyard_l3_selection("synthetic")
+    assert selected["engine"] == "verilator"
+    assert selected["considered"][1]["available"] is False
+    assert "differs from model receipt" in selected["considered"][1]["reason"]

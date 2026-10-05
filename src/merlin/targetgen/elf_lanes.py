@@ -74,6 +74,24 @@ NO_EVIDENCE = "unmeasured"
 #: Fail-closed sentinel for a fact that could not be derived, spelled as the rest of the repo spells it.
 UNKNOWN = "UNKNOWN"
 
+
+def native_host_execution(entry: object) -> bool:
+    """A completed diagnostic host call, distinct from a target scalar/RVV call.
+
+    The whole-model runner executes host islands in the invoking process.  That
+    execution establishes an A-to-H boundary and numerical behavior, but must
+    not satisfy a target-host lane requirement.  Require the executor and
+    placement fields so a bare lane string cannot launder an unknown call.
+    """
+    return (
+        isinstance(entry, dict)
+        and entry.get("lane") == "native_cpu"
+        and entry.get("placement") == "host"
+        and entry.get("executor") == "native_cpu"
+        and entry.get("target_executed") is False
+        and entry.get("status") == "pass"
+    )
+
 # --- ELF constants. These are the ELF format's own, from the gABI -- not a target's ISA facts. -------
 _ELF_MAGIC = b"\x7fELF"
 _ELFCLASS32, _ELFCLASS64 = 1, 2

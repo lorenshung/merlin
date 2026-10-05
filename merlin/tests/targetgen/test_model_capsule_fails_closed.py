@@ -137,6 +137,17 @@ def test_a_tier_that_actually_ran_can_pass(monkeypatch):
                 "matmul_layers_on_mesh": 15,
                 "matmul_layers_host_fallback": 0,
             },
+            "coverage_certificate": {
+                "false_fallback_count": 0,
+                "source_region_execution": {
+                    "status": "measured",
+                    "outline_inventory_status": "matched",
+                    "n_eligible_source_regions": 1,
+                    "eligible_accelerator_region_ids": ["matmul_0"],
+                    "eligible_host_region_ids": [],
+                    "eligible_mixed_region_ids": [],
+                },
+            },
             # The frozen capsule this fixture loads is an INTEROP capstone: it requires the host
             # lane as well as the mesh, because composition across the two is the behaviour under
             # test. A stub that reports only the mesh leaves the other required lane unmeasured,
@@ -224,7 +235,17 @@ def test_declining_a_region_the_hardware_admits_is_a_failure(monkeypatch):
         {
             "status": "verified",
             "verify": {"gate_ok": True},
-            "coverage_certificate": {"false_fallback_count": 3},
+            "coverage_certificate": {
+                "false_fallback_count": 3,
+                "source_region_execution": {
+                    "status": "measured",
+                    "outline_inventory_status": "matched",
+                    "n_eligible_source_regions": 1,
+                    "eligible_accelerator_region_ids": ["matmul_0"],
+                    "eligible_host_region_ids": [],
+                    "eligible_mixed_region_ids": [],
+                },
+            },
             "mesh_tile_verification": {
                 "n_tiles": 15,
                 "n_passed": 15,
@@ -254,7 +275,17 @@ def test_no_declined_region_leaves_the_verdict_alone(monkeypatch):
         {
             "status": "verified",
             "verify": {"gate_ok": True},
-            "coverage_certificate": {"false_fallback_count": 0},
+            "coverage_certificate": {
+                "false_fallback_count": 0,
+                "source_region_execution": {
+                    "status": "measured",
+                    "outline_inventory_status": "matched",
+                    "n_eligible_source_regions": 1,
+                    "eligible_accelerator_region_ids": ["matmul_0"],
+                    "eligible_host_region_ids": [],
+                    "eligible_mixed_region_ids": [],
+                },
+            },
             "mesh_tile_verification": {
                 "n_tiles": 15,
                 "n_passed": 15,
@@ -273,6 +304,57 @@ def test_no_declined_region_leaves_the_verdict_alone(monkeypatch):
         },
     )
     assert r["status"] == "pass"
+
+
+def test_required_model_cannot_pass_from_a_green_plan_when_source_calls_ran_on_host():
+    from merlin.targetgen.capsule_runner import _source_region_execution_verdict
+
+    def certificate(*, host=(), mixed=(), accelerator=(), status="measured"):
+        return {
+            "source_region_execution": {
+                "status": status,
+                "outline_inventory_status": "matched",
+                "n_eligible_source_regions": len(host) + len(mixed) + len(accelerator),
+                "eligible_host_region_ids": list(host),
+                "eligible_mixed_region_ids": list(mixed),
+                "eligible_accelerator_region_ids": list(accelerator),
+            }
+        }
+
+    assert _source_region_execution_verdict(certificate(host=("add_0",), accelerator=("matmul_0",)))[0:2] == (
+        "fail", "FALLBACK_ON_ELIGIBLE_REGION"
+    )
+    assert _source_region_execution_verdict(certificate(mixed=("matmul_0",)))[0] == "fail"
+    assert _source_region_execution_verdict(certificate(host=("add_0",), status="incomplete"))[0] == "fail"
+    assert _source_region_execution_verdict(certificate(status="incomplete"))[0] == "incomplete"
+    assert _source_region_execution_verdict({})[0] == "incomplete"
+    stale = certificate(accelerator=("matmul_0",))
+    stale["source_region_execution"]["outline_inventory_status"] = "incomplete"
+    assert _source_region_execution_verdict(stale)[0] == "incomplete"
+    assert _source_region_execution_verdict(certificate(accelerator=("matmul_0",))) is None
+
+    import inspect
+
+    assert "_source_region_execution_verdict(_cert)" in inspect.getsource(CR._grade_model_capsule_inline)
+
+
+def test_target_model_requires_replay_of_normalization_and_outline():
+    from merlin.targetgen.capsule_runner import _model_transform_audit_verdict
+
+    assert _model_transform_audit_verdict({})[0] == "incomplete"
+    assert _model_transform_audit_verdict({"transform_audit_qualification": {
+        "status": "structural_replay_matched", "normalization_replay": "not_recorded",
+    }})[0] == "incomplete"
+    assert _model_transform_audit_verdict({"transform_audit_qualification": {
+        "status": "structural_replay_matched", "normalization_replay": "unsupported_custom_selection",
+    }})[0] == "incomplete"
+    assert _model_transform_audit_verdict({"transform_audit_qualification": {
+        "status": "structural_replay_matched", "normalization_replay": "matched",
+    }}) is None
+
+    import inspect
+
+    assert "_model_transform_audit_verdict(model_exec)" in inspect.getsource(CR._grade_model_capsule_inline)
 
 
 def test_emulated_host_ops_are_surfaced_even_though_placement_is_advisory(monkeypatch):

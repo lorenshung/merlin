@@ -139,7 +139,55 @@ kernel_abi:
       buffer that declares no fused bias. The name is read from the commit's `attributes.bias` or
       its `operands.bias` (both are legitimate; a stage that names neither is a REFUSAL, never a
       skipped argument). The pointee is in the ACCUMULATOR's dtype, not the operand dtype."
-  pointee_layout: "row-major, edge tiles zero-padded to a multiple of 16 (DIM); weight/out as packed per the i8/i32 readout"
+  pointee_layout: >-
+    Use the declared tensor ABI and selected target's derived geometry, padding and
+    readout format. Logical whole-program buffers and device-packed tile buffers
+    are distinct layouts; never assume a fixed tile edge or element precision.
+  selected_host_toolchain: >-
+    For a whole-program kernel with a host lane, read the selected read-only host package's
+    knobs.yaml cflags. Its -march and -mabi are the host object ISA and calling convention;
+    the emitted LLVM module, runner-owned harness, selected board/DTS and linker must agree.
+    Do not infer these flags from the accelerator name, substitute the build machine's ISA,
+    or implement a second host runtime. The runner owns the harness, link and execution;
+    a package's emitted code must obey the declared pointer ABI above.
+
+whole_program_attribution:
+  source_to_task: >-
+    Preserve each source operation's stable prov.region_id where present while lowering. In
+    params.global_program_plan (schema mixed_program_plan_v1), tasks enumerate actual
+    emission order with unique, contiguous nonnegative task_index values, nonempty kind,
+    and source_op_indices referring to the full source function's operation order.
+    The source_op_indices must cover each source operation exactly once; derive any
+    source-region-to-task/group map from those indices and the source IR, including
+    repeated operations in one region. Do not invent a region ID from a capsule name,
+    opcode count or output shape. A group may contain several source operations, but
+    it may not hide an unassigned or duplicated source operation.
+  lowered_ir_task: >-
+    Carry the same task_index into the lowered LLVM-dialect IR as the
+    merlin.global_task attribute on operations owned by that task, including host
+    arithmetic. Keep this identity consistent with params.global_program_plan.tasks;
+    untagged arithmetic or a tag naming no planned task is not attributable host work.
+    The plan's kind describes the proposed host/device route; it does not prove that
+    the device executed it.
+  device_command_source: >-
+    Attribute device work to its source operation using merlin.source_op_index and
+    the source's prov.region_id. A region ID can be shared by several source operations;
+    a shared ID alone cannot establish that every operation ran. A fused command may
+    implement several source operations only with independently checked transformation
+    evidence; no command count, region tag or candidate declaration supplies that proof.
+  host_compute_boundary: >-
+    In an accepted device task, scalar addressing, loop control and dispatch are
+    legitimate host instructions; arithmetic on tensor elements is not. Helper
+    functions remain inside the same audit boundary. Explicit host tasks may
+    compute only independently ineligible work; moving eligible source operations
+    into host tasks does not waive accelerator placement. Missing or opaque
+    computation ownership remains unverified, never implicitly clean.
+  independent_proof: >-
+    These are candidate declarations, not certification. The independent grader
+    checks source and emitted-IR identity, complete source/task coverage, selected
+    target legality, numerical outputs and a completed source-region-to-dispatch
+    ledger. Static placement, task tags, command or opcode counts, and a linked ELF
+    alone cannot establish accelerator execution or correctness.
 
 build:
   optional: true
@@ -241,3 +289,39 @@ admission:
     required: [reason]
     optional: [op]
     example: {op: "rmsnorm", reason: "no lowering for this operation on this target yet"}
+
+# Optional manifest declarations for the WHOLE-MODEL build path (merlin.perf.whole_model_build). Both
+# are OFF unless the package's own manifest.yaml declares them; a package that declares neither sees no
+# change in how it is built, whatever the build's own flags are. Neither entry says HOW to use the
+# mechanism it names -- what a package does with a region or a pass is the package's own compiler
+# question, never the build's or the runner's to answer.
+whole_model_optional:
+  whole_model_regions:
+    manifest_field: "whole_model_regions: true"
+    purpose: "opt in to being offered a legal run of consecutive whole-model groups as ONE FUSED
+      REGION capsule (a single lower_interface_to_target call over the merged bodies), in addition to
+      being asked for each group alone. A declining package (this field absent, or the offered capsule
+      refused/incomplete) is asked group by group exactly as if this did not exist."
+    answer: "ONE kernel for the whole region. It must commit the BOUNDARY member's output (the last
+      member's) under the capsule's own output name for it; an internal member's output is the
+      kernel's own business -- bound to that member's program buffer when the reply declares it under
+      its capsule name, never required. Its kernel arguments resolve like any reply's
+      (arg_order_by_command_shape; a multi-command region states them as kernel_abi.kind
+      whole_program)."
+    graded: "at the region's BOUNDARY, against the independent oracle: every internal member is
+      recomputed from the inputs the device held and the boundary is checked from them. Every member
+      counts as package-answered while the region's kernel is linked; a region whose kernel is not
+      linked puts every member back on the target's library."
+    who_decides_legality: "merlin.llvmlower.region_legality.legal_regions, from the model's own
+      dataflow, and the TARGET's own declaration of which ops its driver can hold as an internal
+      member (its whole-model driver's FUSED_REGION_INTERNAL_OPS; a target that declares
+      LINKS_FUSED_REGIONS false or nothing is never offered a region) -- never the package's; a
+      package cannot request a specific window, only answer or decline the ones it is offered: from
+      each member, a region grown one group at a time while the package keeps accepting it."
+  whole_model_passes:
+    manifest_field: "whole_model_passes: [name, ...]"
+    purpose: "opt in to running the package's own named whole-model passes over the capsule's
+      interface MLIR before it is split into groups. Each name must also be one of the package's own
+      declared `commands` (schemas/manifest.schema.json); the transformed module is used for the rest
+      of the build ONLY if it verifies as computing the same function as the untransformed one -- never
+      trusted from the pass's own claim. A package that declares no passes here sees no change."

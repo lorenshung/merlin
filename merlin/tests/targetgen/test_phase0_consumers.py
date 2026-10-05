@@ -159,6 +159,8 @@ def test_incompatible_descriptor_is_not_used(monkeypatch, tmp_path):
 
 
 def test_group_cli_selects_explicit_definition_before_output(monkeypatch, tmp_path):
+    import json
+
     _target(monkeypatch, tmp_path)
     selected = declarations.for_target("fixture")
     seen = []
@@ -172,12 +174,16 @@ def test_group_cli_selects_explicit_definition_before_output(monkeypatch, tmp_pa
     from merlin.common import mlir_query
 
     monkeypatch.setattr(mlir_query, "parse", lambda *args: object())
-    monkeypatch.setattr(
-        group_capsules,
-        "entries",
-        lambda *args, **kwargs: {"entries": [], "stated": 0, "accelerator_groups": 0, "distinct": 0, "unstated": {}},
-    )
+    def entries(*_args, **_kwargs):
+        from merlin.targetgen.rtl.facts import load_facts
+
+        assert load_facts("fixture")["source_consistency"]["status"] == "verified"
+        return {"entries": [], "stated": 0, "accelerator_groups": 0, "distinct": 0, "unstated": {}}
+
+    monkeypatch.setattr(group_capsules, "entries", entries)
     definition = tmp_path / "experiment.yaml"
+    facts = tmp_path / "facts.json"
+    facts.write_text(json.dumps({"facts": {"target": "fixture"}, "source_consistency": {"status": "verified"}}))
     assert (
         group_capsules.main(
             [
@@ -185,6 +191,8 @@ def test_group_cli_selects_explicit_definition_before_output(monkeypatch, tmp_pa
                 "fixture",
                 "--definition",
                 str(definition),
+                "--rtl-facts",
+                str(facts),
                 "--capture",
                 "fixture.mlir",
                 "--out",

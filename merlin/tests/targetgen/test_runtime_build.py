@@ -52,3 +52,17 @@ def test_compiler_smoke_no_go_when_compiler_missing(monkeypatch):
     monkeypatch.setenv("MERLIN_CLANG", "/no/such/clang-23")
     ok, why = RB.compiler_smoke("chipyard")
     assert ok is False and "not" in why.lower()
+
+
+def test_compiler_smoke_refuses_missing_mlir_python_after_compiling(monkeypatch, tmp_path):
+    from merlin.llvmlower import toolchain
+
+    def compile_llvm(argv, **_kwargs):
+        Path(argv[argv.index("-o") + 1]).write_bytes(b"object")
+        return type("Result", (), {"returncode": 0, "stderr": ""})()
+
+    monkeypatch.setattr(toolchain, "clang", lambda: Path("fixture-clang"))
+    monkeypatch.setattr(RB.subprocess, "run", compile_llvm)
+    monkeypatch.setenv("MERLIN_COMPILER_PYTHON", str(tmp_path / "missing-python"))
+    ok, why = RB.compiler_smoke("chipyard")
+    assert not ok and "MERLIN_COMPILER_PYTHON" in why

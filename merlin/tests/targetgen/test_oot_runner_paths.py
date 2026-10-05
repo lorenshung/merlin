@@ -70,6 +70,31 @@ def test_a_package_relative_entrypoint_runs(tmp_path):
     assert out.read_text() == "module {}"
 
 
+def test_host_grade_exposes_the_agent_selected_mlir_tools(tmp_path, monkeypatch):
+    """A selected LLVM tool must resolve in the host grader as it does in the agent sandbox."""
+    llvm_bin = tmp_path / "llvm" / "bin"
+    llvm_bin.mkdir(parents=True)
+    clang = llvm_bin / "clang-23"
+    translator = llvm_bin / "mlir-translate"
+    for tool in (clang, translator):
+        tool.write_text("#!/bin/sh\nexit 0\n")
+        tool.chmod(0o755)
+    monkeypatch.setenv("MERLIN_CLANG", str(clang))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    pkg = _pkg(tmp_path, '["python3", "mlir_oot/parse.py", "{input_mlir}", "{output_json}"]')
+    (pkg.directory / "mlir_oot" / "parse.py").write_text(
+        "import pathlib, shutil, sys\n"
+        "pathlib.Path(sys.argv[2]).write_text(shutil.which('mlir-translate') or '<missing>')\n"
+    )
+    src = tmp_path / "in.mlir"
+    src.write_text("module {}")
+    out = tmp_path / "out.json"
+    result = run_entrypoint(pkg, "parse", src, out, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert out.read_text() == str(translator)
+
+
 def test_optional_analysis_bundle_is_feature_detected_and_resolved(tmp_path):
     pkg = _pkg(tmp_path, '["python3", "mlir_oot/parse.py", "{input_mlir}", "{output_json}"]')
     pkg.manifest["commands"]["emit_analysis_bundle"] = {
@@ -174,3 +199,23 @@ def test_cli_accepts_gsim_as_a_cycle_accurate_oracle(monkeypatch):
         == 0
     )
     assert observed["simulator"] == "gsim"
+
+
+def test_running_a_package_never_writes_bytecode_into_it(tmp_path, monkeypatch):
+    """A frozen submission acquired __pycache__ from being run in place (two interpreters in a minute),
+    and the functional gate refuses a digest-excluded path, so every phase-2 launch stopped. Running a
+    package's entrypoint must leave its bytes exactly as they were, whatever the caller's environment."""
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
+    pkg = _pkg(tmp_path, '["python3", "mlir_oot/importer.py", "{input_mlir}", "{output_json}"]')
+    (pkg.directory / "mlir_oot" / "helper.py").write_text("VALUE = 'module {}'\n")
+    (pkg.directory / "mlir_oot" / "importer.py").write_text(
+        "import sys, pathlib\nsys.path.insert(0, str(pathlib.Path(__file__).parent))\nimport helper\n"
+        "pathlib.Path(sys.argv[2]).write_text(helper.VALUE)\n"
+    )
+    src = tmp_path / "in.mlir"
+    src.write_text("module {}")
+    out = tmp_path / "out.json"
+    r = run_entrypoint(pkg, "parse", src, out, timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert out.read_text() == "module {}"
+    assert not list(pkg.directory.rglob("__pycache__"))

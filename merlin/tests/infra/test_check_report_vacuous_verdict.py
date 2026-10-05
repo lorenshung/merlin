@@ -10,6 +10,8 @@ serialized ``verdict: "ok"`` with zero checks having run.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from merlin.targetgen import rtl_checks as RC
 
 
@@ -71,11 +73,15 @@ def test_the_serialized_report_carries_the_run_counts_beside_the_verdict():
     assert [s["id"] for s in d["skipped"]] == ["T0.a"]
 
 
-def test_an_unfactsed_screen_does_not_report_ok(monkeypatch):
-    """End to end: with every RTL fact UNKNOWN and an empty trace, the screen must not read clean."""
-    monkeypatch.setattr(RC, "load_default_facts", lambda target: {"from": "UNKNOWN (RTL facts not derivable)"})
-    rep = RC.screen({"instructions": []}, None, None, target="a-target-with-no-facts")
-    assert rep.verdict != "ok"
-    # Every check that could not run is accounted for.
+def test_a_selected_provider_with_no_usable_facts_does_not_report_ok():
+    """The target-specific provider may skip; core must not promote its empty result."""
+    provider = SimpleNamespace(screen=lambda *_args, **_kwargs: RC.CheckReport(
+        capsule=None,
+        source_trace=None,
+        rtl_facts={"from": "UNKNOWN"},
+        checks=[_check("skipped")],
+    ))
+    rep = RC.screen({"instructions": []}, None, None, target="synthetic", checks=provider)
+    assert rep.verdict == RC.CheckReport.VACUOUS
     assert rep.n_skipped >= 1
     assert rep.n_ran + rep.n_skipped == len(rep.checks)

@@ -363,6 +363,32 @@ def test_dynamic_ledger_proves_a_h_a_and_routing_topology():
     assert routing["accel_segments"] == 2 and routing["host_segments"] == 2
 
 
+def test_native_host_execution_is_a_boundary_not_a_target_host_lane():
+    ledger = [
+        {"ordinal": 0, "symbol": "a", "lane": "on_mesh", "status": "pass"},
+        {
+            "ordinal": 1,
+            "symbol": "h",
+            "lane": "native_cpu",
+            "status": "pass",
+            "placement": "host",
+            "executor": "native_cpu",
+            "target_executed": False,
+        },
+        {"ordinal": 2, "symbol": "b", "lane": "on_mesh", "status": "pass"},
+    ]
+    boundary = dispatch_boundary_report({"dispatch_ledger": ledger})
+    assert boundary["status"] == "pass"
+    assert boundary["boundary"] == "A->H->A"
+    assert boundary["n_host_calls"] == 1
+    host_lane = lane_report(
+        {"lanes": {"require": ["scalar_rvv_lane"]}},
+        None,
+        {"dispatch_ledger": ledger},
+    )
+    assert host_lane["unexercised"] == ["scalar_rvv_lane"]
+
+
 def test_boundary_report_never_uses_a_static_plan_as_execution():
     rep = dispatch_boundary_report({"routing_plan": {"on_mesh": {"matmul": 2}, "scalar_rvv_lane": {"add": 1}}})
     assert rep["status"] == "missing" and rep["boundary"] == "UNKNOWN"

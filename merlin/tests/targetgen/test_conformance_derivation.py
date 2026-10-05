@@ -7,7 +7,7 @@ literal, and the last three pin the three bugs that were actually found while bu
   * the dtype-spelling join (manifest ``fp32`` vs capsule ``f32``) — reported 40 of 56 cells missing while
     the corpus plainly had them
   * composite families never appearing in a capture, which dropped ``attention`` from a transformer corpus
-  * the operand-store fact living in a memories LIST, not a ``shared_memory`` mapping
+  * the operand-store fact living in a memories list whose labels are not stable role names
 """
 
 from __future__ import annotations
@@ -37,6 +37,26 @@ def test_accumulator_boundary_uses_derived_rows_not_a_target_constant(monkeypatc
     assert (bound["capacity_rows"], bound["N_tiles"], bound["output_rows_if_resident"]) == (96, 7, 112)
     assert (bound["tile_edge"], bound["M"]) == (16, 1)
     assert bound["store"] == "result_store"
+
+
+def test_operand_boundary_uses_store_role_not_memory_name(monkeypatch):
+    from merlin.targetgen import address_space as AS
+
+    artifact = {
+        "facts": {
+            "arrays": [{"name": "array", "rows": 16, "cols": 16}],
+            "memories": [
+                {"name": "input_store.mem", "bytes": 262144, "depth": 4096, "row_elems": 16, "elem_bits": 8},
+                {"name": "sum_store.mem", "bytes": 65536, "depth": 512, "row_elems": 16, "elem_bits": 32},
+            ],
+            "datapaths": [{"name": "input", "dtype": "i8"}, {"name": "accumulator", "dtype": "i32"}],
+        }
+    }
+    derive = AS.derive_address_space
+    monkeypatch.setattr(AS, "derive_address_space", lambda target: derive(target, facts=artifact))
+    boundary = CF.boundaries("generic_target")
+    assert boundary.operand_store_bytes == 262144
+    assert "input_store.mem" in boundary.operand_store_source
 
 
 def test_accumulator_boundary_coverage_reads_capsule_shapes(tmp_path):

@@ -162,6 +162,35 @@ def _grant_sources(bundle: dict, repo: Path) -> list[tuple[str, Path]]:
     return [(str(entry["path"]), resolve_grant(str(entry["path"]), repo)) for entry in bundle.get("allowed", [])]
 
 
+def _selected_rtl_facts_file(bundle: dict) -> Path | None:
+    """Only a declared read-only facts grant may set the agent's facts accessor."""
+    value = bundle.get("selected_rtl_facts_file")
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise RuntimeError("selected_rtl_facts_file must be an absolute facts.json path")
+    selected = Path(value)
+    if (
+        not selected.is_absolute()
+        or ".." in selected.parts
+        or selected.name != "facts.json"
+        or str(selected.parent) + "/" not in {row.get("path") for row in bundle.get("allowed", [])}
+    ):
+        raise RuntimeError("selected RTL facts file is not covered by an exact allowed directory grant")
+    return selected
+
+
+def frozen_selected_rtl_facts(ws: Path, bundle: dict, *, repo: Path) -> Path | None:
+    """Return the selected facts from the verified host-only input snapshot."""
+    selected = _selected_rtl_facts_file(bundle)
+    if selected is None:
+        return None
+    [frozen] = snapshot_input_paths(ws, bundle, [selected], repo=repo)
+    if frozen.is_symlink() or not frozen.is_file():
+        raise RuntimeError("selected RTL facts are absent from the frozen input snapshot")
+    return frozen
+
+
 def _host_input_paths(bundle: dict) -> list[str]:
     entries = bundle.get("host_inputs", [])
     if not isinstance(entries, list) or any(
@@ -792,13 +821,26 @@ def reapply_bundle_snapshot(argv: list[str], ws: Path, bundle: dict, *, repo: Pa
     return [*argv, *_bundle_mount_args(ws, bundle, repo), "--bind", str(ws), str(ws)]
 
 
-def base_argv(ws: Path, bundle: dict, *, repo: Path | None = None, _policy_test_live_inputs: bool = False) -> list[str]:
+def base_argv(
+    ws: Path,
+    bundle: dict,
+    *,
+    repo: Path | None = None,
+    _policy_test_live_inputs: bool = False,
+    include_claude_home: bool = True,
+    inherit_environment: bool = True,
+) -> list[str]:
     """Deny-by-default bwrap argv prefix: system RO, /scratch* tmpfs-hidden, ONLY the bundle's allowed
     paths bound RO, denied sub-paths re-masked, workspace writable+last. Target-agnostic — the ``bundle``
     (or an empty ``{}``) is the only input beyond the workspace."""
     repo = repo or repo_root()
     parts = [
         "bwrap",
+        *(
+            []
+            if inherit_environment
+            else ["--clearenv", "--setenv", "HOME", str(Path.home()), "--setenv", "PATH", "/usr/bin:/bin"]
+        ),
         "--unsetenv",
         "MERLIN_CORPUS_SEAL",
         "--die-with-parent",
@@ -844,6 +886,13 @@ def base_argv(ws: Path, bundle: dict, *, repo: Path | None = None, _policy_test_
         "--chdir",
         str(ws),
     ]
+    selected_facts = _selected_rtl_facts_file(bundle)
+    # Do not inherit an operator's mutable cache selection into the frozen agent.
+    parts += (
+        ["--setenv", "MERLIN_RTL_FACTS", str(selected_facts)]
+        if selected_facts is not None
+        else ["--unsetenv", "MERLIN_RTL_FACTS"]
+    )
     # Drop Claude-Code nesting markers inherited from a parent agent session so the sandboxed `claude`
     # starts a clean top-level session. A leaked CLAUDE_CODE_MESSAGING_SOCKET / CLAUDECODE makes it wait on
     # a parent IPC socket that is not inside the box and hang. Auth vars (ANTHROPIC_API_KEY,
@@ -861,7 +910,7 @@ def base_argv(ws: Path, bundle: dict, *, repo: Path | None = None, _policy_test_
     ):
         parts += ["--unsetenv", _v]
     home_claude = os.path.expanduser("~/.claude")
-    if Path(home_claude).exists():
+    if include_claude_home and Path(home_claude).exists():
         parts += ["--bind", home_claude, home_claude]
         # ⚠ ANSWER-SURFACE LEAK GUARD: ~/.claude is bound whole so the sandboxed `claude` CLI finds its
         # credentials/settings, but ~/.claude/projects/<slug>/ holds the EXPERIMENTER's session

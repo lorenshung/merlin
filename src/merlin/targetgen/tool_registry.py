@@ -160,8 +160,14 @@ TOOLS: dict[str, ToolSpec] = {
             f"{_PY}targetgen/families.py",
             f"{_PY}targetgen/compute_units.py",
             f"{_PY}targetgen/semantic_families.py",
+            f"{_PY}targetgen/capability_manifest.py",
             f"{_PY}targetgen/target_experiment.py",
             f"{_PY}targetgen/evidence/store.py",
+            # Synthesized plans resolve the selected support contract at call time.
+            # These readers carry identity only; no backend or oracle code.
+            f"{_PY}targetgen/corpora.py",
+            f"{_PY}targetgen/providers.py",
+            f"{_PY}targetgen/target_registry.py",
             # ``interface_emit`` needs these only for a pooled COMMIT, which is why import-only smoke
             # missed them. They are pure command-buffer shape helpers; the oracle-bearing runtime
             # reference/simulator modules remain explicitly denied.

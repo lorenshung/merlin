@@ -228,17 +228,32 @@ def test_a_capture_s_raw_tag_is_canonicalized_rather_than_trusted() -> None:
     assert unknown.resolved_family() == "not_a_family"
 
 
+#: What each census family's STANDALONE verdict must be on this target. ``composed_with`` restricts a
+#: whole family, so the reviewed contract's standalone ``elementwise_map`` (evidence: the
+#: ``accumulate_on_load`` fact, a plain load into an accumulator address with its accumulate bit set)
+#: moves every elementwise tag with it: a per-tensor scale (the load's MVIN_SCALE or the readout's
+#: accumulator scale), a relu (the readout's activation) and the residual add need no contraction in
+#: front. Pooling is ``reduction``, a mode of the store path, for which "fused only" is the true answer.
+CENSUS_STANDALONE = {"quantize": True, "minmax": True, "elementwise": True, "pool": False}
+
+
 def test_the_refusal_changes_from_unnameable_to_the_honest_one(census_caps) -> None:
-    """THE MUTATION THAT FIRES, half one: the verdict for every census family is now a statement about
-    the HARDWARE (``fused_only`` -- this target's manifest declares the family reachable only in
-    composition) rather than about the vocabulary (``undeclared_family``). The distinction is the
-    whole point: a fused-only family is coverable by a capsule, an unnameable one is not."""
+    """THE MUTATION THAT FIRES, half one: the verdict for every census family is a statement about the
+    HARDWARE rather than about the vocabulary (``undeclared_family``). The distinction is the whole
+    point: a family judged on the hardware is coverable by a capsule, an unnameable one is not. Each
+    family's verdict is pinned to what the device does (``CENSUS_STANDALONE``), not to the others."""
     cap_map, undetermined = census_caps
     for prov_family, op, _n in CENSUS:
         region = E.RegionDescriptor(source="c", op=op, family=prov_family, in_dtype="int8", rank=2)
         verdict = E.is_eligible(region, cap_map, undetermined=undetermined)
-        assert verdict.refusal == "fused_only", f"{op}: {verdict.refusal} -- {verdict.reason}"
+        assert verdict.refusal not in ("undeclared_family", "unrecognized_family"), (
+            f"{op}: {verdict.refusal} -- {verdict.reason}"
+        )
         assert verdict.family in cap_map
+        want = CENSUS_STANDALONE[prov_family]
+        assert verdict.eligible is want, f"{op}: eligible={verdict.eligible} want={want} -- {verdict.reason}"
+        if not want:
+            assert verdict.refusal == "fused_only", f"{op}: {verdict.refusal} -- {verdict.reason}"
 
 
 def test_a_region_fused_with_the_seam_s_contraction_is_eligible_and_so_refusable(census_caps) -> None:

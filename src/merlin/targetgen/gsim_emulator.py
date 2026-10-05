@@ -564,6 +564,43 @@ def resolve(target: str, *, env_var: str | None = None) -> Resolution:
     )
 
 
+def selected_firrtl_status(target: str, *, env_var: str | None = None) -> tuple[bool, str]:
+    """Whether the receipted model represents this run's selected FIRRTL.
+
+    A receipt binding the emulator binary alone does not establish that it was
+    built from the RTL whose facts derived the capsules.  Frozen runs set
+    ``MERLIN_RTL_FACTS`` to their verified input snapshot.  Legacy invocations
+    without that selection retain their existing availability semantics, but
+    cannot cite this check as evidence of source identity.
+    """
+    facts_path = os.environ.get("MERLIN_RTL_FACTS", "").strip()
+    if not facts_path:
+        return True, "no selected FIRRTL facts supplied; source identity unverified"
+    try:
+        facts = json.loads(Path(facts_path).read_text(encoding="utf-8"))
+        inputs = facts["inputs"]
+        expected = inputs.get("fir_sha256")
+        if not expected:
+            firrtl_inputs = inputs.get("firrtl_inputs") or []
+            if len(firrtl_inputs) == 1:
+                expected = firrtl_inputs[0].get("sha256")
+        if not isinstance(expected, str) or len(expected) != 64:
+            raise ValueError("selected facts do not bind one FIRRTL digest")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        return False, f"gsim selected FIRRTL facts are unreadable: {exc}"
+
+    model = resolve(target, env_var=env_var)
+    if not model.ok:
+        return False, model.reason
+    receipt = model.receipt or {}
+    actual = receipt.get("firrtl_sha256")
+    if model.receipt_status != "bound" or not isinstance(actual, str) or len(actual) != 64:
+        return False, "gsim has no bound FIRRTL build receipt for the selected RTL facts"
+    if actual.lower() != expected.lower():
+        return False, f"gsim selected FIRRTL {expected[:12]} differs from model receipt {actual[:12]}"
+    return True, f"gsim FIRRTL {expected[:12]} matches the selected RTL facts"
+
+
 def probe(target: str, *, env_var: str | None = None) -> tuple[bool, str]:
     """``(available, reason)`` in the shape :func:`rtl_engine_policy.select` consumes."""
     r = resolve(target, env_var=env_var)

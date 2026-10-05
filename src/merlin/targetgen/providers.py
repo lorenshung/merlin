@@ -13,6 +13,8 @@ from typing import Any
 
 import yaml
 
+from merlin.common.yaml import safe_load_text
+
 SCHEMA = "merlin.provider.v1"
 METADATA_FILE = "provider.yaml"
 
@@ -39,7 +41,7 @@ class Provider:
 
 def _mapping(path: Path) -> dict[str, Any]:
     try:
-        value = yaml.safe_load(path.read_text(encoding="utf-8"))
+        value = safe_load_text(path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
         raise ProviderError(f"{path}: cannot read provider data: {exc}") from exc
     if not isinstance(value, dict):

@@ -12,7 +12,7 @@ from merlin.targetgen.contract import compile as compiler
 from merlin.targetgen.contract.build_recipe import HarnessBuildRecipe, KernelStackFramePolicy
 
 
-def _recipe(*, budget: int = 4096, policy: bool = True) -> HarnessBuildRecipe:
+def _recipe(*, budget: int = 4096, policy: bool = True, abi: str = "lp64d") -> HarnessBuildRecipe:
     stack = KernelStackFramePolicy("fixture_entry", budget) if policy else None
     return HarnessBuildRecipe(
         compiler=Path("/fixture/cc"),
@@ -20,7 +20,7 @@ def _recipe(*, budget: int = 4096, policy: bool = True) -> HarnessBuildRecipe:
         support_sources=(),
         link_script=Path("/fixture/link.ld"),
         load_address=0,
-        cflags=("-march=rv64gc",),
+        cflags=("-march=rv64gc", f"-mabi={abi}"),
         error_cls=ValueError,
         kernel_stack_frame=stack,
     )
@@ -57,7 +57,7 @@ def test_target_bound_object_records_hash_bound_static_frame(tmp_path, monkeypat
     )
 
     assert obj == tmp_path / "kernel.o"
-    assert calls == [(tmp_path / "kernel.ll", tmp_path / "kernel.o", "riscv", ("-march=rv64gc", "-fstack-usage"))]
+    assert calls == [(tmp_path / "kernel.ll", tmp_path / "kernel.o", "riscv", ("-march=rv64gc", "-mabi=lp64d", "-fstack-usage"))]
     canonical_report = "kernel.ll:helper\t32\tstatic\nkernel.ll:fixture_entry\t384\tstatic\n"
     assert (tmp_path / "kernel.su").read_text() == canonical_report
     receipt = json.loads((tmp_path / "kernel.stack_frame.json").read_text())
@@ -77,6 +77,49 @@ def test_target_bound_object_records_hash_bound_static_frame(tmp_path, monkeypat
         # to make this fit" and "the field was not recorded" cannot read the same.
         "repair": None,
     }
+
+
+def test_nondefault_recipe_abi_reaches_kernel_and_harness_commands(tmp_path, monkeypatch):
+    from merlin.llvmlower import codegen, pipeline
+    from merlin.runtime.backends import base
+
+    llvm = ('define void @fixture_entry() { ret void }\n'
+            '!llvm.module.flags = !{!1}\n'
+            '!1 = !{i32 1, !"target-abi", !"lp64"}\n')
+    monkeypatch.setattr(pipeline, "lower_to_llvm_ir", lambda text, *, workdir: llvm)
+    recipe = _recipe(abi="lp64")
+    monkeypatch.setattr(base, "harness_build_recipe", lambda target: recipe)
+    calls = []
+
+    def compile_ll(source, output, target, *, extra_flags):
+        calls.append(extra_flags)
+        Path(output).write_bytes(b"lp64 object")
+        Path(output).with_suffix(".su").write_text(
+            f"{source}:fixture_entry\t32\tstatic\n", encoding="utf-8")
+        return output
+
+    monkeypatch.setattr(codegen, "compile_ll", compile_ll)
+    obj = compiler.llvm_mlir_to_object("module {}", tmp_path, target="fixture")
+    assert obj.is_file() and calls == [("-march=rv64gc", "-mabi=lp64", "-fstack-usage")]
+    assert "-mabi=lp64" in recipe.with_effective_abi().compile_command(
+        source=tmp_path / "harness.c", output=tmp_path / "harness.o")
+    assert "-mabi=lp64" in recipe.with_effective_abi().link_command(
+        objects=(obj,), output=tmp_path / "model.elf")
+    assert json.loads((tmp_path / "kernel.abi.json").read_text())["abi"] == "lp64"
+
+
+def test_module_abi_mismatch_refuses_before_object_compile(tmp_path, monkeypatch):
+    from merlin.llvmlower import codegen, pipeline
+    from merlin.runtime.backends import base
+
+    monkeypatch.setattr(pipeline, "lower_to_llvm_ir", lambda text, *, workdir:
+                        '!llvm.module.flags = !{!1}\n'
+                        '!1 = !{i32 1, !"target-abi", !"lp64"}\n')
+    monkeypatch.setattr(base, "harness_build_recipe", lambda target: _recipe())
+    monkeypatch.setattr(codegen, "compile_ll", lambda *args, **kwargs: pytest.fail("object compiled"))
+    with pytest.raises(ValueError, match="target-abi 'lp64' conflicts.*'lp64d'"):
+        compiler.llvm_mlir_to_object("module {}", tmp_path, target="fixture")
+    assert not (tmp_path / "kernel.o").exists()
 
 
 @pytest.mark.parametrize(

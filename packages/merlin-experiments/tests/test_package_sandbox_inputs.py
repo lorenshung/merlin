@@ -60,7 +60,7 @@ def test_explicit_python_roots_replace_ambient_path_without_granting_mounts(tmp_
     target = SimpleNamespace(target="synthetic")
     exports = TC.sandbox_env(target, tmp_path, paths=selected, sim=sim, harness="")
     assignment = exports.split("export PYTHONPATH=", 1)[1].split(";", 1)[0]
-    assert shlex.split("PYTHONPATH=" + assignment) == ["PYTHONPATH=" + ":".join(roots)]
+    assert shlex.split("PYTHONPATH=" + assignment) == ["PYTHONPATH=" + ":".join((*roots, str(tmp_path)))]
     assert "$PYTHONPATH" not in exports
     assert str(paths.repo / "merlin/python") not in exports
     assert "/ambient/private-modules" not in exports
@@ -81,7 +81,7 @@ def test_omitted_python_roots_preserve_legacy_environment(tmp_path, monkeypatch)
     paths, sim = _explicit_selection(tmp_path)
     _forbid_discovery(monkeypatch)
     exports = TC.sandbox_env(SimpleNamespace(target="synthetic"), tmp_path, paths=paths, sim=sim, harness="")
-    assert f"export PYTHONPATH={paths.repo}/merlin/python${{PYTHONPATH:+:$PYTHONPATH}}; " in exports
+    assert f"export PYTHONPATH={paths.repo}/merlin/python:{tmp_path}${{PYTHONPATH:+:$PYTHONPATH}}; " in exports
 
 
 @pytest.mark.parametrize("has_harness", [False, True])

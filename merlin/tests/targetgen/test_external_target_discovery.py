@@ -194,6 +194,18 @@ def test_installed_discovery_does_not_scan_host_examples(references, monkeypatch
     assert "synthetic" not in tr.list_targets()
 
 
+def test_installed_reference_alias_resolves_explicit_repo_example(references, monkeypatch):
+    checkout, legacy, example = references
+    alias = legacy / "synthetic/contracts/target_contract.yaml"
+    alias.parent.mkdir(parents=True)
+    alias.symlink_to(example / "contracts/target_contract.yaml")
+    monkeypatch.setattr(tr, "checkout_root", lambda: None)
+    monkeypatch.setenv("MERLIN_REPO_ROOT", str(checkout))
+    assert tr.reference_targets() == {"synthetic": alias.parent.parent}
+    assert tr.resolve("synthetic").base == example
+    assert tr.resolve("synthetic").provider.root == example
+
+
 def test_residual_discovery_uses_selected_reference_over_incidental_generated(references):
     from merlin.targetgen import capability_manifests
 

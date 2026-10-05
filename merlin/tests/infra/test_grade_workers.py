@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from merlin.targetgen import capsule_grade as CG
+from merlin.targetgen import capsule_runner as CR
 
 CPUS = 48
 GB = 1024**3
@@ -90,6 +91,20 @@ def test_never_more_workers_than_capsules(host):
 def test_a_small_host_leaves_cores_for_the_driver(host):
     host.setattr(CG.os, "sched_getaffinity", lambda pid: {0, 1, 2, 3})
     assert 1 <= CG.default_grade_workers() <= 2
+
+
+def test_verilator_caps_explicit_and_automatic_suite_parallelism(host):
+    adapters = {
+        "L2": CR.simulator_adapter("spike", "synthetic"),
+        "L3": CR.simulator_adapter("verilator", "synthetic"),
+    }
+    assert CG._bounded_grade_workers(32, adapters) == 4
+    assert CG._bounded_grade_workers(CG.default_grade_workers(), adapters) == 4
+
+
+def test_gsim_and_unmarked_adapters_keep_useful_parallelism(host):
+    assert CG._bounded_grade_workers(32, {"L3": CR.simulator_adapter("gsim", "synthetic")}) == 5
+    assert CG._bounded_grade_workers(32, {"L3": lambda *args: None}) == 32
 
 
 # --------------------------------------------------------------------------------------------

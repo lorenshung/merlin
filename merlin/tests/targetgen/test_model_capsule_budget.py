@@ -12,8 +12,10 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -31,24 +33,88 @@ _EXACT_ARTIFACTS = (
 )
 
 
-def _copy_model_capsule(tmp_path, name="M3_host_island_seam_gemmini"):
-    source = Path(__file__).parents[2] / "contract" / "capsules" / "model" / name
-    copied = tmp_path / name
-    shutil.copytree(source, copied)
-    return CR.load_capsule(copied)
+def _synthetic_model_capsule(tmp_path, monkeypatch):
+    """Author a tiny identity capture with the production capsule writer.
+
+    No mutable corpus answer surfaces or model download are used. The test-only
+    validator below checks the frozen bytes and identity golden without claiming
+    a real torch.export or accelerator approval.
+    """
+    import subprocess
+    import numpy as np
+    from merlin.targetgen import capsule_source as source
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    loader = tmp_path / "identity_loader.py"
+    loader.write_text("# Synthetic identity model fixture; never imported by the test worker.\n")
+    weights = tmp_path / "identity.safetensors"
+    weights.write_bytes((8).to_bytes(8, "little") + b"{}      ")
+    manifest = tmp_path / "identity.safetensors.manifest.json"
+    manifest.write_text(json.dumps({"0": {"kind": "input", "name": "I0", "shape": [2, 2]}}))
+    linalg = (
+        f'builtin.module attributes {{prov.weights_file = "{weights}"}} {{\n'
+        "  func.func @forward(%arg0: tensor<2x2xf32>) -> tensor<2x2xf32> {\n"
+        "    func.return %arg0 : tensor<2x2xf32>\n  }\n}\n"
+    )
+    values = [[1.0, 2.0], [3.0, 4.0]]
+    artifact = source.CapsuleArtifacts(
+        op="model", dtype="f32", pytorch_src=loader.read_text(), linalg_mlir=linalg,
+        inputs=[values], golden=values, weights_path=str(weights),
+        meta={"weights_manifest": str(manifest),
+              "input_abi": [{"shape": [2, 2], "dtype": "f32"}],
+              "output_abi": [{"shape": [2, 2], "dtype": "f32"}]},
+    )
+    fake_capture = SimpleNamespace(m2m_dir=tmp_path, capture_loader=lambda *_a, **_k: artifact)
+    binding = SimpleNamespace(
+        operand_dtype="f32", target="synthetic", cap_dtype=lambda value: value,
+        tiers=["L0", "L1"], compare="tolerance_float", atol=0.0, rtol=0.0,
+    )
+    monkeypatch.setattr(source, "derived_recipe", lambda *_a: None)
+    monkeypatch.setattr(source, "model_accelerator_demand", lambda *_a: (None, []))
+    destination = source.write_model_capsule(
+        {"kind": "model", "cat": "model", "name": "SY_identity_bundle",
+         "model": "synthetic_identity", "loader": str(loader)},
+        binding, tmp_path / "capsules", source=fake_capture)
+    expected_weights = hashlib.sha256(weights.read_bytes()).hexdigest()
+    monkeypatch.setattr(source, "_m2m_python", lambda: Path(sys.executable))
+
+    def validate_synthetic_worker(cmd, **_kwargs):
+        request = json.loads(Path(cmd[-1]).read_text(encoding="utf-8"))
+        frozen = Path(request["weights"])
+        inputs = np.load(request["inputs_npz"], allow_pickle=False)
+        golden = np.load(request["golden_npy"], allow_pickle=False)
+        if (hashlib.sha256(frozen.read_bytes()).hexdigest() != expected_weights
+                or not np.array_equal(inputs["in0"], golden)):
+            return subprocess.CompletedProcess(cmd, 1, "", "synthetic fixture validation failed")
+        report = {
+            "manifest": json.loads(Path(request["captured_manifest"]).read_text()),
+            "input_order": {"I0": 0},
+            "loader_sha256": hashlib.sha256(Path(request["loader"]).read_bytes()).hexdigest(),
+            "weights_sha256": expected_weights,
+            "python": str(Path(sys.executable)), "python_version": sys.version.split()[0],
+            "torch_version": None, "torch_export": False,
+            "capture_manifest_validated": True, "loader_input_count": 1,
+            "golden_validated": True, "golden_value_replay": True,
+            "weights_validated_exact": True,
+        }
+        return subprocess.CompletedProcess(
+            cmd, 0, "__CAPSULE_BUNDLE_ABI__ " + json.dumps(report) + "\n", "")
+
+    monkeypatch.setattr(subprocess, "run", validate_synthetic_worker)
+    return CR.load_capsule(destination)
 
 
-def test_frozen_capsule_runtime_bundle_is_stable_and_resolvable(tmp_path):
+def test_frozen_capsule_runtime_bundle_is_stable_and_resolvable(tmp_path, monkeypatch):
     """The public capsule, not a mutable recapture, supplies every whole-model runtime argument."""
-    cap = _copy_model_capsule(tmp_path)
+    cap = _synthetic_model_capsule(tmp_path, monkeypatch)
     identities = []
     for _ in range(2):
         with CR._model_runtime_bundle(cap, timeout=60) as (bundle, provenance, verify):
             from merlin.runtime.dispatch_runtime import resolve_forward_args
 
             args = resolve_forward_args(bundle)
-            assert [list(a.shape) for a in args] == [[32], [32], [32, 32], [32, 32], [16, 32]]
-            assert provenance["construction"] == "frozen_capsule_assets_v1"
+            assert [list(a.shape) for a in args] == [[2, 2]]
+            assert provenance["construction"] == "frozen_capsule_assets_v2"
             assert provenance["interface_reused_byte_exact"] is True
             assert provenance["live_recapture_used"] is False
             assert provenance["validation"]["golden_validated"] is True
@@ -57,33 +123,84 @@ def test_frozen_capsule_runtime_bundle_is_stable_and_resolvable(tmp_path):
     assert identities[0] == identities[1], "npz/container timestamps must not change bundle identity"
 
 
-def test_frozen_capsule_runtime_bundle_rejects_mutated_weights(tmp_path):
+def test_frozen_capsule_runtime_bundle_rejects_mutated_weights(tmp_path, monkeypatch):
     """Matching shapes/names cannot spoof a model instance: loader and safetensor values must agree."""
-    cap = _copy_model_capsule(tmp_path)
+    cap = _synthetic_model_capsule(tmp_path, monkeypatch)
     weights = Path(cap["__dir__"]) / "capsule.weights.safetensors"
     mutated = bytearray(weights.read_bytes())
-    mutated[-1] ^= 1
+    mutated[-1] = ord("\t")  # valid JSON padding, different frozen bytes
     weights.write_bytes(mutated)
     with pytest.raises(ValueError, match="validation failed"):
         with CR._model_runtime_bundle(cap, timeout=60):
             pass
 
 
-def test_frozen_capsule_runtime_bundle_rejects_asset_spoof(tmp_path):
+def test_frozen_capsule_runtime_bundle_rejects_asset_spoof(tmp_path, monkeypatch):
     """A declared loader may not escape the frozen capsule or arrive through a mutable symlink."""
-    cap = _copy_model_capsule(tmp_path)
+    cap = _synthetic_model_capsule(tmp_path, monkeypatch)
     cap["pytorch_ref"]["loader"] = "../capsule.pytorch.py"
     with pytest.raises(ValueError, match="must stay inside"):
         with CR._model_runtime_bundle(cap, timeout=60):
             pass
 
 
-def test_frozen_capsule_runtime_bundle_rejects_missing_golden(tmp_path):
-    cap = _copy_model_capsule(tmp_path)
+def test_frozen_capsule_runtime_bundle_rejects_missing_golden(tmp_path, monkeypatch):
+    cap = _synthetic_model_capsule(tmp_path, monkeypatch)
     (Path(cap["__dir__"]) / "golden.yaml").unlink()
     with pytest.raises(ValueError, match="missing or a symlink"):
         with CR._model_runtime_bundle(cap, timeout=60):
             pass
+
+
+def test_pinned_model_bundle_survives_source_generation_removal(tmp_path, monkeypatch):
+    cap = _synthetic_model_capsule(tmp_path / "source", monkeypatch)
+    pinned = CR._pin_model_capsule(cap, tmp_path / "private" / "capsule")
+    shutil.rmtree(cap["__dir__"])
+    with CR._model_runtime_bundle(pinned, timeout=60) as (_, provenance, verify):
+        assert provenance["validation"]["golden_validated"] is True
+        verify()
+
+
+@pytest.mark.parametrize("alias", ["source_directory", "asset"])
+def test_model_snapshot_does_not_launder_source_aliases(tmp_path, alias):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "capsule.yaml").write_text("name: M\nkind: model\n")
+    if alias == "source_directory":
+        selected = tmp_path / "alias"
+        selected.symlink_to(source, target_is_directory=True)
+    else:
+        selected = source
+        outside = tmp_path / "outside.safetensors"
+        outside.write_bytes(b"not a declared capsule-local asset")
+        (source / "capsule.weights.safetensors").symlink_to(outside)
+
+    with pytest.raises(ValueError, match="symlink"):
+        CR._pin_model_capsule(
+            {"name": "M", "kind": "model", "__dir__": str(selected)},
+            tmp_path / "private" / "capsule",
+        )
+
+
+def test_model_suite_cleanup_preserves_shared_store_permissions(tmp_path, monkeypatch):
+    from merlin.common import content_store
+
+    source = tmp_path / "source"
+    source.mkdir()
+    declaration = source / "capsule.yaml"
+    declaration.write_text("name: M\nkind: model\n")
+    declaration.chmod(0o444)
+    source.chmod(0o555)
+    store = tmp_path / "store"
+    store.mkdir()
+    monkeypatch.setattr(content_store, "store_root", lambda: store)
+    monkeypatch.setattr(CR, "_run_suite", lambda *_args, **_kwargs: [])
+
+    CR.run_suite([{"name": "M", "kind": "model", "__dir__": str(source)}])
+
+    objects = [path for path in store.rglob("*") if path.is_file()]
+    assert objects
+    assert all(path.stat().st_mode & 0o222 == 0 for path in objects)
 
 
 def test_mesh_invocation_identity_binds_real_operands():
@@ -187,13 +304,21 @@ def _valid_model_row() -> dict:
             "n_failed": 0,
             "n_unavailable": 0,
             "n_unsynthesizable": 0,
+            "n_screened": 2,
+            "n_screen_passed": 2,
+            "n_screen_failed": 0,
+            "n_screen_unavailable": 0,
             "per_tile": [_tile("tile0"), _tile("tile1")],
         },
         "lane_report": {
             "required": ["on_mesh", "scalar_rvv_lane"],
             "observed": ["on_mesh", "scalar_rvv_lane"],
             "unexercised": [],
-            "evidence": "dynamic_dispatch_ledger",
+            "scope": ["on_mesh", "scalar_rvv_lane"],
+            "evidence": {
+                "on_mesh": "dynamic_dispatch_ledger",
+                "scalar_rvv_lane": "dynamic_dispatch_ledger",
+            },
         },
         "boundary_expectation": {"boundary": "A->H->A", "contains": ["A->H->A"], "n_unresolved": 0},
         "boundary_execution": {
@@ -203,6 +328,16 @@ def _valid_model_row() -> dict:
             "n_unresolved": 0,
         },
     }
+
+
+def test_native_host_call_is_accounted_without_claiming_target_host_execution():
+    row = _valid_model_row()
+    row["mesh_execution"]["dispatch_ledger"][1].update(
+        lane="native_cpu", placement="host", executor="native_cpu", target_executed=False
+    )
+    check = CGR.model_execution_check(row, {"lanes": {"require": ["on_mesh"]}})
+    assert "dynamic_dispatch_ledger_entry_missing_or_malformed" not in check["violations"]
+    assert "required_model_lane_unexercised" not in check["violations"]
 
 
 def test_must_accelerate_requires_runtime_outline_to_preserve_planned_groups():
@@ -276,7 +411,7 @@ def test_budgeted_grade_pins_capsule_assets_before_starting_child(tmp_path, monk
     ``.gemmini.build.*`` ``__dir__`` and later failed opening ``capsule.yaml`` after cache GC removed
     that generation.
     """
-    capsule = _copy_model_capsule(tmp_path / "source")
+    capsule = _synthetic_model_capsule(tmp_path / "source", monkeypatch)
     original = Path(capsule["__dir__"])
     observed = {}
 
@@ -675,21 +810,17 @@ def test_gsim_is_classified_as_cycle_accurate_rtl_tool():
     assert "gsim" in oot_runner._CYCLE_ACCURATE_SIMULATORS
 
 
-def test_required_gsim_prevents_mixed_engine_model_cycle_rollup(monkeypatch):
+def test_required_gsim_rejects_mixed_engine_model_evidence(monkeypatch):
     row = _valid_model_row()
-    for entry in row["mesh_execution"]["dispatch_ledger"]:
-        if entry["lane"] == "on_mesh":
-            entry["oracle_evidence"]["cycles"] = 17
     monkeypatch.setenv("MERLIN_REQUIRED_RTL_ENGINE", "gsim")
 
-    clean = CR._model_tier_evidence(row["mesh_execution"], row["mesh_tile_verification"])
+    clean = CGR.model_execution_check(row, {"lanes": {"require": ["on_mesh", "scalar_rvv_lane"]}})
     row["mesh_execution"]["dispatch_ledger"][0]["oracle_evidence"]["engine"] = "verilator"
-    mixed = CR._model_tier_evidence(row["mesh_execution"], row["mesh_tile_verification"])
+    mixed = CGR.model_execution_check(row, {"lanes": {"require": ["on_mesh", "scalar_rvv_lane"]}})
 
-    assert clean["cycles"] == 34 and clean["cycle_accurate"] is True
-    assert clean["measurement_conditions"]["single_engine_cycle_authority"] is True
-    assert mixed["cycles"] is None and mixed["cycle_accurate"] is False
-    assert mixed["measurement_conditions"]["single_engine_cycle_authority"] is False
+    assert clean["status"] == "pass"
+    assert mixed["status"] == "fail"
+    assert "model_call_oracle_engine_mismatch" in mixed["violations"]
 
 
 def test_exact_cert_identity_changes_when_emitted_artifact_mutates(tmp_path):
@@ -726,6 +857,7 @@ def test_exact_model_cert_rejects_cpu_only_lowered_llvm(tmp_path, monkeypatch):
     from merlin.runtime import reference, simulator
     from merlin.runtime.backends import base as backends
     from merlin.targetgen import oot_runner, provenance
+    from merlin.targetgen.rocc import decode as rocc_decode
 
     package = tmp_path / "pkg"
     package.mkdir()
@@ -733,9 +865,9 @@ def test_exact_model_cert_rejects_cpu_only_lowered_llvm(tmp_path, monkeypatch):
     tool.write_text("stub")
     iface = tmp_path / "model.interface.mlir"
     iface.write_text("module {}")
-    pkg = SimpleNamespace(tool=tool, directory=package)
+    pkg = SimpleNamespace(tool=tool, directory=package, manifest={})
 
-    def _entry(_pkg, name, _input, output_json=None, timeout=0):
+    def _entry(_pkg, name, _input, output_json=None, timeout=0, write_bytecode=False):
         if name == "emit_command_buffer":
             output_json.write_text("{}")
             stdout = ""
@@ -756,6 +888,9 @@ def test_exact_model_cert_rejects_cpu_only_lowered_llvm(tmp_path, monkeypatch):
     monkeypatch.setattr(reference, "outputs_match", lambda *a, **k: True)
     monkeypatch.setattr(simulator, "simulate", lambda *a, **k: {"outputs": {}})
     monkeypatch.setattr(backends, "get_backend", lambda *_: SimpleNamespace(available=lambda _s: False))
+    # This test isolates the certification guard; target ISA extraction has its
+    # own tests and is not available from the synthetic package in this fixture.
+    monkeypatch.setattr(rocc_decode, "decode_text", lambda *_a, **_k: {"instructions": []})
     monkeypatch.setattr(oot_runner, "_record", lambda *a, **k: None)
 
     result = oot_runner.certify(
@@ -772,6 +907,22 @@ def test_exact_model_cert_rejects_cpu_only_lowered_llvm(tmp_path, monkeypatch):
     assert result["trace_check"]["status"] == "fail"
     trace = tmp_path / "runs" / "runs" / "gemmini-contract" / "cpu-only" / "generated" / "instruction_trace.json"
     assert trace.is_file() and json.loads(trace.read_text())["instructions"] == []
+
+
+def test_native_model_console_requires_done_and_every_declared_output():
+    """The public backend protocol and independent golden reject partial completion."""
+    from merlin.runtime.backends.base import parse_console
+    from merlin.targetgen.capsule_golden import compare
+
+    with pytest.raises(RuntimeError, match="did not reach DONE"):
+        parse_console("OUT Y0 1 1 7\n")
+    with pytest.raises(RuntimeError, match="expected 2 values, got 1"):
+        parse_console("OUT Y0 1 2 7\nDONE\n")
+
+    outputs, _ = parse_console("OUT Y0 1 1 7\nDONE\n")
+    numeric = compare({"Y0": [[7]], "Y1": [[9]]}, outputs, {"compare": "exact_int"})
+    assert numeric["status"] == "fail"
+    assert numeric["per_output"]["Y1"]["reason"] == "missing from observed"
 
 
 class _StubPkg:

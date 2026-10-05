@@ -146,7 +146,9 @@ def golden_files(te: TargetExperiment) -> list[Path]:
     ``answer_files()``."""
     files: list[Path] = []
     root = repo_root()
-    corpora = [te.capsule_corpus] if te.capsule_corpus else []
+    # A sealed release can live outside the packaged contract tree.  Its sibling
+    # model/layer categories must be covered even when the descriptor names isa.
+    corpora = [te.capsule_corpus.parent, te.capsule_corpus] if te.capsule_corpus else []
     corpora += [root / rel.rstrip("/") for rel in te.corpus_siblings()]
     # The full capsule tree, in addition to the declared corpus: masks nested + other-target goldens the
     # declared one-level glob would miss (e.g. capsules/<target>/isa/<capsule>/golden.yaml). rglob only
@@ -184,7 +186,10 @@ def weight_files(te: TargetExperiment) -> list[Path]:
     Both the safetensors blob and an optional manifest are covered by suffix, with no per-model list.
     """
     files: list[Path] = []
-    for caps_root in contract_resource_roots(repo_root(), "capsules"):
+    roots = list(contract_resource_roots(repo_root(), "capsules"))
+    if te.capsule_corpus is not None:
+        roots.append(te.capsule_corpus.parent)
+    for caps_root in dict.fromkeys(roots):
         if caps_root.is_dir():
             files.extend(caps_root.rglob("*.safetensors"))
             files.extend(caps_root.rglob("*.safetensors.manifest.json"))
@@ -418,10 +423,18 @@ def _support_package_dirs() -> list[Path]:
     from merlin.targetgen.providers import ProviderRole
 
     roots: set[Path] = set()
+    references = target_registry.reference_targets()
     for name in target_registry.all_targets():
-        provider = target_registry.resolve(name).provider
+        info = target_registry.resolve(name)
+        provider = info.provider
         if provider is not None and provider.role == ProviderRole.SUPPORT:
             roots.add(provider.root)
+            # A legacy reference link and its physical example are two paths to
+            # the same support bytes.  Mask both, even when installed resolution
+            # promotes the physical package for provider-boundary validation.
+            alias = references.get(name)
+            if info.kind == "reference" and alias is not None and alias != provider.root:
+                roots.add(alias)
     return sorted(roots)
 
 
@@ -596,6 +609,7 @@ def audit_tokens(te: TargetExperiment) -> dict[str, tuple[str, ...]]:
     subpaths."""
     answer: list[str] = [
         "golden.yaml",
+        "golden.npz",
         "expected_command_buffer",
         "expected_instruction_coverage.yaml",
     ]

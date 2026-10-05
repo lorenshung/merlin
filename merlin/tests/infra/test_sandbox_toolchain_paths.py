@@ -25,6 +25,7 @@ def test_import_does_not_resolve_checkout_or_configuration(monkeypatch):
 
 
 def test_checkout_defaults_preserve_selected_locations(tmp_path, monkeypatch):
+    (tmp_path / ".venv").mkdir()
     monkeypatch.setattr(TC, "repo_root", lambda: tmp_path)
     monkeypatch.setattr(TC, "compat_lib_dir", lambda: tmp_path / "compat")
     observed = []
@@ -40,6 +41,27 @@ def test_checkout_defaults_preserve_selected_locations(tmp_path, monkeypatch):
     assert value.compat_lib == str(tmp_path / "compat")
     assert value.merlin_clang == str(tmp_path / "selected-clang/bin/clang-23")
     assert observed == [("MERLIN_CLANG_INSTALL", str(tmp_path / "build/host-merlin-release/install"))]
+
+
+def test_explicit_clang_selects_external_llvm_install(tmp_path, monkeypatch):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    llvm = tmp_path / "llvm"
+    (llvm / "bin").mkdir(parents=True)
+    for tool in ("clang-23", "mlir-opt"):
+        (llvm / "bin" / tool).write_text("fixture\n")
+    monkeypatch.setattr(TC, "repo_root", lambda: checkout)
+    monkeypatch.setenv("MERLIN_CLANG", str(llvm / "bin/clang-23"))
+    selected = TC.ToolchainPaths.from_checkout()
+    assert selected.llvm == str(llvm)
+    assert selected.merlin_clang == str(llvm / "bin/clang-23")
+    assert selected.python_import_roots == (str(TC.python_source_dir()),)
+    if TC.sys.prefix != TC.sys.base_prefix:
+        assert selected.venv == str(Path(TC.sys.prefix).resolve())
+    target = SimpleNamespace(sim_via="", curated_harness=None, target="synthetic")
+    exports = TC.sandbox_env(target, tmp_path, paths=selected, sim=TC.SimToolchain(), harness="")
+    assert f"export MERLIN_CLANG={llvm / 'bin/clang-23'};" in exports
+    assert f"export PYTHONPATH={TC.python_source_dir()};" in exports
 
 
 def test_explicit_paths_drive_binds_environment_and_probes(tmp_path, monkeypatch):

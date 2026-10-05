@@ -40,6 +40,7 @@ def certification_suite(target: str) -> str:
         return "unresolved-contract"
     return component(f"{component(target)}-contract")
 
+
 # Cycle-accurate RTL SIMULATOR tools — a property of the simulator TOOL, not of any target. A tier
 # graded by one of these carries a cycle-accurate cert; a functional tier (spike / the arc coarse
 # model) does not. Extensible as data: a new cycle-accurate sim adds its tool name here. These are
@@ -570,7 +571,7 @@ def run_entrypoint(
     output_json: Path | None = None,
     *,
     timeout: int = 600,
-    write_bytecode: bool = True,
+    write_bytecode: bool = False,
 ) -> subprocess.CompletedProcess:
     """Invoke one entrypoint as a subprocess (never imports the package).
 
@@ -583,6 +584,12 @@ def run_entrypoint(
     misrooted path fail identically in both, so the feedback is truthful and early.
 
     Paths are absolutised first, so pinning the cwd cannot break a caller that passed them relative.
+
+    No bytecode is written INTO the package by default: running from the package root, a Python
+    package importing its own modules writes ``__pycache__`` beside them, and a frozen submission whose
+    digest excludes ``__pycache__`` (and whose presence the functional gate refuses) once acquired it
+    from two interpreters within a minute, stopping every phase-2 launch that re-checked it. Running a
+    package must never change its bytes; ``write_bytecode=True`` is an explicit opt-in for a scratch copy.
     """
     input_mlir = Path(input_mlir).resolve()
     output_json = Path(output_json).resolve() if output_json is not None else None
@@ -595,6 +602,19 @@ def run_entrypoint(
     # declared its entrypoints package-relative -- exactly what the contract describes -- failed every
     # capsule at `parse` with "no such file", naming a file that was present in the submission.
     env = dict(os.environ)
+    # The agent sandbox puts the selected LLVM bin directory on PATH, while the
+    # host-side grader used to inherit an unrelated shell PATH. A submitted
+    # compiler using the granted mlir-translate therefore worked for the agent
+    # and failed only when the same entrypoint was graded. Resolve this from
+    # the operator-selected clang, not from a target name or the submission.
+    from merlin.common.paths import repo_root
+    from merlin.llvmlower.toolchain import clang_for
+
+    selected_clang = clang_for(repo_root(), env)
+    if selected_clang.is_absolute() and selected_clang.is_file():
+        llvm_bin = selected_clang.parent
+        if (llvm_bin / "mlir-translate").is_file():
+            env["PATH"] = str(llvm_bin) + os.pathsep + env.get("PATH", "")
     if not write_bytecode:
         env["PYTHONDONTWRITEBYTECODE"] = "1"
     if "PYTHONPATH" in env:

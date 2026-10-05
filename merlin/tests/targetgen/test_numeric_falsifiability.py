@@ -129,6 +129,14 @@ def test_a_golden_with_no_spread_raises_rather_than_grading_on_a_loosened_tolera
         NF.falsifiable_policy({"atol": 0.25, "rtol": 0.02}, {"Y0": [1.0, 1.0, 1.0]}, name="flat")
 
 
+def test_an_integer_error_bound_is_never_silently_tightened():
+    policy = {"compare": "bounded_int", "dtype": "i8", "atol": 2, "rtol": 0}
+    with pytest.raises(NF.UnfalsifiablePolicy, match="widen the stimulus"):
+        NF.falsifiable_policy(policy, {"Y0": [0, 2, 4]}, name="residual")
+    unchanged, _ = NF.falsifiable_policy(policy, {"Y0": [-128, 0, 127]}, name="residual")
+    assert unchanged == policy
+
+
 def test_an_exact_integer_policy_is_not_applicable():
     out, prov = NF.falsifiable_policy({"compare": "exact_int"}, {"Y0": [1, 2, 3]})
     assert prov["status"] == "not_applicable" and "atol" not in out

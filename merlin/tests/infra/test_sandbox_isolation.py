@@ -106,6 +106,24 @@ def test_model_weights_are_derived_answer_surfaces_and_audit_tokens():
         assert any(token in str(path) for token in audit_tokens(te)["answer"])
 
 
+def test_sealed_release_sibling_weights_are_masked(tmp_path):
+    descriptor = repo_root() / "merlin/experiments/capsule_bench/targets/gemmini/target_experiment.yaml"
+    corpus = tmp_path / "release/payload/corpus"
+    (corpus / "isa").mkdir(parents=True)
+    model = corpus / "model/fixture"
+    model.mkdir(parents=True)
+    weight = model / "capsule.weights.safetensors"
+    weight.write_bytes(b"private model weights")
+    manifest = model / "capsule.weights.safetensors.manifest.json"
+    manifest.write_text("{}")
+    te = replace(load_target_experiment(descriptor), capsule_corpus=corpus / "isa")
+    assert {weight, manifest} <= set(weight_files(te))
+    surfaces = answer_surfaces(te)
+    argv = BW.apply_answer_masks(["--ro-bind", str(corpus), str(corpus)], surfaces)
+    assert not BW.is_exposed(argv, weight)
+    assert not BW.is_exposed(argv, manifest)
+
+
 def test_expected_instruction_coverage_is_an_answer_surface_and_audit_token(tmp_path):
     """The structural grading expectation must be as private as the numerical golden."""
     descriptor = repo_root() / "merlin/experiments/capsule_bench/targets/gemmini/target_experiment.yaml"

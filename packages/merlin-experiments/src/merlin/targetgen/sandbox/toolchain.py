@@ -21,12 +21,13 @@ from __future__ import annotations
 
 import os
 import shlex
+import sys
 from collections import UserDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from merlin.common.paths import compat_lib_dir, env, ext_path, repo_root
+from merlin.common.paths import compat_lib_dir, env, ext_path, python_source_dir, repo_root
 from merlin.targetgen.target_experiment import TargetExperiment
 
 # --------------------------------------------------------------------------- universal toolchain
@@ -66,13 +67,51 @@ class ToolchainPaths:
     @classmethod
     def from_checkout(cls) -> ToolchainPaths:
         repo = repo_root()
+        from merlin.llvmlower.toolchain import clang_for
+
+        # The whole-model compiler and the agent sandbox must see the same LLVM
+        # install. Detached checkouts need not contain third_party/llvm-install;
+        # an explicitly selected MERLIN_CLANG may live in a shared toolchain.
+        selected_clang = clang_for(repo, os.environ)
+        selected_llvm = repo / "third_party/llvm-install"
+        if (
+            selected_clang.is_absolute()
+            and selected_clang.name == "clang-23"
+            and selected_clang.parent.name == "bin"
+            and selected_clang.is_file()
+            and (selected_clang.parent / "mlir-opt").is_file()
+        ):
+            selected_llvm = selected_clang.parent.parent.resolve()
+        checkout_venv = repo / ".venv"
+        selected_venv = (
+            Path(sys.prefix).resolve()
+            if not checkout_venv.is_dir() and sys.prefix != sys.base_prefix
+            else checkout_venv
+        )
+        clang_default = (
+            selected_llvm
+            if selected_llvm != repo / "third_party/llvm-install"
+            else repo / "build/host-merlin-release/install"
+        )
+        # Historical bundle manifests grant the package at merlin/python/merlin,
+        # while new releases grant the selected installed source at src/merlin.
+        # Both roots remain hidden by bwrap until exact grants are replayed;
+        # searching both makes the legacy and selected manifests executable
+        # without exposing an ungranted checkout tree.
+        legacy_source = repo / "merlin/python"
+        import_roots = (
+            (str(legacy_source), str(python_source_dir()))
+            if legacy_source.is_dir()
+            else (str(python_source_dir()),)
+        )
         return cls(
             repo=repo,
-            venv=str(repo / ".venv"),
-            llvm=str(repo / "third_party/llvm-install"),
+            venv=str(selected_venv),
+            llvm=str(selected_llvm),
             compat_lib=str(compat_lib_dir()),
-            clang_install=env("MERLIN_CLANG_INSTALL", str(repo / "build/host-merlin-release/install")),
+            clang_install=env("MERLIN_CLANG_INSTALL", str(clang_default)),
             uv_python=os.path.expanduser("~/.local/share/uv"),
+            python_import_roots=import_roots,
         )
 
     @property
@@ -306,10 +345,16 @@ def sandbox_env(
     # NOTE: do NOT put {LLVM}/lib on LD_LIBRARY_PATH — it shadows system libLLVM and breaks the host C/C++
     # compilers. mlir-opt/llc find their libs via rpath.
     parts.append(f"export LD_LIBRARY_PATH={ld}${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}; ")
+    if not ws.is_absolute() or ":" in str(ws) or "\0" in str(ws):
+        raise ValueError("sandbox workspace must be an absolute Python import root")
+    # The controller sets PYTHONSAFEPATH=1, so python -c never adds the working
+    # directory implicitly. The broker clients are staged here, and candidate
+    # modules also need this explicit, writable import root inside the box.
     if paths.python_import_roots is None:
-        parts.append(f"export PYTHONPATH={paths.repo}/merlin/python${{PYTHONPATH:+:$PYTHONPATH}}; ")
+        roots = f"{paths.repo}/merlin/python:{ws}"
+        parts.append(f"export PYTHONPATH={shlex.quote(roots)}${{PYTHONPATH:+:$PYTHONPATH}}; ")
     else:
-        parts.append(f"export PYTHONPATH={shlex.quote(':'.join(paths.python_import_roots))}; ")
+        parts.append(f"export PYTHONPATH={shlex.quote(':'.join((*paths.python_import_roots, str(ws))))}; ")
     harness = curated_harness_dir(te) if harness is None else harness
     if harness:
         # A target-neutral var + the per-target-named one back-compat consumers read. The per-target name

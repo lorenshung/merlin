@@ -28,6 +28,13 @@ pytestmark = pytest.mark.target("gemmini", "mx_gemmini", "atlas", "radiance")
 _TARGETS = ["gemmini", "atlas", "radiance", "mx_gemmini"]
 
 
+def _axis(entry: dict) -> str | None:
+    """The axis a synthesized profile entry was written for. Synthesis annotates it under
+    ``generalization`` -- the key the generator reads; ``semantic`` is a free-form op label that is
+    discarded (see ``test_synth_axis_annotation_survives``)."""
+    return (entry.get("generalization") or {}).get("generalization_axis")
+
+
 def _spec(target: str) -> dict:
     p = merlin_dir() / "contract/capsules/conformance" / f"{target}.yaml"
     if not p.is_file():
@@ -64,9 +71,7 @@ def test_every_declared_region_is_either_a_capsule_or_a_named_hole(target):
     if not required:
         pytest.skip(f"{target} declares no batched or layout region")
     res = CS.synthesize(doc)
-    made = {
-        e["name"] for e in res["capsules"] if (e.get("semantic") or {}).get("generalization_axis") in ("rank", "layout")
-    }
+    made = {e["name"] for e in res["capsules"] if _axis(e) in ("rank", "layout")}
     holes = " ".join(res["provenance"].get("shape_regions_no_writer_can_express") or ())
     for req in required:
         probe = req["probe"]
@@ -121,9 +126,7 @@ def test_a_shape_region_takes_its_extents_from_the_builder_not_the_probe():
     expresses the region -- the batched golden needs its contraction dim a multiple of 32 where the probe
     offers one tile -- so passing it through built an interface that then failed in the golden."""
     doc = _spec("mx_gemmini")
-    entries = [
-        e for e in CS.synthesize(doc)["capsules"] if (e.get("semantic") or {}).get("generalization_axis") == "rank"
-    ]
+    entries = [e for e in CS.synthesize(doc)["capsules"] if _axis(e) == "rank"]
     if not entries:
         pytest.skip("mx_gemmini synthesizes no batched capsule in this checkout")
     for e in entries:
@@ -166,14 +169,22 @@ def test_the_batched_capsule_really_carries_a_rank_3_operand():
     from merlin.targetgen.corpora import descriptor_path
     from merlin.targetgen.target_experiment import load_target_experiment
 
-    target = "mx_gemmini"
-    doc = _spec(target)
-    entries = [
-        e for e in CS.synthesize(doc)["capsules"] if (e.get("semantic") or {}).get("generalization_axis") == "rank"
-    ]
-    if not entries:
-        pytest.skip(f"{target} synthesizes no batched capsule in this checkout")
-    prof = PROFILES.load_profile(target, **for_target(target).profile_inputs())
+    # Any declared target whose rank axis yields a batched entry AND whose profile resolves with the
+    # support providers selected here: the property is the builder's, not one target's.
+    unavailable = {}
+    for target in _TARGETS:
+        entries = [e for e in CS.synthesize(_spec(target))["capsules"] if _axis(e) == "rank"]
+        if not entries:
+            unavailable[target] = "synthesizes no batched entry"
+            continue
+        try:
+            prof = PROFILES.load_profile(target, **for_target(target).profile_inputs())
+        except (ValueError, LookupError, OSError) as exc:  # e.g. its support provider is not selected
+            unavailable[target] = f"{type(exc).__name__}: {exc}"
+            continue
+        break
+    else:
+        pytest.skip(f"no declared target can build a batched capsule here: {unavailable}")
     binding = CSPEC.derive_binding(load_target_experiment(descriptor_path(target)), prof.get("datapath") or {})
     cap, mlir = CSPEC.build(SWEEPS._resolve_flat_extents(entries[0], binding), binding)
     assert "matmul_batched" in mlir, "the capsule must reach the dialect's batched contraction"
@@ -214,7 +225,7 @@ def test_a_host_lane_capsule_is_written_by_the_frontend_or_reported(target):
 
     doc = _spec(target)
     res = CS.synthesize(doc)
-    emitted = [e for e in res["capsules"] if (e.get("semantic") or {}).get("generalization_axis") == "host_lane"]
+    emitted = [e for e in res["capsules"] if _axis(e) == "host_lane"]
     for e in emitted:
         assert e["op"] not in BUILDERS, (
             f"{e['name']} uses {e['op']!r}, which has an iface builder; its capsule would assert the "
@@ -226,12 +237,14 @@ def test_a_host_lane_capsule_is_written_by_the_frontend_or_reported(target):
     required = {f"{p['family']}/{p['dtype']}" for p in ((doc.get("host_lane") or {}).get("required") or [])}
     narrow = {str(f) for f in ((doc.get("host_only") or {}).get("families") or ())}
     holes = " ".join(res["provenance"].get("host_only_unsynthesizable") or ())
-    made = {f"{e['op']}" for e in emitted}
+    made = {e["name"] for e in emitted}
     for key in sorted(required):
-        fam = key.split("/")[0]
+        fam, dtype = key.split("/", 1)
         if fam in narrow:
             continue  # the narrow axis carries this family
-        assert key in holes or made, f"{target}: {key} produced neither a capsule nor a reported hole"
+        # Per PAIR: a capsule for some other pair does not cover this one.
+        name = f"{CS.SYNTH_PREFIX}_host_lane_{fam}_{dtype}".replace("-", "_").replace(".", "_")
+        assert name in made or key in holes, f"{target}: {key} produced neither a capsule nor a reported hole"
 
 
 # --------------------------------------------------------------------- the epilogue axis
@@ -248,7 +261,9 @@ def test_the_epilogue_axis_evidences_every_stage_it_requires(target):
     for req in axis.get("required") or []:
         assert req["evidenced_by"], f"{target}/{req['stage']} is required with no evidence"
         for src in req["evidenced_by"]:
-            assert src in ("manifest_composed_with", "isa_instruction_class")
+            assert src in (
+                "manifest_composed_with", "isa_instruction_class", "readout_applies", "contraction_stage_route"
+            )
         if "isa_instruction_class" in req["evidenced_by"]:
             assert req["isa_classes"], "an ISA-evidenced stage must name the class it resolved"
     # A stage neither source evidences is rejected WITH its reason, never silently absent.
@@ -268,21 +283,71 @@ def test_a_target_whose_isa_declares_a_fusion_role_gets_the_stage():
     )
 
 
+def test_a_stage_the_readout_applies_stays_required_when_its_family_also_runs_standalone(monkeypatch):
+    """A family declared standalone is no longer `composed_with` anything, but the readout still fuses
+    the stages it declares onto a contraction. Those stages stay required, evidenced by the readout;
+    a stage no readout applies is still refused, and nothing applied means nothing required."""
+    from types import SimpleNamespace
+
+    from merlin.targetgen import eligibility as E
+    from merlin.targetgen import isa_taxonomy as IT
+    from merlin.targetgen import readout_facet as RF
+
+    standalone = SimpleNamespace(composed_with=())
+    monkeypatch.setattr(E, "capability_map_for_target", lambda _t: {"elementwise_map": standalone})
+    monkeypatch.setattr(IT, "taxonomy_for_target", lambda _t: (_ for _ in ()).throw(LookupError("none")))
+    readout = SimpleNamespace(selector="i8", applies=frozenset({"relu", "acc_scale"}))
+    monkeypatch.setattr(RF, "epilogue_readouts", lambda _t: [readout])
+    monkeypatch.setattr(RF, "epilogue_stage_routes", lambda _t: ())
+    axis = CF._epilogue_axis("synthetic")
+    required = {r["stage"]: r["evidenced_by"] for r in axis["required"]}
+    assert required.get("relu") == ["readout_applies"] and required.get("acc_scale") == ["readout_applies"]
+    rejected = {r["stage"] for r in axis["rejected"]}
+    assert "requant" in rejected and "requant" not in required
+    monkeypatch.setattr(RF, "epilogue_readouts", lambda _t: None)
+    assert CF._epilogue_axis("synthetic")["required"] == []
+
+
+@pytest.mark.target("gemmini")
+def test_the_systolic_readout_keeps_its_fused_stages_required():
+    """gemmini's elementwise_map is standalone (accumulate-on-load), and its readout still applies
+    relu and accumulator scale. Bias is a separate contraction accumulator-seed route."""
+    from merlin.targetgen.readout_facet import epilogue_readouts, epilogue_stage_routes
+
+    try:
+        readouts = epilogue_readouts("gemmini")
+    except Exception as exc:  # noqa: BLE001 -- no selected provider means no declaration to read
+        pytest.skip(f"no gemmini readout declaration is selected: {type(exc).__name__}: {exc}")
+    if not readouts:
+        pytest.skip("no gemmini support provider declaring readouts is selected (MERLIN_TARGET_PATH)")
+    axis = CF._epilogue_axis("gemmini")
+    required = {r["stage"]: r["evidenced_by"] for r in axis.get("required") or []}
+    for stage in ("relu", "acc_scale"):
+        assert "readout_applies" in required.get(stage, []), (stage, required)
+    assert "contraction_stage_route" in required.get("bias_add", []), required
+    assert "readout_applies" not in required["bias_add"]
+    assert epilogue_stage_routes("gemmini")
+    assert "manifest_composed_with" in required.get("maxpool", [])
+
+
 @pytest.mark.parametrize("target", ["gemmini"])
 def test_every_required_stage_becomes_a_capsule(target):
     """The point of the axis. A (family, dtype, alignment) cell cannot say WHICH epilogue rides the
     contraction, so a corpus derived from cells alone tests whichever single stage the cell axis picked
     and reports the fusion capability covered."""
     doc = _spec(target)
+    # The tracked conformance YAML is a frozen release input. Exercise today's selected provider
+    # derivation, so an old readout claim cannot keep this test green after the route changes.
+    doc["epilogue"] = CF._epilogue_axis(target)
     required = {r["stage"] for r in ((doc.get("epilogue") or {}).get("required") or [])}
     if not required:
         pytest.skip(f"{target} evidences no epilogue stage")
-    made = {
-        tuple(e.get("epilogue") or [])[0]
-        for e in CS.synthesize(doc)["capsules"]
-        if (e.get("semantic") or {}).get("generalization_axis") == "epilogue"
-    }
+    made = {tuple(e.get("epilogue") or [])[0] for e in CS.synthesize(doc)["capsules"] if _axis(e) == "epilogue"}
     assert made == required, f"{target}: required {sorted(required)}, synthesized {sorted(made)}"
+    if any("contraction_stage_route" in r["evidenced_by"] for r in doc["epilogue"]["required"]):
+        routed = {r["stage"] for r in doc["epilogue"]["required"]
+                  if "contraction_stage_route" in r["evidenced_by"]}
+        assert routed <= made, "a selected route must synthesize its capsule without an authored entry"
 
 
 def test_a_pooling_stage_leaves_its_geometry_to_the_generator():

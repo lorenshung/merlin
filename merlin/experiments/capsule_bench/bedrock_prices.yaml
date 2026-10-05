@@ -55,3 +55,12 @@ deepseek:                     [0.74, 2.22, 0.074, 0.93]   # substring fallback
 # not be used for a quoted figure.
 gpt-5.6-sol: [5.00, 30.00, 0.50, 5.00]
 gpt-5.6:     [5.00, 30.00, 0.50, 5.00]   # substring fallback for the family
+
+# gpt-6-sol: a whole-model measured launch first ran under this alias's own identity on 2026-09-29;
+# earlier sessions that asked for it silently ran gpt-5.6-sol instead (a stale alias fell through to
+# the driver default), so it had never been priced. NO published per-token rate has been located for
+# it, so this carries gpt-5.6-sol's ESTIMATE over as a placeholder of the same family -- an explicit
+# carry-over, not a sourced figure. The seat is never metered, so it never enters estimated_cost_usd.
+# REPLACE with gpt-6-sol's own published rate once one exists.
+gpt-6-sol: [5.00, 30.00, 0.50, 5.00]
+gpt-6:     [5.00, 30.00, 0.50, 5.00]   # substring fallback for the family

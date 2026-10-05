@@ -47,7 +47,7 @@ def gated_adapter(inner: Callable, *, log: list | None = None, target: str, fact
                 raise RC.RtlChecksUnavailable("selected RTL check provider returned malformed fact projection")
             trace = RD.decode_text(llvm_text, source="circt_gate", target=target)
             rep = RC.screen(trace, None, rc_facts, target=target, checks=checks)
-            verdict = rep.verdict  # 'ok' | 'warn' | 'reject'
+            verdict = rep.verdict  # 'ok' | 'warn' | 'reject' | 'vacuous'
         except Exception as exc:
             # Unavailable evidence cannot pass, but must not suppress the scientific oracle.
             reason = f"{type(exc).__name__}: {exc}"
