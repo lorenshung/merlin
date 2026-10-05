@@ -9,9 +9,10 @@ Target-appropriate semantics (they are genuinely different pipelines, not a fals
   * ``--target rvv``     — compile a whole captured MODEL: resolve/capture the model2MLIR bundle →
                            lower (native RVV) → cross-compile the runtime binary → optionally run on
                            host/K1 → gate the output vs the captured ``golden.npy``.
-  * ``--target gemmini`` — compile a Gemmini OOT backend PACKAGE and run a capsule through it: build
-                           the package → run the capsule on spike/verilator → three-way correctness
-                           gate (the accelerator runs kernels/capsules, not whole VLA models).
+  * OOT targets         — compile a generated backend PACKAGE and run a capsule through it.
+  * ``--model-build``   — compile an explicitly saved capture with a selected host package and
+                           bare-metal board; optionally check its complete output on a simulator.
+                           Without device routing this is a host baseline, not accelerator offload.
 
 Fail-closed + honest: a missing toolchain / board / sim yields a clear ``status`` (never a fake pass);
 correctness gates before any success is reported. This CLI only ORCHESTRATES the existing, tested API
@@ -27,8 +28,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-# Everything below `main`'s own steps lives in `merlin.compile` and is re-exported here, so
-# `merlin.compile_cli.<name>` keeps resolving for callers. A re-export is a second binding: patching it
+# The exact helpers historically extracted from this facade remain re-exported here, so
+# `merlin.compile_cli.<name>` keeps resolving for callers. New module APIs do not
+# export their private implementation through this facade. A re-export is a second binding: patching it
 # does not reach callers in the defining module, so tests patch a name where it is DEFINED
 # (enforced by merlin/tests/infra/test_compile_cli_patch_targets.py).
 from .compile.bundles import (  # noqa: F401 -- re-exported
@@ -156,6 +158,8 @@ def _workload_features(pkg, bundle, out: dict, harts: int = 1) -> list[str]:
     already fits compiles byte-identically and existing measurements stand. The substitution is
     reported in the result dict and on stderr, never silently: it changes the emitted kernel.
     """
+    if getattr(pkg, "backend", "rvv") == "scalar":
+        return []
     frozen = list(pkg.compiler_features)
     try:
         from .mining.apply import blocking_risks, shape_adapted_features
@@ -250,10 +254,14 @@ def compile_rvv(
     mesh_target: str | None = None,
     mesh_package: str | None = None,
     numeric_policy: dict | None = None,
+    transform_audit: bool | str | None = None,
     bundle_path: str | Path | None = None,
     capture_bundle: str | Path | None = None,
     deadline_ns: int | None = None,
     board: str | None = None,
+    device: Any | None = None,
+    selected_host_dts_required: bool = False,
+    expected_board_target: str | None = None,
 ) -> dict:
     """RVV whole-model: resolve/capture → lower → build → (run) → (gate vs golden).
 
@@ -285,7 +293,18 @@ def compile_rvv(
             }
         from .runtime.boards import board as _selected_board
 
-        _selected_board(board)  # Reject unknown boards before capture or work allocation.
+        selected_board = _selected_board(board)  # Reject unknown boards before capture or work allocation.
+        if selected_board.flow != "zephyr":
+            return {
+                "tool": "merlin-compile",
+                "target": "rvv",
+                "workload": workload,
+                "status": "not_run",
+                "reason": (
+                    f"{board}: {run} model route builds a Zephyr image; selected board flow "
+                    f"{selected_board.flow!r} has no qualified compile_cli bare-metal execution path"
+                ),
+            }
 
     # TWO ways a caller pins the capture rather than letting the mutable registry resolve the workload
     # name again -- with DIFFERENT completeness contracts, which is why they stay separate parameters
@@ -337,6 +356,7 @@ def compile_rvv(
         raise FileNotFoundError(f"explicit capture bundle has neither model.mlir nor a version-2 session: {bundle}")
     pkg_dir = package or default_package(dtype, bundle=bundle)
     pkg = load_rvv_package(pkg_dir)
+    package_backend = getattr(pkg, "backend", "rvv")
     work = Path(tempfile.mkdtemp(prefix=f"merlin_compile_{workload}_{dtype}_"))
     out: dict = {
         "tool": "merlin-compile",
@@ -405,6 +425,7 @@ def compile_rvv(
             mesh_target=mesh_target,
             mesh_package=mesh_package,
             numeric_policy=numeric_policy,
+            transform_audit=transform_audit,
         )
         if kernel_backend == "mesh":
             # THIS MODEL's own layers: how many of its matmuls reached the accelerator and how many
@@ -446,6 +467,9 @@ def compile_rvv(
                 # routing is deliberately separate: it cannot prove that a host island or mesh call ran.
                 "mesh_route_symbols": res.get("mesh_route_symbols"),
                 "dispatch_ledger": res.get("dispatch_ledger"),
+                "outlined_dispatches": res.get("outlined_dispatches"),
+                "transform_audit_index": res.get("transform_audit_index"),
+                "transform_audit_qualification": res.get("transform_audit_qualification"),
                 # Static structure of THIS runtime outline, compared with the target-admitted
                 # groups on the same normalized module. The ledger above remains the independent
                 # evidence of dynamic execution; neither can substitute for the other.
@@ -504,6 +528,32 @@ def compile_rvv(
     # multicore or sustained); the K1 route builds a Linux binary for the board.
     if run in ("spike", "zephyr", "verilator"):
         out["board"] = board
+        selected_dts = os.environ.get("MERLIN_HOST_DTS")
+        if selected_host_dts_required and (
+            selected_board.target != expected_board_target or not selected_board.host_dts_sha256
+        ):
+            out["status"] = "not_run"
+            out["reason"] = "selected board must bind the requested target and an elaborated host DTS SHA256"
+            return out
+        if selected_host_dts_required and not selected_dts:
+            out["status"] = "not_run"
+            out["reason"] = "targeted board host execution requires MERLIN_HOST_DTS for ISA verification"
+            return out
+        if selected_dts:
+            from .compile.host_lane import require_host_isa_dts
+
+            try:
+                out["host_isa"] = require_host_isa_dts(
+                    pkg.cflags,
+                    selected_dts,
+                    expected_sha256=selected_board.host_dts_sha256 if selected_host_dts_required else None,
+                )
+            except (OSError, ValueError) as exc:
+                out["status"] = "not_run"
+                out["reason"] = str(exc)
+                return out
+            out["host_dts"] = selected_dts
+            out["host_dts_check"] = "board_bound" if selected_host_dts_required else "diagnostic"
         if not zm.available():
             out["status"] = "not_run"
             out["reason"] = "Zephyr/spike toolchain unavailable (ZEPHYR_BASE / SDK / MERLIN_CHIPYARD)"
@@ -515,16 +565,23 @@ def compile_rvv(
                 bundle,
                 work,
                 board=board,
-                backend="rvv",
+                backend=package_backend,
                 rvv_hart=0,
                 int8_compute=pkg.is_int8,
-                rvv_schedule=pkg.schedule_text,
-                cflags_override=pkg.cflags + zm._CFLAGS_COMMON,
+                rvv_schedule=pkg.schedule_text if package_backend == "rvv" else None,
+                cflags_override=pkg.cflags + [flag for flag in zm._CFLAGS_COMMON if flag not in pkg.cflags],
                 features=frozenset(fs) or None,
                 n_harts=harts,
                 iters=iters,
                 warmup=warmup,
                 cpus=max(2, harts),
+                # THE ROUTING DECISION REACHES THE EMISSION. `device` is the placement's own
+                # `DeviceRouting`, computed by the caller BEFORE this build (see
+                # `compile_model`). It used to be absent here entirely, which made the whole
+                # offload path unreachable from a compile however the placement decided: a
+                # "compiled" whole model ran its contractions on the host while the artifact that
+                # would have run them on the device was never asked for. `None` moves nothing.
+                device=device,
             )
 
         try:
@@ -564,8 +621,11 @@ def compile_rvv(
             from merlin.runtime.boards import board as _board_desc
 
             res = zm.run_on_spike(
-                b["elf"], dram_base=_board_desc(board).dram_base,
-                harts=max(2, harts), mem_bytes=b["ram_bytes"], timeout=timeout,
+                b["elf"],
+                dram_base=_board_desc(board).dram_base,
+                harts=max(2, harts),
+                mem_bytes=b["ram_bytes"],
+                timeout=timeout,
             )
             if refs:
                 res.update(zm._gate(res["prefix"], refs))
@@ -589,6 +649,10 @@ def compile_rvv(
     # would compile the whole model TWICE — for TinyLlama int8 that is ~40 min of clang thrown
     # away, enough to push the run past its own timeout. Build directly only when nothing else
     # will.
+    if package_backend == "scalar":
+        out["status"] = "not_run"
+        out["reason"] = "scalar package has no K1 Linux build path; select a scalar board build"
+        return out
     if run != "k1":
         # `--harts N` reaches THIS build too. It used not to: the flag was plumbed only to the
         # run-on-hardware routes, so `--run none --harts 8` produced a single-core binary and
@@ -719,6 +783,130 @@ def _summarize_route_plan(plan: dict) -> dict:
     }
 
 
+def _route_before_build(
+    target: str,
+    linalg_mlir: str,
+    *,
+    datapath: str,
+    device_package: str | None = None,
+    model: str = "",
+    capture: str | Path | None = None,
+    granularity: str = "contraction",
+) -> dict:
+    """Everything the EMISSION needs decided BEFORE it runs: where each op goes, and what the device
+    is asked to build.
+
+    This function exists because of an ordering defect, not for tidiness. ``compile_model`` used to
+    compute its ``Placement`` *after* ``compile_rvv`` had already lowered, built and run the model,
+    so the decision could not reach the emission however it came out: a routing that put every
+    contraction on an accelerator was recorded beside an image that ran all of them on the host, and
+    the two read as one result. Placement is an INPUT to a build or it is a commentary on one.
+
+    Returns the plan, the placement record, the ``DeviceRouting`` the build should be given (or None
+    with the reason it could not be derived), and the group-by-group offload census. Optional placement
+    modelling gaps are recorded as named ``why`` entries. A structurally incomplete contraction
+    inventory is different: it raises rather than constructing a misleading placement or coverage claim.
+    """
+    from .llvmlower import group_offload as GO
+    from .targetgen import capsule_source as CSRC
+    from .targetgen import routing as _routing
+
+    record: dict = {"target": target}
+    # Route on the EXACT registry format name, not the compile-mode token -- see the note at the
+    # call site in `compile_model`.
+    # The placement and its coverage denominator must describe every parsed
+    # contraction.  The tag-only reader can silently lose generic-printed
+    # regions, yielding a zero-mesh plan beside successful device dispatch.
+    demands = CSRC.model_op_demands_checked(linalg_mlir, datapath)
+    shadow = _routing.route_plan(demands, target)
+    record["plan"], record["authority"] = shadow, "routing.route_plan"
+    placement = None
+    try:
+        from .system.derive import system_for_experiment as _sysfor
+        from .system.place import measured_cost_for as _cost_for
+        from .system.place import place as _place
+
+        system, host_why = _sysfor(target)
+        placement = _place(demands, system, cost=_cost_for(system))
+        projected = placement.as_route_plan()
+        divergence = {
+            key: {"placement": len(projected[key]), "route_plan": len(shadow[key])}
+            for key in ("mesh", "fallback", "scalar_rvv")
+            if len(projected[key]) != len(shadow[key])
+        }
+        record["plan"] = projected
+        record["authority"] = "system.place (routing.route_plan is the cross-check)"
+        record["placement"] = {
+            **placement.to_dict(),
+            "host": host_why,
+            "authority": record["authority"],
+            "divergence": divergence or None,
+        }
+    except Exception as exc:  # noqa: BLE001 -- a modelling gap must not fail a compile
+        record["placement"] = {
+            "status": "unavailable",
+            "authority": "routing.route_plan (placement unavailable)",
+            "why": f"{type(exc).__name__}: {exc}",
+        }
+
+    # ONE DEVICE CALL PER CLOSED GROUP. Not per contraction: a captured layer is a contraction plus
+    # the readout stages the unit absorbs, and routing only the contraction leaves the bias, the
+    # requantize and the activation on the host -- a different program from the one a whole-model
+    # schedule emits, reported under the same name.
+    try:
+        from .common import mlir_query as _mq
+        from .xdsl_dialects.lowering import stream_plan as _stream_plan
+
+        # WHICH ARGUMENT IS STORED, from the capture's own weights manifest. Without it a first
+        # layer whose two operands are both model arguments cannot be told apart -- and the honest
+        # outcome is that group refusing BY NAME, not a guess about which side holds the weight.
+        # Hence `capture`: a compile pinned to a bundle can read the manifest beside it, where one
+        # handed a module as text has nothing to read and says so per group.
+        offload = GO.plan(
+            _mq.parse(linalg_mlir),
+            target,
+            weight_args=_stream_plan.weight_args_beside(capture if capture is not None else linalg_mlir),
+            model=model,
+        )
+        GO.require_every_group_accounted(offload)
+        record["offload"] = offload
+        record["device_program"] = offload.census()
+    except Exception as exc:  # noqa: BLE001 -- the route reports on a compile, it never fails one
+        record["device_program"] = {"status": "unavailable", "why": f"{type(exc).__name__}: {exc}"}
+
+    # The routing the build is handed. Derived from the placement, never declared: the operand and
+    # accumulate formats are what the router matched against, and a build that assumed them emits
+    # kernels in a precision the placement never chose.
+    if placement is None:
+        record["device_routing_why"] = "no placement was derivable, so there is no routing to build against"
+    elif not device_package:
+        record["device_routing_why"] = (
+            "no backend package was named, so the device side cannot be built; pass mesh_package="
+        )
+    else:
+        from .llvmlower.device_build import routing_for_placement
+
+        devices = sorted({p.device for p in placement.placed if p.on_device})
+        if len(devices) != 1:
+            record["device_routing_why"] = (
+                f"the placement names {len(devices)} device(s) ({devices}); one image carries one "
+                "device datapath, so it has to be split before it can be built"
+            )
+        else:
+            try:
+                record["device_routing"] = routing_for_placement(
+                    placement,
+                    devices[0],
+                    device_package,
+                    granularity=granularity,
+                    capture=capture,
+                    model=model,
+                )
+            except Exception as exc:  # noqa: BLE001 -- named, never silently absent
+                record["device_routing_why"] = f"{type(exc).__name__}: {exc}"
+    return record
+
+
 def compile_model(
     workload: str,
     dtype: str,
@@ -735,6 +923,9 @@ def compile_model(
     numeric_policy: dict | None = None,
     routing_dtype: str | None = None,
     capture_bundle: str | Path | None = None,
+    offload: bool = False,
+    offload_granularity: str = "contraction",
+    transform_audit: bool | str | None = None,
 ) -> dict:
     """Target-aware whole-model compile. Routes each op across the target's compute units (matmul/systolic
     tiles -> the mesh, norms/activations/elementwise -> the vector/scalar lane) via
@@ -763,7 +954,54 @@ def compile_model(
     (``mesh_program_run.demands_from_module`` + ``mesh_matmul_extents``); (b) each layer compiles at its
     real MxKxN and the OOT backend tiles it. RESIDUAL: (c) it is still host-driven multi-kernel — one
     program dispatching several mesh kernels + the scalar lane, not yet ONE fused kernel in a single device
-    address space. That last slice is the OOT backend emitting the whole loop nest inline."""
+    address space. That last slice is the OOT backend emitting the whole loop nest inline.
+
+    ``offload_granularity`` decides WHAT the build then moves: ``"contraction"`` (the default, and
+    what every existing caller gets) routes the multiply-accumulate alone and leaves each layer's
+    bias, requantize, activation and pooling on the host; ``"group"`` routes the closed compute group,
+    so one device call stands for the whole layer and the kernel is built from the layer's own stated
+    program rather than from its extents. The two compute different programs on the device, which is
+    why this is an explicit request and not a default that changed under callers.
+
+    ``offload`` decides whether the derived ``DeviceRouting`` is HANDED TO THE BUILD, and it defaults
+    to off on purpose. The routing and the group-by-group census are computed and reported either way
+    (``out["device_routing"]``, ``out["device_program"]``), so a caller can see what WOULD move
+    without moving it. Deriving a routing is not the same act as building against one: every caller
+    that already passes ``mesh_package`` would otherwise have started emitting device calls the
+    moment the derivation became possible, which is a change to what those builds compute and belongs
+    to whoever asked for it rather than to this function."""
+    # BEFORE THE BUILD, because a decision taken after one is a commentary on it. Everything the
+    # emission needs -- the placement, the device routing derived from it, and the group-by-group
+    # offload census -- is computed here so `device=` below carries a real decision into the
+    # lowering. This block used to sit AFTER the two `compile_rvv` calls, which is why the whole
+    # offload path was unreachable from a compile no matter how the placement came out.
+    _pre: dict = {}
+    if target and linalg_mlir:
+        try:
+            _pre = _route_before_build(
+                target,
+                linalg_mlir,
+                # Route on the EXACT registry format name, not the compile-mode token. `dtype` here
+                # is a compile mode (one of _RVV_DTYPES: "int8", "fp8", ...) chosen for the RVV
+                # lowering; a target declares its datapath with the precise format ("fp8_e4m3").
+                # Feeding the compile token to the router made every fp8 demand carry in_fmt="fp8"
+                # while the unit declared "fp8_e4m3", so a whole model routed 0 of its 15
+                # contractions to a mesh that supports every one of them. Threading the exact name
+                # is also the SAFE fix: an "fp8" -> "fp8_e4m3" alias would route e5m2 data onto an
+                # e4m3 unit, which is why the registry omits that alias.
+                datapath=routing_dtype or dtype,
+                device_package=mesh_package,
+                model=workload,
+                capture=(Path(capture_bundle) / "model.mlir") if capture_bundle else None,
+                granularity=offload_granularity,
+            )
+        except Exception as e:  # noqa: BLE001 — a routing failure must not mask the functional result
+            _pre = {"error": f"{type(e).__name__}: {e}"}
+    # DERIVING A ROUTING IS NOT BUILDING AGAINST ONE. `offload` is the caller's request; without it
+    # the build is handed nothing and is byte-identical to before, while the record below still says
+    # what the placement decided and which groups would have moved.
+    _device = _pre.get("device_routing") if offload else None
+
     # run=="mesh": execute the model's matmul layers on the target accelerator mesh (host dispatch runtime
     # with mesh routing); otherwise the plain RVV/scalar reference (host/spike/...).
     if run == "mesh":
@@ -779,7 +1017,9 @@ def compile_model(
             mesh_target=target,
             mesh_package=mesh_package,
             numeric_policy=numeric_policy,
+            transform_audit=transform_audit,
             capture_bundle=capture_bundle,
+            device=_device,
         )
     else:
         out = compile_rvv(
@@ -790,22 +1030,30 @@ def compile_model(
             package=package,
             auto_capture=auto_capture,
             timeout=timeout,
+            transform_audit=transform_audit,
             capture_bundle=capture_bundle,
+            device=_device,
+            selected_host_dts_required=target is not None,
+            expected_board_target=target,
         )
     out["requested_target"] = target
+    if _pre.get("device_program") is not None:
+        out["device_program"] = _pre["device_program"]
+    if _pre.get("device_routing") is not None:
+        out["device_routing"] = {
+            "device": _pre["device_routing"].device,
+            "package_dir": str(_pre["device_routing"].package_dir),
+            "operand_dtype": _pre["device_routing"].operand_dtype,
+            "accum_dtype": _pre["device_routing"].accum_dtype,
+        }
+    elif _pre.get("device_routing_why"):
+        # WHY NOTHING WAS OFFLOADED, rather than nothing. An absent routing and a routing that
+        # decided against offloading are different facts, and only one of them is a gap to close.
+        out["device_routing"] = {"status": "unavailable", "why": _pre["device_routing_why"]}
     if target and linalg_mlir:
         try:
-            from .targetgen import capsule_source as CSRC
-            from .targetgen import routing as _routing
-
-            # Route on the EXACT registry format name, not the compile-mode token. `dtype` here is a
-            # compile mode (one of _RVV_DTYPES: "int8", "fp8", ...) chosen for the RVV lowering; a
-            # target declares its datapath with the precise format ("fp8_e4m3"). Feeding the compile
-            # token to the router made every fp8 demand carry in_fmt="fp8" while the unit declared
-            # "fp8_e4m3", so a whole model routed 0 of its 15 contractions to a mesh that supports every
-            # one of them. Threading the exact name is also the SAFE fix: an "fp8" -> "fp8_e4m3" alias
-            # would route e5m2 data onto an e4m3 unit, which is why the registry omits that alias.
-            demands = CSRC.model_op_demands(linalg_mlir, routing_dtype or dtype)
+            if _pre.get("error"):
+                raise RuntimeError(_pre["error"])
             # THE PLACEMENT DECIDES; THE ROUTER IS ITS LEGALITY ORACLE AND ITS CROSS-CHECK.
             #
             # `place` used to run in shadow while `route_plan` decided, because the two surfaces had to
@@ -822,42 +1070,11 @@ def compile_model(
             # `emulated` (an op the host took whose format the host cannot natively carry, so the
             # lowering has to emulate it) becomes statable for the first time.
             #
-            # The cost model is passed rather than defaulted. `measured_cost_for` returns None on every
-            # target today because no unit's contract records a measured rate, so pricing is inert here
-            # and placement stays declaration-order -- but a rate landing in a contract now changes the
-            # decision without changing this call, which is the whole point of `select` taking a cost.
-            #
-            # FAIL SOFT, AND SAY SO: if the system cannot be derived, the router decides and the record
-            # names it as the authority. A compile is the wrong place to discover a modelling gap.
-            _shadow = _routing.route_plan(demands, target)
-            plan, _authority = _shadow, "routing.route_plan"
-            try:
-                from .system.derive import system_for_experiment as _sysfor
-                from .system.place import measured_cost_for as _cost_for
-                from .system.place import place as _place
-
-                _system, _host_why = _sysfor(target)
-                _placement = _place(demands, _system, cost=_cost_for(_system))
-                _proj = _placement.as_route_plan()
-                _divergence = {
-                    k: {"placement": len(_proj[k]), "route_plan": len(_shadow[k])}
-                    for k in ("mesh", "fallback", "scalar_rvv")
-                    if len(_proj[k]) != len(_shadow[k])
-                }
-                plan = _proj
-                _authority = "system.place (routing.route_plan is the cross-check)"
-                out["placement"] = {
-                    **_placement.to_dict(),
-                    "host": _host_why,
-                    "authority": _authority,
-                    "divergence": _divergence or None,
-                }
-            except Exception as _exc:  # noqa: BLE001 -- a modelling gap must not fail a compile
-                out["placement"] = {
-                    "status": "unavailable",
-                    "authority": "routing.route_plan (placement unavailable)",
-                    "why": f"{type(_exc).__name__}: {_exc}",
-                }
+            # BOTH ARE READ BACK FROM `_route_before_build`, NOT RECOMPUTED. They were decided above,
+            # before the build, precisely so they could reach it; recomputing them here would let the
+            # record disagree with the decision the image was actually built under.
+            plan, _authority = _pre["plan"], _pre["authority"]
+            out["placement"] = _pre["placement"]
             out["routing_plan"] = {**_summarize_route_plan(plan), "authority": _authority}
             try:
                 from .targetgen import coverage_certificate as _cert
@@ -887,13 +1104,10 @@ def compile_model(
                 from .common import mlir_query as _mq
                 from .perf import placement_census as _census
 
-                # AT THE DATAPATH THE ROUTE WAS DECIDED AT. The demands above carry
-                # `routing_dtype or dtype` for the reason `model_op_demands` states: a capture is
-                # routed under the datapath the compiler will lower it to. The census used to read
-                # element types off the same capture instead, so its denominator answered a
-                # different question than its numerator -- on a dynamically quantized ResNet-50 it
-                # refused all 53 matmuls for `input_dtype fp32` while the route placed 54/54, and
-                # reported offload_of_eligible 1.0 over the one region that carried an i8 type.
+                # The requested datapath is retained for diagnostics, but the census
+                # judges captured operations at their observed operand formats,
+                # matching the route and the emitted groups. A requested int8
+                # datapath alone cannot certify conversion of an fp32 contraction.
                 out["placement_census"] = _census.census_of_module(
                     _mq.parse(linalg_mlir), target, datapath=routing_dtype or dtype
                 )
@@ -932,10 +1146,18 @@ def compile_model(
                 from .xdsl_dialects.lowering import compute_groups as _groups
                 from .xdsl_dialects.lowering import stream_plan as _stream
                 from .xdsl_dialects.lowering.dispatch_program import build_dispatch_program
-                from .xdsl_dialects.lowering.outline import outline_dispatches
+                from .xdsl_dialects.lowering.outline import OutlineResult, outline_dispatches
 
-                _module = _mq.parse(linalg_mlir)
-                _outlined = outline_dispatches(_module, groups=_groups.form_groups(_module, target))
+                # THE MODULE THE DEVICE ROUTE OUTLINED, when there is one. The route above already
+                # formed the groups and outlined them; outlining a second time would cost a whole
+                # second pass over the model AND let this plan describe a different dispatch table
+                # than the one the build was given.
+                _offload = _pre.get("offload")
+                if _offload is not None and _offload.module is not None:
+                    _outlined = OutlineResult(module=_offload.module, dispatches=list(_offload.dispatches))
+                else:
+                    _module = _mq.parse(linalg_mlir)
+                    _outlined = outline_dispatches(_module, groups=_groups.form_groups(_module, target))
                 out["stream_plan"] = _stream.plan(build_dispatch_program(_outlined), _outlined.dispatches)
             except Exception as e:  # noqa: BLE001 -- analysis only; never fails a compile
                 out["stream_plan"] = {"error": f"{type(e).__name__}: {e}"}
@@ -1079,7 +1301,7 @@ def compile_oot(
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="merlin-compile",
-        description="Compile RVV models or OOT capsules; inspect OOT model readiness without claiming a binary.",
+        description="Compile saved models or OOT capsules; inspect model readiness without claiming execution.",
     )
     ap.add_argument(
         "--workload",
@@ -1125,7 +1347,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--warmup", type=int, default=0, help="rvv: untimed warmup iterations before the timed ones")
     ap.add_argument(
         "--run",
-        choices=["none", "host", "k1", "spike", "zephyr", "verilator"],
+        choices=["none", "host", "k1", "spike", "zephyr", "verilator", "gsim"],
         default=None,
         help="where to run after compiling (default: rvv→k1, an OOT target→spike; 'none' = compile only)",
     )
@@ -1147,7 +1369,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--package", default=None, help="override the codegen/OOT package dir")
     ap.add_argument(
         "--board",
-        help="RVV spike/Zephyr/Verilator: board name from the selected MERLIN_BOARD_CATALOG",
+        help="board name for RVV execution or an explicitly selected bare-metal --model-build",
     )
     ap.add_argument(
         "--corpus-descriptor",
@@ -1159,7 +1381,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="read-only OOT model analysis: compare declared routes with groups in a captured program",
     )
-    ap.add_argument("--capture-bundle", help="explicit model2MLIR capture directory for --model-preflight")
+    ap.add_argument("--model-build", action="store_true", help="build one saved capture as a bare-metal ELF")
+    ap.add_argument("--capture-bundle", help="explicit saved capture for --model-preflight or --model-build")
+    ap.add_argument("--board-catalog", type=Path, help="explicit board catalog for --model-build")
+    ap.add_argument("--host-dts", type=Path, help="byte-pinned elaborated host DTS for --model-build")
+    ap.add_argument("--output", type=Path, help="fresh generated output directory for --model-build")
+    ap.add_argument("--arena-mb", type=int, help="explicit model arena size for --model-build")
+    ap.add_argument("--reference-file", help="explicit in-capture .npy reference for model execution")
+    ap.add_argument("--rtl-facts", type=Path, help="selected RTL facts for native --model-build execution")
     ap.add_argument(
         "--deployment-dtype",
         help="exact target operand format for --model-preflight (e.g. int8, bf16, fp8_e4m3)",
@@ -1168,22 +1397,52 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="emit the result dict as JSON")
     a = ap.parse_args(argv)
 
-    if a.corpus_descriptor is not None and (a.target == "rvv" or a.model_preflight):
+    if a.model_build and a.model_preflight:
+        ap.error("--model-build and --model-preflight are separate workflows")
+    if a.corpus_descriptor is not None and (a.target == "rvv" or a.model_preflight or a.model_build):
         ap.error("--corpus-descriptor applies only to OOT capsule compilation")
-    if a.board is not None and a.target != "rvv":
+    if a.board is not None and a.target != "rvv" and not a.model_build:
         ap.error("--board applies only to RVV spike/Zephyr/Verilator execution")
+    if a.capture_bundle is not None and not (a.model_preflight or a.model_build):
+        ap.error("--capture-bundle requires --model-preflight or --model-build")
+    build_only_inputs = (a.board_catalog, a.host_dts, a.output, a.arena_mb, a.reference_file, a.rtl_facts)
+    if any(value is not None for value in build_only_inputs) and not a.model_build:
+        ap.error("bare-metal build inputs require --model-build")
+    if a.model_build:
+        if not all((a.capture_bundle, a.package, a.board_catalog, a.board, a.host_dts, a.output, a.arena_mb)):
+            ap.error("--model-build requires --capture-bundle, --package (host), --board-catalog, "
+                     "--board, --host-dts, --output and --arena-mb")
+        if a.harts != 1 or a.iters != 1 or a.warmup != 0:
+            ap.error("--model-build currently supports one hart and one inference")
+        if a.run not in (None, "none", "spike", "gsim", "verilator"):
+            ap.error("--model-build supports --run none, spike, gsim or verilator")
+        if a.run not in (None, "none") and (not a.verify or not a.reference_file):
+            ap.error("model execution requires --reference-file and complete-output verification")
+        if a.run in ("gsim", "verilator") and not a.rtl_facts:
+            ap.error("native model execution requires --rtl-facts")
+    elif a.target == "rvv" and a.run == "gsim":
+        ap.error("RVV gsim execution requires an explicit --model-build and matching board")
 
     if a.model_preflight and (a.target == "rvv" or not a.capture_bundle or not a.deployment_dtype):
         ap.error("--model-preflight requires an OOT --target, --capture-bundle, and --deployment-dtype")
-    if not a.model_preflight and not a.workload:
+    if not (a.model_preflight or a.model_build) and not a.workload:
         ap.error("--workload is required for compilation")
-    if a.model_preflight:
+    if a.model_preflight or a.model_build:
         # The explicit bundle selects the model. An optional --workload supplied
         # out of habit must not become a second, possibly conflicting selector.
         a.workload = Path(a.capture_bundle).name
-    run = a.run or ("k1" if a.target == "rvv" else "spike")
+    run = a.run or ("none" if a.model_build else "k1" if a.target == "rvv" else "spike")
     try:
-        if a.model_preflight:
+        if a.model_build:
+            from .compile.baremetal_model import compile_saved_model
+
+            res = compile_saved_model(
+                capture=a.capture_bundle, package=a.package, board_catalog=a.board_catalog,
+                board=a.board, dts=a.host_dts, output=a.output, target=a.target,
+                run=run, arena_mb=a.arena_mb, timeout_s=a.timeout,
+                reference_file=a.reference_file, rtl_facts=a.rtl_facts,
+            )
+        elif a.model_preflight:
             from .compile.model_preflight import preflight_model
 
             res = preflight_model(a.capture_bundle, target=a.target, deployment_dtype=a.deployment_dtype)
@@ -1234,7 +1493,7 @@ def main(argv: list[str] | None = None) -> int:
         for k in ("binary", "cycles", "vlen", "bundle", "package"):
             if res.get(k) is not None:
                 print(f"    {k}: {res[k]}")
-    return 0 if res.get("status") in ("compiled", "ran", "verified") else 1
+    return 0 if res.get("status") in ("compiled", "ran", "verified", "verified_complete_output") else 1
 
 
 if __name__ == "__main__":

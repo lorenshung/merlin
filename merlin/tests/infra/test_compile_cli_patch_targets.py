@@ -1,6 +1,6 @@
 """A test that stands in for a compile helper must patch the module that DEFINES it.
 
-``merlin.compile_cli`` re-exports everything under ``merlin.compile`` so its callers keep resolving
+``merlin.compile_cli`` re-exports its historically extracted helpers so callers keep resolving
 ``merlin.compile_cli.<name>``. A re-export is a second binding, though. ``run_matmul_on_mesh`` lives in
 ``merlin.compile.mesh`` and resolves ``_default_oot_package`` in THAT module's namespace, so
 ``monkeypatch.setattr(compile_cli, "_default_oot_package", fake)`` replaces a name nothing on that path
@@ -27,15 +27,57 @@ from merlin.common.paths import merlin_dir
 
 _FACADE = "merlin.compile_cli"
 _PACKAGE = "merlin.compile"
+# Exact historical facade imports from the extraction commit. New module internals
+# need not become facade exports, but these existing bindings must stay intact.
+_FACADE_COMPAT_EXPORTS = {
+    # These are the bindings imported by compile_cli when the facade was split.
+    # Do not turn this into _defined_names(module): later helpers are not legacy API.
+    "bundles": (
+        "_IR_ELEMENT_ORDER", "_IR_ELEMENT_SPELLING", "_bundle_dir", "_capture_python",
+        "ir_scalar_dtype",
+    ),
+    "capacity": (
+        "_accumulator_capacity_elems", "_capacity_fit_tile", "_dtype_bits", "_dtype_bytes",
+        "_operand_store_bytes", "_operand_store_capacity_elems", "capacity_fit",
+        "declared_primitive_tile",
+    ),
+    "host_lane": (
+        "_DTYPE_STRATEGY", "_verified_against_the_pinned_lane", "default_package",
+        "host_lane_identity", "host_lane_pin_name",
+    ),
+    "mesh": (
+        "_MESH_NTILE_WIDTH", "_certify_tile_via_executor", "_default_oot_package",
+        "_matmul_via_bespoke_sim", "_matmul_via_oot_cert", "_matmul_via_program_oracle",
+        "_mesh_rows", "_mesh_tile_binding", "_mesh_verify", "run_matmul_on_mesh",
+        "tile_builder_op",
+    ),
+    "mesh_backend": (
+        "_MESH_PKG_CACHE", "_MESH_PKG_LOCK", "_MESH_REFUSAL", "_MESH_RUN_SEQ",
+        "_built_mesh_package", "_mesh_invocation_id", "_mesh_layer_id", "_refuse",
+        "_requested_mesh_simulator", "_resolve_oot_mesh_simulator",
+    ),
+    "mesh_model": (
+        "_int8_chain_policy", "_int8_chain_reference", "_int8_chain_step",
+        "run_int8_chain_on_mesh", "run_whole_model_on_mesh",
+    ),
+    "mesh_reference": ("_accum_rel_tolerance", "_reference_on_datapath"),
+    "model_preflight": ("preflight_model",),
+}
 
 
 def _is_compile_module(dotted: str | None) -> bool:
-    return bool(dotted) and (dotted == _FACADE or dotted.startswith(_PACKAGE + "."))
+    return bool(dotted) and (dotted in (_FACADE, _PACKAGE) or dotted.startswith(_PACKAGE + "."))
 
 
 def _compile_modules() -> list[str]:
-    pkg = merlin_dir() / "python" / "merlin" / "compile"
-    return [_FACADE] + sorted(f"{_PACKAGE}.{p.stem}" for p in pkg.glob("*.py") if p.stem != "__init__")
+    pkg = Path(inspect.getfile(importlib.import_module(_PACKAGE))).parent
+    modules = {_FACADE}
+    for path in pkg.rglob("*.py"):
+        parts = path.relative_to(pkg).with_suffix("").parts
+        if parts[-1] == "__init__":
+            parts = parts[:-1]
+        modules.add(".".join((_PACKAGE, *parts)))
+    return sorted(modules)
 
 
 def _defined_names(dotted: str) -> set[str]:
@@ -203,7 +245,9 @@ def test_the_scanner_catches_every_patch_form(tmp_path):
         "def test_b(monkeypatch):\n"
         "    from merlin.compile import mesh as M\n"
         "    monkeypatch.setattr(M, 'capacity_fit', None)\n"
-        "    monkeypatch.setattr(M, '_default_oot_package', None)\n",
+        "    monkeypatch.setattr(M, '_default_oot_package', None)\n"
+        "    from merlin.compile import scheduling as S\n"
+        "    monkeypatch.setattr(S, 'BlockSchedule', None)\n",
         encoding="utf-8",
     )
     found = [(mod, n) for _, mod, names in _patches(probe) for n in (names or [])]
@@ -213,18 +257,26 @@ def test_the_scanner_catches_every_patch_form(tmp_path):
     assert ("merlin.compile_cli", "_matmul_via_oot_cert") in found
     assert ("merlin.compile_cli", "host_lane_pin_name") in found
     assert ("merlin.compile.mesh", "capacity_fit") in found
+    assert ("merlin.compile.scheduling", "BlockSchedule") in found
     defined_cli = _defined_names("merlin.compile_cli")
     defined_mesh = _defined_names("merlin.compile.mesh")
     assert "_default_oot_package" not in defined_cli, "re-exported, so it must be reported"
     assert "capacity_fit" not in defined_mesh, "imported into mesh from capacity, so it must be reported"
     assert "_default_oot_package" in defined_mesh, "defined in mesh, so patching it there is right"
+    assert _PACKAGE in _compile_modules()
+    assert "merlin.compile.scheduling" in _compile_modules()
+    assert "merlin.compile.scheduling.block_schedule" in _compile_modules()
+    assert "BlockSchedule" not in _defined_names("merlin.compile.scheduling")
 
 
-def test_the_facade_still_resolves_every_package_name():
-    """Callers keep working: every name the package defines is reachable on merlin.compile_cli, as the
-    same object (so reading through the facade is always correct -- only WRITING through it is not)."""
+def test_the_facade_still_resolves_its_historical_compatibility_names():
+    """Keep legacy facade bindings without exporting every new module's private helpers."""
     cli = importlib.import_module(_FACADE)
-    for mod in _compile_modules()[1:]:
+    absent = object()
+    for suffix, names in _FACADE_COMPAT_EXPORTS.items():
+        mod = f"{_PACKAGE}.{suffix}"
         m = importlib.import_module(mod)
-        for name in _defined_names(mod):
-            assert getattr(cli, name, None) is getattr(m, name), f"{_FACADE}.{name} is not {mod}.{name}"
+        defined = _defined_names(mod)
+        for name in names:
+            assert name in defined, f"historical {mod}.{name} is no longer defined there"
+            assert getattr(cli, name, absent) is getattr(m, name), f"{_FACADE}.{name} is not {mod}.{name}"

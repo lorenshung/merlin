@@ -3,6 +3,7 @@
 # - installs a fail-fast trap handler (exits with 0x1000|mcause<<1|1 so bugs
 #   surface as spike "*** FAILED ***" instead of silent hangs),
 # - enables the vector unit (mstatus.VS = Initial),
+# - initializes FP rounding to nearest, ties to even when the compiled ISA has FP,
 # - gives every hart its own stack,
 # - hart 0 clears .bss and releases the other harts via boot_ready,
 # - all harts then call main(mhartid).
@@ -15,6 +16,12 @@ _start:
   # (mstatus.VS = Initial, bits 9:10). The model uses f32/f64; RVV uses VS.
   li    t0, (1 << 13) | (1 << 9)
   csrs  mstatus, t0
+#if defined(__riscv_flen) && __riscv_flen > 0
+  # FS=Initial enables access, but does not initialize the floating-point CSR.
+  # Select RNE and clear exception flags on every hart; an unreset rounding
+  # register otherwise makes identical images depend on power-on state.
+  csrw  fcsr, zero
+#endif
   csrr  t0, mhartid
   la    sp, _stack_top
   li    t1, 16384             # MERLIN_STACK_PER_HART

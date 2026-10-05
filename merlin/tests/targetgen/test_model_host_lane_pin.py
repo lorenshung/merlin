@@ -8,6 +8,7 @@ arrives as ``mesh_package``; the latter is frozen experiment infrastructure decl
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
 from pathlib import Path
 
@@ -76,21 +77,76 @@ def _snapshot_package(tmp_path, package_rel: str, descriptor: Path):
     return root, root / "repo" / package_rel, manifest["content_sha256"]
 
 
-def test_target_experiment_owns_and_resolves_the_frozen_host_lane():
+def test_target_experiment_selects_scalar_lane_for_rocket():
     te = load_target_experiment(_gemmini_descriptor())
 
-    package, identity = te.resolve_host_lane()
+    assert te.host_lane.package == "out/artifacts/targets/host/gemmini_rocket_scalar_int8_v0"
+    package, identity = te.resolve_host_lane(dtype="int8")
+    assert package.is_dir()
+    assert identity["backend"] == "scalar"
+    assert identity["host_isa"] == "rv64imafdcbzicsr_zifencei_zihpm_zfh_zba_zbb_zbs_xrocket"
 
-    assert package == (repo_root() / "out/artifacts/targets/rvv/impr_tuned_wholemodel_vf_int8").resolve()
-    assert identity["package"] == te.host_lane.package
-    assert identity["package_sha256"] == "32d265324cba85abc6760a151d56b03bdc3e95c79e8ebf0bc392207c0a041d8b"
-    assert identity["run_id"] == "impr_tuned_wholemodel_vf_int8"
-    assert identity["dtype_strategy"] == "int8_w8a8"
+
+def test_selected_dts_checks_every_hart_before_host_execution(tmp_path):
+    from merlin.compile.host_lane import _isa_parts, dts_string_values, require_host_isa_dts
+
+    dts = tmp_path / "selected.dts"
+    rocket = "rv64imafdcbzicsr_zifencei_zihpm_zfh_zba_zbb_zbs_xrocket"
+    dts.write_text(f'riscv,isa = "{rocket}";\nriscv,isa = "{rocket}";\n', encoding="utf-8")
+    digest = hashlib.sha256(dts.read_bytes()).hexdigest()
+    assert require_host_isa_dts(["-march=rv64gc_zba_zbb_zbs_zfh"], dts, expected_sha256=digest) == [rocket, rocket]
+    with pytest.raises(ValueError, match="pinned SHA256"):
+        require_host_isa_dts(["-march=rv64gc_zba_zbb_zbs_zfh"], dts, expected_sha256="0" * 64)
+    with pytest.raises(ValueError, match=r"missing \['v'\]"):
+        require_host_isa_dts(["-march=rv64gcv"], dts)
+    assert _isa_parts("rv64gc_zba")[0] == "rv64"
+    for malformed in ("rv64", "rv64zba", "rv64gc!", "rv128gc"):
+        with pytest.raises(ValueError, match="unrecognized RISC-V ISA"):
+            _isa_parts(malformed)
+    text = (
+        '// riscv,isa = "rv64gcv"; device_type = "cpu";\n'
+        '/* riscv,isa = "rv64gcv"; */\n'
+        'compatible = "riscv,isa = \\"rv64gcv\\"";\n'
+        'not_riscv,isa = "rv64gcv"; foo-riscv,isa = "rv64gcv";\n'
+        'riscv,isa = ""; riscv,isa /* selected */ = "rv64gc";\n'
+        'device_type = "cpu"; device_type = "cpux";'
+    )
+    assert dts_string_values(text, "riscv,isa") == ["rv64gc"]
+    assert dts_string_values(text, "device_type").count("cpu") == 1
+    fake = tmp_path / "false-positive.dts"
+    fake.write_text(text.partition('riscv,isa = "";')[0], encoding="utf-8")
+    with pytest.raises(ValueError, match="no riscv,isa declaration"):
+        require_host_isa_dts(["-march=rv64gc"], fake)
+
+
+def test_board_catalog_rejects_malformed_host_dts_pin(tmp_path):
+    from merlin.runtime.boards import BoardRegistryError, load_boards
+
+    catalog = tmp_path / "boards.yaml"
+    catalog.write_text(yaml.safe_dump({
+        "schema_version": 1,
+        "boards": {"rocket": {
+            "dram_bytes": 1 << 28,
+            "dram_base": 0x80000000,
+            "harts": 1,
+            "console": "htif",
+            "flow": "baremetal",
+            "loader": "uart_tsi",
+            "loader_baud": 921600,
+            "code_reserve": 1 << 20,
+            "target": "gemmini",
+            "host_dts_sha256": "not-a-digest",
+        }},
+    }), encoding="utf-8")
+    with pytest.raises(BoardRegistryError, match="host_dts_sha256 must be a lowercase SHA256"):
+        load_boards(catalog)
 
 
 def test_gemmini_model_dtypes_match_the_descriptor_package():
     te = load_target_experiment(_gemmini_descriptor())
-    _, identity = te.resolve_host_lane()
+    from merlin.mining.registry import load_rvv_package
+
+    package = load_rvv_package(repo_root() / te.host_lane.package)
     model_dtypes = set()
     for root in te.graded_roots():
         for capsule_path in root.glob("*/capsule.yaml"):
@@ -100,28 +156,24 @@ def test_gemmini_model_dtypes_match_the_descriptor_package():
                 model_dtypes.add(attrs.get("compile_dtype"))
 
     assert model_dtypes == {"int8"}, "the experiment's host package selection must cover every capstone"
-    assert identity["dtype_strategy"] == compile_cli._DTYPE_STRATEGY["int8"]
+    assert package.dtype_strategy == compile_cli._DTYPE_STRATEGY["int8"]
 
 
-def test_materialized_gemmini_bundles_lock_the_same_read_only_package():
+def test_fresh_gemmini_bundles_grant_the_selected_read_only_package():
     te = load_target_experiment(_gemmini_descriptor())
-    _, identity = te.resolve_host_lane()
+    from merlin.targetgen import generate_bundles as gb
+
     package = te.host_lane.package
-    bundles = _gemmini_descriptor().parent / "input_bundles"
+    bundles = gb.generate_bundles(te)
     checked = []
-    for manifest_path in sorted(bundles.glob("*/input_bundle_manifest.yaml")):
-        if manifest_path.parent.name == "grader_private_v0":
-            continue
-        manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+    for bundle_id, manifest in sorted(bundles.items()):
         grants = [
             entry
             for entry in manifest.get("allowed", [])
             if str(entry.get("path", "")).rstrip("/") == package.rstrip("/")
         ]
-        assert len(grants) == 1 and grants[0].get("mode") == "ro", manifest_path
-        lock = yaml.safe_load((manifest_path.parent / "bundle_lock.yaml").read_text(encoding="utf-8")) or {}
-        assert (lock.get("allowed_tree_sha256") or {}).get(package.rstrip("/")) == identity["package_sha256"]
-        checked.append(manifest_path.parent.name)
+        assert len(grants) == 1 and grants[0].get("mode") == "ro", bundle_id
+        checked.append(bundle_id)
     assert checked, "no agent input bundles were checked"
 
 
@@ -141,14 +193,14 @@ def test_targeted_model_grade_passes_exact_descriptor_package_and_records_it(mon
         frozen_capsule, target="gemmini", timeout=1, package_dir="submission-under-test"
     )
 
-    expected = (repo_root() / "out/artifacts/targets/rvv/impr_tuned_wholemodel_vf_int8").resolve()
+    expected = (repo_root() / "out/artifacts/targets/host/gemmini_rocket_scalar_int8_v0").resolve()
     assert seen["package"] == str(expected)
     assert seen["mesh_package"] == "submission-under-test"
-    assert result["host_lane"]["package_sha256"] == "32d265324cba85abc6760a151d56b03bdc3e95c79e8ebf0bc392207c0a041d8b"
+    assert result["host_lane"]["package_sha256"] == "89e00e39c929ec0310b0a60d1860d2d8fa833b7ef1a57af5775092c24d5ebb9a"
 
 
 def test_bwrap_model_grade_executes_run_snapshot_not_live_package(monkeypatch, tmp_path, frozen_capsule):
-    package_rel = "out/artifacts/targets/rvv/impr_tuned_wholemodel_vf_int8"
+    package_rel = "out/artifacts/targets/host/gemmini_rocket_scalar_int8_v0"
     descriptor = tmp_path / "target_experiment.yaml"
     descriptor.write_text(_gemmini_descriptor().read_text(encoding="utf-8"), encoding="utf-8")
     snapshot_root, snapshot_package, snapshot_digest = _snapshot_package(tmp_path, package_rel, descriptor)
@@ -159,8 +211,8 @@ def test_bwrap_model_grade_executes_run_snapshot_not_live_package(monkeypatch, t
     live_package = live_root / package_rel
     live_package.parent.mkdir(parents=True)
     shutil.copytree(repo_root() / package_rel, live_package)
-    live_schedule = live_package / "schedule.mlir"
-    live_schedule.write_text("LIVE WORKTREE DRIFT\n", encoding="utf-8")
+    live_knobs = live_package / "knobs.yaml"
+    live_knobs.write_text("LIVE WORKTREE DRIFT\n", encoding="utf-8")
 
     from merlin.targetgen import target_experiment
 
@@ -177,7 +229,7 @@ def test_bwrap_model_grade_executes_run_snapshot_not_live_package(monkeypatch, t
     def fake_compile_model(*args, **kwargs):
         package = Path(kwargs["package"])
         seen["package"] = package
-        seen["schedule"] = (package / "schedule.mlir").read_text(encoding="utf-8")
+        seen["knobs"] = (package / "knobs.yaml").read_text(encoding="utf-8")
         return {"status": "verified", "verify": {"gate_ok": True}}
 
     monkeypatch.setattr(compile_cli, "compile_model", fake_compile_model)
@@ -186,7 +238,7 @@ def test_bwrap_model_grade_executes_run_snapshot_not_live_package(monkeypatch, t
     )
 
     assert seen["package"] == snapshot_package.resolve()
-    assert seen["schedule"] != "LIVE WORKTREE DRIFT\n"
+    assert seen["knobs"] != "LIVE WORKTREE DRIFT\n"
     assert result["host_lane"]["run_snapshot"]["content_sha256"] == snapshot_digest
     assert result["host_lane"]["resolved_package"] == str(snapshot_package.resolve())
 

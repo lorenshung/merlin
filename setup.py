@@ -99,7 +99,11 @@ class SourceDistributionInOutput(sdist):
         dist_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="sdist-", dir=output, delete=not self.keep_temp) as stage:
             name = self.distribution.get_fullname()
-            self.make_release_tree(str(Path(stage) / name), self.filelist.files)
+            # The same reviewed manifest owns wheel and source resources. A new
+            # runtime dependency must not need a second MANIFEST.in declaration
+            # before a wheel rebuilt from the source archive can use it.
+            files = sorted(set(self.filelist.files) | set(public_resources()))
+            self.make_release_tree(str(Path(stage) / name), files)
             self.archive_files = [
                 self.make_archive(
                     str(dist_dir / name), fmt, root_dir=stage, base_dir=name, owner=self.owner, group=self.group

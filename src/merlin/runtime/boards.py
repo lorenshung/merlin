@@ -48,8 +48,8 @@ class Board:
     dram_base: int  # physical DRAM origin
     console: str  # runtime console family
     flow: str  # Zephyr or bare metal
-    loader: str  # operator's ELF upload protocol
-    loader_baud: int  # baud of the upload link, not necessarily runtime console
+    loader: str | None = None  # operator's ELF upload protocol; None until an upload path is qualified
+    loader_baud: int | None = None  # baud of that link; None when no upload path is qualified
     #: How many of those harts can execute VECTOR code, when that differs from `harts`. A
     #: heterogeneous SoC may attach a vector unit to only some harts. Fanning an
     #: RVV model out over a scalar hart can trap before a worker barrier completes.
@@ -89,6 +89,9 @@ class Board:
     target: str | None = None
     #: The selected simulator harness config, if an RTL simulator is declared.
     rtl_sim_config: str | None = None
+    #: SHA256 of the elaborated DTS selected for this board. A caller-supplied DTS
+    #: must match this board-owned identity before its CPU ISA can authorize code.
+    host_dts_sha256: str | None = None
     #: FPGA bitstream identity for measurements, when applicable.
     bitstream: str | None = None
     #: The selected Zephyr port's unmodified DT RAM-region size. A generated
@@ -110,6 +113,8 @@ class Board:
     @property
     def loader_bytes_per_s(self) -> float:
         """Payload throughput of an 8N1 upload link (10 wire bits per byte)."""
+        if self.loader is None or self.loader_baud is None:
+            raise BoardRegistryError(f"{self.name}: no qualified upload loader and baud")
         return self.loader_baud / 10.0
 
     @property
@@ -283,14 +288,25 @@ def load_boards(path: str | Path | None = None) -> dict[str, Board]:
                 conditional.append("uart_label")
         if kwargs["flow"] == FLOW_BAREMETAL:
             conditional.append("code_reserve")
+        if kwargs["flow"] == FLOW_ZEPHYR:
+            conditional.extend(("loader", "loader_baud"))
         missing = [key for key in conditional if kwargs.get(key) is None or kwargs.get(key) == ""]
         if missing:
             raise BoardRegistryError(f"{where}: missing required fact(s) for {kwargs['flow']}: {missing}")
         if kwargs["flow"] == FLOW_ZEPHYR and kwargs.get("vector_harts") is None and kwargs.get("vector_hart_ids") is None:
             raise BoardRegistryError(f"{where}: declare vector_harts or vector_hart_ids for a Zephyr board")
-        for key in ("dram_bytes", "harts", "loader_baud"):
+        if kwargs.get("host_dts_sha256") is not None and (
+            len(kwargs["host_dts_sha256"]) != 64
+            or any(letter not in "0123456789abcdef" for letter in kwargs["host_dts_sha256"])
+        ):
+            raise BoardRegistryError(f"{where}: host_dts_sha256 must be a lowercase SHA256 hex digest")
+        for key in ("dram_bytes", "harts"):
             if kwargs[key] <= 0:
                 raise BoardRegistryError(f"{where}: {key} must be positive")
+        if (kwargs.get("loader") is None) != (kwargs.get("loader_baud") is None):
+            raise BoardRegistryError(f"{where}: loader and loader_baud must be declared together")
+        if kwargs.get("loader_baud") is not None and kwargs["loader_baud"] <= 0:
+            raise BoardRegistryError(f"{where}: loader_baud must be positive")
         if kwargs["dram_base"] < 0:
             raise BoardRegistryError(f"{where}: dram_base must be nonnegative")
         if kwargs.get("code_reserve") is not None and kwargs["code_reserve"] <= 0:
