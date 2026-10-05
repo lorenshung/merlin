@@ -28,3 +28,7 @@ mutating `CODEX_BIN` or the shared artifact cache function. Omitted inputs retai
 the existing environment/cache defaults. Initial execution and session continuation
 use the same selected executable and per-round home; caller sandbox policy remains
 mandatory for bwrap execution. This does not make all provider state thread-safe.
+Continuous Codex sessions retry only explicit capacity refusals, at most three times
+within the existing wall budget, using the same thread, model and sandbox. Preserve
+all failed-turn events and unknown usage. Quota/authentication errors, missing session
+identity, round-mode execution and exhausted retry budgets remain non-successes.

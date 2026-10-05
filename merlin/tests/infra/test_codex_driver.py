@@ -62,6 +62,8 @@ def _fake_codex(
     hang: bool = False,
     orphan_pid_path: Path | None = None,
     version: str = "codex-cli 0.153.0",
+    replies: list[tuple[list[dict], int]] | None = None,
+    finals: list[str | None] | None = None,
 ) -> Path:
     """Write an executable stand-in for the codex CLI that replays *lines*.
 
@@ -72,10 +74,11 @@ def _fake_codex(
     # in the source: a Python literal is not JSON, so an ``exit_code: None`` in
     # an ``item.started`` payload would render as ``null`` and not parse.
     stream_path = tmp_path / "fake_codex_stream.json"
-    stream_path.write_text(json.dumps(lines))
+    stream_path.write_text(json.dumps(replies if replies is not None else lines))
     body = [
         f"#!{sys.executable}",
         "import json, sys, time, os, subprocess",
+        "from pathlib import Path",
         "argv = sys.argv[1:]",
         # The real CLI answers --version without reading stdin, and the driver asks it for the
         # provenance stamp. A stand-in that replayed its event stream here would hand back the first
@@ -89,6 +92,14 @@ def _fake_codex(
         "        out = argv[i + 1]",
         "sys.stdin.read()",
         f"lines = json.load(open({str(stream_path)!r}))",
+        *([
+            f"calls = Path({str(tmp_path / 'fake_codex_calls.jsonl')!r})",
+            "attempt = len(calls.read_text().splitlines()) if calls.exists() else 0",
+            "with calls.open('a') as log: log.write(json.dumps(argv) + '\\n')",
+            "lines, attempt_rc = lines[min(attempt, len(lines) - 1)]",
+        ] if replies is not None else [f"attempt_rc = {exit_code}"]),
+        *([f"attempt_final = {finals!r}[min(attempt, {len(finals) - 1})]"]
+          if finals is not None else [f"attempt_final = {final!r}"]),
         "for line in lines:",
         "    sys.stdout.write(json.dumps(line) + '\\n')",
         "    sys.stdout.flush()",
@@ -103,9 +114,9 @@ def _fake_codex(
             else []
         ),
         *(["time.sleep(600)"] if hang else []),
-        "if out:",
-        f"    open(out, 'w').write({final!r})",
-        f"sys.exit({exit_code})",
+        "if out and attempt_final is not None:",
+        "    open(out, 'w').write(attempt_final)",
+        "sys.exit(attempt_rc)",
     ]
     script.write_text("\n".join(body) + "\n")
     script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
@@ -154,6 +165,7 @@ def _run(
     sandbox: str = "none",
     timeout: int = 60,
     instruction_files: tuple[str, ...] = ("TASK.md",),
+    continue_session: bool = False,
 ):
     ws = tmp_path / "ws"
     ws.mkdir(exist_ok=True)
@@ -162,7 +174,8 @@ def _run(
     run_dir = tmp_path / "run"
     run_dir.mkdir(exist_ok=True)
     rc, tpath = CA.run_round(
-        ws, run_dir, "claude-opus-4-8", {}, None, sandbox, 0, timeout, effort="low", codex_binary=script
+        ws, run_dir, "claude-opus-4-8", {}, None, sandbox, 0, timeout, effort="low", codex_binary=script,
+        continue_session=continue_session,
     )
     records = [json.loads(line) for line in tpath.read_text().splitlines() if line.strip()]
     return rc, tpath, records
@@ -371,6 +384,84 @@ def test_a_failed_turn_is_recorded_as_unmeasured_not_as_zero_tokens(tmp_path):
     assert summary["usage_complete"] is False
     assert summary["turns_usage_reported"] == 0
     assert any("upstream 400" in e for e in summary["errors"])
+
+
+def test_capacity_interruption_resumes_same_thread_and_retains_failed_usage(tmp_path, monkeypatch):
+    refusal = _stream(failed=True)
+    refusal[-1]["error"]["message"] = "Selected model is at capacity. Please try a different model."
+    script = _fake_codex(tmp_path, [], replies=[(refusal, 1), (_stream(), 0)])
+    monkeypatch.setattr(CA, "_CONTINUE_MAX_TURNS", 2)
+    monkeypatch.setattr(CA.time, "sleep", lambda seconds: None)
+    rc, tpath, records = _run(tmp_path, script, continue_session=True, timeout=300)
+    assert rc == 0, records[-2:]
+    calls = [json.loads(line) for line in (tmp_path / "fake_codex_calls.jsonl").read_text().splitlines()]
+    assert len(calls) == 2 and calls[1][:2] == ["exec", "resume"]
+    assert "01a01161-dead-beef-0000-000000000001" in calls[1]
+    assert calls[0][calls[0].index("--model") + 1] == calls[1][calls[1].index("--model") + 1]
+    summary = _by_type(records, "codex_summary")[0]
+    assert summary["capacity_retries"] == 1 and summary["errors"]
+    assert summary["usage_complete"] is False and summary["turns_usage_reported"] == 1
+    assert _by_type(records, "codex_capacity_retry")[0]["thread_id"] == summary["thread_id"]
+    raw = (tpath.parent / "round_00.codex_events.raw.jsonl").read_text()
+    assert '"turn.failed"' in raw and '"turn.completed"' in raw
+
+
+@pytest.mark.parametrize("failure", ["capacity", "unauthorized"])
+def test_capacity_retry_is_bounded_and_other_failures_are_not_retried(tmp_path, monkeypatch, failure):
+    refusal = _stream(failed=True)
+    refusal[-1]["error"]["message"] = (
+        "Selected model is at capacity." if failure == "capacity" else "unauthorized"
+    )
+    script = _fake_codex(tmp_path, [], replies=[(refusal, 1)])
+    monkeypatch.setattr(CA.time, "sleep", lambda seconds: None)
+    rc, _, records = _run(tmp_path, script, continue_session=True, timeout=300)
+    assert rc != 0
+    calls = (tmp_path / "fake_codex_calls.jsonl").read_text().splitlines()
+    assert len(calls) == (4 if failure == "capacity" else 1)
+    assert _by_type(records, "result")[-1]["is_error"] is True
+
+
+@pytest.mark.parametrize("boundary", ["rounds", "short_budget", "missing_thread", "mixed_error", "completed"])
+def test_capacity_refusal_respects_session_and_budget_boundaries(tmp_path, boundary):
+    refusal = _stream(failed=True)
+    refusal[-1]["error"]["message"] = "Selected model is at capacity."
+    if boundary == "missing_thread":
+        refusal = refusal[1:]
+    elif boundary == "mixed_error":
+        refusal.insert(-1, {"type": "error", "message": "You've hit your usage limit."})
+    elif boundary == "completed":
+        refusal.insert(-1, {"type": "turn.completed", "usage": _REAL_USAGE})
+    script = _fake_codex(tmp_path, [], replies=[(refusal, 1), (_stream(), 0)])
+    rc, _, _ = _run(tmp_path, script, timeout=60 if boundary == "short_budget" else 300,
+                    continue_session=boundary != "rounds")
+    assert rc != 0 and len((tmp_path / "fake_codex_calls.jsonl").read_text().splitlines()) == 1
+
+
+def test_capacity_retry_refuses_changed_thread_identity(tmp_path, monkeypatch):
+    refusal = _stream(failed=True)
+    refusal[-1]["error"]["message"] = "Selected model is at capacity."
+    changed = _stream()
+    changed[0]["thread_id"] = "different-thread"
+    script = _fake_codex(tmp_path, [], replies=[(refusal, 1), (changed, 0)])
+    monkeypatch.setattr(CA.time, "sleep", lambda seconds: None)
+    rc, _, records = _run(tmp_path, script, continue_session=True, timeout=300)
+    assert rc != 0
+    calls = (tmp_path / "fake_codex_calls.jsonl").read_text().splitlines()
+    assert len(calls) == 2
+    summary = _by_type(records, "codex_summary")[0]
+    assert summary["thread_id"] == refusal[0]["thread_id"]
+    assert any("thread identity" in error for error in summary["unrecovered_errors"])
+
+
+def test_capacity_retry_does_not_reuse_failed_attempt_final(tmp_path, monkeypatch):
+    refusal = _stream(failed=True)
+    refusal[-1]["error"]["message"] = "Selected model is at capacity."
+    script = _fake_codex(tmp_path, [], replies=[(refusal, 1), (_stream(), 0)], finals=["STALE FAILED ANSWER", None])
+    monkeypatch.setattr(CA, "_CONTINUE_MAX_TURNS", 2)
+    monkeypatch.setattr(CA.time, "sleep", lambda seconds: None)
+    rc, tpath, records = _run(tmp_path, script, continue_session=True, timeout=300)
+    assert rc == 0 and _by_type(records, "result")[-1]["result"] == ""
+    assert (tpath.parent / "round_00.turn00.final.txt").read_text() == "STALE FAILED ANSWER"
 
 
 def test_the_raw_event_stream_is_persisted_byte_for_byte(tmp_path):

@@ -620,6 +620,10 @@ def last_message_path(ws: Path, final_path: Path, sandbox: str) -> Path:
 _CONTINUE_MIN_S = 120
 #: A backstop so a pathological loop cannot spin against the API for the whole budget.
 _CONTINUE_MAX_TURNS = 200
+# Transient capacity refusals may resume the same continuous session, never
+# switch its model or start another grader. Keep retries within its wall budget.
+_CAPACITY_MAX_RETRIES = 3
+_CAPACITY_BACKOFF_S = 20
 
 
 def build_resume_cmd(
@@ -892,6 +896,8 @@ def run_round(
     pending_tools: dict[str, dict] = {}
     unknown: list[str] = []
     errors: list[str] = []
+    recovered_errors: set[int] = set()
+    capacity_retries = 0
     thread_id = None
     timed_out = False
     seq = 0
@@ -912,12 +918,19 @@ def run_round(
     active_pgid: int | None = None
     try:
         while True:
+            turn_errors_start = len(errors)
+            turn_failed = turn_completed = False
             cur_prompt = (
                 prompt_path
                 if turn_index == 0
                 else prompt_path.with_name(f"{prompt_path.stem}.cont{turn_index:02d}{prompt_path.suffix}")
             )
             if turn_index:
+                # A previous attempt's final is not this resumed turn's answer.
+                if inner_final.is_file():
+                    previous_final = rounds / f"round_{rnd:02d}.turn{turn_index - 1:02d}.final.txt"
+                    previous_final.write_text(inner_final.read_text())
+                    inner_final.unlink()
                 cur_prompt.write_text(_CONTINUE_MSG)
                 if sandbox == "bwrap":
                     _verify_frozen_config(codex_home, home_info["config_sha256"])
@@ -1065,11 +1078,18 @@ def run_round(
 
                             etype = event.get("type")
                             if etype == EVENT_THREAD_STARTED:
-                                thread_id = event.get("thread_id")
+                                announced = event.get("thread_id")
+                                if (not isinstance(announced, str) or not announced
+                                        or (thread_id is not None and announced != thread_id)):
+                                    errors.append("codex session thread identity changed or is missing")
+                                    _kill_tree(proc)
+                                else:
+                                    thread_id = announced
                                 tr.emit({"type": "codex_thread", "thread_id": thread_id, "arrived_at": arrived})
                             elif etype == EVENT_TURN_STARTED:
                                 turns_started += 1
                             elif etype == EVENT_TURN_COMPLETED:
+                                turn_completed = True
                                 shaped, reported = usage_to_claude_shape(event.get("usage") or {})
                                 if reported:
                                     turns_reported += 1
@@ -1085,6 +1105,7 @@ def run_round(
                                     record["codex_usage_unreported"] = True
                                 tr.emit(record)
                             elif etype == EVENT_TURN_FAILED:
+                                turn_failed = True
                                 # No usage is carried here: unmeasured, not free.
                                 errors.append(_error_text(event.get("error")))
                                 tr.emit(
@@ -1190,6 +1211,26 @@ def run_round(
             # stop here would look identical to the defect this exists to fix.
             turn_index += 1
             remaining = deadline - time.monotonic()
+            turn_errors = errors[turn_errors_start:]
+            retry_capacity = (
+                continue_session and thread_id and turn_failed and not turn_completed
+                and not timed_out and rc != 0
+                and turn_errors
+                and all(error.lower().startswith("selected model is at capacity") for error in turn_errors)
+                and capacity_retries < _CAPACITY_MAX_RETRIES
+                and turn_index < _CONTINUE_MAX_TURNS
+                and remaining > _CAPACITY_BACKOFF_S + _CONTINUE_MIN_S
+            )
+            if retry_capacity:
+                capacity_retries += 1
+                tr.emit({
+                    "type": "codex_capacity_retry", "attempt": capacity_retries,
+                    "thread_id": thread_id, "model": resolved,
+                    "backoff_s": _CAPACITY_BACKOFF_S, "arrived_at": _now(),
+                })
+                time.sleep(_CAPACITY_BACKOFF_S)
+                recovered_errors.update(range(turn_errors_start, len(errors)))
+                continue
             stop = (
                 ("" if continue_session else "continuation not enabled")
                 or ("no thread id to resume" if not thread_id else "")
@@ -1233,6 +1274,7 @@ def run_round(
             print(f"[codex] could not recover the final message: {_e}", file=sys.stderr)
     final_text = final_path.read_text() if final_path.is_file() else ""
     usage_complete = turns_started > 0 and turns_reported >= turns_started
+    unrecovered_errors = [error for index, error in enumerate(errors) if index not in recovered_errors]
     summary = {
         "thread_id": thread_id,
         "turns_started": turns_started,
@@ -1240,6 +1282,8 @@ def run_round(
         "usage_complete": usage_complete,
         "unknown_types": sorted(set(unknown)),
         "errors": errors[:10],
+        "capacity_retries": capacity_retries,
+        "unrecovered_errors": unrecovered_errors[:10],
         "timed_out": timed_out,
         "exit_code": rc,
         # Which CLI parsed this stream. `unknown_types` above DETECTS contract drift; this says what
@@ -1268,13 +1312,13 @@ def run_round(
         )
         tr.close()
         return 124, tpath
-    if rc != 0 or errors:
+    if rc != 0 or unrecovered_errors:
         tr.emit(
             {
                 "type": "result",
                 "subtype": "error",
                 "is_error": True,
-                "result": (errors[0] if errors else f"codex exited {rc}")[:500],
+                "result": (unrecovered_errors[0] if unrecovered_errors else f"codex exited {rc}")[:500],
             }
         )
         tr.close()
