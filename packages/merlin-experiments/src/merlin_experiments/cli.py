@@ -27,6 +27,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--catalog", type=Path, help="catalog YAML; paths inside it are relative to that file")
     commands = parser.add_subparsers(dest="verb", required=True)
     commands.add_parser("list", help="list the versioned experiment catalog")
+    commands.add_parser("levels", help="show Phase 1 experiment levels and their stable bundle-arm ids")
     stored = commands.add_parser("runs", help="discover stored phase orchestrations (read-only)")
     stored.add_argument("--root", type=Path, help="run root; defaults to the configured out/runs")
     stored.add_argument("--target", help="filter by exact target identity")
@@ -38,6 +39,10 @@ def main(argv: list[str] | None = None) -> int:
         child.add_argument("--run-dir", type=Path, help="explicit output; otherwise use the configured run root")
         child.add_argument("--corpus-seal", type=Path, help="reviewed Phase 0 release seal for Phase 1")
         child.add_argument("--bundle-manifest", type=Path, help="reviewed replacement Phase 1 input bundle")
+        child.add_argument("--phase1-driver", help="Phase 1 agent driver; frozen with the selected run")
+        child.add_argument("--phase1-model", help="Phase 1 model; frozen with the selected run")
+        child.add_argument("--phase1-effort", help="Phase 1 reasoning effort; frozen with the selected run")
+        child.add_argument("--phase1-provider", help="Phase 1 provider; frozen with the selected run")
         child.add_argument(
             "--phase0-conformance-spec", type=Path, help="new reviewed Phase 0 requirement (select with synth profile)"
         )
@@ -67,9 +72,18 @@ def main(argv: list[str] | None = None) -> int:
             "--phase0-m2m-python", type=Path, help="explicit Model2MLIR venv Python for diagnostic capture"
         )
     commands.add_parser("status").add_argument("run_dir", type=Path)
-    commands.add_parser("lineage", help="read frozen phase inputs and handoffs without executing engines").add_argument(
-        "run_dir", type=Path
+    lineage_parser = commands.add_parser(
+        "lineage", help="read frozen phase inputs and handoffs without executing engines"
     )
+    lineage_parser.add_argument("run_dir", type=Path, nargs="?")
+    lineage_parser.add_argument(
+        "--target", help="print the target's index (phase-0 releases, frozen compilers, champions) instead"
+    )
+    index = commands.add_parser(
+        "index", help="regenerate out/artifacts/targets/<target>/INDEX.yaml from existing records"
+    )
+    index.add_argument("target")
+    index.add_argument("--check", action="store_true", help="exit 1 when the written index is stale; write nothing")
     child = commands.add_parser("resume")
     child.add_argument("run_dir", type=Path)
     child.add_argument("--checkpoint", type=Path, help="sealed native checkpoint for a new model_portfolio segment")
@@ -81,7 +95,10 @@ def main(argv: list[str] | None = None) -> int:
     derive.add_argument("definition", help="explicit experiment definition or catalog id")
     derive.add_argument("--application-capture", action="append", required=True, metavar="LABEL=PATH")
     derive.add_argument(
-        "--application-capture-selection", action="append", default=[], metavar="LABEL=PATH@SHA256",
+        "--application-capture-selection",
+        action="append",
+        default=[],
+        metavar="LABEL=PATH@SHA256",
         help="pre-execution selection for each selected capture; omitted legacy captures remain diagnostic",
     )
     derive.add_argument(
@@ -129,7 +146,11 @@ def main(argv: list[str] | None = None) -> int:
     coverage.add_argument("--spec", type=Path, required=True, help="explicit conformance requirement YAML")
     prepare = operations.add_parser("prepare")
     prepare.add_argument("run_dir", type=Path)
-    prepare.add_argument("--output", type=Path, required=True)
+    prepare.add_argument(
+        "--output",
+        type=Path,
+        help="fresh release root; defaults to out/artifacts/protocols/<target>/phase0-<TS>-<sha7>",
+    )
     prepare.add_argument(
         "--generated-only",
         action="store_true",
@@ -232,6 +253,8 @@ def main(argv: list[str] | None = None) -> int:
                     review_note=args.review_note,
                 )
         elif args.verb == "list":
+            from .phase1.levels import level_for_phase1
+
             result = []
             for name, path in catalog(args.catalog).items():
                 spec = load_spec(path)
@@ -245,8 +268,16 @@ def main(argv: list[str] | None = None) -> int:
                         "definition": str(path),
                         "description": spec.document.get("description", ""),
                         "kind": spec.document.get("kind", "experiment"),
+                        "phase1_level": (
+                            level_for_phase1(spec.document["phases"]["1"]["config"])
+                            if "1" in spec.document["phases"] else None
+                        ),
                     }
                 )
+        elif args.verb == "levels":
+            from .phase1.levels import LEVELS
+
+            result = list(LEVELS)
         elif args.verb == "runs":
             from .history import runs
 
@@ -254,9 +285,25 @@ def main(argv: list[str] | None = None) -> int:
         elif args.verb == "status":
             result = runner.status(args.run_dir)
         elif args.verb == "lineage":
+            from merlin.targetgen import target_index
+
             from .history import lineage
 
-            result = lineage(args.run_dir)
+            if (args.run_dir is None) == (args.target is None):
+                raise SpecError("lineage needs exactly one of a run directory or --target")
+            if args.target is not None:
+                result = target_index.build_index(args.target)
+            else:
+                result = lineage(args.run_dir)
+                result["target_index"] = target_index.rows_citing(result["target"], result["run_dir"])
+        elif args.verb == "index":
+            from merlin.targetgen import target_index
+
+            if args.check:
+                current = target_index.is_current(args.target)
+                print(json.dumps({"index": str(target_index.index_path(args.target)), "current": current}))
+                return 0 if current else 1
+            result = {"index": str(target_index.write_index(args.target))}
         elif args.verb == "resume":
             code = runner.resume(args.run_dir, checkpoint=args.checkpoint)
             print(json.dumps(runner.status(args.run_dir), indent=2))
@@ -269,6 +316,10 @@ def main(argv: list[str] | None = None) -> int:
                 run_dir=args.run_dir,
                 corpus_seal=args.corpus_seal,
                 bundle_manifest=args.bundle_manifest,
+                phase1_driver=args.phase1_driver,
+                phase1_model=args.phase1_model,
+                phase1_effort=args.phase1_effort,
+                phase1_provider=args.phase1_provider,
                 phase0_conformance_spec=args.phase0_conformance_spec,
                 phase0_capability_contract=args.phase0_capability_contract,
                 phase0_synth_profile=args.phase0_synth_profile,

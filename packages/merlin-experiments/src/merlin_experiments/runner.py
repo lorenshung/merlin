@@ -32,10 +32,22 @@ def _sha(path: Path) -> str:
     return digest.hexdigest()
 
 
-def default_run_dir(spec: ExperimentSpec) -> Path:
-    from merlin.common.paths import runs_dir
+def default_run_dir(spec: ExperimentSpec, phase: str = "all") -> Path:
+    """Where a new orchestration lives when the operator names no ``--run-dir``.
+
+    A single-phase run is a phase run: ``out/runs/<target>/phase<N>/<TS>_<experiment>_<sha7>/``, so
+    a Phase 0 run owns its evidence, capsules and coverage at the phase address every later phase
+    and the target index cite. A multi-phase orchestration keeps
+    ``out/runs/<target>/<experiment>/<TS>_<uuid8>/``.
+    """
+    from merlin.common.artifacts import phase_run_id
+    from merlin.common.paths import phase_runs_root, runs_dir
 
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    if phase in ("0", "1", "2"):
+        base = phase_runs_root(spec.target, phase)
+        candidate = base / phase_run_id(spec.id, timestamp=stamp)
+        return candidate if not candidate.exists() else base / f"{candidate.name}_{uuid4().hex[:6]}"
     return runs_dir() / spec.target / spec.id / f"{stamp}_{uuid4().hex[:8]}"
 
 
@@ -84,17 +96,26 @@ def _verify_corpus_closures(plan: dict) -> None:
                 "select its seal and release descriptor before starting Phase 1"
             )
         if seal:
+            from merlin.targetgen.target_experiment import load_target_experiment
+
             from .corpus.release import verify
+            from .phase1.corpus_inputs import require_reviewed_bundle
 
             if command["env"].get("MERLIN_CORPUS_SEAL") != seal:
                 raise SpecError("native corpus seal differs from the explicitly selected input")
-            verify(Path(seal), Path(command["inputs"]["descriptor"]))
+            descriptor = Path(command["inputs"]["descriptor"])
+            verify(Path(seal), descriptor)
+            manifest = Path(command["inputs"]["bundle_manifest"])
+            bundle = read_yaml(manifest)
+            try:
+                require_reviewed_bundle(load_target_experiment(descriptor), manifest, bundle)
+            except ValueError as exc:
+                raise SpecError(str(exc)) from exc
             if command.get("requires_reviewed_corpus"):
                 from merlin.targetgen.sandbox.bwrap import resolve_grant
 
                 source_root = Path(command["env"]["MERLIN_REPO_ROOT"]).resolve()
                 legacy = source_root / "merlin" / "contract" / "capsules"
-                bundle = read_yaml(Path(command["inputs"]["bundle_manifest"]))
                 for kind in ("allowed", "host_inputs"):
                     for row in bundle.get(kind) or []:
                         if not isinstance(row, dict) or not isinstance(row.get("path"), str):
@@ -249,6 +270,10 @@ def _phase0_synthesis_status(plan: dict) -> dict:
         if command["adapter"] != "capsule_derivation":
             continue
         selected = command["inputs"]
+        diagnostic = (
+            "--evidence-mode" in command["argv"]
+            and _command_value(command, "--evidence-mode") == "diagnostic"
+        )
         try:
             results[number] = verify_selected_synthesis(
                 selected.get("synth_profile"),
@@ -256,20 +281,32 @@ def _phase0_synthesis_status(plan: dict) -> dict:
                 recipe=selected.get("recipe"),
                 descriptor=selected.get("descriptor"),
                 **({"software_spec": selected["software_spec"]} if selected.get("software_spec") else {}),
+                diagnostic=diagnostic,
             )
         except (OSError, ValueError, YAMLError) as exc:
             raise SpecError(f"phase-0 selected synthesis is invalid: {exc}") from exc
     return results
 
 
+@contextmanager
+def _phase1_environment(command: dict):
+    """Observe the same frozen selectors that native launch/resume receives."""
+    from .measured_launch import execution_environment
+    from .phase1.runtime_environment import PreparedEnvironment, applied_environment
+
+    with applied_environment(PreparedEnvironment(execution_environment(command), {})):
+        yield
+
+
 def _phase1_source_inputs(command: dict) -> dict[str, str]:
     from .phase1.source_inputs import paths
 
-    return paths(
-        repo=Path(command["env"]["MERLIN_REPO_ROOT"]),
-        entrypoint=Path(command["entrypoint"]),
-        descriptor=Path(command["inputs"]["descriptor"]) if command["inputs"].get("descriptor") else None,
-    )
+    with _phase1_environment(command):
+        return paths(
+            repo=Path(command["env"]["MERLIN_REPO_ROOT"]),
+            entrypoint=Path(command["entrypoint"]),
+            descriptor=Path(command["inputs"]["descriptor"]) if command["inputs"].get("descriptor") else None,
+        )
 
 
 def _verify_phase1_sources(plan: dict) -> None:
@@ -340,6 +377,11 @@ def _command_value(command: dict, flag: str) -> str:
 
 def _phase1_operator_inputs(command: dict) -> dict[str, str | None]:
     """Rediscover authored resources and optional timing membership in the existing plan."""
+    with _phase1_environment(command):
+        return _phase1_operator_paths(command)
+
+
+def _phase1_operator_paths(command: dict) -> dict[str, str | None]:
     from merlin.targetgen.sandbox.bwrap import resolve_grant
     from merlin.targetgen.target_experiment import (
         declared_contracts_root,
@@ -360,10 +402,16 @@ def _phase1_operator_inputs(command: dict) -> dict[str, str | None]:
         raise SpecError("explicit bundle identity differs from its manifest")
     paths = {
         "bundle": manifest.parent,
-        "contract": root / "merlin/contract",
+        # Corpus staging reads contract schemas, not the legacy contract tree.
+        # The latter contains compatibility symlinks and is not an input to
+        # this operator; freezing it would reject otherwise ordinary runs.
+        "contract_schemas": root / "merlin/contract/schemas",
         "schemas": root / "merlin/schemas",
         "oracle_timing": Path(command["inputs"]["oracle_timing"]),
     }
+    selected_clang = command["env"].get("MERLIN_CLANG")
+    if selected_clang:
+        paths["clang"] = Path(selected_clang)
     hardware = document.get("hardware_spec") or {}
     harness = hardware.get("curated_harness")
     if harness:
@@ -412,6 +460,10 @@ def resolve_plan(
     run_dir: Path | None = None,
     corpus_seal: Path | None = None,
     bundle_manifest: Path | None = None,
+    phase1_driver: str | None = None,
+    phase1_model: str | None = None,
+    phase1_effort: str | None = None,
+    phase1_provider: str | None = None,
     phase0_conformance_spec: Path | None = None,
     phase0_capability_contract: Path | None = None,
     phase0_synth_profile: Path | None = None,
@@ -424,13 +476,25 @@ def resolve_plan(
     from merlin.common.paths import out_dir, repo_root
 
     root = repo_root().resolve()
-    destination = (run_dir or default_run_dir(spec)).expanduser().resolve()
+    destination = (run_dir or default_run_dir(spec, phase)).expanduser().resolve()
     phases = spec.document["phases"]
     selected = sorted(phases) if phase == "all" else [phase]
     if any(number not in phases for number in selected):
         raise SpecError(f"definition does not declare phase {phase}")
     if (corpus_seal is not None or bundle_manifest is not None) and selected != ["1"]:
         raise SpecError("a reviewed corpus and replacement bundle can only select Phase 1")
+    phase1_selection = {
+        name: value
+        for name, value in (
+            ("driver", phase1_driver),
+            ("model", phase1_model),
+            ("effort", phase1_effort),
+            ("provider", phase1_provider),
+        )
+        if value is not None
+    }
+    if phase1_selection and selected != ["1"]:
+        raise SpecError("Phase 1 launch overrides require a Phase 1-only plan")
     if (corpus_seal is None) != (bundle_manifest is None):
         raise SpecError("select both --corpus-seal and --bundle-manifest for a new reviewed Phase 1 run")
     if (phase0_conformance_spec is None) != (phase0_synth_profile is None):
@@ -485,6 +549,11 @@ def resolve_plan(
         entry = phases[number]
         adapter = ADAPTERS[entry["adapter"]]
         config = dict(entry["config"])
+        if number == "1" and phase1_selection:
+            if adapter.name != "capsule_bench":
+                raise SpecError("Phase 1 launch overrides require the capsule_bench adapter")
+            config.update(phase1_selection)
+            adapter.validate(config)
         if number == "0" and phase0_selection:
             config.update(phase0_selection)
             adapter.validate(config)
@@ -499,20 +568,42 @@ def resolve_plan(
             selected_bundle = bundle_manifest.expanduser().absolute()
             if selected_bundle.name != "input_bundle_manifest.yaml":
                 raise SpecError("--bundle-manifest must name input_bundle_manifest.yaml")
-            original_bundle = spec.resolve(entry["config"]["bundle_manifest"])
-            if selected_bundle.resolve() == original_bundle:
-                raise SpecError("a reviewed corpus needs a newly generated bundle, not the retained example manifest")
+            # Preflight and native admission require this path to be the exact
+            # generated bundle inside the selected release. Path inequality
+            # against the example default is not that proof: an example may
+            # already point at this release, while an unrelated copied bundle
+            # can have a different path and the same unsafe grants.
             config["bundle_manifest"] = str(selected_bundle)
             if selected_bundle.is_file():
                 config["bundle"] = read_yaml(selected_bundle).get("bundle_id")
             adapter.validate(config)
         command = adapter.resolve(spec, config, root, destination)
+        if adapter.name == "capsule_bench" and command.get("module") == PHASE1_MODULE:
+            # The native process inherits the caller's environment. Freeze selections
+            # that otherwise could differ between preflight and launch/resume.
+            for key in ("MERLIN_TARGET_PATH", "MERLIN_TARGET_CONTRACT"):
+                if key in os.environ:
+                    command["env"][key] = os.environ[key]
+            from merlin.targetgen.target_experiment import load_target_experiment, selected_experiment_contract
+
+            descriptor_path = Path(command["inputs"]["descriptor"])
+            if descriptor_path.is_file():
+                try:
+                    experiment = load_target_experiment(descriptor_path)
+                    contract = selected_experiment_contract(experiment, environment=command["env"])
+                except ValueError as error:
+                    raise SpecError(f"invalid Phase 1 capability selection: {error}") from error
+                if contract is not None:
+                    command["env"]["MERLIN_TARGET_CONTRACT"] = str(contract)
+            from merlin.llvmlower.toolchain import clang_for
+
+            selected_clang = clang_for(root, dict(os.environ, **command["env"]))
+            if selected_clang.is_absolute() and selected_clang.is_file():
+                command["env"]["MERLIN_CLANG"] = str(selected_clang.resolve())
         if adapter.name == "capsule_derivation" and command.get("phase0_m2m_selection"):
             if not command["inputs"].get("software_spec"):
                 raise SpecError("selected Model2MLIR capture requires explicit Phase 0 software evidence")
-            if config.get("evidence_mode") != "diagnostic":
-                raise SpecError("live Model2MLIR capture runtime is diagnostic only; select diagnostic evidence mode")
-            from .phase0.m2m_runtime import observe
+            from .phase0.m2m_runtime import observe, sealed_capture_config
 
             choice = command["phase0_m2m_selection"]
             try:
@@ -525,6 +616,21 @@ def resolve_plan(
                 command["input_owner_roots"].append(command["phase0_m2m_selection"]["base"])
             except (OSError, ValueError) as exc:
                 raise SpecError(f"invalid selected Model2MLIR runtime: {exc}") from exc
+            if config.get("evidence_mode") != "diagnostic":
+                # Verified Phase 0 admits a generation-time capture only from the sealed runner
+                # (operator policy, 2026-10-01): every PyTorch capture this run makes is preselected,
+                # sandboxed, replayed and attested against the runtime selected here.
+                from merlin.common.artifacts import cache_dir
+
+                from .capture_execution.runtime_store import STORE_ENV
+                from .phase0.sealed_generation import CONFIG_ENV
+
+                selection = command["phase0_m2m_selection"]
+                command["env"][CONFIG_ENV] = json.dumps(
+                    sealed_capture_config(selection, destination / "phase0"),
+                    sort_keys=True,
+                )
+                command["env"][STORE_ENV] = str(cache_dir("sealed-m2m-runtime"))
         commands[number] = command
         inputs[f"phase{number}:entrypoint"] = command["entrypoint"]
         for name, value in command["inputs"].items():
@@ -609,6 +715,7 @@ def resolve_plan(
         "definition": str(spec.path),
         "spec": spec.document,
         **({"phase0_selected_artifacts": phase0_selection} if phase0_selection else {}),
+        **({"phase1_launch_overrides": phase1_selection} if phase1_selection else {}),
         "run_dir": str(destination),
         "storage_root": str(out_dir().resolve()),
         "phases": commands,
@@ -618,9 +725,81 @@ def resolve_plan(
     }
 
 
+def _verify_toolchain(plan: dict) -> list[str]:
+    """Every grading phase's compiler must resolve to a real executable before anything is graded.
+
+    ``merlin.llvmlower.toolchain.clang`` resolves from the process environment, the checkout's
+    ``.env`` and its ``third_party`` install, and its fallback chain ends in a bare name, so an
+    absent install otherwise surfaces capsule by capsule as compile failures of the candidate
+    rather than once, here, as the missing toolchain it is. Each command is resolved as its
+    engine will see it: the engine's checkout and launch environment, not this process's.
+    """
+    import shutil
+
+    from merlin.llvmlower.toolchain import clang_for
+
+    from .measured_launch import execution_environment
+
+    errors = []
+    for number, command in sorted(plan["phases"].items()):
+        adapter = ADAPTERS.get(command["adapter"])
+        if adapter is None or adapter.phase == "0":
+            continue
+        environment = execution_environment(command)
+        root = Path(environment.get("MERLIN_REPO_ROOT") or command["cwd"])
+        value = clang_for(root, environment)
+        resolved = value
+        if not value.is_absolute():
+            found = shutil.which(str(value), path=environment.get("PATH")) if len(value.parts) == 1 else None
+            resolved = Path(found) if found else Path(command["cwd"]) / value
+        if not (resolved.is_file() and os.access(resolved, os.X_OK)):
+            errors.append(
+                f"phase {number} toolchain clang does not resolve to an executable file: {str(value)!r} "
+                f"(checkout {root}); set MERLIN_CLANG or install the checkout's LLVM toolchain"
+            )
+    return errors
+
+
+def _verify_rtlcheck_support(plan: dict) -> list[str]:
+    """Reject an EL4 selection with no selected, statically resolvable check provider.
+
+    RTL checks resolve from the target's host backend.  Importing an arbitrary OOT
+    backend at preflight would execute user code, so this checks only the selected
+    support contract and its declared file.  Native startup still validates that
+    the module loads and implements the complete check capability.
+    """
+    from merlin.targetgen.plugins import resolve_support, validate
+
+    for command in plan["phases"].values():
+        if command.get("module") != PHASE1_MODULE or "--treatment" not in command["argv"]:
+            continue
+        try:
+            selected_treatment = _command_value(command, "--treatment")
+        except SpecError:
+            continue  # _verify_phase1_sources reports malformed or duplicated selections.
+        if selected_treatment != "rtlchecks":
+            continue
+        target = plan["target"]
+        try:
+            with _phase1_environment(command):
+                support = resolve_support(target)
+                plugin = support.plugin()
+            if not plugin.get("backend"):
+                return [
+                    f"phase 1 EL4 target {target!r} has no selected support plugin.backend; "
+                    "RTL checks cannot run from the metadata-only example. Select a reviewed OOT support provider."
+                ]
+            problems = validate(plugin, root=support.base, where=f"{target} plugin")
+            return [f"phase 1 EL4 support: {problem}" for problem in problems]
+        except (OSError, ValueError) as exc:
+            return [f"phase 1 EL4 support for {target!r} cannot be resolved: {exc}"]
+    return []
+
+
 def preflight(plan: dict) -> dict:
     """Check only definition, files, and process transport, without starting engines.
 
+    The grading phases' compiler is one of those files, resolved as each engine will resolve it.
     Oracle qualification, sandbox admission, credentials, and hardware readiness
     remain the native engines' live gates. This must never report a hardware GO.
     """
@@ -640,11 +819,12 @@ def preflight(plan: dict) -> dict:
                 and requires_chipyard_timing(Path(command["inputs"]["descriptor"]))
             ):
                 try:
-                    read_verified_timing(
-                        Path(command["inputs"]["oracle_timing"]),
-                        descriptor=Path(command["inputs"]["descriptor"]),
-                        target=plan["target"],
-                    )
+                    with _phase1_environment(command):
+                        read_verified_timing(
+                            Path(command["inputs"]["oracle_timing"]),
+                            descriptor=Path(command["inputs"]["descriptor"]),
+                            target=plan["target"],
+                        )
                 except ValueError as exc:
                     raise SpecError(str(exc)) from exc
         from .measured_launch import verify_plan
@@ -662,12 +842,12 @@ def preflight(plan: dict) -> dict:
                 if not diagnostic:
                     errors.append("Phase 0 evidence is not qualified; select explicit diagnostic mode for inspection")
         for number, result in synthesis.items():
-            if result["status"] == "unverified_legacy" and not (
+            if result["status"] in {"unverified_legacy", "incomplete_diagnostic"} and not (
                 "--evidence-mode" in plan["phases"][number]["argv"]
                 and _command_value(plan["phases"][number], "--evidence-mode") == "diagnostic"
             ):
                 errors.append(
-                    f"phase {number} selected synthesis is unverified_legacy; "
+                    f"phase {number} selected synthesis is {result['status']}; "
                     "regenerate and review a digest-bound profile, then freeze a new run"
                 )
     except SpecError as exc:
@@ -692,9 +872,15 @@ def preflight(plan: dict) -> dict:
         for workspace in command.get("workspaces", []):
             if not Path(workspace).is_dir():
                 errors.append(f"candidate workspace missing: {workspace}")
+    errors.extend(_verify_toolchain(plan))
+    errors.extend(_verify_rtlcheck_support(plan))
+    from .phase1.levels import level_for_phase1
+
+    phase1 = plan.get("spec", {}).get("phases", {}).get("1") if "1" in plan["phases"] else None
     return {
         "configuration_ready": not errors,
         "engine_readiness": "not_executed",
+        "phase1_level": level_for_phase1(phase1["config"]) if phase1 else None,
         "errors": errors,
         "inputs": pins,
         "phase0_synthesis": synthesis,
@@ -734,11 +920,17 @@ def status(run_dir: Path) -> dict:
     if _sha(root / "resolved-plan.json") != record.get("plan_sha256"):
         raise SpecError("frozen resolved plan changed")
     phases = {}
+    from .phase1.levels import level_for_phase1
+
     for number, command in plan.get("phases", {}).items():
         attempts = [entry for entry in record["attempts"] if entry.get("phase") == number]
         latest = attempts[-1] if attempts else {}
         phases[number] = {
             "adapter": command["adapter"],
+            **(
+                {"level": level_for_phase1(plan["spec"]["phases"][number]["config"])}
+                if command["adapter"] == "capsule_bench" else {}
+            ),
             "state": latest.get("state", "not_started"),
             "attempt_count": len(attempts),
             "engine_output": latest.get("engine_output", command.get("engine_output")),
