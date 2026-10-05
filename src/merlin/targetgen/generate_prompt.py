@@ -665,6 +665,28 @@ optimization_surfaces:
 Do not invent a surface to satisfy the form. If a lever does not exist yet, implement the general
 compiler mechanism first and then declare its real symbol. Phase 2 treats an absent or invalid mapping
 as UNKNOWN rather than guessing from a filename.
+
+### Whole-program source/task identity and host ABI
+For a whole-model capsule, preserve the source IR's `prov.region_id` wherever present through lowering. Declare
+`params.global_program_plan.tasks` with contiguous `task_index` values in emitted order, a nonempty
+`kind`, and `source_op_indices` covering every source operation exactly once. Derive each task/group's
+source regions from those indices and the source IR; do not invent IDs from capsule names, output
+shapes, or instruction counts. Tag lowered LLVM-dialect operations owned by a task, including host
+arithmetic, with the same `merlin.global_task` index. The shared OOT backend contract defines the
+pointer order and this attribution protocol. A plan, tags, or a nonzero device opcode count is only a
+declaration: the independent grader still requires complete numerical and completed-dispatch evidence.
+Use `merlin.source_op_index` and the source's `prov.region_id` on device-work commands;
+several operations may share a region ID. Fused commands require independently checked
+transformation evidence, not one opcode relabelled as many source operations.
+Host address calculations, loop control and dispatch are allowed in device tasks; host arithmetic
+on tensor elements is not, including through helper calls. Explicit host islands must not absorb
+independently accelerator-eligible source work. Missing computation attribution cannot pass the veto.
+
+If a selected host package is granted read-only, inspect its `knobs.yaml` C flags for the host
+`-march` and `-mabi`; the emitted LLVM module must agree with that selected host ISA/ABI and the
+runner-owned harness/board. Do not hardcode a target-specific host implementation or substitute the
+build machine's ISA. The runner owns harness generation, linking, and execution; your package emits
+the compiler-generated kernel under the declared `kernel_abi` pointer boundary.
 {dram_contract}{termination_contract}
 ## Plan before you build (FIRST round only)
 If `qa/verdict.json` does not exist yet, this is the first round: **before writing any code, write
@@ -886,7 +908,7 @@ def _enforced_workflow(
 ) -> str:
     """The per-arm MANDATORY development workflow — a compulsory checklist (not an optional aid) matching
     the experiment ladder: it names ONLY the tools the arm actually grants, so raw_baseline gets just the
-    build + self-check floor, arm-2 the C++ generators, arm-3 the xDSL/CCA + own-artifact lint, and arm-4
+    build + self-check floor, EL2 the C++ generators, EL3 the xDSL/CCA + own-artifact lint, and EL4
     ALSO the RTL-facts derivation. Fully DERIVED from ``granted_tools`` (the arm's allowed-tool set from its
     bundle grant) so it stays target-agnostic and precisely per-arm; when the grant set is not threaded
     (direct/test callers) it falls back to a coarse arm-string approximation. This is what compels the agent
@@ -981,13 +1003,13 @@ def _enforced_workflow(
         "   a file or a PID burns your budget without advancing the compiler.",
     ]
     n = 6
-    if has_cpp and not has_xdsl:  # arm-2
+    if has_cpp and not has_xdsl:  # EL2
         L.append(
             f"{n}. Scaffold the package with the granted C++ OOT generators "
             "(`targetgen/generate/{mlir_scaffold,llvm_plan,target_repo}`), not ad-hoc hand files."
         )
         n += 1
-    if has_xdsl:  # arm-3 and arm-4
+    if has_xdsl:  # EL3 and EL4
         L.append(
             f"{n}. Author the backend as an **xDSL pass pipeline** (`xdsl_dialects/`, "
             "`targetgen/synthesize/`, `targetgen/generate/`) — structured IR passes, NOT ad-hoc string "
@@ -1051,9 +1073,9 @@ def _enforced_workflow(
                 "bits, config scale — and reconcile every one that disagrees."
             )
             n += 1
-    if has_rtl:  # arm-4 only (the CIRCT / RTL-facts arm)
+    if has_rtl:  # EL4 only (the CIRCT / RTL-facts level)
         L.append(
-            f"{n}. RTL-checks arm: DERIVE the ISA / mesh / datapath from the granted RTL-extracted facts "
+            f"{n}. EL4 (RTL-informed Merlin): DERIVE the ISA / mesh / datapath from the granted RTL-extracted facts "
             "(`targetgen/rtl/` + the RTL facts pin) — do not hand-invent them — and run the CIRCT RTL "
             "checks on your lowering. Your backend must be a compilation FROM those RTL-derived facts."
         )

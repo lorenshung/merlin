@@ -117,12 +117,10 @@ def falsifiable_policy(policy: dict, outputs, *, name: str = "?") -> tuple[dict,
     spans 0.0139..0.1523 was graded at ``atol: 0.25``, so zeros, the mean and the midrange all passed it.
     The capsule reported a numeric pass and proved nothing.
 
-    When the declared absolute tolerance is at or above the ceiling, it is replaced by the profile's OWN
-    relative tolerance applied at the golden's scale (``rtol * max|golden|``). Nothing is invented: both
-    numbers are already declared, and the substitution only stops an absolute budget written for large
-    outputs from swallowing a small one. A capsule that is still unfalsifiable afterwards RAISES -- its
-    golden has no spread for any tolerance to sit inside, which is a defect in the capsule rather than in
-    the policy, and a silently loosened grade is how a corpus certifies constants.
+    A bounded-integer policy is a hardware error contract: if its golden cannot falsify the declared
+    bound, raise and require a wider stimulus. For float tolerance policies, an absolute tolerance at
+    or above the ceiling is replaced by the profile's OWN relative tolerance at the golden's scale
+    (``rtol * max|golden|``). A capsule that is still unfalsifiable afterwards raises.
     """
     pol = dict(policy or {})
     atol = pol.get("atol")
@@ -151,6 +149,12 @@ def falsifiable_policy(policy: dict, outputs, *, name: str = "?") -> tuple[dict,
     if float(atol) < ceiling:
         prov["falsifiable"] = True
         return pol, prov
+    if pol.get("compare") == "bounded_int":
+        raise UnfalsifiablePolicy(
+            f"{name}: declared integer error bound {atol} reaches the golden's falsifiability "
+            f"ceiling {ceiling}; widen the stimulus instead of silently changing the device's "
+            "arithmetic contract"
+        )
     derived = rtol * scale
     if not (derived < ceiling):
         raise UnfalsifiablePolicy(

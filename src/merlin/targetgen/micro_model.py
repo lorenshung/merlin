@@ -154,6 +154,53 @@ def observed_spellings(captures: dict) -> dict:
     return out
 
 
+def _observed_host_ops_by_family(captures: dict, admitted: dict) -> dict:
+    """``family -> observed host operation rows``, over every captured dtype the target does not admit.
+
+    Host layers are built from these, so the composed model's host islands are operations real
+    captures hand the host rather than stock statements of the same family.
+    """
+    from collections import defaultdict
+
+    from merlin.targetgen import conformance as CF
+    from merlin.targetgen import host_lane_ops
+    from merlin.targetgen import model_coverage as mc
+
+    admitted_pairs = set()
+    for fam, dtypes in (admitted or {}).items():
+        for dtype in dtypes or ():
+            try:
+                admitted_pairs.add((str(fam), CF.capsule_dtype(str(dtype))))
+            except Exception:  # noqa: BLE001 -- an unmappable spelling stays as declared
+                admitted_pairs.add((str(fam), str(dtype)))
+    pairs = set()
+    for _label, path in sorted((captures or {}).items()):
+        try:
+            sources = list(mc.region_sources(mc.load_module(path)))
+        except Exception:  # noqa: BLE001 -- unreadable capture
+            continue
+        for fam, dtype, _op, _frontend in sources:
+            if fam and dtype:
+                try:
+                    pair = (str(fam), CF.capsule_dtype(str(dtype)))
+                except Exception:  # noqa: BLE001
+                    continue
+                if pair not in admitted_pairs and not pair[1].startswith("unsupported_mlir:"):
+                    pairs.add(pair)
+    merged: dict = defaultdict(Counter)
+    for key, rows in host_lane_ops.observed_host_ops(captures or {}, sorted(pairs)).items():
+        family = key.partition("/")[0]
+        for row in rows:
+            merged[family][(row["op"], row.get("frontend_op"))] += int(row["n_regions"])
+    return {
+        family: [
+            {"op": op, "frontend_op": frontend, "n_regions": n}
+            for (op, frontend), n in sorted(counter.items(), key=lambda item: (-item[1], item[0][0]))
+        ]
+        for family, counter in merged.items()
+    }
+
+
 def interleave(accelerator: list, host: list) -> list:
     """Order the layers so the host work sits BETWEEN accelerator work.
 
@@ -286,6 +333,7 @@ def spec(
         cap_map = {}
     units = CF.admitting_units(target)
     spellings = observed_spellings(captures)
+    host_ops = _observed_host_ops_by_family(captures, admitted)
 
     # Which families a real capture contains, and how many regions carried each. The host side is drawn
     # from here rather than from imagination: a family no real model uses is not worth a layer.
@@ -353,7 +401,7 @@ def spec(
                     op=op,
                     op_frequency=freq,
                     observed_in=tuple(sorted(observed_in.get(fam, ()))),
-                    emitted_op=emitted_op,
+                    emitted_op=statement_for(fam, host_ops.get(fam))[0],
                     why="the emitted standalone operation cannot use this target's accelerator: "
                     + "; ".join(blocked_reasons),
                 )
@@ -362,7 +410,7 @@ def spec(
 
     for fam in sorted(f for f in observed_counts if f not in admitted):
         op, freq = _spelling(fam)
-        emitted_op, _ = statement_for(fam)
+        emitted_op, _ = statement_for(fam, host_ops.get(fam))
         host.append(
             LayerRequirement(
                 family=fam,
@@ -406,8 +454,8 @@ class UnwritableLayer(ValueError):
 #: order unwritable -- the composition axis is about what follows what, and a reduction that collapsed
 #: a dimension would decide the rest of the model instead of exercising it.
 _STATEMENT: dict[str, tuple[str | None, str]] = {
-    "matmul": ("self.w{i} = nn.Parameter(torch.randn(E, E) * 0.05)", "x = x @ self.w{i}"),
-    "linear": ("self.fc{i} = nn.Linear(E, E, bias=False)", "x = self.fc{i}(x)"),
+    "matmul": ("self.w{i} = nn.Parameter(_weight({i}, E, E))", "x = x @ self.w{i}"),
+    "linear": ("self.w{i} = nn.Parameter(_weight({i}, E, E))", "x = torch.nn.functional.linear(x, self.w{i})"),
     "rmsnorm": (None, "x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-6)"),
     "layernorm": ("self.ln{i} = nn.LayerNorm(E)", "x = self.ln{i}(x)"),
     "softmax": (None, "x = torch.softmax(x, dim=-1)"),
@@ -416,6 +464,12 @@ _STATEMENT: dict[str, tuple[str | None, str]] = {
     "add": (None, "x = x + 1.0"),
     "bias_add": ("self.b{i} = nn.Parameter(torch.zeros(E))", "x = x + self.b{i}"),
     "reduce_sum": (None, "x = x - x.sum(-1, keepdim=True) / E"),
+    # Spelled as model2MLIR names captured host work (`prov.op`), so a host layer can reproduce an
+    # operation real captures contain. Each is shape-preserving like every other statement here.
+    "mul": (None, "x = x * 0.5"),
+    "layer_norm": ("self.ln{i} = nn.LayerNorm(E)", "x = self.ln{i}(x)"),
+    "reduce_mean": (None, "x = x * x.mean(-1, keepdim=True)"),
+    "permute": (None, "x = x.permute(1, 0).contiguous().permute(1, 0)"),
     "movement": (None, "x = x.transpose(-1, -2).contiguous().transpose(-1, -2)"),
     # THE ATTENTION FAMILY IS `attention_full`. Two near misses are worth naming, because both look
     # right and neither works: `attention_qk` is classified as a CONTRACTION (`_op_family_map`) --
@@ -440,23 +494,38 @@ _STATEMENT: dict[str, tuple[str | None, str]] = {
     # tolerance band cannot separate a right answer from a wrong one. Every real attention block is
     # residual for exactly this reason, so this is the faithful spelling as well as the gradeable one.
     "attention_full": (
-        "self.qkv{i} = nn.Parameter(torch.randn(3, E, E) * 0.05)",
+        "self.qkv{i} = nn.Parameter(_weight({i}, 3 * E, E).reshape(3, E, E))",
         "x = x + torch.nn.functional.scaled_dot_product_attention("
         "x @ self.qkv{i}[0], x @ self.qkv{i}[1], x @ self.qkv{i}[2])",
     ),
 }
 
 
-def statement_for(family: str) -> tuple[str, tuple[str | None, str]]:
+def statement_for(family: str, observed: list | None = None) -> tuple[str, tuple[str | None, str]]:
     """``(op, (init_line, forward_line))`` for ``family``, or raise naming the family.
 
-    The op is chosen by :func:`corpus_synth.op_for_family`, the same derivation the op capsules use.
+    With ``observed`` host operations (:func:`merlin.targetgen.host_lane_ops.observed_host_ops` rows),
+    a HOST layer is one of those operations, so the composed model reproduces work the captures
+    contain; none expressible raises. Otherwise the op is chosen by
+    :func:`corpus_synth.op_for_family`, the same derivation the op capsules use.
     Raising rather than skipping is the point: a layer quietly dropped from a composed model changes
     the composition it was written to exercise, and the capsule would then test a different shape than
     the one its name claims.
     """
-    from merlin.targetgen.corpus_synth import available_ops, op_for_family
+    from merlin.targetgen.corpus_synth import _op_family_map, available_ops, op_for_family
 
+    if observed:
+        from merlin.targetgen import host_lane_ops
+
+        families = _op_family_map()
+        writable = {op for op in available_ops() & set(_STATEMENT) if families.get(op) == family}
+        chosen = host_lane_ops.choose(observed, writable)
+        if chosen is None:
+            raise UnwritableLayer(
+                f"no emittable statement for the observed {family!r} host operations "
+                f"{[row.get('op') for row in observed]}; add one to micro_model._STATEMENT"
+            )
+        return chosen["op"], _STATEMENT[chosen["op"]]
     op = op_for_family(family, admitted_ops=available_ops() & set(_STATEMENT))
     if op is None or op not in _STATEMENT:
         raise UnwritableLayer(
@@ -477,6 +546,10 @@ def emit_pytorch(spec) -> str:
     Everything dimensioned comes from the spec: the extent is the target's own tile edge times the
     declared multiple, so the same inventory emits a 32-wide model for a 16-wide array and a 128-wide
     one for a 64-wide array without being edited.
+
+    Inputs and weights use exact integer operations and power-of-two scales:
+    seeded random tensor generators are not byte-stable across PyTorch CPU
+    capability paths, which makes sealed capture fail loader replay.
     """
     extent = int(getattr(spec, "extent", 0) or 0)
     if extent <= 0:
@@ -490,12 +563,13 @@ def emit_pytorch(spec) -> str:
 
     inits, fwd, notes = [], [], []
     for i, layer in enumerate(layers):
-        op, (init_line, forward_line) = statement_for(layer.family)
-        if layer.emitted_op is not None and op != layer.emitted_op:
-            raise UnwritableLayer(
-                f"{layer.family}: classified statement {layer.emitted_op!r} changed to {op!r}; "
-                "derive the placement again before emitting"
-            )
+        if layer.emitted_op is not None:
+            # The spec already chose (and, for a host layer, chose from observed host work).
+            if layer.emitted_op not in _STATEMENT:
+                raise UnwritableLayer(f"{layer.family}: classified statement {layer.emitted_op!r} has no source")
+            op, (init_line, forward_line) = layer.emitted_op, _STATEMENT[layer.emitted_op]
+        else:
+            op, (init_line, forward_line) = statement_for(layer.family)
         if init_line:
             inits.append("        " + init_line.format(i=i))
         fwd.append(f"        # {layer.side}: {layer.family} (observed spelling {layer.op!r})")
@@ -524,6 +598,10 @@ def emit_pytorch(spec) -> str:
         "\n"
         f"E = {extent}\n"
         "\n"
+        "def _weight(index, rows, cols):\n"
+        "    values = torch.arange(rows * cols, dtype=torch.int32).reshape(rows, cols)\n"
+        "    return (((values * 37 + index * 101) % 251) - 125).to(torch.float32) / 1024.0\n"
+        "\n"
         "\n"
         "class MicroModel(nn.Module):\n"
         "    def __init__(self):\n"
@@ -535,6 +613,8 @@ def emit_pytorch(spec) -> str:
         "\n"
         "\n"
         "def get_model_and_inputs():\n"
-        "    torch.manual_seed(0)\n"
-        "    return MicroModel().eval(), (torch.randn(E, E),)\n"
+        "    model = MicroModel().eval()\n"
+        "    values = torch.arange(E * E, dtype=torch.int32).reshape(E, E)\n"
+        "    inputs = ((values % 251) - 125).to(torch.float32) / 64.0\n"
+        "    return model, (inputs,)\n"
     )

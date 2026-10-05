@@ -37,10 +37,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from merlin.common.digest import is_sha256
 from merlin.common.paths import env as _env
 from merlin.common.paths import repo_root
-from merlin.common.digest import is_sha256
 from merlin.targetgen import capture_cache
+from merlin.targetgen.golden_store import write_golden
 
 _MODEL_CAPTURE_ABI_VERSION = 6
 
@@ -191,7 +192,10 @@ def _static_pt2e_model(op: str, *, scheme: str | None, recipe: dict | None, alre
 
 
 def _require_pt2e_integerization_receipt(
-    program: str, meta: dict, *, agreement_tolerance: tuple[float, float] | None,
+    program: str,
+    meta: dict,
+    *,
+    agreement_tolerance: tuple[float, float] | None,
     capture_root: Path | None = None,
 ) -> None:
     """Admit a static W8A8 model only if its whole PT2E region was integerized.
@@ -280,21 +284,37 @@ def _require_pt2e_integerization_receipt(
         if agreement.get("reference") != "pt2e_integer":
             raise M2MUnavailable("integerization receipt did not use the selected independent integer reference")
         source = agreement.get("source")
-        if not isinstance(source, dict) or not isinstance(source.get("path"), str) or not is_sha256(source.get("sha256")):
+        if (
+            not isinstance(source, dict)
+            or not isinstance(source.get("path"), str)
+            or not is_sha256(source.get("sha256"))
+        ):
             raise M2MUnavailable("integerization receipt lacks the integer reference source identity")
         executed = agreement.get("executed_contractions")
-        if not isinstance(executed, dict) or any(
-            type(executed.get(kind)) is not int or executed[kind] != by_kind[kind]["seen"]
-            for kind in ("conv2d", "linear", "matmul")
-        ) or any(executed.get(key) != seen for key in ("total", "selected", "observed")):
+        if (
+            not isinstance(executed, dict)
+            or any(
+                type(executed.get(kind)) is not int or executed[kind] != by_kind[kind]["seen"]
+                for kind in ("conv2d", "linear", "matmul")
+            )
+            or any(executed.get(key) != seen for key in ("total", "selected", "observed"))
+        ):
             raise M2MUnavailable("independent integer reference contraction census differs from PT2E")
         pointer = agreement.get("output")
-        if not isinstance(pointer, dict) or pointer.get("path") != "integer-reference.json" or not is_sha256(pointer.get("sha256")):
+        if (
+            not isinstance(pointer, dict)
+            or pointer.get("path") != "integer-reference.json"
+            or not is_sha256(pointer.get("sha256"))
+        ):
             raise M2MUnavailable("integerization receipt lacks a bundle-local independent reference artifact")
         if capture_root is None:
             raise M2MUnavailable("independent integer reference artifact has no capture directory")
         reference_path = capture_root / "integer-reference.json"
-        if not reference_path.is_file() or reference_path.is_symlink() or hashlib.sha256(reference_path.read_bytes()).hexdigest() != pointer["sha256"]:
+        if (
+            not reference_path.is_file()
+            or reference_path.is_symlink()
+            or hashlib.sha256(reference_path.read_bytes()).hexdigest() != pointer["sha256"]
+        ):
             raise M2MUnavailable("independent integer reference artifact does not match its digest")
 
     emitted = count(receipt.get("integer_mm_emitted"), "emitted integer matmul count")
@@ -499,6 +519,36 @@ class Model(nn.Module):
         return a * b
 def get_model_and_inputs():
     return Model(), (_r({shape_args}), _r({shape_args}))
+""",
+    # The next four are spelled as model2MLIR names the operations real captures carry (`prov.op`), so a
+    # host-lane probe can be built from an operation the captured host work actually consists of.
+    "layer_norm": """
+class Model(nn.Module):
+    def forward(self, x, w, b):
+        return torch.nn.functional.layer_norm(x, ({K},), w, b, {eps})
+def get_model_and_inputs():
+    return Model(), (_r({M}, {K}), _r({K}) * 0.5 + 1.0, _r({K}) * 0.1)
+""",
+    "reduce_mean": """
+class Model(nn.Module):
+    def forward(self, x):
+        return x.mean(-1, keepdim=True)
+def get_model_and_inputs():
+    return Model(), (_r({M}, {K}),)
+""",
+    "batch_matmul": """
+class Model(nn.Module):
+    def forward(self, a, w):
+        return torch.bmm(a, w)
+def get_model_and_inputs():
+    return Model(), (_r({B}, {M}, {K}), _r({B}, {K}, {N}))
+""",
+    "permute": """
+class Model(nn.Module):
+    def forward(self, x):
+        return x.permute(1, 0)
+def get_model_and_inputs():
+    return Model(), (_r({M}, {K}),)
 """,
     "reduce_sum": """
 class Model(nn.Module):
@@ -715,6 +765,12 @@ def build_loader_src(spec: dict) -> str:
 # ------------------------------------------------------------------------------------------------
 # artifacts
 # ------------------------------------------------------------------------------------------------
+def _float_reference_of(workdir: Path):
+    """The worker's ``float_reference.json`` in ``workdir``, or ``None`` when it wrote none."""
+    path = Path(workdir) / "float_reference.json"
+    return json.loads(path.read_text()) if path.is_file() else None
+
+
 @dataclass
 class CapsuleArtifacts:
     """Everything a grounded capsule needs. ``pytorch_src`` + ``linalg_mlir`` are agent-visible realistic
@@ -731,6 +787,9 @@ class CapsuleArtifacts:
     golden: list
     weights_path: str
     meta: dict = field(default_factory=dict)
+    #: The untransformed model's outputs on the same inputs (``float_reference.json``), when the capture
+    #: recorded them; ``None`` for an already-quantized loader or a capture that predates the record.
+    float_reference: object = None
 
 
 # ------------------------------------------------------------------------------------------------
@@ -783,6 +842,8 @@ class PytorchRefSource:
         recipe: dict | None = None,
         already_quantized: bool = False,
         agreement_tolerance: tuple[float, float] | None = None,
+        activation_contractions: bool = False,
+        integer_nonlinear: bool = False,
     ) -> CapsuleArtifacts:
         """Capture an EXISTING loader file (a whole-model workload) rather than a generated op loader.
         Same worker path; ``op`` is ``model`` and ``pytorch_src`` is the loader's own source.
@@ -800,8 +861,18 @@ class PytorchRefSource:
         network is not capturable without them: a loader that refuses to invent inputs unless told which
         stream to use raised, and a loader whose dependency lives only in its own venv raised
         ``ModuleNotFoundError`` -- and BOTH were recorded as "this model could not be built", which reads
-        as a limit of the compiler rather than of how it was invoked."""
+        as a limit of the compiler rather than of how it was invoked.
+
+        CAPTURE CAPABILITIES. ``activation_contractions`` also quantizes, in the scheme's own int8 dynamic
+        form, the contractions the scheme cannot reach -- a matmul of two activations (attention's
+        ``Q @ K^T`` and ``P @ V``) and a convolution that is a pure re-layout of a matmul (a patch
+        embedding); see ``_activation_contractions.py``. The worker refuses it under any other
+        quantization. ``integer_nonlinear`` (with ``activation_contractions`` only) also computes
+        softmax, GELU and layer norm in integer arithmetic (``_integer_nonlinear.py``): a different
+        numerical model, recorded as such."""
         loader_py = Path(loader_py)
+        if integer_nonlinear and not activation_contractions:
+            raise M2MUnavailable("integer nonlinear capture is defined on top of activation contractions only")
         if already_quantized and (recipe is not None or scheme):
             raise M2MUnavailable("already-materialized capture cannot also apply a recipe or a quantization scheme")
         # `available()` stays the predicate when nothing is pinned, so a caller that has established
@@ -825,7 +896,17 @@ class PytorchRefSource:
             recipe=recipe,
             already_quantized=already_quantized,
             agreement_tolerance=agreement_tolerance,
+            activation_contractions=activation_contractions,
+            integer_nonlinear=integer_nonlinear,
         )
+
+    def _launch_worker(self, cmd: list[str], *, env: dict, **_request) -> "subprocess.CompletedProcess[str]":
+        """Run the capture worker; a sealed capture source runs the same request in a sandbox instead.
+
+        ``_request`` carries the structured capture request (loader, dtype, recipe path, tolerance,
+        declared environment, interpreter) so a subclass need not parse ``cmd``.
+        """
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout, env=env)
 
     def _cache_slot(
         self,
@@ -839,6 +920,7 @@ class PytorchRefSource:
         already_quantized: bool = False,
         agreement_tolerance: tuple[float, float] | None = None,
         static_pt2e: bool = False,
+        capabilities: tuple[str, ...] = (),
     ) -> "Path | None":
         """Where a capture of exactly this input already lives, or ``None`` if caching is unavailable.
 
@@ -922,6 +1004,12 @@ class PytorchRefSource:
             }
             if already_quantized:
                 request["capture_quantization"] = "already_materialized"
+            if capabilities:
+                # A capability is part of the program, and so is the module that realises it: its source
+                # is keyed by content. Added only when asked for, so every existing slot keeps its key.
+                request["capture_capabilities"] = {
+                    name: sha256_file(Path(__file__).with_name(f"_{name}.py")) for name in sorted(capabilities)
+                }
             key = hashlib.sha256(json.dumps(request, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
             return cache_dir("model_capture") / f"{op}_{dtype}_{key}"
         except Exception:  # noqa: BLE001 -- an unavailable cache is not a failed capture
@@ -941,7 +1029,30 @@ class PytorchRefSource:
         recipe: dict | None = None,
         already_quantized: bool = False,
         agreement_tolerance: tuple[float, float] | None = None,
+        activation_contractions: bool = False,
+        integer_nonlinear: bool = False,
     ) -> CapsuleArtifacts:
+        capabilities = tuple(
+            name
+            for name, asked in (
+                ("activation_contractions", activation_contractions),
+                ("integer_nonlinear", integer_nonlinear),
+            )
+            if asked
+        )
+        # WHICH FRONTEND MADE THIS CAPTURE, verified against its software pin and recorded on every
+        # capture. A capture that computes softmax/GELU/layer norm in integer arithmetic is REFUSED off the
+        # pin: its integer shifts and floor divisions only lower exactly through the decompositions the
+        # pinned revision carries, and an off-pin checkout would import them as opaque calls or, worse,
+        # with different bytes behind the same name.
+        from merlin.integrations.model2mlir import capture_pin
+
+        frontend_pin = capture_pin(getattr(self, "m2m_dir", None))
+        if "integer_nonlinear" in capabilities and not frontend_pin["ok"]:
+            raise M2MUnavailable(
+                f"integer nonlinear capture needs model2MLIR at its software pin: {frontend_pin['citation']}; "
+                f"drift: {frontend_pin['verification'].get('drift')}"
+            )
         if agreement_tolerance is not None and (
             not isinstance(agreement_tolerance, (tuple, list))
             or len(agreement_tolerance) != 2
@@ -982,6 +1093,7 @@ class PytorchRefSource:
             already_quantized,
             agreement_tolerance,
             static_pt2e,
+            capabilities,
         )
         with capture_cache.slot_lock(slot) as locked_slot:
             if slot is not None and locked_slot is None:
@@ -1005,6 +1117,7 @@ class PytorchRefSource:
                 recipe_sha256=recipe_sha256,
                 already_quantized=already_quantized,
                 agreement_tolerance=agreement_tolerance,
+                capabilities=capabilities,
                 slot=locked_slot,
             )
             if locked_slot is not None:
@@ -1019,12 +1132,15 @@ class PytorchRefSource:
                     already_quantized,
                     agreement_tolerance,
                     static_pt2e,
+                    capabilities,
                 )
                 if current != locked_slot:
                     raise M2MUnavailable("capture implementation changed during cache transaction; retry capture")
                 if not capture_cache.observed_sources_match(artifact.meta):
                     raise M2MUnavailable("observed loader dependencies changed during cache transaction; retry capture")
                 capture_cache.commit(locked_slot, attempt)
+            if isinstance(artifact, CapsuleArtifacts):
+                artifact.meta = {**(artifact.meta or {}), "model2mlir_pin": frontend_pin}
             return artifact
 
     def _run_capture(
@@ -1042,6 +1158,7 @@ class PytorchRefSource:
         recipe_sha256: str,
         already_quantized: bool = False,
         agreement_tolerance: tuple[float, float] | None = None,
+        capabilities: tuple[str, ...] = (),
         slot: Path | None,
     ) -> tuple[CapsuleArtifacts, Path]:
         """Lookup/capture/normalize/read while holding the caller's entire slot transaction.
@@ -1085,6 +1202,7 @@ class PytorchRefSource:
                         golden=json.loads((cached_slot / "golden.json").read_text()),
                         weights_path=cached.get("weights", str(cached_slot / "weights.safetensors")),
                         meta=cached,
+                        float_reference=_float_reference_of(cached_slot),
                     ), cached_slot
             except Exception:  # noqa: BLE001 -- an unreadable slot is a miss, never a failure
                 pass
@@ -1128,6 +1246,10 @@ class PytorchRefSource:
             cmd += ["--scheme", str(scheme)]
         if already_quantized:
             cmd.append("--already-quantized")
+        if "activation_contractions" in capabilities:
+            cmd.append("--quantize-activation-contractions")
+        if "integer_nonlinear" in capabilities:
+            cmd.append("--integer-nonlinear")
         if agreement_tolerance is not None:
             cmd += ["--agreement-atol", str(agreement_tolerance[0]), "--agreement-rtol", str(agreement_tolerance[1])]
         # A rejected cache entry or reused caller directory may still hold the
@@ -1135,7 +1257,20 @@ class PytorchRefSource:
         # cannot inherit the previous attempt's success.
         meta_p = workdir / "meta.json"
         meta_p.unlink(missing_ok=True)
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout, env=env)
+        proc = self._launch_worker(
+            cmd,
+            env=env,
+            workdir=workdir,
+            loader_py=loader_py,
+            op=op,
+            dtype=dtype,
+            recipe_path=(workdir / "quant_recipe.json") if recipe is not None else None,
+            scheme=scheme,
+            already_quantized=already_quantized,
+            agreement_tolerance=agreement_tolerance,
+            declared_env=declared_env,
+            interpreter=interpreter,
+        )
         # ⚠️ A NON-ZERO RC IS NOT NECESSARILY A CRASH, and treating it as one threw away the
         # diagnosis. The worker returns 3 for "ran fine, but the program is not clean" -- and it
         # WRITES meta.json with `opaque` and `opaque_detail` before doing so. This branch fired first
@@ -1232,6 +1367,7 @@ class PytorchRefSource:
             golden=json.loads((workdir / "golden.json").read_text()),
             weights_path=meta.get("weights", str(workdir / "weights.safetensors")),
             meta=meta,
+            float_reference=_float_reference_of(workdir),
         ), workdir
 
 
@@ -1263,6 +1399,10 @@ _FUSED_OP_INPUT_NAMES = {
     "add": ["A", "B"],
     "mul": ["A", "B"],
     "reduce_sum": ["X"],
+    "layer_norm": ["X", "W", "B"],
+    "reduce_mean": ["X"],
+    "batch_matmul": ["A0", "W"],
+    "permute": ["X"],
     # composite ops from real model graphs (linalg-as-interface, positional args)
     "bias_add": ["X", "B"],
     "fused_matmul_bias": ["X", "W", "B"],
@@ -1641,6 +1781,32 @@ def _outs_types(line: str) -> list[tuple[list[int], str]]:
     return _tensor_types(line.split("outs(", 1)[1])
 
 
+def _ins_slot_formats(line: str) -> tuple[str | None, ...]:
+    """Read EVERY pretty-printed ``ins`` slot, retaining unknown/dynamic slots in place."""
+    from merlin.common import quant_formats as qf
+
+    if "ins(" not in line:
+        return ()
+    clause = line.split("ins(", 1)[1].split("outs(", 1)[0]
+    names, separator, types = clause.partition(":")
+    slots = [name.strip() for name in names.strip().removesuffix(")").split(",") if name.strip()]
+    if not separator or not slots:
+        return tuple(None for _ in slots)
+    chunks = types.split("tensor<")[1:]
+    if len(chunks) != len(slots):
+        return tuple(None for _ in slots)
+    result: list[str | None] = []
+    for chunk in chunks:
+        body = chunk.split(">", 1)[0]
+        parts = body.split("x")
+        if (len(parts) < 2 or any(not dim.isdigit() or int(dim) <= 0 for dim in parts[:-1])
+                or not qf.has(parts[-1])):
+            result.append(None)
+        else:
+            result.append(qf.get(parts[-1]).name)
+    return tuple(result)
+
+
 def _element_format(line: str) -> str | None:
     """The canonical format name every ``ins`` operand of this line shares, or ``None`` (UNKNOWN).
 
@@ -1653,16 +1819,10 @@ def _element_format(line: str) -> str | None:
     predicates, indices and accumulators are not operand formats), or operands that disagree with each
     other (a select over ``f32`` and ``i1`` has no single operand format and must not be given one).
     """
-    from merlin.common import quant_formats as qf
-
-    types = _ins_types(line)
-    if not types:
+    formats = _ins_slot_formats(line)
+    if not formats or any(fmt is None for fmt in formats):
         return None
-    names = set()
-    for _dims, dt in types:
-        if not qf.has(dt):
-            return None
-        names.add(qf.get(dt).name)
+    names = set(formats)
     return names.pop() if len(names) == 1 else None
 
 
@@ -1832,10 +1992,91 @@ def _carrier_formats(linalg_mlir: str) -> list[str | None]:
     return [_element_format(line) for line in _tag_lines(linalg_mlir)]
 
 
+def _carrier_input_formats(linalg_mlir: str) -> list[tuple[str | None, ...]]:
+    """Per-tag pretty ``ins`` slots, with no dropped unknown operand."""
+    return [_ins_slot_formats(line) for line in _tag_lines(linalg_mlir)]
+
+
+def _generic_form_linalg_summary(linalg_mlir: str) -> dict:
+    """Read a generic-printed capture from operations, not the tag's physical line.
+
+    MLIR prints a generic op's attributes *after* its nested region.  The old
+    line reader therefore saw no carrier, iterator types, shape or operand
+    format for every generic-printed contraction.  This is the same parsed
+    program used by the independent completeness check; the two observations
+    remain separate because this reader uses provenance and the other checks
+    the computation body.
+    """
+    from math import prod
+
+    from merlin.common import mlir_query as mq
+    from merlin.common import quant_formats as qf
+    from merlin.kernels import shapes as ks
+
+    module = mq.parse(linalg_mlir)
+    shapes = {id(op): shape for op, shape in ks.observe_contractions(module)}
+    rows = {
+        "prov_ops": [],
+        "prov_families": [],
+        "carrier_region_ids": [],
+        "carrying_ops": [],
+        "carrier_reduces": [],
+        "carrier_extents": [],
+        "carrier_formats": [],
+        "carrier_input_formats": [],
+    }
+    for op in mq.walk(module):
+        tag = mq.attr_str(op, "prov.op")
+        if tag is None:
+            continue
+        name = mq.op_name(op)
+        rows["prov_ops"].append(tag)
+        rows["prov_families"].append(mq.attr_str(op, "prov.family") or "")
+        rows["carrier_region_ids"].append(mq.attr_str(op, "prov.region_id"))
+        rows["carrying_ops"].append(name)
+        iterators = (op.properties or {}).get("iterator_types") or op.attributes.get("iterator_types")
+        rows["carrier_reduces"].append("reduction" in str(iterators) if iterators is not None else None)
+        shape = shapes.get(id(op))
+        if shape is not None and len(shape.parallel) >= 2 and shape.reduction:
+            parallel = tuple(int(x) for x in shape.parallel)
+            rows["carrier_extents"].append(
+                (prod(parallel[:-2]), parallel[-2], prod(shape.reduction), parallel[-1])
+            )
+        else:
+            rows["carrier_extents"].append(None)
+        fmt = None
+        input_formats: tuple[str | None, ...] = ()
+        if name.startswith("linalg."):
+            # Linalg's trailing operands initialize its results; only the
+            # preceding operands specify the computation's input format.
+            inputs = op.operands[: len(op.operands) - len(op.results)]
+            input_formats = tuple(
+                qf.get(spelling).name
+                if qf.has(spelling) and shape is not None and all(type(dim) is int and dim > 0 for dim in shape)
+                else None
+                for value in inputs
+                for spelling in (str(value.type.element_type) if hasattr(value.type, "element_type") else "",)
+                for shape in (value.type.get_shape() if hasattr(value.type, "get_shape") else None,)
+            )
+            if input_formats and all(input_formats):
+                names = set(input_formats)
+                if len(names) == 1:
+                    fmt = names.pop()
+        rows["carrier_formats"].append(fmt)
+        rows["carrier_input_formats"].append(input_formats)
+    try:
+        inputs, outputs = mq.forward_signature(module)
+    except ValueError:
+        inputs, outputs = [], []
+    return {**rows, "inputs": inputs, "output": outputs[0] if outputs else None}
+
+
 def linalg_summary(linalg_mlir: str) -> dict:
     """Read a linalg-on-tensors module STRUCTURALLY (str tokenizer, NO regex): the ``@forward`` signature's
     operand + result tensor types and the set of ``prov.op`` / ``prov.family`` tags m2m stamps on each region.
     This is the structural view used to verify a mapped op's interface against its actual lowering."""
+    if '"linalg.' in linalg_mlir or linalg_mlir.lstrip().startswith('"builtin.module"('):
+        return _generic_form_linalg_summary(linalg_mlir)
     prov_ops = [c.split('"', 1)[0] for c in linalg_mlir.split('prov.op = "')[1:]]
     # Per TAG, not per family-occurrence: the two tags are not in one-to-one correspondence, and
     # splitting on them separately misaligns the lists wherever an operation states an op and no family.
@@ -1852,6 +2093,10 @@ def linalg_summary(linalg_mlir: str) -> dict:
     return {
         "prov_ops": prov_ops,
         "prov_families": prov_families,
+        "carrier_region_ids": [
+            line.split('prov.region_id = "', 1)[1].split('"', 1)[0] if 'prov.region_id = "' in line else None
+            for line in _tag_lines(linalg_mlir)
+        ],
         "inputs": inputs,
         "output": output,
         # WHICH OPERATION carries each tag, so a caller can tell a contraction from the shape ops
@@ -1864,6 +2109,7 @@ def linalg_summary(linalg_mlir: str) -> dict:
         # element format its own operands carry. Same construction, so same alignment.
         "carrier_extents": _carrier_extents(linalg_mlir),
         "carrier_formats": _carrier_formats(linalg_mlir),
+        "carrier_input_formats": _carrier_input_formats(linalg_mlir),
     }
 
 
@@ -1874,12 +2120,13 @@ def model_op_demands(linalg_mlir: str, in_fmt: str, weight_fmt: str | None = Non
     / reduction ops are unary. Feeds ``routing.route_target`` so a whole model can be split across a target's
     compute units (matmul tiles -> the systolic mesh, the rest -> vector/scalar lanes).
 
-    ``in_fmt``/``weight_fmt`` are the formats the compile was ASKED for and stay on every demand, because
-    that is what legality is about: a capture is routed under the datapath the compiler will lower it to.
-    Each demand ALSO carries ``elem_fmt``, the format its own operands are captured in, because the two are
-    different facts and a whole-model capture is routinely mixed -- see :attr:`routing.OpDemand.elem_fmt`.
+    ``in_fmt``/``weight_fmt`` are the formats the compile was ASKED for and stay on every demand.
+    Each demand ALSO carries ``elem_fmt``, the format its own operands are captured in; legality
+    follows that observed format because the request alone cannot prove a conversion. A whole-model
+    capture is routinely mixed -- see :attr:`routing.OpDemand.elem_fmt`.
     """
     from merlin.targetgen.routing import OpDemand
+    from merlin.targetgen import semantic_families as sf
 
     summ = linalg_summary(linalg_mlir)
     ops, fams = summ["prov_ops"], summ["prov_families"]
@@ -1887,6 +2134,8 @@ def model_op_demands(linalg_mlir: str, in_fmt: str, weight_fmt: str | None = Non
     reduces = summ["carrier_reduces"]
     extents = summ["carrier_extents"]
     formats = summ["carrier_formats"]
+    input_formats = summ["carrier_input_formats"]
+    region_ids = summ["carrier_region_ids"]
     wf = weight_fmt or in_fmt
     demands: list = []
     for i, op in enumerate(ops):
@@ -1911,7 +2160,11 @@ def model_op_demands(linalg_mlir: str, in_fmt: str, weight_fmt: str | None = Non
                     m=None,
                     k=None,
                     n=None,
-                    elem_fmt=formats[i],
+                elem_fmt=formats[i],
+                captured_input_formats=input_formats[i],
+                region_id=region_ids[i],
+                carrier_op=carrier or None,
+                form=sf.operation_form(carrier or op, carrier_op=carrier),
                 )
             )
             continue
@@ -1924,6 +2177,11 @@ def model_op_demands(linalg_mlir: str, in_fmt: str, weight_fmt: str | None = Non
         # capture had never stated a family for it.
         if fam == "contraction" and carrier == "linalg.generic" and reduces[i] is False:
             fam = ""
+        # ``prov.family`` is a capture vocabulary (layout, cast, elementwise, ...),
+        # while a compute-unit contract speaks canonical semantic families.  Only
+        # normalize a present, operation-valid tag; the deliberately erased
+        # contraction tag above must not be recovered by an op-name guess.
+        canonical_family = sf.from_prov(fam, op) if fam else None
         # THE OPERATION'S OWN EXTENTS, not the next unclaimed named matmul's. This used to walk a
         # separate list of `linalg.matmul` text occurrences with its own counter, on the assumption that
         # the demands tagged `prov.op = "matmul"` are exactly those operations. They are not: a
@@ -1935,24 +2193,29 @@ def model_op_demands(linalg_mlir: str, in_fmt: str, weight_fmt: str | None = Non
         # what make a contraction synthesizable as a tile at all, and withholding them from the ones
         # spelled `convolution_im2col_matmul` / `int_matmul` / `batch_matmul` left real contractions
         # counted `n_unsynthesizable` for a spelling.
-        extent = extents[i] if fam == "contraction" else None
+        extent = extents[i] if canonical_family == "contraction" else None
         batch, m, k, n = extent if extent is not None else (None, None, None, None)
         demands.append(
             OpDemand(
                 op=op,
                 in_fmt=in_fmt,
-                weight_fmt=(wf if fam == "contraction" else None),
+                weight_fmt=(wf if canonical_family == "contraction" else None),
                 site=op,
                 m=m,
                 k=k,
                 n=n,
                 # The capture states the family; routing asks the unit whether it does
                 # this KIND of work, instead of whether it recognises this SPELLING.
-                family=fam or None,
+                family=canonical_family,
+                source_family=fam or None,
                 # The format THIS op is captured in, beside the one the compile declared. Unknown
                 # (unreadable / mixed / not a registry format) stays None and never widens.
                 elem_fmt=formats[i],
+                captured_input_formats=input_formats[i],
                 batch=batch,
+                region_id=region_ids[i],
+                carrier_op=carrier or None,
+                form=sf.operation_form(op, carrier_op=carrier),
             )
         )
     return demands
@@ -2308,6 +2571,10 @@ def _write_frontend_evidence(
             else None
         ),
         "normalization": meta.get("capture_normalization"),
+        # The frontend revision, as verified against its software pin when the capture was made.
+        "frontend_pin": (
+            {k: meta["model2mlir_pin"][k] for k in ("pin", "ok", "citation")} if meta.get("model2mlir_pin") else None
+        ),
         "packaging": packaging_edit["kind"],
         "weights_reference_relocation": (
             {"from_reference_sha256": packaging_edit["from_reference_sha256"], "to": packaging_edit["to"]}
@@ -2475,7 +2742,7 @@ def write_pytorch_capsule(entry: dict, binding, out_root, *, source: "PytorchRef
     )
     (d / "capsule.pytorch.py").write_text(art.pytorch_src, encoding="utf-8")
     (d / "capsule.linalg.mlir").write_text(portable_linalg, encoding="utf-8")
-    (d / "golden.yaml").write_text(yaml.safe_dump(golden, sort_keys=False), encoding="utf-8")
+    write_golden(d, golden)
     return d
 
 
@@ -2958,8 +3225,12 @@ def model_accelerator_demand(linalg_mlir: str, binding) -> tuple[str | None, lis
     for d in demands:
         if d.op in eligible_ops:
             continue
+        if not d.source_formats_complete:
+            continue
         desc = _el.RegionDescriptor(
-            source=d.site or d.op, op=d.op, in_dtype=d.in_fmt, weight_dtype=d.weight_fmt, m=d.m, k=d.k, n=d.n
+            source=d.site or d.op, op=d.op, family=d.family,
+            in_dtype=d.admission_input_fmt, weight_dtype=d.admission_weight_fmt,
+            m=d.m, k=d.k, n=d.n, form=d.form,
         )
         if _el.is_eligible(desc, cap_map).eligible:
             eligible_ops.append(d.op)
@@ -3216,6 +3487,14 @@ def materialized_model_artifacts(selection: dict) -> CapsuleArtifacts:
         "source_closure_verified": observed["source_closure_verified"],
         "scope": "full saved source program and host-eager reference; target execution unverified",
     }
+    if bool(selection.get("loader_path")) != bool(selection.get("loader_sha256")):
+        raise M2MUnavailable("materialized loader needs both its selected path and exact digest")
+    if selection.get("loader_path"):
+        loader = Path(selection["loader_path"]).absolute()
+        if loader.name != "loader.py" or loader.parent != directory or loader.is_symlink() or not loader.is_file():
+            raise M2MUnavailable("materialized loader must be an ordinary member beside its selected capture")
+        if hashlib.sha256(loader.read_bytes()).hexdigest() != selection["loader_sha256"]:
+            raise M2MUnavailable("materialized loader differs from its preselected workload snapshot")
     meta["materialized_artifact_identities"] = receipt["artifacts"]
     meta["materialized_receipt_bytes"] = receipt_raw
     # Retain original source bytes. The writer records the one known relocation.
@@ -3277,6 +3556,18 @@ def write_model_capsule(
     # and the recipe's are what this hardware's readout holds. It is resolved HERE, at capture, and
     # not written into the synthesized profile: whether it can be derived depends on the target's
     # extracted facts, and a committed profile must not change with what a machine has extracted.
+    # CAPTURE CAPABILITIES. An entry may ask the capture to also integerize the activation x
+    # activation contractions (attention scores, value mixing) and the nonlinears between them. Both
+    # replace the stock PT2E flow, so a target-derived recipe does not apply to them.
+    act_contractions = bool(entry.get("quant_activation_contractions"))
+    int_nonlinear = bool(entry.get("quant_integer_nonlinear"))
+    if (act_contractions or int_nonlinear) and already_quantized:
+        raise ValueError("an already-materialized capture cannot also ask for capture capabilities")
+    recipe = None
+    if not already_quantized:
+        recipe = entry.get("quant_recipe")
+        if recipe is None and not act_contractions:
+            recipe = derived_recipe(getattr(binding, "target", None), dtype)
     art = (
         artifact
         if artifact is not None
@@ -3286,13 +3577,11 @@ def write_model_capsule(
             scheme=entry.get("quant_scheme"),
             env=capture_env,
             python=model_capture_python(workload, src.m2m_dir),
-            recipe=(
-                None
-                if already_quantized
-                else entry.get("quant_recipe") or derived_recipe(getattr(binding, "target", None), dtype)
-            ),
+            recipe=recipe,
             already_quantized=already_quantized,
             agreement_tolerance=_tol(binding),
+            **({"activation_contractions": True} if act_contractions else {}),
+            **({"integer_nonlinear": True} if int_nonlinear else {}),
         )
     )
     # WHERE THE INPUTS CAME FROM -- recorded unconditionally, tri-state, and never inferred here.
@@ -3341,6 +3630,15 @@ def write_model_capsule(
     original_weight = art.meta["materialized_weights_reference"] if artifact is not None else str(wsrc)
     linalg, _ = _portable_weights_reference(linalg, original_weight, sidecar=True)
     shutil.copyfile(manifest_src, d / "capsule.weights.safetensors.manifest.json")
+    # Leaf constants a capture capability introduced (lookup tables, integer scales): a compile input
+    # like the weights, shipped beside them under a fixed member name.
+    extra_name = None
+    extra_src = Path(str((art.meta or {}).get("extra") or ""))
+    if (art.meta or {}).get("extra"):
+        if not extra_src.is_file():
+            raise M2MUnavailable("model capture declares leaf constants but the file is missing")
+        extra_name = "capsule.extra.npz"
+        shutil.copyfile(extra_src, d / extra_name)
     if artifact is not None:
         for original, member in (
             ("weights.safetensors", "capsule.weights.safetensors"),
@@ -3399,12 +3697,23 @@ def write_model_capsule(
                     if (art.meta or {}).get("integerization_receipt")
                     else {}
                 ),
+                **(
+                    {"quant_activation_contractions": (art.meta or {})["activation_contractions"]}
+                    if (art.meta or {}).get("activation_contractions")
+                    else {}
+                ),
+                **(
+                    {"quant_integer_nonlinear": (art.meta or {})["integer_nonlinear"]}
+                    if (art.meta or {}).get("integer_nonlinear")
+                    else {}
+                ),
                 "torch_seed": int((art.meta or {}).get("torch_seed", 0)),
                 **({"loader_dependencies": loader_dependencies} if loader_dependencies else {}),
                 "compile_dtype": compile_dtype(binding.operand_dtype),
                 "arg_order": in_names + out_names,
                 "weights": "capsule.weights.safetensors",
                 "weights_manifest": "capsule.weights.safetensors.manifest.json",
+                **({"extra": extra_name} if extra_name else {}),
             },
         },
         # The output ABI, not the target operand, determines readback width and comparison regime.
@@ -3428,7 +3737,11 @@ def write_model_capsule(
         # target also owns -- so host-lane work is the behaviour under test rather than a fallback
         # failure, and must_accelerate is withheld below for the same reason.
         **({"lanes": {"require": _checked_lanes(entry, binding)}} if (entry.get("lanes") or {}).get("require") else {}),
-        "pytorch_ref": {"op": "model", "dtype": idt, **({"loader": "capsule.pytorch.py"} if artifact is None else {})},
+        "pytorch_ref": {
+            "op": "model",
+            "dtype": idt,
+            **({"loader": "capsule.pytorch.py"} if artifact is None or art.meta["materialized_capture"].get("loader_sha256") else {}),
+        },
         # WHAT THIS CAPSULE'S INPUTS WERE. On the capsule rather than only in the golden, because the
         # capsule is what a reader has in hand when they quote the result, and a pass on seeded
         # synthetic inputs proves the compiler reproduces the reference -- not that the model is
@@ -3452,7 +3765,7 @@ def write_model_capsule(
             "grade_policy": {"compare": binding.compare, "atol": _tol(binding)[0], "rtol": _tol(binding)[1]},
             "interface": "linalg_positional",
             "arg_order": in_names + out_names,
-            **({"pytorch_source": "capsule.pytorch.py"} if artifact is None else {}),
+            **({"pytorch_source": "capsule.pytorch.py"} if cap["pytorch_ref"].get("loader") else {}),
             "linalg_mlir": "capsule.interface.mlir",
             # The same record the capsule carries, on the oracle side too: what the reference was
             # computed over is part of where the reference came from, and a grader reading only the
@@ -3462,6 +3775,14 @@ def write_model_capsule(
         },
         "outputs": dict(zip(out_names, golden_values, strict=True)),
     }
+    if getattr(art, "float_reference", None) is not None:
+        # The float model's outputs, before the capture's quantization or precision cast: the reference
+        # the whole-model gate judges accuracy against (:mod:`merlin.perf.float_accuracy`).
+        floats = list(art.float_reference) if len(output_abi) > 1 else [art.float_reference]
+        golden["float_reference"] = {
+            "source": "the loader's model before quantization or precision conversion, host torch-eager",
+            "outputs": dict(zip(out_names, floats, strict=True)),
+        }
     frontend_evidence = _write_frontend_evidence(art, d, linalg)
     if frontend_evidence is not None:
         cap["frontend_trace"] = frontend_evidence
@@ -3476,7 +3797,13 @@ def write_model_capsule(
         (d / "capsule.pytorch.py").write_text(art.pytorch_src, encoding="utf-8")
     else:
         (d / "source-capture-receipt.json").write_bytes(art.meta["materialized_receipt_bytes"])
-    (d / "golden.yaml").write_text(yaml.safe_dump(golden, sort_keys=False), encoding="utf-8")
+        if art.meta["materialized_capture"].get("loader_sha256"):
+            selected_loader = Path(art.meta["materialized_capture"]["loader_path"])
+            loader_bytes = selected_loader.read_bytes()
+            if hashlib.sha256(loader_bytes).hexdigest() != art.meta["materialized_capture"]["loader_sha256"]:
+                raise M2MUnavailable("materialized loader changed during capsule copying")
+            (d / "capsule.pytorch.py").write_bytes(loader_bytes)
+    write_golden(d, golden)
     return d
 
 
@@ -3881,12 +4208,12 @@ def write_spec_capsule(entry: dict, binding, out_root, *, source: "SpecRefSource
     }
     (d / "capsule.interface.mlir").write_text(mlir, encoding="utf-8")
     # the program ships as VISIBLE grounding — strip any embedded golden (the MXU/SIMT programs carry the
-    # output values under "golden"; the answer lives ONLY in the masked golden.yaml, never in a visible file)
+    # output values under "golden"; the answer lives ONLY in the masked golden files, never in a visible one)
     program = {k: v for k, v in art.command_buffer.items() if k != "golden"}
     (d / "capsule.command_buffer.json").write_text(json.dumps(program, indent=1), encoding="utf-8")
     (d / "capsule.yaml").write_text(yaml.safe_dump(cap, sort_keys=False), encoding="utf-8")
     (d / "expected_instruction_coverage.yaml").write_text(
         yaml.safe_dump(cap["expected"], sort_keys=False), encoding="utf-8"
     )
-    (d / "golden.yaml").write_text(yaml.safe_dump(golden, sort_keys=False), encoding="utf-8")
+    write_golden(d, golden)
     return d

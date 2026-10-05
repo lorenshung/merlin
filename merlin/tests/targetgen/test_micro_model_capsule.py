@@ -367,6 +367,10 @@ def test_the_emitted_source_parses_and_exposes_the_loader_contract():
     fns = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
     assert "get_model_and_inputs" in fns, "the loader contract every capture path calls"
     assert "forward" in fns
+    assert "torch.arange(E * E, dtype=torch.int32)" in src
+    assert "_weight" in fns
+    assert "torch.randn" not in src
+    assert "torch.manual_seed" not in src
 
 
 def test_every_layer_in_the_inventory_reaches_the_forward():

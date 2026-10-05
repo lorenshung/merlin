@@ -321,17 +321,19 @@ def run_entrypoints(
     ``fourth_text`` is the lower_target_to_llvm stdout (written to ``fourth_output_name`` — the target
     dialect chooses LLVM-dialect MLIR vs a SIMT kernel). Raises CertFailure on any plane failure.
     The oracle tiers (L2+) are the caller's, since they diverge per target.
+
+    The entrypoint walk itself is :func:`lower_interface`, which a whole model's compute groups go
+    through too: this function is the capsule route's half of it (build the package, resolve the
+    staged interface) and nothing more.
     """
     from .oot_runner import (
         INFRASTRUCTURE_PLANE,
-        BackendDeclined,
         CertFailure,
         InfraCategory,
         InfraFailure,
         build_package,
         integrity_scan,
         load_package,
-        run_entrypoint,
     )
 
     if pkg is None:
@@ -368,29 +370,128 @@ def run_entrypoints(
         raise CertFailure(
             "schema", _cat("STRUCTURAL_INVARIANT_VIOLATION"), f"capsule interface MLIR not found: {iface_path}"
         )
-    inp = paths.generated / "input.interface.mlir"
-    inp.write_text(iface_path.read_text(encoding="utf-8"), encoding="utf-8")
+    cb, artifact = lower_interface(
+        pkg, iface_path, paths.generated, contract=contract, timeout=timeout, artifact_name=fourth_output_name
+    )
+    return pkg, cb, artifact
 
-    p = run_entrypoint(pkg, "parse", inp, timeout=timeout)
+
+def lower_interface(
+    pkg,
+    interface: str | Path,
+    generated: str | Path,
+    *,
+    contract: str | Path | None,
+    timeout: int,
+    invoke=None,
+    artifact_name: str = "lowered.llvm.mlir",
+    overlap: bool = False,
+    memo: dict | None = None,
+) -> tuple[dict, str]:
+    """ONE stated ``merlin_iface`` capsule through the package's own entrypoints -> (buffer, artifact).
+
+    THE CAPSULE ROUTE AND THE MODEL ROUTE ARE THE SAME JOB and used to be two implementations of it.
+    `llvmlower.whole_program` put each compute group of a captured model to the package by writing
+    the interface and calling ONE entrypoint, with no ``parse``, no ``lower_interface_to_target``, no
+    contract validation of what came back and -- for every package that does not declare the optional
+    bundle, which was all 76 in this tree when this was written -- no target artifact at all. So a
+    group could splice a buffer the grader would have refused, and the whole-model artifact a
+    performance arm reads was a file of placeholders. A capsule and a model group now reach a backend
+    through this function, so the two cannot disagree about what "the package lowered it" means.
+
+    ``invoke`` is the runner (default :func:`oot_runner.run_entrypoint`). An analysis worker runs a
+    submission inside a host-created sandbox and must keep doing so; the SEQUENCE is not its business,
+    so it injects the invocation rather than reimplementing the walk.
+
+    Which commands produce the buffer and the artifact is
+    :func:`oot_runner.analysis_emission_entrypoints` -- the package's own declaration, read once,
+    here. It was a second inline feature-detection in the model route.
+
+    ``overlap`` runs ``lower_interface_to_target`` and the buffer command at the same time: both read
+    only the parsed interface and neither reads the other's output, so a caller with many groups to
+    ask (a whole model) pays the slower of the two rather than their sum. The verdict is unchanged --
+    the target plane is still judged first, and a failure there is reported as before.
+
+    ``memo`` (a dict the caller owns for ONE package) records each accepted lowering by the interface's
+    bytes: a whole model asks the same interface for many groups (SmolVLA: 27 distinct for 1,551), and
+    re-reading the package's recorded replies -- up to 160 MB of target IR a reply -- for every one of
+    them was most of a statement. A hit writes the same input and command buffer into ``generated`` and
+    returns the recorded buffer (a copy) and artifact; a refusal is never recorded, so it is re-derived.
+
+    Raises :class:`CertFailure` on any plane failure and :class:`BackendDeclined` on a stated decline.
+    """
+    import contextlib
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .oot_runner import (
+        BackendDeclined,
+        CertFailure,
+        analysis_emission_entrypoints,
+        run_entrypoint,
+    )
+
+    invoke = invoke or run_entrypoint
+    generated = Path(generated)
+    generated.mkdir(parents=True, exist_ok=True)
+    inp = generated / "input.interface.mlir"
+    interface_text = Path(interface).read_text(encoding="utf-8")
+    inp.write_text(interface_text, encoding="utf-8")
+    memo_key = None
+    if memo is not None:
+        import copy
+        import hashlib
+
+        # Keyed by what decides the answer -- the contract and the interface's bytes -- never by where a
+        # caller files the artifact (``artifact_name`` is per group), or no second group would ever hit.
+        memo_key = (str(contract), hashlib.sha256(interface_text.encode("utf-8")).hexdigest())
+        recorded = memo.get(memo_key)
+        if recorded is not None:
+            cb_text, cb_recorded, artifact_recorded = recorded
+            (generated / "command_buffer.json").write_text(cb_text, encoding="utf-8")
+            (generated / artifact_name).write_text(artifact_recorded, encoding="utf-8")
+            return copy.deepcopy(cb_recorded), artifact_recorded
+
+    p = invoke(pkg, "parse", inp, timeout=timeout)
     if p.returncode != 0:
         raise CertFailure("parse", _cat("TOOL_CRASH"), f"parse rc={p.returncode}: {_stderr_excerpt(p.stderr)}")
 
-    p = run_entrypoint(pkg, "lower_interface_to_target", inp, timeout=timeout)
+    _bundled = analysis_emission_entrypoints(pkg) == ("emit_analysis_bundle",)
+    _buffer_cmd = "emit_analysis_bundle" if _bundled else "emit_command_buffer"
+    cb_path = generated / "command_buffer.json"
+    early = None
+    if overlap:
+        pool = ThreadPoolExecutor(max_workers=1)
+        early = pool.submit(invoke, pkg, _buffer_cmd, inp, cb_path, timeout=timeout)
+        pool.shutdown(wait=False)
+    try:
+        p = invoke(pkg, "lower_interface_to_target", inp, timeout=timeout)
+    except BaseException:
+        if early is not None:  # never leave the buffer command running behind a raised target plane
+            with contextlib.suppress(Exception):
+                early.result()
+        raise
     if p.returncode != 0 or not p.stdout.strip():
+        if early is not None:
+            with contextlib.suppress(Exception):
+                early.result()
         raise CertFailure(
             "interface_to_target",
             _cat("ELABORATION_ERROR"),
             f"lower_interface_to_target rc={p.returncode}: {_stderr_excerpt(p.stderr)}",
         )
-    (paths.generated / "lowered.target.mlir").write_text(p.stdout, encoding="utf-8")
+    (generated / "lowered.target.mlir").write_text(p.stdout, encoding="utf-8")
 
-    cb_path = paths.generated / "command_buffer.json"
-    p = run_entrypoint(pkg, "emit_command_buffer", inp, cb_path, timeout=timeout)
+    # ONE PROCESS FOR BOTH ARTIFACTS WHEN THE PACKAGE DECLARES IT. A whole model is one capsule per
+    # group, so the per-group cost is paid once per layer; asking twice for what one invocation can
+    # return doubles the wall time of every round's gate. A package that declares no bundle gets the
+    # two-command protocol it always got.
+    p = early.result() if early is not None else invoke(pkg, _buffer_cmd, inp, cb_path, timeout=timeout)
+    _artifact = p.stdout if _bundled else ""
     if p.returncode != 0:
         raise CertFailure(
             "target_to_command_buffer",
             _cat("STRUCTURAL_INVARIANT_VIOLATION"),
-            f"emit_command_buffer rc={p.returncode}: {_stderr_excerpt(p.stderr)}",
+            f"{_buffer_cmd} rc={p.returncode}: {_stderr_excerpt(p.stderr)}",
         )
     if not cb_path.exists():
         # Exit 0 and no output file. Reporting this as "rc=0: <empty stderr>" tells the agent
@@ -398,11 +499,9 @@ def run_entrypoints(
         # spent twelve rounds and 215 self-checks against exactly that blank string. The cause is
         # nearly always the manifest argv template: it omits {output_json}, so the tool prints the
         # buffer to stdout and the path the runner reads is never written. Say so, and name it.
-        _argv = " ".join(
-            pkg.manifest.get("commands", {}).get("emit_command_buffer", {}).get("argv", []) or ["<undeclared>"]
-        )
+        _argv = " ".join(pkg.manifest.get("commands", {}).get(_buffer_cmd, {}).get("argv", []) or ["<undeclared>"])
         _hint = (
-            "your manifest argv for emit_command_buffer does not reference {output_json}, so "
+            f"your manifest argv for {_buffer_cmd} does not reference {{output_json}}, so "
             "nothing is written to the path the runner reads"
             if "{output_json}" not in _argv
             else "the argv does reference {output_json}, so the tool exited before writing it"
@@ -410,7 +509,7 @@ def run_entrypoints(
         raise CertFailure(
             "target_to_command_buffer",
             _cat("STRUCTURAL_INVARIANT_VIOLATION"),
-            f"emit_command_buffer exited 0 but wrote no file at the output path it "
+            f"{_buffer_cmd} exited 0 but wrote no file at the output path it "
             f"was given ({cb_path.name}). Declared argv: {_argv} -- {_hint}. The "
             f"runner reads the FILE, never stdout. stderr: {_stderr_excerpt(p.stderr, 200)!r}",
         )
@@ -442,17 +541,30 @@ def run_entrypoints(
 
     # the 4th entrypoint: emit the target's codegen artifact (RoCC LLVM / SIMT kernel / ...). The
     # resolver aliases the legacy name lower_target_to_llvm, so packages using either spelling work.
-    p = run_entrypoint(pkg, "emit_target_artifact", inp, timeout=timeout)
-    if p.returncode != 0 or not p.stdout.strip():
+    # A bundling package already returned it on the same stdout that wrote the buffer.
+    if not _bundled:
+        p = invoke(pkg, "emit_target_artifact", inp, timeout=timeout)
+        if p.returncode != 0 or not p.stdout.strip():
+            raise CertFailure(
+                "emit_target_artifact",
+                _cat("ELABORATION_ERROR"),
+                f"emit_target_artifact rc={p.returncode}: {_stderr_excerpt(p.stderr)}",
+            )
+        _artifact = p.stdout
+    elif not _artifact.strip():
         raise CertFailure(
             "emit_target_artifact",
             _cat("ELABORATION_ERROR"),
-            f"emit_target_artifact rc={p.returncode}: {_stderr_excerpt(p.stderr)}",
+            "emit_analysis_bundle wrote a command buffer and no target artifact on stdout",
         )
-    (paths.generated / fourth_output_name).write_text(p.stdout, encoding="utf-8")
+    (generated / artifact_name).write_text(_artifact, encoding="utf-8")
     from . import artifact_scale as _artifact_scale
 
-    _too_long = _artifact_scale.refusal(p.stdout)
+    _too_long = _artifact_scale.refusal(_artifact)
     if _too_long:
         raise CertFailure("emit_target_artifact", _cat("STRUCTURAL_INVARIANT_VIOLATION"), _too_long)
-    return pkg, cb, p.stdout
+    if memo_key is not None:
+        import copy
+
+        memo[memo_key] = (cb_path.read_text(encoding="utf-8"), copy.deepcopy(cb), _artifact)
+    return cb, _artifact

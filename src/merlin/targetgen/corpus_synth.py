@@ -27,8 +27,10 @@ reads downstream as a covered one.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
+from math import isqrt
 from typing import Any
 
 #: Emitted entries carry this prefix so a synthesized capsule can never collide with a hand-authored one
@@ -108,7 +110,7 @@ _BLOCK_SCALED_GOLDEN_ONLY = frozenset({"attention_mx"})
 def _is_ieee_float(dtype: str) -> bool:
     """Whether this dtype routes to the IEEE-float (``simt``) golden engine.
 
-    Same routing the generator applies (``_entry_regime``): block-scaled -> the MX engine, fp8 -> the
+    Same routing the generator applies (``corpus_spec.entry_binding``): block-scaled -> the MX engine, fp8 -> the
     specir refmodel, IEEE fp16/bf16/f32 -> simt, anything else -> the integer engine. Asked of the
     format registry rather than listed here, so a target declaring a new float width routes without an
     edit.
@@ -287,8 +289,10 @@ def op_for_shape(
 _CONV_WINDOW_OUT = 4
 
 
-def _image_for_window(kernel, stride, dilation, pad_before, pad_after) -> tuple[int, ...]:
-    """The input image that makes ``kernel`` produce ``_CONV_WINDOW_OUT`` outputs per axis.
+def _image_for_window(
+    kernel, stride, dilation, pad_before, pad_after, *, output_extent=_CONV_WINDOW_OUT
+) -> tuple[int, ...]:
+    """The input image that makes ``kernel`` produce ``output_extent`` outputs per axis.
 
     The inverse of :func:`merlin.runtime.commandbuffer.conv_out_dims`, which computes
     ``out = (H + pt + pb - (d*(k-1) + 1)) // s + 1``. Solving it for H at a chosen output is what keeps
@@ -302,7 +306,7 @@ def _image_for_window(kernel, stride, dilation, pad_before, pad_after) -> tuple[
         before = pad_before[i] if i < len(pad_before) else 0
         after = pad_after[i] if i < len(pad_after) else 0
         span = d_ * (k - 1) + 1
-        out.append(max(1, (_CONV_WINDOW_OUT - 1) * s_ + span - before - after))
+        out.append(max(1, (output_extent - 1) * s_ + span - before - after))
     return tuple(out)
 
 
@@ -523,14 +527,30 @@ def cap_to_affordable(entry: dict, spec_doc: dict, *, extends: str = "") -> str 
     if not tile:
         return None
     dims = {k: _tile_int(entry.get(k), tile) for k in ("M", "K", "N")}
-    if any(v is None for v in dims.values()):
-        return None
     # WRITTEN OUTPUT, which is what the cost law was calibrated on -- see `_cert_affordability`. The
     # reduction depth is deliberately absent from this product: a capsule drains `M x N` elements
     # whatever `K` is, so a deep accumulation is cheap to certify and must not be capped as though it
     # were large. Pricing by operand size instead (the first attempt) capped exactly the capsules most
     # worth certifying.
-    elements = dims["M"] * dims["N"]
+    if entry.get("op") == "conv2d" and entry.get("Himg") is not None and entry.get("Wimg") is not None:
+        from merlin.runtime.commandbuffer import conv_out_dims
+
+        if dims["N"] is None:
+            return None
+        oh, ow = conv_out_dims(
+            int(entry["Himg"]),
+            int(entry["Wimg"]),
+            int(entry["kh"]),
+            int(entry["kw"]),
+            entry["stride"],
+            entry["padding"],
+            entry["dilation"],
+        )
+        elements = oh * ow * dims["N"]
+    else:
+        if any(v is None for v in dims.values()):
+            return None
+        elements = dims["M"] * dims["N"]
     if elements <= int(ceiling):
         return None
     # Constructed tiers are authoritative. During deterministic Phase 0
@@ -739,7 +759,21 @@ def pass_requirements_for(entry: dict, spec_doc: dict) -> list[str]:
     for probe in (spec_doc.get("boundaries") or {}).get("extent_probes") or ():
         tile = max(tile, int(probe.get("edge") or 0))
     exceeds = {axis: _exceeds_tile(str(entry.get(axis) or ""), tile) for axis in ("M", "K", "N")}
-    if any(exceeds.values()):
+    conv_windows_exceed_tile = False
+    if entry.get("op") == "conv2d" and entry.get("Himg") is not None and entry.get("Wimg") is not None and tile:
+        from merlin.runtime.commandbuffer import conv_out_dims
+
+        oh, ow = conv_out_dims(
+            int(entry["Himg"]),
+            int(entry["Wimg"]),
+            int(entry["kh"]),
+            int(entry["kw"]),
+            entry["stride"],
+            entry["padding"],
+            entry["dilation"],
+        )
+        conv_windows_exceed_tile = oh * ow > tile
+    if any(exceeds.values()) or conv_windows_exceed_tile:
         out.append(_P.TILE_SCHEDULE)
     # THE CONTIGUOUS AXES, NOT ALL OF THEM. A transfer moves a rectangle whose width runs along the
     # operand's fastest-varying axis: the reduction axis K for the activation rows, the output axis N
@@ -763,6 +797,28 @@ def pass_requirements_for(entry: dict, spec_doc: dict) -> list[str]:
 #: so an int or block-scaled datapath needs the direct-MLIR engine instead -- which is exactly why an op
 #: with no builder cannot be written at those dtypes by anyone.
 _PYTORCH_REGIMES = ("simt",)
+
+
+def _host_probe_op(requirement: dict, family: str, dtype: str | None, pool: set[str]) -> tuple[str | None, dict | None]:
+    """``(op, observed row)`` for a host probe: an observed host operation a PyTorch writer can express.
+
+    A requirement that carries ``observed_ops`` is answered ONLY from them, so the probe reproduces
+    work real captures contain and stays inside declarations reviewed for exactly that work; an
+    empty answer is reported as an uncovered pair. A historical requirement with no ``observed_ops``
+    key keeps the family-level choice it was derived under.
+    """
+    rows = requirement.get("observed_ops")
+    if rows is None:
+        return op_for_family(family, admitted_ops=pool, dtype=dtype, writer="pytorch"), None
+    from merlin.targetgen import host_lane_ops
+
+    writable = {
+        op
+        for op in pool
+        if _op_family_map().get(op) == family and _writer_for({"op": op, "operand_dtype": dtype}) == "pytorch"
+    }
+    chosen = host_lane_ops.choose(rows, writable)
+    return (chosen["op"], chosen) if chosen else (None, None)
 
 
 def _writer_for(entry: dict) -> str | None:
@@ -1534,10 +1590,21 @@ def synthesize(
         family, dtype = str(_pair.get("family") or ""), str(_pair.get("dtype") or "")
         if not family or not dtype or family in {str(f) for f in (host_block.get("families") or ())}:
             continue  # the narrow axis below already carries this family
-        # `writer="pytorch"` because this is a HOST axis: see `op_for_family`.
-        op = op_for_family(family, admitted_ops=pool, dtype=dtype, writer="pytorch")
+        # `writer="pytorch"` because this is a HOST axis: see `op_for_family`. When the requirement
+        # names the operations this pair's host work consists of, the probe is one of THOSE, never a
+        # stock op of the same family that no captured model contains.
+        op, observed = _host_probe_op(_pair, family, dtype, pool)
         if op is None:
-            unsized_host.append(f"{family}/{dtype} (no materializable op at this dtype)")
+            unsized_host.append(
+                f"{family}/{dtype} ("
+                + (
+                    "none of the observed host operations "
+                    f"{[row.get('op') for row in _pair.get('observed_ops') or ()]} has a PyTorch writer"
+                    if _pair.get("observed_ops") is not None
+                    else "no materializable op at this dtype"
+                )
+                + ")"
+            )
             continue
         entry = {
             "cat": "model_slices",
@@ -1568,6 +1635,12 @@ def synthesize(
             },
             **extents_for("aligned", probes, quantum=_quanta.get(dtype)),
         }
+        if observed is not None:
+            entry["frontend_op"] = observed.get("frontend_op")
+            entry["source_reference"] += (
+                f". The probe is the observed host operation {op!r} ({observed.get('frontend_op')}, "
+                f"{observed.get('n_regions')} captured region(s))"
+            )
         # AN OP WITH A `merlin_iface` BUILDER CANNOT SERVE THIS AXIS, whatever dtype it declares.
         # `merlin_iface` is the ACCELERATOR's interface dialect -- every program expressible in it is
         # accelerator work by construction -- and the capsule writer derives an iface interface for any
@@ -1593,8 +1666,10 @@ def synthesize(
 
     for family in sorted(str(f) for f in (host_block.get("families") or ())):
         dtype = host_dtypes.get(family)
-        # `writer="pytorch"` because this is a HOST axis: see `op_for_family`.
-        op = op_for_family(family, admitted_ops=pool, dtype=dtype, writer="pytorch")
+        # `writer="pytorch"` because this is a HOST axis: see `op_for_family`. Observed operations
+        # first, exactly as for the host-lane pairs above.
+        _observed_rows = (host_block.get("observed_ops") or {}).get(family) if "observed_ops" in host_block else None
+        op, observed = _host_probe_op({"observed_ops": _observed_rows}, family, dtype, pool) if dtype else (None, None)
         if op is None or not dtype:
             _why = (
                 "no dtype for it is observed in any capture"
@@ -1635,6 +1710,12 @@ def synthesize(
             },
             **extents_for("aligned", probes, quantum=_quanta.get(dtype)),
         }
+        if observed is not None:
+            entry["frontend_op"] = observed.get("frontend_op")
+            entry["source_reference"] += (
+                f". The probe is the observed host operation {op!r} ({observed.get('frontend_op')}, "
+                f"{observed.get('n_regions')} captured region(s))"
+            )
         entry["pass_requirements"] = pass_requirements_for(entry, spec_doc)
         entries.append(entry)
 
@@ -1990,6 +2071,80 @@ def synthesize(
         entry["pass_requirements"] = pass_requirements_for(entry, spec_doc)
         entries.append(entry)
 
+    # A small window capsule establishes convolution semantics, but cannot expose
+    # a scheduler that keeps the *entire* im2col image in the operand store. Ask
+    # for the first square output beyond that store's RTL-derived capacity, using
+    # the most compact materializable 2-D window. The shape comes from facts and
+    # the non-validation capture's window, never from a held-out model.
+    conv_capacity_boundary: dict[str, Any] | None = None
+    capacity_rows = int(mem_block.get("capacity_rows") or 0)
+    tile_edge = int((spec_doc.get("boundaries") or {}).get("tile_edge") or 0)
+    if capacity_rows > 0 and tile_edge > 0:
+        candidates = []
+        for source in entries:
+            if (source.get("generalization") or {}).get("generalization_axis") != "conv_window":
+                continue
+            if source.get("op") != "conv2d":
+                continue
+            kh, kw, ci = int(source["kh"]), int(source["kw"]), int(source.get("ci", 4))
+            if kh * kw <= 1 or ci <= 0:
+                continue
+            rows_per_window = (kh * kw * ci + tile_edge - 1) // tile_edge
+            side = isqrt(capacity_rows // rows_per_window) + 1
+            padding = [int(v) for v in source["padding"]]
+            h, w = _image_for_window(
+                [kh, kw], source["stride"], source["dilation"], padding[:2], padding[2:], output_extent=side
+            )
+            width = _tile_int(source.get("N"), tile_edge) or tile_edge
+            unknown_pad = "UNKNOWN" in str((source.get("generalization") or {}).get("conv_window") or "")
+            candidates.append(
+                (
+                    side * side * kh * kw * ci * width,
+                    unknown_pad,
+                    sum(abs(int(d) - 1) for d in source["dilation"]),
+                    sum(abs(int(s) - 1) for s in source["stride"]),
+                    sum(abs(padding[i] - padding[i + 2]) for i in range(2)),
+                    h * w * ci,
+                    source["name"],
+                    side,
+                    rows_per_window,
+                    source,
+                )
+            )
+        if candidates:
+            _, _, _, _, _, _, _, side, rows_per_window, source = min(candidates)
+            entry = copy.deepcopy(source)
+            kern = [int(entry["kh"]), int(entry["kw"])]
+            stride = [int(v) for v in entry["stride"]]
+            dilation = [int(v) for v in entry["dilation"]]
+            padding = [int(v) for v in entry["padding"]]
+            h, w = _image_for_window(kern, stride, dilation, padding[:2], padding[2:], output_extent=side)
+            entry.update(
+                name=f"{SYNTH_PREFIX}_conv_operand_capacity_boundary",
+                Himg=h,
+                Wimg=w,
+                generalization={"generalization_axis": "shape"},
+                source_reference=(
+                    "synthesized for the convolution operand-capacity boundary: "
+                    f"the RTL-derived operand store holds {capacity_rows} rows, while "
+                    f"{side * side} output windows need at least {side * side * rows_per_window} "
+                    f"rows if materialized together; window geometry comes from {source['name']}. "
+                    "A streaming schedule can pass without retaining the whole im2col image"
+                ),
+            )
+            why = cap_to_affordable(entry, spec_doc, extends=source["name"])
+            if why:
+                entry["source_reference"] += f". {why}"
+            entry["pass_requirements"] = pass_requirements_for(entry, spec_doc)
+            entries.append(entry)
+            conv_capacity_boundary = {
+                "source": source["name"],
+                "capacity_rows": capacity_rows,
+                "rows_per_window": rows_per_window,
+                "output_windows": side * side,
+                "image": [h, w],
+            }
+
     # ---- the GEOMETRY axis --------------------------------------------------------------------------
     # ASPECT RATIO, which no cell can state. A `(family, dtype, alignment)` cell puts a 448:1
     # tall-skinny convolution and a square projection in the same box, and every capsule the other axes
@@ -2319,12 +2474,20 @@ def synthesize(
     contraction_dtypes = {
         str(c.get("dtype")) for c in cells if c.get("dtype") and str(c.get("family")) == "contraction"
     }
+    from merlin.targetgen import claim_models as _claims
+
+    evaluation_only = sorted(
+        {str(m) for m in (ws.get("evaluation_only_models") or ())} | set(_claims.evaluation_only_models())
+    )
     claim_model_evaluation: dict[str, Any] = {
         "schema": "claim_model_evaluation_v1",
         "source": "workload_spec.models",
         "model_count": len(roster),
         "visibility": "owner_only_after_phase1_freeze",
         "public_capsules_emitted": 0,
+        # Whole models held out to check generality: evaluated on the same owner-only terms, never
+        # derived from. Counted, not named in a public artifact beyond the reviewed registry.
+        "evaluation_only_model_count": len(evaluation_only),
     }
     if roster and contraction_dtypes:
         from merlin.targetgen.precision_policy import best_format
@@ -2459,6 +2622,7 @@ def synthesize(
             "memory_regimes_status": "resolved" if regimes_resolved else "not_resolved",
             "accumulator_output_boundary": output_bound,
             "accumulator_output_boundary_refusal": output_bound_refusal,
+            "conv_operand_capacity_boundary": conv_capacity_boundary,
             "memory_regimes_unreachable": unreachable_regimes,
             "memory_regime_note": (
                 "the spec carries no `regime_extents`; it predates the axis and must be regenerated "

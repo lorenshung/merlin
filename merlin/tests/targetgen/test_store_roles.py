@@ -44,6 +44,31 @@ def test_the_narrowest_row_holds_operands_and_the_widest_accumulates_whatever_th
         assert operand.capacity_rows() == 16384 and accumulator.capacity_rows() == 1024
 
 
+def test_contract_residency_uses_the_derived_operand_role_not_a_memory_name(monkeypatch):
+    from merlin.targetgen.rtl import facts as rtl_facts
+    from merlin.xdsl_dialects.lowering.contract_facts import _resident_storage_bytes
+
+    body = {
+        "arrays": [{"name": "grid", "rows": 16, "cols": 16}],
+        "datapaths": [
+            {"name": "input", "dtype": "i8", "evidence": "scratchpad.mem smem UInt<8>"},
+            {"name": "accumulator", "dtype": "i32", "evidence": "AccumulatorMem SInt<32>"},
+        ],
+        "memories": [
+            {"name": "accumulator", "bytes": 65536, "depth": 512},
+            {"name": "scratchpad.mem", "bytes": 262144, "depth": 4096},
+        ],
+    }
+    monkeypatch.setattr(rtl_facts, "load_facts", lambda _target: body)
+
+    assert _resident_storage_bytes({"name": "t_roles"}) == 262144
+    assert _resident_storage_bytes({"name": "t_roles", "capabilities": {"resident_storage_bytes": 4096}}) == 4096
+
+    body["memories"].append({"name": "another_operand", "bytes": 262144, "depth": 4096})
+    body["datapaths"].append({"name": "other", "dtype": "i8", "evidence": "another_operand smem UInt<8>"})
+    assert _resident_storage_bytes({"name": "t_roles"}) == 0
+
+
 def test_a_sole_store_holds_operands_but_is_marked_unclassified_and_has_no_accumulator():
     space = _space([{"name": "m_narrow", "bytes": 262144, "depth": 4096}])
     operand, accumulator = AS.operand_store(space), AS.accumulator_store(space)

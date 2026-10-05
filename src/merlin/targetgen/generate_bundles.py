@@ -15,6 +15,8 @@ allow/deny path SETS match, and verify_no_cheat + the sandbox stay green).
 from __future__ import annotations
 
 import copy
+import json
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +41,7 @@ _CPP_DENY_AGN = [
     f"{_PY}runtime/simulator.py",
     f"{_PY}xdsl_dialects/lowering/",
 ]
-# oracle-callable routes denied in the xDSL/CIRCT arms (arm3/arm4).
+# Oracle-callable routes are denied in EL3 (xDSL) and EL4 (RTL-informed).
 _ORACLE_DENY = [
     f"{_PY}runtime/reference.py",
     f"{_PY}runtime/simulator.py",
@@ -49,7 +51,7 @@ _ORACLE_DENY = [
 # The verification seam is DENIED, not merely left off the allow list, on every assisted arm that does
 # not carry it. One of its two paths -- the ``merlin-opt`` driver -- lives INSIDE ``xdsl_dialects/``,
 # which ``xdsl_kit`` grants as a whole directory. Omitting it would therefore grant it anyway, the verify
-# arm's treatment would reduce to one directory nobody else imports, and the verify-vs-arm-4 contrast
+# arm's treatment would reduce to one directory nobody else imports, and the EL4-V-versus-EL4 contrast
 # would be reported over a difference that partly does not exist. Deny wins in the sandbox binder, so
 # naming the file masks it inside the granted directory.
 _VERIFY_DENY = [{"path": p, "reason": TR.spec("verify_seam").deny_reason} for p in TR.spec("verify_seam").bundle_paths]
@@ -142,6 +144,8 @@ def _shared_allow(te: TargetExperiment, variant: str) -> list[dict]:
     out.append({"path": te.corpus_rel(), "mode": "ro", "note": "capsule corpus"})
     out += [{"path": s, "mode": "ro"} for s in te.corpus_siblings()]
     out += [{"path": h, "mode": "ro", "note": "ISA header (shared hardware spec)"} for h in te.isa_headers]
+    if te.declared_contract:
+        out.append({"path": te.declared_contract, "mode": "ro", "note": "selected capability contract (ALL arms)"})
     task = te.resource_path("task")
     try:
         task.lstat()
@@ -242,8 +246,8 @@ def _arm_manifest(
     elif arm == "merlin_rtlchecks":
         deny = _VERIFY_DENY + [{"path": p, "reason": "oracle-callable route"} for p in _ORACLE_DENY] + deny
     elif arm == "merlin_verify":
-        # arm-4's deny block minus the verification seam: this arm IS arm-4 plus that one grant, so its
-        # denials must be arm-4's exactly, or the pair would differ in a second, unnamed way.
+        # EL4's deny block minus the verification seam: EL4-V is EL4 plus that one grant, so its
+        # denials must be EL4's exactly, or the pair would differ in a second, unnamed way.
         deny = [{"path": p, "reason": "oracle-callable route"} for p in _ORACLE_DENY] + deny
     else:
         raise ValueError(f"unknown arm {arm!r}")
@@ -281,12 +285,15 @@ def _arm_manifest(
         "description": f"{arm} arm for the {te.target} target (generated from target_experiment.yaml)",
         "allowed": allow,
         "denied": deny,
-        "host_inputs": (
-            [{"path": te.hidden_corpus(), "note": "private grading corpus; never an agent grant"}]
-            if te.hidden_corpus()
-            else []
-        )
-        + numerical_inputs,
+        "host_inputs": [
+            {"path": str(te.path), "note": "experiment declaration for host-only model grading"},
+            *(
+                [{"path": te.hidden_corpus(), "note": "private grading corpus; never an agent grant"}]
+                if te.hidden_corpus()
+                else []
+            ),
+            *numerical_inputs,
+        ],
         "tools": list(tools),
         "integrity_required": True,
     }
@@ -313,7 +320,7 @@ _ARMS = {
     "cpp_merlininfra": "cpp_merlininfra",
     "merlin_assisted": "merlin_assisted",
     "merlin_rtlchecks": "merlin_assisted_rtlchecks",
-    # arm5's stem CONTAINS "merlin_assisted" on purpose: generate_prompt._is_assisted_arm is a
+    # The EL3-E stem CONTAINS "merlin_assisted" on purpose: generate_prompt._is_assisted_arm is a
     # substring test, so the arm inherits the assisted seam menu with no prompt edit.
     "merlin_eqsat": "merlin_assisted_eqsat",
 }
@@ -325,7 +332,7 @@ _ARMS = {
 # the next time anyone regenerated -- changing the arm set underneath runs already in flight, which is a
 # measurement change disguised as a codegen change. An arm graduates into ``_ARMS`` when a campaign
 # declares it, not when it is written. The stem still CONTAINS "merlin_assisted" for the same reason
-# arm-5's does: generate_prompt._is_assisted_arm is a substring test.
+# EL3-E's does: generate_prompt._is_assisted_arm is a substring test.
 #
 # GRADUATING AN ARM IS TWO EDITS, NOT ONE. The launcher resolves a bundle id back to its rung by
 # LONGEST MATCHING STEM over ``_ARMS`` (``run_baseline_qa_loop._arm_from_bundle_id``). An opt-in stem
@@ -365,6 +372,46 @@ def _select_python_grants(manifest: dict[str, Any], root: Path) -> None:
             entry["path"] = str(selected) + ("/" if original.endswith("/") else "")
 
 
+def _select_llvm_grant(manifest: dict[str, Any], root: Path) -> None:
+    """Bind a new release to its selected LLVM install, not a checkout-relative guess."""
+    root = Path(root)
+    if not root.is_absolute() or root.is_symlink() or root.resolve() != root or not root.is_dir():
+        raise ValueError("llvm_toolchain_root must be an absolute canonical directory")
+    if not (root / "bin/clang-23").is_file() or not (root / "bin/mlir-opt").is_file():
+        raise ValueError("llvm_toolchain_root requires bin/clang-23 and bin/mlir-opt")
+    for entry in manifest["allowed"]:
+        if entry.get("path") == "third_party/llvm-install/":
+            entry["path"] = str(root) + "/"
+
+
+def _selected_rtl_facts(te: TargetExperiment, root: Path | None) -> tuple[Path, dict] | None:
+    """Select one ordinary Phase 0 facts tree; never fall back to a mutable cache."""
+    if root is None:
+        return None
+    root = Path(root)
+    if not root.is_absolute() or root.is_symlink() or root.resolve() != root or not root.is_dir():
+        raise ValueError("rtl_facts_root must be an absolute canonical directory")
+    selected = root / "facts.json"
+    if list(root.iterdir()) != [selected] or selected.is_symlink() or not selected.is_file():
+        raise ValueError("rtl_facts_root must contain exactly one ordinary facts.json file")
+    document = json.loads(selected.read_text(encoding="utf-8"))
+    facts = document.get("facts") if isinstance(document, dict) else None
+    if not isinstance(facts, dict) or facts.get("target") != te.target:
+        raise ValueError("selected RTL facts must declare the descriptor target")
+    return root, document
+
+
+def _select_rtl_facts_grant(manifest: dict[str, Any], te: TargetExperiment, root: Path) -> None:
+    """Point both treatment grants and denials at the Phase 0-selected facts."""
+    selected = str(root) + "/"
+    for role in ("allowed", "denied"):
+        for entry in manifest.get(role, ()):
+            if entry.get("path") == te.rtl_facts_pin:
+                entry["path"] = selected
+                if role == "allowed":
+                    manifest["selected_rtl_facts_file"] = str(root / "facts.json")
+
+
 def generate_bundles(
     te: TargetExperiment,
     *,
@@ -374,6 +421,8 @@ def generate_bundles(
     arms: tuple[str, ...] = (),
     host_inputs: tuple[str, ...] = (),
     python_source_root: Path | None = None,
+    llvm_toolchain_root: Path | None = None,
+    rtl_facts_root: Path | None = None,
 ) -> dict[str, dict]:
     """The bundle manifests for ``te``, keyed by bundle_id. Target-agnostic: the same code emits them
     for any target from its descriptor + derived paths (no hand-authored YAML).
@@ -382,10 +431,11 @@ def generate_bundles(
     suffix naming the variation, so a run directory records which cell produced it. ``arms`` narrows
     generation to the rungs a cell actually needs, and is also how an OPT-IN arm (one outside the default
     ladder, see ``_OPT_IN_ARMS``) is emitted at all (default: the whole ladder).
-    Explicit ``python_source_root`` selects the parent of the installed Merlin package
-    for legacy Python grants only. Omission preserves historical manifest bytes.
+    Explicit ``python_source_root`` and ``llvm_toolchain_root`` select installed
+    source/toolchain grants for new releases. Omission preserves historical bytes.
     """
     python_source_root = _python_source_selection(python_source_root)
+    selected_facts = _selected_rtl_facts(te, rtl_facts_root)
     suffix = TR.cell_suffix(add_tools, drop_tools)
     wanted = arms or tuple(_ARMS)
     for a in wanted:
@@ -400,6 +450,10 @@ def generate_bundles(
         )
         if python_source_root is not None:
             _select_python_grants(out[bid], python_source_root)
+        if llvm_toolchain_root is not None:
+            _select_llvm_grant(out[bid], llvm_toolchain_root)
+        if selected_facts is not None:
+            _select_rtl_facts_grant(out[bid], te, selected_facts[0])
     return out
 
 
@@ -606,6 +660,8 @@ def materialize_bundles(
     arms: tuple[str, ...] = (),
     host_inputs: tuple[str, ...] = (),
     python_source_root: Path | None = None,
+    llvm_toolchain_root: Path | None = None,
+    rtl_facts_root: Path | None = None,
 ) -> list[Path]:
     """Write every generated bundle under ``dest/<bundle_id>/`` for each requested ``variant``:
     ``input_bundle_manifest.yaml`` (always, overwritten — the manifest is fully generated) plus the
@@ -618,30 +674,37 @@ def materialize_bundles(
     from pathlib import Path
 
     python_source_root = _python_source_selection(python_source_root)
+    selected_facts = _selected_rtl_facts(te, rtl_facts_root)
+
+    def observation():
+        if selected_facts is None:
+            return nullcontext()
+        from .rtl.facts import observed_facts
+
+        return observed_facts(te.target, selected_facts[1], selected_facts[0] / "facts.json")
+
     dest = Path(dest)
     # The capability manifest (needed to render STARTER_PROMPT.md) is target-level; load it once and
     # degrade honestly if unavailable (e.g. mlc absent) — manifests + grant files are still written.
-    try:
-        from .target_experiment import declared_vs_resolved_contract, load_capability_manifest
+    with observation():
+        try:
+            from .target_experiment import declared_vs_resolved_contract, load_capability_manifest
 
-        # When the registry resolves nothing for this target, fall back to the contract the DESCRIPTOR
-        # declares. Without this a descriptor could name its contract, have that file sit right there on
-        # disk, and still render no prompt — which is how a target reached "bundles generated" with three
-        # of its four STARTER_PROMPT.md missing and the anti-cheat gate failing on their absence.
-        declared, resolved, verdict = declared_vs_resolved_contract(te)
-        explicit = declared if verdict == "declared_only" else None
-        if explicit:
+            # A descriptor-declared contract can supply the prompt when the registry has none.
+            declared, resolved, verdict = declared_vs_resolved_contract(te)
+            explicit = declared if verdict == "declared_only" else None
+            if explicit:
+                print(
+                    f"  note: registry resolves no contract for {te.target!r}; using the descriptor's "
+                    f"declared {te.declared_contract}"
+                )
+            cap = load_capability_manifest(te.target, contract_path=explicit)
+        except Exception as e:  # noqa: BLE001 — no capability manifest -> skip prompt, keep the rest
+            cap = None
             print(
-                f"  note: registry resolves no contract for {te.target!r}; using the descriptor's "
-                f"declared {te.declared_contract}"
+                f"  note: capability manifest for {te.target!r} unavailable ({type(e).__name__}: {e}); "
+                f"STARTER_PROMPT.md not rendered (manifests + grant files still written)."
             )
-        cap = load_capability_manifest(te.target, contract_path=explicit)
-    except Exception as e:  # noqa: BLE001 — no capability manifest -> skip prompt, keep the rest
-        cap = None
-        print(
-            f"  note: capability manifest for {te.target!r} unavailable ({type(e).__name__}: {e}); "
-            f"STARTER_PROMPT.md not rendered (manifests + grant files still written)."
-        )
     written: list[Path] = []
     for variant in variants:
         bundles = generate_bundles(
@@ -652,6 +715,8 @@ def materialize_bundles(
             arms=arms,
             host_inputs=host_inputs,
             python_source_root=python_source_root,
+            llvm_toolchain_root=llvm_toolchain_root,
+            rtl_facts_root=rtl_facts_root,
         )
         for bundle_id, manifest in bundles.items():
             bdir = dest / bundle_id
@@ -666,9 +731,10 @@ def materialize_bundles(
             tp = bdir / "tools.txt"
             tp.write_text("".join(f"{t}\n" for t in tools))
             written.append(tp)
-            _materialize_prompt_and_grants(
-                te, bdir, bundle_id, variant, manifest, cap, written, python_source_root=python_source_root
-            )
+            with observation():
+                _materialize_prompt_and_grants(
+                    te, bdir, bundle_id, variant, manifest, cap, written, python_source_root=python_source_root
+                )
     return written
 
 
@@ -716,6 +782,21 @@ def _main(argv: list[str] | None = None) -> int:
         help=f"comma-separated arms to emit (default: the ladder, {', '.join(_ARMS)}). "
         f"Opt-in arms, emitted only when named: {', '.join(_OPT_IN_ARMS)}",
     )
+    ap.add_argument(
+        "--python-source-root",
+        type=Path,
+        help="absolute selected Merlin src directory for new installed-source grants",
+    )
+    ap.add_argument(
+        "--llvm-toolchain-root",
+        type=Path,
+        help="absolute selected LLVM installation containing bin/clang-23 and bin/mlir-opt",
+    )
+    ap.add_argument(
+        "--rtl-facts-root",
+        type=Path,
+        help="absolute ordinary directory containing the selected Phase 0 facts.json",
+    )
     ap.add_argument("--list-tools", action="store_true", help="print the tool catalog and exit")
     a = ap.parse_args(argv)
 
@@ -756,6 +837,9 @@ def _main(argv: list[str] | None = None) -> int:
         add_tools=tuple(a.with_tool),
         drop_tools=tuple(a.without_tool),
         arms=tuple(x.strip() for x in a.arms.split(",") if x.strip()),
+        python_source_root=a.python_source_root,
+        llvm_toolchain_root=a.llvm_toolchain_root,
+        rtl_facts_root=a.rtl_facts_root,
     )
     if product is not None:
         for path in written:

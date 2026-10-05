@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+
+import pytest
 import yaml
 
 from merlin.common.paths import repo_root
@@ -49,8 +52,67 @@ def test_declared_numeric_profile_is_frozen_without_a_candidate_grant():
     te = _te()
     assert te.numeric_profile
     for manifest in generate_bundles(te).values():
+        assert str(te.path) in {entry["path"] for entry in manifest["host_inputs"]}
+        assert str(te.path) not in {entry["path"] for entry in manifest["allowed"]}
         assert te.numeric_profile in {entry["path"] for entry in manifest["host_inputs"]}
         assert te.numeric_profile not in {entry["path"] for entry in manifest["allowed"]}
+
+
+def test_selected_phase0_facts_replace_cache_grants_and_feed_prompt(tmp_path, monkeypatch):
+    from merlin.targetgen import generate_bundles as generator
+    from merlin.targetgen.rtl import facts
+
+    te = _te()
+    selected = tmp_path / "facts"
+    selected.mkdir()
+    document = {"facts": {"target": te.target, "selection_marker": "phase0"}}
+    (selected / "facts.json").write_text(json.dumps(document))
+    bundles = generate_bundles(te, arms=("merlin_assisted", "merlin_rtlchecks"), rtl_facts_root=selected)
+    selected_path = str(selected) + "/"
+    assert selected_path in _sets(bundles["merlin_assisted_rtlchecks_hwbringup_v0"])[0]
+    assert selected_path in _sets(bundles["merlin_assisted_hwbringup_v0"])[1]
+    assert te.rtl_facts_pin not in _sets(bundles["merlin_assisted_rtlchecks_hwbringup_v0"])[0]
+    assert bundles["merlin_assisted_rtlchecks_hwbringup_v0"]["selected_rtl_facts_file"] == str(
+        selected / "facts.json"
+    )
+    assert "selected_rtl_facts_file" not in bundles["merlin_assisted_hwbringup_v0"]
+
+    from merlin.targetgen.sandbox.bwrap import base_argv
+
+    permitted = base_argv(
+        tmp_path / "workspace",
+        {"allowed": [{"path": selected_path}], "selected_rtl_facts_file": str(selected / "facts.json")},
+        _policy_test_live_inputs=True,
+    )
+    denied = base_argv(tmp_path / "workspace", {"allowed": []}, _policy_test_live_inputs=True)
+    selected_index = permitted.index("MERLIN_RTL_FACTS")
+    assert permitted[selected_index - 1 : selected_index + 2] == [
+        "--setenv", "MERLIN_RTL_FACTS", str(selected / "facts.json")
+    ]
+    assert ["--unsetenv", "MERLIN_RTL_FACTS"] == denied[
+        denied.index("MERLIN_RTL_FACTS") - 1 : denied.index("MERLIN_RTL_FACTS") + 1
+    ]
+    with pytest.raises(RuntimeError, match="exact allowed directory grant"):
+        base_argv(
+            tmp_path / "workspace",
+            {"allowed": [], "selected_rtl_facts_file": str(selected / "facts.json")},
+            _policy_test_live_inputs=True,
+        )
+
+    observed = []
+
+    def prompt(_te, _directory, _bundle_id, _variant, _manifest, _cap, _written, **_kwargs):
+        observed.append(facts.load_facts(te.target)["facts"]["selection_marker"])
+
+    monkeypatch.setattr(generator, "_materialize_prompt_and_grants", prompt)
+    generator.materialize_bundles(te, tmp_path / "bundles", arms=("merlin_rtlchecks",), rtl_facts_root=selected)
+    assert observed == ["phase0"]
+    (selected / "facts.json").write_text(json.dumps({"facts": {"target": "another"}}))
+    with pytest.raises(ValueError, match="descriptor target"):
+        generate_bundles(te, rtl_facts_root=selected)
+    (selected / "extra.json").write_text("{}")
+    with pytest.raises(ValueError, match="exactly one ordinary facts.json"):
+        generate_bundles(te, rtl_facts_root=selected)
 
 
 def test_retains_historical_grants_without_reintroducing_broad_contract_access():
@@ -194,3 +256,20 @@ def test_installed_assisted_tool_selection_tracks_actual_grants_and_ablation(tmp
         python_source_root=source,
     )
     assert not any("/targetgen/rtl/" in path for path in selected)
+
+
+def test_new_bundle_can_pin_external_llvm_without_changing_legacy_default(tmp_path):
+    llvm = tmp_path / "llvm"
+    (llvm / "bin").mkdir(parents=True)
+    for tool in ("clang-23", "mlir-opt"):
+        (llvm / "bin" / tool).write_text("fixture\n")
+    default = next(iter(generate_bundles(_te(), arms=("merlin_rtlchecks",)).values()))
+    selected = next(
+        iter(generate_bundles(_te(), arms=("merlin_rtlchecks",), llvm_toolchain_root=llvm).values())
+    )
+    default_paths = {row["path"] for row in default["allowed"]}
+    selected_paths = {row["path"] for row in selected["allowed"]}
+    assert "third_party/llvm-install/" in default_paths
+    assert "third_party/llvm-install/" not in selected_paths
+    assert str(llvm) + "/" in selected_paths
+    assert default_paths - {"third_party/llvm-install/"} == selected_paths - {str(llvm) + "/"}

@@ -96,9 +96,7 @@ def _software_cell_conflicts(requirement: dict, software_spec: dict) -> list[str
         family, dtype = cell.get("family"), cell.get("dtype")
         if not isinstance(family, str) or not isinstance(dtype, str):
             continue
-        decision = admit_operation(
-            software_spec, family, {"family": family, "operand_dtype": dtype}, "accelerator"
-        )
+        decision = admit_operation(software_spec, family, {"family": family, "operand_dtype": dtype}, "accelerator")
         if decision["status"] == "unsupported":
             conflicts.append(str(cell.get("cell") or f"{family}/{dtype}"))
     return sorted(set(conflicts))
@@ -124,12 +122,12 @@ def _ungradeable(entries: list[dict], target: str, *, binding=None) -> list[dict
     thing that consumes it. Reported as a cell that could not be expressed, with the reason, so the
     requirement shows an honest hole instead of a corpus that fails to build.
     """
-    from merlin_experiments.phase0 import writer
+    from merlin.targetgen import corpus_spec as CS
 
     out = []
     binding = (binding if binding is not None else _binding(target)) if entries else None
     for entry in entries:
-        regime, _ = writer._entry_regime(entry, binding)
+        regime, _ = CS.entry_binding(entry, binding)
         source = entry.get("source")
         why = None
         if (

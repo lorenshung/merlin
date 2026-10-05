@@ -99,12 +99,9 @@ def _input_provenance(capsule_dir: str | Path | None):
     else:
         if not capsule_dir:
             return None
-        path = Path(capsule_dir) / "golden.yaml"
-        if not path.is_file():
-            return None
-        import yaml
+        from merlin.targetgen.golden_store import load_golden
 
-        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        document = load_golden(capsule_dir)
     if not document:
         return None
     return ((document.get("oracle_provenance", {}) or {}).get("inputs", {})) or {}

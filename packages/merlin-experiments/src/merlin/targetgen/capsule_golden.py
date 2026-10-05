@@ -301,15 +301,15 @@ def _transpose2d(t: Tensor) -> Tensor:
 # golden source resolution (recompute vs read an INDEPENDENT golden)
 # --------------------------------------------------------------------------------------------
 def _load_golden_yaml(capsule_dir: str | Path | None) -> dict | None:
-    """Read the capsule's ``golden.yaml`` (the independent oracle's masked answer key), if present."""
+    """Read the capsule's golden (the independent oracle's masked answer key), if present.
+
+    ``golden.yaml`` plus its ``golden.npz`` arrays, digest-checked (:mod:`merlin.targetgen.golden_store`).
+    """
     if not capsule_dir:
         return None
-    import yaml
+    from merlin.targetgen.golden_store import load_golden
 
-    gy = Path(capsule_dir) / "golden.yaml"
-    if not gy.is_file():
-        return None
-    return yaml.safe_load(gy.read_text(encoding="utf-8"))
+    return load_golden(capsule_dir)
 
 
 def mx_operands(capsule: dict, capsule_dir: str | Path | None = None) -> dict | None:
@@ -498,9 +498,7 @@ def _recompute_golden(capsule: dict) -> dict[str, list]:
         # One increment per requirement-selected tensor map. Their adjacency
         # is verified on the MLIR rather than inferred from this scalar oracle.
         map_count = attrs["map_count"]
-        return {out_name: [
-            [value + map_count for value in row] for row in contracted.to_list()
-        ]}
+        return {out_name: [[value + map_count for value in row] for row in contracted.to_list()]}
 
     if op in ("matmul", "linear"):
         lhs = env[attrs.get("lhs", _pick("input"))]

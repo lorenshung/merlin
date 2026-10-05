@@ -61,16 +61,17 @@ def _capture_api_report(m2m) -> dict[str, list[str]]:
     if importlib.util.find_spec("m2m.capture.provenance") is None:
         same_conversion_missing.append("m2m/capture/provenance.py")
     frontend_trace_missing = [
-        f"m2m/api.py:convert({name})"
-        for name in sorted({"capture_trace", "original_frontend_snapshot"} - convert_args)
+        f"m2m/api.py:convert({name})" for name in sorted({"capture_trace", "original_frontend_snapshot"} - convert_args)
     ]
     if importlib.util.find_spec("m2m.capture.trace") is None:
         frontend_trace_missing.append("m2m/capture/trace.py")
     static_integerization_missing = [
-        member for module, member in (
+        member
+        for module, member in (
             ("m2m.capture.pt2e_integerize", "m2m/capture/pt2e_integerize.py"),
             ("m2m.capture.pt2e_integer_reference", "m2m/capture/pt2e_integer_reference.py"),
-        ) if importlib.util.find_spec(module) is None
+        )
+        if importlib.util.find_spec(module) is None
     ]
     return {
         "same_conversion_missing": same_conversion_missing,
@@ -86,6 +87,7 @@ def _diagnostic_model_copy(out: Path, loader: Path, *, capture_api: dict[str, li
     older Model2MLIR may have converted the model but cannot provide the modern
     same-conversion materialization contract.
     """
+
     def digest(path: Path) -> str:
         with path.open("rb") as stream:
             return hashlib.file_digest(stream, "sha256").hexdigest()
@@ -104,10 +106,7 @@ def _diagnostic_model_copy(out: Path, loader: Path, *, capture_api: dict[str, li
         "pytorch-opset.json",
         "meta.json",
     )
-    artifacts = {
-        name: {"bytes": (out / name).stat().st_size, "sha256": digest(out / name)}
-        for name in names
-    }
+    artifacts = {name: {"bytes": (out / name).stat().st_size, "sha256": digest(out / name)} for name in names}
     record = {
         "schema": "merlin.diagnostic_m2m_model.v1",
         "status": "diagnostic_raw_conversion",
@@ -306,6 +305,27 @@ def _input_abi(inputs):
     if bad:
         raise RuntimeError(f"model loader inputs must have only tensor leaves; got {bad}")
     return leaves, [{"shape": list(x.shape), "dtype": _mlir_dtype(x.dtype)} for x in leaves]
+
+
+def _float_reference(mdl, inputs, torch) -> dict:
+    """The untransformed model's outputs on ``inputs``, in the golden's JSON shape.
+
+    Every RNG this worker seeds is saved and restored around the forward, so a loader whose forward
+    draws random numbers produces the same golden afterwards as it would have without this run.
+    """
+    import numpy as np
+
+    states = (random.getstate(), np.random.get_state(), torch.get_rng_state())
+    try:
+        with torch.no_grad():
+            y = mdl(*inputs)
+        leaves, _abi = _output_abi(y)
+        values = [_to_native(x) for x in leaves]
+    finally:
+        random.setstate(states[0])
+        np.random.set_state(states[1])
+        torch.set_rng_state(states[2])
+    return {"outputs": values[0] if len(values) == 1 else values}
 
 
 def _output_abi(outputs):
@@ -531,6 +551,48 @@ def _materialize_session(model, inputs, args, out: Path, *, determinism: dict, d
     return 0 if ok else 3
 
 
+def _write_leaf_constants(mdl, inputs, weights_path: str, dest: Path) -> str | None:
+    """Write the ``@forward`` leaves the weights file does not store; the path, or ``None`` if none.
+
+    Externalization stores PARAMETERS. A registered buffer and a tensor constant the export lifts out
+    of the graph stay ``@forward`` arguments with nothing behind them, so a capsule missing them is not
+    self-contained: a consumer has to find the values in some other capture's files, which are another
+    capture's constants unless someone checks. Written in the layout m2m's bundle writer uses and
+    :func:`merlin.perf.whole_model_open.forward_arguments` reads -- ``buf::<dotted name>`` for a
+    buffer, the manifest's own name for a lifted constant -- and only for leaves the manifest names.
+    Lifted constants are recovered by m2m's own re-export, whose graph order is the importer's.
+    """
+    import numpy as np
+
+    manifest_path = Path(weights_path + ".manifest.json")
+    if not manifest_path.is_file():
+        return None
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    rows = [meta or {} for meta in manifest.values()]
+    # A buffer the externalizer STORED carries its `weight` key and is already in the weights file.
+    buffers = {str(meta.get("name") or "") for meta in rows if meta.get("kind") == "buffer" and not meta.get("weight")}
+    lifted = [str(meta.get("name") or "") for meta in rows if "lifted_tensor" in str(meta.get("name") or "")]
+    if not buffers and not lifted:
+        return None
+    extra: dict = {}
+    for name, tensor in mdl.named_buffers():
+        if "b_" + name.replace(".", "_") in buffers:
+            extra["buf::" + name] = tensor.detach().float().cpu().numpy()
+    if lifted:
+        from m2m.capture.bundle import _lifted_constants
+
+        found: dict = {}
+        _lifted_constants(mdl, tuple(inputs), found)
+        extra.update({key: value for key, value in found.items() if key in lifted})
+    recovered = {"b_" + key[len("buf::") :].replace(".", "_") for key in extra if key.startswith("buf::")}
+    missing = sorted(buffers - recovered) + [name for name in lifted if name not in extra]
+    if missing:
+        # FAIL CLOSED: a partial file would be read as complete by a consumer that trusts it.
+        raise RuntimeError(f"leaf arguments named by the manifest could not be recovered: {missing}")
+    np.savez(dest, **extra)
+    return str(dest)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="m2m capsule capture worker (runs in the m2m venv).")
     ap.add_argument("--loader", required=True, help="path to a .py exposing get_model_and_inputs()")
@@ -570,6 +632,19 @@ def main(argv=None) -> int:
         help="also emit the full model2MLIR runtime bundle from this exact conversion and model instance",
     )
     ap.add_argument(
+        "--quantize-activation-contractions",
+        action="store_true",
+        help="also quantize the contractions the scheme cannot reach (activation x activation "
+        "matmuls, non-overlapping convolutions) in the scheme's own int8 dynamic form; see "
+        "_activation_contractions.py",
+    )
+    ap.add_argument(
+        "--integer-nonlinear",
+        action="store_true",
+        help="with --quantize-activation-contractions: also compute softmax, GELU and layer norm in "
+        "integer arithmetic (I-BERT); a different numerical model, see _integer_nonlinear.py",
+    )
+    ap.add_argument(
         "--diagnostic-model-copy",
         action="store_true",
         help="copy raw converted MLIR for inventory with byte hashes, without a capture receipt or Phase 0 admission",
@@ -583,6 +658,10 @@ def main(argv=None) -> int:
         ap.error("agreement tolerances must be finite and nonnegative")
     if a.already_quantized and (a.recipe or a.scheme):
         ap.error("--already-quantized cannot be combined with --recipe or --scheme")
+    if a.integer_nonlinear and not a.quantize_activation_contractions:
+        # Defined only on top of the int8 contractions (the softmax's int8 numerators are the next
+        # contraction's own operand), so it is refused without them rather than mixed into a float program.
+        ap.error("--integer-nonlinear is defined on top of --quantize-activation-contractions only")
 
     if a.m2m_dir and a.m2m_dir not in sys.path:
         sys.path.insert(0, a.m2m_dir)
@@ -594,6 +673,7 @@ def main(argv=None) -> int:
     import m2m
     import torch
     from m2m.coverage import opaque_report
+
     capture_api = _capture_api_report(m2m)
 
     if a.materialize_bundle and capture_api["same_conversion_missing"]:
@@ -602,6 +682,19 @@ def main(argv=None) -> int:
             f"{capture_api['same_conversion_missing']}; "
             "use --diagnostic-model-copy only for unadmitted raw-model inventory"
         )
+    if a.integer_nonlinear:
+        # The integer nonlinears are captured as integer shifts and floor divisions. A bridge that
+        # does not decompose them leaves each one an opaque call, so refuse here, naming them, rather
+        # than capture a program that cannot link.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _integer_nonlinear as NL
+        from m2m.ir.decompositions import DECOMPOSITION_TABLE
+
+        missing = [name for name in NL.REQUIRED_DECOMPOSITIONS if name not in DECOMPOSITION_TABLE]
+        if missing:
+            raise SystemExit(
+                f"--integer-nonlinear needs a Model2MLIR that decomposes {missing}; the selected one does not"
+            )
 
     # Model2MLIR embeds this path in prov.weights_file. A relative --out would
     # otherwise leave a CWD-relative reference in the saved MLIR, which a
@@ -653,6 +746,18 @@ def main(argv=None) -> int:
     elif a.already_quantized:
         original_snapshot["reason"] = "loader supplies an already-quantized graph; the original model was not captured"
     _scheme, cast = _SCHEME.get(a.dtype, (None, None))
+    # THE FLOAT MODEL'S OWN OUTPUT, before any precision cast or quantization rewrites it. The golden
+    # below is the transformed model -- what the compiler must reproduce -- and so can say nothing about
+    # how far the transformation moved the network; this is the reference that can.
+    transforms = (
+        cast is not None
+        or bool(a.recipe)
+        or bool(a.scheme)
+        or a.quantize_activation_contractions
+        or a.integer_nonlinear
+        or (not a.already_quantized and _quant_for(a.dtype, None) is not None)
+    )
+    float_reference = _float_reference(mdl, inputs, torch) if transforms and not a.already_quantized else None
     precision_conversion = None
     if cast is not None:
         try:
@@ -800,13 +905,12 @@ def main(argv=None) -> int:
         if selected_engine == "integer_reference":
             if independent is None:
                 golden_agreement = {
-                    "status": "failed", "reference": "pt2e_integer",
+                    "status": "failed",
+                    "reference": "pt2e_integer",
                     "reason": independent_error or "selected integer reference returned no result",
                 }
             else:
-                golden_agreement = _integerized_agreement(
-                    independent.output, integer_output, atol=0.0, rtol=0.0
-                )
+                golden_agreement = _integerized_agreement(independent.output, integer_output, atol=0.0, rtol=0.0)
                 executed = independent.contraction_count
                 selected = quant_stats.get("annotated_contractions") if isinstance(quant_stats, dict) else None
                 seen = integerization_receipt["quantized_contractions_seen"]
@@ -818,10 +922,15 @@ def main(argv=None) -> int:
                 reference_leaves, reference_abi = _output_abi(independent.output)
                 reference_bytes = (
                     json.dumps(
-                        {"schema": "merlin.capture.integer_reference.v1", "output_abi": reference_abi,
-                         "outputs": [_to_native(value) for value in reference_leaves]},
-                        sort_keys=True, separators=(",", ":"),
-                    ) + "\n"
+                        {
+                            "schema": "merlin.capture.integer_reference.v1",
+                            "output_abi": reference_abi,
+                            "outputs": [_to_native(value) for value in reference_leaves],
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
                 ).encode("utf-8")
                 reference_path = out / "integer-reference.json"
                 reference_path.write_bytes(reference_bytes)
@@ -841,6 +950,34 @@ def main(argv=None) -> int:
             integerization_receipt["golden_agreement"] = golden_agreement
         else:
             integerization_receipt["golden_agreement"] = portable_agreement
+    act_census = None
+    if a.quantize_activation_contractions:
+        # THE CONTRACTIONS quantize_ CANNOT REACH. The scheme replaces Linear weights; a matmul of two
+        # activations and a convolution keep their float arithmetic under a program declared int8.
+        # Only the int8 dynamic form is defined for them, so any other quantization is refused rather
+        # than silently mixed with it.
+        scheme_name = getattr(q, "scheme", None)
+        if recipe is not None or scheme_name != "int8_dyn_act_int8_weight":
+            raise SystemExit(
+                f"--quantize-activation-contractions realises the int8 dynamic scheme's own form only; "
+                f"the capture is quantized under "
+                f"{'a derived recipe' if recipe is not None else repr(scheme_name)}"
+            )
+        # A sibling of this worker, imported by bare name: the worker runs under the capture
+        # interpreter, which cannot import the package.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _activation_contractions as AC
+
+        act_census = AC.install(mdl)
+    nl_census = None
+    if a.integer_nonlinear:
+        # THE NONLINEAR LAYERS BETWEEN THE CONTRACTIONS, in integer arithmetic. Defined only on top of the
+        # int8 contractions (the softmax's int8 numerators are the next contraction's own operand), so it
+        # is refused without them rather than mixed into a floating-point program.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _integer_nonlinear as NL
+
+        nl_census = NL.install(mdl)
     trace_options = {"capture_trace": True, "original_frontend_snapshot": original_snapshot} if trace_supported else {}
     res = m2m.convert(
         mdl,
@@ -915,6 +1052,9 @@ def main(argv=None) -> int:
     # host torch-eager reference — THE golden. Run the (cast/quantized) model the compiler must reproduce.
     with torch.no_grad():
         y = mdl(*inputs)
+    # The census of the forward that produced the golden, taken before anything runs the model again.
+    act_sites = act_census.to_dict() if act_census is not None else None
+    nl_sites = nl_census.to_dict() if nl_census is not None else None
     output_leaves, output_abi = _output_abi(y)
     output_values = [_to_native(x) for x in output_leaves]
     # Preserve the version-1 single-result JSON shape so existing operator capsules and caches remain
@@ -925,6 +1065,11 @@ def main(argv=None) -> int:
 
     (out / "inputs.json").write_text(json.dumps(input_prov), encoding="utf-8")
     (out / "golden.json").write_text(json.dumps(outputs), encoding="utf-8")
+    if not a.already_quantized:
+        # An untransformed capture's golden IS the float model's output.
+        reference = outputs if float_reference is None else float_reference["outputs"]
+        (out / "float_reference.json").write_text(json.dumps(reference), encoding="utf-8")
+    extra_path = _write_leaf_constants(mdl, inputs, weights_path, out / "extra.npz")
     precision = frontend_trace.get("precision") or {}
     precision_exact = precision.get("status") != "projected" and not precision.get("projections")
     meta = {
@@ -944,6 +1089,43 @@ def main(argv=None) -> int:
         "recipe_agreement": agreement,
         "quantization_stats": quant_stats,
         **({"integerization_receipt": integerization_receipt} if integerization_receipt is not None else {}),
+        # The contractions quantized BESIDE the scheme's own (activation x activation, patch
+        # convolutions), with every site the mode saw and its verdict, from the golden's forward.
+        # Absent when the capture did not ask for them.
+        **(
+            {
+                "activation_contractions": {
+                    "form": {
+                        "first_operand": "int8 symmetric, dynamic, one scale per row, [-127, 127]",
+                        "second_operand": "int8 symmetric, dynamic, one scale per output column",
+                        "accumulate": "int32 (torch._int_mm)",
+                        "dequantize": "int32 -> float x row scale x column scale",
+                        "min_reduction_exclusive": AC.MIN_REDUCTION,
+                    },
+                    **act_sites,
+                }
+            }
+            if act_sites is not None
+            else {}
+        ),
+        # The nonlinear layers computed in integer arithmetic, with the census of the golden's forward.
+        **(
+            {
+                "integer_nonlinear": {
+                    "form": {
+                        "softmax": "fixed exponent grid ln2/2**8, integer I-BERT exp, int8 numerators "
+                        "relative to the row's largest term, normalized by their integer sum",
+                        "gelu": "per-row int16 input, relu(x) - |x| h(|x|) with h a degree-6 fixed-point "
+                        "polynomial, one per-row dequantizing scale",
+                        "layer_norm": "per-row int16 input, integer mean, variance and Newton square root, "
+                        "one integer multiply and shift per element; affine weight and bias per channel",
+                    },
+                    **nl_sites,
+                }
+            }
+            if nl_sites is not None
+            else {}
+        ),
         "capture_diagnostics": [str(item)[:2000] for item in (getattr(res, "diagnostics", None) or [])[:100]],
         "path_taken": getattr(res, "path_taken", None),
         "dtype": a.dtype,
@@ -955,6 +1137,9 @@ def main(argv=None) -> int:
         # later from the source loader can have a different argument list (notably tensor-subclass
         # quantization expands parameters into inner tensors).
         "weights_manifest": weights_path + ".manifest.json",
+        # The @forward leaves the weights file does not hold (registered buffers, lifted constants),
+        # or None when the capture has none (see _write_leaf_constants).
+        "extra": extra_path,
         "capture_abi_version": _CAPTURE_ABI_VERSION,
         "frontend_trace": {
             "path": str(trace_path),

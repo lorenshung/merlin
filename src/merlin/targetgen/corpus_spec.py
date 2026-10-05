@@ -292,14 +292,64 @@ def _inapplicable_tiers(datapath: dict, required) -> dict[str, str]:
     return out
 
 
-def _accum_dtype(contract: dict, operand: str) -> str:
-    """Accumulate dtype from the compute unit's declared ``accumulate`` matrix, else the widening default
-    for an integer operand (i32) — a family property (``widening_integer_accumulate``), not a target one."""
+def derived_accumulator(contract: dict, operand: str, facts: dict | None = None) -> str | None:
+    """The accumulate dtype the target itself states for ``operand``, or ``None`` when nothing does.
+
+    Two sources, in order: the primary compute unit's declared ``accumulate`` matrix, then the RTL
+    facts' ``datapaths`` (the ``input``/``accumulator`` pair a CIRCT extraction reports). The facts pair
+    is used only when its input element format IS the operand's, so an integer accumulator is never
+    attached to a floating operand because the unit also carries one. ``None`` is an answer: a caller
+    that must not guess (a captured group stated as a capsule) refuses on it.
+    """
+    from merlin.common.quant_formats import get as quant_format
+
     cu = (contract.get("compute_units") or [{}])[0]
     for acc in cu.get("accumulate") or []:
         if acc.get("acc"):
             return str(acc["acc"])
+    body = facts if isinstance(facts, dict) else {}
+    body = body.get("facts") if isinstance(body.get("facts"), dict) else body
+    rows = {str(row.get("name")): row for row in (body.get("datapaths") or []) if isinstance(row, dict)}
+    source, accumulator = rows.get("input") or {}, rows.get("accumulator") or {}
+    if not source.get("dtype") or not accumulator.get("dtype"):
+        return None
+    try:
+        same = quant_format(str(source["dtype"])).name == quant_format(operand).name
+    except (KeyError, ValueError):
+        same = False
+    return str(accumulator["dtype"]) if same else None
+
+
+def _accum_dtype(contract: dict, operand: str, facts: dict | None = None) -> str:
+    """Accumulate dtype the target states (:func:`derived_accumulator`), else the widening default for an
+    integer operand (i32) — a family property (``widening_integer_accumulate``), not a target one."""
+    stated = derived_accumulator(contract, operand, facts)
+    if stated is not None:
+        return stated
     return "i32" if dtype_info(operand)[3] else "f32"
+
+
+def entry_binding(entry: dict, binding: CorpusBinding) -> tuple[str, CorpusBinding]:
+    """Route an entry to its numeric regime and return the per-entry binding (operand/accum overridden).
+
+    ``int`` (integer mesh), ``specir`` (fp8), ``mx`` (microscaling block-scaled FP), ``simt`` (IEEE
+    fp16/bf16/f32), routed purely by the entry's operand dtype token -- no target name. One definition,
+    used by the Phase 0 writer and by every caller that states a single entry as a capsule, so a group
+    asked of a package and the capsule that certifies it are built under the same binding.
+    """
+    import dataclasses
+
+    tok = entry.get("operand_dtype") or binding.operand_dtype
+    regime = regime_for_dtype(tok)
+    acc = {"mx": "bf16", "simt": "f32"}.get(regime, binding.accum_dtype)
+    eb = dataclasses.replace(
+        binding,
+        operand_dtype=tok,
+        accum_dtype=acc,
+        integer=(regime == "int"),
+        compare=("exact_int" if regime == "int" else "tolerance_float"),
+    )
+    return regime, eb
 
 
 def _declared_hardware_config(contract: dict) -> str | None:
@@ -362,9 +412,7 @@ def _classes_source(te, contract: dict, *, taxonomy: dict | None = None) -> Call
     if "self_hosted_isa" in (contract.get("features") or ()) or any(
         str(header).endswith("isa_definition.py") for header in (getattr(te, "isa_headers", ()) or ())
     ):
-        IT.require_taxonomy(
-            tax, f"target {getattr(te, 'target', '?')!r}", needs="Phase 0 instruction-class derivation"
-        )
+        IT.require_taxonomy(tax, f"target {getattr(te, 'target', '?')!r}", needs="Phase 0 instruction-class derivation")
     # Command target: its OWN contract declares the corpus obligation and issue order. A common
     # transport says nothing about whether this machine is weight-stationary, has configuration
     # instructions, or even names its work as a load/compute/store sequence. Do not infer a
@@ -465,7 +513,7 @@ def derive_binding(
 
     if quant_format(operand).name not in {quant_format(dt).name for dt in declared_dtypes}:
         raise ValueError(f"{te.target}: corpus operand dtype {operand!r} is not admitted by any compute unit")
-    accum = datapath.get("accum_dtype") or _accum_dtype(c, operand)
+    accum = datapath.get("accum_dtype") or _accum_dtype(c, operand, facts)
     integer = dtype_info(accum)[3]
     scaling = datapath.get("scaling") or cu.get("scaling")
     tiers = datapath.get("required_oracle_tiers") or sorted(inferred_oracle_tiers(te.target, te.sim_via))
@@ -651,39 +699,48 @@ def _readout_selectors(binding: CorpusBinding):
         return None
 
 
-def _readout_selector_for(binding: CorpusBinding, epilogue: list[str]) -> str | None:
-    """The dtype a fused ``epilogue`` must commit at, DERIVED from the target's readout declaration.
+def _readout_selector_for(
+    binding: CorpusBinding, epilogue: list[str], *, available_operand_roles: frozenset[str] = frozenset()
+) -> str | None:
+    """The dtype a fused contraction must commit at, from readout and scoped stage routes.
 
     ``None`` when the target declares no readouts: the caller then falls back to the stage heuristics
     below, which is the pre-existing behaviour for a target that has described nothing, and the same
     UNKNOWN posture the grade-time check takes.
 
-    RAISES when the target DOES declare readouts and none applies every stage. That capsule would
+    RAISES when the target DOES declare readouts and no application path applies every stage. That capsule would
     declare a computation this hardware cannot perform, and writing it anyway is exactly how twelve
     such capsules reached a graded corpus and were then refused one at a time, hours into an agent run,
     by a check that had the declaration available the whole time. Generation is where this is cheap to
     find out.
     """
-    from merlin.targetgen.readout_facet import epilogue_readouts
+    from merlin.targetgen.readout_facet import epilogue_readouts, epilogue_stage_routes
     from merlin.verify.epilogue_applicability import selectors_applying
 
     readouts = epilogue_readouts(binding.target)
     if not readouts:
         return None
-    applying = selectors_applying(readouts, epilogue)
+    routes = tuple(
+        route for route in epilogue_stage_routes(binding.target)
+        if route.operand_role in available_operand_roles
+    )
+    applying = selectors_applying(readouts, epilogue, routes=routes, composition="contraction")
     if applying:
         return applying[0]
     raise ValueError(
-        f"{binding.target!r} declares no readout that applies the epilogue {sorted(set(epilogue))}: "
+        f"{binding.target!r} declares no readout or contraction route that applies the epilogue {sorted(set(epilogue))}: "
         + "; ".join(f"{r.selector!r} applies {sorted(r.applies)}" for r in readouts)
         + f". A capsule fusing {sorted(set(epilogue))} onto this target would declare a computation its "
         "hardware does not perform, so it is NOT written. Either the stage is not fusable here (drop it "
         "from the conformance spec's epilogue axis, or carry it as a host stage) or the backend's "
-        "readout_epilogue_capability under-declares what the readout does."
+        "readout/route declarations under-declare what the hardware does."
     )
 
 
-def _resolve_output_dtype(binding: CorpusBinding, epilogue: list[str], entry: dict | None = None) -> str:
+def _resolve_output_dtype(
+    binding: CorpusBinding, epilogue: list[str], entry: dict | None = None,
+    *, available_operand_roles: frozenset[str] = frozenset(),
+) -> str:
     """Output dtype: the entry's own declaration if it makes one, else the accumulate dtype, unless a
     REQUANTIZING epilogue narrows the accumulator (the target declares that narrow dtype in its datapath
     as ``requant_output_dtype``, e.g. i8 for an integer mesh).
@@ -725,8 +782,16 @@ def _resolve_output_dtype(binding: CorpusBinding, epilogue: list[str], entry: di
             _selectors = _readout_selectors(binding)
             if _selectors is not None:
                 from merlin.verify.epilogue_applicability import selectors_applying
+                from merlin.targetgen.readout_facet import epilogue_stage_routes
 
-                _ok = selectors_applying(_selectors, epilogue)
+                routes = tuple(
+                    route for route in epilogue_stage_routes(binding.target)
+                    if route.operand_role in available_operand_roles
+                )
+                _ok = selectors_applying(
+                    _selectors, epilogue,
+                    routes=routes, composition="contraction",
+                )
                 if str(declared) not in _ok:
                     raise ValueError(
                         f"{(entry or {}).get('name', '?')!r} declares output_dtype {str(declared)!r} with "
@@ -740,7 +805,9 @@ def _resolve_output_dtype(binding: CorpusBinding, epilogue: list[str], entry: di
     # stages someone had thought of -- `relu` was in none of them, so a capsule fusing an activation
     # committed the raw accumulator width and declared a program the hardware cannot run.
     if epilogue:
-        selector = _readout_selector_for(binding, epilogue)
+        selector = _readout_selector_for(
+            binding, epilogue, available_operand_roles=available_operand_roles
+        )
         if selector is not None:
             dtype_info(selector)  # same fail-closed check an entry's own declaration gets
             return selector
@@ -934,7 +1001,10 @@ def build_matmul(entry: dict, binding: CorpusBinding) -> tuple[dict, str]:
         # Ahead of _resolve_output_dtype, which reads the epilogue to decide the committed dtype.
         epilogue.insert(0, "bias_add")
     acc_scale = entry.get("acc_scale")
-    output_dtype = _resolve_output_dtype(binding, epilogue, entry)
+    output_dtype = _resolve_output_dtype(
+        binding, epilogue, entry,
+        available_operand_roles=frozenset({"bias"}) if any(stage in _BIAS_STAGES for stage in epilogue) else frozenset(),
+    )
     odt = binding.cap_dtype(output_dtype)
     idt = binding.cap_dtype(binding.operand_dtype)
     bias, bias_dt = _bias_operand(entry, epilogue, N, binding, op)
@@ -1842,7 +1912,10 @@ def build_conv2d(entry: dict, binding: CorpusBinding) -> tuple[dict, str]:
     Ho, Wo = conv_out_dims(H, W, kh, kw, stride, padding, dilation)
     Kdim = kh * kw * ci
     epilogue = list(entry.get("epilogue", []))
-    output_dtype = _resolve_output_dtype(binding, epilogue, entry)
+    output_dtype = _resolve_output_dtype(
+        binding, epilogue, entry,
+        available_operand_roles=frozenset({"bias"}) if any(stage in _BIAS_STAGES for stage in epilogue) else frozenset(),
+    )
     idt, odt = binding.cap_dtype(binding.operand_dtype), binding.cap_dtype(output_dtype)
     midt, modt = binding.mlir_dtype(binding.operand_dtype), binding.mlir_dtype(output_dtype)
     attrs = {
@@ -2117,7 +2190,8 @@ def scope_chain_region_ops(families: list[str]) -> list[str]:
     source-derived performance cohort.
     """
     if not (
-        isinstance(families, list) and len(families) >= 3
+        isinstance(families, list)
+        and len(families) >= 3
         and families[:2] == ["movement", "contraction"]
         and all(family == "elementwise_map" for family in families[2:])
     ):
@@ -2138,8 +2212,10 @@ def build_scope_chain(entry: dict, binding: CorpusBinding) -> tuple[dict, str]:
     adt = binding.cap_dtype(binding.accum_dtype)
     madt = binding.mlir_dtype(binding.accum_dtype)
     if not (
-        midt.startswith("i") and midt[1:].isdigit()
-        and madt.startswith("i") and madt[1:].isdigit()
+        midt.startswith("i")
+        and midt[1:].isdigit()
+        and madt.startswith("i")
+        and madt[1:].isdigit()
         and int(madt[1:]) > int(midt[1:])
     ):
         raise ValueError(
@@ -2153,15 +2229,27 @@ def build_scope_chain(entry: dict, binding: CorpusBinding) -> tuple[dict, str]:
     if min(M, K, N) < 1:
         raise ValueError("scope_chain extents must be positive")
     a, w, out = entry.get("lhs", "A0"), entry.get("weight", "W"), entry.get("out", "Y0")
-    attrs = {"lhs": a, "weight": w, "out": out, "M": M, "K": K, "N": N,
-             "scope_families": list(families),
-             "scope_region_ops": region_ops,
-             "scope_signature": " -> ".join(families),
-             "map_count": map_count, "output_dtype": adt}
+    attrs = {
+        "lhs": a,
+        "weight": w,
+        "out": out,
+        "M": M,
+        "K": K,
+        "N": N,
+        "scope_families": list(families),
+        "scope_region_ops": region_ops,
+        "scope_signature": " -> ".join(families),
+        "map_count": map_count,
+        "output_dtype": adt,
+    }
     cap = {
-        "name": entry["name"], "kind": entry["kind"], "source_role": entry["source_role"],
-        "source_reference": entry["source_reference"], "label": entry.get("label", "dev"),
-        "interface_mlir": "capsule.interface.mlir", "linalg_mlir": "capsule.interface.mlir",
+        "name": entry["name"],
+        "kind": entry["kind"],
+        "source_role": entry["source_role"],
+        "source_reference": entry["source_reference"],
+        "label": entry.get("label", "dev"),
+        "interface_mlir": "capsule.interface.mlir",
+        "linalg_mlir": "capsule.interface.mlir",
         "inputs": [
             {"name": a, "role": "input", "shape": [M, K], "dtype": idt},
             {"name": w, "role": "weight", "shape": [N, K], "dtype": idt},
@@ -2172,7 +2260,9 @@ def build_scope_chain(entry: dict, binding: CorpusBinding) -> tuple[dict, str]:
             "instruction_classes": binding.classes_for(op="matmul", output_dtype=adt, epilogue=[], movement=True),
             "modes": {"matmul": True},
         },
-        "required_oracle_tiers": list(binding.tiers), "vcs": "optional", "firesim": "optional",
+        "required_oracle_tiers": list(binding.tiers),
+        "vcs": "optional",
+        "firesim": "optional",
     }
     lines = [
         'builtin.module attributes {prov.level = "linalg-on-tensors"} {',

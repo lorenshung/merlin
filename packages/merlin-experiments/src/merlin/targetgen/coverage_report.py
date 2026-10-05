@@ -52,7 +52,7 @@ def _ratio(num: int, den: int):
 #: The axis a decline was decided on, in the order :func:`eligibility.is_eligible` checks them. Named
 #: rather than parsed out of the verdict's prose: the reason string is a human sentence and matching it
 #: would break the moment somebody rewords it, which is exactly how this repo has mis-measured before.
-DECLINE_AXES = ("undetermined", "family", "dtype", "rank", "batch", "layout", "engine", "fused_only", "unknown")
+DECLINE_AXES = ("undetermined", "family", "dtype", "rank", "batch", "layout", "form", "engine", "fused_only", "unknown")
 
 
 def _decline_axis(desc, family: str, cap_map: dict, *, undetermined: bool) -> str:
@@ -76,12 +76,20 @@ def _decline_axis(desc, family: str, cap_map: dict, *, undetermined: bool) -> st
             return "dtype"
         if desc.weight_dtype is not None and not _el._dtype_ok(desc.weight_dtype, c.dtypes):
             return "dtype"
+        if c.family == "contraction" and desc.in_dtype is not None and desc.weight_dtype is not None \
+                and c.operand_pairs is not None and not any(
+                    _el._dtype_ok(desc.in_dtype, (left,)) and _el._dtype_ok(desc.weight_dtype, (right,))
+                    for left, right in c.operand_pairs
+                ):
+            return "dtype"
         if c.ranks and desc.rank is not None and desc.rank not in c.ranks:
             return "rank"
         if desc.batch > 1 and not c.batch:
             return "batch"
         if c.layouts and desc.layout is not None and desc.layout not in c.layouts:
             return "layout"
+        if c.forms and desc.form not in c.forms:
+            return "form"
         if c.engines and desc.engine is not None and desc.engine not in c.engines:
             return "engine"
         if c.composed_with and how == "direct" and family == c.family:
@@ -164,6 +172,7 @@ def _capsule_region(cap: dict):
         rank=rank,
         batch=batch,
         layout=layout,
+        form=_sf.operation_form(op),
     )
 
 

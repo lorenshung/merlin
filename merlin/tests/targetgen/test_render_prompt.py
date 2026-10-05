@@ -27,6 +27,10 @@ _SHARED_BLOCKS = [
     "emit_command_buffer",
     "emit_target_artifact",
     "emit_analysis_bundle",
+    "source_op_indices",
+    "merlin.global_task",
+    "merlin.source_op_index",
+    "Host address calculations, loop control and dispatch are allowed",
 ]
 
 
@@ -69,27 +73,39 @@ def test_radiance_prompt_has_radiance_slots_and_no_gemmini_leakage(monkeypatch):
 _ATLAS = "merlin/experiments/capsule_bench/targets/atlas/target_experiment.yaml"
 
 
-def test_grading_model_is_derived_from_the_corpus_not_hardcoded_integer():
-    """The certification-model sentence must follow the corpus goldens: atlas's independent-float
-    (fp8/bf16) corpus grades within a tolerance against the program-oracle and marks the integer
-    self-consistency cross-checks not_applicable. Telling a float-MXU agent the grading is 'exact-integer,
-    no tolerance' would make it build the wrong backend.
+def test_grading_model_is_derived_from_the_corpus_not_hardcoded_integer(tmp_path):
+    """Exercise integer, independent-float and mixed regimes without historical generated corpora.
 
-    gemmini's corpus is MIXED — an int8 systolic datapath whose generalization capsules are authored in
-    float through the PyTorch frontend — so it must say the model is decided PER CAPSULE and describe
-    BOTH. Collapsing a mixed corpus to either single sentence (the old any()-float predicate returned
-    whole-corpus float as soon as one float capsule existed) misdescribes the grading for the rest of it.
+    Capsules and goldens are generated artifacts, not checkout fixtures. The regime must follow
+    each selected corpus's actual metadata rather than assuming one target always has a mixed
+    corpus or requiring its old, untracked model goldens to exist.
     """
-    _, gs = _render("gemmini", _GEM)
-    assert "exact-integer" in gs["grading_model"] and "no tolerance" in gs["grading_model"]
-    assert "PER CAPSULE" in gs["grading_model"], "a mixed corpus must not claim one grading model"
-    assert "tolerance" in gs["grading_model"] and "not_applicable" in gs["grading_model"]
-    try:
-        _, as_ = _render("atlas", _ATLAS)
-    except Exception as e:  # noqa: BLE001
-        pytest.skip(f"atlas not resolvable: {e}")
-    assert "tolerance" in as_["grading_model"] and "not_applicable" in as_["grading_model"]
-    assert "exact-integer" not in as_["grading_model"]
+    from types import SimpleNamespace
+
+    from merlin.targetgen.generate_prompt import _grading_model
+
+    def corpus(name, *, integer=False, floating=False):
+        root = tmp_path / name
+        root.mkdir()
+        if integer:
+            cap = root / "integer"
+            cap.mkdir()
+            (cap / "capsule.yaml").write_text("numeric_policy: {compare: exact_int}\n")
+        if floating:
+            cap = root / "floating"
+            cap.mkdir()
+            (cap / "capsule.yaml").write_text("numeric_policy: {compare: tolerance_float}\n")
+            (cap / "golden.yaml").write_text("golden_source: independent_frontend\n")
+        return SimpleNamespace(capsule_corpus=root, corpus_siblings=lambda: [])
+
+    integer = _grading_model(corpus("integer", integer=True))
+    assert "exact-integer" in integer and "no tolerance" in integer
+    floating = _grading_model(corpus("floating", floating=True))
+    assert "tolerance" in floating and "not_applicable" in floating
+    assert "exact-integer" not in floating
+    mixed = _grading_model(corpus("mixed", integer=True, floating=True))
+    assert "PER CAPSULE" in mixed and "exact-integer" in mixed
+    assert "tolerance" in mixed and "not_applicable" in mixed
 
 
 # Whole sections whose CONTENT is derived from endpoint_kind (how the kernel receives operands + how it

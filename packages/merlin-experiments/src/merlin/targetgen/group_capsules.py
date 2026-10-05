@@ -100,13 +100,14 @@ def promote(target: str, stated: Mapping[str, Any], *, declaration=None) -> dict
 
 def write(target: str, stated: Mapping[str, Any], out_root: Path, *, declaration=None) -> dict[str, Any]:
     """Build every entry with the corpus generator. A builder that refuses one is reported by name."""
-    from merlin_experiments.phase0 import profiles, writer
+    from merlin_experiments.phase0 import profiles
+    from merlin_experiments.phase0.group_forms import write_group_capsule
 
-    from merlin.targetgen import corpus_spec
+    from merlin.targetgen.group_capsule_entries import group_binding
 
     experiment, selected = _experiment(target, declaration)
     profile = profiles.load_profile(selected.profile, include_holdouts=False, **selected.profile_inputs())
-    binding = corpus_spec.derive_binding(experiment, profile.get("datapath", {}))
+    binding = group_binding(experiment, profile.get("datapath", {}))
     semantics = (profile.get("datapath") or {}).get("numerical_semantics")
     built: dict[str, str] = {}
     refused: dict[str, str] = {}
@@ -117,7 +118,10 @@ def write(target: str, stated: Mapping[str, Any], out_root: Path, *, declaration
                 if entry.get("numerical_semantics") not in (None, semantics):
                     raise ValueError("group entry numerical semantics differ from the selected software spec")
                 entry["numerical_semantics"] = semantics
-            built[row["name"]] = str(writer._write_capsule(entry, binding, Path(out_root)))
+            written = write_group_capsule(entry, binding, Path(out_root))
+            if written is None:
+                raise ValueError("the capsule writer produced no artifact")
+            built[row["name"]] = str(written)
         except Exception as error:  # noqa: BLE001 -- reported per capsule, never swallowed
             refused[row["name"]] = f"{type(error).__name__}: {str(error)[:300]}"
     return {"built": built, "refused_by_generator": refused}
@@ -214,6 +218,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     """Attach the shared corpus-group options without importing execution dependencies."""
     parser.add_argument("--target", required=True)
     parser.add_argument("--definition", type=Path, help="explicit derivation definition; disambiguates target reuse")
+    parser.add_argument("--rtl-facts", type=Path, help="selected RTL facts artifact; defaults to the target's selected facts")
     parser.add_argument("--capture", required=True, help="the captured model's linalg MLIR")
     parser.add_argument("--manifest", help="the capture's weights manifest (says which arguments are stored)")
     parser.add_argument("--model", default="")
@@ -243,9 +248,10 @@ def run_from_args(args: argparse.Namespace) -> int:
 
     from merlin.common import mlir_query as mq
     from merlin.common.digest import sha256_file
-    from merlin.targetgen.rtl.facts import find_facts, target_contract_path
+    from merlin.targetgen.rtl.facts import facts_alias, find_facts, observed_facts, target_contract_path
     from merlin.targetgen.software_spec import software_spec_path_for_recipe
     from merlin.targetgen.target_registry import resolve
+    from merlin.xdsl_dialects.lowering import compute_groups
     from merlin.xdsl_dialects.lowering import stream_plan
 
     if args.plan_only and (args.only or args.promote or args.package):
@@ -254,10 +260,29 @@ def run_from_args(args: argparse.Namespace) -> int:
     selected = from_definition(definition) if definition is not None else for_target(args.target)
     _experiment(args.target, selected)  # refuse an incompatible declaration before writing output
 
+    facts_path = find_facts(args.target, explicit=getattr(args, "rtl_facts", None))
+    if facts_path is None:
+        raise ValueError(f"{args.target}: group audit requires selected verified RTL facts; none are available")
+    facts_doc = json.loads(facts_path.read_text(encoding="utf-8"))
+    body = facts_doc.get("facts") if isinstance(facts_doc, dict) else None
+    fact_target = body.get("target") if isinstance(body, dict) else None
+    if fact_target != args.target and fact_target != facts_alias(args.target):
+        raise ValueError(f"{facts_path}: RTL facts are for {fact_target!r}, not {args.target!r}")
+    consistency = facts_doc.get("source_consistency")
+    if not isinstance(consistency, dict) or consistency.get("status") != "verified":
+        raise ValueError(f"{facts_path}: group audit requires selected verified RTL facts")
+
     weights = None
     if args.manifest:
         weights = stream_plan.weight_args_of(json.loads(Path(args.manifest).read_text(encoding="utf-8")))
-    stated = entries(args.target, mq.parse(args.capture), weight_args=weights, model=args.model)
+    with observed_facts(args.target, facts_doc, facts_path):
+        module = mq.parse(args.capture)
+        oracle = compute_groups.TargetOracle(args.target)
+        groups = compute_groups.form_groups(module, args.target, oracle=oracle)
+        stated = entries(args.target, module, weight_args=weights, model=args.model, oracle=oracle, groups=groups)
+        routing_summary = compute_groups.plan(module, args.target, oracle=oracle, groups=groups)["summary"]
+    if routing_summary["accelerator_groups"] != stated["accelerator_groups"]:
+        raise ValueError("group capsule and routing passes disagree on accelerator group count")
     # A derived group list is evidence about these exact bytes, not merely about paths a later
     # reader might repoint. Record the oracle's selected contract/facts alongside source inputs.
     selected_inputs = {
@@ -266,7 +291,7 @@ def run_from_args(args: argparse.Namespace) -> int:
         "software_spec": software_spec_path_for_recipe(selected.recipe),
         "capability_contract": target_contract_path(args.target),
         "provider_contract": resolve(args.target).contract_path,
-        "rtl_facts": find_facts(args.target),
+        "rtl_facts": facts_path,
     }
     if args.manifest:
         selected_inputs["manifest"] = Path(args.manifest)
@@ -283,15 +308,18 @@ def run_from_args(args: argparse.Namespace) -> int:
     if args.plan_only:
         report: dict[str, Any] = {
             **stated,
+            "routing_summary": routing_summary,
             "built": {},
             "refused_by_generator": {},
             "materialization": "not_requested",
         }
     elif args.promote:
         report: dict[str, Any] = {**stated, **promote(args.target, stated, declaration=selected)}
+        report["routing_summary"] = routing_summary
         report["entries"] = [row for row in stated["entries"] if row["name"] in report["built"]]
     else:
         report = {**stated, **write(args.target, stated, out / "capsules", declaration=selected)}
+        report["routing_summary"] = routing_summary
     report["inputs"] = inputs
     report["missing_input_receipts"] = missing_inputs
     if args.package:
@@ -306,9 +334,12 @@ def run_from_args(args: argparse.Namespace) -> int:
         )
     (out / "group_capsules.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(
-        f"{stated['stated']} of {stated['accelerator_groups']} accelerator group(s) stated as "
+        f"{stated['stated']} of {stated['accelerator_groups']} routed accelerator group(s) stated as "
         f"{stated['distinct']} distinct program(s); built {len(report['built'])}, "
-        f"refused by the generator {len(report['refused_by_generator'])}, unstated {stated['unstated'] or 'none'}"
+        f"refused by the generator {len(report['refused_by_generator'])}, unstated {stated['unstated'] or 'none'}; "
+        f"host groups {routing_summary['host_groups']}, host elements {routing_summary['elements_on_host']}, "
+        f"routed input-format changes {sum(routing_summary['device_groups_requiring_input_format_change'].values())} "
+        "(routing only, not emitted-code coverage)"
     )
     return 0
 

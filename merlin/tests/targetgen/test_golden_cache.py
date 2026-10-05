@@ -359,3 +359,50 @@ def test_exact_pair_fold_matches_full_selected_32x32_tile():
             expected = fp_reduce(values, D.BF16, order="index_sequential", cadence="per_step", rm="rne")
             assert reduce(values) == expected, f"mismatched full-tile output ({i}, {j})"
     clear()
+
+
+def test_vectorized_fold_equals_the_scalar_ordered_fold():
+    """`ordered_fold` runs every lane at once but must fold in exactly the scalar index order."""
+    import numpy as np
+
+    rng = np.random.default_rng(7)
+    m, k, n = 5, 37, 4
+    lhs_codes, rhs_codes = rng.integers(0, 9, size=(m, k)), rng.integers(0, 7, size=(k, n))
+    table = rng.integers(0, 1 << 16, size=(9, 7))
+
+    def step(acc, addend):  # deliberately order-sensitive and non-associative
+        return (acc * 31 + addend * 7 + (acc ^ addend)) % 65521
+
+    folded = NUMERICS.ordered_fold(table, lhs_codes, rhs_codes, step)
+    for i in range(m):
+        for j in range(n):
+            acc = int(table[lhs_codes[i, 0], rhs_codes[0, j]])
+            for p in range(1, k):
+                acc = step(acc, int(table[lhs_codes[i, p], rhs_codes[p, j]]))
+            assert folded[i, j] == acc
+    with pytest.raises(ValueError, match="raw codes"):
+        NUMERICS.ordered_fold([[-1]], np.zeros((1, 1), dtype=int), np.zeros((1, 1), dtype=int), step)
+
+
+def test_vectorized_specir_fold_matches_the_scalar_reducer():
+    try:
+        D, fp_reduce = NUMERICS._specir()
+    except ImportError:
+        pytest.skip("independent SpecIR oracle is not installed")
+    import numpy as np
+
+    m, k, n = 4, 64, 3
+    a, _ = NUMERICS._det_fp8(D, "A0", (m, k), "fold_check", "fp8_e4m3", D.FP8_E4M3)
+    w, _ = NUMERICS._det_fp8(D, "W", (k, n), "fold_check", "fp8_e4m3", D.FP8_E4M3)
+    decode = NUMERICS._operand_decoder(D, D.FP8_E4M3, flush_subnormals=True)
+    reduce, clear = NUMERICS._float_reducer(fp_reduce, D.BF16, order="index_sequential", cadence="per_step", rm="rne")
+    lhs, rhs = np.asarray(a).reshape(m, k), np.asarray(w).reshape(k, n)
+    lc, li = np.unique(lhs, return_inverse=True)
+    rc, ri = np.unique(rhs, return_inverse=True)
+    table = [[D.round_to_format(decode(int(x)) * decode(int(y)), D.BF16, "rne") for y in rc] for x in lc]
+    folded = NUMERICS.ordered_fold(table, li.reshape(m, k), ri.reshape(k, n), reduce.step)
+    for i in range(m):
+        for j in range(n):
+            values = [D.round_to_format(decode(a[i * k + p]) * decode(w[p * n + j]), D.BF16, "rne") for p in range(k)]
+            assert folded[i, j] == reduce(values)
+    clear()

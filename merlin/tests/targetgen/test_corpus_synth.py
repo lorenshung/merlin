@@ -88,6 +88,7 @@ def test_every_required_cell_becomes_an_entry(target):
         "accumulation-depth axis",
         "geometry class",
         "convolution-window axis",
+        "convolution operand-capacity boundary",
         # The carried-state axis: configuration a unit STAYS IN, which a later command inherits unless
         # something resets it. It was derived and emitted (`SY_carried_relu_i8`) before this list knew
         # about it, so its entries read as unattributable -- the same shape as the bug that let
@@ -136,24 +137,36 @@ def test_a_fused_only_family_is_carried_as_an_epilogue_not_a_standalone_op():
 
     A family declared `composed_with: [contraction]` is fused-only: the eligibility oracle refuses a
     standalone capsule for it as a false fallback, so the only capsule that can ever evidence that cell
-    is a contraction carrying it as an epilogue. The conformance ratchet spells this out for gemmini in
-    exactly those terms.
+    is a contraction carrying it as an epilogue. Which families are fused-only is read from the
+    target's own capability map, never named here: a family the contract declares standalone must be
+    synthesized as its own op, not hidden behind a contraction the hardware does not need.
     """
+    from merlin.targetgen import eligibility as E
+
     doc = _spec("gemmini")
     res = CS.synthesize(doc)
-    # CELL entries only. The host-lane axis also emits an `elementwise_map` capsule, and it is the exact
-    # inverse of this rule: it exists because the target does NOT admit that family at that dtype, so it
-    # must NOT ride a contraction the hardware would then be entitled to accelerate.
-    fused = [
-        e
-        for e in res["capsules"]
-        if "elementwise_map" in e["name"] and (e.get("generalization") or {}).get("generalization_axis") != "host_lane"
-    ]
+    cap_map = E.capability_map_for_target("gemmini")
+    fused_only = {f for f, cap in cap_map.items() if cap.composed_with}
+    standalone = {f for f, cap in cap_map.items() if not cap.composed_with} - {"contraction"}
+
+    def cells(family):
+        # CELL entries only. The host-lane axis also emits capsules per family, and it is the exact
+        # inverse of this rule: it exists because the target does NOT admit that family at that dtype,
+        # so it must NOT ride a contraction the hardware would then be entitled to accelerate.
+        return [
+            e
+            for e in res["capsules"]
+            if f"_{family}_" in e["name"] and (e.get("generalization") or {}).get("generalization_axis") != "host_lane"
+        ]
+
+    fused = [e for family in sorted(fused_only) for e in cells(family)]
     if not fused:
         pytest.skip("this target's requirement has no fused-only family")
     for entry in fused:
         assert entry["op"] == "matmul", "a fused-only family must ride a contraction"
         assert entry.get("epilogue"), "…and must actually carry an epilogue stage"
+    for entry in (e for family in sorted(standalone) for e in cells(family)):
+        assert not entry.get("epilogue"), f"{entry['name']}: a standalone family is its own op"
 
 
 def test_alignment_decides_the_shape():
@@ -169,8 +182,14 @@ def test_alignment_decides_the_shape():
 def test_accumulator_output_capacity_is_a_derived_not_model_shaped_capsule():
     doc = _spec("gemmini")
     doc["accumulator_output_boundary"] = {
-        "status": "resolved", "capacity_rows": 1024, "tile_edge": 16, "M": 1, "K": 16,
-        "N": 1040, "N_tiles": 65, "output_rows_if_resident": 1040,
+        "status": "resolved",
+        "capacity_rows": 1024,
+        "tile_edge": 16,
+        "M": 1,
+        "K": 16,
+        "N": 1040,
+        "N_tiles": 65,
+        "output_rows_if_resident": 1040,
     }
     doc["oracle_tiers"] = []  # derivation has not constructed an oracle yet
     doc["oracle_tiers_declared"] = ["L0", "L1", "L2", "L3"]
@@ -181,6 +200,20 @@ def test_accumulator_output_capacity_is_a_derived_not_model_shaped_capsule():
     assert entry["max_oracle_tier"] == "L2"
     assert "execution must verify availability" in entry["source_reference"]
     assert "tile-schedule" in entry["pass_requirements"]
+
+
+def test_convolution_capacity_probe_crosses_fact_derived_store_without_a_validation_shape():
+    doc = _spec("gemmini")
+    result = CS.synthesize(doc)
+    entry = next(e for e in result["capsules"] if e["name"] == "SY_conv_operand_capacity_boundary")
+    basis = result["provenance"]["conv_operand_capacity_boundary"]
+    assert basis["capacity_rows"] == doc["memory_mapping"]["capacity_rows"]
+    assert basis["output_windows"] * basis["rows_per_window"] > basis["capacity_rows"]
+    assert [entry["Himg"], entry["Wimg"]] == basis["image"]
+    assert entry["extends"] == basis["source"]
+    assert entry["max_oracle_tier"] == "L2"
+    assert "tile-schedule" in entry["pass_requirements"]
+    assert (entry["generalization"] or {})["generalization_axis"] == "shape"
 
 
 def test_extents_are_tile_relative_not_baked_integers():
@@ -591,7 +624,9 @@ def test_float_movement_host_lane_has_a_pytorch_representative():
     }
     result = CS.synthesize(spec, capability_contract={"name": "t", "compute_units": []})
     entry = next(item for item in result["capsules"] if item["name"] == "SY_host_lane_movement_f32")
-    assert entry["op"] == "transpose"
+    # A historical requirement (no observed host operations) keeps a family-level choice: any movement
+    # op the PyTorch writer expresses, which ties by name among equally cheap candidates.
+    assert CS._op_family_map()[entry["op"]] == "movement"
     assert entry["source"] == "pytorch"
     assert result["provenance"]["host_only_unsynthesizable"] == []
 

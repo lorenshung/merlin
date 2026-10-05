@@ -13,10 +13,12 @@ AttributeError from somewhere deeper.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from merlin.runtime.backends import base
+from merlin.targetgen.contract import build_recipe
 
 
 def _recipe(**over):
@@ -80,6 +82,32 @@ def test_the_error_class_travels_with_the_recipe():
         ).error_cls
         is RuntimeError
     )
+
+
+def test_implicit_compiler_abi_is_queried_then_pinned_for_both_commands(monkeypatch):
+    calls = []
+
+    def query(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout="  -mabi=                         lp64d\n", stderr="")
+
+    monkeypatch.setattr(build_recipe.subprocess, "run", query)
+    recipe = _recipe(cflags=("-O2", "-march=rv64gc"))
+    pinned = recipe.with_effective_abi()
+    assert calls == [["/opt/cc", "-O2", "-march=rv64gc", "-Q", "--help=target"]]
+    assert pinned.cflags == ("-O2", "-march=rv64gc", "-mabi=lp64d")
+    assert "-mabi=lp64d" in pinned.compile_command(source=Path("/w/a.c"), output=Path("/w/a.o"))
+    assert "-mabi=lp64d" in pinned.link_command(objects=(Path("/w/a.o"),), output=Path("/w/a.elf"))
+
+
+def test_explicit_recipe_abi_wins_without_query_and_rejects_duplicates(monkeypatch):
+    monkeypatch.setattr(build_recipe.subprocess, "run", lambda *args, **kwargs: pytest.fail("queried"))
+    assert _recipe(cflags=("-march=rv64gc", "-mabi=lp64")).with_effective_abi().cflags == (
+        "-march=rv64gc", "-mabi=lp64")
+    with pytest.raises(ValueError, match="duplicate -mabi"):
+        _recipe(cflags=("-march=rv64gc", "-mabi=lp64", "-mabi=lp64d")).mabi()
+    with pytest.raises(ValueError, match="invalid -mabi"):
+        _recipe(cflags=("-march=rv64gc", "-mabi=ilp32")).mabi()
 
 
 # ------------------------------------------------------------------ the registry lookup
