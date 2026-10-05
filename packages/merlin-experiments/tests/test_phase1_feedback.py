@@ -135,6 +135,32 @@ def test_candidate_verification_feedback_only_exposes_verified_counts(tmp_path):
     assert "PRIVATE_ANSWER_SENTINEL" not in json.dumps(summary)
 
 
+def test_candidate_verified_numeric_mismatch_has_closed_failure_feedback(tmp_path):
+    check = {
+        "schema": "merlin_candidate_native_model_check_v1", "status": "fail",
+        "violations": ["candidate_verified_numeric_mismatch"],
+        "candidate_required_tiers": {"status": "fail", "required_tiers": ["L2", "L3"],
+                                     "tiers": {"L2": {"status": "fail"}, "L3": {"status": "pass"}}},
+        "native_status": "numeric_match_diagnostic",
+    }
+    projected = qa._candidate_native_feedback({"candidate_native_model_check": check})
+    assert projected["status"] == "fail"
+    assert projected["violations"] == ["candidate_verified_numeric_mismatch"]
+    assert projected["tiers"] == {"L2": "fail", "L3": "pass"}
+    result_path = tmp_path / "runs" / "synthetic-suite" / "M" / "capsule_result.json"
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text(json.dumps({
+        "capsule": "M", "kind": "model", "status": "fail",
+        "numeric": {"status": "pass"},  # unrelated legacy graph
+        "candidate_native_execution": {"numeric": {"status": "fail", "mismatch_count": 1}},
+        "candidate_native_model_check": check,
+    }))
+    row = qa._per_capsule_from_results(tmp_path)["M"]
+    assert row["numeric_status"] == "fail"
+    assert row["failure_plane"] == "candidate_model_numeric"
+    assert row["failure_category"] == "FUNCTIONAL_MISMATCH"
+
+
 def test_model_only_selfcheck_reports_gate_instead_of_harness_failure():
     score = {
         "per_capsule": [

@@ -285,9 +285,13 @@ def _per_capsule_from_results(runs_root: Path) -> dict[str, dict]:
             tiers = {tier: {"status": value} for tier, value in candidate_feedback.get("tiers", {}).items()}
             mandatory = candidate_feedback.get("required_tiers", [])
             missing = [tier for tier in mandatory if (tiers.get(tier) or {}).get("status") != "pass"]
+            verified_mismatch = (candidate_feedback["status"] == "fail"
+                                 and "candidate_verified_numeric_mismatch" in candidate_feedback["violations"])
             fail = {} if candidate_feedback["status"] == "pass" else {
-                "plane": "model_execution",
-                "category": "PROTOCOL_VIOLATION" if candidate_feedback["status"] == "fail" else "NOT_RUN_IS_NOT_PASS",
+                "plane": "candidate_model_numeric" if verified_mismatch else "model_execution",
+                "category": ("FUNCTIONAL_MISMATCH" if verified_mismatch else
+                             "PROTOCOL_VIOLATION" if candidate_feedback["status"] == "fail"
+                             else "NOT_RUN_IS_NOT_PASS"),
                 "tier": missing[0] if missing else None,
                 "detail": ", ".join(candidate_feedback.get("violations", [])) or candidate_feedback.get("reason"),
             }
@@ -417,7 +421,7 @@ def _candidate_native_feedback(result: dict) -> dict | None:
         "candidate_source_placement_violation", "candidate_source_placement_unverified",
         "candidate_full_model_native_unverified", "candidate_required_rtl_engine_mismatch",
         "candidate_completed_dispatch_unverified", "candidate_source_coverage_unverified",
-        "candidate_required_tiers_unverified",
+        "candidate_required_tiers_unverified", "candidate_verified_numeric_mismatch",
     }
     violations = check.get("violations")
     codes = []

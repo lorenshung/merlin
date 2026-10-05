@@ -105,6 +105,125 @@ def test_selected_functional_engine_binds_binary_and_extension_bytes(tmp_path, m
         revalidate()
 
 
+def test_candidate_l2_pinned_full_output_mismatch_is_fail_not_unverified(tmp_path, monkeypatch):
+    """Reopen a synthetic frozen golden and actual OUT/DONE bytes, not a claimed numeric flag."""
+    import hashlib
+    from merlin.runtime.backends import spike
+    from merlin.targetgen import native_model_execution as native
+    from merlin.targetgen.capsule_golden import compare
+    from merlin.targetgen.golden_store import load_golden, write_golden
+
+    capsule = tmp_path / "capsule"
+    capsule.mkdir()
+    (capsule / "capsule.yaml").write_text("numeric_policy:\n  compare: exact_int\n")
+    write_golden(capsule, {"golden_source": "synthetic_test_only", "outputs": {"out": [[1, 2]]}})
+    elf = tmp_path / "candidate.elf"
+    elf.write_bytes(b"synthetic candidate ELF for binding test")
+    console = tmp_path / "console_l2.txt"
+    console.write_text("OUT out 1 2 1 3\nDONE\n")
+    cb = tmp_path / "command_buffer.json"
+    cb.write_text(json.dumps({"tensors": {"out": {"dtype": "i8", "role": "output"}}}))
+    lowered = tmp_path / "lowered.llvm.mlir"
+    lowered.write_text("builtin.module {}")
+    observed, _ = spike.parse_output(console.read_text())
+    numeric = compare(load_golden(capsule)["outputs"], observed, {"compare": "exact_int"},
+                      golden_source="synthetic_test_only")
+    assert numeric["status"] == "fail" and numeric["mismatch_count"] == 1
+    policy = {"required_tiers": ["L0", "L1", "L2", "L3"], "test": "synthetic"}
+    citation = {"binary": {"sha256": "synthetic_test_only"}}
+    receipt = {
+        "source": {"capsule_declaration": _digest(capsule / "capsule.yaml"),
+                   "golden": _digest(capsule / "golden.yaml"),
+                   "golden_arrays": _digest(capsule / "golden.npz")},
+        "frozen_policy": policy, "elf": _digest(elf),
+        "tiers": {"L2": {"status": "fail", "engine": "spike", "engine_citation": citation,
+                         "elf": _digest(elf), "console": _digest(console), "numeric": numeric}},
+    }
+    emission = {"command_buffer": _digest(cb), "lowered_mlir": _digest(lowered)}
+    monkeypatch.setattr(native, "audit_candidate_static_tiers", lambda *a, **k: {
+        "L0": {"status": "pass"}, "L1": {"status": "pass"}})
+    monkeypatch.setattr(native, "_frozen_model_policy", lambda *a, **k: policy)
+    monkeypatch.setattr(native, "_functional_engine", lambda *a, **k: (
+        SimpleNamespace(parse_output=spike.parse_output), citation, lambda: None))
+
+    def l2_status():
+        return native.audit_candidate_tiers(
+            emission, {}, receipt, target="synthetic", entry_symbol="kernel",
+            completed_dispatch={"status": "unverified"})["tiers"]["L2"]["status"]
+
+    assert l2_status() == "fail"
+    from merlin.runtime.backends import base as backends
+    from merlin.targetgen.capsule_grade import candidate_native_model_check
+
+    expected = {
+        "command_buffer_sha256": hashlib.sha256(json.dumps(json.loads(cb.read_text()), sort_keys=True).encode()).hexdigest(),
+        "lowered_mlir_sha256": _digest(lowered)["sha256"],
+    }
+    receipt["candidate"] = expected
+    monkeypatch.setattr(backends, "harness_build_recipe", lambda target: SimpleNamespace(
+        require_kernel_stack_frame=lambda: SimpleNamespace(entry_symbol="kernel")))
+    monkeypatch.setattr(native, "audit_emitted_host_compute",
+                        lambda *a, **k: {"status": "clean", "candidate": expected})
+    monkeypatch.setattr(native, "audit_candidate_source_placement", lambda *a, **k: {
+        "status": "clean", "source_sha256": "s" * 64,
+        "n_source_operations": 1, "eligible_source_op_indices": [0]})
+    monkeypatch.setattr(native, "audit_candidate_completed_dispatch",
+                        lambda *a, **k: {"status": "unverified"})
+    check = candidate_native_model_check({
+        "candidate_emission": emission, "candidate_source_eligibility": {},
+        "candidate_native_execution": receipt,
+    }, target="synthetic")
+    assert check["status"] == "fail"
+    assert "candidate_verified_numeric_mismatch" in check["violations"]
+    assert "candidate_full_model_native_unverified" in check["violations"]  # L3 did not run
+    receipt["console"] = _digest(console)
+    receipt["numeric"] = numeric
+    receipt["simulator"] = "synthetic_rtl"
+    receipt["simulator_provenance"] = {"selection": {"engine": "synthetic_rtl"},
+                                       "citation": {"binary": "synthetic_rtl"}}
+    receipt["tiers"]["L3"] = {
+        "status": "fail", "engine": "synthetic_rtl", "elf": _digest(elf),
+        "console": _digest(console), "numeric": numeric,
+        "selection": receipt["simulator_provenance"]["selection"],
+        "engine_citation": receipt["simulator_provenance"]["citation"],
+    }
+    dispatch = {"status": "verified", "numeric_status": "fail",
+                "linked_elf": _digest(elf), "console": _digest(console)}
+    both = native.audit_candidate_tiers(
+        emission, {}, receipt, target="synthetic", entry_symbol="kernel", completed_dispatch=dispatch)
+    assert both["status"] == "fail"
+    assert both["failed_tiers"] == ["L2", "L3"]
+    assert "derived_from_rtl" not in both["tiers"]["L3"]  # selection declared no fidelity
+    receipt["simulator_provenance"]["selection"]["fidelity"] = "elaborated_rtl"
+    both = native.audit_candidate_tiers(
+        emission, {}, receipt, target="synthetic", entry_symbol="kernel", completed_dispatch=dispatch)
+    assert both["tiers"]["L3"]["derived_from_rtl"] is True
+    assert "cycle_accurate" not in both["tiers"]["L3"]
+    receipt["tiers"]["L3"]["engine_citation"] = {"binary": "forged"}
+    assert native.audit_candidate_tiers(
+        emission, {}, receipt, target="synthetic", entry_symbol="kernel",
+        completed_dispatch=dispatch)["tiers"]["L3"]["status"] == "unverified"
+    receipt["tiers"]["L3"]["engine_citation"] = receipt["simulator_provenance"]["citation"]
+    console.write_text("OUT out 1 2 1 4\nDONE\n")  # stale content pin
+    assert l2_status() == "unverified"
+    console.write_text("OUT out 1 2 1 3\n")  # bound but no completion witness
+    receipt["tiers"]["L2"]["console"] = _digest(console)
+    assert l2_status() == "unverified"
+    console.write_text("OUT out 1 2 1 2\nDONE\n")  # forged failure claim against correct output
+    receipt["tiers"]["L2"]["console"] = _digest(console)
+    assert l2_status() == "unverified"
+    console.write_text("OUT out 1 2 1 3\nDONE\n")
+    receipt["tiers"]["L2"]["console"] = _digest(console)
+    receipt["tiers"]["L2"]["elf"] = {**_digest(elf), "sha256": "0" * 64}
+    assert l2_status() == "unverified"
+    receipt["tiers"]["L2"]["elf"] = _digest(elf)
+    del receipt["source"]["golden_arrays"]  # archive exists but its pin was omitted
+    assert l2_status() == "unverified"
+    receipt["source"]["golden_arrays"] = _digest(capsule / "golden.npz")
+    del receipt["source"]["golden"]
+    assert l2_status() == "unverified"
+
+
 def test_frozen_tier_policy_allows_explicit_empty_prohibitions_but_not_empty_tiers(tmp_path, monkeypatch):
     from merlin.targetgen import target_experiment
 
@@ -304,6 +423,114 @@ def test_device_required_model_without_candidate_native_evidence_is_incomplete()
     assert "candidate_full_model_native_unverified" in checked["violations"]
 
 
+def test_score_numeric_status_never_borrows_legacy_model_numeric():
+    from merlin.targetgen.capsule_grade import _score_numeric_status
+
+    row = {"numeric": {"status": "pass"}, "candidate_native_model_check": {
+        "status": "incomplete", "violations": ["candidate_required_tiers_unverified"]}}
+    assert _score_numeric_status(row) is None
+    row["candidate_native_model_check"].update(
+        status="fail", violations=["candidate_verified_numeric_mismatch"])
+    assert _score_numeric_status(row) == "fail"
+    row["candidate_native_model_check"].update(status="pass", violations=[])
+    assert _score_numeric_status(row) == "pass"
+    del row["candidate_native_model_check"]
+    assert _score_numeric_status(row) == "pass"
+
+
+def test_real_grade_rollup_withholds_legacy_tiers_cost_and_numeric_for_candidate(tmp_path, monkeypatch):
+    from merlin.targetgen import capsule_grade as grade_module
+
+    package, capsules = tmp_path / "package", tmp_path / "capsules"
+    package.mkdir()
+    capsules.mkdir()
+    capsule = {"name": "M", "kind": "model", "label": "public",
+               "semantic": {"must_accelerate": True}}
+    row = {
+        "capsule": "M", "kind": "model", "label": "public", "status": "fail",
+        "numeric": {"status": "pass"},
+        "tiers": {tier: {"status": "pass", "cycles": 5000, "derived_from_rtl": tier == "L3",
+                          "timing": {"sim_active_s": 8.0}} for tier in ("L0", "L1", "L2", "L3")},
+        "mesh_execution": {"matmul_layers_on_mesh": 99},
+        "candidate_native_model_check": {
+            "schema": "merlin_candidate_native_model_check_v1", "status": "fail",
+            "violations": ["candidate_verified_numeric_mismatch"],
+            "candidate_required_tiers": {
+                "status": "fail", "required_tiers": ["L0", "L1", "L2", "L3"],
+                "tiers": {"L0": {"status": "pass"}, "L1": {"status": "pass"},
+                          "L2": {"status": "fail"}, "L3": {"status": "unverified"}},
+            },
+        },
+    }
+    monkeypatch.setattr(grade_module, "load_package", lambda *a, **k: SimpleNamespace(integrity_exempt=False))
+    monkeypatch.setattr(grade_module, "integrity_scan", lambda *a, **k: None)
+    monkeypatch.setattr(grade_module, "build_package", lambda *a, **k: None)
+    monkeypatch.setattr(grade_module.CR, "discover_capsules", lambda *a, **k: [capsule])
+    monkeypatch.setattr(grade_module.CR, "run_suite", lambda *a, **k: [row])
+    monkeypatch.setattr(grade_module, "enforce_model_execution_check", lambda result, *a, **k: result)
+    trace = tmp_path / "runs" / "runs" / "gemmini-capsule-bench" / "M" / "generated" / "instruction_trace.json"
+    trace.parent.mkdir(parents=True)
+    trace.write_text(json.dumps({"legacy_host_graph_trace": True}))
+    aggregate_inputs = {}
+
+    def aggregate(rows, *, traces, **kwargs):
+        aggregate_inputs["rows"] = rows
+        aggregate_inputs["traces"] = traces
+        return {
+            "by_tier_reached": {}, "instruction_class_coverage": {}, "mode_coverage": {},
+            "unavailable": {}, "acceleratable_coverage": {},
+        }
+
+    monkeypatch.setattr(grade_module.CV, "aggregate", aggregate)
+    score = grade_module.grade(
+        package, capsules_root=capsules, runs_root=tmp_path / "runs",
+        target="gemmini", oracle_adapters={})
+    assert score["n_capsules"] == 1 and score["n_passed"] == 0
+    assert score["tier_reached"]["L3"] == 0 and score["highest_tier"] == "L1"
+    assert score["pass_evidence"]["rtl_backed"] == 0
+    assert score["cycles_diagnostic"] == {} and score["timing_diagnostic"] == {}
+    assert score["numeric_all_exact"] is False
+    model = score["per_capsule"][0]
+    assert model["numeric"] == "fail" and model["tiers"]["L2"] == "fail"
+    assert model["tiers"]["L3"] == "unverified"
+    assert "mesh_execution" not in model and "cost_plane" not in model
+    assert aggregate_inputs["rows"][0]["tiers"]["L3"]["status"] == "unverified"
+    assert aggregate_inputs["traces"] == {}  # legacy generated trace never describes candidate ELF
+    assert row["tiers"]["L3"]["cycles"] == 5000  # diagnostic source is preserved, not scored
+
+    # Even a candidate pass cannot inherit RTL identity from an L3 name when
+    # the selected-engine audit supplied no fidelity declaration.
+    row["status"] = "pass"
+    check = row["candidate_native_model_check"]
+    check["status"] = "pass"
+    check["violations"] = []
+    check["candidate_required_tiers"]["status"] = "pass"
+    check["candidate_required_tiers"]["tiers"]["L2"] = {"status": "pass"}
+    check["candidate_required_tiers"]["tiers"]["L3"] = {"status": "pass"}
+    score = grade_module.grade(
+        package, capsules_root=capsules, runs_root=tmp_path / "runs",
+        target="gemmini", oracle_adapters={})
+    assert score["n_passed"] == 1
+    assert score["pass_evidence"]["rtl_backed"] == 0
+    assert score["pass_evidence"]["rtl_tiers_seen"] == []
+    assert aggregate_inputs["traces"] == {}
+
+
+def test_candidate_score_view_carries_only_audited_rtl_fidelity():
+    from merlin.targetgen.capsule_grade import _candidate_score_view
+
+    row = {"kind": "model", "candidate_native_model_check": {
+        "status": "pass", "candidate_required_tiers": {
+            "required_tiers": ["L3"], "tiers": {"L3": {"status": "pass"}}}}}
+    tier = _candidate_score_view(row)["tiers"]["L3"]
+    assert "derived_from_rtl" not in tier and "cycle_accurate" not in tier
+    row["candidate_native_model_check"]["candidate_required_tiers"]["tiers"]["L3"].update(
+        fidelity="elaborated_rtl", derived_from_rtl=True)
+    tier = _candidate_score_view(row)["tiers"]["L3"]
+    assert tier["fidelity"] == "elaborated_rtl" and tier["derived_from_rtl"] is True
+    assert "cycle_accurate" not in tier
+
+
 def test_model_grade_accepts_real_native_candidate_receipt_extra_fields(monkeypatch):
     from merlin.runtime.backends import base as backends
     from merlin.targetgen import native_model_execution as native_module
@@ -322,6 +549,7 @@ def test_model_grade_accepts_real_native_candidate_receipt_extra_fields(monkeypa
                                          "eligible_source_op_indices": [0]})
     monkeypatch.setattr(native_module, "audit_candidate_completed_dispatch",
                         lambda *a, **k: {"status": "verified", "source_sha256": "s" * 64,
+                                         "numeric_status": "pass",
                                          "eligible_tasks": [{"source_op_indices": [0, 1]}]})
     tier_proof = {"status": "pass", "required_tiers": ["L0", "L1", "L2", "L3"],
                   "tiers": {tier: {"status": "pass"} for tier in ("L0", "L1", "L2", "L3")}}
@@ -364,6 +592,19 @@ def test_model_grade_accepts_real_native_candidate_receipt_extra_fields(monkeypa
     checked = model_execution_check(row, {"semantic": {"must_accelerate": True}}, target="synthetic")
     assert "candidate_full_model_native_unverified" in checked["violations"]
     assert checked["candidate_native_model_check"]["status"] == "incomplete"
+
+    # A separately verified functional-tier counterexample is a candidate
+    # failure even if the unrelated legacy host-graph path was incomplete.
+    record["candidate"]["lowered_mlir_sha256"] = expected["lowered_mlir_sha256"]
+    tier_proof["status"] = "fail"
+    tier_proof["failed_tiers"] = ["L2"]
+    tier_proof["tiers"]["L2"] = {"status": "fail"}
+    row["status"] = "incomplete"
+    enforce_model_execution_check(row, {"semantic": {"must_accelerate": True}}, target="synthetic")
+    assert row["status"] == "fail"
+    assert row["failure"]["plane"] == "candidate_model_numeric"
+    assert row["failure"]["category"] == "FUNCTIONAL_MISMATCH"
+    assert "candidate_verified_numeric_mismatch" in row["candidate_native_model_check"]["violations"]
 
 
 def test_known_emitted_accelerator_task_tensor_math_is_failure_even_without_native_run(tmp_path, monkeypatch):

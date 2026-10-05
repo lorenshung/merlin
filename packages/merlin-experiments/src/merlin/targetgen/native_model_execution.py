@@ -733,8 +733,8 @@ def audit_candidate_tiers(
         import yaml
 
         functional = (native.get("tiers") or {}).get("L2") or {}
-        if functional.get("status") != "pass" or functional.get("engine") != "spike":
-            raise NativeModelExecutionError("same candidate ELF has no passing functional L2 execution")
+        if functional.get("status") not in {"pass", "fail"} or functional.get("engine") != "spike":
+            raise NativeModelExecutionError("same candidate ELF has no completed functional L2 execution")
         backend, citation, revalidate = _functional_engine(target)
         if functional.get("engine_citation") != citation:
             raise NativeModelExecutionError("L2 engine citation differs from currently selected bytes")
@@ -747,33 +747,62 @@ def audit_candidate_tiers(
         cb = json.loads(_read_pinned_payload(emission, "command_buffer").decode("utf-8"))
         observed = backends.decode_float_readback(observed, declared_output_dtypes(cb))
         capsule_dir = _pinned_native_file(native["source"], "capsule_declaration").parent
+        _pinned_native_file(native["source"], "golden")
+        if (capsule_dir / "golden.npz").is_file() != ("golden_arrays" in native["source"]):
+            raise NativeModelExecutionError("L2 golden archive presence differs from source pins")
+        if "golden_arrays" in native["source"]:
+            _pinned_native_file(native["source"], "golden_arrays")
         declaration = yaml.safe_load((capsule_dir / "capsule.yaml").read_text(encoding="utf-8"))
         golden = load_golden(capsule_dir)
+        if set(observed) != set(golden["outputs"]):
+            raise NativeModelExecutionError("L2 console has no complete declared full output")
         numeric = compare(golden["outputs"], observed, declaration["numeric_policy"],
                           golden_source=str(golden.get("golden_source") or "independent_capsule"))
-        if numeric.get("status") != "pass" or numeric != functional.get("numeric"):
-            raise NativeModelExecutionError("L2 full output does not match independent golden")
-        tiers["L2"] = {"status": "pass", "engine_citation": citation,
+        if (numeric.get("status") not in {"pass", "fail"} or numeric != functional.get("numeric")
+                or functional.get("status") != numeric["status"]):
+            raise NativeModelExecutionError("L2 numeric receipt differs from independently parsed full output")
+        tiers["L2"] = {"status": numeric["status"], "engine_citation": citation,
                        "elf": _digest(elf), "console": _digest(_pinned_native_file(functional, "console")),
                        "numeric": numeric}
     except Exception as exc:  # noqa: BLE001 -- unbound engine/console is unavailable, not a tier pass
         tiers["L2"] = {"status": "unverified", "detail": f"{type(exc).__name__}: {exc}"}
     try:
         rtl = (native.get("tiers") or {}).get("L3") or {}
+        elf = _pinned_native_file(native, "elf")
+        console = _pinned_native_file(native, "console")
+        provenance = native.get("simulator_provenance") or {}
         if (not isinstance(completed_dispatch, Mapping)
                 or completed_dispatch.get("status") != "verified"
-                or rtl.get("status") != "pass"
-                or rtl.get("elf") != _digest(_pinned_native_file(native, "elf"))
-                or rtl.get("console") != _digest(_pinned_native_file(native, "console"))
-                or rtl.get("numeric") != native.get("numeric")):
+                or completed_dispatch.get("numeric_status") not in {"pass", "fail"}
+                or rtl.get("status") != completed_dispatch["numeric_status"]
+                or completed_dispatch.get("linked_elf") != _digest(elf)
+                or completed_dispatch.get("console") != _digest(console)
+                or rtl.get("elf") != _digest(elf)
+                or rtl.get("console") != _digest(console)
+                or rtl.get("engine") != native.get("simulator")
+                or rtl.get("engine_citation") != provenance.get("citation")
+                or rtl.get("selection") != provenance.get("selection")
+                or rtl.get("numeric") != native.get("numeric")
+                or (native.get("numeric") or {}).get("status") != completed_dispatch["numeric_status"]):
             raise NativeModelExecutionError("selected RTL tier lacks independently verified candidate completion")
-        tiers["L3"] = {"status": "pass", "engine": rtl.get("engine"),
+        tiers["L3"] = {"status": completed_dispatch["numeric_status"], "engine": rtl.get("engine"),
                        "elf": rtl["elf"], "console": rtl["console"],
                        "completed_dispatch": completed_dispatch}
+        # Fidelity comes from the same selected engine report that the completed
+        # dispatch auditor revalidated, never from the L3 label. No selected
+        # fidelity means no RTL or cycle-accuracy claim in the score.
+        fidelity = (provenance.get("selection") or {}).get("fidelity")
+        if isinstance(fidelity, str) and fidelity:
+            from merlin.targetgen.rtl_engine_policy import ELABORATED_RTL
+
+            tiers["L3"]["fidelity"] = fidelity
+            tiers["L3"]["derived_from_rtl"] = fidelity == ELABORATED_RTL
     except Exception as exc:  # noqa: BLE001 -- no verified RTL completion is not an L3 pass
         tiers["L3"] = {"status": "unverified", "detail": f"{type(exc).__name__}: {exc}"}
     missing = [tier for tier in required if (tiers.get(tier) or {}).get("status") != "pass"]
-    return {"status": "pass" if not missing else "unverified", "required_tiers": required,
+    failed = [tier for tier in required if (tiers.get(tier) or {}).get("status") == "fail"]
+    return {"status": "fail" if failed else "pass" if not missing else "unverified", "required_tiers": required,
+            "failed_tiers": failed,
             "missing_tiers": missing, "tiers": tiers,
             "scope": "candidate-only mandatory tier evidence; L0/L1 structural/ISA, L2 functional, L3 RTL"}
 
@@ -954,7 +983,8 @@ def audit_candidate_completed_dispatch(
         placement = audit_candidate_source_placement(emission, certificate, target=target)
         if placement.get("status") != "clean":
             raise NativeModelExecutionError("independent source placement is not clean")
-        if native.get("status") != "numeric_match_diagnostic" or native.get("simulator") is None:
+        if native.get("status") not in {"numeric_match_diagnostic", "numeric_mismatch_diagnostic"} \
+                or native.get("simulator") is None:
             raise NativeModelExecutionError("exact candidate ELF has no completed native oracle run")
         source_text = _read_pinned_payload(emission, "source_interface").decode("utf-8")
         lowered_text = _read_pinned_payload(emission, "lowered_mlir").decode("utf-8")
@@ -1128,9 +1158,11 @@ def audit_candidate_completed_dispatch(
         # cannot be misread as durable proof.
         for name in ("capsule_declaration", "golden"):
             _pinned_native_file(sources, name)
+        capsule_dir = _pinned_native_file(sources, "capsule_declaration").parent
+        if (capsule_dir / "golden.npz").is_file() != ("golden_arrays" in sources):
+            raise NativeModelExecutionError("native golden archive presence differs from source pins")
         if "golden_arrays" in sources:
             _pinned_native_file(sources, "golden_arrays")
-        capsule_dir = _pinned_native_file(sources, "capsule_declaration").parent
         declaration = yaml.safe_load((capsule_dir / "capsule.yaml").read_text(encoding="utf-8"))
         attrs = ((declaration.get("operation") or {}).get("attributes") or {})
         for role, relative in (("interface", declaration.get("interface_mlir")),
@@ -1149,10 +1181,14 @@ def audit_candidate_completed_dispatch(
         golden = load_golden(capsule_dir)
         observed, _ = get_backend(target).parse_output(console)
         observed = backends.decode_float_readback(observed, declared_output_dtypes(cb))
+        if set(observed) != set(golden["outputs"]):
+            raise NativeModelExecutionError("completed candidate console has no complete declared full output")
         numeric = compare(golden["outputs"], observed, declaration["numeric_policy"],
                           golden_source=str(golden.get("golden_source") or "independent_capsule"))
-        if numeric.get("status") != "pass":
-            raise NativeModelExecutionError("exact completed ELF output differs from independent golden")
+        if (numeric.get("status") not in {"pass", "fail"} or numeric != native.get("numeric")
+                or native.get("status") != ("numeric_match_diagnostic" if numeric["status"] == "pass"
+                                             else "numeric_mismatch_diagnostic")):
+            raise NativeModelExecutionError("native numeric receipt differs from independently parsed full output")
         from merlin.llvmlower import toolchain
 
         return {"status": "verified", "scope": "completion-implied mandatory family-matched "
@@ -1162,6 +1198,7 @@ def audit_candidate_completed_dispatch(
                 "lowered_mlir_sha256": candidate["lowered_mlir_sha256"],
                 "kernel_object": _digest(obj), "linked_elf": _digest(elf),
                 "console": _digest(_pinned_native_file(native, "console")),
+                "numeric_status": numeric["status"],
                 "eligible_tasks": completed, "kernel_command_count": len(all_functs),
                 "plan_digest": plan.get("plan_digest"),
                 "disassembler": _digest(toolchain.objdump())}

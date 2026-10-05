@@ -155,22 +155,26 @@ def candidate_native_model_check(result: dict, *, target: str) -> dict:
     native = result.get("candidate_native_execution")
     expected = host.get("candidate") or {}
     native_candidate = native.get("candidate") if isinstance(native, dict) else None
-    if (not isinstance(native, dict)
-            or native.get("status") != "numeric_match_diagnostic"
-            or (native.get("numeric") or {}).get("status") != "pass"
-            or not isinstance(native_candidate, dict)
-            or any(not isinstance(expected.get(key), str)
-                   or native_candidate.get(key) != expected[key]
-                   for key in ("command_buffer_sha256", "lowered_mlir_sha256"))
-            or not isinstance(native.get("elf"), dict)
-            or not isinstance(native.get("console"), dict)):
-        violations.append("candidate_full_model_native_unverified")
+    candidate_artifact_identity_ok = (isinstance(native, dict)
+            and isinstance(native_candidate, dict)
+            and all(isinstance(expected.get(key), str)
+                    and native_candidate.get(key) == expected[key]
+                    for key in ("command_buffer_sha256", "lowered_mlir_sha256"))
+            and isinstance(native.get("elf"), dict))
+    native_identity_ok = candidate_artifact_identity_ok and isinstance(native.get("console"), dict)
     required_engine = os.environ.get("MERLIN_REQUIRED_RTL_ENGINE", "").strip()
     if required_engine and (not isinstance(native, dict) or native.get("simulator") != required_engine):
         violations.append("candidate_required_rtl_engine_mismatch")
     dispatch = audit_candidate_completed_dispatch(
         result.get("candidate_emission"), result.get("candidate_source_eligibility"), native,
         target=target, entry_symbol=entry)
+    numeric_status = (native.get("numeric") or {}).get("status") if isinstance(native, dict) else None
+    if (not native_identity_ok or dispatch.get("status") != "verified"
+            or dispatch.get("numeric_status") not in {"pass", "fail"}
+            or numeric_status != dispatch.get("numeric_status")
+            or native.get("status") != ("numeric_match_diagnostic" if numeric_status == "pass"
+                                        else "numeric_mismatch_diagnostic")):
+        violations.append("candidate_full_model_native_unverified")
     if dispatch.get("status") != "verified":
         violations.append("candidate_completed_dispatch_unverified")
     source_coverage: dict = {"status": "unverified", "scope": "candidate-only eligible source operations"}
@@ -194,11 +198,27 @@ def candidate_native_model_check(result: dict, *, target: str) -> dict:
     tier_check = audit_candidate_tiers(
         result.get("candidate_emission"), result.get("candidate_source_eligibility"), native,
         target=target, entry_symbol=entry, completed_dispatch=dispatch)
-    if tier_check.get("status") != "pass":
+    static_tiers = tier_check.get("tiers") or {}
+    l2_mismatch = (candidate_artifact_identity_ok and placement.get("status") == "clean"
+                   and all((static_tiers.get(tier) or {}).get("status") == "pass"
+                           for tier in ("L0", "L1"))
+                   and (static_tiers.get("L2") or {}).get("status") == "fail")
+    verified_mismatch = (
+        (native_identity_ok and dispatch.get("status") == "verified"
+         and dispatch.get("numeric_status") == "fail" and numeric_status == "fail")
+        or l2_mismatch)
+    if verified_mismatch:
+        violations.append("candidate_verified_numeric_mismatch")
+    if tier_check.get("status") not in {"pass", "fail"} or (
+            tier_check.get("status") == "fail" and not verified_mismatch) or (
+            tier_check.get("status") == "fail"
+            and any((tier_check.get("tiers") or {}).get(tier, {}).get("status") != "pass"
+                    for tier in tier_check.get("required_tiers") or []
+                    if tier not in (tier_check.get("failed_tiers") or []))):
         violations.append("candidate_required_tiers_unverified")
     known = any(name in violations for name in (
         "candidate_host_tensor_compute_violation", "candidate_source_placement_violation",
-        "candidate_required_rtl_engine_mismatch"))
+        "candidate_required_rtl_engine_mismatch", "candidate_verified_numeric_mismatch"))
     return {
         "schema": "merlin_candidate_native_model_check_v1",
         "status": "fail" if known else "incomplete" if violations else "pass",
@@ -756,7 +776,8 @@ def enforce_model_execution_check(result: dict, capsule: dict | None, *, target:
         "candidate_full_model_native_unverified", "candidate_completed_dispatch_unverified",
         "candidate_required_tiers_unverified"))
     known_candidate_violation = any(v in violations for v in (
-        "candidate_host_tensor_compute_violation", "candidate_source_placement_violation"))
+        "candidate_host_tensor_compute_violation", "candidate_source_placement_violation",
+        "candidate_verified_numeric_mismatch"))
     evidence_unmeasured = (engine_unmeasured or alignment_unmeasured or candidate_unmeasured) and not known_candidate_violation
     status = "unavailable" if evidence_unmeasured else "fail"
     detail = "whole-model execution proof failed: " + ", ".join(violations)
@@ -767,18 +788,21 @@ def enforce_model_execution_check(result: dict, capsule: dict | None, *, target:
 
     # Preserve a pre-existing stronger failure.  The dangerous case is the flattering pass that escaped
     # into durable QA; convert that to an honest no-measurement or protocol verdict.
-    if result.get("status") == "pass":
+    verified_numeric_mismatch = "candidate_verified_numeric_mismatch" in violations
+    if result.get("status") == "pass" or verified_numeric_mismatch:
         result["status"] = "incomplete" if evidence_unmeasured else "fail"
         result["failure"] = {
             "plane": (
                 "required_rtl_engine"
                 if engine_unmeasured
+                else "candidate_model_numeric" if verified_numeric_mismatch
                 else "model_host_compute" if "candidate_host_tensor_compute_violation" in violations
                 else "model_source_placement" if "candidate_source_placement_violation" in violations
                 else "model_placement" if alignment_unmeasured
                 else "candidate_model_execution" if candidate_unmeasured else "model_execution"
             ),
-            "category": "NOT_RUN_IS_NOT_PASS" if evidence_unmeasured else "PROTOCOL_VIOLATION",
+            "category": "NOT_RUN_IS_NOT_PASS" if evidence_unmeasured else (
+                "FUNCTIONAL_MISMATCH" if verified_numeric_mismatch else "PROTOCOL_VIOLATION"),
             "detail": detail,
         }
     return result
@@ -946,6 +970,65 @@ def _bounded_grade_workers(requested: int, oracle_adapters: dict | None) -> int:
         if (engine := getattr(adapter, "_merlin_simulator_engine", None))
     }
     return min(requested, *(capsule_worker_cap(engine) for engine in engines)) if engines else requested
+
+
+def _score_numeric_status(row: dict) -> str | None:
+    """Never attribute a legacy host-graph comparison to a submitted model ELF."""
+    check = row.get("candidate_native_model_check")
+    if isinstance(check, dict):
+        if check.get("status") == "pass":
+            return "pass"
+        if "candidate_verified_numeric_mismatch" in (check.get("violations") or []):
+            return "fail"
+        return None
+    return (row.get("numeric") or {}).get("status")
+
+
+def _candidate_score_view(row: dict) -> dict:
+    """Use only candidate-native evidence in a model's score, leaving its durable row intact."""
+    check = row.get("candidate_native_model_check")
+    if row.get("kind") != "model" or not isinstance(check, dict):
+        return row
+    view = dict(row)
+    for key in (
+        "coverage_certificate", "placement_census", "placement", "routing_plan",
+        "mesh_execution", "mesh_tile_verification", "mesh_route_symbols",
+        "planned_outlined_alignment", "boundary_expectation", "boundary_execution",
+        "lane_report", "host_execution", "host_reference", "provenance",
+        "contract_obligations", "tiers_unexercised", "advisories", "metrics",
+        "timing", "cycles", "tier_reuse", "trace_check", "cost_plane",
+    ):
+        view.pop(key, None)
+    tier_check = check.get("candidate_required_tiers") or {}
+    audited = tier_check.get("tiers") or {}
+    required = tier_check.get("required_tiers") or []
+    view["tiers"] = {}
+    for tier in required:
+        audit = audited.get(tier)
+        if tier not in {"L0", "L1", "L2", "L3"} or not isinstance(audit, dict) \
+                or audit.get("status") not in {"pass", "fail", "unverified"}:
+            continue
+        projected = {"status": audit["status"], "mandatory": True,
+                     "evidence": "candidate_whole_program_same_elf"}
+        for field in ("fidelity", "derived_from_rtl", "cycle_accurate"):
+            value = audit.get(field)
+            if (field == "fidelity" and isinstance(value, str) and value) \
+                    or (field != "fidelity" and isinstance(value, bool)):
+                projected[field] = value
+        view["tiers"][tier] = projected
+    numeric = _score_numeric_status(row)
+    view["numeric"] = {"status": numeric} if numeric else {}
+    if check.get("status") == "pass":
+        view.pop("failure", None)
+    else:
+        codes = [code for code in check.get("violations") or [] if isinstance(code, str)]
+        mismatch = "candidate_verified_numeric_mismatch" in codes
+        view["failure"] = {
+            "plane": "candidate_model_numeric" if mismatch else "candidate_model_execution",
+            "category": "FUNCTIONAL_MISMATCH" if mismatch else "NOT_RUN_IS_NOT_PASS",
+            "detail": ", ".join(codes) or "candidate native verification incomplete",
+        }
+    return view
 
 
 def grade(
@@ -1146,6 +1229,10 @@ def grade(
     traces: dict[str, dict] = {}
     rr = Path(runs_root) / "runs" / CR.suite_for(target)
     for cap in caps:
+        if cap.get("kind") == "model":
+            # generated/ is the separate legacy host-graph path, not the
+            # submitted whole-program ELF audited under candidate_native/.
+            continue
         tp = rr / cap["name"] / "generated" / "instruction_trace.json"
         if tp.exists():
             try:
@@ -1170,6 +1257,12 @@ def grade(
     from merlin.targetgen import epilogue_store_path as _store_path
 
     score["epilogue_store_path"] = _store_path.score_rows(_store_path.apply_gate(results, caps, rr, target=target))
+
+    # Everything below is a score projection. The historical model runner can
+    # still leave passing host-graph tiers, cycles and timing on a failed native
+    # candidate row; none describe the submitted ELF. Keep the durable legacy
+    # diagnostic, but never roll its evidence into candidate-native claims.
+    results = [_candidate_score_view(row) for row in results]
 
     # A capsule withheld as outside the target's declared capability is in NEITHER the numerator nor the
     # denominator. Counting it as a failure is what made all_pass unreachable and disabled the loop's
@@ -1386,7 +1479,7 @@ def grade(
     score["n_not_gradeable_no_oracle"] = n_not_gradeable
     score["n_structural_pass"] = n_pass + n_not_gradeable
     score["structural_pass"] = bool(not _empty and not _infra and (n_pass + n_not_gradeable) == len(graded))
-    score["numeric_all_exact"] = None if _empty else all(r.get("numeric", {}).get("status") == "pass" for r in graded)
+    score["numeric_all_exact"] = None if _empty else all(_score_numeric_status(r) == "pass" for r in graded)
     _trace_rows = [r for r in graded if r.get("kind") != "model"]
     _model_rows = [r for r in graded if r.get("kind") == "model"]
     score["trace_all_pass"] = (
@@ -1453,19 +1546,23 @@ def grade(
     # record is the bare-string form a model capsule writes, which states nothing). Only None may fall
     # back to the tier name. Reading `flag or name in _rtl_names` credited an oracle that had explicitly
     # denied being RTL, purely because its tier shared a name with another target's Verilator tier.
-    def _is_rtl_pass(name, rec) -> bool:
+    def _is_rtl_pass(row, name, rec) -> bool:
         if _tier_status(rec) != "pass":
             return False
         flag = _tier_field(rec, "derived_from_rtl")
+        if flag is None and isinstance(row.get("candidate_native_model_check"), dict):
+            return False  # no tier-name fallback for a submitted whole-program candidate
         return bool(name in _rtl_names) if flag is None else bool(flag)
 
-    def _tier_is_rtl(name, rec) -> bool:
+    def _tier_is_rtl(row, name, rec) -> bool:
         """Same three-state rule as :func:`_is_rtl_pass`, without the pass requirement."""
         flag = _tier_field(rec, "derived_from_rtl")
+        if flag is None and isinstance(row.get("candidate_native_model_check"), dict):
+            return False
         return bool(name in _rtl_names) if flag is None else bool(flag)
 
     _passed = [r for r in graded if r.get("status") == "pass"]
-    _rtl_backed = [r for r in _passed if any(_is_rtl_pass(n, t) for n, t in (r.get("tiers") or {}).items())]
+    _rtl_backed = [r for r in _passed if any(_is_rtl_pass(r, n, t) for n, t in (r.get("tiers") or {}).items())]
     # A pass that cleared a tier the ORACLE ITSELF called a model (fidelity != elaborated_rtl) and no RTL
     # tier beside it. Named separately because "not RTL-backed" reads as "did not run on hardware-grade
     # evidence at all", which is not what an RTL-derived cosim pass is.
@@ -1480,7 +1577,7 @@ def grade(
         "rtl_backed": len(_rtl_backed),
         "model_certified": len(_model_certified),
         "cheap_tier_only": len(_passed) - len(_rtl_backed),
-        "rtl_tiers_seen": sorted({n for r in graded for n, t in (r.get("tiers") or {}).items() if _tier_is_rtl(n, t)}),
+        "rtl_tiers_seen": sorted({n for r in graded for n, t in (r.get("tiers") or {}).items() if _tier_is_rtl(r, n, t)}),
         "fidelity_seen": sorted(
             {f for r in graded for t in (r.get("tiers") or {}).values() if (f := _tier_field(t, "fidelity"))}
         ),
@@ -1594,7 +1691,7 @@ def grade(
             "capsule": r["capsule"],
             "label": r.get("label"),
             "status": r["status"],
-            "numeric": r.get("numeric", {}).get("status"),
+            "numeric": _score_numeric_status(r),
             "trace": r.get("trace_check", {}).get("status"),
             "tiers": {t: _tier_status((r.get("tiers") or {}).get(t)) for t in tiers if t in (r.get("tiers") or {})},
         }
