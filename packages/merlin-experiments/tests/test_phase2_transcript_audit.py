@@ -156,3 +156,27 @@ assert not any("gemmini_perf_bench" in str(getattr(module, "__file__", "")) for 
         [sys.executable, "-c", program], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=15
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_the_workspaces_own_location_is_not_an_answer_read(tmp_path, monkeypatch):
+    """A run laid out under a directory that spells a grader token (``.../phase2/<run>/...``): an absolute
+    path INTO the agent's own workspace is not a read of the grader, while a path that leaves the
+    workspace for the grader's sources, or names an answer inside it, still is."""
+    workspace = tmp_path / "checkout" / "out" / "runs" / "t" / "phase2" / "run" / "stage" / "round_00"
+    candidate = workspace / "submission"
+    candidate.mkdir(parents=True)
+    monkeypatch.setattr(
+        audit, "audit_tokens", lambda target: {"answer": ["golden.yaml"], "grader": ["phase2"], "oracle_subpath": []}
+    )
+    monkeypatch.setattr(audit.TC, "required_tool_probes", lambda target: [])
+    target = SimpleNamespace(target="synthetic")
+
+    def kinds(command):
+        report = audit.audit_codex_transcript(transcript(tmp_path / "events.jsonl", command, True), target, candidate)
+        return [hit["kind"] for hit in report["hits"]]
+
+    assert kinds(f"rg -n 'g71|group_71' {candidate} | head") == []
+    assert kinds(f"rg --files {workspace.parent.parent}") == []
+    assert kinds(f"cat {tmp_path}/checkout/src/merlin_experiments/phase2/grader.py") == ["answer_reconnaissance"]
+    assert kinds(f"cat {candidate}/golden.yaml") == ["answer_reconnaissance"]
+    assert kinds("cat phase2/grader.py") == ["answer_reconnaissance"]

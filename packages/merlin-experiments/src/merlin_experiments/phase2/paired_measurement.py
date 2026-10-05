@@ -555,7 +555,7 @@ def _gsim_l3_adapter(
     return run
 
 
-def _run_arm4_engines(
+def _run_el4_compiler_engines(
     package: Path,
     kernel: dict[str, Any],
     kernel_dir: Path,
@@ -572,7 +572,10 @@ def _run_arm4_engines(
     reuse_scope: str,
     workers: int | None = None,
 ) -> dict[str, Any]:
-    """Fixed Arm-4 semantics with GSIM as the only RTL execution/timing backend."""
+    """Measure the EL4-produced compiler with GSIM as the RTL timing backend.
+
+    ``arm4`` remains the frozen Phase 2 approach key in existing result schemas.
+    """
     result: dict[str, Any] = {"approach": "arm4", "ok_build": True, "per_sim": {}}
     package_before, inputs_before = (str(hash_tree(package)["sha256"]), str(hash_tree(kernel_dir)["sha256"]))
     contract = str(contract_root)
@@ -762,7 +765,7 @@ def run_execution(
         runs = _fresh_directory(work / "capsule_runs")
         policy = PC.package_sandbox_policy(target_experiment, work, spec.package)
         with PC.boxed_entrypoints(policy):
-            return _run_arm4_engines(
+            return _run_el4_compiler_engines(
                 spec.package,
                 kernel,
                 spec.member.source_dir,

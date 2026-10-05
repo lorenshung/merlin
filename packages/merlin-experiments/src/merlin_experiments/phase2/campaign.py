@@ -686,6 +686,8 @@ def inspect_functional_run(
         raise CampaignGateError("functional submission digest must be an explicit lowercase SHA-256")
 
     arm_root = (Path(run_root) / "merlin_assisted").resolve()
+    if not (arm_root / run_id).exists() and (Path(run_root) / run_id).is_dir():
+        arm_root = Path(run_root).resolve()  # a phase run root: out/runs/<target>/phase1/<run-id>/
     run_dir = arm_root / run_id
     if run_dir.is_symlink() or not run_dir.is_dir() or arm_root not in run_dir.resolve().parents:
         raise CampaignGateError(f"explicit functional run does not resolve safely: {run_dir}")

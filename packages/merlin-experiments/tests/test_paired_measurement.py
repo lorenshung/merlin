@@ -193,7 +193,7 @@ def test_actual_execution_refuses_changed_inputs_before_engine(tmp_path, monkeyp
     spec = _plan(tmp_path).schedule[0]
     root = spec.package if changed == "package" else spec.member.source_dir
     (root / "added.txt").write_text("changed after planning")
-    monkeypatch.setattr(PM, "_run_arm4_engines", lambda *a, **k: pytest.fail("engine reached"))
+    monkeypatch.setattr(PM, "_run_el4_compiler_engines", lambda *a, **k: pytest.fail("engine reached"))
     monkeypatch.setattr(PM.PC, "package_sandbox_policy", lambda *a, **k: pytest.fail("sandbox reached"))
     with pytest.raises(PM.PC.CampaignGateError, match="bytes changed before execution"):
         PM.run_execution(

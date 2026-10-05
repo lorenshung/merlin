@@ -72,6 +72,55 @@ def _split_heredocs(text: str) -> tuple[list[str], str]:
     return bodies, "\n".join(kept)
 
 
+_PATH_SEPARATORS = frozenset(" \t\n\r'\"`;|&()<>,")
+
+
+def _workspace_ancestry(candidate: Path) -> tuple[tuple[str, ...], ...]:
+    """The workspace's own location, as lower-cased path components (spelled and resolved)."""
+    spellings = {Path(candidate).parent.absolute(), Path(candidate).parent.resolve()}
+    return tuple(tuple(part.lower() for part in spelling.parts[1:]) for spelling in spellings)
+
+
+def _beyond_ancestry(text: str, ancestry: Sequence[tuple[str, ...]]) -> str:
+    """``text`` with each absolute path reduced to what it names BEYOND the workspace's own location.
+
+    WHERE THE HARNESS PUT THE WORKSPACE IS NOT A READ.  The components above it are the run layout's
+    (``out/runs/<target>/phase2/<run>/stage/...``), and one of them spells the grader package's bare
+    stem: every absolute path into the agent's OWN workspace matched it, and a clean round was refused
+    for ``rg -n g71 <workspace>/submission``.  Only the leading components a path shares with the
+    workspace's location are dropped, so a path that leaves it (``<checkout>/src/<grader>/...``) keeps
+    everything that names where it went."""
+    out: list[str] = []
+    word: list[str] = []
+
+    def flush() -> None:
+        if not word:
+            return
+        spelled = "".join(word)
+        word.clear()
+        if not spelled.startswith("/"):
+            out.append(spelled)
+            return
+        parts = [part for part in spelled.split("/") if part]
+        lowered = [part.lower() for part in parts]
+        shared = 0
+        for anchor in ancestry:
+            n = 0
+            while n < min(len(anchor), len(lowered)) and lowered[n] == anchor[n]:
+                n += 1
+            shared = max(shared, n)
+        out.append("/".join(parts[shared:]) if shared else spelled)
+
+    for character in text:
+        if character in _PATH_SEPARATORS:
+            flush()
+            out.append(character)
+        else:
+            word.append(character)
+    flush()
+    return "".join(out)
+
+
 def audit_codex_transcript(
     path: Path,
     target_experiment: TargetExperiment,
@@ -100,6 +149,7 @@ def audit_codex_transcript(
     ):
         raise StageGateError("transcript audit token set is malformed")
     answer_tokens = tuple(value.lower() for values in tokens.values() for value in values if value)
+    ancestry = _workspace_ancestry(candidate)
     entry_tokens: set[str] = set()
     manifest = candidate / "manifest.yaml"
     if manifest.is_file():
@@ -532,7 +582,10 @@ def audit_codex_transcript(
                     elif isinstance(node, ast.Constant) and isinstance(node.value, str):
                         source_words.append(node.value)
                         pending.append(node.value)
-        if any(audit_token_in(text, answer_tokens) for text in (*reconnaissance_texts, *source_words)):
+        if any(
+            audit_token_in(_beyond_ancestry(text, ancestry), answer_tokens)
+            for text in (*reconnaissance_texts, *source_words)
+        ):
             hits.append(
                 {
                     "kind": "answer_reconnaissance",
