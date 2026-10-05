@@ -44,7 +44,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     root = Path(__file__).resolve().parent
     P = _load("p", root / "layout_graph_probe.py")
-    G = _load("gmp", root / "group_model_program.py")
+    from merlin.runtime.backends import base as backends
+
+    G = backends.whole_model_driver("gemmini").program
     from merlin.perf.physical_layout import _component_domains
 
     model = G.extract(args.capture, "gemmini")

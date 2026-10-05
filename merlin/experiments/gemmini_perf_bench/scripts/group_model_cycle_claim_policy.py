@@ -37,21 +37,20 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import sys
 from pathlib import Path
 from typing import Any
 
 
-def _script(name: str):
-    """A sibling script, resolved from this file rather than from whatever ``sys.path`` holds."""
-    path = Path(__file__).resolve().parent / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(name, path)
-    loaded = importlib.util.module_from_spec(spec)
-    sys.modules.setdefault(name, loaded)
-    spec.loader.exec_module(loaded)
-    return loaded
+def _program():
+    """The whole-model program generator of the selected support provider (its driver's ``program``).
+
+    It is target-owned and ships in the OOT support package on ``MERLIN_TARGET_PATH``; no copy
+    remains beside this script."""
+    from merlin.runtime.backends import base as backends
+
+    return backends.whole_model_driver("gemmini").program
 
 
 def _sha256(path: Path) -> str:
@@ -85,7 +84,7 @@ def checksums(model: dict[str, Any], emulation: dict[str, Any]) -> tuple[tuple[s
     admit exactly those runs while looking like a correctness receipt. Measured: on one FPGA run all
     71 group checksums were wrong and the cosine moved under 1%.
     """
-    program = _script("group_model_program")
+    program = _program()
     rows = [(group, int(values["fnv1a"])) for group, values in program.group_checksums(model, emulation).items()]
     return tuple(sorted(rows))
 
@@ -218,7 +217,7 @@ def main(argv=None) -> int:
     )
     arguments = parser.parse_args(argv)
 
-    script = _script("group_model_program")
+    script = _program()
     label = arguments.window_label or script.DEFAULT_WINDOW_LABEL
     try:
         model = script.extract(arguments.capture, arguments.target)

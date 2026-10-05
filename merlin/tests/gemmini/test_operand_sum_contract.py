@@ -51,3 +51,27 @@ def test_a_load_whose_arithmetic_is_not_the_verified_one_is_refused_not_assumed(
                 "#define MVIN_SCALE(x, scale) \\\n    ({float y = (",
             )
         )
+
+
+def _harness(tmp_path: Path, header: Path | None) -> Path:
+    include = tmp_path / "harness" / "include"
+    include.mkdir(parents=True)
+    if header is not None:
+        (include / "gemmini_params.h").write_text(header.read_text(encoding="utf-8"), encoding="utf-8")
+    return include.parent
+
+
+def test_the_backend_hook_derives_the_operand_sum_from_its_header(tmp_path: Path, monkeypatch) -> None:
+    from merlin.targetgen import readout_facet as RF
+
+    hook = _backends.get_backend("gemmini").readout_operand_sum
+    monkeypatch.setenv("MERLIN_GEMMINI_HARNESS_DIR", str(_harness(tmp_path / "with", _HEADER)))
+    assert hook() == operand_sum_contract(_HEADER)
+    # The readout facet takes the hook's answer as its operand-sum rung, as a residual add needs.
+    assert RF.capture_inputs("gemmini", facts={}, include_taxonomy=False)["operand_sum"] == hook()
+    # No header, or a header without a scaled load: no operand sum, never a default one.
+    monkeypatch.setenv("MERLIN_GEMMINI_HARNESS_DIR", str(_harness(tmp_path / "without", None)))
+    assert hook() is None
+    unscaled = _mutated(tmp_path, "#define HAS_MVIN_SCALE\n", "\n")
+    monkeypatch.setenv("MERLIN_GEMMINI_HARNESS_DIR", str(_harness(tmp_path / "unscaled", unscaled)))
+    assert hook() is None

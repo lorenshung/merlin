@@ -22,11 +22,9 @@ import sys
 from pathlib import Path
 
 import pytest
+from selected_driver import driver_file, load
 
-from merlin.common.paths import merlin_dir
-
-sys.path.insert(0, str(merlin_dir() / "experiments" / "gemmini_perf_bench" / "scripts"))
-import group_model_program as gmp  # noqa: E402
+gmp = load("gemmini", "group_model_program.py")
 
 
 @pytest.fixture(scope="module")
@@ -76,9 +74,7 @@ def test_a_changed_source_byte_changes_the_digest(tmp_path):
 def test_the_record_is_attached_to_every_built_manifest():
     """The recorder existing is not the same as the manifest carrying it. Read the source of `main`
     so this fails if the key is dropped, without building a whole model to find out."""
-    source = (merlin_dir() / "experiments" / "gemmini_perf_bench" / "scripts" / "group_model_program.py").read_text(
-        encoding="utf-8"
-    )
+    source = driver_file("gemmini", "group_model_program.py").read_text(encoding="utf-8")
     assert '"compiler_provenance": _compiler_provenance()' in source
 
 

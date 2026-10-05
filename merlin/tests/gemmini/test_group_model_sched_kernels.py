@@ -11,24 +11,16 @@ why. A program that silently fell back would report our schedule's cycles for th
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-
 import pytest
-
-from merlin.common.paths import merlin_dir
 
 
 @pytest.fixture(scope="module")
 def gmsk():
     """The sibling script, loaded by path -- it is a script beside `group_model_program.py`, not a
     package module, and the test must not depend on which directory pytest was started from."""
-    path = merlin_dir() / "experiments/gemmini_perf_bench/scripts/group_model_sched_kernels.py"
-    spec = importlib.util.spec_from_file_location("group_model_sched_kernels", path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    from selected_driver import load
+
+    return load("gemmini", "group_model_sched_kernels.py")
 
 
 def _model() -> dict:
@@ -211,11 +203,9 @@ def test_the_summary_reports_the_mix_not_a_headline(gmsk, rendered):
 
 def test_render_substitutes_ours_and_keeps_the_vendor_call_for_the_rest(rendered):
     """The whole point of threading a census through: the C program is a MIXTURE, declared as one."""
-    path = merlin_dir() / "experiments/gemmini_perf_bench/scripts/group_model_program.py"
-    spec = importlib.util.spec_from_file_location("group_model_program", path)
-    gmp = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = gmp
-    spec.loader.exec_module(gmp)
+    from selected_driver import load
+
+    gmp = load("gemmini", "group_model_program.py")
 
     model = _model()
     model.update(

@@ -293,11 +293,9 @@ def main(argv=None) -> int:
     from merlin.perf.physical_layout import _component_domains
 
     if args.capture:
-        import importlib.util
+        from merlin.runtime.backends import base as backends
 
-        spec = importlib.util.spec_from_file_location("gmp", str(_HERE.with_name("group_model_program.py")))
-        gmp = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(gmp)
+        gmp = backends.whole_model_driver(args.target).program
         model = gmp.extract(args.capture, args.target)
         try:
             derived = derive_boundary_kinds(args.target)

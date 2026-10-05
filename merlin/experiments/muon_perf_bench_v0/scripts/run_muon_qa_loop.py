@@ -49,7 +49,7 @@ TASK = EXP / "task" / "TASK_muon.md"
 REFERENCE = _REPO / "out/artifacts/targets/muon/reference_v0"
 
 # answer-bearing names never staged into the agent's workspace
-_DROP = {"golden.yaml", "expected_command_buffer_g0.json"}
+_DROP = {"golden.yaml", "golden.npz", "expected_command_buffer_g0.json"}
 
 
 def assemble_workspace(ws: Path) -> None:
