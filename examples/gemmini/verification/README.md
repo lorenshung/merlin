@@ -1,5 +1,34 @@
 # Gemmini verification walkthrough
 
+### Qualify a matching gSIM build
+
+[qualify_gsim.py](qualify_gsim.py) exercises an existing generated compiler on
+existing capsule artifacts. It requires a complete gSIM build receipt and the
+exact same selected FIRRTL bytes for its Verilator reference. It does not
+regenerate the corpus, modify the compiler, or substitute a different RTL
+configuration. For each requested capsule it retains the command buffer,
+lowered LLVM MLIR, same ELF, observed consoles, wall times and numerical capture.
+
+```sh
+python examples/gemmini/verification/qualify_gsim.py \
+  --build-root /generated/gsim-build \
+  --verilator /selected/simulator-chipyard.harness-GemminiRocketConfig \
+  --verilator-firrtl /selected/TestHarness.fir \
+  --package /generated/phase1/compiler \
+  --capsule /generated/phase0/corpus/layers/example/capsule.yaml \
+  --out /generated/gsim-qualification --jobs 3 --serial-timing
+```
+
+The optional serial timing check also requires exact output and kernel-cycle
+agreement with the same serial TSI loading policy. The normal fast gSIM path
+uses backdoor loading, which can leave different cache state from Verilator's
+serial loader; its cycles are not directly comparable. Numerical captures are
+reusable for identical pinned ELF/engine/input bytes, while timing requires a
+separately observed loading/warmup policy. These finite checks qualify only the
+tested workloads, not every model or all RTL configurations. At most four
+qualification jobs run together; experiment gSIM concurrency remains capped
+at five.
+
 `software-spec.yaml` is authored software-visible semantics, not generated tests.
 `hardware.yaml` selects the deterministic production policy and direct audit
 questions. `host-capabilities.yaml` is a separate declaration bound to immutable
@@ -168,6 +197,50 @@ That command verifies all frozen bytes and re-executes independently of the
 original source checkout. The tested mvout_acc command saturates its INT32
 accumulator to INT8 DRAM output; it does not qualify bit-preserving INT32
 readout, the full Rocket SoC, or all shapes and values.
+
+### Check the direct residual-sum and ReLU path
+
+`probe_residual_readout.py` builds one target-local bare-metal program from an
+iteration workload's selected `group_capsules.json`. It uses two ordinary
+scaled loads into the accumulator, then a narrowing ReLU/scale readout; it
+does not call the vendor `LOOP_WS` residual helper. A disassembly screen
+rejects any other Gemmini instruction class. Spike and the selected
+GemminiRocketConfig Verilator run the same ELF, and every output is compared
+with an independent single-rounding reference and a separately rounded
+device-path model. Gain above one is moved from both saturating loads to the
+readout scale. The Phase 0 review status is not changed by this probe.
+
+```sh
+export PYTHONPATH=src:packages/merlin-experiments/src
+export MERLIN_TARGET_PATH=/selected/gemmini-mlir/merlin-support
+export MERLIN_CHIPYARD=/selected/chipyard
+python examples/gemmini/verification/probe_residual_readout.py \
+  --phase0 /generated/gemmini/run/phase0 \
+  --groups /generated/gemmini/group_capsules.json \
+  --chipyard "$MERLIN_CHIPYARD" --campaign full \
+  --output out/artifacts/probes/gemmini-direct-residual-1
+```
+
+`full` covers all 65,536 ordered signed-i8 operand pairs at the selected
+group's two scales. It embeds the independently computed i8 expectation in
+the ELF and compares every output on Rocket, emitting only a mismatch count
+so simulator UART traffic stays bounded. `smoke` prints a 256-pair
+boundary/cancellation grid for direct transcript inspection. The group report
+must use the same target contract and CIRCT facts as the frozen Phase 0 run;
+the selected OOT provider contract can route the same graph differently.
+For a bounded RTL run, `--campaign boundary_rows` or `boundary_cols` checks
+4,096 ordered pairs: all 256 values on one operand against the 16 recorded
+boundary/cancellation values on the other. These are not exhaustive; the
+receipt records the exact operand sets and pair count.
+The generated `receipt.json` binds the input facts, readout ABI, group
+report, ELF, disassembly, tools, and both transcripts. A passing result
+checks this arithmetic path for one pair of scales, not a Phase 1 compiler,
+all scales or shapes, or simulator build provenance. Bind the Verilator
+binary to its separate selected-source build attestation for that last claim.
+`--rebind-receipt` can produce a separate equivalence record for an earlier
+passed numerical run when the frozen model, group arithmetic, generated C,
+expectations, ELF and transcripts still match. It does not rerun either
+simulator or change an unreviewed SW-spec admission decision.
 
 ### Check generated contraction kernels on native simulators
 

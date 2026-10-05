@@ -10,7 +10,9 @@ an agent-written compiler, or a passing result.
 | [software-spec.yaml](software-spec.yaml) | User, with accelerator/software reviewers | Software-visible arithmetic, typed operation placement, quantization and host/device transfers that RTL cannot establish alone. `unknown`/unreviewed is not support. |
 | [hardware.yaml](hardware.yaml) | User/tool integrator | Selects exact RTL source production and questions the extractor must audit. Its expected port types are assertions to check, not generated facts. |
 | [descriptor.yaml](descriptor.yaml) | Experiment operator | Workloads, tool resources, grading and host-lane selection. It is not the SW spec or an RTL fact file. |
-| [host-capabilities.yaml](host-capabilities.yaml) | Host-compiler owner/reviewer | Candidate host operation signatures bound to one compiler package. Still unreviewed; never substitutes for Gemmini support. |
+| [host-capabilities.yaml](host-capabilities.yaml) | Host-compiler owner/reviewer | Package-bound exact host semantic declarations, including the reviewed rank-3/4 dequantization rule. These are not per-operation execution certificates or Gemmini support. |
+| [board-catalog.yaml](board-catalog.yaml) | Target integrator | DTS-bound Verilator Rocket host and preferred full U250 `FireSimGemminiRocketConfig` host; loader details remain unknown. |
+| [scalar-host-recipe.yaml](scalar-host-recipe.yaml) | Target integrator | Minimal input to Merlin's generic scalar host-package minter; its output is ignored under `out/`. |
 | [contracts/residual.yaml](contracts/residual.yaml) | Target author | Prototype capability intent and source-location anchors consumed by the generic contract deriver. |
 | [contracts/target_contract.yaml](contracts/target_contract.yaml) | Target author/reviewer | Selected prototype contract read by the experiment, target discovery, and direct verification probes. It is an authored reference, not a certified generated contract. |
 | [evidence_concepts.yaml](evidence_concepts.yaml) | Target author | Vocabulary for classifying discovered evidence; it is not evidence itself. |
@@ -123,15 +125,21 @@ and the reduction extent. For unrestricted signed int8 inputs, K=31 passes its
 conservative i20 bound and K=32 does not. Wider accumulator storage or a small
 final result does not prove that intermediate partial sums avoided wrapping.
 
-The host manifest now lists only typed matmul/batch-matmul candidates found in
-its pinned schedule. No standalone normalization or activation is claimed.
-Exact `ops` selectors do not widen to a shared semantic family: a declaration
-for `linalg.matmul` does not cover a captured `linalg.generic` contraction.
-Inspect `coverage/operation-accounting.json` against the selected schedule
-before reviewing the host declaration. A transform-interpreter success alone
-does not establish that a selector matched. Even a native whole-program result
-matching its saved golden is finite host-execution evidence, not per-operation
-RVV support, accelerator execution, or a reviewed host numerical contract.
+The selected Rocket CPUs have no V extension. Mint the descriptor's scalar
+host package from the checked-in recipe before deriving a new Phase 0 corpus:
+
+```sh
+python build_tools/scripts/mint_scalar_host_package.py \
+  examples/gemmini/target/scalar-host-recipe.yaml
+```
+
+The package has no RVV schedule or target-specific kernel. The descriptor and
+host-capability file pin its content hash. Exact `ops` selectors do not widen
+to a shared semantic family. A saved rank-4 dequantization capture passed a
+bit-exact Spike check with the selected Verilator Rocket DTS; rerun the generic
+qualifier with `python -m merlin.compile.scalar_host_qualification --help` to
+generate your own ignored receipt. That one check does not establish Rocket RTL
+or FireSim execution, nor execution of the other declared host operations.
 Typed load/readout candidates describe bit-preserving crossings; they remain
 unreviewed and never imply that FP32-to-int8 quantization, dispatch, or DMA
 execution was already implemented. The selected hardware readout recipe supplies

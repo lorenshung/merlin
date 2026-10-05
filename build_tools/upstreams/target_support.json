@@ -74,7 +74,7 @@
       "base_commit": "390623a67db81bcf595ec3805f0921f1fb69e378",
       "catalog_commit": "3b8dbc57fd405058597481bcf28198702b6befde",
       "root_role": "candidate_compiler",
-      "companion_commit": "07d506f1b21a19218f1675a5433c39f51ee806e1",
+      "companion_commit": "29818c8ce1ba2f48d5e62cc0d585f1d250c59fb4",
       "provider_root": "merlin-support",
       "provider_role": "support",
       "copied_files": 34,
@@ -91,6 +91,7 @@
       "runtime_environment_provenance": "merlin-support/runtime_environment_migration.json",
       "portfolio_capabilities_provenance": "merlin-support/portfolio_capabilities_migration.json",
       "completion_capability_provenance": "merlin-support/completion_capability_migration.json",
+      "whole_model_driver_provenance": "merlin-support/whole_model_driver_migration.json",
       "removed_canonical_directories": [
         "merlin/targets/gemmini/backend",
         "merlin/targets/gemmini/build_support",

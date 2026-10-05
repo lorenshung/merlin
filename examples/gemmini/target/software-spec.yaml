@@ -1,6 +1,10 @@
 # Authored software semantics. RTL geometry/protocol and qualification are generated evidence.
 schema: merlin.software_spec.v1
 target: gemmini
+status: reviewed
+# Scope: accelerator contraction and exact-op host declarations below. The
+# dequantization declaration is limited to its stated operand/result types and
+# ranks; it does not declare device execution or arbitrary shapes.
 numerical_semantics:
   model:
     engine: integer_reference
@@ -23,6 +27,12 @@ numerical_semantics:
     shift: operation_parameter
 operations:
   contraction:
+    # Authored, not derived: the exact-offload outline admits contractions against these authored
+    # bytes and has no fact view to resolve them with. The spec-vs-facts drift check guards every
+    # field here against the selected facts.
+    # window_mean: the derived recipe quantizes an average pool as this unit's own contraction
+    # against a constant one, with the reciprocal of the count folded into the readout scale.
+    families: [contraction, window_mean]
     placement: accelerator
     operand_dtypes: [int8]
     accumulator_dtype: i32
@@ -31,35 +41,114 @@ operations:
     tails: [zero_pad_valid_window]
     broadcasting: [none, independent_batches]
     aliasing: [disjoint_inputs_outputs]
+  # The declarations below state only WHICH established hardware form they admit. Placement,
+  # composition, dtypes, epilogues and scale granularity are filled at Phase 0 selection from the
+  # selected facts (merlin.targetgen.spec_fact_drift.resolve_spec), under the experiment's
+  # prohibited instruction roles. Narrow a derived value with a reasoned `restrictions` entry.
   elementwise_map:
-    placement: fused_accelerator
-    dtypes: [int8, i32]
-    composed_with: [contraction]
-    epilogues: [bias, relu, acc_scale]
-    scale_granularity: [tensor]
+    # Stages fused with a contraction: readout-applied scale/activation and pre-accumulator bias.
+    # Kept beside the standalone form because admission compares placement exactly.
+    hardware: fused
+  elementwise_map_standalone:
+    # The operand sum on the load path (accumulate_on_load). operand_sum is the recipe family it
+    # quantizes.
+    families: [elementwise_map, operand_sum]
+    hardware: standalone
+  elementwise_map_after_operand_sum:
+    # Only stages the SAME fact-derived operand-sum/readout path carries. This is not the
+    # contraction readout declaration, and does not hand-author an epilogue capability.
+    # Contraction bias seeds the accumulator before mesh compute; the readout does not add bias.
+    # The hardware form is reviewed, but every concrete scale pair must pass the
+    # fact-derived exhaustive i8 numerical screen before this composition is admitted.
+    # This never licenses arbitrary scales or replaces target-oracle execution.
+    status: reviewed
+    numerical_contract: operand_sum_exhaustive_i8_v1
+    families: [elementwise_map]
+    hardware: fused_operand_sum
+  pooling_on_readout:
+    # Max pooling fused on the store path (readout stage 'maxpool').
+    families: [reduction]
+    hardware: fused
   movement:
-    placement: accelerator
-    dtypes: [int8]
+    hardware: standalone
     layouts: [row_major_contiguous]
     aliasing: [disjoint_inputs_outputs]
   host_only:
     families: [reduction, normalization, attention, softmax]
     placement: host
     dtypes: [f32]
+  # Exact-op host declarations for the operations the RTL facts place on the host.
+  host_f32_elementwise:
+    ops: [aten.mul.Tensor, aten.add.Tensor, aten.add.Scalar, aten.div.Tensor, aten.relu.default,
+          aten.rsqrt.default, aten.pow.Tensor_Scalar, aten.sigmoid.default]
+    placement: host
+    dtypes: [f32]
+  host_f32_reduction_ops:
+    ops: [aten.native_layer_norm.default, aten._softmax.default, aten.mean.dim]
+    placement: host
+    dtypes: [f32]
+  host_cast:
+    ops: [aten._to_copy.default]
+    placement: host
+    ordered_operand_dtypes: [i32, f32]
+    ordered_result_dtypes: [f32]
+  host_quantize:
+    ops: [quantized_decomposed.quantize_per_tensor.default]
+    placement: host
+    ordered_operand_dtypes: [f32, f32, i64]
+    ordered_result_dtypes: [i8]
+    quantization_parameters: {zero_point: 0, quant_min: -128, quant_max: 127}
+  # Reviewed only for the exact typed rank-3/4 host operation. Phase 1 still owns
+  # lowering, execution and numerical qualification of the emitted compiler.
+  host_dequantize_per_tensor:
+    status: reviewed
+    ops: [quantized_decomposed.dequantize_per_tensor.default]
+    placement: host
+    ordered_operand_dtypes: [i8, f32, i64]
+    ordered_result_dtypes: [f32]
+    ranks: [3, 4]
+    quantization_parameters: {zero_point: 0}
+  host_embedding:
+    ops: [aten.embedding.default]
+    placement: host
+    ordered_operand_dtypes: [i64, f32]
+    ordered_result_dtypes: [f32]
+  host_f32_bmm:
+    ops: [aten.bmm.default]
+    placement: host
+    ordered_operand_dtypes: [f32, f32, f32]
+    ordered_result_dtypes: [f32]
+    accumulator_dtype: f32
+restrictions:
+  # Keep this guard if a later readout declaration claims bias: a two-load operand sum has no
+  # reviewed bias seed, and this restriction prevents that claim from entering its derived form.
+  - declaration: elementwise_map_after_operand_sum
+    family: elementwise_map
+    field: epilogues
+    values: [bias_add]
+    reason: "The direct operand-sum witness covers readout scaling and ReLU, not a bias epilogue after the sum."
 quantization:
   formats:
     - operand_dtype: int8
       accumulator_dtype: i32
       # CIRCT extracts a 32-bit command carrier, not its software-visible encoding.
       scale_encoding: fp32
-      eligible_operations: [contraction]
+      # Every accelerator declaration covering a family the derived hardware recipes quantize.
+      eligible_operations: from_facts
 transfer_contracts:
+  status: reviewed
   operand_load:
     from: host
     to: accelerator
     copy: {dtype: int8, layout: row_major_contiguous}
+    evidence:
+      status: reviewed
+      basis: "RTL facts: storage_datapaths input i8 (scratchpad smem UInt<8>) and compute input elem_bits 8 (SInt<8> in_a); every observed host->accelerator crossing is an i8 row_major_contiguous SSA value"
   accumulator_readout:
     from: accelerator
     to: host
     copy: {dtype: i32, layout: row_major_contiguous}
     valid_window: required
+    evidence:
+      status: reviewed
+      basis: "RTL facts: storage_datapaths accumulator i32 (AccumulatorMem SInt<32>); every observed accelerator->host crossing is an i32 row_major_contiguous SSA value"

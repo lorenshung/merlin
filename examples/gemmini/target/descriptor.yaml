@@ -22,18 +22,10 @@ grading:
   release_admission: derive_from_corpus_v1
   resource_bound:
     policy: representative_l3_capstones_v1
-    exclude_capsules:
-      - GX0_interop_rvv_lane
-      - M0_small_llama_gemmini
-      - M1_lstmnetvit_gemmini
-      - SY_model_resnet50
-      - SY_model_tiny_llama
-      - SY_model_smolvla
-      - M4_smolvla_denoise_gemmini
-    required_admitted_models:
-      - M2_microvit_gemmini
-      - M3_host_island_seam_gemmini
-      - SY_micro_model
+    # Derived at release preparation from the staged corpus: every whole-model capsule Phase 0
+    # generated and admitted (an integer model only with its model_qualification) is a required
+    # capstone; any other public model is excluded by name. No hand-maintained model list.
+    derive: phase0_qualified_models_v1
 
 answer_surfaces:
   prior_backends: [merlin_native_v0, hand_smoke_oot, agent_spec_v0_mlir_oot, agent_spec_v1_mlir_oot]
@@ -52,10 +44,25 @@ oracle_resources:
     queue_wall_limit_s: 43200
 
 host:
-  board: chipyard_kodiak
+  board: gemmini_rocket_verilator
+  catalog: examples/gemmini/target/board-catalog.yaml
 
 workload_spec:
   models: [resnet50, tiny_llama, smolvla]
+  # OBJECTIVE VARIANTS of a claim model: the same network captured with a capture capability
+  # (`quant_activation_contractions` integerizes the activation x activation contractions,
+  # `quant_integer_nonlinear` adds integer softmax / GELU / layer norm). Each is a different numerical
+  # model the owner measures after the Phase-1 freeze, exactly like the claim model it names; none is
+  # a derivation source. Equivalent forms for derivation come from the `multimodal_policy` application.
+  claim_objective_variants:
+    smolvla:
+      int8attn:
+        quant_scheme: int8_dyn_act_int8_weight
+        quant_activation_contractions: true
+      int8full:
+        quant_scheme: int8_dyn_act_int8_weight
+        quant_activation_contractions: true
+        quant_integer_nonlinear: true
   applications:
     - coverage_mlp
     - residual_cnn
@@ -70,21 +77,23 @@ workload_spec:
 
 host_lane:
   capability_spec: examples/gemmini/target/host-capabilities.yaml
+  # Both selected GemminiRocketConfig and FireSimGemminiRocketConfig DTS files
+  # declare this ISA (with no V). resolve_host_lane checks the package march.
+  host_isa: rv64imafdcbzicsr_zifencei_zihpm_zfh_zba_zbb_zbs_xrocket
   description: >-
-    Candidate int8 RVV host lane for operations not admitted to Gemmini. The selected
-    capability manifest is unreviewed; normalization, reduction and activation tails
-    require exact per-operation lowering and numerical receipts before any partitioned
-    model may claim a verified host fallback. The experiment selects
-    dtype_strategy=int8_w8a8; that selection alone does not establish host support.
-  repo_canonical: https://github.com/ucb-bar/rvv-mlir.git
+    Generated scalar int8 package for the non-vector Rocket host. The package
+    ISA fits the selected DTS; a saved dequantization capture passed Spike.
+    These are not Rocket RTL/FireSim execution or blanket host-operation
+    qualifications. Each claimed host route still needs its own emitted
+    lowering and numerical checks before a partitioned model can pass.
+  repo_canonical: https://github.com/ucb-bar/merlin.git
   dtype_strategy: int8_w8a8
   provenance: in_tree_minted
-  package: out/artifacts/targets/rvv/impr_tuned_wholemodel_vf_int8
+  package: out/artifacts/targets/host/gemmini_rocket_scalar_int8_v0
   requires_paths:
     - manifest.yaml
-    - schedule.mlir
     - knobs.yaml
   read_only:
-    - out/artifacts/targets/rvv/impr_tuned_wholemodel_vf_int8/
+    - out/artifacts/targets/host/gemmini_rocket_scalar_int8_v0/
   deny_modification:
     - merlin/python/merlin/llvmlower/

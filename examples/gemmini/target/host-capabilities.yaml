@@ -1,42 +1,112 @@
 # Separate declaration beside the immutable host compiler, not a compiler payload edit.
 schema: merlin.host_capabilities.v1
-status: unreviewed
+status: reviewed
+review:
+  decision: "operator decision 2026-10-01 via coordinating session, approving W1_DECLARATIONS_DRAFT.md"
+  scope: the 150 host placements proposed by the RTL facts in W1_SEAL_REVIEW.md
+  addendum: "operator approval 2026-10-03 in this session: exact rank-3/4 i8/f32/i64 dequantize_per_tensor host contract only; finite native checks do not prove device execution"
 compiler:
-  package_sha256: 32d265324cba85abc6760a151d56b03bdc3e95c79e8ebf0bc392207c0a041d8b
+  package_sha256: 89e00e39c929ec0310b0a60d1860d2d8fa833b7ef1a57af5775092c24d5ebb9a
   dtype_strategy: int8_w8a8
-# Explicit candidates from this package's schedule. The unreviewed status keeps
-# them separate from successful lowering, execution and numerical qualification.
+# Per-operation host declarations for the operations the RTL facts place on the host. Each names the
+# exact frontend ops and the observed dtypes/ranks, nothing wider. The selected scalar package's
+# ISA fits the Rocket DTS, and one saved dequantization capture has a bit-exact Spike receipt.
+# The reviewed statuses are semantic screens, not proof that every host operation lowers or executes.
 operations:
-  - id: integer_contraction_candidate
-    ops: [linalg.matmul, linalg.batch_matmul]
+  - id: host_f32_elementwise_exact
+    ops: [aten.mul.Tensor, aten.add.Tensor, aten.add.Scalar, aten.div.Tensor, aten.relu.default]
+    families: [elementwise_map]
+    placement: host
+    signature: {dtypes: [f32], ordered_result_dtypes: [f32], ranks: [2, 3, 4]}
+    numerical_contract:
+      status: reviewed
+      semantics: {arithmetic: ieee754_binary32, rounding: round_to_nearest_even, subnormals: preserved,
+                  per_element: correctly_rounded_single_operation, nan: riscv_canonical_nan}
+      evidence: {reviewed_by: "operator decision 2026-10-01 via coordinating session, approving W1_DECLARATIONS_DRAFT.md", basis: "observed f32 signatures and arith.mulf/addf/divf/maximumf bodies in the captured graph; emitted scalar-package execution remains an obligation"}
+  - id: host_f32_elementwise_transcendental
+    ops: [aten.rsqrt.default, aten.pow.Tensor_Scalar, aten.sigmoid.default]
+    families: [elementwise_map]
+    placement: host
+    signature: {dtypes: [f32], ordered_result_dtypes: [f32], ranks: [3]}
+    numerical_contract:
+      status: reviewed
+      semantics: {arithmetic: ieee754_binary32, rounding: round_to_nearest_even, subnormals: preserved,
+                  transcendental_accuracy: selected_lowering_approximation_not_correctly_rounded}
+      evidence: {reviewed_by: "operator decision 2026-10-01 via coordinating session, approving W1_DECLARATIONS_DRAFT.md", basis: "observed f32 signatures and math.rsqrt/math.powf/math.exp+arith.negf bodies in the captured graph; emitted scalar-package execution remains an obligation"}
+  - id: host_f32_reduction
+    ops: [aten.native_layer_norm.default, aten._softmax.default, aten.mean.dim]
+    families: [reduction, elementwise_map]
+    placement: host
+    signature: {dtypes: [f32], ordered_result_dtypes: [f32], ranks: [1, 2, 3, 4]}
+    numerical_contract:
+      status: reviewed
+      semantics: {arithmetic: ieee754_binary32, rounding: round_to_nearest_even, subnormals: preserved,
+                  accumulator: f32, reduction_order: selected_lowering, epsilon: graph_parameter}
+      evidence: {reviewed_by: "operator decision 2026-10-01 via coordinating session, approving W1_DECLARATIONS_DRAFT.md", basis: "observed f32 linalg.reduce/linalg.generic signatures (addf, divf, maximumf, subf, exp, rsqrt bodies); emitted scalar-package execution remains an obligation"}
+  - id: host_i32_to_f32_cast
+    ops: [aten._to_copy.default]
+    families: [elementwise_map]
+    placement: host
+    signature: {ordered_operand_dtypes: [i32, f32], ordered_result_dtypes: [f32], ranks: [2]}
+    numerical_contract:
+      status: reviewed
+      semantics: {conversion: signed_int32_to_ieee754_binary32, rounding: round_to_nearest_even, exact_range: "|x| <= 2^24"}
+      evidence: {reviewed_by: "operator decision 2026-10-01 via coordinating session, approving W1_DECLARATIONS_DRAFT.md", basis: "observed i32->f32 signature with arith.sitofp body in the captured graph; emitted scalar-package execution remains an obligation"}
+  - id: host_quantize_per_tensor_int8
+    ops: [quantized_decomposed.quantize_per_tensor.default]
+    families: [elementwise_map]
+    placement: host
+    signature: {ordered_operand_dtypes: [f32, f32, i64], ordered_result_dtypes: [i8], ranks: [2, 3, 4], quantization_parameters: {zero_point: 0, quant_min: -128, quant_max: 127}}
+    numerical_contract:
+      status: reviewed
+      semantics: {formula: "q = clamp(roundeven(x * (1/scale)) + zero_point, quant_min, quant_max)",
+                  rounding: round_half_to_even, scale_granularity: tensor, zero_point: 0,
+                  quant_min: -128, quant_max: 127, scale_dtype: f32}
+      evidence: {reviewed_by: "operator decision 2026-10-01 via coordinating session, approving W1_DECLARATIONS_DRAFT.md", basis: "selected int8 recipe (activation: tensor, static, symmetric, quant_min -128, quant_max 127); host quantize lowering roundeven(x*(1/s)) in llvmlower/passes_quant_int.py; observed f32,f32,i64->i8 signature"}
+  - id: host_dequantize_per_tensor
+    status: reviewed
+    ops: [quantized_decomposed.dequantize_per_tensor.default]
+    families: [elementwise_map]
+    placement: host
+    signature: {ordered_operand_dtypes: [i8, f32, i64], ordered_result_dtypes: [f32], ranks: [3, 4], quantization_parameters: {zero_point: 0}}
+    numerical_contract:
+      status: reviewed
+      semantics: {formula: "f32(i8 - zero_point) * scale", scale_granularity: tensor, zero_point: 0}
+      evidence:
+        reviewed_by: "operator approval 2026-10-03 in this session"
+        basis: "Fresh preselected sealed int8 captures of residual_cnn and causal_decoder have this exact typed signature. Independent rank-3 and rank-4 PyTorch probe captures and native-host qualifications matched their exact input goldens at zero tolerance. The selected standard-dialect lowering uses signed integer-to-f32 conversion, subtraction of the zero point, then multiplication by the f32 scale. These finite checks support this narrowly reviewed declaration, not RVV/device execution or every scale, shape and value."
+  - id: host_embedding_gather
+    ops: [aten.embedding.default]
+    families: [elementwise_map]
+    placement: host
+    signature: {ordered_operand_dtypes: [i64, f32], ordered_result_dtypes: [f32], ranks: [3]}
+    numerical_contract:
+      status: reviewed
+      semantics: {arithmetic: exact_copy, index_dtype: i64, index_domain: "0 <= index < num_embeddings (out-of-range not admitted)"}
+      evidence: {reviewed_by: "operator decision 2026-10-01 via coordinating session, approving W1_DECLARATIONS_DRAFT.md", basis: "observed i64,f32->f32 signature with linalg.index/arith.index_cast/tensor.extract body (pure gather) in the captured graph"}
+  - id: host_f32_batched_contraction
+    ops: [aten.bmm.default]
     families: [contraction]
     placement: host
-    signature:
-      ordered_operand_dtypes: [int8, int8, i32]
-      ordered_result_dtypes: [i32]
-      compute_dtypes: [i32]
-      accumulator_dtype: i32
-      readout_dtype: i32
-      ranks: [2, 3]
-      layouts: [row_major_contiguous]
-      aliasing: [disjoint_inputs_outputs]
+    signature: {ordered_operand_dtypes: [f32, f32, f32], ordered_result_dtypes: [f32], accumulator_dtype: f32, ranks: [3]}
     numerical_contract:
-      status: unreviewed
-      semantics: {product: signed_integer, accumulator_bits: 32, overflow: wrap, reduction_order: selected_lowering}
-      evidence: {basis: Exact pinned schedule selectors; dtype legality and RVV execution require a new receipt.}
+      status: reviewed
+      semantics: {arithmetic: ieee754_binary32, product_rounding: round_to_nearest_even, accumulator: f32,
+                  reduction_order: selected_lowering, subnormals: preserved, fma_contraction: selected_lowering}
+      evidence: {reviewed_by: "operator decision 2026-10-01 via coordinating session, approving W1_DECLARATIONS_DRAFT.md", basis: "observed f32 bmm signature (accum f32, rank 3); RTL facts admit only int8 operands on the accelerator datapath; emitted scalar-package execution remains an obligation"}
 evidence:
   source: Content identity of the host package selected by descriptor.yaml.
   inspected_package:
-    declared_schedule_ops: [linalg.matmul, linalg.batch_matmul]
-    lowering_patterns: [lower_contraction, lower_masked_transfers, lower_transpose, lower_shape_cast]
-    target_architecture: rv64gcv
-    historical_validation: k1_verified
-    qualification: historical package status and schedule selectors are not independently executed per-operation support receipts
+    backend: scalar
+    lowering: generic linalg-to-loops, no RVV transform schedule
+    target_architecture: rv64gc_zba_zbb_zbs_zfh
+    selected_rocket_compatibility: march_subset_of_pinned_dts
+    qualification: one saved rank-4 dequantization capture passed bit-exact Spike; other operations remain unqualified
   qualification:
-    status: not_available
-    execution_receipts: []
+    status: diagnostic_saved_capture_spike
+    execution_receipts:
+      - out/artifacts/probes/rocket-host-scalar-qualification-20261003-v2/qualification.json
   unknowns:
-    - The populated signatures are schedule-derived candidates, not admitted host support.
-    - Contraction dtype legality and numerical execution need independent receipts.
-    - There are no candidate declarations for normalization, softmax, activation or general reduction in this selected package.
-    - Host lowering and numerical qualification require their own execution receipts.
+    - Spike qualification does not prove execution on Rocket RTL or FireSim.
+    - Declarations are reviewed screens of observed signatures, not admitted emitted lowering for every operation.
+    - Every host lowering and partitioned-model route needs its own numerical qualification.

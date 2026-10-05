@@ -146,7 +146,8 @@ compute_units:
     scaling: per_tensor
     requant: {ref: gemmini.accumulator_scale}
     # Semantic-family capability (ARR denominator): a GEMM accelerator — int8 contraction on the mesh
-    # (matmul + conv2d via im2col), fused relu/acc-scale/bias on readout,
+    # (matmul + conv2d via im2col), fused relu/acc-scale on readout, bias seeded
+    # into the accumulator before contraction,
     # mvin/mvout DMA (movement), and max pooling fused on the store path (reduction).
     #
     # ⚠️ WHAT IS ENCODABLE IS NOT WHAT IS BUILT, and this is the one place that distinction bites.
@@ -174,10 +175,35 @@ compute_units:
       # Declaring a narrower rank set than the target can execute is the same denominator loss the
       # mx_gemmini rank bug was (see merlin/python/merlin/targetgen/eligibility.py).
       - {family: contraction, dtypes: [int8], ranks: [2, 3, 4]}
-      # Epilogue-only: accumulator scaling applies on the way OUT of the accumulator, so an
-      # elementwise map exists ONLY fused behind a contraction. Standalone would be a false_fallback.
-      - {family: elementwise_map, dtypes: [int8], composed_with: [contraction]}
-      - {family: movement, dtypes: [int8]}
+      # STANDALONE, by operator decision 2026-10-01 via coordinating session, approving standalone
+      # elementwise_map from RTL evidence (the LocalAddr accumulate bit on a plain load). The review:
+      #   - Evidence is NOT the loop sequencer. The old line cited LoopMatmulLdA/LdB `is_resadd`, which
+      #     is the hardware-loop FSM (the `loop_descriptor` role) a no-FSM program may not use, so it
+      #     cannot license a capability such a program needs.
+      #   - Evidence IS the load path every load command takes. LocalAddr carries an `accumulate` bit
+      #     (LocalAddr.scala), set by a load into an accumulator address; the accumulator store writes
+      #     the adder's sum when the write's accumulate bit is set (AccumulatorMem.scala:183), and the
+      #     accumulator bank's accumulate bit is that load-address field (Scratchpad.scala:828), fed by
+      #     the DMA read request (Scratchpad.scala:368). Derived from the elaboration as the
+      #     `accumulate_on_load` semantic fact (contracts/semantic_probes.yaml): a plain load (role
+      #     operand_load) into the accumulator with accumulate=1 adds into the region, and a readout
+      #     (config_st's activation and accumulator scale, then the store) reads the sum out.
+      #   - The scale each operand gets on the way in is the readout-scale fact the backend derives
+      #     from gemmini_params.h (`readout_operand_sum`: MVIN_SCALE, f32, half-even, saturating).
+      #   - `standalone_evidence` records the roles that path uses, so an experiment's
+      #     prohibited_instruction_roles policy can check it never depends on `loop_descriptor`
+      #     (merlin.targetgen.capability_roles).
+      # Family-granular: other elementwise_map members still need a device form of their own, which
+      # compute_groups decides per region (the operand sum is one); none is placed on admission alone.
+      - family: elementwise_map
+        dtypes: [int8]
+        standalone_evidence:
+          - fact: accumulate_on_load
+            roles: [operand_load, config, readout, commit]
+      # MVIN/MVOUT transfer bytes; they do not establish a standalone tensor
+      # permutation. Operand transpose is a contraction variant (CONFIG_EX),
+      # not a separate movement kernel. An agent may fuse it with that consumer.
+      - {family: movement, dtypes: [int8], forms: [copy]}
       # Max pooling, fused on the readout/store path -- NOT a standalone reduction unit, which is why
       # it composes with the two families that can produce the values it pools. Derived, and derived
       # from the ELABORATED design rather than from the ISA: the fact bundle records

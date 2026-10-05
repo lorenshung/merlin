@@ -1006,6 +1006,16 @@ artifacts:
       - gemmini_rtl
       - gsim_compiler
     config: GemminiGsimMonitorsConfig
+    # THE SOFTWARE ABI THIS MACHINE GRADES CAPSULES AGAINST, stated because it was assumed rather than
+    # recorded until 2026-09-24. The chain is GemminiGsimSerialClkConfig -> GemminiGsimMonitorsConfig ->
+    # chipyard.GemminiRocketConfig -> gemmini.DefaultGemminiConfig, and `acc_read_full_width` takes its
+    # parameter DEFAULT of `true` there (GemminiConfigs.scala:65) -- so the curated harness header
+    # 3758ae96, which carries `#define ACC_READ_FULL_WIDTH`, is CORRECT for this device. It is not
+    # correct for every device: `gemmini_rocket_lean_u250_firesim_bitstream` elaborates
+    # `leanConfig` with `acc_read_full_width = false` and the same header is wrong for it. A capsule
+    # graded here therefore cannot exercise the accumulator-readout path that machine lacks, which is
+    # why a whole-model arm found it and 46 conv capsules did not.
+    abi_header_sha256: 3758ae967af3a179497660970201093a7fb624be00173990ce33d3f5c38da924
     local_edits:
       - path: out/build/gsim/gemmini/gemmini_gsim_mon_serialclk.fir
         line: 643234
@@ -1238,7 +1248,8 @@ artifacts:
     path: sims/firesim/deploy/results-build/2026-09-17--05-57-16-alveo_u250_firesim_gemmini_rocket_30mhz/cl_xilinx_alveo_u250-firesim-FireSim-FireSimGemminiRocketConfig-BaseXilinxAlveoU250Config/firesim.tar.gz
     digest: "0af6f26e1cbad1c03f9e5873217505a5100bf2d0d068205cfa486522b24fc603"
     built_from:
-      - gemmini_rtl
+      - gemmini_rocket_chipyard
+      - gemmini_rocket_rtl
     config: FireSimGemminiRocketConfig
     notes: >-
       BUILT IN AN OVERLAY of the chipyard checkout ($MERLIN_CHIPYARD_GEMMINI_ROCKET, made by
@@ -1251,11 +1262,13 @@ artifacts:
       THIS BUILD: 30 MHz, 2 h 31 m, rc=0, timing met (WNS +0.024 ns, TNS 0, WHS +0.009 ns, THS 0).
       IDENTITY CHECK: the A0 configuration-smoke capsule ELF (sha256 78463276...) reads 482 cycles on
       this design, the same count it read on the design used before it (queue job 698).
-      PROVENANCE CAVEAT: elaborated from the generator at 63f0b68a, which is the `gemmini_rtl` pin
-      (8c3f9923) plus two local commits: one disables a stale block-stride assertion that fatals a
-      correct matmul, one adds single-factor DSE configurations that the default configuration does
-      not use. `verify("gemmini_rtl")` reports exactly that drift. Results citing this digest are
-      statements about "8c3f9923 + those two commits" until the pin moves or the commits land.
+      PROVENANCE CAVEAT: elaborated from generator revision 63f0b68a, recorded separately as
+      `gemmini_rocket_rtl`, not the older `gemmini_rtl` pin (8c3f9923) used by the Verilator
+      facts. The generator revision includes two local commits: one disables a stale block-stride
+      assertion that fatals a correct matmul, and one adds single-factor DSE configurations that
+      the default configuration does not use. Matching the accelerator's measured features across
+      these two revisions still requires a fact-level comparison; a shared configuration name is
+      not proof of identical elaborated hardware.
       The chipyard superproject was at 009e85b0 and FireSim at b084672c.
       SOFTWARE FOR IT: a vendor-library program must be compiled against the parameter header THIS
       elaboration generated (`generators/gemmini/software/gemmini-rocc-tests/include/gemmini_params.h`,
@@ -1388,14 +1401,89 @@ artifacts:
       that produced it; a store keyed on the program alone would serve a rebuilt simulator's question
       with the old simulator's answer, which is the whole reason these pins exist.
       Built from the `gemmini_gsim_model_serialclk` elaboration (089d053b) by `gsim_compiler`.
-    path: /scratch/agustin/tmp/gsim_recert_20260904/emu_gemmini_gsim_recert
+    path: out/build/rtl_engines/gemmini/gsim/emulator
+    repo_relative: true
     digest: "1a3de02a19ddcb4704443e2b565fd6eb0299a940afdcc7c037e2604bbcbb52ea"
+    notes: >-
+      RE-PINNED 2026-10-01 to the canonical engine location `merlin.targetgen.gsim_emulator` resolves
+      (`<build>/rtl_engines/gemmini/gsim/emulator`). The previous path,
+      /scratch/agustin/tmp/gsim_recert_20260904/emu_gemmini_gsim_recert, was deleted in the 2026-10-01
+      scratch cleanup. The bytes did not change: the file at the new path has this same digest
+      (1a3de02a), so every capture keyed on it remains about this binary.
     built_from:
       - gemmini_gsim_model_serialclk
       - gsim_compiler
     config: GemminiGsimSerialClkConfig
     target: gemmini
     role: gsim_binary
+    # The ABI this emulator's elaboration takes: GemminiGsimSerialClkConfig -> GemminiGsimMonitorsConfig
+    # -> GemminiRocketConfig -> DefaultGemminiConfig keeps the parameter default
+    # `acc_read_full_width = true`, so the curated harness header (the one defining
+    # ACC_READ_FULL_WIDTH) is correct for it. Stated on the binary, because the binary is what a
+    # whole-model measurement runs and checks a program's build header against.
+    abi_header_sha256: "3758ae967af3a179497660970201093a7fb624be00173990ce33d3f5c38da924"
+
+  gemmini_shuttle_opu_u250_firesim_bitstream:
+    description: >-
+      The Alveo U250 FireSim bitstream hwdb `alveo_u250_firesim_shuttle_gemmini_opu` selects: a
+      two-tile Shuttle SoC elaborating FireSimGemminiAndOPUShuttleConfig -> chipyard.GemminiAndOPUShuttleConfig.
+      Hart 0 (tile 0) is Shuttle + the DEFAULT Gemmini (GemminiConfigs.defaultConfig: 16x16 int8 mesh,
+      BOTH dataflows, 4x4096-row scratchpad, 2x512-row int32 accumulator, full-width accumulator readout
+      -- the StreamWriter data port is 512 bits, DIM x int32); its RoCC router decodes only custom3.
+      Hart 1 (tile 1) is Shuttle + Saturn with the outer-product unit (VLEN 128) and NO RoCC: custom3
+      there raises an illegal instruction, so a Gemmini program runs on hart 0 with hart 1 parked. Host
+      code is RV64GC (+Zba/Zbb/Zbs/Zfh) on hart 0 -- no V. A DIFFERENT DEVICE from every Rocket-hosted
+      Gemmini bitstream in this file: the host core is Shuttle, so host-side cycles are not comparable
+      even though the Gemmini parameter set (and therefore the ABI header) is the default one.
+    root_env: MERLIN_CHIPYARD
+    path: sims/firesim/deploy/results-build/2026-05-06--22-08-53-alveo_u250_firesim_shuttle_gemmini_opu/cl_xilinx_alveo_u250-firesim-FireSim-FireSimGemminiAndOPUShuttleConfig-BaseXilinxAlveoU250Config/firesim.tar.gz
+    digest: "b727e1fceee4df23fdf4c900e2bae2fbc2ec48c0db8b29896733a2394734072c"
+    built_from:
+      - gemmini_rtl          # 8c3f9923: all 4326 gemmini source locators in the build's SV resolve; 63f0b68 fails 12
+      - saturn_opu_int8      # ea373800: all 3766 saturn locators resolve; saturn_tapeout 249340a6 fails 519
+    config: FireSimGemminiAndOPUShuttleConfig
+    target: gemmini
+    role: firesim_bitstream
+    hw_configs:
+      - alveo_u250_firesim_shuttle_gemmini_opu
+    # sha256 of sims/firesim/deploy/built-hwdb-entries/alveo_u250_firesim_shuttle_gemmini_opu (368 bytes)
+    hwdb_digest: "03bc7f8e1db773b98a30de7b4c351bde849d2e3f1f64f27e7e443afb6cc89e72"
+    # GENERATED, not asserted: GemminiConfigs.generateHeader re-emitted from parameters read out of this
+    # build's own design/FireSim-generated.sv (DIM, banks, rows, types, scale units, readout widths,
+    # normalizer, opcode) is byte-identical to the curated header.
+    abi_header_sha256: "3758ae967af3a179497660970201093a7fb624be00173990ce33d3f5c38da924"
+    # THE HARTS, as the description above reads them out of this build: which one's RoCC router reaches
+    # the unit, and the ISA each executes, stated no wider than the design has it (a program compiled
+    # for a subset runs; one compiled past it traps). A two-hart program runs its host code on the
+    # vector hart and hands each dispatch to the unit's hart.
+    harts:
+      - {hart: 0, isa: rv64gc, unit: true}
+      - {hart: 1, isa: rv64gcv, vlen: 128, unit: false}
+    notes: >-
+      Digest measured 2026-09-26 with sha256sum over the 59,091,214-byte tar (members: metadata,
+      firesim.bit e6675c7d..., firesim.mcs). ELABORATION IDENTITY: the build's design/FireSim-generated.sv
+      is sha256 bf367efc1e2dec12fb276a4280a7db6a0b46470e0a92e15cd1dfd4214316a286 (38,872,887 bytes,
+      written 2026-05-06 15:11 -0700); the driver it was built with is 2927176e..., byte-identical to the
+      runtime driver rebuilt 2026-08-29. sims/firesim/sim/generated-src for this config was RE-ELABORATED
+      2026-08-29 and its SV (7b9faebf...) differs from the bitstream's only in LoadController.scala (the
+      block-stride assert gemmini 63f0b68 disables), so it is NOT this bitstream's elaboration. Build:
+      fpga_frequency 30 MHz, strategy TIMING, Vivado 2023.1, all timing constraints met; firesim commit
+      b084672c (dirty at build). Memory: DDR channel C only; target DRAM 0x8000_0000..0x4_7FFF_FFFF
+      (16 GiB; AXI4AddressTranslation bound 35'h47fffffff). Effective target frequency measured by queue
+      job 499 (2026-09-06): 24.58 MHz, FMR 1.22.
+    gaps:
+      - >-
+        The chipyard configs (GemminiAndOPUShuttleConfig, FireSimGemminiAndOPUShuttleConfig) were first
+        COMMITTED 2026-09-03 (ed2a5beb), after this 2026-05-06 build, so the build ran from uncommitted
+        source. The config chain is asserted from the current source; every Gemmini parameter the ABI
+        depends on is read from the SV itself, which is the fact.
+      - >-
+        built_from is locator-consistent, not proven: every source locator in the SV resolves at the named
+        commits, which rules revisions out but does not rule a byte-identical-in-those-lines revision in.
+        The saturn checkout is at e16a301 (no src/ diff vs ea373800).
+      - >-
+        The loop units (LoopConv, LoopMatmul) ARE elaborated on this board; the no-FSM rule is enforced by
+        the whole-program check over the linked ELF, not by the hardware's absence.
 
   gemmini_gsim_model_manifest:
     description: >-
@@ -1404,8 +1492,15 @@ artifacts:
       emulator and the FIRRTL do not between them establish WHICH generated sources were compiled: a
       link that consumes fewer than all emitted translation units still runs while simulating an
       incomplete design, and this file is what makes that countable.
-    path: /scratch/agustin/tmp/gsim_cert_serialclk_v1/gsim_generated_model_manifest.json
+    path: out/build/rtl_engines/gemmini/gsim/model_manifest.json
+    repo_relative: true
     digest: "f822a628a3a809f64c91becea8b2d8bfae9c35633a7c4b21bbaced8a2ac6303d"
+    notes: >-
+      RE-PINNED 2026-10-01 to the manifest beside the canonical emulator
+      (`<build>/rtl_engines/gemmini/gsim/model_manifest.json`). The previous path,
+      /scratch/agustin/tmp/gsim_cert_serialclk_v1/gsim_generated_model_manifest.json, was deleted in
+      the 2026-10-01 scratch cleanup. The bytes did not change: the file at the new path has this same
+      digest (f822a628).
     built_from:
       - gemmini_gsim_model_serialclk
       - gsim_compiler
@@ -1620,3 +1715,64 @@ artifacts:
         byte-identical to a 2026-08-26 FireSimGemminiRocketConfig build in another user's tree (hwdb
         `alveo_u250_firesim_gemmini_rocket`); that copy was not re-hashed here. Recover the chipyard and
         gemmini shas from design/ before claiming RTL lineage.
+
+  gemmini_rocket_lean_u250_firesim_bitstream:
+    description: >-
+      The FireSim bitstream every whole-model arm was measured on during 2026-09-24, and the machine
+      NO ENTRY IN THIS FILE DESCRIBED WHILE THOSE MEASUREMENTS WERE TAKEN. hwdb
+      `alveo_u250_firesim_gemmini_rocket_singlecore_no_nic` selects it; it elaborates
+      `FireSimLeanGemminiRocketConfig` -> `chipyard.LeanGemminiRocketConfig` -> `gemmini.LeanGemminiConfig`,
+      whose array parameters are `GemminiConfigs.leanConfig` (Configs.scala:244) -- and that config sets
+      `acc_read_full_width = false`, where the DEFAULT for the parameter is `true`
+      (GemminiConfigs.scala:65). It is therefore a DIFFERENT DEVICE from the one the pinned
+      `gemmini_rocket_u250_firesim_bitstream` describes, which elaborates the stock
+      `FireSimGemminiRocketConfig`, and from `GemminiGsimSerialClkConfig`, which the capsule L3 oracle
+      elaborates through `GemminiRocketConfig` and which likewise has the full-width readout.
+    path: /scratch2/agustin/chipyard/sims/firesim/deploy/results-build/2025-10-02--04-55-45-alveo_u250_firesim_gemmini_rocket_singlecore_no_nic/cl_xilinx_alveo_u250-firesim-FireSim-FireSimLeanGemminiRocketConfig-BaseXilinxAlveoU250Config/firesim.tar.gz
+    digest: 9d66b956d7d797bbbee11efb2d1d105c2920ebdb24d2bbb9cbc8e7ae88ff5299
+    config: FireSimLeanGemminiRocketConfig
+    target: gemmini
+    role: firesim_bitstream
+    # The queue hw-config name a job is SUBMITTED under; nothing else connects that string to
+    # this device, and two gemmini U250 bitstreams share one configuration name.
+    hw_configs:
+      - alveo_u250_firesim_gemmini_rocket_singlecore_no_nic
+    # THE ABI HEADER, DECLARED AND SHA-ASSERTED -- not generated. 5bfbb726 is the curated header with
+    # `#define ACC_READ_FULL_WIDTH` removed, because `GemminiConfigs.leanConfig` sets
+    # `acc_read_full_width = false` (Configs.scala:244). It is the header every lean arm measured from
+    # 2026-09-24 on was compiled against, and declaring it here is what makes a build FOR this machine
+    # refuse the curated 3758ae96 (merlin.perf.whole_model_build.machine_header) instead of accepting
+    # whatever a caller passes. It is an assertion about one macro, not a header generated from the
+    # parameter set; the gap below stays open until one is. Also: no arm -- the vendor library's
+    # included -- classifies correctly on this board (argmax 0 against 21 in every run), so this machine
+    # can screen timing and per-group behaviour but cannot adjudicate correctness on its own.
+    abi_header_sha256: "5bfbb7263e3db079ead66f1c8b1a7224d9764dd4025e8c91d4f9c65204990ec0"
+    notes: >-
+      Digest measured 2026-09-24 with sha256sum over the 114,633,982-byte tar.
+      THE SOFTWARE ABI WAS UNKNOWN AND THE CURATED HEADER IS NOT IT (see abi_header_sha256 above for
+      the header now asserted). Every ELF run on this bitstream on
+      2026-09-24 was compiled against the curated harness header 3758ae96, which carries
+      `#define ACC_READ_FULL_WIDTH`. This design does not have that readout. The consequence is already
+      written down in this file for the sibling `gemmini_universal_rtl`, whose own ABI gap records that
+      compiling with that macro against an `acc_read_full_width = false` device would "emit a full-width
+      accumulator mvout the hardware cannot service" and that "the mvout DMA on this device physically
+      cannot move an int32 accumulator row". MEASURED here, on three independently built arms and on a
+      fourth built by another session from a tree without this session's commits: the ONLY group whose
+      output leaves as an int32 accumulator row -- the final classifier -- reads back zero in every one
+      of them, and the model's argmax is 0 against a golden of 21. Recorded as UNKNOWN rather than
+      asserting the lean variant of the header, because no such header has been generated from this
+      parameter set and shape agreement is not provenance.
+    gaps:
+      - >-
+        No gemmini_params.h has been GENERATED for this parameter set; the declared abi_header_sha256 is
+        the curated header minus one macro, asserted by hand. Generate one from
+        `GemminiConfigs.leanConfig` and replace the assertion with its digest.
+      - >-
+        No `built_from`: the elaboration sources were not recovered from the tar, so the RTL revision is
+        asserted by configuration name only, exactly as for the sibling bitstream entry.
+      - >-
+        THE CAPSULE COHORT AND THE WHOLE-MODEL ARMS ARE GRADED ON DIFFERENT MACHINES. Capsule L3 runs on
+        `GemminiGsimSerialClkConfig` (full-width readout, curated header correct for it); the whole-model
+        arms ran here (narrow readout, curated header wrong for it). A capsule result and a model result
+        are not comparable without saying so, and no capsule can exercise the accumulator-readout path
+        this device lacks.
