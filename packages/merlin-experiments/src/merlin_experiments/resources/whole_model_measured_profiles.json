@@ -1,0 +1,35 @@
+{
+  "schema": "merlin.phase2.whole_model_measured.launch_profiles.v1",
+  "profiles": {
+    "codex-gpt-6-sol": {
+      "description": "Codex on the seat account, gpt-6-sol: long sessions with short iterations; the run stops on a plateau, never on a round count.",
+      "driver": "codex",
+      "model": "gpt-6-sol",
+      "effort": "high",
+      "max_sessions": 96,
+      "round_seconds": 2700,
+      "total_authoring_seconds": 259200,
+      "iteration_seconds": 1200,
+      "max_tool_calls": 400,
+      "edit_authority": "whole-package",
+      "drain_seconds": 5400,
+      "min_memory_available_gib": 16,
+      "max_swap_used_gib": 8
+    },
+    "codex-gpt-6-sol-one-round": {
+      "description": "One Codex gpt-6-sol authoring round of 45 minutes: a proof that a run carries end to end, not a search.",
+      "driver": "codex",
+      "model": "gpt-6-sol",
+      "effort": "high",
+      "max_sessions": 1,
+      "round_seconds": 2700,
+      "total_authoring_seconds": 3600,
+      "iteration_seconds": 1200,
+      "max_tool_calls": 200,
+      "edit_authority": "whole-package",
+      "drain_seconds": 0,
+      "min_memory_available_gib": 16,
+      "max_swap_used_gib": 8
+    }
+  }
+}

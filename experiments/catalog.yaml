@@ -10,3 +10,4 @@ experiments:
   saturn-opu-rvv-functional: ../examples/saturn_opu_rvv/experiment.yaml
   measured-claims-template: definitions/measured-claims-template.yaml
   model-portfolio-template: definitions/model-portfolio-template.yaml
+  whole-model-measured-template: definitions/whole-model-measured-template.yaml

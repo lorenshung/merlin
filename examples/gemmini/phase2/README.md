@@ -14,13 +14,34 @@ they measure placement, cycles and model-level cost after functional capability
 has been established. A fast Phase 2 objective is not a substitute for a
 successful ResNet-50 or SmolVLA whole-model compile and correctness receipt.
 
-Start from the [Phase 1 workflow](../phase1/README.md). There are two distinct
+After the Phase 1 compiler is frozen, an owner-only form audit must compare a
+held-out capture with the iteration-derived form scope. It reports both the
+share in known operation-form classes and the share whose three GEMM extents
+are dominated by one actual iteration group. The latter detects a scale gap
+that a matching operation name alone conceals. Neither number proves cycles,
+correctness or placement; held-out extents never feed capsule generation.
+Before a model-scale performance claim, also compare each held-out group with
+the generated performance members on **all three** GEMM extents at once; a
+single-axis K or M/N sweep cannot witness their interaction. A zero joint-size
+share is a diagnostic failure of extrapolation, not proof that a compiler cannot
+run the model. Generate any additional stress members from hardware capacities
+and independent iteration mechanisms, never held-out dimensions. Measure
+candidate/vendor pairs on those independent members, then use occasional
+whole-model runs to test whether their bounded measurements predict real
+bottlenecks. Keep the audit and its model-specific dimensions owner-private.
+
+Start from the [Phase 1 workflow](../phase1/README.md). There are three distinct
 experiment modes, each with one shared definition template:
+
+The EL1–EL4 labels name **Phase 1 information treatments**, not Phase 2 modes.
+Older Phase 2 records use `arm4` as a compatibility key for a compiler produced
+by the EL4 treatment; it is not a separate experiment level.
 
 | Mode | Template | Required handoff |
 | --- | --- | --- |
 | Measured claims | [`measured-claims-template.yaml`](../../../experiments/definitions/measured-claims-template.yaml) | Frozen functional run ID and submission hash, descriptor, RTL facts, performance profile, both declared GSIM certificates and their exact hashes |
 | Model portfolio | [`model-portfolio-template.yaml`](../../../experiments/definitions/model-portfolio-template.yaml) | Deployment record, frozen campaign configuration, writable candidate checkout and explicit authoring budgets |
+| Whole model, measured | [`whole-model-measured-template.yaml`](../../../experiments/definitions/whole-model-measured-template.yaml) | Phase 1's frozen submission and `oot/`, the model capsule, an objective config naming machines from [`whole-model-machines.yaml`](whole-model-machines.yaml), a launch profile and a round driver |
 
 Do not interpret a model-portfolio estimate as measured hardware performance.
 The measured mode's admission gates validate the functional handoff and timing
@@ -96,3 +117,28 @@ The [primitive probe](primitive_probe.py) is likewise an example-owned Gemmini
 diagnostic for splitting a decoded RoCC short kernel into setup, compute and
 readback. It is not part of Merlin's shared Phase 2 API or the measured-claims
 runner; use the target-neutral provider interface for new accelerators.
+
+## Whole model, measured
+
+The `whole_model_measured` example prefers the full U250 `FireSimGemminiRocketConfig` board
+for screening each correct candidate (several per board job, the vendor reference as the in-batch control),
+the functional model grades every group locally first, and the elaborated-RTL emulator certifies each
+new best. The experiment's `prohibited_instruction_roles` is enforced over every candidate's whole
+linked ELF before any machine time. [`whole-model-machines.yaml`](whole-model-machines.yaml) says how
+each machine is run (host locations are environment references); which device each one is stays the
+pin registry's. [`whole-model-objective.json`](whole-model-objective.json) is an example objective
+config; replace each `/ABSOLUTE/...` placeholder with artifacts measured on that *same full design*.
+The Lean board remains an explicitly named historical option, not an interchangeable fallback: it
+lacks full-width accumulator readout. Merely selecting the full board here does not establish that
+its queue configuration is currently available, that it matches a particular Phase 0 RTL snapshot,
+or that a new run passed qualification. Large inputs such as the model capsule are frozen by
+content into each run, never copied.
+
+The example leaves `builder` and `store` unset: run preparation selects Merlin's
+shared builder and creates a target-scoped artifact store. Its `mechanism_policy`
+derives whether verified package passes and fused regions are available from the
+frozen model capsule's host/accelerator closure. Closed models can use both;
+open models can use neither. The prepared, read-only objective records the exact
+decision. This enables mechanisms for the Phase 2 agent, not hand-authored
+Gemmini transformations, and does not make a diagnostic or unreviewed capsule
+eligible for a verified run.
