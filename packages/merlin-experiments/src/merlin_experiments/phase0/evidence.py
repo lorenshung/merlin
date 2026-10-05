@@ -353,6 +353,7 @@ def select_evidence(
     target: str,
     *,
     descriptor=None,
+    capture_python=None,
     capability_contract_path=None,
     facts_path=None,
     hardware_spec=None,
@@ -360,6 +361,7 @@ def select_evidence(
     conformance_spec=None,
     inventory_path=None,
     native_qualifications=None,
+    prohibited_roles=(),
 ) -> EvidenceSelection:
     """Observe selected source bytes once; never extract facts or modify a checkout.
 
@@ -410,6 +412,8 @@ def select_evidence(
     application_inventory = None
     frontend_traces, application_graphs, framework_catalogs, host_capabilities = {}, {}, {}, {}
     inventory_identity = {"status": "not_available", "reason": "no selected detailed application inventory"}
+    capture_attestations: dict[str, Any] = {}
+    whole_program_admission = None
     if conformance_spec is not None or inventory_path is not None:
         from .profiles import application_inventory_path
 
@@ -428,6 +432,20 @@ def select_evidence(
             if selected_inventory.is_symlink():
                 raise ValueError("selected application inventory may not be a symlink")
             sidecar = selected_inventory
+        declared_whole_program = requirement.get("whole_program_admission")
+        if conformance_spec is not None and isinstance(declared_whole_program, Mapping):
+            from .program_admission import operations_digest
+
+            name = declared_whole_program.get("sidecar")
+            if not isinstance(name, str) or not name or Path(name).name != name:
+                raise ValueError("whole-program admission sidecar must be one adjacent basename")
+            location = Path(conformance_spec).parent / name
+            if location.is_symlink():
+                raise ValueError("whole-program admission sidecar may not be a symlink")
+            raw_whole_program = observe(location, "whole-program-admission", required=True)
+            whole_program_admission = json.loads(raw_whole_program)
+            if operations_digest(whole_program_admission) != declared_whole_program.get("sha256"):
+                raise ValueError("whole-program admission sidecar differs from the requirement's commitment")
         if sidecar is not None:
             raw_inventory = observe(sidecar, "application-inventory", required=False)
             if raw_inventory is not None:
@@ -455,6 +473,13 @@ def select_evidence(
                     "declared_applications": sorted(labels) if labels is not None else None,
                     "observed_applications": sorted(observed),
                 }
+                # Attestations issued at derivation travel with the byte-bound
+                # requirement; the coverage gate re-verifies each one from disk.
+                capture_attestations = requirement.get("capture_execution_attestations") or {}
+                if not isinstance(capture_attestations, dict) or (
+                    capture_attestations and set(capture_attestations) != set(observed)
+                ):
+                    raise ValueError("capture execution attestations must cover exactly the selected applications")
                 from merlin.targetgen.application_inventory import application_graph_inventory
 
                 for label, application in sorted(observed.items()):
@@ -474,6 +499,12 @@ def select_evidence(
                     application_graphs[label] = application_graph_inventory(capture_path)
                     if application_graphs[label]["capture_sha256"] != _digest(capture_raw):
                         raise ValueError(f"application graph was derived from changed source bytes: {label}")
+                    normalized = (application.get("capture_normalization") or {}).get("output_sha256")
+                    if normalized and application_graphs[label]["normalized_mlir_sha256"] != normalized:
+                        raise ValueError(
+                            f"selected application normalization differs from the derived inventory: {label}; "
+                            "use the same frontend/MLIR environment for derivation and Phase 0 execution"
+                        )
                     for name, filename, destination in (
                         ("frontend-trace", "frontend-trace.json", frontend_traces),
                         ("framework-catalog", "pytorch-opset.json", framework_catalogs),
@@ -660,6 +691,9 @@ def select_evidence(
             from merlin.common.paths import repo_root, resolve_grant
 
             source_root = te.source_root if te.source_root is not None else repo_root()
+            board_catalog = te.selected_board_catalog()
+            if board_catalog is not None:
+                observe(board_catalog, "host-board-catalog", required=True)
             if te.host_lanes is not None:
                 for name, lane in sorted(te.host_lanes.profiles.items()):
                     try:
@@ -759,6 +793,40 @@ def select_evidence(
     from merlin.targetgen.quant_recipe import derive_candidates
 
     quantization_candidates = [candidate.to_dict() for candidate in derive_candidates(contract, facets)]
+    # Fill the authored spec's fact-derived declarations from the same fact view the drift check
+    # compares against, under the experiment's prohibited roles. Everything downstream of this
+    # selection (screens, quantization contract, recipes, the frozen corpus) sees the resolved spec;
+    # the authored bytes stay the selected source identity.
+    software_derivation = None
+    if software_spec is not None:
+        from merlin.targetgen import spec_fact_drift
+
+        # Some capability helpers still resolve by target name. Their reads
+        # must use this selection too, never extract from an ambient provider.
+        with (
+            target_registry.observed_contract(target, contract),
+            rtl_facts.observed_facts(target, refreshed_facts, selected_path),
+        ):
+            fact_view = spec_fact_drift.fact_capabilities(
+                target=target,
+                contract=contract,
+                raw_facts=loaded_facts,
+                readout_facets=[facet.to_dict() for facet in facets],
+                quantization_candidates=quantization_candidates,
+                taxonomy=taxonomy,
+                prohibited_roles=prohibited_roles,
+            )
+        software_doc, software_derivation = spec_fact_drift.resolve_spec(software_doc, fact_view)
+        software_derivation["prohibited_instruction_roles"] = sorted(set(prohibited_roles))
+        for row in software_derivation["unresolved"]:
+            diagnostics.append(
+                {
+                    "component": "software-spec-derivation",
+                    "status": "unknown",
+                    "reason": row["reason"],
+                    "declaration": row.get("id") or row.get("format"),
+                }
+            )
     target_profile = derive_profile(target, facts=refreshed_facts, residual=residual, contract=contract).to_dict()
     with rtl_facts.observed_facts(target, refreshed_facts, selected_path):
         execution = execution_capability_facts(target)
@@ -839,6 +907,27 @@ def select_evidence(
                 "reason": "no verified common-elaboration receipt selected",
             }
         )
+    # Fresh facts are not enough: an rtl-source-audit report beside them must verify them, bound to the
+    # exact facts and hardware-spec bytes selected here. And every selected application capture must
+    # carry an admitted sealed-runner attestation that still matches its bytes on disk.
+    from .evidence_status import AUDIT_MEMBER, capture_attestation_diagnostics, rtl_audit_diagnostic
+
+    audit_path = Path(selected_path).with_name(AUDIT_MEMBER) if selected_path is not None else None
+    audit_raw = observe(audit_path, "rtl-source-audit") if audit_path is not None and audit_path.is_file() else None
+    hardware_source = (
+        sources.get(Path(hardware_spec).absolute())
+        if hardware_spec is not None and not isinstance(hardware_spec, Mapping)
+        else None
+    )
+    audit_refusal = rtl_audit_diagnostic(
+        audit_raw, facts_raw=raw_facts, hardware_raw=hardware_source.content if hardware_source else None
+    )
+    if audit_refusal is not None:
+        diagnostics.append(audit_refusal)
+    if application_inventory is not None:
+        diagnostics.extend(
+            capture_attestation_diagnostics(application_inventory.get("applications") or {}, capture_attestations)
+        )
     if software_doc.get("status") != "reviewed":
         diagnostics.append(
             {
@@ -862,7 +951,7 @@ def select_evidence(
 
     # Observe the framework selected for capture, never a convenient host torch.
     # Replays use the serialized result below and do not relaunch this worker.
-    framework_catalog = aten_coverage.observe_opset(timeout=30)
+    framework_catalog = aten_coverage.observe_opset(python=capture_python, timeout=30)
     observe(Path(aten_coverage.__file__).with_name("_aten_opset_worker.py"), "framework-catalog-reader")
     if framework_catalog.get("status") != "available":
         diagnostics.append(
@@ -894,13 +983,17 @@ def select_evidence(
     for source in sources.values():
         if source.path.read_bytes() != source.content:
             raise ValueError(f"evidence source changed during selection: {source.path}")
+    from .evidence_status import status as evidence_status
+
     views = {
         "target": target,
-        "status": "diagnostic",
+        # Operator policy (evidence_status): verified only when nothing is on record against it.
+        "status": evidence_status(diagnostics),
         "diagnostics": diagnostics,
         "descriptor": descriptor_doc,
         "hardware_spec": hardware_doc,
         "software_spec": software_doc,
+        "software_spec_derivation": software_derivation,
         "instruction_semantics": instruction_semantics,
         "instruction_semantics_source_sha256": (
             _digest(instruction_semantics_source) if instruction_semantics_source is not None else None
@@ -908,6 +1001,8 @@ def select_evidence(
         "datapath": datapath,
         "application_inventory": application_inventory,
         "application_inventory_identity": inventory_identity,
+        "capture_execution_attestations": capture_attestations,
+        "whole_program_admission": whole_program_admission,
         "frontend_traces": frontend_traces,
         "application_graphs": application_graphs,
         "framework_catalogs": framework_catalogs,
@@ -1146,6 +1241,7 @@ def export_evidence(selection: EvidenceSelection, artifact_root: str | Path) -> 
         frontend_traces=getattr(selection, "frontend_traces", None),
         application_graphs=getattr(selection, "application_graphs", None),
         host_capabilities=getattr(selection, "host_capabilities", None),
+        capture_execution_attestations=getattr(selection, "capture_execution_attestations", None),
     )
     accounting["selected_inventory"] = getattr(
         selection,

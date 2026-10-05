@@ -192,10 +192,20 @@ def _capture_failure_reason(exc: Exception) -> str:
     thing that was raised. Taking merely the last non-empty line got this wrong on a real case: the
     export refusal ends with a trailing frame, and the recorded reason came out as ``next(self.gen)``.
     """
-    lines = [ln for ln in str(exc).splitlines() if ln.strip()]
-    flush = [ln for ln in lines if ln[:1] not in (" ", "\t")]
-    tail = (flush or lines or [f"{type(exc).__name__} with no message"])[-1].strip()
-    return _redact_local_paths(f"{type(exc).__name__}: {tail}")[:400]
+    def summary(error: Exception) -> str:
+        lines = [ln for ln in str(error).splitlines() if ln.strip()]
+        flush = [ln for ln in lines if ln[:1] not in (" ", "\t")]
+        tail = (flush or lines or [f"{type(error).__name__} with no message"])[-1].strip()
+        return f"{type(error).__name__}: {tail}"
+
+    reasons = [summary(exc)]
+    seen = {id(exc)}
+    cause = exc.__cause__
+    while isinstance(cause, Exception) and id(cause) not in seen and len(reasons) < 3:
+        seen.add(id(cause))
+        reasons.append(summary(cause))
+        cause = cause.__cause__
+    return _redact_local_paths("; caused by ".join(reasons))[:400]
 
 
 def update_provenance_manifest(
@@ -203,6 +213,7 @@ def update_provenance_manifest(
     cap_root=None,
     *,
     target: str | None = None,
+    refused_generated: list[Path] | None = None,
     performance_record: dict | None = None,
     unbuilt_roster: list | None = None,
     claim_model_evaluation: dict | None = None,
@@ -217,8 +228,9 @@ def update_provenance_manifest(
     which did not do it.
 
     MERGE, never replace. A path this run emitted is ``generated``; everything else on disk keeps whatever
-    classification it already had, defaulting to ``hand_authored`` for a capsule with no generator. That
-    ordering matters: rebuilding the split from scratch would reclassify the frozen hand-authored
+    classification it already had, defaulting to ``hand_authored`` for a capsule with no generator. A
+    generated capsule refused by the SW screen is recorded separately and never selected for a phase.
+    This ordering matters: rebuilding the split from scratch would reclassify the frozen hand-authored
     source-of-record (A1, B3/B4, the held-out hidden set) as generated the first time a run happened to
     emit something at the same path.
 
@@ -242,6 +254,7 @@ def update_provenance_manifest(
     man_path = root / "MANIFEST.yaml"
     man = yaml.safe_load(man_path.read_text(encoding="utf-8")) if man_path.is_file() else {}
     gen, hand = set(man.get("generated") or []), set(man.get("hand_authored") or [])
+    refused = set(man.get("refused_generated") or [])
 
     def _rel(d):
         try:
@@ -258,20 +271,34 @@ def update_provenance_manifest(
         if rel:
             gen.add(rel)
             hand.discard(rel)
+            refused.discard(rel)
+    for d in refused_generated or []:
+        rel = _rel(d)
+        if rel:
+            refused.add(rel)
+            gen.discard(rel)
+            hand.discard(rel)
     on_disk = {str(rel) for c in root.rglob("capsule.yaml") if len((rel := c.parent.relative_to(root)).parts) == 2}
-    hand |= on_disk - gen - hand  # never seen by a generator -> frozen source-of-record
+    hand |= on_disk - gen - hand - refused  # never seen by a generator -> frozen source-of-record
     gen &= on_disk
     hand &= on_disk  # drop entries whose capsule is gone
+    refused &= on_disk
 
     # Split the holdouts back out: they are counted here, never named (see the docstring).
     held_gen, held_hand = {r for r in gen if _held(r)}, {r for r in hand if _held(r)}
+    held_refused = {r for r in refused if _held(r)}
     gen -= held_gen
     hand -= held_hand
+    refused -= held_refused
 
     man["generated_by"] = "merlin/contract/capsules/generate_corpus.py"
     man["generated"] = sorted(gen)
     man["hand_authored"] = sorted(hand)
-    man["held_out"] = {"n_generated": len(held_gen), "n_hand_authored": len(held_hand)}
+    man["refused_generated"] = sorted(refused)
+    man["held_out"] = {
+        "n_generated": len(held_gen), "n_hand_authored": len(held_hand),
+        "n_refused_generated": len(held_refused),
+    }
     if target is not None:
         per_target = dict(man.get("performance_generation") or {})
         per_target[target] = copy.deepcopy(performance_record or {})

@@ -44,8 +44,10 @@ def _digest(document) -> str:
     return sha256_bytes(_json(document))
 
 
-def selected_inputs(selection, *, accounting: dict) -> dict:
+def selected_inputs(selection, *, accounting: dict, prohibited_roles=()) -> dict:
     """Project only selected immutable documents; never resolve live references."""
+    from .spec_drift import from_selection
+
     requirement = next(
         (yaml.safe_load(row.content) for row in selection.source_snapshots if row.role == "conformance-spec"), None
     )
@@ -54,6 +56,8 @@ def selected_inputs(selection, *, accounting: dict) -> dict:
         "target": selection.target,
         "accounting": copy.deepcopy(accounting),
         "software_spec": selection.software_spec,
+        # The authored spec compared field by field with the selected fact-derived capability.
+        "spec_fact_drift": from_selection(selection, prohibited_roles=prohibited_roles),
         "capability_contract": selection.contract,
         "conformance": requirement,
         # Preserve the exact selected bytes so memory coverage can be recomputed
@@ -171,6 +175,31 @@ def _framework_versions_complete(application: dict) -> bool:
         and isinstance(sources, dict)
         and all(sources.get(stage) == version for stage in ("original", "quantized", "prepared"))
     )
+
+
+def attestation_failure(application: dict) -> str | None:
+    """Why this application's capture has no admitted fresh sealed execution, or None.
+
+    The attestation must pass the issuer gate (which re-reads its bytes) AND name
+    exactly this application's selected capture and materialized receipt bytes.
+    """
+    from .capture_execution_attestation import AttestationNotVerified, require_verified_execution
+
+    attestation = application.get("capture_execution_attestation") or {}
+    capture = attestation.get("capture") or {}
+    materialized = application.get("capture_receipt") or {}
+    try:
+        require_verified_execution(attestation)
+        if (
+            capture.get("model_sha256") != application.get("capture_sha256")
+            or capture.get("receipt_sha256") != materialized.get("receipt_sha256")
+            or not is_sha256(capture.get("model_sha256"))
+            or not is_sha256(capture.get("receipt_sha256"))
+        ):
+            raise AttestationNotVerified("verified issuer does not bind selected capture and receipt bytes")
+    except AttestationNotVerified as exc:
+        return str(exc)
+    return None
 
 
 def _graph_totality(application: dict, completeness: dict) -> tuple[dict, list[str]]:
@@ -377,6 +406,11 @@ def build_commitment(
     spec = document.get("software_spec") or {}
     if spec.get("status") != "reviewed":
         blockers.append({"component": "software_spec", "reason": "software declarations are not reviewed"})
+    if document.get("schema") == INPUT_SCHEMA:
+        from merlin.targetgen.spec_fact_drift import blockers as drift_blockers
+
+        # A reviewed spec can still forbid what the facts establish, or claim what they refuse.
+        blockers.extend(drift_blockers(document.get("spec_fact_drift")))
     accounting = document.get("accounting") or {}
     applications = accounting.get("applications") or {}
     if not applications:
@@ -394,7 +428,10 @@ def build_commitment(
         for reason in graph_reasons:
             blockers.append({"component": "graph_totality", "application": label, "reason": reason})
         receipt = application.get("capture_receipt") or {}
-        if receipt.get("status") != "verified_materialized" or receipt.get("source_closure_verified") is not True:
+        # The materialized receipt never establishes closure by itself; an admitted
+        # issuer's attestation, re-verified from disk against these bytes, does.
+        closure = receipt.get("source_closure_verified") is True or attestation_failure(application) is None
+        if receipt.get("status") != "verified_materialized" or not closure:
             blockers.append(
                 {
                     "component": "capture_provenance",
@@ -440,8 +477,7 @@ def build_commitment(
                 operand_shapes = [row.get("shape") for row in precision.get("ordered_operand_types") or []]
                 result_shapes = [row.get("shape") for row in precision.get("ordered_result_types") or []]
                 static_source_shapes = all(
-                    isinstance(shape, list)
-                    and all(type(dimension) is int and dimension >= 0 for dimension in shape)
+                    isinstance(shape, list) and all(type(dimension) is int and dimension >= 0 for dimension in shape)
                     for shape in [*operand_shapes, *result_shapes]
                 )
                 reasons = []
@@ -454,9 +490,8 @@ def build_commitment(
                     or evidence.get("result_types") != precision.get("result_types")
                     or evidence.get("operand_shapes") != operand_shapes
                     or evidence.get("result_shapes") != result_shapes
-                    or evidence.get("source_shape_status") != (
-                        "static" if static_source_shapes else "dynamic_or_unknown"
-                    )
+                    or evidence.get("source_shape_status")
+                    != ("static" if static_source_shapes else "dynamic_or_unknown")
                 ):
                     reasons.append("support-lowering observation differs from the selected typed source operation")
                 # No selected compiler artifact/verifier is bound by these Phase 0
@@ -737,25 +772,10 @@ def build_phase0_readiness(report: dict) -> dict:
 
     # A materialized M2M receipt is producer-authored. Even a true-looking
     # closure flag cannot stand in for a separately verified fresh issuer.
-    from .capture_execution_attestation import AttestationNotVerified, require_verified_execution
-
     for label, application in sorted(applications.items()):
-        attestation = application.get("capture_execution_attestation") or {}
-        capture = attestation.get("capture") or {}
-        materialized = application.get("capture_receipt") or {}
-        try:
-            require_verified_execution(attestation)
-            if (
-                capture.get("model_sha256") != application.get("capture_sha256")
-                or capture.get("receipt_sha256") != materialized.get("receipt_sha256")
-                or not is_sha256(capture.get("model_sha256"))
-                or not is_sha256(capture.get("receipt_sha256"))
-            ):
-                raise AttestationNotVerified("verified issuer does not bind selected capture and receipt bytes")
-        except AttestationNotVerified as exc:
-            blockers.append(
-                {"component": "capture_execution", "application": label, "reason": str(exc)}
-            )
+        reason = attestation_failure(application)
+        if reason is not None:
+            blockers.append({"component": "capture_execution", "application": label, "reason": reason})
 
     conformance = report.get("conformance") or {}
     if (
@@ -786,7 +806,7 @@ def build_phase0_readiness(report: dict) -> dict:
                 deferred.append(blocker)
                 continue
         elif component == "support_dependency" and blocker.get("reason") == support_route_only:
-            edges = ((application.get("graph_accounting") or {}).get("edges") or [])
+            edges = (application.get("graph_accounting") or {}).get("edges") or []
             count = sum(edge.get("accounting") == "support_dependency" for edge in edges)
             if count > 0 and blocker.get("count") == count:
                 deferred.append(blocker)
@@ -797,15 +817,22 @@ def build_phase0_readiness(report: dict) -> dict:
             if count > 0 and blocker.get("count") == count:
                 deferred.append(blocker)
                 continue
-        elif component == "conformance.composition" and blocker.get("reason") == "required coverage axis was not measured":
+        elif (
+            component == "conformance.composition"
+            and blocker.get("reason") == "required coverage axis was not measured"
+        ):
             composition = conformance.get("composition") or {}
             if (
                 composition.get("status") == "not_measured"
                 and composition.get("phase") == "phase0"
                 and composition.get("required")
-                and set((composition.get("phase1_receipt_required") or {})) == {
-                    "selected_capture", "selected_capsule", "compiler_execution",
-                    "lowering_correspondence", "execution",
+                and set((composition.get("phase1_receipt_required") or {}))
+                == {
+                    "selected_capture",
+                    "selected_capsule",
+                    "compiler_execution",
+                    "lowering_correspondence",
+                    "execution",
                 }
             ):
                 deferred.append(blocker)
@@ -906,6 +933,27 @@ def verify_cohort_binding(report: dict, inputs: dict | None, roots, *, contract:
         or saved.get("sha256") != _digest(members)
     ):
         raise ValueError("coverage report no longer binds the exact admitted-cohort bytes")
+
+
+def admitted_source_roots(source_roots, public_root: Path, *, contract: Path | None = None) -> list[Path]:
+    """Select the authored bytes of exactly the admitted, materialized cohort.
+
+    Oracle tier ceilings rewrite the public execution view's capsule metadata.
+    Workload readiness instead binds the source program and its original capsule
+    bytes, while the ordinary materializer and snapshot bind the execution view.
+    """
+    from merlin.targetgen.capsule_common import discover_capsules
+
+    admitted = discover_capsules(public_root, labels={"public", "dev"}, contract=contract)
+    source = discover_capsules(source_roots, labels={"public", "dev"}, contract=contract)
+    selected_names = [capsule["name"] for capsule in admitted]
+    source_names = [capsule["name"] for capsule in source]
+    if len(selected_names) != len(set(selected_names)) or len(source_names) != len(set(source_names)):
+        raise ValueError("admitted source cohort has duplicate capsule names")
+    by_name = {capsule["name"]: Path(capsule["__dir__"]) for capsule in source}
+    if not selected_names or set(selected_names) - set(by_name):
+        raise ValueError("materialized cohort is empty or names capsules absent from its source")
+    return [by_name[name] for name in sorted(selected_names)]
 
 
 def observe_cohort(

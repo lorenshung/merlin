@@ -106,6 +106,8 @@ def _fixture():
         "schema": CC.INPUT_SCHEMA,
         "target": "fixture",
         "software_spec": {"status": "reviewed"},
+        # A spec-vs-facts comparison with nothing to report; drift blocking is covered by its own tests.
+        "spec_fact_drift": {"schema": "merlin.phase0.spec_fact_drift.v1", "status": "consistent", "findings": []},
         "evidence": {"status": "diagnostic"},
         "accounting": {
             "applications": {
@@ -237,16 +239,36 @@ def test_phase0_readiness_defers_only_compiler_evidence_and_never_promotes_repla
         "status": "not_measured",
         "required": {"A->H->A": ["application"]},
         "phase1_receipt_required": {
-            key: "required" for key in (
-                "selected_capture", "selected_capsule", "compiler_execution", "lowering_correspondence", "execution"
+            key: "required"
+            for key in (
+                "selected_capture",
+                "selected_capsule",
+                "compiler_execution",
+                "lowering_correspondence",
+                "execution",
             )
         },
     }
     report["conformance"]["n_covered"] = 0
     report["blockers"] = [
-        {"component": "support_lowering", "application": "application", "obligation": "support:0", "reason": artifact_reason},
-        {"component": "support_dependency", "application": "application", "count": 1, "reason": "compute islands connected through support lowering await a compiler-owned typed route"},
-        {"component": "transfer", "application": "application", "count": 1, "reason": "conditional SSA uses await reviewed endpoint placement before transfer screening"},
+        {
+            "component": "support_lowering",
+            "application": "application",
+            "obligation": "support:0",
+            "reason": artifact_reason,
+        },
+        {
+            "component": "support_dependency",
+            "application": "application",
+            "count": 1,
+            "reason": "compute islands connected through support lowering await a compiler-owned typed route",
+        },
+        {
+            "component": "transfer",
+            "application": "application",
+            "count": 1,
+            "reason": "conditional SSA uses await reviewed endpoint placement before transfer screening",
+        },
         {"component": "conformance.composition", "reason": "required coverage axis was not measured"},
     ]
     report["status"] = "incomplete"

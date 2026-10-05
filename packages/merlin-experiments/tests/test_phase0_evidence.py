@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from merlin_experiments.phase0 import evidence, sweeps
 from merlin_experiments.phase0.provenance import _scrub_capsule_dir
 
@@ -47,8 +48,9 @@ def test_mx_reference_inventory_selects_only_loaded_file(tmp_path, monkeypatch):
         "numerical_model", tmp_path, document, {".py"}, {"runs"}
     ) == (reference,)
     monkeypatch.setenv("MERLIN_MLC_DIR", str(tmp_path))
-    from merlin.targetgen.mx_oracle import mx_reference
     from merlin_experiments.phase0.numerics import _mx_ref
+
+    from merlin.targetgen.mx_oracle import mx_reference
 
     assert _mx_ref().VALUE == 1
     assert mx_reference().VALUE == 1
@@ -68,14 +70,51 @@ def _selection(monkeypatch, tmp_path, body=None):
     raw.write_bytes(
         json.dumps({"facts": body or {"arrays": [{"rows": 4, "cols": 4}], "memories": []}}, indent=4).encode() + b"\n"
     )
-    monkeypatch.setattr(
-        target_registry, "resolve", lambda target: SimpleNamespace(base=provider, contract_path=contract)
+    info = target_registry.TargetInfo(
+        name="fixture", kind="external", base=provider, contract_path=contract,
+        dialect_plan_path=provider / "contracts/dialect_plan.yaml", facts_path=raw, backend="fixture",
     )
+    monkeypatch.setattr(target_registry, "resolve", lambda target: info)
     monkeypatch.setattr(facts, "find_facts", lambda target, explicit=None: raw)
     monkeypatch.setattr(facts, "ensure_facts", lambda *a, **k: pytest.fail("selection must never extract"))
     monkeypatch.setattr(readout_facet, "capture_inputs", lambda *a, **k: {"scalar_abi": None, "readouts": None})
     monkeypatch.setattr(base, "execution_capability_facts", lambda target: {})
     return evidence.select_evidence("fixture", facts_path=raw), raw, code
+
+
+def test_software_fact_derivation_binds_legacy_readers_to_selected_bytes(monkeypatch, tmp_path):
+    _, raw, _ = _selection(monkeypatch, tmp_path)
+    software = tmp_path / "software.yaml"
+    software.write_text(yaml.safe_dump({
+        "schema": "merlin.software_spec.v1", "target": "fixture", "status": "reviewed",
+        "numerical_semantics": {
+            "model": {"engine": "integer_reference"}, "operand_dtype": "int8", "accumulator_dtype": "i32",
+            "readout_dtype": "i32", "subnormal_operand_flush": False, "overflow": "wrap_internal_mac",
+        },
+        "operations": {"contraction": {"placement": "accelerator", "dtypes": ["int8"]}},
+    }))
+    from merlin.llvmlower.device_shim import tile_edge_for
+    from merlin.targetgen import spec_fact_drift
+
+    derive = spec_fact_drift.fact_capabilities
+    observed = []
+
+    def through_legacy_readers(**kwargs):
+        # The real helper calls load_facts(target), not the supplied raw_facts.
+        # _selection makes any attempted live extraction fail.
+        assert tile_edge_for(kwargs["target"]) == 4
+        assert facts.load_facts(kwargs["target"]) == kwargs["raw_facts"]
+        assert target_registry.load_contract(kwargs["target"]) == kwargs["contract"]
+        observed.append(kwargs["target"])
+        return derive(**kwargs)
+
+    monkeypatch.setattr(spec_fact_drift, "fact_capabilities", through_legacy_readers)
+    selected = evidence.select_evidence("fixture", facts_path=raw, software_spec=software)
+    assert observed == ["fixture"]
+    assert selected.raw_facts == raw.read_bytes()
+    # The selected-only context must not leak into the next caller.
+    with pytest.raises(pytest.fail.Exception, match="selection must never extract"):
+        tile_edge_for("fixture")
 
 
 def test_phase0_accepts_symlink_alias_for_byte_bound_rtl_production(monkeypatch, tmp_path):
@@ -100,9 +139,7 @@ def test_phase0_accepts_symlink_alias_for_byte_bound_rtl_production(monkeypatch,
             {
                 "schema": source_selection.SCHEMA,
                 "target": "fixture",
-                "sources": {
-                    role: member(alias / core.name) for role in ("core_hw", "soc_hw", "firrtl", "hierarchy")
-                },
+                "sources": {role: member(alias / core.name) for role in ("core_hw", "soc_hw", "firrtl", "hierarchy")},
             }
         )
     )
@@ -157,8 +194,7 @@ def test_phase0_accepts_symlink_alias_for_byte_bound_rtl_production(monkeypatch,
     )
     altered = evidence.select_evidence("fixture", facts_path=facts_path)
     assert any(
-        row["component"] == "source-consistency" and row["status"] == "contradiction"
-        for row in altered.diagnostics
+        row["component"] == "source-consistency" and row["status"] == "contradiction" for row in altered.diagnostics
     )
 
     genericization["input"].pop("path")
@@ -173,8 +209,7 @@ def test_phase0_accepts_symlink_alias_for_byte_bound_rtl_production(monkeypatch,
     )
     malformed = evidence.select_evidence("fixture", facts_path=facts_path)
     assert any(
-        row["component"] == "source-consistency" and row["status"] == "contradiction"
-        for row in malformed.diagnostics
+        row["component"] == "source-consistency" and row["status"] == "contradiction" for row in malformed.diagnostics
     )
 
 
@@ -547,6 +582,12 @@ def test_frontend_graph_catalog_and_receipt_survive_source_deletion(monkeypatch,
     assert (
         selected.application_graphs["iteration"]["capture_sha256"] == hashlib.sha256(capture.read_bytes()).hexdigest()
     )
+    incompatible = json.loads(sidecar.read_bytes())
+    incompatible["applications"]["iteration"]["capture_normalization"]["output_sha256"] = "0" * 64
+    sidecar.write_text(json.dumps(incompatible))
+    with pytest.raises(ValueError, match="same frontend/MLIR environment"):
+        evidence.select_evidence("fixture", descriptor=descriptor, facts_path=facts_path, inventory_path=sidecar)
+    sidecar.write_text(json.dumps(inventory))
     bundle = tmp_path / "capsule"
     bundle.mkdir()
     artifact = SimpleNamespace(
@@ -718,3 +759,28 @@ def test_memory_axis_does_not_reread_missing_selected_store(monkeypatch, tmp_pat
             fixed={"M": [4], "N": [4]},
             evidence=selected,
         )
+
+
+def test_an_rtl_audit_beside_the_facts_clears_only_its_own_diagnostic(monkeypatch, tmp_path):
+    from merlin_experiments.phase0 import evidence_status
+
+    selected, raw, _ = _selection(monkeypatch, tmp_path)
+    assert selected.status == "diagnostic"
+    assert any(row["component"] == "rtl-audit" for row in selected.diagnostics)
+    hardware = tmp_path / "hardware.yaml"
+    hardware.write_text("target: fixture\n")
+    (raw.parent / evidence_status.AUDIT_MEMBER).write_text(
+        json.dumps(
+            {
+                "schema": evidence_status.AUDIT_SCHEMA,
+                "status": "verified",
+                "facts_sha256": hashlib.sha256(raw.read_bytes()).hexdigest(),
+                "hardware_spec_sha256": hashlib.sha256(hardware.read_bytes()).hexdigest(),
+                "checks": [{"source_status": "verified", "extraction": {"status": "agrees"}, "gap": None}],
+            }
+        )
+    )
+    audited = evidence.select_evidence("fixture", facts_path=raw, hardware_spec=hardware)
+    assert not any(row["component"] == "rtl-audit" for row in audited.diagnostics)
+    # Other reasons remain on record, so the selection is still not verified.
+    assert audited.diagnostics and audited.status == "diagnostic"
