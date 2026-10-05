@@ -37,18 +37,20 @@ def test_a_declared_board_resolves_and_an_undeclared_one_says_so(target):
         assert system.host is not None, f"{target} declares board {board!r} but no host resolved: {why2}"
 
 
-def test_the_declared_boards_give_their_targets_a_vector_host():
-    """The point of declaring it. A target whose host_lane pins an RVV package needs a host that HAS a
-    vector unit, or the lane it is pinned to cannot exist."""
+def test_the_declared_boards_expose_only_their_real_host_classes():
+    """A non-vector Rocket must not be invented as a vector host by the global registry."""
     declared = [t for t in _targets() if host_board_for_experiment(t)[0]]
     assert declared, "at least one target must declare a board, or this closes nothing"
     for target in declared:
         system, why = system_for_experiment(target)
-        assert system.host.vector_capable() is True, (
-            f"{target} declares an RVV host lane, so its board must be vector-capable ({why})"
-        )
+        assert system.host is not None, f"{target} declares a board but no host resolved ({why})"
         kinds = {u.kind for u in P.host_units(system.host)}
-        assert "vector" in kinds, f"{target}: host_units synthesized no vector lane ({sorted(kinds)})"
+        assert "scalar" in kinds
+        assert ("vector" in kinds) == system.host.vector_capable(), (
+            f"{target}: host_units disagrees with selected board ({why})"
+        )
+        if target == "gemmini":
+            assert system.host.harts == 1 and "vector" not in kinds
 
 
 def test_an_undeclared_target_does_not_silently_become_scalar_only():

@@ -14,6 +14,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import os
+from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -131,6 +133,7 @@ class HostLane:
     #: Separate operation-support declaration, never appended to the immutable compiler payload.
     capability_spec: str | None = None
     capability_spec_sha256: str | None = None
+    host_isa: str | None = None
 
     #: The provenance values a descriptor may declare.
     PROVENANCE = ("published", "in_tree_minted")
@@ -187,6 +190,7 @@ class HostLane:
             provenance=provenance,
             capability_spec=capability_spec,
             capability_spec_sha256=capability_digest,
+            host_isa=str(value["host_isa"]) if value.get("host_isa") else None,
         )
 
     def resolve(self, *, root: Path | None = None, descriptor: Path | None = None) -> tuple[Path, dict[str, Any]]:
@@ -245,14 +249,22 @@ class HostLane:
         from ..mining.registry import load_rvv_package
 
         loaded = load_rvv_package(package)
-        schedule_rel = _safe_relative(str(loaded.knobs.get("schedule_file", "schedule.mlir")), field="schedule_file")
-        schedule = package / schedule_rel
-        if not schedule.is_file() or schedule.is_symlink():
-            raise ValueError(f"host_lane schedule {schedule_rel.as_posix()!r} is not a regular in-package file")
-        try:
-            schedule.resolve(strict=True).relative_to(package)
-        except (OSError, ValueError) as exc:
-            raise ValueError(f"host_lane schedule {schedule_rel.as_posix()!r} escapes the pinned package") from exc
+        schedule_rel = None
+        if loaded.backend == "rvv":
+            schedule_rel = _safe_relative(
+                str(loaded.knobs.get("schedule_file", "schedule.mlir")), field="schedule_file"
+            )
+            schedule = package / schedule_rel
+            if not schedule.is_file() or schedule.is_symlink():
+                raise ValueError(f"host_lane schedule {schedule_rel.as_posix()!r} is not a regular in-package file")
+            try:
+                schedule.resolve(strict=True).relative_to(package)
+            except (OSError, ValueError) as exc:
+                raise ValueError(f"host_lane schedule {schedule_rel.as_posix()!r} escapes the pinned package") from exc
+        if self.host_isa:
+            from merlin.compile.host_lane import require_host_isa
+
+            require_host_isa(loaded.cflags, self.host_isa)
 
         from merlin.common.tree_hash import hash_tree
 
@@ -276,7 +288,9 @@ class HostLane:
             "dtype_strategy": loaded.dtype_strategy,
             "declared_dtype_strategy": self.dtype_strategy,
             "provenance": self.provenance,
-            "schedule_file": schedule_rel.as_posix(),
+            "schedule_file": schedule_rel.as_posix() if schedule_rel is not None else None,
+            "backend": loaded.backend,
+            "host_isa": self.host_isa,
         }
         # DECLARED vs LOADED, checked here rather than at the call site. The grading path already
         # compared the loaded strategy against the capsule's compile dtype; what it could not catch was
@@ -646,6 +660,9 @@ class TargetExperiment:
     # Left None where the evidence does not name one -- ``system_for_experiment`` then reports the
     # omission instead of fabricating a host, since a made-up host is worse than an absent one.
     host_board: str | None = None
+    # Optional target-owned board catalog. Its bytes, not an ambient registry
+    # override, determine the host named above and are selected with the descriptor.
+    host_board_catalog: str | None = None
     # OPTIONAL: the only things capsule SYNTHESIS cannot derive.
     #
     # `models` -- which workloads this target is FOR. The requirement's `observed` half comes from model
@@ -678,6 +695,21 @@ class TargetExperiment:
 
     def _source_root(self) -> Path:
         return self.source_root if self.source_root is not None else repo_root()
+
+    def selected_board_catalog(self) -> Path | None:
+        if self.host_board_catalog is None:
+            return None
+        relative = Path(self.host_board_catalog)
+        if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+            raise ValueError(f"host.catalog must be a safe source-relative path: {self.host_board_catalog!r}")
+        root = self._source_root().resolve()
+        lexical = root / relative
+        if any(root.joinpath(*relative.parts[:i]).is_symlink() for i in range(1, len(relative.parts) + 1)):
+            raise ValueError(f"host.catalog has a symlinked component: {self.host_board_catalog!r}")
+        catalog = lexical.resolve(strict=True)
+        if not catalog.is_relative_to(root) or not catalog.is_file():
+            raise ValueError(f"host.catalog escapes its source owner or is not a file: {self.host_board_catalog!r}")
+        return catalog
 
     @property
     def batched_oracle_tiers(self) -> frozenset[str]:
@@ -1300,6 +1332,7 @@ def load_target_experiment(descriptor: str | Path, *, source_root: Path | None =
         hidden_expected_admitted_capsules=hidden_admitted,
         host_lanes=HostLaneMatrix.from_mapping(doc.get("host_lane"), descriptor=p),
         host_board=(lambda v: str(v) if v else None)((doc.get("host") or {}).get("board")),
+        host_board_catalog=(lambda v: str(v) if v else None)((doc.get("host") or {}).get("catalog")),
         workload_spec=(lambda v: dict(v) if isinstance(v, dict) else None)(doc.get("workload_spec")),
         oracle_resources=oracle_resources or None,
     )
@@ -1331,6 +1364,43 @@ def batched_oracle_tiers(target: str | None) -> frozenset[str]:
     )
 
 
+def selected_experiment_contract(te: TargetExperiment, *, environment: Mapping[str, str]) -> Path | None:
+    """Resolve descriptor-owned capability selection, without changing support ownership.
+
+    Explicit conflicting process selections fail rather than silently changing
+    the scientific input. Release preparation supplies an empty environment to
+    select its newly staged descriptor independently of the caller's live view.
+    """
+    declared = te.declared_contract_path()
+    if te.declared_contract and declared is None:
+        raise ValueError("declared capability contract is absent; prepare a new release")
+    explicit = environment.get("MERLIN_TARGET_CONTRACT")
+    if declared is not None and explicit and Path(explicit).expanduser().resolve() != declared.resolve():
+        raise ValueError("explicit capability contract differs from the experiment's declared selection")
+    selected = declared or (Path(explicit).expanduser() if explicit else None)
+    if selected is None:
+        return None
+    if selected.is_symlink() or not selected.is_file():
+        raise ValueError("selected capability contract is absent or symlinked")
+    document = yaml.safe_load(selected.read_bytes())
+    if not isinstance(document, dict) or document.get("name") != te.target:
+        raise ValueError("selected capability contract is not a mapping for this target")
+    return selected.resolve()
+
+
+@contextmanager
+def observed_experiment_contract(te: TargetExperiment):
+    """Bind release-local derivation to its declared bytes, without mutating process env."""
+    from .target_registry import observed_contract
+
+    selected = selected_experiment_contract(te, environment={})
+    if selected is None:
+        yield
+    else:
+        with observed_contract(te.target, yaml.safe_load(selected.read_bytes()), source_path=selected):
+            yield
+
+
 def declared_vs_resolved_contract(te: TargetExperiment) -> tuple[Path | None, Path | None, str]:
     """``(declared, resolved, verdict)`` for this target's capability contract.
 
@@ -1350,7 +1420,7 @@ def declared_vs_resolved_contract(te: TargetExperiment) -> tuple[Path | None, Pa
 
     declared = te.declared_contract_path()
     try:
-        resolved = target_registry.resolve(te.target).contract_path
+        resolved = target_registry.resolve(te.target).capability_contract_path
         resolved = resolved if resolved and Path(resolved).is_file() else None
     except Exception:  # noqa: BLE001 — an unresolvable target is one of the answers
         resolved = None
@@ -1368,6 +1438,8 @@ def shared_spec_paths(te: TargetExperiment, variant: str | None = None) -> set[s
     """The shared hardware-spec path strings the descriptor makes authoritative — the ISA headers + the
     hwbringup set EVERY arm's bundle must grant (a constant input, not assistance)."""
     paths = set(te.isa_headers)
+    if te.declared_contract:
+        paths.add(te.declared_contract)
     if te.hwbringup_set:
         paths.add(te.hwbringup_set)
     if variant:

@@ -1,4 +1,9 @@
-"""The convolution geometry a captured model really contains, recovered STRUCTURALLY.
+"""The convolution geometry a captured model contains, recovered from bound evidence.
+
+Integerization can replace a convolution and its im2col gather with an integer
+matmul. For those captures, the receipt-bound original frontend graph supplies
+the source window; concrete operand/result shapes must verify its parameters.
+Captures without a source convolution trace use structural MLIR recovery below.
 
 A padded convolution is a defect class this corpus could not observe. Measured by
 ``check_defect_reach``: no capsule on any target declares a non-zero padding, so a lowering that
@@ -6,10 +11,9 @@ loses the padding identity is wrong only in border rows nothing here computes --
 how a fused convolution/max-pool shipped with a ``-128`` padding identity dropped and 119 wrong
 outputs.
 
-The obvious fix is to read ``padding``/``stride``/``dilation`` off the captured op, and it does not
-work: torch-mlir emits convolutions as **im2col**, so the captured program contains a gather and a
-matmul and no convolution op at all. Nothing carries those attributes because by that point nothing
-is a convolution.
+Reading ``padding``/``stride``/``dilation`` off lowered MLIR does not work:
+torch-mlir emits convolutions as **im2col**, so the lowered program contains a
+gather and a matmul and no convolution op at all.
 
 WHAT IS STILL THERE IS THE GEOMETRY ITSELF, in two structures:
 
@@ -40,7 +44,9 @@ capsules for a convolution the model does not contain.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 
 __all__ = ["ConvGeometry", "geometries", "geometry_classes"]
 
@@ -425,6 +431,106 @@ def _cached_geometries(path) -> list[ConvGeometry]:
     return hit
 
 
+def _trace_geometries(path: Path) -> list[ConvGeometry] | None:
+    """Read source convolution windows when integerization erased the im2col gather.
+
+    The original frontend graph is part of the capture receipt, not an independently
+    supplied model. Reject malformed geometry instead of inferring it from an int_mm.
+    ``None`` means there is no source convolution trace, so MLIR recovery applies.
+    """
+    trace_path = path.parent / "frontend-trace.json"
+    if not trace_path.is_file():
+        return None
+    from merlin.targetgen.application_inventory import verify_capture_receipt
+
+    receipt = verify_capture_receipt(path)
+    if receipt["status"] != "verified_materialized":
+        raise ValueError(f"capture receipt does not bind the frontend trace: {receipt['errors']}")
+    receipt_doc = json.loads((path.parent / "capture_receipt.json").read_bytes())
+    if "frontend-trace.json" not in (receipt_doc.get("artifacts") or {}):
+        raise ValueError("frontend trace is not a capture receipt artifact")
+    doc = json.loads(trace_path.read_bytes())
+    if doc.get("schema") != "m2m.frontend_trace.v1" or doc.get("blockers"):
+        raise ValueError("frontend trace is unsupported or blocked")
+    graph = (doc.get("graphs") or {}).get("original")
+    if not isinstance(graph, dict) or graph.get("status") != "complete" or not isinstance(graph.get("nodes"), list):
+        raise ValueError("original frontend graph is incomplete or has no node list")
+    nodes = graph["nodes"]
+    convolutions = [node for node in nodes if node.get("target") == "aten.conv2d.default"]
+    declared_count = (graph.get("by_target") or {}).get("aten.conv2d.default")
+    if declared_count is not None and declared_count != len(convolutions):
+        raise ValueError("original frontend convolution count differs from the node list")
+    if not convolutions:
+        return None
+    values = {
+        value.get("id"): value
+        for node in nodes
+        for value in (node.get("results") or [])
+        if isinstance(value, dict)
+    }
+
+    def shape(ref: object) -> tuple[int, ...]:
+        if not isinstance(ref, dict) or not isinstance(ref.get("value_id"), str):
+            raise ValueError("convolution tensor operand has no source value identity")
+        dims = (values.get(ref["value_id"]) or {}).get("shape")
+        if not isinstance(dims, list) or not dims or any(type(d) is not int or d <= 0 for d in dims):
+            raise ValueError("convolution tensor operand has no concrete positive shape")
+        return tuple(dims)
+
+    def pair(value: object, name: str) -> tuple[int, int]:
+        if type(value) is int:
+            value = [value, value]
+        if not isinstance(value, (list, tuple)) or len(value) != 2 or any(
+            type(v) is not int or v < (0 if name == "padding" else 1) for v in value
+        ):
+            raise ValueError(f"convolution {name} is not a concrete two-dimensional extent")
+        return tuple(value)
+
+    found = []
+    for node in convolutions:
+        args = node.get("args") or []
+        if not isinstance(args, list) or not 3 <= len(args) <= 7 or node.get("kwargs"):
+            raise ValueError("convolution source arguments are not in the supported positional form")
+        input_shape, weight_shape = shape(args[0]), shape(args[1])
+        results = node.get("results") or []
+        if len(results) != 1:
+            raise ValueError("convolution source has no unique result")
+        output_shape = shape({"value_id": results[0].get("id")})
+        if any(len(s) != 4 for s in (input_shape, weight_shape, output_shape)):
+            raise ValueError("convolution source is not NCHW/OIHW rank four")
+        stride = pair(args[3] if len(args) > 3 else [1, 1], "stride")
+        padding = pair(args[4] if len(args) > 4 else [0, 0], "padding")
+        dilation = pair(args[5] if len(args) > 5 else [1, 1], "dilation")
+        groups = args[6] if len(args) > 6 else 1
+        if type(groups) is not int or groups <= 0 or input_shape[1] != weight_shape[1] * groups:
+            raise ValueError("convolution source channel/group relation is invalid")
+        if input_shape[0] != output_shape[0] or weight_shape[0] != output_shape[1]:
+            raise ValueError("convolution source batch/output-channel relation is invalid")
+        expected = tuple(
+            (input_shape[2 + axis] + 2 * padding[axis] - dilation[axis] * (weight_shape[2 + axis] - 1) - 1)
+            // stride[axis] + 1
+            for axis in range(2)
+        )
+        if expected != output_shape[2:]:
+            raise ValueError("convolution source window does not reproduce the captured output shape")
+        found.append(
+            ConvGeometry(
+                kernel=weight_shape[2:],
+                stride=stride,
+                dilation=dilation,
+                pad_before=padding,
+                pad_after=padding,
+                input_dilation=(1, 1),
+                pad_known=True,
+                in_spatial=input_shape[2:],
+                out_spatial=output_shape[2:],
+                channels_in=input_shape[1],
+                dtype=str(results[0].get("dtype") or "unknown"),
+            )
+        )
+    return found
+
+
 def geometry_classes(captures: dict) -> dict:
     """The distinct convolution geometries a set of captures contains, with their evidence.
 
@@ -434,7 +540,8 @@ def geometry_classes(captures: dict) -> dict:
     unreadable: dict[str, str] = {}
     for label, path in sorted((captures or {}).items()):
         try:
-            found = _cached_geometries(path)
+            traced = _trace_geometries(Path(path)) if isinstance(path, (str, Path)) else None
+            found = traced if traced is not None else _cached_geometries(path)
         except Exception as e:  # noqa: BLE001 -- reported, never skipped silently
             unreadable[label] = f"{type(e).__name__}: {str(e)[-160:]}"
             continue
@@ -448,10 +555,9 @@ def geometry_classes(captures: dict) -> dict:
         "n_classes": len(by_sig),
         "captures_unreadable": unreadable,
         "axis_basis": (
-            "the convolution windows real captures CONTAIN, recovered from the im2col gather's affine "
-            "map and its padding producer rather than from op attributes -- torch-mlir emits im2col, "
-            "so a captured convolution carries no padding/stride/dilation attribute to read. Each "
-            "geometry is verified against padded == (out-1)*stride + (kernel-1)*dilation + 1 and "
-            "dropped when it does not hold, so an unverified window never becomes an obligation"
+            "convolution windows in receipt-bound original frontend graphs, with input/weight/output "
+            "shapes checked against stride, padding and dilation; when a capture has no source "
+            "convolution trace, recover from the im2col gather and its padding producer. Unreadable "
+            "evidence is reported, never converted to an inferred window"
         ),
     }

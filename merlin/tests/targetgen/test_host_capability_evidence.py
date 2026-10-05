@@ -1,5 +1,8 @@
 """Exact host selectors may not turn a schedule into family-wide support."""
 
+import pytest
+
+from merlin.targetgen.host_capabilities import validate_host_capabilities
 from merlin.targetgen.host_capabilities import admit_host_operation
 
 
@@ -46,3 +49,18 @@ def test_family_only_host_selector_remains_available_when_explicitly_declared():
         selected, {"mlir_operation": "linalg.generic"}, {"family": "contraction", "operand_dtype": "int8"}
     )
     assert generic["status"] == "admitted"
+
+
+def test_unreviewed_operation_inside_reviewed_host_document_remains_unknown():
+    selected = _selection()
+    declaration = selected["host"]["capability_spec"]["operations"][0]
+    declaration["status"] = "unreviewed"
+    named = admit_host_operation(
+        selected, {"mlir_operation": "linalg.matmul"}, {"family": "contraction", "operand_dtype": "int8"}
+    )
+    assert named["status"] == "unknown"
+    assert named["review_status"] == "unreviewed"
+    assert named["reviewed"] is False
+    declaration["status"] = "accepted"
+    with pytest.raises(ValueError, match="invalid review status"):
+        validate_host_capabilities(selected["host"]["capability_spec"])

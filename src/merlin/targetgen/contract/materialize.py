@@ -46,6 +46,7 @@ _CAPSULE_FILES = (
     "capsule.weights.safetensors",
     "capsule.weights.safetensors.manifest.json",
     "golden.yaml",
+    "golden.npz",
     "expected_instruction_coverage.yaml",
     "README.md",
     "frontend-trace.json",
@@ -422,6 +423,31 @@ def _staging_dir_of(path: str | Path) -> Path | None:
         if _build_owner_pid(cand.name) is not None:
             return cand
     return None
+
+
+def resolve_published_cohort(path: str | Path) -> Path:
+    """The concrete build directory behind a cohort path this module published; others unchanged.
+
+    :func:`materialize_public_cohort` publishes a per-target SYMLINK beside its immutable build so
+    concurrent readers swap atomically. A consumer that refuses to traverse links (coverage observation
+    reads exact bytes and must not follow an indirection someone else planted) can read the build it
+    points at instead. Only this module's own link is resolved: a symlink whose target is a bare sibling
+    name of the form ``.<link name>.build.<pid>.<hex>`` naming a real directory. Any other link is refused.
+    """
+    candidate = Path(path)
+    if not candidate.is_symlink():
+        return candidate
+    target = os.readlink(candidate)
+    build = candidate.parent / target
+    if (
+        Path(target).name != target
+        or not target.startswith(f".{candidate.name}{_BUILD_INFIX}")
+        or _build_owner_pid(target) is None
+        or build.is_symlink()
+        or not build.is_dir()
+    ):
+        raise ValueError(f"{candidate} is a symlink this module did not publish; refusing to follow it")
+    return build
 
 
 def pin_cohort_builds(*roots: str | Path) -> list[Path]:

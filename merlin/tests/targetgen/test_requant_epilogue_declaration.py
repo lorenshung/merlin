@@ -20,6 +20,12 @@ SILENTLY rather than loudly:
 3. the requirement DEMANDS it. ``conformance._epilogue_axis`` walked a tuple that omitted the stage.
 
 Every test here is written so that undoing one of those three fixes turns it red.
+
+WHICH target must fuse the stage is DERIVED, never assumed. A target declares ``requant`` exactly when
+one of its readouts applies the integer shift (``readout_epilogue_capability``); a target whose readout
+does not must neither require the stage nor have a capsule written for it. The builder mechanics are
+therefore exercised on a fixture target whose declared readout applies the shift, and the real target
+is checked against its own readout declaration in whichever direction that declaration points.
 """
 
 from __future__ import annotations
@@ -35,13 +41,40 @@ from merlin.targetgen import capsule_golden as CG
 from merlin.targetgen import conformance as CF
 from merlin.targetgen import corpus_spec as CS
 from merlin.targetgen import corpus_synth as CSY
+from merlin.targetgen import readout_facet as RF
 from merlin.targetgen.contract import interface_emit as IE
 from merlin.targetgen.contract import matmul_interface as MSE
+from merlin.verify.epilogue_applicability import ReadoutCapability, selectors_applying
 
-#: The target this repo's requant obligation is derived for. A test may name a target -- it is the
-#: subject here -- but nothing about it is assumed: the shift and the narrow dtype are read back out of
-#: the target's own profile rather than spelled in this file.
+#: A target whose declared readout APPLIES the integer shift. It exists only inside these tests (see
+#: ``_shift_target``), so the builder's shift threading is tested on a target where the stage is legal
+#: rather than on whichever real target happens to fuse it.
+_SHIFT_TARGET = "readout_shift_fixture"
+
+#: A real target, checked against its OWN readout declaration: nothing here says whether it applies
+#: the shift. Its conformance spec is also the base document synthesis runs on.
 _TARGET = "gemmini"
+
+
+@pytest.fixture(autouse=True)
+def _shift_target(monkeypatch):
+    """Declare ``_SHIFT_TARGET``'s readout through the same accessor the generator and the grader read."""
+    declared = RF.epilogue_readouts
+    shift = [
+        ReadoutCapability(
+            selector="i8", applies=frozenset({"requant"}), evidence="test fixture: a readout that applies the shift"
+        )
+    ]
+    monkeypatch.setattr(RF, "epilogue_readouts", lambda target: shift if target == _SHIFT_TARGET else declared(target))
+
+
+def _applies_the_shift(target: str) -> bool:
+    """Whether ``target``'s declared readouts apply the ``requant`` stage; skips when it declares none."""
+    readouts = RF.epilogue_readouts(target)
+    if not readouts:
+        pytest.skip(f"{target} declares no readouts here (no support provider selected), so nothing is derivable")
+    return bool(selectors_applying(readouts, ["requant"]))
+
 
 #: A shift that is NOT the value the three engines fall back to (4). Every threading assertion below
 #: uses one of these, so a broken thread shows up as a wrong number rather than as a coincidence.
@@ -51,7 +84,7 @@ _OVERRIDE_SHIFT = 5
 
 def _binding(**over) -> CS.CorpusBinding:
     kw = dict(
-        target=_TARGET,
+        target=_SHIFT_TARGET,
         tile_dim=16,
         operand_dtype="int8",
         accum_dtype="i32",
@@ -197,8 +230,15 @@ def test_a_requant_commit_narrows_to_the_targets_declared_output_dtype():
     assert values and all(-128 <= v <= 127 for v in values)
 
 
-def test_an_entry_declaration_still_wins_over_the_narrowing():
-    """The entry's own output_dtype is the one declaration this resolver may not second-guess."""
+def test_an_entry_declaration_still_wins_over_the_narrowing(monkeypatch):
+    """The entry's own output_dtype is the one declaration this resolver may not second-guess: it is
+    emitted where a readout applies the stage at that width, and refused -- never silently narrowed --
+    where none does."""
+    with pytest.raises(ValueError, match="i32"):
+        CS.build_matmul(_entry(output_dtype="i32"), _binding())
+    wide = ReadoutCapability(selector="i32", applies=frozenset({"requant"}), evidence="test fixture: wide readout")
+    narrow = RF.epilogue_readouts(_SHIFT_TARGET)
+    monkeypatch.setattr(RF, "epilogue_readouts", lambda target: [*narrow, wide] if target == _SHIFT_TARGET else None)
     capsule, _ = CS.build_matmul(_entry(output_dtype="i32"), _binding())
     assert capsule["operation"]["attributes"]["output_dtype"] == "i32"
 
@@ -246,18 +286,38 @@ def test_requant_is_in_the_builder_vocabulary_and_there_is_only_one_of_it():
     assert CF._builder_epilogue_stages() is CS.BUILDER_EPILOGUE_STAGES
 
 
-def test_the_derived_epilogue_requirement_demands_the_requant_stage():
-    axis = CF._epilogue_axis(_TARGET)
+@pytest.mark.parametrize("target", [_SHIFT_TARGET, _TARGET])
+def test_the_derived_requirement_demands_requant_exactly_when_a_readout_applies_the_shift(target):
+    """A readout that applies the shift makes the stage required -- a corpus that never asked for it
+    would let a backend that cannot emit it fail nothing. A readout that does not makes it refused,
+    with the reason, because fusing it would declare a computation that hardware does not perform."""
+    applies = _applies_the_shift(target)
+    axis = CF._epilogue_axis(target)
     required = {str(r.get("stage")): r for r in (axis.get("required") or ())}
-    assert "requant" in required, (
-        f"{_TARGET} declares the stage's family fused-only, so a corpus that never asks for it lets a "
-        f"backend that cannot emit it fail nothing: {sorted(required)}"
-    )
-    assert required["requant"]["evidenced_by"], "a required stage with no evidence is a guess"
+    rejected = {str(r.get("stage")): r for r in (axis.get("rejected") or ())}
+    if applies:
+        assert "requant" in required, f"{target}'s readout applies the shift: {sorted(required)}"
+        assert required["requant"]["evidenced_by"], "a required stage with no evidence is a guess"
+    else:
+        assert "requant" not in required, f"{target}'s readout applies no shift: {sorted(required)}"
+        assert rejected.get("requant", {}).get("why"), "a refused stage must say why"
 
 
-def _synthesized_requant_entry() -> dict:
-    """The profile entry the generator's epilogue axis writes for the DERIVED requant obligation.
+@pytest.mark.parametrize("target", [_SHIFT_TARGET, _TARGET])
+def test_a_requant_capsule_is_written_exactly_where_a_readout_applies_the_shift(target):
+    """The generator reads the same declaration: it builds the stage where a readout applies it and
+    refuses it, at generation, where none does."""
+    binding = _binding(target=target)
+    if _applies_the_shift(target):
+        capsule, _ = CS.build_matmul(_entry(), binding)
+        assert capsule["operation"]["attributes"]["epilogue"] == ["requant"]
+    else:
+        with pytest.raises(ValueError, match="declares no readout that applies"):
+            CS.build_matmul(_entry(), binding)
+
+
+def _synthesized_requant_entries(target: str) -> list[dict]:
+    """The profile entries the generator's epilogue axis writes for ``target``'s DERIVED requant obligation.
 
     Driven off a freshly derived epilogue axis rather than the tracked spec file, so this asserts the
     derivation -> synthesis chain and not the freshness of a checked-in artifact.
@@ -272,14 +332,23 @@ def _synthesized_requant_entry() -> dict:
         )
         or {}
     )
-    spec["epilogue"] = CF._epilogue_axis(_TARGET)
-    entries = [
+    spec["epilogue"] = CF._epilogue_axis(target)
+    return [
         e
         for e in (CSY.synthesize(spec).get("capsules") or ())
         if "requant" in [str(x) for x in (e.get("epilogue") or ())]
     ]
+
+
+def _synthesized_requant_entry() -> dict:
+    entries = _synthesized_requant_entries(_SHIFT_TARGET)
     assert entries, "the epilogue axis wrote no member for the required 'requant' stage"
     return entries[0]
+
+
+@pytest.mark.parametrize("target", [_SHIFT_TARGET, _TARGET])
+def test_a_requant_member_is_synthesized_exactly_where_a_readout_applies_the_shift(target):
+    assert bool(_synthesized_requant_entries(target)) == _applies_the_shift(target)
 
 
 def test_the_synthesized_obligation_annotates_the_generalization_axis():

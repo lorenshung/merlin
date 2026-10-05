@@ -18,6 +18,7 @@ from merlin.targetgen.transfer_contracts import screen_transfer_contract as scre
 from merlin.targetgen.transfer_contracts import validate_transfer_contracts
 
 SCHEMA = "merlin.software_spec.v1"
+_NUMERICAL_CONTRACTS = frozenset({"operand_sum_exhaustive_i8_v1"})
 _IEEE_ROUNDING = frozenset({"rne", "rmm", "rtz", "rdn", "rup"})
 _REDUCTION_ORDERS = frozenset({"index_sequential", "tree", "pairwise"})
 _REDUCTION_CADENCES = frozenset({"per_step", "single_final"})
@@ -43,8 +44,30 @@ _SIGNATURE_FIELDS = frozenset(
         "ordered_operand_dtypes",
         "ordered_result_dtypes",
         "compute_dtypes",
+        "quantization_parameters",
     }
 )
+
+
+def validate_quantization_parameters(parameters: object, *, source: str) -> dict[str, int]:
+    """Validate exact authored per-tensor quantization parameter constraints."""
+    if (
+        not isinstance(parameters, dict)
+        or not parameters
+        or set(parameters) - {"zero_point", "quant_min", "quant_max"}
+        or any(type(value) is not int for value in parameters.values())
+    ):
+        raise ValueError(
+            f"{source}: quantization_parameters must contain exact integer "
+            "zero_point/quant_min/quant_max constraints"
+        )
+    if (
+        "quant_min" in parameters
+        and "quant_max" in parameters
+        and parameters["quant_min"] > parameters["quant_max"]
+    ):
+        raise ValueError(f"{source}: inverted quantization bounds")
+    return parameters
 
 
 def software_spec_path_for_recipe(recipe: str | Path, document: dict | None = None) -> Path | None:
@@ -85,7 +108,9 @@ def validate_numerical_semantics(document: dict) -> dict:
         raise ValueError("numerical_semantics must be a mapping")
     model = document.get("model")
     if not isinstance(model, dict) or model.get("engine") not in {
-        "specir_fp_reduce", "integer_reference", "mx_block_reference"
+        "specir_fp_reduce",
+        "integer_reference",
+        "mx_block_reference",
     }:
         raise ValueError("numerical_semantics.model.engine must select a supported independent model")
     for field in ("operand_dtype", "accumulator_dtype", "readout_dtype"):
@@ -181,6 +206,16 @@ def validate_software_spec(document: dict, target: str | None = None, *, source:
         if row["id"] in seen:
             raise ValueError(f"{source}: duplicate operation id {row['id']!r}")
         seen.add(row["id"])
+        if row.get("status", "reviewed") not in {"reviewed", "unreviewed"}:
+            raise ValueError(f"{source}: operation {row['id']!r} has an invalid review status")
+        if "numerical_contract" in row and (
+            not isinstance(row["numerical_contract"], (str, dict))
+            or (
+                isinstance(row["numerical_contract"], str)
+                and row["numerical_contract"] not in _NUMERICAL_CONTRACTS
+            )
+        ):
+            raise ValueError(f"{source}: operation {row['id']!r} has an unsupported numerical contract")
         # The author names constraints directly; consumers keep one canonical
         # signature representation. Family selectors remain declaration fields.
         flat_constraints = set(row) & (_SIGNATURE_FIELDS - {"family", "families"})
@@ -200,6 +235,7 @@ def validate_software_spec(document: dict, target: str | None = None, *, source:
                     "evidence",
                     "status",
                     "description",
+                    "hardware",
                 }
             )
             if unknown:
@@ -211,10 +247,27 @@ def validate_software_spec(document: dict, target: str | None = None, *, source:
                 or any(not isinstance(value, str) or not value.strip() for value in row[selector])
             ):
                 raise ValueError(f"{source}: operation {row['id']!r} {selector} must be a string list")
-        if row.get("placement") not in {"accelerator", "fused_accelerator", "host", "unknown"}:
+        if "hardware" in row:
+            # A fact-derived declaration: the selected facts fill its hardware-shaped fields at Phase 0
+            # selection (merlin.targetgen.spec_fact_drift.resolve_spec). Authoring one of them as well
+            # would leave two authorities for the same value.
+            from merlin.targetgen.spec_fact_drift import DERIVED_FIELDS, FORMS, semantic_family
+
+            if row["hardware"] not in FORMS:
+                raise ValueError(f"{source}: operation {row['id']!r} hardware must be one of {list(FORMS)}")
+            authored = sorted((set(row) | set(row.get("signature") or {})) & set(DERIVED_FIELDS))
+            if authored:
+                raise ValueError(
+                    f"{source}: operation {row['id']!r} derives {authored} from facts; "
+                    "narrow a derived value with a reasoned restriction instead"
+                )
+            if semantic_family(row) is None:
+                raise ValueError(f"{source}: operation {row['id']!r} hardware form needs exactly one semantic family")
+            row.setdefault("signature", {})
+        elif row.get("placement") not in {"accelerator", "fused_accelerator", "host", "unknown"}:
             raise ValueError(f"{source}: operation {row['id']!r} has no explicit placement")
         signature = row.get("signature")
-        if not isinstance(signature, dict) or not signature:
+        if not isinstance(signature, dict) or (not signature and "hardware" not in row):
             raise ValueError(f"{source}: operation {row['id']!r} requires a signature mapping")
         for field in (
             "operand_dtypes",
@@ -236,6 +289,10 @@ def validate_software_spec(document: dict, target: str | None = None, *, source:
             or any(type(value) is not int or value < 1 for value in signature["ranks"])
         ):
             raise ValueError(f"{source}: operation {row['id']!r} ranks must be positive integers")
+        if "quantization_parameters" in signature:
+            validate_quantization_parameters(
+                signature["quantization_parameters"], source=f"{source}: operation {row['id']!r}"
+            )
         if "shape_bounds" in signature:
             bounds = signature["shape_bounds"]
             if not isinstance(bounds, dict) or any(not isinstance(value, dict) for value in bounds.values()):
@@ -245,6 +302,9 @@ def validate_software_spec(document: dict, target: str | None = None, *, source:
     from merlin.targetgen.quantization_spec import validate_quantization_declarations
 
     validate_quantization_declarations(document)
+    from merlin.targetgen.spec_fact_drift import validate_restrictions
+
+    validate_restrictions(document)
     if "transfer_contracts" in document:
         document["transfer_contracts"] = validate_transfer_contracts(document["transfer_contracts"])
     return document
@@ -339,6 +399,12 @@ def admit_operation(spec: dict, op: str, signature: dict, placement: str) -> dic
     ]
     if not candidates:
         return {"status": "unsupported", "reason": f"no SW operation declaration admits {op!r}", "op": op}
+    unresolved = sorted(row["id"] for row in candidates if "hardware" in row)
+    if unresolved:
+        raise ValueError(
+            f"software declarations {unresolved} derive their hardware fields from facts; "
+            "screen against the Phase 0 selection's resolved spec, not the authored bytes"
+        )
 
     def canonical(value):
         try:
@@ -372,11 +438,27 @@ def admit_operation(spec: dict, op: str, signature: dict, placement: str) -> dic
                 missing.append(key)
             elif [canonical(value) for value in expected] != [canonical(value) for value in actual]:
                 refused.append(f"{key} differs from the declared ordered precision signature")
+        if "quantization_parameters" in constraints:
+            actual = signature.get("quantization_parameters")
+            if not isinstance(actual, dict):
+                missing.append("quantization_parameters")
+            else:
+                for key, expected in sorted(constraints["quantization_parameters"].items()):
+                    observed = actual.get(key)
+                    if type(observed) is not int:
+                        missing.append(f"quantization_parameters.{key}")
+                    elif observed != expected:
+                        refused.append(f"quantization_parameters.{key}={observed} differs from {expected}")
         declared_placement = row["placement"]
         if declared_placement == "unknown" or placement == "unknown":
             missing.append("placement")
         elif declared_placement != placement:
             refused.append(f"placement {placement!r} differs from declared {declared_placement!r}")
+        # A standalone declaration does not authorize using the same family as an epilogue of a
+        # different operation. The composition must be selected and reviewed explicitly, even if
+        # the hardware also exposes a standalone path for this family.
+        if signature.get("composed_with") and "composed_with" not in constraints:
+            refused.append("composition is not admitted by this standalone declaration")
         for key, observed_key in (
             ("operand_dtypes", "operand_dtype"),
             ("dtypes", "operand_dtype"),
@@ -405,6 +487,10 @@ def admit_operation(spec: dict, op: str, signature: dict, placement: str) -> dic
                 actual, choices = canonical(actual), [canonical(choice) for choice in choices]
             if actual not in choices:
                 refused.append(f"{observed_key} {actual!r} not in {choices!r}")
+        if family == "elementwise_map" and signature.get("epilogues") and "epilogues" not in constraints:
+            # An unconstrained standalone elementwise declaration is not a wildcard fused-stage
+            # licence. A contraction's own declaration remains independent of its fused stage form.
+            refused.append("epilogue is not admitted by this declaration")
         if "epilogues" in constraints:
             observed = signature.get("epilogues")
             from merlin.runtime.commandbuffer import BIAS_STAGES
@@ -426,6 +512,34 @@ def admit_operation(spec: dict, op: str, signature: dict, placement: str) -> dic
                 missing.append("composed_with")
             elif not set(composed) <= set(constraints["composed_with"]) or not composed:
                 refused.append("required composition is not admitted")
+        if row.get("numerical_contract") == "operand_sum_exhaustive_i8_v1":
+            witness = signature.get("numeric_screen")
+            parameters = witness.get("parameters") if isinstance(witness, dict) else None
+            valid = (
+                isinstance(witness, dict)
+                and witness.get("schema") == "merlin.operand_sum_numeric_screen.v1"
+                and witness.get("form") == "fused_operand_sum"
+                and witness.get("qualification") == "exhaustive_software_model_not_rtl_execution"
+                and witness.get("pairs_checked") == 65536
+                and isinstance(parameters, dict)
+                and parameters.get("operand_dtype") == "i8"
+                and parameters.get("output_dtype") == "i8"
+                and type(parameters.get("bound_lsb")) is int
+                and 0 <= parameters["bound_lsb"] <= 255
+                and type(witness.get("max_error_lsb")) is int
+                and witness["max_error_lsb"] >= 0
+                and type(witness.get("n_over_bound")) is int
+                and witness["n_over_bound"] >= 0
+                and isinstance(witness.get("witness_sha256"), str)
+                and len(witness["witness_sha256"]) == 64
+                and all(char in "0123456789abcdef" for char in witness["witness_sha256"])
+            )
+            if not valid or witness.get("status") not in {"within_bound", "exceeds_bound"}:
+                missing.append("numerical_contract")
+            elif witness["status"] == "exceeds_bound" or witness["n_over_bound"] != 0 or (
+                witness["max_error_lsb"] > parameters["bound_lsb"]
+            ):
+                refused.append("numerical_contract exceeds the selected fact-derived error bound")
         for axis, bounds in (constraints.get("shape_bounds") or {}).items():
             dimensions = signature.get("dimensions") or {}
             observed = dimensions.get(axis)
@@ -445,9 +559,9 @@ def admit_operation(spec: dict, op: str, signature: dict, placement: str) -> dic
                     refused.append(f"dimension {axis}={observed} violates {comparison}={bound}")
         if refused:
             status, reason = "unsupported", "; ".join(refused)
-        elif missing or spec.get("status") != "reviewed":
+        elif missing or spec.get("status") != "reviewed" or row.get("status", "reviewed") != "reviewed":
             status = "unknown"
-            reason = "unresolved SW constraints: " + ", ".join(missing or ["software spec review"])
+            reason = "unresolved SW constraints: " + ", ".join(missing or ["operation review"])
         else:
             status, reason = "admitted", "reviewed SW constraints match the observed signature"
         decisions.append(
@@ -458,7 +572,11 @@ def admit_operation(spec: dict, op: str, signature: dict, placement: str) -> dic
                 "declaration": row["id"],
                 "constraints_status": "refused" if refused else "unknown" if missing else "matched",
                 "unresolved_constraints": missing,
-                "review_status": spec.get("status", "unknown"),
+                "review_status": (
+                    "reviewed"
+                    if spec.get("status") == "reviewed" and row.get("status", "reviewed") == "reviewed"
+                    else "unreviewed"
+                ),
             }
         )
     return next(

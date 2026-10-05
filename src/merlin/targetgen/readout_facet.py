@@ -126,6 +126,7 @@ class ReadoutFacet:
     register_stages: tuple[str, ...] = ()  # roles with a register field: what is ENCODABLE
     zero_point_carried: bool | None = None  # a register field carries an output zero point
     readouts: tuple[dict[str, Any], ...] = ()  # selector -> the stages that readout applies
+    stage_routes: tuple[dict[str, Any], ...] = ()  # non-readout stages, scoped to a composition path
     unknown: dict[str, str] = field(default_factory=dict)
     evidence: list[Evidence] = field(default_factory=list)
     scalar_abi: dict[str, Any] | None = None
@@ -163,6 +164,7 @@ class ReadoutFacet:
             "register_stages": list(self.register_stages),
             "zero_point_carried": self.zero_point_carried,
             "readouts": [dict(readout) for readout in self.readouts],
+            "stage_routes": [dict(route) for route in self.stage_routes],
             "operand_sum": ({**self.operand_sum, "bound_lsb": self.operand_sum_bound()} if self.operand_sum else None),
             "operand_sum_absent": self.operand_sum_absent,
             "unknown": dict(sorted(self.unknown.items())),
@@ -609,6 +611,7 @@ def derive(
     unit: Mapping[str, Any] | None = None,
     scalar_abi: Mapping[str, Any] | None = None,
     readouts: Sequence[Mapping[str, Any]] | None = None,
+    stage_routes: Sequence[Mapping[str, Any]] | None = None,
     taxonomy: Mapping[str, Any] | None = None,
     operand_sum: Mapping[str, Any] | None = None,
 ) -> ReadoutFacet:
@@ -653,6 +656,9 @@ def derive(
             "backend_declared",
             f"{len(facet.readouts)} readout selector(s) declared by the target's backend",
         )
+    if stage_routes:
+        facet.stage_routes = tuple(dict(route) for route in stage_routes)
+        facet.note("stage_routes", "backend_declared", f"{len(facet.stage_routes)} scoped stage route(s) declared")
     return facet
 
 
@@ -699,6 +705,48 @@ def epilogue_readouts(target: str):
     ]
 
 
+def epilogue_stage_routes(target: str):
+    """Parse the selected backend's non-readout stage routes; malformed rows license nothing."""
+    hook = _backend_hook(target, "epilogue_stage_routes")
+    if hook is None:
+        return ()
+    try:
+        raw = hook()
+    except Exception:  # noqa: BLE001 -- a failed declaration grants nothing
+        return ()
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        return ()
+    from merlin.runtime.commandbuffer import EPILOGUE_STAGE_SET
+    from merlin.verify.epilogue_applicability import StageRoute
+
+    routes = []
+    for row in raw:
+        if not isinstance(row, Mapping):
+            continue
+        stages = row.get("stages")
+        vector_keys = ("readouts", "producer_opcodes", "consumer_opcodes")
+        scalar_keys = ("site", "composed_with", "operand_attribute", "operand_role", "evidence")
+        if not isinstance(stages, Sequence) or isinstance(stages, (str, bytes)) or not stages:
+            continue
+        if any(not isinstance(row.get(key), str) or not row[key] for key in scalar_keys):
+            continue
+        if any(not isinstance(row.get(key), Sequence) or isinstance(row[key], (str, bytes))
+               or not row[key] or any(not isinstance(x, str) or not x for x in row[key]) for key in vector_keys):
+            continue
+        for stage in stages:
+            if not isinstance(stage, str) or stage not in EPILOGUE_STAGE_SET:
+                continue
+            routes.append(StageRoute(
+                stage=str(stage), site=str(row["site"]), composed_with=str(row["composed_with"]),
+                readouts=frozenset(str(x) for x in row["readouts"]),
+                producer_opcodes=frozenset(str(x) for x in row["producer_opcodes"]),
+                consumer_opcodes=frozenset(str(x) for x in row["consumer_opcodes"]),
+                operand_attribute=str(row["operand_attribute"]), operand_role=str(row["operand_role"]),
+                evidence=str(row["evidence"]),
+            ))
+    return tuple(routes)
+
+
 def capture_inputs(target: str, *, facts: Mapping[str, Any], include_taxonomy: bool = True) -> dict[str, Any]:
     """Observe optional readout declarations once, without loading RTL facts."""
     inputs: dict[str, Any] = {}
@@ -713,6 +761,9 @@ def capture_inputs(target: str, *, facts: Mapping[str, Any], include_taxonomy: b
         except Exception as exc:  # noqa: BLE001 -- an unreadable declaration is unknown
             inputs[field_name] = None
             inputs.setdefault("unknown", {})[field_name] = f"{type(exc).__name__}: {exc}"
+    # The fact view and the grade must use the same validated routes. A raw malformed backend row
+    # must not become a software-spec fact merely because the grade's parser would later reject it.
+    inputs["stage_routes"] = [route.to_dict() for route in epilogue_stage_routes(target)]
     inputs["taxonomy"] = None
     if include_taxonomy and _register_bundles(facts.get("facts", facts)) is None:
         try:
@@ -752,6 +803,7 @@ def for_target(
             unit=u,
             scalar_abi=inputs.get("scalar_abi"),
             readouts=inputs.get("readouts"),
+            stage_routes=inputs.get("stage_routes"),
             taxonomy=inputs.get("taxonomy"),
             operand_sum=inputs.get("operand_sum"),
         )

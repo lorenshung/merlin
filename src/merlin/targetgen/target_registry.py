@@ -26,6 +26,7 @@ from typing import Any
 import yaml
 
 from merlin.common.paths import artifacts_dir, build_dir, checkout_root, targets_dir
+from merlin.common.yaml import safe_load_text
 
 from .providers import Provider, ProviderRole, read_provider
 from .rtl.facts import rtl_facts_path
@@ -52,10 +53,11 @@ from .rtl.facts import rtl_facts_path
 # To pin a specific version/location, put it first on ``MERLIN_TARGET_PATH``; it wins over every default.
 _ENV_TARGET_PATH = "MERLIN_TARGET_PATH"
 _OBSERVED_CONTRACTS = contextvars.ContextVar("merlin_observed_contracts", default={})
+_OBSERVED_CONTRACT_PATHS = contextvars.ContextVar("merlin_observed_contract_paths", default={})
 
 
 @contextlib.contextmanager
-def observed_contract(name: str, contract: dict[str, Any]):
+def observed_contract(name: str, contract: dict[str, Any], *, source_path: Path | None = None):
     """Bind deterministic derivation to selected bytes without changing providers.
 
     This scoped bridge is for existing name-based readers. It does not grant
@@ -63,9 +65,11 @@ def observed_contract(name: str, contract: dict[str, Any]):
     Readers receive detached copies so a consumer cannot mutate the selection.
     """
     token = _OBSERVED_CONTRACTS.set({**_OBSERVED_CONTRACTS.get(), name: copy.deepcopy(contract)})
+    paths_token = _OBSERVED_CONTRACT_PATHS.set({**_OBSERVED_CONTRACT_PATHS.get(), name: source_path})
     try:
         yield
     finally:
+        _OBSERVED_CONTRACT_PATHS.reset(paths_token)
         _OBSERVED_CONTRACTS.reset(token)
 
 
@@ -97,20 +101,30 @@ class TargetInfo:
         """Package role and origin, not a trust decision or compiler qualification."""
         return read_provider(self.base)
 
+    @property
+    def capability_contract_path(self) -> Path:
+        """Selected capability bytes; ``contract_path`` still owns executable support."""
+        observed = _OBSERVED_CONTRACT_PATHS.get().get(self.name)
+        if observed is not None:
+            return Path(observed)
+        override = os.environ.get("MERLIN_TARGET_CONTRACT")
+        return Path(override).expanduser() if override else self.contract_path
+
     def load_contract(self) -> dict[str, Any]:
         if self.name in _OBSERVED_CONTRACTS.get():
             return copy.deepcopy(_OBSERVED_CONTRACTS.get()[self.name])
         # An experiment may select a capability contract alongside an OOT support provider.
         # Keep executable plugin ownership at the provider's own contract (below), but make all
         # capability consumers read the same explicitly selected view as RTL extraction.
-        override = os.environ.get("MERLIN_TARGET_CONTRACT")
-        if override:
-            path = Path(override)
+        path = self.capability_contract_path
+        if path != self.contract_path:
             if not path.is_file():
                 raise TargetContractMissing(f"{self.name!r}: selected capability contract does not exist: {path}")
-            selected = yaml.safe_load(path.read_text(encoding="utf-8"))
+            selected = safe_load_text(path.read_text(encoding="utf-8"))
             if not isinstance(selected, dict):
                 raise ValueError(f"{path}: selected capability contract must be a mapping")
+            if selected.get("name") != self.name:
+                raise ValueError(f"{path}: selected capability contract names a different target")
             return selected
         return self._load_provider_contract()
 
@@ -125,7 +139,7 @@ class TargetInfo:
                 f"package has not been generated, or the name asked for is a DIRECTORY name whose "
                 f"descriptor declares a different `target:` (see `declared_target_for`)"
             )
-        return yaml.safe_load(self.contract_path.read_text(encoding="utf-8"))
+        return safe_load_text(self.contract_path.read_text(encoding="utf-8"))
 
     def load_dialect_plan(self) -> dict[str, Any]:
         return yaml.safe_load(self.dialect_plan_path.read_text(encoding="utf-8"))
@@ -150,7 +164,7 @@ def _backend_from_contract(contract_path: Path) -> str:
     (a declared target fact, not a name -> backend map). Generic ``simulator`` when the file or the field
     is absent — an unknown target degrades honestly rather than inheriting another target's backend."""
     try:
-        doc = yaml.safe_load(contract_path.read_text(encoding="utf-8")) or {}
+        doc = safe_load_text(contract_path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError):
         return _GENERIC_BACKEND
     val = (doc.get("runtime") or {}).get("default_backend")
@@ -328,6 +342,36 @@ def resolve(name: str) -> TargetInfo:
     return _resolve(name, allow_alias=True)
 
 
+def _physical_reference_alias(base: Path, name: str) -> Path:
+    """Resolve a checkout compatibility link only against an explicitly selected repo.
+
+    Installed distributions do not discover arbitrary ``examples/`` under cwd.
+    An explicitly selected repository may, however, contain old ``merlin/targets``
+    links to its own physical example packages.  Use the self-contained package
+    for provider ownership; never accept a link to another root or target.
+    """
+    selected = os.environ.get("MERLIN_REPO_ROOT")
+    link = base / "contracts/target_contract.yaml"
+    if not selected or not link.is_symlink():
+        return base
+    repo = Path(selected).resolve()
+    examples = repo / "examples"
+    try:
+        contract = link.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return base
+    candidate = contract.parent.parent
+    if (
+        contract.name == "target_contract.yaml"
+        and contract.parent.name == "contracts"
+        and candidate.name == "target"
+        and candidate.parent.parent == examples
+        and _target_name(candidate) == name
+    ):
+        return candidate
+    return base
+
+
 def _resolve(name: str, *, allow_alias: bool) -> TargetInfo:
     # 1. explicit env selection — highest precedence
     env = _discover(_env_target_roots())
@@ -336,6 +380,7 @@ def _resolve(name: str, *, allow_alias: bool) -> TargetInfo:
     # 2. curated in-tree reference
     base = reference_targets().get(name)
     if base is not None:
+        base = _physical_reference_alias(base, name)
         contract = Path(os.environ.get("MERLIN_TARGET_CONTRACT") or base / "contracts/target_contract.yaml")
         return TargetInfo(
             name=name,

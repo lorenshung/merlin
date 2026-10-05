@@ -444,6 +444,12 @@ def host_lane_cells(captures: dict, target: str, corpus_roots=None) -> dict:
         for (f, d), n in sorted(seen.items(), key=lambda kv: (-kv[1], kv[0]))
         if (f, d) not in admitted_pairs and not str(d).startswith("unsupported_mlir:")
     ]
+    # Which operations each pair's host work consists of, so a probe is built from one of them.
+    from merlin.targetgen import host_lane_ops
+
+    observed_ops = host_lane_ops.observed_host_ops(captures or {}, [(row["family"], row["dtype"]) for row in required])
+    for row in required:
+        row["observed_ops"] = observed_ops.get(host_lane_ops.pair_key(row["family"], row["dtype"]), [])
     return {
         "required": required,
         "unsupported_format_host_obligations": unsupported_formats,
@@ -528,19 +534,20 @@ def boundaries(target: str) -> Boundaries:
     except Exception as e:  # noqa: BLE001
         b.block_scale_source = f"unavailable: {type(e).__name__}"
 
-    # On-chip operand store, for capacity-fit extents. The facts artifact carries it as a MEMORIES LIST
-    # keyed by name, not as a `shared_memory` mapping -- reading the mapping spelling silently yielded
-    # None here, which would have published a spec claiming the target declares no operand store. Match
-    # on the entry's name, then fall back to the contract, and record which one answered.
+    # On-chip operand store, for capacity-fit extents. Select its role from the
+    # RTL-derived address space; memory names are extractor labels, not an ABI.
     try:
-        from merlin.targetgen.rtl.facts import load_facts
+        from merlin.targetgen import address_space as AS
 
-        mems = ((load_facts(target) or {}).get("facts") or {}).get("memories") or []
-        for m in mems:
-            if isinstance(m, dict) and str(m.get("name")) == "shared_memory" and m.get("bytes"):
-                b.operand_store_bytes = int(m["bytes"])
-                b.operand_store_source = 'rtl facts memories[name="shared_memory"].bytes'
-                break
+        resolved = AS.operand_store(AS.derive_address_space(target))
+        if resolved.store is not None and resolved.store.nbytes:
+            b.operand_store_bytes = int(resolved.store.nbytes)
+            b.operand_store_source = (
+                f"RTL-derived operand store {resolved.store.name!r} "
+                f"({resolved.basis})"
+            )
+        else:
+            b.operand_store_source = f"RTL operand store unresolved: {resolved.reason}"
     except Exception as e:  # noqa: BLE001
         b.operand_store_source = f"rtl facts unavailable: {type(e).__name__}"
     if b.operand_store_bytes is None:
@@ -746,6 +753,14 @@ def required_cells(
         ),
     }
     return cells, diagnostics
+
+
+def _host_only_observed_ops(captures: dict, dtypes: dict) -> dict:
+    """``family -> [{op, frontend_op, n_regions}]`` at each host-only family's observed dtype."""
+    from merlin.targetgen import host_lane_ops
+
+    observed = host_lane_ops.observed_host_ops(captures or {}, list(dtypes.items()))
+    return {family: observed.get(host_lane_ops.pair_key(family, dtype), []) for family, dtype in dtypes.items()}
 
 
 def host_only_dtypes(captures: dict, families) -> dict:
@@ -1324,9 +1339,14 @@ def _epilogue_axis(target: str) -> dict:
     and called the rest incapable, which is the single-target overfit this axis exists to remove.
 
     So a stage is required when the manifest says its family is fused-only, OR the target's own
-    instruction taxonomy resolves a class for the role the stage needs. Each stage records which of the
-    two evidenced it, because "the manifest declares it" and "the ISA has an instruction for it" are
-    different claims and a reader must be able to tell them apart.
+    instruction taxonomy resolves a class for the role the stage needs, OR a readout the target
+    declares APPLIES it, OR a composition-scoped route applies it before readout. The stage-granular
+    sources are needed because ``composed_with`` is family-granular in the other
+    direction too: a family that ALSO runs standalone (an elementwise map licensed by accumulate-on-load
+    evidence) is no longer declared fused-only, yet a readout can still fuse activation and scale,
+    while a separate route can seed bias before the contraction. A corpus that stopped asking for those
+    stages would let a backend that cannot fuse them fail nothing. Each stage records which source
+    evidenced it; a readout claim and a pre-accumulator route are different claims.
     """
     from merlin.targetgen import isa_taxonomy as IT
     from merlin.targetgen import semantic_families as sf
@@ -1347,21 +1367,22 @@ def _epilogue_axis(target: str) -> dict:
     except Exception:  # noqa: BLE001 -- no taxonomy is not "no capability"
         taxonomy = None
 
-    # THIRD SOURCE, and the finest-grained one: which stages the target's READOUT actually applies.
+    # Stage-granular sources: the target's readout and any composition-scoped non-readout routes.
     # The manifest's `composed_with` is evidence at FAMILY granularity -- "elementwise_map exists only
-    # as an epilogue" -- so it makes every elementwise stage required together. The readout declaration
-    # is stage-granular and RTL-evidenced, and it is the one that knows a target can fuse an activation
-    # but not an integer requantize. Consulting only the coarse source put a stage in the requirement
-    # that no readout performs, the corpus duly minted a capsule for it, and the grade-time check
+    # as an epilogue" -- so it makes every elementwise stage required together. These declarations
+    # distinguish activation on readout from bias seeded before contraction. Consulting only the
+    # coarse source put a stage in the requirement that no application path performs, and the grade
     # refused that capsule hours later -- having read the very declaration this loop now reads.
     # Absent (the target declares no readouts) leaves the two original sources deciding, unchanged.
-    from merlin.targetgen.readout_facet import epilogue_readouts
+    from merlin.targetgen.readout_facet import epilogue_readouts, epilogue_stage_routes
     from merlin.verify.epilogue_applicability import selectors_applying
 
     try:
         readouts = epilogue_readouts(target)
+        routes = epilogue_stage_routes(target)
     except Exception:  # noqa: BLE001 -- an unreadable declaration evidences nothing
         readouts = None
+        routes = ()
 
     required, rejected = [], []
     for stage in _builder_epilogue_stages():
@@ -1373,14 +1394,21 @@ def _epilogue_axis(target: str) -> dict:
                 classes = sorted(set(IT.required_classes_for_op(taxonomy, op="matmul", epilogue=(stage,))) - base)
             except Exception:  # noqa: BLE001
                 classes = []
-        no_readout_applies = bool(readouts) and not selectors_applying(readouts, [stage])
+        applying = selectors_applying(readouts, [stage], routes=routes, composition="contraction") if readouts else []
+        on_readout = selectors_applying(readouts, [stage]) if readouts else []
+        routed = any(
+            r.stage == stage and r.composed_with == "contraction"
+            and any(readout.selector in r.readouts for readout in readouts or ())
+            for r in routes
+        )
+        no_readout_applies = bool(readouts) and not applying
         if no_readout_applies:
             rejected.append(
                 {
                     "stage": stage,
                     "family": family,
                     "why": (
-                        "no readout this target declares APPLIES the stage ("
+                        "no readout or contraction-scoped stage route this target declares APPLIES the stage ("
                         + "; ".join(f"{r.selector!r} applies {sorted(r.applies)}" for r in readouts)
                         + "), so fusing it would declare a computation the hardware does not perform. "
                         "Stage-granular RTL-evidenced declaration overrides the family-granular "
@@ -1389,13 +1417,15 @@ def _epilogue_axis(target: str) -> dict:
                     ),
                 }
             )
-        elif by_manifest or classes:
+        elif by_manifest or classes or applying:
             required.append(
                 {
                     "stage": stage,
                     "family": family,
                     "evidenced_by": (["manifest_composed_with"] if by_manifest else [])
-                    + (["isa_instruction_class"] if classes else []),
+                    + (["isa_instruction_class"] if classes else [])
+                    + (["readout_applies"] if on_readout else [])
+                    + (["contraction_stage_route"] if routed else []),
                     "isa_classes": classes,
                 }
             )
@@ -1405,8 +1435,9 @@ def _epilogue_axis(target: str) -> dict:
                     "stage": stage,
                     "family": family,
                     "why": (
-                        "the manifest declares no family fused-only for it and this target's "
-                        "instruction taxonomy resolves no class for the role it needs"
+                        "the manifest declares no family fused-only for it, this target's "
+                        "instruction taxonomy resolves no class for the role it needs, and it "
+                        "declares no readout that applies it"
                     ),
                 }
             )
@@ -1417,7 +1448,7 @@ def _epilogue_axis(target: str) -> dict:
             "the epilogue stages this target can fuse onto a contraction, evidenced by its capability "
             "manifest declaring the stage's family fused-only OR by its own instruction taxonomy "
             "resolving a class for the role the stage needs, and then INTERSECTED with the stages its "
-            "declared readout actually applies -- the first two are family-granular and the last is "
+            "declared readout or contraction-scoped non-readout route actually applies -- the first two are family-granular and the last is "
             "stage-granular, so a target that fuses an activation but not an integer requantize is "
             "described correctly instead of being asked for both. A (family, dtype, alignment) cell "
             "cannot express WHICH epilogue rides the contraction, so a corpus derived from cells alone "
@@ -1874,6 +1905,7 @@ def derive_spec(
     # keeps the synthesizer pure and keeps one definition of what a regime costs.
     _regime_dtype, _regime_dtype_selection = regime_dtype_selection(list(cells))
     HL = host_lane_cells(captures, target, corpus_roots=corpus_roots)
+    HO_DTYPES = host_only_dtypes(captures, diag.get("families_needed_but_not_admitted") or ())
     try:
         _reduction_depth = MR.reduction_depth_regimes(
             target, sorted((mem.get("by_regime") or {}).keys()), tile_dim=bnd.tile_edge or 0, dtype=_regime_dtype
@@ -2021,7 +2053,9 @@ def derive_spec(
             "families": list(diag.get("families_needed_but_not_admitted") or ()),
             # The dtype each host family is actually observed in. It cannot come from the manifest -- the
             # hardware declares no capability for these -- so it comes from the captures.
-            "dtypes": host_only_dtypes(captures, diag.get("families_needed_but_not_admitted") or ()),
+            "dtypes": HO_DTYPES,
+            # The operations each host-only family's work consists of, at its observed dtype.
+            "observed_ops": _host_only_observed_ops(captures, HO_DTYPES),
             "observed_in": {
                 f: n
                 for f, n in (diag.get("families_observed") or {}).items()

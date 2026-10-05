@@ -15,13 +15,14 @@ Two rules, both load-bearing:
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from .model import Device, Host, Link, System
 
 # ------------------------------------------------------------------ host
 
-def host_from_board(board_name: str, **overrides) -> Host:
+def host_from_board(board_name: str, *, board_catalog: Path | None = None, **overrides) -> Host:
     """Derive the Host from a board descriptor (``runtime.boards``).
 
     The board is where the host facts already live -- harts, which of them carry a vector unit, the
@@ -32,7 +33,17 @@ def host_from_board(board_name: str, **overrides) -> Host:
     """
     from merlin.runtime import boards as _b
 
-    brd = _b.board(board_name, **overrides)
+    if board_catalog is None:
+        brd = _b.board(board_name, **overrides)
+    else:
+        selected = _b.load_boards(board_catalog)
+        if board_name not in selected:
+            raise _b.BoardRegistryError(f"board {board_name!r} is absent from {board_catalog}")
+        brd = selected[board_name]
+        if overrides:
+            from dataclasses import replace
+
+            brd = replace(brd, **overrides)
     return Host(
         name=getattr(brd, "name", board_name),
         harts=getattr(brd, "harts", None),
@@ -141,6 +152,7 @@ def device_for(target: str) -> Device:
 
 
 def system_for(target: str | None = None, *, targets=None, board: str | None = None,
+               board_catalog: Path | None = None,
                **board_overrides) -> System:
     """The System a compile runs on: one host, and the device(s) named.
 
@@ -149,7 +161,7 @@ def system_for(target: str | None = None, *, targets=None, board: str | None = N
     change when a second device appears.
     """
     names = list(targets) if targets is not None else ([target] if target else [])
-    host = host_from_board(board, **board_overrides) if board else None
+    host = host_from_board(board, board_catalog=board_catalog, **board_overrides) if board else None
     return System(host=host, devices=tuple(device_for(n) for n in names))
 
 
@@ -198,8 +210,12 @@ def system_for_experiment(target: str, **board_overrides) -> tuple[System, str]:
     # (harts=2, vlen=None) and every placement would be measured against hardware nobody has. Strict at
     # this seam only; the general helper keeps its documented behaviour.
     try:
-        from merlin.runtime.boards import BOARDS
-        known = set(BOARDS)
+        from merlin.runtime.boards import BOARDS, load_boards
+        from merlin.targetgen.corpora import descriptor_path
+        from merlin.targetgen.target_experiment import load_target_experiment
+
+        catalog = load_target_experiment(descriptor_path(target)).selected_board_catalog()
+        known = set(load_boards(catalog)) if catalog is not None else set(BOARDS)
     except Exception as exc:                       # noqa: BLE001 -- an unreadable registry is not a board
         return system_for(target), f"could not read the board registry: {type(exc).__name__}: {exc}"
     if board not in known:
@@ -208,7 +224,7 @@ def system_for_experiment(target: str, **board_overrides) -> tuple[System, str]:
             f"merlin.runtime.boards (known: {', '.join(sorted(known))}). Refusing the conservative "
             f"fallback here, because a defaulted host would be measured as if it were real hardware")
     try:
-        return system_for(target, board=board, **board_overrides), why
+        return system_for(target, board=board, board_catalog=catalog, **board_overrides), why
     except Exception as exc:                       # noqa: BLE001 -- a bad board name is not a host
         return system_for(target), (f"{target!r} declares board {board!r}, which did not resolve: "
                                     f"{type(exc).__name__}: {exc}")

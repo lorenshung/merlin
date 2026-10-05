@@ -46,6 +46,29 @@ COMPOSITES: dict[str, tuple[str, ...]] = {
 #: Every family name callers may use.
 FAMILIES: frozenset[str] = frozenset(PRIMITIVES) | frozenset(COMPOSITES)
 
+
+def operation_form(op: str | None, *, carrier_op: str | None = None) -> str | None:
+    """Classify a movement operation's *work*, not its storage layout.
+
+    A transfer/copy and an axis permutation share the ``movement`` family but
+    require different hardware mechanisms. Prefer the actual IR carrier when
+    available; a provenance label may describe a larger enclosing region.
+    Unknown forms stay unknown so a form-constrained capability cannot claim
+    them by family membership alone.
+    """
+    if carrier_op in ("linalg.transpose", "merlin_iface.transpose", "merlin_iface.permute"):
+        return "permutation"
+    if carrier_op in ("linalg.copy", "memref.copy", "merlin_iface.movement"):
+        return "copy"
+    if carrier_op is not None:
+        return None
+    if op in ("transpose", "permute"):
+        return "permutation"
+    if op in ("movement", "copy"):
+        return "copy"
+    return None
+
+
 # --- capture prov.family -> canonical family ---------------------------------------------------
 # The capture tags each op with a coarse prov.family; this pins each to a canonical family. Keys are
 # the strings emitted by model2MLIR (mirrored by merlin.dse_guidance.attribution).
@@ -165,6 +188,7 @@ _OP_FAMILY: dict[str, str] = {
     # contraction: any reduce-over-k product (matmul/conv/attention-scores/batched GEMV)
     "matmul": "contraction",
     "batch_matmul": "contraction",
+    "matmul_batched": "contraction",
     "addmm": "contraction",
     # A contraction and a residual add presented as two regions. Its PRIMARY family is the contraction
     # it contains; the add is credited through `composed_families`, the same way a fused epilogue is --
@@ -217,6 +241,7 @@ _OP_FAMILY: dict[str, str] = {
     # reduction: reduce over an axis
     "reduce": "reduction",
     "reduce_sum": "reduction",
+    "reduce_mean": "reduction",
     "sum": "reduction",
     "max": "reduction",
     "argmax": "reduction",
@@ -331,6 +356,7 @@ _OP_FAMILY: dict[str, str] = {
     # movement: data motion without arithmetic
     "movement": "movement",
     "transpose": "movement",
+    "permute": "movement",
     "reshape": "movement",
     "expand": "movement",
     "pack": "movement",

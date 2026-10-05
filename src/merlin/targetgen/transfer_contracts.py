@@ -80,6 +80,22 @@ def validate_transfer_contracts(document: dict | None) -> dict | None:
     return document
 
 
+def _canonical(key: str, value):
+    """One spelling per dtype, from the quant-format registry, exactly as operation admission compares.
+
+    An MLIR element type (``i8``) and the registry name an author writes (``int8``) are the same
+    format; comparing their spellings refused every observed transfer. Layouts compare as written.
+    """
+    if not key.endswith("_dtype"):
+        return value
+    from merlin.common.quant_formats import get as quant_format
+
+    try:
+        return quant_format(value).name
+    except (KeyError, ValueError, TypeError):
+        return value
+
+
 def screen_transfer_contract(
     software_spec: dict | None,
     *,
@@ -128,7 +144,9 @@ def screen_transfer_contract(
         refused = [
             key
             for key in constraints
-            if observations[key] is not None and constraints[key] != "unknown" and constraints[key] != observations[key]
+            if observations[key] is not None
+            and constraints[key] != "unknown"
+            and _canonical(key, constraints[key]) != _canonical(key, observations[key])
         ]
         semantics_known = (
             bool(row["semantics"])

@@ -122,6 +122,21 @@ def _spec():
     }
 
 
+def test_operation_review_cannot_inherit_a_reviewed_document_status():
+    spec = _spec()
+    spec["operations"][0]["status"] = "unreviewed"
+    decision = software_spec.admit_operation(
+        spec, "matmul", {"family": "contraction", "operand_dtype": "int8", "accum_dtype": "i32", "rank": 2},
+        "accelerator",
+    )
+    assert decision["constraints_status"] == "matched"
+    assert decision["status"] == "unknown"
+    assert decision["review_status"] == "unreviewed"
+    spec["operations"][0]["status"] = "accepted"
+    with pytest.raises(ValueError, match="invalid review status"):
+        software_spec.validate_software_spec(spec, target="test_device")
+
+
 def _hardware(formats=None, *, element="i8", accumulator="i32"):
     formats = formats or ["int8"]
     contract = {

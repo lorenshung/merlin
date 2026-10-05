@@ -9,7 +9,7 @@ from __future__ import annotations
 import copy
 
 from merlin.common.digest import is_sha256
-from merlin.targetgen.software_spec import admit_operation
+from merlin.targetgen.software_spec import admit_operation, validate_quantization_parameters
 
 SCHEMA = "merlin.host_capabilities.v1"
 
@@ -45,8 +45,14 @@ def validate_host_capabilities(
         if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"] or row["id"] in seen:
             raise ValueError("host capability operations require unique IDs")
         seen.add(row["id"])
+        if row.get("status", "reviewed") not in {"reviewed", "unreviewed"}:
+            raise ValueError(f"host capability {row['id']} has an invalid review status")
         if row.get("placement") != "host" or not isinstance(row.get("signature"), dict) or not row["signature"]:
             raise ValueError("host capability operations require host placement and typed signature constraints")
+        if "quantization_parameters" in row["signature"]:
+            validate_quantization_parameters(
+                row["signature"]["quantization_parameters"], source=f"host capability {row['id']!r}"
+            )
         for selector in ("ops", "families"):
             if selector in row and (
                 not isinstance(row[selector], list)
@@ -121,7 +127,7 @@ def admit_host_operation(selected: dict | None, row: dict, signature: dict) -> d
         )
         status = verdict["status"] if verdict else "unsupported"
         reason = verdict["reason"] if verdict else "no host operation declaration admits the observed signature"
-        if document["status"] != "reviewed" and status == "unsupported":
+        if (document["status"] != "reviewed" or (verdict and verdict["review_status"] != "reviewed")) and status == "unsupported":
             status, reason = "unknown", "unreviewed host declarations cannot establish absence of operation support"
         if not pinned:
             status, reason = "unknown", "host package and capability spec byte identities are not selected together"
@@ -130,8 +136,10 @@ def admit_host_operation(selected: dict | None, row: dict, signature: dict) -> d
                 "profile": name,
                 "status": status,
                 "reason": reason,
-                "review_status": document["status"],
-                "reviewed": document["status"] == "reviewed" and pinned,
+                "review_status": verdict["review_status"] if verdict else document["status"],
+                "reviewed": document["status"] == "reviewed" and pinned and (
+                    verdict is None or verdict["review_status"] == "reviewed"
+                ),
                 "package_sha256": selection.get("package_sha256"),
                 "capability_spec_sha256": selection.get("capability_spec_sha256"),
                 "dtype_strategy": selection.get("dtype_strategy"),

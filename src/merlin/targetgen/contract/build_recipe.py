@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+import shlex
+import subprocess
+
+
+_RISCV_ABIS = frozenset({"ilp32", "ilp32e", "ilp32f", "ilp32d", "lp64", "lp64f", "lp64d"})
 
 
 @dataclass(frozen=True)
@@ -114,6 +119,74 @@ class HarnessBuildRecipe:
             "this target's build recipe declares no -march=; the runner cannot compile the package "
             "kernel for the same ISA the harness is built for, and a mismatch is a runtime trap"
         )
+
+    def mabi(self) -> str:
+        """Resolve the effective RISC-V ABI from recipe flags or the selected compiler.
+
+        A missing explicit flag is not an ABI default chosen by the runner. It is a fact of this
+        compiler with these flags, queried without compiling a source. The result is then made
+        explicit for both halves of the ELF by :meth:`with_effective_abi`.
+        """
+        declared: list[str] = []
+        flags = iter(self.cflags)
+        for flag in flags:
+            if flag.startswith("-mabi="):
+                declared.append(flag.partition("=")[2])
+            elif flag == "-mabi":
+                declared.append(next(flags, ""))
+        if len(declared) > 1:
+            raise self.error_cls("build recipe has ambiguous duplicate -mabi options")
+        if declared:
+            abi = declared[0]
+        else:
+            command = [str(self.compiler), *self.cflags, "-Q", "--help=target"]
+            try:
+                answer = subprocess.run(command, capture_output=True, text=True, timeout=10)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise self.error_cls(f"cannot query selected compiler's effective ABI: {exc}") from exc
+            if answer.returncode == 0:
+                values = [parts[1] for line in answer.stdout.splitlines()
+                          if (parts := line.split()) and len(parts) == 2 and parts[0] == "-mabi="]
+                if len(values) != 1:
+                    raise self.error_cls("selected compiler returned no unique effective -mabi")
+                abi = values[0]
+            else:
+                # Clang reports its resolved cc1 target ABI in a dry-run driver trace.
+                command = [str(self.compiler), *self.cflags, "-###", "-x", "c", "-c",
+                           "/dev/null", "-o", "/dev/null"]
+                try:
+                    answer = subprocess.run(command, capture_output=True, text=True, timeout=10)
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    raise self.error_cls(f"cannot query selected compiler's effective ABI: {exc}") from exc
+                if answer.returncode:
+                    raise self.error_cls("selected compiler cannot report its effective -mabi")
+                values = []
+                for line in answer.stderr.splitlines():
+                    args = shlex.split(line)
+                    if "-cc1" not in args:
+                        continue
+                    values += [args[index + 1] for index, arg in enumerate(args[:-1])
+                               if arg == "-target-abi"]
+                if len(values) != 1:
+                    raise self.error_cls("selected compiler returned no unique effective -mabi")
+                abi = values[0]
+        march = self.march().partition("=")[2]
+        if abi not in _RISCV_ABIS or not march.startswith(("rv32", "rv64")) or not abi.startswith(
+                "ilp32" if march.startswith("rv32") else "lp64"):
+            raise self.error_cls(f"build recipe has invalid -mabi={abi!s} for -march={march}")
+        return f"-mabi={abi}"
+
+    def with_effective_abi(self) -> "HarnessBuildRecipe":
+        """Pin the selected ABI in each harness compile/link command, including implicit defaults."""
+        abi = self.mabi()
+        flags: list[str] = []
+        original = iter(self.cflags)
+        for flag in original:
+            if flag == "-mabi":
+                next(original, None)
+            elif not flag.startswith("-mabi="):
+                flags.append(flag)
+        return replace(self, cflags=(*flags, abi))
 
     def link_command(self, *, objects: "Sequence[Path]", output: Path, link_script: Path | None = None) -> list[str]:
         """Link already-compiled objects. Support sources are NOT re-appended: they are among them."""

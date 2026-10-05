@@ -15,7 +15,8 @@ from merlin.targetgen.contract.build_service import BuildOnlyService, load_build
 def service(tmp_path):
     source = tmp_path / "renderer.py"
     source.write_text("trusted build fixture")
-    recipe = HarnessBuildRecipe(Path("/usr/bin/cc"), (), (), Path("/fixture/link.ld"), 0, ("-march=fixture",))
+    recipe = HarnessBuildRecipe(Path("/usr/bin/cc"), (), (), Path("/fixture/link.ld"), 0,
+                                ("-march=rv64gc", "-mabi=lp64d"))
     return BuildOnlyService(
         "fixture",
         recipe,
@@ -83,9 +84,44 @@ def test_package_reuse_refuses_changed_source(tmp_path):
 def test_build_translation_refuses_non_llvm_before_tool(tmp_path, monkeypatch):
     cap = service(tmp_path)
     monkeypatch.setattr(compiler.subprocess, "run", lambda *a, **k: pytest.fail("translation ran"))
-    text = 'builtin.module { %x = "builtin.unrealized_conversion_cast"() : () -> i32 }'
-    with pytest.raises(ValueError, match="LLVM/Builtin"):
+    for text in (
+        'builtin.module { %x = "builtin.unrealized_conversion_cast"() : () -> i32 }',
+        'builtin.module { "unknown.target_operation"() : () -> () }',
+    ):
+        with pytest.raises(ValueError, match="LLVM/Builtin"):
+            compiler.llvm_mlir_to_object(text, tmp_path, target="fixture", _build_service=cap)
+
+
+def test_build_translation_preserves_upstream_llvm_metadata(tmp_path, monkeypatch):
+    """Stock LLVM metadata is validated by the selected translator, not xDSL's older schema."""
+    from types import SimpleNamespace
+    from merlin.llvmlower import codegen
+
+    cap = service(tmp_path)
+    text = '''#unroll = #llvm.loop_unroll<disable = true>
+#annotation = #llvm.loop_annotation<unroll = #unroll>
+"builtin.module"() ({
+  "llvm.func"() <{function_type = !llvm.func<void ()>, sym_name = "fixture_entry"}> ({
+    %c = "llvm.mlir.constant"() <{value = true}> : () -> i1
+    "llvm.cond_br"(%c)[^bb1, ^bb1] <{loop_annotation = #annotation,
+      operandSegmentSizes = array<i32: 1, 0, 0>}> : (i1) -> ()
+  ^bb1:
+    "llvm.return"() : () -> ()
+  }) : () -> ()
+}) : () -> ()'''
+    calls = []
+
+    def translate(command, **kwargs):
+        calls.append(command)
+        assert Path(command[2]).read_text() == text
+        return SimpleNamespace(returncode=1, stderr="fixture translator rejected metadata")
+
+    monkeypatch.setattr(compiler.subprocess, "run", translate)
+    monkeypatch.setattr(codegen, "compile_ll", lambda *a, **k: pytest.fail("compiled rejected LLVM"))
+    with pytest.raises(RuntimeError, match="translator rejected metadata"):
         compiler.llvm_mlir_to_object(text, tmp_path, target="fixture", _build_service=cap)
+    assert len(calls) == 1
+    assert calls[0][1] == "--mlir-to-llvmir"
 
 
 def test_legacy_object_path_retains_original_lowering(tmp_path, monkeypatch):

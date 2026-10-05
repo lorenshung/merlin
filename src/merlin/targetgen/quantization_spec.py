@@ -80,6 +80,11 @@ def validate_quantization_declarations(spec: Mapping) -> list[dict]:
         seen.add(identity)
         row["id"] = identity
         references = row.get("eligible_operations")
+        if references == "from_facts":
+            # Filled at Phase 0 selection from the derived quantization recipes
+            # (merlin.targetgen.spec_fact_drift.resolve_spec).
+            result.append(row)
+            continue
         if (
             not isinstance(references, list)
             or not references

@@ -16,10 +16,46 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+import hashlib
+import json
 from pathlib import Path
 from typing import Any, Mapping
 
 from .harness_blobs import stage_harness_blobs
+
+
+def _module_target_abi(llvm_text: str) -> str | None:
+    """Read the LLVM module's target-abi flag, without treating IR as ABI authority."""
+    references: list[str] = []
+    definitions: dict[str, str] = {}
+    for line in llvm_text.splitlines():
+        line = line.strip()
+        if line.startswith("!llvm.module.flags = !{"):
+            if references:
+                raise ValueError("LLVM module has duplicate module-flag tables")
+            payload = line.partition("!{")[2].removesuffix("}")
+            references = [item.strip() for item in payload.split(",")]
+        elif line.startswith("!") and " = !{" in line:
+            name, _, payload = line.partition(" = !{")
+            definitions[name] = payload.removesuffix("}")
+    found: list[str] = []
+    for reference in references:
+        operands = [part.strip() for part in definitions.get(reference, "").split(",")]
+        if len(operands) > 1 and operands[1] == '!"target-abi"':
+            if len(operands) != 3 or not operands[2].startswith('!"') or not operands[2].endswith('"'):
+                raise ValueError("LLVM module has malformed target-abi flag")
+            found.append(operands[2][2:-1])
+    if len(found) > 1:
+        raise ValueError("LLVM module has ambiguous target-abi flags")
+    return found[0] if found else None
+
+
+def _abi_receipt(workdir: Path, obj: Path, abi: str) -> None:
+    """Bind the object to the ABI selected for its harness in a paired build."""
+    (workdir / "kernel.abi.json").write_text(json.dumps({
+        "schema": "merlin_kernel_abi_v1", "abi": abi,
+        "object_sha256": hashlib.sha256(obj.read_bytes()).hexdigest(),
+    }, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def llvm_mlir_to_object(lowered_mlir_text: str, workdir: Path, *, target: str | None = None,
@@ -46,8 +82,8 @@ def llvm_mlir_to_object(lowered_mlir_text: str, workdir: Path, *, target: str | 
         if type(_build_service) is not BuildOnlyService:
             raise ValueError("build-only override requires an exact host service")
         _build_service.verify(target)
-        recipe = _build_service.recipe
-        extra = (recipe.march(),)
+        recipe = _build_service.recipe.with_effective_abi()
+        extra = (recipe.march(), recipe.mabi())
         # This opt-in service consumes finished target LLVM, not tensors or
         # partially lowered programs. Do not invoke an unrelated model importer
         # and its Python environment merely to translate an LLVM module.
@@ -55,12 +91,20 @@ def llvm_mlir_to_object(lowered_mlir_text: str, workdir: Path, *, target: str | 
         from xdsl.dialects import builtin, llvm
         from xdsl.parser import Parser
         from merlin.llvmlower import toolchain
-        context = Context()
+        # xDSL's LLVM schema need not model every metadata attribute or
+        # property emitted by the selected stock LLVM installation. Retain
+        # those bytes and leave semantic verification to mlir-translate below;
+        # xDSL is used here only to inspect the complete operation inventory.
+        context = Context(allow_unregistered=True)
         context.load_dialect(builtin.Builtin)
         context.load_dialect(llvm.LLVM)
         module = Parser(context, lowered_mlir_text).parse_module()
-        module.verify()
-        if any(op.name != "builtin.module" and not op.name.startswith("llvm.") for op in module.walk()):
+        def operation_name(op):
+            if op.name == "builtin.unregistered":
+                return op.op_name.data
+            return op.name
+        if any(operation_name(op) != "builtin.module" and not operation_name(op).startswith("llvm.")
+               for op in module.walk()):
             raise ValueError("build-only translation requires a complete LLVM/Builtin module")
         source = workdir / "kernel.llvm.mlir"
         source.write_text(lowered_mlir_text, encoding="utf-8")
@@ -75,20 +119,27 @@ def llvm_mlir_to_object(lowered_mlir_text: str, workdir: Path, *, target: str | 
         (workdir / "kernel.ll").write_text(ll, encoding="utf-8")
         if target is not None:
             from merlin.runtime.backends import base as _backends
-            recipe = _backends.harness_build_recipe(target)
-            extra = (recipe.march(),)
+            recipe = _backends.harness_build_recipe(target).with_effective_abi()
+            extra = (recipe.march(), recipe.mabi())
     llvm_path, object_path = workdir / "kernel.ll", workdir / "kernel.o"
     if recipe is None:
         return Path(codegen.compile_ll(llvm_path, object_path, "riscv", extra_flags=extra))
+
+    report_path = object_path.with_suffix(".su")
+    receipt_path = workdir / "kernel.stack_frame.json"
+    for stale_output in (object_path, report_path, receipt_path, workdir / "kernel.abi.json"):
+        stale_output.unlink(missing_ok=True)
+    abi = recipe.mabi().partition("=")[2]
+    declared = _module_target_abi(llvm_path.read_text(encoding="utf-8"))
+    if declared is not None and declared != abi:
+        raise recipe.error_cls(
+            f"LLVM module target-abi {declared!r} conflicts with selected build recipe ABI {abi!r}; "
+            "the candidate IR cannot be rewritten to match the harness")
 
     # ``clang -fstack-usage`` emits a deterministic sibling of the named object.  Remove a previous
     # report first so a compiler invocation that unexpectedly stops producing the sidecar cannot be
     # admitted using stale evidence from an earlier object in a reused work directory.
     policy = recipe.require_kernel_stack_frame()
-    report_path = object_path.with_suffix(".su")
-    receipt_path = workdir / "kernel.stack_frame.json"
-    for stale_output in (object_path, report_path, receipt_path):
-        stale_output.unlink(missing_ok=True)
     compiled = Path(codegen.compile_ll(
         llvm_path, object_path, "riscv", extra_flags=(*extra, "-fstack-usage")))
     from .stack_usage import (StackFramePreflightError, _sha256 as _stack_sha,
@@ -131,11 +182,13 @@ def llvm_mlir_to_object(lowered_mlir_text: str, workdir: Path, *, target: str | 
                 "emitted_llvm_ir_sha256": _stack_sha(llvm_path),
                 **arena_report,
             })
+        _abi_receipt(workdir, compiled, abi)
         return compiled
     write_receipt(
         receipt_path, status="passed", llvm_path=llvm_path, object_path=compiled,
         report_path=report_path, entry_symbol=policy.entry_symbol,
         max_static_bytes=policy.max_static_bytes, measurement=measurement)
+    _abi_receipt(workdir, compiled, abi)
     return compiled
 
 
@@ -270,12 +323,22 @@ def link_elf(cb: dict[str, Any], obj: Path, workdir: Path, *, target: str,
                 or prepack_authorizations is not None):
             raise ValueError("build-only service cannot mix caller authority paths")
         _build_service.verify(target)
-        recipe = _build_service.recipe
+        recipe = _build_service.recipe.with_effective_abi()
         _render = _build_service.render
     else:
         from merlin.runtime.backends import base as _backends
-        recipe = _backends.harness_build_recipe(target)
+        recipe = _backends.harness_build_recipe(target).with_effective_abi()
         _render = _backends.harness_renderer(target)
+    abi_receipt = workdir / "kernel.abi.json"
+    if abi_receipt.exists():
+        try:
+            record = json.loads(abi_receipt.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise recipe.error_cls("kernel ABI receipt is unreadable") from exc
+        if (record.get("schema") != "merlin_kernel_abi_v1"
+                or record.get("abi") != recipe.mabi().partition("=")[2]
+                or record.get("object_sha256") != hashlib.sha256(Path(obj).read_bytes()).hexdigest()):
+            raise recipe.error_cls("kernel ABI receipt does not match selected harness ABI and object")
     # An opt-in renderer may return large constant operands as exact bytes.
     # The target still decides the tensor layout; the runner owns sidecar
     # filenames, assembly and linking for every target in the same way.
@@ -513,7 +576,11 @@ def compile_lowered_to_elf(cb: dict[str, Any], lowered_mlir_text: str,
     try:
         key = _bc.build_identity(target=target, lowered_mlir_text=lowered_mlir_text, cb=cb,
                                  inputs=inputs,
-                                 recipe=_backends.harness_build_recipe(target))
+                                 recipe=_backends.harness_build_recipe(target).with_effective_abi())
+        # The paired ABI check is new build semantics. Do not restore an older cache entry that
+        # predates it, even when an explicitly declared -mabi made the old recipe token identical.
+        if key is not None:
+            key = hashlib.sha256(("paired-kernel-abi-v1:" + key).encode("ascii")).hexdigest()
     except Exception:                    # noqa: BLE001 -- an unkeyable build is an ordinary build
         key = None
     cached = _bc.reuse(work, key, PACKAGE_ELF_NAME)

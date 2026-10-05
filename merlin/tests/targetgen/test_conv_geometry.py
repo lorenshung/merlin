@@ -201,6 +201,56 @@ def test_geometry_classes_groups_and_names_its_evidence():
     assert rep["captures_unreadable"] == {}
 
 
+def test_integerized_capture_retains_source_convolution_window(tmp_path, monkeypatch):
+    import json
+
+    from merlin.targetgen import application_inventory
+
+    monkeypatch.setattr(
+        application_inventory, "verify_capture_receipt", lambda path: {"status": "verified_materialized", "errors": []}
+    )
+    capture = tmp_path / "model.mlir"
+    capture.write_text("module {}")  # Integerized model contains no im2col gather.
+    (tmp_path / "capture_receipt.json").write_text(json.dumps({"artifacts": {"frontend-trace.json": {}}}))
+    nodes = []
+    for value_id, shape in (("input", [1, 3, 16, 16]), ("weight", [8, 3, 3, 3])):
+        nodes.append({"target": "placeholder", "results": [{"id": value_id, "shape": shape}]})
+    nodes.append({
+        "target": "aten.conv2d.default",
+        "args": [{"value_id": "input"}, {"value_id": "weight"}, None, [1, 1], [1, 1]],
+        "kwargs": {},
+        "results": [{"id": "result", "shape": [1, 8, 16, 16], "dtype": "float32"}],
+    })
+    trace = tmp_path / "frontend-trace.json"
+    trace.write_text(json.dumps({
+        "schema": "m2m.frontend_trace.v1", "blockers": [], "graphs": {"original": {"status": "complete", "nodes": nodes}}
+    }))
+    observed = CG.geometry_classes({"independent_cnn": capture})
+    assert observed["n_classes"] == 1
+    assert observed["required"][0]["signature"] == "k3x3/s1x1/d1x1/pad1x1"
+    assert observed["required"][0]["sources"] == ["independent_cnn"]
+
+    nodes[-1]["results"][0]["shape"] = [1, 8, 15, 15]
+    trace.write_text(json.dumps({
+        "schema": "m2m.frontend_trace.v1", "blockers": [], "graphs": {"original": {"status": "complete", "nodes": nodes}}
+    }))
+    rejected = CG.geometry_classes({"independent_cnn": capture})
+    assert rejected["n_classes"] == 0
+    assert "independent_cnn" in rejected["captures_unreadable"]
+
+    trace.write_text(json.dumps({
+        "schema": "m2m.frontend_trace.v1", "blockers": [], "graphs": {"original": {"status": "incomplete", "nodes": nodes}}
+    }))
+    incomplete = CG.geometry_classes({"independent_cnn": capture})
+    assert incomplete["n_classes"] == 0
+    assert "incomplete" in incomplete["captures_unreadable"]["independent_cnn"]
+
+    (tmp_path / "capture_receipt.json").write_text(json.dumps({"artifacts": {}}))
+    unbound = CG.geometry_classes({"independent_cnn": capture})
+    assert unbound["n_classes"] == 0
+    assert "not a capture receipt artifact" in unbound["captures_unreadable"]["independent_cnn"]
+
+
 def test_an_unreadable_capture_is_reported_not_skipped():
     rep = CG.geometry_classes({"broken": "/nonexistent/model.mlir"})
     assert rep["n_classes"] == 0
