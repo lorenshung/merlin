@@ -135,7 +135,7 @@ def _cmd_audit_dialect_modes(args: argparse.Namespace) -> int:
         else "SOURCE_DISCREPANCIES"
         if not report["source_reconciled"]
         else "PARAMETER_DOMAINS_OPEN"
-        if args.require == "phase1-inputs" and report["phase1_mode_scope_ready"] and not report[criterion]
+        if (args.require == "phase1-inputs" and report["phase1_mode_scope_ready"] and not report[criterion])
         else "MODE_SCOPE_OPEN"
         if args.require == "phase1-inputs" and not report[criterion]
         else "PHASE1_INPUTS_READY"
@@ -243,8 +243,15 @@ def _cmd_native_build(args: argparse.Namespace) -> int:
     return 0 if report["status"] == "selection_only" else 2
 
 
+def _load_native_search_limits(path: str | None):
+    from merlin.semantic_compiler.search import SearchLimits
+
+    return SearchLimits.from_record(json.loads(Path(path).read_text())) if path else SearchLimits()
+
+
 def _cmd_native_select(args: argparse.Namespace) -> int:
     from merlin.semantic_compiler.model import KernelRequest
+    from merlin.semantic_compiler.search import SearchAblations
     from merlin.semantic_compiler.snapshot import open_native_snapshot
 
     output = Path(args.out)
@@ -255,7 +262,15 @@ def _cmd_native_select(args: argparse.Namespace) -> int:
         if set(abi) != {"fixed_inputs", "fixed_outputs"} or not isinstance(abi["fixed_inputs"], dict):
             raise ValueError("native ABI needs fixed_inputs and fixed_outputs")
         fixed_outputs = None if abi["fixed_outputs"] is None else tuple(abi["fixed_outputs"])
-        result = snapshot.select(request, fixed_inputs=abi["fixed_inputs"], fixed_outputs=fixed_outputs)
+        ablations = SearchAblations(**{name: name in args.ablation for name in vars(SearchAblations())})
+        limits = _load_native_search_limits(args.search_limits)
+        result = snapshot.select(
+            request,
+            fixed_inputs=abi["fixed_inputs"],
+            fixed_outputs=fixed_outputs,
+            limits=limits,
+            ablations=ablations,
+        )
         constants = {binding.node_id: binding for binding in request.constants}
         constant_requirements = [
             {
@@ -273,8 +288,12 @@ def _cmd_native_select(args: argparse.Namespace) -> int:
             "status": result.status,
             "scope": "selection_only",
             "request_digest": result.request_digest,
+            "qualification": "component_diagnostic" if result.diagnostic_only else "component_check",
+            "diagnostic_only": result.diagnostic_only,
+            "diagnostic_ablations": list(result.diagnostic_ablations),
             "target_digest": snapshot.profile.digest(),
             "snapshot": str(snapshot.root),
+            "search_limits": limits.record(),
             "reason": result.reason,
             "candidate_attempts": result.candidate_attempts,
             "ordering_attempts": result.ordering_attempts,
@@ -302,7 +321,6 @@ def _cmd_native_select(args: argparse.Namespace) -> int:
 def _cmd_native_compile(args: argparse.Namespace) -> int:
     """Invoke a selected target binding with typed source and an explicit ABI."""
     from merlin.semantic_compiler.model import KernelRequest
-    from merlin.semantic_compiler.search import SearchLimits
     from merlin.semantic_compiler.snapshot import open_native_snapshot
     from merlin.semantic_compiler.target_binding import load_native_target_binding, verify_native_publication
 
@@ -328,6 +346,7 @@ def _cmd_native_compile(args: argparse.Namespace) -> int:
             not all(type(value) is int for value in abi["fixed_outputs"])
         ):
             raise ValueError("native compile ABI addresses must be integers")
+        limits = _load_native_search_limits(args.search_limits)
         if output.exists():
             raise FileExistsError(f"fresh native compilation output required: {output}")
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -340,7 +359,7 @@ def _cmd_native_compile(args: argparse.Namespace) -> int:
                 fixed_outputs=tuple(abi["fixed_outputs"]),
                 target_source=Path(args.target_source),
                 destination=staged,
-                limits=SearchLimits(),
+                limits=limits,
             )
             verify_native_publication(
                 staged,
@@ -358,6 +377,7 @@ def _cmd_native_compile(args: argparse.Namespace) -> int:
             "out": str(args.out),
             "request_digest": request.digest(),
             "target_identity": snapshot.profile.target_identity,
+            "search_limits": limits.record(),
             "binary_sha256": manifest.get("binary_sha256"),
         }
     except (OSError, ValueError, RuntimeError, KeyError, TypeError, ImportError) as error:
@@ -376,6 +396,8 @@ def _cmd_native_compile(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from merlin.semantic_compiler.search import SearchAblations
+
     parser = argparse.ArgumentParser(prog="merlin-targetgen", description=__doc__.split("\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -418,7 +440,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--require",
         choices=("phase1-inputs", "complete-dialect"),
         default="complete-dialect",
-        help="phase1-inputs freezes source/mode scope and reviewed finite parameter domains; complete-dialect additionally requires typed bindings and declared admission",
+        help=(
+            "phase1-inputs freezes source/mode scope and reviewed finite parameter domains; "
+            "complete-dialect additionally requires typed bindings and declared admission"
+        ),
     )
     modes.add_argument("--out", required=True, help="mode audit JSON artifact")
     modes.set_defaults(func=_cmd_audit_dialect_modes)
@@ -455,6 +480,14 @@ def build_parser() -> argparse.ArgumentParser:
     native_select.add_argument("--snapshot", required=True)
     native_select.add_argument("--request", required=True, help="typed semantic kernel JSON")
     native_select.add_argument("--abi", help="optional fixed_inputs/fixed_outputs JSON; no runtime samples")
+    native_select.add_argument("--search-limits", help="complete versioned native search-limit JSON")
+    native_select.add_argument(
+        "--ablation",
+        action="append",
+        default=[],
+        choices=tuple(vars(SearchAblations())),
+        help="diagnostic-only native mechanism removal; repeat for multiple ablations",
+    )
     native_select.add_argument("--out", required=True, help="selection result JSON")
     native_select.set_defaults(func=_cmd_native_select)
 
@@ -464,6 +497,7 @@ def build_parser() -> argparse.ArgumentParser:
     native_compile.add_argument("--snapshot", required=True)
     native_compile.add_argument("--request", required=True, help="typed semantic kernel JSON")
     native_compile.add_argument("--abi", required=True, help="fixed_inputs/fixed_outputs JSON")
+    native_compile.add_argument("--search-limits", help="complete versioned native search-limit JSON")
     native_compile.add_argument("--target-source", required=True, help="selected target source checkout")
     native_compile.add_argument("--mode", choices=("strict-native", "hybrid", "diagnostic"), required=True)
     native_compile.add_argument("--out", required=True, help="fresh compilation output directory")

@@ -21,8 +21,9 @@ from merlin.semantic_compiler.target_binding import verify_native_publication
 def _invoke(*arguments: object) -> subprocess.CompletedProcess[str]:
     script = Path(sys.executable).with_name("merlin-targetgen")
     assert script.is_file(), "install the Merlin CLI entrypoint before this integration test"
-    return subprocess.run([str(script), *(str(item) for item in arguments)], text=True,
-                          capture_output=True, timeout=180, check=False)
+    return subprocess.run(
+        [str(script), *(str(item) for item in arguments)], text=True, capture_output=True, timeout=180, check=False
+    )
 
 
 def test_native_publication_refuses_changed_execution_plan(tmp_path: Path) -> None:
@@ -31,7 +32,9 @@ def test_native_publication_refuses_changed_execution_plan(tmp_path: Path) -> No
     (tmp_path / "program.bin").write_bytes(binary)
     (tmp_path / "execution_plan.json").write_bytes(plan)
     manifest = {
-        "engine": "merlin_native", "request_digest": "source-1", "target_identity": "target-1",
+        "engine": "merlin_native",
+        "request_digest": "source-1",
+        "target_identity": "target-1",
         "binary_sha256": hashlib.sha256(binary).hexdigest(),
         "execution_plan_sha256": hashlib.sha256(plan).hexdigest(),
     }
@@ -49,20 +52,35 @@ def test_native_publication_refuses_changed_execution_plan(tmp_path: Path) -> No
 def test_installed_native_build_select_and_failure_replace_stale_result(tmp_path: Path) -> None:
     dtype = TensorType((1,), "i32", "exact-i32")
     descriptor = InstructionDescriptor(
-        "identity", "identity", ("external",), "external", "i32", "exact-i32", (1,),
-        input_dtypes=("i32",), input_numerical_policies=("exact-i32",),
+        "identity",
+        "identity",
+        ("external",),
+        "external",
+        "i32",
+        "exact-i32",
+        (1,),
+        input_dtypes=("i32",),
+        input_numerical_policies=("exact-i32",),
     )
     add = InstructionDescriptor(
-        "add", "add", ("external", "external"), "external", "i32", "exact-i32", (1,),
-        input_dtypes=("i32", "i32"), input_numerical_policies=("exact-i32", "exact-i32"),
+        "add",
+        "add",
+        ("external", "external"),
+        "external",
+        "i32",
+        "exact-i32",
+        (1,),
+        input_dtypes=("i32", "i32"),
+        input_numerical_policies=("exact-i32", "exact-i32"),
     )
-    profile = NativeTargetProfile("synthetic-cli-1", (descriptor, add),
-                                  (StorageBank("external", "dram", 3, "tile"),))
+    profile = NativeTargetProfile("synthetic-cli-1", (descriptor, add), (StorageBank("external", "dram", 3, "tile"),))
     request = KernelRequest(
-        nodes=(SemanticNode("x", "input", (), dtype, effect="input"),
-               SemanticNode("y", "identity", ("x",), dtype)),
-        outputs=("y",), output_storages=("external",), input_storages=(("x", "external"),),
-        target_identity=profile.target_identity, source_identity="fresh-public-kernel",
+        nodes=(SemanticNode("x", "input", (), dtype, effect="input"), SemanticNode("y", "identity", ("x",), dtype)),
+        outputs=("y",),
+        output_storages=("external",),
+        input_storages=(("x", "external"),),
+        target_identity=profile.target_identity,
+        source_identity="fresh-public-kernel",
     )
     profile_path, request_path, abi_path = (tmp_path / name for name in ("profile.json", "request.json", "abi.json"))
     profile_path.write_text(json.dumps(profile.record()))
@@ -71,48 +89,221 @@ def test_installed_native_build_select_and_failure_replace_stale_result(tmp_path
     snapshot, output = tmp_path / "native-snapshot", tmp_path / "selection.json"
     bridge = repo_root() / "src/merlin/semantic_compiler/egg_bridge"
 
-    built = _invoke("native-build", "--engine", "merlin_native", "--profile", profile_path,
-                    "--crate", bridge, "--cargo-target-dir", tmp_path / "cargo-target",
-                    "--source-revision", "public-cli-test", "--out", snapshot)
+    built = _invoke(
+        "native-build",
+        "--engine",
+        "merlin_native",
+        "--profile",
+        profile_path,
+        "--crate",
+        bridge,
+        "--cargo-target-dir",
+        tmp_path / "cargo-target",
+        "--source-revision",
+        "public-cli-test",
+        "--out",
+        snapshot,
+    )
     assert built.returncode == 0, built.stderr + built.stdout
     assert json.loads(built.stdout)["status"] == "selection_only"
     assert (snapshot / "bin/merlin-egg-bridge").is_file()
 
-    selected = _invoke("native-select", "--engine", "merlin_native", "--snapshot", snapshot,
-                       "--request", request_path, "--abi", abi_path, "--out", output)
+    selected = _invoke(
+        "native-select",
+        "--engine",
+        "merlin_native",
+        "--snapshot",
+        snapshot,
+        "--request",
+        request_path,
+        "--abi",
+        abi_path,
+        "--out",
+        output,
+    )
     assert selected.returncode == 0, selected.stderr + selected.stdout
     report = json.loads(output.read_text())
     assert report["status"] == "selected" and report["engine"] == "merlin_native"
     assert report["scope"] == "selection_only" and report["check_fingerprint"]
     assert report["allocation"]["addresses"] and report["selected_graph"]
+    assert report["diagnostic_only"] is False and report["diagnostic_ablations"] == []
+
+    limits = {
+        "schema": "merlin.native_search_limits.v1",
+        "iterations": 8,
+        "egraph_nodes": 5000,
+        "candidate_nodes": 1,
+        "candidates": 256,
+        "orders_per_candidate": 32,
+        "solver_timeout_ms": 5000,
+        "wall_timeout_s": 60,
+    }
+    limits_path = tmp_path / "search-limits.json"
+    limits_path.write_text(json.dumps(limits))
+    chain = KernelRequest(
+        nodes=(
+            SemanticNode("x", "input", (), dtype, effect="input"),
+            SemanticNode("a", "add", ("x", "x"), dtype),
+            SemanticNode("y", "add", ("a", "x"), dtype),
+        ),
+        outputs=("y",),
+        output_storages=("external",),
+        input_storages=(("x", "external"),),
+        target_identity=profile.target_identity,
+    )
+    request_path.write_text(json.dumps(chain.record()))
+    abi_path.write_text(json.dumps({"fixed_inputs": {"x": 0}, "fixed_outputs": [2]}))
+    exhausted = _invoke(
+        "native-select",
+        "--engine",
+        "merlin_native",
+        "--snapshot",
+        snapshot,
+        "--request",
+        request_path,
+        "--abi",
+        abi_path,
+        "--search-limits",
+        limits_path,
+        "--out",
+        output,
+    )
+    assert exhausted.returncode == 2, exhausted.stderr + exhausted.stdout
+    exhausted_report = json.loads(output.read_text())
+    assert exhausted_report["status"] == "resource_limit"
+    assert exhausted_report["search_limits"] == limits
+    assert exhausted_report["candidate_attempts"] == 0
+    assert exhausted_report["selected_graph"] is None
+
+    limits["candidate_nodes"] = 2
+    limits_path.write_text(json.dumps(limits))
+    recovered = _invoke(
+        "native-select",
+        "--engine",
+        "merlin_native",
+        "--snapshot",
+        snapshot,
+        "--request",
+        request_path,
+        "--abi",
+        abi_path,
+        "--search-limits",
+        limits_path,
+        "--out",
+        output,
+    )
+    assert recovered.returncode == 0, recovered.stderr + recovered.stdout
+    recovered_report = json.loads(output.read_text())
+    assert recovered_report["status"] == "selected"
+    assert recovered_report["search_limits"] == limits
+
+    limits["candidate_nodes"] = True
+    limits_path.write_text(json.dumps(limits))
+    invalid = _invoke(
+        "native-select",
+        "--engine",
+        "merlin_native",
+        "--snapshot",
+        snapshot,
+        "--request",
+        request_path,
+        "--abi",
+        abi_path,
+        "--search-limits",
+        limits_path,
+        "--out",
+        output,
+    )
+    assert invalid.returncode == 2
+    assert json.loads(output.read_text())["status"] == "compile_error"
+    assert "selected_graph" not in json.loads(output.read_text())
+    request_path.write_text(json.dumps(request.record()))
+    abi_path.write_text(json.dumps({"fixed_inputs": {"x": 0}, "fixed_outputs": [1]}))
+
+    diagnostic = _invoke(
+        "native-select",
+        "--engine",
+        "merlin_native",
+        "--snapshot",
+        snapshot,
+        "--request",
+        request_path,
+        "--abi",
+        abi_path,
+        "--ablation",
+        "disable_structural_rewrites",
+        "--out",
+        output,
+    )
+    assert diagnostic.returncode == 0, diagnostic.stderr + diagnostic.stdout
+    diagnostic_report = json.loads(output.read_text())
+    assert diagnostic_report["status"] == "selected"
+    assert diagnostic_report["qualification"] == "component_diagnostic"
+    assert diagnostic_report["diagnostic_only"] is True
+    assert diagnostic_report["diagnostic_ablations"] == ["disable_structural_rewrites"]
 
     with_constant = KernelRequest(
-        nodes=(SemanticNode("x", "input", (), dtype, effect="input"),
-               SemanticNode("c", "constant", (), dtype, effect="constant"),
-               SemanticNode("sum", "add", ("x", "c"), dtype)),
-        outputs=("sum",), output_storages=("external",), input_storages=(("x", "external"),),
+        nodes=(
+            SemanticNode("x", "input", (), dtype, effect="input"),
+            SemanticNode("c", "constant", (), dtype, effect="constant"),
+            SemanticNode("sum", "add", ("x", "c"), dtype),
+        ),
+        outputs=("sum",),
+        output_storages=("external",),
+        input_storages=(("x", "external"),),
         target_identity=profile.target_identity,
         constants=(ConstantBinding("c", "i32-le", "feffffff"),),
     )
     request_path.write_text(json.dumps(with_constant.record()))
     abi_path.write_text(json.dumps({"fixed_inputs": {"x": 0}, "fixed_outputs": [2]}))
-    selected_constant = _invoke("native-select", "--engine", "merlin_native", "--snapshot", snapshot,
-                                "--request", request_path, "--abi", abi_path, "--out", output)
+    selected_constant = _invoke(
+        "native-select",
+        "--engine",
+        "merlin_native",
+        "--snapshot",
+        snapshot,
+        "--request",
+        request_path,
+        "--abi",
+        abi_path,
+        "--out",
+        output,
+    )
     assert selected_constant.returncode == 0, selected_constant.stderr + selected_constant.stdout
     requirement = json.loads(output.read_text())["constant_requirements"]
-    assert requirement == [{"value_id": 1, "storage": "external", "address": 1,
-                            "node_id": "c", "encoding": "i32-le", "data_hex": "feffffff"}]
+    assert requirement == [
+        {
+            "value_id": 1,
+            "storage": "external",
+            "address": 1,
+            "node_id": "c",
+            "encoding": "i32-le",
+            "data_hex": "feffffff",
+        }
+    ]
 
     broken = with_constant.record()
     broken["target_identity"] = "changed-target"
     request_path.write_text(json.dumps(broken))
-    failed = _invoke("native-select", "--engine", "merlin_native", "--snapshot", snapshot,
-                     "--request", request_path, "--abi", abi_path, "--out", output)
+    failed = _invoke(
+        "native-select",
+        "--engine",
+        "merlin_native",
+        "--snapshot",
+        snapshot,
+        "--request",
+        request_path,
+        "--abi",
+        abi_path,
+        "--out",
+        output,
+    )
     assert failed.returncode == 2
     replacement = json.loads(output.read_text())
     assert replacement["status"] == "compile_error" and "selected_graph" not in replacement
     assert "target identity differs" in replacement["reason"]
 
-    wrong_engine = _invoke("native-select", "--engine", "act_reference", "--snapshot", snapshot,
-                           "--request", request_path, "--out", output)
+    wrong_engine = _invoke(
+        "native-select", "--engine", "act_reference", "--snapshot", snapshot, "--request", request_path, "--out", output
+    )
     assert wrong_engine.returncode == 2 and "invalid choice" in wrong_engine.stderr
