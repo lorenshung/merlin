@@ -331,6 +331,155 @@ def test_a_module_level_buffer_is_a_tensor_buffer():
     assert report.findings[0].on_tensor == 1
 
 
+def test_clean_host_compute_guard_allows_addressing_only():
+    report = rq.host_compute(_buffer(["convolution"]), function=_host_ir(_ON_ADDRESSING))
+    assert rq.require_clean_host_compute(report) is report
+    assert not report.blocks(gate_phase.PHASE_REPORT)
+
+
+def test_clean_host_compute_guard_vetoes_tensor_arithmetic_in_accepted_task():
+    report = rq.host_compute(_buffer(["convolution"]), function=_host_ir(_ON_TENSOR))
+    assert report.status == rq.STATUS_REPORTED
+    assert not report.blocks(gate_phase.PHASE_REPORT)  # legacy report-phase behavior is unchanged
+    with pytest.raises(rq.HostComputeViolation, match="accepted task.*0"):
+        rq.require_clean_host_compute(report)
+
+
+def test_clean_host_compute_guard_refuses_missing_global_task_metadata():
+    unattributed_ir = _ON_TENSOR.replace(" {merlin.global_task = 0 : i64}", "")
+    report = rq.host_compute(_buffer(["convolution"]), function=_host_ir(unattributed_ir))
+    assert report.status == rq.STATUS_INCOMPLETE
+    assert any("no program-plan task attribution" in cause for cause in report.causes)
+    with pytest.raises(rq.HostComputeUnverified, match="not fully verified"):
+        rq.require_clean_host_compute(report)
+
+
+def test_clean_host_compute_guard_refuses_absent_report_or_host_ir():
+    with pytest.raises(rq.HostComputeUnverified, match="report.*required"):
+        rq.require_clean_host_compute(None)
+    incomplete = rq.host_compute(_buffer(["convolution"]), function=None)
+    with pytest.raises(rq.HostComputeUnverified, match="no parsed host IR"):
+        rq.require_clean_host_compute(incomplete)
+
+
+def test_direct_llvm_helper_call_cannot_hide_tensor_compute_or_opaque_work():
+    """A void helper's work is invisible to a walk limited to the selected kernel function."""
+    def kernel_with_helper(helper: str, call: str):
+        context = make_context()
+        context.load_dialect(LLVM)
+        module = parse_mlir_text(
+            "builtin.module { " + helper + " llvm.func @kernel(%t: !llvm.ptr, %n: i64) { "
+            + call + " llvm.return } }", context)
+        return next(op for op in module.body.block.ops
+                    if op.name == "llvm.func" and op.sym_name.data == "kernel")
+
+    tensor_helper = """llvm.func @helper(%p: !llvm.ptr) {
+      %v = llvm.load %p : !llvm.ptr -> i64
+      %one = llvm.mlir.constant(1 : i64) : i64
+      %s = llvm.add %v, %one : i64
+      llvm.store %s, %p : i64, !llvm.ptr
+      llvm.return
+    }"""
+    tensor_call = "llvm.call @helper(%t) {merlin.global_task = 0 : i64} : (!llvm.ptr) -> ()"
+    report = rq.host_compute(_buffer(["convolution"]),
+                             function=kernel_with_helper(tensor_helper, tensor_call))
+    assert report.status == rq.STATUS_REPORTED, report.to_dict()
+    assert report.findings[0].on_tensor == 1
+    with pytest.raises(rq.HostComputeViolation, match="accepted task"):
+        rq.require_clean_host_compute(report)
+
+    addressing_helper = """llvm.func @helper(%p: !llvm.ptr, %i: i64) {
+      %one = llvm.mlir.constant(1 : i64) : i64
+      %next = llvm.add %i, %one : i64
+      %at = llvm.getelementptr %p[%next] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+      %v = llvm.load %at : !llvm.ptr -> i64
+      llvm.store %v, %p : i64, !llvm.ptr
+      llvm.return
+    }"""
+    address_call = "llvm.call @helper(%t, %n) {merlin.global_task = 0 : i64} : (!llvm.ptr, i64) -> ()"
+    clean = rq.host_compute(_buffer(["convolution"]),
+                            function=kernel_with_helper(addressing_helper, address_call))
+    assert clean.status == rq.STATUS_OK, clean.to_dict()
+    assert clean.tasks[0].on_addressing == 1
+    rq.require_clean_host_compute(clean)
+
+    opaque = rq.host_compute(_buffer(["convolution"]),
+                             function=kernel_with_helper("llvm.func @helper(!llvm.ptr)", tensor_call))
+    assert opaque.status == rq.STATUS_INCOMPLETE, opaque.to_dict()
+    with pytest.raises(rq.HostComputeUnverified, match="no resolved local callee body"):
+        rq.require_clean_host_compute(opaque)
+
+    unattributed = rq.host_compute(_buffer(["convolution"]), function=kernel_with_helper(
+        tensor_helper, tensor_call.replace(" {merlin.global_task = 0 : i64}", "")))
+    assert unattributed.status == rq.STATUS_INCOMPLETE
+    with pytest.raises(rq.HostComputeUnverified, match="task attribution"):
+        rq.require_clean_host_compute(unattributed)
+
+    recursive = """llvm.func @helper(%x: i64) -> i64 {
+      %again = llvm.call @helper(%x) : (i64) -> i64
+      llvm.return %again : i64
+    }"""
+    recursive_call = """%v = llvm.load %t : !llvm.ptr -> i64
+      %answer = llvm.call @helper(%v) {merlin.global_task = 0 : i64} : (i64) -> i64"""
+    undecided = rq.host_compute(_buffer(["convolution"]),
+                                 function=kernel_with_helper(recursive, recursive_call))
+    assert undecided.status == rq.STATUS_INCOMPLETE, undecided.to_dict()
+    with pytest.raises(rq.HostComputeUnverified, match="recursive call"):
+        rq.require_clean_host_compute(undecided)
+
+    host_island = rq.host_compute(_buffer(["host"]),
+                                  function=kernel_with_helper(tensor_helper, tensor_call))
+    assert host_island.status == rq.STATUS_OK and host_island.coverage == 1
+
+
+def test_tensor_value_forwarded_through_cfg_argument_is_not_addressing():
+    tensor_phi = """
+      %v = llvm.load %t : !llvm.ptr -> i64
+      %yes = llvm.mlir.constant(true) : i1
+      llvm.cond_br %yes, ^join(%v : i64), ^join(%n : i64)
+    ^join(%x: i64):
+      %one = llvm.mlir.constant(1 : i64) : i64
+      %sum = llvm.add %x, %one {merlin.global_task = 0 : i64} : i64
+      llvm.store %sum, %t : i64, !llvm.ptr
+      llvm.return
+    """
+    report = rq.host_compute(_buffer(["convolution"]), function=_host_ir(tensor_phi))
+    assert report.status == rq.STATUS_REPORTED, report.to_dict()
+    with pytest.raises(rq.HostComputeViolation):
+        rq.require_clean_host_compute(report)
+
+    # A known tensor path wins over an opaque incoming path regardless of predecessor order.
+    unknown_and_tensor = """
+      %opaque = llvm.call @missing() {merlin.global_task = 0 : i64} : () -> i64
+      %v = llvm.load %t : !llvm.ptr -> i64
+      %yes = llvm.mlir.constant(true) : i1
+      llvm.cond_br %yes, ^join(%opaque : i64), ^join(%v : i64)
+    ^join(%x: i64):
+      %one = llvm.mlir.constant(1 : i64) : i64
+      %sum = llvm.add %x, %one {merlin.global_task = 0 : i64} : i64
+      llvm.return
+    """
+    mixed = rq.host_compute(_buffer(["convolution"]), function=_host_ir(unknown_and_tensor))
+    assert mixed.status == rq.STATUS_REPORTED, mixed.to_dict()
+    assert mixed.findings[0].on_tensor == 1
+    with pytest.raises(rq.HostComputeViolation):
+        rq.require_clean_host_compute(mixed)
+
+    index_only_loop = """
+      llvm.br ^loop(%n : i64)
+    ^loop(%index: i64):
+      %one = llvm.mlir.constant(1 : i64) : i64
+      %next = llvm.add %index, %one {merlin.global_task = 0 : i64} : i64
+      %yes = llvm.mlir.constant(true) : i1
+      llvm.cond_br %yes, ^loop(%next : i64), ^done
+    ^done:
+      llvm.return
+    """
+    clean = rq.host_compute(_buffer(["convolution"]), function=_host_ir(index_only_loop))
+    assert clean.status == rq.STATUS_OK, clean.to_dict()
+    assert clean.tasks[0].on_addressing == 1
+
+
 # ------------------------------------------------------------------------------------------------
 # Phase wiring -- both tiers, and `incomplete` is never a pass at either
 # ------------------------------------------------------------------------------------------------

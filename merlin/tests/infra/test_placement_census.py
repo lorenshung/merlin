@@ -247,47 +247,17 @@ def test_runtime_outline_must_preserve_a_planned_accelerator_group(monkeypatch) 
 
 
 @pytest.mark.parametrize("target", [_TARGET])
-def test_a_module_whose_contractions_are_placed_never_reads_as_zero_coverage(target: str) -> None:
-    """DIRECTION 1. Fails if the census reports a decided zero for a model the router places.
-
-    The capture spells `f32` because integer preparation has not run; the compile declares the format
-    it will lower to. At that format the contraction is placed, and nothing this census publishes may
-    read as a measured zero. Asked WITHOUT that declaration it places nothing -- and must then say it
-    could not decide, rather than print the zero that falls out.
-    """
-    # The module as captured, with nothing declared: every region is judged at a format the backend
-    # will not place from, so this census has decided NOTHING about the program being compiled.
-    undeclared = _module_census(target)
-    assert not any(row["placement"] == "accelerator" for row in undeclared["regions"])
-
-    # THE ERA-1 ASSERTION, AND IT FAILS BY VALUE. This field read 0.000 -- a decided zero, with
-    # `admitted: True` beside it -- for a model whose router places every contraction it is given.
-    assert undeclared["coverage"]["coverage"] is None
-    assert not (undeclared["coverage"]["coverage"] == 0.0 and undeclared["admitted"])
-
-    assert [row["refusal"] for row in undeclared["regions"]] == ["input_dtype", "undeclared_family"]
-    assert {row["dtype_authority"] for row in undeclared["regions"]} == {PC.FROM_CAPTURE}
-    assert undeclared["status"] == GP.STATUS_INCOMPLETE
-    assert not undeclared["offload"]["admitted"] and not undeclared["offload"]["blocking"]
-    assert undeclared["offload"]["offload_of_addressable"] is None
-    # The bound spans everything nobody decided, and nothing else. The contraction is undecided (its
-    # refusal rests on a format the backend will not place from), so the ceiling reaches it; the
-    # reduce is decidedly unacceleratable -- this target declares no reduction unit at ANY format --
-    # so it is ruled out rather than left open, and the ceiling stops short of it.
-    assert undeclared["coverage"]["coverage_undecided_regions"] == 1
-    assert undeclared["coverage"]["coverage_floor"] == 0.0
-    assert undeclared["coverage"]["coverage_ceiling"] == 0.5
-    assert undeclared["regions"][1]["off_accelerator_cause"] == LC.NO_UNIT
-
-    # The SAME module at the format the compile declares it will lower to: the contraction is placed,
-    # and now every number this census publishes is a measurement rather than a refusal to make one.
-    placed = _module_census(target, datapath=_admitted_dtype("contraction"))
-    contractions = [row for row in placed["regions"] if row["family"] == "contraction"]
-    assert contractions and all(row["placement"] == "accelerator" for row in contractions)
-    assert placed["coverage"]["coverage_floor"] > 0.0
-    assert placed["coverage"]["coverage"] != 0.0
-    assert placed["macs"]["offload_of_total"] > 0.0
-    assert placed["offload"]["offload_of_addressable"] > 0.0
+def test_an_unconverted_capture_never_reads_as_placed_from_a_request(target: str) -> None:
+    """Both with and without an int8 request, this executable IR still computes f32."""
+    observed = _module_census(target)
+    requested = _module_census(target, datapath=_admitted_dtype("contraction"))
+    for report in (observed, requested):
+        assert report["coverage"]["coverage"] == 0.0
+        assert report["status"] == LC.STATUS_ZERO_OFFLOAD
+        assert report["regions"][0]["refusal"] == "input_dtype"
+        assert report["regions"][0]["dtype_authority"] == PC.FROM_CAPTURE
+        assert report["regions"][1]["off_accelerator_cause"] == LC.NO_UNIT
+    assert requested["regions"][0]["requested_datapath_mismatch"] is True
 
 
 def test_a_model_whose_work_a_unit_refused_never_reads_as_full_offload() -> None:
@@ -387,25 +357,32 @@ def test_a_region_on_a_unit_the_oracle_refused_is_a_disagreement_not_a_bonus() -
 
 @pytest.mark.parametrize("target", [_TARGET])
 def test_a_weights_manifest_is_not_ranked_into_declaring_the_datapath(target: str) -> None:
-    """`regions_from_module` joins a manifest and falls back to the element type in one expression, so
-    no region can afterwards say which set its format. An authority that cannot be attributed per
-    region is not one this census claims -- it stays undecided rather than guessing."""
+    """An unmatched weights entry cannot retype a captured f32 operation."""
     report = PC.census_of_module(_parse(_PRE_INTEGER_PREPARATION), target, precisions={"nothing.matches": "int8"})
-    assert report["coverage"]["coverage"] is None
-    assert report["status"] == GP.STATUS_INCOMPLETE
+    assert report["coverage"]["coverage"] == 0.0
+    assert report["status"] == LC.STATUS_ZERO_OFFLOAD
 
 
 @pytest.mark.parametrize("target", [_TARGET])
-def test_the_declared_datapath_moves_the_coverage_and_says_it_did(target: str) -> None:
+def test_the_requested_datapath_does_not_move_captured_coverage(target: str) -> None:
     datapath = _admitted_dtype("contraction")
     report = _module_census(target, datapath=datapath)
     assert report["datapath"] == datapath
-    assert report["coverage"]["coverage"] > 0.0
+    assert report["coverage"]["coverage"] == 0.0
     contraction = report["regions"][0]
-    assert contraction["placement"] == "accelerator" and contraction["refusal"] is None
-    # The capture's own spelling survives beside the one the region was judged at.
-    assert contraction["dtype"] == datapath and contraction["captured_dtype"] == "fp32"
-    assert contraction["dtype_authority"] == PC.FROM_DATAPATH
+    assert contraction["placement"] == "host" and contraction["refusal"] == "input_dtype"
+    assert contraction["dtype"] == contraction["captured_dtype"] == "fp32"
+    assert contraction["dtype_authority"] == PC.FROM_CAPTURE
+    assert contraction["requested_datapath_mismatch"] is True
+
+
+def test_requested_datapath_does_not_retype_a_captured_float_contraction() -> None:
+    report = _module_census(_TARGET, datapath=_admitted_dtype("contraction"))
+    contraction = report["regions"][0]
+    assert contraction["captured_dtype"] == "fp32"
+    assert contraction["dtype"] == "fp32"
+    assert contraction["dtype_authority"] == PC.FROM_CAPTURE
+    assert contraction["placement"] == "host"
 
 
 @pytest.mark.parametrize("target", [_TARGET])
@@ -420,23 +397,15 @@ def test_a_region_the_target_cannot_take_stays_uncovered_for_its_own_reason(targ
     reduction = report["regions"][1]
     assert reduction["placement"] == "host" and not reduction["eligible"]
     assert reduction["refusal"] == "undeclared_family" and reduction["gap_class"] == "OG1"
-    assert report["coverage"]["on_host"] == 1
+    assert report["coverage"]["on_host"] == 2
 
 
 @pytest.mark.parametrize("target", [_TARGET])
 def test_an_empty_silent_fallback_list_says_whether_it_was_in_a_position_to_be_complete(target: str) -> None:
-    """The field on its way to being graded, and the zero it produces by not having decided.
-
-    A silent fallback is a region the oracle ADMITTED that nothing took. Judged at a format the
-    backend will not place from, every region is refused instead, so none can qualify -- and the list
-    reads `[]` for a model nobody measured, which is indistinguishable from a clean one. It must say
-    which it is.
-    """
-    undecided = _module_census(target)
-    assert undecided["silent_fallbacks"] == [] and undecided["silent_fallbacks_status"] == GP.STATUS_INCOMPLETE
-
-    decided = _module_census(target, datapath=_admitted_dtype("contraction"))
-    assert decided["silent_fallbacks"] == [] and decided["silent_fallbacks_status"] == LC.STATUS_OFFLOADED
+    """No silent fallback is not a pass when all captured work missed the unit."""
+    for report in (_module_census(target), _module_census(target, datapath=_admitted_dtype("contraction"))):
+        assert report["silent_fallbacks"] == []
+        assert report["silent_fallbacks_status"] == LC.STATUS_ZERO_OFFLOAD
 
 
 def test_two_authorities_for_one_operand_format_are_refused_rather_than_ranked() -> None:
@@ -444,3 +413,38 @@ def test_two_authorities_for_one_operand_format_are_refused_rather_than_ranked()
 
     with pytest.raises(PC.TwoDtypeAuthorities, match="pass one"):
         PC.census_of_module(mq.parse(_PRE_INTEGER_PREPARATION), _TARGET, precisions={"a.b": "int8"}, datapath="int8")
+
+
+def test_matching_storage_manifest_cannot_retype_actual_compute_operands():
+    from merlin.targetgen import model_coverage
+
+    module = _parse(_PRE_INTEGER_PREPARATION)
+    op = next(op for op in module.walk() if op.name == "linalg.matmul")
+    from xdsl.dialects.builtin import StringAttr
+    op.attributes["prov.fqn"] = StringAttr("layer")
+    regions = model_coverage.regions_from_module(module, precisions={"layer": "int8"})
+    contraction = next(region for region in regions if region.family == "contraction")
+    assert contraction.in_dtype == contraction.weight_dtype == "fp32"
+    assert contraction.captured_input_formats == ("fp32", "fp32")
+    report = PC.census_of_module(module, _TARGET, precisions={"layer": "int8"})
+    row = next(row for row in report["regions"] if row["family"] == "contraction")
+    assert row["placement"] == "host" and not row["eligible"]
+
+
+def test_incomplete_source_weight_cannot_become_a_declared_int8_pair():
+    dtype = _admitted_dtype("contraction")
+    region = E.RegionDescriptor(
+        op="matmul", family="contraction", in_dtype=dtype, weight_dtype=dtype,
+        captured_input_formats=(dtype, None), m=4, k=8, n=2,
+    )
+    verdict = E.is_eligible(region, E.capability_map_for_target(_TARGET))
+    assert not verdict.eligible and verdict.undetermined
+    seen = []
+    def observe(demands):
+        seen.extend(demands)
+        return _nothing_routes(demands)
+    report = PC.census([region], _TARGET, router=observe, datapath=dtype)
+    assert seen[0].captured_input_formats == (dtype, None)
+    assert not seen[0].source_formats_complete
+    assert not report["regions"][0]["eligible"]
+    assert report["regions"][0]["off_accelerator_cause"] == LC.ELIGIBILITY_UNKNOWN

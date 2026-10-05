@@ -177,12 +177,10 @@ def pack_operands(spec: Mapping[str, Any], *, accumulator_dtype: str) -> tuple[b
 
 def fnv1a64_words(data: bytes) -> int:
     """FNV-1a over little-endian 64-bit words (the tail zero-padded): 8x fewer steps on the device."""
+    from merlin.common import fnv
+
     padded = data + b"\0" * ((-len(data)) % 8)
-    h = FNV_OFFSET
-    for word in np.frombuffer(padded, dtype="<u8").tolist():
-        h ^= word
-        h = (h * FNV_PRIME) & _M64
-    return h
+    return fnv.fnv1a64_words(np.frombuffer(padded, dtype="<u8"), FNV_OFFSET, FNV_PRIME)
 
 
 def expected_output(spec: Mapping[str, Any], contract) -> np.ndarray:

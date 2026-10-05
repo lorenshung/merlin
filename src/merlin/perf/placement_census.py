@@ -48,11 +48,17 @@ GAP_CLASS_OF_REFUSAL: dict[str, str] = {
     "unrecognized_family": "OG7",
     "input_dtype": "OG7",
     "weight_dtype": "OG7",
+    "operand_pair": "OG7",
+    "result_dtype": "OG7",
+    # The target has not declared whether its elementwise unit can change
+    # output format; absence of that evidence is not an unsupported frontend.
+    "result_dtype_unknown": "OG1",
     "undetermined_family": "OG1",
     "undeclared_family": "OG1",
     "rank": "OG1",
     "batch": "OG1",
     "layout": "OG1",
+    "form": "OG1",
     "engine": "OG1",
     "fused_only": "OG4",
     # The design cannot hold a scale at the region's granularity: a missing hardware feature, and
@@ -84,15 +90,19 @@ UNIT_EXISTS_FOR_REFUSAL: dict[str, bool | None] = {
     "unrecognized_family": None,
     "undetermined_family": None,
     "scale_granularity_unknown": None,
+    "result_dtype_unknown": None,
     UNEXPRESSED_DTYPE: None,
     # The target declares no capability for this family at all.
     "undeclared_family": False,
     # A unit for the family exists and refused THIS instance -- only a unit that exists can do that.
     "input_dtype": True,
     "weight_dtype": True,
+    "operand_pair": True,
+    "result_dtype": True,
     "rank": True,
     "batch": True,
     "layout": True,
+    "form": True,
     "engine": True,
     "fused_only": True,
     "scale_granularity": True,
@@ -148,28 +158,16 @@ def census(
     has already decided placement passes its own so the census reports THAT decision; the two share
     one legality function, so they agree unless the caller's cost model chose otherwise.
 
-    ``datapath`` is the operand format the compile DECLARES it will lower to, and when given it is
-    the format every region is judged at. Without it this census judges a capture at the element
-    types the capture happens to carry -- which is not the program the compiler is building, and on
-    a dynamically quantized model it is not even close. Measured on a ResNet-50 ``int8_dyn_act``
-    capture: the compiler routed 54/54 contractions onto the mesh while this census, reading ``f32``
-    element types off the same module, refused all 53 of its matmuls with ``input_dtype`` and
-    reported coverage 0.004 -- and reported ``offload_of_eligible`` as **1.0**, because the
-    denominator had collapsed to the one region that happened to carry an ``i8`` element type. A
-    perfect-looking ratio over a denominator of one is worse than the zero beside it.
+    ``datapath`` is the requested operand format, not evidence that a capture
+    was transformed. A region's observed operand type takes precedence; only
+    an untyped region may use the request as a weaker fallback. The authority
+    and any request/capture mismatch are recorded per row. This is the same
+    rule as model routing: an f32 contraction does not become an int8 device
+    contraction because the caller requested int8.
 
-    The rule is not invented here: ``capsule_source.model_op_demands`` already routes every demand at
-    the compile's declared format, "because that is what legality is about: a capture is routed under
-    the datapath the compiler will lower it to". Judging the denominator by a different rule than the
-    numerator is what made the two disagree. The capture's own spelling is kept on every row
-    (``captured_dtype``) and never discarded.
-
-    ``precision_declared`` says whether the format each region was judged at is the one the BACKEND
-    WILL PLACE FROM. A caller that built these descriptors chose their dtypes and is that authority,
-    so it defaults True; :func:`census_of_module` walking a capture is not, and says so. When it is
-    False every property refusal becomes :data:`lowering_coverage.ELIGIBILITY_UNKNOWN` and the
-    verdict below is ``incomplete`` -- never a pass, and never the 0.000 that used to be reported
-    with ``admitted: True`` beside it.
+    ``precision_declared`` says whether judged formats are authoritative for
+    execution. Parsed IR with known operand types is authoritative; an
+    unexpressed type remains undecided even when the flag is true.
 
     WHY THE HEADLINE RATIO MOVED. ``offload_of_eligible`` asks whether the router and the eligibility
     oracle AGREED; it does not ask how much of the model reached a unit, and the two are not the same
@@ -186,28 +184,39 @@ def census(
     undetermined = E.undetermined_families_for_target(target)
     route = router or (lambda demands: R.route_plan(list(demands), target))
 
-    judged = [region.in_dtype if datapath is None else datapath for region in regions]
+    # A requested datapath does not rewrite executable capture types. Prefer
+    # the operation's own operand format; use a declared format only where the
+    # capture genuinely did not express one, and keep that weaker authority
+    # visible in the row.
+    judged = [region.in_dtype or datapath for region in regions]
     authority = [
-        FROM_DATAPATH if datapath is not None else (FROM_CAPTURE if region.in_dtype is not None else FROM_UNEXPRESSED)
+        FROM_CAPTURE if region.in_dtype is not None else (FROM_DATAPATH if datapath is not None else FROM_UNEXPRESSED)
         for region in regions
     ]
     # A format nobody expressed is not a stated one whatever the caller declares: there is nothing to
     # have declared. Everywhere else the caller's declaration stands.
-    stated = [precision_declared and authority[index] is not FROM_UNEXPRESSED for index in range(len(regions))]
-
     demands = [
         R.OpDemand(
             op=region.op or "",
             in_fmt=judged[index] or "",
-            weight_fmt=region.weight_dtype,
+            weight_fmt=(region.weight_dtype or judged[index] or "")
+            if region.captured_input_formats is not None and region.resolved_family() == "contraction"
+            else region.weight_dtype,
             site=str(index),
             m=region.m,
             n=region.n,
             k=region.k,
             rank=region.rank,
             family=region.resolved_family(),
+            elem_fmt=region.in_dtype,
+            form=region.form,
+            captured_input_formats=region.captured_input_formats,
         )
         for index, region in enumerate(regions)
+    ]
+    stated = [
+        precision_declared and authority[index] is not FROM_UNEXPRESSED and demands[index].source_formats_complete
+        for index in range(len(regions))
     ]
     plan = route(demands)
     unit_of = {result.demand.site: result.unit for result in plan["results"] if getattr(result, "unit", None)}
@@ -226,7 +235,13 @@ def census(
         # denominator of the same ratio; asking them about different operand formats is how a
         # complete placement came to read as no coverage at all.
         asked = region if judged[index] == region.in_dtype else replace(region, in_dtype=judged[index])
-        verdict = E.is_eligible(asked, cap_map, undetermined=undetermined, readout=readout)
+        verdict = (
+            E.is_eligible(asked, cap_map, undetermined=undetermined, readout=readout)
+            if demands[index].source_formats_complete else E.EligibilityVerdict(
+                False, region.resolved_family(), "captured input roles are incomplete; precision unverified",
+                undetermined=True, refusal="input_dtype",
+            )
+        )
         unit = unit_of.get(str(index))
         on_unit = unit is not None
         eligible, refusal = verdict.eligible, verdict.refusal
@@ -252,7 +267,15 @@ def census(
                 "family": verdict.family,
                 "dtype": judged[index],
                 "captured_dtype": region.in_dtype,
+                "captured_input_formats": region.captured_input_formats,
+                "captured_weight_dtype": region.weight_dtype,
+                "source_formats_complete": demands[index].source_formats_complete,
                 "dtype_authority": authority[index],
+                "requested_datapath_mismatch": bool(
+                    datapath is not None
+                    and region.in_dtype is not None
+                    and not E._dtype_ok(region.in_dtype, (datapath,))
+                ),
                 "placement": LC.ACCELERATOR if on_unit else LC.HOST,
                 "unit": unit,
                 "eligible": eligible,
@@ -309,9 +332,9 @@ def census(
     return {
         "schema": SCHEMA,
         "target": target,
-        # The format this census JUDGED at, beside the target it judged against. Both halves of
-        # every ratio below were asked at this format; a reader who does not know it cannot tell a
-        # model the target cannot run from a census asked about a different program.
+        # The requested format, beside the target. Per-row `dtype` and
+        # `dtype_authority` record what was actually judged; a mixed capture
+        # cannot be described by this single request alone.
         "datapath": datapath,
         "regions": rows,
         "coverage": {
@@ -381,40 +404,26 @@ def census_of_module(
 ) -> dict[str, Any]:
     """:func:`census` over every computation-carrying region of a parsed model module.
 
-    ``precisions`` (a weights manifest) and ``datapath`` (the compile's declared operand format) are
-    two different authorities over the same fact, and passing both is REFUSED rather than ranked: a
-    silent precedence between two sources of a dtype is exactly the shape of the defect this
-    parameter exists to fix. Pass the manifest for a mixed-precision capture whose regions really do
-    differ; pass the datapath when one format is what the compiler will lower every region to.
-
-    A MODULE DECLARES NOTHING ABOUT THE PROGRAM IT WILL BECOME. Only ``datapath`` states the operand
-    format the backend will place from, so only ``datapath`` makes this census DECIDED. Walking a
-    capture without one judges every region at whatever element type integer preparation has not yet
-    consumed, and on a dynamically quantized model that is ``fp32`` everywhere while the compiler
-    lowers all of it to the target's integer datapath: measured on a real ResNet-50, 177 of 178
-    regions refused on ``input_dtype``, coverage 0.000, ``admitted: True``, and the same module at
-    its declared datapath places 56. So without a datapath the verdict is ``incomplete`` and the
-    coverage ratio is ``None``, with the reason attached.
-
-    A weights manifest does not rescue it, and is not ranked into that role: ``regions_from_module``
-    joins the manifest on each region's provenance and falls back to the element type where the join
-    misses, inside one expression -- so no region can afterwards say which of the two set its format.
-    An authority that cannot be attributed per region is not one this census will claim.
+    ``precisions`` (a weights manifest) and ``datapath`` (a requested compile
+    format) are independent declarations that must not silently override one
+    another, so passing both is refused. The parsed module's actual operation
+    types are the execution authority. If quantization occurs later, run this
+    census on the transformed module; a request is not a substitute for that
+    evidence.
     """
     from merlin.targetgen import model_coverage
 
     if precisions and datapath is not None:
         raise TwoDtypeAuthorities(
-            "a weights manifest and a declared datapath both claim the operand format of every "
-            "region; pass one. Ranking them here would decide, per region and invisibly, which "
-            "program this census is about."
+            "a weights manifest and a requested datapath both supply fallback operand formats; "
+            "pass one. Ranking them would decide invisibly which program this census describes."
         )
     return census(
         model_coverage.regions_from_module(module, precisions=precisions),
         target,
         router=router,
         datapath=datapath,
-        precision_declared=datapath is not None,
+        precision_declared=True,
     )
 
 
