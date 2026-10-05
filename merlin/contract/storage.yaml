@@ -78,14 +78,17 @@ concerns:
   presentation: Paper and talk assets -- figures, captures, inputs, and the studies behind them.
   probes: One-off diagnostics and detours. Kept because a report may cite one, grouped because a
     standing concern and an afternoon's debugging should not be neighbours at the same level.
-  protocols: Frozen experiment protocols -- the declaration a run is held to.
+  protocols: Frozen experiment protocols -- the declaration a run is held to -- and sealed phase-0
+    corpus releases, per target, at protocols/<target>/phase0-<TS>-<sha7>/.
   recaptures: Model recaptures (PURGEABLE). See recaptures_dir().
   rvv-development-corpus: The RVV development corpus, per target.
   selfcheck: Output of the repository self-check.
   source-data: Model source data held for reproduction, per model.
   target-evolution: How a target's derived contract changed over time, per target.
   targetgen-evals: Curated evaluation tables for the target generator, per target.
-  targets: Codegen packages minted for a target. See the artifact-layout skill.
+  targets: Codegen packages minted for a target, the phase-2 champions exported from a run's best
+    tag at targets/<target>/champions/<package_id>/, and the generated targets/<target>/INDEX.yaml.
+    See the artifact-layout skill.
   verification: Evidence produced at each verification tier, per target.
 
 # Where a directory that predates the roster belongs, applied by ``merlin-storage organize``.
@@ -107,6 +110,25 @@ product_roots:
   perf-preflight: perf-studies/preflight
   perf-counters: perf-studies/counters
   perf-recovery: perf-studies/recovery
+  # Destinations below that carry a target axis (<concern>/<target>/...); the leaf is not a
+  # new_product() version directory, so these are resolved with declared_product_roots(), not
+  # new_product().
+  phase0-releases: protocols
+  target-champions: targets
+
+# Output that retention must never offer to drop, declared as layout rather than as a per-directory
+# pin a writer might forget. Patterns are relative to the out/ root and match one path component per
+# segment (fnmatch). A unit that IS, contains, or lies inside a match is protected, the same as a
+# lifecycle pin; the producers also take a lifecycle pin, so either alone keeps the evidence.
+# `doc` is the phrase CLAUDE.md uses for the rule; a test holds the two together.
+retention:
+  pinned:
+    - pattern: artifacts/protocols/*/phase0-*
+      reason: a sealed phase-0 corpus release is the reviewed input every phase-1 run is held to
+      doc: protocols/<target>/phase0-<TS>-<sha7>/
+    - pattern: artifacts/targets/*/champions/*
+      reason: an exported phase-2 champion is the published compiler and its measured evidence
+      doc: targets/<target>/champions/<package_id>/
 
 folds:
   - {from: audits, into: artifacts/audits}

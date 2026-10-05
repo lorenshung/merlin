@@ -713,8 +713,37 @@ def _holds_tracked_files(source: Path) -> bool:
     return done.returncode != 0 or bool(done.stdout.strip(b"\0"))
 
 
+def declared_retention() -> list[dict]:
+    """The contract's ``retention.pinned`` rules: ``{pattern, reason, doc}`` rows."""
+    rows = (contract().get("retention") or {}).get("pinned") or []
+    if not isinstance(rows, list) or not all(isinstance(r, dict) and isinstance(r.get("pattern"), str) for r in rows):
+        raise ValueError("storage retention.pinned must be a list of {pattern, reason} mappings")
+    return rows
+
+
+def retention_reasons(path: Path) -> list[str]:
+    """Why the declared retention keeps ``path``: it is, holds, or lies inside a pinned pattern."""
+    from fnmatch import fnmatchcase
+
+    try:
+        relative = Path(path).resolve().relative_to(out_dir().resolve()).parts
+    except ValueError:
+        return []
+    reasons = []
+    for rule in declared_retention():
+        pattern = tuple(rule["pattern"].split("/"))
+        shared = min(len(relative), len(pattern))
+        if not all(fnmatchcase(relative[i], pattern[i]) for i in range(shared)):
+            continue
+        if len(relative) < len(pattern) and not any(Path(path).glob("/".join(pattern[len(relative) :]))):
+            continue  # a container that holds no pinned unit
+        reasons.append(f"declared retention: {rule.get('reason') or rule['pattern']}")
+    return reasons
+
+
 def _protection_reasons(path: Path, *, require_terminal: bool = False) -> list[str]:
     reasons = storage_lifecycle.blockers(path, require_terminal=require_terminal)
+    reasons += retention_reasons(path)
     if _holds_tracked_files(path):
         reasons.append("tracked files or an uninspectable Git index")
     return reasons

@@ -100,11 +100,92 @@ def _sym_name(fn) -> str | None:
     return getattr(sym, "data", None) if sym is not None else None
 
 
+def _closing(text: str, start: int, opener: str, closer: str) -> int:
+    """Index just past the bracket that closes ``text[start]`` (an ``opener``), skipping string literals;
+    ``-1`` when it never closes."""
+    depth, i, n = 0, start, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                i += 2 if text[i] == "\\" else 1
+        elif ch == opener:
+            depth += 1
+        elif ch == closer:
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return -1
+
+
+def _signature_skeleton(text: str, func_name: str) -> str | None:
+    """A module holding only ``@func_name``'s printed header over an empty body, or ``None`` when the
+    header is not in the custom ``func.func @name(...)`` form this reader handles.
+
+    The function type is fully stated by the header (its arguments and its ``->`` results); a
+    transformer's body is ~100k lines a full parse spends a minute on to read a few hundred types.
+    """
+    marker = f"@{func_name}("
+    at = 0
+    while True:
+        at = text.find(marker, at)
+        if at < 0:
+            return None
+        line_start = text.rfind("\n", 0, at) + 1
+        words = text[line_start:at].split()
+        if words and words[0] == "func.func":
+            break
+        at += 1
+    end = _closing(text, at + len(marker) - 1, "(", ")")
+    if end < 0:
+        return None
+    # After the arguments: optional results, optional `attributes {...}`, then the body's `{`.
+    i = end
+    while i < len(text):
+        if text.startswith("attributes", i) and text[i + len("attributes") :].lstrip().startswith("{"):
+            brace = text.index("{", i)
+            i = _closing(text, brace, "{", "}")
+            if i < 0:
+                return None
+            continue
+        if text[i] in "(<[":
+            closer = {"(": ")", "<": ">", "[": "]"}[text[i]]
+            i = _closing(text, i, text[i], closer)
+            if i < 0:
+                return None
+            continue
+        if text[i] == "{":
+            return "builtin.module {\n" + text[line_start:i] + "{\n    func.return\n  }\n}\n"
+        i += 1
+    return None
+
+
 def forward_signature(
     src: "Any", func_name: str = "forward"
 ) -> tuple[list[tuple[list[int], str]], list[tuple[list[int], str]]]:
     """``(inputs, results)`` of ``@func_name`` as lists of ``(shape, dtype)``, read from the function
-    type (not the printed text). Raises ``ValueError`` if the function is absent."""
+    type (not the printed text). Raises ``ValueError`` if the function is absent.
+
+    Text or a file is read from the function's own header alone (:func:`_signature_skeleton`), the
+    same function type a full parse yields; a header this reader cannot isolate, or one that does not
+    parse on its own, falls back to parsing the whole module."""
+    if isinstance(src, (str, Path)):
+        s = str(src)
+        is_path = "\n" not in s and len(s) < 4096 and Path(s).is_file()
+        text = Path(s).read_text(encoding="utf-8") if is_path else s
+        skeleton = _signature_skeleton(text, func_name)
+        if skeleton is not None:
+            try:
+                fn = next(op for op in parse_mlir_text(skeleton).walk() if op.name == "func.func")
+                ftype = fn.function_type
+                return (
+                    [type_shape_dtype(t) for t in ftype.inputs.data],
+                    [type_shape_dtype(t) for t in ftype.outputs.data],
+                )
+            except Exception:  # noqa: BLE001 -- the full parse below is the definition this agrees with
+                pass
     module = parse(src)
     fn = next((op for op in module.walk() if op.name == "func.func" and _sym_name(op) == func_name), None)
     if fn is None:

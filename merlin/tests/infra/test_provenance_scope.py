@@ -24,6 +24,27 @@ def registry(tmp_path):
     return dst
 
 
+def test_installed_hardware_registry_uses_packaged_resource_without_a_checkout(tmp_path, monkeypatch):
+    import importlib.resources
+
+    package = tmp_path / "installed" / "merlin"
+    bundled = package / "_data" / "contract" / "hardware_pins.yaml"
+    bundled.parent.mkdir(parents=True)
+    bundled.write_text("pins: {}\nartifacts: {}\n")
+    software = bundled.with_name("software_pins.yaml")
+    software.write_text("pins: {}\n")
+    monkeypatch.setenv("MERLIN_REPO_ROOT", str(tmp_path / "empty-workdir"))
+    monkeypatch.setattr(importlib.resources, "files", lambda name: package)
+    assert PROV.pins_path() == bundled
+    assert PROV.software_pins_path() == software
+    assert PROV.load_pins() == {}
+    assert PROV.load_pins(PROV.software_pins_path()) == {}
+    assert PROV.load_artifacts() == {}
+    # An explicitly requested missing registry must never fall back to defaults.
+    with pytest.raises(PROV.PinsError, match="no pin registry"):
+        PROV.load_artifacts(tmp_path / "missing.yaml")
+
+
 def test_the_registry_is_parsed_once_per_file_state(registry, monkeypatch):
     calls = []
     real = PROV.yaml_safe_load if hasattr(PROV, "yaml_safe_load") else None

@@ -3,9 +3,14 @@ title: Disk under out/ — why it grows and what is safe to reclaim
 kind: guide
 status: current
 owner: infra
-last_verified: 2026-09-23
+last_verified: 2026-09-29
 related: [reproducibility, getting_started, gemmini_experiment]
 code_refs: [src/merlin/common/content_store.py,
+            src/merlin/common/oot_repo.py,
+            src/merlin/common/artifacts.py,
+            src/merlin/targetgen/champions.py,
+            src/merlin/targetgen/target_index.py,
+            packages/merlin-experiments/src/merlin_experiments/phase1/oot_history.py,
             src/merlin/common/storage_cli.py,
             src/merlin/common/storage_lifecycle.py,
             merlin/contract/storage.yaml,
@@ -265,3 +270,67 @@ units you just edited as the live ones. Deleting run output is an operator decis
 report, and `merlin/experiments/*/AGENT.md` records what a campaign still needs.
 
 Dry run is the default. `--apply` acts, and prints every path it removed.
+
+## Where the phases write: runs, OOT history, releases, champions
+
+Every phase writes to one address per unit, and every later phase cites that address:
+
+| what | where | written by |
+| --- | --- | --- |
+| a phase run | `out/runs/<target>/phase<N>/<TS>_<method>_<sha7>/` | `start_phase_run(target=, phase=, method=)`; a single-phase `merlin experiment run --phase N` |
+| its compiler history | `<phase run>/oot/` (a git repo) | the harness only, via `merlin.common.oot_repo` |
+| a sealed phase-0 release | `out/artifacts/protocols/<target>/phase0-<TS>-<sha7>/` | `merlin experiment corpus prepare` (default `--output`) then `seal` |
+| a phase-2 champion | `out/artifacts/targets/<target>/champions/<package_id>/` | `merlin.targetgen.champions.export_champion` |
+| the target index | `out/artifacts/targets/<target>/INDEX.yaml` | `merlin experiment index <target>` (generated, never edited) |
+
+The suite of a phase run IS the phase, so `aet runs --suite <target>/phase1` and `merlin-storage
+experiments` see phase runs like any other run. `method` names what ran: the experiment id or recipe
+for phase 0, the arm for phase 1, the mode for phase 2. A multi-phase `--phase all` orchestration keeps
+`out/runs/<target>/<experiment>/<TS>_<uuid8>/`; `merlin experiment runs` discovers both shapes.
+
+**The OOT repository is evidence, so only the harness writes it.** A phase-1 run commits the package
+it graded once per round and tags the submission `frozen`. A phase-2 run starts with
+`oot_repo.init_from(<phase-2 run>/oot, <phase-1 run>/oot, ref="frozen")` — only that tag's history,
+no remote — commits each candidate, and tags `measured/<n>` (immutable) and `best` (the only tag that
+moves). Commits are built with plumbing in a private index, with hooks, signing and user/system git
+configuration switched off, a pinned author and committer, and both dates from the run clock, so the
+same bytes at the same time always give the same sha. The committed files are exactly the ones
+`hash_tree` identifies, so `oot_repo.tree_digest(commit)` equals the digest the measurement store names
+the package by; iteration records store `CommitRecord.as_record()`, not a copy of the package. The repo
+is refused when it overlaps the agent's writable sandbox.
+
+The phase-1 engine does this itself: a new run lives at `out/runs/<target>/phase1/<run-id>/`
+(`--run-id` is typically `<TS>_<arm>_<sha7>`; under `merlin experiment run --phase 1` the engine
+adopts the orchestration's own phase-run directory), loop grading commits the operator-only snapshot
+it is about to grade (`merlin_experiments.phase1.oot_history`), the round records in
+`qa_loop_summary.yaml` and `oot_commits.jsonl` carry the commit sha, and the official freeze tags
+`frozen` and records it in `freeze.json` under `oot`. A run that began under the legacy
+`capsule-bench/<arm>/` root resumes there without a history.
+
+```python
+from merlin.common import oot_repo as O
+repo = O.init(run_dir / "oot", sandbox_roots=[workspace])
+rec = O.commit_candidate(repo, graded_snapshot, label="round 3", when=graded_at, run_id=run_id)
+O.tag(repo, O.FROZEN_TAG)                 # phase 1, at freeze
+O.verify(repo, rec.commit, store_digest)  # phase 2, before trusting a measurement
+```
+
+**A champion is exported from `best`, not from a workspace.** `export_champion` checks that
+`best` descends from the declared phase-1 `frozen` commit and that its tree digest is the digest the
+measurements were taken of, exports the tree, and passes it through the publish bridge
+(`publish.assemble_repo_tree` + `publish.embed_provenance`), which gives the standalone layout that
+`merlin-target-publish` pushes: the payload bytes unchanged, `MERLIN_PUBLICATION.md` and
+`.merlin/{manifest.yaml,provenance.yaml,certification.yaml,CHAMPION}`. It adds
+`.merlin/provenance.json` (phase-1 run and frozen commit, phase-2 run and best commit, corpus seal
+digest, phase-0 evidence digest), `measurements.json` (FireSim cycles with the machine, the parameter
+header and the vendor control run in the same batch), `certification.json` (GSIM) and
+`isa_prohibition.json` (the whole-ELF prohibited-instruction scan). Each required field is checked and
+none is defaulted; a scan that is not clean or a GSIM verdict that is not `pass` refuses the export.
+
+**Retention is declared, not remembered.** `retention.pinned` in `merlin/contract/storage.yaml` names
+the sealed releases and the champions; `merlin-storage retain` and `prune` treat a unit that is,
+contains or lies inside a pinned pattern as protected, exactly like a lifecycle pin. The producers take
+a lifecycle pin as well, so either alone keeps the evidence.
+
+`merlin experiment lineage --target <target>` prints the index; `merlin experiment lineage <run>`
+adds the index rows that cite that run.

@@ -101,6 +101,18 @@ def product_root(generator: str) -> Path:
     return artifacts_dir() / roots.get(generator, _product_relative_path(generator))
 
 
+def declared_home(name: str, *, artifacts_root: str | Path | None = None) -> Path:
+    """The concern a ``product_roots`` entry names, below ``artifacts_root`` (default the artifacts dir).
+
+    Unlike :func:`product_root` an undeclared name is refused, not taken literally: a home that the
+    storage contract does not declare is exactly the drift the roster exists to prevent.
+    """
+    roots = declared_product_roots(storage_contract())
+    if name not in roots:
+        raise ValueError(f"storage contract declares no product root {name!r}")
+    return (Path(artifacts_root) if artifacts_root else artifacts_dir()) / roots[name]
+
+
 def utc_stamp() -> str:
     """Canonical timestamp token: UTC, ISO-8601 basic, no ':' (fs/shell/url/tar safe, sortable)."""
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -226,6 +238,31 @@ def start_run(
         git_sha=sha,
         timestamp=ts,
     )
+
+
+def phase_run_id(method: str, *, timestamp: str | None = None, sha: str | None = None) -> str:
+    """A phase run's id: ``<TS>_<method>_<sha7>`` (timestamp-first, no seed segment)."""
+    if not method or "/" in method or method in (".", ".."):
+        raise ValueError(f"phase run method must be one path component, got {method!r}")
+    return f"{timestamp or utc_stamp()}_{method}_{sha or git_sha7(repo_root())}"
+
+
+def start_phase_run(*, target: str, phase: int | str, method: str, **kwargs) -> RunHandle:
+    """Begin a phase run under ``out/runs/<target>/phase<N>/<TS>_<method>_<sha7>/``.
+
+    The phase is the suite of :func:`start_run`, so aet discovery (``aet runs --suite
+    <target>/phase<N>``) and the storage tools see phase runs like every other run. ``method`` names
+    what ran: the experiment id or recipe (phase 0), the arm (phase 1), the mode (phase 2). A
+    phase run owns its engine output and, for phases 1 and 2, the harness-owned ``oot/`` repository
+    (:mod:`merlin.common.oot_repo`).
+    """
+    from .paths import phase_suite
+
+    if not target:
+        raise ValueError("a phase run needs a target")
+    if "run_id" in kwargs or "suite" in kwargs:
+        raise ValueError("a phase run's suite and run id are derived, not chosen")
+    return start_run(suite=phase_suite(phase), method=method, target=target, run_id=phase_run_id(method), **kwargs)
 
 
 def finish_run(h: RunHandle, status: str, summary: dict | None = None) -> None:

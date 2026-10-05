@@ -91,6 +91,19 @@ def runs_root(target: str, suite: str) -> Path:
     return runs_dir() / target / suite
 
 
+def phase_suite(phase: int | str) -> str:
+    """The run suite of a phase: ``phase0``, ``phase1`` or ``phase2`` (the suite IS the phase)."""
+    name = str(phase)
+    if name not in ("0", "1", "2"):
+        raise ValueError(f"phase must be 0, 1 or 2, got {phase!r}")
+    return f"phase{name}"
+
+
+def phase_runs_root(target: str, phase: int | str) -> Path:
+    """Canonical phase run root: out/runs/<target>/phase<N>, honoring MERLIN_OUT_ROOT."""
+    return runs_root(target, phase_suite(phase))
+
+
 def merlin_dir() -> Path:
     """Return ``<repo>/merlin``."""
     return repo_root() / "merlin"
@@ -282,8 +295,12 @@ def tracked_build_dir() -> Path:
 @functools.lru_cache(maxsize=1)
 def _dotenv() -> dict[str, str]:
     """Parse ``<repo>/.env`` (``KEY=VALUE`` lines, ``#`` comments) into a dict. Cached."""
+    return read_dotenv(repo_root() / ".env")
+
+
+def read_dotenv(p: Path) -> dict[str, str]:
+    """Parse one ``.env`` file the way :func:`_dotenv` parses this checkout's; absent means empty."""
     out: dict[str, str] = {}
-    p = repo_root() / ".env"
     if p.is_file():
         for line in p.read_text(encoding="utf-8").splitlines():
             line = line.strip()

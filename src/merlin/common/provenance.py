@@ -72,6 +72,7 @@ __all__ = [
     "citations",
     "require",
     "source_digest",
+    "software_pins_path",
     "source_status",
     "verify",
     "verify_artifact",
@@ -87,9 +88,16 @@ class PinsError(RuntimeError):
 
 
 def pins_path() -> Path:
-    from .paths import merlin_dir
+    from .paths import data_path
 
-    return Path(merlin_dir()) / "contract" / "hardware_pins.yaml"
+    return data_path("contract", "hardware_pins.yaml")
+
+
+def software_pins_path() -> Path:
+    """The registry of pinned toolchain/frontend revisions: same schema, same verifier, own file."""
+    from .paths import data_path
+
+    return data_path("contract", "software_pins.yaml")
 
 
 @dataclass(frozen=True)
@@ -370,6 +378,11 @@ class Artifact:
     #: hash was never recorded, and a record stating one is then confirmed by NAME alone -- reported
     #: as such, never silently upgraded to a byte match and never held against the record.
     hwdb_digest: str = ""
+    #: sha256 of the parameter header whose ABI this device ELABORATES, when it has been established.
+    #: A program compiled against a different header runs and is wrong in whichever layer the two
+    #: disagree about, which reads as a schedule regression; so a measurement compares a program's
+    #: build header against this before a run is spent. Empty means UNKNOWN -- never assumed equal.
+    abi_header_sha256: str = ""
     #: ``file`` (one built file) or ``tree`` (a built DIRECTORY whose identity is all of its bytes).
     #: A tree is hashed with the SAME hasher the host-lane pin uses, so a descriptor's
     #: ``package_sha256`` and this registry's ``digest`` are literally the same number -- two hashers
@@ -462,6 +475,7 @@ def load_artifacts(path: "str | Path | None" = None) -> dict[str, Artifact]:
             target=str(body.get("target") or ""),
             role=str(body.get("role") or ""),
             hw_configs=tuple(str(c) for c in (body.get("hw_configs") or ())),
+            abi_header_sha256=str(body.get("abi_header_sha256") or ""),
             hwdb_digest=str(hwdb_digest),
         )
     return out
