@@ -22,6 +22,7 @@ from .declarations import from_definition
 from .evidence import _materialize_evidence, export_evidence, select_evidence
 from .performance_scope import derive_performance_scope
 from .profiles import selected_software_spec_path, synthesis_input_identity
+from .program_admission import entry_refusal_is_final
 from .software_screen import diagnostic_entry, intersect_requirement, screen_entry
 from .typed_scope import typed_required_instances
 
@@ -30,15 +31,22 @@ def _json(value) -> bytes:
     return (json.dumps(value, sort_keys=True, indent=2) + "\n").encode()
 
 
-def _materialized_iteration_capsules(full: dict, digest: str) -> tuple[list[dict], dict[str, bytes]]:
+def _materialized_iteration_capsules(
+    full: dict,
+    digest: str,
+    *,
+    loader_snapshots: dict[str, tuple[Path, str]] | None = None,
+) -> tuple[list[dict], dict[str, bytes]]:
     """Select full iteration programs, not a family representative or a held-out model.
 
-    Save all producer-receipt members before exposing entries. Reopening the
-    source loader or claiming the target executes the program is not involved.
+    Save all producer-receipt members before exposing entries. A source loader
+    becomes gradeable only when a verified preselected capture binds its exact
+    snapshot bytes; an older receipt alone remains diagnostic.
     """
     from merlin.targetgen.capsule_source import materialized_model_artifacts
 
     entries, outputs = [], {}
+    loader_snapshots = loader_snapshots or {}
     for label, application in sorted(full["applications"].items()):
         if not label or Path(label).name != label or label in {".", ".."}:
             raise ValueError("application identity must be a single safe path component")
@@ -80,6 +88,16 @@ def _materialized_iteration_capsules(full: dict, digest: str) -> tuple[list[dict
             != artifact.meta["framework_catalog"]["sha256"]
         ):
             raise ValueError(f"framework catalog changed while copying {label}")
+        loader_binding = {}
+        if label in loader_snapshots:
+            loader_path, loader_sha256 = loader_snapshots[label]
+            if loader_path.is_symlink() or not loader_path.is_file():
+                raise ValueError(f"selected workload loader is absent or symlinked: {label}")
+            loader_bytes = loader_path.read_bytes()
+            if hashlib.sha256(loader_bytes).hexdigest() != loader_sha256:
+                raise ValueError(f"selected workload loader changed while copying {label}")
+            outputs[f"materialized/{label}/loader.py"] = loader_bytes
+            loader_binding = {"loader_path": f"materialized/{label}/loader.py", "loader_sha256": loader_sha256}
         entries.append(
             {
                 "name": f"SY_source_{label}",
@@ -91,7 +109,11 @@ def _materialized_iteration_capsules(full: dict, digest: str) -> tuple[list[dict
                 "operand_dtype": artifact.dtype,
                 "source_role": "materialized_iteration_capture",
                 "source_reference": "full saved iteration capture; target compile and execution unverified",
-                "materialized_capture": {**selection, "path": f"materialized/{label}/model.mlir"},
+                "materialized_capture": {
+                    **selection,
+                    "path": f"materialized/{label}/model.mlir",
+                    **loader_binding,
+                },
                 "generalization": {"generalization_axis": "composition"},
             }
         )
@@ -119,8 +141,13 @@ def _selected_file_specs(selections: list[str], role: str) -> dict[str, tuple[Pa
         label, separator, location = item.partition("=")
         name, digest_separator, digest = location.rpartition("@")
         if (
-            not separator or not digest_separator or not label or not name or label in result
-            or len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest)
+            not separator
+            or not digest_separator
+            or not label
+            or not name
+            or label in result
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
         ):
             raise ValueError(f"invalid/duplicate {role} {item!r}; use LABEL=PATH@SHA256")
         path = Path(name).expanduser().absolute()
@@ -193,6 +220,22 @@ def _validate_capture_recipes(
     return selected_policies
 
 
+def grouping_oracle(target: str, prohibited_roles):
+    """The grouping's target oracle under the experiment's prohibited instruction roles.
+
+    ``None`` (the grouping's own default oracle) when the experiment prohibits nothing. Otherwise a
+    standalone form whose every evidence path needs a prohibited role -- a residual add licensed only
+    by a hardware loop descriptor, say -- is refused at grouping, so no form the policy forbids reaches
+    the requirement (``merlin.targetgen.capability_roles``).
+    """
+    roles = tuple(prohibited_roles or ())
+    if not roles:
+        return None
+    from merlin.xdsl_dialects.lowering import compute_groups as CG
+
+    return CG.TargetOracle(target, prohibited_roles=roles)
+
+
 def derive(
     definition: str | Path,
     captures: dict[str, Path],
@@ -224,14 +267,28 @@ def derive(
     capture_preselections = capture_preselections or {}
     if capture_preselections and set(capture_preselections) != set(captures):
         raise ValueError("capture preselection must cover the entire declared iteration roster")
-    selected_capture_evidence = {}
+    selected_capture_evidence, capture_attestations, loader_snapshots = {}, {}, {}
+    capture_python = None
     if capture_preselections:
-        from .capture_selection import verify
+        from .capture_execution_attestation import attest_sealed_m2m
+        from .capture_selection import load, verify
 
         for label, (selection_path, selected_sha256) in sorted(capture_preselections.items()):
             selected_capture_evidence[label] = verify(
                 selection_path, expected_sha256=selected_sha256, model_path=captures[label]
             )
+            capture_attestations[label] = attest_sealed_m2m(
+                selected_capture_evidence[label], selection_path=selection_path, model_path=captures[label]
+            )
+            selected = load(selection_path, expected_sha256=selected_sha256)
+            loader_snapshots[label] = (
+                Path(selected["run_dir"]) / "snapshots/source/workload/loader.py",
+                selected["plan"]["loader_sha256"],
+            )
+            interpreter = Path(selected["plan"]["venv"]) / "bin" / "python"
+            if capture_python is not None and capture_python != interpreter:
+                raise ValueError("iteration captures select different PyTorch interpreters")
+            capture_python = interpreter
     spec = load_spec(definition)
     config = spec.document["phases"]["0"]["config"]
     software = selected_software_spec_path(
@@ -246,13 +303,17 @@ def derive(
     selected = select_evidence(
         te.target,
         descriptor=declaration.descriptor,
+        capture_python=capture_python,
         capability_contract_path=capability_contract_path,
         software_spec=software,
         hardware_spec=hardware,
         facts_path=rtl_facts,
+        prohibited_roles=spec.prohibited_instruction_roles,
     )
     options = {
         "capability_contract": selected.contract,
+        "software_spec": selected.software_spec,
+        "host_capabilities": selected.host_capabilities,
         "include_graph": True,
         "application_metadata": {
             label: {"workload_id": label, "workload_role": "iteration", "coverage_scope": "full_capture"}
@@ -275,7 +336,7 @@ def derive(
             cert_budget_s=(te.workload_spec or {}).get("cert_budget_s"),
             application_inventory_options=options,
         )
-    if full["status"] != "inventoried":
+    if full["status"] != "inventoried" and config.get("evidence_mode") != "diagnostic":
         raise ValueError("one or more declared iteration captures could not be fully inventoried")
     digest = hashlib.sha256(json.dumps(full, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     if digest != requirement["application_demands"]["full_inventory_sha256"]:
@@ -284,6 +345,17 @@ def derive(
     # scope census. This is source evidence, not an accelerator-eligible Phase 2
     # requirement; placement and compiler correspondence remain unresolved.
     requirement["scope"]["typed_required_instances"] = typed_required_instances(requirement["scope"], full)
+    # Each declared capture's per-operation admission, judged now with the selected declarations, so
+    # generation can hold the whole-program capsule built from that capture to the same placements.
+    from .program_admission import SCHEMA as WHOLE_PROGRAM_SCHEMA
+    from .program_admission import derive_inventory
+
+    whole_program = derive_inventory(full, target=te.target, evidence=selected)
+    requirement["whole_program_admission"] = {
+        "schema": WHOLE_PROGRAM_SCHEMA,
+        "sidecar": "whole-program-admission.json",
+        "sha256": whole_program["sha256"],
+    }
     from merlin.targetgen.quantization_spec import build_quantization_contract, capture_recipe_candidates
 
     quantization = build_quantization_contract(
@@ -325,6 +397,9 @@ def derive(
             "applications": selected_capture_evidence,
             "phase0_admission": "not_granted",
         }
+        # The replay records above stay nonadmissible; the separately issued
+        # attestations are what the coverage gate re-verifies from disk.
+        requirement["capture_execution_attestations"] = capture_attestations
     requirement = intersect_requirement(requirement, selected.software_spec, selected.contract)
     # The recipe's tier ladder is an authored PLAN, not evidence that an oracle
     # was constructed. Keep it separate from ``oracle_tiers`` (which remains
@@ -337,13 +412,54 @@ def derive(
     if planned_tiers is not None and (
         not isinstance(planned_tiers, list)
         or any(
-            not isinstance(tier, str) or not tier.startswith("L") or not tier[1:].isdigit()
-            for tier in planned_tiers
+            not isinstance(tier, str) or not tier.startswith("L") or not tier[1:].isdigit() for tier in planned_tiers
         )
     ):
         raise ValueError("selected recipe required_oracle_tiers must be a list of fidelity tiers")
     requirement["oracle_tiers_declared"] = list(planned_tiers or [])
     requirement["scope"]["performance"] = derive_performance_scope(requirement["scope"], selected.software_spec)
+    # The two capture-derived stages share ONE grouping and ONE binding (the corpus binding under the
+    # selected recipe, contract and facts), read only the declared ITERATION captures, and refuse any
+    # held-out model. Their outputs are byte-bound here with every other derived member.
+    from merlin.targetgen.group_capsule_entries import group_binding
+
+    from .claim_boundary import held_out_models
+    from .form_perf import derive_form_scope
+    from .model_forms import derive_model_forms
+
+    held_out = held_out_models(te)
+    stage_binding = group_binding(
+        te,
+        (recipe_doc.get("datapath") or {}) if isinstance(recipe_doc, dict) else {},
+        contract=selected.contract,
+        facts=selected.refreshed_facts,
+        taxonomy=selected.isa_taxonomy,
+    )
+    with (
+        target_registry.observed_contract(te.target, selected.contract),
+        observed_facts(te.target, selected.refreshed_facts, Path(rtl_facts)),
+    ):
+        oracle = grouping_oracle(te.target, spec.prohibited_instruction_roles)
+        requirement["scope"]["performance"]["forms"] = derive_form_scope(
+            te.target,
+            captures,
+            stage_binding,
+            iteration_roster=list(declared),
+            held_out=held_out,
+            facts=selected.refreshed_facts,
+            oracle=oracle,
+        )
+        model_forms = derive_model_forms(
+            te.target,
+            captures,
+            stage_binding,
+            iteration_roster=list(declared),
+            held_out=held_out,
+            facts=selected.refreshed_facts,
+            ceiling=(requirement.get("cert_affordability") or {}).get("max_elements"),
+            numerical_semantics=(selected.software_spec or {}).get("numerical_semantics"),
+            oracle=oracle,
+        )
     requirement["derivation"]["phase0_execution"] = {
         "agentic": False,
         "policy": "deterministic from selected inputs",
@@ -357,6 +473,7 @@ def derive(
     outputs = {
         "requirements.yaml": yaml.safe_dump(requirement, sort_keys=False).encode(),
         "application-demands.json": _json(full),
+        "whole-program-admission.json": _json(whole_program),
         **policy_outputs,
     }
     if selected_capture_evidence:
@@ -372,6 +489,14 @@ def derive(
         )
     except corpus_synth.SynthesisError as exc:
         plan = {"status": "blocked", "reason": str(exc), "capsules": [], "provenance": {}}
+    source_entries, source_outputs = _materialized_iteration_capsules(
+        full, digest, loader_snapshots=loader_snapshots
+    )
+    outputs.update(source_outputs)
+    gradeable_sources = [entry for entry in source_entries if entry["materialized_capture"].get("loader_sha256")]
+    if plan.get("status") != "blocked":
+        plan["capsules"] = [*plan.get("capsules", []), *model_forms["entries"], *gradeable_sources]
+    plan.setdefault("provenance", {})["model_forms"] = model_forms["provenance"]
     screens = []
     for index, entry in enumerate(plan.get("capsules") or []):
         decision = screen_entry(
@@ -381,36 +506,38 @@ def derive(
             host_capabilities=selected.host_capabilities,
         )
         screens.append({"capsule": entry.get("name"), **decision})
-        if decision["status"] == "unsupported":
+        if entry_refusal_is_final(entry, decision):
             plan["capsules"][index] = diagnostic_entry(entry, decision)
     plan.setdefault("provenance", {})["software_intersection"] = {
         **requirement["software_intersection"],
         "candidate_screens": screens,
     }
-    # Exact source obligations are covered by complete materialized source
-    # programs, independently of the target capability-axis representatives.
-    source_entries, source_outputs = _materialized_iteration_capsules(full, digest)
-    outputs.update(source_outputs)
+    # A preselected, replay-verified workload snapshot supplies exact loader bytes.
+    # Older receipt-only captures remain diagnostic and cannot become graded models.
     plan.setdefault("provenance", {})["materialized_iteration_captures"] = {
         "status": "byte_verified",
         "applications": sorted(captures),
         "full_inventory_sha256": digest,
         "scope": "full capture, not headline validation",
         "qualification": "host reference and source coverage only; target support and execution unverified",
+        "gradeable_model_capsules": len(gradeable_sources),
+        "diagnostic_model_names": [
+            entry["name"] for entry in source_entries if entry not in gradeable_sources
+        ],
     }
-    if plan.get("status") != "blocked":
-        plan["capsules"] = [*plan.get("capsules", []), *source_entries]
     outputs["synthesis-plan.json"] = _json(plan)
     _materialize_evidence(root, outputs)
     selected = select_evidence(
         te.target,
         descriptor=declaration.descriptor,
+        capture_python=capture_python,
         capability_contract_path=capability_contract_path,
         software_spec=software,
         hardware_spec=hardware,
         facts_path=rtl_facts,
         conformance_spec=root / "requirements.yaml",
         native_qualifications=native_qualifications,
+        prohibited_roles=spec.prohibited_instruction_roles,
     )
     manifest = export_evidence(selected, root / "evidence")
     identity = synthesis_input_identity(

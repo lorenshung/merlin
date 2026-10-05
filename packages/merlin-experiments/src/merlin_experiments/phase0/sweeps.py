@@ -543,9 +543,7 @@ def _resolve_target_oracle_evidence(
     return performance
 
 
-def _materialize_performance_entry(
-    entry: dict, binding, *, oracle_selection: dict[str, str] | None = None
-) -> dict:
+def _materialize_performance_entry(entry: dict, binding, *, oracle_selection: dict[str, str] | None = None) -> dict:
     """Resolve a performance member onto a runnable direct corpus path.
 
     Dtypes come from workload_gen's capability-manifest accessor and must agree
@@ -592,9 +590,7 @@ def _materialize_performance_entry(
     if oracle_selection is None:
         performance = _resolve_target_oracle_evidence(performance, target)
     else:
-        performance = _resolve_target_oracle_evidence(
-            performance, target, oracle_selection=oracle_selection
-        )
+        performance = _resolve_target_oracle_evidence(performance, target, oracle_selection=oracle_selection)
     performance["emitter"] = copy.deepcopy(performance["emitter"])
     performance["emitter"]["resolved"] = {
         "source": "direct",
@@ -615,8 +611,11 @@ def _materialize_performance_entry(
 
 
 def _scope_requirement_sweeps(
-    sweeps: list[dict], requirement: dict | None, digest: str | None,
-    skipped: list | None, blocked: list | None,
+    sweeps: list[dict],
+    requirement: dict | None,
+    digest: str | None,
+    skipped: list | None,
+    blocked: list | None,
 ) -> list[dict]:
     """Derive one exact claim cohort per supported captured scope signature.
 
@@ -634,18 +633,21 @@ def _scope_requirement_sweeps(
             expanded.append(sweep)
             continue
         family = str(sweep.get("id") or "")
-        if pattern != {"prefix": ["movement", "contraction"],
-                       "repeated_tail": "elementwise_map", "min_tail": 1}:
+        if pattern != {"prefix": ["movement", "contraction"], "repeated_tail": "elementwise_map", "min_tail": 1}:
             raise ValueError(f"performance sweep {family}: unsupported scope pattern")
-        scope = ((requirement or {}).get("scope") or {})
+        scope = (requirement or {}).get("scope") or {}
         performance_scope = scope.get("performance") or {}
         if performance_scope.get("schema") != "merlin.phase0.performance_scope.v1":
             if blocked is not None:
-                blocked.append({
-                    "family": family, "sweep": family, "status": "blocked_unimplemented",
-                    "reason": "selected requirement lacks exact SW/emitter-derived Phase 2 scope",
-                    "requirement_sha256": digest,
-                })
+                blocked.append(
+                    {
+                        "family": family,
+                        "sweep": family,
+                        "status": "blocked_unimplemented",
+                        "reason": "selected requirement lacks exact SW/emitter-derived Phase 2 scope",
+                        "requirement_sha256": digest,
+                    }
+                )
             continue
         from .performance_scope import validate_performance_scope
 
@@ -658,8 +660,11 @@ def _scope_requirement_sweeps(
                 continue
             signature = row["signature"]
             families = signature.split(" -> ")
-            if not (len(families) >= 3 and families[:2] == pattern["prefix"]
-                    and all(part == pattern["repeated_tail"] for part in families[2:])):
+            if not (
+                len(families) >= 3
+                and families[:2] == pattern["prefix"]
+                and all(part == pattern["repeated_tail"] for part in families[2:])
+            ):
                 continue
             matched += 1
             if row.get("length") != len(families) or not digest:
@@ -670,8 +675,16 @@ def _scope_requirement_sweeps(
                 reason = None
             if reason is not None:
                 if blocked is not None:
-                    blocked.append({"family": family, "sweep": family, "status": "blocked_unimplemented",
-                                    "reason": reason, "signature": signature, "requirement_sha256": digest})
+                    blocked.append(
+                        {
+                            "family": family,
+                            "sweep": family,
+                            "status": "blocked_unimplemented",
+                            "reason": reason,
+                            "signature": signature,
+                            "requirement_sha256": digest,
+                        }
+                    )
                 continue
             derived_family = f"{family}_{hashlib.sha256(signature.encode()).hexdigest()[:12]}"
             if derived_family in seen_families:
@@ -684,7 +697,9 @@ def _scope_requirement_sweeps(
             performance = selected["base"]["performance"]
             performance["family"] = derived_family
             performance["requirement_basis"] = {
-                "sha256": digest, "axis": "scope.performance.required", "pattern_family": family,
+                "sha256": digest,
+                "axis": "scope.performance.required",
+                "pattern_family": family,
                 "signature": signature,
                 "occurrences": row.get("occurrences"),
             }
@@ -694,15 +709,27 @@ def _scope_requirement_sweeps(
             expanded.append(selected)
         if matched == 0:
             if performance_scope.get("status") == "unresolved" and blocked is not None:
-                blocked.append({
-                    "family": family, "sweep": family, "status": "blocked_unimplemented",
-                    "reason": "exact source/SW/emitter Phase 2 scope remains unresolved",
-                    "required_pattern": pattern, "requirement_sha256": digest,
-                })
+                blocked.append(
+                    {
+                        "family": family,
+                        "sweep": family,
+                        "status": "blocked_unimplemented",
+                        "reason": "exact source/SW/emitter Phase 2 scope remains unresolved",
+                        "required_pattern": pattern,
+                        "requirement_sha256": digest,
+                    }
+                )
             elif skipped is not None:
-                skipped.append({"family": family, "sweep": family, "status": "skipped_inapplicable",
-                                "reason": "selected frozen requirement has no eligible scope-chain signature",
-                                "required_pattern": pattern, "requirement_sha256": digest})
+                skipped.append(
+                    {
+                        "family": family,
+                        "sweep": family,
+                        "status": "skipped_inapplicable",
+                        "reason": "selected frozen requirement has no eligible scope-chain signature",
+                        "required_pattern": pattern,
+                        "requirement_sha256": digest,
+                    }
+                )
     return expanded
 
 
@@ -750,8 +777,11 @@ def expand_sweeps(
         if trait_facts is None:
             trait_facts = evidence.performance_facts
     sweeps = _scope_requirement_sweeps(
-        profile.get("sweeps") or [], selected_requirement, requirement_sha256,
-        skipped, blocked_unimplemented,
+        profile.get("sweeps") or [],
+        selected_requirement,
+        requirement_sha256,
+        skipped,
+        blocked_unimplemented,
     )
     if not sweeps:
         return entries
@@ -773,6 +803,22 @@ def expand_sweeps(
         sweep_id = str(sweep.get("id") or "").strip()
         if not sweep_id:
             raise ValueError("every sweep needs an `id` (it prefixes the generated names)")
+        withdrawal = (profile.get("_performance_withdrawals") or {}).get(sweep_id)
+        if withdrawal is not None:
+            if skipped is not None:
+                skipped.append(
+                    {
+                        "family": sweep_id,
+                        "sweep": sweep_id,
+                        "status": "withdrawn",
+                        "reason": withdrawal["reason"],
+                        "decided_by": withdrawal["decided_by"],
+                        "basis": "target recipe performance_withdrawals",
+                        "fit_axes": list(sweep.get("fit_axes") or []),
+                        "comparison_roles": _comparison_roles(sweep),
+                    }
+                )
+            continue
         base = dict(sweep.get("base") or {})
         variant_performance = [
             i
@@ -793,21 +839,26 @@ def expand_sweeps(
                 operand = mlir_dtype(binding.operand_dtype) if callable(mlir_dtype) else ""
                 accumulator = mlir_dtype(binding.accum_dtype) if callable(mlir_dtype) else ""
                 if not (
-                    operand.startswith("i") and operand[1:].isdigit()
-                    and accumulator.startswith("i") and accumulator[1:].isdigit()
+                    operand.startswith("i")
+                    and operand[1:].isdigit()
+                    and accumulator.startswith("i")
+                    and accumulator[1:].isdigit()
                     and int(accumulator[1:]) > int(operand[1:])
                 ):
                     if skipped is not None:
-                        skipped.append({
-                            "family": sweep_id, "sweep": sweep_id, "status": "skipped_inapplicable",
-                            "reason": (
-                                "scope-chain builder requires signed integer operands "
-                                "and a wider accumulator"
-                            ),
-                            "operand_dtype": getattr(binding, "operand_dtype", None),
-                            "accum_dtype": getattr(binding, "accum_dtype", None),
-                            "requirement_basis": performance.get("requirement_basis"),
-                        })
+                        skipped.append(
+                            {
+                                "family": sweep_id,
+                                "sweep": sweep_id,
+                                "status": "skipped_inapplicable",
+                                "reason": (
+                                    "scope-chain builder requires signed integer operands and a wider accumulator"
+                                ),
+                                "operand_dtype": getattr(binding, "operand_dtype", None),
+                                "accum_dtype": getattr(binding, "accum_dtype", None),
+                                "requirement_basis": performance.get("requirement_basis"),
+                            }
+                        )
                     continue
             if legacy_traits_supplied:
                 raise ValueError(
@@ -854,6 +905,42 @@ def expand_sweeps(
                         }
                     )
                 continue
+        if sweep.get("requires_form_scope") is not None:
+            # The FORM-PERF tier: members come from the frozen requirement's derived form classes,
+            # never from axes, and are materialized onto the same runnable direct corpus path.
+            from .form_perf import form_perf_entries
+
+            for entry in form_perf_entries(
+                sweep,
+                selected_requirement,
+                requirement_sha256,
+                source_window_entries=entries,
+                skipped=skipped,
+                blocked=blocked_unimplemented,
+            ):
+                if entry["name"] in seen:
+                    raise ValueError(f"sweep {sweep_id!r} generated duplicate capsule name {entry['name']!r}")
+                seen.add(entry["name"])
+                try:
+                    if "_performance_oracles" in profile:
+                        _materialize_performance_entry(entry, binding, oracle_selection=profile["_performance_oracles"])
+                    else:
+                        _materialize_performance_entry(entry, binding)
+                except Exception as exc:  # noqa: BLE001 - persisted as a generation error
+                    if errors is None:
+                        raise
+                    errors.append(
+                        {
+                            "family": sweep_id,
+                            "member": entry["name"],
+                            "status": "error",
+                            "error_type": type(exc).__name__,
+                            "detail": str(exc)[:500],
+                        }
+                    )
+                    continue
+                generated.append(entry)
+            continue
         axes = sweep.get("axes") or {}
         if not isinstance(axes, dict) or not axes:
             raise ValueError(f"sweep {sweep_id!r} declares no axes")
@@ -967,6 +1054,30 @@ def expand_sweeps(
                 "group of one cannot be compared to anything, so declare the other members or drop "
                 "the group"
             )
+
+        # A group whose standalone part the declarations refuse cannot be compared on this target.
+        if evidence is not None and _groups:
+            from .comparison_screen import refused_part
+
+            refusal = refused_part(variants, base, software_spec=evidence.software_spec, binding=binding)
+            if refusal is not None:
+                if skipped is not None:
+                    skipped.append(
+                        {
+                            "family": sweep_id,
+                            "sweep": sweep_id,
+                            "status": "skipped_inapplicable",
+                            "reason": (
+                                f"comparison part {refusal['member']!r} is refused standalone by the selected "
+                                f"declarations: {refusal['reason']}"
+                            ),
+                            "refused_part": refusal,
+                            "gate": gate_decision,
+                            "fit_axes": list(sweep.get("fit_axes") or []),
+                            "comparison_roles": _comparison_roles(sweep),
+                        }
+                    )
+                continue
 
         template = str(sweep.get("name") or "{id}_{i:02d}")
         index = 0

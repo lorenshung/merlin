@@ -33,6 +33,7 @@ from merlin_experiments.measured_launch import without_unsealed_board_catalog
 
 SCHEMA = "merlin.model_qualification.v1"
 MODULE = "merlin_experiments.model_qualification"
+_MAX_IR_OBSERVATION_BYTES = 256 * 1024 * 1024
 
 
 def _plain(path: Path, *, directory: bool = False) -> Path:
@@ -67,12 +68,28 @@ def _selected_source_certifier(selected: Path, certify, active: contextvars.Cont
 
 def _ir_observation(text: str) -> dict:
     """Inspect actual emitted IR, rather than treating a zero exit as lowering."""
+    digest = hashlib.sha256()
+    size = 0
+    for offset in range(0, len(text), 4 * 1024 * 1024):
+        chunk = text[offset : offset + 4 * 1024 * 1024].encode()
+        digest.update(chunk)
+        size += len(chunk)
+    result = {"sha256": digest.hexdigest(), "bytes": size}
+    if size > _MAX_IR_OBSERVATION_BYTES:
+        result.update(
+            status="not_parsed",
+            reason=(
+                f"emitted IR exceeds the {_MAX_IR_OBSERVATION_BYTES}-byte in-memory verification limit; "
+                "the saved artifact remains available for separate inspection"
+            ),
+        )
+        return result
+
     from xdsl.printer import Printer
 
     from merlin.common import mlir_query as mq
     from merlin.frontends.capture_normalization import normalize_capture_mlir
 
-    result = {"sha256": hashlib.sha256(text.encode()).hexdigest(), "bytes": len(text.encode())}
     try:
         normalized, normalization = normalize_capture_mlir(text)
         module = mq.parse(normalized)
@@ -285,6 +302,8 @@ def inspect_workflow(bundle: Path) -> dict:
 
 def _compiler_check(package, model: Path, name: str, output: Path, *, timeout: float):
     """Use the existing bounded candidate executor and PID-isolated sandbox base."""
+    from merlin.common.paths import repo_root
+    from merlin.llvmlower.toolchain import clang_for
     from merlin.perf.analysis_worker import run_sandboxed_entrypoint
     from merlin.targetgen.sandbox.bwrap import base_argv
     from merlin.targetgen.sandbox.preflight import require_working_sandbox
@@ -297,6 +316,23 @@ def _compiler_check(package, model: Path, name: str, output: Path, *, timeout: f
     scratch = output / "compiler-scratch"
     scratch.mkdir(exist_ok=True)
     prefix = base_argv(scratch, {})
+    # Match the operator-selected LLVM toolchain used by the agent and the
+    # ordinary package runner.  The base sandbox hides /scratch*, so PATH alone
+    # cannot make an installed compiler's mlir-translate visible here.
+    selected_clang = clang_for(repo_root(), os.environ)
+    llvm_bin = None
+    if selected_clang.is_absolute() and selected_clang.is_file():
+        candidate = selected_clang.parent
+        if (candidate / "mlir-translate").is_file():
+            llvm_bin = candidate
+            if not candidate.is_relative_to(Path("/usr")):
+                install = candidate.parent
+                prefix += ["--ro-bind", str(install), str(install)]
+    tool_path = ":".join(
+        str(path)
+        for path in (Path(sys.executable).parent, llvm_bin, Path("/usr/bin"), Path("/bin"))
+        if path
+    )
     # This evaluator is not an agent launch: credentials and user-home state
     # have no role in compiler execution. Only its explicit package and MLIR
     # input are exposed; numerical answers/weights remain outside the sandbox.
@@ -305,11 +341,13 @@ def _compiler_check(package, model: Path, name: str, output: Path, *, timeout: f
         "--unshare-net",
         "--setenv",
         "PATH",
-        f"{Path(sys.executable).parent}:/usr/bin:/bin",
+        tool_path,
         "--setenv",
         "PYTHONDONTWRITEBYTECODE",
         "1",
     ]
+    if llvm_bin is not None:
+        prefix += ["--setenv", "MERLIN_CLANG", str(selected_clang)]
     user_state = Path.home() / ".claude"
     if user_state.exists():
         prefix += ["--tmpfs", str(user_state)]

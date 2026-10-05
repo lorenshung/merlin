@@ -144,6 +144,45 @@ def test_compiler_preflight_requires_the_same_network_isolation_as_its_launch(tm
     assert seen and seen[0]["network_isolation"] is True
 
 
+def test_compiler_check_binds_the_selected_llvm_install(tmp_path, monkeypatch):
+    from merlin.llvmlower import toolchain
+    from merlin.perf import analysis_worker
+    from merlin.targetgen.package_runtime import load_package
+    from merlin.targetgen.sandbox import bwrap
+
+    model = _bundle(tmp_path / "capture") / "model.mlir"
+    package = load_package(_package(tmp_path / "compiler"))
+    llvm_bin = tmp_path / "selected-llvm" / "bin"
+    llvm_bin.mkdir(parents=True)
+    for name in ("clang-23", "mlir-translate"):
+        (llvm_bin / name).write_text("fixture")
+    monkeypatch.setattr(PF, "require_working_sandbox", lambda **_kwargs: None)
+    monkeypatch.setattr(bwrap, "base_argv", lambda *_args: ["bwrap"])
+    monkeypatch.setattr(toolchain, "clang_for", lambda *_args: llvm_bin / "clang-23")
+    captured = {}
+
+    def invoke(_package, _name, _model, _output_json, *, sandbox, timeout_s):
+        captured.update(sandbox=sandbox, timeout_s=timeout_s)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(analysis_worker, "run_sandboxed_entrypoint", invoke)
+    Q._compiler_check(package, model, "parse", tmp_path, timeout=5)
+    prefix = captured["sandbox"]["command_prefix"]
+    assert ["--ro-bind", str(llvm_bin.parent), str(llvm_bin.parent)] == prefix[1:4]
+    assert str(llvm_bin) in prefix[prefix.index("PATH") + 1].split(":")
+
+
+def test_large_ir_is_recorded_without_an_unbounded_parse(monkeypatch):
+    monkeypatch.setattr(Q, "_MAX_IR_OBSERVATION_BYTES", 10)
+    emitted = "module {}\n" + "x" * 100
+    observation = Q._ir_observation(emitted)
+    assert observation["status"] == "not_parsed"
+    assert "in-memory verification limit" in observation["reason"]
+    assert observation["sha256"] == hashlib.sha256(emitted.encode()).hexdigest()
+    assert observation["bytes"] == len(emitted.encode())
+    assert "canonical_sha256" not in observation
+
+
 def test_selected_certification_guards_source_but_allows_its_execution_copy(tmp_path):
     selected = _package(tmp_path / "selected")
     other = _package(tmp_path / "other")

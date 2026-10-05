@@ -190,7 +190,42 @@ def _float_reducer(fp_reduce, fmt, *, order: str, cadence: str, rm: str):
             acc = step(acc, addend)
         return acc
 
+    # The two-term transition, exposed so a contraction can run the SAME ordered fold over every
+    # output lane at once (see `ordered_fold`); the schedules above without one keep the scalar path.
+    reduce.step = step
     return reduce, step.cache_clear
+
+
+#: Raw codes above this cannot be packed two to an int64 key by `ordered_fold`.
+_CODE_LIMIT = 1 << 31
+
+
+def ordered_fold(table, lhs_index, rhs_index, step):
+    """``out[i][j] = fold(step, [table[lhs[i,p], rhs[p,j]] for p in range(K)])`` for every lane at once.
+
+    Identical, lane by lane, to the scalar fold: the first product seeds the accumulator and each
+    later product is folded in by the same two-term ``step`` in index order -- the reduction order
+    is not touched, only the bookkeeping around it. Each step evaluates ``step`` once per DISTINCT
+    (accumulator, addend) pair across the lanes, because the operand alphabet is small.
+    ``table`` holds the rounded products of the distinct operand codes (``lhs_index``/``rhs_index``
+    index into it); every value is a raw format code.
+    """
+    table = np.asarray(table, dtype=np.int64)
+    if table.size and (table.min() < 0 or table.max() >= _CODE_LIMIT):
+        raise ValueError("ordered_fold needs non-negative raw codes below 2**31")
+    k = lhs_index.shape[1]
+    acc = table[lhs_index[:, 0][:, None], rhs_index[0][None, :]]
+    for p in range(1, k):
+        addend = table[lhs_index[:, p][:, None], rhs_index[p][None, :]]
+        keys = (acc << 32) | addend
+        unique, inverse = np.unique(keys, return_inverse=True)
+        folded = np.fromiter(
+            (step(int(key >> 32), int(key & 0xFFFFFFFF)) for key in unique), dtype=np.int64, count=unique.size
+        )
+        if folded.size and (folded.min() < 0 or folded.max() >= _CODE_LIMIT):
+            raise ValueError("ordered_fold produced a code outside the packable range")
+        acc = folded[inverse.reshape(acc.shape)]
+    return acc
 
 
 def _float_golden(entry, binding, *, semantics=None):
@@ -292,6 +327,14 @@ def _float_golden(entry, binding, *, semantics=None):
     def mm(a_raw, ashape, w_raw, wshape):
         m, k = ashape
         _, n = wshape
+        step = getattr(reduce, "step", None)
+        if step is not None and k > 0:
+            lhs = np.asarray(a_raw, dtype=np.int64).reshape(m, k)
+            rhs = np.asarray(w_raw, dtype=np.int64).reshape(k, n)
+            lhs_codes, lhs_index = np.unique(lhs, return_inverse=True)
+            rhs_codes, rhs_index = np.unique(rhs, return_inverse=True)
+            table = [[_prod(int(a), int(b)) for b in rhs_codes] for a in lhs_codes]
+            return ordered_fold(table, lhs_index.reshape(m, k), rhs_index.reshape(k, n), step).tolist()
         out = [[0] * n for _ in range(m)]
         for i in range(m):
             a_row = a_raw[i * k : (i + 1) * k]

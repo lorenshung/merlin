@@ -29,8 +29,13 @@ def module(
     reshape_weight: bool = False,
     relu_fan_out: bool = False,
     residual: bool = False,
+    quantized_input: bool = False,
 ) -> str:
-    """dq(x), dq(w) -> matmul -> bias -> relu -> quantize, in the fake-quantized form a capture has."""
+    """dq(x), dq(w) -> matmul -> bias -> relu -> quantize, in the fake-quantized form a capture has.
+
+    ``quantized_input`` makes ``%x`` arrive as the float tensor a model argument actually is and puts
+    it on the integer grid first, which is the shape of a captured model's very first region.
+    """
     if weight_dequantize == "per_channel":
         weight = (
             '    %wd = "quant_ext.dequantize_per_channel"(%w, %ws, %wz) <{axis = '
@@ -55,13 +60,25 @@ def module(
             "outs(%wt : tensor<8x16xf32>) permutation = [0, 1]"
         )
         weight_value = "%wp"
+    stored, grid = "%x", []
+    if quantized_input:
+        stored, grid = (
+            "%xq",
+            [
+                '    %xq = "quant_ext.quantize_per_tensor"(%x, %s, %z) <{quant_min = -128 : i64, '
+                'quant_max = 127 : i64, output_dtype = "int8"}> : (tensor<4x8xf32>, tensor<f32>, '
+                "tensor<i64>) -> tensor<4x8xi8>",
+            ],
+        )
     lines = [
         "builtin.module {",
-        "  func.func @forward(%x: tensor<4x8xi8>, %w: tensor<8x16xi8>, %ws: tensor<16xf32>, "
+        f"  func.func @forward(%x: tensor<4x8x{'f32' if quantized_input else 'i8'}>, "
+        "%w: tensor<8x16xi8>, %ws: tensor<16xf32>, "
         "%wz: tensor<16xi64>, %b: tensor<16xf32>, %skip: tensor<4x16xf32>) -> tensor<4x16xi8> {",
         "    %s = arith.constant dense<5.000000e-01> : tensor<f32>",
         "    %z = arith.constant dense<0> : tensor<i64>",
-        '    %xd = "quant_ext.dequantize_per_tensor"(%x, %s, %z) <{quant_min = -128 : i64, '
+        *grid,
+        f'    %xd = "quant_ext.dequantize_per_tensor"({stored}, %s, %z) <{{quant_min = -128 : i64, '
         "quant_max = 127 : i64}> : (tensor<4x8xi8>, tensor<f32>, tensor<i64>) -> tensor<4x8xf32>",
         weight,
         "    %e0 = tensor.empty() : tensor<4x16xf32>",
@@ -193,6 +210,18 @@ def residual_module(
     return "\n".join(lines)
 
 
+def product_module(*, lhs_scale: float = 0.5, rhs_scale: float = 0.25, out_scale: float = 1.0) -> str:
+    """dq(a), dq(b) -> MULTIPLY -> quantize: an elementwise map of two tensors, same family as the
+    residual add and a different arithmetic.
+
+    An accumulator that sums separately loaded operands performs the add and not the product, so this
+    is the part of a family-granular ``elementwise_map`` claim no device form covers.
+    """
+    return residual_module(lhs_scale=lhs_scale, rhs_scale=rhs_scale, out_scale=out_scale, relu=False).replace(
+        "arith.addf", "arith.mulf"
+    )
+
+
 def _mean_lines(
     source: str, shape: tuple[int, ...], dims: tuple[int, ...], scales, count: float, tag: str
 ) -> list[str]:
@@ -284,8 +313,15 @@ class Oracle:
         families=("contraction", "elementwise_map"),
         readout=None,
         applies=("bias_add", "bias", "requant", "acc_scale", "relu", "maxpool"),
+        standalone=(),
     ):
         self.holds, self.families, self.target, self.readout = holds, families, "synthetic", readout
+        #: Families this target admits with NO contraction in front of them -- what a contract says
+        #: when it declares a family and composes it with nothing.
+        self.standalone = tuple(standalone)
+        #: Every question put to this target, in order, so a test can pin WHAT was asked and not only
+        #: what came back: a right answer to the wrong question is the defect that needs pinning.
+        self.asked: list[dict] = []
         #: What this synthetic target DECLARES its readout applies, in the command-buffer ABI's stage
         #: vocabulary -- the same declaration a real target makes in ``readout_epilogue_capability``.
         #: ``None`` is a target that declares nothing at all.
@@ -305,11 +341,12 @@ class Oracle:
         return RF.TargetReadout((RF.ReadoutFacet(target=self.target, readouts=declared),))
 
     def ask(self, *, op, family, in_dtype, weight_dtype=None, rank=None, attached, granularity=None):
+        self.asked.append({"op": op, "family": family, "in_dtype": in_dtype, "attached": attached})
         if family not in self.families:
             return CG.Admission(False, "undeclared_family", f"no capability for {family}")
         if in_dtype != "int8":
             return CG.Admission(False, "input_dtype", f"{in_dtype} is not an integer format here")
-        if family != "contraction" and not attached:
+        if family != "contraction" and family not in self.standalone and not attached:
             return CG.Admission(False, "fused_only", "available only fused with a contraction")
         if granularity is not None and granularity not in self.holds:
             return CG.Admission(

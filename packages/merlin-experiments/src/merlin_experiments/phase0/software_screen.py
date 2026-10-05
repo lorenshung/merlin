@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 
+from merlin.targetgen.interface_observations import epilogue_carrier
 from merlin.targetgen.semantic_families import from_op
 from merlin.targetgen.software_spec import admit_operation
 
@@ -142,7 +143,11 @@ def screen_entry(
     if host_only:
         from merlin.targetgen.host_capabilities import admit_host_operation
 
-        decision = admit_host_operation(host_capabilities, {"mlir_operation": op}, signature)
+        # A probe built from an observed host operation names the frontend operator it reproduces;
+        # declarations that name exact operators can then recognize it before it is written.
+        decision = admit_host_operation(
+            host_capabilities, {"mlir_operation": op, "frontend_op": entry.get("frontend_op")}, signature
+        )
         return {
             **decision,
             "constraints_status": "refused" if decision["status"] == "unsupported" else "unknown",
@@ -153,12 +158,21 @@ def screen_entry(
     decisions = [{"role": "carrier", **carrier}]
     stages = attrs.get("epilogue", entry.get("epilogue") or [])
     family = from_op(op)
+    producer = epilogue_carrier(op, family)
     for stage in stages:
+        # Pre-emission screening must project the same carrier and data type as
+        # the command-buffer observation. Missing readout type stays unknown;
+        # an accumulator type is not evidence of an elementwise stage's input.
+        stage_dtype = (
+            signature.get("operand_dtype")
+            if family == "contraction"
+            else attrs.get("output_dtype") or entry.get("readout_dtype") or signature.get("operand_dtype")
+        )
         stage_signature = {
             **signature,
-            "operand_dtype": signature.get("accum_dtype"),
+            "operand_dtype": stage_dtype,
             "epilogues": [stage],
-            "composed_with": [family] if family is not None else None,
+            "composed_with": [producer] if producer is not None else None,
         }
         # An epilogue is explicitly part of the accelerator carrier, not a
         # standalone host operation with a coincidentally matching family.

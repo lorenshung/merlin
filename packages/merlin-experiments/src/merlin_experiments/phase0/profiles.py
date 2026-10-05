@@ -118,6 +118,7 @@ def verify_selected_synthesis(
     descriptor: str | Path | None = None,
     software_spec: str | Path | None = None,
     document: dict | None = None,
+    diagnostic: bool = False,
 ) -> dict:
     """Verify a reviewed synth sidecar against its selected, frozen inputs.
 
@@ -190,10 +191,14 @@ def verify_selected_synthesis(
         actual = hashlib.sha256(json.dumps(detailed, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         if actual != demands.get("full_inventory_sha256"):
             raise ValueError(f"{sidecar}: detailed-demand content differs from selected conformance spec")
+        permitted_statuses = {"inventoried", "incomplete"} if diagnostic else {"inventoried"}
         if applications and (
-            detailed.get("status") != "inventoried" or detailed.get("coverage_status") != "unverified"
+            detailed.get("status") not in permitted_statuses or detailed.get("coverage_status") != "unverified"
         ):
-            raise ValueError(f"{sidecar}: detailed-demand inventory must be inventoried with coverage unverified")
+            raise ValueError(
+                f"{sidecar}: detailed-demand inventory must be "
+                f"{'inventoried or incomplete' if diagnostic else 'inventoried'} with coverage unverified"
+            )
         if applications:
             labels = {str(label) for label in applications}
             selected = detailed.get("applications") or {}
@@ -231,15 +236,20 @@ def verify_selected_synthesis(
                 raise ValueError(
                     f"{synth_profile}: materialized source does not bind its exact full iteration inventory"
                 )
-    if applications and demands.get("status") != "inventoried":
+    permitted_statuses = {"inventoried", "incomplete"} if diagnostic else {"inventoried"}
+    if applications and demands.get("status") not in permitted_statuses:
         raise ValueError(
-            f"{conformance_spec}: declared applications require an inventoried operation-demand requirement; "
+            f"{conformance_spec}: declared applications require an inventoried operation-demand requirement"
+            f"{' or an explicitly diagnostic incomplete one' if diagnostic else ''}; "
             "regenerate and review the conformance spec and selected synthesis"
         )
+    if applications and sidecar is not None and detailed.get("status") != demands.get("status"):
+        raise ValueError(f"{conformance_spec}: detailed-demand and requirement statuses differ")
     coverage_status = demands.get("coverage_status", "unverified")
     if applications and coverage_status != "unverified":
         raise ValueError(f"{conformance_spec}: application-demand coverage must remain explicitly unverified")
-    return {"status": "verified", "selected_inputs": dict(identity), "application_coverage_status": coverage_status}
+    status = "incomplete_diagnostic" if applications and demands.get("status") == "incomplete" else "verified"
+    return {"status": status, "selected_inputs": dict(identity), "application_coverage_status": coverage_status}
 
 
 _PERFORMANCE_FIELDS = frozenset(
@@ -342,7 +352,12 @@ def _normalize_public_capsules(profile: dict, *, source: Path) -> None:
     profile["capsules"] = normalized
 
 
-def _validate_performance_block(block, *, owner: str) -> dict:
+#: A blocked family may declare a claim kind this cohort cannot yet admit (an emitted-stream EMITS
+#: property); it is recorded, never materialized, so it cannot reach a measured claim analyzer.
+_BLOCKED_ONLY_CLAIMS = frozenset({"EMITS"})
+
+
+def _validate_performance_block(block, *, owner: str, blocked: bool = False) -> dict:
     """Validate the claim-bearing contract before a family can be admitted.
 
     Performance metadata is consumed later than corpus generation, so a partial
@@ -359,7 +374,7 @@ def _validate_performance_block(block, *, owner: str) -> dict:
         if not isinstance(block[field], str) or not block[field].strip():
             raise ValueError(f"{owner}: performance.{field} must be a non-empty string")
     claim = block.get("claim")
-    if claim not in _PERFORMANCE_CLAIMS:
+    if claim not in _PERFORMANCE_CLAIMS and not (blocked and claim in _BLOCKED_ONLY_CLAIMS):
         raise ValueError(f"{owner}: performance.claim must be one of {sorted(_PERFORMANCE_CLAIMS)}, got {claim!r}")
     member_class = block.get("member_class")
     if member_class not in _MEMBER_CLASSES:
@@ -505,6 +520,36 @@ def _target_local_perf_declarations(profile: dict) -> list[str]:
     return found
 
 
+def _select_performance_withdrawals(profile: dict, *, source: Path) -> None:
+    """Validate a target recipe's reviewed withdrawals of shared performance families.
+
+    The shared template stays the one definition of every family; a target may only decline one,
+    by name, with the reason and the decision that withdrew it. Both are recorded beside the
+    generation's other skipped families, so a withdrawn family is never mistaken for a gate refusal
+    or for a family that was never declared. A withdrawal naming no declared family is an error: it
+    would otherwise persist silently after the family was renamed or removed.
+    """
+    rows = profile.pop("performance_withdrawals", None)
+    if rows is None:
+        return
+    if not isinstance(rows, list) or not rows:
+        raise ValueError(f"{source}: performance_withdrawals must be a nonempty list")
+    declared = {row["family"] for row in (profile.get("_performance_template") or {}).get("families") or []}
+    selected: dict[str, dict] = {}
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {"family", "reason", "decided_by"}:
+            raise ValueError(f"{source}: each performance withdrawal needs exactly family, reason and decided_by")
+        if any(not isinstance(row[key], str) or not row[key].strip() for key in row):
+            raise ValueError(f"{source}: performance withdrawal fields must be nonempty strings")
+        if row["family"] not in declared:
+            raise ValueError(f"{source}: performance withdrawal names undeclared family {row['family']!r}")
+        if row["family"] in selected:
+            raise ValueError(f"{source}: performance family {row['family']!r} is withdrawn twice")
+        selected[row["family"]] = copy.deepcopy(row)
+    profile["_performance_withdrawals"] = selected
+    profile["_performance_template"]["withdrawn"] = [selected[name] for name in sorted(selected)]
+
+
 def _profiles_root(profiles_root: str | Path | None) -> Path:
     if profiles_root is None:
         raise ValueError("Phase 0 requires explicit recipe inputs or profiles_root; select an experiment definition")
@@ -554,7 +599,12 @@ def _merge_shared_perf(
         performance = _validate_performance_block(
             (sweep.get("base") or {}).get("performance"), owner=f"shared sweep {sweep_id}"
         )
-        _validate_declared_fit_axes(sweep, owner=f"shared sweep {sweep_id}")
+        if sweep.get("requires_form_scope") is not None:
+            from .form_perf import validate_form_scope_declaration
+
+            validate_form_scope_declaration(sweep, owner=f"shared sweep {sweep_id}")
+        else:
+            _validate_declared_fit_axes(sweep, owner=f"shared sweep {sweep_id}")
         if performance["family"] != sweep_id:
             raise ValueError(f"shared sweep {sweep_id}: performance.family must equal the sweep id")
         if sweep_id in seen:
@@ -567,7 +617,9 @@ def _merge_shared_perf(
         family = str(item.get("family") or "").strip()
         if not family or not str(item.get("reason") or "").strip():
             raise ValueError(f"shared {shared_path}: blocked_unimplemented needs family and reason")
-        performance = _validate_performance_block(item.get("performance"), owner=f"blocked performance family {family}")
+        performance = _validate_performance_block(
+            item.get("performance"), owner=f"blocked performance family {family}", blocked=True
+        )
         if performance["family"] != family:
             raise ValueError(f"blocked family {family}: performance.family must equal its family")
         if family in seen:
@@ -638,6 +690,7 @@ def load_profile(
     hidden_profile: str | Path | None = None,
     descriptor: str | Path | None = None,
     software_spec: str | Path | None = None,
+    diagnostic: bool = False,
 ) -> dict:
     """The target's functional profile plus shared perf and the private holdout sidecar.
 
@@ -698,8 +751,7 @@ def load_profile(
             or not engine
             or not ("A" <= engine[0] <= "Z" or "a" <= engine[0] <= "z")
             or not all(
-                "A" <= char <= "Z" or "a" <= char <= "z" or "0" <= char <= "9" or char == "_"
-                for char in engine[1:]
+                "A" <= char <= "Z" or "a" <= char <= "z" or "0" <= char <= "9" or char == "_" for char in engine[1:]
             )
             or engine == "elaborated_rtl"
             for tier, engine in oracles.items()
@@ -727,6 +779,7 @@ def load_profile(
         prof["_software_spec_identity"] = {"status": "unverified_legacy", "reason": "no selected software spec"}
     _normalize_public_capsules(prof, source=public)
     _merge_shared_perf(prof, source=public, performance_template=shared)
+    _select_performance_withdrawals(prof, source=public)
     # SYNTHESIZED ENTRIES, appended after the hand-authored ones. They come from the target's own
     # derived conformance requirement (build_tools/scripts/synth_capsule_corpus.py --write) and carry
     # the cell each was synthesized for in `source_reference`. Appended rather than prepended so
@@ -742,6 +795,7 @@ def load_profile(
             descriptor=descriptor,
             software_spec=selected_spec,
             document=doc,
+            diagnostic=diagnostic,
         )
         extra = list(doc.get("capsules") or ())
         for entry in extra:
@@ -749,10 +803,17 @@ def load_profile(
             if selection is not None:
                 if not isinstance(selection, dict) or not isinstance(selection.get("path"), str):
                     raise ValueError(f"{synth}: materialized capture must declare a path and exact identities")
-                location = Path(selection["path"])
-                if location.is_absolute() or ".." in location.parts:
-                    raise ValueError(f"{synth}: materialized capture must remain inside its selected profile bundle")
-                entry["materialized_capture"] = {**selection, "path": str(synth.parent / location)}
+                resolved = dict(selection)
+                for key in ("path", "loader_path"):
+                    if key not in selection:
+                        continue
+                    if not isinstance(selection[key], str):
+                        raise ValueError(f"{synth}: materialized {key} must be a path")
+                    location = Path(selection[key])
+                    if location.is_absolute() or ".." in location.parts:
+                        raise ValueError(f"{synth}: materialized {key} must remain inside its selected profile bundle")
+                    resolved[key] = str(synth.parent / location)
+                entry["materialized_capture"] = resolved
         prof["_claim_model_evaluation"] = (doc.get("provenance") or {}).get("claim_model_evaluation")
         if extra:
             prof["capsules"] = list(prof.get("capsules") or []) + extra
@@ -789,12 +850,9 @@ def load_profile(
     if descriptor is not None:
         from merlin.targetgen.target_experiment import load_target_experiment
 
-        from .claim_boundary import assert_no_claim_capsules
+        from .claim_boundary import assert_no_claim_capsules, held_out_models
 
-        declared = getattr(load_target_experiment(descriptor), "workload_spec", None) or {}
-        assert_no_claim_capsules(
-            list(prof.get("capsules") or ()), [str(model) for model in declared.get("models") or ()]
-        )
+        assert_no_claim_capsules(list(prof.get("capsules") or ()), held_out_models(load_target_experiment(descriptor)))
     return prof
 
 

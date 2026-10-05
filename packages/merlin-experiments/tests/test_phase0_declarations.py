@@ -118,3 +118,43 @@ def test_requirement_derivation_selects_authored_capability_contract(tmp_path, m
     captures = {label: tmp_path / label / "model.mlir" for label in roster}
     with pytest.raises(ContractObserved):
         requirements.derive(definition, captures, rtl_facts=tmp_path / "facts.json", output_root=tmp_path / "derived")
+
+
+def test_requirement_derivation_observes_the_preselected_capture_python(tmp_path, monkeypatch):
+    from merlin.common.paths import repo_root
+    from merlin.targetgen.target_experiment import load_target_experiment
+    from merlin_experiments.phase0 import capture_execution_attestation, capture_selection, requirements
+
+    definition = repo_root() / "examples/gemmini/experiment.yaml"
+    descriptor = repo_root() / "examples/gemmini/target/descriptor.yaml"
+    roster = load_target_experiment(descriptor).workload_spec["applications"]
+    interpreter = tmp_path / "capture-venv" / "bin" / "python"
+    monkeypatch.setattr(capture_selection, "verify", lambda *args, **kwargs: {"status": "verified_preselected_replay"})
+    monkeypatch.setattr(capture_execution_attestation, "attest_sealed_m2m", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        capture_selection,
+        "load",
+        lambda *args, **kwargs: {
+            "run_dir": str(tmp_path / "selected-run"),
+            "plan": {"venv": str(interpreter.parent.parent), "loader_sha256": "a" * 64},
+        },
+    )
+
+    class PythonObserved(Exception):
+        pass
+
+    def observe(target, **kwargs):
+        assert kwargs["capture_python"] == interpreter
+        raise PythonObserved
+
+    monkeypatch.setattr(requirements, "select_evidence", observe)
+    captures = {label: tmp_path / label / "model.mlir" for label in roster}
+    selections = {label: (tmp_path / label / "capture-selection.json", "a" * 64) for label in roster}
+    with pytest.raises(PythonObserved):
+        requirements.derive(
+            definition,
+            captures,
+            rtl_facts=tmp_path / "facts.json",
+            output_root=tmp_path / "derived",
+            capture_preselections=selections,
+        )

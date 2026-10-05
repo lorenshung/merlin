@@ -343,6 +343,40 @@ sweeps:
         status: existing
         entry: merlin.targetgen.corpus_spec.build
         knobs: {members: [fused_matmul_bias, matmul, bias_add]}
+      # Declared HERE, not on the capsules: a PF capsule is generated, so a contract written into it
+      # by hand is deleted by the next regeneration and the family silently loses its analyzer.
+      acceptance:
+        schema_version: 1
+        analyzer: merlin.perf.group_arithmetic_claim.analyze_group_arithmetic_claim/v1
+        program_arm: candidate
+        group_field: comparison_group
+        whole_role: fused
+        part_role: part
+        parts_per_group: 2
+        expected_lower: whole
+        # The paths every member of a group must declare and agree on. They hold the fused member
+        # and the parts it replaces to ONE computation: the same operand and accumulator datatypes,
+        # the same declared member list, the same lever and the same shared-inputs regime. A member
+        # missing any of them is REFUSED rather than assumed to match. Shape is not listed because a
+        # bias-add part legitimately declares no matmul geometry; the analyzer holds the members to
+        # one problem through the operands they share by name.
+        demand_equal:
+        - performance.lever
+        - performance.regime.layout
+        - performance.emitter.knobs.members
+        - performance.emitter.resolved.operand_dtype
+        - performance.emitter.resolved.accum_dtype
+        replicates:
+          exact_count: 2
+          identities: [r000, r001]
+        band:
+          kind: measured_replicate_dispersion
+          declared_constant: null
+        evidence:
+          correctness_simulator: $target_oracle:L2
+          correctness_tier: L2
+          timing_simulator: $target_oracle:L3
+          timing_tier: L3
       cost:
         tier: 1
         runs: three_per_shape
@@ -1416,6 +1450,93 @@ sweeps:
     selected frozen scope.performance.required exact SW/emitter-compatible chain;
     its four K points vary contraction work while preserving that chain
 
+# FORM-PERF TIER. A model-shaped member per form class the ITERATION workloads' own compute groups
+# form on the target (`scope.performance.forms`, derived by `phase0.form_perf` at corpus derive from
+# the declared iteration captures only; claim and evaluation-only models never reach it). At most one
+# extra member per class witnesses an observed group outside the primary member's joint M/K/N envelope.
+# A separate member covers an independently recovered source-convolution window when integerization erased that
+# window into im2col + matmul. It reuses Phase 0's derived functional window member, so the paired
+# measurement tests the window mechanism, not a held-out model's shape or model-scale cost.
+# The primary member sits at the extents of its class's costliest group. Each member is measured on
+# two arms: the CANDIDATE, held
+# to the experiment's declared `prohibited_instruction_roles`, and the VENDOR REFERENCE -- the target
+# support package's own implementation of the identical form -- which may use every instruction role
+# the target has, because it is the bar. The coverage report requires a member and a vendor bar for
+# every class at or above the declared share of any iteration workload's predicted issue cycles.
+- id: PW
+  requires_form_scope:
+    # A class holding at least one fiftieth of an iteration workload's predicted issue cycles must be
+    # covered. Classes below it still get a member; the threshold is what the coverage report holds.
+    min_predicted_cycle_share: 0.02
+  comparison_roles: [candidate, vendor_reference]
+  base:
+    cat: _perf
+    kind: model_slice
+    out: Y0
+    label: dev
+    source_role: derived_sweep
+    performance:
+      level: L4_form
+      family: PW
+      lever: whole_model_form_lowering
+      # its cycles are the thing the search minimises, one model form at a time
+      member_class: OBJECTIVE
+      claim: DIFFERENTIAL
+      comparand:
+        kind: vendor_reference
+        against: the_target_support_reference_arm_on_the_identical_form
+        cancels: [operation, shape, operands, numeric_policy]
+        demand_equal: [op, M, K, N, operand_dtype, accum_dtype, epilogue]
+      falsifier:
+        observation: candidate_cycles_over_vendor_reference_cycles
+        fires_when: the_candidate_does_not_beat_the_vendor_bar_beyond_the_summed_replicate_band
+        negative_control: the_vendor_reference_arm_repeated_across_replicates
+      gate:
+        traits: [structural_pipeline_depth]
+        instrument: cycle_count
+        capacity: one_candidate_and_one_vendor_reference_measurement_per_form
+        on_missing: skip_with_evidence
+      regime:
+        separation: one_form_or_source_window_per_paired_member
+        layout: identical_interface_operands_and_numeric_policy_for_both_arms
+      emitter:
+        status: existing
+        entry: merlin.targetgen.corpus_spec.build
+        knobs: {operation: derived_from_form_scope, extents: observed_iteration_group_or_derived_window_member}
+      arms:
+        candidate:
+          role: objective
+          instruction_policy: experiment_declared_prohibited_instruction_roles
+        vendor_reference:
+          role: bar
+          source: target_support_reference_arm
+          instruction_policy: unrestricted
+          note: >-
+            the vendor bar may use every instruction role the target has, including roles the
+            candidate arm is prohibited from; it bounds what the form costs, it is not a candidate
+      acceptance:
+        schema_version: 1
+        analyzer: perf_vendor_reference_claim.analyze_vendor_reference_claim/v1
+        replicates:
+          exact_count: 2
+          identities: [r000, r001]
+        band:
+          kind: measured_replicate_dispersion
+          declared_constant: null
+        evidence:
+          correctness_simulator: $target_oracle:L2
+          correctness_tier: L2
+          timing_simulator: $target_oracle:L3
+          timing_tier: L3
+      cost:
+        tier: 2
+        runs: two_arms_by_two_replicates_per_form
+        projected_cycles: derived_at_preflight
+        basis: one_candidate_and_one_vendor_reference_arm_per_derived_form
+  name: '{id}{i:02d}_{label}'
+  source_reference: >-
+    form-perf member derived from the iteration workloads' compute groups (scope.performance.forms)
+
 blocked_unimplemented:
 - family: PT
   status: blocked_unimplemented
@@ -1534,3 +1655,135 @@ blocked_unimplemented:
       # the machine's own rate. `unbounded` is the word for that and always was.
       projected_cycles: unbounded
       basis: four_members_before_repetition_at_fixed_drained_output_bytes
+- family: PD
+  status: blocked_unimplemented
+  reason: >-
+    an EMITS claim: it decides a property of the candidate's decoded instruction stream, not a
+    measured cycle count, and this cohort admits measured claims only. Its analyzer
+    (merlin.perf.load_state_claim.analyze_load_state_claim/v1) and the trace-check mode it demands are not on this line, so the family is
+    declared and recorded as blocked rather than silently absent. It does not overlap PN, which fits
+    a cycle law over a captured multi-region chain.
+  fit_axes: []
+  comparison_roles: [lever_bearing, control]
+  performance:
+    level: L2_intra_layer
+    family: PD
+    lever: load_configuration_residency
+    member_class: OBJECTIVE
+    claim: EMITS
+    comparand:
+      kind: emitted_instruction_property
+      against: the_programs_own_distinct_load_configuration_count
+      cancels: [operation, shape, operands, epilogue, oracle]
+      demand_equal: [the_candidates_own_emitted_stream_is_the_only_evidence]
+    falsifier:
+      observation: load_configuration_commands_issued_against_distinct_configurations_used
+      fires_when: a_command_re_establishes_a_configuration_the_load_path_already_holds
+      negative_control: the_members_whose_operand_row_pitches_coincide_need_one_configuration_and_must_pass
+    gate:
+      traits: [persistent_configuration_state, explicit_dma, managed_scratchpad]
+      instrument: decoded_instruction_stream
+      capacity: at_least_two_addressable_load_configuration_states
+      on_missing: skip_with_evidence
+    regime:
+      separation: the_operand_row_pitches_are_the_only_varied_property_and_they_follow_from_N_and_K
+      layout: one_tiled_contraction_whose_two_operands_move_at_their_own_pitches
+    emitter:
+      status: blocked
+      entry: new:merlin.perf.load_state_claim
+      knobs:
+        operation: matmul
+        needs: the_emitted_stream_analyzer_and_its_trace_check_mode
+    cost:
+      tier: 1
+      runs: one_observation_per_member_because_a_decoded_stream_is_not_a_measurement
+      projected_cycles: not_a_cycle_observable
+      basis: the emitted stream is read once per candidate at the correctness tier the member already pays for
+- family: PA
+  status: blocked_unimplemented
+  reason: >-
+    an EMITS claim: it decides a property of the candidate's decoded instruction stream, not a
+    measured cycle count, and this cohort admits measured claims only. Its analyzer
+    (merlin.perf.stationary_claim.analyze_stationary_claim/v1) and the trace-check mode it demands are not on this line, so the family is
+    declared and recorded as blocked rather than silently absent. It does not overlap PN, which fits
+    a cycle law over a captured multi-region chain.
+  fit_axes: []
+  comparison_roles: [lever_bearing, control]
+  performance:
+    level: L2_intra_layer
+    family: PA
+    lever: stationary_operand_residency
+    member_class: OBJECTIVE
+    claim: EMITS
+    comparand:
+      kind: emitted_instruction_property
+      against: the_programs_own_floor_of_stationary_block_presentations
+      cancels: [operation, shape, operands, epilogue, oracle]
+      demand_equal: [the_candidates_own_emitted_stream_is_the_only_evidence]
+    falsifier:
+      observation: staging_commands_naming_a_block_against_the_floor_the_stream_itself_computes
+      fires_when: a_command_names_the_stationary_block_the_array_already_holds
+      negative_control: the_members_whose_output_fits_one_array_row_block_present_a_different_block_at_every_position_and_must_pass
+    gate:
+      traits: [managed_scratchpad, banked_memory, feedback_sequenced_units]
+      instrument: decoded_instruction_stream
+      capacity: at_least_two_compute_forms_inheriting_one_staging_command
+      on_missing: skip_with_evidence
+    regime:
+      separation: the_output_row_extent_is_the_only_varied_property_and_it_decides_the_reuse_depth
+      layout: one_tiled_contraction_whose_stationary_block_serves_a_run_of_output_row_positions
+    emitter:
+      status: blocked
+      entry: new:merlin.perf.stationary_claim
+      knobs:
+        operation: matmul
+        needs: the_emitted_stream_analyzer_and_its_trace_check_mode
+    cost:
+      tier: 1
+      runs: one_observation_per_member_because_a_decoded_stream_is_not_a_measurement
+      projected_cycles: not_a_cycle_observable
+      basis: the emitted stream is read once per candidate at the correctness tier the member already pays for
+- family: PJ
+  status: blocked_unimplemented
+  reason: >-
+    an EMITS claim: it decides a property of the candidate's decoded instruction stream, not a
+    measured cycle count, and this cohort admits measured claims only. Its analyzer
+    (merlin.perf.movein_claim.analyze_movein_claim/v1) and the trace-check mode it demands are not on this line, so the family is
+    declared and recorded as blocked rather than silently absent. It does not overlap PN, which fits
+    a cycle law over a captured multi-region chain.
+  fit_axes: []
+  comparison_roles: [lever_bearing, control]
+  performance:
+    level: L2_intra_layer
+    family: PJ
+    lever: movein_placement_against_the_exposed_prefix
+    member_class: OBJECTIVE
+    claim: EMITS
+    comparand:
+      kind: emitted_instruction_property
+      against: the_transfers_the_programs_own_first_compute_position_reads
+      cancels: [operation, shape, operands, epilogue, oracle]
+      demand_equal: [the_candidates_own_emitted_stream_is_the_only_evidence]
+    falsifier:
+      observation: inbound_transfers_issued_before_the_first_compute_against_what_that_position_reads
+      fires_when: a_transfer_is_staged_while_no_compute_has_issued_and_no_position_yet_needs_it
+      negative_control: the_single_position_members_whole_movement_set_is_compulsory_before_the_first_compute_and_must_pass
+    gate:
+      traits: [explicit_dma, managed_scratchpad, independent_engine_ports]
+      instrument: decoded_instruction_stream
+      capacity: at_least_one_load_critical_and_one_mesh_critical_geometry
+      on_missing: skip_with_evidence
+    regime:
+      separation: the_output_row_extent_is_the_only_varied_property_and_it_decides_which_lever_pays
+      layout: one_tiled_contraction_whose_operand_transfers_may_be_hoisted_or_placed_at_first_use
+    emitter:
+      status: blocked
+      entry: new:merlin.perf.movein_claim
+      knobs:
+        operation: matmul
+        needs: the_emitted_stream_analyzer_and_its_trace_check_mode
+    cost:
+      tier: 1
+      runs: one_observation_per_member_because_a_decoded_stream_is_not_a_measurement
+      projected_cycles: not_a_cycle_observable
+      basis: the emitted stream is read once per candidate at the correctness tier the member already pays for

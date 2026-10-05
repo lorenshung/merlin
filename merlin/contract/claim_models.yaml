@@ -44,6 +44,15 @@ claim_models:
   - tiny_llama
   - smolvla
 
+# Held out from derivation and used ONLY for owner-side generality evaluation after the Phase-1 compiler
+# is frozen: whole models that are not headline claims. They are barred from requirement derivation,
+# model-form and form-perf derivation on exactly the claim models' terms -- a derived capsule named
+# after one (an `MF_resnet18_*` form) is the corpus being built from the model it later checks.
+evaluation_only_models:
+  - resnet18
+  - resnet34
+  - regnet_x_400mf
+
 # Everything else under `out/artifacts/recaptures/` derives the requirement. Named as a policy rather
 # than a list so a newly captured model joins derivation by default -- the safe direction, since the
 # unsafe one is a claim model quietly entering it.

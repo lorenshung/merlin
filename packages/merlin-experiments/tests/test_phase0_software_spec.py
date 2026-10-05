@@ -38,20 +38,47 @@ def _spec():
 def test_gemmini_software_spec_does_not_admit_integer_shift_as_fused_readout():
     from merlin_experiments.phase0.software_screen import screen_entry
 
+    from merlin.targetgen.spec_fact_drift import FactField, resolve_spec
+
     path = Path(__file__).resolve().parents[3] / "examples/gemmini/target/software-spec.yaml"
-    spec = SS.load_software_spec(path, target="gemmini")
-    decision = screen_entry(
-        spec,
-        {
-            "op": "matmul",
-            "kind": "isa",
-            "epilogue": ["requant"],
-            "operand_dtype": "int8",
-            "accum_dtype": "i32",
-            "placement": "accelerator",
-            "layout": "row_major_contiguous",
+    authored = SS.load_software_spec(path, target="gemmini")
+    entry = {
+        "op": "matmul",
+        "kind": "isa",
+        "epilogue": ["requant"],
+        "operand_dtype": "int8",
+        "accum_dtype": "i32",
+        "placement": "accelerator",
+        "layout": "row_major_contiguous",
+    }
+    # The fused readout declaration is filled from facts; the authored bytes alone cannot screen it.
+    with pytest.raises(ValueError, match="resolved spec"):
+        screen_entry(authored, entry)
+    # The readout stages the gemmini readout facet reports (none is an integer shift).
+    fused = {
+        "placement": FactField(("fused_accelerator",), True, ()),
+        "composed_with": FactField(("contraction",), True, ()),
+        "dtypes": FactField(("int32", "int8"), True, ()),
+        "epilogues": FactField(("acc_scale", "bias_add", "relu"), True, ()),
+        "scale_granularity": FactField(("tensor",), True, ()),
+    }
+    standalone = {"placement": FactField(("accelerator",), True, ()), "dtypes": FactField(("int8",), True, ())}
+    fused_operand_sum = {
+        **fused,
+        "composed_with": FactField(("residual_add",), True, ()),
+        "dtypes": FactField(("int8",), True, ()),
+    }
+    facts = {
+        "forms": {
+            "elementwise_map": {"fused": fused, "standalone": standalone, "fused_operand_sum": fused_operand_sum},
+            "reduction": {"fused": {**fused, "composed_with": FactField(("contraction", "movement"), True, ())}},
+            "movement": {"standalone": standalone},
         },
-    )
+        "quantization": {"contraction": FactField(("quantizable",), True, ())},
+    }
+    spec, record = resolve_spec(authored, facts)
+    assert record["status"] == "resolved"
+    decision = screen_entry(spec, entry)
     assert decision["status"] == "unsupported"
     assert any(row["role"] == "epilogue" and row["status"] == "unsupported" for row in decision["decisions"])
 
@@ -67,9 +94,7 @@ def test_recipe_selects_only_contained_oot_software_spec(tmp_path, monkeypatch):
     selected = provider / "contracts/software-spec.yaml"
     selected.write_text("schema: merlin.software_spec.v1\ntarget: test_device\n")
     recipe = tmp_path / "recipe.yaml"
-    recipe.write_text(
-        "software_spec: {provider: test_device, resource: contracts/software-spec.yaml}\n"
-    )
+    recipe.write_text("software_spec: {provider: test_device, resource: contracts/software-spec.yaml}\n")
     monkeypatch.setenv("MERLIN_TARGET_PATH", str(provider))
     assert SS.software_spec_path_for_recipe(recipe) == selected
     recipe.write_text("software_spec: {provider: test_device, resource: ../outside.yaml}\n")
