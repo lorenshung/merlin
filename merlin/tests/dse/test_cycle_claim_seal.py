@@ -33,7 +33,6 @@ by under 1%, and a smaller one would leave both markers intact.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 
@@ -62,12 +61,10 @@ _JOB_731_CYCLES = 24_319_110
 
 
 def _harness():
-    """The harness script, loaded from its path: it is a script, not an importable package module."""
-    path = merlin_dir() / "experiments" / "gemmini_perf_bench" / "scripts" / "group_model_program.py"
-    spec = importlib.util.spec_from_file_location("group_model_program", path)
-    loaded = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(loaded)
-    return loaded
+    """The whole-model harness of the selected support provider (its driver's ``program``)."""
+    from selected_driver import load
+
+    return load("gemmini", "group_model_program.py")
 
 
 def _observed(job: int) -> dict:

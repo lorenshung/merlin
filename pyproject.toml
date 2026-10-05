@@ -67,6 +67,9 @@ merlin-verify = "merlin.verify.cli:main"
 # (an unreferenced store object, an abandoned input closure, a declared-regenerable cache) rather
 # than a judgement about whether a run is finished.
 merlin-storage = "merlin.common.storage_cli:main"
+merlin-whole-model-gate = "merlin.perf.whole_model_gate:main"
+merlin-whole-model-gsim = "merlin.perf.whole_model_gsim:main"
+merlin-semantic-facts = "merlin.targetgen.rtl.semantic_facts:main"
 merlin-lit-suite = "merlin.targetgen.lit_suite:main"
 kernel-index = "merlin.kernels.cli_index:main"
 kernel-extract = "merlin.kernels.cli_extract:main"
