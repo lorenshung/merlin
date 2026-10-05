@@ -116,17 +116,20 @@ def check_selection(
                     choice.children[0].storage != descriptor.input_storages[0]
                 ):
                     return "selected physical copy uses an undeclared storage transition"
-                if source.type.dtype != descriptor.output_dtype or (
-                    source.type.dtype != descriptor.input_dtypes[0]
-                ) or source.type.numerical_policy != descriptor.numerical_policy or (
-                    source.type.numerical_policy != descriptor.input_numerical_policies[0]
+                if (
+                    source.type.dtype != descriptor.output_dtype
+                    or (source.type.dtype != descriptor.input_dtypes[0])
+                    or source.type.numerical_policy != descriptor.numerical_policy
+                    or (source.type.numerical_policy != descriptor.input_numerical_policies[0])
                 ):
                     return "selected physical copy changes tensor type or numerical policy"
-                if len(source.type.shape) not in descriptor.ranks or (
-                    descriptor.input_ranks and len(source.type.shape) != descriptor.input_ranks[0]
-                ) or not all(bound.accepts(source.type.shape) for bound in descriptor.output_axis_bounds) or (
-                    descriptor.input_axis_bounds and not all(
-                        bound.accepts(source.type.shape) for bound in descriptor.input_axis_bounds[0]
+                if (
+                    len(source.type.shape) not in descriptor.ranks
+                    or (descriptor.input_ranks and len(source.type.shape) != descriptor.input_ranks[0])
+                    or not all(bound.accepts(source.type.shape) for bound in descriptor.output_axis_bounds)
+                    or (
+                        descriptor.input_axis_bounds
+                        and not all(bound.accepts(source.type.shape) for bound in descriptor.input_axis_bounds[0])
                     )
                 ):
                     return "selected physical copy violates its shape precondition"
@@ -180,6 +183,11 @@ def check_selection(
         elif kind == "input":
             if choice.children or choice.storage != boundaries.get(source_id):
                 return "selected input lacks its declared boundary representation"
+            expected_preservation = dict(source.attrs).get("input_retention", "preserve") == "preserve"
+            if type(metadata.get("preserve_input")) is not bool or (
+                metadata["preserve_input"] != expected_preservation
+            ):
+                return "selected input retention differs from the source contract"
         elif kind == "constant":
             if choice.children or choice.storage != "external":
                 return "selected constant has no legal boundary representation"
