@@ -152,6 +152,7 @@ def _conv2d(
     attrs: dict[str, Any],
     default_shift: int,
     bias: Tensor | None = None,
+    declared_ifm: list[int] | None = None,
 ) -> Tensor:
     unknown = sorted(set(attrs) - _CONV2D_ATTRS)
     if unknown:
@@ -170,6 +171,31 @@ def _conv2d(
     stride = _conv_geom(attrs, "stride", 2, [1, 1])
     padding = _conv_geom(attrs, "padding", 4, [0, 0, 0, 0])
     dilation = _conv_geom(attrs, "dilation", 2, [1, 1])
+    if len(ifm.shape) == 2 and declared_ifm is not None:
+        # THE FLAT FORM THIS OPCODE ALREADY DESCRIBES. CONV2D's own semantics say the nhwc
+        # activation is gathered into its [N*Ho*Wo, Kh*Kw*Ci] im2col matrix, so [N*H*W, C] is the
+        # same statement written without the spatial split -- the same bytes in the same order, not
+        # a second layout. A whole model produces it constantly: a COMMIT reads its accumulator out
+        # as [M, N] and the next convolution consumes exactly that. No capsule can: of the graded
+        # cohort's conv2d interfaces, none has a second compute op to chain one from.
+        #
+        # ACCEPTED ONLY WHEN IT IS PROVABLY THE SAME BYTES. The spatial extents come from the
+        # tensor the convolution itself declares, never from a guess: an activation of 3136 rows is
+        # 56x56 or 112x28 or 3136x1 and nothing in the flat form distinguishes them. A declaration
+        # that does not multiply out to the flat extents is refused by name.
+        rows, channels = int(ifm.shape[0]), int(ifm.shape[1])
+        want = [int(extent) for extent in declared_ifm]
+        flat = 1
+        for extent in want[:-1]:
+            flat *= extent
+        if len(want) != 4 or flat != rows or want[-1] != channels:
+            raise ValueError(
+                f"CONV2D activation {ifm_name}{ifm.shape} is flat and the shape it is declared in, "
+                f"{want}, is not the same bytes: {want} does not fold to [{rows}, {channels}]"
+            )
+        # The SAME list, re-shaped: nothing is copied, reordered or converted, which is what makes
+        # "the same bytes in the same order" a statement about this line rather than a hope.
+        ifm = Tensor(tuple(want), ifm.data, ifm.dtype)
     if len(ifm.shape) != 4:
         raise ValueError(f"CONV2D activation {ifm_name}{ifm.shape} is not rank-4 NHWC")
     if ifm.shape[3] != ci:
@@ -387,7 +413,17 @@ def reference_outputs(cb: dict[str, Any], inputs: dict[str, Any] | None = None) 
             bias = None
             if any(stage in BIAS_STAGES for stage in attrs.get("epilogue", [])):
                 bias = env[bias_tensor_name(ops, attrs, op=f"CONV2D {dst!r}")]
-            t = _conv2d(ifm_name, env[ifm_name], weight_operand, weight, dst, attrs, default_shift, bias)
+            t = _conv2d(
+                ifm_name,
+                env[ifm_name],
+                weight_operand,
+                weight,
+                dst,
+                attrs,
+                default_shift,
+                bias,
+                declared_ifm=((cb.get("tensors") or {}).get(ifm_name) or {}).get("shape"),
+            )
             env[dst] = t
             outputs[dst] = t.to_list()
         elif op == "BATCHED_MATMUL":

@@ -128,6 +128,31 @@ def test_the_trap_handler_reports_through_the_console_abi():
     assert "la    t1, tohost" not in src
 
 
+def test_startup_sets_round_to_nearest_only_when_floating_point_is_available():
+    """Hardware may leave frm unreset; every FP hart must select RNE before main."""
+    import shutil
+    import subprocess
+    import pytest
+    from merlin.common.paths import runtime_dir
+
+    compiler = shutil.which("cc")
+    if compiler is None:
+        pytest.skip("C preprocessor unavailable")
+    source = runtime_dir() / "baremetal" / "spike" / "crt.S"
+    for flags, expected in ((["-D__riscv_flen=64"], True), (["-U__riscv_flen"], False)):
+        result = subprocess.run(
+            [compiler, "-E", "-P", "-x", "assembler-with-cpp", *flags, str(source)],
+            capture_output=True, text=True, check=True,
+        )
+        instructions = " ".join(
+            line.partition("#")[0].strip() for line in result.stdout.splitlines()
+        )
+        assert ("csrw fcsr, zero" in instructions) is expected
+        if expected:
+            assert instructions.index("csrs mstatus") < instructions.index("csrw fcsr, zero")
+            assert instructions.index("csrw fcsr, zero") < instructions.index("call main")
+
+
 def test_the_probe_passes_the_console_choice_through_to_the_link():
     """The probe is the FIRST thing run on a board, so it above all must speak that board's channel:
     an HTIF probe on silicon hangs on its second character and reports nothing."""

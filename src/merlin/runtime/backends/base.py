@@ -23,7 +23,6 @@ import os
 import pkgutil
 import sys
 import threading
-from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -52,7 +51,7 @@ class TargetClass(str, Enum):
     NPU = "npu"  # an array engine (systolic wavefront or outer-product tile) as the outermost unit
 
 
-def target_class_for(target: str) -> "TargetClass | None":
+def target_class_for(target: str) -> TargetClass | None:
     """The class a target's DECLARED engines imply, or None when it declares none.
 
     None is a real answer -- "nobody has said what silicon this is" -- and must not be defaulted to
@@ -471,6 +470,44 @@ def harness_build_recipe(target: str) -> HarnessBuildRecipe:
     return factory()
 
 
+def whole_model_driver(target: str):
+    """``target``'s whole-model program driver, loaded: a namespace with ``program`` and ``kernels``.
+
+    Optional, like :func:`harness_renderer`. The driver is the C program a whole model runs as on
+    this target -- its vendor-library fallback calls, its timing brackets, the UART lines it prints --
+    so it belongs to the target; the backend declares where its two modules live and this loads them
+    once per process under a name that carries the target, so two targets' drivers never shadow.
+    """
+    import importlib.util
+    import sys
+    import types
+
+    backend = get_backend(target)
+    declare = getattr(backend, "whole_model_driver", None)
+    if declare is None:
+        raise NotImplementedError(
+            f"backend for target {target!r} declares no whole_model_driver; a whole model cannot be "
+            f"built as one program for it. Add one to the backend module if it should."
+        )
+    loaded: dict[str, Any] = {}
+    for part, path in dict(declare()).items():
+        name = f"merlin_whole_model_driver__{target}__{part}"
+        module = sys.modules.get(name)
+        if module is None:
+            spec = importlib.util.spec_from_file_location(name, str(path))
+            if spec is None or spec.loader is None:
+                raise ImportError(f"{target!r} declares its whole-model {part} at {path}, which does not load")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            try:
+                spec.loader.exec_module(module)
+            except BaseException:
+                sys.modules.pop(name, None)
+                raise
+        loaded[str(part)] = module
+    return types.SimpleNamespace(**loaded)
+
+
 def harness_renderer(target: str):
     """``target``'s runner-owned harness renderer — ``render_harness(cb, *, target) -> str``.
 
@@ -653,13 +690,6 @@ def parse_console(
 
 # The digest form of a large output (``OUTSUM``) is part of the command-buffer ABI, where a pure target
 # renderer may import it; re-exported here because this is where a console transcript is parsed.
-from merlin.runtime.commandbuffer import (  # noqa: E402
-    CONSOLE_VALUE_CAP_PARAM,
-    OUTPUT_DIGEST_LINE,
-    output_digest_line,
-    output_text_digest,
-    parse_console_digests,
-)
 from merlin.runtime.fp8_formats import float_format_of
 
 

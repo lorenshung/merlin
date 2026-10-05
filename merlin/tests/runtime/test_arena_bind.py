@@ -509,3 +509,80 @@ def test_lower_model_does_not_touch_the_ll_unless_the_flag_is_set(tmp_path, monk
 def test_pack_disjoint_refuses_a_zero_sized_block():
     with pytest.raises(ArenaPlanError):
         pack_disjoint([("a", 0)], {})
+
+
+# ---- heap_demand: the bytes one run allocates, for an allocator that never frees -------------------
+
+_DEMAND_MAIN = """
+declare ptr @malloc(i64)
+declare void @dispatch_0(ptr)
+
+define void @chunk(ptr %0) {
+  %2 = call ptr @malloc(i64 1000)
+  %3 = tail call noalias ptr @malloc(i64 noundef 24) #3
+  ret void
+}
+
+define void @forward(ptr %0) {
+  call void @chunk(ptr %0)
+  call void @chunk(ptr %0)
+  %2 = call ptr @malloc(i64 64)
+  call void @dispatch_0(ptr %2)
+  ret void
+}
+
+define void @_mlir_ciface_forward(ptr %0) {
+  call void @forward(ptr %0)
+  ret void
+}
+"""
+
+#: A group body the C dispatch calls: nothing in the modules calls it, so it runs once.
+_DEMAND_HOST = """
+declare ptr @malloc(i64)
+
+define void @group_0(ptr %0) {
+  %2 = call ptr @malloc(i64 4096)
+  ret void
+}
+"""
+
+
+def test_heap_demand_counts_each_site_once_per_call_of_its_function():
+    d = ab.heap_demand([_DEMAND_MAIN, _DEMAND_HOST])
+    # chunk runs twice (1024 bytes each time), forward's own 64 once, the host group's 4096 once.
+    assert d.bytes == 2 * (1000 + 24) + 64 + 4096
+    assert d.allocations == 2 * 2 + 1 + 1
+    assert d.largest == 4096
+    assert d.unbounded == {}
+
+
+def test_heap_demand_names_what_it_cannot_bound():
+    looped = """
+declare ptr @malloc(i64)
+
+define void @step(i64 %n) {
+  %a = call ptr @malloc(i64 %n)
+  ret void
+}
+
+define void @forward(i64 %n) {
+  br label %loop
+loop:
+  %b = call ptr @malloc(i64 32)
+  call void @step(i64 %n)
+  br i1 %c, label %loop, label %done
+done:
+  %d = call ptr @malloc(i64 8)
+  ret void
+}
+"""
+    d = ab.heap_demand([looped])
+    assert d.bytes == 8 and d.allocations == 1
+    # A site in the loop, and a computed size in a function itself called from the loop: the loop is
+    # the reason for both, since it multiplies whatever the site asks for.
+    assert d.unbounded == {"in_loop": 1, "called_in_loop": 1}
+    once = ab.heap_demand(
+        ["declare ptr @malloc(i64)\n\ndefine void @forward(i64 %n) {\n  %a = call ptr @malloc(i64 %n)\n  ret void\n}\n"]
+    )
+    assert once.unbounded == {"dynamic_size": 1}

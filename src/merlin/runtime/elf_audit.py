@@ -49,11 +49,13 @@ def upload_bytes(brd, segments: list[Segment], sections: dict[str, tuple[int, in
 
     Guessing one model for both is what put a "4 min" figure next to an image that takes an hour.
     """
-    from .boards import LOADER_PYUARTSI
+    from .boards import LOADER_PYUARTSI, LOADER_UART_TSI
 
     if brd.loader == LOADER_PYUARTSI:
         total = sum(size for (addr, size, kind) in sections.values() if kind == "PROGBITS" and addr > 0)
         return total, "PROGBITS sections with addr>0 (pyuartsi skips NOBITS)"
+    if brd.loader != LOADER_UART_TSI:
+        raise ElfAuditError(f"{brd.name}: no qualified upload loader")
     return sum(s.memsz for s in segments), "PT_LOAD MemSiz incl. zero-fill (uart_tsi/fesvr)"
 
 

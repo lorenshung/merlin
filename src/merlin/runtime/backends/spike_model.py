@@ -28,7 +28,6 @@ import numpy as np
 from merlin.common import proc as _proc
 from merlin.common.paths import runtime_dir
 
-from ...common.paths import repo_root
 from ...llvmlower import c_runtime, toolchain
 from ...llvmlower.lower import lower_model_file
 from ..boards import CONSOLE_HTIF, CONSOLE_UART
@@ -68,12 +67,98 @@ def _run(cmd: list, **kw) -> subprocess.CompletedProcess:
     return _proc.run_checked(cmd, error=SpikeModelError, timeout=timeout, timeout_hint=" (pathological compile)", **kw)
 
 
-ARENA_BASE = 0xC0000000  # arena lives here (literal-addressed, in -m memory)  # derived-ok: address chosen by this backend's own -m map, not read from a target
+# derived-ok: address chosen by this backend's own -m map, not read from a target.
+ARENA_BASE = 0xC0000000  # arena lives here (literal-addressed, in -m memory)
 DRAM_BASE = 0x80000000  # derived-ok: RISC-V platform DRAM base used by spike/fesvr; the -m map is passed explicitly
 #: Reserve ahead of the weights blob for everything that is NOT the model's static I/O: code,
 #: rodata, the stack and the runtime's own tables. The model-dependent part (embedded inputs + the
 #: static output buffer) is added on top, from `c_runtime.generate`'s `static_io_bytes`.
 _CODE_RESERVE_FIXED = 64 * 1024 * 1024
+
+
+#: Absolute symbols an image may define to state the DRAM span it was laid out for (base, bytes). A
+#: functional simulator's default span is a few GB; an image whose arena lies past it faults on its first
+#: allocation, so a runner gives the simulator what the image itself declares.
+DRAM_BASE_SYMBOL = "MERLIN_DRAM_BASE"
+DRAM_SPAN_SYMBOL = "MERLIN_DRAM_SPAN"
+
+
+#: How many harts an image runs on (a two-hart open model), stated in its symbol table.
+HART_COUNT_SYMBOL = "MERLIN_HART_COUNT"
+
+
+def declared_harts(elf: str | Path) -> int | None:
+    """The hart count an image states with :data:`HART_COUNT_SYMBOL`; ``None`` when it states none."""
+    listing = subprocess.run(
+        [str(toolchain.nm()), "--defined-only", "--radix=d", str(elf)], capture_output=True, text=True
+    )
+    for line in listing.stdout.splitlines() if listing.returncode == 0 else ():
+        parts = line.split()
+        if len(parts) == 3 and parts[2] == HART_COUNT_SYMBOL and parts[0].isdigit():
+            return int(parts[0])
+    return None
+
+
+def _extension_name(token: str) -> str:
+    """``zvl128b1p0`` -> ``zvl128b``, ``m2p0`` -> ``m``: an ELF arch token without its version."""
+    end = len(token)
+    while end and token[end - 1].isdigit():
+        end -= 1
+    if end and token[end - 1] == "p" and end < len(token):
+        cut = end - 1
+        while cut and token[cut - 1].isdigit():
+            cut -= 1
+        return token[:cut]
+    return token
+
+
+def arch_extensions(path: str | Path) -> list[str]:
+    """The ISA an ELF (an image or one object) records it was compiled for (``Tag_RISCV_arch``), as
+    ``[base+first letter, extension, ...]`` without versions (``["rv64i", "m", ..., "v", "zvl128b"]``);
+    empty when it records none."""
+    listing = subprocess.run([str(toolchain.readelf()), "-A", str(path)], capture_output=True, text=True)
+    arch, named = None, False
+    for line in listing.stdout.splitlines() if listing.returncode == 0 else ():
+        key, _, value = line.strip().partition(":")
+        if key == "TagName":
+            named = value.strip() == "arch"
+        elif key == "Value" and named:
+            arch, named = value.strip(), False
+    return [_extension_name(t) for t in (arch or "").split("_") if t]
+
+
+def declared_isa(elf: str | Path) -> str | None:
+    """The ``--isa`` a functional simulator needs to run the image, read from the ISA its linked objects
+    record (``Tag_RISCV_arch``) -- only when that goes past the simulator's default by a vector
+    extension (a two-hart program's host code); ``None`` otherwise, so every other image keeps the
+    command it always had. The counters the programs read their cycles from are kept."""
+    tokens = arch_extensions(elf)
+    if not tokens:
+        return None
+    base, letters = tokens[0][:4], tokens[0][4:] + "".join(t for t in tokens[1:] if len(t) == 1)
+    if "v" not in letters:
+        return None
+    widths = [t for t in tokens[1:] if t.startswith("zvl") and t.endswith("b") and t[3:-1].isdigit()]
+    widest = max(widths, key=lambda t: int(t[3:-1])) if widths else None
+    return "_".join([base + letters, "zicntr", "zihpm", *([widest] if widest else [])])
+
+
+def declared_memory(elf: str | Path) -> tuple[int, int] | None:
+    """``(base, bytes)`` the image states with :data:`DRAM_BASE_SYMBOL` / :data:`DRAM_SPAN_SYMBOL`,
+    read off its symbol table; ``None`` for an image that states none (the simulator's default span)."""
+    listing = subprocess.run(
+        [str(toolchain.nm()), "--defined-only", "--radix=d", str(elf)], capture_output=True, text=True
+    )
+    if listing.returncode != 0:
+        return None
+    found: dict[str, int] = {}
+    for line in listing.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[2] in (DRAM_BASE_SYMBOL, DRAM_SPAN_SYMBOL) and parts[0].isdigit():
+            found[parts[2]] = int(parts[0])
+    if len(found) != 2:
+        return None
+    return found[DRAM_BASE_SYMBOL], found[DRAM_SPAN_SYMBOL]
 
 
 def _layout(
@@ -131,7 +216,8 @@ def build(
     dram_base: int = DRAM_BASE,
     dram_bytes: int | None = None,
     int8_compute: bool = False,
-    features: "frozenset[str] | None" = None,
+    backend: str = "rvv",
+    features: frozenset[str] | None = None,
     rvv_schedule: str | None = None,
     cflags_override: list[str] | None = None,
     vlen: int | None = None,
@@ -139,9 +225,9 @@ def build(
     sdk_dir: str | Path | None = None,
     sdk_chip: str | None = None,
     chip_freq_hz: int | None = None,
-    matrix: "Any | None" = None,
+    matrix: Any | None = None,
     matrix_scalar_tile: bool = False,
-    device: "Any | None" = None,
+    device: Any | None = None,
     stack_bytes: int = 0x40000,
     op_profile: bool = False,
     prof_heartbeat_cycles: int = 2_000_000_000,
@@ -214,6 +300,10 @@ def build(
     h, rt = _harness_dir(), _c_runtime_dir()
     arena_bytes = arena_mb * 1024 * 1024
     prepared_path = model_dir / "model.mlir"
+    if backend not in {"rvv", "scalar"}:
+        raise SpikeModelError(f"unknown whole-model backend {backend!r}")
+    if backend == "scalar" and rvv_schedule is not None:
+        raise SpikeModelError("scalar backend cannot use an RVV transform schedule")
     vectorize = False
     # TWO flag sets, because two compilers: the model object is built by CLANG (an RVV package's
     # cflags are clang flags -- `-fno-vectorize` is not a GCC option and the harness units would fail
@@ -221,9 +311,12 @@ def build(
     # bare-metal environment. Only the -march has to agree between them, which is what `vlen` pins.
     from .zephyr_model import march_with_vlen
 
-    clang_cflags = list(cflags_override or RVV_CFLAGS)
-    gcc_cflags = list(RVV_CFLAGS)
-    if vlen is not None:
+    clang_cflags = list(cflags_override or (RVV_CFLAGS if backend == "rvv" else ["-march=rv64gc", *RVV_CFLAGS[1:]]))
+    marches = [flag for flag in clang_cflags if flag.startswith("-march=")]
+    if len(marches) != 1:
+        raise SpikeModelError("whole-model build requires exactly one -march flag")
+    gcc_cflags = [marches[0], *RVV_CFLAGS[1:]]
+    if vlen is not None and backend == "rvv":
         clang_cflags = march_with_vlen(clang_cflags, vlen)
         gcc_cflags = march_with_vlen(gcc_cflags, vlen)
 
@@ -244,8 +337,11 @@ def build(
                 "prepare_for_lowering; build it with int8_compute/features/rvv_schedule so the "
                 "object and the argument table agree"
             )
-        if int8_compute or features or rvv_schedule or (
-            device is not None and getattr(device, "exact_selection", None) is not None
+        if (
+            int8_compute
+            or features
+            or rvv_schedule
+            or (device is not None and getattr(device, "exact_selection", None) is not None)
         ):
             from . import zephyr_model as _zm
 
@@ -258,7 +354,7 @@ def build(
                 matrix=matrix,
                 device=device,
             )
-            vectorize = True
+            vectorize = backend == "rvv"
         if op_profile:
             # Instrumented AFTER preparation, so the ids name the ops that actually run -- instrumenting
             # the raw module would number ops the rewrites go on to split, fuse or route away, and the
@@ -273,7 +369,11 @@ def build(
             prepared_path,
             work / "lower",
             targets=(),
-            textual=True,
+            # The scalar route has no RVV transform schedule to preserve. Its generic xDSL
+            # preprocessing keeps region terminators in parser-stable generic form; the
+            # textual compatibility printer can emit an attributed linalg.yield that the
+            # selected MLIR parser cannot read back. Keep the historical RVV route unchanged.
+            textual=backend != "scalar",
             vectorize=vectorize,
             transform_schedule=rvv_schedule,
             features=features,
@@ -339,7 +439,7 @@ def build(
     )
     _hh.update(_source_digest(_rt_srcs).encode("utf-8"))
     # The instrumentation switches change the emitted code, so they belong in the identity too.
-    _hh.update(f"op_profile={bool(op_profile)} heartbeat={int(prof_heartbeat_cycles)}".encode("utf-8"))
+    _hh.update(f"op_profile={bool(op_profile)} heartbeat={int(prof_heartbeat_cycles)}".encode())
     build_hash = _hh.hexdigest()[:12]
     # Console backend: one of two implementations of the same four-symbol ABI. `uart` needs the
     # target's own MMIO facts, derived from its SDK headers -- never defaulted, because a wrong
@@ -403,10 +503,17 @@ def build(
     #         wrote rather than by anything passed in, for the same reason the matrix shim is: the
     #         symbols the module actually calls are the ones that must be defined, and a set
     #         reconstructed here could drift from them into a link error.
+    from ...llvmlower.device_offload import build_arguments as _device_build_arguments
     from ...llvmlower.device_offload import load_sidecar as _load_device_sidecar
 
     _dev_side = _load_device_sidecar(work)
-    _dev_sigs = {k: tuple(v) for k, v in (_dev_side.get("signatures") or {}).items()}
+    # THE STATEMENT THE REWRITE WROTE, NOT A RECONSTRUCTION. A group route records each routed
+    # symbol's own program in the sidecar -- epilogue, requantize multiplier, convolution geometry,
+    # committed type -- and a build that read only the signatures would synthesize a bare contraction
+    # of the same extents: the same kernel count, the same link, and every layer's readout gone. One
+    # reader for all three arguments, so the one that is easy to forget cannot be.
+    _dev_args = _device_build_arguments(_dev_side)
+    _dev_sigs = _dev_args["signatures"]
     if _dev_sigs:
         if device is None:
             raise RuntimeError(
@@ -428,17 +535,17 @@ def build(
                 raise RuntimeError("device offload sidecar lost exact operation or package identity")
         from ...llvmlower.device_build import build_device_objects
 
-        _dev_dts = {r["symbol"]: tuple(r["dtypes"]) for r in (_dev_side.get("routed") or [])}
         _dev_build = build_device_objects(
             device.device,
             _dev_sigs,
-            _dev_dts,
+            _dev_args["dtypes"],
             package_dir=device.package_dir,
             workdir=work / "device",
             operand_dtype=device.operand_dtype,
             accum_dtype=device.accum_dtype,
             codegen_target="riscv",
             numeric_policy=device.numeric_policy,
+            entries=_dev_args["entries"],
             # the SAME ISA the rest of the image is built for -- see device_build._flags
             cflags=[CLANG_TARGET, *clang_cflags],
             expected_interfaces=_dev_side.get("expected_interfaces") or None,
@@ -454,6 +561,8 @@ def build(
         objs.extend(_dev_build.objects)
         print(
             f"[device] linked {len(_dev_build.kernels)} kernel(s) + shim for {device.device}"
+            f" ({_dev_side.get('granularity') or 'contraction'} granularity;"
+            f" built_from={sorted(set(_dev_build.built_from.values()))})"
             + (f"; declined: {[w for _s, w in _dev_build.skipped]}" if _dev_build.skipped else "")
         )
 
@@ -559,32 +668,72 @@ def run(
     console = (proc.stdout or b"").decode("utf-8", errors="replace") + (proc.stderr or b"").decode(
         "utf-8", errors="replace"
     )
-    out_line = next((l for l in console.splitlines() if l.startswith("OUT ")), None)
-    if out_line is None or "DONE" not in console:
-        raise SpikeModelError(f"run did not produce OUT/DONE (rc={proc.returncode}):\n{console[-2000:]}")
-    parts = out_line.split()
-    n = int(parts[1])
-    bits = [int(x) for x in parts[2 : 2 + n]]
+    if proc.returncode != 0:
+        raise SpikeModelError(
+            f"spike exited {proc.returncode} even though it may have printed OUT/DONE:\n{console[-2000:]}"
+        )
+    return parse_console(console)
+
+
+def parse_console(console: str) -> dict[str, Any]:
+    """Parse the shared bare-metal model protocol, independent of its simulator.
+
+    OUT is a bounded prefix (at most 4096 values), not evidence of a complete
+    larger tensor. Process success and hardware provenance belong to the caller.
+    Duplicate, truncated, or malformed output must never qualify a run.
+    """
+    lines = console.splitlines()
+    out_lines = [line for line in lines if line.startswith("OUT ")]
+    done_lines = [line for line in lines if line.strip() == "DONE"]
+    if len(out_lines) != 1 or len(done_lines) != 1:
+        raise SpikeModelError(f"run requires exactly one OUT and DONE:\n{console[-2000:]}")
+    if lines.index(out_lines[0]) >= lines.index(done_lines[0]):
+        raise SpikeModelError("DONE preceded model output")
+    parts = out_lines[0].split()
+    try:
+        n = int(parts[1])
+        bits = [int(x) for x in parts[2:]]
+    except (IndexError, ValueError) as exc:
+        raise SpikeModelError("malformed OUT count or raw f32 bits") from exc
+    if not 0 <= n <= 4096 or len(bits) != n or any(not 0 <= b <= 0xFFFFFFFF for b in bits):
+        raise SpikeModelError("OUT count or raw f32 bits do not match the bare-metal protocol")
     flat = np.array(
         [struct.unpack("<f", struct.pack("<I", b & 0xFFFFFFFF))[0] for b in bits], dtype=np.float32
     )  # exact prefix (≤4096)
     metrics = {}
     argmax = None
     sumval = None
-    for l in console.splitlines():
-        if l.startswith("METRIC "):
-            _, k, v = l.split()
+    for line in console.splitlines():
+        if line.startswith("METRIC "):
+            parts = line.split()
+            if len(parts) != 3 or parts[1] in metrics:
+                raise SpikeModelError("malformed or duplicate model METRIC")
+            _, k, v = parts
             # Not every metric is a number: `build_hash` is a hex digest. Keeping the string beats
             # crashing the parse of an otherwise complete run.
             try:
                 metrics[k] = int(v)
             except ValueError:
                 metrics[k] = v
-        elif l.startswith("ARGMAX "):
-            p = l.split()
-            argmax = np.array([int(x) for x in p[2 : 2 + int(p[1])]], dtype=np.int64)
-        elif l.startswith("SUM "):
-            sumval = struct.unpack("<f", struct.pack("<I", int(l.split()[1]) & 0xFFFFFFFF))[0]
+        elif line.startswith("ARGMAX "):
+            p = line.split()
+            try:
+                count = int(p[1])
+                values = [int(x) for x in p[2:]]
+                if argmax is not None or count < 0 or len(values) != count:
+                    raise ValueError("duplicate or truncated ARGMAX")
+                argmax = np.array(values, dtype=np.int64)
+            except (IndexError, ValueError, OverflowError) as exc:
+                raise SpikeModelError("malformed or duplicate model ARGMAX") from exc
+        elif line.startswith("SUM "):
+            p = line.split()
+            try:
+                bits = int(p[1])
+                if sumval is not None or len(p) != 2 or not 0 <= bits <= 0xFFFFFFFF:
+                    raise ValueError("duplicate or malformed SUM")
+                sumval = struct.unpack("<f", struct.pack("<I", bits))[0]
+            except (IndexError, ValueError) as exc:
+                raise SpikeModelError("malformed or duplicate model SUM") from exc
     return {"outputs": flat, "prefix": flat, "argmax": argmax, "sum": sumval, "metrics": metrics, "console": console}
 
 

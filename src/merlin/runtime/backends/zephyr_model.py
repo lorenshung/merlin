@@ -20,7 +20,7 @@ import struct
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cache, lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -409,8 +409,11 @@ def allocation_bytes(ll_path: str | Path) -> tuple[int, int]:
 
 
 def _ram_for_weights(
-    weights_bytes: int, activation_bytes: int | None = None, allocation_bytes_total: int | None = None,
-    *, default_ram_bytes: int,
+    weights_bytes: int,
+    activation_bytes: int | None = None,
+    allocation_bytes_total: int | None = None,
+    *,
+    default_ram_bytes: int,
 ) -> int:
     """RAM-region size to hold the weights blob (linked into .data) plus an activation
     arena (the leftover, claimed by ARENA_SIZE=-1). Headroom scales with the model
@@ -469,8 +472,8 @@ def _prepare_model_mlir(
     vectorize_amax_reduction: bool = False,
     hoist_weight_invariant_quantize: bool = False,
     respect_captured_quantization_scope: bool = False,
-    bundle_dir: "Path | None" = None,
-    op_counts_out: "dict[str, int] | None" = None,
+    bundle_dir: Path | None = None,
+    op_counts_out: dict[str, int] | None = None,
     vec_lanes: int = _VEC_RANK_LANES,
     vec_max_rank: int = _VEC_RANK_MAX_RANK,
 ) -> Path:
@@ -753,7 +756,7 @@ class MatrixRouting:
     support_target: str  # explicitly selected OOT support identity
     unit: str  # a unit declared by that provider
     config: str  # the elaborated hardware configuration
-    select: "Callable[[Any], bool] | None" = None
+    select: Callable[[Any], bool] | None = None
 
     def __post_init__(self) -> None:
         for name, value in self.identity().items():
@@ -783,7 +786,7 @@ class MatrixRouting:
         """
         return self.provider().geometry(unit=self.unit, config=self.config)[0]
 
-    def selector(self) -> "Callable[[Any], bool]":
+    def selector(self) -> Callable[[Any], bool]:
         return self.select if self.select is not None else self.provider().selector(self.tile_edge())
 
 
@@ -852,7 +855,7 @@ def _write_parallel_arms(work: Path, harts: int, table: dict, par_table: dict) -
     )
 
 
-def parallel_arms(work: Path) -> "list | None":
+def parallel_arms(work: Path) -> list | None:
     """The ``[(op class, tiles)]`` :func:`prepare_for_lowering` derived for ``work``, or None.
 
     None means "this prepare derived no per-op block table", which is the packages whose block lives
@@ -873,12 +876,12 @@ def prepare_for_lowering(
     work: Path,
     *,
     int8_compute: bool = False,
-    features: "frozenset[str] | None" = None,
+    features: frozenset[str] | None = None,
     blocking: bool = True,
     harts: int = 1,
     vlen: int | None = None,
-    matrix: "MatrixRouting | None" = None,
-    device: "Any | None" = None,
+    matrix: MatrixRouting | None = None,
+    device: Any | None = None,
     outline_int8: bool = False,
 ) -> tuple[Path, frozenset[str]]:
     """``(prepared_mlir, concrete_features)`` — everything that must happen to a captured module
@@ -1064,17 +1067,29 @@ def prepare_for_lowering(
     if device is not None and (
         getattr(device, "select", None) is not None or getattr(device, "exact_selection", None) is not None
     ):
+        from ...llvmlower.device_offload import BY_CONTRACTION
         from ...llvmlower.device_offload import rewrite_prepared_file as _dev_rewrite
 
         exact = getattr(device, "exact_selection", None)
         if exact is not None:
             exact.check_package(device.package_dir)
             exact.check_backend_contract()
+        # THE ROUTING SAYS WHAT UNIT MOVES, not this call site. A contraction route and a group route
+        # build different programs, and a build that chose for itself would make the choice invisible
+        # in the artifact it produced.
+        _grain = str(getattr(device, "granularity", None) or BY_CONTRACTION)
         moved = _dev_rewrite(
-            prepared, work, device.device, select=device.select, exact_selection=exact
+            prepared,
+            work,
+            device.device,
+            select=device.select,
+            exact_selection=exact,
+            granularity=_grain,
+            capture=getattr(device, "capture", None),
+            model=str(getattr(device, "model", "") or ""),
         )
         print(
-            f"[device] routed {moved.moved} contraction(s) to {device.device} across "
+            f"[device] routed {moved.moved} {_grain}(s) to {device.device} across "
             f"{len(moved.signatures)} signature(s)"
             + (f"; declined: {[why for _s, why in moved.skipped]}" if moved.skipped else "")
         )
@@ -1390,7 +1405,7 @@ def prepare_for_lowering(
     return _strip_provenance(prepared, work, features), features
 
 
-def _strip_provenance(prepared: Path, work: Path, features: "frozenset[str]") -> Path:
+def _strip_provenance(prepared: Path, work: Path, features: frozenset[str]) -> Path:
     """LAST of the prepared-module rewrites, when ``cse_through_provenance`` asks for it.
 
     LAST, and this is a correctness requirement rather than a preference. The strip round-trips the
@@ -1884,7 +1899,7 @@ def _kconfig_symbols() -> frozenset[str]:
     return frozenset(found)
 
 
-@lru_cache(maxsize=None)
+@cache
 def _kconfig_default_int(symbol: str) -> int | None:
     """The tree's own ``default <int>`` for an ``int``-typed Kconfig symbol, or None.
 
@@ -2004,6 +2019,7 @@ def _prj_conf(cpus: int, backend: str, brd, console_facts=None, debug: bool = Fa
     that belong to the chip, and defaulting either of them produces a console that emits garbage.
     """
     from ..boards import CONSOLE_HTIF, CONSOLE_UART
+
     if brd is None:
         raise ZephyrModelError("a board descriptor is required for Zephyr app configuration")
     if brd.fpu_sharing is None or brd.zephyr_vector_ext is None:
@@ -2144,7 +2160,7 @@ CONFIG_HEAP_MEM_POOL_SIZE=65536
             "# RISCV_V_KERNEL_ONLY, so setting it would put `v` in the global -march and\n"
             "# no matching libgcc multilib exists. mstatus.VS comes from CONFIG_FPU.\n"
         )
-    vec = [f"\nCONFIG_RISCV_ISA_EXT_V=y", f"CONFIG_RISCV_VECTOR_MAX_LEN={vector_max_len}"]
+    vec = ["\nCONFIG_RISCV_ISA_EXT_V=y", f"CONFIG_RISCV_VECTOR_MAX_LEN={vector_max_len}"]
     # Emit only what this Zephyr tree actually defines -- an unknown symbol aborts the build.
     if _kconfig_has("RISCV_V_KERNEL_ONLY"):
         vec.append("CONFIG_RISCV_V_KERNEL_ONLY=y")
@@ -2161,7 +2177,7 @@ def _cmakelists(
     weights_section_ld: Path | None = None,
     omp: bool = False,
     n_harts: int = 1,
-    hart_ids: "tuple[int, ...] | None" = None,
+    hart_ids: tuple[int, ...] | None = None,
     backend: str = "rvv",
     debug: bool = False,
     build_hash: str = "",
@@ -2273,7 +2289,7 @@ def build_app(
     int8_compute: bool = False,
     rvv_schedule: str | None = None,
     cflags_override: list[str] | None = None,
-    features: "frozenset[str] | None" = None,
+    features: frozenset[str] | None = None,
     n_harts: int = 1,
     iters: int = 1,
     warmup: int = 0,
@@ -2281,11 +2297,16 @@ def build_app(
     vlen: int | None = None,
     sdk_dir: str | Path | None = None,
     debug: bool = False,
-    matrix: "MatrixRouting | None" = None,
+    matrix: MatrixRouting | None = None,
     matrix_scalar_tile: bool = False,
     completion_metric_prefix: str | None = None,
+    device: Any | None = None,
 ) -> dict:
     """Lower the model, generate the Zephyr app, and build ``zephyr.elf``.
+
+    ``device`` is a :class:`~merlin.llvmlower.device_build.DeviceRouting`, threaded through to
+    :func:`prepare_for_lowering` exactly as ``matrix`` is. It is the seam a whole-model DEVICE
+    offload arrives through; ``None`` (the default) moves nothing and the build is byte-identical.
 
     ``backend``: ``"rvv"`` (vector tile / Saturn) or ``"scalar"`` (scalar tile). The
     scalar build is the portable FireSim-safe path; the vector build targets the Saturn
@@ -2339,7 +2360,11 @@ def build_app(
     if iters < 1:
         raise ZephyrModelError(f"iters must be >= 1, got {iters}")
     # A VLEN the build assumes must match the one it will run on -- see march_with_vlen.
-    cflags = march_with_vlen(cflags_override or _cflags(backend), vlen)
+    cflags = (
+        march_with_vlen(cflags_override or _cflags(backend), vlen)
+        if backend == "rvv"
+        else list(cflags_override or _cflags(backend))
+    )
 
     gcc = _spike.gcc_path()
     ld = gcc.with_name("riscv64-unknown-elf-ld")
@@ -2389,6 +2414,7 @@ def build_app(
             harts=n_harts,
             vlen=vlen,
             matrix=matrix,
+            device=device,
         )
         # A DEBUG image interleaves a mark between the top-level ops of @forward. Two things come out
         # of it: a per-op cost table at the end of a successful run, and -- the reason it is here at
@@ -3317,7 +3343,7 @@ def build_and_run(
     omp_threads: int | None = None,
     rvv_schedule: str | None = None,
     cflags_override: list[str] | None = None,
-    features: "frozenset[str] | None" = None,
+    features: frozenset[str] | None = None,
     vlen: int | None = None,
 ) -> dict[str, Any]:
     """Build the Zephyr image and (for spike) run + gate. ``references`` (a ``{tier: array}``
@@ -3369,8 +3395,12 @@ def build_and_run(
     if board is None or _board_desc(board).simulator != "spike":
         return result  # FireSim path runs the elf separately (firesim_runner / queue)
     run = run_on_spike(
-        b["elf"], dram_base=_board_desc(board).dram_base, harts=harts,
-        mem_bytes=b["ram_bytes"], timeout=timeout, vlen=vlen,
+        b["elf"],
+        dram_base=_board_desc(board).dram_base,
+        harts=harts,
+        mem_bytes=b["ram_bytes"],
+        timeout=timeout,
+        vlen=vlen,
     )
     result.update(run)
     refs = references if references is not None else reference

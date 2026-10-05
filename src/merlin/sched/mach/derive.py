@@ -427,14 +427,12 @@ def _contract_for(target: str) -> Mapping[str, Any]:
     materialised package. A target with neither gets an empty mapping, and every quantity a contract
     would have supplied becomes an ``Unknown`` -- never a family default wearing a contract's clothes.
     """
-    import yaml
-
     from merlin.targetgen import capability_manifests, target_registry
 
     try:
-        path = target_registry.resolve(target).contract_path
-        if path and path.is_file():
-            doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        selected = target_registry.resolve(target)
+        if selected.capability_contract_path.is_file():
+            doc = selected.load_contract()
             if isinstance(doc, Mapping):
                 return doc
     except Exception:  # noqa: S110 - not resolvable as a package; try the residual deriver below

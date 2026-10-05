@@ -31,6 +31,7 @@ import numpy as np
 
 from .dispatch_numeric import boundary_scale as boundary_scale
 from .dispatch_numeric import float_boundary_operands as float_boundary_operands
+from .dispatch_transform_audit import qualify_model_transform_audit, record_model_transform_audit
 
 _NP = {
     "f32": np.float32,
@@ -1232,6 +1233,53 @@ def _propagate_quant_inner(module) -> int:
     return n
 
 
+def outlined_dispatch_inventory(outlined) -> list[dict[str, str | None]]:
+    """Exact static dispatch identities carried beside a completed-run ledger."""
+    return [
+        {
+            "symbol": dispatch.symbol,
+            "root_op": dispatch.root_op,
+            "region_id": dispatch.prov.get("prov.region_id"),
+            "prov_op": dispatch.prov.get("prov.op"),
+            "prov_role": dispatch.prov.get("prov.role"),
+            "prov_rewrite": dispatch.prov.get("prov.rewrite"),
+        }
+        for dispatch in outlined.dispatches
+    ]
+
+
+def _normalize_model_module(
+    module,
+    *,
+    int8_compute: bool,
+    quant_passes: list[str] | None,
+    prequant_gather: bool,
+    quant_select=None,
+) -> None:
+    """The one normalization sequence used by execution and exact audit replay."""
+    from ..llvmlower.passes_xdsl import (
+        collapse_overrank_matmul,
+        fix_bool_fptosi,
+        fix_bool_sitofp,
+        lower_bf16_matmul_f32acc,
+        lower_quant_ext,
+    )
+    from ..llvmlower.torchao_affine import lower_torchao_affine_quant
+
+    lower_torchao_affine_quant(module)
+    collapse_overrank_matmul(module)
+    _propagate_quant_inner(module)
+    if int8_compute:
+        from ..llvmlower.quant_passes import apply_quant
+
+        extra = {"prequant_gather": True} if prequant_gather else {}
+        apply_quant(module, quant_passes, select=quant_select, **extra)
+    lower_quant_ext(module)
+    lower_bf16_matmul_f32acc(module)
+    fix_bool_sitofp(module)
+    fix_bool_fptosi(module)
+
+
 def run_model(
     model_dir: str | Path,
     workdir: str | Path,
@@ -1245,6 +1293,7 @@ def run_model(
     mesh_target: str | None = None,
     mesh_package: str | None = None,
     numeric_policy: dict | None = None,
+    transform_audit: bool | str | None = None,
 ) -> dict[str, Any]:
     """Outline + bind + execute a captured model; gate against ``golden.npy``.
 
@@ -1266,19 +1315,18 @@ def run_model(
     than the reference does" when grading against a reference (e.g. torchao, which quantizes
     ``nn.Linear`` only) whose quantization policy is narrower than ours.
     """
+    import hashlib
+    import os as _os
+
     from ..frontends.linalg_mlir import parse_mlir_file
-    from ..llvmlower.passes_xdsl import (
-        collapse_overrank_matmul,
-        fix_bool_fptosi,
-        fix_bool_sitofp,
-        lower_bf16_matmul_f32acc,
-        lower_quant_ext,
-    )
-    from ..llvmlower.torchao_affine import lower_torchao_affine_quant
     from ..xdsl_dialects.lowering.outline import outline_dispatches
 
     model_dir = Path(model_dir)
-    module = parse_mlir_file(model_dir / "model.mlir")
+    model_source = model_dir / "model.mlir"
+    source_sha256 = hashlib.sha256(model_source.read_bytes()).hexdigest()
+    module = parse_mlir_file(model_source)
+    if hashlib.sha256(model_source.read_bytes()).hexdigest() != source_sha256:
+        raise DispatchRuntimeError("model source changed while it was parsed")
     # Normalize before outlining so quantized/bf16/over-rank models compute correctly:
     #  - 3-D `aten.linear` matmuls (invalid 2-D-map matmul) -> batched linalg.generic;
     #  - int8 weights: dequantize_per_channel -> linalg.generic (weights stay i8 in memory);
@@ -1287,31 +1335,38 @@ def run_model(
     #    (fixes the eager-attention causal-mask sign flip; molmoact decoder).
     # An activation-quant capture leaves torchao's choose_qparams/quantize as opaque calls to
     # externs nothing defines; without this the module cannot even be outlined.
-    lower_torchao_affine_quant(module)
-    collapse_overrank_matmul(module)
-    _propagate_quant_inner(module)  # dequant prov.quant_inner_{w,s} -> source empties
-    if int8_compute:
-        # The integer (W8A8) datapath, via the quant-pass registry (the quantization region's
-        # edit-point). apply_quant() with the default set runs the six lower_*_int passes in the
-        # canonical order — byte-identical to the historical hardcoded sequence, now toggleable.
-        from ..llvmlower.quant_passes import apply_quant
-
-        # `prequant_gather` = the `quantize_before_gather` feature. Threaded through the HOST
-        # interpreter too, not only the device build: the per-tensor activation scale it introduces is
-        # a genuine numeric change, so it has to be gradeable against golden_w8a8.npy here before any
-        # board measurement is worth taking.
-        # Passed ONLY when asked for: `test_default_reach_passes_no_select_at_all` gates that the
-        # default path hands the passes no kwargs at all, so a pass that never learned this flag keeps
-        # working and the shipped datapath cannot drift behind a default argument.
-        extra = {"prequant_gather": True} if prequant_gather else {}
-        apply_quant(module, quant_passes, select=quant_select, **extra)
-    lower_quant_ext(module)  # residual dequants (unconverted) -> f32 fallback
-    lower_bf16_matmul_f32acc(module)
-    fix_bool_sitofp(module)
-    # Keep the interpreter on the SAME bool-cast semantics as the compiled path: `fptosi f32 -> i1`
-    # is poison in LLVM but `int(x)` here, so leaving it out is exactly how the two paths diverge.
-    fix_bool_fptosi(module)
+    _normalize_model_module(
+        module,
+        int8_compute=int8_compute,
+        quant_passes=quant_passes,
+        prequant_gather=prequant_gather,
+        quant_select=quant_select,
+    )
     outlined = outline_dispatches(module)
+    requested_audit = _os.environ.get("MERLIN_MODEL_TRANSFORM_AUDIT", "") if transform_audit is None else transform_audit
+    transform_audit_index = record_model_transform_audit(
+        model_source,
+        Path(workdir),
+        module,
+        outlined,
+        enabled={"": False, "1": True, "exact": "exact", "both": "both", "compact": "compact"}.get(
+            requested_audit, requested_audit
+        ),
+        expected_source_sha256=source_sha256,
+        normalization_recipe={
+            "int8_compute": int8_compute,
+            "quant_passes": quant_passes,
+            "prequant_gather": prequant_gather,
+            "selection_policy": "all" if quant_select is None else "custom_unreplayable",
+        },
+    )
+    transform_audit_qualification = (
+        qualify_model_transform_audit(transform_audit_index) if transform_audit_index is not None else None
+    )
+    # Static inventory from the exact normalized module whose dispatches this
+    # invocation executes.  A source region may contain multiple linalg roots;
+    # the dynamic ledger alone cannot tell whether one of them disappeared.
+    outlined_dispatches = outlined_dispatch_inventory(outlined)
     driver = next(op for op in outlined.module.walk() if op.name == "func.func" and "$kernel_" not in op.sym_name.data)
     out_types = list(driver.function_type.outputs.data)
     if not out_types:
@@ -1324,11 +1379,13 @@ def run_model(
     if extra_path.is_file():
         ex = np.load(extra_path)
         qinner = {k[len("qinner::") :]: ex[k] for k in ex.files if k.startswith("qinner::")}
-    import os as _os
-
     # Per-run mesh counters. A whole-model verdict is decided by these, so they must not
     # live on a module-global function attribute that a concurrent grade can clobber.
     _mesh_counts: dict = {}
+    _mesh_counts["outlined_dispatches"] = outlined_dispatches
+    if transform_audit_index is not None:
+        _mesh_counts["transform_audit_index"] = str(transform_audit_index)
+        _mesh_counts["transform_audit_qualification"] = transform_audit_qualification
     if kernel_backend is None and _os.environ.get("MERLIN_XNNPACK_HOST") == "1":
         kernel_backend = "xnnpack"
     if kernel_backend == "mesh" and mesh_target:
@@ -1412,4 +1469,6 @@ def run_model(
             ok=all(x["ok"] for x in checks),
             output_checks=checks,
         )
+    if hashlib.sha256(model_source.read_bytes()).hexdigest() != source_sha256:
+        raise DispatchRuntimeError("model source changed during whole-model execution")
     return res

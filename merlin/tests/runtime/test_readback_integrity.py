@@ -20,8 +20,15 @@ import pytest
 from merlin.common import readback_integrity as RI
 from merlin.runtime.backends.base import get_backend
 
-MO = get_backend("muon").muon_oracles
-MU = get_backend("muon").muon
+
+@pytest.fixture
+def muon_backend():
+    """Run transport-specific checks only when the optional Muon OOT backend is selected."""
+    try:
+        backend = get_backend("muon")
+    except KeyError:
+        pytest.skip("Muon OOT backend is not installed in this target-independent environment")
+    return backend.muon_oracles, backend.muon
 
 
 def _words(values: list[int]) -> bytes:
@@ -89,8 +96,9 @@ def test_ragged_byte_count_fails_closed():
         RI.require_intact(b"\x00\x01\x02", transport="t")
 
 
-def test_oracle_decode_refuses_the_broken_readback(tmp_path):
+def test_oracle_decode_refuses_the_broken_readback(tmp_path, muon_backend):
     """The wiring: a holed dump must never reach the value comparison."""
+    MO, MU = muon_backend
     raw = _words([0x458DB70E if i % 2 == 0 else 0 for i in range(690)])
     dump = tmp_path / "gsim.output.bin"
     dump.write_bytes(raw)
@@ -116,7 +124,8 @@ def test_oracle_decode_refuses_the_broken_readback(tmp_path):
     assert "gsim_evaluator_owned_gmem_dump" in str(exc.value)
 
 
-def test_oracle_decode_accepts_a_complete_readback(tmp_path):
+def test_oracle_decode_accepts_a_complete_readback(tmp_path, muon_backend):
+    MO, _ = muon_backend
     raw = _words([0x3F800000 + i for i in range(690)])
     dump = tmp_path / "gsim.output.bin"
     dump.write_bytes(raw)
@@ -151,8 +160,9 @@ def test_the_false_pass_hazard_itself():
     assert RI.residue_class_defect(words) is not None  # the structural check will not
 
 
-def test_cyclotron_decode_refuses_the_broken_readback(tmp_path):
+def test_cyclotron_decode_refuses_the_broken_readback(tmp_path, muon_backend):
     """The same refusal guards the timing-model transport, not only the RTL one."""
+    MO, MU = muon_backend
     raw = _words([0x458DB70E if i % 2 == 0 else 0 for i in range(690)])
     dump = tmp_path / "cyclotron.output.bin"
     dump.write_bytes(raw)
@@ -173,7 +183,8 @@ def test_cyclotron_decode_refuses_the_broken_readback(tmp_path):
     assert "cyclotron_host_gmem_dump" in str(exc.value)
 
 
-def test_cyclotron_decode_accepts_a_complete_readback(tmp_path):
+def test_cyclotron_decode_accepts_a_complete_readback(tmp_path, muon_backend):
+    MO, _ = muon_backend
     raw = _words([0x3F800000 + i for i in range(690)])
     dump = tmp_path / "cyclotron.output.bin"
     dump.write_bytes(raw)
