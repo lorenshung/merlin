@@ -65,7 +65,7 @@ def selected(monkeypatch):
         name: SimpleNamespace(rocc_semantics=SimpleNamespace(rtl_checks=owner)) for name, owner in owners.items()
     }
     monkeypatch.setattr(base, "get_backend", lambda target: backends[target])
-    monkeypatch.setattr(compiler, "_is_rocc_target", lambda *_: True)
+    monkeypatch.setattr(compiler, "_endpoint_kind_for", lambda *_: "inline_asm_insn")
     monkeypatch.setattr(compiler, "_provenance", lambda *_: {})
     return owners, backends
 
@@ -86,6 +86,35 @@ def test_same_transport_does_not_imply_same_protocol(selected):
         assert rendered.strip() in compiled
         assert checks.load_default_facts(target) == {"source": target}
         assert owner.calls
+
+
+def test_all_skipped_selected_screen_stays_vacuous_in_runner(selected, monkeypatch, tmp_path):
+    owners, _ = selected
+    owners["first"].screen = lambda *_args, **_kwargs: checks.CheckReport(
+        None, None, {}, [checks.Check("protocol.unavailable", "T0", "error", "skipped", "no facts")]
+    )
+    monkeypatch.setattr(runner, "_load_capsule", lambda *_: {"name": "fixture"})
+    monkeypatch.setattr(runner, "run_filecheck", lambda *_args: (True, "synthetic comparator"))
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    (generated / "instruction_trace.json").write_text(json.dumps(trace("LOAD", "ISSUE")))
+    result = runner.screen_run(tmp_path, {}, {}, "synthetic-filecheck", target="first")
+    assert result["screen"]["verdict"] == checks.CheckReport.VACUOUS
+    assert result["verdict"] == checks.CheckReport.VACUOUS
+
+
+def test_self_hosted_kernel_without_filecheck_is_unverified(monkeypatch, tmp_path):
+    from merlin.targetgen import isa_taxonomy
+
+    monkeypatch.setattr(compiler, "_endpoint_kind_for", lambda *_: "external_backend")
+    monkeypatch.setattr(isa_taxonomy, "taxonomy_for_target", lambda *_: {})
+    monkeypatch.setattr(runner, "_load_capsule", lambda *_: {"name": "fixture", "operation": {"op": "matmul"}})
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    (generated / "kernel.S").write_text(".word 0\n")
+    result = runner.screen_run(tmp_path, {}, {}, None, target="synthetic")
+    assert result["filecheck"] == {}
+    assert result["verdict"] == checks.CheckReport.VACUOUS
 
 
 @pytest.mark.parametrize(

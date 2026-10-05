@@ -1,10 +1,12 @@
 """Coarse source production, hierarchy, precision and immutable-selection checks."""
 
 import json
+import sys
 import tempfile
 import unittest
 from contextlib import nullcontext
 from pathlib import Path
+from types import ModuleType
 
 from merlin.targetgen.rtl import circt_introspect, source_selection
 from merlin.targetgen.rtl.extract_module import extract
@@ -144,3 +146,34 @@ def test_selected_generic_hw_is_generated_with_facts_not_into_source_bundle(tmp_
     monkeypatch.setattr(circt_introspect, "_build_facts", inspect_selected)
     monkeypatch.setattr("merlin.targetgen.rtl.facts.write_facts_guarded", lambda out, record: None)
     circt_introspect.dump_facts(facts, target="demo", source_bundle=bundle)
+
+
+def test_genericization_receipt_is_independent_of_launch_directory(tmp_path, monkeypatch):
+    from merlin.targetgen.rtl import hw_graph
+
+    monkeypatch.chdir(tmp_path)
+    source, tool = Path("core.hw.mlir"), Path("circt-opt")
+    source.write_text("module {}\n")
+    tool.write_text("selected tool bytes\n")
+    selected = {"target": "demo", "_generic_hw_output": "generated/core.generic.mlir"}
+    discovery = ModuleType("mlc.discover.irgraph")
+    discovery.HwGraph = lambda module: module
+    discovery.to_generic = lambda *a, **k: None
+    monkeypatch.setitem(sys.modules, "mlc.discover.irgraph", discovery)
+
+    def execute(command, **kwargs):
+        # Exercise the real producer, with the same relative output selection
+        # that broke receipt verification in the installed Phase 0 launcher.
+        assert all(Path(command[index]).is_absolute() for index in (0, 2, 4))
+        Path(command[4]).write_text("module {}\n")
+
+    monkeypatch.setattr(hw_graph.subprocess, "run", execute)
+    with selected_sources(selected):
+        hw_graph.load_hw_graph(source, circt_opt=tool)
+    receipt = selected["_genericization"]
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    for index, member in ((0, "tool"), (2, "input"), (4, "output")):
+        assert Path(receipt["command"][index]).resolve() == Path(receipt[member]["path"])
+        assert digest(receipt[member]["path"]) == receipt[member]["sha256"]

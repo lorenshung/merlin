@@ -755,6 +755,173 @@ def _host_command_port(port_text: str) -> str | None:
     return None
 
 
+def _directed_fields(text: str) -> list[tuple[str, bool, str]]:
+    """``[(field name, flipped, field type text)]`` for a FIRRTL bundle body; like :func:`_bundle_fields`
+    but keeping the ``flip`` that says the field points INTO the module."""
+    out: list[tuple[str, bool, str]] = []
+    depth, start = 0, 0
+    chunks: list[str] = []
+    for i, ch in enumerate(text):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            chunks.append(text[start:i])
+            start = i + 1
+    if text[start:].strip():
+        chunks.append(text[start:])
+    for chunk in chunks:
+        head, sep, typ = chunk.partition(":")
+        if not sep:
+            continue
+        parts = head.split()
+        flipped = bool(parts) and parts[0] == "flip"
+        if flipped:
+            parts = parts[1:]
+        if parts:
+            out.append((parts[0], flipped, typ.strip()))
+    return out
+
+
+def _uint_width(typ: str) -> int | None:
+    """The width of a ``UInt<W>`` type text, else None."""
+    head, sep, rest = typ.strip().partition("<")
+    if head.strip() != "UInt" or not sep:
+        return None
+    width, close, _ = rest.partition(">")
+    return int(width) if close and width.strip().isdigit() else None
+
+
+def _channel_payload(typ: str) -> dict[str, str] | None:
+    """The ``bits`` payload fields of a decoupled (ready/valid) channel type, else None."""
+    leaves = {name: t for name, _flip, t in _directed_fields(_inner_bundle(typ))}
+    if "ready" not in leaves or "valid" not in leaves or "bits" not in leaves:
+        return None
+    return {name: t for name, _flip, t in _directed_fields(_inner_bundle(leaves["bits"]))}
+
+
+def bus_master_edges(port_text: str) -> list[dict[str, Any]]:
+    """Every outward MEMORY-MASTER edge a module's ports declare, with its data width each way.
+
+    Structural: a port field whose bundle holds a request channel ``a`` pointing OUT of the module whose
+    payload carries an ``address`` and a ``data`` field, and a response channel ``d`` pointing IN whose
+    payload carries ``data``. That pair is a master edge onto a memory bus; a manager edge has the same
+    channels the other way round and is not counted. Write data leaves on ``a``; read data returns on
+    ``d``. Each channel is a ready/valid handshake, so it retires at most one payload per cycle and its
+    ``data`` width is that direction's per-cycle ceiling on this edge.
+    """
+    edges: list[dict[str, Any]] = []
+    for line in port_text.splitlines():
+        _, _, rest = line.partition(":")
+        for node, node_flipped, typ in _directed_fields(_inner_bundle(rest)):
+            channels = {name: (flip != node_flipped, t) for name, flip, t in _directed_fields(_inner_bundle(typ))}
+            request, response = channels.get("a"), channels.get("d")
+            if request is None or response is None or request[0] or not response[0]:
+                continue
+            a_bits, d_bits = _channel_payload(request[1]), _channel_payload(response[1])
+            if a_bits is None or d_bits is None or "address" not in a_bits or "data" not in a_bits:
+                continue
+            write, read = _uint_width(a_bits["data"]), _uint_width(d_bits.get("data", ""))
+            if write is None or read is None:
+                continue
+            edges.append({"node": node, "write_data_bits": write, "read_data_bits": read})
+    return edges
+
+
+def _receives_host_command(port_text: str) -> str | None:
+    """The name of a decoupled port field pointing INTO the module whose payload carries a RISC-V
+    instruction bundle (the co-processor command handoff, received), else None."""
+    for line in port_text.splitlines():
+        _, _, rest = line.partition(":")
+        for name, flipped, typ in _directed_fields(_inner_bundle(rest)):
+            if not flipped:
+                continue
+            payload = _channel_payload(typ)
+            if payload is None:
+                continue
+            for sub in payload.values():
+                if _INSTRUCTION_FIELDS <= {f for f, _ in _bundle_fields(_inner_bundle(sub))}:
+                    return name
+    return None
+
+
+def memory_path(fir: str | Path) -> dict[str, Any]:
+    """The accelerator's memory path from an elaborated FIRRTL: the per-cycle byte ceiling each way.
+
+    Generator-free and name-free. The accelerator is a module that RECEIVES a host co-processor command
+    (:func:`_receives_host_command`) AND masters at least one memory edge (:func:`bus_master_edges`);
+    a command queue receives the command but masters no edge, and the host core masters edges but sends
+    the command, so neither qualifies. Its edges are summed per direction (every master edge it has can
+    move a payload in the same cycle). When several modules qualify -- a wrapper re-exposing the same
+    ports -- the WIDEST is taken, so the result never understates what one accelerator can move: a cycle
+    floor built from it stays a floor.
+
+    Streamed one module at a time: the elaborations are 80-130 MB on a host other sessions share.
+    Returns ``{"status": "derived", "read_bytes_per_cycle", "write_bytes_per_cycle", "modules"}`` or
+    ``{"status": "unknown", "reason"}`` -- never a default width.
+    """
+    found: list[dict[str, Any]] = []
+
+    def close(module: str, ports: list[str]) -> None:
+        if not module or not ports:
+            return
+        text = "".join(ports)
+        command = _receives_host_command(text)
+        if command is None:
+            return
+        edges = bus_master_edges(text)
+        if not edges:
+            return
+        found.append(
+            {
+                "module": module,
+                "command_port": command,
+                "edges": edges,
+                "read_data_bits": sum(e["read_data_bits"] for e in edges),
+                "write_data_bits": sum(e["write_data_bits"] for e in edges),
+            }
+        )
+
+    current, ports, in_ports = "", [], False
+    with Path(fir).open(encoding="utf-8", errors="ignore") as fh:
+        for raw in fh:
+            stripped = raw.strip()
+            head = _module_head(stripped)
+            if head is not None:
+                close(current, ports)
+                current, ports, in_ports = head[0], [], True
+                continue
+            if not in_ports:
+                continue
+            if stripped.startswith(("input ", "output ")):
+                ports.append(stripped + "\n")
+            elif stripped:
+                in_ports = False  # ports are declared first; the body begins
+    close(current, ports)
+    if not found:
+        return {
+            "status": "unknown",
+            "reason": "no module both receives a host co-processor command and masters a memory edge, so "
+            "the accelerator's memory path is not derivable from this elaboration",
+        }
+    best = max(found, key=lambda m: (m["read_data_bits"] + m["write_data_bits"], m["module"]))
+    if best["read_data_bits"] % 8 or best["write_data_bits"] % 8:
+        return {"status": "unknown", "reason": f"module {best['module']}'s data widths are not whole bytes"}
+    return {
+        "status": "derived",
+        "read_bytes_per_cycle": best["read_data_bits"] // 8,
+        "write_bytes_per_cycle": best["write_data_bits"] // 8,
+        "module": best["module"],
+        "modules": found,
+        "evidence": f"module {best['module']} receives the host command on `{best['command_port']}` and masters "
+        + ", ".join(
+            f"`{e['node']}` (a.data {e['write_data_bits']}b out, d.data {e['read_data_bits']}b in)"
+            for e in best["edges"]
+        ),
+    }
+
+
 def _module_port_field_type(fir: Path, module: str, dotted_field: str) -> str | None:
     """Resolve one declared dotted FIRRTL port field inside an exact module, without guessing width."""
     parts = dotted_field.split(".")

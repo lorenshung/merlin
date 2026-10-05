@@ -11,6 +11,21 @@ import pytest
 
 from merlin.targetgen import rtl_engine_policy as P
 
+
+def test_gsim_has_five_cross_process_runtime_slots(tmp_path):
+    from contextlib import ExitStack
+
+    root = tmp_path / "slots"
+    assert P.capsule_worker_cap("gsim") == 5
+    with ExitStack() as held:
+        for _ in range(5):
+            held.enter_context(P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root))
+        with pytest.raises(TimeoutError, match="five GSim slots"):
+            with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root):
+                pass
+    with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root):
+        pass
+
 _UP = lambda why="ok": (lambda: (True, why))          # noqa: E731 - table-style probes read better inline
 _DOWN = lambda why: (lambda: (False, why))            # noqa: E731
 
@@ -102,8 +117,9 @@ def test_a_refused_lineage_loses_the_selection_not_just_the_probe(tmp_path, monk
     home = tmp_path / "gsim"
     home.mkdir()
     (home / "gsim_run.py").write_text("def run_program(*a, **k): ...", encoding="utf-8")
+    monkeypatch.setenv("MERLIN_GSIM_REQUIRE_RECEIPT", "1")
     monkeypatch.setattr(PO, "_rtl_engine_dir", lambda target, engine: home)
-    monkeypatch.setattr(GE, "resolve", lambda target, **k: GE.Resolution(
+    monkeypatch.setattr(GE, "resolve_wrapper", lambda target, **k: GE.Resolution(
         target=target, path=home / "gsim_run.py", source="derived", ok=False, refused=True,
         reason="lineage ADOPTED, not built-and-bound", flavour="wrapper", digest="d",
         receipt_status="adopted", receipt=None))

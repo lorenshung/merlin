@@ -44,16 +44,21 @@ def load_hw_graph(path: str | Path, *, circt_opt):
             raise ValueError("selected CIRCT genericization output may not be a symlink")
         receipt = selected.get("_genericization")
         if receipt is None:
+            # Bind the executed command to the same canonical paths as its
+            # receipt. Relative argv otherwise makes later validation depend
+            # on the launcher's cwd, even when every selected byte is intact.
+            generic = generic.resolve()
+            source, tool = Path(path).resolve(), Path(circt_opt).resolve()
             generic.parent.mkdir(parents=True, exist_ok=True)
-            command = [str(circt_opt), "--mlir-print-op-generic", str(path), "-o", str(generic)]
+            command = [str(tool), "--mlir-print-op-generic", str(source), "-o", str(generic)]
             subprocess.run(command, check=True, capture_output=True)
             selected["_genericization"] = {
                 "kind": "circt_generic_serialization",
                 "command": command,
                 "returncode": 0,
-                "input": {"path": str(Path(path).resolve()), "sha256": digest(path)},
-                "output": {"path": str(generic.resolve()), "sha256": digest(generic)},
-                "tool": {"path": str(Path(circt_opt).resolve()), "sha256": digest(circt_opt)},
+                "input": {"path": str(source), "sha256": digest(source)},
+                "output": {"path": str(generic), "sha256": digest(generic)},
+                "tool": {"path": str(tool), "sha256": digest(tool)},
             }
         elif digest(path) != receipt["input"]["sha256"] or digest(generic) != receipt["output"]["sha256"]:
             raise ValueError("selected CIRCT genericization bytes changed during observation")

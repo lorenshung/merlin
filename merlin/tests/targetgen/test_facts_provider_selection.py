@@ -62,12 +62,28 @@ def test_discovery_does_not_require_reconciling_an_unselected_provider(selected)
     assert not any("Reconcile" in note for note in notes)
 
 
-def test_missing_selected_facts_never_mix_legacy_evidence(selected):
-    _, pin, _ = selected
+def test_missing_selected_facts_are_derived_never_mixed_with_legacy_evidence(selected, monkeypatch):
+    """Facts are derived, not shipped: without a pin the selected provider is served by a fresh
+    extraction for its target -- never by the stale same-name cache, which cannot say whose contract
+    it was extracted under -- and discovery, which never extracts, still finds nothing."""
+    provider, pin, _ = selected
     pin.unlink()
-    with pytest.raises(FileNotFoundError):
-        facts.ensure_facts("synthetic")
     assert discovery._facts_if_present("synthetic") == (None, "")
+
+    def extract(path, target):
+        contract = provider / "contracts/target_contract.yaml"
+        import hashlib
+
+        digest = hashlib.sha256(contract.read_bytes()).hexdigest()
+        doc = {
+            "inputs": {"target": target, "extraction_contract_sha256": digest},
+            "facts": {"target": target, "marker": "derived"},
+        }
+        path.write_text(json.dumps(doc))
+
+    monkeypatch.setattr(facts, "_dump_facts_for_kind", extract)
+    derived = facts.ensure_facts("synthetic")
+    assert json.loads(derived.read_text())["facts"]["marker"] == "derived"
 
 
 @pytest.mark.parametrize("bad", ["malformed", "wrong-target", "nonmapping"])

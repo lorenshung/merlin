@@ -67,11 +67,12 @@ def target_base(target: str) -> Path:
 
 
 def _selected_external_facts(target: str) -> tuple[bool, Path | None]:
-    """Selected OOT support is authoritative even when it ships no facts.
+    """Whether OOT support is selected for ``target``, and its reviewed facts pin when it ships one.
 
-    Name-keyed caches and descriptor aliases cannot establish identity with this
-    provider. Read its pin directly; no provider digest or hardware qualification
-    is inferred from its location. Invalid selected resources fail closed.
+    A name-keyed cache cannot establish identity with this provider by its location or name; a pin is
+    read directly, and without one the extraction must have committed to this provider's own contract
+    bytes (:func:`_derived_for_selected`). No provider digest or hardware qualification is inferred
+    from its location. Invalid selected resources fail closed.
     """
     from merlin.targetgen.providers import contained_resource
     from merlin.targetgen.target_registry import resolve
@@ -500,15 +501,55 @@ def _declared_cache_pins_match(doc: dict) -> bool:
     return cache_pins_match(doc, contract_path=target_contract_path, file_digest=sha256_file)
 
 
+def _derived_for_selected(target: str, *, regenerate: bool) -> Path | None:
+    """FACTS ARE DERIVED, NOT SHIPPED: a selected support provider without a reviewed pin is served by
+    the standard derivation for its target -- the cache, ONLY when the extraction it records committed to
+    its sources and those commitments still verify (its extractor, its reader and the selected provider's
+    own contract bytes among them), else a fresh extraction into that cache.
+
+    A legacy cache that records no commitments cannot say it was extracted for THIS provider, so it is
+    never served here; with ``regenerate`` off that leaves nothing (``None``), and the caller that needs
+    facts refuses by name rather than reading another provider's evidence."""
+    p = rtl_facts_path(target)
+    cached = _read_facts_doc(p) if p.is_file() else None
+    committed = isinstance(cached, dict) and bool((cached.get("inputs") or {}).get("extraction_contract_sha256"))
+    if (
+        committed
+        and _has_facts(cached)
+        and _declared_cache_pins_match(cached)
+        and not _written_by_another_family(cached, target)
+    ):
+        return p
+    if not regenerate:
+        return None
+    if target in _REGENERATING:
+        raise RuntimeError(f"re-entrant RTL-facts regeneration for target {target!r}")
+    _warn_if_degraded(target)
+    _REGENERATING.add(target)
+    try:
+        _dump_facts_for_kind(p, target)
+    except Exception as exc:  # noqa: BLE001 -- restated as unavailable evidence, with the cause
+        raise FileNotFoundError(
+            f"{target}: the selected support provider ships no contracts/rtl_facts/facts.json and deriving "
+            f"them failed: {type(exc).__name__}: {exc}"
+        ) from exc
+    finally:
+        _REGENERATING.discard(target)
+    if not p.is_file():
+        raise FileNotFoundError(f"{target}: deriving the selected provider's facts produced no artifact at {p}")
+    return p
+
+
 def ensure_facts(target: str, *, explicit: str | Path | None = None) -> Path:
     """Resolve the facts artifact and GUARANTEE it exists, REGENERATING it from the RTL into the
     purgeable cache when the cache is cold.
 
     Resolution, in order: explicit / ``$MERLIN_RTL_FACTS`` win and are used as-is (an override that does
     not exist is a hard, loud ``FileNotFoundError`` — we never silently regenerate over a caller's pin);
-    then an OOT support provider's own reviewed pin, when that provider is selected (missing means
-    unavailable, never another provider's cache); otherwise a cached artifact that actually CARRIES
-    FACTS, matches its declared source commitments and was written by this target's own family;
+    then an OOT support provider's own reviewed pin, when that provider is selected (absent, the
+    standard derivation for its target serves it: :func:`_derived_for_selected`); otherwise a cached
+    artifact that actually CARRIES FACTS, matches its declared source commitments and was written by
+    this target's own family;
     then the target's declared facts source (:func:`facts_alias`); then the committed pin; then a
     regeneration through the extractor the target's family declares (:func:`_dump_facts_for_kind`). The
     first regen is slow (CIRCT ~seconds), every subsequent read is an instant cache hit.
@@ -547,11 +588,17 @@ def _resolve_facts(target: str, *, explicit: str | Path | None, regenerate: bool
     if explicit is None and not os.environ.get("MERLIN_RTL_FACTS"):
         selected, pin = _selected_external_facts(target)
         if selected:
-            if pin is None:
-                if not regenerate:
-                    return None
-                raise FileNotFoundError(f"{target}: selected support provider has no contracts/rtl_facts/facts.json")
-            return pin
+            if pin is not None:
+                return pin
+            from merlin.targetgen.target_registry import explicit_targets
+
+            if target in explicit_targets():
+                return _derived_for_selected(target, regenerate=regenerate)
+            # A generated package found by location alone, not explicitly selected: its missing pin is
+            # unavailable evidence, never a licence to extract RTL on its behalf.
+            if not regenerate:
+                return None
+            raise FileNotFoundError(f"{target}: the generated support package has no contracts/rtl_facts/facts.json")
     p = rtl_facts_path(target, explicit=explicit)
     if explicit is not None or os.environ.get("MERLIN_RTL_FACTS"):
         if p.is_file():
@@ -1058,12 +1105,9 @@ def target_contract_path(target: str, *, explicit: str | Path | None = None) -> 
     """Resolve contract: explicit > ``$MERLIN_TARGET_CONTRACT`` > selected support."""
     if explicit:
         return Path(explicit)
-    env = os.environ.get("MERLIN_TARGET_CONTRACT")
-    if env:
-        return Path(env)
     from merlin.targetgen.target_registry import resolve
 
-    return resolve(target).contract_path
+    return resolve(target).capability_contract_path
 
 
 def dialect_plan_path(target: str, *, explicit: str | Path | None = None) -> Path:

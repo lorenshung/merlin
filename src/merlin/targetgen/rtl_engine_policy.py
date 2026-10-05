@@ -34,10 +34,72 @@ evidence before an engine is ranked as equal.
 
 from __future__ import annotations
 
+import fcntl
+import os
+import stat
+import time
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Callable
 
 # Declared once, with the rationale above. Cost order among engines of EQUAL fidelity.
 ENGINE_PRIORITY: tuple[str, ...] = ("vcs", "gsim", "verilator")
+
+# Bound per-suite fan-out by simulator cost, even when a caller explicitly asks
+# for more workers. Host-load sizing is a snapshot: two independent grades can
+# both observe an idle host and otherwise each start a full-width pool. The
+# asynchronous broker and direct/scheduled graders must use the same caps.
+CAPSULE_WORKER_CAP: dict[str, int] = {"verilator": 4, "gsim": 5, "spike": 8}
+
+
+def capsule_worker_cap(engine: str) -> int:
+    """Conservative parallel capsule limit for one simulator engine."""
+    return CAPSULE_WORKER_CAP.get(engine, 8)
+
+
+@contextmanager
+def gsim_runtime_slot(*, wait_timeout_s: float | None = None, slot_root: Path | None = None):
+    """Hold one of five same-user GSim slots for the entire native simulation.
+
+    Per-suite worker bounds do not protect the machine when two independent grades run at once.
+    Advisory file locks survive abrupt worker exit without stale PID reclamation. A private,
+    fixed per-user directory makes every Merlin capsule process share the same limit.
+    """
+    root = slot_root or Path("/tmp") / f"merlin_gsim_slots_{os.getuid()}"
+    root.mkdir(mode=0o700, parents=False, exist_ok=True)
+    info = root.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise RuntimeError(f"GSim slot directory is not private and owned by this user: {root}")
+    deadline = None if wait_timeout_s is None else time.monotonic() + max(0.0, wait_timeout_s)
+    fd = None
+    try:
+        while fd is None:
+            for index in range(CAPSULE_WORKER_CAP["gsim"]):
+                candidate = root / f"slot_{index}.lock"
+                opened = os.open(candidate, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+                file_info = os.fstat(opened)
+                if not stat.S_ISREG(file_info.st_mode) or file_info.st_uid != os.getuid() or file_info.st_mode & 0o077:
+                    os.close(opened)
+                    raise RuntimeError(f"GSim slot file is not regular and owned by this user: {candidate}")
+                try:
+                    fcntl.flock(opened, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    os.close(opened)
+                except BaseException:
+                    os.close(opened)
+                    raise
+                else:
+                    fd = opened
+                    break
+            if fd is None:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError("all five GSim slots stayed busy until the capsule wait deadline")
+                time.sleep(0.1)
+        yield
+    finally:
+        if fd is not None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
 
 # Every engine here answers at this fidelity; the tier records it rather than inferring from the name.
 ELABORATED_RTL = "elaborated_rtl"
