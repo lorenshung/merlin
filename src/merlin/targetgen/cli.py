@@ -213,7 +213,11 @@ def _cmd_stage_capture(args: argparse.Namespace) -> int:
 
 
 def _cmd_native_build(args: argparse.Namespace) -> int:
-    from merlin.semantic_compiler.snapshot import NativeTargetProfile, build_native_snapshot
+    from merlin.semantic_compiler.snapshot import (
+        NativeTargetProfile,
+        build_native_snapshot,
+        packaged_egg_bridge_path,
+    )
     from merlin.semantic_compiler.target_binding import load_native_target_binding
 
     try:
@@ -227,7 +231,7 @@ def _cmd_native_build(args: argparse.Namespace) -> int:
         snapshot = build_native_snapshot(
             profile,
             destination=Path(args.out),
-            crate=Path(args.crate),
+            crate=Path(args.crate) if args.crate else packaged_egg_bridge_path(),
             cargo_target_dir=Path(args.cargo_target_dir),
             source_revision=args.source_revision,
         )
@@ -507,7 +511,7 @@ def build_parser() -> argparse.ArgumentParser:
     native_build.add_argument("--engine", choices=("merlin_native",), required=True)
     native_build.add_argument("--profile", help="versioned native target profile JSON")
     native_build.add_argument("--support", help="explicit installed native target support provider")
-    native_build.add_argument("--crate", required=True, help="pinned Merlin egg bridge source directory")
+    native_build.add_argument("--crate", help="override the packaged Merlin egg bridge source directory")
     native_build.add_argument("--cargo-target-dir", required=True)
     native_build.add_argument("--source-revision", required=True)
     native_build.add_argument("--out", required=True, help="fresh snapshot directory")

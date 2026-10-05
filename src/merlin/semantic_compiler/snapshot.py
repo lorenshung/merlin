@@ -47,6 +47,16 @@ _NATIVE_SOURCE_FILES = (
 )
 
 
+def packaged_egg_bridge_path() -> Path:
+    """Return the Rust bridge shipped with Merlin, in a checkout or wheel."""
+    crate = Path(__file__).resolve().with_name("egg_bridge")
+    required = ("Cargo.toml", "Cargo.lock", "src/main.rs")
+    missing = [name for name in required if not (crate / name).is_file()]
+    if missing:
+        raise FileNotFoundError(f"installed Merlin native bridge source is incomplete: {missing}")
+    return crate
+
+
 def _compiler_sources() -> dict[str, str]:
     """Bind the installed Python selector bytes used by this snapshot."""
     package = Path(__file__).resolve().parent

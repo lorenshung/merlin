@@ -88,16 +88,12 @@ def test_installed_native_build_select_and_failure_replace_stale_result(tmp_path
     request_path.write_text(json.dumps(request.record()))
     abi_path.write_text(json.dumps({"fixed_inputs": {"x": 0}, "fixed_outputs": [1]}))
     snapshot, output = tmp_path / "native-snapshot", tmp_path / "selection.json"
-    bridge = repo_root() / "src/merlin/semantic_compiler/egg_bridge"
-
     built = _invoke(
         "native-build",
         "--engine",
         "merlin_native",
         "--profile",
         profile_path,
-        "--crate",
-        bridge,
         "--cargo-target-dir",
         tmp_path / "cargo-target",
         "--source-revision",
