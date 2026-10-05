@@ -8,8 +8,7 @@ phases:
     adapter: capsule_bench
     config:
       descriptor: ../operator-inputs/target_experiment.yaml
-      treatment: baseline
-      arm: raw_baseline
+      level: EL1
       bundle: OPERATOR_BUNDLE_ID
       bundle_manifest: ../operator-inputs/input_bundles/OPERATOR_BUNDLE_ID/input_bundle_manifest.yaml
       oracle_timing: ../operator-inputs/oracle_timing.json

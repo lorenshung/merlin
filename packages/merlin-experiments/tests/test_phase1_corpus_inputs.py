@@ -1,11 +1,41 @@
 """Run-owned corpus inputs survive live-source changes without changing the grading policy."""
 
+from types import SimpleNamespace
+
 import pytest
 import yaml
 
 from merlin.common.paths import repo_root
 from merlin.targetgen.sandbox import bwrap as BW
 from merlin.targetgen.target_experiment import load_target_experiment
+
+
+def test_reviewed_bundle_must_come_from_selected_release(tmp_path):
+    from merlin_experiments.phase1 import corpus_inputs as CI
+
+    experiment = tmp_path / "release/payload/experiment"
+    te = SimpleNamespace(
+        path=experiment / "target_experiment.yaml",
+        capsule_corpus=experiment / "capsules/isa",
+    )
+    expected = experiment / "input_bundles/el4/input_bundle_manifest.yaml"
+    expected.parent.mkdir(parents=True)
+    expected.write_text("bundle_id: el4\n")
+    CI.require_reviewed_bundle(te, expected, {"bundle_id": "el4"})
+    with pytest.raises(ValueError, match="manifest mapping"):
+        CI.require_reviewed_bundle(te, expected, None)
+
+    legacy = tmp_path / "legacy/el4/input_bundle_manifest.yaml"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("bundle_id: el4\n")
+    with pytest.raises(ValueError, match="selected release"):
+        CI.require_reviewed_bundle(te, legacy, {"bundle_id": "el4"})
+    with pytest.raises(ValueError, match="invalid identity"):
+        CI.require_reviewed_bundle(te, expected, {"bundle_id": "../el4"})
+    expected.unlink()
+    expected.symlink_to(legacy)
+    with pytest.raises(ValueError, match="selected release"):
+        CI.require_reviewed_bundle(te, expected, {"bundle_id": "el4"})
 
 
 def _capsule(root, name, label="public"):

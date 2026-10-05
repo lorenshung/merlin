@@ -29,6 +29,7 @@ from merlin_experiments.phase1.feedback import loop_grading as LOOP_GRADING
 from merlin_experiments.phase1.feedback import qa as PHASE1_QA
 from merlin_experiments.phase1.options import parse_options
 from merlin_experiments.phase1.providers import execution as PROVIDER
+from merlin_experiments.phase1.session import phase_run_dir
 from merlin_experiments.phase2 import campaign
 from merlin_experiments.phase2 import functional_inputs as FI
 from merlin_experiments.runner import fingerprint
@@ -170,7 +171,7 @@ def bridge(tmp_path, monkeypatch, request):
     contract = Path(fixture["environment"]["MERLIN_CONTRACT_DIR"])
     shutil.copytree(contract, fixture["workspace"] / "merlin/contract")
     toolchain = fixture["workspace"] / "third_party/llvm-install"
-    toolchain.mkdir(parents=True)
+    toolchain.mkdir(parents=True, exist_ok=True)
     (toolchain / "FIXTURE_ONLY.txt").write_text("No compiler is installed or executed by this admission test.\n")
     # Declare the fixture's L0 endpoint without executing it or claiming a grade.
     monkeypatch.setattr(CR, "qa_loop_adapters", lambda *_args, **_kwargs: {"L0": forbidden})
@@ -216,6 +217,12 @@ def bridge(tmp_path, monkeypatch, request):
 
 def test_reviewed_derivation_reaches_real_v4_phase1_views_and_resume(bridge):
     b = bridge
+    assert str(b.descriptor) in {entry["path"] for entry in b.prepared.bundle["host_inputs"]}
+    assert str(b.descriptor) not in {entry["path"] for entry in b.prepared.bundle["allowed"]}
+    [frozen_descriptor] = BW.snapshot_input_paths(
+        b.workspace, b.prepared.bundle, [b.descriptor], repo=b.fixture["workspace"]
+    )
+    assert frozen_descriptor.read_bytes() == b.descriptor.read_bytes()
     record = BW.snapshot_record(b.workspace)
     assert record["version"] == 4 and record["n_files"] > 0
     assert not b.view.public.is_relative_to(b.fixture["release"])
@@ -531,7 +538,11 @@ def test_reviewed_derivation_formal_freeze_and_phase2_admission_share_exact_byte
 
 
 def _execute_reviewed_authoring(bridge, tmp_path, monkeypatch):
-    """Run the installed authoring owner over a real reviewed bundle with an inert provider."""
+    """Run inert baseline authoring; assisted tool execution has its own sandbox test.
+
+    This fixture has no hardware facts or functioning compiler installation and
+    must not assert that a full assisted-tool readiness probe would succeed.
+    """
     calls = []
 
     def local_provider(workspace, run, *_args, **_kwargs):
@@ -580,14 +591,13 @@ def _execute_reviewed_authoring(bridge, tmp_path, monkeypatch):
             "--run-id",
             "reviewed-local-authoring",
             "--arm",
-            "merlin_assisted",
+            "raw_baseline",
             "--model",
             "fixture",
             "--driver",
             "codex",
             "--sandbox",
-            "none",
-            "--allow-unsandboxed",
+            "bwrap",
             "--no-oracle",
             "--skip-hidden",
             "--schedule",
@@ -598,7 +608,13 @@ def _execute_reviewed_authoring(bridge, tmp_path, monkeypatch):
             "realistic",
         ]
     )
+    authoring_manifest = (
+        bridge.descriptor.parent / "input_bundles/raw_baseline_public_v0/input_bundle_manifest.yaml"
+    )
     with monkeypatch.context() as scoped:
+        # Admission above remains process-free; this step executes the actual
+        # sandbox preflight and local authoring supervisor, never a paid provider.
+        scoped.setattr(subprocess, "Popen", bridge.original_popen)
         scoped.setattr(PROVIDER, "launch", local_provider)
         scoped.setattr(PHASE1_SESSION, "repo_sha", lambda **_kwargs: "synthetic-unversioned-workspace")
 
@@ -621,24 +637,24 @@ def _execute_reviewed_authoring(bridge, tmp_path, monkeypatch):
         result = PHASE1.run(
             context,
             options,
-            bundle_manifest=bridge.manifest,
-            bundle_id=bridge.prepared.bundle["bundle_id"],
+            bundle_manifest=authoring_manifest,
+            bundle_id="raw_baseline_public_v0",
             oracle_timing=tmp_path / "timing.json",
             public_root=bridge.view.public,
         )
-        submitted = hash_tree(context.runs / options.arm / options.run_id / "submission")
+        submitted = hash_tree(phase_run_dir(context, options.arm, options.run_id, resume=False) / "submission")
         resumed = PHASE1.run(
             context,
             replace(options, resume=True),
-            bundle_manifest=bridge.manifest,
-            bundle_id=bridge.prepared.bundle["bundle_id"],
+            bundle_manifest=authoring_manifest,
+            bundle_id="raw_baseline_public_v0",
             oracle_timing=tmp_path / "timing.json",
             public_root=bridge.view.public,
         )
     assert result == 1
     assert resumed == 1
     assert len(calls) == 1
-    diagnostic_run = context.runs / options.arm / options.run_id
+    diagnostic_run = phase_run_dir(context, options.arm, options.run_id, resume=False)
     assert hash_tree(diagnostic_run / "submission") == submitted
     summary = yaml.safe_load((diagnostic_run / "qa_loop_summary.yaml").read_text())
     assert summary["n_rounds"] == 1

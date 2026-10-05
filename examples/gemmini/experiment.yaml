@@ -4,6 +4,12 @@ target: gemmini
 description: Capsule derivation and a continuous functional compiler experiment using the existing engines.
 inputs:
   target: target/descriptor.yaml
+# No candidate program may hand the accelerator a whole loop nest (its hardware-loop FSM): the role is
+# closed-vocabulary (merlin.kernels.roles), Phase 0 resolves it to this target's own instructions from
+# the RTL facts, and the whole linked ELF is scanned in Phase 1 and in the Phase 2 candidate arm. The
+# Phase 2 vendor-reference arm is the bar and is exempt.
+policy:
+  prohibited_instruction_roles: [loop_descriptor]
 phases:
   0:
     adapter: capsule_derivation
@@ -16,14 +22,18 @@ phases:
       evidence_mode: diagnostic
       # Select freshly derived conformance/synthesis artifacts with CLI overrides.
       performance_template: ../../experiments/templates/phase0/performance.yaml
+      # Private, operator-owned held-out sweeps (gitignored; never example content). Phase 0
+      # regenerates the hidden cohort from it on every run, and the run refuses a hidden capsule
+      # that repeats a public program.
+      hidden_profile: ../../merlin/contract/capsules/profiles/gemmini.hidden.yaml
       descriptor: target/descriptor.yaml
   1:
     adapter: capsule_bench
     config:
       require_reviewed_corpus: true
       descriptor: target/descriptor.yaml
-      arm: merlin_assisted
-      treatment: rtlchecks
+      # EL4 selects the RTL-informed treatment; the runner derives its stable legacy keys.
+      level: EL4
       # Regenerate/review this bundle for the selected corpus before execution.
       bundle: merlin_assisted_rtlchecks_public_v0
       bundle_manifest: ../../merlin/experiments/capsule_bench/targets/gemmini/input_bundles/merlin_assisted_rtlchecks_public_v0/input_bundle_manifest.yaml
@@ -36,3 +46,5 @@ phases:
       max_wall_s: 43200
       round_timeout: 43200
       grade_interval: 900
+      # The shared gSIM slot policy also caps concurrent grades at five globally.
+      sim_max_jobs: 5

@@ -7,8 +7,8 @@ Resolve required semantics and source consistency, regenerate a fresh run, and
 complete independent coverage/numerical review before verified execution.
 The Phase 2 selection is distinct and must not replace the functional population.
 
-The [catalog definition](../experiment.yaml) uses the installed RTLchecks
-treatment with an explicit bundle identity, manifest and timing path. These
+The [catalog definition](../experiment.yaml) selects **EL4 (RTL-informed Merlin)**
+with an explicit bundle identity, manifest and timing path. These
 retained inputs must be regenerated and reviewed for the selected corpus before
 verified execution. See [execution prerequisites](../../../experiments/README.md#definitions-and-execution)
 for missing artifacts, tool provisioning and historical-resume limitations.

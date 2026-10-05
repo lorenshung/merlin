@@ -25,6 +25,9 @@ class InvocationContext:
     bundles: Path
     sourced_environment: tuple[str, ...]
     harness: Path | None = None
+    #: New runs live at out/runs/<target>/phase1/<run-id>/; ``runs`` remains the legacy
+    #: capsule-bench root, read only to resume a run that started there.
+    phase_runs: Path | None = None
 
 
 def load_context(
@@ -56,9 +59,12 @@ def load_context(
 
     sourced = source_experiment_env(descriptor=descriptor)
     if _legacy_target_reader is None:
-        from merlin.targetgen.target_experiment import load_target_experiment
+        from merlin.targetgen.target_experiment import load_target_experiment, selected_experiment_contract
 
         experiment_descriptor = load_target_experiment(descriptor)
+        selected_contract = selected_experiment_contract(experiment_descriptor, environment=os.environ)
+        if selected_contract is not None:
+            os.environ["MERLIN_TARGET_CONTRACT"] = str(selected_contract)
         target = experiment_descriptor.target
         experiment = experiment_descriptor.resource_path(".")
         bundles = experiment_descriptor.resource_path("input_bundles")
@@ -71,6 +77,7 @@ def load_context(
         bundles = experiment / "input_bundles"
 
     from merlin.benchharness import reports_root, runs_root
+    from merlin.common.paths import phase_runs_root
 
     return InvocationContext(
         repo=root,
@@ -82,6 +89,7 @@ def load_context(
         bundles=bundles,
         sourced_environment=tuple(sourced),
         harness=Path(harness).resolve() if harness is not None else None,
+        phase_runs=phase_runs_root(target, 1),
     )
 
 

@@ -1,6 +1,6 @@
 # Phase 1: functional compiler
 
-Use the [registered definition](../experiment.yaml) and the
+Use the [registered EL4 definition](../experiment.yaml) and the
 [configuration-specific descriptor](../target/descriptor.yaml). The authored
 contract and ABI are example-owned; the old task, harness and generated public
 bundles remain at the descriptor's explicit compatibility resource root. The

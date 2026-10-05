@@ -114,6 +114,18 @@ def test_identity_requires_guarded_bootstrap_not_environment(frozen_service_sour
     assert json.loads(result.stdout) == identity
 
 
+def test_frozen_worker_can_import_its_declared_venv_dependency(frozen_service_source):
+    _, _, command, _ = frozen_service_source
+    result = subprocess.run(
+        command([sys.executable, "-c", "import jsonschema; print(jsonschema.__name__)"]),
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "jsonschema"
+
+
 def test_frozen_service_and_guardian_share_existing_seal(frozen_service, tmp_path):
     endpoint, _, identity, _, _ = frozen_service
     with Session(endpoint, expected_source=identity) as session:

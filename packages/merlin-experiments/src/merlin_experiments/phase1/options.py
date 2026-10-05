@@ -66,7 +66,8 @@ def build_parser(
         "--arm",
         choices=["raw_baseline", "merlin_assisted", "cpp_merlininfra"],
         default=default_arm,
-        help="which arm/bundle to run (default raw_baseline; the QA loop is identical)",
+        help="stable runner arm: EL1 raw_baseline, EL2 cpp_merlininfra, or EL3/EL4 merlin_assisted "
+        "(the selected bundle and treatment distinguish EL3 from EL4; default EL1)",
     )
     ap.add_argument("--run-id", required=True)
     ap.add_argument("--model", default="claude-opus-4-8")

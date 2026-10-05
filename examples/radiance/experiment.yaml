@@ -17,8 +17,7 @@ phases:
     config:
       require_reviewed_corpus: true
       descriptor: target/descriptor.yaml
-      arm: merlin_assisted
-      treatment: rtlchecks
+      level: EL4
       # Regenerate/review this bundle for the selected corpus before execution.
       bundle: merlin_assisted_rtlchecks_public_v0
       bundle_manifest: ../../merlin/experiments/capsule_bench/targets/radiance/input_bundles/merlin_assisted_rtlchecks_public_v0/input_bundle_manifest.yaml

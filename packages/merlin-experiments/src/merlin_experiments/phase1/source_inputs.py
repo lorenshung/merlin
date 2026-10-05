@@ -189,7 +189,11 @@ def paths(
         import yaml
 
         from merlin.targetgen.software_spec import software_spec_path_for_recipe
-        from merlin.targetgen.target_experiment import declared_vs_resolved_contract, load_target_experiment
+        from merlin.targetgen.target_experiment import (
+            declared_vs_resolved_contract,
+            load_target_experiment,
+            selected_experiment_contract,
+        )
         from merlin_experiments.corpus.numeric_policy import numeric_profile_path
 
         document = yaml.safe_load(Path(descriptor).read_bytes())
@@ -197,6 +201,9 @@ def paths(
             raise SpecError("phase-1 descriptor must be a mapping")
         inputs.update(_selected_provider_inputs(document.get("target")))
         selected_target = load_target_experiment(descriptor)
+        capability_path = selected_experiment_contract(selected_target, environment=os.environ)
+        if capability_path is not None:
+            inputs["phase1:startup:target_contract"] = str(capability_path)
         if selected_target.sim_via == "chipyard":
             _, contract_path, agreement = declared_vs_resolved_contract(selected_target)
             if agreement != "agree" or contract_path is None:

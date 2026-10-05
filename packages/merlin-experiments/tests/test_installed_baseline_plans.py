@@ -8,14 +8,18 @@ from pathlib import Path
 import pytest
 import yaml
 from merlin_experiments import SpecError, load_spec
+from merlin_experiments.cli import main
 from merlin_experiments.runner import preflight, resolve_plan, resume, run
 
 
 @pytest.fixture
 def baseline(tmp_path, monkeypatch):
+    # This synthetic target exercises frozen command/operator-input identity, not
+    # the separate real-target EL4 support-provider admission gate.
+    monkeypatch.setattr("merlin_experiments.runner._verify_rtlcheck_support", lambda _plan: [])
     monkeypatch.setenv("MERLIN_REPO_ROOT", str(tmp_path))
     monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "out"))
-    for name in ("task", "bundle", "corpus/isa", "merlin/contract", "merlin/schemas"):
+    for name in ("task", "bundle", "corpus/isa", "merlin/contract/schemas", "merlin/schemas"):
         (tmp_path / name).mkdir(parents=True)
     (tmp_path / "task/TASK_realistic.md").write_text("Authored task\n")
     (tmp_path / "bundle/input_bundle_manifest.yaml").write_text(
@@ -70,6 +74,52 @@ def test_baseline_resolves_installed_entrypoint_without_native_tree(baseline, tr
     assert not any(key.startswith("phase1:native:") for key in plan["input_paths"])
     if treatment == "rtlchecks":
         assert command["argv"][command["argv"].index("--treatment") + 1] == treatment
+
+
+def test_phase1_launch_overrides_freeze_codex_selection_without_editing_definition(
+    baseline, capsys, monkeypatch
+):
+    authored = baseline.read_bytes()
+    flags = [
+        "--phase1-driver", "codex",
+        "--phase1-model", "gpt-6.1-sol",
+        "--phase1-effort", "xhigh",
+        "--phase1-provider", "subscription",
+    ]
+    assert main([
+        "inspect", str(baseline), "--phase", "1", "--run-dir", str(baseline.parent / "run"), *flags,
+    ]) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["phase1_launch_overrides"] == {
+        "driver": "codex", "model": "gpt-6.1-sol", "effort": "xhigh", "provider": "subscription",
+    }
+    argv = plan["phases"]["1"]["argv"]
+    for key, value in plan["phase1_launch_overrides"].items():
+        flag = "--" + key.replace("_", "-")
+        assert argv[argv.index(flag) + 1] == value
+    assert plan["spec"]["phases"]["1"]["config"]["model"] == "fixture"
+    assert baseline.read_bytes() == authored
+
+    real_popen = subprocess.Popen
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        lambda _argv, **kwargs: real_popen([sys.executable, "-c", "raise SystemExit(7)"], **kwargs),
+    )
+    assert run(plan) == 7
+    frozen = json.loads((baseline.parent / "run/resolved-plan.json").read_text())
+    assert frozen["phase1_launch_overrides"] == plan["phase1_launch_overrides"]
+    assert frozen["phases"]["1"]["argv"] == argv
+    frozen["phase1_launch_overrides"]["model"] = "different-model"
+    (baseline.parent / "run/resolved-plan.json").write_text(json.dumps(frozen))
+    with pytest.raises(SpecError, match="frozen resolved plan changed"):
+        resume(baseline.parent / "run")
+
+
+def test_phase1_launch_override_rejects_invalid_driver(baseline):
+    spec = load_spec(baseline)
+    with pytest.raises(SpecError, match="invalid driver"):
+        resolve_plan(spec, phase="1", phase1_driver="not-a-driver")
 
 
 def test_optional_timing_appearance_refuses_preflight(baseline):

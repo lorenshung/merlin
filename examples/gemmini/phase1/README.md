@@ -59,14 +59,14 @@ time even when the region count looks good. The exact minimum Phase 0 source-op
 witness basis is not a substitute for this Phase 1 placement and execution check.
 
 The current example does **not** claim that finish line has been reached.
-The descriptor makes `M2_microvit_gemmini`, `M3_host_island_seam_gemmini`, and
-`SY_micro_model` mandatory admitted L3 representatives, while
-`SY_model_resnet50`, `SY_model_smolvla`, and the SmolVLA denoise-step capstone
-are resource-excluded from mandatory L3 simulation. Exclusion is a cost policy,
-not proof of a compile failure or a successful compile. Inspect a real
-whole-model compilation receipt before asserting either. The target's
-`workload_spec.models` also keeps ResNet-50 as a held-out generalization claim;
-do not use its capture to derive the tests against which it is evaluated.
+The descriptor derives mandatory L3 model capstones from the reviewed Phase 0
+release and its numerical qualifications; it does not maintain a hand-picked
+model list. Retained historical capsules are not automatically part of a new
+release. ResNet50, TinyLlama and SmolVLA are held-out generalization claims in
+`workload_spec.models`, not Phase 0 derivation sources. Inspect actual
+whole-model compilation and numerical receipts before asserting success or
+failure on any of them. A resource exclusion is only a cost policy, not a
+compiler verdict.
 
 Before attempting that claim, inspect an explicit capture with the
 [whole-model preflight](../whole-model/README.md#check-model-readiness). It
@@ -131,15 +131,24 @@ whole-model cost under its own measured or model-portfolio evidence.
 
 ## Run the installed Phase 1 controller
 
-The catalog ID `gemmini-functional` selects the single definition above. Its
-`treatment: rtlchecks` selects the installed Phase 1 module with explicit bundle
+The catalog ID `gemmini-functional` selects the single definition above. It is
+**EL4** (RTL-informed Merlin). The definition's `level: EL4` derives the stable
+`arm: merlin_assisted` and `treatment: rtlchecks` execution keys; the
+`merlin_assisted_rtlchecks_*` bundle is the selected tool surface, not a separate
+experiment. The treatment selects the installed Phase 1 module with explicit bundle
 identity, bundle manifest and oracle-timing path. When copying the definition for
 a reviewed release, select the release's descriptor, `corpus_seal`, and generated
 RTL-checks bundle manifest together. The retained manifest path is a preparation
 reference, not proof that its inputs are current or reviewed. Inspect and preflight
 the copied definition before running it. Provision its declared toolchains and replace
 legacy directory-symlink grants with explicitly owned input trees in a newly generated,
-reviewed bundle; the frozen-input check deliberately refuses incomplete closures.
+reviewed bundle **inside the same sealed release**; copying an old manifest to a
+different path does not qualify it. The frozen-input check deliberately refuses
+incomplete closures.
+If the installed checkout has no `third_party/llvm-install`, set `MERLIN_CLANG`
+to the absolute `bin/clang-23` in the selected LLVM/MLIR install before preparing
+the release. New generated bundle manifests then name that exact install, and
+the sandbox uses the same compiler and `mlir-opt`; old manifests are unchanged.
 
 The direct installed CLI below selects the same treatment. For an installed
 **baseline** catalog route instead, use the shared
@@ -169,7 +178,7 @@ MERLIN_CORPUS_SEAL="${CORPUS_SEAL:?}" python -m merlin_experiments.phase1 \
   --descriptor "${DESCRIPTOR:?}" --repo "${RESOURCE_ROOT:?}" \
   --bundle "${BUNDLE_ID:?}" --bundle-manifest "${BUNDLE_MANIFEST:?}" \
   --oracle-timing "${ORACLE_TIMING:?}" \
-  --run-id "${RUN_ID:?}" --arm merlin_assisted --treatment rtlchecks \
+  --run-id "${RUN_ID:?}" --level EL4 \
   --driver claudecode --provider subscription --model "${MODEL:?}" --effort high \
   --schedule continuous --max-wall-s 43200 --round-timeout 43200 --grade-interval 900
 ```

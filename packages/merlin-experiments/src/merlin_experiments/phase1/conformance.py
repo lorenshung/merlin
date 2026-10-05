@@ -679,7 +679,7 @@ def compute(
     isa = assisted if tools is None else "isa_tools" in tools
     cca = assisted if tools is None else bool(tools & {"cca_spine", "cca_tools"})
     rtl_surface = frozenset({"rtl_generators", "rtl_facts"})
-    arm4 = False if tools is None else bool(tools & rtl_surface)
+    el4_rtl_treatment = False if tools is None else bool(tools & rtl_surface)
     external = endpoint_kind == "external_backend"
     calls = _tool_calls(tpath)
     regex_hits, vendored_regex = [], []
@@ -722,17 +722,18 @@ def compute(
         else None
     )
     checks["full_selfcheck"] = _full_selfcheck(calls)
-    # A partial RTL surface is a malformed treatment, not Arm3.  Fail closed so removing one of the two
-    # Arm4 grants cannot silently downgrade the conformance contract.
-    checks["arm4_toolset_complete"] = (rtl_surface <= tools) if arm4 else None
-    derived_idx = _call_index(calls, _derived_levers_evidence) if arm4 else None
-    facts_idx = _call_index(calls, _rtl_facts_evidence) if arm4 else None
-    scaffold_idx = _call_index(calls, _scaffold_generator_evidence) if arm4 else None
-    checks["rtl_derived_levers_used"] = derived_idx is not None if arm4 else None
-    checks["rtl_facts_used"] = facts_idx is not None if arm4 else None
-    checks["scaffold_generators_used"] = scaffold_idx is not None if arm4 else None
-    checks["rtl_checks_read"] = _rtl_checks_read(calls) if arm4 else None
-    if arm4:
+    # A partial RTL surface is a malformed EL4 treatment, not EL3. Fail closed so
+    # removing one of the two grants cannot silently downgrade its contract.
+    # The serialized check name remains stable for historical receipts.
+    checks["arm4_toolset_complete"] = (rtl_surface <= tools) if el4_rtl_treatment else None
+    derived_idx = _call_index(calls, _derived_levers_evidence) if el4_rtl_treatment else None
+    facts_idx = _call_index(calls, _rtl_facts_evidence) if el4_rtl_treatment else None
+    scaffold_idx = _call_index(calls, _scaffold_generator_evidence) if el4_rtl_treatment else None
+    checks["rtl_derived_levers_used"] = derived_idx is not None if el4_rtl_treatment else None
+    checks["rtl_facts_used"] = facts_idx is not None if el4_rtl_treatment else None
+    checks["scaffold_generators_used"] = scaffold_idx is not None if el4_rtl_treatment else None
+    checks["rtl_checks_read"] = _rtl_checks_read(calls) if el4_rtl_treatment else None
+    if el4_rtl_treatment:
         bijection_idx = _call_index(
             calls,
             lambda call: _cca_evidence(
@@ -770,7 +771,7 @@ def compute(
         "arm": arm,
         "endpoint_kind": endpoint_kind,
         "resolved_tools": sorted(tools) if tools is not None else None,
-        "arm4_tooling_required": arm4,
+        "arm4_tooling_required": el4_rtl_treatment,
     }
     if regex_scan_error is not None:
         result["regex_scan_error"] = regex_scan_error

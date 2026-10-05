@@ -41,6 +41,46 @@ class PreparedBundle:
     effective_sha256: str
 
 
+def require_reviewed_bundle(te, authored_path: Path, bundle: dict) -> None:
+    """A reviewed run may grant only the bundle staged with its sealed descriptor.
+
+    Otherwise a caller could pair a new corpus seal with an older bundle whose
+    allowed paths still expose retired public claim capsules.  Seal verification
+    later binds the entire release payload, including this exact manifest.
+    """
+    if not isinstance(bundle, dict):
+        raise ValueError("reviewed Phase 1 bundle is not a manifest mapping")
+    bundle_id = bundle.get("bundle_id")
+    if not isinstance(bundle_id, str) or not bundle_id or Path(bundle_id).name != bundle_id:
+        raise ValueError("reviewed Phase 1 bundle has an invalid identity")
+    expected = te.path.parent / "input_bundles" / bundle_id / "input_bundle_manifest.yaml"
+    if (
+        authored_path.absolute() != expected.absolute()
+        or expected.is_symlink()
+        or expected.parent.is_symlink()
+        or expected.parent.parent.is_symlink()
+    ):
+        raise ValueError("reviewed Phase 1 requires the selected release's generated bundle manifest")
+    from ..phase0.coverage_commitment import read_inputs
+
+    coverage_inputs = read_inputs(te.capsule_corpus.parent)
+    selected = (coverage_inputs or {}).get("capability_contract")
+    if isinstance(selected, dict) and selected:
+        path = te.declared_contract_path()
+        if path is None or not path.resolve().is_relative_to(te.path.parent.resolve()):
+            raise ValueError(
+                "reviewed Phase 1 lacks a release-local Phase 0 capability contract; "
+                "freeze a new run and prepare a new release"
+            )
+        if yaml.safe_load(path.read_bytes()) != selected:
+            raise ValueError("released capability contract differs from selected Phase 0 coverage inputs")
+        grants = {
+            row.get("path") for row in bundle.get("allowed", []) if isinstance(row, dict) and row.get("mode") == "ro"
+        }
+        if str(path) not in grants:
+            raise ValueError("reviewed Phase 1 bundle does not grant the selected capability contract read-only")
+
+
 def prepare_bundle(
     run_dir: Path,
     te,
@@ -177,6 +217,7 @@ def stage(run_dir: Path, te, bundle: dict, *, contract: Path, capsules_root: Pat
     from ..phase0.coverage_commitment import (
         INPUT_PATH,
         _digest,
+        admitted_source_roots,
         observe_cohort,
         read_inputs,
         requires_workload_coverage,
@@ -194,7 +235,12 @@ def stage(run_dir: Path, te, bundle: dict, *, contract: Path, capsules_root: Pat
                 "role": "coverage_inputs",
             }
         )
-    completeness = observe_cohort(selected_inputs, public, target=te.target, contract=contract)
+    completeness = observe_cohort(
+        selected_inputs,
+        admitted_source_roots(staged_sources, public, contract=contract),
+        target=te.target,
+        contract=contract,
+    )
     private_json(stage_root / "coverage-report.json", completeness)
     private_json(stage_root / "source_commitments.json", {"version": 1, "mode": mode, "sources": commitments})
     record = {
@@ -266,7 +312,7 @@ def resolve(
     public, policy, contract = frozen / "public", frozen / "policy", frozen / "contract"
     if not public.is_dir() or not policy.is_dir() or not (contract / "schemas").is_dir():
         raise RuntimeError("run corpus snapshot is missing a declared view")
-    from ..phase0.coverage_commitment import _digest, verify_cohort_binding
+    from ..phase0.coverage_commitment import _digest, admitted_source_roots, verify_cohort_binding
 
     completeness = None
     commitment_record = record.get("workload_coverage")
@@ -274,7 +320,12 @@ def resolve(
         selected_path = frozen / "coverage/coverage-inputs.json"
         selected_inputs = json.loads(selected_path.read_bytes()) if selected_path.is_file() else None
         saved = json.loads((frozen / "coverage-report.json").read_bytes())
-        verify_cohort_binding(saved, selected_inputs, public, contract=contract)
+        verify_cohort_binding(
+            saved,
+            selected_inputs,
+            admitted_source_roots(policy, public, contract=contract),
+            contract=contract,
+        )
         completeness = saved
         if (
             _digest(saved) != commitment_record.get("report_sha256")

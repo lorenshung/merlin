@@ -29,6 +29,7 @@ from merlin.targetgen import experiment_tokens as ET
 from merlin.targetgen.target_experiment import load_capability_manifest, load_target_experiment
 from merlin_experiments.phase1 import recovery as ROQ
 from merlin_experiments.phase1 import run_inputs as RI
+from merlin_experiments.phase1 import spend as SPEND
 from merlin_experiments.phase1 import treatments as T
 from merlin_experiments.phase1.audit import AnswerAudit
 from merlin_experiments.phase1.feedback import certification as CERT
@@ -87,50 +88,8 @@ def _workflow_conformance(
 
 
 def _spend_over_cap(this_round_cost) -> tuple[bool, float, float]:
-    """Append subagent-inclusive cost to MERLIN_SPEND_LEDGER; return (over_cap, total, cap).
-
-    MERLIN_MAX_SPEND_USD is a soft cap: one in-flight round per arm may overshoot.
-    Missing cap/ledger disables it; unknown usage remains a visible lower bound.
-    """
-    import os as _os
-
-    cap = float(_os.environ.get("MERLIN_MAX_SPEND_USD") or 0)
-    ledger = _os.environ.get("MERLIN_SPEND_LEDGER")
-    if cap <= 0 or not ledger:
-        return False, 0.0, 0.0
-    import fcntl
-
-    # Missing usage is unknown, never zero; a timeout may prevent the terminal usage event.
-    _unmeasured = this_round_cost is None
-    c = None if _unmeasured else float(this_round_cost)
-    p = Path(ledger)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    total, n_unmeasured = 0.0, 0
-    with open(p, "a+", encoding="utf-8") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        f.write(json.dumps({"cost": c, "unmeasured": _unmeasured}) + "\n")
-        f.flush()
-        f.seek(0)
-        for line in f:
-            try:
-                row = json.loads(line)
-            except Exception:  # noqa: BLE001 — a malformed ledger line must not defeat the cap
-                continue
-            if row.get("unmeasured") or row.get("cost") is None:
-                n_unmeasured += 1
-                continue
-            try:
-                total += float(row.get("cost") or 0)
-            except Exception:  # noqa: BLE001
-                continue
-        fcntl.flock(f, fcntl.LOCK_UN)
-    if n_unmeasured:
-        print(
-            f"  [spend] ${total:.2f} of ${cap:.2f} measured, plus {n_unmeasured} UNMEASURED round(s) "
-            f"whose usage never arrived — the true total is a LOWER BOUND",
-            flush=True,
-        )
-    return total >= cap, total, cap
+    """Keep the established authoring patch/call surface while accounting lives in Phase 1."""
+    return SPEND.spend_over_cap(this_round_cost)
 
 
 def _grading_public_root(context, public_root: Path | None = None):
@@ -244,7 +203,8 @@ def finalize_report(
         )
         cmd = (
             EX.sandbox_command(inner, ws, bundle, context=context, private_run_dir=run_dir)
-            if sandbox == "bwrap" else inner
+            if sandbox == "bwrap"
+            else inner
         )
         try:
             rc = AS.stream_stamped(
@@ -258,9 +218,8 @@ def finalize_report(
         except subprocess.TimeoutExpired:
             rc = 124
     else:
-        # Converse / OpenCode: the claude CLI can't drive these models, so skip the agent finalize turn —
-        # the driver stamps REPORT.md's status line below (_stamp_report_status). An empty transcript keeps
-        # audit_transcript happy (no tokens, no answer-access hits).
+        # Converse / OpenCode: the claude CLI can't drive these models, so skip the finalize turn; the driver
+        # stamps REPORT.md's status (_stamp_report_status). An empty transcript keeps audit_transcript happy.
         tpath.write_text("")
 
     # re-grade: if the finalize turn broke the (passing) package, restore the snapshot
@@ -305,12 +264,18 @@ def execute(prepared: PreparedRun, runtime: AuthoringRuntime) -> int:
     _run_config = prepared.request.run_config
     _verify_implementation_sources = prepared.verify_inputs
     provider = EX.ProviderConfig(a.driver, a.provider, a.subagent_model, a.background_model)
+    from merlin.targetgen.sandbox import bwrap as BW
+
+    selected_rtl_facts = (
+        BW.frozen_selected_rtl_facts(ws, bundle, repo=context.repo) if a.sandbox == "bwrap" else None
+    )
     execution = EX.ExecutionConfig(
         prepared.request.context,
         provider,
         prepared.request.resolved_tools,
         runtime.oracle_timing,
         max(0, int(a.sim_max_jobs)),
+        selected_rtl_facts,
     )
 
     grading_inputs = LG.GradingInputs(
@@ -597,9 +562,8 @@ def execute(prepared: PreparedRun, runtime: AuthoringRuntime) -> int:
             rc, tpath = 124, run_dir / "rounds" / "round_00.transcript.jsonl"
             print("[continuous] agent session TIMEOUT (the session bound, not a round)")
         stop.set()
-        # A timed join is not cancellation: if the grader is already in qa_grade it remains live and
-        # races the authoritative grade below.  Preserve the same single-flight invariant as the
-        # certified continuous path.
+        # A timed join is not cancellation: a grader already in qa_grade stays live and races the
+        # authoritative grade below. Preserve the certified continuous path's single-flight invariant.
         gt.join()
         # FINAL AUTHORITATIVE GRADE: the background grades are progress reports on a moving workspace;
         # the run's verdict is a grade of the submission as the session left it.
@@ -619,6 +583,7 @@ def execute(prepared: PreparedRun, runtime: AuthoringRuntime) -> int:
                 "conformance": conf,
                 "n_passed": verdict.get("n_passed"),
                 "n_capsules": verdict.get("n_capsules"),
+                "oot_commit": verdict.get("oot_commit"),
             }
         )
         _checkpoint(state["tick"] + 1)
@@ -834,9 +799,9 @@ def execute(prepared: PreparedRun, runtime: AuthoringRuntime) -> int:
                 "authoring_complete": _authoring_complete(),
                 "n_passed": verdict.get("n_passed"),
                 "n_capsules": verdict.get("n_capsules"),
+                "oot_commit": verdict.get("oot_commit"),  # the graded package, by sha (oot_history)
                 "tool_calls": rsum.get("tool_calls"),
-                # per-round effort split (was only recorded whole-run before) — lets us
-                # plot tokens/cost/thinking PER round, not just totals.
+                # per-round effort split: plot tokens/cost/thinking PER round, not just totals.
                 "tokens_total": rsum.get("tokens_total"),
                 "tokens_output": rsum.get("tokens_output"),
                 "tokens_cached": rsum.get("tokens_cached"),
@@ -1411,6 +1376,8 @@ def execute(prepared: PreparedRun, runtime: AuthoringRuntime) -> int:
             grade_cmd.append("--no-oracle")
         if a.skip_hidden:
             grade_cmd.append("--skip-hidden")
+        if execution.selected_rtl_facts is not None:
+            grade_cmd += ["--workspace", str(ws), "--rtl-facts", str(execution.selected_rtl_facts)]
         from merlin_experiments.frozen_python import inherited_python_command
 
         grade_proc = subprocess.run(inherited_python_command(grade_cmd), cwd=str(context.repo))

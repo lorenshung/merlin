@@ -1,7 +1,7 @@
 # Saturn OPU: functional compiler prerequisites
 
-The [definition](../experiment.yaml) selects the installed `rtlchecks` treatment
-and `merlin_assisted_rtlchecks_public_v0` bundle. That public bundle is not
+The [definition](../experiment.yaml) selects **EL4 (RTL-informed Merlin)**,
+whose retained bundle is `merlin_assisted_rtlchecks_public_v0`. That public bundle is not
 supplied here: prepare and review it for this target. Do not substitute a
 hardware-bringup bundle to satisfy a missing file.
 
