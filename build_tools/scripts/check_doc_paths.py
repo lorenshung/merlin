@@ -120,10 +120,29 @@ SKIP_PARTS = {
 }
 
 
+#: Agent and tool worktrees nested inside the checkout: another checkout's docs, not this one's.
+SKIP_RELATIVE = {".claude/worktrees"}
+
+
+def _is_other_checkout(directory: Path) -> bool:
+    """A nested worktree, clone or submodule carries its own ``.git``; its docs are not the repo's."""
+    try:
+        return (directory / ".git").exists()
+    except OSError:  # vanished or unreadable mid-scan: nothing of ours to read there
+        return True
+
+
 def _doc_files() -> list[Path]:
     out: list[Path] = []
     for base, dirs, files in os.walk(ROOT):
-        dirs[:] = [d for d in dirs if d not in SKIP_PARTS]
+        here = Path(base)
+        dirs[:] = [
+            d
+            for d in dirs
+            if d not in SKIP_PARTS
+            and (here / d).relative_to(ROOT).as_posix() not in SKIP_RELATIVE
+            and not _is_other_checkout(here / d)
+        ]
         for f in files:
             if f.endswith(".md") and (
                 f == "AGENT.md" or Path(base) == ROOT / "docs" or (ROOT / "docs") in Path(base).parents
@@ -154,7 +173,11 @@ def scan() -> list[str]:
         rel = p.relative_to(ROOT).as_posix()
         if _is_design_note(rel):
             continue
-        for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+        try:
+            text = p.read_text(encoding="utf-8")
+        except (FileNotFoundError, NotADirectoryError):
+            continue  # removed between the walk and the read (a worktree deleted mid-scan)
+        for i, line in enumerate(text.splitlines(), 1):
             low = line.lower()
             if any(w in low for w in ALLOW_WORDS):
                 continue

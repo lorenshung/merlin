@@ -100,4 +100,15 @@ echo "[pre-commit] no world-published container ports (staged)…"
 echo "[pre-commit] docs freshness…"
 "$PY" build_tools/scripts/check_docs.py
 
+# Not staged, not tree: a submitted PACKAGE is never a tracked file (phase-2 candidates live under
+# out/, gitignored), so there is nothing for --staged or a whole-tree walk to find. A supervisor
+# names the campaign's current best with MERLIN_PHASE2_BEST_PACKAGE before committing a promotion,
+# and this is skipped, not silently passing, when nothing is named.
+if [ -n "${MERLIN_PHASE2_BEST_PACKAGE:-}" ] && [ -d "${MERLIN_PHASE2_BEST_PACKAGE:-}" ]; then
+  echo "[pre-commit] package group overfit (\$MERLIN_PHASE2_BEST_PACKAGE)…"
+  "$PY" build_tools/scripts/check_package_group_overfit.py --package "$MERLIN_PHASE2_BEST_PACKAGE"
+else
+  echo "[pre-commit] package group overfit: skipped (MERLIN_PHASE2_BEST_PACKAGE not set to a directory)"
+fi
+
 echo "[pre-commit] OK"

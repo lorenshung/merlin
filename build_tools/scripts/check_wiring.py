@@ -10,9 +10,9 @@ unreported for a year. An unwired check reads exactly like a passing one.
 This gate builds the import graph structurally (``ast``; a word search over-counts, because a
 module's name appears in comments and docstrings of code that never imports it) and requires every
 module under the instrumented packages to have a PRODUCTION importer: code under the library, the
-experiments, the targets or the build tools, excluding the test suite and the module itself. A
-declared console script counts as wired. Tests do not: a test proves a module works, not that
-anything uses it.
+experiments, the targets (``merlin/targets`` and the target workflows under ``examples/``) or the
+build tools, excluding the test suite and the module itself. A declared console script counts as
+wired. Tests do not: a test proves a module works, not that anything uses it.
 
 Known debt lives in ``unwired_ratchet.txt`` beside this file, one repo-relative path per line. It
 may only shrink (``check_ratchets_shrink.py`` holds every ``*_ratchet.txt``), and an entry for a
@@ -44,6 +44,29 @@ INSTRUMENTED = tuple(
 ) + ("packages/merlin-experiments/src/merlin_experiments/evaluation",)
 #: Where a production importer may live.
 PRODUCTION = (*_source_layout.SOURCE_SCAN_ROOTS, "merlin/experiments", "merlin/targets", "build_tools")
+#: Where target workflows live since the layout consolidation moved them out of ``merlin/targets``.
+EXAMPLES = "examples"
+
+
+def _target_workflow_roots() -> tuple[str, ...]:
+    """``examples/<name>`` directories that are a target's workflow: they carry the target's own
+    inputs (``target/``) or its experiment definition (``experiment.yaml``).
+
+    These hold the operator commands a target's README documents -- binding a run to an exact RTL
+    binary, probing a headline kernel -- so an import there is a production caller, exactly as one
+    under ``merlin/targets`` was before the move. Frontend samples, shared shell helpers and
+    standalone packages beside them (no ``target/``, no ``experiment.yaml``) do not count.
+    """
+    base = ROOT / EXAMPLES
+    if not base.is_dir():
+        return ()
+    return tuple(
+        directory.relative_to(ROOT).as_posix()
+        for directory in sorted(base.iterdir())
+        if directory.is_dir() and ((directory / "target").is_dir() or (directory / "experiment.yaml").is_file())
+    )
+
+
 EXCLUDED_PARTS = ("_data", "__pycache__", "tests", "_qa_ws")
 
 
@@ -140,7 +163,7 @@ def unwired() -> list[str]:
             if name:
                 candidates.setdefault(name, path.resolve())
     imported_by: dict[str, set[Path]] = {name: set() for name in candidates}
-    for relative_root in PRODUCTION:
+    for relative_root in (*PRODUCTION, *_target_workflow_roots()):
         for path in _python_files(relative_root):
             for name in _imports(path):
                 if name in imported_by and candidates[name] != path.resolve():

@@ -116,3 +116,29 @@ def test_a_worker_importing_its_sibling_by_bare_name_counts_as_a_caller(tmp_path
     monkeypatch.setattr(gate, "PACKAGE_ROOT", tmp_path / "merlin/python")
     assert "merlin.targetgen._helper" in gate._imports(worker)
     assert "merlin.targetgen.sys" not in gate._imports(worker)  # no such sibling file
+
+
+def test_a_target_workflow_under_examples_is_a_production_caller(tmp_path: Path) -> None:
+    """Target workflows moved from ``merlin/targets`` to ``examples/<name>``; their documented
+    operator commands still wire what they import. A sample with no ``target/`` and no
+    ``experiment.yaml`` does not, and neither does a workflow's own test suite."""
+    gate = _gate(
+        _tree(
+            tmp_path,
+            {
+                f"{_PERF}/__init__.py": "",
+                f"{_PERF}/bound.py": "X = 1\n",
+                f"{_PERF}/probed.py": "X = 1\n",
+                f"{_PERF}/sampled.py": "X = 1\n",
+                f"{_PERF}/tested.py": "X = 1\n",
+                "examples/acc/target/descriptor.yaml": "target: acc\n",
+                "examples/acc/verification/bind.py": "from merlin.perf.bound import X\n",
+                "examples/acc/tests/test_bind.py": "from merlin.perf import tested\n",
+                "examples/npu/experiment.yaml": "id: npu\n",
+                "examples/npu/phase0/probe.py": "import merlin.perf.probed\n",
+                "examples/samples/demo.py": "from merlin.perf import sampled\n",
+            },
+        )
+    )
+    assert gate._target_workflow_roots() == ("examples/acc", "examples/npu")
+    assert gate.unwired() == [f"{_PERF}/sampled.py", f"{_PERF}/tested.py"]
