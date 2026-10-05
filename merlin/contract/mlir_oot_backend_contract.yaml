@@ -152,11 +152,26 @@ kernel_abi:
     a package's emitted code must obey the declared pointer ABI above.
 
 whole_program_attribution:
+  public_plan_schema: "merlin/contract/schemas/mixed_program_plan.schema.json"
+  public_preflight: >-
+    The granted xDSL kit exposes python -m merlin.targetgen.oot_starterkit.plan inventory
+    --source <capsule.interface.mlir> and validate --source <capsule.interface.mlir>
+    --command-buffer <command_buffer.json> --lowered-mlir <lowered.mlir>. The inventory
+    hashes exact UTF-8 source bytes and indexes every direct operation in the unique
+    source function's entry block
+    except func.return, including constants, tensor.empty, tensor.splat and linalg.fill;
+    it does not index nested scalar-body operations. The payload-only linalg reader's op
+    indices are NOT source_op_indices. Validation checks schema, source/task/range/tensor
+    bindings and lowered task tags only; it is not numerical or execution evidence.
   source_to_task: >-
     Preserve each source operation's stable prov.region_id where present while lowering. In
     params.global_program_plan (schema mixed_program_plan_v1), tasks enumerate actual
     emission order with unique, contiguous nonnegative task_index values, nonempty kind,
-    and source_op_indices referring to the full source function's operation order.
+    and source_op_indices referring to the full source function's operation order. Bind
+    source_sha256 and source_op_count to the public inventory. Include the scheduled
+    instruction count, wrapper ranges, task instruction ranges, reads/writes,
+    entry_bindings, source_values, output_bindings and compiler_temporaries specified
+    by the typed schema; every materialized tensor needs source or temporary provenance.
     The source_op_indices must cover each source operation exactly once; derive any
     source-region-to-task/group map from those indices and the source IR, including
     repeated operations in one region. Do not invent a region ID from a capsule name,

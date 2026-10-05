@@ -675,6 +675,14 @@ shapes, or instruction counts. Tag lowered LLVM-dialect operations owned by a ta
 arithmetic, with the same `merlin.global_task` index. The shared OOT backend contract defines the
 pointer order and this attribution protocol. A plan, tags, or a nonzero device opcode count is only a
 declaration: the independent grader still requires complete numerical and completed-dispatch evidence.
+Use the granted `python -m merlin.targetgen.oot_starterkit.plan inventory --source
+<capsule.interface.mlir>` before assigning indices. It pins the exact source bytes and enumerates
+every DIRECT operation in the unique source function's entry block except `func.return`, including constants, empty tensors,
+splats and fills (unlike the payload-only linalg reader); nested scalar-body operations are not
+counted. The typed `merlin/contract/schemas/mixed_program_plan.schema.json` documents the complete
+plan record. After emission, run `python -m merlin.targetgen.oot_starterkit.plan validate --source
+<capsule.interface.mlir> --command-buffer <command_buffer.json> --lowered-mlir <lowered.mlir>`.
+This is a public structural preflight, not a qualification verdict.
 Use `merlin.source_op_index` and the source's `prov.region_id` on device-work commands;
 several operations may share a region ID. Fused commands require independently checked
 transformation evidence, not one opcode relabelled as many source operations.

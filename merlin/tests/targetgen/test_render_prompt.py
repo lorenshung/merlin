@@ -30,6 +30,8 @@ _SHARED_BLOCKS = [
     "source_op_indices",
     "merlin.global_task",
     "merlin.source_op_index",
+    "merlin.targetgen.oot_starterkit.plan inventory",
+    "mixed_program_plan.schema.json",
     "Host address calculations, loop control and dispatch are allowed",
 ]
 

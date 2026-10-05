@@ -336,7 +336,7 @@ def build_task(
         pilot += (
             "\n\n## Language mandate: xDSL / Python (REQUIRED for this arm)\n"
             "- Build the dialect + the 4 entrypoints with the granted **xDSL kit** "
-            "(`oot_starterkit/` — dialect.py / transforms.py / verify.py — + `xdsl_dialects/`): define the "
+            "(`oot_starterkit/` — dialect.py / transforms.py / verify.py / plan.py — + `xdsl_dialects/`): define the "
             "target dialect as xDSL ops with verifiers, and the interface->target lowering as xDSL rewrite "
             "passes. This is the approach this arm exists to exercise.\n"
             f"- `manifest.yaml` MUST declare `language: python`; the tool is an executable Python `{_stem}` "
