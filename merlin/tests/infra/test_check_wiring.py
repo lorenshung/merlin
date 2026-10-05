@@ -142,3 +142,40 @@ def test_a_target_workflow_under_examples_is_a_production_caller(tmp_path: Path)
     )
     assert gate._target_workflow_roots() == ("examples/acc", "examples/npu")
     assert gate.unwired() == [f"{_PERF}/sampled.py", f"{_PERF}/tested.py"]
+
+
+def test_only_executable_commands_in_the_rendered_shared_prompt_are_wired(tmp_path: Path) -> None:
+    base = "src/merlin/targetgen"
+    prompt = f"{base}/generate_prompt.py"
+    command = "merlin.targetgen.oot_starterkit.plan"
+    plan = f"{base}/oot_starterkit/plan.py"
+    files = {
+        prompt: (
+            '"""Docs mention python -m merlin.targetgen.docs_only."""\n'
+            '_TEMPLATE = "Use python -m merlin.targetgen.oot_starterkit.plan inventory"\n'
+            '_DORMANT = "python -m merlin.targetgen.dormant"\n'
+            'def render_prompt():\n    return _TEMPLATE.format()\n'
+        ),
+        plan: 'def main():\n    return 0\nif __name__ == "__main__":\n    raise SystemExit(main())\n',
+        f"{base}/docs_only.py": 'def main():\n    return 0\nif __name__ == "__main__":\n    raise SystemExit(main())\n',
+        f"{base}/dormant.py": 'def main():\n    return 0\nif __name__ == "__main__":\n    raise SystemExit(main())\n',
+        f"{base}/not_executable.py": 'def main():\n    return 0\n',
+        "src/merlin/driver.py": "from merlin.targetgen.generate_prompt import render_prompt\n",
+        "docs/guide.md": "python -m merlin.targetgen.docs_only\n",
+    }
+    gate = _gate(_tree(tmp_path, files))
+    assert gate._generated_prompt_module_commands(
+        {"merlin.targetgen.generate_prompt": {tmp_path / "src/merlin/driver.py"}},
+        {command: tmp_path / plan},
+    ) == {command}
+    assert gate.unwired() == [f"{base}/docs_only.py", f"{base}/dormant.py", f"{base}/not_executable.py"]
+    files[prompt] = files[prompt].replace(
+        "Use python -m merlin.targetgen.oot_starterkit.plan inventory",
+        "Use python -m merlin.targetgen.not_executable inventory",
+    )
+    gate = _gate(_tree(tmp_path, files))
+    assert gate.unwired() == [f"{base}/docs_only.py", f"{base}/dormant.py", f"{base}/not_executable.py", plan]
+    files["src/merlin/driver.py"] = "# A dormant generator is not a task command.\n"
+    gate = _gate(_tree(tmp_path, files))
+    assert gate.unwired() == [f"{base}/docs_only.py", f"{base}/dormant.py", prompt,
+                              f"{base}/not_executable.py", plan]

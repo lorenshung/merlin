@@ -11,8 +11,9 @@ This gate builds the import graph structurally (``ast``; a word search over-coun
 module's name appears in comments and docstrings of code that never imports it) and requires every
 module under the instrumented packages to have a PRODUCTION importer: code under the library, the
 experiments, the targets (``merlin/targets`` and the target workflows under ``examples/``) or the
-build tools, excluding the test suite and the module itself. A declared console script counts as
-wired. Tests do not: a test proves a module works, not that anything uses it.
+build tools, excluding the test suite and the module itself. A declared console script or an
+executable ``python -m`` command in the shared runtime-rendered task prompt counts as wired. Tests
+do not: a test proves a module works, not that anything uses it.
 
 Known debt lives in ``unwired_ratchet.txt`` beside this file, one repo-relative path per line. It
 may only shrink (``check_ratchets_shrink.py`` holds every ``*_ratchet.txt``), and an entry for a
@@ -145,6 +146,77 @@ def _console_script_modules() -> set[str]:
     return modules
 
 
+def _module_entrypoint(path: Path) -> bool:
+    """A ``python -m`` target must have both a main function and an executable guard."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (SyntaxError, UnicodeDecodeError):
+        return False
+    has_main = any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "main"
+                   for node in tree.body)
+    for node in tree.body:
+        if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
+            continue
+        test = node.test
+        if (not isinstance(test.left, ast.Name) or test.left.id != "__name__"
+                or len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq)
+                or len(test.comparators) != 1 or not isinstance(test.comparators[0], ast.Constant)
+                or test.comparators[0].value != "__main__"):
+            continue
+        if has_main and any(isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                            and call.func.id == "main" for statement in node.body for call in ast.walk(statement)):
+            return True
+    return False
+
+
+def _generated_prompt_module_commands(imported_by: dict[str, set[Path]],
+                                      candidates: dict[str, Path]) -> set[str]:
+    """Only commands in the actually rendered, production-called shared prompt are entrypoints.
+
+    The prompt generator is the task command definition. Docs, tests, comments and unrelated
+    dormant strings must not make a module appear wired. This does not infer commands from all
+    string literals in production code.
+    """
+    path = ROOT / "src/merlin/targetgen/generate_prompt.py"
+    if not path.is_file() or not imported_by.get("merlin.targetgen.generate_prompt"):
+        return set()
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (SyntaxError, UnicodeDecodeError):
+        return set()
+    template = None
+    rendered = False
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and any(isinstance(target, ast.Name)
+                                                  and target.id == "_TEMPLATE" for target in node.targets)
+                and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
+            template = node.value.value
+        elif isinstance(node, ast.FunctionDef) and node.name == "render_prompt":
+            rendered = any(
+                isinstance(result, ast.Return) and isinstance(result.value, ast.Call)
+                and isinstance(result.value.func, ast.Attribute)
+                and result.value.func.attr == "format"
+                and isinstance(result.value.func.value, ast.Name)
+                and result.value.func.value.id == "_TEMPLATE"
+                for result in ast.walk(node)
+            )
+    if not rendered or template is None:
+        return set()
+    commands: set[str] = set()
+    for suffix in template.split("python -m ")[1:]:
+        module = ""
+        for char in suffix:
+            if not char.isascii() or not (char.isalnum() or char in "_."):
+                break
+            module += char
+        if not module or any(not part.isidentifier() for part in module.split(".")):
+            continue
+        target = candidates.get(module)
+        if target is not None and _module_entrypoint(target):
+            commands.add(module)
+    return commands
+
+
 def unwired() -> list[str]:
     candidates = {}
     # Evaluators can live in any separately installed shared-namespace distribution. Relocation
@@ -168,7 +240,7 @@ def unwired() -> list[str]:
             for name in _imports(path):
                 if name in imported_by and candidates[name] != path.resolve():
                     imported_by[name].add(path)
-    scripts = _console_script_modules()
+    scripts = _console_script_modules() | _generated_prompt_module_commands(imported_by, candidates)
     return sorted(
         str(candidates[name].relative_to(ROOT))
         for name, importers in imported_by.items()

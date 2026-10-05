@@ -17,7 +17,6 @@ merlin/python/merlin/targetgen/_capsule_bundle_worker.py
 merlin/python/merlin/targetgen/_m2m_capture_worker.py
 merlin/python/merlin/targetgen/_pt2_capture_worker.py
 merlin/python/merlin/targetgen/artifact_dag.py
-merlin/python/merlin/targetgen/capture_source.py
 merlin/python/merlin/targetgen/config_domains.py
 merlin/python/merlin/targetgen/contract/command_operands.py
 merlin/python/merlin/targetgen/contraction_egraph.py
