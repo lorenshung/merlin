@@ -222,6 +222,63 @@ def test_preflight_refuses_application_inventory_without_materialized_receipts(a
     assert any("lack verified materialization receipts" in error for error in report["errors"])
 
 
+def test_incomplete_demands_can_be_inspected_but_not_verified(authored):
+    make, root, _ = authored
+    (root / "target.yaml").write_text("target: fixture\nworkload_spec: {applications: [model_a]}\n")
+    detailed = {
+        "status": "incomplete",
+        "coverage_status": "unverified",
+        "applications": {
+            "model_a": {
+                "capture_sha256": "a" * 64,
+                "n_operations": 1,
+                "capture_receipt": {"status": "verified_materialized", "receipt_sha256": "b" * 64},
+            }
+        },
+        "n_operations": 1,
+    }
+    digest = hashlib.sha256(json.dumps(detailed, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    (root / "inventory.json").write_text(json.dumps(detailed))
+    (root / "conformance.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "application_demands": {
+                    "status": "incomplete",
+                    "coverage_status": "unverified",
+                    "sidecar": "inventory.json",
+                    "full_inventory_sha256": digest,
+                }
+            }
+        )
+    )
+    (root / "synth.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "provenance": {
+                    "selected_inputs": synthesis_input_identity(
+                        conformance_spec=root / "conformance.yaml",
+                        recipe=root / "recipe.yaml",
+                        descriptor=root / "target.yaml",
+                    )
+                },
+                "capsules": [],
+            }
+        )
+    )
+    verified = runner.preflight(make())
+    assert not verified["configuration_ready"]
+    assert any("must be inventoried" in error for error in verified["errors"])
+    diagnostic_plan = runner.resolve_plan(
+        load_spec(root / "experiment.yaml"),
+        phase="0",
+        run_dir=root.parent / "diagnostic-run",
+        phase0_evidence_mode="diagnostic",
+    )
+    diagnostic = runner.preflight(diagnostic_plan)
+    assert diagnostic["phase0_synthesis"]["0"]["status"] == "incomplete_diagnostic"
+    assert diagnostic["configuration_ready"], diagnostic["errors"]
+
+
 def test_detailed_application_inventory_is_frozen_and_verified(authored):
     make, root, _ = authored
     detailed = {"status": "not_declared", "coverage_status": "not_applicable", "applications": {}, "n_operations": 0}

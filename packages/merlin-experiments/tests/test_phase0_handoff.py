@@ -171,7 +171,8 @@ def test_real_hidden_integer_derivation_is_counted_not_publicly_named(phase0_han
     fixture = phase0_handoff
     public = yaml.safe_load((fixture["profiles"] / "fixture-device.yaml").read_text())
     hidden_name = "derived_private_identity"
-    hidden = dict(public["capsules"][0], name=hidden_name, cat="hidden", label="hidden")
+    # A hidden member is a point the public cohort does not contain (Phase 0 refuses a renamed copy).
+    hidden = dict(public["capsules"][0], name=hidden_name, cat="hidden", label="hidden", K=4)
     (fixture["profiles"] / "fixture-device.hidden.yaml").write_text(yaml.safe_dump({"capsules": [hidden]}))
     descriptor = fixture["workspace"] / "source-experiment/target_experiment.yaml"
     document = yaml.safe_load(descriptor.read_text())

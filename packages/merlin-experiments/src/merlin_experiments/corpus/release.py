@@ -154,8 +154,10 @@ def bind_exact_offload(selection, *, seal_path: Path, descriptor: Path, applicat
 
     review = verify(seal_path, descriptor)
     binding = ReleaseBinding(
-        seal_path.expanduser().absolute(), descriptor.expanduser().absolute(),
-        application, review["review_digest"],
+        seal_path.expanduser().absolute(),
+        descriptor.expanduser().absolute(),
+        application,
+        review["review_digest"],
     )
     verify_exact_offload_binding(binding, selection)
     return replace(selection, release_binding=binding)
@@ -255,6 +257,64 @@ def _stage_instruction_model(plan: dict, private: Path) -> dict | None:
     return {"sha256": digest, "source_evidence_sha256": manifest_sha}
 
 
+def _selected_rtl_facts(plan: dict, generated: Path) -> Path | None:
+    """Use the exact facts exported by the selected Phase 0 evidence bundle."""
+    location = plan.get("phase0_evidence_bundle")
+    if location is None:
+        # Historical diagnostic runs could emit facts directly in their
+        # generated corpus. Never use this path when evidence was selected.
+        legacy = generated / "hardware/effective-views/loaded-facts.json"
+        return legacy if legacy.is_file() and not legacy.is_symlink() else None
+    from ..phase0.evidence import load_exported_evidence
+
+    bundle = Path(location).expanduser().absolute()
+    evidence = load_exported_evidence(bundle)
+    relative = Path("hardware/effective-views/loaded-facts.json")
+    selected = dict(evidence.archived_artifacts).get(relative.as_posix())
+    path = bundle / relative
+    if selected is None or path.is_symlink() or not path.is_file() or path.read_bytes() != selected:
+        raise SpecError("selected Phase 0 RTL facts are absent or differ from verified evidence")
+    try:
+        document = json.loads(selected)
+    except (TypeError, ValueError) as error:
+        raise SpecError("selected Phase 0 RTL facts are not JSON") from error
+    facts = document.get("facts") if isinstance(document, dict) else None
+    if not isinstance(facts, dict) or facts.get("target") != plan["target"]:
+        raise SpecError("selected Phase 0 RTL facts name a different target")
+    return path
+
+
+def _selected_capability_contract(plan: dict, generated: Path) -> tuple[Path, str] | None:
+    """Carry the effective Phase 0 view, never re-resolve a live provider contract."""
+    location = plan.get("phase0_evidence_bundle")
+    relative = Path("software/contract.json")
+    if location is None:
+        legacy = generated / relative
+        if not legacy.exists():
+            if plan["phases"]["0"]["inputs"].get("capability_contract"):
+                raise SpecError("selected Phase 0 capability contract has no exported view; freeze a new run")
+            return None
+        path = legacy
+        ordinary_tree(path)
+        raw = path.read_bytes()
+    else:
+        from ..phase0.evidence import load_exported_evidence
+
+        bundle = Path(location).expanduser().absolute()
+        evidence = load_exported_evidence(bundle)
+        raw = dict(evidence.archived_artifacts).get(relative.as_posix())
+        path = bundle / relative
+        if raw is None or path.is_symlink() or not path.is_file() or path.read_bytes() != raw:
+            raise SpecError("selected Phase 0 capability contract is absent or differs from verified evidence")
+    try:
+        document = json.loads(raw)
+    except (TypeError, ValueError) as error:
+        raise SpecError("selected Phase 0 capability contract is not JSON") from error
+    if not isinstance(document, dict) or document.get("name") != plan["target"]:
+        raise SpecError("selected Phase 0 capability contract names a different target")
+    return path, hashlib.sha256(raw).hexdigest()
+
+
 def _freeze_payload(root: Path) -> None:
     from merlin.common.content_store import is_shared
 
@@ -294,9 +354,24 @@ def inspect_release(path: Path) -> dict:
     }
 
 
+#: The storage contract's ``product_roots`` entry for sealed phase-0 releases.
+RELEASES_HOME = "phase0-releases"
+
+
+def default_release_root(target: str, *, timestamp: str | None = None, sha: str | None = None) -> Path:
+    """``out/artifacts/protocols/<target>/phase0-<TS>-<sha7>/``: the target axis of a new release."""
+    from merlin.common.artifacts import declared_home, git_sha7, utc_stamp
+    from merlin.common.paths import repo_root
+
+    if not target or Path(target).name != target or target in (".", ".."):
+        raise SpecError(f"corpus release target must be one path component: {target!r}")
+    stamp = timestamp or utc_stamp()
+    return declared_home(RELEASES_HOME) / target / f"phase0-{stamp}-{sha or git_sha7(repo_root())}"
+
+
 def prepare(
     run_dir: Path,
-    output: Path,
+    output: Path | None = None,
     *,
     private_baseline: Path | None = None,
     retirements: Path | None = None,
@@ -310,6 +385,9 @@ def prepare(
     from ..runner import fingerprint
 
     source = run_dir.expanduser().resolve(strict=True)
+    if output is None:
+        selected, _, _ = source_run(source)
+        output = default_release_root(load_target_experiment(selected["phases"]["0"]["inputs"]["descriptor"]).target)
     root = output.expanduser().absolute()
     if root.is_symlink() or root.exists():
         raise SpecError("corpus release output already exists; choose a fresh destination")
@@ -320,6 +398,14 @@ def prepare(
     plan, attempt, generated = source_run(source)
     lineage = generation_lineage(plan, generated)
     te = load_target_experiment(plan["phases"]["0"]["inputs"]["descriptor"])
+    from merlin.common.artifacts import declared_home
+
+    try:
+        releases = declared_home(RELEASES_HOME).resolve()
+    except ValueError:
+        releases = None  # a checkout without the storage contract declares no release home to police
+    if releases is not None and root.is_relative_to(releases) and root.relative_to(releases).parts[:1] != (te.target,):
+        raise SpecError(f"a corpus release under {releases.name}/ must sit below its target {te.target!r}")
     if private_baseline is not None:
         private_baseline = private_baseline.expanduser().absolute()
         if private_baseline.is_symlink() or not private_baseline.is_dir():
@@ -346,7 +432,16 @@ def prepare(
                 retirements=retirements,
                 generated_only=generated_only,
             )
-            scaffolding = scaffold(te, payload / "corpus", payload / "experiment", private=root / "private")
+            selected_facts = _selected_rtl_facts(plan, generated)
+            selected_contract = _selected_capability_contract(plan, generated)
+            scaffolding = scaffold(
+                te,
+                payload / "corpus",
+                payload / "experiment",
+                private=root / "private",
+                selected_facts=selected_facts,
+                selected_contract=selected_contract,
+            )
             descriptor = payload / "experiment" / "target_experiment.yaml"
             checked = admission(descriptor, coverage_output=root / "private" / "workload-coverage.json")
             instruction_semantics = _stage_instruction_model(plan, root / "private")
@@ -542,6 +637,11 @@ def _verify_snapshot(
     identity = verify(seal_path, descriptor)
     te = load_target_experiment(descriptor)
     sources = [*te.graded_roots(), *te.hidden_roots()]
+    if te.declared_contract:
+        contract = te.declared_contract_path()
+        if contract is None:
+            raise SpecError("reviewed capability contract is absent; freeze and prepare a new release")
+        sources.append(contract)
     sources += [te.resource_path("task"), te.resource_path("scripts/agent_selfcheck.py")]
     if (te.capsule_corpus.parent / "_phase0").is_dir():
         sources += [te.capsule_corpus.parent / "_phase0"]

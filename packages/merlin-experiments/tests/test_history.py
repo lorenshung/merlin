@@ -116,6 +116,7 @@ def test_cli_navigates_frozen_phase_handoffs_without_reading_live_inputs(tmp_pat
         },
         "spec": {
             "phases": {
+                "1": {"config": {}},
                 "2": {
                     "config": {
                         "functional_run_id": "functional-1",
@@ -245,8 +246,46 @@ def test_phase0_descriptor_snapshot_is_bound_to_frozen_input_bytes(tmp_path):
     snapshot.unlink()
     snapshot.write_bytes(content)
     manifest.write_text(
-        json.dumps(
-            {"sources": [{"role": "recipe", "path": str(snapshot.relative_to(phase0)), "sha256": digest}]}
-        )
+        json.dumps({"sources": [{"role": "recipe", "path": str(snapshot.relative_to(phase0)), "sha256": digest}]})
     )
     assert lineage(directory)["phases"]["0"]["inputs"]["descriptor"]["identity"] == "historical_unverified"
+
+
+def test_single_phase_orchestrations_are_discovered_under_their_phase(tmp_path):
+    # record() names the experiment after its directory, so these plans say experiment "phase0",
+    # which neither phase-run name carries: misplaced, reported, never silently adopted.
+    record(tmp_path, "alpha", "phase0", "20260929T000000Z_functional_abc1234")
+    record(tmp_path, "alpha", "phase0", "20260929T000001Z_other_abc1234")
+    result = runs(root=tmp_path)
+    assert result["runs"] == []
+    assert len(result["problems"]) == 2
+
+
+def test_default_run_dir_of_one_phase_is_the_phase_run(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from merlin_experiments.runner import default_run_dir
+
+    monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "out"))
+    spec = SimpleNamespace(target="alpha", id="functional")
+    one = default_run_dir(spec, "1")
+    assert one.parent == tmp_path / "out/runs/alpha/phase1"
+    stamp, rest = one.name.split("_", 1)
+    assert rest.startswith("functional_") and len(stamp) == 16
+    assert default_run_dir(spec).parent == tmp_path / "out/runs/alpha/functional"
+
+
+def test_phase_run_records_are_listed_by_their_experiment(tmp_path):
+    directory = tmp_path / "alpha" / "phase1" / "20260929T000000Z_functional_abc1234"
+    directory.mkdir(parents=True)
+    plan = {"target": "alpha", "experiment": "functional", "evidence_authority": "fixture evidence only"}
+    payload = json.dumps(plan).encode()
+    (directory / "resolved-plan.json").write_bytes(payload)
+    (directory / "orchestration.json").write_text(
+        json.dumps({"plan_sha256": hashlib.sha256(payload).hexdigest(), "state": "completed", "attempts": []})
+    )
+    record(tmp_path, "alpha", "performance", "run")
+    result = runs(root=tmp_path, experiment="functional")
+    assert [r["run_dir"] for r in result["runs"]] == [str(directory)]
+    assert result["problems"] == []
+    assert len(runs(root=tmp_path)["runs"]) == 2

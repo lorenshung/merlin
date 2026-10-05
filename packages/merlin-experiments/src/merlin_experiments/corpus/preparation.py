@@ -38,13 +38,17 @@ def ordinary_tree(path: Path) -> None:
             raise SpecError("corpus release source contains symlinked or nonregular entries")
 
 
-def copy_input(source: Path, destination: Path, *, private: bool = False) -> str:
+def copy_input(
+    source: Path, destination: Path, *, private: bool = False, expected_sha256: str | None = None
+) -> str:
     from merlin.common import content_store
 
     from ..runner import fingerprint
 
     ordinary_tree(source)
     before = fingerprint(source)
+    if expected_sha256 is not None and before != expected_sha256:
+        raise SpecError("selected corpus input differs from verified evidence; prepare a new release")
     destination.parent.mkdir(parents=True, exist_ok=True)
     # Private and public inputs may independently contain identical bytes. Do
     # not merge their storage identities: an inode alias is an answer surface,
@@ -100,6 +104,53 @@ def copy_curated_harness(source: Path, destination: Path) -> tuple[str, list[str
     ordinary_tree(destination)
     if fingerprint(source) != before or fingerprint(destination) != expected.hexdigest():
         raise SpecError("curated harness changed while copying; prepare a new release")
+    return before, links
+
+
+def copy_public_hardware(source: Path, destination: Path) -> tuple[str, list[dict[str, str]]]:
+    """Freeze an already-declared public hardware grant without retaining live links."""
+    from merlin.common import content_store
+    from merlin.common.digest import sha256_file
+
+    from ..runner import fingerprint
+
+    if source.is_symlink() or not source.is_dir():
+        raise SpecError("public hardware source must be an ordinary directory")
+
+    def observed_digest() -> tuple[str, list[dict[str, str]]]:
+        rows: list[tuple[Path, str]] = []
+        links: list[dict[str, str]] = []
+
+        def visit(path: Path, relative: Path, ancestry: tuple[tuple[int, int], ...]) -> None:
+            canonical = path.resolve(strict=True)
+            if path.is_symlink():
+                links.append({"path": relative.as_posix(), "target": os.readlink(path), "canonical": str(canonical)})
+            if canonical.is_dir():
+                stat = canonical.stat()
+                key = (stat.st_dev, stat.st_ino)
+                if key in ancestry:
+                    raise SpecError("public hardware source contains a directory-link cycle")
+                if relative != Path("."):
+                    rows.append((relative, "directory"))
+                for child in canonical.iterdir():
+                    visit(path / child.name, relative / child.name, ancestry + (key,))
+            elif canonical.is_file():
+                rows.append((relative, sha256_file(canonical)))
+            else:
+                raise SpecError("public hardware source contains a nonregular entry")
+
+        visit(source, Path("."), ())
+        digest = hashlib.sha256()
+        for relative, value in sorted(rows, key=lambda row: row[0]):
+            digest.update(json.dumps([relative.as_posix(), value]).encode())
+        return digest.hexdigest(), sorted(links, key=lambda row: row["path"])
+
+    before, links = observed_digest()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    content_store.place_tree(source, destination, content_store.store_root())
+    ordinary_tree(destination)
+    if observed_digest() != (before, links) or fingerprint(destination) != before:
+        raise SpecError("public hardware source changed while copying; prepare a new release")
     return before, links
 
 
@@ -380,13 +431,20 @@ def assemble(
         raise SpecError("baseline provenance does not account for its private corpus")
     missing = (prior_generated & set(before)) - set(emitted)
     retired, retirement_digest = _reviewed_retirements(retirements)
-    if set(retired) != missing:
+    # Historical hand-authored public members are normally preserved.  An
+    # operator may explicitly retire one (for example, a validation model that
+    # must move behind the post-freeze boundary), but the review file must not
+    # name a new, private, or freshly generated member.
+    hand_authored = set(original.get("hand_authored") or []) & set(before)
+    reviewed_hand_authored = set(retired) - missing
+    if not missing.issubset(retired) or not reviewed_hand_authored.issubset(hand_authored - set(emitted)):
         raise SpecError(
             "retirement review must account exactly for absent baseline generated members "
+            "and name only existing, unreplaced hand-authored public members "
             f"(missing={len(missing)}, declared={len(retired)})"
         )
     retired_receipts = []
-    for key in sorted(missing):
+    for key in sorted(retired):
         target = destination / key
         retired_receipts.append({"member": key, "previous_sha256": fingerprint(target), "reason": retired[key]})
         # Only the release-local copy is removed; source and frozen run stay untouched.
@@ -421,11 +479,11 @@ def assemble(
         # The public manifest needs an audit commitment, not a list of removed
         # claim-model identities or reviewer prose. Detailed decisions stay in
         # the release-private preparation record.
-        encoded = json.dumps(retired_receipts, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        merged["retired_generated"] = {
-            "count": len(retired_receipts),
-            "sha256": hashlib.sha256(encoded).hexdigest(),
-        }
+        for key, members in (("retired_generated", missing), ("retired_hand_authored", reviewed_hand_authored)):
+            if members:
+                selected = [row for row in retired_receipts if row["member"] in members]
+                encoded = json.dumps(selected, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                merged[key] = {"count": len(selected), "sha256": hashlib.sha256(encoded).hexdigest()}
     merged["hand_authored"] = sorted((set(original.get("hand_authored") or []) - declared) & set(final_members))
     previous_hidden = sum((original.get("held_out") or {}).get(key, 0) for key in ("n_generated", "n_hand_authored"))
     new_hidden = {key for key in emitted if key.startswith("hidden/")} - set(before)
@@ -446,6 +504,44 @@ def assemble(
         },
         "generated_manifest_sha256": fingerprint(generated / "MANIFEST.yaml"),
         "replacements": replacements,
+    }
+
+
+#: A descriptor's ``grading.resource_bound.derive`` value that asks for the model policy to be derived.
+DERIVED_RESOURCE_BOUND = "phase0_qualified_models_v1"
+
+
+def derive_resource_bound(corpus: Path) -> dict:
+    """The model resource policy the staged corpus itself states, never a hand-maintained name list.
+
+    Every public whole-model capsule Phase 0 GENERATED and ADMITTED is a required capstone: an
+    integer model is admitted only with a qualified ``model_qualification`` record, and a model whose
+    arithmetic needs no such bound was admitted by being written. Any other public model (a retained,
+    hand-authored or unqualified one) is excluded by name. Both lists name only capsules present.
+    """
+    from merlin.targetgen import capsule_runner
+
+    manifest = read_yaml(corpus / "MANIFEST.yaml")
+    generated = {str(member) for member in manifest.get("generated") or ()}
+    required, excluded = [], []
+    for cap in capsule_runner.discover_capsules(corpus, labels={"public", "dev"}):
+        if cap.get("kind") != "model":
+            continue
+        name = str(cap["name"])
+        member = Path(str(cap.get("__dir__") or "")).resolve()
+        relative = f"{member.parent.name}/{member.name}"
+        if member.parent.name.startswith("_"):
+            continue
+        qualification = cap.get("model_qualification") or {}
+        needs_bound = "integer_partial_sum_bound" in cap or qualification
+        admitted = relative in generated and (not needs_bound or qualification.get("status") == "qualified")
+        (required if admitted else excluded).append(name)
+    if not required:
+        raise SpecError("derived resource policy found no admitted whole-model capstone in the staged corpus")
+    return {
+        "derive": DERIVED_RESOURCE_BOUND,
+        "required_admitted_models": sorted(required),
+        "exclude_capsules": sorted(excluded),
     }
 
 
@@ -504,9 +600,19 @@ def derive_release_admission(staged) -> dict:
     }
 
 
-def scaffold(te, corpus: Path, experiment: Path, *, private: Path) -> dict:
+def scaffold(
+    te,
+    corpus: Path,
+    experiment: Path,
+    *,
+    private: Path,
+    selected_facts: Path | None = None,
+    selected_contract: tuple[Path, str] | None = None,
+) -> dict:
     """Stage only declared task/selfcheck/harness resources, never prior runs or bundles."""
-    from merlin.targetgen.target_experiment import load_target_experiment
+    from merlin.common.digest import sha256_file
+    from merlin.targetgen.sandbox.bwrap import resolve_grant
+    from merlin.targetgen.target_experiment import load_target_experiment, observed_experiment_contract
 
     experiment.mkdir(parents=True)
     inputs = {}
@@ -544,6 +650,44 @@ def scaffold(te, corpus: Path, experiment: Path, *, private: Path) -> dict:
     document.pop("task_root", None)
     document.pop("contracts_root", None)
     document["capsule_corpus"] = str(corpus / te.capsule_corpus.name)
+    hardware = document.get("hardware_spec") or {}
+    if selected_contract is not None:
+        contract_source, contract_sha256 = selected_contract
+        staged_contract = experiment / "contracts/target_contract.yaml"
+        digest = copy_input(contract_source, staged_contract, expected_sha256=contract_sha256)
+        hardware["target_contract"] = str(staged_contract)
+        inputs["capability_contract"] = {"path": str(contract_source), "sha256": digest}
+    elif te.declared_contract:
+        raise SpecError("descriptor declares a capability contract without a selected Phase 0 export; freeze a new run")
+    hardware_root = None
+    if te.hwbringup_set:
+        source = resolve_grant(te.hwbringup_set)
+        hardware_root = experiment / "hardware_spec/hwbringup"
+        digest, links = copy_public_hardware(source, hardware_root)
+        hardware["hwbringup_set"] = str(hardware_root)
+        inputs["hardware_spec/hwbringup"] = {"path": str(source), "sha256": digest, "materialized_links": links}
+    if te.isa_headers:
+        staged_headers = []
+        source_root = resolve_grant(te.hwbringup_set) if te.hwbringup_set else None
+        for index, declared in enumerate(te.isa_headers):
+            source = resolve_grant(declared)
+            if source_root is not None and source.is_relative_to(source_root):
+                staged = hardware_root / source.relative_to(source_root)
+            else:
+                staged = experiment / "hardware_spec/isa_headers" / f"{index:02d}-{source.name}"
+                if not source.is_file():
+                    raise SpecError(f"declared ISA header is not a regular file: {source}")
+                before = sha256_file(source)
+                staged.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, staged, follow_symlinks=True)
+                if sha256_file(source) != before or sha256_file(staged) != before:
+                    raise SpecError("ISA header changed while copying; prepare a new release")
+            if not staged.is_file() or staged.is_symlink():
+                raise SpecError(f"staged ISA header is not an ordinary file: {staged}")
+            staged_headers.append(str(staged))
+        hardware["isa_headers"] = staged_headers
+    if hardware:
+        document["hardware_spec"] = hardware
     if te.curated_harness:
         relative = Path(te.curated_harness)
         if relative.is_absolute() or ".." in relative.parts:
@@ -551,11 +695,28 @@ def scaffold(te, corpus: Path, experiment: Path, *, private: Path) -> dict:
         source = te.resource_path(relative)
         digest, links = copy_curated_harness(source, experiment / relative)
         inputs[relative.as_posix()] = {"path": str(source), "sha256": digest, "materialized_file_links": links}
+    facts_root = None
+    if selected_facts is not None:
+        facts_root = experiment / "rtl_facts"
+        digest = copy_input(selected_facts, facts_root / "facts.json")
+        inputs["rtl_facts"] = {"path": str(selected_facts), "sha256": digest}
+    resource_bound = (document.get("grading") or {}).get("resource_bound") or {}
+    if resource_bound.get("derive") is not None:
+        if resource_bound.get("derive") != DERIVED_RESOURCE_BOUND:
+            raise SpecError(f"unknown resource_bound derivation {resource_bound.get('derive')!r}")
+        if resource_bound.get("required_admitted_models") or resource_bound.get("exclude_capsules"):
+            raise SpecError("a derived resource policy cannot also carry hand-maintained model names")
+        derived_bound = derive_resource_bound(corpus)
+        document["grading"]["resource_bound"] = {
+            key: value for key, value in {**resource_bound, **derived_bound}.items() if key != "derive" and value != []
+        }
+        inputs["resource_bound"] = {"policy": DERIVED_RESOURCE_BOUND, **derived_bound}
     descriptor = experiment / "target_experiment.yaml"
     descriptor.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
     if te.graded_release_admission:
         staged = load_target_experiment(descriptor)
-        derived = derive_release_admission(staged)
+        with observed_experiment_contract(staged):
+            derived = derive_release_admission(staged)
         grading = document["grading"]
         grading.pop("release_admission")
         grading.update({key: value for key, value in derived.items() if key != "resource_decisions"})
@@ -571,18 +732,29 @@ def scaffold(te, corpus: Path, experiment: Path, *, private: Path) -> dict:
     # Generate fresh declarations, not copies that might still point at the old corpus.
     from merlin.common.paths import python_source_dir
     from merlin.targetgen.generate_bundles import materialize_bundles
+    from merlin.targetgen.sandbox.toolchain import ToolchainPaths
 
     promoted = load_target_experiment(descriptor)
+    toolchain = ToolchainPaths.from_checkout()
+    llvm_root = Path(toolchain.llvm)
+    if not llvm_root.is_dir():
+        raise SpecError(
+            f"selected LLVM/MLIR toolchain is absent: {llvm_root}; "
+            "select an installed clang-23 with MERLIN_CLANG before preparing a release"
+        )
+    checkout_llvm = toolchain.repo / "third_party/llvm-install"
     # Native generation can explain unavailable contracts. Keep those diagnostics
     # in the private preparation record, never the public inspect response.
     diagnostics = io.StringIO()
-    with redirect_stdout(diagnostics):
+    with redirect_stdout(diagnostics), observed_experiment_contract(promoted):
         materialize_bundles(
             promoted,
             experiment / "input_bundles",
             variants=("public_v0", "realistic_v0", "hwbringup_v0"),
             host_inputs=(str(private), *([str(corpus / "_phase0")] if (corpus / "_phase0").is_dir() else [])),
             python_source_root=python_source_dir(),
+            llvm_toolchain_root=llvm_root if llvm_root != checkout_llvm else None,
+            rtl_facts_root=facts_root,
         )
     inputs["bundle_generation"] = {"diagnostics": diagnostics.getvalue()}
     return inputs
@@ -590,19 +762,31 @@ def scaffold(te, corpus: Path, experiment: Path, *, private: Path) -> dict:
 
 def admission(descriptor: Path, *, coverage_output: Path | None = None) -> dict:
     """Reuse native discovery/admission without launching an oracle or changing policy."""
+    from merlin.targetgen.target_experiment import load_target_experiment, observed_experiment_contract
+
+    te = load_target_experiment(descriptor)
+    with observed_experiment_contract(te):
+        return _admission(te, coverage_output=coverage_output)
+
+
+def _admission(te, *, coverage_output: Path | None) -> dict:
     from merlin.targetgen import capsule_runner
     from merlin.targetgen.contract.materialize import (
         _TIER_ORDER,
         materialize_public_cohort,
+        pin_cohort_builds,
+        resolve_published_cohort,
         validate_materialized_cohort,
     )
-    from merlin.targetgen.target_experiment import load_target_experiment
 
-    te = load_target_experiment(descriptor)
     capsule_runner.discover_capsules(te.graded_roots(), labels={"public", "dev"})
-    materialized = materialize_public_cohort(te, tier_ceiling=_TIER_ORDER[-1])
+    # Read the immutable build behind the published per-target link: coverage observation refuses
+    # to traverse links, and the link is this module's own swap point, not a corpus input.
+    materialized = resolve_published_cohort(materialize_public_cohort(te, tier_ceiling=_TIER_ORDER[-1]))
+    pin_cohort_builds(materialized)
     public = validate_materialized_cohort(materialized, te)
     from ..phase0.coverage_commitment import (
+        admitted_source_roots,
         build_phase0_readiness,
         observe_cohort,
         phase0_readiness_identity,
@@ -611,7 +795,11 @@ def admission(descriptor: Path, *, coverage_output: Path | None = None) -> dict:
     )
 
     coverage_inputs = read_inputs(te.capsule_corpus.parent)
-    completeness = observe_cohort(coverage_inputs, materialized, target=te.target)
+    completeness = observe_cohort(
+        coverage_inputs,
+        admitted_source_roots(te.graded_roots(), materialized),
+        target=te.target,
+    )
     readiness = build_phase0_readiness(completeness)
     workload_required = requires_workload_coverage(te, coverage_inputs)
     if coverage_output is not None:

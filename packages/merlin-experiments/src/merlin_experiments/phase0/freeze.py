@@ -38,14 +38,17 @@ def _model_root(evidence, software_path: str) -> Path | None:
 
 def selection(command: dict, target: str):
     inputs = command["inputs"]
+    capture = command.get("phase0_m2m_selection") or {}
     return select_evidence(
         target,
         descriptor=inputs["descriptor"],
+        capture_python=capture.get("python"),
         capability_contract_path=inputs.get("capability_contract"),
         facts_path=inputs.get("rtl_facts"),
         hardware_spec=inputs.get("hardware_spec"),
         software_spec=inputs.get("software_spec"),
         conformance_spec=inputs.get("conformance_spec"),
+        prohibited_roles=(command.get("instruction_policy") or {}).get("prohibited_instruction_roles") or (),
     )
 
 
@@ -79,7 +82,15 @@ def _materialized_inputs(command: dict) -> dict[Path, tuple[Path, str]]:
         if relative.is_absolute() or ".." in relative.parts:
             raise ValueError("frozen materialized capture must be contained beside its synthesis profile")
         source = profile.parent / relative
-        artifact = materialized_model_artifacts({**binding, "path": str(source)})
+        resolved = {**binding, "path": str(source)}
+        loader = None
+        if binding.get("loader_path"):
+            relative_loader = Path(binding["loader_path"])
+            if relative_loader.is_absolute() or ".." in relative_loader.parts:
+                raise ValueError("frozen materialized loader must be contained beside its synthesis profile")
+            loader = profile.parent / relative_loader
+            resolved["loader_path"] = str(loader)
+        artifact = materialized_model_artifacts(resolved)
         receipt_path = source.parent / "capture_receipt.json"
         receipt = json.loads(receipt_path.read_bytes())
         if hashlib.sha256(receipt_path.read_bytes()).hexdigest() != binding["receipt_sha256"]:
@@ -92,6 +103,12 @@ def _materialized_inputs(command: dict) -> dict[Path, tuple[Path, str]]:
             if path.is_symlink() or not path.is_file():
                 raise ValueError(f"selected materialized member is not an ordinary file: {path}")
             result[path] = (profile.parent, path.relative_to(profile.parent).as_posix())
+        if loader is not None:
+            if loader.is_symlink() or not loader.is_file():
+                raise ValueError(f"selected materialized loader is not an ordinary file: {loader}")
+            if hashlib.sha256(loader.read_bytes()).hexdigest() != binding.get("loader_sha256"):
+                raise ValueError("selected materialized loader changed before freezing")
+            result[loader] = (profile.parent, loader.relative_to(profile.parent).as_posix())
     return result
 
 
@@ -254,6 +271,12 @@ def stage(plan: dict) -> dict:
         m2m_runtime.verify(selected_m2m)
         command["phase0_m2m_selection"] = selected_m2m
         command["env"].update(m2m_runtime.environment(selected_m2m))
+        from .sealed_generation import CONFIG_ENV
+
+        if CONFIG_ENV in command["env"]:
+            command["env"][CONFIG_ENV] = json.dumps(
+                m2m_runtime.sealed_capture_config(selected_m2m, artifact_root), sort_keys=True
+            )
         m2m_receipt = artifact_root / "private" / "m2m-runtime.json"
         with m2m_receipt.open("xb") as stream:
             stream.write(m2m_runtime.receipt(selected_m2m))
@@ -335,8 +358,12 @@ def verify(plan: dict) -> None:
         if command["env"].get(key) != value:
             raise ValueError("frozen Phase 0 numerical model routing changed")
     selected_m2m = command.get("phase0_m2m_selection")
+    from .sealed_generation import CONFIG_ENV
+
     if selected_m2m is None:
-        if any(key in command["env"] for key in ("MERLIN_M2M_DIR", "MERLIN_MODEL2MLIR", "MERLIN_M2M_PYTHON")):
+        if any(
+            key in command["env"] for key in ("MERLIN_M2M_DIR", "MERLIN_MODEL2MLIR", "MERLIN_M2M_PYTHON", CONFIG_ENV)
+        ):
             raise ValueError("unselected Model2MLIR runtime entered frozen Phase 0")
     else:
         from . import m2m_runtime
@@ -344,6 +371,12 @@ def verify(plan: dict) -> None:
         m2m_runtime.verify(selected_m2m)
         if any(command["env"].get(key) != value for key, value in m2m_runtime.environment(selected_m2m).items()):
             raise ValueError("frozen Phase 0 Model2MLIR runtime routing changed")
+        if CONFIG_ENV in command["env"] or command["env"].get("MERLIN_PHASE0_EVIDENCE_MODE") == "verified":
+            expected = json.dumps(
+                m2m_runtime.sealed_capture_config(selected_m2m, Path(plan["phase0_evidence_bundle"])), sort_keys=True
+            )
+            if command["env"].get(CONFIG_ENV) != expected:
+                raise ValueError("frozen Phase 0 sealed Model2MLIR source routing changed; freeze a new run")
         receipt_path = Path(plan["phase0_m2m_runtime_receipt"])
         if receipt_path.read_bytes() != m2m_runtime.receipt(selected_m2m):
             raise ValueError("frozen Phase 0 Model2MLIR runtime receipt changed")

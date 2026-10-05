@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -77,6 +78,26 @@ def test_plan_only_rejects_partial_or_materializing_requests(tmp_path):
         with pytest.raises(ValueError, match="--plan-only records all groups"):
             group_capsules.run_from_args(args)
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_group_audit_refuses_unverified_selected_facts_before_grouping(monkeypatch, tmp_path, explicit):
+    from merlin_experiments.phase0 import declarations
+
+    facts = tmp_path / "facts.json"
+    facts.write_text(json.dumps({"facts": {"target": "gemmini"}, "source_consistency": {"status": "unverified"}}))
+    selected = declarations.for_target("gemmini")
+    monkeypatch.setattr(group_capsules, "_experiment", lambda *_args: (object(), selected))
+    monkeypatch.setattr(group_capsules, "entries", lambda *_args, **_kwargs: pytest.fail("grouped before facts admission"))
+    if not explicit:
+        monkeypatch.setenv("MERLIN_RTL_FACTS", str(facts))
+    with pytest.raises(ValueError, match="verified RTL facts"):
+        group_capsules.main([
+            "--target", "gemmini", "--capture", str(tmp_path / "unused.mlir"),
+            "--out", str(tmp_path / "report"), "--plan-only",
+            *(["--rtl-facts", str(facts)] if explicit else []),
+        ])
+    assert not (tmp_path / "report").exists()
 
 
 @pytest.mark.parametrize("legacy", [False, True])

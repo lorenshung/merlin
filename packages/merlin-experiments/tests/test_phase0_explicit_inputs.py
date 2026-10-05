@@ -174,7 +174,7 @@ def test_generation_forwards_paths_before_numerical_work(inputs, tmp_path, monke
 
     def load(target, **kwargs):
         assert target == "profile-id"
-        assert kwargs == {**inputs, "descriptor": tmp_path / "target.yaml"}
+        assert kwargs == {**inputs, "descriptor": tmp_path / "target.yaml", "diagnostic": False}
         raise InputsReached
 
     monkeypatch.setattr(generation, "load_profile", load)

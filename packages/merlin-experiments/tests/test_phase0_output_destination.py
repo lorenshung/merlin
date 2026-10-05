@@ -140,3 +140,17 @@ def test_missing_selected_registry_is_not_treated_as_empty(tmp_path, monkeypatch
         generation._require_distinct_corpus_destinations(
             SimpleNamespace(capsule_corpus=tmp_path / "source"), output_root=tmp_path / "run", evidence_root=None
         )
+
+
+def test_a_frozen_snapshots_excluded_corpus_is_not_a_protected_source(tmp_path):
+    evidence = tmp_path / "run" / "phase0"
+    snapshot_corpus = evidence / "private" / "source" / "merlin" / "contract" / "capsules" / "isa"
+    frozen_target = SimpleNamespace(capsule_corpus=snapshot_corpus)
+    generation._require_distinct_corpus_destinations(
+        frozen_target, output_root=evidence / "capsules", evidence_root=evidence
+    )
+    snapshot_corpus.mkdir(parents=True)
+    with pytest.raises(ValueError, match="evidence_root .* overlaps source capsule corpus"):
+        generation._require_distinct_corpus_destinations(
+            frozen_target, output_root=evidence / "capsules", evidence_root=evidence
+        )

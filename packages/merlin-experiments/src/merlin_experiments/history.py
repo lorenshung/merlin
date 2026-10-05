@@ -186,11 +186,15 @@ def runs(*, root: Path | None = None, target: str | None = None, experiment: str
             result["problems"].append({"run_dir": str(parent), "error": type(exc).__name__})
             return []
 
+    phase_suites = {"phase0", "phase1", "phase2"}
     for target_dir in directories(base):
         if target is not None and target_dir.name != target:
             continue
         for experiment_dir in directories(target_dir):
-            if experiment is not None and experiment_dir.name != experiment:
+            # A single-phase orchestration lives under its phase (runs/<target>/phase<N>/), named
+            # <TS>_<experiment>_<sha7>; every other one under runs/<target>/<experiment>/.
+            by_phase = experiment_dir.name in phase_suites
+            if experiment is not None and not by_phase and experiment_dir.name != experiment:
                 continue
             for run_dir in directories(experiment_dir):
                 records = [run_dir / "resolved-plan.json", run_dir / "orchestration.json"]
@@ -202,8 +206,15 @@ def runs(*, root: Path | None = None, target: str | None = None, experiment: str
                     if any(not path.is_file() for path in records):
                         raise SpecError("orchestration records must be present regular files")
                     record = status(run_dir)
-                    if record["target"] != target_dir.name or record["experiment"] != experiment_dir.name:
+                    placed = (
+                        f"_{record['experiment']}_" in f"{run_dir.name}_"
+                        if by_phase
+                        else record["experiment"] == experiment_dir.name
+                    )
+                    if record["target"] != target_dir.name or not placed:
                         raise SpecError("record identity differs from its target/experiment directory")
+                    if experiment is not None and record["experiment"] != experiment:
+                        continue
                 except (OSError, SpecError, KeyError, TypeError, ValueError) as exc:
                     result["problems"].append({"run_dir": str(run_dir), "error": str(exc)})
                     continue

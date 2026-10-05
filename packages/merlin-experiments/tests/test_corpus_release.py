@@ -22,8 +22,9 @@ from merlin_experiments.spec import SpecError
 
 
 def test_release_uses_phase0_readiness_without_promoting_phase1(monkeypatch, tmp_path):
-    from merlin.targetgen import target_experiment
     from merlin_experiments.phase0 import coverage_commitment as commitment
+
+    from merlin.targetgen import target_experiment
 
     root = tmp_path / "release"
     private = root / "private"
@@ -31,9 +32,12 @@ def test_release_uses_phase0_readiness_without_promoting_phase1(monkeypatch, tmp
     # Compiler-owned support-lowering remains incomplete in the original
     # certificate. This wiring test supplies a synthetic policy verdict only;
     # real readiness still requires a verified capture issuer.
-    report = {"schema": commitment.SCHEMA, "phase": "phase1", "status": "incomplete", "blockers": [
-        {"component": "support_lowering", "reason": "pending compiler evidence"}
-    ]}
+    report = {
+        "schema": commitment.SCHEMA,
+        "phase": "phase1",
+        "status": "incomplete",
+        "blockers": [{"component": "support_lowering", "reason": "pending compiler evidence"}],
+    }
     coverage = private / "workload-coverage.json"
     coverage.write_text(json.dumps(report))
     coverage.chmod(0o600)
@@ -50,10 +54,12 @@ def test_release_uses_phase0_readiness_without_promoting_phase1(monkeypatch, tmp
     monkeypatch.setattr(commitment, "requires_workload_coverage", lambda *_: True)
     monkeypatch.setattr(commitment, "build_phase0_readiness", lambda observed: readiness if observed == report else {})
     summary = {"required": True, "status": "incomplete", "report_sha256": corpus_release._digest(report)}
-    prepared = {"admission": {
-        "whole_workload_phase1": summary,
-        "phase0_readiness": commitment.phase0_readiness_identity(readiness, required=True),
-    }}
+    prepared = {
+        "admission": {
+            "whole_workload_phase1": summary,
+            "phase0_readiness": commitment.phase0_readiness_identity(readiness, required=True),
+        }
+    }
     assert corpus_release._verify_workload_coverage(root, prepared) == summary
     prepared["admission"]["phase0_readiness"]["report_sha256"] = "0" * 64
     with pytest.raises(SpecError, match="readiness differs"):
@@ -183,6 +189,33 @@ def test_selected_instruction_model_is_private_and_bound_to_release(monkeypatch,
         corpus_release._stage_instruction_model(
             {"phase0_evidence_bundle": str(bundle), "target": "fixture-device"}, tmp_path / "other-private"
         )
+
+
+def test_selected_rtl_facts_come_from_verified_evidence_not_capsules(monkeypatch, tmp_path):
+    from merlin_experiments.phase0 import evidence
+
+    bundle = tmp_path / "phase0"
+    member = bundle / "hardware/effective-views/loaded-facts.json"
+    member.parent.mkdir(parents=True)
+    member.write_text('{"facts":{"target":"fixture-device","selection_marker":"verified"}}')
+    generated = bundle / "capsules"
+    stale = generated / "hardware/effective-views/loaded-facts.json"
+    stale.parent.mkdir(parents=True)
+    stale.write_text('{"facts":{"target":"fixture-device","selection_marker":"stale"}}')
+    verified_bytes = member.read_bytes()
+    monkeypatch.setattr(
+        evidence,
+        "load_exported_evidence",
+        lambda _path: SimpleNamespace(
+            target="fixture-device",
+            archived_artifacts=(("hardware/effective-views/loaded-facts.json", verified_bytes),),
+        ),
+    )
+    plan = {"phase0_evidence_bundle": str(bundle), "target": "fixture-device"}
+    assert corpus_release._selected_rtl_facts(plan, generated) == member
+    member.write_text('{"facts":{"target":"fixture-device","selection_marker":"changed"}}')
+    with pytest.raises(SpecError, match="differ from verified evidence"):
+        corpus_release._selected_rtl_facts(plan, generated)
 
 
 def _member(root: Path, category: str, name: str, label: str) -> None:
@@ -334,6 +367,18 @@ def test_release_derives_admission_from_staged_members(release_fixture, capsys, 
     assert promoted["grading"]["hidden_capability_admission"] == {"source_capsules": 1, "admitted_capsules": 1}
     assert report["counts"]["public_source"] == 2
     assert report["counts"]["hidden_source"] == 1
+
+
+def test_release_rejects_absent_selected_llvm(release_fixture, capsys):
+    (release_fixture["root"] / "third_party/llvm-install").rmdir()
+    assert main(
+        ["run", str(release_fixture["definition"]), "--phase", "0", "--run-dir", str(release_fixture["run"])]
+    ) == 0
+    capsys.readouterr()
+    assert main(["corpus", "prepare", str(release_fixture["run"]), "--output", str(release_fixture["release"])]) == 2
+    failure = json.loads((release_fixture["release"] / "private/failure.json").read_text())
+    assert "selected LLVM/MLIR toolchain is absent" in failure["error"]
+    assert not (release_fixture["release"] / "private/seal.json").exists()
 
 
 def test_generated_only_admission_reports_model_policy_and_private_cohort_gaps(release_fixture, capsys, monkeypatch):
@@ -596,6 +641,59 @@ def test_retired_generated_member_requires_exact_review_and_is_removed_from_copy
     assert "retained_member" not in str(promoted["retired_generated"])
 
 
+def test_reviewed_hand_authored_retirement_is_private_and_release_local(release_fixture, tmp_path):
+    from merlin.targetgen.target_experiment import load_target_experiment
+
+    fixture = release_fixture
+    baseline = fixture["baseline"]
+    manifest = yaml.safe_load((baseline / "MANIFEST.yaml").read_text())
+    manifest["generated"] = ["isa/generated_member"]
+    manifest["hand_authored"] = ["layers/retained_member"]
+    (baseline / "MANIFEST.yaml").write_text(yaml.safe_dump(manifest))
+    generated = tmp_path / "generated"
+    _member(generated, "isa", "generated_member", "public")
+    (generated / "MANIFEST.yaml").write_text(
+        yaml.safe_dump({"generated": ["isa/generated_member"], "held_out": {"n_generated": 0}})
+    )
+    te = load_target_experiment(fixture["root"] / "source-experiment/target_experiment.yaml")
+    review = tmp_path / "retirements.yaml"
+    review.write_text(
+        yaml.safe_dump(
+            {"schema_version": 1, "retired": {"layers/retained_member": "Move claim behind owner-only validation"}}
+        )
+    )
+    destination = tmp_path / "reviewed"
+    receipt = assemble(te, generated, destination, retirements=review)
+    assert not (destination / "layers/retained_member").exists()
+    assert (baseline / "layers/retained_member/capsule.yaml").exists()
+    assert [row["member"] for row in receipt["retirements"]["members"]] == ["layers/retained_member"]
+    promoted = yaml.safe_load((destination / "MANIFEST.yaml").read_text())
+    assert promoted["retired_hand_authored"]["count"] == 1
+    assert "retained_member" not in str(promoted)
+
+
+@pytest.mark.parametrize("member", ["isa/generated_member", "layers/absent_member"])
+def test_hand_authored_retirement_refuses_fresh_or_unknown_member(release_fixture, tmp_path, member):
+    from merlin.targetgen.target_experiment import load_target_experiment
+
+    fixture = release_fixture
+    baseline = fixture["baseline"]
+    manifest = yaml.safe_load((baseline / "MANIFEST.yaml").read_text())
+    manifest["generated"] = ["isa/generated_member"]
+    manifest["hand_authored"] = ["layers/retained_member"]
+    (baseline / "MANIFEST.yaml").write_text(yaml.safe_dump(manifest))
+    generated = tmp_path / "generated"
+    _member(generated, "isa", "generated_member", "public")
+    (generated / "MANIFEST.yaml").write_text(
+        yaml.safe_dump({"generated": ["isa/generated_member"], "held_out": {"n_generated": 0}})
+    )
+    review = tmp_path / "retirements.yaml"
+    review.write_text(yaml.safe_dump({"schema_version": 1, "retired": {member: "Invalid retirement"}}))
+    te = load_target_experiment(fixture["root"] / "source-experiment/target_experiment.yaml")
+    with pytest.raises(SpecError, match="retirement review must account exactly"):
+        assemble(te, generated, tmp_path / "refused", retirements=review)
+
+
 @pytest.mark.parametrize("damage", ["missing_member", "public_generated_alias"])
 def test_external_private_baseline_rejects_incomplete_or_aliased_source(release_fixture, capsys, damage):
     fixture = release_fixture
@@ -657,6 +755,209 @@ def test_prepared_release_carries_generated_manifest_not_live_checkout(release_f
     assert manifest["hand_authored"] == ["layers/retained_member"]
     assert manifest["generated_by"] == "derive.py"
     assert promoted.stat().st_ino != (fixture["baseline"] / "MANIFEST.yaml").stat().st_ino
+
+
+def test_prepared_release_binds_exact_generated_facts_to_rtl_arm(release_fixture, capsys):
+    fixture = release_fixture
+    derivation = fixture["root"] / "derive.py"
+    derivation.write_text(
+        derivation.read_text()
+        + "facts=output/'hardware/effective-views/loaded-facts.json'\n"
+        + "facts.parent.mkdir(parents=True)\n"
+        + "facts.write_text('{\"facts\":{\"target\":\"fixture-device\",\"selection_marker\":\"phase0\"}}')\n"
+    )
+    _prepare(fixture, capsys)
+    experiment = fixture["release"] / "payload/experiment"
+    selected = experiment / "rtl_facts/facts.json"
+    assert json.loads(selected.read_text())["facts"]["selection_marker"] == "phase0"
+    bundle = yaml.safe_load(
+        (experiment / "input_bundles/merlin_assisted_rtlchecks_public_v0/input_bundle_manifest.yaml").read_text()
+    )
+    assert bundle["selected_rtl_facts_file"] == str(selected)
+    assert str(selected.parent) + "/" in {row["path"] for row in bundle["allowed"]}
+    denied = yaml.safe_load(
+        (experiment / "input_bundles/merlin_assisted_public_v0/input_bundle_manifest.yaml").read_text()
+    )
+    assert "selected_rtl_facts_file" not in denied
+
+
+def test_release_hands_selected_capability_view_to_native_phase1(release_fixture, capsys, monkeypatch):
+    from merlin_experiments.phase1 import source_inputs
+    from merlin_experiments.phase1.context import load_context
+    from merlin_experiments.runner import _phase1_source_inputs
+
+    from merlin.targetgen.target_experiment import declared_vs_resolved_contract, load_target_experiment
+    from merlin.targetgen.target_registry import resolve
+
+    monkeypatch.setattr(os, "environ", dict(os.environ))
+    fixture = release_fixture
+    root = fixture["root"]
+    support = root / "support"
+    (support / "contracts").mkdir(parents=True)
+    provider_contract = support / "contracts/target_contract.yaml"
+    provider_contract.write_text("name: fixture-device\nplugin: {backend: provider_backend}\n")
+    monkeypatch.setenv("MERLIN_TARGET_PATH", str(support))
+    monkeypatch.delenv("MERLIN_TARGET_CONTRACT", raising=False)
+    selected = {"name": "fixture-device", "selection_marker": "phase0-effective", "eligibility": {"compute": []}}
+    raw = json.dumps(selected, sort_keys=True, indent=2) + "\n"
+    derivation = root / "derive.py"
+    derivation.write_text(
+        derivation.read_text()
+        + "contract=output/'software/contract.json'\n"
+        + "contract.parent.mkdir(parents=True)\n"
+        + f"contract.write_text({raw!r})\n"
+    )
+    report = _prepare(fixture, capsys)
+    descriptor = Path(report["descriptor"])
+    te = load_target_experiment(descriptor)
+    copied = te.declared_contract_path()
+    assert copied is not None and copied.is_relative_to(descriptor.parent)
+    assert copied.read_text() == raw
+    assert "MERLIN_TARGET_CONTRACT" not in os.environ  # preparation does not leak its selection
+    for manifest in descriptor.parent.glob("input_bundles/*/input_bundle_manifest.yaml"):
+        bundle = yaml.safe_load(manifest.read_text())
+        assert str(copied) in {row["path"] for row in bundle["allowed"]}
+    prepared = json.loads((fixture["release"] / "private/preparation.json").read_text())
+    assert prepared["scaffolding"]["capability_contract"]["sha256"] == fingerprint(copied)
+
+    command = {
+        "env": {"MERLIN_REPO_ROOT": str(root), "MERLIN_TARGET_CONTRACT": str(copied)},
+        "entrypoint": str(root / "installed.py"),
+        "inputs": {"descriptor": str(descriptor)},
+    }
+    frozen = _phase1_source_inputs(command)
+    assert frozen["phase1:startup:target_contract"] == str(copied)
+    assert frozen["phase1:startup:provider:contract"] == str(provider_contract)
+    assert "MERLIN_TARGET_CONTRACT" not in os.environ
+
+    load_context(descriptor, repo=root)
+    assert os.environ["MERLIN_TARGET_CONTRACT"] == str(copied)
+    assert resolve(te.target).load_contract() == selected
+    assert resolve(te.target).plugin()["backend"] == "provider_backend"
+    assert declared_vs_resolved_contract(te) == (copied, copied, "agree")
+    arguments = {"repo": root, "entrypoint": root / "installed.py", "descriptor": descriptor}
+    record = source_inputs.record(**arguments)
+    source_inputs.verify(record, **arguments)
+    monkeypatch.setenv("MERLIN_TARGET_CONTRACT", str(provider_contract))
+    with pytest.raises(ValueError, match="capability contract.*differs"):
+        load_context(descriptor, repo=root)
+    copied.write_text(raw + "\n")
+    monkeypatch.setenv("MERLIN_TARGET_CONTRACT", str(copied))
+    with pytest.raises(SpecError, match="source identity changed"):
+        source_inputs.verify(record, **arguments)
+
+
+def test_selected_capability_view_uses_verified_phase0_export(monkeypatch, tmp_path):
+    from merlin_experiments.phase0 import evidence
+
+    bundle = tmp_path / "phase0"
+    member = bundle / "software/contract.json"
+    member.parent.mkdir(parents=True)
+    member.write_text('{"name":"fixture-device","selection_marker":"verified"}\n')
+    generated = bundle / "capsules"
+    stale = generated / "software/contract.json"
+    stale.parent.mkdir(parents=True)
+    stale.write_text('{"name":"fixture-device","selection_marker":"stale"}\n')
+    raw = member.read_bytes()
+    monkeypatch.setattr(
+        evidence, "load_exported_evidence",
+        lambda _: SimpleNamespace(archived_artifacts=(("software/contract.json", raw),)),
+    )
+    plan = {"phase0_evidence_bundle": str(bundle), "target": "fixture-device"}
+    selected = corpus_release._selected_capability_contract(plan, generated)
+    assert selected == (member, fingerprint(member))
+    member.write_text(stale.read_text())
+    from merlin_experiments.corpus.preparation import copy_input
+
+    with pytest.raises(SpecError, match="differs from verified evidence"):
+        copy_input(selected[0], tmp_path / "staged.yaml", expected_sha256=selected[1])
+    with pytest.raises(SpecError, match="capability contract.*verified evidence"):
+        corpus_release._selected_capability_contract(plan, generated)
+
+
+def test_reviewed_phase1_refuses_missing_or_different_phase0_contract(tmp_path, monkeypatch):
+    from merlin_experiments.phase0 import coverage_commitment
+    from merlin_experiments.phase1.corpus_inputs import require_reviewed_bundle
+
+    from merlin.targetgen.target_experiment import load_target_experiment
+
+    corpus = tmp_path / "corpus/isa"
+    corpus.mkdir(parents=True)
+    descriptor = tmp_path / "experiment/target_experiment.yaml"
+    descriptor.parent.mkdir()
+    descriptor.write_text(yaml.safe_dump({"target": "fixture-device", "capsule_corpus": str(corpus)}))
+    manifest = descriptor.parent / "input_bundles/raw_baseline_public_v0/input_bundle_manifest.yaml"
+    contract = descriptor.parent / "contracts/target_contract.yaml"
+    selected = {"name": "fixture-device", "marker": "phase0"}
+    monkeypatch.setattr(coverage_commitment, "read_inputs", lambda _: {"capability_contract": selected})
+    bundle = {"bundle_id": "raw_baseline_public_v0", "allowed": [{"path": str(contract), "mode": "ro"}]}
+    with pytest.raises(ValueError, match="freeze a new run"):
+        require_reviewed_bundle(load_target_experiment(descriptor), manifest, bundle)
+    contract.parent.mkdir()
+    contract.write_text(yaml.safe_dump({"name": "fixture-device", "marker": "provider"}))
+    document = yaml.safe_load(descriptor.read_bytes())
+    document["hardware_spec"] = {"target_contract": str(contract)}
+    descriptor.write_text(yaml.safe_dump(document))
+    with pytest.raises(ValueError, match="differs from selected Phase 0"):
+        require_reviewed_bundle(load_target_experiment(descriptor), manifest, bundle)
+    contract.write_text(yaml.safe_dump(selected))
+    require_reviewed_bundle(load_target_experiment(descriptor), manifest, bundle)
+    bundle["allowed"] = []
+    with pytest.raises(ValueError, match="read-only"):
+        require_reviewed_bundle(load_target_experiment(descriptor), manifest, bundle)
+
+
+def test_prepared_release_materializes_declared_hardware_links(release_fixture, capsys):
+    fixture = release_fixture
+    root = fixture["root"]
+    derivation = root / "derive.py"
+    derivation.write_text(
+        derivation.read_text()
+        + "facts=output/'hardware/effective-views/loaded-facts.json'\n"
+        + "facts.parent.mkdir(parents=True)\n"
+        + "facts.write_text('{\"facts\":{\"target\":\"fixture-device\"}}')\n"
+    )
+    hardware = root / "public-hardware"
+    hardware.mkdir()
+    external = root / "selected-rtl"
+    (external / "include").mkdir(parents=True)
+    (external / "rtl").mkdir()
+    (external / "include/device.h").write_text("#define DEVICE_DIM 16\n")
+    (external / "rtl/device.scala").write_text("class Device\n")
+    (hardware / "include").symlink_to(external / "include", target_is_directory=True)
+    (hardware / "rtl").symlink_to(external / "rtl", target_is_directory=True)
+    descriptor = root / "source-experiment/target_experiment.yaml"
+    source_doc = yaml.safe_load(descriptor.read_text())
+    source_doc["hardware_spec"] = {
+        "hwbringup_set": "public-hardware",
+        "isa_headers": ["public-hardware/include/device.h"],
+    }
+    descriptor.write_text(yaml.safe_dump(source_doc))
+
+    report = _prepare(fixture, capsys)
+    staged = fixture["release"] / "payload/experiment/hardware_spec/hwbringup"
+    assert (staged / "include/device.h").read_text() == "#define DEVICE_DIM 16\n"
+    assert (staged / "rtl/device.scala").read_text() == "class Device\n"
+    assert not any(member.is_symlink() for member in staged.rglob("*"))
+    promoted = yaml.safe_load((fixture["release"] / "payload/experiment/target_experiment.yaml").read_text())
+    assert promoted["hardware_spec"]["hwbringup_set"] == str(staged)
+    assert promoted["hardware_spec"]["isa_headers"] == [str(staged / "include/device.h")]
+    preparation = json.loads((fixture["release"] / "private/preparation.json").read_text())
+    links = preparation["scaffolding"]["hardware_spec/hwbringup"]["materialized_links"]
+    assert [row["path"] for row in links] == ["include", "rtl"]
+    bundle = yaml.safe_load(
+        (
+            fixture["release"]
+            / "payload/experiment/input_bundles/merlin_assisted_rtlchecks_public_v0/input_bundle_manifest.yaml"
+        ).read_text()
+    )
+    assert str(staged) in {row["path"] for row in bundle["allowed"]}
+    assert bundle["selected_rtl_facts_file"] == str(
+        fixture["release"] / "payload/experiment/rtl_facts/facts.json"
+    )
+    sealed = _seal(fixture, report, capsys)
+    definition = _phase1_definition(fixture, sealed)
+    assert main(["preflight", str(definition), "--phase", "1"]) == 0
 
 
 def test_legacy_selected_synthesis_can_prepare_but_cannot_seal(release_fixture, capsys, monkeypatch):
@@ -845,13 +1146,17 @@ def test_example_style_phase1_selects_release_and_bundle_without_editing_definit
     assert plan["phases"]["1"]["inputs"]["descriptor"] == sealed["descriptor"]
     assert plan["phases"]["1"]["inputs"]["corpus_seal"] == sealed["seal"]
     assert plan["phases"]["1"]["requires_reviewed_corpus"] is True
+    assert main(["preflight", *args]) == 2
+    assert "selected release's generated bundle manifest" in capsys.readouterr().out
+    args[-1] = str(retained_bundle)
     assert main(["preflight", *args]) == 0
     assert json.loads(capsys.readouterr().out)["configuration_ready"] is True
     unsafe = yaml.safe_load(selected_bundle.read_text())
     unsafe["allowed"].append({"path": "merlin/contract/", "mode": "ro"})
     selected_bundle.write_text(yaml.safe_dump(unsafe))
+    args[-1] = str(selected_bundle)
     assert main(["preflight", *args]) == 2
-    assert "still grants the historical in-tree capsule corpus" in capsys.readouterr().out
+    assert "selected release's generated bundle manifest" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("task_only", [False, True])
@@ -1334,3 +1639,95 @@ def test_missing_private_snapshot_cannot_fall_back_to_live_review(release_fixtur
     with pytest.raises(RuntimeError, match="snapshot"):
         corpus_release.verify_snapshot(Path(sealed["seal"]), descriptor, ws, bundle, repo=fixture["root"])
     BW.remove_bundle_snapshot(ws)
+
+
+def test_default_release_root_carries_the_target_axis(tmp_path, monkeypatch):
+    import pytest
+    from merlin_experiments.corpus.release import default_release_root
+    from merlin_experiments.spec import SpecError
+
+    monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "out"))
+    root = default_release_root("alpha", timestamp="20260929T000000Z", sha="abc1234")
+    assert root == tmp_path / "out/artifacts/protocols/alpha/phase0-20260929T000000Z-abc1234"
+    with pytest.raises(SpecError):
+        default_release_root("../escape")
+
+
+def test_a_derived_resource_policy_names_only_the_generated_admitted_models(release_fixture, capsys, monkeypatch):
+    """The model policy is computed from the staged corpus, so it cannot name a model the corpus lacks."""
+    from merlin.targetgen import eligibility
+
+    fixture = release_fixture
+    generated_member = fixture["baseline"] / "isa/generated_member/capsule.yaml"
+    model = yaml.safe_load(generated_member.read_text())
+    model["kind"] = "model"
+    generated_member.write_text(yaml.safe_dump(model))
+    descriptor = fixture["root"] / "source-experiment/target_experiment.yaml"
+    authored = yaml.safe_load(descriptor.read_text())
+    authored["grading"] = {
+        "release_admission": "derive_from_corpus_v1",
+        "resource_bound": {"policy": "fixture_review", "derive": "phase0_qualified_models_v1"},
+    }
+    descriptor.write_text(yaml.safe_dump(authored))
+    monkeypatch.setattr(eligibility, "capability_map_for_target", lambda _target: {"fixture": object()})
+
+    report = _prepare(fixture, capsys)
+    promoted = yaml.safe_load(Path(report["descriptor"]).read_text())
+    bound = promoted["grading"]["resource_bound"]
+    assert bound == {"policy": "fixture_review", "required_admitted_models": ["generated_member"]}
+    corpus_models = {
+        yaml.safe_load(path.read_text())["name"]
+        for path in Path(promoted["capsule_corpus"]).parent.rglob("capsule.yaml")
+        if yaml.safe_load(path.read_text()).get("kind") == "model"
+    }
+    assert set(bound["required_admitted_models"]) <= corpus_models
+
+
+def test_a_derived_policy_refuses_hand_maintained_names_and_an_unqualified_integer_model(tmp_path):
+    from merlin_experiments.corpus import preparation
+    from merlin_experiments.spec import SpecError
+
+    corpus = tmp_path / "corpus"
+    for category, name, extra in (
+        ("model", "SY_qualified", {"model_qualification": {"status": "qualified"}}),
+        ("model", "SY_unqualified", {"integer_partial_sum_bound": {"status": "unknown"}}),
+        ("model", "M_retained", {}),
+    ):
+        directory = corpus / category / name
+        directory.mkdir(parents=True)
+        (directory / "capsule.yaml").write_text(
+            yaml.safe_dump({"name": name, "kind": "model", "label": "public", **extra})
+        )
+    (corpus / "MANIFEST.yaml").write_text(yaml.safe_dump({"generated": ["model/SY_qualified", "model/SY_unqualified"]}))
+    import merlin.targetgen.capsule_runner as capsule_runner
+
+    def discover(root, labels=None):
+        out = []
+        for path in sorted(Path(root).rglob("capsule.yaml")):
+            cap = yaml.safe_load(path.read_text())
+            cap["__dir__"] = str(path.parent)
+            out.append(cap)
+        return out
+
+    original = capsule_runner.discover_capsules
+    capsule_runner.discover_capsules = discover
+    try:
+        derived = preparation.derive_resource_bound(corpus)
+    finally:
+        capsule_runner.discover_capsules = original
+    assert derived["required_admitted_models"] == ["SY_qualified"]
+    assert derived["exclude_capsules"] == ["M_retained", "SY_unqualified"]
+    with pytest.raises(SpecError):
+        empty = tmp_path / "empty"
+        (empty / "model").mkdir(parents=True)
+        (empty / "MANIFEST.yaml").write_text("generated: []\n")
+        preparation.derive_resource_bound(empty)
+
+
+def test_the_gemmini_descriptor_derives_its_model_policy():
+    from merlin.common.paths import repo_root
+
+    descriptor = yaml.safe_load((repo_root() / "examples/gemmini/target/descriptor.yaml").read_text())
+    bound = descriptor["grading"]["resource_bound"]
+    assert bound["derive"] == "phase0_qualified_models_v1"
+    assert "required_admitted_models" not in bound and "exclude_capsules" not in bound

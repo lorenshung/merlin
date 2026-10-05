@@ -21,6 +21,24 @@ from merlin_experiments.spec import SpecError
 from merlin.common.paths import data_path
 
 
+def test_phase0_evidence_observes_selected_capture_interpreter(monkeypatch):
+    selected = Path("/selected/capture/bin/python")
+    observed = {}
+
+    def capture(target, **kwargs):
+        observed.update(target=target, **kwargs)
+        return object()
+
+    monkeypatch.setattr(freeze, "select_evidence", capture)
+    command = {
+        "inputs": {"descriptor": "target.yaml"},
+        "phase0_m2m_selection": {"python": str(selected)},
+    }
+    freeze.selection(command, "fixture")
+    assert observed["target"] == "fixture"
+    assert observed["capture_python"] == str(selected)
+
+
 def test_frozen_phase0_launch_uses_only_selected_environment(monkeypatch):
     monkeypatch.setenv("MERLIN_M2M_PYTHON", "/unselected/python")
     monkeypatch.setenv("MERLIN_MODEL2MLIR", "/unselected/source")
@@ -57,11 +75,12 @@ def _fixture(tmp_path, model_selector):
     spec.loader.exec_module(helper)
     fixture = helper.build_phase0_handoff(tmp_path)
     installed = fixture["installed"]
-    # Actual distributions own these package resources beside Python modules.
+    # Match actual wheel layout, not checkout-only resource siblings. The
+    # frozen launch must resolve these from the copied package, never live code.
     for resource in ("schemas", "contract"):
         shutil.copytree(
             data_path(resource),
-            installed / "merlin" / resource,
+            installed / "merlin/_data" / resource,
             dirs_exist_ok=True,
             ignore=shutil.ignore_patterns("capsules", "__pycache__"),
         )
@@ -318,6 +337,9 @@ def test_selected_m2m_runtime_is_explicit_and_rechecked_without_original_source(
     source = tmp_path / "model2mlir"
     (source / "m2m").mkdir(parents=True)
     (source / "m2m/__init__.py").write_text("# selected package\n")
+    cache = source / "m2m/__pycache__"
+    cache.mkdir()
+    (cache / "__init__.cpython-312.pyc").write_bytes(b"transient bytecode")
     (source / "workloads" / "small_model").mkdir(parents=True)
     (source / "workloads" / "small_model" / "loader.py").write_text("# selected model loader\n")
     synth = tmp_path / "synthesis.yaml"
@@ -340,7 +362,13 @@ def test_selected_m2m_runtime_is_explicit_and_rechecked_without_original_source(
     assert "m2m/capture/trace.py" in selected["frontend_trace_api"]["missing"]
     assert selected["static_integer_reference_api"]["status"] == "incompatible"
     assert "m2m/capture/pt2e_integerize.py" in selected["static_integer_reference_api"]["missing"]
+    (cache / "other.cpython-312.pyc").write_bytes(b"later transient bytecode")
+    assert m2m_runtime.observe(source, venv / "bin/python", synth_profile=synth)["package"] == selected["package"]
     frozen = m2m_runtime.stage(selected, tmp_path / "run/m2m-source")
+    from merlin_experiments.capture_execution.sealed_m2m import _source_tree
+
+    assert frozen["frozen_package"] == _source_tree(Path(frozen["frozen_root"]) / "m2m")
+    assert not (Path(frozen["frozen_root"]) / "m2m/__pycache__").exists()
     shutil.rmtree(source)
     m2m_runtime.verify(frozen)
     assert (Path(frozen["frozen_root"]) / "workloads/small_model/loader.py").is_file()
@@ -349,9 +377,16 @@ def test_selected_m2m_runtime_is_explicit_and_rechecked_without_original_source(
     (venv / "site-module.py").write_text("VERSION = 2\n")
     with pytest.raises(ValueError, match="host runtime changed"):
         m2m_runtime.verify(frozen)
+    (venv / "site-module.py").write_text("VERSION = 1\n")
+    frozen_package = Path(frozen["frozen_root"]) / "m2m"
+    frozen_package.chmod(frozen_package.stat().st_mode | 0o200)
+    (frozen_package / "__pycache__").mkdir()
+    with pytest.raises(ValueError, match="source package changed"):
+        m2m_runtime.verify(frozen)
 
 
-def test_installed_phase0_freezes_selected_m2m_routing_and_resumes(tmp_path, monkeypatch):
+@pytest.mark.parametrize("sealed", [False, True])
+def test_installed_phase0_freezes_selected_m2m_routing_and_resumes(tmp_path, monkeypatch, sealed):
     fixture = _fixture(tmp_path, "path")
     source = tmp_path / "selected-m2m"
     (source / "m2m").mkdir(parents=True)
@@ -370,14 +405,24 @@ def test_installed_phase0_freezes_selected_m2m_routing_and_resumes(tmp_path, mon
     fixture["definition"].write_text(yaml.safe_dump(document))
     driver = tmp_path / "run-selected.py"
     driver.write_text(
-        "import os\n"
+        "import json, os\n"
         "from pathlib import Path\n"
         "from merlin_experiments.runner import resolve_plan, run\n"
         "from merlin_experiments.spec import load_spec\n"
-        "raise SystemExit(run(resolve_plan(load_spec(os.environ['DEFINITION']), phase='0', "
-        "run_dir=Path(os.environ['RUN_DIR']))))\n"
+        "plan = resolve_plan(load_spec(os.environ['DEFINITION']), phase='0', run_dir=Path(os.environ['RUN_DIR']))\n"
+        "if os.environ['SELECT_SEALED'] == '1':\n"
+        "    selected = plan['phases']['0']['phase0_m2m_selection']\n"
+        "    root = Path(plan['run_dir']) / 'phase0/private'\n"
+        "    config = {'m2m_root': selected['root'], 'package': selected['package'], "
+        "'venv': str(Path(selected['python']).parent.parent), 'runs_root': str(root / 'sealed-captures'), "
+        "'tmp_root': str(root / 'tmp')}\n"
+        "    plan['phases']['0']['env']['MERLIN_PHASE0_SEALED_CAPTURE'] = json.dumps(config, sort_keys=True)\n"
+        "raise SystemExit(run(plan))\n"
     )
-    environment = dict(fixture["environment"], DEFINITION=str(fixture["definition"]), RUN_DIR=str(fixture["run"]))
+    environment = dict(
+        fixture["environment"], DEFINITION=str(fixture["definition"]), RUN_DIR=str(fixture["run"]),
+        SELECT_SEALED="1" if sealed else "0",
+    )
     result = subprocess.run(
         [sys.executable, "-P", str(driver)],
         cwd=fixture["workspace"],
@@ -393,8 +438,26 @@ def test_installed_phase0_freezes_selected_m2m_routing_and_resumes(tmp_path, mon
     assert Path(selected["frozen_root"]).is_relative_to(fixture["run"])
     assert plan["phases"]["0"]["env"]["MERLIN_M2M_DIR"] == selected["frozen_root"]
     assert selected["phase0_admission"] == "not_granted"
+    if sealed:
+        config = json.loads(plan["phases"]["0"]["env"]["MERLIN_PHASE0_SEALED_CAPTURE"])
+        assert config["m2m_root"] == selected["frozen_root"]
+        assert config["package"] == selected["frozen_package"]
     shutil.rmtree(source)
     freeze.verify(plan)
+    if sealed:
+        import tempfile
+
+        from merlin_experiments.phase0.sealed_generation import SealedCaptureSource
+
+        monkeypatch.setattr(tempfile, "tempdir", tempfile.tempdir)
+        adapter = SealedCaptureSource(config)
+        assert adapter.available()
+        assert adapter.m2m_dir == Path(selected["frozen_root"])
+        changed = copy.deepcopy(plan)
+        config["m2m_root"] = str(source)
+        changed["phases"]["0"]["env"]["MERLIN_PHASE0_SEALED_CAPTURE"] = json.dumps(config, sort_keys=True)
+        with pytest.raises(ValueError, match="sealed Model2MLIR.*routing"):
+            freeze.verify(changed)
     from merlin_experiments.runner import resume
 
     monkeypatch.setenv("MERLIN_OUT_ROOT", plan["storage_root"])

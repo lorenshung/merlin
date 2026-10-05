@@ -51,6 +51,9 @@ def build_phase0_handoff(tmp_path, *, copy_sources=True):
         shutil.copyfile(data_path("contract", "corpora.yaml"), registry)
     workspace = tmp_path / "external-workspace"
     workspace.mkdir()
+    # Admission only stages the toolchain grant. This synthetic fixture never
+    # invokes a compiler or claims that the empty installation can compile.
+    (workspace / "third_party/llvm-install").mkdir(parents=True)
     support = workspace / "explicit-target-resources"
     for resource in ("rtl_facts", "irdl"):
         directory = support / "contracts" / resource

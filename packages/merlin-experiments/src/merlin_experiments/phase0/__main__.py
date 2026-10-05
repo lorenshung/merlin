@@ -58,6 +58,13 @@ def main(argv=None) -> int:
         "the descriptor's source corpus is never an implicit output",
     )
     ap.add_argument(
+        "--prohibited-instruction-role",
+        action="append",
+        default=[],
+        dest="prohibited_instruction_roles",
+        help="declared instruction role no candidate program may emit; resolved against the target's facts",
+    )
+    ap.add_argument(
         "--comparison-manifest",
         action="store_true",
         help="also emit the cross-target op-comparison manifest under out/artifacts/compare/",
@@ -122,6 +129,8 @@ def main(argv=None) -> int:
                 if getattr(a, name) is not None
             }
         )
+        if a.prohibited_instruction_roles:
+            options["prohibited_instruction_roles"] = list(a.prohibited_instruction_roles)
         written = generate_target(t, **options)
         print(f"{t}: wrote {len(written)} capsules -> {written[0].parent.parent if written else '(none)'}")
     if a.comparison_manifest or not a.target:

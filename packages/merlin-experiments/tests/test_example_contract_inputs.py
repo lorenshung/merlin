@@ -8,7 +8,6 @@ from merlin_experiments.runner import _phase1_operator_inputs, _verify_inputs, f
 from merlin_experiments.spec import SpecError
 
 from merlin.common.paths import repo_root
-from merlin.targetgen.generate_bundles import generate_bundles
 from merlin.targetgen.target_experiment import load_target_experiment
 
 
@@ -27,14 +26,13 @@ def test_example_contract_siblings_are_frozen(tmp_path, target, changed):
     original = load_target_experiment(repo_root() / f"examples/{target}/target/descriptor.yaml")
     contract = original.hwbringup_set
     shutil.copytree(repo_root() / contract, tmp_path / contract)
-    generated = next(iter(generate_bundles(original).values()))
     bundle = tmp_path / "bundle/input_bundle_manifest.yaml"
     bundle.parent.mkdir()
     bundle.write_text(
         yaml.safe_dump(
             {
                 "bundle_id": "example",
-                "allowed": [entry for entry in generated["allowed"] if entry["path"] == contract],
+                "allowed": [{"path": contract}],
             }
         )
     )
@@ -99,5 +97,40 @@ def test_operator_inventory_pins_selected_curated_harness(tmp_path, monkeypatch)
     plan = {"phases": {}, "inputs": {"harness": {"path": path, "sha256": fingerprint(selected)}}}
     _verify_inputs(plan)
     header.write_text("/* changed */\n")
+    with pytest.raises(SpecError, match="frozen input changed"):
+        _verify_inputs(plan)
+
+
+def test_operator_inventory_freezes_only_consumed_contract_schemas(tmp_path):
+    schemas = tmp_path / "merlin/contract/schemas"
+    schemas.mkdir(parents=True)
+    (schemas / "capsule.schema.json").write_text("{}\n")
+    unrelated = tmp_path / "merlin/contract/capsules"
+    unrelated.mkdir()
+    (unrelated / "conformance").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+    descriptor = tmp_path / "descriptor.yaml"
+    descriptor.write_text("target: device\n")
+    manifest = tmp_path / "bundle/input_bundle_manifest.yaml"
+    manifest.parent.mkdir()
+    manifest.write_text("bundle_id: fixture\n")
+    inventory = _phase1_operator_inputs(
+        {
+            "env": {"MERLIN_REPO_ROOT": str(tmp_path)},
+            "argv": ["--bundle", "fixture"],
+            "inputs": {
+                "descriptor": str(descriptor),
+                "bundle_manifest": str(manifest),
+                "oracle_timing": str(tmp_path / "timing.json"),
+            },
+        }
+    )
+    assert inventory["phase1:operator:contract_schemas"] == str(schemas)
+    assert "phase1:operator:contract" not in inventory
+    plan = {
+        "phases": {},
+        "inputs": {"schemas": {"path": str(schemas), "sha256": fingerprint(schemas)}},
+    }
+    _verify_inputs(plan)
+    (schemas / "capsule.schema.json").write_text('{"changed": true}\n')
     with pytest.raises(SpecError, match="frozen input changed"):
         _verify_inputs(plan)
