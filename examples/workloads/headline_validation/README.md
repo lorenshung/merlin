@@ -96,6 +96,7 @@ running a compiler, or adding validation shapes to the Phase 0 corpus:
 ```sh
 merlin experiment corpus groups \
   --target "$TARGET" --definition "$DEFINITION" \
+  --rtl-facts "$FACTS" \
   --capture "$CAPTURE/model.mlir" \
   --manifest "$CAPTURE/weights.safetensors.manifest.json" \
   --model "$MODEL" --out "$REPORT" --plan-only
@@ -104,9 +105,18 @@ merlin experiment corpus groups \
 Inspect `group_capsules.json`: `accelerator_groups` is the routed denominator;
 `stated` and `unstated` say whether those groups can be expressed in the shared
 capsule vocabulary; `entries` names each distinct program and its source groups.
+Also inspect `routing_summary`: `host_groups`, `elements_on_host`,
+`growth_stopped_by`, `host_by_gap_class`, `readout_underived`, and
+`device_groups_requiring_input_format_change` show work that
+the group count alone conceals. A stated group is a possible target program,
+not evidence that its source operations were legally transformed, emitted, or
+executed on the device; zero unstated groups does not establish complete offload.
 `inputs` records SHA-256 of the capture, manifest, experiment definition,
 selected software spec, capability contract, OOT provider contract and RTL facts actually
-read, while `missing_input_receipts` exposes any
+read. The command refuses absent or source-unverified facts before routing any groups;
+`--rtl-facts` pins the same selected artifact used for Phase 0. This checks the
+artifact's recorded source-consistency status, not independent source qualification.
+`missing_input_receipts` exposes any
 selection that could not be byte-bound. `materialization: not_requested` means
 none of these entries has yet been built or graded. A complete plan is neither
 capsule conformance nor whole-model numerical validation. Omit `--plan-only` to
@@ -192,10 +202,11 @@ probe and numerical receipt live under the local `out/artifacts/probes/` tree.
 The SmolVLA `flow_denoise` gate-projection window also matched scalar arithmetic
 on Spike and Verilator, but its captured body is BF16 and the Gemmini probe
 projects it to synthetic i8. It is a source-identified geometry check, not a
-numerical check of SmolVLA's captured dtype or operands. The selected
-Merlin capture worker currently refuses a full int8 SmolVLA session until
-its shared-weight precision policy is explicit; the separate one-step int8
-diagnostic cannot fill that session gap.
+numerical check of SmolVLA's captured dtype or operands. A full int8 session
+needs one consistent shared-weight quantization policy across all three
+programs, plus a fresh complete session receipt. The separate one-step int8
+diagnostic cannot fill that gap; the existence of a deferred shared-weight
+capture path in model2MLIR does not itself qualify the session.
 
 The earlier TinyLlama lowering proof covers captured prefill and recurrent
 decode programs, not compiled host or accelerator numerical execution. The

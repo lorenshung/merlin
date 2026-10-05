@@ -2,8 +2,9 @@
 
 The selection is created before its run directory exists and is supplied again
 by exact digest to issuance and derivation. A reproducible sandbox replay binds
-these selected bytes to a capture, but this v1 selection is not a verified
-Phase 0 execution issuer or a claim that the target compiler ran the model.
+these selected bytes to a capture. Selection and replay alone grant no Phase 0
+admission; the separate, policy-restricted sealed-M2M attestation may qualify a
+fresh verified replay. Neither establishes that the target compiler ran the model.
 """
 
 from __future__ import annotations
@@ -39,7 +40,9 @@ def _libraries(plan: dict) -> list[dict[str, Any]]:
 
 def _selected_bytes(plan: dict, run_dir: Path, bwrap: Path) -> dict:
     output = run_dir / "capture"
-    command = sealed_m2m._command_v2(output, dtype=plan["dtype"], recipe=plan.get("recipe") is not None)
+    command = sealed_m2m._command_v2(
+        output, dtype=plan["dtype"], recipe=plan.get("recipe") is not None, options=plan.get("worker_options")
+    )
     return {
         "schema": SCHEMA,
         "status": "preselected_before_capture",
@@ -50,7 +53,7 @@ def _selected_bytes(plan: dict, run_dir: Path, bwrap: Path) -> dict:
         "system_libraries": _libraries(plan),
         "bwrap": {"path": str(bwrap), "sha256": _file_digest(bwrap)},
         "issuer_source_sha256": _file_digest(Path(sealed_m2m.__file__)),
-        "sandbox_policy_sha256": sealed_m2m._policy(command, output),
+        "sandbox_policy_sha256": sealed_m2m._policy(command, output, replayable_logs=True),
         "phase0_admission": "not_granted",
     }
 
@@ -68,6 +71,7 @@ def select(
     recipe: Path | None = None,
     checkpoint: Path | None = None,
     bwrap_binary: Path | None = None,
+    worker_options: dict | None = None,
 ) -> dict:
     """Write one owner-only selection before any capture output exists.
 
@@ -93,10 +97,12 @@ def select(
         schemas_root=schemas_root,
         dtype=dtype,
         recipe=recipe,
+        worker_options=worker_options,
     )
-    selected_inputs = [Path(plan[name]) for name in (
-        "m2m_root", "workload_root", "worker", "merlin_root", "schemas_root", "venv", "base"
-    )]
+    selected_inputs = [
+        Path(plan[name])
+        for name in ("m2m_root", "workload_root", "worker", "merlin_root", "schemas_root", "venv", "base")
+    ]
     if plan.get("recipe"):
         selected_inputs.append(Path(plan["recipe"]["path"]))
     if any(
@@ -168,6 +174,7 @@ def issue(path: Path, *, expected_sha256: str) -> Path:
         dtype=plan["dtype"],
         recipe=Path(plan["recipe"]["path"]) if plan.get("recipe") else None,
         max_snapshot_bytes=plan["max_snapshot_bytes"],
+        worker_options=plan.get("worker_options"),
     )
     bwrap = _bwrap_binary(Path(selected["bwrap"]["path"]))
     if current != plan or _selected_bytes(current, run, bwrap) != selected:
@@ -175,7 +182,10 @@ def issue(path: Path, *, expected_sha256: str) -> Path:
     if _digest(Path(path).read_bytes()) != expected_sha256:
         raise ValueError("capture selection changed before execution")
     receipt = sealed_m2m.issue(
-        plan, run, bwrap_binary=bwrap, capture_selection_sha256=expected_sha256,
+        plan,
+        run,
+        bwrap_binary=bwrap,
+        capture_selection_sha256=expected_sha256,
         selected_system_libraries=selected["system_libraries"],
         selected_bwrap_sha256=selected["bwrap"]["sha256"],
     )
@@ -187,8 +197,9 @@ def issue(path: Path, *, expected_sha256: str) -> Path:
 def verify(path: Path, *, expected_sha256: str, model_path: Path) -> dict:
     """Read-only independent binding of selected bytes to a fresh replay.
 
-    The returned record intentionally remains nonadmissible: no verified issuer
-    or Phase 0 release authority is granted by this v1 evidence alone.
+    The returned record intentionally remains nonadmissible. The separately
+    issued sealed-M2M attestation checks these bytes again before granting
+    source-closure admission under its explicit operator policy.
     """
     selected = load(path, expected_sha256=expected_sha256)
     run = _canonical_path(Path(selected["run_dir"]), exists=True)

@@ -18,6 +18,7 @@ from merlin_experiments.phase0.writer import _integer_reference_bound, _source_i
 from merlin.targetgen import capsule_source as source
 from merlin.targetgen.capsule_common import load_capsule
 from merlin.targetgen.corpus_spec import CorpusBinding, build
+from merlin.targetgen.golden_store import load_golden
 
 
 def _bundle(root):
@@ -115,12 +116,13 @@ def test_source_capsule_reuse_is_offline_exact_and_fail_closed(tmp_path, monkeyp
     receipt = json.loads((result / "frontend-evidence.json").read_text())
     assert receipt["raw_source_mlir_sha256"] == application["capture_sha256"]
     assert receipt["source_mlir_sha256"] == hashlib.sha256((result / receipt["source_mlir"]).read_bytes()).hexdigest()
-    assert receipt["packaged_mlir_sha256"] == hashlib.sha256(
-        (result / receipt["packaged_mlir"]).read_bytes()
-    ).hexdigest()
-    assert receipt["interface_mlir_sha256"] == hashlib.sha256(
-        (result / receipt["interface_mlir"]).read_bytes()
-    ).hexdigest()
+    assert (
+        receipt["packaged_mlir_sha256"] == hashlib.sha256((result / receipt["packaged_mlir"]).read_bytes()).hexdigest()
+    )
+    assert (
+        receipt["interface_mlir_sha256"]
+        == hashlib.sha256((result / receipt["interface_mlir"]).read_bytes()).hexdigest()
+    )
     assert receipt["source_portability"]["kind"] == "weights_reference_relocation"
     assert receipt["source_portability"]["edit_count"] == 1
     assert 'prov.weights_file = "capsule.weights.safetensors"' in (result / "frontend-source.mlir").read_text()
@@ -147,7 +149,7 @@ def test_source_capsule_reuse_is_offline_exact_and_fail_closed(tmp_path, monkeyp
         _scrub_capsule_dir(result)
     evidence_path.write_bytes(original_evidence)
     _scrub_capsule_dir(result)  # idempotent after restoring the exact evidence-bearing bytes
-    assert yaml.safe_load((result / "golden.yaml").read_text())["outputs"] == {"Y0": [1.0, 2.0]}
+    assert load_golden(result)["outputs"] == {"Y0": [1.0, 2.0]}
     with pytest.raises(source.M2MUnavailable, match="held-out validation"):
         source.materialized_model_artifacts({**selected["materialized_capture"], "workload_role": "validation"})
     source_receipt = saved / "materialized/iteration/capture_receipt.json"
@@ -166,6 +168,36 @@ def test_source_capsule_reuse_is_offline_exact_and_fail_closed(tmp_path, monkeyp
     selected_model = saved / "materialized/iteration/model.mlir"
     selected_model.write_text(selected_model.read_text() + "\n")
     with pytest.raises(source.M2MUnavailable, match="receipt"):
+        source.materialized_model_artifacts(selected["materialized_capture"])
+
+
+def test_preselected_loader_is_copied_into_a_gradeable_source_capsule(tmp_path):
+    application = _bundle(tmp_path / "original")
+    snapshot = tmp_path / "snapshot" / "loader.py"
+    snapshot.parent.mkdir()
+    snapshot.write_text("def load_model():\n    return None\n")
+    loader_sha256 = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+    entries, outputs = _materialized_iteration_capsules(
+        {"applications": {"iteration": application}},
+        "0" * 64,
+        loader_snapshots={"iteration": (snapshot, loader_sha256)},
+    )
+    assert outputs["materialized/iteration/loader.py"] == snapshot.read_bytes()
+    saved = tmp_path / "installed"
+    _materialize_evidence(saved, outputs)
+    selected = entries[0]
+    selected["materialized_capture"]["path"] = str(saved / selected["materialized_capture"]["path"])
+    selected["materialized_capture"]["loader_path"] = str(
+        saved / selected["materialized_capture"]["loader_path"]
+    )
+    binding = CorpusBinding("fixture", 2, "f32", "f32", False, ["L0"], "tolerance_float", atol=1e-5, rtol=1e-5)
+    result = _write_capsule(selected, binding, tmp_path / "corpus")
+    capsule = yaml.safe_load((result / "capsule.yaml").read_text())
+    assert capsule["pytorch_ref"]["loader"] == "capsule.pytorch.py"
+    assert (result / "capsule.pytorch.py").read_bytes() == snapshot.read_bytes()
+    materialized_loader = saved / "materialized/iteration/loader.py"
+    materialized_loader.write_text("def load_model():\n    raise RuntimeError('changed')\n")
+    with pytest.raises(source.M2MUnavailable, match="loader differs"):
         source.materialized_model_artifacts(selected["materialized_capture"])
 
 
@@ -318,8 +350,14 @@ def test_fused_integer_matmul_bias_cannot_bypass_internal_width_bound():
     }
     binding = CorpusBinding("fixture", 16, "int8", "i32", True, ["L0"], "exact_int")
     entry = {
-        "name": "fused", "kind": "layer", "source_role": "derived_sweep", "source_reference": "fixture",
-        "op": "fused_matmul_bias", "M": 16, "K": 64, "N": 16,
+        "name": "fused",
+        "kind": "layer",
+        "source_role": "derived_sweep",
+        "source_reference": "fixture",
+        "op": "fused_matmul_bias",
+        "M": 16,
+        "K": 64,
+        "N": 16,
     }
     capsule, _ = build(entry, binding)
     capsule["stimulus_range"] = [127, 127]
@@ -344,8 +382,13 @@ def test_resident_reuse_bounds_each_integer_matmul(monkeypatch):
     }
     binding = CorpusBinding("fixture", 16, "int8", "i32", True, ["L0"], "exact_int")
     entry = {
-        "name": "reuse", "kind": "layer", "source_role": "derived_sweep", "source_reference": "fixture",
-        "op": "resident_reuse", "K": 64, "N": 16,
+        "name": "reuse",
+        "kind": "layer",
+        "source_role": "derived_sweep",
+        "source_reference": "fixture",
+        "op": "resident_reuse",
+        "K": 64,
+        "N": 16,
         "matmuls": [{"lhs": "A0", "out": "Y0", "M": 16}, {"lhs": "A1", "out": "Y1", "M": 16}],
     }
     capsule, _ = build(entry, binding)
@@ -362,7 +405,8 @@ def test_resident_reuse_bounds_each_integer_matmul(monkeypatch):
     assert proof["status"] == "proven_safe"
     assert proof["bound"] == 64 * 127
     assert [(member["lhs"], member["partial_sum_bound"]["reduction_extent"]) for member in proof["members"]] == [
-        ("A0", 64), ("A1", 64),
+        ("A0", 64),
+        ("A1", 64),
     ]
     capsule["operation"]["attributes"]["matmuls"][1]["lhs"] = "missing"
     with pytest.raises(ValueError, match="requires concrete lhs"):
@@ -380,9 +424,18 @@ def test_host_island_bounds_both_concrete_integer_contractions(role, transform):
     }
     binding = CorpusBinding("fixture", 16, "int8", "i32", True, ["L0"], "exact_int")
     entry = {
-        "name": "seam", "kind": "model_slice", "source_role": "derived_sweep", "source_reference": "fixture",
-        "op": "host_island_seam", "M": 1, "K": 1, "H": 16, "N": 1,
-        "comparison_role": role, "host_transform": transform, "xor_mask": 1,
+        "name": "seam",
+        "kind": "model_slice",
+        "source_role": "derived_sweep",
+        "source_reference": "fixture",
+        "op": "host_island_seam",
+        "M": 1,
+        "K": 1,
+        "H": 16,
+        "N": 1,
+        "comparison_role": role,
+        "host_transform": transform,
+        "xor_mask": 1,
     }
     capsule, _ = build(entry, binding)
     capsule["stimulus_range"] = [127, 127]
@@ -423,14 +476,23 @@ def _exact_source_integer_member(root, *, reduction_extent):
     }
     binding = CorpusBinding("fixture", 16, "int8", "i32", True, ["L0"], "exact_int")
     entry = {
-        "name": "source_mm", "cat": "isa", "kind": "isa", "source_role": "model_derived",
-        "source_reference": "selected integer operation", "source": "pytorch", "capture_op": "int_matmul",
-        "op": "matmul", "M": 1, "K": reduction_extent, "N": 1,
+        "name": "source_mm",
+        "cat": "isa",
+        "kind": "isa",
+        "source_role": "model_derived",
+        "source_reference": "selected integer operation",
+        "source": "pytorch",
+        "capture_op": "int_matmul",
+        "op": "matmul",
+        "M": 1,
+        "K": reduction_extent,
+        "N": 1,
         "numerical_semantics": semantics,
     }
     capsule, _ = build(entry, binding)
     capsule["application_signature_match"] = {
-        "status": "verified_capture_match", "source_quantization": "int8_dyn_act_int8_weight",
+        "status": "verified_capture_match",
+        "source_quantization": "int8_dyn_act_int8_weight",
     }
     root.mkdir()
     (root / "capsule.yaml").write_text(yaml.safe_dump(capsule))
@@ -440,12 +502,16 @@ def _exact_source_integer_member(root, *, reduction_extent):
         "oracle_provenance": {
             "inputs": {
                 "A0": {
-                    "shape": [1, reduction_extent], "dtype": "i8",
-                    "decoded": values, "integer_bytes_hex": bytes(values).hex(),
+                    "shape": [1, reduction_extent],
+                    "dtype": "i8",
+                    "decoded": values,
+                    "integer_bytes_hex": bytes(values).hex(),
                 },
                 "W": {
-                    "shape": [reduction_extent, 1], "dtype": "i8",
-                    "decoded": values, "integer_bytes_hex": bytes(values).hex(),
+                    "shape": [reduction_extent, 1],
+                    "dtype": "i8",
+                    "decoded": values,
+                    "integer_bytes_hex": bytes(values).hex(),
                 },
             }
         },
@@ -466,7 +532,7 @@ def test_source_integer_bound_uses_captured_bytes_and_stamps_both_artifacts(tmp_
     monkeypatch.setattr(writer, "_write_capsule_inner", lambda *_: directory)
     _write_capsule(entry, binding, tmp_path)
     saved_cap = yaml.safe_load((directory / "capsule.yaml").read_text())
-    saved_golden = yaml.safe_load((directory / "golden.yaml").read_text())
+    saved_golden = load_golden(directory)
     assert saved_cap["integer_partial_sum_bound"] == saved_golden["integer_partial_sum_bound"] == proof
     assert saved_golden["golden_source"] == "host_torch_eager"
     assert saved_golden["outputs"] == golden["outputs"]
@@ -481,7 +547,8 @@ def test_source_integer_bound_refuses_overflow_and_incomplete_capture(tmp_path):
     with pytest.raises(ValueError, match="verified isolated i8 matmul"):
         _source_integer_reference_bound(entry, capsule, safe)
     capsule["application_signature_match"] = {
-        "status": "verified_capture_match", "source_quantization": "int8_dyn_act_int8_weight",
+        "status": "verified_capture_match",
+        "source_quantization": "int8_dyn_act_int8_weight",
     }
     with pytest.raises(ValueError, match="verified isolated i8 matmul"):
         _source_integer_reference_bound({**entry, "kind": "model"}, capsule, safe)
@@ -529,12 +596,13 @@ def test_spec_integer_bound_uses_exact_program_operands_and_refuses_incomplete_p
     assert bound["maximum_absolute_operands"] == [127, 127]
     assert bound["maximum_absolute_initial_addend"] == 0
     assert [member["operand_stream"] for member in bound["members"]] == [
-        "spec_program", "capsule_materialized",
+        "spec_program",
+        "capsule_materialized",
     ]
     monkeypatch.setattr(writer, "_write_capsule_inner", lambda *_: safe)
     _write_capsule(entry, binding, tmp_path)
     assert yaml.safe_load((safe / "capsule.yaml").read_text())["integer_partial_sum_bound"] == bound
-    assert yaml.safe_load((safe / "golden.yaml").read_text())["integer_partial_sum_bound"] == bound
+    assert load_golden(safe)["integer_partial_sum_bound"] == bound
 
     golden["golden_source"] = "specir_program_other"
     (safe / "golden.yaml").write_text(yaml.safe_dump(golden))
@@ -596,9 +664,14 @@ def test_scope_chain_bounds_its_embedded_integer_contraction():
     }
     binding = CorpusBinding("fixture", 4, "int8", "i32", True, ["L0"], "exact_int")
     entry = {
-        "name": "selected_scope", "kind": "model_slice", "source_role": "derived_sweep",
-        "source_reference": "selected requirement", "op": "scope_chain",
-        "M": 4, "K": 8, "N": 4,
+        "name": "selected_scope",
+        "kind": "model_slice",
+        "source_role": "derived_sweep",
+        "source_reference": "selected requirement",
+        "op": "scope_chain",
+        "M": 4,
+        "K": 8,
+        "N": 4,
         "scope_families": ["movement", "contraction", "elementwise_map"],
     }
     capsule, _ = build(entry, binding)
@@ -750,11 +823,11 @@ def test_selected_host_axes_do_not_resolve_an_ambient_contract(tmp_path, monkeyp
     )
     (member / "capsule.interface.mlir").write_text(
         'module attributes {prov.level = "linalg-on-tensors"} { '
-        'func.func @forward(%a: tensor<4x4xf32>, %b: tensor<4x4xf32>) -> tensor<4x4xf32> { '
-        '%0 = tensor.empty() : tensor<4x4xf32> '
-        '%1 = linalg.matmul ins(%a, %b : tensor<4x4xf32>, tensor<4x4xf32>) '
-        'outs(%0 : tensor<4x4xf32>) -> tensor<4x4xf32> '
-        'return %1 : tensor<4x4xf32> } }'
+        "func.func @forward(%a: tensor<4x4xf32>, %b: tensor<4x4xf32>) -> tensor<4x4xf32> { "
+        "%0 = tensor.empty() : tensor<4x4xf32> "
+        "%1 = linalg.matmul ins(%a, %b : tensor<4x4xf32>, tensor<4x4xf32>) "
+        "outs(%0 : tensor<4x4xf32>) -> tensor<4x4xf32> "
+        "return %1 : tensor<4x4xf32> } }"
     )
     contract = {"name": "fixture", "compute_units": []}
     raw_contract = (json.dumps(contract, sort_keys=True, indent=2) + "\n").encode()

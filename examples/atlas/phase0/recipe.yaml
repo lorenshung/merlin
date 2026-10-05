@@ -2,6 +2,9 @@
 # selected facts, software spec and independent iteration captures.
 software_spec: ../target/software-spec.yaml
 capsule_policy: derived_only
+# Stable measurement policy for the performance cohort (the target's own program oracle route:
+# the npu_model functional model at L2, the elaborated-RTL Verilator simulator at L3).
+performance_oracles: {L2: npu_model, L3: verilator}
 datapath:
   semantic_defaults: {must_accelerate: true}
   compare: tolerance_float

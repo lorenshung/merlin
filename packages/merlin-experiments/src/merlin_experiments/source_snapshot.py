@@ -39,13 +39,20 @@ def provider_environment(root: Path, receipt: dict) -> dict[str, str]:
     """Authoritative source selection, decoded without consulting the live registry."""
     _require_current(receipt)
     provider = receipt.get("selected_provider")
+
+    def resource(name: str) -> Path:
+        # Checkout resources and wheel resources have different owners. Both
+        # must resolve inside this verified snapshot, never a live installation.
+        legacy, bundled = root / "merlin" / name, root / "merlin/_data" / name
+        return legacy if legacy.is_dir() or not bundled.is_dir() else bundled
+
     return {
         "MERLIN_TARGET_PATH": str(root / provider["root"]) if provider and provider["kind"] == "external" else "",
         "MERLIN_TARGET_CONTRACT": "",
         "MERLIN_RTL_FACTS": "",
         "MERLIN_TARGETS_DIR": str(root / "merlin/targets"),
-        "MERLIN_CONTRACT_DIR": str(root / "merlin/contract"),
-        "MERLIN_SCHEMAS_DIR": str(root / "merlin/schemas"),
+        "MERLIN_CONTRACT_DIR": str(resource("contract")),
+        "MERLIN_SCHEMAS_DIR": str(resource("schemas")),
     }
 
 

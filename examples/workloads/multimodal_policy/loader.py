@@ -28,4 +28,13 @@ def get_model_and_inputs():
     image = torch.arange(192, dtype=torch.float32).reshape(1, 3, 8, 8) / 192
     tokens = torch.arange(4, dtype=torch.int64).reshape(1, 4)
     state = torch.linspace(-1, 1, 4).reshape(1, 4)
-    return MultimodalPolicy().eval(), (image, tokens, state)
+    model = MultimodalPolicy().eval()
+    with torch.no_grad():
+        for ordinal, module in enumerate(model.modules()):
+            if isinstance(module, (torch.nn.Linear, torch.nn.Conv2d, torch.nn.Embedding)):
+                for field, parameter in enumerate(module.parameters(recurse=False)):
+                    values = torch.arange(parameter.numel(), dtype=torch.int64).reshape(parameter.shape)
+                    parameter.copy_(
+                        (((values * 37 + ordinal * 101 + field * 53) % 251) - 125).to(parameter.dtype) / 512
+                    )
+    return model, (image, tokens, state)

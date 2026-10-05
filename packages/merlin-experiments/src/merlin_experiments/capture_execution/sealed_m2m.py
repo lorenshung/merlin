@@ -48,19 +48,63 @@ _LAUNCH_SUFFIX = (
 
 
 def _command(output_mount: Path) -> tuple[str, ...]:
-    return ("/opt/capture-venv/bin/python", "-I", "-S", "-B", "-c",
-            _LAUNCH_PREFIX + repr(str(output_mount)) + _LAUNCH_SUFFIX)
+    return (
+        "/opt/capture-venv/bin/python",
+        "-I",
+        "-S",
+        "-B",
+        "-c",
+        _LAUNCH_PREFIX + repr(str(output_mount)) + _LAUNCH_SUFFIX,
+    )
 
 
-def _command_v2(output_mount: Path, *, dtype: str, recipe: bool) -> tuple[str, ...]:
-    if (dtype, recipe) not in {("fp32", False), ("int8", True)}:
+#: The worker's float tokens. A float capture selects no recipe; an int8 capture must select one.
+_FLOAT_DTYPES = frozenset({"fp32", "f32"})
+
+
+def _worker_options(options: Any) -> dict[str, Any]:
+    """Validate the worker options a plan may select; nothing outside this vocabulary is accepted."""
+    if options is None:
+        return {}
+    if not isinstance(options, dict) or set(options) - {"agreement_tolerance"}:
+        raise SealedM2MError("sealed capture worker options support only an agreement tolerance")
+    tolerance = options.get("agreement_tolerance")
+    if tolerance is not None and (
+        not isinstance(tolerance, list)
+        or len(tolerance) != 2
+        or any(isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 for value in tolerance)
+        or any(value != value or value in (float("inf"),) for value in tolerance)
+    ):
+        raise SealedM2MError("sealed capture agreement tolerance must be two finite nonnegative numbers")
+    return {key: value for key, value in options.items() if value is not None}
+
+
+def _command_v2(
+    output_mount: Path, *, dtype: str, recipe: bool, options: dict[str, Any] | None = None
+) -> tuple[str, ...]:
+    if not ((dtype in _FLOAT_DTYPES and not recipe) or (dtype == "int8" and recipe)):
         raise SealedM2MError("CPU capture requires fp32 without a recipe or int8 with a selected recipe")
+    options = _worker_options(options)
     worker = "/source/merlin-src/merlin/targetgen/_m2m_capture_worker.py"
-    argv = [worker, "--m2m-dir", "/source/m2m-src", "--loader",
-            "/source/workload/loader.py", "--dtype", dtype, "--seed", "0",
-            "--materialize-bundle", "--out", str(output_mount)]
+    argv = [
+        worker,
+        "--m2m-dir",
+        "/source/m2m-src",
+        "--loader",
+        "/source/workload/loader.py",
+        "--dtype",
+        dtype,
+        "--seed",
+        "0",
+        "--materialize-bundle",
+        "--out",
+        str(output_mount),
+    ]
     if recipe:
         argv += ["--recipe", "/source/inputs/quant_recipe.json"]
+    if options.get("agreement_tolerance") is not None:
+        atol, rtol = options["agreement_tolerance"]
+        argv += ["--agreement-atol", repr(float(atol)), "--agreement-rtol", repr(float(rtol))]
     program = (
         "import runpy,sys;"
         "sys.path[:0]=['/source/m2m-src','/source/merlin-src',"
@@ -73,7 +117,7 @@ def _command_v2(output_mount: Path, *, dtype: str, recipe: bool) -> tuple[str, .
 
 
 def _recipe_selection(path: Path | None, *, dtype: str) -> dict[str, Any] | None:
-    if dtype == "fp32":
+    if dtype in _FLOAT_DTYPES:
         if path is not None:
             raise SealedM2MError("fp32 capture must not select a quantization recipe")
         return None
@@ -85,6 +129,7 @@ def _recipe_selection(path: Path | None, *, dtype: str) -> dict[str, Any] | None
     try:
         recipe = json.loads(path.read_bytes())
         from merlin.targetgen.quant_recipe import digest as recipe_digest
+
         valid = (
             isinstance(recipe, dict)
             and recipe.get("schema") == "quant_recipe_v1"
@@ -98,35 +143,117 @@ def _recipe_selection(path: Path | None, *, dtype: str) -> dict[str, Any] | None
         raise SealedM2MError("selected int8 recipe is unreadable or malformed") from exc
     if not valid:
         raise SealedM2MError("selected int8 recipe lacks a derived static W8A8 integer-reference contract")
-    return {"path": str(path), "bytes": path.stat().st_size,
-            "sha256": _file_digest(path), "recipe_sha256": recipe["recipe_sha256"]}
+    return {
+        "path": str(path),
+        "bytes": path.stat().st_size,
+        "sha256": _file_digest(path),
+        "recipe_sha256": recipe["recipe_sha256"],
+    }
 
 
-def _policy(command: tuple[str, ...], output_mount: Path) -> str:
-    return _digest(_json({"flags": _FLAGS, "guest_env": {"USER": "capture", "LOGNAME": "capture",
-                                                     "XDG_CACHE_HOME": str(output_mount / "cache")},
-                          "command": command, "output_mount": str(output_mount),
-                          "mounts": ["guest-root:ro", "source:ro", "capture:rw", "tmp:tmpfs", "dev:private"],
-                          "timeout_seconds": _TIMEOUT_SECONDS}))
+# Framework C++ warnings carry wall-clock timestamps (for example the NNPACK initialization
+# warning emitted when the sandbox hides /proc/cpuinfo), so a run that prints one can never replay
+# its own stderr bytes. Preselected runs raise the framework's C++ log floor to errors; the
+# variable is part of the recorded sandbox policy. Unselected historical receipts keep their policy.
+_REPLAYABLE_LOG_ENV = (("TORCH_CPP_LOG_LEVEL", "ERROR"),)
 
 
-def _execute(bwrap: Path, runtime: Path, source: Path, output: Path,
-             command: tuple[str, ...], output_mount: Path) -> dict[str, Any]:
-    argv = [str(bwrap), *_FLAGS, "--setenv", "USER", "capture", "--setenv", "LOGNAME", "capture",
-            "--setenv", "XDG_CACHE_HOME", str(output_mount / "cache"),
-            "--ro-bind", str(runtime), "/", "--ro-bind", str(source), "/source",
-            "--bind", str(output), str(output_mount), "--tmpfs", "/tmp", "--dev", "/dev", "--", *command]
+def _guest_env(output_mount: Path, *, replayable_logs: bool) -> dict[str, str]:
+    env = {"USER": "capture", "LOGNAME": "capture", "XDG_CACHE_HOME": str(output_mount / "cache")}
+    if replayable_logs:
+        env.update(_REPLAYABLE_LOG_ENV)
+    return env
+
+
+def _policy(command: tuple[str, ...], output_mount: Path, *, replayable_logs: bool = False) -> str:
+    return _digest(
+        _json(
+            {
+                "flags": _FLAGS,
+                "guest_env": _guest_env(output_mount, replayable_logs=replayable_logs),
+                "command": command,
+                "output_mount": str(output_mount),
+                "mounts": ["guest-root:ro", "source:ro", "capture:rw", "tmp:tmpfs", "dev:private"],
+                "timeout_seconds": _TIMEOUT_SECONDS,
+            }
+        )
+    )
+
+
+def _execute(
+    bwrap: Path,
+    runtime: Path,
+    source: Path,
+    output: Path,
+    command: tuple[str, ...],
+    output_mount: Path,
+    *,
+    replayable_logs: bool = False,
+) -> dict[str, Any]:
+    setenv = [
+        item
+        for name, value in _guest_env(output_mount, replayable_logs=replayable_logs).items()
+        for item in ("--setenv", name, value)
+    ]
+    argv = [
+        str(bwrap),
+        *_FLAGS,
+        *setenv,
+        "--ro-bind",
+        str(runtime),
+        "/",
+        "--ro-bind",
+        str(source),
+        "/source",
+        "--bind",
+        str(output),
+        str(output_mount),
+        "--tmpfs",
+        "/tmp",
+        "--dev",
+        "/dev",
+        "--",
+        *command,
+    ]
     try:
-        result = subprocess.run(argv, env={}, cwd="/", stdin=subprocess.DEVNULL,
-                                capture_output=True, timeout=_TIMEOUT_SECONDS)
+        result = subprocess.run(
+            argv, env={}, cwd="/", stdin=subprocess.DEVNULL, capture_output=True, timeout=_TIMEOUT_SECONDS
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise SealedM2MError(f"sandbox execution failed: {type(exc).__name__}") from exc
     if result.returncode:
-        raise SealedM2MError(f"sandboxed M2M exited {result.returncode}: "
-                             f"{result.stderr.decode('utf-8', errors='replace')[-8000:]}")
-    return {"returncode": 0,
-            "stdout": {"bytes": len(result.stdout), "sha256": _digest(result.stdout)},
-            "stderr": {"bytes": len(result.stderr), "sha256": _digest(result.stderr)}}
+        raise SealedM2MError(
+            f"sandboxed M2M exited {result.returncode}: {result.stderr.decode('utf-8', errors='replace')[-8000:]}"
+        )
+    return {
+        "returncode": 0,
+        "stdout": {"bytes": len(result.stdout), "sha256": _digest(result.stdout)},
+        "stderr": {"bytes": len(result.stderr), "sha256": _digest(result.stderr)},
+    }
+
+
+def _probe_sandbox(bwrap: Path) -> None:
+    """Fail before copying a large runtime if this host cannot create the required namespaces.
+
+    The probe runs only the host's ``true`` under the same namespace flags. It is
+    readiness evidence, not an attested capture and not a weaker execution policy.
+    The real capture still runs with its selected, private guest-root mounts.
+    """
+    argv = [
+        str(bwrap),
+        *_FLAGS,
+        "--ro-bind", "/", "/",
+        "--tmpfs", "/tmp",
+        "--dev", "/dev",
+        "--", "/bin/true",
+    ]
+    try:
+        result = subprocess.run(argv, env={}, cwd="/", stdin=subprocess.DEVNULL, capture_output=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SealedM2MError(f"sealed M2M sandbox unavailable before snapshot: {type(exc).__name__}") from exc
+    if result.returncode:
+        detail = result.stderr.decode("utf-8", errors="replace")[-1000:]
+        raise SealedM2MError(f"sealed M2M sandbox unavailable before snapshot: {detail}")
 
 
 class SealedM2MError(ValueError):
@@ -139,34 +266,41 @@ def _capture_api_missing(m2m_root: Path) -> tuple[str, ...]:
     This is only a compatibility gate. The fresh sandbox execution and replay,
     not source signatures, establish whether a selected implementation works.
     """
-    return _source_api_missing(m2m_root, {
-        "m2m/api.py": {
-            "convert": {"backend", "quantization", "quantization_preapplied", "level", "func_name", "weights_path"}
+    return _source_api_missing(
+        m2m_root,
+        {
+            "m2m/api.py": {
+                "convert": {"backend", "quantization", "quantization_preapplied", "level", "func_name", "weights_path"}
+            },
+            "m2m/capture/bundle.py": {"write_bundle": {"source_path", "capture_trace", "conversion_result"}},
+            "m2m/capture/provenance.py": {"write_capture_receipt": {"source_path"}},
         },
-        "m2m/capture/bundle.py": {
-            "write_bundle": {"source_path", "capture_trace", "conversion_result"}
-        },
-        "m2m/capture/provenance.py": {"write_capture_receipt": {"source_path"}},
-    })
+    )
 
 
 def _frontend_trace_api_missing(m2m_root: Path) -> tuple[str, ...]:
     """Report the exact optional APIs needed for frontend-op and precision evidence."""
-    return _source_api_missing(m2m_root, {
-        "m2m/api.py": {"convert": {"capture_trace", "original_frontend_snapshot"}},
-        "m2m/capture/trace.py": {
-            "capture_frontend_snapshot": {"stage"},
-            "materialize_frontend_precision": {"dtype", "original_frontend_snapshot"},
+    return _source_api_missing(
+        m2m_root,
+        {
+            "m2m/api.py": {"convert": {"capture_trace", "original_frontend_snapshot"}},
+            "m2m/capture/trace.py": {
+                "capture_frontend_snapshot": {"stage"},
+                "materialize_frontend_precision": {"dtype", "original_frontend_snapshot"},
+            },
         },
-    })
+    )
 
 
 def _static_integer_reference_api_missing(m2m_root: Path) -> tuple[str, ...]:
     """Report APIs needed before a static W8A8 capture can claim integer arithmetic."""
-    return _source_api_missing(m2m_root, {
-        "m2m/capture/pt2e_integerize.py": {"integerize_pt2e": set()},
-        "m2m/capture/pt2e_integer_reference.py": {"run_pt2e_integer_reference": set()},
-    })
+    return _source_api_missing(
+        m2m_root,
+        {
+            "m2m/capture/pt2e_integerize.py": {"integerize_pt2e": set()},
+            "m2m/capture/pt2e_integer_reference.py": {"run_pt2e_integer_reference": set()},
+        },
+    )
 
 
 def _source_api_missing(m2m_root: Path, required: dict[str, dict[str, set[str]]]) -> tuple[str, ...]:
@@ -194,10 +328,11 @@ def _source_api_missing(m2m_root: Path, required: dict[str, dict[str, set[str]]]
     return tuple(missing)
 
 
-def _source_tree(root: Path, *, skip_lib64: bool = False) -> dict[str, Any]:
+def _source_tree(root: Path, *, skip_lib64: bool = False, skip_python_cache: bool = False) -> dict[str, Any]:
     """Digest normalized file bytes, names and modes without retaining a huge manifest.
 
-    Only the venv's known directory alias is skipped.  File symlinks are
+    The selected Python package may exclude validated transient bytecode caches;
+    the venv may skip its known directory alias. File symlinks are
     dereferenced by copytree and thus by this inventory; outside targets are
     permitted only for the three CPython executable aliases, whose selected
     base interpreter is independently snapshotted.
@@ -209,6 +344,15 @@ def _source_tree(root: Path, *, skip_lib64: bool = False) -> dict[str, Any]:
     for current, directories, files in os.walk(root, followlinks=False):
         here = Path(current)
         relative = here.relative_to(root).as_posix()
+        if skip_python_cache:
+            cache = here / "__pycache__"
+            if "__pycache__" in directories:
+                if cache.is_symlink() or any(
+                    not member.is_file() or member.is_symlink() or member.suffix not in {".pyc", ".pyo"}
+                    for member in cache.iterdir()
+                ):
+                    raise SealedM2MError(f"selected Python cache has an unsupported member: {cache}")
+            directories[:] = [name for name in directories if name != "__pycache__"]
         if relative == "." and skip_lib64:
             if (here / "lib64").is_symlink() and (here / "lib64").resolve() == (here / "lib").resolve():
                 directories.remove("lib64")
@@ -217,8 +361,18 @@ def _source_tree(root: Path, *, skip_lib64: bool = False) -> dict[str, Any]:
         for name in directories:
             if (here / name).is_symlink():
                 raise SealedM2MError(f"directory link is outside the supported snapshot policy: {here / name}")
-        records.append((relative, *sorted({"kind": "directory", "mode": stat.S_IMODE(here.stat().st_mode),
-                                            "members": sorted([*directories, *files])}.items())))
+        records.append(
+            (
+                relative,
+                *sorted(
+                    {
+                        "kind": "directory",
+                        "mode": stat.S_IMODE(here.stat().st_mode),
+                        "members": sorted([*directories, *files]),
+                    }.items()
+                ),
+            )
+        )
         for name in sorted(files):
             path = here / name
             member = path.relative_to(root).as_posix()
@@ -226,16 +380,27 @@ def _source_tree(root: Path, *, skip_lib64: bool = False) -> dict[str, Any]:
                 resolved = path.resolve(strict=True)
                 if not resolved.is_file():
                     raise SealedM2MError(f"non-file link in source: {member}")
-                if not resolved.is_relative_to(root) and not (skip_lib64 and member in {
-                    "bin/python", "bin/python3", "bin/python3.12"
-                }):
+                if not resolved.is_relative_to(root) and not (
+                    skip_lib64 and member in {"bin/python", "bin/python3", "bin/python3.12"}
+                ):
                     raise SealedM2MError(f"external source link: {member}")
             if not path.is_file():
                 raise SealedM2MError(f"non-regular source member: {member}")
             info = path.stat()
             total += info.st_size
-            records.append((member, *sorted({"kind": "file", "mode": stat.S_IMODE(info.st_mode),
-                                            "bytes": info.st_size, "sha256": _file_digest(path)}.items())))
+            records.append(
+                (
+                    member,
+                    *sorted(
+                        {
+                            "kind": "file",
+                            "mode": stat.S_IMODE(info.st_mode),
+                            "bytes": info.st_size,
+                            "sha256": _file_digest(path),
+                        }.items()
+                    ),
+                )
+            )
     return {"members": len(records), "bytes": total, "sha256": _digest(_json(sorted(records)))}
 
 
@@ -254,8 +419,11 @@ def _venv_home(venv: Path) -> Path:
     cfg = venv / "pyvenv.cfg"
     if not cfg.is_file():
         raise SealedM2MError("selected interpreter has no pyvenv.cfg")
-    homes = [line.partition("=")[2].strip() for line in cfg.read_text().splitlines()
-             if line.partition("=")[0].strip() == "home"]
+    homes = [
+        line.partition("=")[2].strip()
+        for line in cfg.read_text().splitlines()
+        if line.partition("=")[0].strip() == "home"
+    ]
     if len(homes) != 1 or not Path(homes[0]).is_absolute() or ".." in Path(homes[0]).parts:
         raise SealedM2MError("unsupported venv home")
     base = Path(homes[0]).parent
@@ -281,8 +449,13 @@ def _ldd_library_path(line: str) -> Path | None:
 def _system_libs(interpreter: Path, torch_so: Path, numpy_so: Path) -> tuple[Path, ...]:
     external: set[Path] = set()
     for binary in (interpreter, torch_so, numpy_so):
-        result = subprocess.run(["/usr/bin/ldd", str(binary)], capture_output=True, text=True,
-                                env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"}, timeout=30)
+        result = subprocess.run(
+            ["/usr/bin/ldd", str(binary)],
+            capture_output=True,
+            text=True,
+            env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+            timeout=30,
+        )
         if result.returncode or "not found" in result.stdout:
             raise SealedM2MError(f"ELF dependencies unavailable for {binary.name}")
         for line in result.stdout.splitlines():
@@ -294,10 +467,20 @@ def _system_libs(interpreter: Path, torch_so: Path, numpy_so: Path) -> tuple[Pat
     return tuple(sorted(external))
 
 
-def prepare_plan(*, m2m_root: Path, workload_root: Path, worker: Path,
-                 venv: Path, schemas_root: Path, dtype: str = "fp32", recipe: Path | None = None,
-                 max_snapshot_bytes: int = _MAX_SNAPSHOT_BYTES) -> dict[str, Any]:
+def prepare_plan(
+    *,
+    m2m_root: Path,
+    workload_root: Path,
+    worker: Path,
+    venv: Path,
+    schemas_root: Path,
+    dtype: str = "fp32",
+    recipe: Path | None = None,
+    max_snapshot_bytes: int = _MAX_SNAPSHOT_BYTES,
+    worker_options: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Read-only selection and space bound; no capture or admission claim."""
+    options = _worker_options(worker_options)
     if type(max_snapshot_bytes) is not int or not 0 < max_snapshot_bytes <= _MAX_SNAPSHOT_BYTES:
         raise SealedM2MError("snapshot cap must be a positive bound no larger than 15 GB")
     m2m_root = _canonical_path(m2m_root, exists=True)
@@ -312,8 +495,7 @@ def prepare_plan(*, m2m_root: Path, workload_root: Path, worker: Path,
     if schemas_root not in {merlin_root / "_data/schemas", merlin_root.parent.parent / "merlin/schemas"}:
         raise SealedM2MError("selected schemas must belong to the selected Merlin package or source checkout")
     if not schemas_root.is_dir() or any(
-        not (schemas_root / name).is_file()
-        for name in ("quant_formats.registry.yaml", "quant_format.schema.yaml")
+        not (schemas_root / name).is_file() for name in ("quant_formats.registry.yaml", "quant_format.schema.yaml")
     ):
         raise SealedM2MError("selected Merlin schema tree lacks the quant-format registry and validator")
     if not (m2m_root / "m2m/api.py").is_file() or not (workload_root / "loader.py").is_file():
@@ -321,17 +503,23 @@ def prepare_plan(*, m2m_root: Path, workload_root: Path, worker: Path,
     missing_api = _capture_api_missing(m2m_root)
     if missing_api:
         raise SealedM2MError(
-            "selected Model2MLIR lacks same-conversion materialization/receipt API: "
-            + ", ".join(missing_api)
+            "selected Model2MLIR lacks same-conversion materialization/receipt API: " + ", ".join(missing_api)
         )
     if _loader_env_reads((workload_root / "loader.py").read_text()):
         raise SealedM2MError("this first sealed policy rejects environment-reading loaders")
     if not worker.is_file() or worker.suffix != ".py":
         raise SealedM2MError("worker must be a selected Python source file")
-    selected = subprocess.run(["git", "rev-parse", "HEAD"], cwd=m2m_root,
-                              capture_output=True, text=True, timeout=5, check=True).stdout.strip()
-    dirty = subprocess.run(["git", "status", "--porcelain", "--", "m2m"], cwd=m2m_root,
-                           capture_output=True, text=True, timeout=5, check=True).stdout
+    selected = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=m2m_root, capture_output=True, text=True, timeout=5, check=True
+    ).stdout.strip()
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain", "--", "m2m"],
+        cwd=m2m_root,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=True,
+    ).stdout
     if dirty or len(selected) != 40:
         raise SealedM2MError("selected M2M package must have a clean pinned commit")
     base = _venv_home(venv)
@@ -350,7 +538,10 @@ def prepare_plan(*, m2m_root: Path, workload_root: Path, worker: Path,
     selected_trees = {
         "venv": _source_tree(venv, skip_lib64=True),
         "base": _source_tree(base.resolve()),
-        "m2m": _source_tree(m2m_root / "m2m"),
+        # The guest receives only the selected package source (see _stage_source),
+        # never these transient caches. -B prevents guest bytecode writes; it does
+        # not by itself disable reading existing bytecode.
+        "m2m": _source_tree(m2m_root / "m2m", skip_python_cache=True),
         "workload": _source_tree(workload_root),
         "merlin": _source_tree(merlin_root),
         "schemas": _source_tree(schemas_root),
@@ -362,18 +553,32 @@ def prepare_plan(*, m2m_root: Path, workload_root: Path, worker: Path,
     if estimate > max_snapshot_bytes or estimate > shutil.disk_usage(venv).free:
         raise SealedM2MError(f"normalized snapshot bytes {estimate} exceed selected cap or free space")
     return {
-        "schema": SCHEMA, "status": "plan_only", "m2m_root": str(m2m_root),
-        "m2m_commit": selected, "workload_root": str(workload_root),
-        "worker": str(worker), "merlin_root": str(merlin_root), "schemas_root": str(schemas_root),
-        "venv": str(venv), "base": str(base), "dtype": dtype, "recipe": selected_recipe,
+        "schema": SCHEMA,
+        "status": "plan_only",
+        "m2m_root": str(m2m_root),
+        "m2m_commit": selected,
+        "workload_root": str(workload_root),
+        "worker": str(worker),
+        "merlin_root": str(merlin_root),
+        "schemas_root": str(schemas_root),
+        "venv": str(venv),
+        "base": str(base),
+        "dtype": dtype,
+        "recipe": selected_recipe,
         "worker_sha256": _file_digest(worker),
         "loader_sha256": _file_digest(workload_root / "loader.py"),
-        "system_libs": [str(path) for path in libs], "estimate_bytes": estimate,
+        "system_libs": [str(path) for path in libs],
+        "estimate_bytes": estimate,
         "selected_trees": selected_trees,
         "max_snapshot_bytes": max_snapshot_bytes,
-        "command_template_sha256": _digest(_command_v2(Path("/capture-out"), dtype=dtype,
-                                                       recipe=selected_recipe is not None)[-1].encode()),
+        "command_template_sha256": _digest(
+            _command_v2(Path("/capture-out"), dtype=dtype, recipe=selected_recipe is not None, options=options)[
+                -1
+            ].encode()
+        ),
         "scope": "one selected CPU capture; no env-reading loader or unselected checkpoint",
+        # Present only when selected, so a plan without options keeps its historical bytes.
+        **({"worker_options": options} if options else {}),
     }
 
 
@@ -385,8 +590,9 @@ def _validate_snapshots(source: Path, runtime: Path, output_mount: Path, *, sche
     executable = runtime / "opt/capture-venv/bin/python"
     if executable.is_symlink() or not executable.is_file() or executable.read_bytes()[:4] != b"\x7fELF":
         raise SealedM2MError("snapshotted interpreter is not a direct ELF")
-    worker = (source / "worker.py" if schema == SCHEMA_V1 else
-              source / "merlin-src/merlin/targetgen/_m2m_capture_worker.py")
+    worker = (
+        source / "worker.py" if schema == SCHEMA_V1 else source / "merlin-src/merlin/targetgen/_m2m_capture_worker.py"
+    )
     if not worker.is_file() or not (source / "workload/loader.py").is_file():
         raise SealedM2MError("selected source entrypoints are absent")
     if schema == SCHEMA and any(
@@ -399,8 +605,9 @@ def _validate_snapshots(source: Path, runtime: Path, output_mount: Path, *, sche
         raise SealedM2MError("host-resolvable guest output mount point is not empty")
 
 
-def _materialized(output: Path, source: Path, output_mount: Path,
-                  *, worker_member: str = "worker.py") -> dict[str, Any]:
+def _materialized(
+    output: Path, source: Path, output_mount: Path, *, worker_member: str = "worker.py"
+) -> dict[str, Any]:
     from merlin.targetgen.application_inventory import verify_capture_receipt
 
     result = verify_capture_receipt(output / "model.mlir")
@@ -414,10 +621,12 @@ def _materialized(output: Path, source: Path, output_mount: Path,
     loader = payload.get("source") or {}
     entry = (payload.get("tool") or {}).get("executed_entrypoint") or {}
     worker = source / worker_member
-    if (loader.get("path") != "/source/workload/loader.py"
-            or loader.get("sha256") != _file_digest(source / "workload/loader.py")
-            or entry.get("path") != "/source/" + worker_member
-            or entry.get("sha256") != _file_digest(worker)):
+    if (
+        loader.get("path") != "/source/workload/loader.py"
+        or loader.get("sha256") != _file_digest(source / "workload/loader.py")
+        or entry.get("path") != "/source/" + worker_member
+        or entry.get("sha256") != _file_digest(worker)
+    ):
         raise SealedM2MError("M2M receipt does not bind the snapshotted entrypoints")
     sources = (payload.get("tool") or {}).get("source_sha256")
     if (
@@ -427,9 +636,14 @@ def _materialized(output: Path, source: Path, output_mount: Path,
     ):
         raise SealedM2MError("M2M receipt lacks its complete direct source inventory")
     for name, digest in sources.items():
-        if (not isinstance(name, str) or not name.startswith("m2m/")
-                or PurePosixPath(name).as_posix() != name or ".." in PurePosixPath(name).parts
-                or "\\" in name or "\x00" in name):
+        if (
+            not isinstance(name, str)
+            or not name.startswith("m2m/")
+            or PurePosixPath(name).as_posix() != name
+            or ".." in PurePosixPath(name).parts
+            or "\\" in name
+            or "\x00" in name
+        ):
             raise SealedM2MError(f"unsafe M2M source member: {name!r}")
         path = source / "m2m-src" / name
         if not path.is_file() or _file_digest(path) != digest:
@@ -438,13 +652,14 @@ def _materialized(output: Path, source: Path, output_mount: Path,
 
 
 def _materialized_v2(output: Path, source: Path, output_mount: Path, plan: dict[str, Any]) -> dict[str, Any]:
-    result = _materialized(output, source, output_mount,
-                           worker_member="merlin-src/merlin/targetgen/_m2m_capture_worker.py")
+    result = _materialized(
+        output, source, output_mount, worker_member="merlin-src/merlin/targetgen/_m2m_capture_worker.py"
+    )
     metadata = json.loads((output / "meta.json").read_bytes())
     if not isinstance(metadata, dict) or metadata.get("dtype") != plan.get("dtype"):
         raise SealedM2MError("capture metadata does not identify the selected dtype")
     recipe = plan.get("recipe")
-    if plan.get("dtype") == "fp32":
+    if plan.get("dtype") in _FLOAT_DTYPES:
         if recipe is not None or metadata.get("recipe_sha256") is not None:
             raise SealedM2MError("fp32 capture unexpectedly selected a quantization recipe")
     elif plan.get("dtype") == "int8":
@@ -455,7 +670,7 @@ def _materialized_v2(output: Path, source: Path, output_mount: Path, plan: dict[
         if any(observed[key] != recipe.get(key) for key in ("bytes", "sha256", "recipe_sha256")):
             raise SealedM2MError("int8 recipe snapshot differs from the selected plan")
         stats = metadata.get("quantization_stats") or {}
-        agreement = ((metadata.get("integerization_receipt") or {}).get("golden_agreement") or {})
+        agreement = (metadata.get("integerization_receipt") or {}).get("golden_agreement") or {}
         if (
             metadata.get("scheme") != "int8_static_act_int8_weight"
             or metadata.get("recipe_sha256") != recipe.get("recipe_sha256")
@@ -472,7 +687,12 @@ def _materialized_v2(output: Path, source: Path, output_mount: Path, plan: dict[
 
 def _stage_source(plan: dict[str, Any], source: Path) -> None:
     """Copy exactly the source members named by the selected v2 plan."""
-    shutil.copytree(Path(plan["m2m_root"]) / "m2m", source / "m2m-src/m2m", symlinks=False)
+    shutil.copytree(
+        Path(plan["m2m_root"]) / "m2m",
+        source / "m2m-src/m2m",
+        symlinks=False,
+        ignore=lambda _directory, names: {name for name in names if name == "__pycache__"},
+    )
     shutil.copytree(Path(plan["workload_root"]), source / "workload", symlinks=False)
     shutil.copytree(Path(plan["merlin_root"]), source / "merlin-src/merlin", symlinks=False)
     if _snapshot_tree(source / "merlin-src/merlin") != plan["selected_trees"]["merlin"]:
@@ -506,10 +726,15 @@ def _verify_staged_selection(plan: dict[str, Any], source: Path, runtime: Path) 
     return selected_trees["schemas"]
 
 
-def issue(plan: dict[str, Any], run_dir: Path, *, bwrap_binary: Path | None = None,
-          capture_selection_sha256: str | None = None,
-          selected_system_libraries: list[dict[str, Any]] | None = None,
-          selected_bwrap_sha256: str | None = None) -> Path:
+def issue(
+    plan: dict[str, Any],
+    run_dir: Path,
+    *,
+    bwrap_binary: Path | None = None,
+    capture_selection_sha256: str | None = None,
+    selected_system_libraries: list[dict[str, Any]] | None = None,
+    selected_bwrap_sha256: str | None = None,
+) -> Path:
     """Make one private snapshot and capture; receipt remains pending replay."""
     if plan.get("schema") != SCHEMA or plan.get("status") != "plan_only":
         raise SealedM2MError("unsupported M2M plan")
@@ -519,27 +744,31 @@ def issue(plan: dict[str, Any], run_dir: Path, *, bwrap_binary: Path | None = No
         or any(character not in "0123456789abcdef" for character in capture_selection_sha256)
     ):
         raise SealedM2MError("capture selection requires an exact SHA-256 identity")
-    if capture_selection_sha256 is not None and (
-        selected_system_libraries is None or selected_bwrap_sha256 is None
-    ):
+    if capture_selection_sha256 is not None and (selected_system_libraries is None or selected_bwrap_sha256 is None):
         raise SealedM2MError("selected capture requires antecedent system-library and bubblewrap bytes")
     if selected_system_libraries is not None and (
         not isinstance(selected_system_libraries, list)
         or [row.get("path") for row in selected_system_libraries] != plan.get("system_libs")
     ):
         raise SealedM2MError("selected system-library roster differs from the plan")
-    selected = prepare_plan(m2m_root=Path(plan["m2m_root"]), workload_root=Path(plan["workload_root"]),
-                            worker=Path(plan["worker"]), venv=Path(plan["venv"]),
-                            schemas_root=Path(plan["schemas_root"]),
-                            dtype=plan["dtype"],
-                            recipe=Path(plan["recipe"]["path"]) if plan.get("recipe") else None,
-                            max_snapshot_bytes=plan["max_snapshot_bytes"])
+    selected = prepare_plan(
+        m2m_root=Path(plan["m2m_root"]),
+        workload_root=Path(plan["workload_root"]),
+        worker=Path(plan["worker"]),
+        venv=Path(plan["venv"]),
+        schemas_root=Path(plan["schemas_root"]),
+        dtype=plan["dtype"],
+        recipe=Path(plan["recipe"]["path"]) if plan.get("recipe") else None,
+        max_snapshot_bytes=plan["max_snapshot_bytes"],
+        worker_options=plan.get("worker_options"),
+    )
     if selected != plan:
         raise SealedM2MError("selected M2M plan changed")
     run_dir = _canonical_path(run_dir, exists=False)
-    inputs = [Path(plan[key]) for key in (
-        "m2m_root", "workload_root", "worker", "merlin_root", "schemas_root", "venv", "base"
-    )]
+    inputs = [
+        Path(plan[key])
+        for key in ("m2m_root", "workload_root", "worker", "merlin_root", "schemas_root", "venv", "base")
+    ]
     if plan.get("recipe"):
         inputs.append(Path(plan["recipe"]["path"]))
     if any(run_dir == path or run_dir.is_relative_to(path) or path.is_relative_to(run_dir) for path in inputs):
@@ -547,25 +776,19 @@ def issue(plan: dict[str, Any], run_dir: Path, *, bwrap_binary: Path | None = No
     bwrap = _bwrap_binary(bwrap_binary)
     if selected_bwrap_sha256 is not None and _file_digest(bwrap) != selected_bwrap_sha256:
         raise SealedM2MError("bubblewrap bytes differ from the pre-execution selection")
+    _probe_sandbox(bwrap)
     run_dir.mkdir(mode=0o700, parents=False, exist_ok=False)
     source = run_dir / "snapshots/source"
     runtime = run_dir / "snapshots/guest-root"
     source.mkdir(parents=True)
     runtime.mkdir()
     _stage_source(plan, source)
-    venv_copy = runtime / "opt/capture-venv"
-    venv_copy.parent.mkdir(parents=True)
-    shutil.copytree(plan["venv"], venv_copy, symlinks=False,
-                    ignore=lambda directory, names: {"lib64"} if Path(directory) == Path(plan["venv"]) else set())
-    base = Path(plan["base"])
-    base_copy = runtime / base.relative_to("/")
-    base_copy.parent.mkdir(parents=True)
-    shutil.copytree(base.resolve(), base_copy, symlinks=False)
-    for name in plan["system_libs"]:
-        path = Path(name)
-        target = runtime / path.relative_to("/")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, target)
+    # The selected runtime (venv, base interpreter, system libraries) is identical across captures, so
+    # it is materialized once into a content-addressed store and hard-linked into this private guest
+    # root. Every byte is still re-verified against the plan before anything executes.
+    from .runtime_store import link_runtime
+
+    link_runtime(plan, runtime)
     output = run_dir / "capture"
     for name in ("source", "capture-out", "tmp", "dev"):
         (runtime / name).mkdir()
@@ -591,10 +814,13 @@ def issue(plan: dict[str, Any], run_dir: Path, *, bwrap_binary: Path | None = No
     if source_digest["bytes"] + runtime_digest["bytes"] > plan["max_snapshot_bytes"]:
         raise SealedM2MError("actual snapshot bytes exceed selected cap")
     output.mkdir()
-    command = _command_v2(output, dtype=plan["dtype"], recipe=plan.get("recipe") is not None)
+    command = _command_v2(
+        output, dtype=plan["dtype"], recipe=plan.get("recipe") is not None, options=plan.get("worker_options")
+    )
     if selected_bwrap_sha256 is not None and _file_digest(bwrap) != selected_bwrap_sha256:
         raise SealedM2MError("bubblewrap bytes changed before sandbox execution")
-    process = _execute(bwrap, runtime, source, output, command, output)
+    replayable_logs = capture_selection_sha256 is not None
+    process = _execute(bwrap, runtime, source, output, command, output, replayable_logs=replayable_logs)
     materialized = _materialized_v2(output, source, output, plan)
     if (_snapshot_tree(source), _snapshot_tree(runtime)) != (source_digest, runtime_digest):
         raise SealedM2MError("sealed source or runtime changed during capture")
@@ -602,12 +828,19 @@ def issue(plan: dict[str, Any], run_dir: Path, *, bwrap_binary: Path | None = No
         raise SealedM2MError("bubblewrap bytes changed during sandbox execution")
     receipt = run_dir / "sealed_m2m_pending.json"
     payload = {
-        "schema": SCHEMA, "status": "pending_replay", "issuer_sha256": _file_digest(Path(__file__)),
-        "nonce": secrets.token_hex(16), "plan": plan, "command": list(command),
-        "policy_sha256": _policy(command, output), "source": source_digest,
-        "guest_root": runtime_digest, "output": _snapshot_tree(output),
+        "schema": SCHEMA,
+        "status": "pending_replay",
+        "issuer_sha256": _file_digest(Path(__file__)),
+        "nonce": secrets.token_hex(16),
+        "plan": plan,
+        "command": list(command),
+        "policy_sha256": _policy(command, output, replayable_logs=replayable_logs),
+        "source": source_digest,
+        "guest_root": runtime_digest,
+        "output": _snapshot_tree(output),
         "schemas": selected_schemas,
-        "process": process, "materialized": materialized,
+        "process": process,
+        "materialized": materialized,
         "bwrap_sha256": _file_digest(bwrap),
         "scope": _V2_SCOPE,
     }
@@ -640,7 +873,7 @@ def replay_verify(run_dir: Path, *, bwrap_binary: Path | None = None) -> dict[st
         expected_scope = _V1_SCOPE
     elif schema == SCHEMA:
         dtype, recipe = plan.get("dtype"), plan.get("recipe")
-        if dtype not in {"fp32", "int8"} or (recipe is not None) != (dtype == "int8"):
+        if dtype not in _FLOAT_DTYPES | {"int8"} or (recipe is not None) != (dtype == "int8"):
             raise SealedM2MError("pending M2M receipt has an unsupported dtype or recipe selection")
         selected_digest = doc.get("capture_selection_sha256")
         if selected_digest is not None and (
@@ -650,30 +883,42 @@ def replay_verify(run_dir: Path, *, bwrap_binary: Path | None = None) -> dict[st
         ):
             raise SealedM2MError("pending M2M receipt has a malformed capture selection identity")
         expected_issuer = _file_digest(Path(__file__))
-        expected_template = _digest(_command_v2(Path("/capture-out"), dtype=dtype,
-                                                recipe=recipe is not None)[-1].encode())
-        expected_command = _command_v2(run_dir / "capture", dtype=dtype, recipe=recipe is not None)
+        expected_template = _digest(
+            _command_v2(
+                Path("/capture-out"), dtype=dtype, recipe=recipe is not None, options=plan.get("worker_options")
+            )[-1].encode()
+        )
+        expected_command = _command_v2(
+            run_dir / "capture", dtype=dtype, recipe=recipe is not None, options=plan.get("worker_options")
+        )
         expected_scope = _V2_SCOPE
     else:
         raise SealedM2MError("pending M2M receipt has an unsupported schema")
+    replayable_logs = schema == SCHEMA and doc.get("capture_selection_sha256") is not None
     supported_issuer = (
         {expected_issuer, _HISTORICAL_V2_ISSUER_SHA256}
         if schema == SCHEMA and doc.get("capture_selection_sha256") is None
         else {expected_issuer}
     )
-    if (doc.get("status") != "pending_replay"
-            or doc.get("issuer_sha256") not in supported_issuer
-            or not isinstance(doc.get("nonce"), str) or len(doc["nonce"]) != 32
-            or plan.get("schema") != schema or plan.get("status") != "plan_only"
-            or plan.get("command_template_sha256") != expected_template
-            or doc.get("command") != list(expected_command)
-            or doc.get("policy_sha256") != _policy(expected_command, run_dir / "capture")
-            or doc.get("scope") != expected_scope):
+    if (
+        doc.get("status") != "pending_replay"
+        or doc.get("issuer_sha256") not in supported_issuer
+        or not isinstance(doc.get("nonce"), str)
+        or len(doc["nonce"]) != 32
+        or plan.get("schema") != schema
+        or plan.get("status") != "plan_only"
+        or plan.get("command_template_sha256") != expected_template
+        or doc.get("command") != list(expected_command)
+        or doc.get("policy_sha256") != _policy(expected_command, run_dir / "capture", replayable_logs=replayable_logs)
+        or doc.get("scope") != expected_scope
+    ):
         raise SealedM2MError("pending M2M receipt has an unsupported policy")
     source, runtime, output = (run_dir / "snapshots/source", run_dir / "snapshots/guest-root", run_dir / "capture")
     _validate_snapshots(source, runtime, output, schema=schema)
     if (_snapshot_tree(source), _snapshot_tree(runtime), _snapshot_tree(output)) != (
-        doc.get("source"), doc.get("guest_root"), doc.get("output")
+        doc.get("source"),
+        doc.get("guest_root"),
+        doc.get("output"),
     ):
         raise SealedM2MError("sealed M2M snapshot or capture bytes differ")
     if schema == SCHEMA:
@@ -681,8 +926,11 @@ def replay_verify(run_dir: Path, *, bwrap_binary: Path | None = None) -> dict[st
         if not isinstance(selected_trees, dict):
             raise SealedM2MError("v2 plan lacks exact selected source/runtime tree identities")
         commit = plan.get("m2m_commit")
-        if (not isinstance(commit, str) or len(commit) != 40
-                or any(character not in "0123456789abcdef" for character in commit)):
+        if (
+            not isinstance(commit, str)
+            or len(commit) != 40
+            or any(character not in "0123456789abcdef" for character in commit)
+        ):
             raise SealedM2MError("v2 plan lacks a pinned M2M revision identity")
         selected_roots = {
             "venv": runtime / "opt/capture-venv",
@@ -691,8 +939,13 @@ def replay_verify(run_dir: Path, *, bwrap_binary: Path | None = None) -> dict[st
             "schemas": source / "merlin-src/merlin/_data/schemas",
         }
         base = plan.get("base")
-        if (not isinstance(base, str) or not base.startswith("/") or base == "/"
-                or Path(base).as_posix() != base or ".." in Path(base).parts):
+        if (
+            not isinstance(base, str)
+            or not base.startswith("/")
+            or base == "/"
+            or Path(base).as_posix() != base
+            or ".." in Path(base).parts
+        ):
             raise SealedM2MError("selected base Python path is absent or unsafe")
         selected_roots["base"] = runtime / base.lstrip("/")
         if set(selected_trees) != set(selected_roots) | {"merlin"}:
@@ -708,8 +961,9 @@ def replay_verify(run_dir: Path, *, bwrap_binary: Path | None = None) -> dict[st
             raise SealedM2MError("selected Merlin worker bytes differ from the v2 plan")
         if selected_trees["schemas"] != doc.get("schemas"):
             raise SealedM2MError("selected Merlin schema bytes differ from the v2 receipt")
-    materialized = (_materialized(output, source, output) if schema == SCHEMA_V1
-                    else _materialized_v2(output, source, output, plan))
+    materialized = (
+        _materialized(output, source, output) if schema == SCHEMA_V1 else _materialized_v2(output, source, output, plan)
+    )
     if materialized != doc.get("materialized"):
         raise SealedM2MError("materialized M2M receipt differs")
     bwrap = _bwrap_binary(bwrap_binary)
@@ -718,21 +972,34 @@ def replay_verify(run_dir: Path, *, bwrap_binary: Path | None = None) -> dict[st
     with tempfile.TemporaryDirectory(prefix="m2m-replay-", dir=run_dir) as temporary:
         replay = Path(temporary)
         replay.chmod(output.stat().st_mode & 0o777)
-        if _execute(bwrap, runtime, source, replay, expected_command, output) != doc.get("process"):
+        if _execute(
+            bwrap, runtime, source, replay, expected_command, output, replayable_logs=replayable_logs
+        ) != doc.get("process"):
             raise SealedM2MError("fresh M2M process output differs")
-        replay_materialized = (_materialized(replay, source, output) if schema == SCHEMA_V1
-                               else _materialized_v2(replay, source, output, plan))
+        replay_materialized = (
+            _materialized(replay, source, output)
+            if schema == SCHEMA_V1
+            else _materialized_v2(replay, source, output, plan)
+        )
         if replay_materialized != doc.get("materialized") or _snapshot_tree(replay) != doc["output"]:
             raise SealedM2MError("fresh M2M materialized bytes differ")
     if (_snapshot_tree(source), _snapshot_tree(runtime), _snapshot_tree(output)) != (
-        doc["source"], doc["guest_root"], doc["output"]
+        doc["source"],
+        doc["guest_root"],
+        doc["output"],
     ):
         raise SealedM2MError("sealed M2M evidence changed during replay")
     result = {
-        "schema": schema, "status": "verified_sandbox_replay", "sealed_source_closure_replayed": True,
-        "scope": ("selected FP32 CPU workload in copied empty-root Python runtime only"
-                  if schema == SCHEMA_V1 else "selected CPU workload in copied empty-root Python runtime only"),
-        "phase0_admission": "not_granted", "receipt_sha256": _file_digest(receipt),
+        "schema": schema,
+        "status": "verified_sandbox_replay",
+        "sealed_source_closure_replayed": True,
+        "scope": (
+            "selected FP32 CPU workload in copied empty-root Python runtime only"
+            if schema == SCHEMA_V1
+            else "selected CPU workload in copied empty-root Python runtime only"
+        ),
+        "phase0_admission": "not_granted",
+        "receipt_sha256": _file_digest(receipt),
     }
     if schema == SCHEMA:
         result["capture_dtype"] = plan["dtype"]

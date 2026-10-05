@@ -13,23 +13,33 @@ import yaml
 
 from merlin.targetgen import capsule_inputs
 from merlin.targetgen.application_inventory import (
-    exact_int_mm_geometry, verified_static_integerization, verify_capture_receipt,
+    exact_int_mm_geometry,
+    verified_static_integerization,
+    verify_capture_receipt,
 )
+from merlin.targetgen.golden_store import load_golden
 
 
 def test_integer_reference_projection_requires_exact_accounted_artifact():
     agreement = {
-        "status": "passed", "finite": True, "samples": 1, "reference": "pt2e_integer",
-        "max_abs": 0.0, "max_rel": 0.0, "atol": 0.0, "rtol": 0.0,
+        "status": "passed",
+        "finite": True,
+        "samples": 1,
+        "reference": "pt2e_integer",
+        "max_abs": 0.0,
+        "max_rel": 0.0,
+        "atol": 0.0,
+        "rtol": 0.0,
         "source": {"sha256": "a" * 64},
         "output": {"path": "integer-reference.json", "sha256": "b" * 64},
-        "executed_contractions": {"linear": 1, "conv2d": 0, "matmul": 0,
-                                  "total": 1, "selected": 1, "observed": 1},
-        "outputs": [{"finite": True, "within_tolerance": True,
-                     "max_abs": 0.0, "max_rel": 0.0, "atol": 0.0, "rtol": 0.0}],
+        "executed_contractions": {"linear": 1, "conv2d": 0, "matmul": 0, "total": 1, "selected": 1, "observed": 1},
+        "outputs": [
+            {"finite": True, "within_tolerance": True, "max_abs": 0.0, "max_rel": 0.0, "atol": 0.0, "rtol": 0.0}
+        ],
     }
     projection = {
-        "schema": "merlin.capture_integerization.v1", "status": "byte_bound_metadata",
+        "schema": "merlin.capture_integerization.v1",
+        "status": "byte_bound_metadata",
         "source_quantization": "int8_static_act_int8_weight",
         "software_numerical_engine": "integer_reference",
         "capture_receipt_sha256": "c" * 64,
@@ -37,12 +47,16 @@ def test_integer_reference_projection_requires_exact_accounted_artifact():
         "capture": {"sha256": "e" * 64, "bytes": 1},
         "reference_artifact": {"sha256": "b" * 64, "bytes": 1},
         "integerization_receipt": {
-            "schema": "m2m.pt2e-integerize.v1", "accumulator_bound_checked": True,
-            "quantized_contractions_seen": 1, "quantized_contractions_integerized": 1,
-            "quantized_contractions_remaining": 0, "exported_integer_mm_count": 1,
-            "integer_mm_emitted": 1, "refusals": [], "golden_agreement": agreement,
-            "quantized_by_kind": {"linear": {"seen": 1}, "conv2d": {"seen": 0},
-                                  "matmul": {"seen": 0}},
+            "schema": "m2m.pt2e-integerize.v1",
+            "accumulator_bound_checked": True,
+            "quantized_contractions_seen": 1,
+            "quantized_contractions_integerized": 1,
+            "quantized_contractions_remaining": 0,
+            "exported_integer_mm_count": 1,
+            "integer_mm_emitted": 1,
+            "refusals": [],
+            "golden_agreement": agreement,
+            "quantized_by_kind": {"linear": {"seen": 1}, "conv2d": {"seen": 0}, "matmul": {"seen": 0}},
         },
     }
     assert verified_static_integerization(projection)
@@ -52,6 +66,8 @@ def test_integer_reference_projection_requires_exact_accounted_artifact():
     broken = deepcopy(projection)
     broken["integerization_receipt"]["golden_agreement"]["outputs"][0]["max_abs"] = 0.001
     assert not verified_static_integerization(broken)
+
+
 from merlin.targetgen.capsule_common import load_capsule
 from merlin.targetgen.capsule_source import (
     M2MUnavailable,
@@ -213,7 +229,7 @@ def test_integer_matmul_capsule_has_matching_linalg_and_independent_golden(tmp_p
     monkeypatch.setattr(source, "capture", capture_once)
     directory = write_pytorch_capsule(entry, binding, tmp_path, source=source)
     capsule = load_capsule(directory)
-    golden = yaml.safe_load((directory / "golden.yaml").read_text())
+    golden = load_golden(directory)
     assert capsule["application_signature_match"]["status"] == "verified_capture_match"
     assert capsule["semantic"]["generalization_axis"] == "application_operation"
     assert capsule["source_role"] == "model_derived"
@@ -397,7 +413,7 @@ def test_static_integer_slices_require_saved_byte_bound_complete_finite_conversi
     assert match["source_quantization"] == metadata["scheme"]
     assert match["sources"][0]["capture_integerization"] == projection
     assert _application_operation_plan(selected, exact_entries=entries)["blocked_operations"] == 0
-    from merlin_experiments.phase0.writer import _write_capsule_inner
+    from merlin_experiments.phase0 import writer as phase0_writer
 
     from merlin.targetgen import capsule_source as CSRC
     from merlin.targetgen.corpus_spec import CorpusBinding
@@ -407,7 +423,7 @@ def test_static_integer_slices_require_saved_byte_bound_complete_finite_conversi
             return True
 
     observed_entries = []
-    monkeypatch.setattr(CSRC, "PytorchRefSource", AvailableSource)
+    monkeypatch.setattr(phase0_writer, "capture_source", AvailableSource)
     monkeypatch.setattr(CSRC, "write_pytorch_capsule", lambda entry, *_args, **_kwargs: observed_entries.append(entry))
     binding = CorpusBinding(
         target="test",
@@ -419,7 +435,7 @@ def test_static_integer_slices_require_saved_byte_bound_complete_finite_conversi
         compare="exact_int",
         classes_for=lambda **_: [],
     )
-    _write_capsule_inner(entries[0], binding, tmp_path)
+    phase0_writer._write_capsule_inner(entries[0], binding, tmp_path)
     assert observed_entries == entries
     for failure in (
         "missing",

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import os
 from pathlib import Path
 
@@ -10,6 +9,7 @@ import yaml
 
 from merlin.targetgen import capsule_golden as CG  # noqa: E402
 from merlin.targetgen import corpus_spec as CS  # noqa: E402
+from merlin.targetgen import golden_store as GS  # noqa: E402
 from merlin.targetgen import numeric_falsifiability as NF  # noqa: E402
 
 from .golden_cache import _golden_cached
@@ -22,6 +22,22 @@ from .numerics import (
     float_semantics,
     specir_oracle_source_identity,
 )
+from .sealed_generation import capture_source
+
+INTEGER_CONTRACTION_BOUND_OPS = frozenset(
+    {
+        "matmul",
+        "linear",
+        "matmul_bias",
+        "fused_matmul_bias",
+        "resident_reuse",
+        "host_island_seam",
+        "residual_seam",
+        "conv2d",
+        "scope_chain",
+        "attention_qk",
+    }
+)
 
 
 def _m2m_unavailable_reason() -> str:
@@ -32,6 +48,18 @@ def _m2m_unavailable_reason() -> str:
     return "model2MLIR capture runtime unavailable (set MERLIN_M2M_PYTHON)"
 
 
+def _with_attestations(written, source, *, start: int):
+    """Record on the capsule the sealed-runner attestations of the captures it was built from."""
+    attestations = list(getattr(source, "attestations", ()) or ())[start:]
+    if written is None or not attestations:
+        return written
+    path = Path(written) / "capsule.yaml"
+    capsule = yaml.safe_load(path.read_bytes())
+    capsule["capture_execution_attestations"] = attestations
+    path.write_text(yaml.safe_dump(capsule, sort_keys=False))
+    return written
+
+
 def _skip_or_require_m2m(entry: dict) -> None:
     reason = _m2m_unavailable_reason()
     required = os.environ.get("MERLIN_PHASE0_M2M_REQUIRED") == "1"
@@ -39,26 +67,6 @@ def _skip_or_require_m2m(entry: dict) -> None:
     if required or verified:
         raise ValueError(f"{entry['name']}: {reason}; requested frontend capsule cannot be omitted")
     print(f"  [skip] {entry['name']}: {reason}")
-
-
-def _entry_regime(entry, binding):
-    """Route an entry to its numeric regime + return a per-entry binding (operand/accum overridden). ``int``
-    (gemmini), ``specir`` (atlas fp8), ``mx`` (microscaling block-scaled FP), ``simt`` (IEEE fp16/bf16/f32).
-    Routed purely by the entry's operand dtype token — no target name."""
-    tok = entry.get("operand_dtype") or binding.operand_dtype
-    # ONE definition of the routing, in corpus_spec, so the synthesizer can ask the same question this
-    # answers. A second copy here drifted from the synthesizer's view and let entries be emitted that no
-    # writer could materialize.
-    regime = CS.regime_for_dtype(tok)
-    acc = {"mx": "bf16", "simt": "f32"}.get(regime, binding.accum_dtype)
-    eb = dataclasses.replace(
-        binding,
-        operand_dtype=tok,
-        accum_dtype=acc,
-        integer=(regime == "int"),
-        compare=("exact_int" if regime == "int" else "tolerance_float"),
-    )
-    return regime, eb
 
 
 def _integer_reference_bound(entry: dict, cap: dict) -> dict:
@@ -73,18 +81,7 @@ def _integer_reference_bound(entry: dict, cap: dict) -> dict:
         if op == "host_island_seam":
             raise ValueError("host-island integer contractions require a selected internal-width bound policy")
         return {"status": "unknown", "reason": "no selected full-operation internal-width bound policy"}
-    if op not in {
-        "matmul",
-        "linear",
-        "matmul_bias",
-        "fused_matmul_bias",
-        "resident_reuse",
-        "host_island_seam",
-        "residual_seam",
-        "conv2d",
-        "scope_chain",
-        "attention_qk",
-    }:
+    if op not in INTEGER_CONTRACTION_BOUND_OPS:
         return {"status": "not_applicable", "reason": "this writer path has no modeled integer contraction"}
     if op == "scope_chain":
         families = attrs.get("scope_families")
@@ -155,16 +152,14 @@ def _integer_reference_bound(entry: dict, cap: dict) -> dict:
             or (semantics.get("internal_arithmetic") or {}).get("signed_operand_bits") != 8
         ):
             raise ValueError("host-island bound requires the declared two-contraction i8 seam")
-        lhs_name, first_weight_name, second_weight_name = (
-            attrs.get("lhs"), attrs.get("weight0"), attrs.get("weight1")
-        )
-        if not all(isinstance(name, str) for name in (lhs_name, first_weight_name, second_weight_name)) or set(
-            leaves
-        ) != {lhs_name, first_weight_name, second_weight_name} or len(leaves) != 3:
+        lhs_name, first_weight_name, second_weight_name = (attrs.get("lhs"), attrs.get("weight0"), attrs.get("weight1"))
+        if (
+            not all(isinstance(name, str) for name in (lhs_name, first_weight_name, second_weight_name))
+            or set(leaves) != {lhs_name, first_weight_name, second_weight_name}
+            or len(leaves) != 3
+        ):
             raise ValueError("host-island bound requires exactly its three concrete input tensors")
-        lhs, first_weight, second_weight = (
-            leaves[lhs_name], leaves[first_weight_name], leaves[second_weight_name]
-        )
+        lhs, first_weight, second_weight = (leaves[lhs_name], leaves[first_weight_name], leaves[second_weight_name])
         dimensions = tuple(attrs.get(key) for key in ("M", "K", "H", "N"))
         if (
             any(type(value) is not int or value < 1 for value in dimensions)
@@ -306,7 +301,7 @@ def _spec_integer_reference_bound(entry: dict, cap: dict, directory: Path) -> di
         or (entry.get("numerical_semantics") or {}).get("accumulator_dtype") != "i32"
     ):
         raise ValueError("spec-backed integer contraction lacks an isolated exact i8 matmul")
-    golden = yaml.safe_load((directory / "golden.yaml").read_text(encoding="utf-8")) or {}
+    golden = GS.load_golden(directory) or {}
     if not isinstance(golden, dict):
         raise ValueError("spec-backed integer contraction lacks an independent golden document")
     provenance = golden.get("oracle_provenance") or {}
@@ -349,8 +344,7 @@ def _spec_integer_reference_bound(entry: dict, cap: dict, directory: Path) -> di
     if len(lhs[0]) != len(rhs):
         raise ValueError("spec-backed integer matmul has mismatched reduction extents")
     recomputed = [
-        [sum(lhs[m][k] * rhs[k][n] for k in range(len(rhs))) for n in range(len(rhs[0]))]
-        for m in range(len(lhs))
+        [sum(lhs[m][k] * rhs[k][n] for k in range(len(rhs))) for n in range(len(rhs[0]))] for m in range(len(lhs))
     ]
     outputs = golden.get("outputs")
     observed = outputs.get(out_name) if isinstance(outputs, dict) else None
@@ -393,7 +387,7 @@ def _is_source_backed(entry: dict) -> bool:
 
 
 # ------------------------------------------------------------------------------------------------
-def _write_capsule(entry, binding, out_root, facts_sha: str = ""):
+def _write_capsule(entry, binding, out_root, facts_sha: str = "", *, capture=None):
     """Write one capsule, then GUARANTEE it carries its generalization-intent block.
 
     The stamp is a post-step rather than something each writer does, because there are four writers
@@ -402,7 +396,9 @@ def _write_capsule(entry, binding, out_root, facts_sha: str = ""):
     capsules unannotated -- exactly the silent-gap failure mode this block exists to close -- so it is
     applied here, at the one point every path must pass through.
     """
-    written = _write_capsule_inner(entry, binding, out_root, facts_sha)
+    written = _write_capsule_inner(
+        entry, binding, out_root, facts_sha, **({"capture": capture} if capture is not None else {})
+    )
     if not written:
         return written
     d = Path(written) if not isinstance(written, Path) else written
@@ -411,24 +407,36 @@ def _write_capsule(entry, binding, out_root, facts_sha: str = ""):
         return written
     cap = yaml.safe_load(capf.read_text()) or {}
     dirty = False
-    regime, _ = _entry_regime(entry, binding)
+    regime, _ = CS.entry_binding(entry, binding)
+    model_capsule = entry.get("kind") == "model" or entry.get("op") == "model"
     if regime == "int" and _is_source_backed(entry):
-        bound = _source_integer_reference_bound(entry, cap, d)
-        golden_path = d / "golden.yaml"
-        golden = yaml.safe_load(golden_path.read_bytes())
+        if model_capsule:
+            # A whole model's contractions read internal tensors, so it is qualified by the isolated
+            # verification of every device group it forms; without that evidence it is refused
+            # exactly as before (see model_qualification).
+            from .model_qualification import qualify
+
+            bound = qualify(entry, cap, d, binding, Path(out_root))
+            cap["model_qualification"] = bound
+        else:
+            bound = _source_integer_reference_bound(entry, cap, d)
+        golden = GS.load_golden(d)
         source = golden.get("golden_source") if isinstance(golden, dict) else None
         if source != "host_torch_eager" and not (isinstance(source, str) and source.startswith("specir_program_")):
             raise ValueError("source-backed integer bound requires its independently captured golden")
         cap["integer_partial_sum_bound"] = bound
         golden["integer_partial_sum_bound"] = bound
         golden["qualification"] = (
-            "source-backed integer contraction with concrete operand-stream internal-width bounds; "
+            "source-backed integer model qualified by isolated per-group verification; "
+            "target execution and full-model numerics unverified"
+            if model_capsule
+            else "source-backed integer contraction with concrete operand-stream internal-width bounds; "
             "target execution and full-mesh ordering unverified"
         )
-        golden_path.write_text(yaml.safe_dump(golden, sort_keys=False), encoding="utf-8")
+        GS.write_golden(d, golden)
         dirty = True
     if not (cap.get("semantic") or {}).get("generalization_axis"):
-        _, eb = _entry_regime(entry, binding)
+        _, eb = CS.entry_binding(entry, binding)
         cap["semantic"] = CS._semantic_block(entry, eb)
         dirty = True
     dirty = _backfill_required_classes(cap, binding) or dirty
@@ -446,9 +454,8 @@ def _write_capsule(entry, binding, out_root, facts_sha: str = ""):
     # for a datapath error budget and the wrong shape for a small-magnitude output: a softmax capsule
     # whose golden spans 0.0139..0.1523 was graded at `atol: 0.25`, so zeros, the mean and the midrange
     # all passed it. It reported a numeric pass and proved nothing.
-    _gp = d / "golden.yaml"
-    if _gp.is_file() and (cap.get("numeric_policy") or {}).get("atol") is not None:
-        _gdoc = yaml.safe_load(_gp.read_text(encoding="utf-8")) or {}
+    if (d / GS.DOCUMENT).is_file() and (cap.get("numeric_policy") or {}).get("atol") is not None:
+        _gdoc = GS.load_golden(d) or {}
         _pol, _prov = NF.falsifiable_policy(
             cap["numeric_policy"], _gdoc.get("outputs") or {}, name=str(entry.get("name") or d.name)
         )
@@ -795,8 +802,8 @@ def _emit_micro_model_loader(entry: dict, target: str, out_root, *, capture_dtyp
     return True
 
 
-def _write_capsule_inner(entry, binding, out_root, facts_sha: str = ""):
-    regime, eb = _entry_regime(entry, binding)
+def _write_capsule_inner(entry, binding, out_root, facts_sha: str = "", *, capture=None):
+    regime, eb = CS.entry_binding(entry, binding)
     # Whole-model capsule: a small representative network lowered end-to-end via model2MLIR, graded vs its
     # host torch-eager output, GATED so it runs only after the op suite proves itself. Additive: skipped
     # (loudly) when the m2m venv is absent.
@@ -806,7 +813,7 @@ def _write_capsule_inner(entry, binding, out_root, facts_sha: str = ""):
         if entry.get("materialized_capture"):
             artifact = CSRC.materialized_model_artifacts(entry["materialized_capture"])
             return CSRC.write_model_capsule(entry, eb, out_root, artifact=artifact)
-        src = CSRC.PytorchRefSource()
+        src = capture if capture is not None else capture_source()
         if not src.available():
             _skip_or_require_m2m(entry)
             return None
@@ -816,7 +823,8 @@ def _write_capsule_inner(entry, binding, out_root, facts_sha: str = ""):
             entry, eb.target, out_root, capture_dtype=entry.get("capture_dtype") or eb.operand_dtype
         ):
             return None
-        return CSRC.write_model_capsule(entry, eb, out_root, source=src)
+        start = len(getattr(src, "attestations", ()) or ())
+        return _with_attestations(CSRC.write_model_capsule(entry, eb, out_root, source=src), src, start=start)
     # PREFERRED source: a capsule defined in PyTorch (frontend-faithful), lowered to linalg via model2MLIR
     # with a host torch-eager golden. Opt in per entry (``source: pytorch``). Restricted to the float
     # regime: a host-eager float reference is graded with tolerance, matching the merlin_iface float
@@ -846,13 +854,14 @@ def _write_capsule_inner(entry, binding, out_root, facts_sha: str = ""):
             )
         from merlin.targetgen import capsule_source as CSRC
 
-        src = CSRC.PytorchRefSource()
+        src = capture if capture is not None else capture_source()
         if not src.available():
             # Diagnostic derivation without a selected runtime may skip a
             # frontend capsule. Selected or verified runs must fail closed.
             _skip_or_require_m2m(entry)
             return None
-        return CSRC.write_pytorch_capsule(entry, eb, out_root, source=src)
+        start = len(getattr(src, "attestations", ()) or ())
+        return _with_attestations(CSRC.write_pytorch_capsule(entry, eb, out_root, source=src), src, start=start)
     # Spec source: a capsule whose PROGRAM + bit-exact golden come from the specir verification spec itself
     # (``spec_ref: '<gen>:op.<name>'``). Additive: a gen without a specir program emitter (or no specir) is
     # skipped loudly rather than sinking the target.
@@ -880,17 +889,14 @@ def _write_capsule_inner(entry, binding, out_root, facts_sha: str = ""):
         bound = _integer_reference_bound(entry, cap)
         cap["integer_partial_sum_bound"] = bound
         (d / "capsule.yaml").write_text(yaml.safe_dump(cap, sort_keys=False), encoding="utf-8")
-        (d / "golden.yaml").write_text(
-            yaml.safe_dump(
-                {
-                    "golden_source": "merlin_tensor_int",
-                    "integer_partial_sum_bound": bound,
-                    "qualification": "mathematical reference; target execution and full-mesh ordering unverified",
-                    "outputs": CG.golden({**cap, "__dir__": ""}),
-                },
-                sort_keys=False,
-            ),
-            encoding="utf-8",
+        GS.write_golden(
+            d,
+            {
+                "golden_source": "merlin_tensor_int",
+                "integer_partial_sum_bound": bound,
+                "qualification": "mathematical reference; target execution and full-mesh ordering unverified",
+                "outputs": CG.golden({**cap, "__dir__": ""}),
+            },
         )
     elif regime == "specir":
         selected_semantics = float_semantics(entry, eb)
@@ -898,34 +904,31 @@ def _write_capsule_inner(entry, binding, out_root, facts_sha: str = ""):
         outputs, prov = _golden_cached(_float_golden, entry, eb, facts_sha, oracle_source=oracle_source)
         if specir_oracle_source_identity(selected_semantics) != oracle_source:
             raise OSError("selected SpecIR oracle source changed while computing the golden")
-        (d / "golden.yaml").write_text(
-            yaml.safe_dump(
-                {
-                    "golden_source": (
-                        "specir_refmodel_float"
-                        if selected_semantics["selection_status"] == "explicit"
-                        else "specir_refmodel_fp8_e4m3_bf16"
-                    ),
-                    "oracle_provenance": {
-                        "engine": "specir.oracle.dtypes + specir.oracle.refmodel.fp_reduce",
-                        "source_identity": oracle_source,
-                        "datapath": selected_semantics,
-                        # How the datapath decodes an operand code. A unit that admits only normal operands
-                        # reads a zero exponent field as zero; the golden decodes it the same way, so the two
-                        # references implement ONE datapath (see the target's profile ``datapath`` block).
-                        "operand_decode": ("subnormal_flush_to_zero" if eb.subnormal_operand_flush else "exact"),
-                        "operand_dtype": eb.cap_dtype(eb.operand_dtype),
-                        "accum_dtype": eb.cap_dtype(eb.accum_dtype),
-                        "output_dtype": selected_semantics["readout_dtype"],
-                        "note": "INDEPENDENT of the target RTL (not self-oracle); specir refmodel is the reference.",
-                        "grade_policy": {"compare": eb.compare, "atol": eb.atol, "rtol": eb.rtol},
-                        "inputs": prov,
-                    },
-                    "outputs": outputs,
+        GS.write_golden(
+            d,
+            {
+                "golden_source": (
+                    "specir_refmodel_float"
+                    if selected_semantics["selection_status"] == "explicit"
+                    else "specir_refmodel_fp8_e4m3_bf16"
+                ),
+                "oracle_provenance": {
+                    "engine": "specir.oracle.dtypes + specir.oracle.refmodel.fp_reduce",
+                    "source_identity": oracle_source,
+                    "datapath": selected_semantics,
+                    # How the datapath decodes an operand code. A unit that admits only normal operands
+                    # reads a zero exponent field as zero; the golden decodes it the same way, so the two
+                    # references implement ONE datapath (see the target's profile ``datapath`` block).
+                    "operand_decode": ("subnormal_flush_to_zero" if eb.subnormal_operand_flush else "exact"),
+                    "operand_dtype": eb.cap_dtype(eb.operand_dtype),
+                    "accum_dtype": eb.cap_dtype(eb.accum_dtype),
+                    "output_dtype": selected_semantics["readout_dtype"],
+                    "note": "INDEPENDENT of the target RTL (not self-oracle); specir refmodel is the reference.",
+                    "grade_policy": {"compare": eb.compare, "atol": eb.atol, "rtol": eb.rtol},
+                    "inputs": prov,
                 },
-                sort_keys=False,
-            ),
-            encoding="utf-8",
+                "outputs": outputs,
+            },
         )
     elif regime == "mx":
         # matmul/linear -> the single MX GEMM golden; attention_mx -> the fused flash-attention composition
@@ -956,48 +959,42 @@ def _write_capsule_inner(entry, binding, out_root, facts_sha: str = ""):
                 "16-deep systolic per-column acc schedule (ACC_E/ACC_M); one E8M0 scale per "
                 "32-elt K group; bf16 accumulate"
             )
-        (d / "golden.yaml").write_text(
-            yaml.safe_dump(
-                {
-                    "golden_source": "mlc_mx_ref_hardware_semantics",
-                    "oracle_provenance": {
-                        "engine": engine,
-                        "datapath": datapath,
-                        "operand_dtype": eb.cap_dtype(eb.operand_dtype),
-                        "block_scale": "e8m0",
-                        "output_dtype": "bf16",
-                        "note": (
-                            "NOT specir (specir is atlas fp8); "  # target-ok: descriptive numeric-regime contrast
-                            "MX is a distinct block-scaled datapath."
-                        ),
-                        "grade_policy": {"compare": eb.compare, "atol": eb.atol, "rtol": eb.rtol},
-                        "inputs": prov,
-                    },
-                    "outputs": outputs,
+        GS.write_golden(
+            d,
+            {
+                "golden_source": "mlc_mx_ref_hardware_semantics",
+                "oracle_provenance": {
+                    "engine": engine,
+                    "datapath": datapath,
+                    "operand_dtype": eb.cap_dtype(eb.operand_dtype),
+                    "block_scale": "e8m0",
+                    "output_dtype": "bf16",
+                    "note": (
+                        "NOT specir (specir is atlas fp8); "  # target-ok: descriptive numeric-regime contrast
+                        "MX is a distinct block-scaled datapath."
+                    ),
+                    "grade_policy": {"compare": eb.compare, "atol": eb.atol, "rtol": eb.rtol},
+                    "inputs": prov,
                 },
-                sort_keys=False,
-            ),
-            encoding="utf-8",
+                "outputs": outputs,
+            },
         )
     else:  # simt (IEEE fp16/bf16/f32)
         outputs, prov = _golden_cached(_simt_golden, entry, eb, facts_sha)
-        (d / "golden.yaml").write_text(
-            yaml.safe_dump(
-                {
-                    "golden_source": "ieee_simt_f32_accumulate",
-                    "oracle_provenance": {
-                        "engine": "numpy IEEE float (CVFPU fp32 accumulate; format-rounded operands)",
-                        "operand_dtype": eb.cap_dtype(eb.operand_dtype),
-                        "accum_dtype": "f32",
-                        "output_dtype": "f32",
-                        "note": "SIMT cores do ordinary IEEE math; reference is independent of any accelerator model.",
-                        "grade_policy": {"compare": eb.compare, "atol": eb.atol, "rtol": eb.rtol},
-                        "inputs": prov,
-                    },
-                    "outputs": outputs,
+        GS.write_golden(
+            d,
+            {
+                "golden_source": "ieee_simt_f32_accumulate",
+                "oracle_provenance": {
+                    "engine": "numpy IEEE float (CVFPU fp32 accumulate; format-rounded operands)",
+                    "operand_dtype": eb.cap_dtype(eb.operand_dtype),
+                    "accum_dtype": "f32",
+                    "output_dtype": "f32",
+                    "note": "SIMT cores do ordinary IEEE math; reference is independent of any accelerator model.",
+                    "grade_policy": {"compare": eb.compare, "atol": eb.atol, "rtol": eb.rtol},
+                    "inputs": prov,
                 },
-                sort_keys=False,
-            ),
-            encoding="utf-8",
+                "outputs": outputs,
+            },
         )
     return d

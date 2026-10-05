@@ -2,12 +2,24 @@
 
 The model2MLIR receipt verifies materialized capture members. It does not prove
 which source, checkpoint, Python dependencies, or ambient files the process read.
-This module deliberately has no verified issuer: a diagnostic made after a run
-cannot upgrade that run to a sealed execution, even if its bytes still match.
+A diagnostic made after a run cannot upgrade that run to a sealed execution, even
+if its bytes still match.
+
+Exactly one issuer is admitted: Merlin's own sealed Model2MLIR CPU runner
+(``capture_execution.sealed_m2m``, receipt schema ``merlin.sealed_m2m_cpu.v2``),
+and only for a run that was PRESELECTED before it existed
+(``phase0.capture_selection``) and then replayed in a fresh sandbox. Admitting
+that runner is an operator policy decision: its receipt is unsigned and its
+Python runtime closure is the copied venv rather than an independently pinned
+dependency set; the decision accepts those residuals and records them in every
+attestation it issues. Every admission re-reads the selection, the sealed
+receipt, the model and the materialized receipt from disk and compares their
+digests, so an edited attestation document cannot pass on its flags alone.
 """
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -19,7 +31,18 @@ from typing import Any
 from merlin.targetgen.application_inventory import verify_capture_receipt
 
 SCHEMA = "merlin.capture_execution_attestation.v1"
-_VERIFIED_ISSUERS: frozenset[str] = frozenset()
+#: The one admitted issuer: the sealed Model2MLIR CPU runner's receipt schema.
+SEALED_M2M_ISSUER = "merlin.sealed_m2m_cpu.v2"
+_VERIFIED_ISSUERS: frozenset[str] = frozenset({SEALED_M2M_ISSUER})
+PRESELECTED_REPLAY_SCHEMA = "merlin.phase0.preselected_capture_replay.v1"
+SEALED_M2M_POLICY = {
+    "decision": "operator policy decision 2026-10-01: admit the sealed Model2MLIR CPU runner as a verified issuer",
+    "scope": "preselected, fresh sealed_m2m_cpu.v2 runs replayed in a fresh sandbox; no other issuer or schema",
+    "accepted_residuals": [
+        "the sealed M2M receipt is unsigned",
+        "the Python runtime closure is the copied selected venv, not an independently pinned dependency set",
+    ],
+}
 SEALED_M2M_ASSESSMENT_SCHEMA = "merlin.phase0.sealed_m2m_assessment.v2"
 _REQUIRED_CONTROLS = (
     "fresh_private_source_snapshot",
@@ -167,12 +190,12 @@ def write_diagnostic(path: Path, document: Mapping[str, Any]) -> None:
 
 
 def require_verified_execution(document: Mapping[str, Any]) -> None:
-    """Admission gate for a future Merlin sealed runner, closed until one exists.
+    """Admission gate: only the preselected sealed M2M runner, re-verified from disk.
 
     A model2MLIR receipt, an old capture, a diagnostic receipt, or edited JSON with
-    ``source_closure_verified: true`` cannot pass this gate. Introducing a verified
-    issuer requires a separate reviewed runner and verifier that bind actual source,
-    runtime, checkpoint, command, isolation controls, and new output bytes.
+    ``source_closure_verified: true`` cannot pass this gate. The sealed M2M issuer
+    passes only while the selection, sealed receipt, model and materialized receipt
+    it names still carry the attested digests and bind the preselected plan.
     """
     if document.get("schema") != SCHEMA:
         raise AttestationNotVerified("unsupported capture execution attestation schema")
@@ -184,6 +207,116 @@ def require_verified_execution(document: Mapping[str, Any]) -> None:
         raise AttestationNotVerified("capture has no verified fresh sealed execution")
     if document.get("issuer") not in _VERIFIED_ISSUERS:
         raise AttestationNotVerified("no supported Merlin sealed execution issuer has verified this capture")
+    if document.get("issuer") == SEALED_M2M_ISSUER:
+        _require_sealed_m2m_bytes(document)
+
+
+def _is_sha(value) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
+
+
+def _sealed_m2m_bindings(selection_path: Path, selection_sha256: str, model_path: Path) -> dict[str, Any]:
+    """Re-read every byte the sealed M2M attestation names; raise on any difference."""
+    from merlin_experiments.capture_execution import sealed_m2m
+    from merlin_experiments.capture_execution.sealed_static import _canonical_path
+
+    from .capture_selection import load
+
+    try:
+        selected = load(Path(selection_path), expected_sha256=selection_sha256)
+        run = _canonical_path(Path(selected["run_dir"]), exists=True)
+        model = _canonical_path(Path(model_path), exists=True)
+    except (OSError, ValueError, KeyError) as exc:
+        raise AttestationNotVerified(f"sealed M2M selection or capture is unreadable: {exc}") from exc
+    if model != run / "capture/model.mlir" or not model.is_file():
+        raise AttestationNotVerified("attested model is not the preselected sealed run's capture/model.mlir")
+    pending, materialized = run / "sealed_m2m_pending.json", model.parent / "capture_receipt.json"
+    if any(path.is_symlink() or not path.is_file() for path in (pending, materialized)):
+        raise AttestationNotVerified("sealed M2M receipt or materialized capture receipt is absent or indirect")
+    try:
+        receipt = json.loads(pending.read_bytes())
+        digests = {
+            name: _sha256(path)[1]
+            for name, path in (
+                ("sealed_receipt_sha256", pending),
+                ("model_sha256", model),
+                ("receipt_sha256", materialized),
+            )
+        }
+    except (OSError, ValueError) as exc:
+        raise AttestationNotVerified(f"sealed M2M evidence bytes cannot be read consistently: {exc}") from exc
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("schema") != sealed_m2m.SCHEMA
+        or receipt.get("status") != "pending_replay"
+        or receipt.get("capture_selection_sha256") != selection_sha256
+        or receipt.get("plan") != selected.get("plan")
+        or receipt.get("policy_sha256") != selected.get("sandbox_policy_sha256")
+        or receipt.get("bwrap_sha256") != (selected.get("bwrap") or {}).get("sha256")
+        or receipt.get("issuer_sha256") != selected.get("issuer_source_sha256")
+    ):
+        raise AttestationNotVerified("sealed M2M receipt does not bind the preselected plan, policy and tools")
+    if verify_capture_receipt(model).get("status") != "verified_materialized":
+        raise AttestationNotVerified("sealed M2M materialized capture receipt is unverified")
+    return {"run_dir": str(run), "model_path": str(model), **digests}
+
+
+def _require_sealed_m2m_bytes(document: Mapping[str, Any]) -> None:
+    capture = document.get("capture") or {}
+    selection = document.get("selection") or {}
+    if (
+        document.get("policy") != SEALED_M2M_POLICY
+        or (document.get("replay") or {}).get("schema") != PRESELECTED_REPLAY_SCHEMA
+        or (document.get("replay") or {}).get("status") != "verified_preselected_replay"
+        or not _is_sha(selection.get("sha256"))
+        or not isinstance(selection.get("path"), str)
+        or not isinstance(capture.get("model_path"), str)
+        or not all(_is_sha(capture.get(key)) for key in ("model_sha256", "receipt_sha256", "sealed_receipt_sha256"))
+    ):
+        raise AttestationNotVerified("sealed M2M attestation lacks its selection, replay or byte bindings")
+    observed = _sealed_m2m_bindings(Path(selection["path"]), selection["sha256"], Path(capture["model_path"]))
+    for key in ("model_sha256", "receipt_sha256", "sealed_receipt_sha256", "run_dir", "model_path"):
+        if observed[key] != capture.get(key):
+            raise AttestationNotVerified(f"sealed M2M attested {key} differs from the bytes on disk")
+
+
+def attest_sealed_m2m(replay: Mapping[str, Any], *, selection_path: Path, model_path: Path) -> dict[str, Any]:
+    """Issue the admitted attestation from one ``capture_selection.verify`` replay record.
+
+    The replay must be the preselected-replay record for exactly these selection
+    bytes, and its digests must equal the bytes on disk now. The returned document
+    passes ``require_verified_execution`` only while those bytes stay unchanged.
+    """
+    if (
+        not isinstance(replay, Mapping)
+        or replay.get("schema") != PRESELECTED_REPLAY_SCHEMA
+        or replay.get("status") != "verified_preselected_replay"
+        or not all(
+            _is_sha(replay.get(key))
+            for key in ("selection_sha256", "model_sha256", "capture_receipt_sha256", "sealed_receipt_sha256")
+        )
+    ):
+        raise AttestationNotVerified("only a verified preselected sealed M2M replay can be attested")
+    observed = _sealed_m2m_bindings(Path(selection_path), replay["selection_sha256"], Path(model_path))
+    if (observed["model_sha256"], observed["receipt_sha256"], observed["sealed_receipt_sha256"]) != (
+        replay["model_sha256"],
+        replay["capture_receipt_sha256"],
+        replay["sealed_receipt_sha256"],
+    ):
+        raise AttestationNotVerified("replayed capture bytes differ from the bytes on disk")
+    document = {
+        "schema": SCHEMA,
+        "status": "verified_sealed_execution",
+        "source_closure_verified": True,
+        "fresh_execution": True,
+        "issuer": SEALED_M2M_ISSUER,
+        "policy": copy.deepcopy(SEALED_M2M_POLICY),
+        "selection": {"path": str(Path(selection_path).absolute()), "sha256": replay["selection_sha256"]},
+        "replay": {"schema": replay["schema"], "status": replay["status"]},
+        "capture": observed,
+    }
+    require_verified_execution(document)
+    return document
 
 
 def assess_sealed_m2m_capture(

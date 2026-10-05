@@ -12,3 +12,13 @@ datapath:
   requant_shift: 3
   required_oracle_tiers: [L0, L1, L2, L3]
 capsules: []
+# Shared performance families this target declines, each with the reason and the decision. The
+# family stays defined in the shared template; generation records it as withdrawn, not as refused.
+performance_withdrawals:
+  - family: PB
+    reason: >-
+      The island member's host-required map is a requant of the i32 accumulator to i8 that no
+      reviewed host declaration in the selected software spec admits (the observed operand is
+      reported as unsupported_mlir:i32 and no selected host profile matches the signature), so
+      verified generation refuses every PB member and the island/no_island comparison cannot be built.
+    decided_by: operator decision 2026-10-01 via coordinating session, withdrawing PB for gemmini at derivation

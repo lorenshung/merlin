@@ -1,6 +1,6 @@
 # Authored software semantics and independent checks. Hardware geometry, legal
 # families and application shapes belong to extracted facts and the generated
-# requirement/synthesis artifacts, not this recipe. These 50 seed cases and two
+# requirement/synthesis artifacts, not this recipe. These 49 seed cases and two
 # sweeps remain authored until a reviewed generated corpus proves equivalence.
 software_spec: ../target/software-spec.yaml
 datapath:
@@ -495,24 +495,6 @@ capsules:
    generalization: {not_asserted_reason: 'The model deliberately contains required scalar/RVV host
      islands, so whole-model all-region acceleration is not the claim; lanes.require independently
      requires mesh execution.'}}
-
-# Small VLA denoise-step representative: prefix and action-expert
-# cross-attention, with explicitly required mesh and host execution. The
-# source application is derivation evidence, not a held-out claim model.
-- {name: M4_smolvla_denoise_gemmini, kind: model, op: model, model: smolvla_denoise_step,
-   loader: examples/gemmini/phase0/inputs/smolvla_denoise_step.py,
-   operand_dtype: int8, out: Y0, source_role: pytorch_model_slice,
-   source_reference: 'smolvla denoise step int8 — one flow-matching step of a vision-language-action
-     policy (patch-embed conv, concatenated vision+language+state prefix, RoPE self-attention, SwiGLU,
-     timestep-conditioned action expert cross-attending into the prefix, GELU FFN, action head), at the
-     extents the cycle-accurate tier can afford; op inventory derived from the prov census of
-     out/artifacts/recaptures/smolvla_denoise_step_fp32_app/model.mlir',
-   gate: {after_op_pass_fraction: 0.8},
-   lanes: {require: [on_mesh, scalar_rvv_lane]},
-   pass_requirements: [model-boundary-capstone],
-   generalization: {not_asserted_reason: 'The model deliberately contains required scalar/RVV host
-     islands (RMSNorm, softmax, silu/gelu), so whole-model all-region acceleration is not the claim;
-     lanes.require independently requires mesh execution.'}}
 
 # Focused accelerator -> host -> accelerator composition check. The host island
 # is normalization, which the reviewed mesh contract does not admit.

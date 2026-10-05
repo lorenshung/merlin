@@ -17,6 +17,17 @@ Their smaller shapes are deliberate. Inspect exact frontend and MLIR signatures,
 layouts, storage/compute/accumulator precision and transfer obligations before
 making a property-specific comparison. A matching operator name alone is insufficient.
 
+The [per-tensor dequantization probes](quant_boundary/loader.py) are separate,
+target-independent operation diagnostics. The [rank-4 companion](quant_boundary/loader_rank4.py)
+checks every int8 input value at a non-power-of-two scale; each has one result because the native-host
+qualifier currently accepts one exact FP32 result ABI. Both exercise int8 inputs
+and the PyTorch `quantized_decomposed.dequantize_per_tensor` frontend path.
+Capture it with `--dtype int8 --already-quantized`; the saved MLIR and golden can
+then be checked through `merlin_experiments.model_qualification --native-host-only`.
+That exact-input native-host result helps review a host fallback, but is not a
+generated Phase 1 capsule, a sealed source capture, or evidence of accelerator
+execution or every scale and input value.
+
 The held-out headline roster is **TinyLlama, SmolVLA and ResNet50**, declared through
 the existing claim-model policy and each target's `workload_spec.models`. Do not
 feed their captures, layer frequencies or results into capsule derivation or

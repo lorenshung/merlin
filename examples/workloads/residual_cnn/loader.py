@@ -20,4 +20,13 @@ class ResidualCNN(torch.nn.Module):
 
 def get_model_and_inputs():
     image = torch.arange(3 * 16 * 16, dtype=torch.float32).reshape(1, 3, 16, 16) / 768
-    return ResidualCNN().eval(), (image,)
+    model = ResidualCNN().eval()
+    with torch.no_grad():
+        for ordinal, module in enumerate(model.modules()):
+            if isinstance(module, (torch.nn.Linear, torch.nn.Conv2d, torch.nn.Embedding)):
+                for field, parameter in enumerate(module.parameters(recurse=False)):
+                    values = torch.arange(parameter.numel(), dtype=torch.int64).reshape(parameter.shape)
+                    parameter.copy_(
+                        (((values * 37 + ordinal * 101 + field * 53) % 251) - 125).to(parameter.dtype) / 512
+                    )
+    return model, (image,)

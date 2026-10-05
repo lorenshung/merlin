@@ -71,10 +71,12 @@ def _load(path: Path, name: str, digest: str | None = None):
 @lru_cache(maxsize=16)
 def _interpreter_dependencies(executable: str) -> tuple[str, ...]:
     program = (
-        "import json,sys,sysconfig; from pathlib import Path; "
+        "import json,os,sys,sysconfig; from pathlib import Path; "
         "prefix=Path(sys.argv[1]).absolute().parent.parent; "
-        "variables={'base':str(prefix),'platbase':str(prefix)} if (prefix/'pyvenv.cfg').is_file() else {}; "
-        "print(json.dumps([sysconfig.get_path(k,vars=variables) for k in ('purelib','platlib')]))"
+        "venv=(prefix/'pyvenv.cfg').is_file(); "
+        "variables={'base':str(prefix),'platbase':str(prefix)} if venv else {}; "
+        "scheme=('nt_venv' if os.name=='nt' else 'posix_venv') if venv else sysconfig.get_default_scheme(); "
+        "print(json.dumps([sysconfig.get_path(k,scheme=scheme,vars=variables) for k in ('purelib','platlib')]))"
     )
     checked = subprocess.run(
         [executable, "-I", "-S", "-c", program, executable], capture_output=True, text=True, timeout=15, check=True

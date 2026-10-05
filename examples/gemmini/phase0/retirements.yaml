@@ -34,4 +34,5 @@ retired:
   layers/SY_app_contraction_i8_partial_fits_double_rank2_wide_skinny_l3: Superseded application scope slice; current workload-derived scope cells are the source of truth.
   model/SY_micro_model: Historical model capsule; it is not a current generated application-demand slice.
   model/SY_model_resnet50: Claim model moved behind the owner-only post-Phase-1-freeze evaluation boundary; no public corpus copy is admitted.
+  model/SY_model_smolvla: Hand-authored claim model moved behind the owner-only post-Phase-1-freeze evaluation boundary; no public corpus copy is admitted.
   model/SY_model_tiny_llama: Claim model moved behind the owner-only post-Phase-1-freeze evaluation boundary; no public corpus copy is admitted.

@@ -11,7 +11,7 @@ Phase 1 develops the functional compiler; Phase 2 uses a separate performance co
 | --- | --- |
 | [Software spec](../target/software-spec.yaml) | Operation signatures, numerical semantics, placement/transfers and quantization eligibility |
 | [Hardware selection](../target/hardware.yaml) | Source-production requirements and direct RTL audit questions |
-| [Host capabilities](../target/host-capabilities.yaml) | Separately pinned host compiler and reviewed operation/precision support |
+| [Host capabilities](../target/host-capabilities.yaml) | Separately pinned scalar Rocket host package and per-operation semantic declarations; the approved typed dequantization rule does not qualify Rocket execution |
 | [Recipe](recipe.yaml) | Derived-only policy, comparison tolerances and oracle tiers; no authored capsule list |
 | [Descriptor](../target/descriptor.yaml) | Independent iteration roster, held-out validation roster and experiment resources |
 | [Selected capability contract](../target/contracts/target_contract.yaml) | Prototype command order and runner intent, explicitly frozen by the experiment; not an OOT support certificate |
@@ -22,8 +22,19 @@ The selected configuration has signed 8-bit operands, a 20-bit MAC result and
 proof or an independently qualified width-aware model; storage width is not
 compute precision.
 
+The preferred later timing board is the content-pinned U250
+`FireSimGemminiRocketConfig` in [Phase 2](../phase2/whole-model-machines.yaml).
+This Phase 0 selection currently extracts the `GemminiRocketConfig` Verilator
+elaboration. They are separate artifacts and their generator pins name different
+revisions; the shared Gemmini configuration name alone does not prove their
+facts identical. A board-level claim must compare the selected facts against
+the FireSim source/elaboration or regenerate facts from a matching source
+selection before treating them as one hardware revision.
+
 [regression-seeds.yaml](regression-seeds.yaml) preserves historical authored tests
-for explicit compatibility studies. It is **not** a default derivation input.
+for explicit compatibility studies, excluding a former SmolVLA-derived seed
+that crossed the held-out validation boundary. It is **not** a default
+derivation input.
 The small hand-authored g0–g2 interface samples in [reference/](reference/)
 exercise the historical OOT contract; they are not a generated Phase 0 release.
 Generated capsules, weights and goldens are artifacts, never committed examples.
@@ -49,6 +60,10 @@ Use [the four shared loaders](../../workloads/README.md): `coverage_mlp`,
 `residual_cnn`, `causal_decoder` and `multimodal_policy`. The worker seeds Python,
 NumPy and Torch before loading the model and requires deterministic algorithms.
 Use the same explicitly selected model2MLIR interpreter/build for all four.
+The integerized CNN MLIR can erase the im2col window, so convolution geometry is
+read from the original PyTorch graph in that capture's receipt-bound frontend
+trace. No second workload or held-out model is used to derive this obligation;
+missing or inconsistent trace geometry is reported, not guessed.
 
 ```sh
 "$CAPTURE_PYTHON" src/merlin/targetgen/_m2m_capture_worker.py \
@@ -86,14 +101,38 @@ the run directory. Repeat separately for each iteration workload. When deriving
 from those exact captures, pass a matching
 `--application-capture-selection "LABEL=PATH@SHA256"` for **every** roster label;
 mixing selected and legacy captures is refused. This establishes an auditable
-preselection and replay, but **does not grant Phase 0 admission**: the selection
-and receipt are owner-controlled, not an independent verified issuer. It also
-does not support external checkpoints yet.
+preselection and replay. Those records alone **do not grant Phase 0 admission**.
+The separate sealed-M2M attestation can admit a fresh replay only after the
+selected source, runtime and output bytes pass its policy-restricted sandbox
+checks; Phase 0 re-verifies that attestation from disk. Its explicit policy
+accepts an unsigned receipt and a copied, rather than independently pinned,
+Python runtime. A host that cannot create the required network namespace
+cannot issue this attestation. External checkpoints are not supported yet.
 The worker anchors `--out` before Model2MLIR writes its weight reference, so a
 relative command-line output path still yields an absolute source reference.
 Phase 0 later copies the receipt-bound weights and rewrites that one reference
 to the capsule-local sidecar; do not edit the captured MLIR by hand.
 FP32 captures inventory frontend demand; they do not imply FP32 device support.
+For an int8 capture, the reviewed rank-3/4 dequantization signature is only a
+semantic screen. Mint the selected scalar package from
+[its recipe](../target/scalar-host-recipe.yaml) before deriving; the old RVV
+package requires a V extension absent from Rocket. The scalar package's ISA
+fits the selected DTS, and one saved rank-4 capture passed Spike, but this does
+not qualify Rocket RTL/FireSim execution or every declared host operation.
+A deterministic native-host diagnostic can
+be generated for a saved capture with
+`python -m merlin_experiments.model_qualification --bundle "$CAPTURE_ROOT/residual_cnn" --out "$QUALIFICATION_ROOT/residual_cnn" --native-host-only --atol 0 --rtol 0`.
+The generated `qualification.json` binds the input bytes, compiler route and
+numerical result. It proves that saved whole program on the CPU, not independent
+per-operation support, Rocket execution, or Gemmini execution; Phase 0 keeps the
+Rocket-host execution obligation unresolved until those separate obligations are met.
+The target-independent dequantization probes isolate the PyTorch operation at
+[rank 3](../../workloads/quant_boundary/loader.py) and
+[rank 4](../../workloads/quant_boundary/loader_rank4.py), with separate scales and
+single-result ABIs. Each saved capture can be qualified through the same
+native-host command. Exact agreement on both finite probes is review evidence
+for the typed host signatures, not a substitute for sealed-source checks,
+Rocket execution, or all scales and values.
 If the selected Model2MLIR build lacks the same-conversion bundle/receipt APIs,
 `--materialize-bundle` fails before capture. For raw frontend inventory only,
 replace it with `--diagnostic-model-copy` and use a fresh output directory.
@@ -292,6 +331,17 @@ The separate `phase1-capsule-coverage.json` and `phase2-capsule-coverage.json`
 reports inventory only each selected cohort's exact bytes. Interface-command
 observations and source-model MLIR witnesses remain distinct; a performance
 cohort cannot borrow functional source coverage or claim whole-model validation.
+For Phase 2, inspect `form_perf_coverage.missing` and
+`form_perf_coverage.source_windows_without_form`. The latter catches an
+independent iteration convolution whose integerized MLIR appears as matmul but
+whose source padding/window and movement regime have no performance capsule.
+The form sweep reuses each exact derived functional window member as a bounded
+paired candidate/vendor performance member; inspect `form_perf_coverage.source_windows`
+to see the emitted match. This covers the window mechanism, not a model-scale
+timing claim or a fused epilogue that the member does not declare.
+Either gap makes the Phase 2 cohort incomplete. A covered form still has an
+unmeasured candidate/vendor ratio until the selected timing engine executes it;
+predicted array issue cycles do not price host im2col, epilogues or DMA stalls.
 Open `capsules/model/SY_micro_model/capsule.pytorch.py` to inspect the derived
 A→H→A layer order. Its header lists accelerator capabilities that the emitted
 standalone statements cannot exercise; for Gemmini, a float GELU, transpose or

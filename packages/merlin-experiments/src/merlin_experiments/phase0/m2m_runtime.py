@@ -99,7 +99,7 @@ def observe(
         raise ValueError("invalid selected Model2MLIR workload names")
     _check_workload_declarations(root, names, python)
     workloads = {name: _source_tree(root / "workloads" / name) for name in names}
-    package_inventory = _source_tree(package)
+    package_inventory = _source_tree(package, skip_python_cache=True)
     missing_capture_api = _capture_api_missing(root)
     missing_frontend_trace_api = _frontend_trace_api_missing(root)
     missing_static_integer_api = _static_integer_reference_api_missing(root)
@@ -165,7 +165,12 @@ def stage(selection: dict, destination: Path) -> dict:
     if required_space > shutil.disk_usage(destination.parent).free:
         raise ValueError("selected Model2MLIR source exceeds available run storage")
     destination.mkdir(parents=True)
-    shutil.copytree(Path(selection["root"]) / "m2m", destination / "m2m", symlinks=False)
+    shutil.copytree(
+        Path(selection["root"]) / "m2m",
+        destination / "m2m",
+        symlinks=False,
+        ignore=lambda _directory, names: {name for name in names if name == "__pycache__"},
+    )
     if _source_tree(destination / "m2m") != selection["package"]:
         raise ValueError("selected Model2MLIR source changed while staging")
     for name, expected in selection["workloads"].items():
@@ -233,3 +238,16 @@ def environment(frozen: dict) -> dict[str, str]:
 def receipt(frozen: dict) -> bytes:
     """Small, inspectable run artifact identifying this diagnostic selection."""
     return (json.dumps(frozen, sort_keys=True, indent=2, allow_nan=False) + "\n").encode()
+
+
+def sealed_capture_config(selected: dict, artifact_root: Path) -> dict:
+    """Bind generation captures to the selected owner, using copied sources after freezing."""
+    copied = "frozen_root" in selected
+    private = artifact_root / "private"
+    return {
+        "m2m_root": selected["frozen_root" if copied else "root"],
+        "package": selected["frozen_package" if copied else "package"],
+        "venv": str(Path(selected["python"]).parent.parent),
+        "runs_root": str(private / "sealed-captures"),
+        "tmp_root": str(private / "tmp"),
+    }
