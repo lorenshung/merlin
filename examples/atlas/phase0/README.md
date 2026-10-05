@@ -40,6 +40,52 @@ Source consistency proves provenance, not operation legality or numerical agreem
 Manual RTL audit improves the deterministic extractor; it is not an agentic runtime
 step in Phase 0. Keep raw facts separate from the effective consumer views.
 
+For a machine-dialect generation campaign, audit the **selected decoder-mode
+population** separately from the model-derived capsule population. Supply the
+exact selected RTL pattern and decoder files, the corresponding model ISA file,
+and a reviewed mode ledger from the explicitly selected OOT support package:
+
+```sh
+merlin-targetgen audit-isa \
+  --patterns "$RTL_SOURCE/Instructions.scala" \
+  --decoder "$RTL_SOURCE/IDecode.scala" \
+  --model-isa "$MODEL_SOURCE/isa_definition.py" \
+  --rtl-revision "$RTL_COMMIT" \
+  --model-revision "$MODEL_COMMIT" --verify-revisions \
+  --out "$DERIVATION_ROOT/isa-census.json"
+merlin-targetgen audit-dialect-modes \
+  --census "$DERIVATION_ROOT/isa-census.json" \
+  --inventory "$MODE_LEDGER" \
+  --dialect-plan "$REVIEWED_DIALECT_PLAN" \
+  --out "$DERIVATION_ROOT/dialect-mode-audit.json"
+```
+
+The revision check compares both selected checkout HEADs and the three exact
+file bodies with their Git commit objects. A commit string alone is insufficient.
+These commands keep missing and changed modes in the denominator, including
+scalar/control modes that do not appear in tensor workloads. They return a
+nonzero status for source disagreements or open mode obligations. The source
+crosswalk and OOT ledger can establish exact mode accounting; their reported
+test flags do not certify legality, arithmetic, timing, or integrated execution.
+If model and RTL encodings disagree, the mode ledger may include exact
+`source_resolutions` entries with the census discrepancy `kind` and `item`,
+`authority: selected_rtl`, `reviewed: true`, and an evidence reference. The
+audit rejects stale or invented resolutions. Such a declaration records the
+source-selection decision; numerical and temporal qualification still needs
+independent tests.
+The reviewed **typed** plan is required for a ready mode audit. Its explicit
+mode attributes must cover every required decoder variant with legal values;
+the audit does not accept a matching operation name alone. Such a plan is not present in
+this example yet. A handwritten dialect's inventory is useful as an
+independent comparator and is not a substitute for Merlin-generated signatures
+and verifiers. Keep the ledger and generated compiler outside this example
+directory.
+
+The current descriptor selects `AtlasRocketConfig`. If the campaign instead
+targets `EE290SimConfig`, create a new selected source bundle and Phase 0 run
+with that exact elaboration and simulator identity. Existing receipts must not
+be relabeled as evidence for the new SoC configuration.
+
 ## 3. Capture the independent iteration workloads
 
 Use [the four shared loaders](../../workloads/README.md): `coverage_mlp`,

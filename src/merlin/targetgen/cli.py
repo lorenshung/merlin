@@ -15,6 +15,7 @@ Deterministic, no LLM calls.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import tempfile
@@ -23,6 +24,7 @@ from pathlib import Path
 
 from . import pipeline
 from .isa_census import derive_source_census
+from .isa_mode_audit import audit_mode_inventory
 from .validate import check_generated_target
 
 
@@ -71,6 +73,8 @@ def _cmd_audit_isa(args: argparse.Namespace) -> int:
             decoder_file=Path(args.decoder),
             model_isa_file=Path(args.model_isa),
             rtl_revision=args.rtl_revision,
+            model_revision=args.model_revision,
+            verify_revisions=args.verify_revisions,
         )
         output.parent.mkdir(parents=True, exist_ok=True)
         temporary.write_text(json.dumps(census, indent=2, sort_keys=True) + "\n")
@@ -94,6 +98,46 @@ def _cmd_audit_isa(args: argparse.Namespace) -> int:
     status = "SOURCE_DISCREPANCIES" if problems else "SOURCE_CROSSWALK_ONLY"
     print(json.dumps({"status": status, "discrepancies": problems, "out": str(output)}))
     return 1 if problems else 0
+
+
+def _cmd_audit_dialect_modes(args: argparse.Namespace) -> int:
+    """Reconcile an OOT mode ledger with pinned source rows and an optional plan."""
+    import yaml
+
+    output = Path(args.out)
+    temporary = output.with_name(output.name + ".tmp")
+    try:
+        census_bytes = Path(args.census).read_bytes()
+        inventory_bytes = Path(args.inventory).read_bytes()
+        plan_bytes = Path(args.dialect_plan).read_bytes() if args.dialect_plan else None
+        census = json.loads(census_bytes)
+        inventory = json.loads(inventory_bytes)
+        plan = yaml.safe_load(plan_bytes) if plan_bytes is not None else None
+        report = audit_mode_inventory(census, inventory, dialect_plan=plan)
+        report["inputs_sha256"] = {
+            "census": hashlib.sha256(census_bytes).hexdigest(),
+            "inventory": hashlib.sha256(inventory_bytes).hexdigest(),
+            "dialect_plan": hashlib.sha256(plan_bytes).hexdigest() if plan_bytes is not None else None,
+        }
+        output.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        temporary.replace(output)
+    except (OSError, ValueError, yaml.YAMLError) as error:
+        output.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
+        print(json.dumps({"status": "FAIL", "error": str(error), "out": str(output)}))
+        return 2
+    status = (
+        "SOURCE_MISMATCH"
+        if not report["source_bound"]
+        else "SOURCE_DISCREPANCIES"
+        if not report["source_reconciled"]
+        else "MODE_OBLIGATIONS_OPEN"
+        if not report["mode_inventory_ready"]
+        else "MODE_INVENTORY_READY"
+    )
+    print(json.dumps({"status": status, "counts": report["counts"], "out": str(output)}))
+    return 0 if report["mode_inventory_ready"] else 1
 
 
 def _write_status(path: Path, report: dict[str, object]) -> None:
@@ -326,8 +370,21 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--decoder", required=True, help="selected RTL IDecode.scala")
     a.add_argument("--model-isa", required=True, help="selected Python ISA definition")
     a.add_argument("--rtl-revision", required=True, help="exact selected RTL commit")
+    a.add_argument("--model-revision", help="exact selected model commit")
+    a.add_argument(
+        "--verify-revisions",
+        action="store_true",
+        help="require selected RTL/model bytes to match both local Git HEADs and their commit objects",
+    )
     a.add_argument("--out", required=True, help="census JSON artifact")
     a.set_defaults(func=_cmd_audit_isa)
+
+    modes = sub.add_parser("audit-dialect-modes", help="account for every selected decoder mode in an OOT ledger")
+    modes.add_argument("--census", required=True, help="output of audit-isa for the selected source bytes")
+    modes.add_argument("--inventory", required=True, help="explicitly selected OOT JSON mode ledger")
+    modes.add_argument("--dialect-plan", help="reviewed dialect plan YAML from the same selected target")
+    modes.add_argument("--out", required=True, help="mode audit JSON artifact")
+    modes.set_defaults(func=_cmd_audit_dialect_modes)
 
     stage = sub.add_parser("stage-capture", help="stage IR, weights and signature without evaluator inputs")
     stage.add_argument("--capture", required=True, help="materialized model capture directory")
