@@ -44,6 +44,58 @@ from merlin_experiments.phase1.context import (
 from merlin_experiments.phase1.feedback import qa as _qc
 
 
+def _candidate_selfcheck_row(result: dict, closed: dict | None, *, name: str,
+                             barrier_tier: str) -> tuple[dict, bool]:
+    """Project one submitted whole-model artifact from QA's closed candidate fields.
+
+    The runner-owned graph's tiers, numeric output, trace, console and executable
+    are different artifacts. An absent closed row never promotes raw result data.
+    """
+    projected = closed if isinstance(closed, dict) else {}
+    summary = projected.get("candidate_native_verification")
+    if not isinstance(summary, dict):
+        summary = {"status": "unverified", "violations": ["candidate_verification_record_unrecognized"]}
+    tiers = summary.get("tiers")
+    tiers = tiers if isinstance(tiers, dict) else {}
+    required = summary.get("required_tiers")
+    required = required if isinstance(required, list) else []
+    required_pass = bool(required) and all(tiers.get(tier) == "pass" for tier in required)
+    components = summary.get("components")
+    components = components if isinstance(components, dict) else {}
+    source_coverage = summary.get("source_coverage")
+    source_verified = isinstance(source_coverage, dict) and source_coverage.get("status") == "verified"
+    component_pass = all(components.get(key) == expected for key, expected in (
+        ("emitted_host_compute", "clean"), ("source_placement", "clean"),
+        ("completed_dispatch", "verified"), ("candidate_required_tiers", "pass")))
+    bar_used = barrier_tier
+    bar = tiers.get(barrier_tier)
+    if bar is None:
+        deeper = [tier for tier in required if isinstance(tier, str) and tier > barrier_tier
+                  and tiers.get(tier) == "pass"]
+        if deeper:
+            bar_used = max(deeper)
+            bar = tiers[bar_used]
+    certified = bool(projected) and result.get("status") == "pass" and (
+        summary.get("status") == "pass" and required_pass and source_verified
+        and component_pass and bar == "pass")
+    row = {
+        "capsule": name, "pass": certified, "execution_digest": None,
+        "barrier_tier": bar_used, "barrier_declared": barrier_tier, "barrier_status": bar,
+        "candidate_native_verification": summary,
+    }
+    if not certified:
+        numeric = {key: projected.get(field) for key, field in (
+            ("status", "numeric_status"), ("mismatch_count", "mismatch_count"))
+            if projected.get(field) is not None}
+        row.update(tiers=tiers, numeric=numeric, failure={
+            "plane": projected.get("failure_plane"),
+            "category": projected.get("failure_category"),
+            "tier": projected.get("failure_tier"),
+            "detail": projected.get("failure_detail"),
+        })
+    return row, certified
+
+
 # Restored during branch integration: the merge took this file whole from the other side, which
 # dropped select_tiers and left the six tests that pin it failing on a missing attribute.
 def select_tiers(full: dict, default: dict, requested: str) -> tuple[dict, str | None]:
@@ -599,12 +651,31 @@ def _model_layers(
     # fresh is the failure this harness exists to prevent, so the rows are restricted to the corpus
     # root this invocation actually graded.
     graded_now = {d.name for d in root.iterdir() if (d / "capsule.yaml").is_file()}
+    closed_rows = _qc._per_capsule_from_results(runs_root)
     for result_path in sorted((runs_root / "runs" / CR.suite_for(context.target)).glob("*/capsule_result.json")):
         if result_path.parent.name not in graded_now:
             continue
         try:
             result = json.loads(result_path.read_text())
         except Exception:  # noqa: BLE001
+            continue
+        name = result.get("capsule", result_path.parent.name)
+        if _qc._candidate_native_feedback(result) is not None:
+            candidate_row, certified = _candidate_selfcheck_row(
+                result, closed_rows.get(name), name=name,
+                barrier_tier=ladder[0] if ladder else "L3")
+            summary = candidate_row["candidate_native_verification"]
+            failure = candidate_row.get("failure") or {}
+            rows.append({
+                "capsule": name, "status": result.get("status"),
+                "tiers": summary.get("tiers", {}),
+                "failure_plane": failure.get("plane"),
+                "failure_category": failure.get("category"),
+                "failure_detail": failure.get("detail"),
+                "mismatch_count": (candidate_row.get("numeric") or {}).get("mismatch_count"),
+                "candidate_native_verification": summary,
+                "candidate_verified": certified,
+            })
             continue
         failure, numeric = result.get("failure") or {}, result.get("numeric") or {}
         rows.append(
@@ -626,6 +697,8 @@ def _model_layers(
     withheld = set(ladder[1:])
 
     def _passed_here(row: dict) -> bool:
+        if "candidate_native_verification" in row:
+            return row["candidate_verified"]
         ran = {tier: status for tier, status in row["tiers"].items() if tier not in withheld}
         return (
             bool(ran)
@@ -639,7 +712,8 @@ def _model_layers(
         "n_passed_functional_tier": len(screened),
         "all_pass": bool(rows) and len(screened) == len(rows),
         "per_capsule": rows,
-        "grade_failure": (score or {}).get("failure") if isinstance(score, dict) else None,
+        "grade_failure": ((score or {}).get("failure") if isinstance(score, dict)
+                          and not any("candidate_native_verification" in row for row in rows) else None),
     }
     report["tiers_withheld"] = ladder[1:]
     report["graded"] = sorted(row["capsule"] for row in rows)
@@ -653,6 +727,11 @@ def _model_layers(
         "partial last tile, a scratchpad address past its bank. They are graded at the functional "
         "tier only and do not count toward your score; they decide whether a model can run."
     )
+    if any("candidate_native_verification" in row for row in rows):
+        report["note"] += (
+            " Candidate whole-program rows use only submitted-artifact verification; "
+            "the runner-owned functional layer screen cannot pass them."
+        )
     txt = json.dumps(report, indent=2)
     print(txt)
     if out_path:
@@ -910,12 +989,10 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
         _log_telemetry(out, a.capsules)
         return 1
 
-    # FULL developer visibility: read each capsule_result.json directly (not the over-redacted helper)
-    # and surface everything the agent's OWN run produced — its command buffer, decoded RoCC trace +
-    # instruction counts, full numeric diagnostics (max_abs_diff, mismatch_count, first-mismatch INDEX
-    # and the agent's OWN value), sim console, and the exact failure. The ONLY thing withheld is the
-    # golden EXPECTED value (the answer key): we drop `first_mismatch.expected`. The agent's own
-    # artifacts are copied to ./selfcheck_out/<capsule>/ so it can inspect/diff them like a real dev.
+    # Ordinary operator capsules retain full developer visibility into their own command buffer,
+    # trace, console and redacted numeric detail. Candidate whole-model capsules instead use QA's
+    # closed submitted-artifact projection: the runner-owned host graph and candidate ELF are distinct
+    # programs, so its legacy trace, timing, console or failure must not be shown as candidate evidence.
     out_dir = Path("selfcheck_out")
     out_dir.mkdir(exist_ok=True)
     # Read results from the TARGET'S OWN suite dir. run_capsule writes under cfg.suite
@@ -924,6 +1001,7 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
     # the driver's in-memory grade was correct (the atlas 0/11 blind-loop bug).
     rows, npass, ncert, nscreened = [], 0, 0, 0
     _results = sorted(cb_root.glob("*/capsule_result.json")) if cb_root.exists() else []
+    closed_rows = _qc._per_capsule_from_results(runs_root)
     # Does the declared barrier EVER produce a verdict for this target? Two very different situations
     # look identical per-capsule, and only this whole-corpus view separates them:
     #   • the tier ran for some capsule but not this one -> this capsule genuinely fell short of the
@@ -937,8 +1015,16 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
             _d = json.loads(_cr.read_text())
         except Exception:
             continue
-        _s = ((_d.get("tiers") or {}).get(barrier_tier) or {}).get("status")
-        if _s not in (None, "skipped"):
+        _summary = _qc._candidate_native_feedback(_d)
+        if _summary is not None:
+            _closed = closed_rows.get(_d.get("capsule", _cr.parent.name)) or {}
+            _candidate = _closed.get("candidate_native_verification") or {}
+            _s = (_candidate.get("tiers") or {}).get(barrier_tier)
+            ran = _s in ("pass", "fail")
+        else:
+            _s = ((_d.get("tiers") or {}).get(barrier_tier) or {}).get("status")
+            ran = _s not in (None, "skipped")
+        if ran:
             _declared_ran = True
             break
     for cr in _results:
@@ -948,6 +1034,13 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
             continue
         name = d.get("capsule", cr.parent.name)
         if want and name not in want:
+            continue
+        if _qc._candidate_native_feedback(d) is not None:
+            row, certified = _candidate_selfcheck_row(
+                d, closed_rows.get(name), name=name, barrier_tier=barrier_tier)
+            rows.append(row)
+            npass += int(certified)
+            ncert += int(certified)
             continue
         _tier_results = d.get("tiers") or {}
         tiers = {t: (v or {}).get("status") for t, v in _tier_results.items()}
@@ -1161,6 +1254,7 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
     # `all_pass` is left alone so nothing that already reads it changes meaning.
     suite_size = _suite_size(capsules_root)
     scope = "all" if want is None else "subset"
+    has_candidate_rows = any("candidate_native_verification" in row for row in rows)
     out = {
         "sim": sim,
         "barrier_tier": barrier_tier,
@@ -1188,13 +1282,21 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
                 if scope == "subset" and suite_size
                 else ""
             )
-            + f"Self-check on {sim} ({barrier_tier}). You see EVERYTHING your dialect produced — "
-            "command buffer, decoded trace + instruction counts, sim console, and your artifacts "
-            "copied to ./selfcheck_out/. The diff stats (mismatch_count, magnitudes) are YOUR "
-            "output measured against the operation's own definition, which you can reproduce from "
-            "the declared inputs — there is no answer key; the reference output values are withheld "
-            "so you debug from your own intent, as in real bring-up. 'done' = all public pass on "
-            "verilator/VCS; cycles are not a criterion. (Movement ops legitimately have 0 matmuls.)"
+            + f"Self-check on {sim} ({barrier_tier}). "
+            + (
+                "Candidate whole-program rows show only submitted-artifact numeric status, "
+                "required-tier status and closed verification codes; the separate runner-owned "
+                "graph's trace, console, timing and failure are withheld. An incomplete candidate "
+                "is not a passed screen. Other rows retain their ordinary diagnostic detail."
+                if has_candidate_rows else
+                "You see EVERYTHING your dialect produced — command buffer, decoded trace + instruction "
+                "counts, sim console, and your artifacts copied to ./selfcheck_out/. The diff stats "
+                "(mismatch_count, magnitudes) are YOUR output measured against the operation's own "
+                "definition, which you can reproduce from the declared inputs — there is no answer key; "
+                "the reference output values are withheld so you debug from your own intent, as in real "
+                "bring-up. 'done' = all public pass on verilator/VCS; cycles are not a criterion. "
+                "(Movement ops legitimately have 0 matmuls.)"
+            )
             + (
                 f" {n_declined} capsule(s) were DECLINED by your backend -- see 'declined' on those "
                 f"rows. A decline is a shape/op you never lowered, NOT wrong arithmetic."
