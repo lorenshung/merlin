@@ -274,6 +274,14 @@ def test_real_package_controller_copy_fresh_and_resume(tmp_path, interface):
             },
         )
     fresh = _invoke(root, environment)
+    if interface in {"rtlchecks", "catalog-rtlchecks"}:
+        # Assisted EL4 authoring now requires a verified frozen bwrap snapshot.
+        # This fixture deliberately selects unsandboxed copy mode, so it must
+        # stop before invoking even the inert provider.
+        assert fresh.returncode == 4, fresh.stdout + fresh.stderr
+        assert "frozen_snapshot: no verified snapshot" in fresh.stderr
+        assert not (root / "provider_calls.jsonl").exists()
+        return
     assert fresh.returncode == 42, fresh.stdout + fresh.stderr
     [checkpoint] = list((root / "generated").rglob("qa_loop_state.yaml"))
     run = checkpoint.parent

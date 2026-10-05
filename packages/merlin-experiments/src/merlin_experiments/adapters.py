@@ -18,6 +18,7 @@ from .spec import SpecError
 
 PHASE0_MODULE = "merlin_experiments.phase0"
 PHASE1_MODULE = "merlin_experiments.phase1"
+WMM_MODULE = "merlin_experiments.phase2.whole_model_measured"
 
 
 def phase1_entrypoint() -> Path:
@@ -152,6 +153,13 @@ class Adapter:
     module: str | None = None
 
     def validate(self, config: dict) -> None:
+        if self.name == "capsule_bench":
+            from .phase1.levels import materialize_level
+
+            try:
+                materialize_level(config)
+            except ValueError as exc:
+                raise SpecError(f"{self.name}: {exc}") from exc
         unknown = set(config) - set(self.options)
         missing = {name for name, option in self.options.items() if option.required} - set(config)
         if unknown or missing:
@@ -211,6 +219,22 @@ class Adapter:
                 raise SpecError("select both m2m_root and m2m_python for a frozen capture runtime")
 
     def resolve(self, spec, config: dict, root: Path, run_dir: Path) -> dict:
+        """The frozen command for this phase, carrying the experiment's declared instruction policy."""
+        command = self._resolve(spec, config, root, run_dir)
+        roles = list(getattr(spec, "prohibited_instruction_roles", ()) or ())
+        if roles:
+            command["instruction_policy"] = {"prohibited_instruction_roles": roles, "source": "experiment.policy"}
+            if self.name in ("capsule_derivation", "whole_model_measured"):
+                # Phase 0 resolves the roles against the target's own derived instruction taxonomy;
+                # the measured mode stamps them into every candidate section and scans each whole ELF.
+                for role in roles:
+                    command["argv"] += ["--prohibited-instruction-role", role]
+            elif self.name == "capsule_bench":
+                # The native Phase 1 grader reads the declared policy it must enforce from its env.
+                command["env"]["MERLIN_PROHIBITED_INSTRUCTION_ROLES"] = ",".join(roles)
+        return command
+
+    def _resolve(self, spec, config: dict, root: Path, run_dir: Path) -> dict:
         from merlin.common.paths import out_dir, python_import_roots
 
         values = dict(config)
@@ -240,6 +264,10 @@ class Adapter:
                 script, _ = phase0_sources()
             elif self.name == "capsule_bench" and module == PHASE1_MODULE:
                 script = phase1_entrypoint()
+            elif self.name == "whole_model_measured" and module == WMM_MODULE:
+                from merlin.common.paths import module_source_path
+
+                script = module_source_path(WMM_MODULE + ".__main__").resolve()
             else:
                 raise SpecError("unsupported installed phase module")
             argv = [sys.executable, "-m", module]
@@ -280,6 +308,12 @@ class Adapter:
             argv += ["--experiment-id", spec.id, "--root", str(run_dir / "phase2")]
         elif self.name == "model_portfolio":
             argv += ["--output", str(run_dir / "phase2" / "segment-0001")]
+        elif self.name == "whole_model_measured":
+            # The phase run itself lives under out/runs/<target>/phase2/; the orchestration directory
+            # gets a pointer to it. Large inputs are frozen by content, never copied.
+            argv += ["run", "--target", spec.target, "--record-dir", str(run_dir / "phase2")]
+            if "model_capsule" in values:
+                argv += ["--input", f"model_capsule={values['model_capsule']}"]
         if "descriptor" in values:
             env["MERLIN_TARGET_EXPERIMENT"] = values["descriptor"]
         for name, value in values.items():
@@ -299,9 +333,9 @@ class Adapter:
         if self.name == "capsule_derivation":
             engine_output = str(run_dir / "phase0" / "capsules")
         if self.name == "capsule_bench":
-            from merlin.common.paths import runs_dir
+            from merlin.common.paths import phase_runs_root
 
-            engine_output = str(runs_dir() / spec.target / "capsule-bench" / values["arm"] / run_dir.name)
+            engine_output = str(phase_runs_root(spec.target, 1) / run_dir.name)
         return {
             "adapter": self.name,
             "mode": self.mode,
@@ -375,6 +409,7 @@ ADAPTERS = {
             "descriptor": Option("input", True, flag=""),
             "corpus_seal": Option("input", flag=""),
             "require_reviewed_corpus": Option("bool", flag=""),
+            "level": Option(choices=("EL1", "EL2", "EL3", "EL4", "EL3-E", "EL4-V"), flag=""),
             "arm": Option(required=True, choices=("raw_baseline", "cpp_merlininfra", "merlin_assisted")),
             "treatment": Option(choices=("baseline", "rtlchecks")),
             "model": _REQUIRED_TEXT,
@@ -474,5 +509,24 @@ ADAPTERS = {
         mode="model_portfolio",
         resume="checkpoint_segment",
         module="merlin_experiments.phase2.portfolio_cli",
+    ),
+    "whole_model_measured": Adapter(
+        "whole_model_measured",
+        "2",
+        _legacy_script("whole_model_measured"),
+        {
+            "objective_config": _REQUIRED_INPUT,
+            "seed": Option("path", True),
+            "method": _REQUIRED_TEXT,
+            "profile": _REQUIRED_TEXT,
+            "round_driver": _TEXT,
+            "why": _REQUIRED_TEXT,
+            "model_capsule": Option("input", flag=""),
+            "phase1_oot": Option("path"),
+            "price_table": _INPUT,
+        },
+        mode="whole_model_measured",
+        resume="native_flag",
+        module=WMM_MODULE,
     ),
 }

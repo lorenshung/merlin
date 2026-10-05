@@ -25,8 +25,12 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import shutil
 import stat
+import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -191,10 +195,28 @@ def test_outside_bwrap_codex_keeps_its_own_sandbox():
     assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
 
 
-def test_inside_bwrap_the_outer_boundary_is_the_proof_so_codex_bypasses_its_own():
+def test_inside_bwrap_codex_enforces_the_frozen_candidate_profile():
     cmd = CA.build_cmd(Path("/ws"), model="m", effort="", final_path=Path("/f"), sandbox="bwrap")
-    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+    assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
     assert "--sandbox" not in cmd
+    assert "--strict-config" in cmd
+    assert 'default_permissions="merlin-candidate"' in cmd
+    resumed = CA.build_resume_cmd(
+        Path("/ws"), model="m", effort="", final_path=Path("/f"),
+        sandbox="bwrap", thread_id="session-id",
+    )
+    assert "--dangerously-bypass-approvals-and-sandbox" not in resumed
+    assert "--sandbox" not in resumed
+    assert "--strict-config" in resumed
+    assert 'default_permissions="merlin-candidate"' in resumed
+
+
+def test_bridged_codex_cannot_inherit_proxy_secret_into_untrusted_bwrap(tmp_path):
+    with pytest.raises(RuntimeError, match="host-side proxy credential broker"):
+        CA.run_round(
+            tmp_path / "workspace", tmp_path / "run", "nemotron", {}, None,
+            "bwrap", 0, 1, effective_model="nemotron",
+        )
 
 
 def test_the_prompt_is_passed_on_stdin_not_as_an_argv_fragment():
@@ -458,15 +480,146 @@ def test_the_isolated_home_holds_a_frozen_config_and_no_credential(tmp_path):
     config = (tmp_path / "home" / "config.toml").read_text()
     assert 'model = "gpt-5.6-sol"' in config
     assert 'model_reasoning_effort = "high"' in config
+    assert 'default_permissions = "merlin-candidate"' in config
+    assert f'{json.dumps(str(tmp_path / "home"))} = "deny"' in config
+    assert '":root" = "deny"' in config
     # The user's own config carries per-project trust levels and notice state;
     # none of it belongs in a measured run.
     assert "trust_level" not in config and "[projects" not in config
 
     assert info["auth_copied"] is False
     assert not (tmp_path / "home" / "auth.json").exists(), (
-        "the credential is bind-mounted read-only, never written into the tree"
+        "the credential is bind-mounted, never written into the tree"
     )
     assert info["config_sha256"] and info["isolated_from_real_home"] is True
+
+    bridged = CA.prepare_codex_home(tmp_path / "bridged", model="nemotron", effort="high")
+    bridged_config = tomllib.loads((tmp_path / "bridged/config.toml").read_text())
+    assert bridged_config["model_provider"] == "merlinproxy"
+    assert bridged_config["default_permissions"] == "merlin-candidate"
+    assert bridged["config_sha256"]
+
+
+def test_native_candidate_profile_blocks_synthetic_auth_inside_outer_bwrap(tmp_path, monkeypatch):
+    """No model request: test the real installed CLI against a dummy auth mount."""
+    if not shutil.which("bwrap") or not shutil.which("codex"):
+        pytest.skip("live Codex/bwrap isolation probe requires both installed executables")
+    from merlin.targetgen.sandbox import bwrap as BW
+
+    fake_real = tmp_path / "operator-codex"
+    fake_real.mkdir()
+    (fake_real / "auth.json").write_text("synthetic credential, never a real token")
+    monkeypatch.setattr(CA, "real_codex_home", lambda: fake_real)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    home = tmp_path / "isolated-codex"
+    info = CA.prepare_codex_home(home, model="gpt-5.6-sol", effort="high")
+    assert tomllib.loads((home / "config.toml").read_text())["default_permissions"] == "merlin-candidate"
+    CA._verify_frozen_config(home, info["config_sha256"])
+
+    def sandbox_command(inner, _ws, bundle, *, extra_binds):
+        argv = BW.base_argv(ws, bundle, repo=tmp_path, include_claude_home=False, inherit_environment=False)
+        return shlex.join(argv + extra_binds + ["bash", "-c", inner])
+
+    rounds = tmp_path / "rounds"
+    CA._preflight_candidate_sandbox(
+        ws, home, str(shutil.which("codex")), {}, sandbox_command, rounds, 0,
+    )
+    # If the exact deny is removed, the broader /scratch read grant exposes the
+    # dummy file. The mandatory preflight must refuse this weaker profile.
+    config = home / "config.toml"
+    config.write_text(config.read_text().replace(f'{json.dumps(str(home))} = "deny"\n', ""))
+    with pytest.raises(RuntimeError, match="preflight failed"):
+        CA._preflight_candidate_sandbox(
+            ws, home, str(shutil.which("codex")), {}, sandbox_command, rounds, 1,
+        )
+
+
+def test_native_candidate_cannot_reach_parent_open_auth_or_relogin(tmp_path, monkeypatch):
+    """Probe /proc FDs, process memory, ptrace, and a nested CLI with dummy auth."""
+    if not shutil.which("bwrap") or not shutil.which("codex"):
+        pytest.skip("live Codex/bwrap isolation probe requires both installed executables")
+    from merlin.targetgen.sandbox import bwrap as BW
+
+    fake_real = tmp_path / "operator-codex"
+    fake_real.mkdir()
+    (fake_real / "auth.json").write_text(json.dumps({"OPENAI_API_KEY": "sk-synthetic-test-only"}))
+    host_login = subprocess.run(
+        ["codex", "login", "status"],
+        env={**os.environ, "CODEX_HOME": str(fake_real)},
+        capture_output=True, timeout=10,
+    )
+    assert host_login.returncode == 0, "synthetic login must be a valid negative control"
+    monkeypatch.setattr(CA, "real_codex_home", lambda: fake_real)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    home = tmp_path / "isolated-codex"
+    CA.prepare_codex_home(home, model="gpt-5.6-sol", effort="high")
+
+    candidate = '''
+import ctypes, json, os, subprocess
+pid = int(os.environ["HOLDER_PID"])
+fd = int(os.environ["HOLDER_FD"])
+try:
+    with open(f"/proc/{pid}/fd/{fd}", "rb") as stream:
+        fd_readable = bool(stream.read(1))
+except OSError:
+    fd_readable = False
+class IOVec(ctypes.Structure):
+    _fields_ = [("base", ctypes.c_void_p), ("length", ctypes.c_size_t)]
+size = int(os.environ["HOLDER_SIZE"])
+local = ctypes.create_string_buffer(size)
+local_vec = IOVec(ctypes.addressof(local), size)
+remote_vec = IOVec(int(os.environ["HOLDER_ADDR"]), size)
+libc = ctypes.CDLL(None, use_errno=True)
+libc.process_vm_readv.restype = ctypes.c_ssize_t
+memory_readable = libc.process_vm_readv(pid, ctypes.byref(local_vec), 1, ctypes.byref(remote_vec), 1, 0) > 0
+ptrace_attached = libc.ptrace(0x4206, pid, None, None) == 0  # PTRACE_SEIZE, no stop
+if ptrace_attached:
+    libc.ptrace(17, pid, None, None)  # PTRACE_DETACH
+login = subprocess.run(["codex", "login", "status"], capture_output=True, timeout=10)
+result = {"parent_visible": os.path.exists(f"/proc/{pid}"),
+          "fd_readable": fd_readable, "memory_readable": memory_readable,
+          "ptrace_attached": ptrace_attached, "nested_codex_logged_in": login.returncode == 0}
+print(json.dumps(result))
+'''
+    holder = '''
+import ctypes, json, os, subprocess, sys
+fd = os.open(os.environ["CODEX_HOME"] + "/auth.json", os.O_RDONLY)
+buffer = ctypes.create_string_buffer(b"SYNTHETIC-PARENT-MEMORY-ONLY")
+env = os.environ.copy()
+env.update(HOLDER_PID=str(os.getpid()), HOLDER_FD=str(fd),
+           HOLDER_ADDR=str(ctypes.addressof(buffer)), HOLDER_SIZE=str(len(buffer)))
+command = (["/usr/bin/python3", "-c", sys.argv[2]] if sys.argv[3] == "direct" else
+           ["codex", "sandbox", "-P", "merlin-candidate", "-C", sys.argv[1],
+            "--", "/usr/bin/python3", "-c", sys.argv[2]])
+child = subprocess.run(command, env=env, capture_output=True, text=True, timeout=20)
+sys.stdout.write(child.stdout)
+sys.stderr.write(child.stderr)
+sys.exit(child.returncode)
+'''
+    prefix = BW.base_argv(ws, {}, repo=tmp_path, include_claude_home=False, inherit_environment=False)
+    prefix += CA.codex_runtime_binds(home)
+    direct = subprocess.run(
+        prefix + ["/usr/bin/python3", "-c", holder, str(ws), candidate, "direct"],
+        cwd=ws, capture_output=True, text=True, timeout=30,
+    )
+    assert direct.returncode == 0, direct.stderr[-1200:]
+    direct_result = json.loads(direct.stdout.strip().splitlines()[-1])
+    assert direct_result["fd_readable"] is True, "unsandboxed shell must expose the dummy open FD"
+    assert direct_result["nested_codex_logged_in"] is True, "unsandboxed CLI must see dummy auth"
+
+    command = prefix + ["/usr/bin/python3", "-c", holder, str(ws), candidate, "sandbox"]
+    proc = subprocess.run(command, cwd=ws, capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr[-1200:]
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert result == {
+        "parent_visible": True,
+        "fd_readable": False,
+        "memory_readable": False,
+        "ptrace_attached": False,
+        "nested_codex_logged_in": False,
+    }
 
 
 def test_the_binds_reach_the_launchers_real_target_and_redirect_the_home(tmp_path):

@@ -19,6 +19,10 @@ if Path(sys.argv[0]).name == "bwrap":
         descriptor = int(args[1])
         with os.fdopen(descriptor, "rb", closefd=False) as stream:
             args = stream.read().decode().rstrip("\x00").split("\x00") + args[2:]
+    # The operability preflight runs exactly `-- /bin/true`; answer it without
+    # executing anything. It proves only that the double is reachable, not isolation.
+    if args[-2:] == ["--", "/bin/true"] and "--unshare-pid" in args and "--die-with-parent" in args:
+        sys.exit(0)
     # Never execute shell text: inspect the real policy argv and only dispatch one
     # fixed local payload. All unknown shapes refuse before any process execution.
     assert args[-3:-1] == ["bash", "-c"], args[-4:]
@@ -128,6 +132,19 @@ for value in Path(f"/proc/{ancestor}/task/{ancestor}/children").read_text().spli
 assert len(brokers) >= 2, "real selfcheck and simjob brokers were not started"
 with calls.open("a") as stream:
     stream.write(json.dumps({"pid": os.getpid(), "workspace": str(workspace), "brokers": brokers}) + "\n")
+if os.environ.get("PHASE1_FIXTURE_MODE") == "history":
+    # A dummy author: two rounds that each leave a different package, then a weekly quota stop so the
+    # operator can seal the current submission. It never touches git; the harness owns that history.
+    call = len(calls.read_text().splitlines())
+    if call <= 2:
+        submission = workspace / "submission"
+        (submission / "manifest.yaml").write_text("package_id: fixture_oot\nlanguage: python\n")
+        (submission / "transforms.py").write_text(f"ROUND = {call}\n")
+        emit({"type": "assistant", "message": {"model": "claude-fixture", "content": [{"type": "text", "text": "ok"}]}})
+        emit({"type": "result", "subtype": "success", "is_error": False, "result": f"round {call} authored"})
+    else:
+        emit({"type": "rate_limit_event", "rate_limit_info": {"rateLimitType": "seven_day", "status": "rejected"}})
+    raise SystemExit(0)
 partial = workspace / "submission/partial.txt"
 if first:
     partial.write_text("preserved across resume\n")

@@ -24,6 +24,7 @@ from merlin.targetgen.sandbox import bwrap as _BWS
 from merlin.targetgen.target_experiment import load_target_experiment
 
 from . import corpus_inputs as CI
+from . import oot_history as _oot_history
 from . import run_inputs as RI
 from . import source_inputs as SI
 from . import treatments as T
@@ -211,6 +212,31 @@ def task_scope(
     }
 
 
+#: What ``merlin experiment run --phase 1`` leaves in a phase run before the engine starts.
+_ORCHESTRATION_MEMBERS = frozenset({"resolved-plan.json", "orchestration.json", ".orchestration.lock"})
+
+
+def orchestration_owned(run_dir: Path) -> bool:
+    """A run dir holding only the orchestration record that launched this engine (no engine state)."""
+    names = {member.name for member in run_dir.iterdir()} if run_dir.is_dir() else set()
+    attempts = {name for name in names if name.startswith("phase1-attempt-") and name.endswith(".log")}
+    return "orchestration.json" in names and names - attempts <= _ORCHESTRATION_MEMBERS
+
+
+def phase_run_dir(context, arm: str, run_id: str, *, resume: bool) -> Path:
+    """``out/runs/<target>/phase1/<run-id>/`` (``context.phase_runs``, set by ``load_context``).
+
+    A context built without a phase root, or a resumed run that began in the legacy
+    ``capsule-bench/<arm>/`` root, keeps the legacy location.
+    """
+    if Path(run_id).name != run_id or run_id in (".", ".."):
+        raise ValueError(f"run id must be one path component: {run_id!r}")
+    legacy = context.runs / arm / run_id
+    if context.phase_runs is None or (resume and legacy.is_dir()):
+        return legacy  # a hand-built legacy context, or a run that began in the legacy root
+    return context.phase_runs / run_id
+
+
 def validate_options(a: RunOptions) -> int | None:
     """Pre-initialization refusals shared by native and installed admission."""
     if a.resume and a.seed_submission:
@@ -267,10 +293,13 @@ def prepare(
 
     bundle = yaml.safe_load(request.bundle_manifest.read_text())
     bundle_dir = request.bundle_manifest.parent
+    _corpus_seal = os.environ.get("MERLIN_CORPUS_SEAL", "").strip()
+    if _corpus_seal:
+        CI.require_reviewed_bundle(_te(), request.bundle_manifest, bundle)
 
-    run_dir = context.runs / arm / a.run_id
+    run_dir = phase_run_dir(context, arm, a.run_id, resume=a.resume)
     _resuming = run_dir.exists() and a.resume
-    if run_dir.exists() and not a.resume:
+    if run_dir.exists() and not a.resume and not orchestration_owned(run_dir):
         print(f"run dir exists, refusing to overwrite: {run_dir}", file=sys.stderr)
         return 2
     _source_context = request.source_context
@@ -317,7 +346,11 @@ def prepare(
     from merlin.common import storage_lifecycle as _storage
 
     workspace_leases.append(_storage.acquire(ws_root, owner="phase1-qa-workspace"))
-    run_dir.mkdir(parents=True, exist_ok=_resuming)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    # The compiler history lives beside the run record, outside the agent's writable workspace. Only a
+    # sandboxed run keeps one: copy mode is a diagnostic that launches no tools and is never admitted.
+    if a.sandbox == "bwrap":
+        _oot_history.start(run_dir, sandbox_roots=(ws_root,), resuming=_resuming)
     _operator_errata_record = None
     if a.operator_errata:
         _operator_errata_record = RI.stage_operator_errata(run_dir, a.operator_errata)
@@ -358,7 +391,6 @@ def prepare(
     _model_host_lane_snapshot = None
     _hidden_snapshot_record = None
     _hidden_dir = None
-    _corpus_seal = os.environ.get("MERLIN_CORPUS_SEAL", "").strip()
     _corpus_review = None
     _semantic_model_snapshot = None
     _semantic_diagnostic = None
@@ -380,6 +412,9 @@ def prepare(
             _semantic_model_snapshot = _reviewed.private_instruction_model
             _reviewed_corpus_roots = tuple(_te().graded_roots())
         _bundle_snapshot_record = _BWS.snapshot_record(ws)
+        from .frozen_facts import select as select_frozen_facts
+
+        select_frozen_facts(ws, _BWS.frozen_selected_rtl_facts(ws, bundle, repo=context.repo))
         _corpus_view = CI.resolve(ws, bundle, _corpus_record, repo=context.repo, reviewed_roots=_reviewed_corpus_roots)
         _verify_phase0_handoff(_corpus_review, _corpus_view.workload_coverage)
         _public_root, _policy_root = _corpus_view.public, _corpus_view.policy
@@ -406,6 +441,19 @@ def prepare(
                 numeric_profile_path,
             )
 
+            # Whole-model grading resolves the descriptor through the same frozen
+            # snapshot as the numerical recipe. Refuse an incomplete bundle here,
+            # before an agent spends a round producing an ungradeable compiler.
+            descriptor_source = Path(_te_setup.path)
+            if not descriptor_source.is_absolute():
+                descriptor_source = context.repo / descriptor_source
+            host_inputs = set()
+            for entry in bundle.get("host_inputs", []):
+                source = Path(entry["path"])
+                host_inputs.add((source if source.is_absolute() else context.repo / source).absolute())
+            if descriptor_source.absolute() not in host_inputs:
+                raise RuntimeError("experiment descriptor is not a host input; regenerate the input bundle")
+            _BWS.snapshot_input_paths(ws, bundle, [descriptor_source], repo=context.repo)
             if _te_setup.numeric_profile not in [entry["path"] for entry in bundle.get("host_inputs", [])]:
                 raise RuntimeError("declared numeric profile is not a host input; regenerate the input bundle")
             [_numeric_profile] = _BWS.snapshot_input_paths(
@@ -434,6 +482,7 @@ def prepare(
         os.environ[_MODEL_HOST_SNAPSHOT_REQUIRED_ENV] = "1"
     else:
         # Do not let an inherited pointer bind an explicitly unsandboxed diagnostic to another run.
+        os.environ.pop("MERLIN_RTL_FACTS", None)
         os.environ.pop(_MODEL_HOST_SNAPSHOT_ROOT_ENV, None)
         os.environ.pop("MERLIN_MODEL_HOST_LANE_SNAPSHOT_RECORD", None)
         os.environ.pop(_MODEL_HOST_SNAPSHOT_REQUIRED_ENV, None)
@@ -618,6 +667,59 @@ def prepare(
         )
     else:
         print(f"[preflight] oracle GO: {_ora_why}")
+
+    # Presence of a simulator is not proof that its compiler can build a kernel.
+    # Exercise the selected compile-based oracle toolchain before any agent spend;
+    # non-compile oracles return an explicit n/a from the shared capability check.
+    if not a.no_oracle:
+        from merlin.targetgen import runtime_build as _RBpf
+
+        _compiler_ok, _compiler_why = _RBpf.compiler_smoke(_te_pf.sim_via)
+        (run_dir / "compiler_smoke.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "target": _te_pf.target,
+                    "sim_via": _te_pf.sim_via,
+                    "compiler_ok": _compiler_ok,
+                    "reason": _compiler_why,
+                },
+                sort_keys=False,
+            )
+        )
+        if not _compiler_ok:
+            print(
+                f"NO_GO: oracle compile toolchain failed: {_compiler_why}. "
+                "Refusing to launch (zero tokens spent).",
+                file=sys.stderr,
+            )
+            return 4
+        print(f"[preflight] compiler smoke: {_compiler_why}")
+
+    # Exercise the assisted tool surface using this run's verified frozen bundle.
+    # The receipt is host-private, and a failed probe refuses before authoring.
+    from . import tooling_readiness as _TRpf
+
+    _tooling = _TRpf.run(
+        context,
+        _te_pf,
+        ws,
+        bundle,
+        tuple(_resolved_tool_ids),
+        _public_root,
+        run_dir,
+        _bundle_snapshot_record,
+        _bundle_manifest_sha256,
+        without_tools=tuple(a.without_tool),
+    )
+    if _tooling["status"] == "no_go":
+        failed = [f"{check['name']}: {check['detail']}" for check in _tooling["checks"] if not check["ok"]]
+        print(
+            f"NO_GO: selected authoring tools are not ready: {'; '.join(failed)}. "
+            "Refusing to launch (zero tokens spent).",
+            file=sys.stderr,
+        )
+        return 4
+    print(f"[preflight] tooling readiness: {_tooling['status']}")
 
     # Oracle availability and code production are separate admission evidence. The
     # selected backend owns its production probe; resource paths never select it.

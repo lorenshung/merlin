@@ -1,6 +1,6 @@
 """In-sandbox ASYNC oracle CLI — staged as <ws>/simjob.py under --sandbox bwrap.
 
-Lets the agent run the simulators (spike / verilator / vcs) on its OWN submission, per-capsule, WITHOUT
+Lets the agent run the simulators (spike / gsim / verilator / vcs) on its OWN submission, per-capsule, WITHOUT
 blocking its turn: `submit` returns a job id immediately; the heavy sim runs OUTSIDE the sandbox (the
 driver-side simjob_broker), and the agent `poll`s for the redacted verdict. This is how the agent gets
 cycle-accurate verilator feedback even though one capsule takes minutes.
@@ -10,14 +10,14 @@ shared <ws>/.qa_channel directory. The broker runs the SAME redacted grader (age
 self-check uses, so goldens never enter the box.
 
 Subcommands (same channel, simjob_* prefixes):
-  submit  --sim {spike|verilator|vcs} --capsules <csv|all> [--debug NAME...] [--workers N]
+  submit  --sim <accepted-engine> --capsules <csv|all> [--debug NAME...] [--workers N]
             -> prints {"job_id","state":"queued","n_capsules"} and returns immediately
   poll    --job-id ID        -> {"job_id","state":queued|running|done|error, "result": <redacted|null>}
   wait    --job-id ID [--timeout S]   -> poll-loop (bounded; default short so a turn can't hang), prints result
   list                        -> this workspace's jobs + states
 
-Verilator is slow (minutes/capsule): prefer `submit` a few per-capsule jobs, then `poll` — do NOT
-`wait` on a big verilator batch.
+The broker sizes parallel capsule workers by engine when --workers is omitted; its global Verilator
+slots bound the total across jobs. Poll long batches instead of blocking an agent turn.
 """
 
 from __future__ import annotations
@@ -133,7 +133,7 @@ def main(argv=None):
     s.add_argument("--sim", required=True)
     s.add_argument("--capsules", default="all")
     s.add_argument("--debug", nargs="*", default=[])
-    s.add_argument("--workers", type=int, default=1)
+    s.add_argument("--workers", type=int, default=0, help="parallel capsule workers; 0 lets the broker size the batch")
     s.set_defaults(fn=_submit)
     p = sub.add_parser("poll")
     p.add_argument("--job-id", required=True, dest="job_id")

@@ -18,10 +18,33 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--public-root", type=Path, help="explicit public grading corpus override")
     parser.add_argument("--language", default="", help="task language selection")
     parser.add_argument("--treatment", choices=("baseline", "rtlchecks"), default="baseline")
+    from .levels import LEVELS, materialize_level
+
+    parser.add_argument(
+        "--level",
+        choices=tuple(level["id"] for level in LEVELS),
+        help="readable experiment level; derives the legacy --arm and --treatment keys",
+    )
     arguments = list(sys.argv[1:] if argv is None else argv)
     values = vars(parser.parse_args(arguments))
     if not values["bundle"]:
         parser.error("installed execution requires --bundle (the authored bundle identity)")
+    selected_level = values.pop("level")
+    if selected_level:
+        selection = {"level": selected_level, "bundle": values["bundle"]}
+        for key in ("arm", "treatment"):
+            flag = "--" + key
+            if any(arg == flag or arg.startswith(flag + "=") for arg in arguments):
+                selection[key] = values[key]
+        try:
+            materialize_level(selection)
+        except ValueError as exc:
+            parser.error(str(exc))
+        for key in ("arm", "treatment"):
+            flag = "--" + key
+            values[key] = selection[key]
+            if not any(arg == flag or arg.startswith(flag + "=") for arg in arguments):
+                arguments += [flag, str(selection[key])]
     if values["treatment"] == "rtlchecks":
         from .feedback.rtlchecks import prepare_arguments
 
@@ -31,6 +54,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"REFUSING: {exc}", file=sys.stderr)
             return 4
         values = vars(parser.parse_args(arguments))
+        values.pop("level")
     treatment_name = values.pop("treatment")
     descriptor, repo = values.pop("descriptor"), values.pop("repo")
     manifest = values.pop("bundle_manifest").expanduser().resolve()

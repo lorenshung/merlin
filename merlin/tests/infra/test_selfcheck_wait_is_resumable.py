@@ -17,12 +17,11 @@ import contextlib
 import importlib.util
 import io
 import json
-import sys
 from pathlib import Path
 
-from merlin.common.paths import merlin_dir
+from merlin.common.paths import module_source_path
 
-HARNESS = merlin_dir() / "experiments/capsule_bench/harness"
+SHIM = module_source_path("merlin_experiments.phase1.tools.selfcheck")
 
 
 def _module(name: str, at: Path | None = None):
@@ -33,12 +32,11 @@ def _module(name: str, at: Path | None = None):
     throwaway workspace has to stage it the same way; importing it in place would make the repo's own
     harness directory the workspace and write channel files into the source tree.
     """
-    src = HARNESS / f"{name}.py"
+    assert name == "selfcheck_shim"
+    src = SHIM
     path = src if at is None else (at / "agent_selfcheck.py")
     if at is not None:
         path.write_text(src.read_text())
-    if str(HARNESS) not in sys.path:
-        sys.path.insert(0, str(HARNESS))
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

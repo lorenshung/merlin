@@ -208,24 +208,34 @@ def _target_experiment(target: str):
 
 
 def _public_bundle(te, arm: str) -> tuple[Path, dict]:
-    """Return the one public bundle that an actual functional launch serves for this arm."""
-    import yaml
+    """Build the same selected-source public bundle a fresh Phase 1 release uses.
 
-    registry_arm = _registry_arm(arm)
-    candidates: list[tuple[Path, dict]] = []
-    for path in sorted(te.resource_path("input_bundles").glob("*/input_bundle_manifest.yaml")):
-        body = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        if body.get("arm") == registry_arm and str(body.get("bundle_id", "")).endswith("_public_v0"):
-            candidates.append((path, body))
-    if len(candidates) != 1:
-        raise RuntimeError(
-            f"expected exactly one {registry_arm} public bundle, found "
-            f"{[str(path.parent.name) for path, _ in candidates]}"
-        )
-    return candidates[0]
+    Tracked historical manifests intentionally retain checkout-relative Python and
+    LLVM grants. A detached installed release rewrites those grants at generation;
+    checking the historical manifest would test a different import path and make
+    the authoring probe fail even when the launch bundle is sound.
+    """
+    from merlin.common.paths import python_source_dir
+    from merlin.targetgen.generate_bundles import generate_bundles
+    from merlin.targetgen.sandbox.toolchain import ToolchainPaths
+
+    arm_name = _registry_arm(arm)
+    selected_facts = os.environ.get("MERLIN_RTL_FACTS")
+    bundles = generate_bundles(
+        te,
+        variant="public_v0",
+        arms=(arm_name,),
+        python_source_root=python_source_dir(),
+        llvm_toolchain_root=Path(ToolchainPaths.from_checkout().llvm),
+        rtl_facts_root=Path(selected_facts).parent if selected_facts else None,
+    )
+    if len(bundles) != 1:
+        raise RuntimeError(f"expected one generated {arm_name} public bundle, found {sorted(bundles)}")
+    bundle_id, body = next(iter(bundles.items()))
+    return te.resource_path("input_bundles") / bundle_id / "input_bundle_manifest.yaml", body
 
 
-def _promised_paths(te, arm: str) -> tuple[list[str], tuple]:
+def _promised_paths(te, arm: str, *, python_source_root: Path | None = None) -> tuple[list[str], tuple]:
     """Exact file grants and brokers promised by one registry arm."""
     from merlin.targetgen import tool_registry as registry
 
@@ -235,6 +245,12 @@ def _promised_paths(te, arm: str) -> tuple[list[str], tuple]:
         spec = registry.spec(name)
         paths.extend(spec.bundle_paths)
         paths.extend(str(getattr(te, attr)) for attr in spec.derived_paths)
+    if python_source_root is not None:
+        from merlin.targetgen.generate_bundles import _select_python_grants
+
+        selected = {"allowed": [{"path": path} for path in paths]}
+        _select_python_grants(selected, python_source_root)
+        paths = [entry["path"] for entry in selected["allowed"]]
     return list(dict.fromkeys(paths)), registry.brokers_for(tools)
 
 
@@ -246,7 +262,12 @@ def _tool_only_bundle(te, arm: str, bundle: dict) -> dict:
     registry paths must therefore exist as exact manifest grants; their relevant deny overlays remain in
     force.  A stale manifest fails closed before bwrap starts.
     """
-    promised, _ = _promised_paths(te, arm)
+    from merlin.common.paths import python_source_dir
+
+    promised, _ = _promised_paths(te, arm, python_source_root=python_source_dir())
+    selected_facts = bundle.get("selected_rtl_facts_file")
+    if selected_facts:
+        promised = [str(Path(selected_facts).parent) + "/" if path == te.rtl_facts_pin else path for path in promised]
     by_path = {
         str(entry.get("path")): entry
         for entry in bundle.get("allowed", [])
@@ -262,6 +283,7 @@ def _tool_only_bundle(te, arm: str, bundle: dict) -> dict:
         # Preserve the launch manifest's complete deny set. Deny-wins overlays that do not intersect a
         # tool grant are harmless; the two that do (runtime_adapter and xdsl/lowering) are essential.
         "denied": [dict(entry) for entry in bundle.get("denied", [])],
+        **({"selected_rtl_facts_file": selected_facts} if selected_facts else {}),
     }
 
 
@@ -458,9 +480,12 @@ def sandbox_authoring_readiness(target: str, arm: str = "merlin_assisted_rtlchec
                 shutil.copy2(module_source_path(shim), ws / staged_as)
             log = (channel / spec.log).open("w", encoding="utf-8")
             logs.append(log)
+            argv = [sys.executable, "-m", spec.module, "--ws", str(ws)]
+            if spec.module == "merlin_experiments.phase1.brokers.isa_tools":
+                argv += ["--descriptor", str(te.path.resolve()), "--repo", str(C.REPO)]
             processes.append(
                 subprocess.Popen(
-                    [sys.executable, str(C.HARNESS / spec.module), "--ws", str(ws)],
+                    argv,
                     cwd=str(C.REPO),
                     env=broker_env,
                     stdout=log,
@@ -477,7 +502,17 @@ def sandbox_authoring_readiness(target: str, arm: str = "merlin_assisted_rtlchec
             if process.poll() is not None
         ]
         if dead:
-            raise RuntimeError("promised broker failed during startup: " + ", ".join(dead))
+            tails = []
+            for spec, process, log in zip(broker_specs, processes, logs, strict=True):
+                if process.poll() is None:
+                    continue
+                log.flush()
+                try:
+                    tail = (ws / spec.channel / spec.log).read_text(encoding="utf-8", errors="replace")[-400:]
+                except OSError as error:
+                    tail = f"log unreadable: {error}"
+                tails.append(f"{spec.module}: {tail.strip() or '<empty log>'}")
+            raise RuntimeError("promised broker failed during startup: " + ", ".join(dead) + "; " + "; ".join(tails))
 
         probe = _authoring_probe(target)
         argv = [
@@ -494,7 +529,7 @@ def sandbox_authoring_readiness(target: str, arm: str = "merlin_assisted_rtlchec
             and "BROKER_ROUNDTRIPS_OK" in run.stdout
         )
         detail = (
-            f"bundle={manifest_path.parent.name}; snapshot={snapshot['content_sha256']} "
+            f"bundle=generated-selected:{manifest_path.parent.name}; snapshot={snapshot['content_sha256']} "
             f"({snapshot['n_files']} files/{snapshot['n_bytes']} bytes); rc={run.returncode}; "
             f"output={evidence[-1200:]}"
         )

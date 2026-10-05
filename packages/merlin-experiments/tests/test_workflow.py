@@ -83,6 +83,12 @@ def test_inspect_preflight_run_status_resume_processes(workflow, capsys):
     assert len(status(destination)["attempts"]) == 4
 
 
+def test_phase1_launch_override_rejects_multiphase_plan(workflow):
+    definition, destination, _, _ = workflow
+    with pytest.raises(SpecError, match="Phase 1-only"):
+        resolve_plan(load_spec(definition), run_dir=destination, phase1_driver="codex")
+
+
 def test_completed_portfolio_segment_can_resume_from_explicit_checkpoint(tmp_path, monkeypatch):
     from merlin_experiments import portfolio_catalog
 
@@ -367,6 +373,11 @@ def test_phase1_and_phase2_real_adapter_contract(tmp_path, monkeypatch):
             }
         )
     )
+    clang = tmp_path / "clang-23"
+    clang.write_text("#!/bin/sh\nexit 0\n")
+    clang.chmod(0o755)
+    monkeypatch.setenv("MERLIN_CLANG", str(clang))
+    monkeypatch.setenv("MERLIN_TARGET_PATH", str(tmp_path / "unselected-support"))
     plan = resolve_plan(load_spec(spec_path), run_dir=tmp_path / "run")
     functional = plan["phases"]["1"]
     assert functional["argv"][1:3] == ["-m", "merlin_experiments.phase1"]
@@ -374,6 +385,9 @@ def test_phase1_and_phase2_real_adapter_contract(tmp_path, monkeypatch):
     assert "--continuous" not in functional["argv"]
     assert functional["argv"][functional["argv"].index("--schedule") + 1] == "continuous"
     assert functional["env"]["MERLIN_TARGET_EXPERIMENT"] == str(descriptor)
+    assert functional["env"]["MERLIN_CLANG"] == str(clang)
+    assert functional["env"]["MERLIN_TARGET_PATH"] == str(tmp_path / "unselected-support")
+    assert plan["input_paths"]["phase1:operator:clang"] == str(clang)
     assert plan["phases"]["2"]["resume_policy"] == "checkpoint_segment"
     assert plan["phases"]["2"]["mode"] == "model_portfolio"
     assert "--root" not in plan["phases"]["2"]["argv"]
@@ -552,7 +566,11 @@ def test_production_flags_exist_in_legacy_argparse_contract(tmp_path):
 
             flags = {flag for action in portfolio_parser()._actions for flag in action.option_strings}
         else:
-            tree = ast.parse(Path(command["entrypoint"]).read_text())
+            entrypoint = Path(command["entrypoint"])
+            if adapter.name == "whole_model_measured":
+                # The mode's __main__ only dispatches; its parser lives in its cli module.
+                entrypoint = module_source_path("merlin_experiments.phase2.whole_model_measured.cli")
+            tree = ast.parse(entrypoint.read_text())
             flags = {
                 arg.value
                 for call in ast.walk(tree)
@@ -594,7 +612,9 @@ def test_templates_are_discoverable_but_cannot_execute(workflow):
     assert not destination.exists()
 
 
-@pytest.mark.parametrize("name", ["measured-claims-template", "model-portfolio-template"])
+@pytest.mark.parametrize(
+    "name", ["measured-claims-template", "model-portfolio-template", "whole-model-measured-template"]
+)
 def test_phase2_templates_require_operator_target_and_refuse_execution(name, tmp_path, monkeypatch):
     from merlin_experiments import runner
 
@@ -655,7 +675,11 @@ def test_catalog_examples_declare_operator_prerequisites_not_ready_runs():
             try:
                 functional = resolve_plan(spec, phase="1")
             except SpecError as exc:
-                assert str(exc) == "phase-1 selected target contract is not agreed and resolvable: none"
+                assert str(exc) in {
+                    "phase-1 selected target contract is not agreed and resolvable: none",
+                    "invalid Phase 1 capability selection: declared capability contract is absent; "
+                    "prepare a new release",
+                }
                 continue
             command = functional["phases"]["1"]
             assert command["module"] == "merlin_experiments.phase1"
@@ -679,6 +703,16 @@ def test_catalog_examples_declare_operator_prerequisites_not_ready_runs():
                 else:
                     # Implementation and other nonoperator pins must still be valid.
                     fingerprint(value)
+            from merlin.targetgen.plugins import resolve_support
+
+            try:
+                if not resolve_support(spec.target).plugin().get("backend"):
+                    expected_errors.add(
+                        f"phase 1 EL4 target {spec.target!r} has no selected support plugin.backend; "
+                        "RTL checks cannot run from the metadata-only example. Select a reviewed OOT support provider."
+                    )
+            except (OSError, ValueError) as exc:
+                expected_errors.add(f"phase 1 EL4 support for {spec.target!r} cannot be resolved: {exc}")
             readiness = preflight(functional)
             assert set(readiness["errors"]) == expected_errors
             assert readiness["configuration_ready"] is (not expected_errors)
@@ -775,6 +809,8 @@ def test_phase0_output_and_manifest_are_run_owned(tmp_path):
     recorded = []
     hardware_targets = []
     namespace = {
+        "__name__": "merlin_experiments.phase0.generation",
+        "__package__": "merlin_experiments.phase0",
         "Path": Path,
         "copy": copy,
         "validate_profile_inputs": validate_profile_inputs,
@@ -789,6 +825,10 @@ def test_phase0_output_and_manifest_are_run_owned(tmp_path):
         "_performance_facts": lambda target: hardware_targets.append(target) or {"sha256": "0" * 64},
         "expand_sweeps": lambda *args, **kwargs: [],
         "assert_no_claim_capsules": lambda *args, **kwargs: None,
+        "held_out_models": lambda te: [],
+        "validate_roles": lambda roles: [],
+        "_instruction_policy": lambda *args: {"status": "none_declared"},
+        "_with_candidate_policy": lambda entry, policy: entry,
         "_prune_superseded_synth": lambda *args, **kwargs: [],
         "update_provenance_manifest": lambda *args, **kwargs: recorded.append(kwargs),
     }
@@ -858,3 +898,37 @@ def test_unsealed_phase0_to_phase1_handoff_cannot_run(tmp_path):
     with pytest.raises(SpecError, match="handoff is not sealed"):
         run(plan)
     assert not destination.exists()
+
+
+def _without_resolvable_clang(monkeypatch, tmp_path):
+    for name in ("MERLIN_CLANG", "MERLIN_IREE_BIN", "MERLIN_EXT_MERLIN_IREE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path / "no-bin"))
+
+
+def test_unresolvable_clang_refuses_grading_phases_before_any_engine_starts(workflow, monkeypatch, tmp_path):
+    # toolchain.clang() ends its fallback chain in a bare name, so a checkout without an install
+    # used to reach grading and fail every capsule as a candidate compile error.
+    definition, destination, _, _ = workflow
+    _without_resolvable_clang(monkeypatch, tmp_path)
+    plan = resolve_plan(load_spec(definition), run_dir=destination)
+    errors = [error for error in preflight(plan)["errors"] if "toolchain clang" in error]
+    assert [error.split()[1] for error in errors] == ["1", "2"]
+    assert all("'clang-23'" in error and str(tmp_path) in error for error in errors)
+    with pytest.raises(SpecError, match="toolchain clang does not resolve"):
+        run(plan)
+    assert not destination.exists()
+    assert not list((tmp_path / "receipt").iterdir())
+
+
+def test_clang_resolves_from_the_engine_checkout_install(workflow, monkeypatch, tmp_path):
+    definition, destination, _, _ = workflow
+    _without_resolvable_clang(monkeypatch, tmp_path)
+    compiler = tmp_path / "third_party" / "llvm-install" / "bin" / "clang-23"
+    compiler.parent.mkdir(parents=True)
+    compiler.write_text("#!/bin/sh\nexit 0\n")
+    compiler.chmod(0o644)
+    plan = resolve_plan(load_spec(definition), run_dir=destination)
+    assert any("toolchain clang" in error for error in preflight(plan)["errors"])  # present, not executable
+    compiler.chmod(0o755)
+    assert preflight(plan)["configuration_ready"]

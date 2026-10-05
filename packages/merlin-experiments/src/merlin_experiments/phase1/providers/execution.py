@@ -40,6 +40,7 @@ class ExecutionConfig:
     resolved_tools: Callable[[], tuple[str, ...]]
     timing_file: Path
     sim_max_jobs: int = 0
+    selected_rtl_facts: Path | None = None
 
 
 _DRIVER_MODULES = {
@@ -122,8 +123,9 @@ def sandbox_command(
     *,
     context: InvocationContext,
     private_run_dir: Path | None = None,
+    codex_mode: bool = False,
 ) -> str:
-    """bwrap argv (deny-by-default) + claude runtime binds + TOOLCHAIN binds (the legit build+sim tools,
+    """bwrap argv (deny-by-default) + provider runtime binds + TOOLCHAIN binds (the legit build+sim tools,
     bound back over the /scratch* masks) + the DERIVED answer-mask pass + toolchain env. The mask set now
     comes from the shared descriptor-driven answer surface (goldens/hidden/prior/oracle/grader/memory) and
     is coverage-proven by test_sandbox_isolation; masking is bundle-independent (a bind that re-exposes an
@@ -131,7 +133,12 @@ def sandbox_command(
     from merlin.targetgen.sandbox import bwrap as _BW
     from merlin.targetgen.target_experiment import load_target_experiment
 
-    parts = _BW.base_argv(ws, bundle, repo=context.repo) + _BW.claude_runtime_binds()
+    base_options = {"repo": context.repo}
+    if codex_mode:
+        base_options.update(include_claude_home=False, inherit_environment=False)
+    parts = _BW.base_argv(ws, bundle, **base_options)
+    if not codex_mode:
+        parts += _BW.claude_runtime_binds()
     target = load_target_experiment(context.descriptor)
     from merlin.targetgen.sandbox import toolchain as TC
 
@@ -217,6 +224,7 @@ def launch(
                 capsules_root,
                 policy_root,
                 contract,
+                config.selected_rtl_facts,
             ),
         )
         if sandbox == "bwrap"
@@ -298,7 +306,7 @@ def launch(
                 background_model=config.provider.background_model,
                 effort=effort,
                 continue_session=continuous,
-                sandbox_command=partial(sandbox_command, context=config.context, private_run_dir=run_dir),
+                sandbox_command=partial(sandbox_command, context=config.context, private_run_dir=run_dir, codex_mode=True),
             )
         # claudecode. The claude CLI speaks the Anthropic Messages API, so a NON-Anthropic model reaches
         # it only through the LiteLLM bridge (ANTHROPIC_BASE_URL -> our proxy -> Bedrock). This is what

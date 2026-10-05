@@ -151,6 +151,30 @@ def test_frozen_assembly_filters_snapshot_not_mutable_live_membership(inputs, mo
         W.BW.remove_bundle_snapshot(ws)
 
 
+def test_frozen_assembly_verifies_all_grants_in_one_batch(inputs, monkeypatch):
+    context, corpus, ws = inputs
+    tool = context.repo / "public tool"
+    tool.mkdir()
+    (tool / "helper.py").write_text("public helper")
+    monkeypatch.setenv("MERLIN_OUT_ROOT", str(ws.parent / "out"))
+    bundle = {"allowed": [{"path": str(corpus), "as": "public"}, {"path": str(tool), "as": "tool"}]}
+    original = W.BW.snapshot_input_paths
+    calls = []
+
+    def observe(workspace, selected, sources, *, repo):
+        calls.append(sources)
+        return original(workspace, selected, sources, repo=repo)
+
+    monkeypatch.setattr(W.BW, "snapshot_input_paths", observe)
+    try:
+        W.assemble(bundle, ws, "bwrap", context=context)
+        assert calls == [[corpus, tool]]
+        assert sorted(p.name for p in (ws / "public").iterdir()) == ["capsule.interface.mlir"]
+        assert (ws / "tool").is_symlink()
+    finally:
+        W.BW.remove_bundle_snapshot(ws)
+
+
 def test_explicit_public_contract_below_blanket_target_deny_is_preserved(inputs):
     context, corpus, ws = inputs
     package = context.repo / "target-package"

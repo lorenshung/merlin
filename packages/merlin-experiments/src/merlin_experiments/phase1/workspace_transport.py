@@ -70,9 +70,14 @@ def assemble_workspace(
     ws.mkdir(parents=True, exist_ok=True)
     (ws / "submission").mkdir(exist_ok=True)
     skipped = []
-    for entry in bundle.get("allowed", []):
-        src = BW.resolve_grant(entry["path"], context.repo)
-        frozen = src if _policy_test_live_inputs else BW.snapshot_input_paths(ws, bundle, [src], repo=context.repo)[0]
+    entries = bundle.get("allowed", [])
+    sources = [BW.resolve_grant(entry["path"], context.repo) for entry in entries]
+    # The resolver verifies the entire snapshot before returning any path. Batch
+    # grants so a toolchain-sized payload is not rehashed once per friendly alias.
+    frozen_sources = (
+        sources if _policy_test_live_inputs else BW.snapshot_input_paths(ws, bundle, sources, repo=context.repo)
+    )
+    for entry, src, frozen in zip(entries, sources, frozen_sources, strict=True):
         if not frozen.exists():
             skipped.append(entry["path"])
             continue

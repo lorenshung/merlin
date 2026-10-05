@@ -439,7 +439,11 @@ def main(argv=None, *, context: InvocationContext | Callable[[], InvocationConte
     ap.add_argument("--poll", type=float, default=0.4)
     ap.add_argument("--descriptor", type=Path, help="Explicit target experiment descriptor")
     ap.add_argument("--repo", type=Path, help="Explicit repository/work root for descriptor resources")
+    ap.add_argument("--rtl-facts", type=Path, help="Selected facts in the verified frozen input snapshot")
     a = ap.parse_args(argv)
+    from ..frozen_facts import select
+
+    select(Path(a.ws), a.rtl_facts)
     if context is None:
         if a.descriptor is None or a.repo is None:
             ap.error("installed ISA broker requires --descriptor and --repo")

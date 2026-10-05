@@ -81,7 +81,11 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--ws", required=True)
     ap.add_argument("--poll", type=float, default=0.4)
+    ap.add_argument("--rtl-facts", type=Path, help="Selected facts in the verified frozen input snapshot")
     a = ap.parse_args(argv)
+    from ..frozen_facts import select
+
+    select(Path(a.ws), a.rtl_facts)
     ch = Path(a.ws) / ".cca_channel"
     ch.mkdir(parents=True, exist_ok=True)
     seen: set[str] = set()

@@ -167,6 +167,12 @@ def test_installed_staged_simjob_submit_poll_wait(staged):
     assert result.returncode == 1
     assert json.loads(result.stdout)["result"] == {"all_pass": False, "error": "synthetic refusal"}
 
+    automatic = _run(staged, "simjob.py", "submit", "--sim", "gsim", "--capsules", "one,two")
+    assert automatic.returncode == 0, automatic.stderr
+    automatic_job = json.loads(automatic.stdout)["job_id"]
+    automatic_request = json.loads((channel / f"simreq_{automatic_job}.json").read_text())
+    assert automatic_request["workers"] == 0
+
 
 @pytest.mark.parametrize(
     ("client", "arguments", "channel_name", "expected"),

@@ -16,6 +16,7 @@ import yaml
 from merlin_experiments.phase1 import session as S
 from merlin_experiments.phase1.context import load_context
 from merlin_experiments.phase1.options import parse_options
+from merlin_experiments.phase1.session import phase_run_dir
 from merlin_experiments.phase1.treatments import Treatment
 from merlin_experiments.phase1.workspaces import workspace_parent, workspace_session
 
@@ -198,6 +199,32 @@ def _run(request, continuation):
     return invocation()
 
 
+def test_tooling_no_go_refuses_before_codegen_or_authoring(project, monkeypatch):
+    _external_substitutes(monkeypatch)
+    from merlin_experiments.phase1 import tooling_readiness
+
+    from merlin.targetgen import capsule_runner
+
+    observed = []
+
+    def refuse(context, te, ws, bundle, tools, public_root, run_dir, snapshot, manifest_sha256, *, without_tools):
+        assert snapshot and snapshot["content_sha256"]
+        assert public_root.is_dir()
+        assert manifest_sha256
+        assert without_tools == ()
+        observed.append((context.target, bundle["bundle_id"], tools))
+        return {"status": "no_go", "checks": [{"name": "selected_sandbox_authoring", "ok": False, "detail": "dead"}]}
+
+    monkeypatch.setattr(tooling_readiness, "run", refuse)
+    monkeypatch.setattr(
+        capsule_runner,
+        "codegen_smoke",
+        lambda *args, **kwargs: pytest.fail("codegen ran after tooling NO_GO"),
+    )
+    assert _run(_request(project), lambda prepared: pytest.fail("authoring continued after tooling NO_GO")) == 4
+    assert observed == [("fixture", "fixture", ("after-stage",))]
+
+
 def test_real_prepare_retains_views_and_post_staging_tool_observation(project, monkeypatch):
     _external_substitutes(monkeypatch)
     request = _request(project)
@@ -362,6 +389,17 @@ def test_actual_preflight_refusals_do_not_invoke_continuation(
         assert yaml.safe_load(receipts[0].read_text())["backend_target"] is None
 
 
+def test_broken_oracle_compiler_refuses_before_authoring(project, monkeypatch):
+    from merlin.targetgen import runtime_build
+
+    _external_substitutes(monkeypatch)
+    monkeypatch.setattr(runtime_build, "compiler_smoke", lambda sim_via: (False, "broken selected clang"))
+    assert _run(_request(project), lambda prepared: pytest.fail("broken compiler reached authoring")) == 4
+    receipts = list(project.rglob("compiler_smoke.yaml"))
+    assert len(receipts) == 1
+    assert yaml.safe_load(receipts[0].read_text())["compiler_ok"] is False
+
+
 def test_inoperable_sandbox_refuses_before_workspace_snapshot_or_authoring(project, monkeypatch):
     from merlin.targetgen.sandbox import preflight
 
@@ -452,7 +490,8 @@ def test_mask_refusal_releases_lease_and_uncertain_continuation_retains_it(proje
     with pytest.raises(RuntimeError, match="uncertain child"):
         _run(_request(project, resume=True), fail)
     request = _request(project, resume=True)
-    environment = yaml.safe_load((request.context.runs / "raw_baseline/one/environment.yaml").read_text())
+    run_dir = phase_run_dir(request.context, "raw_baseline", "one", resume=False)
+    environment = yaml.safe_load((run_dir / "environment.yaml").read_text())
     assert storage_lifecycle.blockers(Path(environment["workspace_path"]).parent)
 
 

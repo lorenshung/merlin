@@ -13,6 +13,7 @@ import sysconfig
 from pathlib import Path
 
 import merlin_experiments
+from merlin_experiments import access_policy as AP
 from merlin_experiments import frozen_python as FP
 from merlin_experiments import source_snapshot as SNAP
 from merlin_experiments.phase2 import host_policy as HP
@@ -100,11 +101,23 @@ def test_cold_installed_ready_checkpoint_resume(tmp_path, monkeypatch):
     )
     stage = tmp_path / "stage"
     roots = []
-    for index, path in enumerate(dict.fromkeys(Path(value).resolve() for value in merlin.__path__)):
+    # This test runs from a worktree that can coexist with another editable
+    # Merlin installation. Only this checkout's owners belong to the frozen
+    # fixture; importing the other checkout would duplicate logical modules.
+    checkout = Path(__file__).resolve().parents[3]
+    owners = dict.fromkeys(
+        path for value in merlin.__path__ if (path := Path(value).resolve()).is_relative_to(checkout)
+    )
+    for index, path in enumerate(owners):
         relative = f"owner-{index}"
         _copy_python(path, stage / relative / "merlin")
         roots.append(relative)
     _copy_python(Path(merlin_experiments.__file__).resolve().parent, stage / "experiments/merlin_experiments")
+    # The real installed package includes this mandatory deny registry. A
+    # Python-only fixture would omit it and fail before testing cold resume.
+    policy = stage / "experiments/merlin_experiments" / AP.RESOURCE
+    policy.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(AP.resource_path(), policy)
     roots.append("experiments")
     for relative in HP.RESOURCE_FILES:
         path = stage / "contract" / relative

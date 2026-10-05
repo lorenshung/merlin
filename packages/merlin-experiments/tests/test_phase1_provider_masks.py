@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 from merlin_experiments.phase1.context import InvocationContext
 from merlin_experiments.phase1.providers import execution as E
+from merlin_experiments.phase1.providers import codex_agent as CA
 
 from merlin.targetgen import target_experiment
 from merlin.targetgen.sandbox import bwrap as BW
@@ -53,6 +54,45 @@ def _command(prepared, extra):
         "true", prepared.ws, prepared.bundle, extra,
         context=prepared.context, private_run_dir=None,
     )
+
+
+def test_codex_prefix_does_not_mount_other_provider_secrets_or_inherit_host_env(prepared, tmp_path, monkeypatch):
+    operator = tmp_path / "operator"
+    claude_home = operator / ".claude"
+    claude_home.mkdir(parents=True)
+    claude_credential = claude_home / ".credentials.json"
+    claude_credential.write_text("synthetic credential")
+    claude_settings = operator / ".claude.json"
+    claude_settings.write_text("synthetic settings")
+    config_home = operator / ".config"
+    config_home.mkdir()
+    (config_home / "secret").write_text("synthetic credential")
+    real_codex = operator / ".codex"
+    real_codex.mkdir()
+    (real_codex / "auth.json").write_text("synthetic credential")
+    launcher = operator / ".local/bin"
+    launcher.mkdir(parents=True)
+    isolated = tmp_path / "isolated-codex-home"
+    isolated.mkdir()
+    monkeypatch.setenv("HOME", str(operator))
+    monkeypatch.setenv("CODEX_HOME", str(real_codex))
+    monkeypatch.setenv("MERLIN_TEST_CANDIDATE_SECRET", "synthetic credential")
+
+    def forbidden_claude_runtime_binds():
+        pytest.fail("the Codex provider must not request Claude runtime mounts")
+
+    monkeypatch.setattr(BW, "claude_runtime_binds", forbidden_claude_runtime_binds)
+    argv = E.sandbox_command(
+        "true", prepared.ws, prepared.bundle, CA.codex_runtime_binds(isolated),
+        context=prepared.context, codex_mode=True,
+    )
+    assert "--clearenv" in argv
+    assert not BW.is_exposed(argv, claude_credential)
+    assert not BW.is_exposed(argv, claude_settings)
+    assert not BW.is_exposed(argv, config_home / "secret")
+    assert ["--ro-bind", str(launcher), str(launcher)] == argv[
+        argv.index(str(launcher)) - 1 : argv.index(str(launcher)) + 2
+    ]
 
 
 def test_agent_composer_keeps_host_run_private_even_through_a_bind_alias(prepared):

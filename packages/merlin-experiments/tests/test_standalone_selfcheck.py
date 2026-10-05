@@ -88,3 +88,26 @@ def test_unpinned_selfcheck_discovers_grade_engine_and_broker_defers_selection(m
     )
     assert selfcheck._default_sim(object()) == selfcheck.FALLBACK_RTL_SIM
     assert "no RTL engine available" in capsys.readouterr().err
+
+
+def test_legacy_capsule_fallback_names_itself_and_its_cause(tmp_path, capsys):
+    # A silent fallback to the legacy set reads as the package failing capsules that are merely
+    # missing from it ("unknown capsule(s)"); the operator has to see that it happened, and why.
+    from merlin_experiments.phase1.context import InvocationContext
+
+    missing = tmp_path / "absent" / "target_experiment.yaml"
+    context = InvocationContext(
+        repo=tmp_path,
+        descriptor=missing,
+        experiment=missing.parent,
+        target="stub",
+        runs=tmp_path,
+        reports=tmp_path,
+        bundles=tmp_path,
+        sourced_environment=(),
+        harness=tmp_path / "harness",
+    )
+    assert selfcheck._public_capsules(context) == tmp_path / "harness" / "full_public_capsules"
+    err = capsys.readouterr().err
+    assert "falling back to the legacy committed set" in err
+    assert str(missing) in err and "Error" in err

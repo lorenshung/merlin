@@ -35,11 +35,11 @@ contains into the transcript's init record, so an asymmetry is visible in the
 artifact rather than discovered later.
 
 Sandboxing: at ``--sandbox bwrap`` the whole ``codex`` process runs inside the
-harness's existing bwrap wrapper (the boundary that masks goldens, private model weights, and hidden
-capsules), and Codex's own approval prompts are bypassed *because* that outer
-boundary is what the isolation claim rests on. At ``--sandbox none`` there is no
-outer boundary, so Codex's own ``workspace-write`` sandbox is used instead of
-bypassing it.
+harness's existing bwrap wrapper (which masks goldens and hidden inputs), while
+model-generated commands run inside a second, deny-by-default Codex permission
+profile. The second boundary keeps the writable credential available to the
+Codex parent for token refresh, but unavailable to its candidate commands.
+At ``--sandbox none`` Codex's own ``workspace-write`` sandbox is used.
 """
 
 from __future__ import annotations
@@ -95,6 +95,7 @@ DEFAULT_CODEX_MODEL = os.environ.get("CODEX_MODEL", "gpt-5.6-sol")
 _INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md", "AGENT.md", "TASK.md")
 
 _POLL_S = 0.25
+_CANDIDATE_PERMISSION_PROFILE = "merlin-candidate"
 
 
 def _now() -> str:
@@ -170,9 +171,10 @@ def build_cmd(
     ]
     cmd += _effort_arg(effort)
     if sandbox == "bwrap":
-        # The outer bwrap IS the boundary; Codex's own sandbox would only add a
-        # second, weaker one that cannot see the masked answer surfaces.
-        cmd.append("--dangerously-bypass-approvals-and-sandbox")
+        # Do not pass --sandbox: the legacy setting overrides permission profiles.
+        # --strict-config fails closed on a CLI too old to understand the profile.
+        cmd += ["--strict-config", "-c", f'default_permissions="{_CANDIDATE_PERMISSION_PROFILE}"',
+                "-c", "approval_policy=never"]
     else:
         # NOT ``--ask-for-approval``: that flag does not exist in 0.147.0 (the
         # CLI offers --approve-for-me / --dangerously-bypass-approvals-and-sandbox),
@@ -226,7 +228,46 @@ def usage_to_claude_shape(usage: dict) -> tuple[dict, bool]:
 #: The frozen per-experiment Codex config. Deliberately minimal: the user's own
 #: config.toml carries per-project trust levels and notice state that have nothing
 #: to do with the experiment and would differ between machines.
-_FROZEN_CONFIG = "model = {model}\nmodel_reasoning_effort = {effort}\n{provider}"
+_FROZEN_CONFIG = (
+    "model = {model}\nmodel_reasoning_effort = {effort}\n"
+    f'default_permissions = "{_CANDIDATE_PERMISSION_PROFILE}"\n'
+    "{provider}\n{profile}"
+)
+
+
+def _candidate_permission_config(codex_home: Path) -> str:
+    """Freeze the candidate's filesystem policy into the isolated Codex config.
+
+    The outer bwrap masks /scratch and /scratch2 before remounting only declared
+    inputs and tools. Granting those mount destinations read-only here therefore
+    cannot reveal an unmounted host path; the writable workspace gets its own
+    narrower rule. The even narrower CODEX_HOME denial is essential: its auth
+    file is writable to the Codex *parent* for refresh, never to candidate tools.
+    """
+    if not codex_home.is_absolute():
+        raise ValueError("isolated CODEX_HOME must be absolute")
+    launcher_dir = Path.home() / ".local" / "bin"
+    package_roots = dict.fromkeys((real_codex_home() / "packages", Path.home() / ".codex" / "packages"))
+    runtime_grants = "".join(
+        f'{json.dumps(str(path))} = "read"\n'
+        for path in (launcher_dir, *package_roots)
+        if path.exists()
+    )
+    return (
+        f'[permissions.{_CANDIDATE_PERMISSION_PROFILE}]\n'
+        'extends = ":workspace"\n'
+        f'[permissions.{_CANDIDATE_PERMISSION_PROFILE}.filesystem]\n'
+        '":root" = "deny"\n'
+        '":minimal" = "read"\n'
+        '"/scratch" = "read"\n'
+        '"/scratch2" = "read"\n'
+        f'{runtime_grants}'
+        f'{json.dumps(str(codex_home))} = "deny"\n'
+        f'[permissions.{_CANDIDATE_PERMISSION_PROFILE}.filesystem.":workspace_roots"]\n'
+        '"." = "write"\n'
+        f'[permissions.{_CANDIDATE_PERMISSION_PROFILE}.network]\n'
+        'enabled = false\n'
+    )
 
 
 #: ``codex --version`` per binary, asked once. The CLI is a hot dependency and its event names are
@@ -272,8 +313,9 @@ def prepare_codex_home(dest: Path, *, model: str, effort: str) -> dict:
     What the isolated home holds is a frozen ``config.toml`` and nothing else;
     Codex creates its own ``sessions/``, ``state_*.sqlite`` and caches inside it.
     **The credential is never copied here** — :func:`codex_runtime_binds`
-    read-only *bind-mounts* the real ``auth.json`` over this path inside the
-    sandbox, so no secret is written to the artifact tree.
+    bind-mounts the real ``auth.json`` over this path in the outer sandbox. A
+    separately enforced Codex permission profile denies the entire isolated
+    home to candidate commands, while the Codex parent can refresh its token.
 
     Measured caveat: a fresh home has no warm prompt cache, so the cached-token
     share differs from a run using the user's own home. Every arm must therefore
@@ -289,7 +331,8 @@ def prepare_codex_home(dest: Path, *, model: str, effort: str) -> dict:
 
     provider = _BR.codex_config_fragment(model)
     config = _FROZEN_CONFIG.format(
-        model=json.dumps(_BR.codex_model_name(model)), effort=json.dumps(effort or "high"), provider=provider
+        model=json.dumps(_BR.codex_model_name(model)), effort=json.dumps(effort or "high"),
+        profile=_candidate_permission_config(dest), provider=provider,
     )
     config_path = dest / "config.toml"
     config_path.write_text(config)
@@ -301,7 +344,7 @@ def prepare_codex_home(dest: Path, *, model: str, effort: str) -> dict:
         "config_sha256": hashlib.sha256(config.encode()).hexdigest(),
         "auth_source": str(auth),
         "auth_present": auth.is_file(),
-        "auth_copied": False,  # bind-mounted read-only; never written to disk here
+        "auth_copied": False,  # bind-mounted; never written to disk here
         "isolated_from_real_home": True,
         "bridge": _BR.record(model, harness="codex"),
     }
@@ -371,11 +414,11 @@ def check_token_outlasts_run(planned_s: float) -> dict:
 def codex_runtime_binds(codex_home: Path) -> list[str]:
     """bwrap args that make ``codex`` runnable and authenticated inside the sandbox.
 
-    Three binds, each for a reason:
+    Runtime mounts, each for a reason:
 
-    * ``~/.codex/packages`` RO — ``~/.local/bin/codex`` is a SYMLINK into it, so
-      binding ``~/.local/bin`` alone (which the shared claude binds already do)
-      leaves the launcher pointing at nothing. Contains no conversation state.
+    * ``~/.local/bin`` and ``~/.codex/packages`` RO — the former normally
+      contains a ``codex`` symlink into the latter. Neither needs Claude's
+      credential or configuration mounts.
     * *codex_home* writable — Codex must create sessions/state/caches somewhere.
     * the real ``auth.json`` WRITABLE **onto** ``<codex_home>/auth.json``.
 
@@ -389,10 +432,9 @@ def codex_runtime_binds(codex_home: Path) -> list[str]:
       credential. ``codex login`` only postpones it to the next rotation, so the
       read-only bind was the defect rather than the safeguard.
 
-      Writable is therefore the correct bind, with the user's explicit consent
-      (it lets a sandboxed process write a live credential). The target is the
-      user's own ``~/.codex/auth.json``, so no secret is copied into the
-      artifact tree; rotation lands where the next run will look for it.
+      Writable permits token rotation. The native Codex permission profile is
+      mandatory before untrusted execution: without it, generated shell commands
+      share this mount namespace and can read or rewrite the credential.
 
     Note what is NOT bound: ``~/.codex`` itself. Inside the sandbox that
     directory therefore contains only ``packages/``, so no prior session,
@@ -400,9 +442,20 @@ def codex_runtime_binds(codex_home: Path) -> list[str]:
     """
     home = real_codex_home()
     binds: list[str] = []
-    packages = home / "packages"
-    if packages.exists():
-        binds += ["--ro-bind", str(packages), str(packages)]
+    # The Codex path no longer inherits Claude's broad runtime mounts. Keep its
+    # launcher reachable explicitly; the usual ~/.local/bin/codex is a symlink
+    # into the separately mounted packages directory.
+    launcher_dir = Path.home() / ".local" / "bin"
+    if launcher_dir.exists():
+        binds += ["--ro-bind", str(launcher_dir), str(launcher_dir)]
+        # base_argv(clearenv=True) intentionally drops the operator PATH. Keep
+        # only this launcher directory plus system bins; toolchain env prepends
+        # the experiment's frozen Python/LLVM/clang paths later.
+        binds += ["--setenv", "PATH", f"{launcher_dir}:/usr/bin:/bin"]
+    package_roots = (home / "packages", Path.home() / ".codex" / "packages")
+    for packages in dict.fromkeys(package_roots):
+        if packages.exists():
+            binds += ["--ro-bind", str(packages), str(packages)]
     binds += ["--bind", str(codex_home), str(codex_home)]
     auth = home / "auth.json"
     if auth.is_file():
@@ -575,9 +628,9 @@ def build_resume_cmd(
     """Assemble ``codex exec resume <SESSION_ID> -`` for continuing an existing thread.
 
     Built from scratch rather than by rewriting the first turn's argv, because ``resume`` accepts a
-    SMALLER option set than ``exec``. Measured against 0.153.0's ``--help``: it takes ``--json``,
-    ``--model``, ``-o``, ``--skip-git-repo-check`` and the sandbox-bypass flag, but NOT ``--color``
-    and NOT ``-C``. Patching the exec argv therefore produced
+    SMALLER option set than ``exec``. The 0.158.0 CLI accepts ``--json``, ``--model``, ``-o``,
+    ``--skip-git-repo-check`` and ``-c``, but NOT ``--color``, ``--sandbox`` or ``-C``.
+    Patching the exec argv therefore produced
 
         Usage: codex exec resume --json --dangerously-bypass-approvals-and-sandbox <SESSION_ID> [PROMPT]
 
@@ -590,9 +643,12 @@ def build_resume_cmd(
     cmd = [codex_bin, "exec", "resume", "--json", "--skip-git-repo-check", "--model", model, "-o", str(final_path)]
     cmd += _effort_arg(effort)
     if sandbox == "bwrap":
-        cmd.append("--dangerously-bypass-approvals-and-sandbox")
+        cmd += ["--strict-config", "-c", f'default_permissions="{_CANDIDATE_PERMISSION_PROFILE}"',
+                "-c", "approval_policy=never"]
     else:
-        cmd += ["--sandbox", "workspace-write", "-c", "approval_policy=never"]
+        # `resume` has no --sandbox option; its config override is the same
+        # workspace-write policy the first unsandboxed turn selects.
+        cmd += ["-c", 'sandbox_mode="workspace-write"', "-c", "approval_policy=never"]
     cmd += [str(thread_id), "-"]
     return cmd
 
@@ -630,6 +686,57 @@ def _sandbox_script(rounds: Path, rnd: int, turn: int, command: str) -> list[str
         if staged is not None:
             staged.unlink(missing_ok=True)
     return ["bash", str(script)]
+
+
+def _verify_frozen_config(codex_home: Path, expected_sha256: str) -> None:
+    """Refuse an altered policy before the first turn and every continuation."""
+    import hashlib
+
+    actual = hashlib.sha256((codex_home / "config.toml").read_bytes()).hexdigest()
+    if actual != expected_sha256:
+        raise RuntimeError("isolated Codex config changed after it was frozen")
+
+
+def _preflight_candidate_sandbox(
+    ws: Path,
+    codex_home: Path,
+    codex_bin: str,
+    bundle: dict,
+    sandbox_command: Callable[..., str],
+    rounds: Path,
+    rnd: int,
+) -> None:
+    """No-model proof that the installed CLI enforces the frozen profile.
+
+    The probe runs through the *same* outer mount policy as the paid turn. A
+    missing or unsupported permission profile, visible credential, inaccessible
+    workspace, or failure to execute common tools is a launch failure, not a
+    degraded mode that silently falls back to bypassing Codex's sandbox.
+    """
+    probe = (
+        'test -n "$CODEX_HOME" && '
+        'test ! -r "$CODEX_HOME/auth.json" && test ! -w "$CODEX_HOME/auth.json" && '
+        'for proc_auth in /proc/[0-9]*/root"$CODEX_HOME/auth.json"; do '
+        'test ! -r "$proc_auth" || exit 1; done && '
+        f'test -r {shlex.quote(str(ws))} && test -w {shlex.quote(str(ws))} && '
+        'command -v python3 >/dev/null && python3 --version >/dev/null'
+    )
+    auth = shlex.quote(str(codex_home / "auth.json"))
+    native_probe = shlex.join(
+        (codex_bin, "sandbox", "--permission-profile", _CANDIDATE_PERMISSION_PROFILE,
+         "-C", str(ws), "--", "/bin/sh", "-c", probe)
+    )
+    inner = f"test -r {auth} && test -w {auth} && {native_probe}"
+    script = _sandbox_script(
+        rounds, rnd, -1,
+        sandbox_command(inner, ws, bundle, extra_binds=codex_runtime_binds(codex_home)),
+    )
+    result = subprocess.run(script, cwd=str(ws), capture_output=True, text=True, timeout=45)
+    if result.returncode:
+        raise RuntimeError(
+            "Codex candidate permission profile preflight failed; refusing untrusted launch "
+            f"(rc={result.returncode}, stderr={result.stderr[-1200:].strip()!r})"
+        )
 
 
 def run_round(
@@ -687,6 +794,14 @@ def run_round(
     resolved = str(effective_model).strip() if effective_model is not None else resolve_model(model)
     if not resolved:
         raise ValueError("effective Codex model must be non-empty")
+    if sandbox == "bwrap":
+        from merlin_experiments.phase1.providers import agent_bridge as _BR
+
+        if _BR.bridged_name(resolved, "codex"):
+            # The proxy's master key belongs to the host Codex process, not the
+            # candidate shell. A future broker can deliver it without a shell
+            # environment leak; clearenv intentionally does not do that today.
+            raise RuntimeError("bridged Codex needs a host-side proxy credential broker under bwrap")
     rounds = run_dir / "rounds"
     rounds.mkdir(parents=True, exist_ok=True)
     tpath = rounds / f"round_{rnd:02d}.transcript.jsonl"
@@ -755,10 +870,15 @@ def run_round(
         # An isolated CODEX_HOME per run: the real ~/.codex holds every prior
         # session on this host, which a graded agent must not be able to read.
         # PURGEABLE cache, and no credential is written into it — the real
-        # auth.json is bind-mounted read-only (see codex_runtime_binds).
+        # auth.json is bind-mounted writable for refresh, behind Codex's native
+        # candidate-command sandbox (see codex_runtime_binds).
         home_root = Path(codex_home_root) if codex_home_root is not None else cache_dir("codex_home")
         codex_home = home_root / f"{run_dir.name}_r{rnd:02d}"
+        if codex_home.resolve().is_relative_to(ws.resolve()) or ws.resolve().is_relative_to(codex_home.resolve()):
+            raise ValueError("isolated CODEX_HOME must not overlap the candidate workspace")
         home_info = prepare_codex_home(codex_home, model=resolved, effort=effort)
+        _verify_frozen_config(codex_home, home_info["config_sha256"])
+        _preflight_candidate_sandbox(ws, codex_home, codex_bin, bundle, sandbox_command, rounds, rnd)
         inner = " ".join(shlex.quote(c) for c in run_cmd)
         cmd = _sandbox_script(
             rounds, rnd, 0, sandbox_command(inner, ws, bundle, extra_binds=codex_runtime_binds(codex_home))
@@ -799,6 +919,8 @@ def run_round(
             )
             if turn_index:
                 cur_prompt.write_text(_CONTINUE_MSG)
+                if sandbox == "bwrap":
+                    _verify_frozen_config(codex_home, home_info["config_sha256"])
                 resume_argv = build_resume_cmd(
                     ws,
                     model=resolved,

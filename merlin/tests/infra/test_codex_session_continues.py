@@ -47,14 +47,16 @@ def test_the_session_id_precedes_the_stdin_prompt_marker():
     assert cmd[-2:] == ["TID", "-"]
 
 
-def test_resume_keeps_the_sandbox_bypass_off_the_unsandboxed_path():
-    """The outer bwrap is the boundary when sandboxed; without it codex needs its own policy."""
+def test_resume_preserves_each_path_sandbox_policy_without_an_unsupported_flag():
+    """Bwrap gets its permission profile; the bare path selects workspace-write via config."""
     boxed = CA.build_resume_cmd(
         Path("/ws"), model="m", effort="", final_path=Path("/f"), sandbox="bwrap", thread_id="T"
     )
     bare = CA.build_resume_cmd(Path("/ws"), model="m", effort="", final_path=Path("/f"), sandbox="none", thread_id="T")
-    assert "--dangerously-bypass-approvals-and-sandbox" in boxed
-    assert "--sandbox" in bare and "workspace-write" in bare
+    assert "--dangerously-bypass-approvals-and-sandbox" not in boxed + bare
+    assert 'default_permissions="merlin-candidate"' in boxed
+    assert "--sandbox" not in boxed + bare
+    assert 'sandbox_mode="workspace-write"' in bare
 
 
 def test_the_continuation_prompt_carries_no_hint():

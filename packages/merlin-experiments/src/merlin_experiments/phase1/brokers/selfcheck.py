@@ -310,8 +310,12 @@ def main(
         "--policy-capsules-root", type=Path, help="frozen descriptor corpus for promotion, not the QA subset"
     )
     ap.add_argument("--ws", required=True)
+    ap.add_argument("--rtl-facts", type=Path, help="Selected facts in the verified frozen input snapshot")
     ap.add_argument("--poll", type=float, default=0.5)
     a = ap.parse_args(argv)
+    from ..frozen_facts import select
+
+    select(Path(a.ws), a.rtl_facts)
     context = resolve_context(a, ap, context)
     capsules_root = a.capsules_root if a.capsules_root is not None else capsules_root
     promotion_capsules_root = a.policy_capsules_root if a.policy_capsules_root is not None else policy_capsules_root
@@ -430,7 +434,8 @@ def main(
             _atomic_write(ch / f"done_{rid}", "err")
             continue
         to = int(r.get("timeout", 1800))
-        argv2 = worker_command(context, capsules_root, contract) + [
+        worker_kwargs = {"rtl_facts": a.rtl_facts} if a.rtl_facts is not None else {}
+        argv2 = worker_command(context, capsules_root, contract, **worker_kwargs) + [
             "--submission",
             str(ws / "submission"),
             "--capsules",

@@ -141,10 +141,10 @@ def test_actual_dispatch_configuration_order_and_primary_cleanup(tmp_path, monke
         if driver != "converse":
             assert kw["effort"] == "high"
             assert kw["sandbox_command"].func is E.sandbox_command
-            assert kw["sandbox_command"].keywords == {
-                "context": config.context,
-                "private_run_dir": tmp_path,
-            }
+            expected_sandbox = {"context": config.context, "private_run_dir": tmp_path}
+            if driver == "codex":
+                expected_sandbox["codex_mode"] = True
+            assert kw["sandbox_command"].keywords == expected_sandbox
         if driver == "codex":
             assert kw["continue_session"] is True
         if primary:

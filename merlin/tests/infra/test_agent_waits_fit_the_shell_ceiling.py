@@ -16,22 +16,22 @@ ceiling costs one cheap turn to re-issue. Being killed costs the entire wait.
 from __future__ import annotations
 
 import importlib.util
-import sys
 
 import pytest
 
-from merlin.common.paths import merlin_dir
+from merlin.common.paths import module_source_path
 
-HARNESS = merlin_dir() / "experiments/capsule_bench/harness"
+SOURCES = {
+    "await_verdict": module_source_path("merlin_experiments.phase1.tools.await_verdict"),
+    "selfcheck_shim": module_source_path("merlin_experiments.phase1.tools.selfcheck"),
+}
 
 #: What the agent's shell kills at. Not ours to change; the waits must fit under it.
 SHELL_CEILING_S = 600
 
 
 def _module(name: str):
-    if str(HARNESS) not in sys.path:
-        sys.path.insert(0, str(HARNESS))
-    spec = importlib.util.spec_from_file_location(name, HARNESS / f"{name}.py")
+    spec = importlib.util.spec_from_file_location(name, SOURCES[name])
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

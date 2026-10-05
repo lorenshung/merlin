@@ -147,7 +147,7 @@ def test_codex_invocation_configuration_is_local(tmp_path, monkeypatch, explicit
     def prepare(home, **kwargs):
         homes.append(home)
         assert kwargs == {"model": "offline", "effort": ""}
-        return {}
+        return {"config_sha256": "offline-fixture"}
 
     class PolicyReached(Exception):
         pass
@@ -161,6 +161,8 @@ def test_codex_invocation_configuration_is_local(tmp_path, monkeypatch, explicit
     monkeypatch.setattr(artifacts, "cache_dir", cache_dir)
     monkeypatch.setattr(driver, "cli_version", lambda binary: versions.append(binary) or "offline")
     monkeypatch.setattr(driver, "prepare_codex_home", prepare)
+    monkeypatch.setattr(driver, "_verify_frozen_config", lambda *args: None)
+    monkeypatch.setattr(driver, "_preflight_candidate_sandbox", lambda *args: None)
     monkeypatch.setattr(driver, "codex_runtime_binds", lambda home: ["synthetic-bind"])
     monkeypatch.setattr(driver.subprocess, "Popen", lambda *a, **k: pytest.fail("must not launch a provider"))
     kwargs = {"codex_binary": selected, "codex_home_root": root} if explicit else {}
@@ -204,7 +206,9 @@ def test_codex_continuation_retains_explicit_binary_and_home(tmp_path, monkeypat
     monkeypatch.setattr(driver, "cli_version", lambda binary: "offline")
     monkeypatch.setattr(driver, "_CONTINUE_MAX_TURNS", 2)
     monkeypatch.setattr(driver, "_CONTINUE_MIN_S", 0)
-    monkeypatch.setattr(driver, "prepare_codex_home", lambda home, **kw: homes.append(home) or {})
+    monkeypatch.setattr(driver, "prepare_codex_home", lambda home, **kw: homes.append(home) or {"config_sha256": "offline-fixture"})
+    monkeypatch.setattr(driver, "_verify_frozen_config", lambda *args: None)
+    monkeypatch.setattr(driver, "_preflight_candidate_sandbox", lambda *args: None)
     monkeypatch.setattr(driver, "codex_runtime_binds", lambda home: binds.append(home) or [])
     monkeypatch.setattr(artifacts, "cache_dir", lambda *a: pytest.fail("must not consult global cache"))
     original_popen = subprocess.Popen

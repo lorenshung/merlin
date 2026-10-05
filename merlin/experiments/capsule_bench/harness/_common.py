@@ -1,8 +1,9 @@
 """Shared helpers for the target-neutral capsule-bench isolation harness.
 
 Thin shim over ``merlin.benchharness`` (the shared harness primitives). This module is imported by
-harness scripts BEFORE they add merlin/python to sys.path, so it bootstraps the repo root itself
-(git first, parents[] fallback), puts merlin/python on the path, then re-exports the shared helpers.
+harness scripts BEFORE merlin is importable, so it bootstraps the repo root itself (the tree holding
+this file when it carries the library, else git), puts that tree's src and packages/*/src on the path,
+then re-exports the shared helpers.
 Public symbols (REPO/HARNESS/EXP/RUNS/REPORTS/BUNDLES/sh/hash_tree/repo_sha) are preserved for callers.
 """
 
@@ -16,12 +17,28 @@ from pathlib import Path
 # Self-contained bootstrap (runs before merlin is importable).
 _HERE = Path(__file__).resolve()
 _root = os.environ.get("MERLIN_REPO_ROOT", "").strip()
+# The tree this file sits in wins over the enclosing git checkout when it holds the library. A run's
+# frozen source snapshot is no checkout of its own and lives under the repo's out/ root, so
+# `git rev-parse` answers with the LIVE checkout, whose merlin is then imported ahead of the
+# snapshot's: every snapshot check ran whatever another session had left there, and failed the
+# moment its API moved. The markers are the ones `merlin.common.paths.checkout_root` recognises.
+_tree = _HERE.parents[4]
+if not _root and any((_tree / marker / "__init__.py").is_file() for marker in ("src/merlin", "merlin/python/merlin")):
+    _root = str(_tree)
 if not _root:
     _root = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"], cwd=str(_HERE.parent), capture_output=True, text=True
     ).stdout.strip()
-REPO = Path(_root).expanduser().resolve() if _root else _HERE.parents[4]
-sys.path.insert(0, str(REPO / "merlin" / "python"))
+REPO = Path(_root).expanduser().resolve() if _root else _tree
+# Pin the selected tree's core and extension roots first, in the same order as the test suite's
+# conftest: `merlin.benchharness` and `merlin_experiments` live under packages/*/src, and leaving
+# them to an editable install lets another checkout's copies answer for this one.
+_core = REPO / "src" if (REPO / "src" / "merlin").is_dir() else REPO / "merlin" / "python"
+for _source_root in reversed([_core, *sorted((REPO / "packages").glob("*/src"))]):
+    if _source_root.is_dir():
+        if str(_source_root) in sys.path:
+            sys.path.remove(str(_source_root))
+        sys.path.insert(0, str(_source_root))
 
 from merlin_experiments.phase1 import context as _context  # noqa: E402
 

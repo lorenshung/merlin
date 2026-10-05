@@ -17,7 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from merlin_experiments.phase1.brokers import cca, isa_tools
+from merlin_experiments.phase1.brokers import cca, isa_tools, simjob
 from merlin_experiments.phase1.context import InvocationContext
 
 from merlin.common.paths import module_source_path, python_import_roots
@@ -27,6 +27,22 @@ def _invocation(root, target="synthetic"):
     descriptor = root / f"{target}.yaml"
     descriptor.write_text(f"target: {target}\n")
     return InvocationContext(root, descriptor, root, target, root / "runs", root / "reports", root / "bundles", ())
+
+
+def test_simjob_parallel_capsules_respect_global_verilator_slots(tmp_path, monkeypatch):
+    monkeypatch.setattr(simjob, "GLOBAL_VERIL_SLOTS", tmp_path)
+    assert simjob._capsule_workers(0, sim="gsim", n_capsules=12) == 5
+    assert simjob._capsule_workers(0, sim="verilator", n_capsules=12) == 4
+    assert simjob._capsule_workers(0, sim="verilator", n_capsules=1) == 1
+    first = simjob._reserve_veril_workers(2, 2)
+    assert len(first) == 2
+    assert simjob._reserve_veril_workers(2, 2) == ()
+    simjob._release_veril_workers(first[:1])
+    second = simjob._reserve_veril_workers(2, 2)
+    assert len(second) == 1
+    simjob._release_veril_workers(first[1:])
+    simjob._release_veril_workers(second)
+    assert not list(tmp_path.glob("slot_*"))
 
 
 def test_context_caches_models_per_invocation_but_reloads_schedule(tmp_path, monkeypatch):

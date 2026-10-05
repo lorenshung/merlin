@@ -5,7 +5,7 @@ as a SEPARATE PROCESS = the existing agent_selfcheck.py (the single grading+reda
 expected values withheld), and writes back `simresp_<id>.json` + `simdone_<id>`. A timeout is a normal
 redacted verdict, never a crash.
 
-CONSTRAINED SIM-RUNNER (load-bearing isolation): a request may only name {sim in spike/verilator/vcs,
+CONSTRAINED SIM-RUNNER (load-bearing isolation): a request may only name {an allowed simulator,
 capsules that exist under the public capsule set, debug from a whitelist, workers (clamped)}. The broker
 maps those to a FIXED agent_selfcheck.py argv — it NEVER execs anything the request names. So the agent
 gets full sim power on its OWN submission + the harness capsules, but cannot read goldens/oracle or run
@@ -177,6 +177,44 @@ def _veril_acquire(n_slots: int) -> Path | None:
                     f"cannot create {slot}: {e}. No L3 job can run until the slot directory is writable."
                 ) from e
     return None
+
+
+def _reserve_veril_workers(desired: int, n_slots: int) -> tuple[Path, ...]:
+    """Reserve one global slot per concurrent RTL capsule, not merely per batch job.
+
+    A batch may use fewer workers than requested when another run already owns slots. A zero-length
+    result means the caller should leave this job queued. Never let a partially reserved batch leak
+    slots if the second acquisition fails unexpectedly.
+    """
+    reserved: list[Path] = []
+    try:
+        for _ in range(min(desired, n_slots)):
+            slot = _veril_acquire(n_slots)
+            if slot is None:
+                break
+            reserved.append(slot)
+    except Exception:
+        for slot in reserved:
+            slot.unlink(missing_ok=True)
+        raise
+    return tuple(reserved)
+
+
+def _release_veril_workers(slots: tuple[Path, ...]) -> None:
+    for slot in slots:
+        slot.unlink(missing_ok=True)
+
+
+def _capsule_workers(requested: object, *, sim: str, n_capsules: int) -> int:
+    """Bound the agent's parallelism without allowing a batch to bypass the Verilator semaphore."""
+    from merlin.targetgen.rtl_engine_policy import capsule_worker_cap
+
+    limit = capsule_worker_cap(sim)
+    try:
+        named = int(requested)
+    except (TypeError, ValueError):
+        named = 0
+    return max(1, min(named if named > 0 else limit, limit, n_capsules))
 
 
 def _reclaim_if_stale(slot: Path) -> bool:
@@ -402,6 +440,7 @@ def main(
         "--policy-capsules-root", type=Path, help="frozen descriptor corpus for promotion, not the QA subset"
     )
     ap.add_argument("--ws", required=True)
+    ap.add_argument("--rtl-facts", type=Path, help="Selected facts in the verified frozen input snapshot")
     ap.add_argument("--max-jobs", type=int, default=4)
     ap.add_argument("--veril-slots", type=int, default=2)
     ap.add_argument("--poll", type=float, default=0.5)
@@ -409,6 +448,9 @@ def main(
         "--per-capsule-timeout", type=int, default=0, help="0=derive from the cert engine's own measured cost law"
     )
     a = ap.parse_args(argv)
+    from ..frozen_facts import select
+
+    select(Path(a.ws), a.rtl_facts)
     context = resolve_context(a, ap, context)
     capsules_root = a.capsules_root if a.capsules_root is not None else capsules_root
     promotion_capsules_root = a.policy_capsules_root if a.policy_capsules_root is not None else policy_capsules_root
@@ -520,8 +562,7 @@ def main(
                     j["log"].close()
                 except Exception:  # noqa: BLE001 -- closing a log must never break the reap
                     pass
-            if j["slot"]:
-                j["slot"].unlink(missing_ok=True)
+            _release_veril_workers(j["slots"])
             if j.get("snapshot_root"):
                 shutil.rmtree(j["snapshot_root"], ignore_errors=True)
             running.pop(jid)
@@ -575,11 +616,13 @@ def main(
                     (ch / f"simerr_{jid}").write_text("rejected")
                     claimed.add(jid)
                     continue
-                slot = None
+                ncaps = len(_valid_capsules("all", capsules_root) or []) if caps == ["all"] else len(caps)
+                workers = _capsule_workers(r.get("workers", 0), sim=sim, n_capsules=ncaps)
+                slots = _reserve_veril_workers(workers, a.veril_slots) if sim == "verilator" else ()
                 if sim == "verilator":
-                    slot = _veril_acquire(a.veril_slots)
-                    if slot is None:
+                    if not slots:
                         continue  # global verilator budget full; try later
+                    workers = len(slots)
                 submission = Path(ws) / "submission"
                 snapshot_root = None
                 source_identity_verified = False
@@ -592,8 +635,7 @@ def main(
                         submission_digest=_TP._submission_digest,
                     )
                     if snapshot_error:
-                        if slot:
-                            slot.unlink(missing_ok=True)
+                        _release_veril_workers(slots)
                         (ch / f"simresp_{jid}.json").write_text(
                             json.dumps(
                                 {"error": snapshot_error, "all_pass": False, "promotion_source_verified": False},
@@ -605,12 +647,11 @@ def main(
                         claimed.add(jid)
                         continue
                     source_identity_verified = True
-                workers = max(1, min(int(r.get("workers", 1)), 2 if sim == "verilator" else 8))
                 capspec = "all" if caps == ["all"] else ",".join(caps)
-                ncaps = len(_valid_capsules("all", capsules_root) or []) if caps == ["all"] else len(caps)
                 to = _job_timeout_s(sim, ncaps, vpc)
                 resp_tmp = ch / f"simtmp_{jid}.json"
-                argv2 = worker_command(context, capsules_root, contract) + [
+                worker_kwargs = {"rtl_facts": a.rtl_facts} if a.rtl_facts is not None else {}
+                argv2 = worker_command(context, capsules_root, contract, **worker_kwargs) + [
                     "--submission",
                     str(submission),
                     "--capsules",
@@ -639,14 +680,13 @@ def main(
                     proc = _spawn_selfcheck(argv2, cwd=ws, env=_sim_env(context), job_log=job_log, timeout_s=to)
                 except Exception:
                     job_log.close()
-                    if slot:
-                        slot.unlink(missing_ok=True)
+                    _release_veril_workers(slots)
                     if snapshot_root:
                         shutil.rmtree(snapshot_root, ignore_errors=True)
                     raise
                 running[jid] = {
                     "proc": proc,
-                    "slot": slot,
+                    "slots": slots,
                     "resp_tmp": str(resp_tmp),
                     "sim": sim,
                     "promoted": bool(r.get("promoted")),
@@ -661,8 +701,7 @@ def main(
     # drain on STOP
     for j in running.values():
         j["proc"].kill()
-        if j["slot"]:
-            j["slot"].unlink(missing_ok=True)
+        _release_veril_workers(j["slots"])
         if j.get("snapshot_root"):
             shutil.rmtree(j["snapshot_root"], ignore_errors=True)
 

@@ -31,16 +31,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _common as C  # noqa: E402 — active target (descriptor-driven), bootstraps merlin/python
 
 from merlin.common.artifacts import cache_dir  # noqa: E402 — purgeable scratch for probes
-from merlin.common.paths import ext_path, repo_root  # noqa: E402
+from merlin.common.paths import ext_path, python_import_roots, repo_root  # noqa: E402
 from merlin.targetgen.target_experiment import load_target_experiment  # noqa: E402
 
-# Repo root + venv interpreter come from the canonical path helpers (never Path(__file__).parents[N],
-# and never EXP.parent.parent — that resolves the merlin/ subdir, not the repo root where .venv lives).
+# The checkout comes from the canonical path helper. Reuse the interpreter that launched this
+# check: an installed or detached checkout need not have its own ``.venv``.
 REPO = repo_root()
 EXP = C.EXP  # the active target's experiment dir (descriptor-driven)
 TARGET = C.TARGET
 _TE = load_target_experiment(C.DESCRIPTOR)
-PY = str(REPO / ".venv/bin/python")
+PY = sys.executable
 SCRIPTS = EXP / "scripts"
 BUNDLES = EXP / "input_bundles"
 #: (name, verdict, detail) where verdict is True=pass, False=fail, None=not applicable.
@@ -261,6 +261,9 @@ def test_circt_gate():
 # ---- D. harness wiring ----------------------------------------------------------------------------
 def test_harness():
     section("D. harness wiring (dry-run matrix + aggregator)")
+    # These scripts run in a fresh interpreter. A detached checkout's optional
+    # packages need explicit source roots rather than the caller's editable installs.
+    child_env = {**os.environ, "PYTHONPATH": os.pathsep.join(map(str, python_import_roots()))}
     r = subprocess.run(
         [
             PY,
@@ -276,6 +279,7 @@ def test_harness():
             "--dry-run",
         ],
         cwd=str(REPO),
+        env=child_env,
         capture_output=True,
         text=True,
     )
@@ -295,10 +299,12 @@ def test_harness():
     r2 = subprocess.run(
         [PY, str(SCRIPTS / "agg_ab_results.py"), "--tag", "abc4", "--out-dir", str(probe_out)],
         cwd=str(REPO),
+        env=child_env,
         capture_output=True,
         text=True,
     )
-    _ok("agg_ab_results runs", r2.returncode == 0, (r2.stdout.strip().splitlines() or [""])[0][:70])
+    detail = (r2.stdout.strip().splitlines() or r2.stderr.strip().splitlines() or [""])[0]
+    _ok("agg_ab_results runs", r2.returncode == 0, detail[:140])
 
 
 # ---- E. anti-cheat gate ---------------------------------------------------------------------------
@@ -718,7 +724,14 @@ def test_contract_provenance():
     declared, resolved, verdict = declared_vs_resolved_contract(_TE)
 
     def rel(p):
-        return str(Path(p).relative_to(REPO)) if p else "(none)"
+        if not p:
+            return "(none)"
+        path = Path(p)
+        try:
+            return str(path.relative_to(REPO))
+        except ValueError:
+            # An out-of-tree support package is expected to live outside Merlin.
+            return str(path)
 
     if verdict == "mismatch":
         _ok(
@@ -1223,6 +1236,15 @@ def test_oracles_endtoend():
     if not (ref / "manifest.yaml").is_file():
         _ok("reference backend agent_spec_v1 present", False, "missing")
         return
+    # This is a fixed reference *simulator smoke*, independent of the grading release.
+    # The separate graded-path check below must still reject Phase-0 admission inputs until
+    # an operator has prepared and reviewed a release. Without an explicit probe root the
+    # self-check attempts that release first, so no L2/L3 simulator timing can be measured.
+    probe_root = REPO / "merlin/contract/capsules/isa"
+    probe_names = ("A1_mvin_mvout", "A2_single_tile_matmul")
+    if not all((probe_root / name / "capsule.yaml").is_file() for name in probe_names):
+        _ok("reference ISA simulator probes present", False, f"missing {probe_names} under {probe_root}")
+        return
     _cy = ext_path("chipyard")  # resolve the real chipyard (.env MERLIN_EXT_CHIPYARD), same as the sandbox
     CE = str(_cy / ".conda-env") if _cy else "/path/to/chipyard/.conda-env"
     _compat = str(REPO / ".compat_lib")
@@ -1247,6 +1269,8 @@ def test_oracles_endtoend():
                     str(C.REPO),
                     "--submission",
                     str(sub),
+                    "--capsules-root",
+                    str(probe_root),
                     "--sim",
                     sim,
                     "--capsules",
