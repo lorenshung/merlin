@@ -130,3 +130,67 @@ def test_the_stored_weight_is_laid_out_the_way_the_device_program_holds_it() -> 
     assert np.array_equal(columns @ device, direct)
     # The mutation: the capture's own column order, fed to the device convolution, is wrong.
     assert not np.array_equal(columns @ stored.reshape(co, -1).T, direct)
+
+
+# --------------------------------------------- the shape the DEVICE writes, derived once and shared
+
+
+def test_the_device_output_shape_is_positions_by_features_not_the_captures_tensor() -> None:
+    """A device program does not write the capture's tensor. A contraction commits `[M, N]`; a
+    convolution commits one row per output POSITION -- so `[1, 64, 56, 56]` in the capture is
+    `[3136, 64]` on the device, and those are the same elements only under a stated reshape."""
+    from merlin.xdsl_dialects.lowering import group_command as GC
+
+    assert GC.device_output_shape({"op": "matmul", "M": 3136, "N": 64}) == [3136, 64]
+    assert GC.device_output_shape({"op": "residual_add", "M": 14336, "N": 56}) == [14336, 56]
+    # 224 with a 7-tap stride-2 window and 3 of padding -> 112, then a 3x3 stride-2 pool with 1 -> 56.
+    conv = {
+        "op": "conv2d",
+        "N": 64,
+        "ci": 3,
+        "Himg": 224,
+        "Wimg": 224,
+        "kh": 7,
+        "kw": 7,
+        "stride": [2, 2],
+        "padding": [3, 3, 3, 3],
+        "epilogue": ["bias_add", "acc_scale", "relu", "maxpool"],
+        "pool_size": [3, 3],
+        "pool_stride": [2, 2],
+        "pool_padding": [1, 1, 1, 1],
+    }
+    assert GC.device_output_shape(conv) == [3136, 64]
+    without_pool = {**conv, "epilogue": ["bias_add", "acc_scale", "relu"]}
+    assert GC.device_output_shape(without_pool) == [112 * 112, 64]
+
+
+def test_an_entry_that_states_no_output_is_refused_rather_than_sized_by_invention() -> None:
+    """Sizing a buffer by arithmetic nobody performed is a wrong allocation that nothing would
+    attribute back to here."""
+    import pytest
+
+    from merlin.xdsl_dialects.lowering import group_command as GC
+
+    with pytest.raises(GC.NoDeviceShape, match="no M/N"):
+        GC.device_output_shape({"op": "matmul", "N": 64})
+    with pytest.raises(GC.NoDeviceShape, match="states no window"):
+        GC.device_output_shape(
+            {"op": "conv2d", "N": 64, "Himg": 8, "Wimg": 8, "kh": 3, "kw": 3, "stride": [1, 1], "epilogue": ["maxpool"]}
+        )
+
+
+def test_a_group_that_leaves_as_the_accumulator_still_states_its_device_weight():
+    """The guard skipped any group without a QUANTIZE stage, conflating "has a quantized readout"
+    with "has a stored operand the unit reads in its own layout". The second is a property of the
+    TARGET. A model's final classifier commits i32 -- no multiplier, no clamp, no folded bias --
+    and its weight is permuted like any other; consumers asking for it were told no row existed and
+    declared the capture's [out, in] where the contraction reads [in, out].
+    """
+    import inspect
+
+    from merlin.xdsl_dialects.lowering import group_prepack as GP
+
+    source = inspect.getsource(GP.prepack)
+    assert "if group.placement == CG.HOST:" in source
+    assert "if group.placement == CG.HOST or CG.QUANTIZE not in group.stages:" not in source
+    assert '"leaves_as": "accumulator"' in source, "such a row must say what it is"

@@ -65,6 +65,11 @@ READOUT_REQUIRES_SCALE = "readout_requires_scale"
 #: Growth stopped by a fact about the GRAPH rather than about the target: a value read outside the
 #: group, or a pad no pool consumes. Not a capability question and not a capability gap.
 STRUCTURAL = "graph_structure"
+#: Refusal of a region a unit's capability admits and no DEVICE FORM states. A capability is declared
+#: at family granularity; a group is statable only in one of the forms :func:`_has_device_form` names.
+#: A region with a declared family and none of those forms is this compiler's gap, not the hardware's,
+#: and it says so instead of being placed on a unit nothing downstream can then ask for.
+NO_DEVICE_FORM = "no_device_form"
 #: The clause label of a stop that recorded no refusal. Every stop above names one, so nothing should
 #: reach this -- and if something does it says so rather than naming a plausible cause, as its
 #: predecessor ``"not_absorbable"`` did: that stood in for a capability answer nobody had asked for,
@@ -145,7 +150,7 @@ def declared_stage_name(kind: str) -> str:
     return names[SCALE] if kind in CONVERSION_OF_SCALED_STORE else names.get(kind, kind)
 
 
-def readout_absorbs(kind: str, readout: Any, *, target: str) -> "Admission":
+def readout_absorbs(kind: str, readout: Any, *, target: str) -> Admission:
     """Can ``target``'s DECLARED readout carry stage ``kind`` out of a contraction with it?
 
     The question a module constant used to answer. It listed one workload's conv-block epilogue --
@@ -269,6 +274,27 @@ def _operand_dims(op) -> list[set[int]] | None:
     if maps is None:
         return None
     return [set().union(*[_dims_of(expr) for expr in results]) if results else set() for results in maps]
+
+
+def _stride_of(expr) -> int | None:
+    """``s`` in an index expression ``d_out * s + d_window``; 1 when the output dim is unscaled."""
+    if KS._dim_position(expr) is not None:
+        return 1
+    sides = [getattr(expr, "lhs", None), getattr(expr, "rhs", None)]
+    if None in sides:
+        return None
+    strides = []
+    for side in sides:
+        if KS._dim_position(side) is not None:
+            strides.append(1)
+            continue
+        factors = [getattr(side, "lhs", None), getattr(side, "rhs", None)]
+        constants = [getattr(f, "value", None) for f in factors if isinstance(getattr(f, "value", None), int)]
+        if len(constants) != 1 or not any(KS._dim_position(f) is not None for f in factors):
+            return None
+        strides.append(constants[0])
+    # One side is the scaled output dim and the other the window dim, which is never scaled.
+    return max(strides) if 1 in strides else None
 
 
 def _is_windowed(op) -> bool:
@@ -569,11 +595,13 @@ class Admission:
 class TargetOracle:
     """The target's answers, asked through the same oracles the rest of the system uses."""
 
-    def __init__(self, target: str, *, readout: Any | None = None):
+    def __init__(self, target: str, *, readout: Any | None = None, prohibited_roles=(), semantic_facts=None):
         from merlin.targetgen import eligibility as E
         from merlin.targetgen import readout_facet
 
         self.target = target
+        # The experiment's prohibited instruction roles: a standalone form that needs one is refused.
+        self.prohibited_roles, self.semantic_facts = tuple(prohibited_roles), semantic_facts
         self._E = E
         self.cap_map = E.capability_map_for_target(target)
         self.undetermined = E.undetermined_families_for_target(target)
@@ -601,6 +629,16 @@ class TargetOracle:
         except Exception:  # noqa: BLE001 -- an unroutable demand leaves the declared provider
             unit = None
         return unit or (providers[0] if providers else "accelerator")
+
+    def standalone_admission(self, family: str) -> dict[str, Any]:
+        """Is ``family`` admitted standalone under the prohibited roles (``capability_roles``)?"""
+        from merlin.targetgen import capability_roles as CR
+        from merlin.targetgen import compute_units as CU
+        from merlin.targetgen.target_registry import load_contract
+
+        units = list(CU.compute_units(load_contract(self.target)))
+        return CR.family_admission(units, family, prohibited_roles=self.prohibited_roles,
+                                   semantic_facts=self.semantic_facts)  # fmt: skip
 
     def absorbs(self, kind: str) -> Admission:
         """Does a readout this target DECLARES carry ``kind`` out of a contraction with it?"""
@@ -685,6 +723,29 @@ def _input_chain(value) -> tuple[list[Any], Any | None, str | None]:
         adapters.append(owner)
         value = owner.operands[0]
     return [], None, None
+
+
+def _read_format(op) -> tuple[list[int], str | None]:
+    """``(shape, element type)`` of the value ``op`` COMPUTES ON -- its first tensor operand.
+
+    The scale and zero-point beside a quantize are rank-0 and are not what it reads; an operation
+    that reads no tensor at all is described by its own result, the only format it has.
+    """
+    for operand in getattr(op, "operands", ()):
+        shape, dtype = mq.type_shape_dtype(operand.type)
+        if shape:
+            return shape, dtype
+    return mq.type_shape_dtype(op.results[0].type) if op.results else ([], None)
+
+
+def _has_device_form(group: Group) -> bool:
+    """Can a group be STATED as something to ask a device for? (:mod:`.group_demand` states it.)
+
+    The three forms are the three that module holds: a contraction root, an integer operand sum, a
+    mean over a window. This is the ONE place that enumerates them, so a fourth is added by teaching
+    this function about it and not by a placement that discovers its absence four passes later.
+    """
+    return group.root is not None or group.operand_sum is not None or group.window_mean is not None
 
 
 def _sole_user_is(op, consumers: set[int]) -> bool:
@@ -788,7 +849,14 @@ def _host_regions(ops, stage_of, taken: dict[int, Group], oracle: TargetOracle) 
         if dequantized and primary is not members[0]:
             _, dtype = mq.type_shape_dtype(dequantized[0].operands[0].type)
         else:
-            _, dtype = mq.type_shape_dtype(primary.results[0].type) if primary.results else ([], None)
+            # No dequantize inside the region names a stored format, so its elements ARE the format
+            # they carry, and what a unit would have to hold is the format the region READS. The
+            # RESULT is the wrong end to read it from: a quantize is the one stage whose two ends are
+            # in different formats by definition, so taking its result asked whether a unit holds
+            # int8 about a region whose operand is a float32 model ARGUMENT. Nothing dequantizes an
+            # argument, so that float32 is not a fake-quantized stand-in for integers the way an
+            # intermediate is -- it is the format the bytes are in at run time.
+            _, dtype = _read_format(primary)
         feeder = _accelerator_feeder(members, taken)
         group = Group(index=0, placement=HOST, root=None, members=list(members), in_dtype=_dtype_token(dtype))
         working = [m for m in members if stage_of[id(m)].kind != VIEW]
@@ -815,6 +883,26 @@ def _host_regions(ops, stage_of, taken: dict[int, Group], oracle: TargetOracle) 
                 group.gap = "OG7" if mean is None else gap_class(mean.get("refusal")) or "OG1"
                 out.append(group)
                 continue
+        # A BARE INTEGER SUM (multiplier one): its dtype is the quantize's own result, not the outer
+        # `dtype`, which for a lone quantize is the float operand it quantized from.
+        from .window_sum import window_sum_of
+
+        wsum, unread_wsum = window_sum_of(working, stage_of)
+        if wsum is not None or unread_wsum is not None:
+            wsum_dtype = _dtype_token(wsum["in_dtype"]) if wsum is not None else _dtype_token(dtype)
+            refusal = unread_wsum or _window_mean_refusal(wsum, oracle, wsum_dtype)
+            if refusal is None:
+                group.placement = oracle.unit_for(wsum_dtype, wsum_dtype, 2, wsum["units"])
+                group.root = wsum["reduce"]
+                group.scale_granularity = "tensor"
+                group.window_mean = {k: wsum[k] for k in ("rows", "window", "multiplier", "bound_lsb", "exactness")}
+                out.append(group)
+                continue
+            if wsum is None or wsum.get("asked"):
+                group.refusal, group.reason = WINDOW_MEAN, refusal
+                group.gap = "OG7" if wsum is None else gap_class(wsum.get("refusal")) or "OG1"
+                out.append(group)
+                continue
         summed, unread = _operand_sum_of(working, stage_of)
         readout = getattr(oracle, "readout", None)
         asked = getattr(readout, "operand_sum", None)
@@ -822,6 +910,10 @@ def _host_regions(ops, stage_of, taken: dict[int, Group], oracle: TargetOracle) 
         # always was, an elementwise map with no standalone provider.
         if callable(asked) and any(getattr(f, "operand_sum", None) for f in getattr(readout, "facets", ())):
             facet, refusal = asked(summed["multipliers"]) if summed is not None else (None, unread)
+            ask_standalone = getattr(oracle, "standalone_admission", None)  # a stand-in may not have it
+            standalone = ask_standalone(FAMILY_OF_STAGE[RESIDUAL_ADD]) if facet and callable(ask_standalone) else None
+            if standalone is not None and not standalone["standalone"]:  # e.g. only a prohibited role runs it
+                facet, refusal = None, standalone["reason"]
             if facet is not None:
                 group.placement = facet.unit or "accelerator"
                 group.root = summed["add"]
@@ -868,8 +960,24 @@ def _host_regions(ops, stage_of, taken: dict[int, Group], oracle: TargetOracle) 
                 ),
             )
             group.gap = gap_class(group.refusal)
-        elif verdict.admitted:
+        elif verdict.admitted and _has_device_form(group):
             group.placement = verdict.units[0] if verdict.units else "accelerator"
+        elif verdict.admitted:
+            # Admitted, and still no device FORM. A capability is declared per FAMILY, so
+            # `elementwise_map` covers both the scaled add two separately loaded operands meet in an
+            # accumulator for AND, say, a two-tensor multiply no accumulator performs: admitting the
+            # family is not a claim about every member of it. The forms that can be stated are the
+            # three decided above, each from its own evidence, and a region arriving here matched
+            # none -- so admission alone must not place it. Placed anyway it became a group every
+            # consumer refuses, and refuses by the wrong name: the statement path called it "a host
+            # region" while it sat on a unit, and a whole model died naming a contraction root
+            # nothing in the region was ever going to have.
+            group.refusal, group.reason = (
+                NO_DEVICE_FORM,
+                f"{FAMILY_OF_STAGE[kind]} is admitted standalone here, and this {kind} region has "
+                f"no contraction, operand sum or window mean to be stated as",
+            )
+            group.gap = gap_class(group.refusal)
         else:
             group.refusal, group.reason = verdict.refusal, verdict.reason
             group.gap = gap_class(verdict.refusal)
@@ -1223,6 +1331,10 @@ def gap_class(refusal: str | None) -> str | None:
         # The readout can carry a conversion only when a scale stage precedes it. This instance
         # lacks that required attachment; the owner is the same route/attachment class as fused_only.
         return "OG4"
+    if refusal == NO_DEVICE_FORM:
+        # The target admits it and nothing can state it. No fact about the hardware is established
+        # either way, so no hardware gap is owed: the region is unplaced, by us.
+        return "OG6"
     if refusal in (READOUT_DOES_NOT_APPLY, READOUT_UNDECLARED):
         # No readout DECLARES this stage as something a contraction's group can take (a residual
         # accumulated into the result, for one) -- either none lists it, or the target described no
@@ -1233,9 +1345,13 @@ def gap_class(refusal: str | None) -> str | None:
     return GAP_CLASS_OF_REFUSAL.get(refusal, UNCLASSIFIED)
 
 
-def plan(module, target: str, *, oracle: TargetOracle | None = None, function: str | None = None) -> dict[str, Any]:
+def plan(
+    module, target: str, *, oracle: TargetOracle | None = None,
+    function: str | None = None, groups: Sequence[Group] | None = None,
+) -> dict[str, Any]:
     """The group plan of a model on a target, with its denominators."""
-    groups = form_groups(module, target, oracle=oracle, function=function)
+    oracle = oracle or TargetOracle(target)
+    groups = groups if groups is not None else form_groups(module, target, oracle=oracle, function=function)
     rows = []
     for group in groups:
         rows.append(
@@ -1285,6 +1401,7 @@ def plan(module, target: str, *, oracle: TargetOracle | None = None, function: s
     elementwise_host = sum(row["elements"] for row in host)
     elementwise_device = sum(row["elements"] for row in device)
     total = elementwise_host + elementwise_device
+    from .group_route_report import input_format_changes
     return {
         "schema": SCHEMA,
         "target": target,
@@ -1313,6 +1430,16 @@ def plan(module, target: str, *, oracle: TargetOracle | None = None, function: s
                 )
             ),
             "closed_integer_regions": sum(1 for row in device if QUANTIZE in row["stages"]),
+            "device_groups_requiring_input_format_change": input_format_changes(groups),
+            # WHICH READOUT FACTS NOBODY DERIVED, beside the placements they decided. A run whose
+            # fact bundle is missing loses the readout entirely -- no granularity, no operand sum --
+            # and every other number here comes out IDENTICAL, because an underived facet refuses
+            # by never being consulted rather than by saying so. Measured on a whole model: with the
+            # bundle absent the share, the group counts and the gap classes were unchanged and the
+            # only difference was inside the facet. A reader has to be able to see that from the
+            # summary, or a report from an unprovisioned checkout is indistinguishable from a
+            # derived one.
+            "readout_underived": dict(sorted(getattr(oracle.readout, "unknown", {}).items())),
             # Host groups that compute something and carry no owner. Empty is the invariant: a
             # host placement nobody can explain is the silent fallback this pass exists to end.
             "unexplained_host_groups": [
@@ -1350,139 +1477,18 @@ def annotate(groups: Sequence[Group]) -> None:
             member.attributes["merlin.placement"] = StringAttr(group.placement)
 
 
-# --- the demand a group places on a backend --------------------------------------------------------
-class NoCapsuleForm(ValueError):
-    """A group has a stage the capsule vocabulary cannot state, so no backend can be asked for it."""
+def __getattr__(name: str):
+    """``NoCapsuleForm`` and ``capsule_entry`` now live in :mod:`.group_demand`.
 
-
-def _stride_of(expr) -> int | None:
-    """``s`` in an index expression ``d_out * s + d_window``; 1 when the output dim is unscaled."""
-    if KS._dim_position(expr) is not None:
-        return 1
-    sides = [getattr(expr, "lhs", None), getattr(expr, "rhs", None)]
-    if None in sides:
-        return None
-    strides = []
-    for side in sides:
-        if KS._dim_position(side) is not None:
-            strides.append(1)
-            continue
-        factors = [getattr(side, "lhs", None), getattr(side, "rhs", None)]
-        constants = [getattr(f, "value", None) for f in factors if isinstance(getattr(f, "value", None), int)]
-        if len(constants) != 1 or not any(KS._dim_position(f) is not None for f in factors):
-            return None
-        strides.append(constants[0])
-    # One side is the scaled output dim and the other the window dim, which is never scaled.
-    return max(strides) if 1 in strides else None
-
-
-def capsule_entry(
-    group: Group, *, name: str | None = None, extents: Mapping[int, tuple] | None = None
-) -> dict[str, Any]:
-    """The capsule-corpus entry that demands exactly this group from a backend.
-
-    A model route and a capsule route lower the same pattern only if they are asked in the same
-    words. This states a group in the entry vocabulary the capsule builders already consume
-    (``op``, extents, ``epilogue`` in the command-buffer stage names), so the capsule that
-    certifies a pattern and the model that needs it cannot drift apart.
+    They are still reached through this module because every caller asks THIS module for them, and a
+    statement of a group belongs beside the formation that produced it as far as a reader is
+    concerned. Resolved on attribute access, so neither module imports the other at import time.
     """
-    if group.root is None:
-        raise NoCapsuleForm("a host region has no contraction root to demand")
-    if group.operand_sum is not None:
-        return _operand_sum_entry(group, name=name)
-    if group.window_mean is not None:
-        return {
-            "name": name or f"group_{group.index}",
-            "kind": "op",
-            "op": "matmul",
-            "M": int(group.window_mean["rows"]),
-            "K": int(group.window_mean["window"]),
-            "N": 1,
-            "epilogue": ["acc_scale"],
-            "acc_scale": float(group.window_mean["multiplier"]),
-            "scale_granularity": "tensor",
-            "operand_dtype": group.in_dtype,
-        }
-    stage_name = epilogue_stage_names()
-    silent = {DEQUANTIZE, PAD, MOVEMENT, VIEW, CONTRACTION, ROUND, CLAMP}
-    epilogue: list[str] = []
-    for kind in group.stages:
-        if kind in silent:
-            continue
-        if kind not in stage_name:
-            raise NoCapsuleForm(f"stage {kind!r} has no name in the capsule epilogue vocabulary")
-        if stage_name[kind] not in epilogue:
-            epilogue.append(stage_name[kind])
+    if name in ("NoCapsuleForm", "capsule_entry"):
+        from . import group_demand  # noqa: PLC0415 -- deferred: group_demand imports this module
 
-    root = group.root
-    out_shape, _ = mq.type_shape_dtype(root.results[0].type)
-    entry: dict[str, Any] = {
-        "name": name or f"group_{group.index}",
-        "kind": "op",
-        "epilogue": epilogue,
-        "scale_granularity": group.scale_granularity,
-        "operand_dtype": group.in_dtype,
-    }
-    if _is_windowed(root):
-        maps = KS.indexing_maps(root)
-        in_shape, _ = mq.type_shape_dtype(root.operands[0].type)
-        w_shape, _ = mq.type_shape_dtype(root.operands[1].type)
-        if not maps or len(in_shape) != 4 or len(w_shape) != 4:
-            raise NoCapsuleForm("a windowed contraction whose geometry is not a 2-D convolution")
-        strides = [_stride_of(expr) for expr in maps[0][2:4]]
-        if None in strides:
-            raise NoCapsuleForm("the convolution's strides could not be read from its index maps")
-        entry.update(
-            {
-                "op": "conv2d",
-                "ci": int(in_shape[1]),
-                "N": int(w_shape[0]),
-                "Himg": int(in_shape[2]),
-                "Wimg": int(in_shape[3]),
-                "kh": int(w_shape[2]),
-                "kw": int(w_shape[3]),
-                "stride": strides,
-            }
-        )
-        return entry
-    if extents is None:
-        # One walk of the whole module. A caller stating many groups passes the table in, because
-        # recomputing it per group is quadratic in the model.
-        from merlin.targetgen import model_coverage
-
-        extents = (
-            model_coverage._contraction_extents(root.parent_op().parent_op()) if root.parent_op() is not None else {}
-        )
-    found = extents.get(id(root))
-    if not found or None in found[:3]:
-        raise NoCapsuleForm("the contraction's M/K/N extents could not be read")
-    m, k, n, _rank = found
-    entry.update({"op": "matmul", "M": int(m), "K": int(k), "N": int(n)})
-    return entry
-
-
-def _operand_sum_entry(group: Group, *, name: str | None) -> dict[str, Any]:
-    """An integer sum of two tensors in the ``residual_add`` builder's words.
-
-    An elementwise operation has no rows and columns of its own, so the tensor is stated as the
-    matrix its last axis makes of it: contiguous storage means any flattening is the same program.
-    """
-    shape, _ = mq.type_shape_dtype(group.root.results[0].type)
-    if not shape or any(not isinstance(extent, int) or extent <= 0 for extent in shape):
-        raise NoCapsuleForm("the sum's extents are not static")
-    return {
-        "name": name or f"group_{group.index}",
-        "kind": "op",
-        "op": "residual_add",
-        "M": _product(shape[:-1]),
-        "N": int(shape[-1]),
-        "lhs_scale": float(group.operand_sum["lhs_scale"]),
-        "rhs_scale": float(group.operand_sum["rhs_scale"]),
-        "bound_lsb": int(group.operand_sum["bound_lsb"]),
-        "epilogue": ["relu"] if group.operand_sum.get("relu") else [],
-        "scale_granularity": "tensor",
-        "operand_dtype": group.in_dtype,
-    }
+        return getattr(group_demand, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def demand(groups: Sequence[Group], *, weight_args: Collection[int] | None = None) -> dict[str, Any]:

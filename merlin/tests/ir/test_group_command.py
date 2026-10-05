@@ -100,3 +100,16 @@ def test_an_operand_sum_is_stated_as_a_residual_add_with_its_computed_bound() ->
     # Multipliers are numbers one program runs with: two sums that differ only there are one demand.
     other = CG.form_groups(mq.parse(residual_module(lhs_scale=1.25, rhs_scale=0.5)), "synthetic", oracle=oracle)
     assert len(CG.demand([group, *other])["entries"]) == 1
+
+
+def test_a_window_mean_is_oriented_as_the_program_holds_it_and_nothing_else_is() -> None:
+    """``x[features, window] @ ones[window, 1]`` is asked for as ``ones[1, window] @ x[window, features]``
+    with the activation stationary; a stored weight or a many-column contraction is left as stated."""
+    from merlin.xdsl_dialects.lowering import group_command as GC
+
+    mean = {"op": "matmul", "M": 5, "K": 3, "N": 1}
+    oriented = GC.device_orientation(mean, {"stored_operand": None})
+    assert (oriented["M"], oriented["K"], oriented["N"]) == (1, 3, 5) and GC.stationary_is_activation(oriented)
+    assert GC.device_orientation(mean, {"stored_operand": 1}) == mean
+    assert GC.device_orientation({**mean, "N": 4}, {"stored_operand": None}) == {**mean, "N": 4}
+    assert GC.device_orientation(mean, None) == mean

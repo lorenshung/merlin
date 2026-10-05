@@ -532,7 +532,7 @@ _SIGMOID_MOD = (
     "%r = linalg.generic {{indexing_maps = [affine_map<(d0,d1)->(d0,d1)>, "
     'affine_map<(d0,d1)->(d0,d1)>], iterator_types = ["parallel","parallel"]}} '
     "ins(%x : tensor<{m}x{l}xf32>) outs(%e : tensor<{m}x{l}xf32>) "
-    'attrs = {{prov.op = "sigmoid"}} {{ '
+    'attrs = {{prov.op = "sigmoid", prov.region_id = "sigmoid_0"}} {{ '
     "^bb(%a: f32, %o: f32): %n = arith.negf %a : f32 %ex = math.exp %n : f32 "
     "%c1 = arith.constant 1.0 : f32 %d = arith.addf %c1, %ex : f32 "
     "%s = arith.divf %c1, %d : f32 linalg.yield %s : f32 }} "
@@ -554,6 +554,13 @@ def test_lower_silu_int_removes_math_exp(tmp_path):
     assert n == 1
     assert sum(1 for op in module.walk() if op.name == "math.exp") == 0
     assert any(op.name in ("arith.muli", "arith.shrsi") for op in module.walk())
+    replacements = [
+        op for op in module.walk()
+        if op.name == "linalg.generic" and getattr(op.attributes.get("prov.region_id"), "data", None) == "sigmoid_0"
+    ]
+    assert len(replacements) == 1
+    assert getattr(replacements[0].attributes.get("prov.op"), "data", None) == "sigmoid"
+    assert getattr(replacements[0].attributes.get("prov.rewrite"), "data", None) == "silu_int"
 
 
 _RSQRT_MOD = (

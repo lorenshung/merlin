@@ -79,10 +79,15 @@ def as_the_contraction_reads_it(group: CG.Group, operand_index: int, stored):
     """
     import numpy as np
 
-    adapters, dequantize, _dtype = CG._input_chain(list(group.root.operands)[operand_index])
+    operand = list(group.root.operands)[operand_index]
+    adapters, dequantize, _dtype = CG._input_chain(operand)
     value = np.asarray(stored)
     between = []  # from the stored tensor toward the dequantize: views and movement only
-    cursor = dequantize.operands[0] if dequantize is not None else None
+    # A contraction that reads the INTEGERS directly (an int8 capture, no dequantize in between) still
+    # reads them through whatever relayout the capture put there -- a torch linear's [out, in] weight
+    # transposed to [in, out] -- so the walk starts at the operand itself. Skipping it laid the weight
+    # out as stored: the right bytes for a square matrix only by accident, and the wrong shape otherwise.
+    cursor = dequantize.operands[0] if dequantize is not None else operand
     while cursor is not None and getattr(cursor, "owner", None) is not None and hasattr(cursor.owner, "operands"):
         if not cursor.owner.operands:
             break
@@ -165,6 +170,23 @@ def _scalar_row(group: CG.Group) -> dict[str, Any]:
     return row
 
 
+def module_extents(groups: Sequence[CG.Group]) -> dict[int, tuple] | None:
+    """The contraction-extent table of the one module ``groups`` were formed over, read ONCE, so a
+    caller stating every group does not walk the whole module per group. ``None`` (each group reads
+    its own) when the groups do not name one module."""
+    from merlin.targetgen import model_coverage
+
+    modules = {
+        id(module): module
+        for module in (
+            g.root.parent_op().parent_op() for g in groups if g.root is not None and g.root.parent_op() is not None
+        )
+    }
+    if len(modules) != 1:
+        return None
+    return model_coverage._contraction_extents(next(iter(modules.values())))
+
+
 def prepack(
     groups: Sequence[CG.Group],
     manifest_path: str | Path,
@@ -185,15 +207,101 @@ def prepack(
 
     manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     weight_args = stream_plan.weight_args_of(manifest)
+    extents = module_extents(groups)
     limit = (1 << (accumulator_bits - 1)) - 1
     rows: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     arrays: dict[str, Any] = {}
     for group in groups:
-        if group.placement == CG.HOST or CG.QUANTIZE not in group.stages:
+        if group.placement == CG.HOST:
+            continue
+        if CG.QUANTIZE not in group.stages:
+            # A GROUP THAT LEAVES AS THE ACCUMULATOR STILL HAS A DEVICE WEIGHT. This guard skipped
+            # it entirely, conflating "has a quantized readout" with "has a stored operand the unit
+            # reads in its own layout" -- and the second is a property of the TARGET, not of how the
+            # group ends. A model's final classifier is exactly this group: it commits i32, so it
+            # folds no bias by a multiplier and states no clamp, but its weight is permuted like any
+            # other. Consumers that asked the prepack for it were told no row existed and declared
+            # the capture's [out, in] where the contraction reads [in, out].
+            if device_layout:
+                row = {"group": group.index, "stages": list(group.stages), "leaves_as": "accumulator"}
+                try:
+                    stated = group_command.program(group, weight_args=weight_args, extents=extents)
+                    name, stored, spelled = _stored_raw(stated.stored_arg, manifest, Path(safetensors_path))
+                    if spelled not in _INTEGER_DTYPE:
+                        raise GN.GroupNumericsError(f"stored tensor {name!r} is {spelled}, not an integer weight")
+                    laid_out = device_weight(group, stated, stored)
+                    key = f"group_{group.index}_weight_device"
+                    arrays[key] = laid_out
+                    row["weight"] = {
+                        "stored_tensor": name,
+                        "arg_index": stated.stored_arg,
+                        "array": key,
+                        "shape": [int(v) for v in laid_out.shape],
+                        "transposed": stated.transposed,
+                        "column_order": list(stated.column_order) if stated.column_order else None,
+                        "sha256": hashlib.sha256(laid_out.tobytes()).hexdigest(),
+                    }
+                    # ITS BIAS IS FOLDED BY THE SAME RULE A CLOSED GROUP'S IS, and stated here so
+                    # the prepack is the ONE definition of it. The group commits the accumulator, so
+                    # the divisor is the product of the two operand scales rather than a readout
+                    # multiplier; a consumer that folded it for itself would be a second definition
+                    # free to drift from this one.
+                    if stated.bias_arg is not None:
+                        sources = [
+                            GN._scale_source(member)
+                            for member in group.members
+                            if CG.classify(member).kind == CG.DEQUANTIZE
+                        ]
+                        if len(sources) != 2 or any(s.value is None or s.zero_point for s in sources):
+                            raise GN.GroupNumericsError(
+                                "this group leaves as the accumulator and its scales are not static, "
+                                "so nothing can say what its bias is in the accumulator's units"
+                            )
+                        divisor = float(sources[0].value) * float(sources[1].value)
+                        bias_name, bias = _stored_tensor(stated.bias_arg, manifest, Path(safetensors_path))
+                        folded = np.rint(bias / divisor).astype(np.int32)
+                        bias_key = f"group_{group.index}_bias_q"
+                        arrays[bias_key] = folded
+                        row["bias"] = {
+                            "stored_tensor": bias_name,
+                            "arg_index": stated.bias_arg,
+                            "divisor": divisor,
+                            "array": bias_key,
+                            "elements": int(folded.size),
+                            "sha256": hashlib.sha256(folded.tobytes()).hexdigest(),
+                        }
+                except (CG.NoCapsuleForm, GN.GroupNumericsError, TypeError) as refusal:
+                    row["weight"] = {"refused": str(refusal)}
+                rows.append(row)
             continue
         if group.operand_sum is not None or group.window_mean is not None:
-            rows.append(_scalar_row(group))
+            scalar = _scalar_row(group)
+            # A MEAN'S STORED OPERAND IS A REAL ARRAY, not only a sentence about one. The row has
+            # always SAID the operand is "a constant one for every element of the window"; it just
+            # never supplied it, so a consumer resolving `arrays[row["weight"]["array"]]` found
+            # nothing and the group fell back with the prepack blamed for holding no device weight.
+            # The contraction is the window summed and then scaled by the readout's reciprocal
+            # count, so the operand is a column of ones -- derived from the group's own window
+            # extent, and stated in the same words every other weight row uses.
+            if device_layout and group.window_mean is not None:
+                import numpy as np
+
+                window = int(group.window_mean["window"])
+                ones = np.ones((window, 1), dtype=np.int8)
+                key = f"group_{group.index}_weight_device"
+                arrays[key] = ones
+                scalar["weight"] = {
+                    "stored_tensor": None,
+                    "arg_index": None,
+                    "array": key,
+                    "shape": [window, 1],
+                    "transposed": False,
+                    "column_order": None,
+                    "sha256": hashlib.sha256(ones.tobytes()).hexdigest(),
+                    "derived": "a constant one per window element; the mean's divisor is the readout's",
+                }
+            rows.append(scalar)
             continue
         try:
             numerics = GN.numerics_of(group)
@@ -232,7 +340,7 @@ def prepack(
                 }
             if device_layout:
                 try:
-                    stated = group_command.program(group, weight_args=weight_args)
+                    stated = group_command.program(group, weight_args=weight_args, extents=extents)
                     name, stored, spelled = _stored_raw(stated.stored_arg, manifest, Path(safetensors_path))
                     if spelled not in _INTEGER_DTYPE:
                         raise GN.GroupNumericsError(f"stored tensor {name!r} is {spelled}, not an integer weight")

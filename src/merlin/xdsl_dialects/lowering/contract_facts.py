@@ -44,22 +44,26 @@ def _trace_to_block_arg(val, block):
 
 
 def _resident_storage_bytes(tc: dict[str, Any]) -> int:
-    """Resident scratchpad capacity (bytes) for the capacity-fit proof. Reads the contract when it
-    declares it (toy_npu still does); otherwise — for a target whose capacities are CIRCT-extracted
-    facts, not hand-declared (gemmini) — reads the scratchpad ``bytes`` from the fact bundle. 0 (proof
-    skipped) when neither is available, matching the previous fail-open default."""
+    """Resident operand-store capacity for the capacity-fit proof.
+
+    An explicit contract capacity takes precedence. Otherwise resolve the operand
+    store structurally from the selected RTL facts: extractor memory names are
+    physical labels, not a stable ``scratchpad`` role. An unavailable or ambiguous
+    store retains the existing no-proof result of zero.
+    """
     v = (tc.get("capabilities", {}) or {}).get("resident_storage_bytes")
     if v is not None:
         return int(v)
     name = tc.get("name")
     if name:
         try:
+            from merlin.targetgen.address_space import derive_address_space, operand_store
             from merlin.targetgen.rtl.facts import load_facts
 
-            f = load_facts(name)["facts"]
-            sp = next((m for m in f.get("memories", []) if m.get("name") == "scratchpad"), None)
-            if sp and sp.get("bytes"):
-                return int(sp["bytes"])
+            space = derive_address_space(name, facts=load_facts(name))
+            store = operand_store(space).store
+            if store is not None and store.nbytes is not None and store.nbytes > 0:
+                return store.nbytes
         except Exception:  # noqa: BLE001 — facts unavailable ⇒ fall back to the fail-open default
             pass
     return 0

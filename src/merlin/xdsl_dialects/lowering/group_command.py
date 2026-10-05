@@ -22,7 +22,7 @@ reason (:class:`~.compute_groups.NoCapsuleForm`); nothing here knows a target.
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -83,6 +83,17 @@ def _source_argument(value) -> int | None:
     return None
 
 
+def _stored_sources(group: CG.Group, weight_args: Collection[int] | None) -> list[int]:
+    """Root operand indices (of the first two) a stored tensor feeds, by the rule of :func:`stored_operand`."""
+    found = []
+    for index, operand in enumerate(list(group.root.operands)[:2]):
+        _adapters, dequantize, _dtype = CG._input_chain(operand)
+        arg = _source_argument(dequantize.operands[0] if dequantize is not None else operand)
+        if arg is not None and (weight_args is None or arg in weight_args):
+            found.append(index)
+    return found
+
+
 def stored_operand(group: CG.Group, weight_args: Collection[int] | None = None) -> tuple[int, int]:
     """``(root operand index, model-argument index)`` of the group's stored tensor.
 
@@ -104,6 +115,107 @@ def stored_operand(group: CG.Group, weight_args: Collection[int] | None = None) 
             else "neither operand of the contraction is a stored tensor"
         )
     return stored[0], int(sources[stored[0]])
+
+
+#: The entry key that says what occupies a contraction's STATIONARY operand (the right-hand ``[K, N]``
+#: the unit holds while the left streams past), when it is not a stored tensor. Absent for a stored
+#: weight, which is what every entry meant before this key existed.
+STATIONARY_KEY = "stationary_operand"
+#: ...an activation the program computes: attention's ``Q @ K^T`` and ``P @ V``, or a kernel quantized at
+#: run time. Both operands are runtime operands; nothing is stored, so nothing is prepacked.
+STATIONARY_ACTIVATION = "activation"
+
+
+def stationary_is_activation(entry) -> bool:
+    """Whether a stated entry's stationary operand is a runtime activation (see :data:`STATIONARY_KEY`)."""
+    return str((entry or {}).get(STATIONARY_KEY) or "") == STATIONARY_ACTIVATION
+
+
+def device_orientation(entry: Mapping[str, Any], program: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The entry in the orientation a whole-model program HOLDS its operands, and so asks a package for.
+
+    ONE FORM IS STATED IN ONE ORIENTATION AND EXECUTED IN THE OTHER: a mean over a trailing window.
+    :func:`program` records it as ``x[features, window] @ ones[window, 1]``, but the activation is held
+    ``[window, features]``, so a whole-model program (``llvmlower.whole_program``, "the constant goes on
+    the left") asks for ``ones[1, window] @ x[window, features]`` -- one row, the window as the
+    reduction, the features as the columns, and the ACTIVATION as the stationary operand. A capsule
+    minted in the statement's orientation teaches a program no model presents: measured on ResNet-50,
+    a package that passed a mean capsule declined the model's own mean (``operand_not_bound_by_shape``).
+
+    Recognised structurally: a contraction of one output column whose stationary operand is neither
+    stored (``program["stored_operand"]`` is ``None``) nor declared a runtime activation is the
+    window's constant. Every other entry is returned unchanged. The one definition of this rule: the
+    corpus that mints a model's forms and the program that asks for them both call it.
+    """
+    if str(entry.get("op")) != "matmul" or stationary_is_activation(entry):
+        return dict(entry)
+    if program is None or program.get("stored_operand") is not None or int(entry.get("N") or 0) != 1:
+        return dict(entry)
+    return {**entry, "M": 1, "K": int(entry["K"]), "N": int(entry["M"]), STATIONARY_KEY: STATIONARY_ACTIVATION}
+
+
+def _is_plain_contraction(root, rows: int, reduced: int, columns: int) -> bool:
+    """``root`` reads ``lhs[M, K] @ rhs[K, N] -> [M, N]`` exactly: two rank-2 operands in that
+    orientation and index maps that do not transpose either. Read off the types and the maps; a named
+    op without maps is admitted only when its operand types already say the orientation."""
+    operands = list(root.operands)
+    if len(operands) < 2:
+        return False
+    lhs, _ = mq.type_shape_dtype(operands[0].type)
+    rhs, _ = mq.type_shape_dtype(operands[1].type)
+    if [int(v) for v in lhs] != [rows, reduced] or [int(v) for v in rhs] != [reduced, columns]:
+        return False
+    maps = KS.indexing_maps(root)
+    if maps is None:
+        return mq.op_name(root) == "linalg.matmul"
+    if len(maps) < 3 or any(len(m) != 2 for m in maps[:3]):
+        return False
+    dims = [[KS._dim_position(e) for e in m] for m in maps[:3]]
+    if any(d is None for m in dims for d in m):
+        return False
+    (m0, k0), (k1, n1), (m2, n2) = dims
+    return m0 == m2 and n1 == n2 and k0 == k1 and len({m0, n1, k0}) == 3
+
+
+def _activation_contraction(group: CG.Group, base: dict[str, Any]) -> GroupProgram:
+    """A contraction whose operands are BOTH activations, in device form.
+
+    Nothing is stored, so there is nothing to prepack and nothing to transpose: the left operand
+    streams and the right is the stationary one, both handed over at run time, in the orientation the
+    capture already reads them. That is the only orientation stated -- a windowed gather, a transposing
+    index map, a bias or a readout that needs a stored operand's scale is refused by name."""
+    shape, _ = mq.type_shape_dtype(group.root.results[0].type)
+    if len(shape) != 2:
+        raise CG.NoCapsuleForm("a batched contraction of two activations is not one device command yet")
+    rows, reduced, columns = int(base["M"]), int(base["K"]), int(base["N"])
+    if not _is_plain_contraction(group.root, rows, reduced, columns):
+        raise CG.NoCapsuleForm(
+            "neither operand of the contraction is a stored tensor, and the two activations are not read as "
+            "lhs[M, K] @ rhs[K, N]"
+        )
+    if _window(group, 0, reduced) is not None or _window(group, 1, reduced) is not None:
+        raise CG.NoCapsuleForm("a windowed contraction over two activations is not stated")
+    side, _bias = _bias_side(group)
+    if side is not None:
+        raise CG.NoCapsuleForm("a bias on a contraction of two activations has no stored operand to follow")
+    entry: dict[str, Any] = {key: base[key] for key in ("name", "kind", "scale_granularity", "operand_dtype")}
+    from merlin.runtime.commandbuffer import EPILOGUE_STAGES
+
+    entry["epilogue"] = sorted(base["epilogue"], key=EPILOGUE_STAGES.index)
+    if "maxpool" in entry["epilogue"]:
+        raise CG.NoCapsuleForm("a pooled contraction of two activations is not stated")
+    entry.update({"op": "matmul", "M": rows, "K": reduced, "N": columns, STATIONARY_KEY: STATIONARY_ACTIVATION})
+    if "acc_scale" in entry["epilogue"]:
+        numerics = GN.numerics_of(group)
+        if numerics.multiplier is None:
+            raise CG.NoCapsuleForm("the group's requantization multiplier is not a compile-time number")
+        entry["acc_scale"] = float(numerics.multiplier)
+    return GroupProgram(
+        entry=entry,
+        stored_operand=None,
+        transposed=False,
+        notes=("both operands are activations: the stationary operand is handed over at run time, not stored",),
+    )
 
 
 def _result_axis_now(group: CG.Group, until, axis: int) -> int | None:
@@ -296,11 +408,21 @@ def _pool(group: CG.Group) -> dict[str, Any]:
     return window
 
 
-def program(group: CG.Group, *, weight_args: Collection[int] | None = None, name: str | None = None) -> GroupProgram:
-    """``group`` as a generator entry in device form. Raises ``NoCapsuleForm`` with the reason."""
+def program(
+    group: CG.Group,
+    *,
+    weight_args: Collection[int] | None = None,
+    name: str | None = None,
+    extents: Mapping[int, tuple] | None = None,
+) -> GroupProgram:
+    """``group`` as a generator entry in device form. Raises ``NoCapsuleForm`` with the reason.
+
+    ``extents`` is the module's contraction-extent table (``model_coverage._contraction_extents``); a
+    caller stating every group of one module passes it, because without it each call walks the whole
+    module again (quadratic in the model: 69% of a 1551-group statement's time)."""
     from merlin.runtime.commandbuffer import EPILOGUE_STAGES
 
-    base = CG.capsule_entry(group, name=name)  # the stage names, and the refusals that go with them
+    base = CG.capsule_entry(group, name=name, extents=extents)  # the stage names, and the refusals that go with them
     if group.window_mean is not None:
         return GroupProgram(
             entry=base,
@@ -325,7 +447,17 @@ def program(group: CG.Group, *, weight_args: Collection[int] | None = None, name
     shape, _ = mq.type_shape_dtype(group.root.results[0].type)
     if len(shape) != 2:
         raise CG.NoCapsuleForm("a batched contraction is not restated as one device command yet")
-    stored, stored_arg = stored_operand(group, weight_args)
+    try:
+        stored, stored_arg = stored_operand(group, weight_args)
+    except CG.NoCapsuleForm as refusal:
+        if _stored_sources(group, weight_args):
+            raise
+        # NO OPERAND IS STORED: a contraction of two activations (attention's scores and context, a
+        # kernel quantized at run time). Stated on its own terms rather than refused for lacking a weight.
+        try:
+            return _activation_contraction(group, base)
+        except CG.NoCapsuleForm as why:
+            raise CG.NoCapsuleForm(f"{refusal}; {why}") from why
     side, bias_arg = _bias_side(group)
     # The stored tensor's own output axis: rows when it is the left operand, columns when the right.
     wanted = "row" if stored == 0 else "column"
@@ -382,3 +514,47 @@ def program(group: CG.Group, *, weight_args: Collection[int] | None = None, name
         column_order=column_order,
         notes=tuple(notes),
     )
+
+
+class NoDeviceShape(ValueError):
+    """A stated entry whose device output shape cannot be derived from what it declares."""
+
+
+def device_output_shape(entry: Mapping[str, Any]) -> list[int]:
+    """``[positions, features]`` -- the shape the DEVICE writes for this entry, not the capture's.
+
+    A device program does not write the capture's tensor. A contraction commits ``[M, N]``; a
+    convolution commits one row per output POSITION, which is the windowed extent after its stride
+    and padding and after any pooling its readout fused -- so ``[1, 64, 56, 56]`` in the capture is
+    ``[3136, 64]`` on the device, and those are the same elements only under a stated reshape.
+
+    One definition for every consumer that sizes a device buffer or prices a written output: two
+    spellings of the same arithmetic drift, and a buffer sized by the drifted one is a wrong
+    allocation nothing attributes back here. Raises :class:`NoDeviceShape` rather than guessing.
+    """
+    op = str(entry.get("op") or "")
+    features = entry.get("N")
+    if op == "conv2d":
+        needed = ("Himg", "Wimg", "kh", "kw", "stride")
+        if features is None or any(entry.get(key) is None for key in needed):
+            raise NoDeviceShape(
+                f"a conv2d entry missing {[k for k in needed if entry.get(k) is None]} states no output"
+            )
+        pad = [int(p) for p in (entry.get("padding") or [0, 0, 0, 0])]
+        stride = [int(s) for s in entry["stride"]]
+        rows = (int(entry["Himg"]) + pad[0] + pad[2] - int(entry["kh"])) // stride[0] + 1
+        cols = (int(entry["Wimg"]) + pad[1] + pad[3] - int(entry["kw"])) // stride[1] + 1
+        if "maxpool" in (entry.get("epilogue") or ()):
+            size, pool_stride = list(entry.get("pool_size") or ()), list(entry.get("pool_stride") or ())
+            pool_pad = [int(p) for p in (entry.get("pool_padding") or [0, 0, 0, 0])]
+            if len(size) != 2 or len(pool_stride) != 2:
+                raise NoDeviceShape("a fused maxpool states no window, so the committed extent is unknown")
+            rows = (rows + pool_pad[0] + pool_pad[2] - int(size[0])) // int(pool_stride[0]) + 1
+            cols = (cols + pool_pad[1] + pool_pad[3] - int(size[1])) // int(pool_stride[1]) + 1
+        if rows < 1 or cols < 1:
+            raise NoDeviceShape("the convolution's window leaves no output position")
+        return [rows * cols, int(features)]
+    rows = entry.get("M")
+    if rows is None or features is None:
+        raise NoDeviceShape(f"a {op or 'nameless'} entry declares no M/N, so it states no output shape")
+    return [int(rows), int(features)]

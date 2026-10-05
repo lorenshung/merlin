@@ -6,11 +6,13 @@ import pytest
 from fake_quant_layer import Oracle as _Oracle  # noqa: E402
 from fake_quant_layer import mean_module as _mean
 from fake_quant_layer import module as _module
+from fake_quant_layer import product_module as _product
 from fake_quant_layer import residual_module as _residual
 from fake_quant_layer import residual_then_mean_module as _residual_then_mean
 
 from merlin.common import mlir_query as mq
 from merlin.xdsl_dialects.lowering import compute_groups as CG
+from merlin.xdsl_dialects.lowering.window_sum import window_sum_of
 
 
 def _groups(text: str, oracle=None):
@@ -267,7 +269,28 @@ def test_the_plan_carries_a_first_refusal_census_of_why_growth_stopped() -> None
     assert (closed["sites_admitted"], closed["clauses"]) == (1, [])
 
 
-def _summing(*, readout_scale: bool = True):
+def test_a_plan_says_which_readout_facts_nobody_derived() -> None:
+    """An underived readout is visible in the summary, not only inside the facet.
+
+    A checkout without the target's fact bundle loses the readout entirely, and every other number
+    a plan reports comes out identical -- an underived facet refuses by never being consulted. The
+    summary has to carry the difference, or a report from such a checkout reads as a derived one.
+    """
+    from merlin.targetgen import readout_facet as RF
+
+    text = _module(weight_dequantize="per_tensor")
+    derived = RF.ReadoutFacet(target="synthetic", unit="unit0", scale_granularities=("tensor",))
+    silent = RF.ReadoutFacet(target="synthetic", unit="unit0", unknown={"scale_granularities": "no fact bundle"})
+
+    def summary(facet):
+        oracle = _Oracle(readout=RF.TargetReadout((facet,)))
+        return CG.plan(mq.parse(text), "synthetic", oracle=oracle)["summary"]
+
+    assert summary(derived)["readout_underived"] == {}
+    assert summary(silent)["readout_underived"] == {"scale_granularities": "no fact bundle"}
+
+
+def _summing(*, readout_scale: bool = True, standalone=()):
     from merlin.targetgen import readout_facet as RF
 
     facet = RF.ReadoutFacet(
@@ -277,7 +300,7 @@ def _summing(*, readout_scale: bool = True):
         scale_granularities=("tensor",) if readout_scale else None,
         operand_sum={"operands": 2, "operand_dtype": "i8", "operand_rounding": "half_even", "operand_saturates": True},
     )
-    return _Oracle(readout=RF.TargetReadout((facet,)))
+    return _Oracle(readout=RF.TargetReadout((facet,)), standalone=standalone)
 
 
 def test_a_quantized_residual_is_an_integer_sum_on_a_unit_whose_load_multiplies() -> None:
@@ -470,3 +493,178 @@ def test_the_declaration_is_read_through_the_one_accessor_every_consumer_uses() 
         assert CG.declared_stage_name(kind) == "acc_scale"
     assert CG.readout_absorbs(CG.RELU, readout, target="synthetic").admitted
     assert not CG.readout_absorbs(CG.POOL, readout, target="synthetic").admitted
+
+
+def test_a_region_is_asked_about_the_format_it_reads_not_the_one_it_writes() -> None:
+    # A model ARGUMENT arrives in float and the first region puts it on the integer grid. What a
+    # unit would have to load is that float; the int8 is what the region WRITES. A quantize is the
+    # one stage whose two ends are in different formats by definition, so reading the format off its
+    # result asks the target the wrong question -- and the wrong question only starts answering "yes"
+    # once a contract correctly admits `elementwise_map` standalone, which is how a float32 image
+    # came to be routed onto a device with no float datapath.
+    oracle = _Oracle(standalone=("elementwise_map",))
+    grid, layer = _groups(_module(weight_dequantize="per_tensor", quantized_input=True), oracle)
+    assert layer.placement == "unit0" and "contraction" in layer.stages
+    assert (grid.placement, grid.stages, grid.in_dtype) == (CG.HOST, [CG.QUANTIZE], "fp32")
+    assert (grid.refusal, grid.gap) == ("input_dtype", "OG7")
+    # The question itself, not only its answer: a standalone region is asked at the format it reads.
+    standalone = [ask for ask in oracle.asked if ask["op"] == CG.QUANTIZE and not ask["attached"]]
+    assert [ask["in_dtype"] for ask in standalone] == ["fp32"]
+
+
+def test_a_region_a_target_admits_and_no_device_form_states_stays_on_the_host_by_that_name() -> None:
+    # `elementwise_map` is one family word over two arithmetics: the scaled ADD two separately loaded
+    # operands meet in an accumulator for, and a PRODUCT no accumulator performs. A contract admits
+    # the family, so it admits both -- admission alone cannot place a region, because the statement
+    # path still has to hold a form to ask a device in. Placed anyway, such a group reached every
+    # consumer as "a host region has no contraction root to demand", of a region not on the host.
+    target = _summing(standalone=("elementwise_map",))
+    (product,) = _groups(_product(), target)
+    assert (product.placement, product.root, product.refusal) == (CG.HOST, None, CG.NO_DEVICE_FORM)
+    assert product.gap == "OG6" and "no contraction, operand sum or window mean" in product.reason
+    # The add the same declaration exists for is placed, so this refuses a FORM and not the family.
+    (add,) = _groups(_residual(), target)
+    assert add.placement == "unit0" and add.operand_sum is not None
+    # And nothing downstream is left to discover it: every placed group has something to demand.
+    assert CG.demand([product, add])["unstated"] == {}
+
+
+# --- window_sum_of: a bare integer sum, the shape a row-quantized activation reduces to ---------
+#
+# Tested directly against `working`/`stage_of`, below `form_groups`' union-find and dtype
+# derivation: the pattern this function matches (round -> narrowing cast -> reduce) is exactly what
+# was measured in the real capture (SmolVLA int8full, layer_norm1's mean-sum and self_attn's
+# softmax-sum both match it; a boolean mask population count -- also measured in that capture --
+# does not, since it has no preceding round). Establishing THIS shape's operand as int8 for a real
+# target's oracle needs a fact this synthetic test does not supply (no `quant_ext` marker exists for
+# a hand-rolled round+cast quantization the way one does for a captured dequantize/quantize pair) --
+# that is a separate, still-open gap, not one this function's own shape-matching is responsible for.
+
+
+def _int_sum_module(*, body: str = "arith.addi", drop_quantize: bool = False, narrow: str = "i16") -> str:
+    """``quantize(x, s, z) -> cast(i64) -> reduce(dims=[1])`` over a ``tensor<4x16xf32>``, or a
+    deliberately wrong variant of it -- the real shape ``_quantize_row`` (a ``quant_ext.
+    quantize_per_tensor`` marker, not a bare round) leaves at a row-quantization point. ``narrow``
+    is the quantize's own result element type (``i16`` matches layer_norm's real capture; ``i8``
+    lets a test reuse the shared ``Oracle`` fixture's int8-only admission unmodified)."""
+    id2 = "affine_map<(d0, d1) -> (d0, d1)>"
+    bounds = {"i8": (-128, 127, "int8"), "i16": (-32768, 32767, "int16")}[narrow]
+    lines = [
+        "builtin.module {",
+        "  func.func @forward(%x: tensor<4x16xf32>) -> tensor<4xi64> {",
+    ]
+    cast_src, cast_ty = "%x", "f32"
+    if not drop_quantize:
+        lines += [
+            "    %s = arith.constant dense<0.5> : tensor<f32>",
+            "    %z = arith.constant dense<0> : tensor<i64>",
+            f'    %q = "quant_ext.quantize_per_tensor"(%x, %s, %z) <{{quant_min = {bounds[0]} : i64, '
+            f'quant_max = {bounds[1]} : i64, output_dtype = "{bounds[2]}"}}> : (tensor<4x16xf32>, '
+            f"tensor<f32>, tensor<i64>) -> tensor<4x16x{narrow}>",
+        ]
+        cast_src, cast_ty = "%q", narrow
+    cast_op = "arith.extsi" if cast_ty != "f32" else "arith.fptosi"
+    lines += [
+        "    %ce = tensor.empty() : tensor<4x16xi64>",
+        f"    %cast = linalg.generic {{indexing_maps = [{id2}, {id2}], "
+        f'iterator_types = ["parallel", "parallel"]}} ins({cast_src} : tensor<4x16x{cast_ty}>) '
+        "outs(%ce : tensor<4x16xi64>) {",
+        f"    ^bb0(%cp: {cast_ty}, %cq: i64):",
+        f"      %cr = {cast_op} %cp : {cast_ty} to i64",
+        "      linalg.yield %cr : i64",
+        "    } -> tensor<4x16xi64>",
+        "    %zero = arith.constant 0 : i64",
+        "    %init = tensor.splat %zero : tensor<4xi64>",
+        "    %summed = linalg.reduce ins(%cast:tensor<4x16xi64>) outs(%init:tensor<4xi64>) dimensions = [1]",
+        "      (%sp: i64, %sq: i64) {",
+        f"        %sr = {body} %sp, %sq : i64",
+        "        linalg.yield %sr : i64",
+        "      }",
+        "    func.return %summed : tensor<4xi64>",
+        "  }",
+        "}",
+    ]
+    return "\n".join(lines)
+
+
+def _int_sum_ops(*, body: str = "arith.addi", drop_quantize: bool = False):
+    """``working``/``stage_of`` for :func:`_int_sum_module`, for calling ``_window_sum_of`` directly."""
+    module = mq.parse(_int_sum_module(body=body, drop_quantize=drop_quantize))
+    (fn,) = [op for op in module.walk() if op.name == "func.func"]
+    ops = list(fn.body.blocks[0].ops)
+    stage_of = {id(op): CG.classify(op) for op in ops}
+    working = [op for op in ops if stage_of[id(op)] is not None and stage_of[id(op)].kind != CG.VIEW]
+    return working, stage_of
+
+
+def _sum_group(groups):
+    """The group that holds the sum. Formation closes a region at its quantize, so the quantize is a
+    region of its own (the model argument put on the integer grid) and the sum is the next one."""
+    assert [g.stages[0] for g in groups][0] == CG.QUANTIZE
+    return [g for g in groups if CG.CAST in g.stages]
+
+
+def test_a_quantize_then_narrowing_cast_then_reduce_is_read_as_a_bare_integer_sum() -> None:
+    working, stage_of = _int_sum_ops()
+    facts, why = window_sum_of(working, stage_of)
+    assert why is None and facts is not None
+    assert (facts["rows"], facts["window"], facts["multiplier"]) == (4, 16, 1.0)
+    assert (facts["bound_lsb"], facts["exactness"]) == (0, "exact")
+    assert (facts["in_dtype"], mq.op_name(facts["reduce"])) == ("i16", "linalg.reduce")
+
+
+def test_a_cast_with_no_preceding_quantize_is_not_this_shape() -> None:
+    # The boolean-mask-population-count reduce measured in the real capture: a narrowing cast with
+    # nothing quantizing ahead of it. `working` here is only [cast, reduce] -- two members, not three.
+    working, stage_of = _int_sum_ops(drop_quantize=True)
+    assert window_sum_of(working, stage_of) == (None, None)
+
+
+def test_the_sum_is_read_the_same_when_its_quantize_closed_the_region_before_it() -> None:
+    working, stage_of = _int_sum_ops()
+    without_quantize = [m for m in working if stage_of[id(m)].kind != CG.QUANTIZE]
+    assert window_sum_of(without_quantize, stage_of) == window_sum_of(working, stage_of)
+
+
+def test_a_reduce_whose_body_is_not_addition_is_not_this_shape() -> None:
+    # An unrelated int64 reduction (a max, say) must not be read as a sum.
+    working, stage_of = _int_sum_ops(body="arith.maxsi")
+    assert window_sum_of(working, stage_of) == (None, None)
+
+
+def test_a_row_sum_binds_through_form_groups_and_is_exact_vs_the_oracle() -> None:
+    # The full path, not just the recognizer in isolation: form_groups reads the quantize's own
+    # result (int8 here, so the shared fixture Oracle's int8-only admission applies unmodified) as
+    # the group's dtype, asks the oracle, and states the group as a device group, window_mean set.
+    text = _int_sum_module(narrow="i8")
+    (group,) = _sum_group(CG.form_groups(mq.parse(text), "synthetic", oracle=_Oracle()))
+    assert group.placement == "unit0" and group.refusal is None
+    assert group.window_mean == {
+        "rows": 4,
+        "window": 16,
+        "multiplier": 1.0,
+        "bound_lsb": 0,
+        "exactness": "exact",
+    }
+    assert group.root is not None and mq.op_name(group.root) == "linalg.reduce"
+
+
+def test_a_row_sum_falls_back_to_the_host_when_the_oracle_declines_it() -> None:
+    # Where nothing contracts, the region is what it always was: no new refusal is invented for it
+    # (mirrors the window-mean fallback test above).
+    text = _int_sum_module(narrow="i8")
+    (group,) = _sum_group(CG.form_groups(mq.parse(text), "synthetic", oracle=_Oracle(families=("elementwise_map",))))
+    assert (group.placement, group.window_mean) == (CG.HOST, None) and group.refusal != CG.WINDOW_MEAN
+
+
+def test_a_row_sum_is_stated_as_a_window_mean_of_multiplier_one() -> None:
+    """The one grouping states the recognized sum through the same window-mean statement every mean
+    uses: ones against the row, the readout's multiplier one -- no second statement of it."""
+    from merlin.xdsl_dialects.lowering import group_command as GC
+
+    (group,) = _sum_group(CG.form_groups(mq.parse(_int_sum_module(narrow="i8")), "synthetic", oracle=_Oracle()))
+    entry = GC.program(group).entry
+    assert (entry["op"], entry["M"], entry["K"], entry["N"]) == ("matmul", 4, 16, 1)
+    assert entry["acc_scale"] == 1.0 and entry["epilogue"] == ["acc_scale"]
+    oriented = GC.device_orientation(entry, {"stored_operand": None})
+    assert (oriented["M"], oriented["K"], oriented["N"]) == (1, 16, 4)

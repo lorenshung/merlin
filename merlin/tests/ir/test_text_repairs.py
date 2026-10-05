@@ -5,6 +5,7 @@ textual rather than structural. Each test therefore quotes an actual line taken 
 artifact on disk (the provenance is in the docstring), so a future rewrite has something
 to be byte-identical against rather than a plausible-looking invention.
 """
+
 from __future__ import annotations
 
 from merlin.baselines.buddy import _repair_malformed_select_slices
@@ -43,8 +44,10 @@ def test_f0x_with_an_unknown_payload_width_is_left_for_llvm_to_reject():
 # --- linalg_mlir: the parenthesized multi-result linalg terminator xDSL rejects -------------
 # Real line from out/runs/rvv/beam/matmul/.../generated/v/model.prepared.mlir.
 def test_paren_multi_result_terminator_loses_its_parens():
-    assert (strip_paren_results("    } -> (tensor<1x32xf32>, tensor<1x32xi64>)")
-            == "    } -> tensor<1x32xf32>, tensor<1x32xi64>")
+    assert (
+        strip_paren_results("    } -> (tensor<1x32xf32>, tensor<1x32xi64>)")
+        == "    } -> tensor<1x32xf32>, tensor<1x32xi64>"
+    )
 
 
 def test_single_result_terminator_is_untouched():
@@ -60,14 +63,18 @@ def test_nested_parens_after_the_arrow_are_left_alone():
 
 # --- passes_xdsl: model2MLIR's invalid whole-model text ------------------------------------
 # Real op from out/artifacts/recaptures/gemma2_2b_int8_full/model.mlir.
-DEQUANT = ('    %1121 = "quant_ext.dequantize_per_channel"(%1115, %2, %1120) '
-           '<{axis = 1 : i64, input_dtype = "i8"}> {prov.op = "dequantize"} : '
-           '(tensor<2304x2048xi8>, tensor<2048xf32>, tensor<2048xi32>) -> tensor<2304x2048xf32>')
+DEQUANT = (
+    '    %1121 = "quant_ext.dequantize_per_channel"(%1115, %2, %1120) '
+    '<{axis = 1 : i64, input_dtype = "i8"}> {prov.op = "dequantize"} : '
+    "(tensor<2304x2048xi8>, tensor<2048xf32>, tensor<2048xi32>) -> tensor<2304x2048xf32>"
+)
 # Real op shape from a bitvla capture: sizes carry only the RESULT rank, offsets/strides the source's.
-RANK_REDUCED_SLICE = ('    %58 = "tensor.extract_slice"(%57) <{static_offsets = '
-                      'array<i64: 0, 0, 31, 0>, static_sizes = array<i64: 32>, static_strides = '
-                      'array<i64: 1, 1, 1, 1>, operandSegmentSizes = array<i32: 1, 0, 0, 0>}> '
-                      '{prov.op = "select"} : (tensor<1x1x32x32xf32>) -> tensor<32xf32>')
+RANK_REDUCED_SLICE = (
+    '    %58 = "tensor.extract_slice"(%57) <{static_offsets = '
+    "array<i64: 0, 0, 31, 0>, static_sizes = array<i64: 32>, static_strides = "
+    "array<i64: 1, 1, 1, 1>, operandSegmentSizes = array<i32: 1, 0, 0, 0>}> "
+    '{prov.op = "select"} : (tensor<1x1x32x32xf32>) -> tensor<32xf32>'
+)
 
 
 def test_dequant_becomes_a_pure_upstream_linalg_generic():
@@ -83,61 +90,72 @@ def test_dequant_becomes_a_pure_upstream_linalg_generic():
 def test_rank_reduced_extract_slice_sizes_are_padded_to_the_source_rank():
     out, _ = preprocess_text_textual(RANK_REDUCED_SLICE)
     assert "static_sizes = array<i64: 1, 1, 1, 32>" in out
-    assert "static_offsets = array<i64: 0, 0, 31, 0>" in out      # untouched
-    assert '(tensor<1x1x32x32xf32>) -> tensor<32xf32>' in out     # signature untouched
+    assert "static_offsets = array<i64: 0, 0, 31, 0>" in out  # untouched
+    assert "(tensor<1x1x32x32xf32>) -> tensor<32xf32>" in out  # signature untouched
 
 
 def test_insert_slice_stride_overrunning_the_destination_is_reset_to_one():
     """m2m's slice_scatter decomposition read `step` from the `end` slot, so a stride of 99
     landed on a destination of extent 14. Only the overrunning stride is reset."""
-    op = ('    %396 = "tensor.insert_slice"(%395, %393) <{static_offsets = array<i64: 0, 0>, '
-          'static_sizes = array<i64: 1, 14>, static_strides = array<i64: 1, 99>, '
-          'operandSegmentSizes = array<i32: 1, 1, 0, 0, 0>}> {prov.op = "x"} : '
-          '(tensor<1x14xf32>, tensor<1x14xf32>)')
+    op = (
+        '    %396 = "tensor.insert_slice"(%395, %393) <{static_offsets = array<i64: 0, 0>, '
+        "static_sizes = array<i64: 1, 14>, static_strides = array<i64: 1, 99>, "
+        'operandSegmentSizes = array<i32: 1, 1, 0, 0, 0>}> {prov.op = "x"} : '
+        "(tensor<1x14xf32>, tensor<1x14xf32>)"
+    )
     out, _ = preprocess_text_textual(op)
     assert "static_strides = array<i64: 1, 1>" in out
 
 
 def test_well_formed_slices_are_returned_byte_for_byte():
-    op = ('    %690 = "tensor.extract_slice"(%689) <{static_offsets = array<i64: 0, 0>, '
-          'static_sizes = array<i64: 1, 8>, static_strides = array<i64: 1, 1>}> : '
-          '(tensor<1x9xi64>) -> tensor<1x8xi64>')
+    op = (
+        '    %690 = "tensor.extract_slice"(%689) <{static_offsets = array<i64: 0, 0>, '
+        "static_sizes = array<i64: 1, 8>, static_strides = array<i64: 1, 1>}> : "
+        "(tensor<1x9xi64>) -> tensor<1x8xi64>"
+    )
     assert preprocess_text_textual(op)[0] == op
 
 
 def test_only_the_first_func_gets_the_c_interface_attribute():
-    text = ("func.func @forward(%a: tensor<4xf32>) -> tensor<4xf32> {\n}\n"
-            "func.func @other(%a: tensor<4xf32>) -> tensor<4xf32> {\n}\n")
+    text = (
+        "func.func @forward(%a: tensor<4xf32>) -> tensor<4xf32> {\n}\n"
+        "func.func @other(%a: tensor<4xf32>) -> tensor<4xf32> {\n}\n"
+    )
     out, stats = preprocess_text_textual(text)
     assert stats["c_interface_funcs"] == 1
     assert out.count("llvm.emit_c_interface") == 1
-    assert out.startswith("func.func @forward(%a: tensor<4xf32>) -> tensor<4xf32> "
-                          "attributes {llvm.emit_c_interface} {")
+    assert out.startswith("func.func @forward(%a: tensor<4xf32>) -> tensor<4xf32> attributes {llvm.emit_c_interface} {")
 
 
 # --- buddy: the m2m aten.select export bug, repaired post-tool and pre-reparse --------------
 def test_buddy_reconstructs_rank_r_sizes_for_a_selected_dim():
     """Real op from .../dse_guidance/recaptures/bitvla/model.mlir: offset 31 on dim 2 leaves
     only one element there, so dim 3 (extent 32, offset 0) is the kept dim."""
-    op = ('static_offsets = array<i64: 0, 0, 31, 0>, static_sizes = array<i64: 32>, '
-          'static_strides = array<i64: 1, 1, 1, 1>, x}> : (tensor<1x1x32x32xf32>) -> tensor<32xf32>')
+    op = (
+        "static_offsets = array<i64: 0, 0, 31, 0>, static_sizes = array<i64: 32>, "
+        "static_strides = array<i64: 1, 1, 1, 1>, x}> : (tensor<1x1x32x32xf32>) -> tensor<32xf32>"
+    )
     fixed, n = _repair_malformed_select_slices(op)
     assert n == 1
     assert "static_sizes = array<i64: 1, 1, 1, 32>" in fixed
-    assert "static_strides = array<i64: 1, 1, 1, 1>" in fixed     # closing `>` survives the rewrite
+    assert "static_strides = array<i64: 1, 1, 1, 1>" in fixed  # closing `>` survives the rewrite
 
 
 def test_buddy_leaves_a_well_formed_slice_alone():
-    op = ('static_offsets = array<i64: 0, 0>, static_sizes = array<i64: 1, 8>, '
-          'static_strides = array<i64: 1, 1>, x}> : (tensor<1x8xi64>) -> tensor<1x8xi64>')
+    op = (
+        "static_offsets = array<i64: 0, 0>, static_sizes = array<i64: 1, 8>, "
+        "static_strides = array<i64: 1, 1>, x}> : (tensor<1x8xi64>) -> tensor<1x8xi64>"
+    )
     assert _repair_malformed_select_slices(op) == (op, 0)
 
 
 def test_buddy_leaves_an_unreconstructable_slice_alone():
     """No source dim has extent 99, so there is nothing to safely reconstruct — the op stays
     malformed and the bufferizer rejects it loudly."""
-    op = ('static_offsets = array<i64: 0, 0>, static_sizes = array<i64: 99>, '
-          'static_strides = array<i64: 1, 1>, x}> : (tensor<1x8xi64>) -> tensor<99xi64>')
+    op = (
+        "static_offsets = array<i64: 0, 0>, static_sizes = array<i64: 99>, "
+        "static_strides = array<i64: 1, 1>, x}> : (tensor<1x8xi64>) -> tensor<99xi64>"
+    )
     assert _repair_malformed_select_slices(op) == (op, 0)
 
 
@@ -149,3 +167,32 @@ def test_the_string_attr_base_gets_the_attribute_sigil_not_the_type_sigil():
     it used to relax the whole constraint to `irdl.any`, which then accepted `name = 42 : i64`."""
     raw = '      %5 = irdl.base "!builtin.string" \n      %6 = irdl.any \n'
     assert _fix_string_base_sigil(raw) == '      %5 = irdl.base "#builtin.string" \n      %6 = irdl.any \n'
+
+
+# --- passes_xdsl: the C interface attaches to a body, never to an attribute dictionary ------------
+
+_DECLARED_FIRST = """module {
+  func.func private @ext(tensor<2xf32>) -> tensor<2xf32> attributes {llvm.emit_c_interface}
+  func.func @forward(%a: tensor<2xf32>) -> tensor<2xf32> {
+    return %a : tensor<2xf32>
+  }
+}"""
+
+_STATED = """module {
+  func.func @body(%a: tensor<2xf32>) -> tensor<2xf32> attributes {llvm.emit_c_interface} {
+    return %a : tensor<2xf32>
+  }
+}"""
+
+
+def test_a_declaration_stating_its_attributes_is_skipped_for_the_function_after_it():
+    out, stats = preprocess_text_textual(_DECLARED_FIRST)
+    assert stats["c_interface_funcs"] == 1
+    assert "@ext(tensor<2xf32>) -> tensor<2xf32> attributes {llvm.emit_c_interface}\n" in out
+    assert "-> tensor<2xf32> attributes {llvm.emit_c_interface} {\n    return" in out
+    assert "attributes attributes" not in out
+
+
+def test_a_function_already_asking_for_the_c_interface_is_left_as_written():
+    out, stats = preprocess_text_textual(_STATED)
+    assert out == _STATED and stats["c_interface_funcs"] == 1
