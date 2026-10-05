@@ -371,18 +371,23 @@ def test_selected_m2m_runtime_is_explicit_and_rechecked_without_original_source(
     assert not (Path(frozen["frozen_root"]) / "m2m/__pycache__").exists()
     shutil.rmtree(source)
     m2m_runtime.verify(frozen)
+    m2m_runtime.verify_frozen_copy(frozen)
     assert (Path(frozen["frozen_root"]) / "workloads/small_model/loader.py").is_file()
     assert m2m_runtime.environment(frozen)["MERLIN_MODEL2MLIR"] == frozen["frozen_root"]
     assert frozen["phase0_admission"] == "not_granted"
     (venv / "site-module.py").write_text("VERSION = 2\n")
     with pytest.raises(ValueError, match="host runtime changed"):
         m2m_runtime.verify(frozen)
+    m2m_runtime.verify_frozen_copy(frozen)
     (venv / "site-module.py").write_text("VERSION = 1\n")
     frozen_package = Path(frozen["frozen_root"]) / "m2m"
     frozen_package.chmod(frozen_package.stat().st_mode | 0o200)
-    (frozen_package / "__pycache__").mkdir()
+    (frozen_package / "__pycache__").mkdir(mode=0o555)
+    frozen_package.chmod(frozen_package.stat().st_mode & ~0o222)
     with pytest.raises(ValueError, match="source package changed"):
         m2m_runtime.verify(frozen)
+    with pytest.raises(ValueError, match="source package changed"):
+        m2m_runtime.verify_frozen_copy(frozen)
 
 
 @pytest.mark.parametrize("sealed", [False, True])
@@ -444,6 +449,85 @@ def test_installed_phase0_freezes_selected_m2m_routing_and_resumes(tmp_path, mon
         assert config["package"] == selected["frozen_package"]
     shutil.rmtree(source)
     freeze.verify(plan)
+    from merlin_experiments.corpus.preparation import source_run
+
+    assert source_run(fixture["run"])[1]["state"] == "execution_succeeded"
+    drift = venv / "later-installed-module.py"
+    drift.write_text("# unrelated later venv installation\n")
+    assert source_run(fixture["run"])[1]["state"] == "execution_succeeded"
+    from merlin_experiments import adapters
+
+    def live_citation(*_args):
+        raise AssertionError("completed consumption reopened current producer citation")
+
+    with monkeypatch.context() as historical:
+        historical.setattr(adapters, "_legacy_script", live_citation)
+        assert source_run(fixture["run"])[1]["state"] == "execution_succeeded"
+    with pytest.raises(ValueError, match="host runtime changed"):
+        freeze.verify(plan)
+    from merlin_experiments.runner import _verify_inputs
+
+    with pytest.raises(SpecError, match="host runtime changed"):
+        _verify_inputs(plan)
+    drift.unlink()
+    record_path = fixture["run"] / "orchestration.json"
+    original_record = record_path.read_bytes()
+    for invalid_returncode in (1, False):
+        changed_record = json.loads(original_record)
+        changed_record["attempts"][-1]["returncode"] = invalid_returncode
+        record_path.write_text(json.dumps(changed_record))
+        with pytest.raises(SpecError, match="successful immutable output receipt"):
+            source_run(fixture["run"])
+    record_path.write_bytes(original_record)
+    manifest = Path(plan["phases"]["0"]["engine_output"]) / "MANIFEST.yaml"
+    original_manifest = manifest.read_bytes()
+    manifest.write_bytes(original_manifest + b"\n# unreviewed output mutation\n")
+    with pytest.raises(SpecError, match="output changed"):
+        source_run(fixture["run"])
+    manifest.write_bytes(original_manifest)
+    copied_package = Path(selected["frozen_root"]) / "m2m"
+    copied_package.chmod(copied_package.stat().st_mode | 0o200)
+    unexpected = copied_package / "unselected.py"
+    unexpected.write_text("# source membership changed\n")
+    copied_package.chmod(copied_package.stat().st_mode & ~0o222)
+    with pytest.raises(SpecError, match="writable member"):
+        source_run(fixture["run"])
+    unexpected.chmod(0o444)
+    with pytest.raises(SpecError, match="source package changed"):
+        source_run(fixture["run"])
+    copied_package.chmod(copied_package.stat().st_mode | 0o200)
+    unexpected.unlink()
+    alias = copied_package / "unselected.py"
+    alias.symlink_to("__init__.py")
+    copied_package.chmod(copied_package.stat().st_mode & ~0o222)
+    with pytest.raises(SpecError, match="indirect"):
+        source_run(fixture["run"])
+    copied_package.chmod(copied_package.stat().st_mode | 0o200)
+    alias.unlink()
+    copied_package.chmod(copied_package.stat().st_mode & ~0o222)
+    from merlin_experiments import source_snapshot
+
+    snapshot = Path(plan["phase0_source_snapshot"])
+    prior_mode = snapshot.stat().st_mode
+    prior_seal = next(snapshot.glob("snapshot.*.json"))
+    prior_bytes = prior_seal.read_bytes()
+    external = tmp_path / "external-dependency"
+    external.mkdir()
+    snapshot.chmod(prior_mode | 0o200)
+    prior_seal.unlink()
+    (snapshot / "out").symlink_to(external, target_is_directory=True)
+    amended = json.loads(prior_bytes)
+    amended["external_links"]["out"] = str(external.resolve())
+    new_seal = source_snapshot.seal(snapshot, "snapshot", amended)
+    snapshot.chmod(prior_mode & ~0o222)
+    with pytest.raises(SpecError, match="live external dependency links"):
+        source_run(fixture["run"])
+    snapshot.chmod(prior_mode | 0o200)
+    new_seal.unlink()
+    (snapshot / "out").unlink()
+    prior_seal.write_bytes(prior_bytes)
+    prior_seal.chmod(0o444)
+    snapshot.chmod(prior_mode)
     if sealed:
         import tempfile
 

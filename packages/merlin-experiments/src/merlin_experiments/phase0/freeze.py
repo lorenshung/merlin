@@ -326,8 +326,8 @@ def stage(plan: dict) -> dict:
     return frozen
 
 
-def verify(plan: dict) -> None:
-    """Verify private copies; never reopen the original authored or source tree."""
+def _verify_frozen_sources(plan: dict) -> dict:
+    """Verify archived source and command bindings without consulting live owners."""
     snapshot = Path(plan["phase0_source_snapshot"])
     receipt = source_snapshot.verify(snapshot)
     command = plan["phases"]["0"]
@@ -368,7 +368,6 @@ def verify(plan: dict) -> None:
     else:
         from . import m2m_runtime
 
-        m2m_runtime.verify(selected_m2m)
         if any(command["env"].get(key) != value for key, value in m2m_runtime.environment(selected_m2m).items()):
             raise ValueError("frozen Phase 0 Model2MLIR runtime routing changed")
         if CONFIG_ENV in command["env"] or command["env"].get("MERLIN_PHASE0_EVIDENCE_MODE") == "verified":
@@ -380,3 +379,30 @@ def verify(plan: dict) -> None:
         receipt_path = Path(plan["phase0_m2m_runtime_receipt"])
         if receipt_path.read_bytes() != m2m_runtime.receipt(selected_m2m):
             raise ValueError("frozen Phase 0 Model2MLIR runtime receipt changed")
+    return receipt
+
+
+def verify_completed_artifact(plan: dict) -> None:
+    """Verify a finished run's copied producer, never its historical host venv."""
+    receipt = _verify_frozen_sources(plan)
+    if receipt["external_links"]:
+        raise ValueError("completed Phase 0 source snapshot has live external dependency links")
+    selected_m2m = plan["phases"]["0"].get("phase0_m2m_selection")
+    if selected_m2m is not None:
+        from . import m2m_runtime
+
+        copied = Path(selected_m2m["frozen_root"])
+        run = Path(plan["run_dir"])
+        if copied != copied.resolve(strict=True) or not copied.is_relative_to(run):
+            raise ValueError("frozen Model2MLIR source is not an ordinary run-owned copy")
+        m2m_runtime.verify_frozen_copy(selected_m2m)
+
+
+def verify(plan: dict) -> None:
+    """Verify private copies AND the selected live host runtime before execution."""
+    _verify_frozen_sources(plan)
+    selected_m2m = plan["phases"]["0"].get("phase0_m2m_selection")
+    if selected_m2m is not None:
+        from . import m2m_runtime
+
+        m2m_runtime.verify(selected_m2m)

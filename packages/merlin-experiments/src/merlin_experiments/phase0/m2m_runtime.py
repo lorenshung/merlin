@@ -196,12 +196,7 @@ def stage(selection: dict, destination: Path) -> dict:
 
 def verify(frozen: dict) -> None:
     """Reject changed copied source or live runtime before every attempt."""
-    if (
-        frozen.get("schema") != SCHEMA
-        or frozen.get("status") != "diagnostic_host_runtime"
-        or frozen.get("phase0_admission") != "not_granted"
-    ):
-        raise ValueError("unsupported frozen Model2MLIR selection")
+    _require_frozen_selection(frozen)
     selected = {
         key: value for key, value in frozen.items() if key not in {"frozen_root", "frozen_package", "frozen_workloads"}
     }
@@ -210,11 +205,38 @@ def verify(frozen: dict) -> None:
     current = _runtime(Path(frozen["python"]))
     if any(current[key] != selected[key] for key in ("venv", "base_python", "python_sha256", "base")):
         raise ValueError("selected Model2MLIR host runtime changed; freeze a new run")
+    verify_frozen_copy(frozen)
+
+
+def _require_frozen_selection(frozen: dict) -> None:
+    if (
+        frozen.get("schema") != SCHEMA
+        or frozen.get("status") != "diagnostic_host_runtime"
+        or frozen.get("phase0_admission") != "not_granted"
+    ):
+        raise ValueError("unsupported frozen Model2MLIR selection")
+
+
+def verify_frozen_copy(frozen: dict) -> None:
+    """Verify archived source bytes without reopening the historical host runtime."""
+    _require_frozen_selection(frozen)
     copied = Path(frozen["frozen_root"])
+    if copied.is_symlink() or not copied.is_dir() or copied.stat().st_mode & 0o222:
+        raise ValueError("frozen Model2MLIR source root is absent, indirect or writable")
+    expected_roots = {"m2m"} | ({"workloads"} if frozen["workloads"] else set())
+    if {member.name for member in copied.iterdir()} != expected_roots:
+        raise ValueError("frozen Model2MLIR source root membership changed")
+    for member in copied.rglob("*"):
+        if member.is_symlink() or not (member.is_dir() or member.is_file()) or member.stat().st_mode & 0o222:
+            raise ValueError("frozen Model2MLIR source contains an indirect, nonregular or writable member")
+    if frozen["workloads"] and {member.name for member in (copied / "workloads").iterdir()} != set(
+        frozen["workloads"]
+    ):
+        raise ValueError("frozen Model2MLIR workload membership changed")
     if _source_tree(copied / "m2m") != frozen.get("frozen_package"):
         raise ValueError("frozen Model2MLIR source package changed")
     if not isinstance(frozen.get("frozen_workloads"), dict) or set(frozen["frozen_workloads"]) != set(
-        selected["workloads"]
+        frozen["workloads"]
     ):
         raise ValueError("frozen Model2MLIR workload membership changed")
     for name, expected in frozen["frozen_workloads"].items():

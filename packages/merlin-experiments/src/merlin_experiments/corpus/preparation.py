@@ -155,33 +155,65 @@ def copy_public_hardware(source: Path, destination: Path) -> tuple[str, list[dic
 
 
 def source_run(run_dir: Path) -> tuple[dict, dict, Path]:
+    """Consume a completed historical producer, not certify a current execution.
+
+    The run's unsigned attempt/output receipt and sealed source copies provide
+    recorded byte consistency; a new Phase-1 tool bundle has its own source owner.
+    """
     from .. import runner
 
-    record = runner.status(run_dir)
-    plan = runner._read_json(run_dir / "resolved-plan.json")
-    runner._verify_inputs(plan)
+    source = run_dir.expanduser().absolute()
+    if source.is_symlink() or source != source.resolve(strict=True):
+        raise SpecError("Phase-0 source run is indirect; select its ordinary run directory")
+    record = runner.status(source)
+    plan = runner._read_json(source / "resolved-plan.json")
+    if plan.get("run_dir") != str(source):
+        raise SpecError("completed Phase-0 plan does not identify its selected run")
     phase = plan["phases"].get("0")
     attempts = [row for row in record["attempts"] if row["phase"] == "0"]
     if not phase or phase["adapter"] != "capsule_derivation" or not attempts:
         raise SpecError("release preparation requires a completed capsule-derivation phase")
     latest = attempts[-1]
-    if latest["state"] != "execution_succeeded" or not latest.get("output_sha256"):
+    if (
+        latest["state"] != "execution_succeeded"
+        or type(latest.get("returncode")) is not int
+        or latest["returncode"] != 0
+        or latest.get("adapter") != phase["adapter"]
+        or latest.get("argv") != phase["argv"]
+        or not latest.get("output_sha256")
+    ):
         raise SpecError("phase 0 has no successful immutable output receipt; derive a new corpus")
-    output = Path(phase["engine_output"]).resolve()
-    if latest.get("engine_output") != str(output) or not output.is_relative_to(run_dir):
+    output = Path(phase["engine_output"])
+    if (
+        not output.is_absolute()
+        or output != output.resolve(strict=True)
+        or latest.get("engine_output") != str(output)
+        or not output.is_relative_to(source)
+    ):
         raise SpecError("phase-0 output receipt does not bind its run-owned corpus")
     ordinary_tree(output)
     if runner.fingerprint(output) != latest["output_sha256"]:
         raise SpecError("phase-0 output changed after successful derivation")
+    if plan.get("phase0_source_snapshot"):
+        _verify_completed_frozen_sources(plan, source)
+        _verify_completed_generation(plan, output)
+    else:
+        # Old diagnostic runs retain their original execution-source checks;
+        # this path never upgrades them to the completed frozen-source policy.
+        runner._verify_inputs(plan)
     provenance = read_yaml(output / "MANIFEST.yaml")
     if phase.get("module"):
-        from ..adapters import PHASE0_MODULE, _legacy_script
+        from ..adapters import PHASE0_MODULE, _legacy_script, _relative_entrypoint
 
-        # _verify_inputs above binds actual installed module resolution, complete
-        # source membership and every frozen source hash. Only that implementation
-        # may retain the historical generator citation; an arbitrary string is not
-        # a substitute for an execution/source receipt.
-        if phase["module"] != PHASE0_MODULE or provenance.get("generated_by") != _legacy_script("capsule_derivation"):
+        # The frozen source seal and recorded execution command bind the
+        # historical producer; current installed source is a different owner.
+        if plan.get("phase0_source_snapshot"):
+            binding = Path(plan["input_paths"]["phase0:startup:provenance_binding"])
+            historical = json.loads(binding.read_bytes())
+            cited = _relative_entrypoint(historical["entrypoints"]["capsule_derivation"]["default"])
+        else:
+            cited = _legacy_script("capsule_derivation")
+        if phase["module"] != PHASE0_MODULE or provenance.get("generated_by") != cited:
             raise SpecError("phase-0 provenance does not identify the frozen derivation implementation")
         if latest.get("argv") != phase["argv"]:
             raise SpecError("phase-0 execution receipt differs from its frozen module command")
@@ -190,6 +222,99 @@ def source_run(run_dir: Path) -> tuple[dict, dict, Path]:
         if source.resolve() != Path(phase["entrypoint"]).resolve() or phase["argv"][1:2] != [phase["entrypoint"]]:
             raise SpecError("phase-0 provenance does not identify the frozen derivation entrypoint")
     return plan, latest, output
+
+
+def _verify_completed_frozen_sources(plan: dict, run_dir: Path) -> None:
+    """Admit only recorded run-owned source bytes, not a live producer/runtime."""
+    from ..adapters import PHASE0_MODULE
+    from ..phase0 import freeze
+    from ..runner import _command_value, _phase0_input_paths, fingerprint
+
+    command = plan["phases"]["0"]
+    if command.get("module") != PHASE0_MODULE or command["argv"][1:3] != ["-m", PHASE0_MODULE]:
+        raise SpecError("completed Phase-0 module binding is not the recorded derivation implementation")
+    paths, pins = plan.get("input_paths"), plan.get("inputs")
+    if not isinstance(paths, dict) or not isinstance(pins, dict) or set(paths) != set(pins):
+        raise SpecError("completed Phase-0 input closure differs from its frozen pin inventory")
+    membership = plan.get("phase0_operator_inputs")
+    if not isinstance(membership, dict) or {
+        name: path for name, path in paths.items() if name.startswith("phase0:operator:")
+    } != _phase0_input_paths(membership):
+        raise SpecError("completed Phase-0 operator selection differs from its frozen pin inventory")
+    for name, record in membership.items():
+        if name == "phase0:operator:application_demands_sidecar":
+            continue  # Derived from the selected requirement, not a command argument.
+        option = name.removeprefix("phase0:operator:")
+        value = command["inputs"].get(option)
+        if (record is None and value is not None) or (record is not None and value != record["path"]):
+            raise SpecError(f"completed Phase-0 operator input changed: {name}")
+        flag = "--" + option.replace("_", "-")
+        if value is not None and _command_value(command, flag) != value:
+            raise SpecError(f"completed Phase-0 command differs from its selected input: {name}")
+    for name, selected in paths.items():
+        pin = pins[name]
+        if not isinstance(selected, str) or not isinstance(pin, dict) or pin.get("path") != selected:
+            raise SpecError(f"completed Phase-0 input pin changed: {name}")
+        path = Path(selected)
+        if not path.is_absolute() or path != path.resolve(strict=True) or not path.is_relative_to(run_dir):
+            raise SpecError(f"completed Phase-0 input escapes its ordinary run: {name}")
+        ordinary_tree(path)
+        if fingerprint(path) != pin.get("sha256"):
+            raise SpecError(f"completed Phase-0 frozen input changed: {name}")
+    for key in ("phase0_source_snapshot", "phase0_evidence_bundle", "phase0_m2m_runtime_receipt"):
+        selected = plan.get(key)
+        if selected is None:
+            continue
+        path = Path(selected)
+        if not path.is_absolute() or path != path.resolve(strict=True) or not path.is_relative_to(run_dir):
+            raise SpecError(f"completed Phase-0 {key} is not run-owned")
+    try:
+        freeze.verify_completed_artifact(plan)
+    except (OSError, ValueError) as exc:
+        raise SpecError(f"completed Phase-0 frozen source changed: {exc}") from exc
+
+
+def _verify_completed_generation(plan: dict, generated: Path) -> None:
+    """Reopen committed generation and capture issuer evidence without recapturing."""
+    from ..phase0.capture_execution_attestation import AttestationNotVerified, require_verified_execution
+    from ..phase0.evidence import load_exported_evidence
+    from ..phase0.evidence_status import capture_attestation_diagnostics
+    from ..phase0.sealed_generation import verified_capture_failure
+
+    lineage = generation_lineage(plan, generated)
+    bundle = plan.get("phase0_evidence_bundle")
+    if lineage is None or not isinstance(bundle, str):
+        raise SpecError("completed frozen Phase-0 run has no selected generation lineage")
+    evidence = load_exported_evidence(bundle)
+    selected = plan["phases"]["0"].get("phase0_evidence") or {}
+    if selected != {
+        "status": evidence.status,
+        "raw_facts_sha256": evidence.raw_facts_sha256,
+        "views_sha256": hashlib.sha256(evidence.views_json).hexdigest(),
+        "diagnostics": evidence.diagnostics,
+    }:
+        raise SpecError("completed Phase-0 evidence differs from its frozen selection")
+    if evidence.status != "verified":
+        return  # Diagnostic corpus inspection remains possible, never promoted here.
+    views = json.loads(evidence.views_json)
+    applications = (views.get("application_inventory") or {}).get("applications")
+    attestations = views.get("capture_execution_attestations")
+    if (
+        not isinstance(applications, dict)
+        or not isinstance(attestations, dict)
+        or set(applications) != set(attestations)
+    ):
+        raise SpecError("verified Phase-0 capture attestations do not cover the selected applications")
+    if failures := capture_attestation_diagnostics(applications, attestations):
+        raise SpecError(f"verified Phase-0 capture execution changed: {failures[0]}")
+    for member, (_path, capsule) in _members(generated).items():
+        for attestation in capsule.get("capture_execution_attestations") or []:
+            try:
+                require_verified_execution(attestation)
+            except AttestationNotVerified as exc:
+                raise SpecError(f"generation-time capture attestation changed: {member}: {exc}") from exc
+        if failure := verified_capture_failure(capsule):
+            raise SpecError(f"generation-time capture admission changed: {member}: {failure}")
 
 
 def _members(root: Path) -> dict[str, tuple[Path, dict]]:
