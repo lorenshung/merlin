@@ -6,7 +6,36 @@ from copy import deepcopy
 
 import pytest
 
-from merlin.targetgen.operation_accounting import build_operation_accounting
+from merlin.targetgen.operation_accounting import admit_operation_row, build_operation_accounting
+
+
+@pytest.mark.parametrize(
+    "carrier, form, status",
+    [
+        ("merlin_iface.movement", "copy", "admitted"),
+        ("linalg.copy", "copy", "admitted"),
+        ("memref.copy", "copy", "admitted"),
+        ("linalg.transpose", "permutation", "unsupported"),
+        ("linalg.generic", None, "unsupported"),
+    ],
+)
+def test_movement_form_comes_from_the_ir_carrier_not_a_provenance_label(carrier, form, status):
+    _, _, contract = _inputs()
+    contract["compute_units"][0]["semantic_capabilities"] = [
+        {"family": "movement", "dtypes": ["int8"], "forms": ["copy"], "layouts": ["row_major_contiguous"]}
+    ]
+    row = {
+        "operation": "movement", "mlir_operation": carrier, "semantic_family": "movement",
+        "disposition": "unclassified", "operand_format": "int8", "shape_confidence": "observed",
+        "layout": "row_major_contiguous", "ordered_operand_types": [{"shape": [2, 3], "dtype": "i8"}],
+        "ordered_result_types": [{"shape": [2, 3], "dtype": "i8"}], "result_dtypes": ["i8"],
+    }
+    result = admit_operation_row(row, software_spec=None, capability_contract=contract)
+    assert result["observed_admission_signature"].get("form") == form
+    assert result["hardware_admission"]["status"] == status
+    row.pop("layout")
+    unresolved = admit_operation_row(row, software_spec=None, capability_contract=contract)
+    assert unresolved["hardware_admission"]["status"] == "unknown"
 
 
 def _inputs():
@@ -181,3 +210,16 @@ def test_inconsistent_counts_and_lost_ordinals_cannot_create_a_clean_report():
         mutate(changed["applications"]["small_model"])
         with pytest.raises(ValueError):
             build_operation_accounting(changed)
+
+
+def test_capture_execution_attestation_is_carried_per_application_and_never_judged():
+    inventory, spec, contract = _inputs()
+    (label,) = inventory["applications"]
+    attestation = {"schema": "fixture", "issuer": "anything"}
+    report = build_operation_accounting(
+        inventory, spec, capability_contract=contract, capture_execution_attestations={label: attestation}
+    )
+    assert report["applications"][label]["capture_execution_attestation"] == attestation
+    assert report["applications"][label]["capture_execution_attestation"] is not attestation
+    absent = build_operation_accounting(inventory, spec, capability_contract=contract)
+    assert absent["applications"][label]["capture_execution_attestation"] is None

@@ -190,8 +190,9 @@ def build_application_completeness(
             "result_type": edge["type"],
             "operand_dtype": edge["dtype"],
             "result_dtype": edge["dtype"],
-            "operand_layout": None,
-            "result_layout": None,
+            # An SSA edge carries one value: its layout, observed from its type, is both ends' layout.
+            "operand_layout": edge.get("layout"),
+            "result_layout": edge.get("layout"),
             "producer_signature": producer["observed_signature"],
             "consumer_signature": consumer["observed_signature"],
             "status": "conditional",

@@ -19,7 +19,7 @@ silently assumed eligible.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from merlin.common import quant_formats as qf
@@ -32,7 +32,7 @@ class RegionDescriptor:
     """A single region of computation, described structurally (no lowering assumed).
 
     ``family`` may be omitted and is then resolved from ``op`` via
-    :mod:`merlin.targetgen.semantic_families`. ``in_dtype``/``weight_dtype`` are quant-format names.
+    :mod:`merlin.targetgen.semantic_families`. Dtypes are quant-format names.
     """
 
     source: str = ""
@@ -46,6 +46,8 @@ class RegionDescriptor:
     rank: int | None = None
     batch: int = 1
     layout: str | None = None
+    #: Structural operation form, not a storage layout (e.g. copy vs permutation).
+    form: str | None = None
     #: Require the region to run on a specific compute-unit KIND (a ``compute_units.KINDS`` token).
     #: None == "any engine will do", which is what almost every region means; a caller sets this only
     #: when it is asking a narrower question ("can the ARRAY run this?", distinct from "can the target
@@ -65,6 +67,11 @@ class RegionDescriptor:
     #: absorb it is decided by exactly this: a store path holding one scale per command takes a
     #: per-tensor requantization and cannot take a per-channel one.
     scale_granularity: str | None = None
+    #: Observed result format; an elementwise conversion needs independent output evidence.
+    out_dtype: str | None = None
+    #: Exact parsed linalg input roles; unknown slots are not an inapplicable
+    #: weight. None retains direct descriptors. Keep appended for positional ABI.
+    captured_input_formats: tuple[str | None, ...] | None = None
 
     def resolved_family(self) -> str | None:
         """The CANONICAL family, resolving a capture's own coarse tag rather than trusting it.
@@ -120,9 +127,13 @@ REFUSALS: tuple[str, ...] = (
     "undeclared_family",
     "input_dtype",
     "weight_dtype",
+    "operand_pair",
+    "result_dtype",
+    "result_dtype_unknown",
     "rank",
     "batch",
     "layout",
+    "form",
     "engine",
     "fused_only",
     "scale_granularity",
@@ -250,6 +261,22 @@ def is_eligible(
         return EligibilityVerdict(
             False, family, f"target declares no capability for family {family!r}", refusal="undeclared_family"
         )
+    observed = region.captured_input_formats
+    if observed is not None:
+        complete = (
+            len(observed) == 2 and all(observed)
+            if family == "contraction"
+            else bool(observed) and all(observed) and len(set(observed)) == 1
+        )
+        if not complete:
+            return EligibilityVerdict(
+                False, family, "captured input roles are incomplete; precision unverified",
+                undetermined=True, refusal="input_dtype",
+            )
+        region = replace(
+            region, in_dtype=observed[0],
+            weight_dtype=observed[1] if family == "contraction" else region.weight_dtype,
+        )
     for c in caps:
         if not _dtype_ok(region.in_dtype, c.dtypes):
             return EligibilityVerdict(
@@ -264,6 +291,37 @@ def is_eligible(
                 family,
                 f"weight dtype {region.weight_dtype!r} not supported by {c.family}",
                 refusal="weight_dtype",
+            )
+        if c.family == "contraction" and region.in_dtype is not None and region.weight_dtype is not None \
+                and c.operand_pairs is not None and not any(
+                    _dtype_ok(region.in_dtype, (left,)) and _dtype_ok(region.weight_dtype, (right,))
+                    for left, right in c.operand_pairs
+                ):
+            return EligibilityVerdict(
+                False, family,
+                f"input/weight pair ({region.in_dtype!r}, {region.weight_dtype!r}) "
+                f"not supported by {c.family}; declared pairs {list(c.operand_pairs)}",
+                refusal="operand_pair",
+            )
+        if region.out_dtype is not None and c.result_dtypes is not None:
+            if not _dtype_ok(region.out_dtype, c.result_dtypes):
+                return EligibilityVerdict(
+                    False, family,
+                    f"result dtype {region.out_dtype!r} not in {c.family} result formats {list(c.result_dtypes)}",
+                    refusal="result_dtype",
+                )
+        elif (
+            c.family == "elementwise_map"
+            and region.in_dtype is not None
+            and region.out_dtype is not None
+            and not _dtype_ok(region.out_dtype, (region.in_dtype,))
+        ):
+            return EligibilityVerdict(
+                False, family,
+                f"UNDETERMINED: {c.family} input {region.in_dtype!r} changes to result "
+                f"{region.out_dtype!r} without a declared result-format capability",
+                undetermined=True,
+                refusal="result_dtype_unknown",
             )
         if c.ranks and region.rank is not None and region.rank not in c.ranks:
             return EligibilityVerdict(
@@ -282,6 +340,13 @@ def is_eligible(
                 family,
                 f"layout {region.layout!r} not in {c.family} legal layouts {list(c.layouts)}",
                 refusal="layout",
+            )
+        if c.forms and region.form not in c.forms:
+            return EligibilityVerdict(
+                False,
+                family,
+                f"form {region.form!r} not in {c.family} supported forms {list(c.forms)}",
+                refusal="form",
             )
         if c.engines and region.engine is not None and region.engine not in c.engines:
             return EligibilityVerdict(

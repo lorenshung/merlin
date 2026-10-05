@@ -112,7 +112,13 @@ def _validate_application(label: str, application: dict) -> None:
 
 def _observed_signature(row: dict) -> dict:
     """Project actual ABI observations; do not turn annotations into semantics."""
+    from merlin.targetgen.semantic_families import operation_form
+
     observed = {"family": row.get("semantic_family")}
+    carrier = row.get("mlir_operation") or ""
+    form = operation_form(carrier.rpartition(".")[2], carrier_op=carrier)
+    if form is not None:
+        observed["form"] = form
     for source, key in (
         ("ordered_operand_types", "ordered_operand_dtypes"),
         ("ordered_result_types", "ordered_result_dtypes"),
@@ -140,6 +146,19 @@ def _observed_signature(row: dict) -> dict:
         if shape is not None:
             observed["rank"] = len(shape)
             break
+    # Access observations derived from the graph (application_inventory); absent ones stay unresolved.
+    for key in ("layout", "tails", "broadcasting", "aliasing"):
+        if row.get(key) is not None:
+            observed[key] = row[key]
+    if row.get("quantization_parameters") is not None:
+        observed["quantization_parameters"] = row["quantization_parameters"]
+    # Composition observed in a written program (an epilogue stage and the family that produced its
+    # operand). Captured application rows carry none, so they stay unresolved exactly as before.
+    for key, value in (row.get("composed_observation") or {}).items():
+        if key in {"epilogues", "composed_with", "scale_granularity"} and value is not None:
+            observed[key] = value
+    if row.get("numeric_screen") is not None:
+        observed["numeric_screen"] = row["numeric_screen"]
     geometry = row.get("contraction_shape") or {}
     observed["dimensions"] = {axis: geometry[axis] for axis in ("M", "K", "N") if type(geometry.get(axis)) is int}
     return observed
@@ -203,7 +222,7 @@ def _hardware_admission(row: dict, signature: dict, contract: dict | None, capab
             "basis": "selected_capability_contract",
             "reason": "declared rank constraints need an observed tensor rank",
         }
-    if any(capability.layouts for capability in capabilities):
+    if any(capability.layouts for capability in capabilities) and signature.get("layout") is None:
         return {
             "status": "unknown",
             "basis": "selected_capability_contract",
@@ -215,12 +234,15 @@ def _hardware_admission(row: dict, signature: dict, contract: dict | None, capab
             op=row["mlir_operation"].rpartition(".")[2],
             family=family,
             in_dtype=dtype,
+            out_dtype=signature.get("readout_dtype"),
             weight_dtype=(
                 (row.get("ordered_operand_types") or [{}, {}])[1].get("dtype")
                 if family == "contraction" and len(row.get("ordered_operand_types") or []) >= 2
                 else None
             ),
             rank=signature.get("rank"),
+            form=signature.get("form"),
+            layout=signature.get("layout"),
             m=dimensions.get("M"),
             k=dimensions.get("K"),
             n=dimensions.get("N"),
@@ -228,6 +250,8 @@ def _hardware_admission(row: dict, signature: dict, contract: dict | None, capab
         capability_map,
         undetermined=undetermined_families_from_contract(contract),
         providers=providers_from_contract(contract),
+        # A fused-only capability admits a stage only behind an observed producer of its operand.
+        fused_with=tuple(signature.get("composed_with") or ()) or None,
     )
     return {
         "status": "admitted" if verdict.eligible else "unknown" if verdict.undetermined else "unsupported",
@@ -298,6 +322,45 @@ def _support_partition(accelerator: dict, host: dict) -> str:
     if host["status"] == "admitted":
         return "host_candidate_accelerator_unknown" if accelerator["status"] == "unknown" else "host_only_candidate"
     return "neither_admitted" if accelerator["status"] == host["status"] == "unsupported" else "unresolved"
+
+
+def admit_operation_row(
+    row: dict,
+    *,
+    software_spec: dict | None,
+    capability_contract: dict | None,
+    capability_map: dict | None = None,
+    host_capabilities: dict | None = None,
+    observed: dict | None = None,
+) -> dict:
+    """Every lane's admission of ONE observed operation, exactly as a captured application's are judged.
+
+    ``row`` is an inventory signature row (``operation``, ``mlir_operation``, ``disposition``, typed
+    operands/results and access observations); ``observed`` overrides the signature projected from it.
+    A written capsule's program is screened through this same function, so a capsule and the workload
+    operation it stands for cannot be judged by two rules.
+    """
+    from merlin.targetgen.host_capabilities import admit_host_operation
+
+    if capability_contract is not None and capability_map is None:
+        from merlin.targetgen.eligibility import capability_map_from_contract
+
+        capability_map = capability_map_from_contract(capability_contract)
+    observed = observed if observed is not None else _observed_signature(row)
+    software = _software_admissions(software_spec, row, observed)
+    hardware = _hardware_admission(row, observed, capability_contract, capability_map)
+    accelerator = _accelerator_admission(row, software, hardware, software_spec is not None)
+    host = admit_host_operation(host_capabilities, row, observed)
+    return {
+        "observed_admission_signature": observed,
+        "software_admissions": software,
+        "matching_declarations": [decision["declaration"] for decision in software],
+        "hardware_admission": hardware,
+        "accelerator_admission": accelerator,
+        "host_admission": host,
+        "support_partition": _support_partition(accelerator, host),
+        "classification": _classification(row, software, hardware, software_spec is not None),
+    }
 
 
 def _summary(entries: list[dict]) -> dict:
@@ -441,9 +504,12 @@ def build_operation_accounting(
     frontend_traces: dict[str, dict] | None = None,
     application_graphs: dict[str, dict] | None = None,
     host_capabilities: dict | None = None,
+    capture_execution_attestations: dict[str, dict] | None = None,
 ) -> dict:
     """Build deterministic, complete workload partitions from selected immutable inputs.
 
+    ``capture_execution_attestations`` are carried per application unchanged; this
+    module never judges them (the coverage gate re-verifies each from disk).
     ``None`` means the detailed inventory is unavailable, not an empty covered
     workload. Only a supplied selected contract is re-screened for hardware
     admission; no target registry or ambient facts are read here.
@@ -476,18 +542,12 @@ def build_operation_accounting(
         capability_map = capability_map_from_contract(capability_contract)
     result_applications, all_entries = {}, []
     from merlin.targetgen.framework_operation_partition import attach_frontend_partitions, combine_frontend_partitions
-    from merlin.targetgen.host_capabilities import admit_host_operation
     from merlin.targetgen.operation_obligations import build_application_completeness
 
     for label, application in sorted(applications.items()):
         selected_graph = (application_graphs or {}).get(label) or application.get("operation_graph")
         entries = []
         for row in sorted(application["signatures"], key=lambda item: min(item["ordinals"])):
-            observed = _observed_signature(row)
-            software = _software_admissions(software_spec, row, observed)
-            hardware = _hardware_admission(row, observed, capability_contract, capability_map)
-            accelerator = _accelerator_admission(row, software, hardware, software_spec is not None)
-            host = admit_host_operation(host_capabilities, row, observed)
             entry = {
                 "application": label,
                 "capture_sha256": application["capture_sha256"],
@@ -495,14 +555,13 @@ def build_operation_accounting(
                 "count": row["count"],
                 "ordinals": sorted(row["ordinals"]),
                 "observed_signature": copy.deepcopy(row),
-                "observed_admission_signature": observed,
-                "software_admissions": software,
-                "matching_declarations": [decision["declaration"] for decision in software],
-                "hardware_admission": hardware,
-                "accelerator_admission": accelerator,
-                "host_admission": host,
-                "support_partition": _support_partition(accelerator, host),
-                "classification": _classification(row, software, hardware, software_spec is not None),
+                **admit_operation_row(
+                    row,
+                    software_spec=software_spec,
+                    capability_contract=capability_contract,
+                    capability_map=capability_map,
+                    host_capabilities=host_capabilities,
+                ),
                 "lowering_status": "unverified",
             }
             entries.append(entry)
@@ -540,6 +599,7 @@ def build_operation_accounting(
             "capture": application.get("capture"),
             "capture_sha256": application["capture_sha256"],
             "capture_receipt": copy.deepcopy(application.get("capture_receipt")),
+            "capture_execution_attestation": copy.deepcopy((capture_execution_attestations or {}).get(label)),
             "capture_quantization": application.get("capture_quantization"),
             "operation_graph_identity": _graph_identity(selected_graph),
             **summary,

@@ -22,7 +22,7 @@ contains — so gemmini-mx works standalone or as a sub-unit.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 from merlin.common import quant_formats as qf
@@ -51,6 +51,34 @@ class AccumRule:
 
 
 @dataclass(frozen=True)
+class EvidencePath:
+    """One way a capability runs standalone: the derived fact that licenses it, and the roles it uses."""
+
+    fact: str
+    roles: tuple[str, ...]
+
+
+def _evidence_paths(raw: Any, unit_name: str, family: str) -> tuple[EvidencePath, ...]:
+    from merlin.kernels.roles import ROLES
+
+    if raw in (None, []):
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError(f"compute unit {unit_name!r}: {family} standalone_evidence must be a list")
+    out = []
+    for row in raw:
+        fact = row.get("fact") if isinstance(row, dict) else None
+        roles = row.get("roles") if isinstance(row, dict) else None
+        if not isinstance(fact, str) or not fact or not isinstance(roles, list) or not roles:
+            raise ValueError(f"compute unit {unit_name!r}: {family} evidence needs a fact and a roles list")
+        unknown = sorted(set(roles) - set(ROLES))
+        if unknown:
+            raise ValueError(f"compute unit {unit_name!r}: {family} evidence names unknown role(s) {unknown}")
+        out.append(EvidencePath(fact=fact, roles=tuple(roles)))
+    return tuple(out)
+
+
+@dataclass(frozen=True)
 class SemanticCapability:
     """What a unit can compute at the **semantic-family** level — the HARDWARE-truth declaration the
     eligibility oracle (:mod:`merlin.targetgen.eligibility`) reads as the ARR *denominator*.
@@ -70,6 +98,10 @@ class SemanticCapability:
     arbitrary_mnk: bool = True  # M/N/K need not be tile multiples (tails handled)
     batch: bool = True  # batch dimensions supported
     layouts: tuple[str, ...] = ()  # legal layout tags (coarse); () = unconstrained
+    #: Semantic operation forms within a family, distinct from storage layout. For
+    #: example, DMA copy does not establish a standalone axis permutation. Empty
+    #: retains the legacy unconstrained declaration for older contracts.
+    forms: tuple[str, ...] = ()
     #: Which compute-unit KINDS provide this family on this target — the engine attribution.
     #:
     #: The fold below merges every unit's capabilities into one family -> capability map and, until
@@ -90,7 +122,19 @@ class SemanticCapability:
     #: permanent false_fallback no compiler change can clear; omitting the family entirely hides real
     #: hardware. This field is how a capability says "yes, but only attached to that".
     composed_with: tuple[str, ...] = ()
+    #: How the family runs STANDALONE, as evidence paths: each names the derived hardware fact that
+    #: licenses it and the instruction ROLES a program uses to drive it. A policy that prohibits a
+    #: role (``prohibited_instruction_roles``) then knows whether the standalone form survives it:
+    #: see :mod:`merlin.targetgen.capability_roles`. () means the declaration predates the evidence.
+    standalone_evidence: tuple[EvidencePath, ...] = ()
     notes: str = ""
+    #: Optional proven result formats for dtype-changing operations. An absent
+    #: declaration does not license a conversion merely because its input is legal.
+    result_dtypes: tuple[str, ...] | None = None
+    #: Correlated input/weight support, projected from each declaring unit before
+    #: merging. None retains the older direct-construction API. Appended so the
+    #: existing positional shape arguments keep their meaning.
+    operand_pairs: tuple[tuple[str, str], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -167,17 +211,48 @@ def _sem_cap(raw: dict[str, Any], unit_name: str) -> SemanticCapability:
             f"compute unit {unit_name!r}: semantic_capability {family!r} unknown quant "
             f"formats {unknown} (known: {qf.names()})"
         )
+    raw_pairs = raw.get("operand_pairs")
+    if raw_pairs is not None and (
+        not isinstance(raw_pairs, list)
+        or any(not isinstance(pair, dict) or set(pair) != {"in", "weight"}
+               or not all(isinstance(pair[key], str) and qf.has(pair[key]) for key in ("in", "weight"))
+               for pair in raw_pairs)
+    ):
+        raise ValueError(f"compute unit {unit_name!r}: {family} operand_pairs must name known input/weight formats")
+    operand_pairs = tuple((qf.get(pair["in"]).name, qf.get(pair["weight"]).name)
+                          for pair in raw_pairs) if raw_pairs is not None else None
+    if operand_pairs is not None and any(
+        left not in {qf.get(name).name for name in dtypes}
+        or right not in {qf.get(name).name for name in dtypes}
+        for left, right in operand_pairs
+    ):
+        raise ValueError(f"compute unit {unit_name!r}: {family} operand_pairs exceed semantic dtypes")
+    result_dtypes = raw.get("result_dtypes")
+    if result_dtypes is not None:
+        if not isinstance(result_dtypes, list) or not result_dtypes or any(not qf.has(d) for d in result_dtypes):
+            raise ValueError(f"compute unit {unit_name!r}: {family} result_dtypes must name known formats")
     return SemanticCapability(
         family=family,
         dtypes=dtypes,
+        operand_pairs=operand_pairs,
+        result_dtypes=tuple(result_dtypes) if result_dtypes is not None else None,
         ranks=tuple(raw.get("ranks", ()) or ()),
         transpose=bool(raw.get("transpose", True)),
         arbitrary_mnk=bool(raw.get("arbitrary_mnk", True)),
         batch=bool(raw.get("batch", True)),
         composed_with=tuple(raw.get("composed_with", ()) or ()),
         layouts=tuple(raw.get("layouts", ()) or ()),
+        forms=tuple(raw.get("forms", ()) or ()),
+        standalone_evidence=_standalone_evidence(raw, unit_name, family),
         notes=raw.get("notes", "") or "",
     )
+
+
+def _standalone_evidence(raw: dict[str, Any], unit_name: str, family: str) -> tuple[EvidencePath, ...]:
+    paths = _evidence_paths(raw.get("standalone_evidence"), unit_name, family)
+    if paths and raw.get("composed_with"):
+        raise ValueError(f"compute unit {unit_name!r}: {family} declares standalone evidence and composed_with at once")
+    return paths
 
 
 def _derived_sem_caps(raw: dict[str, Any], unit_name: str) -> tuple[SemanticCapability, ...]:
@@ -358,15 +433,26 @@ def _merge_caps(a: SemanticCapability, b: SemanticCapability) -> SemanticCapabil
     return SemanticCapability(
         family=a.family,
         dtypes=_u(a.dtypes, b.dtypes),
+        operand_pairs=(
+            _u(a.operand_pairs, b.operand_pairs)
+            if a.operand_pairs is not None and b.operand_pairs is not None else None
+        ),
+        result_dtypes=(
+            _u(a.result_dtypes, b.result_dtypes)
+            if a.result_dtypes is not None and b.result_dtypes is not None else None
+        ),
         ranks=_u(a.ranks, b.ranks),
         transpose=a.transpose or b.transpose,
         arbitrary_mnk=a.arbitrary_mnk or b.arbitrary_mnk,
         batch=a.batch or b.batch,
         layouts=_u(a.layouts, b.layouts),
+        forms=(() if not a.forms or not b.forms else _u(a.forms, b.forms)),
         # Engines UNION: two units providing one family means the target has two ways to run it, and
         # that is exactly the fact a single folded map used to destroy.
         engines=_u(a.engines, b.engines),
         composed_with=_i(a.composed_with, b.composed_with),
+        # Evidence UNIONS: either unit's way of running the family standalone is a way the target has.
+        standalone_evidence=_u(a.standalone_evidence, b.standalone_evidence),
         notes=notes,
     )
 
@@ -377,15 +463,40 @@ def semantic_capability_map(units: list[ComputeUnit]) -> dict[str, SemanticCapab
     eligibility oracle reads — derived only from the declared contract, never from routing/lowering.
     """
     merged: dict[str, SemanticCapability] = {}
+    # Validate containment as effective() historically did, but project each
+    # declaration from its OWN unit. Projecting after composition would allow
+    # a parent's float operand to pair with a child's integer operand.
     for u in units:
-        for cap in effective(u, units).semantic_capabilities:
+        effective(u, units)
+    for u in units:
+        for cap in u.semantic_capabilities:
             # Attribute to the unit that DECLARED it before merging. `effective` folds a containing
             # unit's capabilities together with what it contains, so the attribution is taken from the
             # declaring unit found by `providers_of`, not from the outer unit's kind -- otherwise a
             # SIMT cluster containing a systolic mesh would report every family as SIMT.
-            cap = _attribute(cap, providers_of(cap.family, units))
+            cap = _attribute(_with_operand_pairs(cap, u), providers_of(cap.family, units))
             merged[cap.family] = _merge_caps(merged[cap.family], cap) if cap.family in merged else cap
     return merged
+
+
+def _with_operand_pairs(cap: SemanticCapability, unit: ComputeUnit) -> SemanticCapability:
+    """Project only pairs licensed by this declaring unit and this semantic family."""
+    allowed = {qf.get(name).name for name in cap.dtypes}
+    if cap.operand_pairs is not None:
+        pairs = cap.operand_pairs  # independently declared hardware capability
+    elif unit.accumulate:
+        pairs = tuple(dict.fromkeys(
+            (qf.get(rule.inp).name, qf.get(rule.weight).name)
+            for rule in unit.accumulate
+            if qf.has(rule.inp) and qf.has(rule.weight)
+            and qf.get(rule.inp).name in allowed and qf.get(rule.weight).name in allowed
+        ))
+    else:
+        # With no matrix, the semantic capability's dtypes are the independent
+        # hardware declaration. They may intentionally be broader than the
+        # router's unit.dtypes; intersecting would hide compiler false fallback.
+        pairs = tuple((left, right) for left in sorted(allowed) for right in sorted(allowed))
+    return replace(cap, operand_pairs=pairs)
 
 
 def _attribute(cap: SemanticCapability, providers: tuple[tuple[str, str], ...]) -> SemanticCapability:
