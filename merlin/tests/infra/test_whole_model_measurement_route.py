@@ -25,7 +25,6 @@ verdicts come from :mod:`merlin.perf.firesim_batch` rather than from a copy of i
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import subprocess
 from pathlib import Path
@@ -47,12 +46,10 @@ _POLICY = _POLICIES / "resnet50_group_model_cycle_claim_fnv1a_v2.json"
 
 
 def _harness():
-    """The whole-model harness, loaded from its path: it is a script, not a package module."""
-    path = merlin_dir() / "experiments" / "gemmini_perf_bench" / "scripts" / "group_model_program.py"
-    spec = importlib.util.spec_from_file_location("group_model_program", path)
-    loaded = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(loaded)
-    return loaded
+    """The whole-model harness of the selected support provider (its driver's ``program``)."""
+    from selected_driver import load
+
+    return load("gemmini", "group_model_program.py")
 
 
 # --------------------------------------------------------------- a tiny whole-model program
