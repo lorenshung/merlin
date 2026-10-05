@@ -203,13 +203,23 @@ def validate(plan: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"{name}.parameters must be a list")
         normalized_params = []
         for param in params:
-            if not isinstance(param, dict) or set(param) - {"name", "kind", "min", "max"}:
+            if not isinstance(param, dict) or set(param) - {
+                "name",
+                "kind",
+                "min",
+                "max",
+                "intervals",
+                "choices",
+                "unit",
+            }:
                 raise ValueError(f"{name}.parameters contains unsupported fields")
             pname = _identifier(param.get("name"), f"{name}.parameter.name")
             kind = param.get("kind")
             if kind not in {"unsigned", "type"}:
                 raise ValueError(f"{name}.{pname} has unsupported parameter kind")
-            if kind == "type" and ("min" in param or "max" in param):
+            if "unit" in param and (not isinstance(param["unit"], str) or not param["unit"].strip()):
+                raise ValueError(f"{name}.{pname} has invalid physical unit")
+            if kind == "type" and set(param) & {"min", "max", "intervals", "choices"}:
                 raise ValueError(f"{name}.{pname} type parameter cannot have numeric bounds")
             if kind == "unsigned" and (
                 type(param.get("min", 0)) is not int
@@ -219,6 +229,38 @@ def validate(plan: dict[str, Any]) -> dict[str, Any]:
                 or param.get("max", 2**32 - 1) < param.get("min", 0)
             ):
                 raise ValueError(f"{name}.{pname} has invalid unsigned bounds")
+            if "intervals" in param or "choices" in param:
+                if kind != "unsigned" or set(param) & {"min", "max"} or ("intervals" in param and "choices" in param):
+                    raise ValueError(f"{name}.{pname} has conflicting unsigned domains")
+                if "intervals" in param:
+                    intervals = param["intervals"]
+                    if not isinstance(intervals, list) or not intervals:
+                        raise ValueError(f"{name}.{pname} has invalid intervals")
+                    previous_max = -1
+                    for interval in intervals:
+                        if not isinstance(interval, dict) or set(interval) != {"min", "max", "step"}:
+                            raise ValueError(f"{name}.{pname} has invalid intervals")
+                        low, high, step = (interval[key] for key in ("min", "max", "step"))
+                        if (
+                            any(type(item) is not int for item in (low, high, step))
+                            or low < 0
+                            or low <= previous_max
+                            or high < low
+                            or high > 2**32 - 1
+                            or step < 1
+                            or (high - low) % step
+                        ):
+                            raise ValueError(f"{name}.{pname} has invalid intervals")
+                        previous_max = high
+                else:
+                    choices = param["choices"]
+                    if (
+                        not isinstance(choices, list)
+                        or not choices
+                        or any(type(item) is not int or not 0 <= item <= 2**32 - 1 for item in choices)
+                        or len(set(choices)) != len(choices)
+                    ):
+                        raise ValueError(f"{name}.{pname} has invalid choices")
             normalized_params.append({**param, "name": pname, "kind": kind})
         if len({p["name"] for p in normalized_params}) != len(normalized_params):
             raise ValueError(f"{name} has duplicate parameter names")
@@ -259,8 +301,10 @@ def validate(plan: dict[str, Any]) -> dict[str, Any]:
                         "type",
                         "min",
                         "max",
+                        "intervals",
                         "choices",
                         "role",
+                        "unit",
                     }
                 )
                 if set(field) - allowed:
@@ -275,6 +319,8 @@ def validate(plan: dict[str, Any]) -> dict[str, Any]:
                         raise ValueError(f"{name}.{fname} has unsupported attribute type")
                     if field.get("role", "binding") not in {"mode", "binding", "policy"}:
                         raise ValueError(f"{name}.{fname} has unsupported attribute role")
+                    if "unit" in field and (not isinstance(field["unit"], str) or not field["unit"].strip()):
+                        raise ValueError(f"{name}.{fname} has invalid physical unit")
                     choices = field.get("choices")
                     if choices is not None and (
                         not isinstance(choices, list)
@@ -286,8 +332,33 @@ def validate(plan: dict[str, Any]) -> dict[str, Any]:
                         )
                     ):
                         raise ValueError(f"{name}.{fname} has invalid choices")
+                    if choices is not None and set(field) & {"min", "max", "intervals"}:
+                        raise ValueError(f"{name}.{fname} has conflicting finite domains")
                     if ("min" in field or "max" in field) and ftype not in {"i32", "i64"}:
                         raise ValueError(f"{name}.{fname} has noninteger bounds")
+                    if "intervals" in field:
+                        if ftype not in {"i32", "i64"} or set(field) & {"min", "max", "choices"}:
+                            raise ValueError(f"{name}.{fname} has conflicting integer domains")
+                        intervals = field["intervals"]
+                        if not isinstance(intervals, list) or not intervals:
+                            raise ValueError(f"{name}.{fname} has invalid intervals")
+                        previous_max = -(2**63) - 1
+                        width = 32 if ftype == "i32" else 64
+                        for interval in intervals:
+                            if not isinstance(interval, dict) or set(interval) != {"min", "max", "step"}:
+                                raise ValueError(f"{name}.{fname} has invalid intervals")
+                            low, high, step = (interval[key] for key in ("min", "max", "step"))
+                            if (
+                                any(type(item) is not int for item in (low, high, step))
+                                or low < -(2 ** (width - 1))
+                                or high >= 2 ** (width - 1)
+                                or low <= previous_max
+                                or high < low
+                                or not 1 <= step <= 2**64 - 1
+                                or (high - low) % step
+                            ):
+                                raise ValueError(f"{name}.{fname} has invalid intervals")
+                            previous_max = high
                     if any(type(field[key]) is not int for key in ("min", "max") if key in field):
                         raise ValueError(f"{name}.{fname} has invalid bounds")
                     if "min" in field and "max" in field and field["min"] > field["max"]:
@@ -354,7 +425,7 @@ def types_td(spec: dict[str, Any]) -> str:
             lines.append(f"  let parameters = (ins {', '.join(pieces)});")
             fmt = " `,` ".join(f"${p['name']}" for p in params)
             lines.append(f'  let assemblyFormat = "`<` {fmt} `>`";')
-            if any(p["kind"] == "unsigned" and ("min" in p or "max" in p) for p in params):
+            if any(p["kind"] == "unsigned" and set(p) & {"min", "max", "intervals", "choices"} for p in params):
                 lines.append("  let genVerifyDecl = 1;")
         else:
             lines.append('  let assemblyFormat = "";')
@@ -378,7 +449,7 @@ def ops_td(spec: dict[str, Any]) -> str:
         operands += [f"{_ATTR_TYPES[field['type']]}:${field['name']}" for field in sig["attributes"]]
         results = [f"{field['type']}:${field['name']}" for field in sig["results"]]
         verify = bool(sig["predicates"]) or any(
-            any(key in field for key in ("min", "max", "choices")) for field in sig["attributes"]
+            any(key in field for key in ("min", "max", "intervals", "choices")) for field in sig["attributes"]
         )
         chunks.append(
             "\n".join(
@@ -442,6 +513,19 @@ def ops_cpp(spec: dict[str, Any], pkg: str) -> str:
                 checks.append(
                     f"  if (!({' || '.join(terms)})) return emitOpError({_literal(field['name'] + ' has invalid choice')});"
                 )
+            if "intervals" in field:
+                terms = [
+                    f"({value} >= {_cpp_integer(interval['min'])} && "
+                    f"{value} <= {_cpp_integer(interval['max'])} && "
+                    f"((static_cast<unsigned long long>({value}) - "
+                    f"static_cast<unsigned long long>({_cpp_integer(interval['min'])})) "
+                    f"% {interval['step']}ULL) == 0ULL)"
+                    for interval in field["intervals"]
+                ]
+                checks.append(
+                    f"  if (!({' || '.join(terms)})) return emitOpError("
+                    f"{_literal(field['name'] + ' outside declared domain')});"
+                )
         fields = {field["name"]: field["type"] for field in sig["attributes"]}
         refs = _type_parameter_refs(sig, spec["types"], dialect)
         for predicate in sig["predicates"]:
@@ -459,7 +543,7 @@ def type_verifiers(spec: dict[str, Any]) -> str:
     chunks = []
     for row in spec["types"]:
         params = row["parameters"]
-        if not any(p["kind"] == "unsigned" and ("min" in p or "max" in p) for p in params):
+        if not any(p["kind"] == "unsigned" and set(p) & {"min", "max", "intervals", "choices"} for p in params):
             continue
         signature = ", ".join(
             f"{'unsigned' if p['kind'] == 'unsigned' else '::mlir::Type'} {p['name']}" for p in params
@@ -473,6 +557,22 @@ def type_verifiers(spec: dict[str, Any]) -> str:
             if "max" in param:
                 checks.append(
                     f"  if ({param['name']} > {param['max']}) return emitError() << {_literal(param['name'] + ' above maximum')};"
+                )
+            if "intervals" in param:
+                cases = [
+                    f"({param['name']} >= {interval['min']}u && {param['name']} <= {interval['max']}u"
+                    f" && (({param['name']} - {interval['min']}u) % {interval['step']}u) == 0u)"
+                    for interval in param["intervals"]
+                ]
+                checks.append(
+                    f"  if (!( {' || '.join(cases)} )) return emitError() << "
+                    f"{_literal(param['name'] + ' outside declared domain')};"
+                )
+            if "choices" in param:
+                cases = [f"{param['name']} == {choice}u" for choice in param["choices"]]
+                checks.append(
+                    f"  if (!( {' || '.join(cases)} )) return emitError() << "
+                    f"{_literal(param['name'] + ' outside declared domain')};"
                 )
         chunks.append(
             f"LogicalResult {camel(row['name'])}Type::verify(llvm::function_ref<InFlightDiagnostic()> emitError, {signature}) {{\n"

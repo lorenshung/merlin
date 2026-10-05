@@ -10,7 +10,66 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from pathlib import Path
 from typing import Any
+
+
+def _parameter_domain_problems(detail: Any) -> list[str]:
+    """Screen finite physical value domains without interpreting target units.
+
+    The declaration is input to later legality generation, not a proof that
+    the selected hardware implements that bound. Legacy prose stays visible
+    as an unresolved authoring input rather than being guessed into numbers.
+    """
+    if not isinstance(detail, dict):
+        return ["parameter_domain_unstructured"]
+    if detail.get("reviewed") is not True:
+        return ["parameter_domain_unreviewed"]
+    if not isinstance(detail.get("unit"), str) or not detail["unit"].strip():
+        return ["parameter_domain_unit_missing"]
+    evidence = detail.get("evidence_sources")
+    if (
+        not isinstance(evidence, list)
+        or not evidence
+        or any(
+            not isinstance(name, str) or not name or name == "." or Path(name).is_absolute() or ".." in Path(name).parts
+            for name in evidence
+        )
+        or len(evidence) != len(set(evidence))
+    ):
+        return ["parameter_domain_evidence_missing"]
+    kind = detail.get("kind")
+    if kind == "integer":
+        if set(detail) != {"kind", "unit", "intervals", "reviewed", "evidence_sources"}:
+            return ["parameter_domain_malformed"]
+        intervals = detail["intervals"]
+        if not isinstance(intervals, list) or not intervals:
+            return ["parameter_domain_malformed"]
+        previous_max = None
+        for interval in intervals:
+            if not isinstance(interval, dict) or set(interval) != {"min", "max", "step"}:
+                return ["parameter_domain_malformed"]
+            low, high, step = (interval[name] for name in ("min", "max", "step"))
+            if any(type(value) is not int for value in (low, high, step)) or step <= 0 or low > high:
+                return ["parameter_domain_malformed"]
+            if (high - low) % step or previous_max is not None and low <= previous_max:
+                return ["parameter_domain_malformed"]
+            previous_max = high
+        return []
+    if kind == "enum":
+        if set(detail) != {"kind", "unit", "values", "reviewed", "evidence_sources"}:
+            return ["parameter_domain_malformed"]
+        values = detail["values"]
+        if (
+            not isinstance(values, list)
+            or not values
+            or any(type(value) not in {int, str} or type(value) is str and not value for value in values)
+            or len({type(value) for value in values}) != 1
+            or len(set(values)) != len(values)
+        ):
+            return ["parameter_domain_malformed"]
+        return []
+    return ["parameter_domain_malformed"]
 
 
 def _controls(value: Any) -> tuple[str, ...] | None:
@@ -23,7 +82,13 @@ def _controls(value: Any) -> tuple[str, ...] | None:
     return fields if len(fields) == 17 and all(fields) else None
 
 
-def _mode_binding_problems(entry: dict[str, Any], plan_op: dict[str, Any] | None) -> list[str]:
+def _mode_binding_problems(
+    entry: dict[str, Any],
+    plan_op: dict[str, Any] | None,
+    parameter_domains: dict[str, Any],
+    plan_types: dict[str, dict[str, Any]],
+    dialect: str,
+) -> list[str]:
     """Check that one decoder mode is expressible by a reviewed typed op.
 
     Machine placement attributes need not have a value in the mode ledger.
@@ -71,7 +136,112 @@ def _mode_binding_problems(entry: dict[str, Any], plan_op: dict[str, Any] | None
             or value > field.get("max", 2 ** (31 if kind == "i32" else 63) - 1)
         ):
             problems.append("mode_attribute_out_of_domain")
+    domains = entry.get("parameter_domains")
+    bindings = entry.get("parameter_bindings")
+    if (
+        not isinstance(domains, list)
+        or any(not isinstance(name, str) for name in domains)
+        or len(domains) != len(set(domains))
+        or not isinstance(bindings, dict)
+        or set(bindings) != set(domains)
+    ):
+        problems.append("parameter_binding_missing")
+        return sorted(set(problems))
+
+    physical_fields = {
+        ("attribute", field["name"]) for field in signature["attributes"] if field.get("role") == "binding"
+    }
+    for field in (*signature["operands"], *signature["results"]):
+        source_type = field["source_type"]
+        if not source_type.startswith(f"!{dialect}."):
+            continue
+        typ = plan_types[source_type[len(dialect) + 2 :]]
+        physical_fields.update(
+            ("type_parameter", field["name"], param["name"]) for param in typ["parameters"] if "unit" in param
+        )
+    covered: set[tuple[str, ...]] = set()
+    for domain_name in sorted(bindings):
+        references = bindings[domain_name]
+        if not isinstance(references, list) or not references:
+            problems.append("parameter_binding_malformed")
+            continue
+        domain = parameter_domains.get(domain_name)
+        for reference in references:
+            if not isinstance(reference, dict):
+                problems.append("parameter_binding_malformed")
+                continue
+            kind = reference.get("kind")
+            declaration = None
+            identity: tuple[str, ...] | None = None
+            if (
+                kind == "attribute"
+                and set(reference) == {"kind", "name"}
+                and isinstance(reference["name"], str)
+                and reference["name"]
+            ):
+                identity = (kind, reference["name"])
+                declaration = next(
+                    (field for field in signature["attributes"] if field["name"] == reference["name"]), None
+                )
+            elif (
+                kind == "type_parameter"
+                and set(reference) == {"kind", "value", "name"}
+                and all(isinstance(reference[key], str) and reference[key] for key in ("value", "name"))
+            ):
+                identity = (kind, reference["value"], reference["name"])
+                field = next(
+                    (
+                        field
+                        for role in ("operands", "results")
+                        for field in signature[role]
+                        if field["name"] == reference["value"]
+                    ),
+                    None,
+                )
+                if field is not None and field["source_type"].startswith(f"!{dialect}."):
+                    typ = plan_types[field["source_type"][len(dialect) + 2 :]]
+                    declaration = next(
+                        (param for param in typ["parameters"] if param["name"] == reference["name"]), None
+                    )
+            else:
+                problems.append("parameter_binding_malformed")
+                continue
+            if identity not in physical_fields or declaration is None:
+                problems.append("parameter_binding_field_missing")
+                continue
+            if identity in covered:
+                problems.append("parameter_binding_duplicate_field")
+            covered.add(identity)
+            if not _same_physical_domain(domain, declaration):
+                problems.append("parameter_binding_domain_mismatch")
+    if physical_fields - covered:
+        problems.append("unbound_physical_field")
     return sorted(set(problems))
+
+
+def _same_physical_domain(domain: Any, declaration: dict[str, Any]) -> bool:
+    """Require exact finite values and units; equivalent alternative encodings may be reviewed later."""
+    if not isinstance(domain, dict) or declaration.get("unit") != domain.get("unit"):
+        return False
+    if domain.get("kind") == "integer":
+        expected = domain.get("intervals")
+        if not isinstance(expected, list):
+            return False
+        if "intervals" in declaration:
+            return declaration["intervals"] == expected
+        if "min" in declaration and "max" in declaration and "choices" not in declaration:
+            return expected == [{"min": declaration["min"], "max": declaration["max"], "step": 1}]
+        return False
+    if domain.get("kind") == "enum":
+        values = domain.get("values")
+        return (
+            isinstance(values, list)
+            and all(type(value) in {int, str} for value in values)
+            and "choices" in declaration
+            and set(declaration["choices"]) == set(values)
+            and len(declaration["choices"]) == len(values)
+        )
+    return False
 
 
 def _discrepancy_key(kind: str, item: Any) -> str:
@@ -146,7 +316,9 @@ def audit_mode_inventory(
     ) != sources.get("model_revision"):
         revision_problems.append("selected_source_revision_disagrees")
     parameter_domains = inventory.get("parameter_domains")
-    if not isinstance(parameter_domains, dict):
+    if not isinstance(parameter_domains, dict) or any(
+        not isinstance(name, str) or not name for name in parameter_domains
+    ):
         raise ValueError("mode inventory requires parameter_domains")
     if dialect_plan is not None and (
         not isinstance(dialect_plan, dict)
@@ -172,6 +344,7 @@ def audit_mode_inventory(
 
     plan_ops: set[str] = set()
     typed_plan_ops: dict[str, dict[str, Any]] = {}
+    typed_plan_types: dict[str, dict[str, Any]] = {}
     typed_plan_error = None
     if dialect_plan is not None:
         for op in dialect_plan["ops"]:
@@ -183,6 +356,7 @@ def audit_mode_inventory(
 
             checked = validate(dialect_plan)
             typed_plan_ops = {f"{checked['dialect_name']}.{op['name']}": op for op in checked["ops"]}
+            typed_plan_types = {row["name"]: row for row in checked["types"]}
         else:
             typed_plan_error = "dialect plan has no reviewed typed signatures"
     else:
@@ -220,6 +394,22 @@ def audit_mode_inventory(
                         problems.append("model_encoding_disagrees")
             if not isinstance(entry.get("required"), bool):
                 problems.append("required_selection_missing")
+            elif entry["required"] is False:
+                exclusion = entry.get("scope_exclusion")
+                if (
+                    not isinstance(exclusion, dict)
+                    or set(exclusion) != {"reason", "evidence", "reviewed"}
+                    or any(
+                        not isinstance(exclusion.get(key), str) or not exclusion[key].strip()
+                        for key in ("reason", "evidence")
+                    )
+                    or exclusion.get("reviewed") is not True
+                ):
+                    problems.append("scope_exclusion_unreviewed")
+            elif entry.get("scope_exclusion") is not None:
+                problems.append("scope_exclusion_on_required_mode")
+            if not isinstance(entry.get("family"), str) or not entry["family"].strip():
+                problems.append("instruction_family_missing")
             if not isinstance(entry.get("mode_attrs"), dict):
                 problems.append("mode_attributes_missing")
             if not isinstance(entry.get("dialect_op"), str) or "." not in entry["dialect_op"]:
@@ -231,6 +421,9 @@ def audit_mode_inventory(
                 not isinstance(domain, str) or domain not in parameter_domains for domain in domains
             ):
                 problems.append("parameter_domain_unresolved")
+            elif entry.get("required") is True:
+                for domain in domains:
+                    problems.extend(_parameter_domain_problems(parameter_domains[domain]))
             if entry.get("required") is True:
                 if entry.get("software_admitted") is not True:
                     problems.append("software_admission_missing")
@@ -243,7 +436,13 @@ def audit_mode_inventory(
         required = entry.get("required") if entry is not None else (actual is not None)
         dialect_op = entry.get("dialect_op") if entry is not None else None
         binding_problems = (
-            _mode_binding_problems(entry, typed_plan_ops.get(dialect_op if isinstance(dialect_op, str) else ""))
+            _mode_binding_problems(
+                entry,
+                typed_plan_ops.get(dialect_op if isinstance(dialect_op, str) else ""),
+                parameter_domains,
+                typed_plan_types,
+                dialect_plan["dialect_name"],
+            )
             if entry is not None and required is True and typed_plan_error is None
             else []
         )
@@ -274,8 +473,55 @@ def audit_mode_inventory(
     }
     source_bound = not source_discrepancies and not (source_problems & problem_counts.keys())
     census_discrepancies = {key: summary[key] for key in discrepancy_kinds if summary[key]}
-    resolved, unresolved = _reviewed_resolutions(inventory, census_discrepancies)
+    # An individual ledger binding can disagree with the selected model even
+    # when the census-level source crosswalk is otherwise complete. Review it
+    # with the same exact, source-bound resolution mechanism.
+    reviewable_discrepancies = {
+        **census_discrepancies,
+        "mode_model_encoding_disagrees": [
+            row["id"] for row in mode_rows if "model_encoding_disagrees" in row["problems"]
+        ],
+    }
+    resolved, unresolved = _reviewed_resolutions(inventory, reviewable_discrepancies)
     source_reconciled = source_bound and not unresolved
+    resolved_model_modes = {row["item"] for row in resolved if row["kind"] == "mode_model_encoding_disagrees"}
+    for row in mode_rows:
+        row["qualification_problems"] = [
+            problem
+            for problem in row["problems"]
+            if problem != "model_encoding_disagrees" or row["id"] not in resolved_model_modes
+        ]
+    qualification_problem_counts = Counter(problem for row in mode_rows for problem in row["qualification_problems"])
+    # Phase 0 freezes an ISA requirement population before a dialect or
+    # compiler exists. Admission, typing, emission, and execution remain
+    # Phase 1 obligations; requiring them here would make launch circular.
+    scope_problem_kinds = {
+        "inventory_mode_not_in_selected_decoder",
+        "selected_pattern_has_no_decode_row",
+        "selected_mode_missing_from_inventory",
+        "rtl_pattern_changed",
+        "rtl_decode_controls_changed",
+        "duplicate_mode_id",
+        "selected_rtl_revision_changed",
+        "required_selection_missing",
+        "scope_exclusion_unreviewed",
+        "scope_exclusion_on_required_mode",
+        "instruction_family_missing",
+        "parameter_domain_unresolved",
+        "model_class_binding_malformed",
+    }
+    scope_problem_counts = {key: count for key, count in problem_counts.items() if key in scope_problem_kinds}
+    phase1_mode_scope_ready = source_reconciled and not scope_problem_counts
+    domain_problem_kinds = {
+        "parameter_domain_unresolved",
+        "parameter_domain_unstructured",
+        "parameter_domain_unreviewed",
+        "parameter_domain_unit_missing",
+        "parameter_domain_malformed",
+        "parameter_domain_evidence_missing",
+    }
+    domain_problem_counts = {key: count for key, count in problem_counts.items() if key in domain_problem_kinds}
+    phase1_parameter_domains_ready = phase1_mode_scope_ready and not domain_problem_counts
     required = sum(row["id"] in selected_rows and row["required"] is not False for row in mode_rows)
     bound = (
         sum(
@@ -302,7 +548,9 @@ def audit_mode_inventory(
         "inventory_rtl_revision": sources["rtl_revision"],
         "source_bound": source_bound,
         "source_reconciled": source_reconciled,
-        "mode_inventory_ready": source_reconciled and not problem_counts and typed_mode_binding_ready,
+        "phase1_mode_scope_ready": phase1_mode_scope_ready,
+        "phase1_parameter_domains_ready": phase1_parameter_domains_ready,
+        "mode_inventory_ready": source_reconciled and not qualification_problem_counts and typed_mode_binding_ready,
         "typed_mode_binding_ready": typed_mode_binding_ready,
         "typed_plan_error": typed_plan_error,
         "counts": {
@@ -310,9 +558,12 @@ def audit_mode_inventory(
             "inventory_modes": len(inventory["variants"]),
             "required_modes": required,
             "typed_mode_bindings": bound,
-            "modes_with_open_obligations": sum(bool(row["problems"]) for row in mode_rows),
+            "modes_with_open_obligations": sum(bool(row["qualification_problems"]) for row in mode_rows),
             "modes_with_open_bindings": sum(bool(row["typed_binding_problems"]) for row in mode_rows),
             "problem_kinds": dict(sorted(problem_counts.items())),
+            "qualification_problem_kinds": dict(sorted(qualification_problem_counts.items())),
+            "phase1_scope_problem_kinds": dict(sorted(scope_problem_counts.items())),
+            "phase1_parameter_domain_problem_kinds": dict(sorted(domain_problem_counts.items())),
             "typed_binding_problem_kinds": dict(sorted(binding_problem_counts.items())),
         },
         "source_discrepancies": source_discrepancies,
@@ -321,7 +572,9 @@ def audit_mode_inventory(
         "unresolved_source_discrepancies": unresolved,
         "modes": mode_rows,
         "qualification": (
-            "source/mode/typed-plan accounting and authored resolution declarations only; "
+            "phase1_mode_scope_ready covers source-bound required-mode identities; "
+            "phase1_parameter_domains_ready additionally requires finite reviewed machine-value domains; "
+            "mode_inventory_ready includes typed bindings and declared admission, not independently qualified behavior; "
             "no legality, numerical, emission, or execution certification"
         ),
     }

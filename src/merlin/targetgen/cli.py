@@ -23,6 +23,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from . import pipeline
+from .dialect_source_scope import audit_dialect_source_scope
 from .isa_census import derive_source_census
 from .isa_mode_audit import audit_mode_inventory
 from .validate import check_generated_target
@@ -127,17 +128,47 @@ def _cmd_audit_dialect_modes(args: argparse.Namespace) -> int:
         temporary.unlink(missing_ok=True)
         print(json.dumps({"status": "FAIL", "error": str(error), "out": str(output)}))
         return 2
+    criterion = "phase1_parameter_domains_ready" if args.require == "phase1-inputs" else "mode_inventory_ready"
     status = (
         "SOURCE_MISMATCH"
         if not report["source_bound"]
         else "SOURCE_DISCREPANCIES"
         if not report["source_reconciled"]
+        else "PARAMETER_DOMAINS_OPEN"
+        if args.require == "phase1-inputs" and report["phase1_mode_scope_ready"] and not report[criterion]
+        else "MODE_SCOPE_OPEN"
+        if args.require == "phase1-inputs" and not report[criterion]
+        else "PHASE1_INPUTS_READY"
+        if args.require == "phase1-inputs"
         else "MODE_OBLIGATIONS_OPEN"
-        if not report["mode_inventory_ready"]
+        if not report[criterion]
         else "MODE_INVENTORY_READY"
     )
     print(json.dumps({"status": status, "counts": report["counts"], "out": str(output)}))
-    return 0 if report["mode_inventory_ready"] else 1
+    return 0 if report[criterion] else 1
+
+
+def _cmd_audit_dialect_source_scope(args: argparse.Namespace) -> int:
+    """Check that a mode census belongs to one reproduced selected RTL source."""
+    output = Path(args.out)
+    temporary = output.with_name(output.name + ".tmp")
+    try:
+        report = audit_dialect_source_scope(
+            selection_path=Path(args.source_selection),
+            census_path=Path(args.census),
+            inventory_path=Path(args.inventory),
+            expected_config=args.expected_config,
+        )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        temporary.replace(output)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        output.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
+        print(json.dumps({"status": "FAIL", "error": str(error), "out": str(output)}))
+        return 2
+    print(json.dumps({"status": report["status"].upper(), "blockers": len(report["blockers"]), "out": str(output)}))
+    return 0 if report["status"] == "ready" else 1
 
 
 def _write_status(path: Path, report: dict[str, object]) -> None:
@@ -383,8 +414,25 @@ def build_parser() -> argparse.ArgumentParser:
     modes.add_argument("--census", required=True, help="output of audit-isa for the selected source bytes")
     modes.add_argument("--inventory", required=True, help="explicitly selected OOT JSON mode ledger")
     modes.add_argument("--dialect-plan", help="reviewed dialect plan YAML from the same selected target")
+    modes.add_argument(
+        "--require",
+        choices=("phase1-inputs", "complete-dialect"),
+        default="complete-dialect",
+        help="phase1-inputs freezes source/mode scope and reviewed finite parameter domains; complete-dialect additionally requires typed bindings and declared admission",
+    )
     modes.add_argument("--out", required=True, help="mode audit JSON artifact")
     modes.set_defaults(func=_cmd_audit_dialect_modes)
+
+    source_scope = sub.add_parser(
+        "audit-dialect-source-scope",
+        help="bind a reviewed decoder-mode scope to reproduced selected RTL elaboration",
+    )
+    source_scope.add_argument("--source-selection", required=True, help="selected FIRRTL-to-HW source bundle")
+    source_scope.add_argument("--census", required=True, help="exact source ISA census")
+    source_scope.add_argument("--inventory", required=True, help="reviewed OOT mode ledger")
+    source_scope.add_argument("--expected-config", required=True, help="campaign configuration symbol")
+    source_scope.add_argument("--out", required=True, help="source-scope report JSON")
+    source_scope.set_defaults(func=_cmd_audit_dialect_source_scope)
 
     stage = sub.add_parser("stage-capture", help="stage IR, weights and signature without evaluator inputs")
     stage.add_argument("--capture", required=True, help="materialized model capture directory")
