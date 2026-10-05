@@ -129,9 +129,7 @@ _QUANT_KINDS = {
 }
 
 
-def lower_quant_ext(
-    module, *, on_rewrite: Callable[[Any, tuple[Any, ...], Any], None] | None = None
-) -> int:
+def lower_quant_ext(module, *, on_rewrite: Callable[[Any, tuple[Any, ...], Any], None] | None = None) -> int:
     """Rewrite supported quant_ext quantize/dequantize ops; returns the count.
 
     Generic dequant → f32 (or bf16) via a linalg.generic; the scale/zp indexing map is derived
@@ -627,7 +625,6 @@ def _preprocess_module(module, *, audit=None, on_quant_rewrite=None) -> dict:
 
 def preprocess_text(mlir_text: str, *, audit=None) -> tuple[str, dict]:
     """Run Merlin xDSL passes, optionally observing each completed rewrite without changing it."""
-    from ..frontends.linalg_mlir import parse_mlir_text
     from ..xdsl_dialects._common import text as module_to_text
 
     module = parse_mlir_text(mlir_text)
@@ -674,7 +671,6 @@ def preprocess_text_with_transform_map(mlir_text: str) -> tuple[str, dict, dict]
     A rewrite must explicitly register every generated helper and its result
     replacement; an unowned emitted operation causes refusal.
     """
-    from ..frontends.linalg_mlir import parse_mlir_text
     from ..xdsl_dialects._common import text as module_to_text
 
     module = parse_mlir_text(mlir_text)
@@ -942,6 +938,20 @@ def _attach_c_interface(text: str) -> tuple[str, int]:
         brace = text.find("{", name_end)
         if args_close < 0 or brace < 0 or brace < args_close:
             continue  # a `{` inside the arg list: not a signature we know
+        # A func that STATES its attributes (`... attributes {...}`) is left as written: the `{` found
+        # above is its attribute dictionary, not its body. A declaration (no body) is skipped; a
+        # definition that already asks for the C interface is the one being annotated.
+        declared = text.find(" attributes {", args_close, brace + 1)
+        if declared >= 0:
+            header_end = text.find("}", declared)
+            if header_end < 0:
+                continue
+            after_header = _skip_space(text, header_end + 1)
+            if not text.startswith("{", after_header):
+                continue  # a declaration: there is no body to call
+            if "llvm.emit_c_interface" in text[declared:header_end]:
+                return text, 1
+            continue
         after_args = _skip_space(text, args_close + 1)
         results = ""
         if text.startswith("->", after_args):

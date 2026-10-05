@@ -65,8 +65,12 @@ def lower_model(
     static_arena: bool | None = None,
     ir_audit: bool | str = False,
     audit_sidecars: tuple[str | Path, ...] = (),
+    data_layout: str | None = None,
 ) -> LowerResult:
     """Lower MLIR text end to end; emit per-target artifacts in ``workdir``.
+
+    ``data_layout`` is the target's LLVM data layout, set on the module before translation (see
+    :func:`merlin.llvmlower.pipeline.lower_to_llvm_ir`).
 
     ``ir_audit=True`` retains exact named-stage IR and a completion/failure index
     in a fresh workdir child. ``audit_sidecars`` binds existing weights/manifests
@@ -123,6 +127,7 @@ def lower_model(
                 features=features,
                 parallel_harts=parallel_harts,
                 parallel_chunks=parallel_chunks,
+                data_layout=data_layout,
             )
         except Exception as exc:
             # A module MLIR refuses to PARSE fails before any pass, and the reader's dump names a line

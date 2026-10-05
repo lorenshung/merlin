@@ -18,12 +18,16 @@ from __future__ import annotations
 import pytest
 
 from merlin.verify import epilogue_applicability as EA
-from merlin.verify.epilogue_applicability import ReadoutCapability
+from merlin.verify.epilogue_applicability import ReadoutCapability, StageRoute
 
 #: A synthetic target with two readouts: one that requantizes and one that dumps the accumulator.
 NARROW = ReadoutCapability("narrow", frozenset({"scale", "activation"}), "applies scale + activation")
 WIDE = ReadoutCapability("wide", frozenset(), "writes the raw accumulator")
 CAPS = (NARROW, WIDE)
+BIAS_ROUTE = StageRoute(
+    "bias_add", "accumulator_seed", "contraction", frozenset({"narrow", "wide"}),
+    frozenset({"CONTRACT"}), frozenset({"COMMIT"}), "bias", "bias", "seed before compute",
+)
 
 
 def _cb(*commands):
@@ -38,6 +42,32 @@ def _commit(readout, epilogue, opcode="COMMIT"):
 
 
 class TestTheRuleIsGeneral:
+    def test_route_licenses_contraction_without_claiming_readout_bias(self):
+        assert "bias_add" not in NARROW.applies | WIDE.applies
+        assert EA.selectors_applying(CAPS, ["bias_add"], routes=(BIAS_ROUTE,), composition="contraction") == (
+            "narrow", "wide"
+        )
+        assert EA.selectors_applying(CAPS, ["bias_add"], routes=(BIAS_ROUTE,), composition="operand_sum") == ()
+        assert EA.selectors_applying(
+            CAPS, ["activation", "bias_add"], routes=(BIAS_ROUTE,), composition="contraction"
+        ) == ()
+        cb = {
+            "tensors": {"B": {"role": "bias"}},
+            "commands": [
+                {"opcode": "CONTRACT", "operands": {"dst": "acc"}},
+                {"opcode": "COMMIT", "operands": {"src": "acc"},
+                 "attributes": {"output_dtype": "wide", "epilogue": ["bias_add"], "bias": "B"}},
+            ],
+        }
+        assert EA.assess(cb, CAPS, routes=(BIAS_ROUTE,)).status == "applied"
+        cb["commands"].insert(1, {"opcode": "OPERAND_SUM", "operands": {"dst": "acc"}})
+        assert EA.assess(cb, CAPS, routes=(BIAS_ROUTE,)).status == "discarded"
+        cb["commands"].pop(1)
+        cb["commands"][-1]["attributes"].pop("bias")
+        assert EA.assess(cb, CAPS, routes=(BIAS_ROUTE,)).status == "discarded"
+        cb["commands"][-1]["attributes"].update({"bias": "B", "epilogue": ["activation", "bias_add"]})
+        assert EA.assess(cb, CAPS, routes=(BIAS_ROUTE,)).status == "discarded"
+
     def test_a_readout_that_applies_the_stage_passes(self):
         got = EA.assess(_cb(_commit("narrow", ["activation"])), CAPS)
         assert got.status == "applied" and not got.refusing

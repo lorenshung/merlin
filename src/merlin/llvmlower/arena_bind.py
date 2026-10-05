@@ -826,3 +826,135 @@ def _assert_no_conflicting_overlap(
                     f"placement seats conflicting buffers {a} [{oa},{oa + sa}) and {b} "
                     f"[{ob},{ob + sb}) on overlapping bytes"
                 )
+
+
+# ---- How many bytes one call of a program allocates, read off its emitted LLVM IR ---------------
+
+
+@dataclass(frozen=True)
+class HeapDemand:
+    """What every ``malloc`` the program's host code makes in one run adds up to.
+
+    For an allocator that never frees within a run (the bare-metal bump arena), ``bytes`` IS the arena
+    the run needs, less per-allocation alignment. Each site counts once per call of its function, and
+    a function counts once per call site of each caller, where a function nothing in the modules
+    calls (``forward``, a group body the C dispatch calls) is called once. ``unbounded`` lists the
+    sites the total cannot include, by reason: a computed size, a site in a loop, a function called
+    from a loop or recursively. A caller decides what an unbounded site means; it is never guessed.
+    """
+
+    bytes: int
+    allocations: int
+    largest: int
+    unbounded: dict[str, int]
+    functions: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "bytes": self.bytes,
+            "allocations": self.allocations,
+            "largest": self.largest,
+            "unbounded": dict(self.unbounded),
+            "functions": self.functions,
+        }
+
+
+def _defines(lines: list[str]) -> list[tuple[str, int, int]]:
+    """``(name, define_line, closing_line)`` of every function defined in a module."""
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("define ") and line.rstrip().endswith("{"):
+            at = line.find("@")
+            name = line[at + 1 :].partition("(")[0].strip('"') if at >= 0 else ""
+            j = i + 1
+            while j < len(lines) and lines[j] != "}":
+                j += 1
+            out.append((name, i, j))
+            i = j
+        i += 1
+    return out
+
+
+def _call_target(inst: str) -> str | None:
+    """The ``@symbol`` a direct call names (without the ``@``), else None."""
+    body = inst.partition(" = ")[2] or inst
+    if not body.startswith(("call ", "tail call ", "musttail call ", "notail call ", "invoke ")):
+        return None
+    at = body.find("@")
+    if at < 0:
+        return None
+    end = at + 1
+    while end < len(body) and body[end] in _NAME_CHARS:
+        end += 1
+    return body[at + 1 : end]
+
+
+def _malloc_size(inst: str) -> int | None:
+    """The literal byte count a ``malloc`` call asks for, in any spelling (``i64 N``, ``i64 noundef N``,
+    a trailing attribute group): the size is the argument's LAST token. ``None`` for a computed size."""
+    args, close, _ = inst.partition("@malloc(")[2].partition(")")
+    tokens = args.split()
+    if not close or len(tokens) < 2 or not tokens[0].startswith("i") or not tokens[-1].isdigit():
+        return None
+    return int(tokens[-1])
+
+
+def heap_demand(ll_texts: "list[str]") -> HeapDemand:
+    """The bytes one run of the program made of ``ll_texts`` (its LLVM modules) allocates."""
+    sites: dict[str, list[tuple[int | None, bool]]] = {}  # fn -> [(size or None, in a cycle)]
+    calls: dict[str, list[tuple[str, bool]]] = {}  # callee -> [(caller, in a cycle)]
+    for text in ll_texts:
+        lines = text.split("\n")
+        for name, start, end in _defines(lines):
+            blocks = _blocks_of(lines, start, end)
+            by_label = {b.label: k for k, b in enumerate(blocks)}
+            cyclic = _cyclic_blocks([[by_label[s] for s in b.succs] for b in blocks])
+            mine = sites.setdefault(name, [])
+            for k, b in enumerate(blocks):
+                for li in b.insts:
+                    inst = lines[li].strip()
+                    target = _call_target(inst)
+                    if target is None:
+                        continue
+                    if target == "malloc":
+                        mine.append((_malloc_size(inst), k in cyclic))
+                    else:
+                        calls.setdefault(target, []).append((name, k in cyclic))
+
+    counts: dict[str, int | None] = {}
+
+    def count(fn: str, path: frozenset[str]) -> int | None:
+        if fn in counts:
+            return counts[fn]
+        callers = [(c, loop) for c, loop in calls.get(fn, []) if c in sites]
+        if not callers:
+            n: int | None = 1
+        elif any(loop for _c, loop in callers) or any(c in path for c, _loop in callers):
+            n = None
+        else:
+            n = 0
+            for caller, _loop in callers:
+                m = count(caller, path | {fn})
+                if m is None:
+                    n = None
+                    break
+                n += m
+        counts[fn] = n
+        return n
+
+    total = allocations = largest = 0
+    unbounded: dict[str, int] = {}
+    for fn, found in sites.items():
+        n = count(fn, frozenset()) if found else 1
+        for size, loop in found:
+            # A loop multiplies whatever the site asks for, so it outranks a computed size as the reason.
+            reason = "in_loop" if loop else "called_in_loop" if n is None else "dynamic_size" if size is None else None
+            if reason:
+                unbounded[reason] = unbounded.get(reason, 0) + 1
+                continue
+            total += size * n
+            allocations += n
+            largest = max(largest, size)
+    return HeapDemand(total, allocations, largest, unbounded, len(sites))

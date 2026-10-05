@@ -61,3 +61,32 @@ def capture_python(*, checkout: Path | None = None) -> Path:
             "configure MERLIN_M2M_PYTHON or MERLIN_M2M_VENV (compiler Python is separate)"
         )
     return selected
+
+
+#: The software pin (``merlin/contract/software_pins.yaml``) every capture is verified against.
+CAPTURE_PIN = "model2mlir_capture"
+
+
+def capture_pin(checkout: "Path | str | None") -> dict:
+    """The capture checkout verified against :data:`CAPTURE_PIN`, as the record a capture carries.
+
+    ``{"pin", "ok", "citation", "verification"}``; ``ok`` is False on ANY drift -- another commit, or
+    bytes of a read path that are not the pinned commit's (an uncommitted edit included). No checkout,
+    or a verification that could not run, is recorded as unverified (``ok`` False) rather than raised:
+    whether that stops a capture is the caller's decision."""
+    from merlin.common import provenance as P
+
+    if checkout is None:
+        return {"pin": CAPTURE_PIN, "ok": False, "citation": f"{CAPTURE_PIN} UNKNOWN: no checkout", "verification": {}}
+    path = P.software_pins_path()
+    try:
+        got = P.verify(CAPTURE_PIN, checkout=Path(checkout), path=path)
+        citation = P.citation(got, path=path)
+    except Exception as exc:  # noqa: BLE001 -- recorded as unverified, never as pinned
+        return {
+            "pin": CAPTURE_PIN,
+            "ok": False,
+            "citation": f"{CAPTURE_PIN} UNKNOWN: {type(exc).__name__}: {exc}",
+            "verification": {},
+        }
+    return {"pin": CAPTURE_PIN, "ok": got.ok, "citation": citation, "verification": got.to_dict()}

@@ -46,6 +46,20 @@ def _carry_prov(src, **roles) -> None:
         dst.attributes["prov.role"] = StringAttr(role)
 
 
+def _carry_rewrite_prov(src, dst, rewrite: str) -> None:
+    """Keep a replaced nonlinear source op attributable without claiming equivalence.
+
+    These approximate rewrites replace one generic with one generic, so there
+    is no split-role to assign.  The rewrite marker makes the changed numerical
+    contract explicit in exact IR audits and profile joins.
+    """
+    from xdsl.dialects.builtin import StringAttr
+
+    for table in (src.attributes, getattr(src, "properties", {}) or {}):
+        dst.attributes.update({key: value for key, value in table.items() if key.startswith("prov.")})
+    dst.attributes["prov.rewrite"] = StringAttr(rewrite)
+
+
 def _is_dequant(op) -> bool:
     # ``op`` may be a Block (a block-argument owner) — guard with getattr.
     name = getattr(op, "op_name", None)
@@ -1442,6 +1456,7 @@ def lower_softmax_int(module, *, select=None) -> int:
             result_types=(st,),
         )
         new += [ee, eg]
+        _carry_rewrite_prov(op, eg, "softmax_int")
 
         for nop in new:
             block.insert_op_before(nop, op)
@@ -1668,6 +1683,7 @@ def lower_gelu_int(module, *, select=None) -> int:
             result_types=(st,),
         )
         new += [ge, gelu]
+        _carry_rewrite_prov(op, gelu, "gelu_int")
         for nop in new:
             block.insert_op_before(nop, op)
         op.results[0].replace_all_uses_with(gelu.results[0])
@@ -1755,6 +1771,7 @@ def lower_silu_int(module, *, select=None) -> int:
             result_types=(st,),
         )
         new += [ee, sg]
+        _carry_rewrite_prov(op, sg, "silu_int")
         for nop in new:
             block.insert_op_before(nop, op)
         op.results[0].replace_all_uses_with(sg.results[0])

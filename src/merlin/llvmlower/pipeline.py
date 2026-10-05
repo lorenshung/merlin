@@ -848,6 +848,7 @@ def build_rvv_pipeline(
 # act_poly runner called the PassManager directly, so every fork that also enabled
 # `vectorized_transcendental_activation` (the whole-model proposer enables it by default) got the
 # self-copy erase requested, reported as applied, and never run.
+from . import fusion_guard
 from .alloca_scope_lower import RUNNER_PRELUDE as _ALLOCA_SCOPE_LOWER_PRELUDE
 from .broadcast_fold import RUNNER_PRELUDE as _BROADCAST_FOLD_PRELUDE
 from .concat_dps import RUNNER_PRELUDE as _CONCAT_DPS_PRELUDE
@@ -1034,10 +1035,8 @@ def apply_passes(mlir_text: str, pipeline: str, timeout: int = 600) -> str:
     src.write_text(mlir_text, encoding="utf-8")
     script = work / "apply.py"
     script.write_text(
-        "import sys\n"
-        "from torch_mlir import ir\n"
-        "from torch_mlir.passmanager import PassManager\n"
-        "ctx = ir.Context()\n"
+        fusion_guard.inject("import sys\nfrom torch_mlir import ir\nfrom torch_mlir.passmanager import PassManager\n")
+        + "ctx = ir.Context()\n"
         "with open(sys.argv[1]) as f:\n"
         "    module = ir.Module.parse(f.read(), ctx)\n"
         "PassManager.parse('builtin.module(' + sys.argv[3] + ')', ctx).run(module.operation)\n"
@@ -1091,8 +1090,15 @@ def dealloc_placement_violations(mlir_text: str, timeout: int = 600) -> list[str
 # which feature-specific runner is selected — without this, enabling multicore silently
 # dropped the feature runners (the accum-v3 SCALARIZE_MARKER would leak into the pipeline
 # as an unregistered pass, and erase_self_copy/fuse_transpose_b would stop applying).
-EMIT_TRANSLATE = "f.write(str(llvm.translate_module_to_llvmir(module.operation)))"
-EMIT_DUMP = "f.write(str(module.operation))"
+# argv[17] (optional) is the target's LLVM data layout, set on the module before it is emitted so every
+# load/store carries the target's natural alignment (without it LLVM's default layout aligns i64/f64 to
+# 4 bytes, and RVV cannot vectorize an under-aligned 64-bit access). See target_data_layout.py.
+_SET_LAYOUT = (
+    "len(sys.argv) > 17 and sys.argv[17] and module.operation.attributes.__setitem__("
+    "'llvm.data_layout', ir.StringAttr.get(sys.argv[17], ctx)); "
+)
+EMIT_TRANSLATE = _SET_LAYOUT + "f.write(str(llvm.translate_module_to_llvmir(module.operation)))"
+EMIT_DUMP = _SET_LAYOUT + "f.write(str(module.operation))"
 
 _RUNNER_SRC = (
     r"""
@@ -1336,7 +1342,8 @@ def _select_runner(
         source = run_source(tag_bmm_tails=_BMM_TAIL_PAD_FEATURE in feats).replace("__MERLIN_EMIT__", emit)
     else:
         source = _RUNNER_SRC.replace("__MERLIN_EMIT__", emit)
-    return bind_inspection(source, inspection_dir, keep_exact=keep_exact)
+    # Every variant runs elementwise fusion under the broadcast control function (fusion_guard).
+    return bind_inspection(fusion_guard.inject(source), inspection_dir, keep_exact=keep_exact)
 
 
 class PipelineError(RuntimeError):
@@ -1403,8 +1410,12 @@ def lower_to_llvm_ir(
     parallel_harts: int | None = None,
     parallel_chunks: "list | None" = None,
     audit=None,
+    data_layout: str | None = None,
 ) -> str:
     """Lower upstream-MLIR text to LLVM IR text via the m2m venv. Returns .ll text.
+
+    ``data_layout`` (the target's LLVM layout string, :mod:`.target_data_layout`) is set on the module
+    before translation, so accesses carry the target's alignment; ``None`` keeps LLVM's default.
 
     ``vectorize=True`` selects the native RVV path: writes the transform schedule into
     ``workdir`` and uses :func:`build_rvv_pipeline` so the IR carries fixed-width vector
@@ -1687,6 +1698,7 @@ def lower_to_llvm_ir(
         _fold_broadcast_gate,
         _named_broadcast_gate,
         _alloca_scope_gate,
+        data_layout or "",
     ]
     if audit is not None and audit.directory is not None:
         from ..targetgen.provenance import toolchain_provenance
@@ -1755,6 +1767,13 @@ def lower_to_llvm_ir(
             _require_coarsen_report(proc.stdout)
         except ValueError as exc:
             raise PipelineError(str(exc) + f"\n{proc.stdout}") from exc
+    if fusion_guard.FUSE_PASS in pipeline and fusion_guard.enabled() and fusion_guard.TOKEN not in proc.stdout:
+        # The pass ran and the broadcast control function did not: a runner that reached the native
+        # PassManager without the guard would silently re-evaluate per-row values per element.
+        raise PipelineError(
+            f"elementwise fusion ran without its broadcast guard ({fusion_guard.TOKEN!r} absent from "
+            f"the runner's output)\n{proc.stdout}"
+        )
     if SINK_DEALLOC_PASS in pipeline and DEALLOC_CHECK_TOKEN not in proc.stdout:
         # The sinking stage ran and the use-after-free check did NOT. That is only reachable from a
         # runner variant that drives the PassManager itself instead of going through `_run_stages`

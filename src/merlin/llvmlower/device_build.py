@@ -27,7 +27,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-__all__ = ["DeviceBuild", "DeviceRouting", "build_device_objects", "kernel_symbol", "routing_for_placement"]
+__all__ = [
+    "FROM_EXTENTS",
+    "FROM_GROUP",
+    "DeviceBuild",
+    "DeviceRouting",
+    "build_device_objects",
+    "kernel_entry",
+    "kernel_symbol",
+    "routing_for_placement",
+]
+
+#: The kernel was built from the layer's own stated program -- its epilogue, its requantize
+#: multiplier, its convolution geometry, the type it commits.
+FROM_GROUP = "stated_group"
+#: The kernel was built from the extents ALONE, as a bare contraction. Everything a readout absorbs
+#: is absent from it, so the caller has to run those stages somewhere else. Honest for the
+#: contraction-granular rewrite (:mod:`.device_offload`), which routes exactly the contraction and
+#: leaves the epilogue in the driver -- and a silent loss for anything that meant to route a group.
+FROM_EXTENTS = "bare_extents"
 
 
 @dataclass(frozen=True)
@@ -51,9 +69,29 @@ class DeviceRouting:
     numeric_policy: dict | None = None
     #: Exact Phase 0 operation/interface identities; mutually exclusive with a shape selector.
     exact_selection: Any | None = None
+    #: The capture bundle this model came from, when there is one. It is what carries the weights
+    #: manifest, and the manifest is what says which argument of a first layer is the stored tensor --
+    #: a group route with no manifest refuses that layer by name rather than guessing a side.
+    capture: str | Path | None = None
+    #: The model's name, carried so a routed group's statement names the layer it came from.
+    model: str = ""
+    #: WHAT IS MOVED: one contraction per call, or one closed compute group per call. The two build
+    #: different programs -- a contraction leaves the layer's bias, requantize, activation and pooling
+    #: on the host -- so the choice travels with the routing rather than being a property of whichever
+    #: rewrite the build happened to call. See :mod:`merlin.llvmlower.device_offload`.
+    granularity: str = "contraction"
 
 
-def routing_for_placement(placement, device: str, package_dir: str | Path, *, numeric_policy=None) -> DeviceRouting:
+def routing_for_placement(
+    placement,
+    device: str,
+    package_dir: str | Path,
+    *,
+    numeric_policy=None,
+    granularity: str = "contraction",
+    capture: str | Path | None = None,
+    model: str = "",
+) -> DeviceRouting:
     """The ``DeviceRouting`` a whole-model build needs, derived from a placement rather than declared.
 
     This is the step that made the fused single-ELF path unreachable in production. Every piece of it
@@ -107,6 +145,9 @@ def routing_for_placement(placement, device: str, package_dir: str | Path, *, nu
         accum_dtype=str(accum),
         select=device_selector(placement),
         numeric_policy=numeric_policy,
+        granularity=str(granularity),
+        capture=capture,
+        model=str(model),
     )
 
 
@@ -141,6 +182,12 @@ class DeviceBuild:
     #: shim entry symbol -> the kernel symbol it calls.
     kernels: dict[str, str] = field(default_factory=dict)
     skipped: tuple[tuple[str, str], ...] = ()
+    #: symbol -> which entry the kernel was built from: :data:`FROM_GROUP` (the layer's own stated
+    #: program, epilogue and all) or :data:`FROM_EXTENTS` (a bare contraction of those extents).
+    #: A MIXED BUILD MUST NOT READ AS ONE MECHANISM: the two compute different functions, and an
+    #: archive that held some of each while reporting only "N kernels" would say nothing about
+    #: which of a model's layers kept their readout.
+    built_from: dict[str, str] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -172,9 +219,9 @@ def kernel_symbol(base: str, index: int) -> str:
 
 
 def _ar() -> str | None:
-    from .toolchain import DEFAULT_LLVM_INSTALL
+    from .toolchain import llvm_install
 
-    local = Path(DEFAULT_LLVM_INSTALL) / "bin" / "llvm-ar"
+    local = llvm_install() / "bin" / "llvm-ar"
     if local.exists():
         return str(local)
     return shutil.which("llvm-ar") or shutil.which("ar")
@@ -283,18 +330,18 @@ def objects_buildable(device: str) -> str | None:
 
 
 def _objcopy() -> str | None:
-    from .toolchain import DEFAULT_LLVM_INSTALL
+    from .toolchain import llvm_install
 
-    local = Path(DEFAULT_LLVM_INSTALL) / "bin" / "llvm-objcopy"
+    local = llvm_install() / "bin" / "llvm-objcopy"
     if local.exists():
         return str(local)
     return shutil.which("llvm-objcopy") or shutil.which("objcopy")
 
 
 def _nm() -> str | None:
-    from .toolchain import DEFAULT_LLVM_INSTALL
+    from .toolchain import llvm_install
 
-    local = Path(DEFAULT_LLVM_INSTALL) / "bin" / "llvm-nm"
+    local = llvm_install() / "bin" / "llvm-nm"
     if local.exists():
         return str(local)
     return shutil.which("llvm-nm") or shutil.which("nm")
@@ -346,18 +393,62 @@ def verify_object_symbol_binding(
         or shim_undefined.count(kernel_symbol) != 1
         or kernel_undefined
         or sorted(shim_undefined) != [kernel_symbol]
-        or original_kernel_symbol in [
-            *(name for name, _kind in kernel_defined), *kernel_undefined,
-            *(name for name, _kind in shim_defined), *shim_undefined,
+        or original_kernel_symbol
+        in [
+            *(name for name, _kind in kernel_defined),
+            *kernel_undefined,
+            *(name for name, _kind in shim_defined),
+            *shim_undefined,
         ]
     ):
         raise ValueError("staged kernel and shim object symbols disagree or have unresolved references")
-    return {"status": "object_symbol_binding_verified", "entry_symbol": entry_symbol,
-            "kernel_symbol": kernel_symbol}
+    return {"status": "object_symbol_binding_verified", "entry_symbol": entry_symbol, "kernel_symbol": kernel_symbol}
 
 
 def _run(argv: Sequence[str], *, timeout: int) -> subprocess.CompletedProcess:
     return subprocess.run([str(a) for a in argv], capture_output=True, text=True, timeout=timeout)
+
+
+def kernel_entry(
+    symbol: str, extents: Sequence[int], stated: Mapping[str, Any] | None, device: str
+) -> tuple[dict[str, Any] | None, str, str]:
+    """``(entry, provenance, refusal)`` -- what a backend is asked to emit for one routed symbol.
+
+    Two sources, named apart because they compute different functions. A STATED group program is
+    carried verbatim: it is the layer's own program -- epilogue, requantize multiplier, convolution
+    geometry, committed type -- and rebuilding any of it from the extents would emit a kernel that
+    computes something else. Without one the entry is synthesized as a bare contraction of those
+    extents, which is honest for a caller that routed exactly the contraction.
+
+    THE EXTENT TRIPLE IS REQUIRED ONLY OF THE SYNTHESIZED FORM. A statement carries its own shape --
+    a convolution states taps and strides, an integer sum reduces over nothing -- so demanding
+    ``M x K x N`` of one would decline exactly the layers a whole-program route exists to carry
+    (measured on a captured ResNet-50: 54 of its 69 routed groups are convolutions). A separate
+    function so that rule is reachable without a package and a toolchain: inside the build loop it
+    sits behind a package load, and a test of it there passes whether or not the rule is present.
+    """
+    key = tuple(int(v) for v in extents)
+    if stated is not None:
+        entry = dict(stated)
+        entry.setdefault("name", symbol)
+        return entry, FROM_GROUP, ""
+    if len(key) not in (3, 4):
+        return None, FROM_EXTENTS, f"signature {key} has neither 3 nor 4 extents; no kernel shape for it"
+    m, n, k = key[-3:]
+    return (
+        {
+            "name": symbol,
+            "op": "matmul",
+            "kind": "op",
+            "source_role": "mesh_tile_synthesized",
+            "source_reference": f"offloaded layer {m}x{k}x{n} for {device}",
+            "M": m,
+            "K": k,
+            "N": n,
+        },
+        FROM_EXTENTS,
+        "",
+    )
 
 
 def build_device_objects(
@@ -372,6 +463,7 @@ def build_device_objects(
     numeric_policy: dict | None = None,
     codegen_target: str = "riscv",
     cflags: Sequence[str] | None = None,
+    entries: Mapping[str, Mapping[str, Any]] | None = None,
     timeout: int = 900,
     expected_interfaces: Mapping[str, Mapping[str, str]] | None = None,
     package_sha256: str | None = None,
@@ -381,6 +473,20 @@ def build_device_objects(
 
     ``signatures`` / ``dtypes`` come from the offload rewrite. ``operand_dtype`` / ``accum_dtype`` are
     the device's own datapath tokens, which the caller derived from the device rather than assumed.
+
+    ``entries`` is ``symbol -> the group's own stated program`` (see
+    :mod:`merlin.llvmlower.group_offload`), and supplying it is what makes this a WHOLE-MODEL build
+    rather than a per-contraction one. Without it a kernel is synthesized from the extents alone --
+    which is correct for a caller that routed exactly the contraction and kept the epilogue on the
+    host, and quietly wrong for one that routed a whole group: the bias, the requantize, the
+    activation and the pooling the layer carries would simply not be in the kernel, and nothing in
+    the artifact would say so. Which of the two each kernel came from is recorded in
+    :attr:`DeviceBuild.built_from`, per symbol.
+
+    FAIL CLOSED WHEN AN ENTRY IS MISSING. If ``entries`` is supplied at all, a symbol absent from it
+    is DECLINED by name rather than falling back to the synthesized form: the caller has said it is
+    routing stated programs, so an unstated symbol is a gap in the statement, and substituting a bare
+    contraction for it is exactly the silent loss this parameter exists to prevent.
 
     Every failure is recorded and skipped rather than raised: a model whose third extent the package
     declines should still build its other two and say what it lost, because the alternative is an
@@ -424,6 +530,25 @@ def build_device_objects(
     if unbuildable:
         return DeviceBuild(device=device, skipped=(("all", unbuildable),))
 
+    # FAIL CLOSED ON THE CALLER'S CONTRACT FIRST. A symbol the caller routed as a stated program but
+    # supplied no statement for is a gap in the CALLER, not in the package or the toolchain -- and
+    # asking those first would report it as whichever of them happened to be unavailable, which is
+    # how a dropped readout gets attributed to a missing manifest.
+    if entries is not None:
+        unstated = sorted(sym for sym in signatures if sym not in entries)
+        if unstated:
+            return DeviceBuild(
+                device=device,
+                skipped=tuple(
+                    (
+                        sym,
+                        "no stated group program for this symbol; the caller routed stated programs, so "
+                        "building it from the extents alone would drop whatever readout the layer carries",
+                    )
+                    for sym in unstated
+                ),
+            )
+
     abi = kernel_abi_for(device)
     if abi is None:
         return DeviceBuild(device=device, skipped=(("all", "no readable kernel_abi"),))
@@ -441,31 +566,22 @@ def build_device_objects(
 
     objs: list[Path] = []
     kernels: dict[str, str] = {}
+    built_from: dict[str, str] = {}
     oc = _objcopy()
 
     for index, sym in enumerate(sorted(signatures)):
         key = tuple(int(v) for v in signatures[sym])
-        if len(key) not in (3, 4):
-            skipped.append((sym, f"signature {key} has neither 3 nor 4 extents; no kernel shape for it"))
+        entry, provenance, refusal = kernel_entry(sym, key, None if entries is None else entries.get(sym), device)
+        if entry is None:
+            skipped.append((sym, refusal))
             continue
         # A batched signature needs the SAME kernel as its unbatched form: the batch is a loop in the
         # shim over disjoint slices, not a third axis the device sees. Building a separate kernel per
         # batch size would mint one per B for identical work.
-        m, n, k = key[-3:]
+        m, n, k = key[-3:] if len(key) in (3, 4) else (None, None, None)
         want = kernel_symbol(abi.symbol, index)
         stem = work / f"{sym}"
-
         if expected_interfaces is None:
-            entry = {
-                "name": sym,
-                "op": "matmul",
-                "kind": "op",
-                "source_role": "mesh_tile_synthesized",
-                "source_reference": f"offloaded layer {m}x{k}x{n} for {device}",
-                "M": m,
-                "K": k,
-                "N": n,
-            }
             try:
                 _capsule, iface = CS.build(entry, binding)
             except Exception as exc:  # noqa: BLE001
@@ -486,7 +602,8 @@ def build_device_objects(
 
         r = run_entrypoint(pkg, "emit_target_artifact", ifc, timeout=timeout)
         if r.returncode != 0:
-            skipped.append((sym, f"package declined {m}x{k}x{n}: {(r.stderr or '').strip()[:200]}"))
+            shape = f"{m}x{k}x{n}" if m is not None else str(entry.get("op") or "this program")
+            skipped.append((sym, f"package declined {shape}: {(r.stderr or '').strip()[:200]}"))
             continue
         if expected_interfaces is not None and f"llvm.func @{abi.symbol}(" not in r.stdout:
             skipped.append((sym, "exact package artifact has no contract-named LLVM kernel entry"))
@@ -517,6 +634,7 @@ def build_device_objects(
 
         objs.append(obj)
         kernels[sym] = want
+        built_from[sym] = provenance
 
     if not kernels:
         return DeviceBuild(device=device, skipped=tuple(skipped))
@@ -530,18 +648,41 @@ def build_device_objects(
     )
     if not unit.symbols:
         return DeviceBuild(
-            device=device, objects=tuple(objs), kernels=kernels, skipped=tuple([*skipped, *unit.skipped])
+            device=device,
+            objects=tuple(objs),
+            kernels=kernels,
+            built_from=built_from,
+            skipped=tuple([*skipped, *unit.skipped]),
         )
+    # A KERNEL THE SHIM DECLINED IS NOT A KERNEL THIS ARCHIVE CAN OFFER. The shim is what defines the
+    # symbol the model's own call binds to, so a kernel object with no entry beside it ships a private
+    # definition nothing reaches and leaves the call undefined at link -- a diagnostic that names the
+    # symbol and not the reason. Drop it here, with the shim's own reason carried forward, so the
+    # caller can compare what it routed against what was built.
+    shimmed = set(unit.symbols)
+    for sym in [s for s in kernels if s not in shimmed]:
+        skipped.append(
+            (sym, next((why for name, why in unit.skipped if name == sym), "the kernel ABI shim emitted no entry"))
+        )
+        kernels.pop(sym)
+        built_from.pop(sym, None)
     shim_c = work / "device_shim.c"
     shim_c.write_text(unit.text, encoding="utf-8")
     shim_o = work / "device_shim.o"
     s = _run([clang(), *_flags(codegen_target, cflags), "-c", str(shim_c), "-o", str(shim_o)], timeout=timeout)
     if s.returncode != 0:
         skipped.append(("shim", f"clang: {(s.stderr or '').strip()[:300]}"))
-        return DeviceBuild(device=device, objects=tuple(objs), kernels=kernels, skipped=tuple(skipped))
+        return DeviceBuild(
+            device=device, objects=tuple(objs), kernels=kernels, built_from=built_from, skipped=tuple(skipped)
+        )
 
     return DeviceBuild(
-        device=device, objects=(*objs, shim_o), shim_object=shim_o, kernels=kernels, skipped=tuple(skipped)
+        device=device,
+        objects=(*objs, shim_o),
+        shim_object=shim_o,
+        kernels=kernels,
+        built_from=built_from,
+        skipped=tuple(skipped),
     )
 
 

@@ -50,6 +50,7 @@ the board's ``PROF <id> <ticks>`` lines can be joined back to model semantics.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 #: Name of the marker hook the instrumented IR calls (defined in runtime/c/merlin_op_prof.c).
@@ -197,7 +198,19 @@ def _body_ops(line: str) -> list[str]:
 
 
 def find_forward_ops(mlir_text: str) -> tuple[int, int, list[dict]]:
-    """Locate the top-level ops of ``func.func @forward``.
+    """Locate the top-level ops of ``func.func @forward`` (see :func:`find_function_ops`)."""
+    return find_function_ops(mlir_text, "forward")
+
+
+def _is_function_line(line: str, symbol: str) -> bool:
+    stripped = line.lstrip()
+    if symbol == "forward":  # the historical match, kept exactly
+        return stripped.startswith("func.func @forward")
+    return stripped.startswith("func.func ") and f"@{symbol}(" in stripped.split("{", 1)[0]
+
+
+def find_function_ops(mlir_text: str, symbol: str = "forward") -> tuple[int, int, list[dict]]:
+    """Locate the top-level ops of ``func.func @symbol``.
 
     Returns ``(body_start_line, return_line, ops)`` where ``ops`` is a list of
     ``{"line": <0-based index>, "mlir_op": ..., "result_type": ..., prov...}`` in program
@@ -207,11 +220,11 @@ def find_forward_ops(mlir_text: str) -> tuple[int, int, list[dict]]:
     lines = mlir_text.splitlines()
     start = None
     for i, line in enumerate(lines):
-        if line.lstrip().startswith("func.func @forward"):
+        if _is_function_line(line, symbol):
             start = i
             break
     if start is None:
-        raise OpProfileError("no `func.func @forward` in the module — cannot instrument")
+        raise OpProfileError(f"no `func.func @{symbol}` in the module — cannot instrument")
 
     ops: list[dict] = []
     ret_line = None
@@ -264,9 +277,9 @@ def find_forward_ops(mlir_text: str) -> tuple[int, int, list[dict]]:
                 )
         depth += _depth_delta(line)
         if depth < 0:  # closed the function body without a return
-            raise OpProfileError("unbalanced braces before the terminator of @forward")
+            raise OpProfileError(f"unbalanced braces before the terminator of @{symbol}")
     if ret_line is None:
-        raise OpProfileError("no `return`/`func.return` found in @forward")
+        raise OpProfileError(f"no `return`/`func.return` found in @{symbol}")
     for idx, rec in enumerate(ops):
         rec["elems"] = _elem_count(rec["result_type"])
         # Only where it can answer a question the op line cannot: an op the frontend already tagged
@@ -276,18 +289,22 @@ def find_forward_ops(mlir_text: str) -> tuple[int, int, list[dict]]:
     return start, ret_line, ops
 
 
-def instrument(mlir_text: str) -> tuple[str, list[dict]]:
-    """Interleave ``@merlin_prof_mark`` calls between the top-level ops of ``@forward``.
+def instrument(mlir_text: str, functions: "Sequence[str]" = ("forward",)) -> tuple[str, list[dict]]:
+    """Interleave ``@merlin_prof_mark`` calls between the top-level ops of each of ``functions``.
 
-    Returns ``(instrumented_text, table)``. ``table`` has one record per mark id; the final
-    id (``len(table)``) is the sentinel emitted before ``func.return`` and closes the last
-    op's interval. Raises :class:`OpProfileError` if the module has no instrumentable
-    ``@forward``.
+    Returns ``(instrumented_text, table)``. ``table`` has one record per mark id, numbered across the
+    functions in the order given (each record names its ``function``); the final id (``len(table)``) is
+    the sentinel emitted before the FIRST function's ``func.return`` and closes the last op's interval.
+
+    Several functions are how a CHUNKED forward is profiled: ``forward``'s top-level ops are then calls
+    to its chunk functions, so marking ``forward`` alone credits each whole chunk to one call. Marking
+    the chunks' own ops too attributes them: the shim credits the time since the previous mark, so a call
+    keeps only its own overhead and every op inside the chunk its own cost. Raises
+    :class:`OpProfileError` if the module has no instrumentable ``functions[0]``.
     """
     lines = mlir_text.splitlines()
-    fn_line, ret_line, ops = find_forward_ops(mlir_text)
-    if not ops:
-        raise OpProfileError("@forward has no top-level ops to instrument")
+    if not functions:
+        raise OpProfileError("no function named to instrument")
 
     # Marker insertions, keyed by the line they precede.
     def mark(mid: int, indent: str) -> list[str]:
@@ -297,28 +314,39 @@ def instrument(mlir_text: str) -> tuple[str, list[dict]]:
         ]
 
     at: dict[int, list[str]] = {}
-    for rec in ops:
-        line = lines[rec["line"]]
-        indent = line[: len(line) - len(line.lstrip())]
-        at[rec["line"]] = mark(rec["id"], indent)
-    sentinel = len(ops)
-    rl = lines[ret_line]
-    at[ret_line] = mark(sentinel, rl[: len(rl) - len(rl.lstrip())])
+    table: list[dict] = []
+    first_fn_line = None
+    first_ret_line = None
+    for symbol in functions:
+        fn_line, ret_line, ops = find_function_ops(mlir_text, symbol)
+        if first_ret_line is None:
+            if not ops:
+                raise OpProfileError(f"@{symbol} has no top-level ops to instrument")
+            first_ret_line = ret_line
+        first_fn_line = fn_line if first_fn_line is None else min(first_fn_line, fn_line)
+        for rec in ops:
+            rec["id"] = len(table)
+            line = lines[rec["line"]]
+            at[rec["line"]] = mark(rec["id"], line[: len(line) - len(line.lstrip())])
+            table.append({**{k: v for k, v in rec.items() if k != "line"}, "function": symbol})
+    sentinel = len(table)
+    rl = lines[first_ret_line]
+    at[first_ret_line] = mark(sentinel, rl[: len(rl) - len(rl.lstrip())])
 
     out: list[str] = []
     for i, line in enumerate(lines):
         out.extend(at.get(i, ()))
         out.append(line)
 
-    # Declare the hook just before @forward, at the function's own indentation.
-    decl_indent = lines[fn_line][: len(lines[fn_line]) - len(lines[fn_line].lstrip())]
+    # Declare the hook just before the first instrumented function, at that function's indentation.
+    # Every insertion above is inside a body, so the declaration line's index is stable.
+    decl_indent = lines[first_fn_line][: len(lines[first_fn_line]) - len(lines[first_fn_line].lstrip())]
     decl = f"{decl_indent}func.func private @{MARK_SYM}(i32) -> ()"
-    # `fn_line` shifted by the markers inserted above it (there are none — all insertions are
-    # inside the body — so the index is stable, but recompute defensively).
-    ins = out.index(lines[fn_line])
+    ins = out.index(lines[first_fn_line])
     out.insert(ins, decl)
-
-    table = [{k: v for k, v in rec.items() if k != "line"} for rec in ops]
+    if len(functions) == 1:
+        # The single-function table is the historical shape: no per-record function name.
+        table = [{k: v for k, v in rec.items() if k != "function"} for rec in table]
     return "\n".join(out) + "\n", table
 
 

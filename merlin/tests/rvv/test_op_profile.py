@@ -159,3 +159,45 @@ func.func @forward(%arg0: tensor<4x4xi8>) -> tensor<4x4xi32> {
 """
     _, _, ops = opf.find_forward_ops(mlir)
     assert ops[0]["callee"] == "@merlin_opu_gemm_i8_2"
+
+
+_CHUNKED = """\
+module {
+  func.func @forward(%arg0: tensor<4xf32>) -> tensor<4xf32> {
+    %0 = func.call @merlin_forward_chunk_0(%arg0) : (tensor<4xf32>) -> tensor<4xf32>
+    %1 = func.call @merlin_forward_chunk_1(%0) : (tensor<4xf32>) -> tensor<4xf32>
+    func.return %1 : tensor<4xf32>
+  }
+  func.func @merlin_forward_chunk_0(%a: tensor<4xf32>) -> tensor<4xf32> {
+    %0 = tensor.empty() : tensor<4xf32>
+    %1 = linalg.matmul {prov.fqn = "layers.0.mlp"} ins(%a, %a : tensor<4xf32>, tensor<4xf32>) outs(%0 : tensor<4xf32>) -> tensor<4xf32>
+    func.return %1 : tensor<4xf32>
+  }
+  func.func @merlin_forward_chunk_1(%a: tensor<4xf32>) -> tensor<4xf32> {
+    %0 = tensor.empty() : tensor<4xf32>
+    func.return %0 : tensor<4xf32>
+  }
+}
+"""
+
+
+def test_a_chunked_forward_is_profiled_inside_its_chunks():
+    """A chunked forward's top-level ops are its chunk calls. Marked alone, every chunk is credited to
+    one call; marking each chunk's ops too attributes the work, with ids unique across functions."""
+    text, table = opf.instrument(_CHUNKED, ["forward", "merlin_forward_chunk_0", "merlin_forward_chunk_1"])
+    assert [r["id"] for r in table] == list(range(5))
+    assert [r["function"] for r in table] == ["forward"] * 2 + ["merlin_forward_chunk_0"] * 2 + [
+        "merlin_forward_chunk_1"
+    ]
+    assert [r["mlir_op"] for r in table][2:4] == ["tensor.empty", "linalg.matmul"]
+    assert table[3]["fqn"] == "layers.0.mlp"
+    assert text.count(f"func.func private @{opf.MARK_SYM}") == 1
+    # One mark per op plus the sentinel, which closes forward (the first function named).
+    assert text.count(f"call @{opf.MARK_SYM}(") == 6
+    body = text.split("func.func @merlin_forward_chunk_0", 1)[1].split("func.func @merlin_forward_chunk_1", 1)[0]
+    assert body.count(f"call @{opf.MARK_SYM}(") == 2
+    fwd = text.split("func.func @forward", 1)[1].split("func.func @merlin_forward_chunk_0", 1)[0]
+    assert "%prof_id_5 = arith.constant 5" in fwd
+    # One function keeps the historical table shape.
+    _, single = opf.instrument(_CHUNKED)
+    assert "function" not in single[0] and len(single) == 2

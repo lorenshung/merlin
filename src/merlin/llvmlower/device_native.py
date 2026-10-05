@@ -49,6 +49,7 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .device_build import _ar, _flags, _run  # noqa: PLC2701 -- one toolchain locator per package
 
@@ -511,7 +512,8 @@ def build_device_native_seam(
     accum_dtype: str,
     numeric_policy: dict | None = None,
     codegen_target: str = "riscv",
-    cflags: "Sequence[str] | None" = None,
+    cflags: Sequence[str] | None = None,
+    entries: Mapping[str, Mapping[str, Any]] | None = None,
     timeout: int = 900,
 ) -> DeviceNativeSeam:
     """Emit one device program plus its address contract per signature, and the host stager for all.
@@ -519,6 +521,14 @@ def build_device_native_seam(
     ``signatures`` comes from the offload rewrite, exactly as for
     :func:`~merlin.llvmlower.device_build.build_device_objects`; ``operand_dtype`` / ``accum_dtype``
     are the device's own datapath tokens, derived by the caller rather than assumed.
+
+    ``entries`` is ``symbol -> the group's own stated program``, and it is read here for exactly the
+    reason the linkable path reads it: a device program synthesized from the extents alone is a bare
+    contraction, so the bias, the requantize, the activation and the pooling the layer carries are
+    simply not in the instruction stream -- and the address contract derived from that stream would
+    describe the wrong operands as well. The two paths must not disagree about what a routed symbol
+    IS, so the contract is the same one, fail-closed included: with ``entries`` supplied, a symbol
+    absent from it is declined by name rather than synthesized.
 
     Every per-signature failure is recorded and skipped rather than raised, for the same reason the
     linkable path does it: a model whose third extent the package declines should still emit the seam
@@ -536,6 +546,25 @@ def build_device_native_seam(
     unemittable = seam_emittable(device)
     if unemittable:
         return DeviceNativeSeam(device=device, skipped=(("all", unemittable),))
+
+    # FAIL CLOSED ON THE CALLER'S CONTRACT FIRST, as `build_device_objects` does and for the same
+    # reason: a symbol the caller routed as a stated program but supplied no statement for is a gap
+    # in the CALLER, and asking the package or the toolchain first would report it as whichever of
+    # them happened to be unavailable.
+    if entries is not None:
+        unstated = sorted(sym for sym in signatures if sym not in entries)
+        if unstated:
+            return DeviceNativeSeam(
+                device=device,
+                skipped=tuple(
+                    (
+                        sym,
+                        "no stated group program for this symbol; the caller routed stated programs, so "
+                        "emitting it from the extents alone would drop whatever readout the layer carries",
+                    )
+                    for sym in unstated
+                ),
+            )
 
     from merlin.system.derive import link_for
     from merlin.targetgen.target_experiment import load_capability_manifest
@@ -555,22 +584,31 @@ def build_device_native_seam(
     programs: list[SeamProgram] = []
     for sym in sorted(signatures):
         key = tuple(int(v) for v in signatures[sym])
-        if len(key) not in (3, 4):
+        stated = None if entries is None else entries.get(sym)
+        if stated is None and len(key) not in (3, 4):
             skipped.append((sym, f"signature {key} has neither 3 nor 4 extents; no kernel shape for it"))
             continue
         # A batched signature is the same device program as its unbatched form -- the batch is a loop
         # over disjoint slices on the host side, not an axis the device sees.
-        m, n, k = key[-3:]
-        entry = {
-            "name": sym,
-            "op": "matmul",
-            "kind": "op",
-            "source_role": "mesh_tile_synthesized",
-            "source_reference": f"offloaded layer {m}x{k}x{n} for {device}",
-            "M": m,
-            "K": k,
-            "N": n,
-        }
+        m, n, k = key[-3:] if len(key) in (3, 4) else (None, None, None)
+        if stated is not None:
+            # VERBATIM, as the linkable path carries it: the entry IS the layer's program, and
+            # rebuilding any of it from the extents would emit an instruction stream computing a
+            # different function than the layer the call stands for.
+            entry = dict(stated)
+            entry.setdefault("name", sym)
+        else:
+            entry = {
+                "name": sym,
+                "op": "matmul",
+                "kind": "op",
+                "source_role": "mesh_tile_synthesized",
+                "source_reference": f"offloaded layer {m}x{k}x{n} for {device}",
+                "M": m,
+                "K": k,
+                "N": n,
+            }
+        shape = f"{m}x{k}x{n}" if m is not None else str(entry.get("op") or "this program")
         try:
             _capsule, iface = CS.build(entry, binding)
         except Exception as exc:  # noqa: BLE001
@@ -583,7 +621,7 @@ def build_device_native_seam(
         art = stem.with_suffix(".device.S")
         r = run_entrypoint(pkg, "emit_target_artifact", ifc, timeout=timeout)
         if r.returncode != 0:
-            skipped.append((sym, f"package declined {m}x{k}x{n}: {(r.stderr or '').strip()[:200]}"))
+            skipped.append((sym, f"package declined {shape}: {(r.stderr or '').strip()[:200]}"))
             continue
         art.write_text(r.stdout, encoding="utf-8")
 
@@ -593,9 +631,7 @@ def build_device_native_seam(
         cbf = stem.with_suffix(".contract.json")
         c = run_entrypoint(pkg, "emit_command_buffer", ifc, cbf, timeout=timeout)
         if c.returncode != 0 or not cbf.is_file():
-            skipped.append(
-                (sym, f"package emitted no address contract for {m}x{k}x{n}: {(c.stderr or '').strip()[:200]}")
-            )
+            skipped.append((sym, f"package emitted no address contract for {shape}: {(c.stderr or '').strip()[:200]}"))
             continue
         try:
             tensors = address_contract(json.loads(cbf.read_text(encoding="utf-8")), window_base=window_base)

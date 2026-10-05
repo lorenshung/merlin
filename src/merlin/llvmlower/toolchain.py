@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from merlin.common.paths import ext_path, repo_root
@@ -23,6 +24,12 @@ DEFAULT_M2M_DIR = "/path/to/model2MLIR"  # external model2MLIR checkout; set MER
 # in-process translate bridge is unreliable (its OpenMPIRBuilder segfaults on whole-model
 # omp IR, whereas this build's mlir-translate handles it cleanly).
 DEFAULT_LLVM_INSTALL = repo_root() / "third_party" / "llvm-install"
+
+
+def llvm_install() -> Path:
+    """The selected stock LLVM/MLIR install, including detached or installed runs."""
+    selected = _env("MERLIN_MLIR_INSTALL")
+    return Path(selected) if selected else DEFAULT_LLVM_INSTALL
 
 
 def m2m_dir() -> Path:
@@ -54,10 +61,16 @@ def compiler_python() -> Path:
     return base / "bin" / "python"
 
 
-def _iree_bin() -> Path | None:
+def _iree_bin(lookup: Callable[[str], str | None] | None = None) -> Path | None:
     """bin/ of the IREE-based Merlin build (ships clang-23), if configured. Set MERLIN_IREE_BIN, or
     MERLIN_EXT_MERLIN_IREE pointing at the third_party/baselines/merlin-iree submodule build.
     Resolved lazily so importing this module never requires the IREE build to be present."""
+    if lookup is not None:
+        env = lookup("MERLIN_IREE_BIN")
+        if env:
+            return Path(env)
+        external = lookup("MERLIN_EXT_MERLIN_IREE")
+        return Path(external) / "build" / "host-merlin-release" / "install" / "bin" if external else None
     env = _env("MERLIN_IREE_BIN")
     if env:
         return Path(env)
@@ -67,30 +80,51 @@ def _iree_bin() -> Path | None:
         return None
 
 
-def clang() -> Path:
-    """clang able to target both x86-64 and riscv64. The repo's OWN toolchain always wins — resolution,
-    first that exists: ``MERLIN_CLANG`` (explicit override) → the repo's OWN
-    ``third_party/llvm-install`` ``clang-23`` (built with clang + the RISCV target; self-contained and
-    authoritative) → the IREE build's ``clang-23`` (legacy fallback only, when that external build
-    happens to be present) → ``clang-23`` on PATH. Preferring the repo's own install keeps the toolchain
-    self-contained and independent of the retired IREE build."""
-    env = _env("MERLIN_CLANG")
+def _resolve_clang(install: Path, lookup: Callable[[str], str | None], iree: Callable[[], Path | None]) -> Path:
+    env = lookup("MERLIN_CLANG")
     if env:
         return Path(env)
-    local = DEFAULT_LLVM_INSTALL / "bin" / "clang-23"
+    local = install / "bin" / "clang-23"
     if local.exists():
         return local
-    b = _iree_bin()
-    if b and (b / "clang-23").exists():
-        return b / "clang-23"
-    return (b / "clang-23") if b else Path("clang-23")
+    iree_bin = iree()
+    if iree_bin and (iree_bin / "clang-23").exists():
+        return iree_bin / "clang-23"
+    return (iree_bin / "clang-23") if iree_bin else Path("clang-23")
+
+
+def clang() -> Path:
+    """Resolve clang for x86-64 and riscv64.
+
+    ``MERLIN_CLANG`` wins, then ``MERLIN_MLIR_INSTALL`` (or the checkout's own LLVM
+    install), then the legacy IREE build, then ``clang-23`` on PATH.
+    """
+    return _resolve_clang(llvm_install(), _env, _iree_bin)
+
+
+def clang_for(root: Path, environ: Mapping[str, str]) -> Path:
+    """What :func:`clang` answers in a process rooted at checkout ``root`` with ``environ``.
+
+    The same chain, read from that environment and ``root``'s own ``.env`` and install instead of
+    this process's, so a launcher can check the compiler a child will use before starting it.
+    """
+    from merlin.common.paths import read_dotenv
+
+    dotenv = read_dotenv(Path(root) / ".env")
+
+    def lookup(key: str) -> str | None:
+        return environ.get(key) or dotenv.get(key)
+
+    selected = lookup("MERLIN_MLIR_INSTALL")
+    install = Path(selected) if selected else Path(root) / "third_party" / "llvm-install"
+    return _resolve_clang(install, lookup, lambda: _iree_bin(lookup))
 
 
 def mlir_translate() -> Path:
     """Standalone LLVM-23 ``mlir-translate`` (handles OpenMP -> LLVM-IR; the in-process
     torch-mlir bridge crashes on whole-model omp). Env-overridable."""
     env = _env("MERLIN_MLIR_TRANSLATE")
-    return Path(env) if env else Path(DEFAULT_LLVM_INSTALL) / "bin" / "mlir-translate"
+    return Path(env) if env else llvm_install() / "bin" / "mlir-translate"
 
 
 def available() -> bool:
@@ -107,7 +141,37 @@ def objdump() -> Path:
     env = _env("MERLIN_OBJDUMP")
     if env:
         return Path(env)
-    local = DEFAULT_LLVM_INSTALL / "bin" / "llvm-objdump"
+    local = llvm_install() / "bin" / "llvm-objdump"
     if local.exists():
         return local
     return Path(clang()).parent / "llvm-objdump"
+
+
+def _llvm_sibling(env_key: str, tool: str) -> Path:
+    """An LLVM binutil from the same install as :func:`clang`, env-overridable -- the objdump rule."""
+    env = _env(env_key)
+    if env:
+        return Path(env)
+    local = llvm_install() / "bin" / tool
+    if local.exists():
+        return local
+    return Path(clang()).parent / tool
+
+
+def objcopy() -> Path:
+    """LLVM ``objcopy``, from the same install as :func:`clang`. Env-overridable.
+
+    Used to give each of several package-emitted kernels its own symbol so they can link into one
+    program: every one of them defines the entry the target's contract declares. Taken from the install
+    that compiled the objects, for the same reason :func:`objdump` is."""
+    return _llvm_sibling("MERLIN_OBJCOPY", "llvm-objcopy")
+
+
+def nm() -> Path:
+    """LLVM ``nm``, from the same install as :func:`clang`. Env-overridable."""
+    return _llvm_sibling("MERLIN_NM", "llvm-nm")
+
+
+def readelf() -> Path:
+    """LLVM ``readelf``, from the same install as :func:`clang`. Env-overridable."""
+    return _llvm_sibling("MERLIN_READELF", "llvm-readelf")
