@@ -4,7 +4,6 @@ import json
 from types import SimpleNamespace
 
 import pytest
-
 from merlin_experiments.adapters import PHASE1_MODULE
 from merlin_experiments.cli import main
 from merlin_experiments.phase1.__main__ import main as phase1_main
@@ -29,9 +28,12 @@ def test_original_comparison_and_optional_branches() -> None:
 
 def test_contradictory_selection_has_no_level() -> None:
     assert level_for_phase1({"arm": "raw_baseline", "treatment": "rtlchecks"}) is None
-    assert level_for_phase1({
-        "arm": "merlin_assisted", "treatment": "baseline", "bundle": "merlin_assisted_rtlchecks_public_v0"
-    }) is None
+    assert (
+        level_for_phase1(
+            {"arm": "merlin_assisted", "treatment": "baseline", "bundle": "merlin_assisted_rtlchecks_public_v0"}
+        )
+        is None
+    )
 
 
 def test_catalog_levels_materialize_exact_execution_keys() -> None:
@@ -75,11 +77,27 @@ def test_installed_phase1_level_preserves_legacy_execution_keys(tmp_path, monkey
         return 0
 
     monkeypatch.setattr(controller, "run", capture)
-    assert phase1_main([
-        "--descriptor", str(tmp_path / "descriptor.yaml"), "--repo", str(tmp_path),
-        "--bundle-manifest", str(manifest), "--oracle-timing", str(tmp_path / "timing.json"),
-        "--run-id", "example", "--bundle", "merlin_assisted_rtlchecks_public_v0", "--level", "EL4",
-    ]) == 0
+    assert (
+        phase1_main(
+            [
+                "--descriptor",
+                str(tmp_path / "descriptor.yaml"),
+                "--repo",
+                str(tmp_path),
+                "--bundle-manifest",
+                str(manifest),
+                "--oracle-timing",
+                str(tmp_path / "timing.json"),
+                "--run-id",
+                "example",
+                "--bundle",
+                "merlin_assisted_rtlchecks_public_v0",
+                "--level",
+                "EL4",
+            ]
+        )
+        == 0
+    )
     assert observed["options"].arm == "merlin_assisted"
     argv = observed["launcher_argv"]
     assert argv[argv.index("--level") + 1] == "EL4"
@@ -97,12 +115,11 @@ def test_cli_exposes_levels_and_labels_gemmini(capsys) -> None:
 
 
 def test_el4_preflight_does_not_treat_metadata_as_executable_support(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "merlin.targetgen.plugins.resolve_support", lambda _: SimpleNamespace(plugin=lambda: {})
-    )
-    plan = {"target": "sample", "phases": {"1": {
-        "module": PHASE1_MODULE, "argv": ["python", "--treatment", "rtlchecks"], "env": {}
-    }}}
+    monkeypatch.setattr("merlin.targetgen.plugins.resolve_support", lambda _: SimpleNamespace(plugin=lambda: {}))
+    plan = {
+        "target": "sample",
+        "phases": {"1": {"module": PHASE1_MODULE, "argv": ["python", "--treatment", "rtlchecks"], "env": {}}},
+    }
     assert "plugin.backend" in _verify_rtlcheck_support(plan)[0]
 
 
@@ -113,7 +130,8 @@ def test_el4_preflight_requires_explicit_support_selection(monkeypatch) -> None:
         raise PluginError("executable support requires explicit MERLIN_TARGET_PATH selection")
 
     monkeypatch.setattr("merlin.targetgen.plugins.resolve_support", refuse)
-    plan = {"target": "sample", "phases": {"1": {
-        "module": PHASE1_MODULE, "argv": ["python", "--treatment", "rtlchecks"], "env": {}
-    }}}
+    plan = {
+        "target": "sample",
+        "phases": {"1": {"module": PHASE1_MODULE, "argv": ["python", "--treatment", "rtlchecks"], "env": {}}},
+    }
     assert "explicit MERLIN_TARGET_PATH" in _verify_rtlcheck_support(plan)[0]

@@ -33,6 +33,7 @@ from typing import Any
 
 from merlin.common import proc as _proc
 
+
 def _bytes_per_s(brd) -> float:
     return float(brd.loader_bytes_per_s)
 

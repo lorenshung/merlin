@@ -126,8 +126,14 @@ def test_open_model_derivation_disables_mechanisms_and_refuses_manual_override(t
     config = _config(tmp_path)
     config["mechanism_policy"] = C.DERIVED_MECHANISMS
     run = RUNS.prepare(
-        target="toy", method="open", objective_config=config, seed=FX.package(tmp_path, "seed"),
-        prohibited_roles=[], inputs={"model_capsule": capsule}, why="open model", run_factory=_factory(tmp_path),
+        target="toy",
+        method="open",
+        objective_config=config,
+        seed=FX.package(tmp_path, "seed"),
+        prohibited_roles=[],
+        inputs={"model_capsule": capsule},
+        why="open model",
+        run_factory=_factory(tmp_path),
     )
     prepared = json.loads(run.config_path.read_text())
     assert prepared["screen"]["build_options"]["allow_passes"] is False
@@ -135,8 +141,13 @@ def test_open_model_derivation_disables_mechanisms_and_refuses_manual_override(t
     config["screen"]["build_options"]["allow_regions"] = True
     with pytest.raises(C.ConfigError, match="contradicts"):
         RUNS.prepare(
-            target="toy", method="open", objective_config=config, seed=FX.package(tmp_path, "seed2"),
-            prohibited_roles=[], inputs={"model_capsule": capsule}, why="no manual override",
+            target="toy",
+            method="open",
+            objective_config=config,
+            seed=FX.package(tmp_path, "seed2"),
+            prohibited_roles=[],
+            inputs={"model_capsule": capsule},
+            why="no manual override",
             run_factory=_factory(tmp_path / "second"),
         )
 
@@ -150,8 +161,13 @@ def test_derived_mechanisms_refuse_an_unfrozen_capsule(tmp_path, monkeypatch):
     config["screen"]["build_options"]["model_capsule"] = str(_capsule(tmp_path))
     with pytest.raises(RUNS.RunError, match="declared frozen input"):
         RUNS.prepare(
-            target="toy", method="unfrozen", objective_config=config, seed=FX.package(tmp_path, "seed"),
-            prohibited_roles=[], why="must freeze", run_factory=_factory(tmp_path),
+            target="toy",
+            method="unfrozen",
+            objective_config=config,
+            seed=FX.package(tmp_path, "seed"),
+            prohibited_roles=[],
+            why="must freeze",
+            run_factory=_factory(tmp_path),
         )
 
 

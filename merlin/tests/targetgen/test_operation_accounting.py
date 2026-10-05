@@ -25,10 +25,16 @@ def test_movement_form_comes_from_the_ir_carrier_not_a_provenance_label(carrier,
         {"family": "movement", "dtypes": ["int8"], "forms": ["copy"], "layouts": ["row_major_contiguous"]}
     ]
     row = {
-        "operation": "movement", "mlir_operation": carrier, "semantic_family": "movement",
-        "disposition": "unclassified", "operand_format": "int8", "shape_confidence": "observed",
-        "layout": "row_major_contiguous", "ordered_operand_types": [{"shape": [2, 3], "dtype": "i8"}],
-        "ordered_result_types": [{"shape": [2, 3], "dtype": "i8"}], "result_dtypes": ["i8"],
+        "operation": "movement",
+        "mlir_operation": carrier,
+        "semantic_family": "movement",
+        "disposition": "unclassified",
+        "operand_format": "int8",
+        "shape_confidence": "observed",
+        "layout": "row_major_contiguous",
+        "ordered_operand_types": [{"shape": [2, 3], "dtype": "i8"}],
+        "ordered_result_types": [{"shape": [2, 3], "dtype": "i8"}],
+        "result_dtypes": ["i8"],
     }
     result = admit_operation_row(row, software_spec=None, capability_contract=contract)
     assert result["observed_admission_signature"].get("form") == form

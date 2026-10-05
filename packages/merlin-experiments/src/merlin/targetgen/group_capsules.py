@@ -218,7 +218,9 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     """Attach the shared corpus-group options without importing execution dependencies."""
     parser.add_argument("--target", required=True)
     parser.add_argument("--definition", type=Path, help="explicit derivation definition; disambiguates target reuse")
-    parser.add_argument("--rtl-facts", type=Path, help="selected RTL facts artifact; defaults to the target's selected facts")
+    parser.add_argument(
+        "--rtl-facts", type=Path, help="selected RTL facts artifact; defaults to the target's selected facts"
+    )
     parser.add_argument("--capture", required=True, help="the captured model's linalg MLIR")
     parser.add_argument("--manifest", help="the capture's weights manifest (says which arguments are stored)")
     parser.add_argument("--model", default="")
@@ -251,8 +253,7 @@ def run_from_args(args: argparse.Namespace) -> int:
     from merlin.targetgen.rtl.facts import facts_alias, find_facts, observed_facts, target_contract_path
     from merlin.targetgen.software_spec import software_spec_path_for_recipe
     from merlin.targetgen.target_registry import resolve
-    from merlin.xdsl_dialects.lowering import compute_groups
-    from merlin.xdsl_dialects.lowering import stream_plan
+    from merlin.xdsl_dialects.lowering import compute_groups, stream_plan
 
     if args.plan_only and (args.only or args.promote or args.package):
         raise ValueError("--plan-only records all groups and cannot combine with --only, --promote, or --package")

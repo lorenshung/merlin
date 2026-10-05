@@ -67,8 +67,9 @@ def test_real_canonical_tool_broker_request_and_shutdown(tmp_path, monkeypatch):
 
 
 def test_host_tool_broker_uses_only_selected_frozen_facts(tmp_path, monkeypatch):
-    from merlin.targetgen.sandbox.bwrap import bundle_snapshot_root
     from merlin_experiments.phase1.frozen_facts import select
+
+    from merlin.targetgen.sandbox.bwrap import bundle_snapshot_root
 
     monkeypatch.setattr(L._TR, "COMMON_BROKERS", ())
     monkeypatch.setenv("PYTHONPATH", os.pathsep.join(map(str, python_import_roots())))

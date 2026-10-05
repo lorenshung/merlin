@@ -25,8 +25,15 @@ NARROW = ReadoutCapability("narrow", frozenset({"scale", "activation"}), "applie
 WIDE = ReadoutCapability("wide", frozenset(), "writes the raw accumulator")
 CAPS = (NARROW, WIDE)
 BIAS_ROUTE = StageRoute(
-    "bias_add", "accumulator_seed", "contraction", frozenset({"narrow", "wide"}),
-    frozenset({"CONTRACT"}), frozenset({"COMMIT"}), "bias", "bias", "seed before compute",
+    "bias_add",
+    "accumulator_seed",
+    "contraction",
+    frozenset({"narrow", "wide"}),
+    frozenset({"CONTRACT"}),
+    frozenset({"COMMIT"}),
+    "bias",
+    "bias",
+    "seed before compute",
 )
 
 
@@ -45,18 +52,23 @@ class TestTheRuleIsGeneral:
     def test_route_licenses_contraction_without_claiming_readout_bias(self):
         assert "bias_add" not in NARROW.applies | WIDE.applies
         assert EA.selectors_applying(CAPS, ["bias_add"], routes=(BIAS_ROUTE,), composition="contraction") == (
-            "narrow", "wide"
+            "narrow",
+            "wide",
         )
         assert EA.selectors_applying(CAPS, ["bias_add"], routes=(BIAS_ROUTE,), composition="operand_sum") == ()
-        assert EA.selectors_applying(
-            CAPS, ["activation", "bias_add"], routes=(BIAS_ROUTE,), composition="contraction"
-        ) == ()
+        assert (
+            EA.selectors_applying(CAPS, ["activation", "bias_add"], routes=(BIAS_ROUTE,), composition="contraction")
+            == ()
+        )
         cb = {
             "tensors": {"B": {"role": "bias"}},
             "commands": [
                 {"opcode": "CONTRACT", "operands": {"dst": "acc"}},
-                {"opcode": "COMMIT", "operands": {"src": "acc"},
-                 "attributes": {"output_dtype": "wide", "epilogue": ["bias_add"], "bias": "B"}},
+                {
+                    "opcode": "COMMIT",
+                    "operands": {"src": "acc"},
+                    "attributes": {"output_dtype": "wide", "epilogue": ["bias_add"], "bias": "B"},
+                },
             ],
         }
         assert EA.assess(cb, CAPS, routes=(BIAS_ROUTE,)).status == "applied"

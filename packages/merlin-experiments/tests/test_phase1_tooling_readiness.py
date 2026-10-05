@@ -91,7 +91,10 @@ def test_selected_source_grants_still_fail_when_one_is_missing(tmp_path, monkeyp
     source = tmp_path / "source"
     logical = R.TR.spec("merlin_infra").bundle_paths
     allowed = [
-        {"path": str(source / "merlin" / item.removeprefix("merlin/python/merlin/")) + ("/" if item.endswith("/") else "")}
+        {
+            "path": str(source / "merlin" / item.removeprefix("merlin/python/merlin/"))
+            + ("/" if item.endswith("/") else "")
+        }
         for item in logical[:-1]
     ]
     monkeypatch.setattr(R, "python_source_dir", lambda: tmp_path / "unrelated-install")
@@ -206,7 +209,11 @@ def test_filecheck_lookup_includes_declared_sim_family(tmp_path, monkeypatch):
     monkeypatch.setattr(R.BW, "resolve_grant", lambda path, repo: tmp_path / "facts.json")
     monkeypatch.setattr(R.BW, "snapshot_input_paths", lambda ws, bundle, sources, repo: [frozen])
     monkeypatch.setattr(compiler, "compile_checks", lambda *args: {"kernel": "CHECK: op"})
-    monkeypatch.setattr(runner, "find_filecheck", lambda candidates: next((str(path) for path in candidates if Path(path).is_file()), None))
+    monkeypatch.setattr(
+        runner,
+        "find_filecheck",
+        lambda candidates: next((str(path) for path in candidates if Path(path).is_file()), None),
+    )
     checks = R._frozen_rtl_checks(te, ws, {}, capsule.parent, repo=context.repo)
     assert next(check for check in checks if check["name"] == "FileCheck")["detail"] == str(sim_bin / "FileCheck")
 

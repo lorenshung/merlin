@@ -14,7 +14,6 @@ from merlin.runtime import boards
 from merlin.runtime.elf_audit import ElfAuditError, upload_bytes
 from merlin.targetgen.target_experiment import load_target_experiment
 
-
 CATALOG = "examples/gemmini/target/board-catalog.yaml"
 ROCKET_ISA = "rv64imafdcbzicsr_zifencei_zihpm_zfh_zba_zbb_zbs_xrocket"
 
@@ -38,22 +37,38 @@ def test_selected_board_facts_and_unknown_upload_fail_closed(monkeypatch):
 
     monkeypatch.setattr(boards, "board", lambda name: entries[name])
     result = compile_rvv(
-        "not_a_capture", "int8", run="verilator", verify=False, package=None,
-        auto_capture=False, timeout=5, board=experiment.host_board,
-        selected_host_dts_required=True, expected_board_target="gemmini",
+        "not_a_capture",
+        "int8",
+        run="verilator",
+        verify=False,
+        package=None,
+        auto_capture=False,
+        timeout=5,
+        board=experiment.host_board,
+        selected_host_dts_required=True,
+        expected_board_target="gemmini",
     )
     assert result["status"] == "not_run"
     assert "no qualified compile_cli bare-metal execution path" in result["reason"]
 
 
-@pytest.mark.parametrize("name,relative_dts", [
-    ("gemmini_rocket_verilator", "sims/verilator/generated-src/"
-     "chipyard.harness.TestHarness.GemminiRocketConfig/"
-     "chipyard.harness.TestHarness.GemminiRocketConfig.dts"),
-    ("firesim_gemmini_rocket_u250_30mhz", "sims/firesim-staging/generated-src/"
-     "firechip.chip.FireSim.FireSimGemminiRocketConfig/"
-     "firechip.chip.FireSim.FireSimGemminiRocketConfig.dts"),
-])
+@pytest.mark.parametrize(
+    "name,relative_dts",
+    [
+        (
+            "gemmini_rocket_verilator",
+            "sims/verilator/generated-src/"
+            "chipyard.harness.TestHarness.GemminiRocketConfig/"
+            "chipyard.harness.TestHarness.GemminiRocketConfig.dts",
+        ),
+        (
+            "firesim_gemmini_rocket_u250_30mhz",
+            "sims/firesim-staging/generated-src/"
+            "firechip.chip.FireSim.FireSimGemminiRocketConfig/"
+            "firechip.chip.FireSim.FireSimGemminiRocketConfig.dts",
+        ),
+    ],
+)
 def test_selected_elaborated_dts_is_the_pinned_nonvector_rocket(name, relative_dts):
     chipyard = os.environ.get("MERLIN_CHIPYARD_GEMMINI_ROCKET")
     if not chipyard:
@@ -63,7 +78,8 @@ def test_selected_elaborated_dts_is_the_pinned_nonvector_rocket(name, relative_d
         pytest.skip(f"selected elaborated DTS not available: {dts}")
     selected = boards.load_boards(repo_root() / CATALOG)[name]
     assert require_host_isa_dts(
-        ["-march=rv64gc_zba_zbb_zbs_zfh"], dts,
+        ["-march=rv64gc_zba_zbb_zbs_zfh"],
+        dts,
         expected_sha256=selected.host_dts_sha256,
     ) == [ROCKET_ISA]
     with pytest.raises(ValueError, match=r"missing \['v'\]"):

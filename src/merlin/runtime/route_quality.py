@@ -608,8 +608,7 @@ def require_clean_host_compute(report: HostComputeReport) -> HostComputeReport:
         tasks = ", ".join(row.task for row in findings[:8])
         raise HostComputeViolation(f"accepted task(s) {tasks} compute on tensor data on the host")
     if report.status != STATUS_OK or report.causes:
-        undecided = [cause for row in report.tasks if row.route == "A"
-                     for cause in row.undecided_causes]
+        undecided = [cause for row in report.tasks if row.route == "A" for cause in row.undecided_causes]
         why = "; ".join((*report.causes, *undecided)) or f"status is {report.status!r}"
         raise HostComputeUnverified(f"host compute is not fully verified: {why}")
     return report
@@ -756,10 +755,14 @@ def host_compute(
     rows: dict[str, TaskCompute] = {}
     unattributed = 0
 
-    def scan_function(func: Any, *, inherited_task: str | None,
-                      scalar_args: Mapping[int, tuple[bool, str | None]],
-                      pointer_args: Mapping[int, tuple[bool, str | None]],
-                      call_stack: frozenset[Any]) -> tuple[bool, str | None]:
+    def scan_function(
+        func: Any,
+        *,
+        inherited_task: str | None,
+        scalar_args: Mapping[int, tuple[bool, str | None]],
+        pointer_args: Mapping[int, tuple[bool, str | None]],
+        call_stack: frozenset[Any],
+    ) -> tuple[bool, str | None]:
         """Scan one concrete call site; return whether its returned value reaches tensor data."""
         nonlocal unattributed
         blocks = tuple(func.body.blocks)
@@ -772,8 +775,7 @@ def host_compute(
         stored_into: dict[str, list[Any]] = {}
         for op in operations:
             if _category_of(op) == "store" and len(op.operands) >= 2:
-                stored_into.setdefault(
-                    _pointer_root(op.operands[1], entry, op_index), []).append(op.operands[0])
+                stored_into.setdefault(_pointer_root(op.operands[1], entry, op_index), []).append(op.operands[0])
         value_verdict: dict[Any, tuple[bool, str | None]] = {}
         call_verdict: dict[Any, tuple[bool, str | None]] = {}
 
@@ -817,14 +819,20 @@ def host_compute(
                     elif root.startswith("global:"):
                         pointer[i] = (True, None)
                     elif root.startswith("alloca:"):
-                        values = [reaches_tensor(stored, frozenset())
-                                  for stored in stored_into.get(root, ())]
-                        pointer[i] = (any(hit for hit, _ in values),
-                                      next((cause for _, cause in values if cause), None))
+                        values = [reaches_tensor(stored, frozenset()) for stored in stored_into.get(root, ())]
+                        pointer[i] = (
+                            any(hit for hit, _ in values),
+                            next((cause for _, cause in values if cause), None),
+                        )
                     else:
                         pointer[i] = (False, "a called helper's pointer argument has no derivable root")
-                result = scan_function(callee, inherited_task=task, scalar_args=scalar,
-                                       pointer_args=pointer, call_stack=call_stack | {callee})
+                result = scan_function(
+                    callee,
+                    inherited_task=task,
+                    scalar_args=scalar,
+                    pointer_args=pointer,
+                    call_stack=call_stack | {callee},
+                )
             call_verdict[op] = result
             if result[1] is not None:
                 row = rows.setdefault(task, TaskCompute(task=task, route=routes[task]))
@@ -864,9 +872,14 @@ def host_compute(
                     if name == "llvm.br" and terminal.successor is owner:
                         edges = (terminal.arguments,)
                     elif name == "llvm.cond_br":
-                        edges = tuple(arguments for successor, arguments in (
-                            (terminal.then_block, terminal.then_arguments),
-                            (terminal.else_block, terminal.else_arguments)) if successor is owner)
+                        edges = tuple(
+                            arguments
+                            for successor, arguments in (
+                                (terminal.then_block, terminal.then_arguments),
+                                (terminal.else_block, terminal.else_arguments),
+                            )
+                            if successor is owner
+                        )
                     else:
                         edges = ()
                     for arguments in edges:
@@ -972,8 +985,7 @@ def host_compute(
             return True, None
         return False, next((cause for _, cause in returned if cause), None)
 
-    scan_function(function, inherited_task=None, scalar_args={}, pointer_args={},
-                  call_stack=frozenset({function}))
+    scan_function(function, inherited_task=None, scalar_args={}, pointer_args={}, call_stack=frozenset({function}))
 
     if unattributed:
         causes.append(

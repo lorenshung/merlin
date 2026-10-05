@@ -688,8 +688,7 @@ def prepare(
         )
         if not _compiler_ok:
             print(
-                f"NO_GO: oracle compile toolchain failed: {_compiler_why}. "
-                "Refusing to launch (zero tokens spent).",
+                f"NO_GO: oracle compile toolchain failed: {_compiler_why}. Refusing to launch (zero tokens spent).",
                 file=sys.stderr,
             )
             return 4

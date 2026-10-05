@@ -116,8 +116,7 @@ def load_rvv_package(package_dir: str | Path) -> RvvPackage:
         marches = [flag.removeprefix("-march=") for flag in cflags if flag.startswith("-march=")]
         required = _isa_parts(marches[0])[1] if len(marches) == 1 else set()
         if len(marches) != 1 or any(
-            extension == "v" or extension.startswith(("zve", "zvl", "zv"))
-            for extension in required
+            extension == "v" or extension.startswith(("zve", "zvl", "zv")) for extension in required
         ):
             raise ValueError("scalar host package requires exactly one non-vector -march flag")
 

@@ -101,6 +101,7 @@ def gsim_runtime_slot(*, wait_timeout_s: float | None = None, slot_root: Path | 
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
+
 # Every engine here answers at this fidelity; the tier records it rather than inferring from the name.
 ELABORATED_RTL = "elaborated_rtl"
 

@@ -29,8 +29,7 @@ def test_mx_software_spec_keeps_three_formats_separate_and_epilogues_on_host():
     assert all(row["site_modes"] == expected_site_modes for row in declarations)
     contract = build_quantization_contract(spec, {"target": "mx_gemmini"})
     assert all(
-        row["unselected_parameters"]["site_modes"]["value"] == expected_site_modes
-        for row in contract["formats"]
+        row["unselected_parameters"]["site_modes"]["value"] == expected_site_modes for row in contract["formats"]
     )
     missing_scale_rule = deepcopy(spec["numerical_semantics"])
     del missing_scale_rule["scale_rule"]
@@ -55,18 +54,12 @@ def test_mx_software_spec_keeps_three_formats_separate_and_epilogues_on_host():
             spec, "matmul", {**signature, "dimensions": {"M": tile, "N": tile, "K": 31}}, "accelerator"
         )
         assert bad["status"] == "unsupported"
-    relu = software_spec.admit_operation(
-        spec, "relu", {"operand_dtype": "bf16"}, "accelerator"
-    )
+    relu = software_spec.admit_operation(spec, "relu", {"operand_dtype": "bf16"}, "accelerator")
     assert relu["status"] == "unsupported"
-    host_relu = software_spec.admit_operation(
-        spec, "relu", {"operand_dtype": "f32"}, "host"
-    )
+    host_relu = software_spec.admit_operation(spec, "relu", {"operand_dtype": "f32"}, "host")
     assert host_relu["constraints_status"] == "matched"
     assert host_relu["status"] == "unknown"  # host policy still needs review
-    host_norm = software_spec.admit_operation(
-        spec, "layernorm", {"operand_dtype": "f32"}, "host"
-    )
+    host_norm = software_spec.admit_operation(spec, "layernorm", {"operand_dtype": "f32"}, "host")
     assert host_norm["constraints_status"] == "matched"
     assert host_norm["status"] == "unknown"
 
@@ -126,7 +119,9 @@ def test_operation_review_cannot_inherit_a_reviewed_document_status():
     spec = _spec()
     spec["operations"][0]["status"] = "unreviewed"
     decision = software_spec.admit_operation(
-        spec, "matmul", {"family": "contraction", "operand_dtype": "int8", "accum_dtype": "i32", "rank": 2},
+        spec,
+        "matmul",
+        {"family": "contraction", "operand_dtype": "int8", "accum_dtype": "i32", "rank": 2},
         "accelerator",
     )
     assert decision["constraints_status"] == "matched"

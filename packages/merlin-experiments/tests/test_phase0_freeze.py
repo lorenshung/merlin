@@ -425,7 +425,9 @@ def test_installed_phase0_freezes_selected_m2m_routing_and_resumes(tmp_path, mon
         "raise SystemExit(run(plan))\n"
     )
     environment = dict(
-        fixture["environment"], DEFINITION=str(fixture["definition"]), RUN_DIR=str(fixture["run"]),
+        fixture["environment"],
+        DEFINITION=str(fixture["definition"]),
+        RUN_DIR=str(fixture["run"]),
         SELECT_SEALED="1" if sealed else "0",
     )
     result = subprocess.run(

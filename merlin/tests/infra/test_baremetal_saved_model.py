@@ -34,9 +34,15 @@ def _fixture(tmp_path: Path, monkeypatch, *, elements: int = 2):
         p.name: {"bytes": p.stat().st_size, "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
         for p in capture.iterdir()
     }
-    (capture / "capture_receipt.json").write_text(json.dumps({
-        "schema": "m2m.capture-receipt.v1", "materialized_abi": {"complete": True}, "artifacts": artifacts,
-    }))
+    (capture / "capture_receipt.json").write_text(
+        json.dumps(
+            {
+                "schema": "m2m.capture-receipt.v1",
+                "materialized_abi": {"complete": True},
+                "artifacts": artifacts,
+            }
+        )
+    )
     package = tmp_path / "package"
     package.mkdir()
     (package / "manifest.yaml").write_text("host: scalar\n")
@@ -46,23 +52,56 @@ def _fixture(tmp_path: Path, monkeypatch, *, elements: int = 2):
     firrtl.write_text("circuit SampleConfig :\n")
     fir_sha = hashlib.sha256(firrtl.read_bytes()).hexdigest()
     facts = tmp_path / "selected-facts.json"
-    facts.write_text(json.dumps({"inputs": {"target": "sample", "fir_sha256": fir_sha,
-                                              "firrtl_inputs": [{"path": str(firrtl), "sha256": fir_sha}]},
-                                 "facts": {"source": {"config": "SampleConfig"}}}))
+    facts.write_text(
+        json.dumps(
+            {
+                "inputs": {
+                    "target": "sample",
+                    "fir_sha256": fir_sha,
+                    "firrtl_inputs": [{"path": str(firrtl), "sha256": fir_sha}],
+                },
+                "facts": {"source": {"config": "SampleConfig"}},
+            }
+        )
+    )
     catalog = tmp_path / "boards.yaml"
-    catalog.write_text(yaml.safe_dump({"schema_version": 1, "boards": {"selected": {
-        "target": "sample", "dram_bytes": 256 << 20, "dram_base": BM.spike_model.DRAM_BASE,
-        "harts": 1, "console": "htif", "flow": "baremetal", "code_reserve": 64 << 20,
-        "host_dts_sha256": hashlib.sha256(dts.read_bytes()).hexdigest(), "rtl_sim_config": "SampleConfig",
-    }}}))
-    pkg = SimpleNamespace(backend="scalar", cflags=["-march=rv64imafdc_zicsr_zifencei"],
-                          is_int8=False, schedule_text="")
+    catalog.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "boards": {
+                    "selected": {
+                        "target": "sample",
+                        "dram_bytes": 256 << 20,
+                        "dram_base": BM.spike_model.DRAM_BASE,
+                        "harts": 1,
+                        "console": "htif",
+                        "flow": "baremetal",
+                        "code_reserve": 64 << 20,
+                        "host_dts_sha256": hashlib.sha256(dts.read_bytes()).hexdigest(),
+                        "rtl_sim_config": "SampleConfig",
+                    }
+                },
+            }
+        )
+    )
+    pkg = SimpleNamespace(
+        backend="scalar", cflags=["-march=rv64imafdc_zicsr_zifencei"], is_int8=False, schedule_text=""
+    )
     monkeypatch.setattr(BM.registry, "load_rvv_package", lambda path: pkg)
     monkeypatch.setattr(
         BM.spike_model, "arch_extensions", lambda path: ["rv64i", "m", "a", "f", "d", "c", "zicsr", "zifencei"]
     )
-    return {"capture": capture, "package": package, "board_catalog": catalog, "board": "selected",
-            "dts": dts, "target": "sample", "arena_mb": 1, "rtl_facts": facts}, out
+    return {
+        "capture": capture,
+        "package": package,
+        "board_catalog": catalog,
+        "board": "selected",
+        "dts": dts,
+        "target": "sample",
+        "arena_mb": 1,
+        "rtl_facts": facts,
+    }, out
 
 
 def _fake_build(bundle, work, **kwargs):
@@ -104,11 +143,18 @@ def test_compile_only_and_native_engine_reuse_one_saved_elf(tmp_path, monkeypatc
         revalidate=lambda: {"command_sha256": "mock"},
         to_evidence=lambda: {"schema": "mock-command", "emulator_argv": ["mock-gsim"], "max_cycles": 1},
     )
-    monkeypatch.setattr(BM, "_native_engine", lambda target, run, facts: (
-        backend, {"selection": selection, "citation": {"binary_sha256": "mock"}},
-        lambda: None, lambda *a, **kw: command,
-    ))
+    monkeypatch.setattr(
+        BM,
+        "_native_engine",
+        lambda target, run, facts: (
+            backend,
+            {"selection": selection, "citation": {"binary_sha256": "mock"}},
+            lambda: None,
+            lambda *a, **kw: command,
+        ),
+    )
     from contextlib import nullcontext
+
     from merlin.targetgen import rtl_engine_policy
 
     monkeypatch.setattr(rtl_engine_policy, "gsim_runtime_slot", lambda **kw: nullcontext())
@@ -142,14 +188,19 @@ def test_native_wrong_board_firrtl_refused_before_build(tmp_path, monkeypatch):
     assert receipt["status"] == "failed"
 
 
-@pytest.mark.parametrize("failure,expected_stdout,expected_stderr", [
-    (subprocess.TimeoutExpired("mock-gsim", 1, output=b"OUT 2 0", stderr="timed out"),
-     b"OUT 2 0", b"timed out"),
-    (subprocess.CalledProcessError(1, "mock-gsim", output="OUT 2 0", stderr=b"failed"),
-     b"OUT 2 0", b"failed"),
-])
+@pytest.mark.parametrize(
+    "failure,expected_stdout,expected_stderr",
+    [
+        (subprocess.TimeoutExpired("mock-gsim", 1, output=b"OUT 2 0", stderr="timed out"), b"OUT 2 0", b"timed out"),
+        (subprocess.CalledProcessError(1, "mock-gsim", output="OUT 2 0", stderr=b"failed"), b"OUT 2 0", b"failed"),
+    ],
+)
 def test_native_failure_keeps_partial_stream_bytes_without_numerical_claim(
-    tmp_path, monkeypatch, failure, expected_stdout, expected_stderr,
+    tmp_path,
+    monkeypatch,
+    failure,
+    expected_stdout,
+    expected_stderr,
 ):
     inputs, out = _fixture(tmp_path, monkeypatch)
     monkeypatch.setattr(BM.spike_model, "build", _fake_build)
@@ -158,17 +209,23 @@ def test_native_failure_keeps_partial_stream_bytes_without_numerical_claim(
         revalidate=lambda: {"command_sha256": "mock"},
         to_evidence=lambda: {"schema": "mock-command", "emulator_argv": ["mock-gsim"], "max_cycles": 1},
     )
-    monkeypatch.setattr(BM, "_native_engine", lambda target, run, facts: (
-        backend, {"selection": {"engine": "gsim"}, "citation": {"binary_sha256": "mock"}},
-        lambda: None, lambda *a, **kw: command,
-    ))
+    monkeypatch.setattr(
+        BM,
+        "_native_engine",
+        lambda target, run, facts: (
+            backend,
+            {"selection": {"engine": "gsim"}, "citation": {"binary_sha256": "mock"}},
+            lambda: None,
+            lambda *a, **kw: command,
+        ),
+    )
     from contextlib import nullcontext
+
     from merlin.targetgen import rtl_engine_policy
 
     monkeypatch.setattr(rtl_engine_policy, "gsim_runtime_slot", lambda **kw: nullcontext())
     with pytest.raises(type(failure)):
-        BM.compile_saved_model(**inputs, output=out / "failed_native", run="gsim",
-                               reference_file="golden.npy")
+        BM.compile_saved_model(**inputs, output=out / "failed_native", run="gsim", reference_file="golden.npy")
     receipt = json.loads((out / "failed_native" / "baremetal_model.json").read_text())
     assert receipt["status"] == "failed"
     assert receipt["failure_artifacts"]["scope"] == "diagnostic_partial_simulator_output_only"

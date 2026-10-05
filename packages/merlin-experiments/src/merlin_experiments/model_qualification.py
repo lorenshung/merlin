@@ -329,9 +329,7 @@ def _compiler_check(package, model: Path, name: str, output: Path, *, timeout: f
                 install = candidate.parent
                 prefix += ["--ro-bind", str(install), str(install)]
     tool_path = ":".join(
-        str(path)
-        for path in (Path(sys.executable).parent, llvm_bin, Path("/usr/bin"), Path("/bin"))
-        if path
+        str(path) for path in (Path(sys.executable).parent, llvm_bin, Path("/usr/bin"), Path("/bin")) if path
     )
     # This evaluator is not an agent launch: credentials and user-home state
     # have no role in compiler execution. Only its explicit package and MLIR
@@ -565,6 +563,7 @@ def _worker(request: dict, root: Path) -> dict:
             selected_certification = contextvars.ContextVar("selected_model_certification", default=False)
             certify_patched = False
             try:
+
                 def isolated_entrypoint(pkg, name, input_mlir, output_json=None, *, timeout=600, **_kwargs):
                     if not selected_certification.get():
                         raise ValueError("compiler entrypoint ran outside selected certification")

@@ -236,9 +236,14 @@ def test_sandbox_composition_preserves_original_order_and_payload(tmp_path, monk
     monkeypatch.setattr(bwrap, "compose_command", observe("compose", "composed"))
     assert (
         E.sandbox_command(
-            "printf '%s' '(value)'", workspace, bundle, ["extra"],
-            context=config.context, private_run_dir=None,
-        ) == "composed"
+            "printf '%s' '(value)'",
+            workspace,
+            bundle,
+            ["extra"],
+            context=config.context,
+            private_run_dir=None,
+        )
+        == "composed"
     )
     assert [event[0] for event in events] == [
         "base",

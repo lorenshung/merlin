@@ -505,7 +505,9 @@ def boundaries(target: str) -> Boundaries:
                 rtl_rows = None
         from_rtl = rtl_rows is not None and edge is not None and int(rtl_rows) == int(edge)
         from_structure = structural_rows is not None and edge is not None and structural_rows == edge
-        b.tile_edge_is_hardware_fact = hw or from_rtl or from_structure or (edge is not None and edge != _DEFAULT_SW_TILE)
+        b.tile_edge_is_hardware_fact = (
+            hw or from_rtl or from_structure or (edge is not None and edge != _DEFAULT_SW_TILE)
+        )
         b.tile_edge_source = (
             "capability manifest (declared mesh/tile rows)"
             if hw
@@ -542,10 +544,7 @@ def boundaries(target: str) -> Boundaries:
         resolved = AS.operand_store(AS.derive_address_space(target))
         if resolved.store is not None and resolved.store.nbytes:
             b.operand_store_bytes = int(resolved.store.nbytes)
-            b.operand_store_source = (
-                f"RTL-derived operand store {resolved.store.name!r} "
-                f"({resolved.basis})"
-            )
+            b.operand_store_source = f"RTL-derived operand store {resolved.store.name!r} ({resolved.basis})"
         else:
             b.operand_store_source = f"RTL operand store unresolved: {resolved.reason}"
     except Exception as e:  # noqa: BLE001
@@ -1397,7 +1396,8 @@ def _epilogue_axis(target: str) -> dict:
         applying = selectors_applying(readouts, [stage], routes=routes, composition="contraction") if readouts else []
         on_readout = selectors_applying(readouts, [stage]) if readouts else []
         routed = any(
-            r.stage == stage and r.composed_with == "contraction"
+            r.stage == stage
+            and r.composed_with == "contraction"
             and any(readout.selector in r.readouts for readout in readouts or ())
             for r in routes
         )

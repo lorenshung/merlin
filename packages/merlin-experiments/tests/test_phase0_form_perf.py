@@ -82,10 +82,16 @@ def test_non_array_forms_are_unpriced_and_require_conservative_coverage():
     assert FP.predict(residual, machine)["predicted_cycles"] is None
     assert FP.predict(matmul, machine, placement="host")["predicted_cycles"] is None
 
-    summary = FP.aggregate({"iteration": {"members": [
-        _member(1, _STEM, matmul, 100),
-        _member(2, {"placement": "device", "op": "residual_add"}, residual, None),
-    ]}})
+    summary = FP.aggregate(
+        {
+            "iteration": {
+                "members": [
+                    _member(1, _STEM, matmul, 100),
+                    _member(2, {"placement": "device", "op": "residual_add"}, residual, None),
+                ]
+            }
+        }
+    )
     assert summary["application_totals"]["iteration"]["basis"] == "macs"
     assert all(row["unpriced_applications"] == ["iteration"] for row in summary["classes"])
     requirement = {"scope": {"performance": {"forms": {"schema": FP.SCHEMA, "classes": summary["classes"]}}}}
@@ -112,18 +118,37 @@ def test_every_class_gets_a_model_shaped_member_with_a_vendor_bar():
 
 def test_bounded_residual_form_spans_the_operand_format():
     key = {"placement": "device", "op": "residual_add", "activation_source": "intermediate"}
-    member = _member(16, key, {
-        "op": "residual_add", "M": 256, "N": 8, "epilogue": ["relu"],
-        "operand_dtype": "int8", "lhs_scale": 1.06, "rhs_scale": 0.31, "bound_lsb": 2,
-    }, 256)
+    member = _member(
+        16,
+        key,
+        {
+            "op": "residual_add",
+            "M": 256,
+            "N": 8,
+            "epilogue": ["relu"],
+            "operand_dtype": "int8",
+            "lhs_scale": 1.06,
+            "rhs_scale": 0.31,
+            "bound_lsb": 2,
+        },
+        256,
+    )
     summary = FP.aggregate({"iteration_cnn": {"members": [member]}})
     requirement = {"scope": {"performance": {"forms": {"schema": FP.SCHEMA, "classes": summary["classes"]}}}}
     entries = FP.form_perf_entries(_pw(), requirement, "f" * 64)
     assert entries[0]["stimulus_range"] == [-128, 127]
-    capsule, _ = CS.build(entries[0], CS.CorpusBinding(
-        target="synthetic", tile_dim=16, operand_dtype="int8", accum_dtype="i32",
-        integer=True, tiers=["L2"], compare="bounded_int",
-    ))
+    capsule, _ = CS.build(
+        entries[0],
+        CS.CorpusBinding(
+            target="synthetic",
+            tile_dim=16,
+            operand_dtype="int8",
+            accum_dtype="i32",
+            integer=True,
+            tiers=["L2"],
+            compare="bounded_int",
+        ),
+    )
     assert capsule["stimulus_range"] == [-128, 127]
     assert capsule["numeric_policy"]["atol"] == capsule["operation"]["attributes"]["bound_lsb"] == 2
 
@@ -161,10 +186,14 @@ def test_form_coverage_reports_joint_iteration_extent_gap_without_claim_shapes()
     # The costliest representative has more MACs, yet it does not jointly bound
     # a deeper sibling. A form-level capsule is present; performance scale is not proved.
     summary = FP.aggregate(
-        {"iteration": {"members": [
-            _member(1, key, {"op": "matmul", "M": 64, "K": 16, "N": 64}, 500),
-            _member(2, key, {"op": "matmul", "M": 16, "K": 128, "N": 16}, 100),
-        ]}}
+        {
+            "iteration": {
+                "members": [
+                    _member(1, key, {"op": "matmul", "M": 64, "K": 16, "N": 64}, 500),
+                    _member(2, key, {"op": "matmul", "M": 16, "K": 128, "N": 16}, 100),
+                ]
+            }
+        }
     )
     requirement = {"scope": {"performance": {"forms": {"schema": FP.SCHEMA, "classes": summary["classes"]}}}}
     entries = FP.form_perf_entries(_pw(), requirement, "f" * 64)
@@ -196,31 +225,46 @@ def test_form_coverage_reports_joint_iteration_extent_gap_without_claim_shapes()
 
 def test_joint_extent_witnesses_use_observed_iteration_groups_and_keep_paired_arms():
     key = {"placement": "device", "op": "matmul", "activation_source": "intermediate"}
-    summary = FP.aggregate({"iteration": {"members": [
-        _member(1, key, {"op": "matmul", "M": 64, "K": 16, "N": 64}, 500),
-        _member(2, key, {"op": "matmul", "M": 16, "K": 128, "N": 16}, 100),
-        _member(3, key, {"op": "matmul", "M": 8, "K": 8, "N": 8}, 10),
-    ]}})
+    summary = FP.aggregate(
+        {
+            "iteration": {
+                "members": [
+                    _member(1, key, {"op": "matmul", "M": 64, "K": 16, "N": 64}, 500),
+                    _member(2, key, {"op": "matmul", "M": 16, "K": 128, "N": 16}, 100),
+                    _member(3, key, {"op": "matmul", "M": 8, "K": 8, "N": 8}, 10),
+                ]
+            }
+        }
+    )
     requirement = {"scope": {"performance": {"forms": {"schema": FP.SCHEMA, "classes": summary["classes"]}}}}
     entries = FP.form_perf_entries(_pw(), requirement, "f" * 64)
     assert {(e["M"], e["K"], e["N"]) for e in entries} == {(64, 16, 64), (16, 128, 16)}
     assert entries[0]["name"].startswith("PW00_")
     assert entries[1]["performance"]["form"]["representative"]["group"] == 2
     assert all(set(e["performance"]["arms"]) == {"candidate", "vendor_reference"} for e in entries)
-    assert entries[1]["performance"]["arms"]["vendor_reference"]["demand_equal_entry"] == {
-        "M": 16, "K": 128, "N": 16
-    }
-    capsule, interface = CS.build(entries[1], CS.CorpusBinding(
-        target="synthetic", tile_dim=16, operand_dtype="int8", accum_dtype="i32",
-        integer=True, tiers=["L2"], compare="exact_int",
-    ))
+    assert entries[1]["performance"]["arms"]["vendor_reference"]["demand_equal_entry"] == {"M": 16, "K": 128, "N": 16}
+    capsule, interface = CS.build(
+        entries[1],
+        CS.CorpusBinding(
+            target="synthetic",
+            tile_dim=16,
+            operand_dtype="int8",
+            accum_dtype="i32",
+            integer=True,
+            tiers=["L2"],
+            compare="exact_int",
+        ),
+    )
     assert capsule["operation"]["op"] == "matmul" and "merlin_iface.matmul" in interface
     coverage = FP.form_perf_coverage(requirement, entries, threshold=0.01)
     assert coverage["classes"][0]["joint_extent_diagnostic"]["status"] == "observed_all_bounded"
     window = {
         "signature": "k3x3/s1x1/d1x1/pad1x1",
-        "kernel": [3, 3], "stride": [1, 1], "dilation": [1, 1],
-        "pad_before": [1, 1], "pad_after": [1, 1],
+        "kernel": [3, 3],
+        "stride": [1, 1],
+        "dilation": [1, 1],
+        "pad_before": [1, 1],
+        "pad_after": [1, 1],
     }
     with_window = {**requirement, "conv_geometry": {"required": [window]}}
     # A matmul extent witness cannot discharge the independent source-window obligation.
@@ -231,11 +275,17 @@ def test_joint_extent_witnesses_use_observed_iteration_groups_and_keep_paired_ar
 
 def test_joint_extent_witness_is_capped_at_one_per_class_and_leaves_other_gaps_visible():
     key = {"placement": "device", "op": "matmul", "activation_source": "intermediate"}
-    summary = FP.aggregate({"iteration": {"members": [
-        _member(1, key, {"op": "matmul", "M": 64, "K": 16, "N": 64}, 500),
-        _member(2, key, {"op": "matmul", "M": 16, "K": 128, "N": 16}, 100),
-        _member(3, key, {"op": "matmul", "M": 128, "K": 8, "N": 8}, 50),
-    ]}})
+    summary = FP.aggregate(
+        {
+            "iteration": {
+                "members": [
+                    _member(1, key, {"op": "matmul", "M": 64, "K": 16, "N": 64}, 500),
+                    _member(2, key, {"op": "matmul", "M": 16, "K": 128, "N": 16}, 100),
+                    _member(3, key, {"op": "matmul", "M": 128, "K": 8, "N": 8}, 50),
+                ]
+            }
+        }
+    )
     requirement = {"scope": {"performance": {"forms": {"schema": FP.SCHEMA, "classes": summary["classes"]}}}}
     entries = FP.form_perf_entries(_pw(), requirement, "f" * 64)
     assert len(entries) == 2
@@ -309,9 +359,17 @@ def test_source_window_performance_member_reuses_independent_functional_synthesi
         "name": "SY_conv_from_iteration",
         "source_role": "derived_sweep",
         "generalization": {"generalization_axis": "conv_window", "conv_window": window["signature"]},
-        "op": "conv2d", "operand_dtype": "i8", "kh": 3, "kw": 3,
-        "stride": [1, 1], "dilation": [1, 1], "padding": [1, 1, 1, 1],
-        "Himg": 4, "Wimg": 4, "ci": 4, "N": 16,
+        "op": "conv2d",
+        "operand_dtype": "i8",
+        "kh": 3,
+        "kw": 3,
+        "stride": [1, 1],
+        "dilation": [1, 1],
+        "padding": [1, 1, 1, 1],
+        "Himg": 4,
+        "Wimg": 4,
+        "ci": 4,
+        "N": 16,
     }
     requirement = {"scope": {"performance": {"forms": _scope()}}, "conv_geometry": {"required": [window]}}
     entries = FP.form_perf_entries(_pw(), requirement, "f" * 64, source_window_entries=[functional])
@@ -322,8 +380,13 @@ def test_source_window_performance_member_reuses_independent_functional_synthesi
     capsule, interface = CS.build_conv2d(
         source,
         CS.CorpusBinding(
-            target="synthetic", tile_dim=16, operand_dtype="int8", accum_dtype="i32",
-            integer=True, tiers=["L2"], compare="exact_int",
+            target="synthetic",
+            tile_dim=16,
+            operand_dtype="int8",
+            accum_dtype="i32",
+            integer=True,
+            tiers=["L2"],
+            compare="exact_int",
         ),
     )
     assert capsule["operation"]["attributes"]["padding"] == window["pad_before"] + window["pad_after"]
@@ -334,9 +397,7 @@ def test_source_window_performance_member_reuses_independent_functional_synthesi
     wrong = copy.deepcopy(functional)
     wrong["padding"] = [0, 0, 0, 0]
     blocked = []
-    mismatched = FP.form_perf_entries(
-        _pw(), requirement, "f" * 64, source_window_entries=[wrong], blocked=blocked
-    )
+    mismatched = FP.form_perf_entries(_pw(), requirement, "f" * 64, source_window_entries=[wrong], blocked=blocked)
     assert blocked and "no exact derived functional member" in blocked[0]["reason"]
     assert FP.form_perf_coverage(requirement, mismatched, threshold=0.01)["status"] == "incomplete"
 
@@ -407,15 +468,19 @@ def test_claim_form_statistics_require_the_actual_frozen_submission(tmp_path):
     committed = oot_repo.commit_candidate(repo, submission, label="freeze", when=1, run_id="run")
     oot_repo.tag(repo, oot_repo.FROZEN_TAG, committed.commit)
     receipt = run / "freeze.json"
-    receipt.write_text(json.dumps({
-        "submission_sha256": committed.package_digest,
-        "submission_files": committed.n_files,
-        "oot": {
-            "repo": str(repo),
-            "frozen_commit": committed.commit,
-            "package_digest": committed.package_digest,
-        },
-    }))
+    receipt.write_text(
+        json.dumps(
+            {
+                "submission_sha256": committed.package_digest,
+                "submission_files": committed.n_files,
+                "oot": {
+                    "repo": str(repo),
+                    "frozen_commit": committed.commit,
+                    "package_digest": committed.package_digest,
+                },
+            }
+        )
+    )
     assert FP._verified_phase1_freeze_digest(receipt) == hashlib.sha256(receipt.read_bytes()).hexdigest()
 
     (submission / "compiler.py").write_text("changed\n")

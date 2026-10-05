@@ -83,13 +83,11 @@ def test_offline_process_boundary_preserves_interpreter_and_refuses_scope_upgrad
     assert result["status"] == "completed"
     statuses = {row["entrypoint"]: row["status"] for row in result["observations"]["compiler_observations"]}
     if not PF.probe_sandbox(network_isolation=True).usable:
-        assert statuses == {name: "unavailable" for name in (
-            "parse", "lower_interface_to_target", "emit_command_buffer", "lower_target_to_llvm"
-        )}
-        assert all(
-            "sandbox inoperable" in row["reason"]
-            for row in result["observations"]["compiler_observations"]
-        )
+        assert statuses == {
+            name: "unavailable"
+            for name in ("parse", "lower_interface_to_target", "emit_command_buffer", "lower_target_to_llvm")
+        }
+        assert all("sandbox inoperable" in row["reason"] for row in result["observations"]["compiler_observations"])
         assert result["observations"]["model_routes"][0]["status"] == "unresolved"
         assert result["observations"]["runtime"]["target_executed"] is False
         assert result["whole_workload_validation_verified"] is False
@@ -255,7 +253,8 @@ def test_session_inspection_binds_typed_abi_and_producer_receipts(tmp_path, monk
     contract = root / "session_contract.yaml"
     contract.write_text(yaml.safe_dump(document))
     monkeypatch.setattr(
-        session_bundle, "load",
+        session_bundle,
+        "load",
         lambda *_: SimpleNamespace(program_names=("prefix", "decode"), bindings=(object(),)),
     )
     receipt = {

@@ -121,9 +121,10 @@ def test_requirement_derivation_selects_authored_capability_contract(tmp_path, m
 
 
 def test_requirement_derivation_observes_the_preselected_capture_python(tmp_path, monkeypatch):
+    from merlin_experiments.phase0 import capture_execution_attestation, capture_selection, requirements
+
     from merlin.common.paths import repo_root
     from merlin.targetgen.target_experiment import load_target_experiment
-    from merlin_experiments.phase0 import capture_execution_attestation, capture_selection, requirements
 
     definition = repo_root() / "examples/gemmini/experiment.yaml"
     descriptor = repo_root() / "examples/gemmini/target/descriptor.yaml"

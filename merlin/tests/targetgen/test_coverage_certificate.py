@@ -118,7 +118,7 @@ def test_source_region_execution_exposes_a_planned_acceleration_that_ran_on_host
         ],
         "dispatch_ledger": [
             {"ordinal": 0, "symbol": "forward$kernel_4__radd_0", "lane": "native_cpu", "status": "pass"}
-        ]
+        ],
     }
     cert = CC.build(
         plan,
@@ -153,7 +153,9 @@ def test_requested_precision_is_not_a_verified_capture_conversion():
     unknown = OpDemand(op="add", in_fmt="int8", family="elementwise_map", carrier_op="linalg.generic")
     unknown_route = RouteResult(unknown, unit="tensor_unit", acc=None, gap=None)
     unknown_plan = {"results": [unknown_route], "mesh": [unknown_route], "fallback": [], "scalar_rvv": []}
-    unknown_cert = CC.build(unknown_plan, {"elementwise_map": SemanticCapability(family="elementwise_map", dtypes=("int8",))})
+    unknown_cert = CC.build(
+        unknown_plan, {"elementwise_map": SemanticCapability(family="elementwise_map", dtypes=("int8",))}
+    )
     assert unknown_cert["n_unknown_capture_formats"] == 1
     assert unknown_cert["precision_transform_verification"]["status"] == "unknown_capture_format"
 
@@ -172,9 +174,7 @@ def test_copy_capability_does_not_make_permutation_eligible():
     from merlin.targetgen.eligibility import RegionDescriptor, is_eligible
 
     cap = {"movement": SemanticCapability(family="movement", dtypes=("int8",), forms=("copy",))}
-    verdict = is_eligible(
-        RegionDescriptor(op="permute", family="movement", in_dtype="int8", form="permutation"), cap
-    )
+    verdict = is_eligible(RegionDescriptor(op="permute", family="movement", in_dtype="int8", form="permutation"), cap)
     assert verdict.eligible is False
     assert verdict.refusal == "form"
 
@@ -189,7 +189,12 @@ def test_source_region_execution_refuses_unattributed_or_mixed_execution():
         caps,
         execution={
             "outlined_dispatches": [
-                {"symbol": "forward$kernel_0__radd_0", "region_id": "add_0", "root_op": "linalg.generic", "prov_op": "add"}
+                {
+                    "symbol": "forward$kernel_0__radd_0",
+                    "region_id": "add_0",
+                    "root_op": "linalg.generic",
+                    "prov_op": "add",
+                }
             ],
             "dispatch_ledger": [{"symbol": "xnn__radd_0", "lane": "on_mesh", "status": "pass"}],
         },
@@ -201,13 +206,23 @@ def test_source_region_execution_refuses_unattributed_or_mixed_execution():
         caps,
         execution={
             "outlined_dispatches": [
-                {"symbol": "forward$kernel_0__radd_0", "region_id": "add_0", "root_op": "linalg.generic", "prov_op": "add"},
-                {"symbol": "forward$kernel_1__radd_0", "region_id": "add_0", "root_op": "linalg.generic", "prov_op": "add"},
+                {
+                    "symbol": "forward$kernel_0__radd_0",
+                    "region_id": "add_0",
+                    "root_op": "linalg.generic",
+                    "prov_op": "add",
+                },
+                {
+                    "symbol": "forward$kernel_1__radd_0",
+                    "region_id": "add_0",
+                    "root_op": "linalg.generic",
+                    "prov_op": "add",
+                },
             ],
             "dispatch_ledger": [
                 {"symbol": "forward$kernel_0__radd_0", "lane": "on_mesh", "status": "pass"},
                 {"symbol": "forward$kernel_1__radd_0", "lane": "native_cpu", "status": "pass"},
-            ]
+            ],
         },
     )["source_region_execution"]
     assert mixed["status"] == "incomplete"  # extra outlined op also lacks a source correspondence
@@ -253,8 +268,12 @@ def test_source_region_requires_every_same_provenance_operation_and_completed_sy
 
 def test_contraction_split_requires_both_children_but_only_contraction_child_on_device():
     demand = OpDemand(
-        op="batch_matmul", in_fmt="int8", weight_fmt="int8", family="contraction",
-        region_id="matmul_0", carrier_op="linalg.generic",
+        op="batch_matmul",
+        in_fmt="int8",
+        weight_fmt="int8",
+        family="contraction",
+        region_id="matmul_0",
+        carrier_op="linalg.generic",
     )
     route = RouteResult(demand, unit="tensor_unit", acc="i32", gap=None)
     plan = {"results": [route], "mesh": [route], "fallback": [], "scalar_rvv": []}
@@ -262,8 +281,20 @@ def test_contraction_split_requires_both_children_but_only_contraction_child_on_
     contraction = "forward$kernel_0__rmatmul_0"
     requant = "forward$kernel_1__rmatmul_0"
     outline = [
-        {"symbol": contraction, "root_op": "linalg.generic", "prov_op": "batch_matmul", "region_id": "matmul_0", "prov_role": "contraction"},
-        {"symbol": requant, "root_op": "linalg.generic", "prov_op": "batch_matmul", "region_id": "matmul_0", "prov_role": "requant"},
+        {
+            "symbol": contraction,
+            "root_op": "linalg.generic",
+            "prov_op": "batch_matmul",
+            "region_id": "matmul_0",
+            "prov_role": "contraction",
+        },
+        {
+            "symbol": requant,
+            "root_op": "linalg.generic",
+            "prov_op": "batch_matmul",
+            "region_id": "matmul_0",
+            "prov_role": "requant",
+        },
     ]
     calls = [
         {"ordinal": 0, "symbol": contraction, "lane": "on_mesh", "status": "pass"},
@@ -282,14 +313,16 @@ def test_contraction_split_requires_both_children_but_only_contraction_child_on_
     assert missing["status"] == "incomplete"
     assert missing["unexecuted_outlined_symbols"] == [requant]
     missing_child = CC.build(
-        plan, caps,
+        plan,
+        caps,
         execution={"outlined_dispatches": outline[:1], "dispatch_ledger": calls[:1]},
     )["source_region_execution"]
     assert missing_child["status"] == "incomplete"
     assert missing_child["invalid_split_source_keys"] == ["matmul_0|linalg.generic|batch_matmul"]
     bad_role = [dict(outline[0], prov_role="unknown"), outline[1]]
     unknown = CC.build(
-        plan, caps,
+        plan,
+        caps,
         execution={"outlined_dispatches": bad_role, "dispatch_ledger": calls},
     )["source_region_execution"]
     assert unknown["status"] == "incomplete"

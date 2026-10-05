@@ -154,12 +154,12 @@ def test_only_executable_commands_in_the_rendered_shared_prompt_are_wired(tmp_pa
             '"""Docs mention python -m merlin.targetgen.docs_only."""\n'
             '_TEMPLATE = "Use python -m merlin.targetgen.oot_starterkit.plan inventory"\n'
             '_DORMANT = "python -m merlin.targetgen.dormant"\n'
-            'def render_prompt():\n    return _TEMPLATE.format()\n'
+            "def render_prompt():\n    return _TEMPLATE.format()\n"
         ),
         plan: 'def main():\n    return 0\nif __name__ == "__main__":\n    raise SystemExit(main())\n',
         f"{base}/docs_only.py": 'def main():\n    return 0\nif __name__ == "__main__":\n    raise SystemExit(main())\n',
         f"{base}/dormant.py": 'def main():\n    return 0\nif __name__ == "__main__":\n    raise SystemExit(main())\n',
-        f"{base}/not_executable.py": 'def main():\n    return 0\n',
+        f"{base}/not_executable.py": "def main():\n    return 0\n",
         "src/merlin/driver.py": "from merlin.targetgen.generate_prompt import render_prompt\n",
         "docs/guide.md": "python -m merlin.targetgen.docs_only\n",
     }
@@ -177,5 +177,4 @@ def test_only_executable_commands_in_the_rendered_shared_prompt_are_wired(tmp_pa
     assert gate.unwired() == [f"{base}/docs_only.py", f"{base}/dormant.py", f"{base}/not_executable.py", plan]
     files["src/merlin/driver.py"] = "# A dormant generator is not a task command.\n"
     gate = _gate(_tree(tmp_path, files))
-    assert gate.unwired() == [f"{base}/docs_only.py", f"{base}/dormant.py", prompt,
-                              f"{base}/not_executable.py", plan]
+    assert gate.unwired() == [f"{base}/docs_only.py", f"{base}/dormant.py", prompt, f"{base}/not_executable.py", plan]

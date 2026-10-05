@@ -102,7 +102,10 @@ def main(argv: list[str] | None = None) -> int:
         help="pre-execution selection for each selected capture; omitted legacy captures remain diagnostic",
     )
     derive.add_argument(
-        "--application-quant-policy", action="append", default=[], metavar="LABEL=PATH@SHA256",
+        "--application-quant-policy",
+        action="append",
+        default=[],
+        metavar="LABEL=PATH@SHA256",
         help="independently selected policy bytes for each externally quantized capture",
     )
     derive.add_argument(
@@ -203,7 +206,10 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             elif args.operation == "derive":
                 from .phase0.requirements import (
-                    capture_selection_specs, capture_selections, derive, quantization_policy_specs,
+                    capture_selection_specs,
+                    capture_selections,
+                    derive,
+                    quantization_policy_specs,
                 )
 
                 try:
@@ -270,7 +276,8 @@ def main(argv: list[str] | None = None) -> int:
                         "kind": spec.document.get("kind", "experiment"),
                         "phase1_level": (
                             level_for_phase1(spec.document["phases"]["1"]["config"])
-                            if "1" in spec.document["phases"] else None
+                            if "1" in spec.document["phases"]
+                            else None
                         ),
                     }
                 )

@@ -75,16 +75,22 @@ def test_group_writer_uses_canonical_profile_and_writer_owners(monkeypatch, tmp_
 def test_group_writer_uses_selected_arithmetic_and_rejects_entry_drift(monkeypatch, tmp_path):
     binding = _target(monkeypatch, tmp_path)
     semantics = {"internal_arithmetic": {"mac_result_bits": 20}}
-    monkeypatch.setattr(profiles, "load_profile", lambda *args, **kwargs: {"datapath": {"numerical_semantics": semantics}})
+    monkeypatch.setattr(
+        profiles, "load_profile", lambda *args, **kwargs: {"datapath": {"numerical_semantics": semantics}}
+    )
     monkeypatch.setattr(corpus_spec, "derive_binding", lambda *args: binding)
     received = []
-    monkeypatch.setattr(writer, "_write_capsule", lambda entry, *_args: received.append(entry) or tmp_path / entry["name"])
+    monkeypatch.setattr(
+        writer, "_write_capsule", lambda entry, *_args: received.append(entry) or tmp_path / entry["name"]
+    )
     result = group_capsules.write(
         "fixture",
-        {"entries": [
-            {"name": "selected", "entry": {"name": "selected"}},
-            {"name": "drift", "entry": {"name": "drift", "numerical_semantics": {"other": True}}},
-        ]},
+        {
+            "entries": [
+                {"name": "selected", "entry": {"name": "selected"}},
+                {"name": "drift", "entry": {"name": "drift", "numerical_semantics": {"other": True}}},
+            ]
+        },
         tmp_path,
     )
     assert [entry["numerical_semantics"] for entry in received] == [semantics]
@@ -174,6 +180,7 @@ def test_group_cli_selects_explicit_definition_before_output(monkeypatch, tmp_pa
     from merlin.common import mlir_query
 
     monkeypatch.setattr(mlir_query, "parse", lambda *args: object())
+
     def entries(*_args, **_kwargs):
         from merlin.targetgen.rtl.facts import load_facts
 

@@ -1174,7 +1174,6 @@ def test_a_fused_regions_expectations_grade_it_once_at_its_boundary(monkeypatch,
     monkeypatch.setattr(driver.program, "extract", lambda *a, **k: {"steps": [dict(s) for s in steps]})
     monkeypatch.setattr(WB, "_output_widths", lambda out_dir: {})
     from merlin.perf import whole_model_build as WMB
-
     from merlin.perf import whole_model_open as WO
 
     monkeypatch.setattr(WO, "is_open_model", lambda capsule, target: False)

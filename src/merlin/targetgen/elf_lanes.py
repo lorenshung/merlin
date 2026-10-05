@@ -92,6 +92,7 @@ def native_host_execution(entry: object) -> bool:
         and entry.get("status") == "pass"
     )
 
+
 # --- ELF constants. These are the ELF format's own, from the gABI -- not a target's ISA facts. -------
 _ELF_MAGIC = b"\x7fELF"
 _ELFCLASS32, _ELFCLASS64 = 1, 2

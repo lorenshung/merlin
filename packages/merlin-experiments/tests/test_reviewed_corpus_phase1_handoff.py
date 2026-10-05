@@ -608,9 +608,7 @@ def _execute_reviewed_authoring(bridge, tmp_path, monkeypatch):
             "realistic",
         ]
     )
-    authoring_manifest = (
-        bridge.descriptor.parent / "input_bundles/raw_baseline_public_v0/input_bundle_manifest.yaml"
-    )
+    authoring_manifest = bridge.descriptor.parent / "input_bundles/raw_baseline_public_v0/input_bundle_manifest.yaml"
     with monkeypatch.context() as scoped:
         # Admission above remains process-free; this step executes the actual
         # sandbox preflight and local authoring supervisor, never a paid provider.

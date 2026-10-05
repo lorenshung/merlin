@@ -21,9 +21,9 @@ from merlin.common.paths import out_dir
 from merlin.compile import model_execution_inputs as MI
 from merlin.compile.host_lane import require_host_isa_dts
 from merlin.mining import registry
-from merlin.runtime.boards import CONSOLE_HTIF, FLOW_BAREMETAL, load_boards
 from merlin.runtime.backends import spike as spike_backend
 from merlin.runtime.backends import spike_model
+from merlin.runtime.boards import CONSOLE_HTIF, FLOW_BAREMETAL, load_boards
 from merlin.targetgen.application_inventory import verify_capture_receipt
 
 
@@ -157,10 +157,19 @@ def compile_saved_model(
         "status": "failed",
         "scope": "one saved whole-model ELF; execution is not a Phase 0 release or static-routing proof",
         "execution_route": "host_baseline" if device is None else "device_requested_dispatch_unverified",
-        "inputs": {"capture": str(capture_path), "package": str(package_path), "board_catalog": str(catalog_path),
-                   "board": board, "dts": str(dts_path), "target": target, "run": run,
-                   "reference_file": reference_file, "rtl_facts": str(rtl_facts) if rtl_facts else None,
-                   "arena_mb": arena_mb, "timeout_s": timeout_s},
+        "inputs": {
+            "capture": str(capture_path),
+            "package": str(package_path),
+            "board_catalog": str(catalog_path),
+            "board": board,
+            "dts": str(dts_path),
+            "target": target,
+            "run": run,
+            "reference_file": reference_file,
+            "rtl_facts": str(rtl_facts) if rtl_facts else None,
+            "arena_mb": arena_mb,
+            "timeout_s": timeout_s,
+        },
     }
     try:
         capture_tree = MI.strict_tree_sha256(capture_path)
@@ -188,8 +197,11 @@ def compile_saved_model(
             raise BaremetalModelError("host package must declare exactly one -march")
         if device is not None:
             device_tree = MI.strict_tree_sha256(device_path)
-            receipt["inputs"]["device"] = {"name": device.device, "package": str(device.package_dir),
-                                           "package_tree": device_tree}
+            receipt["inputs"]["device"] = {
+                "name": device.device,
+                "package": str(device.package_dir),
+                "package_tree": device_tree,
+            }
         else:
             device_tree = None
         native = run in {"gsim", "verilator"}
@@ -206,21 +218,33 @@ def compile_saved_model(
             backend, selection, revalidate, prepare = None, None, None, None
         if run == "spike" and not spike_backend.available():
             raise BaremetalModelError("Spike simulator or bare-metal cross-toolchain is unavailable")
-        receipt["inputs"].update({
-            "capture_tree": capture_tree, "package_tree": package_tree,
-            "board_catalog_sha256": catalog_sha, "dts_sha256": dts_sha,
-            "host_isa": isas[0], "simulator_isa": marches[0],
-            "golden_sha256": _sha(capture_path / reference_file) if golden is not None else None,
-        })
+        receipt["inputs"].update(
+            {
+                "capture_tree": capture_tree,
+                "package_tree": package_tree,
+                "board_catalog_sha256": catalog_sha,
+                "dts_sha256": dts_sha,
+                "host_isa": isas[0],
+                "simulator_isa": marches[0],
+                "golden_sha256": _sha(capture_path / reference_file) if golden is not None else None,
+            }
+        )
         if selection is not None:
             receipt["engine_selection"] = selection
         built = spike_model.build(
-            capture_path, output_path / "build", arena_mb=arena_mb,
-            dram_base=selected.dram_base, dram_bytes=selected.dram_bytes,
-            code_reserve=selected.code_reserve, int8_compute=bool(pkg.is_int8),
-            backend=pkg.backend, rvv_schedule=pkg.schedule_text if pkg.backend == "rvv" else None,
-            cflags_override=list(pkg.cflags), vlen=selected.vlen if pkg.backend == "rvv" else None,
-            console=selected.console, device=device,
+            capture_path,
+            output_path / "build",
+            arena_mb=arena_mb,
+            dram_base=selected.dram_base,
+            dram_bytes=selected.dram_bytes,
+            code_reserve=selected.code_reserve,
+            int8_compute=bool(pkg.is_int8),
+            backend=pkg.backend,
+            rvv_schedule=pkg.schedule_text if pkg.backend == "rvv" else None,
+            cflags_override=list(pkg.cflags),
+            vlen=selected.vlen if pkg.backend == "rvv" else None,
+            console=selected.console,
+            device=device,
         )
         if not isinstance(built.get("build_hash"), str) or not built["build_hash"]:
             raise BaremetalModelError("bare-metal build returned no citable build hash")
@@ -230,9 +254,13 @@ def compile_saved_model(
         elf_sha = _sha(elf)
         arch = spike_model.arch_extensions(elf)
         MI.require_elf_isa_supported(arch, isas[0], require_scalar=False)
-        receipt["output"] = {"elf": str(elf), "elf_sha256": elf_sha, "elf_arch_extensions": arch,
-                             "build_hash": built.get("build_hash"),
-                             "matrix_routing": built.get("matrix_routing")}
+        receipt["output"] = {
+            "elf": str(elf),
+            "elf_sha256": elf_sha,
+            "elf_arch_extensions": arch,
+            "build_hash": built.get("build_hash"),
+            "matrix_routing": built.get("matrix_routing"),
+        }
         from merlin.llvmlower.device_offload import SIDECAR_NAME
 
         sidecar = output_path / "build" / SIDECAR_NAME
@@ -245,8 +273,14 @@ def compile_saved_model(
         if run != "none":
             if backend is None:
                 try:
-                    result = spike_model.run(elf, harts=selected.harts, mem_bytes=built["mem_bytes"],
-                                             isa=marches[0], timeout=timeout_s, vlen=built.get("vlen"))
+                    result = spike_model.run(
+                        elf,
+                        harts=selected.harts,
+                        mem_bytes=built["mem_bytes"],
+                        isa=marches[0],
+                        timeout=timeout_s,
+                        vlen=built.get("vlen"),
+                    )
                 except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
                     _retain_simulator_failure_output(exc, output_path, receipt)
                     raise
@@ -257,8 +291,9 @@ def compile_saved_model(
                 if run == "gsim":
                     if not callable(prepare):
                         raise BaremetalModelError("GSIM backend has no byte-bound command preparer")
-                    command = prepare(elf, expected_elf_sha256=elf_sha,
-                                      expected_engine_provenance=selection["citation"])
+                    command = prepare(
+                        elf, expected_elf_sha256=elf_sha, expected_engine_provenance=selection["citation"]
+                    )
                     command_check = command.revalidate()
                     command_evidence = command.to_evidence()
                     receipt["output"]["native_command"] = {
@@ -302,10 +337,16 @@ def compile_saved_model(
                 raise BaremetalModelError(
                     f"whole-model output differs from declared reference in {mismatched} elements"
                 )
-            receipt["output"].update({"elements": int(golden.size), "mismatched_elements": 0,
-                                       "metrics": observed.get("metrics") or {}})
-        if (MI.strict_tree_sha256(capture_path) != capture_tree or MI.strict_tree_sha256(package_path) != package_tree
-                or _sha(catalog_path) != catalog_sha or _sha(dts_path) != dts_sha or _sha(elf) != elf_sha):
+            receipt["output"].update(
+                {"elements": int(golden.size), "mismatched_elements": 0, "metrics": observed.get("metrics") or {}}
+            )
+        if (
+            MI.strict_tree_sha256(capture_path) != capture_tree
+            or MI.strict_tree_sha256(package_path) != package_tree
+            or _sha(catalog_path) != catalog_sha
+            or _sha(dts_path) != dts_sha
+            or _sha(elf) != elf_sha
+        ):
             raise BaremetalModelError("an input or linked ELF changed during compilation/execution")
         if device is not None and MI.strict_tree_sha256(device_path) != device_tree:
             raise BaremetalModelError("selected device package changed during compilation/execution")

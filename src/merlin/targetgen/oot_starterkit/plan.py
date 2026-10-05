@@ -64,8 +64,11 @@ def source_operation_inventory(source: bytes | str) -> dict[str, Any]:
     """Inventory exact UTF-8 source bytes, including direct initialization operations."""
     raw = source.encode("utf-8") if isinstance(source, str) else source
     entry, block, operations, returned = _parsed_source(raw)
-    owners = {value: {"op_index": i, "result_index": j}
-              for i, op in enumerate(operations) for j, value in enumerate(op.results)}
+    owners = {
+        value: {"op_index": i, "result_index": j}
+        for i, op in enumerate(operations)
+        for j, value in enumerate(op.results)
+    }
     owners.update({value: {"arg_index": i} for i, value in enumerate(block.args)})
 
     def value_record(value):
@@ -73,18 +76,22 @@ def source_operation_inventory(source: bytes | str) -> dict[str, Any]:
 
     rows = []
     for i, op in enumerate(operations):
-        rows.append({
-            "source_op_index": i,
-            "operation": op.name if op.name != "builtin.unregistered" else
-                (_attribute_text(op, "op_name__") or op.name),
-            "region_id": _attribute_text(op, "prov.region_id"),
-            "operands": [value_record(value) for value in op.operands],
-            "results": [_tensor_type(value) for value in op.results],
-        })
+        rows.append(
+            {
+                "source_op_index": i,
+                "operation": op.name
+                if op.name != "builtin.unregistered"
+                else (_attribute_text(op, "op_name__") or op.name),
+                "region_id": _attribute_text(op, "prov.region_id"),
+                "operands": [value_record(value) for value in op.operands],
+                "results": [_tensor_type(value) for value in op.results],
+            }
+        )
     return {
         "schema": "mixed_source_operation_inventory_v1",
         "source_sha256": hashlib.sha256(raw).hexdigest(),
-        "entry": entry, "source_op_count": len(rows),
+        "entry": entry,
+        "source_op_count": len(rows),
         "arguments": [_tensor_type(value) for value in block.args],
         "operations": rows,
         "returns": [value_record(value) for value in returned.operands],
@@ -97,12 +104,15 @@ def _plan_shape_problems(plan: Mapping[str, Any]) -> list[str]:
     except ImportError as exc:
         raise RuntimeError("mixed-program plan validation requires jsonschema") from exc
     schema = json.loads(data_path("contract", "schemas", "mixed_program_plan.schema.json").read_text())
-    return [f"plan schema {e.json_path}: {e.message}"
-            for e in sorted(Draft202012Validator(schema).iter_errors(plan), key=lambda e: e.json_path)]
+    return [
+        f"plan schema {e.json_path}: {e.message}"
+        for e in sorted(Draft202012Validator(schema).iter_errors(plan), key=lambda e: e.json_path)
+    ]
 
 
-def _source_plan_problems(inventory: Mapping[str, Any], command_buffer: Mapping[str, Any],
-                          plan: Mapping[str, Any]) -> list[str]:
+def _source_plan_problems(
+    inventory: Mapping[str, Any], command_buffer: Mapping[str, Any], plan: Mapping[str, Any]
+) -> list[str]:
     problems: list[str] = []
     if plan["source_sha256"] != inventory["source_sha256"]:
         problems.append("plan source_sha256 differs from exact source bytes")
@@ -124,9 +134,13 @@ def _source_plan_problems(inventory: Mapping[str, Any], command_buffer: Mapping[
             else:
                 owned[index] = ident
         if "source_region_ids" in row:
-            actual = sorted({inventory["operations"][index]["region_id"]
-                             for index in row["source_op_indices"] if index < nops
-                             and inventory["operations"][index]["region_id"] is not None})
+            actual = sorted(
+                {
+                    inventory["operations"][index]["region_id"]
+                    for index in row["source_op_indices"]
+                    if index < nops and inventory["operations"][index]["region_id"] is not None
+                }
+            )
             if sorted(row["source_region_ids"]) != actual:
                 problems.append(f"task {ident} region IDs differ from owned source operations")
         start, end = row["instruction_start"], row["instruction_end"]
@@ -149,8 +163,12 @@ def _source_plan_problems(inventory: Mapping[str, Any], command_buffer: Mapping[
         elif end > start:
             ranges.append((start, end))
     ranges.sort()
-    if (not ranges or ranges[0][0] != 0 or ranges[-1][1] != plan["schedule_instruction_count"]
-            or any(left[1] != right[0] for left, right in zip(ranges, ranges[1:]))):
+    if (
+        not ranges
+        or ranges[0][0] != 0
+        or ranges[-1][1] != plan["schedule_instruction_count"]
+        or any(left[1] != right[0] for left, right in zip(ranges, ranges[1:]))
+    ):
         problems.append("task and wrapper ranges do not partition scheduled instructions")
 
     tensors = command_buffer.get("tensors")
@@ -189,22 +207,28 @@ def _source_plan_problems(inventory: Mapping[str, Any], command_buffer: Mapping[
         spec = tensors[name]
         encoding = encodings.get(name)
         if encoding is not None:
-            shape_ok = (isinstance(encoding, Mapping) and
-                        encoding.get("schema") == "grouped_axes_storage_v1" and
-                        encoding.get("logical_shape") == typ.get("shape") and
-                        isinstance(spec, Mapping) and
-                        encoding.get("physical_shape") == spec.get("shape") and
-                        encoding.get("dtype") == typ.get("dtype") == spec.get("dtype"))
+            shape_ok = (
+                isinstance(encoding, Mapping)
+                and encoding.get("schema") == "grouped_axes_storage_v1"
+                and encoding.get("logical_shape") == typ.get("shape")
+                and isinstance(spec, Mapping)
+                and encoding.get("physical_shape") == spec.get("shape")
+                and encoding.get("dtype") == typ.get("dtype") == spec.get("dtype")
+            )
         else:
-            shape_ok = ("shape" in typ and isinstance(spec, Mapping) and
-                        spec.get("shape") == typ["shape"] and spec.get("dtype") == typ["dtype"])
+            shape_ok = (
+                "shape" in typ
+                and isinstance(spec, Mapping)
+                and spec.get("shape") == typ["shape"]
+                and spec.get("dtype") == typ["dtype"]
+            )
         if not shape_ok:
             problems.append(f"tensor {name!r} changes source shape or dtype")
         if key in values and values[key] != name:
             problems.append(f"source value {key} has conflicting tensor bindings")
         values[key] = name
 
-    for i, name in enumerate(plan["entry_bindings"][:len(inventory["arguments"])]):
+    for i, name in enumerate(plan["entry_bindings"][: len(inventory["arguments"])]):
         bind(("arg", i), name, inventory["arguments"][i])
     for row in plan["source_values"]:
         i, j = row["op_index"], row["result_index"]
@@ -217,18 +241,33 @@ def _source_plan_problems(inventory: Mapping[str, Any], command_buffer: Mapping[
     else:
         for value, name in zip(inventory["returns"], plan["output_bindings"], strict=True):
             source = value["source"]
-            key = (("arg", source["arg_index"]) if source and "arg_index" in source else
-                   ("op", source["op_index"], source["result_index"]) if source else None)
+            key = (
+                ("arg", source["arg_index"])
+                if source and "arg_index" in source
+                else ("op", source["op_index"], source["result_index"])
+                if source
+                else None
+            )
             if key is None or values.get(key) != name:
                 problems.append("output_bindings differ from actual source return order")
     temporary_names = set()
     for row in plan.get("compiler_temporaries", []):
         name, i, j = row["tensor"], row["source_op_index"], row["source_result_index"]
-        if name in values.values() or name in temporary_names or i >= nops or j >= len(inventory["operations"][i]["results"]):
+        if (
+            name in values.values()
+            or name in temporary_names
+            or i >= nops
+            or j >= len(inventory["operations"][i]["results"])
+        ):
             problems.append("compiler temporary lacks unique source-result provenance")
-        elif name not in names or not isinstance(tensors[name], Mapping) or (
-                tensors[name].get("role") != "intermediate" or
-                tensors[name].get("shape") != inventory["operations"][i]["results"][j].get("shape")):
+        elif (
+            name not in names
+            or not isinstance(tensors[name], Mapping)
+            or (
+                tensors[name].get("role") != "intermediate"
+                or tensors[name].get("shape") != inventory["operations"][i]["results"][j].get("shape")
+            )
+        ):
             problems.append(f"compiler temporary {name!r} lacks matching intermediate storage")
         temporary_names.add(name)
     if names != set(values.values()) | temporary_names:
@@ -290,8 +329,9 @@ def _lowered_task_problems(text: str, plan: Mapping[str, Any], command_buffer: M
     return problems
 
 
-def validate_mixed_program_plan(source: bytes | str, command_buffer: Mapping[str, Any],
-                                lowered_mlir: str | None = None) -> dict[str, Any]:
+def validate_mixed_program_plan(
+    source: bytes | str, command_buffer: Mapping[str, Any], lowered_mlir: str | None = None
+) -> dict[str, Any]:
     """Public preflight only; a successful result is never a grading certificate."""
     from xdsl.utils.exceptions import ParseError
 
@@ -309,8 +349,13 @@ def validate_mixed_program_plan(source: bytes | str, command_buffer: Mapping[str
             abi = command_buffer.get("kernel_abi")
             if lowered_mlir is not None and isinstance(abi, Mapping) and abi.get("kind") == "whole_program":
                 findings += _lowered_task_problems(lowered_mlir, plan, command_buffer)
-        return {"ok": not findings, "findings": findings, "source_sha256": inventory["source_sha256"],
-                "source_op_count": inventory["source_op_count"], "scope": "public structural preflight only"}
+        return {
+            "ok": not findings,
+            "findings": findings,
+            "source_sha256": inventory["source_sha256"],
+            "source_op_count": inventory["source_op_count"],
+            "scope": "public structural preflight only",
+        }
     except (ValueError, UnicodeError, ParseError) as exc:
         return {"ok": False, "findings": [f"invalid source or plan: {exc}"]}
 
@@ -329,8 +374,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.action == "inventory":
         result = source_operation_inventory(source)
     else:
-        result = validate_mixed_program_plan(source, json.loads(args.command_buffer.read_text()),
-                                             args.lowered_mlir.read_text() if args.lowered_mlir else None)
+        result = validate_mixed_program_plan(
+            source,
+            json.loads(args.command_buffer.read_text()),
+            args.lowered_mlir.read_text() if args.lowered_mlir else None,
+        )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if args.action == "inventory" or result["ok"] else 1
 

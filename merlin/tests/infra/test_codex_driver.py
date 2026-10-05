@@ -92,14 +92,21 @@ def _fake_codex(
         "        out = argv[i + 1]",
         "sys.stdin.read()",
         f"lines = json.load(open({str(stream_path)!r}))",
-        *([
-            f"calls = Path({str(tmp_path / 'fake_codex_calls.jsonl')!r})",
-            "attempt = len(calls.read_text().splitlines()) if calls.exists() else 0",
-            "with calls.open('a') as log: log.write(json.dumps(argv) + '\\n')",
-            "lines, attempt_rc = lines[min(attempt, len(lines) - 1)]",
-        ] if replies is not None else [f"attempt_rc = {exit_code}"]),
-        *([f"attempt_final = {finals!r}[min(attempt, {len(finals) - 1})]"]
-          if finals is not None else [f"attempt_final = {final!r}"]),
+        *(
+            [
+                f"calls = Path({str(tmp_path / 'fake_codex_calls.jsonl')!r})",
+                "attempt = len(calls.read_text().splitlines()) if calls.exists() else 0",
+                "with calls.open('a') as log: log.write(json.dumps(argv) + '\\n')",
+                "lines, attempt_rc = lines[min(attempt, len(lines) - 1)]",
+            ]
+            if replies is not None
+            else [f"attempt_rc = {exit_code}"]
+        ),
+        *(
+            [f"attempt_final = {finals!r}[min(attempt, {len(finals) - 1})]"]
+            if finals is not None
+            else [f"attempt_final = {final!r}"]
+        ),
         "for line in lines:",
         "    sys.stdout.write(json.dumps(line) + '\\n')",
         "    sys.stdout.flush()",
@@ -174,7 +181,16 @@ def _run(
     run_dir = tmp_path / "run"
     run_dir.mkdir(exist_ok=True)
     rc, tpath = CA.run_round(
-        ws, run_dir, "claude-opus-4-8", {}, None, sandbox, 0, timeout, effort="low", codex_binary=script,
+        ws,
+        run_dir,
+        "claude-opus-4-8",
+        {},
+        None,
+        sandbox,
+        0,
+        timeout,
+        effort="low",
+        codex_binary=script,
         continue_session=continue_session,
     )
     records = [json.loads(line) for line in tpath.read_text().splitlines() if line.strip()]
@@ -215,8 +231,12 @@ def test_inside_bwrap_codex_enforces_the_frozen_candidate_profile():
     assert "--strict-config" in cmd
     assert 'default_permissions="merlin-candidate"' in cmd
     resumed = CA.build_resume_cmd(
-        Path("/ws"), model="m", effort="", final_path=Path("/f"),
-        sandbox="bwrap", thread_id="session-id",
+        Path("/ws"),
+        model="m",
+        effort="",
+        final_path=Path("/f"),
+        sandbox="bwrap",
+        thread_id="session-id",
     )
     assert "--dangerously-bypass-approvals-and-sandbox" not in resumed
     assert "--sandbox" not in resumed
@@ -227,8 +247,15 @@ def test_inside_bwrap_codex_enforces_the_frozen_candidate_profile():
 def test_bridged_codex_cannot_inherit_proxy_secret_into_untrusted_bwrap(tmp_path):
     with pytest.raises(RuntimeError, match="host-side proxy credential broker"):
         CA.run_round(
-            tmp_path / "workspace", tmp_path / "run", "nemotron", {}, None,
-            "bwrap", 0, 1, effective_model="nemotron",
+            tmp_path / "workspace",
+            tmp_path / "run",
+            "nemotron",
+            {},
+            None,
+            "bwrap",
+            0,
+            1,
+            effective_model="nemotron",
         )
 
 
@@ -409,9 +436,7 @@ def test_capacity_interruption_resumes_same_thread_and_retains_failed_usage(tmp_
 @pytest.mark.parametrize("failure", ["capacity", "unauthorized"])
 def test_capacity_retry_is_bounded_and_other_failures_are_not_retried(tmp_path, monkeypatch, failure):
     refusal = _stream(failed=True)
-    refusal[-1]["error"]["message"] = (
-        "Selected model is at capacity." if failure == "capacity" else "unauthorized"
-    )
+    refusal[-1]["error"]["message"] = "Selected model is at capacity." if failure == "capacity" else "unauthorized"
     script = _fake_codex(tmp_path, [], replies=[(refusal, 1)])
     monkeypatch.setattr(CA.time, "sleep", lambda seconds: None)
     rc, _, records = _run(tmp_path, script, continue_session=True, timeout=300)
@@ -432,8 +457,9 @@ def test_capacity_refusal_respects_session_and_budget_boundaries(tmp_path, bound
     elif boundary == "completed":
         refusal.insert(-1, {"type": "turn.completed", "usage": _REAL_USAGE})
     script = _fake_codex(tmp_path, [], replies=[(refusal, 1), (_stream(), 0)])
-    rc, _, _ = _run(tmp_path, script, timeout=60 if boundary == "short_budget" else 300,
-                    continue_session=boundary != "rounds")
+    rc, _, _ = _run(
+        tmp_path, script, timeout=60 if boundary == "short_budget" else 300, continue_session=boundary != "rounds"
+    )
     assert rc != 0 and len((tmp_path / "fake_codex_calls.jsonl").read_text().splitlines()) == 1
 
 
@@ -579,9 +605,7 @@ def test_the_isolated_home_holds_a_frozen_config_and_no_credential(tmp_path):
     assert "trust_level" not in config and "[projects" not in config
 
     assert info["auth_copied"] is False
-    assert not (tmp_path / "home" / "auth.json").exists(), (
-        "the credential is bind-mounted, never written into the tree"
-    )
+    assert not (tmp_path / "home" / "auth.json").exists(), "the credential is bind-mounted, never written into the tree"
     assert info["config_sha256"] and info["isolated_from_real_home"] is True
 
     bridged = CA.prepare_codex_home(tmp_path / "bridged", model="nemotron", effort="high")
@@ -614,7 +638,13 @@ def test_native_candidate_profile_blocks_synthetic_auth_inside_outer_bwrap(tmp_p
 
     rounds = tmp_path / "rounds"
     CA._preflight_candidate_sandbox(
-        ws, home, str(shutil.which("codex")), {}, sandbox_command, rounds, 0,
+        ws,
+        home,
+        str(shutil.which("codex")),
+        {},
+        sandbox_command,
+        rounds,
+        0,
     )
     # If the exact deny is removed, the broader /scratch read grant exposes the
     # dummy file. The mandatory preflight must refuse this weaker profile.
@@ -622,7 +652,13 @@ def test_native_candidate_profile_blocks_synthetic_auth_inside_outer_bwrap(tmp_p
     config.write_text(config.read_text().replace(f'{json.dumps(str(home))} = "deny"\n', ""))
     with pytest.raises(RuntimeError, match="preflight failed"):
         CA._preflight_candidate_sandbox(
-            ws, home, str(shutil.which("codex")), {}, sandbox_command, rounds, 1,
+            ws,
+            home,
+            str(shutil.which("codex")),
+            {},
+            sandbox_command,
+            rounds,
+            1,
         )
 
 
@@ -638,7 +674,8 @@ def test_native_candidate_cannot_reach_parent_open_auth_or_relogin(tmp_path, mon
     host_login = subprocess.run(
         ["codex", "login", "status"],
         env={**os.environ, "CODEX_HOME": str(fake_real)},
-        capture_output=True, timeout=10,
+        capture_output=True,
+        timeout=10,
     )
     assert host_login.returncode == 0, "synthetic login must be a valid negative control"
     monkeypatch.setattr(CA, "real_codex_home", lambda: fake_real)
@@ -647,7 +684,7 @@ def test_native_candidate_cannot_reach_parent_open_auth_or_relogin(tmp_path, mon
     home = tmp_path / "isolated-codex"
     CA.prepare_codex_home(home, model="gpt-5.6-sol", effort="high")
 
-    candidate = '''
+    candidate = """
 import ctypes, json, os, subprocess
 pid = int(os.environ["HOLDER_PID"])
 fd = int(os.environ["HOLDER_FD"])
@@ -673,8 +710,8 @@ result = {"parent_visible": os.path.exists(f"/proc/{pid}"),
           "fd_readable": fd_readable, "memory_readable": memory_readable,
           "ptrace_attached": ptrace_attached, "nested_codex_logged_in": login.returncode == 0}
 print(json.dumps(result))
-'''
-    holder = '''
+"""
+    holder = """
 import ctypes, json, os, subprocess, sys
 fd = os.open(os.environ["CODEX_HOME"] + "/auth.json", os.O_RDONLY)
 buffer = ctypes.create_string_buffer(b"SYNTHETIC-PARENT-MEMORY-ONLY")
@@ -688,12 +725,15 @@ child = subprocess.run(command, env=env, capture_output=True, text=True, timeout
 sys.stdout.write(child.stdout)
 sys.stderr.write(child.stderr)
 sys.exit(child.returncode)
-'''
+"""
     prefix = BW.base_argv(ws, {}, repo=tmp_path, include_claude_home=False, inherit_environment=False)
     prefix += CA.codex_runtime_binds(home)
     direct = subprocess.run(
         prefix + ["/usr/bin/python3", "-c", holder, str(ws), candidate, "direct"],
-        cwd=ws, capture_output=True, text=True, timeout=30,
+        cwd=ws,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     assert direct.returncode == 0, direct.stderr[-1200:]
     direct_result = json.loads(direct.stdout.strip().splitlines()[-1])

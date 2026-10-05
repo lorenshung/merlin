@@ -111,8 +111,14 @@ CALLER_DECLINED = "caller_declined"
 
 from .whole_model_capsule import (
     ModelCapsule as ModelCapsule,
+)
+from .whole_model_capsule import (
     WholeModelBuildError as WholeModelBuildError,
+)
+from .whole_model_capsule import (
     _model_golden as _model_golden,
+)
+from .whole_model_capsule import (
     load_model_capsule as load_model_capsule,
 )
 

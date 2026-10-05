@@ -421,6 +421,7 @@ def test_matching_storage_manifest_cannot_retype_actual_compute_operands():
     module = _parse(_PRE_INTEGER_PREPARATION)
     op = next(op for op in module.walk() if op.name == "linalg.matmul")
     from xdsl.dialects.builtin import StringAttr
+
     op.attributes["prov.fqn"] = StringAttr("layer")
     regions = model_coverage.regions_from_module(module, precisions={"layer": "int8"})
     contraction = next(region for region in regions if region.family == "contraction")
@@ -434,15 +435,23 @@ def test_matching_storage_manifest_cannot_retype_actual_compute_operands():
 def test_incomplete_source_weight_cannot_become_a_declared_int8_pair():
     dtype = _admitted_dtype("contraction")
     region = E.RegionDescriptor(
-        op="matmul", family="contraction", in_dtype=dtype, weight_dtype=dtype,
-        captured_input_formats=(dtype, None), m=4, k=8, n=2,
+        op="matmul",
+        family="contraction",
+        in_dtype=dtype,
+        weight_dtype=dtype,
+        captured_input_formats=(dtype, None),
+        m=4,
+        k=8,
+        n=2,
     )
     verdict = E.is_eligible(region, E.capability_map_for_target(_TARGET))
     assert not verdict.eligible and verdict.undetermined
     seen = []
+
     def observe(demands):
         seen.extend(demands)
         return _nothing_routes(demands)
+
     report = PC.census([region], _TARGET, router=observe, datapath=dtype)
     assert seen[0].captured_input_formats == (dtype, None)
     assert not seen[0].source_formats_complete

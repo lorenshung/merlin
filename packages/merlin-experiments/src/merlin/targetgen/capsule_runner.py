@@ -554,9 +554,7 @@ def simulator_adapter(sim: str, target: str, selection: dict | None = None) -> C
         if sim == "gsim":
             from . import gsim_emulator
 
-            exact, reason = gsim_emulator.selected_firrtl_status(
-                target, env_var=getattr(backend, "GSIM_EMU_ENV", None)
-            )
+            exact, reason = gsim_emulator.selected_firrtl_status(target, env_var=getattr(backend, "GSIM_EMU_ENV", None))
             if not exact:
                 raise OracleUnavailable(reason)
         res = oot_compile.run_on_oracle(cb, llvm_text, simulator=sim, target=target, workdir=workdir, timeout=timeout)
@@ -3240,7 +3238,13 @@ def _source_region_execution_verdict(certificate: dict) -> tuple[str, str, str] 
             "the exact source-operation inventory did not reconcile with the runtime outline; "
             "a completed call for one operation cannot certify other operations in its region",
         )
-    if not isinstance(host, list) or not isinstance(mixed, list) or not isinstance(accel, list) or not isinstance(total, int) or total <= 0:
+    if (
+        not isinstance(host, list)
+        or not isinstance(mixed, list)
+        or not isinstance(accel, list)
+        or not isinstance(total, int)
+        or total <= 0
+    ):
         return (
             "incomplete",
             "SOURCE_REGION_EXECUTION_NOT_MEASURED",
@@ -4536,33 +4540,41 @@ def run_capsule(
             # submitted whole-program artifact. Collect candidate evidence
             # independently and keep the old verdict as a diagnostic.
             from .native_model_execution import (
-                _digest, execute_candidate_model, independent_frozen_source_eligibility,
+                _digest,
+                execute_candidate_model,
+                independent_frozen_source_eligibility,
             )
 
             result["legacy_model_diagnostic"] = {
-                "status": result.get("status"), "failure": result.get("failure"),
+                "status": result.get("status"),
+                "failure": result.get("failure"),
                 "scope": "runner-owned host-dispatch graph and separately compiled tiles",
             }
             try:
                 result["candidate_source_eligibility"] = independent_frozen_source_eligibility(
-                    capsule, target=eff_target)
+                    capsule, target=eff_target
+                )
             except Exception as exc:  # noqa: BLE001 -- source census failure cannot stop diagnostics
                 result["candidate_source_eligibility_failure"] = {
-                    "type": type(exc).__name__, "detail": str(exc)[:2000],
+                    "type": type(exc).__name__,
+                    "detail": str(exc)[:2000],
                 }
 
             try:
                 _, candidate_cb, candidate_llvm = run_entrypoints(
-                    pkg, package_dir, capsule, paths, contract=contract,
-                    timeout=timeout, fourth_output_name=cfg.fourth_output_name,
+                    pkg,
+                    package_dir,
+                    capsule,
+                    paths,
+                    contract=contract,
+                    timeout=timeout,
+                    fourth_output_name=cfg.fourth_output_name,
                 )
-                source_interface = Path(capsule["__dir__"]) / capsule.get(
-                    "interface_mlir", "capsule.interface.mlir")
+                source_interface = Path(capsule["__dir__"]) / capsule.get("interface_mlir", "capsule.interface.mlir")
                 if source_interface.is_symlink():
                     raise ValueError("frozen model interface cannot be a symlink")
                 result["candidate_emission"] = {
-                    "capsule_declaration": _digest(
-                        (Path(capsule["__dir__"]) / "capsule.yaml").resolve(strict=True)),
+                    "capsule_declaration": _digest((Path(capsule["__dir__"]) / "capsule.yaml").resolve(strict=True)),
                     "source_interface": _digest(source_interface.resolve(strict=True)),
                     "command_buffer": _digest((paths.generated / "command_buffer.json").resolve(strict=True)),
                     "lowered_mlir": _digest((paths.generated / cfg.fourth_output_name).resolve(strict=True)),
@@ -4570,9 +4582,12 @@ def run_capsule(
                 with _model_runtime_bundle(capsule, timeout=timeout) as (bundle, provenance, verify):
                     result["candidate_capture"] = provenance
                     result["candidate_native_execution"] = execute_candidate_model(
-                        command_buffer=candidate_cb, lowered_mlir_text=candidate_llvm,
-                        capsule_dir=capsule["__dir__"], capture_bundle=bundle,
-                        target=eff_target, out_dir=paths.run_path / "candidate_native",
+                        command_buffer=candidate_cb,
+                        lowered_mlir_text=candidate_llvm,
+                        capsule_dir=capsule["__dir__"],
+                        capture_bundle=bundle,
+                        target=eff_target,
+                        out_dir=paths.run_path / "candidate_native",
                         simulator=os.environ.get("MERLIN_MODEL_NATIVE_SIMULATOR") or None,
                         rtl_facts=os.environ.get("MERLIN_MODEL_NATIVE_RTL_FACTS") or None,
                         board_config=os.environ.get("MERLIN_MODEL_NATIVE_BOARD_CONFIG") or None,
@@ -4581,7 +4596,8 @@ def run_capsule(
                     verify()
             except Exception as exc:  # noqa: BLE001 -- absence cannot inherit the host-dispatch pass
                 result["candidate_emission_failure"] = {
-                    "type": type(exc).__name__, "detail": str(exc)[:2000],
+                    "type": type(exc).__name__,
+                    "detail": str(exc)[:2000],
                 }
             from .capsule_grade import enforce_model_execution_check
 
@@ -4689,8 +4705,8 @@ def run_capsule(
         # own declaration. A backend that declares no readouts leaves the check UNAVAILABLE rather
         # than refusing every capsule -- an undeclared target is not a broken one, and the reason is
         # recorded so "not checked" never reads as "checked and fine".
-        from merlin.verify import epilogue_applicability as _EPI
         from merlin.targetgen.readout_facet import epilogue_stage_routes
+        from merlin.verify import epilogue_applicability as _EPI
 
         _declared = _readout_epilogue_capabilities(eff_target)
         if _declared:
@@ -5941,8 +5957,9 @@ def run_suite(*args, **kwargs) -> list[dict]:
     the right place to open the scope — a library function opening one would cache beyond the event it
     describes.
     """
-    from ..common import provenance as PROV
     import tempfile as _tf
+
+    from ..common import provenance as PROV
 
     with PROV.observation_scope():
         # Freeze every model BEFORE package build and the op phase. A staged
@@ -5980,9 +5997,7 @@ def _pin_model_capsule(capsule: dict, destination: Path) -> dict:
         if lexical.is_symlink() or not canonical.is_relative_to(source):
             raise ValueError(f"model capsule snapshot source is a symlink or escapes its directory: {lexical}")
 
-    content_store.place_tree(
-        source, destination, content_store.store_root(), observe=require_local_source
-    )
+    content_store.place_tree(source, destination, content_store.store_root(), observe=require_local_source)
     # We own these directory entries, not the shared file inodes. Keeping the
     # private directories owner-writable lets cleanup unlink read-only assets
     # without tempfile's permission repair chmodding a shared store object.

@@ -12,12 +12,13 @@ everything target-specific is resolved through it: the harness ABI from the targ
 (:mod:`.harness_abi`), and the harness renderer, build recipe and oracle from its backend via
 :mod:`merlin.runtime.backends.base`. What remains here is orchestration — lower, render, link, run.
 """
+
 from __future__ import annotations
 
-import subprocess
-import tempfile
 import hashlib
 import json
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -52,14 +53,23 @@ def _module_target_abi(llvm_text: str) -> str | None:
 
 def _abi_receipt(workdir: Path, obj: Path, abi: str) -> None:
     """Bind the object to the ABI selected for its harness in a paired build."""
-    (workdir / "kernel.abi.json").write_text(json.dumps({
-        "schema": "merlin_kernel_abi_v1", "abi": abi,
-        "object_sha256": hashlib.sha256(obj.read_bytes()).hexdigest(),
-    }, sort_keys=True) + "\n", encoding="utf-8")
+    (workdir / "kernel.abi.json").write_text(
+        json.dumps(
+            {
+                "schema": "merlin_kernel_abi_v1",
+                "abi": abi,
+                "object_sha256": hashlib.sha256(obj.read_bytes()).hexdigest(),
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
-def llvm_mlir_to_object(lowered_mlir_text: str, workdir: Path, *, target: str | None = None,
-                        _build_service=None) -> Path:
+def llvm_mlir_to_object(
+    lowered_mlir_text: str, workdir: Path, *, target: str | None = None, _build_service=None
+) -> Path:
     """Lower package-emitted llvm-dialect MLIR to an rv64 object (.o) for ``target``'s own ISA.
 
     THE MARCH IS THE TARGET'S, NOT A DEFAULT. This object and the runner-owned harness are linked into
@@ -74,11 +84,13 @@ def llvm_mlir_to_object(lowered_mlir_text: str, workdir: Path, *, target: str | 
     ``target=None`` keeps the previous default, for callers with no target in hand.
     """
     from merlin.llvmlower import codegen
+
     workdir.mkdir(parents=True, exist_ok=True)
     extra: tuple[str, ...] = ()
     recipe = None
     if _build_service is not None:
         from .build_service import BuildOnlyService
+
         if type(_build_service) is not BuildOnlyService:
             raise ValueError("build-only override requires an exact host service")
         _build_service.verify(target)
@@ -90,7 +102,9 @@ def llvm_mlir_to_object(lowered_mlir_text: str, workdir: Path, *, target: str | 
         from xdsl.context import Context
         from xdsl.dialects import builtin, llvm
         from xdsl.parser import Parser
+
         from merlin.llvmlower import toolchain
+
         # xDSL's LLVM schema need not model every metadata attribute or
         # property emitted by the selected stock LLVM installation. Retain
         # those bytes and leave semantic verification to mlir-translate below;
@@ -99,26 +113,35 @@ def llvm_mlir_to_object(lowered_mlir_text: str, workdir: Path, *, target: str | 
         context.load_dialect(builtin.Builtin)
         context.load_dialect(llvm.LLVM)
         module = Parser(context, lowered_mlir_text).parse_module()
+
         def operation_name(op):
             if op.name == "builtin.unregistered":
                 return op.op_name.data
             return op.name
-        if any(operation_name(op) != "builtin.module" and not operation_name(op).startswith("llvm.")
-               for op in module.walk()):
+
+        if any(
+            operation_name(op) != "builtin.module" and not operation_name(op).startswith("llvm.")
+            for op in module.walk()
+        ):
             raise ValueError("build-only translation requires a complete LLVM/Builtin module")
         source = workdir / "kernel.llvm.mlir"
         source.write_text(lowered_mlir_text, encoding="utf-8")
-        translated = subprocess.run([str(toolchain.mlir_translate()), "--mlir-to-llvmir", str(source),
-                                     "-o", str(workdir / "kernel.ll")], capture_output=True, text=True)
+        translated = subprocess.run(
+            [str(toolchain.mlir_translate()), "--mlir-to-llvmir", str(source), "-o", str(workdir / "kernel.ll")],
+            capture_output=True,
+            text=True,
+        )
         if translated.returncode:
             raise _build_service.recipe.error_cls("LLVM translation failed:\n" + translated.stderr[-2000:])
         _build_service.verify(target)
     else:
         from merlin.llvmlower.pipeline import lower_to_llvm_ir
+
         ll = lower_to_llvm_ir(lowered_mlir_text, workdir=workdir)
         (workdir / "kernel.ll").write_text(ll, encoding="utf-8")
         if target is not None:
             from merlin.runtime.backends import base as _backends
+
             recipe = _backends.harness_build_recipe(target).with_effective_abi()
             extra = (recipe.march(), recipe.mabi())
     llvm_path, object_path = workdir / "kernel.ll", workdir / "kernel.o"
@@ -134,23 +157,23 @@ def llvm_mlir_to_object(lowered_mlir_text: str, workdir: Path, *, target: str | 
     if declared is not None and declared != abi:
         raise recipe.error_cls(
             f"LLVM module target-abi {declared!r} conflicts with selected build recipe ABI {abi!r}; "
-            "the candidate IR cannot be rewritten to match the harness")
+            "the candidate IR cannot be rewritten to match the harness"
+        )
 
     # ``clang -fstack-usage`` emits a deterministic sibling of the named object.  Remove a previous
     # report first so a compiler invocation that unexpectedly stops producing the sidecar cannot be
     # admitted using stale evidence from an earlier object in a reused work directory.
     policy = recipe.require_kernel_stack_frame()
-    compiled = Path(codegen.compile_ll(
-        llvm_path, object_path, "riscv", extra_flags=(*extra, "-fstack-usage")))
-    from .stack_usage import (StackFramePreflightError, _sha256 as _stack_sha,
-                              measure_entrypoint, write_receipt)
+    compiled = Path(codegen.compile_ll(llvm_path, object_path, "riscv", extra_flags=(*extra, "-fstack-usage")))
+    from .stack_usage import StackFramePreflightError, measure_entrypoint, write_receipt
+    from .stack_usage import _sha256 as _stack_sha
+
     try:
         if compiled != object_path or compiled.is_symlink() or not compiled.is_file():
-            raise StackFramePreflightError(
-                f"compiler produced no regular object at the requested path {object_path}")
+            raise StackFramePreflightError(f"compiler produced no regular object at the requested path {object_path}")
         measurement = measure_entrypoint(
-            report_path, llvm_path=llvm_path, entry_symbol=policy.entry_symbol,
-            max_static_bytes=policy.max_static_bytes)
+            report_path, llvm_path=llvm_path, entry_symbol=policy.entry_symbol, max_static_bytes=policy.max_static_bytes
+        )
     except StackFramePreflightError as exc:
         # REPAIR ON A PROVEN FAILURE, never pre-emptively. The host lane hoists one `alloca` per
         # intermediate into the entry frame with no reuse, so the frame scales with the model:
@@ -160,34 +183,50 @@ def llvm_mlir_to_object(lowered_mlir_text: str, workdir: Path, *, target: str | 
         # It runs ONLY after the emitted frame has been measured over budget, so a build that
         # already fits is byte-identical to before -- which is what keeps the one bundle known to
         # have run correctly on hardware a valid acceptance test for this path.
-        repaired = _repair_oversized_frame(
-            llvm_path, object_path, recipe=recipe, policy=policy, extra=extra)
+        repaired = _repair_oversized_frame(llvm_path, object_path, recipe=recipe, policy=policy, extra=extra)
         if repaired is None:
             write_receipt(
-                receipt_path, status="rejected", llvm_path=llvm_path, object_path=compiled,
-                report_path=report_path, entry_symbol=policy.entry_symbol,
-                max_static_bytes=policy.max_static_bytes, measurement=exc.measurement,
-                diagnostic=str(exc))
+                receipt_path,
+                status="rejected",
+                llvm_path=llvm_path,
+                object_path=compiled,
+                report_path=report_path,
+                entry_symbol=policy.entry_symbol,
+                max_static_bytes=policy.max_static_bytes,
+                measurement=exc.measurement,
+                diagnostic=str(exc),
+            )
             raise recipe.error_cls("kernel stack-frame preflight failed: " + str(exc)) from exc
         compiled, measurement, arena_llvm, arena_su, arena_report = repaired
         write_receipt(
-            receipt_path, status="passed", llvm_path=arena_llvm, object_path=compiled,
-            report_path=arena_su, entry_symbol=policy.entry_symbol,
-            max_static_bytes=policy.max_static_bytes, measurement=measurement,
+            receipt_path,
+            status="passed",
+            llvm_path=arena_llvm,
+            object_path=compiled,
+            report_path=arena_su,
+            entry_symbol=policy.entry_symbol,
+            max_static_bytes=policy.max_static_bytes,
+            measurement=measurement,
             repair={
                 "transform": "stack_arena_bind",
-                "frame_bytes_before": (exc.measurement.frame_bytes
-                                       if exc.measurement is not None else None),
+                "frame_bytes_before": (exc.measurement.frame_bytes if exc.measurement is not None else None),
                 "diagnostic_before": str(exc),
                 "emitted_llvm_ir_sha256": _stack_sha(llvm_path),
                 **arena_report,
-            })
+            },
+        )
         _abi_receipt(workdir, compiled, abi)
         return compiled
     write_receipt(
-        receipt_path, status="passed", llvm_path=llvm_path, object_path=compiled,
-        report_path=report_path, entry_symbol=policy.entry_symbol,
-        max_static_bytes=policy.max_static_bytes, measurement=measurement)
+        receipt_path,
+        status="passed",
+        llvm_path=llvm_path,
+        object_path=compiled,
+        report_path=report_path,
+        entry_symbol=policy.entry_symbol,
+        max_static_bytes=policy.max_static_bytes,
+        measurement=measurement,
+    )
     _abi_receipt(workdir, compiled, abi)
     return compiled
 
@@ -207,10 +246,10 @@ def _repair_oversized_frame(llvm_path, object_path, *, recipe, policy, extra):
     from merlin.llvmlower.stack_arena import StackArenaError, bind_stack_arena
 
     from .stack_usage import StackFramePreflightError, measure_entrypoint
+
     llvm_path, object_path = Path(llvm_path), Path(object_path)
     try:
-        rewritten, report = bind_stack_arena(llvm_path.read_text(encoding="utf-8"),
-                                             entry_symbol=policy.entry_symbol)
+        rewritten, report = bind_stack_arena(llvm_path.read_text(encoding="utf-8"), entry_symbol=policy.entry_symbol)
     except StackArenaError:
         return None
     if not report.n_bound:
@@ -221,12 +260,11 @@ def _repair_oversized_frame(llvm_path, object_path, *, recipe, policy, extra):
     arena_llvm.write_text(rewritten, encoding="utf-8")
     for stale in (arena_object, arena_su):
         stale.unlink(missing_ok=True)
-    rebuilt = Path(_codegen.compile_ll(arena_llvm, arena_object, "riscv",
-                                       extra_flags=(*extra, "-fstack-usage")))
+    rebuilt = Path(_codegen.compile_ll(arena_llvm, arena_object, "riscv", extra_flags=(*extra, "-fstack-usage")))
     try:
         measurement = measure_entrypoint(
-            arena_su, llvm_path=arena_llvm, entry_symbol=policy.entry_symbol,
-            max_static_bytes=policy.max_static_bytes)
+            arena_su, llvm_path=arena_llvm, entry_symbol=policy.entry_symbol, max_static_bytes=policy.max_static_bytes
+        )
     except StackFramePreflightError:
         return None
     # The arena's bytes are NOT free: they are `.bss` in the same image, and a large one narrows the
@@ -254,19 +292,21 @@ def _recorded_operands(cb: dict[str, Any]) -> dict[str, list] | None:
     """
     from merlin.runtime.backends import base as _backends
     from merlin.runtime.commandbuffer import declared_output_dtypes
+
     recorded = cb.get("canonical_inputs") or {}
     tensors = cb.get("tensors") or {}
     if not recorded:
         return None
     dtypes = declared_output_dtypes(cb)
     outputs = [n for n, s in tensors.items() if (s or {}).get("role") == "output"]
-    whole_program = ((cb.get("kernel_abi") or {}).get("kind") == "whole_program")
-    if (not whole_program
-            and (not outputs
-                 or not all(_backends.float_format_of(dtypes.get(n, "")) for n in outputs))):
+    whole_program = (cb.get("kernel_abi") or {}).get("kind") == "whole_program"
+    if not whole_program and (not outputs or not all(_backends.float_format_of(dtypes.get(n, "")) for n in outputs)):
         return None
-    return {name: spec["values"] for name, spec in recorded.items()
-            if isinstance(spec, dict) and spec.get("values") is not None and name in tensors} or None
+    return {
+        name: spec["values"]
+        for name, spec in recorded.items()
+        if isinstance(spec, dict) and spec.get("values") is not None and name in tensors
+    } or None
 
 
 def _explicit_prepack_inputs(inputs, authorizations) -> None:
@@ -276,6 +316,7 @@ def _explicit_prepack_inputs(inputs, authorizations) -> None:
     if not isinstance(authorizations, Mapping) or not isinstance(inputs, Mapping):
         raise ValueError("host prepack authorization requires explicit logical inputs")
     from merlin.runtime.prepack_authority import HostPrepackAuthorization
+
     if any(type(grant) is not HostPrepackAuthorization for grant in authorizations.values()):
         raise ValueError("prepack requires an exact host authorization object")
     if set(authorizations) - set(inputs):
@@ -287,25 +328,35 @@ def _strict_warm_profile(profile, cb=None):
     if profile is None:
         return None
     from merlin.perf.warm_profile_harness import require_strict_final_warm_profile
+
     validated = require_strict_final_warm_profile(profile)
     if cb is not None and (cb.get("kernel_abi") or {}).get("kind") != "whole_program":
-        raise ValueError(
-            "strict final warm profiling requires an explicit whole-program kernel ABI")
+        raise ValueError("strict final warm profiling requires an explicit whole-program kernel ABI")
     return validated
 
 
 def _accepts_keyword(callable_object, name: str) -> bool:
     """Whether a renderer explicitly accepts ``name`` or a generic keyword set."""
     import inspect
+
     parameters = inspect.signature(callable_object).parameters
-    return (name in parameters or any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters.values()))
+    return name in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
 
 
-def link_elf(cb: dict[str, Any], obj: Path, workdir: Path, *, target: str,
-             inputs: dict | None = None, prepack_authorizations=None, _compact_caller=None,
-             _build_service=None, warm_profile=None) -> Path:
+def link_elf(
+    cb: dict[str, Any],
+    obj: Path,
+    workdir: Path,
+    *,
+    target: str,
+    inputs: dict | None = None,
+    prepack_authorizations=None,
+    _compact_caller=None,
+    _build_service=None,
+    warm_profile=None,
+) -> Path:
     """Build the runner-owned harness from ``cb`` and link it with the package object -> ELF.
 
     Orchestration only: the harness TEXT comes from ``target``'s declared harness ABI and the BUILD
@@ -319,14 +370,19 @@ def link_elf(cb: dict[str, Any], obj: Path, workdir: Path, *, target: str,
     warm_profile = _strict_warm_profile(warm_profile, cb)
     if _build_service is not None:
         from .build_service import BuildOnlyService
-        if (type(_build_service) is not BuildOnlyService or _compact_caller is not None
-                or prepack_authorizations is not None):
+
+        if (
+            type(_build_service) is not BuildOnlyService
+            or _compact_caller is not None
+            or prepack_authorizations is not None
+        ):
             raise ValueError("build-only service cannot mix caller authority paths")
         _build_service.verify(target)
         recipe = _build_service.recipe.with_effective_abi()
         _render = _build_service.render
     else:
         from merlin.runtime.backends import base as _backends
+
         recipe = _backends.harness_build_recipe(target).with_effective_abi()
         _render = _backends.harness_renderer(target)
     abi_receipt = workdir / "kernel.abi.json"
@@ -335,9 +391,11 @@ def link_elf(cb: dict[str, Any], obj: Path, workdir: Path, *, target: str,
             record = json.loads(abi_receipt.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise recipe.error_cls("kernel ABI receipt is unreadable") from exc
-        if (record.get("schema") != "merlin_kernel_abi_v1"
-                or record.get("abi") != recipe.mabi().partition("=")[2]
-                or record.get("object_sha256") != hashlib.sha256(Path(obj).read_bytes()).hexdigest()):
+        if (
+            record.get("schema") != "merlin_kernel_abi_v1"
+            or record.get("abi") != recipe.mabi().partition("=")[2]
+            or record.get("object_sha256") != hashlib.sha256(Path(obj).read_bytes()).hexdigest()
+        ):
             raise recipe.error_cls("kernel ABI receipt does not match selected harness ABI and object")
     # An opt-in renderer may return large constant operands as exact bytes.
     # The target still decides the tensor layout; the runner owns sidecar
@@ -355,12 +413,12 @@ def link_elf(cb: dict[str, Any], obj: Path, workdir: Path, *, target: str,
         if inputs is not None or prepack_authorizations is not None:
             raise ValueError("prepared compact caller cannot be combined with other input sources")
         import hashlib
+
         compact_object_sha = hashlib.sha256(Path(obj).read_bytes()).hexdigest()
         kwargs = {"target": target, "compact_caller": _compact_caller}
         if warm_profile is not None:
             if not _accepts_keyword(_render, "warm_profile"):
-                raise NotImplementedError(
-                    "backend compact harness cannot consume a strict warm profile")
+                raise NotImplementedError("backend compact harness cannot consume a strict warm profile")
             kwargs["warm_profile"] = warm_profile
         harness = _render(cb, **kwargs, **blob_kwargs)
     else:
@@ -374,12 +432,12 @@ def link_elf(cb: dict[str, Any], obj: Path, workdir: Path, *, target: str,
             raise NotImplementedError(
                 f"backend for target {target!r} declares a render_harness that cannot take `inputs`, so "
                 f"the device would compute on name-materialized operands while the reference and the "
-                f"simulator use the injected ones. Add an `inputs` parameter to its render_harness.")
+                f"simulator use the injected ones. Add an `inputs` parameter to its render_harness."
+            )
         if prepack_authorizations is not None:
             if not _accepts_keyword(_render, "prepack_authorizations"):
                 raise NotImplementedError("backend harness cannot consume host prepack authorization")
-            kwargs = {"target": target, "inputs": inputs,
-                      "prepack_authorizations": prepack_authorizations}
+            kwargs = {"target": target, "inputs": inputs, "prepack_authorizations": prepack_authorizations}
         else:
             kwargs = {"target": target, "inputs": inputs}
         if warm_profile is not None:
@@ -400,8 +458,10 @@ def link_elf(cb: dict[str, Any], obj: Path, workdir: Path, *, target: str,
     # script's proven section layout but replacing its BAKED origin — so the base is a HW fact, not a
     # hardcoded literal in a vendored file.
     from ..runtime_build import derived_link_script
+
     link_ld = derived_link_script(recipe.load_address, recipe.link_script, Path(workdir))
     from ..elf_lanes import PACKAGE_ELF_NAME
+
     elf = workdir / PACKAGE_ELF_NAME
     # REPRODUCIBLE BUILD, in two phases. A single compile+link invocation lets the driver name its
     # intermediate objects `ccXXXXXX.o`, and those random names are recorded in the ELF as STT_FILE
@@ -450,8 +510,8 @@ def link_elf(cb: dict[str, Any], obj: Path, workdir: Path, *, target: str,
         # so the question is what the environment failed to supply, not what the code mentions. A
         # symbol with no declared shim re-raises with the original error, so an unexplained missing
         # symbol is still a build failure and not a silently stubbed one.
-        from merlin.targetgen.bundle_harness import (BundleHarnessError, render_freestanding_support,
-                                                     unresolved_symbols)
+        from merlin.targetgen.bundle_harness import BundleHarnessError, render_freestanding_support, unresolved_symbols
+
         missing = unresolved_symbols(proc.stderr)
         support = ""
         if missing:
@@ -464,36 +524,46 @@ def link_elf(cb: dict[str, Any], obj: Path, workdir: Path, *, target: str,
         shim_c = workdir / "freestanding_support.c"
         shim_c.write_text(support, encoding="utf-8")
         shim_o = workdir / "freestanding_support.o"
-        step = subprocess.run(recipe.compile_command(source=shim_c, output=shim_o),
-                              capture_output=True, text=True)
+        step = subprocess.run(recipe.compile_command(source=shim_c, output=shim_o), capture_output=True, text=True)
         if step.returncode != 0:
-            raise recipe.error_cls(
-                f"freestanding support for {list(missing)} did not compile:\n{step.stderr[-2000:]}")
+            raise recipe.error_cls(f"freestanding support for {list(missing)} did not compile:\n{step.stderr[-2000:]}")
         # Appended, so the order of every pre-existing object -- which decides placement within a
         # section and therefore cycles -- is unchanged.
         retry = recipe.link_command(objects=[*objects, shim_o], output=elf, link_script=link_ld)
         proc = subprocess.run(retry, capture_output=True, text=True)
         if proc.returncode != 0:
-            raise recipe.error_cls(
-                f"link failed after supplying freestanding {list(missing)}:\n"
-                f"{proc.stderr[-2000:]}")
+            raise recipe.error_cls(f"link failed after supplying freestanding {list(missing)}:\n{proc.stderr[-2000:]}")
     if _compact_caller is not None:
         verify = getattr(_backends.get_backend(target), "verify_compact_caller_link", None)
         if verify is None:
             raise NotImplementedError("target cannot verify linked compact caller allocations")
-        verify(cb, _compact_caller, object_path=obj, elf_path=elf, workdir=workdir,
-               expected_object_sha256=compact_object_sha)
+        verify(
+            cb,
+            _compact_caller,
+            object_path=obj,
+            elf_path=elf,
+            workdir=workdir,
+            expected_object_sha256=compact_object_sha,
+        )
     if _build_service is not None:
         _build_service.verify(target)
     return elf
 
 
-def compile_lowered_to_elf(cb: dict[str, Any], lowered_mlir_text: str,
-                           workdir: str | Path | None = None, *, target: str,
-                           inputs: dict | None = None, prepack_authorizations=None,
-                           compact_contract=None, logical_payloads=None,
-                           compact_storage_limit_bytes: int = 64 * 1024,
-                           _build_service=None, warm_profile=None) -> Path:
+def compile_lowered_to_elf(
+    cb: dict[str, Any],
+    lowered_mlir_text: str,
+    workdir: str | Path | None = None,
+    *,
+    target: str,
+    inputs: dict | None = None,
+    prepack_authorizations=None,
+    compact_contract=None,
+    logical_payloads=None,
+    compact_storage_limit_bytes: int = 64 * 1024,
+    _build_service=None,
+    warm_profile=None,
+) -> Path:
     """Full package-lowered-MLIR -> rv64 ELF (object + runner harness + link).
 
     The result is a pure function of its inputs, so an unchanged capsule is not recompiled: see
@@ -521,9 +591,14 @@ def compile_lowered_to_elf(cb: dict[str, Any], lowered_mlir_text: str,
     warm_profile = _strict_warm_profile(warm_profile, cb)
     if _build_service is not None:
         from .build_service import BuildOnlyService
-        if (type(_build_service) is not BuildOnlyService or inputs is None
-                or prepack_authorizations is not None or compact_contract is not None
-                or logical_payloads is not None):
+
+        if (
+            type(_build_service) is not BuildOnlyService
+            or inputs is None
+            or prepack_authorizations is not None
+            or compact_contract is not None
+            or logical_payloads is not None
+        ):
             raise ValueError("build-only service requires explicit inputs and no alternate caller authority")
         _build_service.verify(target)
         work = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="oot_build_only_"))
@@ -533,8 +608,10 @@ def compile_lowered_to_elf(cb: dict[str, Any], lowered_mlir_text: str,
             kwargs["warm_profile"] = warm_profile
         return link_elf(cb, obj, work, **kwargs)
     from merlin.runtime.backends import base as _backends
+
     from .. import build_cache as _bc
     from ..elf_lanes import PACKAGE_ELF_NAME
+
     work = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="oot_compile_"))
     if compact_contract is not None or logical_payloads is not None:
         if compact_contract is None or logical_payloads is None or inputs is not None:
@@ -542,9 +619,15 @@ def compile_lowered_to_elf(cb: dict[str, Any], lowered_mlir_text: str,
         prepare = getattr(_backends.get_backend(target), "prepare_compact_caller", None)
         if prepare is None:
             raise NotImplementedError("target has no verified compact caller preparation")
-        prepared = prepare(cb, compact_contract, logical_payloads, lowered_mlir_text=lowered_mlir_text,
-            workdir=work, prepack_authorizations=prepack_authorizations,
-            max_storage_bytes=compact_storage_limit_bytes)
+        prepared = prepare(
+            cb,
+            compact_contract,
+            logical_payloads,
+            lowered_mlir_text=lowered_mlir_text,
+            workdir=work,
+            prepack_authorizations=prepack_authorizations,
+            max_storage_bytes=compact_storage_limit_bytes,
+        )
         # Never reuse/publish a cached build: the ABI authority and exact logical
         # byte/prepack grants are not part of the legacy ELF cache key.
         obj = llvm_mlir_to_object(lowered_mlir_text, work, target=target)
@@ -558,8 +641,7 @@ def compile_lowered_to_elf(cb: dict[str, Any], lowered_mlir_text: str,
         # authorization policy is itself part of cache admission, never reuse or
         # publish such a build. The absent-authorization path remains unchanged.
         obj = llvm_mlir_to_object(lowered_mlir_text, work, target=target)
-        kwargs = {"target": target, "inputs": inputs,
-                  "prepack_authorizations": prepack_authorizations}
+        kwargs = {"target": target, "inputs": inputs, "prepack_authorizations": prepack_authorizations}
         if warm_profile is not None:
             kwargs["warm_profile"] = warm_profile
         return link_elf(cb, obj, work, **kwargs)
@@ -568,20 +650,23 @@ def compile_lowered_to_elf(cb: dict[str, Any], lowered_mlir_text: str,
         # serialized into the command buffer.  Never let the legacy build key
         # reuse/publish a cold or differently instrumented ELF under this opt-in.
         obj = llvm_mlir_to_object(lowered_mlir_text, work, target=target)
-        return link_elf(cb, obj, work, target=target, inputs=inputs,
-                        warm_profile=warm_profile)
+        return link_elf(cb, obj, work, target=target, inputs=inputs, warm_profile=warm_profile)
     # Coalesced ONCE. The harness embeds these operands, so a key computed from the caller's argument
     # while the build used the recorded ones would key two different executables the same way.
     inputs = inputs or _recorded_operands(cb) or None
     try:
-        key = _bc.build_identity(target=target, lowered_mlir_text=lowered_mlir_text, cb=cb,
-                                 inputs=inputs,
-                                 recipe=_backends.harness_build_recipe(target).with_effective_abi())
+        key = _bc.build_identity(
+            target=target,
+            lowered_mlir_text=lowered_mlir_text,
+            cb=cb,
+            inputs=inputs,
+            recipe=_backends.harness_build_recipe(target).with_effective_abi(),
+        )
         # The paired ABI check is new build semantics. Do not restore an older cache entry that
         # predates it, even when an explicitly declared -mabi made the old recipe token identical.
         if key is not None:
             key = hashlib.sha256(("paired-kernel-abi-v1:" + key).encode("ascii")).hexdigest()
-    except Exception:                    # noqa: BLE001 -- an unkeyable build is an ordinary build
+    except Exception:  # noqa: BLE001 -- an unkeyable build is an ordinary build
         key = None
     cached = _bc.reuse(work, key, PACKAGE_ELF_NAME)
     if cached is not None:
@@ -608,6 +693,7 @@ def simulator_provenance(backend, simulator: str) -> dict[str, Any] | None:
     entry. Never raises — provenance that cannot be established is recorded as absent.
     """
     from pathlib import Path as _Path
+
     rec: dict[str, Any] = {"engine": simulator}
     try:
         getter = getattr(backend, f"{simulator}_path", None)
@@ -616,6 +702,7 @@ def simulator_provenance(backend, simulator: str) -> dict[str, Any] | None:
             rec["binary"] = str(binary)
             if binary.is_file():
                 from merlin.common import provenance as _prov
+
                 rec["sha256"] = _prov.file_digest(binary)
         status = getattr(backend, f"{simulator}_status", None)
         if callable(status):
@@ -626,8 +713,9 @@ def simulator_provenance(backend, simulator: str) -> dict[str, Any] | None:
     return rec if len(rec) > 1 else None
 
 
-def _counter_observations(console: str, *, target: str, simulator: str, cycles: int | None,
-                          oracle: Any) -> "tuple[list[dict] | None, dict | None]":
+def _counter_observations(
+    console: str, *, target: str, simulator: str, cycles: int | None, oracle: Any
+) -> "tuple[list[dict] | None, dict | None]":
     """``(timing_observations, timing_capability)`` a bracketed run earned, or ``(None, None)``.
 
     THE HOP THAT WAS MISSING. The bracket emitter, the console parser, the wire contract and every
@@ -647,17 +735,19 @@ def _counter_observations(console: str, *, target: str, simulator: str, cycles: 
     and the positive case silently never fired. Each refusal below is a specific, reachable condition.
     """
     if not isinstance(oracle, Mapping) or oracle.get("derived_from_rtl") is not True:
-        return None, None                      # a model's counters describe a different machine
-    from merlin.perf import hw_counters, observations as _observations
+        return None, None  # a model's counters describe a different machine
+    from merlin.perf import hw_counters
+    from merlin.perf import observations as _observations
+
     readings = hw_counters.parse_counter_output(console)
     if not readings:
-        return None, None                      # unbracketed: byte-identical to before
+        return None, None  # unbracketed: byte-identical to before
     discovery = hw_counters.counters_for_target(target)
     if discovery.get("status") != "derived":
-        return None, None                      # no counter set derived from this target's own header
+        return None, None  # no counter set derived from this target's own header
     measured_schema = hw_counters.parse_counter_schema(console)
     if measured_schema is not None and measured_schema != discovery.get("header_sha256"):
-        return None, None                      # the ELF was bracketed against a DIFFERENT schema
+        return None, None  # the ELF was bracketed against a DIFFERENT schema
     # An ABSENT schema line is UNKNOWN, not a mismatch -- a real bracketed run need not emit one, and
     # refusing on its absence would refuse every such run. What actually binds the readings to this
     # header is the coverage check below: the reading set must contain every combination the header
@@ -666,15 +756,20 @@ def _counter_observations(console: str, *, target: str, simulator: str, cycles: 
     occupancy = hw_counters.derive_occupancy_counters(header)
     required = set(occupancy.by_combination.values())
     if not required or not required <= set(readings):
-        return None, None                      # a partial combination set is a lower bound, not a total
+        return None, None  # a partial combination set is a lower bound, not a total
     # The KIND of each engine is the TARGET's declaration: a kind cannot be read off a counter name,
     # and a consumer refuses a unit that lacks one. Absent when the backend declares none.
     from merlin.runtime.backends import base as _backends
+
     _kinds_reader = getattr(_backends.get_backend(target), "counter_engine_kinds", None)
     kinds = _kinds_reader() if callable(_kinds_reader) else None
     block = hw_counters.observations_from_counters(
-        readings, occupancy, total_cycles=cycles,
-        source=f"hardware combination counters ({discovery['header']})", kind_of=kinds)
+        readings,
+        occupancy,
+        total_cycles=cycles,
+        source=f"hardware combination counters ({discovery['header']})",
+        kind_of=kinds,
+    )
     validated = _observations.validate_block(block)
     if validated is None:
         return None, None
@@ -683,9 +778,16 @@ def _counter_observations(console: str, *, target: str, simulator: str, cycles: 
     return ([dict(o) for o in validated.observations] or None), validated.to_dict()
 
 
-def run_on_oracle(cb: dict[str, Any], lowered_mlir_text: str, *, simulator: str, target: str,
-                  workdir: str | Path | None = None, timeout: int = 600,
-                  inputs: dict | None = None) -> dict[str, Any]:
+def run_on_oracle(
+    cb: dict[str, Any],
+    lowered_mlir_text: str,
+    *,
+    simulator: str,
+    target: str,
+    workdir: str | Path | None = None,
+    timeout: int = 600,
+    inputs: dict | None = None,
+) -> dict[str, Any]:
     """Compile the package's lowered MLIR + run on ``simulator``; return outputs/metrics/console.
 
     ``timing`` splits the work: ``build_s`` (ELF compile/link) and ``sim_active_s`` (the simulator
@@ -693,7 +795,9 @@ def run_on_oracle(cb: dict[str, Any], lowered_mlir_text: str, *, simulator: str,
     spike/verilator — only VCS/FireSim adapters that route through a queue set it).
     """
     import time
+
     from merlin.runtime.backends import base as _backends
+
     backend = _backends.get_backend(target)
     work = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="oot_run_"))
     _t0 = time.perf_counter()
@@ -712,6 +816,7 @@ def run_on_oracle(cb: dict[str, Any], lowered_mlir_text: str, *, simulator: str,
     # integer-declared output and for a backend that already prints decimals, so every existing
     # readback is byte-identical.
     from merlin.runtime.commandbuffer import declared_output_dtypes
+
     outputs = _backends.decode_float_readback(outputs, declared_output_dtypes(cb))
     # WHICH BUILD of the simulator answered — recorded beside the oracle's declared kind, not inferred
     # afterwards. The tier record identifies the ELF, the RTL pins and the tools, and identified the one
@@ -722,15 +827,21 @@ def run_on_oracle(cb: dict[str, Any], lowered_mlir_text: str, *, simulator: str,
     _prov = simulator_provenance(backend, simulator)
     if _prov:
         _oracle["provenance"] = _prov
-    result = {"outputs": outputs, "raw_metrics": raw, "cycles": raw.get("cycles", 0),
-              "oracle": _oracle, "elf": str(elf), "console": console,
-              "timing": {"build_s": round(_t1 - _t0, 3), "sim_active_s": round(_t2 - _t1, 3),
-                         "oracle_wait_s": 0.0}}
+    result = {
+        "outputs": outputs,
+        "raw_metrics": raw,
+        "cycles": raw.get("cycles", 0),
+        "oracle": _oracle,
+        "elf": str(elf),
+        "console": console,
+        "timing": {"build_s": round(_t1 - _t0, 3), "sim_active_s": round(_t2 - _t1, 3), "oracle_wait_s": 0.0},
+    }
     # Counter markers are a target-independent wire protocol.  The event names/codes remain the
     # target's own: this boundary merely preserves readings the runner already paid to collect.  If
     # they exactly cover a structurally derived joint-occupancy block, compute eta; otherwise retain
     # the raw named readings without guessing what they mean.
     from merlin.perf import counter_trust, hw_counters
+
     readings = hw_counters.parse_counter_output(console)
     # An engine that SYNTHESISES its accelerator counters must not have its readings stamped
     # "measured". The eta path above already refuses a non-RTL oracle; this raw-readings path did
@@ -739,46 +850,64 @@ def run_on_oracle(cb: dict[str, Any], lowered_mlir_text: str, *, simulator: str,
     # absent field is distinguishable from one nobody collected.
     _trust = counter_trust.verdict_for(simulator)
     if readings and not _trust.trusted:
-        result["counters"] = {"status": "unknown", "readings": None,
-                              "why": _trust.refusal(), "engine": _trust.to_dict()}
+        result["counters"] = {
+            "status": "unknown",
+            "readings": None,
+            "why": _trust.refusal(),
+            "engine": _trust.to_dict(),
+        }
     elif readings:
         discovery = hw_counters.counters_for_target(target)
         measured_schema = hw_counters.parse_counter_schema(console)
-        report: dict[str, Any] = {"status": "measured", "readings": readings,
-                                  "discovery": discovery,
-                                  "measured_header_sha256": measured_schema}
-        if (discovery.get("status") == "derived"
-                and measured_schema == discovery.get("header_sha256")):
+        report: dict[str, Any] = {
+            "status": "measured",
+            "readings": readings,
+            "discovery": discovery,
+            "measured_header_sha256": measured_schema,
+        }
+        if discovery.get("status") == "derived" and measured_schema == discovery.get("header_sha256"):
             header = Path(discovery["header"]).read_text(encoding="utf-8", errors="replace")
             occupancy = hw_counters.derive_occupancy_counters(header)
             required = set(occupancy.by_combination.values())
             if required and required <= set(readings):
                 report["occupancy"] = occupancy.to_dict()
                 partition_reader = getattr(backend, "counter_partition_inputs", None)
-                partition = partition_reader() if callable(partition_reader) else {
-                    "status": "unknown",
-                    "why": "the target backend exposes no CIRCT counter-partition artifact",
-                }
+                partition = (
+                    partition_reader()
+                    if callable(partition_reader)
+                    else {
+                        "status": "unknown",
+                        "why": "the target backend exposes no CIRCT counter-partition artifact",
+                    }
+                )
                 if partition.get("status") == "available":
                     report["overlap"] = hw_counters.eta_from_counters(
-                        readings, occupancy, hw_text=partition["hw_text"],
-                        codes=hw_counters.event_codes(header), module=partition["module"],
+                        readings,
+                        occupancy,
+                        hw_text=partition["hw_text"],
+                        codes=hw_counters.event_codes(header),
+                        module=partition["module"],
                         counter_module=partition["counter_module"],
-                        measurement_cycles=raw.get("cycles"), source=partition["source"])
+                        measurement_cycles=raw.get("cycles"),
+                        source=partition["source"],
+                    )
                 else:
                     report["overlap"] = {
-                        "state": "unknown", "eta": None,
+                        "state": "unknown",
+                        "eta": None,
                         "why": partition.get("why", "CIRCT counter-partition proof is unavailable"),
                     }
         elif discovery.get("status") == "derived":
             report["status"] = "unknown"
             report["overlap"] = {
-                "state": "unknown", "eta": None,
+                "state": "unknown",
+                "eta": None,
                 "why": "the measured ELF counter-schema digest does not match current discovery",
             }
         result["counters"] = report
-    _obs, _cap = _counter_observations(console, target=target, simulator=simulator,
-                                       cycles=raw.get("cycles"), oracle=_oracle)
+    _obs, _cap = _counter_observations(
+        console, target=target, simulator=simulator, cycles=raw.get("cycles"), oracle=_oracle
+    )
     if _cap is not None:
         result["timing_observations"] = _obs
         result["timing_capability"] = _cap

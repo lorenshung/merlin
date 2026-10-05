@@ -30,7 +30,8 @@ def test_accumulator_boundary_uses_derived_rows_not_a_target_constant(monkeypatc
 
     monkeypatch.setattr(AS, "derive_address_space", lambda target: object())
     monkeypatch.setattr(
-        AS, "accumulator_kind",
+        AS,
+        "accumulator_kind",
         lambda space: AS.AccumulatorKind(AS.ADDRESSABLE, store=SimpleNamespace(name="result_store"), rows=96),
     )
     bound = CF._accumulator_output_boundary("any_target", 16)
@@ -64,7 +65,8 @@ def test_accumulator_boundary_coverage_reads_capsule_shapes(tmp_path):
     capsule = tmp_path / "member"
     capsule.mkdir()
     doc = {
-        "name": "boundary", "label": "public",
+        "name": "boundary",
+        "label": "public",
         "operation": {"op": "matmul", "attributes": {"lhs": "A", "weight": "W"}},
         "inputs": [
             {"name": "A", "shape": [16, 16], "dtype": "i8"},

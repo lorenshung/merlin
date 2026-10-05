@@ -76,11 +76,16 @@ def _decline_axis(desc, family: str, cap_map: dict, *, undetermined: bool) -> st
             return "dtype"
         if desc.weight_dtype is not None and not _el._dtype_ok(desc.weight_dtype, c.dtypes):
             return "dtype"
-        if c.family == "contraction" and desc.in_dtype is not None and desc.weight_dtype is not None \
-                and c.operand_pairs is not None and not any(
-                    _el._dtype_ok(desc.in_dtype, (left,)) and _el._dtype_ok(desc.weight_dtype, (right,))
-                    for left, right in c.operand_pairs
-                ):
+        if (
+            c.family == "contraction"
+            and desc.in_dtype is not None
+            and desc.weight_dtype is not None
+            and c.operand_pairs is not None
+            and not any(
+                _el._dtype_ok(desc.in_dtype, (left,)) and _el._dtype_ok(desc.weight_dtype, (right,))
+                for left, right in c.operand_pairs
+            )
+        ):
             return "dtype"
         if c.ranks and desc.rank is not None and desc.rank not in c.ranks:
             return "rank"

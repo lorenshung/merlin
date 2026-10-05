@@ -85,15 +85,24 @@ MACHINE_CANNOT_READ_OUT = "machine_cannot_read_out_the_models_accumulators"
 
 from .whole_model_dispatches import (
     BUFFER_ACCESS as BUFFER_ACCESS,
+)
+from .whole_model_dispatches import (
     DISPATCH_PREFIX,
     HOST_PREFIX,
     Dispatch,
     OpenModelError,
-    _committed_members as _committed_members,
-    _is_zero as _is_zero,
-    _shape_dtype as _shape_dtype,
     externalize_dispatches,
 )
+from .whole_model_dispatches import (
+    _committed_members as _committed_members,
+)
+from .whole_model_dispatches import (
+    _is_zero as _is_zero,
+)
+from .whole_model_dispatches import (
+    _shape_dtype as _shape_dtype,
+)
+
 
 def two_harts(machine: str, host_hart: int) -> dict[str, Any]:
     """The hart roles of a two-hart program for ``machine``, from its registry entry's declared harts:
@@ -198,7 +207,6 @@ def module_text(module) -> str:
     if not brace:
         raise OpenModelError("the printed module has no closing brace to place its declarations before")
     return head.rstrip() + "\n" + "\n".join(generic) + "\n}" + tail
-
 
 
 def _sha256(path: str | Path) -> str:

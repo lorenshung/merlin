@@ -1,6 +1,5 @@
 from merlin.targetgen.operand_sum_numeric import audit_i8_operand_sum
 
-
 _FACET = {
     "operand_sum": {
         "operands": 2,
@@ -32,6 +31,4 @@ def test_full_i8_domain_accepts_the_selected_gain_but_refuses_a_larger_gain():
 
 
 def test_missing_numeric_fact_cannot_be_treated_as_success():
-    assert audit_i8_operand_sum(
-        lhs_scale=1, rhs_scale=1, bound_lsb=2, relu=True, facet={}
-    )["status"] == "unknown"
+    assert audit_i8_operand_sum(lhs_scale=1, rhs_scale=1, bound_lsb=2, relu=True, facet={})["status"] == "unknown"

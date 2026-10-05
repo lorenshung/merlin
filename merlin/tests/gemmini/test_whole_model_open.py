@@ -1076,6 +1076,7 @@ def test_the_functional_arena_also_holds_what_the_dispatch_layer_allocates(tmp_p
     with pytest.raises(WO.OpenModelError, match="dispatches"):
         WO.functional_arena_bytes(tmp_path, ["main"], dispatches=[unknown])
 
+
 def test_lowering_identity_follows_the_lowering_source_and_its_switches(tmp_path):
     """A host object is reused only under the same lowering: an edited pass or prelude, or a flipped
     ``MERLIN_*`` switch the lowering reads, changes the identity its cache key carries."""

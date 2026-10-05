@@ -168,7 +168,10 @@ def quantization_policy_specs(selections: list[str]) -> dict[str, tuple[Path, st
 
 
 def _validate_capture_recipes(
-    captures: dict[str, Path], selected_recipe_hashes: set[str], *, software_spec_sha256: str | None = None,
+    captures: dict[str, Path],
+    selected_recipe_hashes: set[str],
+    *,
+    software_spec_sha256: str | None = None,
     policy_selections: dict[str, tuple[Path, str]] | None = None,
 ) -> dict[str, str]:
     """A realized quantized graph must use a recipe this provider actually derived."""
@@ -196,8 +199,10 @@ def _validate_capture_recipes(
                 "regenerate the capture from its selected Phase 0 recipe"
             )
         manifest_path = path.with_name("quantization-manifest.json")
-        if manifest_path.exists() or meta.get("quantization_manifest") is not None or (
-            b"prov.quantization_manifest_sha256" in path.read_bytes()
+        if (
+            manifest_path.exists()
+            or meta.get("quantization_manifest") is not None
+            or (b"prov.quantization_manifest_sha256" in path.read_bytes())
         ):
             verified = application_inventory.verify_capture_receipt(path)
             if verified["status"] != "verified_materialized":
@@ -209,10 +214,13 @@ def _validate_capture_recipes(
             if selected_policy is None:
                 raise ValueError(f"{label}: external quantization requires an independent policy selection")
             policy_path, policy_sha256 = selected_policy
-            if (policy_path.is_symlink() or any(parent.is_symlink() for parent in policy_path.parents)
-                    or not policy_path.is_file()
-                    or hashlib.sha256(policy_path.read_bytes()).hexdigest() != policy_sha256
-                    or manifest.get("policy_sha256") != policy_sha256):
+            if (
+                policy_path.is_symlink()
+                or any(parent.is_symlink() for parent in policy_path.parents)
+                or not policy_path.is_file()
+                or hashlib.sha256(policy_path.read_bytes()).hexdigest() != policy_sha256
+                or manifest.get("policy_sha256") != policy_sha256
+            ):
                 raise ValueError(f"{label}: selected quantization policy differs from capture manifest")
             selected_policies[label] = policy_sha256
     if set(policy_selections) != set(selected_policies):
@@ -369,7 +377,8 @@ def derive(
     )
     selected_recipes = capture_recipe_candidates(selected.software_spec, quantization)
     selected_policies = _validate_capture_recipes(
-        captures, {row["recipe"]["recipe_sha256"] for row in selected_recipes},
+        captures,
+        {row["recipe"]["recipe_sha256"] for row in selected_recipes},
         software_spec_sha256=hashlib.sha256(software.read_bytes()).hexdigest(),
         policy_selections=quantization_policies,
     )
@@ -489,9 +498,7 @@ def derive(
         )
     except corpus_synth.SynthesisError as exc:
         plan = {"status": "blocked", "reason": str(exc), "capsules": [], "provenance": {}}
-    source_entries, source_outputs = _materialized_iteration_capsules(
-        full, digest, loader_snapshots=loader_snapshots
-    )
+    source_entries, source_outputs = _materialized_iteration_capsules(full, digest, loader_snapshots=loader_snapshots)
     outputs.update(source_outputs)
     gradeable_sources = [entry for entry in source_entries if entry["materialized_capture"].get("loader_sha256")]
     if plan.get("status") != "blocked":
@@ -521,9 +528,7 @@ def derive(
         "scope": "full capture, not headline validation",
         "qualification": "host reference and source coverage only; target support and execution unverified",
         "gradeable_model_capsules": len(gradeable_sources),
-        "diagnostic_model_names": [
-            entry["name"] for entry in source_entries if entry not in gradeable_sources
-        ],
+        "diagnostic_model_names": [entry["name"] for entry in source_entries if entry not in gradeable_sources],
     }
     outputs["synthesis-plan.json"] = _json(plan)
     _materialize_evidence(root, outputs)
@@ -585,12 +590,12 @@ def derive(
         "admitted_cells": len(requirement.get("cells") or []),
         "declared_compute_units": len(selected.contract.get("compute_units") or []),
         "candidate_capsules": len(capsules),
-        "candidate_capsules_by_source_role": dict(sorted(Counter(
-            str(entry.get("source_role") or "unspecified") for entry in capsules
-        ).items())),
-        "candidate_screen_statuses": dict(sorted(Counter(
-            str(screen.get("status") or "unknown") for screen in screens
-        ).items())),
+        "candidate_capsules_by_source_role": dict(
+            sorted(Counter(str(entry.get("source_role") or "unspecified") for entry in capsules).items())
+        ),
+        "candidate_screen_statuses": dict(
+            sorted(Counter(str(screen.get("status") or "unknown") for screen in screens).items())
+        ),
         "synthesis_profile": "synthesis.yaml" if plan.get("status") != "blocked" else None,
         "application_operation_plan": {
             key: value for key, value in operation_plan.items() if key not in {"obligations", "missing_mapping"}

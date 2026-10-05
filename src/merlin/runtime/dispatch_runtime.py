@@ -1343,7 +1343,9 @@ def run_model(
         quant_select=quant_select,
     )
     outlined = outline_dispatches(module)
-    requested_audit = _os.environ.get("MERLIN_MODEL_TRANSFORM_AUDIT", "") if transform_audit is None else transform_audit
+    requested_audit = (
+        _os.environ.get("MERLIN_MODEL_TRANSFORM_AUDIT", "") if transform_audit is None else transform_audit
+    )
     transform_audit_index = record_model_transform_audit(
         model_source,
         Path(workdir),

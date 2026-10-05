@@ -68,9 +68,7 @@ def test_target_selected_verilator_contract_refuses_gsim_plan_before_execution()
         },
         "fit": {"dependent_metric": "verilator_L3_cycles"},
     }
-    member = SimpleNamespace(
-        family="PK", capsule="point", descriptor={"performance": {"acceptance": acceptance}}
-    )
+    member = SimpleNamespace(family="PK", capsule="point", descriptor={"performance": {"acceptance": acceptance}})
     inputs = SimpleNamespace(phase="tuning", corpus=SimpleNamespace(capsules=(member,)))
     with pytest.raises(PM.PC.CampaignGateError, match="frozen oracles select spike at L2 and verilator at L3"):
         PM.build_measurement_plan(inputs)

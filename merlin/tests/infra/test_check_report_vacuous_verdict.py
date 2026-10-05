@@ -75,12 +75,14 @@ def test_the_serialized_report_carries_the_run_counts_beside_the_verdict():
 
 def test_a_selected_provider_with_no_usable_facts_does_not_report_ok():
     """The target-specific provider may skip; core must not promote its empty result."""
-    provider = SimpleNamespace(screen=lambda *_args, **_kwargs: RC.CheckReport(
-        capsule=None,
-        source_trace=None,
-        rtl_facts={"from": "UNKNOWN"},
-        checks=[_check("skipped")],
-    ))
+    provider = SimpleNamespace(
+        screen=lambda *_args, **_kwargs: RC.CheckReport(
+            capsule=None,
+            source_trace=None,
+            rtl_facts={"from": "UNKNOWN"},
+            checks=[_check("skipped")],
+        )
+    )
     rep = RC.screen({"instructions": []}, None, None, target="synthetic", checks=provider)
     assert rep.verdict == RC.CheckReport.VACUOUS
     assert rep.n_skipped >= 1

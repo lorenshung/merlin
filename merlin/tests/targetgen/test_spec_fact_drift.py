@@ -35,10 +35,15 @@ _RAW_FACTS = {
         # A grid's shape alone no longer proves it computes MACs. Model the
         # corroborated extractor output so this fixture tests a licensed
         # contraction rather than relying on the former shape-only inference.
-        "arrays": [{
-            "name": "mesh", "rows": 4, "cols": 4,
-            "corroborated": True, "mac_idiom": {"muls": 1, "adds": 1},
-        }],
+        "arrays": [
+            {
+                "name": "mesh",
+                "rows": 4,
+                "cols": 4,
+                "corroborated": True,
+                "mac_idiom": {"muls": 1, "adds": 1},
+            }
+        ],
         "datapaths": [{"name": "input", "dtype": "i8"}],
         "interfaces": [{"name": "mesh_dma"}],
         "storage_datapaths": [{"name": "input", "dtype": "i8"}, {"name": "accumulator", "dtype": "i32"}],
@@ -397,10 +402,15 @@ def test_a_declaration_restriction_narrows_only_its_derived_form():
     spec["operations"].append(
         {"id": "sum_readout", "families": ["elementwise_map"], "hardware": "fused_operand_sum", "signature": {}}
     )
-    spec["restrictions"] = [{
-        "declaration": "sum_readout", "family": "elementwise_map", "field": "epilogues",
-        "values": ["bias_add"], "reason": "this composition has no reviewed bias witness",
-    }]
+    spec["restrictions"] = [
+        {
+            "declaration": "sum_readout",
+            "family": "elementwise_map",
+            "field": "epilogues",
+            "values": ["bias_add"],
+            "reason": "this composition has no reviewed bias witness",
+        }
+    ]
     facets = copy.deepcopy(_FACETS)
     facets[0]["readouts"][0]["applies"].append("bias_add")
     facets[0]["operand_sum"] = {"operands": 2, "operand_dtype": "i8"}
@@ -424,11 +434,15 @@ def test_contraction_seed_route_derives_fused_bias_without_operand_sum_bias():
     )
     facets = copy.deepcopy(_FACETS)
     facets[0]["operand_sum"] = {"operands": 2, "operand_dtype": "i8"}
-    facets[0]["stage_routes"] = [{
-        "stages": ["bias_add", "bias"], "site": "accumulator_seed",
-        "composed_with": "contraction", "readouts": ["i8", "i32"],
-        "evidence": "bias preloads the accumulator before contraction",
-    }]
+    facets[0]["stage_routes"] = [
+        {
+            "stages": ["bias_add", "bias"],
+            "site": "accumulator_seed",
+            "composed_with": "contraction",
+            "readouts": ["i8", "i32"],
+            "evidence": "bias preloads the accumulator before contraction",
+        }
+    ]
     facts = _facts(readout_facets=facets)
     fused = facts["forms"]["elementwise_map"]["fused"]
     after_sum = facts["forms"]["elementwise_map"]["fused_operand_sum"]
@@ -439,15 +453,23 @@ def test_contraction_seed_route_derives_fused_bias_without_operand_sum_bias():
     assert "bias_add" in rows["elementwise_map"]["signature"]["epilogues"]
     assert "bias_add" not in rows["sum_readout"]["signature"]["epilogues"]
     request = {
-        "family": "elementwise_map", "operand_dtype": "int8", "epilogues": ["bias_add"],
+        "family": "elementwise_map",
+        "operand_dtype": "int8",
+        "epilogues": ["bias_add"],
         "scale_granularity": "tensor",
     }
-    assert admit_operation(
-        resolved, "bias_add", {**request, "composed_with": ["contraction"]}, "fused_accelerator"
-    )["status"] == "admitted"
-    assert admit_operation(
-        resolved, "bias_add", {**request, "composed_with": ["residual_add"]}, "fused_accelerator"
-    )["status"] == "unsupported"
+    assert (
+        admit_operation(resolved, "bias_add", {**request, "composed_with": ["contraction"]}, "fused_accelerator")[
+            "status"
+        ]
+        == "admitted"
+    )
+    assert (
+        admit_operation(resolved, "bias_add", {**request, "composed_with": ["residual_add"]}, "fused_accelerator")[
+            "status"
+        ]
+        == "unsupported"
+    )
     assert admit_operation(resolved, "bias_add", request, "accelerator")["status"] == "unsupported"
 
 
