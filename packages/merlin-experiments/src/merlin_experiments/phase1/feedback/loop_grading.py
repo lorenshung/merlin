@@ -17,6 +17,7 @@ from pathlib import Path
 import yaml
 
 from merlin.targetgen.target_experiment import load_target_experiment
+from merlin_experiments.phase1 import oot_history as OH
 from merlin_experiments.phase1 import run_inputs as RI
 from merlin_experiments.phase1 import treatments as T
 from merlin_experiments.phase1.context import InvocationContext
@@ -164,6 +165,7 @@ def grade(
     # with PermissionError. Keep the numeric id for logs, but let the caller supply a run-wide scratch
     # identity that includes both the agent round and its tick.
     _key = scratch_key or (f"{rnd:02d}" if label == "round" else str(rnd))
+    oot_commit = None
     cand = run_dir / "_qa_work" / f"cand_{_key}" / "submission"
     if cand.exists():
         shutil.rmtree(cand.parent)
@@ -197,6 +199,8 @@ def grade(
     else:
         shutil.copytree(ws / "submission", cand, ignore=shutil.ignore_patterns("build", "__pycache__", ".git"))
         RI.strip_build_state(cand)  # clean, relocatable build per grade (abc9 L3-build bug)
+        # The harness commits exactly the bytes about to be graded; the agent never touches the repo.
+        oot_commit = OH.commit_graded(run_dir, cand, label=label, key=_key, sandbox_roots=(ws.parent,))
         public_root = inputs.public_root() if callable(inputs.public_root) else inputs.public_root
         out = run_dir / "qa_history" / f"verdict_{label}_{_key}.json"
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -286,7 +290,10 @@ def grade(
     qa_dir = ws / "qa"
     qa_dir.mkdir(exist_ok=True)
     write_verdict(qa_dir / "verdict.json", verdict)
-    return verdict
+    if oot_commit is None:
+        return verdict
+    OH.record_round(run_dir, oot_commit, label=label, key=_key, verdict=verdict)
+    return {**verdict, "oot_commit": oot_commit.commit}  # host-side round record; not the agent's copy
 
 
 # --- the agent must never run a whole turn BLIND -------------------------------------------------

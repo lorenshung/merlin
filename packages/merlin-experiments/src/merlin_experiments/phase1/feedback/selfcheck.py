@@ -13,7 +13,7 @@ here — only functional/numerical correctness.
   # fast functional iteration (seconds/capsule):
   python agent_selfcheck.py --sim spike --capsules all
   # the real barrier (cycle-accurate RTL; minutes/capsule; runs in parallel):
-  python agent_selfcheck.py --sim verilator --capsules all --workers 8
+  python agent_selfcheck.py --sim verilator --capsules all --workers 2
   # focus on the ones still failing:
   python agent_selfcheck.py --sim verilator --capsules B3_conv2d_im2col_i8,A1_mvin_mvout
 
@@ -109,18 +109,34 @@ def _public_capsules(context: InvocationContext) -> Path:
         from merlin_experiments.corpus.admission import public_capsules_for
 
         return public_capsules_for(load_target_experiment(context.descriptor))
-    except Exception:  # noqa: BLE001 — keep the self-check usable without a resolvable descriptor
+    except Exception as error:  # noqa: BLE001 — keep the self-check usable without a resolvable descriptor
         if context.harness is not None:
+            # Said out loud: the legacy set is older than the corpus, so a silent fallback reads as the
+            # package failing a capsule that is merely missing from it ("unknown capsule(s)").
+            print(
+                f"[selfcheck] public capsule set not derivable from {context.descriptor} "
+                f"({type(error).__name__}: {error}); falling back to the legacy committed set "
+                f"{context.harness / 'full_public_capsules'}",
+                file=sys.stderr,
+            )
             return context.harness / "full_public_capsules"
         raise
 
 
-def worker_command(context: InvocationContext, capsules_root: Path, contract: Path | None = None) -> list[str]:
+def worker_command(
+    context: InvocationContext,
+    capsules_root: Path,
+    contract: Path | None = None,
+    *,
+    rtl_facts: Path | None = None,
+) -> list[str]:
     """Fixed trusted worker; candidate request fields never select executable or resources."""
     command = [sys.executable, "-m", "merlin_experiments.phase1.feedback.selfcheck"]
     command += context_argv(context) + ["--capsules-root", str(capsules_root)]
     if contract is not None:
         command += ["--contract", str(contract)]
+    if rtl_facts is not None:
+        command += ["--rtl-facts", str(rtl_facts)]
     return command
 
 
@@ -397,6 +413,28 @@ def _log_telemetry(out: dict, capsules_arg: str) -> None:
         pass
 
 
+def _gated_without_result_rows(score: dict) -> list[dict]:
+    """Explain a model-only grade deferred by its op-evidence gate.
+
+    Gated models have score rows but no ``capsule_result.json`` because no model
+    was executed. That is an intentional non-verdict, not a lost harness output.
+    A mixed/unknown empty result set remains a harness fault.
+    """
+    rows = score.get("per_capsule") if isinstance(score, dict) else None
+    if not isinstance(rows, list) or not rows or not all(
+        isinstance(row, dict)
+        and row.get("kind") == "model"
+        and row.get("status") == "gated"
+        and isinstance(row.get("capsule"), str)
+        for row in rows
+    ):
+        return []
+    return [
+        {"capsule": row["capsule"], "pass": False, "status": "gated", "reason": row.get("gate_reason")}
+        for row in rows
+    ]
+
+
 def _shape_coverage(sub: Path, out_path: str, *, context: InvocationContext, contract: Path | None = None) -> int:
     """The agent-facing shape-coverage report (see ``--shape-coverage``).
 
@@ -627,6 +665,7 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
     add_context_arguments(ap)
     ap.add_argument("--capsules-root", type=Path, help="explicit public corpus, never rediscovered when supplied")
     ap.add_argument("--contract", type=Path, help="explicit grading contract root")
+    ap.add_argument("--rtl-facts", type=Path, help="Selected facts in the verified frozen input snapshot")
     ap.add_argument("--submission", default="submission", help="path to your package (with manifest.yaml)")
     # DEFAULTS TO THE CERTIFYING SIM, not the screen. The capsules declare a cycle-accurate cert
     # tier as mandatory, and this ladder runs cheapest-measured-first with fail-fast, so the
@@ -686,6 +725,10 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
         "toy shapes only. Honors --capsules: name one layer to check one layer.",
     )
     a = ap.parse_args(argv)
+    if a.rtl_facts is not None:
+        from ..frozen_facts import select
+
+        select(Path.cwd(), a.rtl_facts)
     context = resolve_context(a, ap, context)
     if a.sim is None:
         a.sim = _default_sim(context)
@@ -1047,9 +1090,33 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
             )
         rows.append(row)
     n = len(rows)
-    # n==0 here means the grade returned WITHOUT a top-level build failure yet wrote no capsule_result
-    # under cb_root — a harness/path problem (not "all clear", not a stubbed grader). Say so loudly with
-    # the paths, so it can never again be silently misread as an empty-but-fine verdict.
+    # A model-only request has no operation evidence to clear the capstone gate.
+    # The grade records that deferral in memory, not as a capsule_result.json.
+    # Name it before the genuinely unexpected no-results path below.
+    if n == 0:
+        gated = _gated_without_result_rows(_score)
+        if gated:
+            out = {
+                "sim": sim,
+                "barrier_tier": barrier_tier,
+                "n_passed": 0,
+                "n_capsules": len(gated),
+                "all_pass": False,
+                "per_capsule": gated,
+                "model_gate": True,
+                "scope": "subset" if want else "all",
+                "note": "MODEL GATE: these capstones were not executed because this request supplied no "
+                "passing operation suite. Run the admitted operation suite first; use --model-layers "
+                "for a separate functional layer diagnostic. A gated model is not a compiler pass.",
+            }
+            txt = json.dumps(out, indent=2)
+            print(txt)
+            if a.out:
+                Path(a.out).write_text(txt)
+            _log_telemetry(out, a.capsules)
+            return 1
+    # Otherwise no top-level build failure and no capsule_result is a harness/path
+    # problem. Never read it as an empty-but-clean verdict.
     if n == 0:
         out = {
             "sim": sim,
@@ -1149,7 +1216,7 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
     txt = json.dumps(out, indent=2)
     print(txt)
     if a.out:
-        Path(a.out).write_text(txt)
+        _atomic_json(Path(a.out), out)
     _log_telemetry(out, a.capsules)  # one operator-side dev-trajectory line (all verdicts, incl. degenerate)
     return 0 if out["all_pass"] else 1
 

@@ -274,18 +274,42 @@ def _per_capsule_from_results(runs_root: Path) -> dict[str, dict]:
         num = r.get("numeric") or {}
         fail = r.get("failure") or {}
         tiers = r.get("tiers") or {}
+        candidate_feedback = _candidate_native_feedback(r)
+        if candidate_feedback is not None:
+            # The old runner's numerical/timing/tier evidence belongs to a
+            # different program. Only the candidate record may populate these
+            # fields; missing evidence remains missing, not a host-graph pass.
+            native = r.get("candidate_native_execution")
+            num = native.get("numeric") if isinstance(native, dict) else None
+            num = num if isinstance(num, dict) else {}
+            tiers = {tier: {"status": value} for tier, value in candidate_feedback.get("tiers", {}).items()}
+            mandatory = candidate_feedback.get("required_tiers", [])
+            missing = [tier for tier in mandatory if (tiers.get(tier) or {}).get("status") != "pass"]
+            fail = {} if candidate_feedback["status"] == "pass" else {
+                "plane": "model_execution",
+                "category": "PROTOCOL_VIOLATION" if candidate_feedback["status"] == "fail" else "NOT_RUN_IS_NOT_PASS",
+                "tier": missing[0] if missing else None,
+                "detail": ", ".join(candidate_feedback.get("violations", [])) or candidate_feedback.get("reason"),
+            }
         out[r.get("capsule", cr.parent.name)] = {
             "status": r.get("status"),
             # Opaque content address of the exact executable plus target/RTL identity. It reveals no
             # answer-bearing value; promotion uses it solely to retain a still-applicable certificate.
-            "execution_digest": _execution_digest_from_result(cr),
+            "execution_digest": _execution_digest_from_result(cr) if candidate_feedback is None else None,
             # The backend's own STATED refusal. Redaction-safe: it is text the SUBMISSION wrote about
             # its own coverage, never corpus or golden data.
             "declined": r.get("declined"),
-            "numeric_status": num.get("status"),
-            "mismatch_count": num.get("mismatch_count"),
-            "trace_status": (r.get("trace_check") or {}).get("status"),
-            "trace_violations": list((r.get("trace_check") or {}).get("violations") or []),
+            "numeric_status": (
+                num.get("status") if candidate_feedback is None or num.get("status") in ("pass", "fail") else None
+            ),
+            "mismatch_count": (
+                num.get("mismatch_count") if candidate_feedback is None
+                or (type(num.get("mismatch_count")) is int and num["mismatch_count"] >= 0) else None
+            ),
+            "trace_status": (r.get("trace_check") or {}).get("status") if candidate_feedback is None else None,
+            "trace_violations": (
+                list((r.get("trace_check") or {}).get("violations") or []) if candidate_feedback is None else []
+            ),
             "tiers": {t: (tiers.get(t) or {}).get("status") for t in tiers},
             # WHY EACH NON-PASSING TIER DID NOT PASS, redacted. The line above carries the bare status,
             # which is what left the agent (and every reader of a verdict) with `L3: "unavailable"` and
@@ -337,7 +361,7 @@ def _per_capsule_from_results(runs_root: Path) -> dict[str, dict]:
                     if isinstance(v, dict)
                     else None
                 )
-            )(r.get("tier_reuse")),
+            )(r.get("tier_reuse") if candidate_feedback is None else None),
             "failure_plane": fail.get("plane"),
             "failure_category": fail.get("category"),
             # The tier LABEL survives redaction. It is a harness constant ("L2"), never capsule data, and
@@ -350,20 +374,95 @@ def _per_capsule_from_results(runs_root: Path) -> dict[str, dict]:
             # The cost of the agent's OWN emitted program, available before the cert tier runs. See
             # _emitted_cost: an opaque L3 failure with a null plane was the only feedback on a lowering
             # that moved 2,000x the median capsule's DRAM traffic.
-            "emitted_cost": _emitted_cost(cr),
+            "emitted_cost": _emitted_cost(cr) if candidate_feedback is None else None,
             # WHERE EACH CALL LANDED AND, OFF THE ACCELERATOR, WHY. See _placement_coverage: the
             # grader computes this census for every whole-model row and the agent was told only
             # `eligible_model_layer_fell_back_to_host` -- a violation string that names neither the
             # call nor the reason, so "the hardware cannot take this shape" and "the compiler never
             # tried" reached the agent as the same sentence.
             "placement_coverage": _placement_coverage(r),
+            "candidate_native_verification": candidate_feedback,
             # WOULD THIS PROGRAM EVEN RUN ON SILICON. See _liveness_screen: the L2.5 screen's verdict was
             # computed for every capsule, written beside the result, and never shown to the agent -- 313
             # `stall` verdicts across 3446 reports on disk with no reader. SURFACED, NOT GATED (see
             # REFUSING_SEVERITIES): rule names, severities and counts only.
-            "liveness": _liveness_screen(cr),
+            "liveness": _liveness_screen(cr) if candidate_feedback is None else None,
         }
     return out
+
+
+def _candidate_native_feedback(result: dict) -> dict | None:
+    """Project native verification without consoles, goldens or private error text.
+
+    Component statuses and closed failure codes concern the candidate's own
+    artifact. Coverage counts are admitted only from the independently verified
+    source/dispatch join, never from the legacy runner's distinct program.
+    This projection does not grade or upgrade the underlying result.
+    """
+    owner = result
+    if "candidate_native_model_check" not in owner:
+        owner = result.get("model_execution_check")
+    if not isinstance(owner, dict) or "candidate_native_model_check" not in owner:
+        return None
+    check = owner["candidate_native_model_check"]
+    if not isinstance(check, dict) or check.get("schema") != "merlin_candidate_native_model_check_v1":
+        return {"status": "unverified", "reason": "candidate_verification_record_unrecognized"}
+
+    def status(record, allowed):
+        value = record.get("status") if isinstance(record, dict) else None
+        return value if isinstance(value, str) and value in allowed else "unverified"
+
+    allowed_codes = {
+        "candidate_host_tensor_compute_violation", "candidate_emitted_host_compute_unverified",
+        "candidate_source_placement_violation", "candidate_source_placement_unverified",
+        "candidate_full_model_native_unverified", "candidate_required_rtl_engine_mismatch",
+        "candidate_completed_dispatch_unverified", "candidate_source_coverage_unverified",
+        "candidate_required_tiers_unverified",
+    }
+    violations = check.get("violations")
+    codes = []
+    for value in violations if isinstance(violations, list) else []:
+        code = value if isinstance(value, str) and value in allowed_codes else "candidate_verification_failure_unrecognized"
+        if code not in codes:
+            codes.append(code)
+    summary = {
+        "status": status(check, {"pass", "fail", "incomplete", "unverified"}),
+        "violations": codes,
+        "scope": "candidate-only native verification; not general transformation equivalence",
+        "components": {
+            key: status(check.get(key), {"clean", "violation", "verified", "pass", "fail", "incomplete", "unverified"})
+            for key in ("emitted_host_compute", "source_placement", "completed_dispatch", "candidate_required_tiers")
+        },
+    }
+    native_status = check.get("native_status")
+    if isinstance(native_status, str) and native_status in {
+        "incomplete", "compiled_not_run", "numeric_match_diagnostic", "numeric_mismatch_diagnostic"
+    }:
+        summary["native_status"] = native_status
+    coverage = check.get("candidate_source_coverage")
+    counts = [coverage.get(key) if isinstance(coverage, dict) else None
+              for key in ("n_source_operations", "n_eligible", "n_completed_eligible")]
+    if (isinstance(coverage, dict) and coverage.get("status") == "verified"
+            and all(type(value) is int for value in counts) and counts[0] >= counts[1] == counts[2] > 0):
+        summary["source_coverage"] = {
+            "status": "verified", "n_source_operations": counts[0],
+            "n_eligible": counts[1], "n_completed_eligible": counts[2],
+        }
+    else:
+        summary["source_coverage"] = {"status": "unverified"}
+    tier_check = check.get("candidate_required_tiers")
+    if isinstance(tier_check, dict):
+        known_tiers = {"L0", "L1", "L2", "L3"}
+        required = tier_check.get("required_tiers")
+        if isinstance(required, list) and all(isinstance(tier, str) and tier in known_tiers for tier in required):
+            summary["required_tiers"] = list(required)
+        tiers = tier_check.get("tiers")
+        if isinstance(tiers, dict):
+            summary["tiers"] = {
+                tier: status(tiers[tier], {"pass", "fail", "unverified", "unavailable", "incomplete", "skipped"})
+                for tier in sorted(known_tiers & tiers.keys())
+            }
+    return summary
 
 
 def _placement_coverage(result: dict) -> dict | None:
@@ -379,6 +478,11 @@ def _placement_coverage(result: dict) -> dict | None:
     census on such a row would read as "nothing fell back" rather than "there was nothing to look
     at".
     """
+    if _candidate_native_feedback(result) is not None:
+        # The legacy census describes a different runner-owned program, even
+        # when that program's numerical check passed. Do not present it as the
+        # submitted whole-program compiler's placement coverage.
+        return None
     census = (result.get("model_execution_check") or {}).get("lowering_coverage")
     if not isinstance(census, dict) or not census.get("operations"):
         return None
@@ -586,6 +690,13 @@ def _execution_digest_from_result(capsule_result: Path) -> str | None:
     all, and every consumer -- readiness section G included -- reported ``n=None`` as if the oracle had
     not run."""
     try:
+        result = json.loads(capsule_result.read_text(encoding="utf-8"))
+        if _candidate_native_feedback(result) is not None:
+            # The legacy identity owner gathers generated/ executables, whereas
+            # this candidate's ELF lives in candidate_native/. Until that owner
+            # binds the native ELF and selected hardware, use conservative
+            # submission invalidation rather than borrow another program's cert.
+            return None
         from merlin_experiments.phase1.feedback.promotion import execution_digest
 
         return execution_digest(capsule_result)
@@ -683,11 +794,13 @@ def run(
                 "mismatch_count": rich.get("mismatch_count"),
                 "trace_status": rich.get("trace_status", pc.get("trace")),
                 "trace_violations": rich.get("trace_violations", []),
-                "tiers": pc.get("tiers", {}),
+                "tiers": rich.get("tiers", {}) if rich.get("candidate_native_verification") is not None
+                else pc.get("tiers", {}),
                 "tier_cycles": rich.get("tier_cycles", {}),
                 "tier_reuse": rich.get("tier_reuse"),
                 "failure_plane": rich.get("failure_plane"),
                 "failure_category": rich.get("failure_category"),
+                "failure_tier": rich.get("failure_tier"),
                 "failure_detail": rich.get("failure_detail"),
                 "tier_reasons": rich.get("tier_reasons") or {},
                 "execution_digest": rich.get("execution_digest"),
@@ -695,6 +808,8 @@ def run(
         )
         if rich.get("placement_coverage"):
             per_capsule[-1]["placement_coverage"] = rich["placement_coverage"]
+        if rich.get("candidate_native_verification") is not None:
+            per_capsule[-1]["candidate_native_verification"] = rich["candidate_native_verification"]
         # WHAT THE PROGRAM COST, beside whether it was right. `tier_cycles` already rides this row and
         # nothing interprets it: a number with no floor and no ceiling is not a cost, and an agent
         # reading "L3: 2,400,000 cycles" has no way to tell a good program from a hundredfold-slow
@@ -702,7 +817,7 @@ def run(
         # ceiling. REPORT phase: it never moves `all_pass`, so this round is scored by the same rule
         # as the last. Redaction-safe -- cycle counts of the agent's OWN program, plus a floor derived
         # from hardware geometry the arm already has through the capability manifest.
-        if isinstance(pc.get("cost_plane"), dict):
+        if rich.get("candidate_native_verification") is None and isinstance(pc.get("cost_plane"), dict):
             per_capsule[-1]["cost_plane"] = {
                 key: pc["cost_plane"].get(key)
                 for key in (

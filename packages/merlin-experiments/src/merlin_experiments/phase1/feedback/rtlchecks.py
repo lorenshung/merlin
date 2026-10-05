@@ -42,10 +42,10 @@ def prepare_arguments(
     argv = list(argv)
     requested = _option_values(argv, "--bundle")
     if len(requested) > 1 or any(value is None for value in requested):
-        raise ValueError(f"Arm-4 requires at most one well-formed --bundle; received {requested!r}")
+        raise ValueError(f"EL4 requires at most one well-formed --bundle; received {requested!r}")
     selected = requested[0] if requested else default_bundle
     if not selected or Path(selected).name != selected or not selected.startswith("merlin_assisted_rtlchecks_"):
-        raise ValueError(f"invalid Arm-4 bundle identity {selected!r}")
+        raise ValueError(f"invalid EL4 bundle identity {selected!r}")
     if bundle_manifest is None:
         if bundles is None:
             raise ValueError("installed RTLchecks requires an explicit bundle manifest")
@@ -53,7 +53,7 @@ def prepare_arguments(
     try:
         manifest = yaml.safe_load(bundle_manifest.read_text(encoding="utf-8")) or {}
     except Exception as exc:
-        raise ValueError(f"cannot read Arm-4 bundle manifest {bundle_manifest}: {exc}") from exc
+        raise ValueError(f"cannot read EL4 bundle manifest {bundle_manifest}: {exc}") from exc
     if (
         not isinstance(manifest, dict)
         or manifest.get("bundle_id") != selected
@@ -62,7 +62,7 @@ def prepare_arguments(
         raise ValueError(f"{selected!r} is not a generated merlin_rtlchecks bundle")
     arms = _option_values(argv, "--arm")
     if any(value != "merlin_assisted" for value in arms):
-        raise ValueError("the Arm-4 RTL-checks wrapper requires --arm merlin_assisted")
+        raise ValueError("the EL4 RTL-checks wrapper requires --arm merlin_assisted")
     if not arms:
         argv += ["--arm", "merlin_assisted"]
     if not requested:

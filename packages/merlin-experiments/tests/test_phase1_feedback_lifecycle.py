@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -63,6 +64,33 @@ def test_real_canonical_tool_broker_request_and_shutdown(tmp_path, monkeypatch):
     for module, staged_as in L._TR.COMMON_CLIENTS:
         assert (workspace / staged_as).read_bytes() == module_source_path(module).read_bytes()
     assert not (workspace / "merlin_experiments").exists()
+
+
+def test_host_tool_broker_uses_only_selected_frozen_facts(tmp_path, monkeypatch):
+    from merlin.targetgen.sandbox.bwrap import bundle_snapshot_root
+    from merlin_experiments.phase1.frozen_facts import select
+
+    monkeypatch.setattr(L._TR, "COMMON_BROKERS", ())
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(map(str, python_import_roots())))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    facts = bundle_snapshot_root(workspace) / "selected/facts.json"
+    facts.parent.mkdir(parents=True)
+    facts.write_text('{"facts":{"target":"fixture"}}')
+    with pytest.raises(ValueError, match="frozen input snapshot"):
+        select(workspace, tmp_path / "unselected/facts.json")
+    brokers = L.start_brokers(
+        workspace,
+        replace(_config(tmp_path, tools=("cca_tools",)), selected_rtl_facts=facts),
+    )
+    try:
+        channel = workspace / ".cca_channel"
+        (channel / "req_probe.json").write_text(json.dumps({"cmd": "unrecognized-probe"}))
+        _until(lambda: (channel / "done_probe").exists())
+        assert "error" in json.loads((channel / "resp_probe.json").read_text())
+        assert brokers[0].poll() is None
+    finally:
+        L.stop_brokers(workspace, brokers)
 
 
 def test_real_thread_single_flight_handoff_and_first_grade_retry(tmp_path, monkeypatch):

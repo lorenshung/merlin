@@ -24,6 +24,11 @@ def freeze(run_dir: Path, *, repo: Path) -> dict:
         "submission_files": h["n_files"],
         "repo_sha": repo_sha(repo=repo),
     }
+    from merlin_experiments.phase1 import oot_history
+
+    history = oot_history.freeze(run_dir, sub)
+    if history is not None:
+        rec["oot"] = history  # the harness-owned `frozen` tag on exactly these bytes
     (run_dir / "freeze.json").write_text(json.dumps(rec, indent=2), encoding="utf-8")
     return rec
 

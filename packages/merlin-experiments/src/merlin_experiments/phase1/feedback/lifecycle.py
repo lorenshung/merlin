@@ -36,6 +36,7 @@ class BrokerConfig:
     capsules_root: Path | None = None
     policy_root: Path | None = None
     contract: Path | None = None
+    selected_rtl_facts: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -115,6 +116,13 @@ def start_brokers(ws: Path, config: BrokerConfig):
                 "merlin_experiments.phase1.brokers.simjob",
             }:
                 argv += ["--descriptor", str(config.context.descriptor), "--repo", str(config.context.repo)]
+            if config.selected_rtl_facts is not None and name in {
+                "merlin_experiments.phase1.brokers.isa_tools",
+                "merlin_experiments.phase1.brokers.cca",
+                "merlin_experiments.phase1.brokers.selfcheck",
+                "merlin_experiments.phase1.brokers.simjob",
+            }:
+                argv += ["--rtl-facts", str(config.selected_rtl_facts)]
             if name == "merlin_experiments.phase1.brokers.simjob":
                 argv += ["--timing-file", str(config.timing_file)]
             if name in {"merlin_experiments.phase1.brokers.selfcheck", "merlin_experiments.phase1.brokers.simjob"}:

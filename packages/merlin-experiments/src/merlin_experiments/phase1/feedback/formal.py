@@ -277,6 +277,8 @@ def main(argv: list[str] | None = None, *, context: InvocationContext | None = N
     ap = argparse.ArgumentParser()
     add_context_arguments(ap)
     ap.add_argument("--run-dir", required=True)
+    ap.add_argument("--workspace", type=Path, help="Frozen Phase 1 workspace for selected RTL facts")
+    ap.add_argument("--rtl-facts", type=Path, help="Selected facts in that workspace's frozen input snapshot")
     ap.add_argument("--arm", required=True)
     ap.add_argument("--model", default="unknown")
     ap.add_argument(
@@ -300,6 +302,12 @@ def main(argv: list[str] | None = None, *, context: InvocationContext | None = N
     ap.add_argument("--no-oracle", action="store_true")
     ap.add_argument("--skip-hidden", action="store_true")
     a = ap.parse_args(argv)
+    if a.rtl_facts is not None:
+        if a.workspace is None:
+            ap.error("--rtl-facts requires --workspace")
+        from ..frozen_facts import select
+
+        select(a.workspace, a.rtl_facts)
     legacy_context = context is not None
     context = resolve_context(a, ap, context)
     if a.capsules is None:

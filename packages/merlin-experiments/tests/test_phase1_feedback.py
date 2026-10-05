@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 from merlin_experiments.phase1.context import InvocationContext
 from merlin_experiments.phase1.feedback import dispatch, qa, snapshots
+from merlin_experiments.phase1.feedback import selfcheck as selfcheck_feedback
 
 from merlin.common.paths import data_path, module_source_path, python_import_roots
 
@@ -28,6 +29,123 @@ def _context(root):
     return InvocationContext(
         root, root / "target.yaml", root, "fixture", root / "runs", root / "reports", root / "bundles", ()
     )
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("native_numeric", [None, "pass", "fail"])
+def test_qa_keeps_candidate_verification_separate_from_legacy_coverage(tmp_path, monkeypatch, nested, native_numeric):
+    """The actual QA result-to-verdict path must not certify the runner's other program."""
+    check = {
+        "schema": "merlin_candidate_native_model_check_v1",
+        "status": "incomplete",
+        "violations": ["candidate_completed_dispatch_unverified", "candidate_required_tiers_unverified"],
+        "emitted_host_compute": {"status": "clean", "detail": "PRIVATE_ANSWER_SENTINEL"},
+        "source_placement": {"status": "clean"},
+        "completed_dispatch": {"status": "unverified", "console": "PRIVATE_ANSWER_SENTINEL"},
+        "candidate_source_coverage": {"status": "unverified"},
+        "candidate_required_tiers": {
+            "status": "unverified", "required_tiers": ["L0", "L1", "L3"],
+            "tiers": {"L0": {"status": "pass"}, "L1": {"status": "pass"},
+                      "L3": {"status": "unverified", "numeric": {"expected": "PRIVATE_ANSWER_SENTINEL"}}},
+        },
+        "native_status": "numeric_match_diagnostic",
+    }
+    row = {
+        "capsule": "model_case", "status": "incomplete", "numeric": {"status": "pass", "mismatch_count": 0},
+        "tiers": {"L3": {"status": "pass", "cycles": 999}},
+        "model_execution_check": {"lowering_coverage": {
+            "operations": 6, "on_accelerator": 6, "coverage": 1.0}},
+        "failure": {"plane": "legacy_host_graph", "category": "PRIVATE_ANSWER_SENTINEL", "tier": "L2",
+                    "detail": "PRIVATE_ANSWER_SENTINEL"},
+    }
+    if native_numeric is not None:
+        row["candidate_native_execution"] = {"numeric": {
+            "status": native_numeric, "mismatch_count": 3 if native_numeric == "fail" else 0,
+            "first_mismatch": {"expected": "PRIVATE_ANSWER_SENTINEL"},
+        }}
+    (row["model_execution_check"] if nested else row)["candidate_native_model_check"] = check
+    result_path = tmp_path / "runs" / "fixture-suite" / "model_case" / "capsule_result.json"
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text(json.dumps(row))
+    monkeypatch.setattr(qa, "_loop_target_sim_via", lambda context: ("fixture", ""))
+    monkeypatch.setattr(qa.CR, "qa_checkpoint_adapters", lambda *a: {"L3": object()})
+    monkeypatch.setattr(qa, "_emitted_cost", lambda *a: {"dram_movements": 999})
+    monkeypatch.setattr(qa, "_liveness_screen", lambda *a: {"status": "ok"})
+    monkeypatch.setattr(qa.CG, "grade", lambda *a, **k: {
+        "n_capsules": 1, "n_passed": 0, "per_capsule": [{
+            "capsule": "model_case", "label": "public", "status": "incomplete", "tiers": {"L3": "unverified"},
+            "cost_plane": {"status": "measured", "measured_cycles": 999}}],
+    })
+    verdict = qa.run("submission", str(tmp_path), tmp_path, {"public"}, False, 1, context=_context(tmp_path))
+    projected = verdict["per_capsule"][0]
+    feedback = projected["candidate_native_verification"]
+    assert feedback["status"] == "incomplete"
+    assert feedback["violations"] == check["violations"]
+    assert feedback["components"]["completed_dispatch"] == "unverified"
+    assert feedback["required_tiers"] == ["L0", "L1", "L3"]
+    assert feedback["tiers"] == {"L0": "pass", "L1": "pass", "L3": "unverified"}
+    assert feedback["source_coverage"] == {"status": "unverified"}
+    assert projected["failure_tier"] == "L3"
+    assert projected["failure_plane"] == "model_execution"
+    assert projected["failure_category"] == "NOT_RUN_IS_NOT_PASS"
+    assert projected["failure_detail"] == ", ".join(check["violations"])
+    assert projected["numeric_status"] == native_numeric
+    assert projected["mismatch_count"] == (None if native_numeric is None else 3 if native_numeric == "fail" else 0)
+    assert projected["tiers"] == feedback["tiers"]
+    assert projected["tier_cycles"] == {}
+    assert "cost_plane" not in projected
+    rich = qa._per_capsule_from_results(tmp_path)["model_case"]
+    assert rich["emitted_cost"] is None
+    assert rich["liveness"] is None
+    assert "placement_coverage" not in projected
+    assert "PRIVATE_ANSWER_SENTINEL" not in json.dumps(verdict)
+    assert not verdict["all_pass"]
+    from merlin_experiments.phase1.feedback import promotion
+
+    monkeypatch.setattr(promotion, "execution_digest", lambda *a: "f" * 64)
+    assert qa._execution_digest_from_result(result_path) is None
+
+
+def test_candidate_verification_feedback_only_exposes_verified_counts(tmp_path):
+    check = {
+        "schema": "merlin_candidate_native_model_check_v1", "status": "pass", "violations": [],
+        "candidate_source_coverage": {
+            "status": "verified", "n_source_operations": 25, "n_eligible": 6, "n_completed_eligible": 6,
+            "golden": "PRIVATE_ANSWER_SENTINEL", "source_sha256": "PRIVATE_ANSWER_SENTINEL",
+        },
+    }
+    record = {"candidate_native_model_check": check}
+    summary = qa._candidate_native_feedback(record)
+    assert summary["source_coverage"] == {
+        "status": "verified", "n_source_operations": 25, "n_eligible": 6, "n_completed_eligible": 6}
+    assert "PRIVATE_ANSWER_SENTINEL" not in json.dumps(summary)
+    for bad_count in (True, -1, 3, 7, "PRIVATE_ANSWER_SENTINEL"):
+        check["candidate_source_coverage"]["n_completed_eligible"] = bad_count
+        assert qa._candidate_native_feedback(record)["source_coverage"] == {"status": "unverified"}
+    assert qa._candidate_native_feedback({}) is None
+    for malformed in (None, [], {"schema": "PRIVATE_ANSWER_SENTINEL"}):
+        summary = qa._candidate_native_feedback({"candidate_native_model_check": malformed})
+        assert summary["status"] == "unverified"
+        assert "PRIVATE_ANSWER_SENTINEL" not in json.dumps(summary)
+    check["violations"] = ["PRIVATE_ANSWER_SENTINEL"]
+    check["status"] = ["PRIVATE_ANSWER_SENTINEL"]
+    check["completed_dispatch"] = {"status": ["PRIVATE_ANSWER_SENTINEL"]}
+    summary = qa._candidate_native_feedback(record)
+    assert summary["status"] == "unverified"
+    assert "PRIVATE_ANSWER_SENTINEL" not in json.dumps(summary)
+
+
+def test_model_only_selfcheck_reports_gate_instead_of_harness_failure():
+    score = {
+        "per_capsule": [
+            {"capsule": "model_case", "kind": "model", "status": "gated", "gate_reason": "op pass fraction 0.00 < gate 0.8"}
+        ]
+    }
+    rows = selfcheck_feedback._gated_without_result_rows(score)
+    assert rows == [
+        {"capsule": "model_case", "pass": False, "status": "gated", "reason": "op pass fraction 0.00 < gate 0.8"}
+    ]
+    assert selfcheck_feedback._gated_without_result_rows({"per_capsule": score["per_capsule"] + [{"status": "fail"}]}) == []
 
 
 _HOST = r"""
