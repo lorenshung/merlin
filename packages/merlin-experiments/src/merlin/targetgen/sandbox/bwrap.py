@@ -986,10 +986,11 @@ def _is_under(path: Path, base: str) -> bool:
 
 
 class _MountVisibility:
-    """One-call lexical mount index; never caches filesystem visibility or mutable argv.
+    """One-call mount index; never caches filesystem visibility or mutable argv.
 
     Path-equivalent destinations share a slot, but precedence still uses the
     original destination STRING length and ordered mount index, not path depth.
+    Guest-visible symlinks can redirect to a later, deeper frozen mount.
     """
 
     def __init__(self, argv: list[str]):
@@ -1006,32 +1007,67 @@ class _MountVisibility:
         if previous is None or record[:2] >= previous[:2]:
             self._destinations[key] = record
 
+    @staticmethod
+    def _source_alias(source: Path, destination: Path, relative: Path) -> Path | None:
+        """Rewrite the first guest-visible symlink inside this bind, excluding its source root.
+
+        This handles a live ``lib64 -> lib`` alias whose ``lib`` child is replaced
+        by a pycache-free frozen grant; a late host pyc is not guest-visible.
+        """
+        cursor = source
+        parts = relative.parts
+        for index, part in enumerate(parts):
+            cursor /= part
+            if not cursor.is_symlink():
+                continue
+            try:
+                link = os.readlink(cursor)
+            except OSError:
+                return destination / relative  # changed while observed: fail closed
+            target = Path(link)
+            guest_parent = destination.joinpath(*parts[:index])
+            rewritten = target if target.is_absolute() else guest_parent / target
+            return Path(os.path.normpath(str(rewritten.joinpath(*parts[index + 1 :]))))
+        return None
+
     def is_exposed(self, path: Path) -> bool:
-        best = None
-        # Build each ancestor once per query, rather than once per mount.
-        for ancestor in (path, *path.parents):
-            record = self._destinations.get(ancestor)
-            if record is not None and (best is None or record[:2] >= best[:2]):
-                best = record
-        if best is None or best[2] == "hide":
-            return False
-        _, _, _, src, dest = best
-        # A frozen snapshot may be mounted over a live tree. Test the actual
-        # source bytes, not the destination's host contents; do not cache stats.
-        mapped = Path(src) / path.relative_to(dest) if str(path) != dest else Path(src)
-        try:
-            return mapped.exists()
-        except PermissionError:
-            return True  # locked-but-present still exposes content
-        except OSError:
-            return False
+        current = path
+        seen: set[Path] = set()
+        # The same bounded traversal as filesystem symlink resolution; cycles
+        # and unstable paths fail closed as exposed, never as a clean mask.
+        for _ in range(41):
+            if current in seen:
+                return True
+            seen.add(current)
+            best = None
+            for ancestor in (current, *current.parents):
+                record = self._destinations.get(ancestor)
+                if record is not None and (best is None or record[:2] >= best[:2]):
+                    best = record
+            if best is None or best[2] == "hide":
+                return False
+            _, _, _, src, dest = best
+            relative = current.relative_to(dest)
+            alias = self._source_alias(Path(src), Path(dest), relative)
+            if alias is not None:
+                current = alias
+                continue
+            # A frozen snapshot may be mounted over a live tree. Test the
+            # effective source bytes, not the destination's host contents.
+            mapped = Path(src) / relative
+            try:
+                return mapped.exists()
+            except PermissionError:
+                return True  # locked-but-present still exposes content
+            except OSError:
+                return False
+        return True
 
 
 def is_exposed(argv: list[str], path: Path) -> bool:
-    """Whether the longest raw-destination mount (latest on ties) exposes ``path``.
+    """Whether the effective ordered mount exposes ``path``.
 
-    The controlling source must still contain the mapped path. Each call uses
-    fresh argv and filesystem state; batched callers share only a lexical index.
+    Test the controlling source after guest symlinks; never cache source state.
     """
     return _MountVisibility(argv).is_exposed(path)
 
