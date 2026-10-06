@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +16,15 @@ import pytest
 from merlin_experiments.phase2.whole_model_measured import cli as MCLI
 from merlin_experiments.phase2.whole_model_measured import launch as LAUNCH
 from merlin_experiments.phase2.whole_model_measured import runs as RUNS
+
+
+def _exec_done(child) -> None:
+    """Wait until the child has exec'd: until then /proc shows an empty command line."""
+    for _ in range(500):
+        if Path(f"/proc/{child.pid}/cmdline").read_bytes():
+            return
+        time.sleep(0.01)
+    raise AssertionError("the child never exec'd")
 
 
 def _run_dir(tmp_path: Path) -> Path:
@@ -43,7 +54,8 @@ def test_a_live_launcher_is_found_by_its_record_and_refuses_a_second_launch(tmp_
     run_dir = _run_dir(tmp_path)
     assert LAUNCH.launcher_alive(run_dir) is None
     # A live process whose command line names the run: a real child, so /proc says what it runs.
-    child = subprocess.Popen(["sleep", "30", str(run_dir.resolve())], start_new_session=True)
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", str(run_dir.resolve())])
+    _exec_done(child)
     try:
         LAUNCH.launch(run_dir, profile="p", round_driver="m:f", spawn=lambda argv, **kw: SimpleNamespace(pid=child.pid))
         assert LAUNCH.launcher_alive(run_dir) is True
