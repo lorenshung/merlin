@@ -63,6 +63,10 @@ jobs:
         run: uv run --no-sync python build_tools/scripts/check_semantic_coverage.py
       - name: wiring gate (every instrument has a production caller)
         run: uv run --no-sync python build_tools/scripts/check_wiring.py
+      # On an evidence path, absent must not read as a value: a fabricated `.get` fallback, a
+      # swallowed load error, a discarded subprocess result, a shelled pipeline's last-stage status.
+      - name: silent-default gate (a substituted datum may not become a verdict)
+        run: uv run --no-sync python build_tools/scripts/check_silent_defaults.py
       - name: sign coverage (a sign-sensitive capsule can go negative)
         run: uv run --no-sync python build_tools/scripts/check_sign_coverage.py
       # A slope is only a rate if exactly one term moved between the points; the plan's isolation is
