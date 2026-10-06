@@ -182,6 +182,20 @@ merlin experiment measured roofline --run RUN --result ours=RESULT.json --result
 merlin experiment measured admin STORE outage-retry-now --why "board re-enumerated"
 ```
 
+The records these read, beside a run's `run.json` (every one is the run's own; the dashboard reads
+the same files):
+
+- `heartbeat.json` (`merlin.phase2.whole_model_measured.heartbeat.v1`): the launcher's `pid` and kernel
+  `start_ticks`, `last_activity` (`at`, `what`) and `last_measured` (the newest MEASURED or
+  MEASURED_INVALID candidate across the run's stores, every attempt counted). `status` reports the run
+  STALLED when the launcher is gone or nothing was measured within `--stall-hours` (default 6);
+  `watch` (the relauncher) records each stall once in `liveness_events.jsonl` and can run
+  `--notify-command`.
+- `machine_capabilities.json`: each section's machine report (its header's flags and values, its
+  declared limits) and what it lacks against the registry's other boards; launches print the warnings.
+- In each store, a job's earlier attempts live under `attempts/<n>/` (`attempt.json` says why) and a
+  `result.json` is written once; `control_preflight.json` says why batches are held.
+
 A cell run is the same mode pointed at one cell's own group programs.
 [`cells.yaml`](cells.yaml) names the ResNet-50 cells by group or by form; the
 seed defaults to the loop's confirmed best (or the target's exported champion):
