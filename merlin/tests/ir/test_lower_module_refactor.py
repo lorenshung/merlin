@@ -146,8 +146,13 @@ def _fingerprint(res) -> dict[str, str]:
 # --------------------------------------------------------------- 1. the refactor changed nothing
 
 
-@selected_driver.requires_support("saturn")
-@pytest.mark.parametrize("case", sorted(CASES))
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(c, marks=selected_driver.requires_support(CASES[c]["target"])) if "target" in CASES[c] else c
+        for c in sorted(CASES)
+    ],
+)
 def test_stage_fingerprints_match_pre_refactor(case):
     """Every stage of every configuration is byte-identical to the pre-refactor pipeline."""
     from merlin.xdsl_dialects.lowering import lower_repeated_rhs_matmul
