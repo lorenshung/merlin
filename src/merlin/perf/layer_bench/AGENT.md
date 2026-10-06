@@ -35,3 +35,15 @@ only while nothing that could change the number has changed.
 - **A receipt that fails verification is an error, not a miss.** Re-measuring silently would hide a
   corrupted or mismatched store.
 - **Target-neutral.** The build recipe and engine command come from the target's registered backend.
+- **Explicit compiler policy overrides recipe defaults in both phases.** `extra_cflags` is appended
+  to recipe compiler flags before building compile and link commands. Link-time compiler options
+  can select runtime startup behavior (such as flushing subnormals), so overriding only compilation
+  does not establish a strict floating-point policy. With no overrides the recipe is unchanged.
+- **Link dependencies follow objects and recipe libraries.** `extra_ldflags` appends
+  explicit link-only options after the recipe's linker flags. Static libraries
+  are consumed in order; passing them as compiler flags can leave symbols
+  unresolved. The target still declares its compiler, ABI and standard libraries.
+
+- **Translation units remain distinct.** Shared recipe object naming reserves
+  incoming objects and assigns stable distinct names to basename collisions.
+  Source/support link order and unique-basename commands remain unchanged.

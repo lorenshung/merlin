@@ -46,3 +46,24 @@ Merlin runtime **execution backends**: run the same Merlin command buffers the P
 ## Notes for future agents
 
 `cycles` from spike is mcycle delta on hart 0 between the start barrier and the final barrier; counters (pack/hits/evictions/commits) are counted by the generated driver itself, byte counters are computed statically by codegen using the simulator's formulas.
+
+- Whole-model `spike_model` build identity includes the actual linked device and
+  matrix object bytes in link order, after compiling them and before emitting the
+  harness marker. Paths are not identity. Final ELF hashes remain authoritative.
+- Explicit whole-model operation profiling uses complete typed operation
+  boundaries, including calls/stores with no result. Generic source printing
+  retains the entry C interface; private marker callbacks retain their ABI.
+  Profiling is optional, and marker costs/optimization perturbation must be
+  measured against an uninstrumented control. A profile interval is not an
+  automatic CPU/device attribution or accelerator-only timing measurement.
+- The ordinary bare-metal model build also records owned model/runtime/harness
+  compile commands and the link command in `compilation_recipe.json`, with actual
+  executable and explicit input/output hashes. Ordered link inputs include provider
+  objects. Completion follows final audits; a new refused/failed invocation cannot
+  retain the previous success receipt. This observes the build, preserving flags,
+  emitted bytes and existing marker identity. Header/library/provider compilation
+  closure remains unknown rather than being inferred from a compiler name.
+- Device host ABI preparation is optional and source-bound. The provider's
+  post-offload callback receives exact routed IR and an immutable sidecar; its
+  selected host file enters the normal lowering/object identity path. ABI bridge
+  code remains provider-owned; this hook makes no placement decision.

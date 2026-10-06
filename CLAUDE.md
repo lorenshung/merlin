@@ -16,6 +16,28 @@ without duplicate implementations. `merlin/python/merlin` is only a compatibilit
 Experiment definitions start at `experiments/catalog.yaml`; retained research inputs live under
 `experiments/reference-data/`, not generated `out/`. See `docs/reference/repo_structure.md`.
 
+## Compiler and OOT ownership rule
+
+All target-specific dialect operations, instruction encodings, device kernels and schedules,
+hardware layout/resource facts, ABI glue and target execution support belong in the target's
+OOT MLIR dialect repository. Reusable host code generation, packing, requantization,
+graph/global optimizations, dispatch, buffer ownership, device compilation orchestration and
+runtime infrastructure belong in Merlin. An optimization selectable independently of the
+accelerator belongs in Merlin even when first measured on one target. Split mixed changes at
+an explicit contract: generic mechanism in Merlin, target facts and implementation in OOT.
+Promote generic OOT prototypes into Merlin and make the provider delegate; do not maintain
+duplicate implementations. Preserve explicit numeric policy selection and correctness gates.
+
+The OOT dialect is a **general compiler backend**, not a workload-specific kernel generator.
+Production passes derive choices from input operation semantics, shapes, layouts, numeric
+contracts and hardware capabilities. Never select production behavior by model name, captured
+provenance ID, golden output or benchmark constants. Constant/shape specialization is valid
+when derived from the current input IR with legality and resource proofs. Capture-specific
+experiments may select candidates, but promotion requires general passes/cost models and
+independent shape/tail cases, with sound fallback or explicit refusal.
+Provenance IDs remain valid for traceability and exact source-to-device binding; they do not
+select the optimization strategy.
+
 # Target-agnostic convention — derive, never hardcode (the cardinal rule)
 
 The whole point of this repo is to plug in *any* hardware target (RTL repo) and have the compiler,

@@ -21,6 +21,9 @@ the per-backend adapters under `backends/`.
   `cumsum` accumulator-init `i64`) are passed by value via `abi.ScalarArg`, NOT as a memref
   descriptor — `emit_c_interface` only wraps memrefs.
 - `backends/` — host / spike adapters.
+- `host_math.py` — explicit portable libm evaluation policies and their compiled runtime objects.
+  The default emits nothing. A selected policy changes linked-byte identity and must pass the
+  caller's original numerical contract; it does not promise errno or exception-flag equivalence.
 
 ## What does not belong here
 

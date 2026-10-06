@@ -20,3 +20,8 @@ Experiment-ABI contract layer.
 validation, coverage and leases. It never selects evaluator adapters. Use core
 `materialize_public_cohort` with an explicit ceiling; default evaluated selection is
 `merlin_experiments.corpus.admission.public_capsules_for`, not a lazy core export.
+
+`build_recipe.named_object_paths` shares deterministic object naming across
+contract and layer builds. Equal basenames from caller and provider sources must
+never overwrite one object; imported objects are reserved and link order is
+retained. Unique basenames keep their original object names and commands.

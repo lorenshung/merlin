@@ -3,7 +3,7 @@ title: Architecture
 kind: reference
 status: current
 owner: core
-last_verified: 2026-09-20
+last_verified: 2026-10-05
 related: [repo_structure, core_dialects, lowering_pipeline]
 code_refs: [src/merlin, packages, experiments/catalog.yaml]
 ---
@@ -23,6 +23,29 @@ Shared compiler IR, scheduling, contracts, runtime and target/toolchain resoluti
 DSE, mining, and analysis. Their historical `merlin.*` import names remain compatible;
 an import prefix alone does not identify its distribution. `merlin/python/merlin` is a
 legacy symlink to core, not a second implementation.
+
+### Compiler and target boundary
+
+| Owner | Implementation |
+| --- | --- |
+| Merlin | Reusable host code generation, packing, requantization, graph/global optimizations, dispatch, buffer ownership, device compilation orchestration, and runtime infrastructure |
+| Target OOT MLIR dialect repository | Target dialect operations, instruction encodings, device kernels/schedules, hardware layout/resource facts, target ABI glue, and target execution support |
+
+An optimization that can be selected independently of the accelerator belongs in Merlin,
+including one first measured on a particular device. A mixed optimization uses an explicit
+contract: Merlin supplies the generic algorithm and verifies its semantic obligations; the
+provider supplies target legality facts, instruction selection and implementation. Generic
+OOT prototypes move into Merlin when promoted, with provider delegation replacing duplicated
+code. Optional numeric policies retain explicit selection and their original accuracy gates.
+
+The OOT dialect is a general compiler backend. Production decisions follow operation
+semantics, shapes, layouts, numeric contracts and hardware capabilities, with legality and
+resource checks. They must not depend on model names, captured provenance IDs, golden outputs
+or benchmark constants. Constant and shape specialization derives from the current input IR.
+Experiment drivers may select source-bound candidates; promotion requires general transforms
+and cost models tested on independent cases, including tails and refused/fallback cases.
+Provenance IDs support traceability and exact source-to-device binding, independently of
+the semantic and cost-based decision to apply an optimization.
 
 The catalog defines experiments; `merlin/experiments/` still contains checkout-dependent
 native engines and resources. Reviewed phase-0 handoff and frozen phase-1/2 inputs preserve

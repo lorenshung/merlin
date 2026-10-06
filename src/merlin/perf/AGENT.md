@@ -58,3 +58,12 @@ code runs on two targets of different archetypes and produces **different, corre
 
 `merlin/experiments/performance_contract/TASKS.md` — every task, its state, and its blocker.
 Rationale for the cost and oracle decisions: `docs/design/performance_budget_unit.md`.
+
+`debug_companion` admits only byte/address/attribute-identical allocated ELF
+sections and normalized relocations before mapping an existing PC census.
+Target tools, compiler recipes, source identities and numerical/ISA gates remain
+caller-owned. Every address is retained once, including missing source metadata;
+inline frames preserve context and their counts overlap parent call-site totals.
+Instruction counts never imply hardware cycles. The ELF reader explicitly
+refuses unsupported formats rather than guessing them. Tests live in the DSE
+bucket and exercise actual compiler/symbolizer twins plus changed-byte refusals.

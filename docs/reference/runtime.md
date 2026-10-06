@@ -3,7 +3,7 @@ title: Runtime
 kind: reference
 status: current
 owner: runtime
-last_verified: 2026-09-07
+last_verified: 2026-10-05
 related: [zephyr]
 code_refs: [src/merlin/runtime, merlin/runtime]
 ---
@@ -109,6 +109,22 @@ instance→class generalization (mirroring `xdsl_dialects.targets.factory`) so t
 | `ours_board` | CPU | MATMUL_ROUTE | board (RVV): route through the "OURS" hand GEMM |
 | `xnnpack_host` | CPU | MATMUL_ROUTE | host (x86): XNNPACK reference — the third e2e column beside `hand_v0` and ours |
 
+For prepared whole models, `spike_model.build` selects its default RVV host
+schedule from the model compiler's final `-march`. Scalar host ISAs use scalar
+lowering even when contractions route to a separate device. An explicit
+`rvv_schedule` or `host_vectorize=True` can intentionally select fixed-width
+vector scheduling and LLVM scalarization; `host_vectorize=False` selects scalar
+lowering and refuses a conflicting explicit schedule. The build result records
+the selected `host_vectorize` policy. The default `rv64gcv` target is unchanged.
+
+An optional `host_llvm_transform(source, workdir)` callback selects a late LLVM
+legalization before object compilation. It must retain the original lowering
+artifact and write its replacement in the supplied work directory. The build
+records both file hashes and compiles the selected file before generating the
+harness build hash. Target support owns the transformation's semantic proof;
+the normal backend still owns compiler flags, compilation, linking and the
+selected final ELF audit.
+
 Each backend's external toolchain / simulator resolves via a `MERLIN_*` env var and is optional: its
 `available()` returns False (or it fails at use with an actionable message) when the toolchain is
 absent, so the Python simulator + whole-model paths that need no external tool still work. `spike`
@@ -158,3 +174,23 @@ Studied as runtime-design inspiration (`/path/to/CompGen`,
   schedule tables keyed by table position instead of dispatch id; per-backend weight
   layouts baked into kernels (keep the canonical layout in the command buffer; pack at
   dispatch).
+
+## Explicit host exponential precision
+
+`spike_model.build(..., host_math_policy="native")` retains the existing libm
+implementation and emits no additional source, object, or linker flags. The
+opt-in `"expf_via_double"` policy wraps external `expf` calls with
+`(float)exp((double)x)`. The portable recipe lives in `merlin.runtime.host_math`;
+it has no accelerator, model, shape, or captured-input selection.
+
+The backend compiles the generated runtime object before computing the normal
+build identity. Actual object bytes and selected link flags enter that identity.
+The policy is reported in build metadata. The generated code requires a
+GNU-compatible linker supporting `--wrap` and a double-precision `exp` in libm.
+
+This is an explicit returned-value precision policy, not a claim of bit identity
+with another platform's `expf`, universal correct rounding, or preservation of
+`errno` and floating-point exception flags. It is unsuitable when those library
+side effects form part of the program contract. Callers must qualify the original
+model's numerical contract on native and actual target execution before selecting
+it. No default routing or accuracy tolerance changes with this option.
