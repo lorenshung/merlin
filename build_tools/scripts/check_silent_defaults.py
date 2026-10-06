@@ -111,7 +111,6 @@ _UNKNOWN_MARKERS = frozenset(
         "n/a",
         "na",
         "nan",
-        "tbd",
         "unknown",
         "unmeasured",
         "unset",
@@ -124,8 +123,6 @@ _UNKNOWN_MARKERS = frozenset(
         "absent",
         "none",
         "not measured",
-        "not recorded",
-        "no data",
     }
 )
 
@@ -243,15 +240,6 @@ def _scope_of(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str:
             names.append(cursor.name)
         cursor = parents.get(cursor)
     return ".".join(reversed(names)) or "<module>"
-
-
-def _enclosing_function(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> ast.AST | None:
-    cursor = parents.get(node)
-    while cursor is not None:
-        if isinstance(cursor, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            return cursor
-        cursor = parents.get(cursor)
-    return None
 
 
 def _statement_of(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> ast.AST | None:

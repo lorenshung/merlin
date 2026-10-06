@@ -131,6 +131,10 @@ class _FuserCheck:
                 )
             except (OSError, subprocess.SubprocessError) as exc:
                 raise OpenFileCheckUnavailable(f"fuser could not run: {exc}") from exc
+            # fuser exits 0 when it found a holder and 1 when it found none; anything else is a failure,
+            # and a failed check must not read as "nothing holds this".
+            if done.returncode not in (0, 1):
+                raise OpenFileCheckUnavailable(f"fuser exited {done.returncode}: {done.stderr.strip()[:300]}")
             # fuser prints the pids on stdout (access letters, if any, go to stderr with the names).
             pids |= {int(token) for token in done.stdout.split() if token.isdigit()}
         return sorted(pids)
@@ -540,6 +544,8 @@ def _size(path: Path) -> int | None:
         return None
     # -P: never follow a symlink; -x: stay on the worktree's filesystem; -b: apparent bytes.
     done = subprocess.run([du, "-sbPx", "--", str(path)], capture_output=True, text=True, timeout=3600)
+    if done.returncode != 0:
+        return None  # an unreadable entry makes the total a lower bound: report the size as unknown
     head = done.stdout.split(maxsplit=1)
     return int(head[0]) if head and head[0].isdigit() else None
 
