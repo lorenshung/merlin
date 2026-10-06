@@ -18,6 +18,27 @@ compute_units:
       - {in: fp8_e4m3, weight: fp8_e4m3, acc: bf16}
     semantic_capabilities:
       - {family: contraction, dtypes: [fp8_e4m3], ranks: [2, 3]}
+  # DERIVED, not authored: the unit capability_manifests.manifest_for('atlas') synthesizes from the
+  # selected RTL facts (AtlasRocketConfig FIRRTL, sha256 fefa711dba44498317573ee5af2cfd82edb674cdfff1505318ea93e896fc123d).
+  # The ISA role census evidences the engine; the lane-replication reader names its element format.
+  # merlin/tests/targetgen/test_lane_datapaths.py re-derives it and compares whenever that checkout is present.
+  - name: vector_unit
+    kind: vector
+    dtypes: [bf16]
+    ops: [elementwise]
+    scaling: none
+    requant: {ref: none}
+    semantic_capabilities:
+      - {family: elementwise_map, dtypes: [bf16]}
+    derived_from: "isa_role: ISA role 'tensor_compute_binary' -> ['TensorComputeBinary']"
+    dtypes_derived_from: >-
+      rtl_facts.lane_datapaths[VectorEngineTop] (firrtl_lane_replication): module VectorEngineTop
+      (a unit beside the compute array) replicates 6 primitive(s) once per lane, 16x each: AddRecFN,
+      MulRawFN, RecFNToRecFN, RoundRawFNToRecFN_e8_s8, Tanh, VectorAddRecFN; `RoundRawFNToRecFN_e8_s8`
+      is a hardfloat primitive parameterised e8/s8 (8 exponent + 7 fraction bits = bf16 in the format
+      registry) and declares the 17-bit port it implies
+# Marks the vector unit above as synthesized from evidence, never as author-declared.
+derived_compute_units: [vector_unit]
 memory_model:
   resident: true
   accumulators: true
@@ -34,7 +55,9 @@ runner:
   model_ext: npu_model
 provenance: >-
   Candidate compute format and MXU intent from the curated Atlas MxuParams.scala,
-  PE.scala and software-spec.yaml; geometry, storage and decoder facts require
+  PE.scala and software-spec.yaml; the vector unit is the derived unit recorded
+  above (its bf16 lanes agree with the curated VpuParams.scala); geometry,
+  storage and decoder facts require
   one explicitly selected FIRRTL/CIRCT source bundle. This reference is not an
   executable backend or a numerical/transfer qualification.
 notes: >-
