@@ -164,6 +164,19 @@ def schemas_dir() -> Path:
     return data_path("schemas")
 
 
+def contract_dir() -> Path:
+    """Return the contract dir (``<repo>/merlin/contract`` in-repo, bundled ``_data/contract`` in a
+    wheel). Honors ``MERLIN_CONTRACT_DIR``.
+
+    Every reader of a contract file resolves through this, never through ``merlin_dir()``: a frozen
+    source snapshot installs the package as a wheel, where ``merlin_dir()/contract`` does not exist
+    and only ``MERLIN_CONTRACT_DIR`` names the contract the run was sealed against."""
+    env = os.environ.get("MERLIN_CONTRACT_DIR")
+    if env:
+        return Path(env)
+    return data_path("contract")
+
+
 def prompts_dir() -> Path:
     """Return the agent-prompt dir (``<repo>/merlin/prompts`` in-repo, bundled ``_data/prompts`` in a
     wheel). Honors ``MERLIN_PROMPTS_DIR``."""
