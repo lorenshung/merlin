@@ -463,6 +463,7 @@ def run_model(
     """
     from . import isa_prohibition as ISA
     from . import whole_model_builder as B
+    from . import whole_model_partial as PARTIAL
     from . import whole_model_screen as S
 
     out = Path(out)
@@ -478,7 +479,7 @@ def run_model(
     checks = result["checks"]
 
     def _build(machine: str, header: str, header_sha256: str | None) -> dict[str, Any]:
-        return B.build(
+        record = B.build(
             Path(package),
             target=target,
             out_dir=out / "build",
@@ -494,6 +495,8 @@ def run_model(
             phase0_recipe=None if phase0_recipe is None else str(phase0_recipe),
             descriptor=None if descriptor is None else str(descriptor),
         )
+        PARTIAL.refuse(record, reader="the whole-model gate")  # a partial program is not the model
+        return record
 
     try:
         chosen = _READOUT_CHOICE.get(_choice_key(model))

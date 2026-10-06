@@ -34,7 +34,11 @@ def main(argv: list[str] | None = None) -> int:
     stored.add_argument("--experiment", help="filter by exact experiment identity")
     for verb in ("inspect", "preflight", "run"):
         child = commands.add_parser(verb)
-        child.add_argument("spec", help="definition path or catalog id")
+        child.add_argument(
+            "spec",
+            help="definition path or catalog id"
+            + ("; with --group, a measured job directory or a package directory" if verb == "inspect" else ""),
+        )
         child.add_argument("--phase", choices=("0", "1", "2", "all"), default="all")
         child.add_argument("--run-dir", type=Path, help="explicit output; otherwise use the configured run root")
         child.add_argument("--corpus-seal", type=Path, help="reviewed Phase 0 release seal for Phase 1")
@@ -71,6 +75,10 @@ def main(argv: list[str] | None = None) -> int:
         child.add_argument(
             "--phase0-m2m-python", type=Path, help="explicit Model2MLIR venv Python for diagnostic capture"
         )
+        if verb == "inspect":
+            from . import group_inspect
+
+            group_inspect.configure_parser(child)
     commands.add_parser("status").add_argument("run_dir", type=Path)
     lineage_parser = commands.add_parser(
         "lineage", help="read frozen phase inputs and handoffs without executing engines"
@@ -102,7 +110,10 @@ def main(argv: list[str] | None = None) -> int:
         help="pre-execution selection for each selected capture; omitted legacy captures remain diagnostic",
     )
     derive.add_argument(
-        "--application-quant-policy", action="append", default=[], metavar="LABEL=PATH@SHA256",
+        "--application-quant-policy",
+        action="append",
+        default=[],
+        metavar="LABEL=PATH@SHA256",
         help="independently selected policy bytes for each externally quantized capture",
     )
     derive.add_argument(
@@ -173,6 +184,11 @@ def main(argv: list[str] | None = None) -> int:
     seal.add_argument("--reviewed-by", required=True)
     seal.add_argument("--review-note", required=True)
     args = parser.parse_args(argv)
+    if args.verb == "inspect" and args.group is not None:
+        # One group of a candidate (a measured job or a package), not an experiment definition.
+        from . import group_inspect
+
+        return group_inspect.run_from_args(args)
     try:
         if args.verb == "corpus":
             if args.operation == "capture":
@@ -203,7 +219,10 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             elif args.operation == "derive":
                 from .phase0.requirements import (
-                    capture_selection_specs, capture_selections, derive, quantization_policy_specs,
+                    capture_selection_specs,
+                    capture_selections,
+                    derive,
+                    quantization_policy_specs,
                 )
 
                 try:
@@ -270,7 +289,8 @@ def main(argv: list[str] | None = None) -> int:
                         "kind": spec.document.get("kind", "experiment"),
                         "phase1_level": (
                             level_for_phase1(spec.document["phases"]["1"]["config"])
-                            if "1" in spec.document["phases"] else None
+                            if "1" in spec.document["phases"]
+                            else None
                         ),
                     }
                 )

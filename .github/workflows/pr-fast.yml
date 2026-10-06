@@ -63,6 +63,15 @@ jobs:
         run: uv run --no-sync python build_tools/scripts/check_semantic_coverage.py
       - name: wiring gate (every instrument has a production caller)
         run: uv run --no-sync python build_tools/scripts/check_wiring.py
+      # A gate nobody has ever seen fail reads exactly like one that cannot. The structural half runs
+      # pre-commit; this is the half that cannot be faked: it runs each recorded proof and requires the
+      # proof to be observed entering its own gate.
+      - name: mutation-proof gate (every check has a recorded failing direction)
+        run: uv run --no-sync python build_tools/scripts/check_mutation_proofs.py --prove
+      # On an evidence path, absent must not read as a value: a fabricated `.get` fallback, a
+      # swallowed load error, a discarded subprocess result, a shelled pipeline's last-stage status.
+      - name: silent-default gate (a substituted datum may not become a verdict)
+        run: uv run --no-sync python build_tools/scripts/check_silent_defaults.py
       - name: sign coverage (a sign-sensitive capsule can go negative)
         run: uv run --no-sync python build_tools/scripts/check_sign_coverage.py
       # A slope is only a rate if exactly one term moved between the points; the plan's isolation is
@@ -106,6 +115,11 @@ jobs:
         run: uv run --no-sync python build_tools/scripts/check_contract_copies.py
       - name: fact-provenance gate (a hardware fact derives from RTL, not from prose)
         run: uv run --no-sync python build_tools/scripts/check_fact_provenance.py
+      # Provenance asks which revision a fact came from; this asks what a declared RESTRICTION was read
+      # off. A narrowing claim is the one a wrong answer makes invisible -- it removes demand, so
+      # nothing fails.
+      - name: capability-backing gate (a claim that narrows a target must cite its source)
+        run: uv run --no-sync python build_tools/scripts/check_capability_backing.py
       - name: opcode-documentation gate (every accepted op has ABI semantics)
         run: uv run --no-sync python build_tools/scripts/check_opcode_documentation.py
       # Fresh CI has no generated OOT contracts. Keep new weakenings fatal for contracts it CAN read,

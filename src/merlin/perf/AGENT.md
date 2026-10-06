@@ -50,6 +50,11 @@ code runs on two targets of different archetypes and produces **different, corre
   mispredicts every small workload.
 - **At least two points per fitted parameter.** A single rate cannot price a unit whose cost is a rate
   plus a fixed overhead.
+- **A partial whole-model build is never a whole model.** `only_groups` (`whole_model_partial`) marks
+  the record, the oracle and the expectations. The verdict, the grade, the gate and the measured
+  service each refuse the marker; a new whole-model reader must call `whole_model_partial.refuse`.
+- Build stages are compile-trace stages (`whole_model_build.BUILD_STAGES`, the stage clock's own
+  vocabulary); the builder CLI lives in `whole_model_build_cli` so the builder module holds the build.
 - Tests go in an existing bucket — there is no `perf` bucket and the list is an enum. Contract, record
   and profile tests live in `merlin/tests/targetgen/`; envelope, attribution and analysis tests in
   `merlin/tests/dse/`. Resolve paths via `merlin.common.paths.repo_root()`.
