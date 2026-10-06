@@ -38,9 +38,7 @@ def ordinary_tree(path: Path) -> None:
             raise SpecError("corpus release source contains symlinked or nonregular entries")
 
 
-def copy_input(
-    source: Path, destination: Path, *, private: bool = False, expected_sha256: str | None = None
-) -> str:
+def copy_input(source: Path, destination: Path, *, private: bool = False, expected_sha256: str | None = None) -> str:
     from merlin.common import content_store
 
     from ..runner import fingerprint
@@ -296,6 +294,7 @@ def _verify_completed_generation(plan: dict, generated: Path) -> None:
         raise SpecError("completed Phase-0 evidence differs from its frozen selection")
     if evidence.status != "verified":
         return  # Diagnostic corpus inspection remains possible, never promoted here.
+    _require_enforceable_instruction_policy(plan, generated)
     views = json.loads(evidence.views_json)
     applications = (views.get("application_inventory") or {}).get("applications")
     attestations = views.get("capture_execution_attestations")
@@ -315,6 +314,22 @@ def _verify_completed_generation(plan: dict, generated: Path) -> None:
                 raise SpecError(f"generation-time capture attestation changed: {member}: {exc}") from exc
         if failure := verified_capture_failure(capsule):
             raise SpecError(f"generation-time capture admission changed: {member}: {failure}")
+
+
+def _require_enforceable_instruction_policy(plan: dict, generated: Path) -> None:
+    """Refuse to release a verified corpus whose sealed instruction policy cannot refuse anything.
+
+    The roles the Phase 0 command declared (else the ones the manifest records) must each resolve to at
+    least one of the target's instructions. A corpus once sealed ``status: resolved`` beside
+    ``vacuous_roles: [loop_descriptor]`` -- a no-FSM rule that matched nothing -- and every later phase
+    read that as enforced."""
+    from ..phase0.instruction_roles import enforcement_problems
+
+    policy = read_yaml(generated / "MANIFEST.yaml").get("instruction_policy")
+    declared = ((plan["phases"]["0"].get("instruction_policy") or {}).get("prohibited_instruction_roles")) or []
+    roles = list(declared) or list((policy or {}).get("prohibited_instruction_roles") or ())
+    if roles and (problems := enforcement_problems(policy, roles)):
+        raise SpecError(f"verified Phase-0 corpus carries an unenforceable instruction policy: {'; '.join(problems)}")
 
 
 def _members(root: Path) -> dict[str, tuple[Path, dict]]:
