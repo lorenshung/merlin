@@ -527,10 +527,6 @@ _BOUNDARY_LITERAL_ALLOW = {
         "merlin/python/merlin/compare/host_experiment.py",
         "merlin/experiments/cpu_host_compiler_v0/optimization_space_v1.yaml",
     ): "binds the calibration to that experiment's frozen optimization space, by content",
-    (
-        "merlin/python/merlin/targetgen/generate_bundles.py",
-        "experiments/",
-    ): "guest-visible sandbox mount spec: a path inside the agent's bundle, never read by this process",
 }
 
 
