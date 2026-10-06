@@ -135,6 +135,21 @@ def missing_evidence(records: dict[str, dict]) -> list[str]:
     return problems
 
 
+def exactness_problems(measurements: dict[str, Any]) -> list[str]:
+    """What keeps the measurements' exactness record from saying which contract the cycles were graded
+    under: a champion's correctness is only as strict as that contract, so an export without it -- or
+    with a contract nobody can identify -- is refused rather than read as bit-exact."""
+    record = measurements.get("exactness")
+    if not isinstance(record, dict):
+        return ["measurements.exactness (the measurement recorded no exactness contract)"]
+    problems = []
+    if not _check("sha256", record.get("contract_sha256")):
+        problems.append("measurements.exactness.contract_sha256")
+    if not _check("text", record.get("label")) or record.get("label") == "unrecorded":
+        problems.append("measurements.exactness.label")
+    return problems
+
+
 def layout_problems(root: Path) -> list[str]:
     """What keeps ``root`` from being a standalone champion tree (empty when it is one)."""
     root = Path(root)
@@ -192,7 +207,7 @@ def export_champion(
         "measurements": dict(measurements),
         "isa_prohibition": dict(isa_prohibition),
     }
-    problems = missing_evidence(records)
+    problems = missing_evidence(records) + exactness_problems(records["measurements"])
     if problems:
         raise ChampionError(f"champion evidence is incomplete or not passing: {', '.join(problems)}")
     if measurements["package_digest"] != digest:

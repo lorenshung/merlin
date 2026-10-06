@@ -110,7 +110,7 @@ def build(
     allow_regions: bool = False,
     phase0_recipe: str | None = None,
     descriptor: str | None = None,
-    chunk_ops: int | None = None,
+    chunk_ops: int | str | None = None,
     lowering_passes: Sequence[str] = (),
     only_groups: Sequence[Any] = (),
     trace_dir: str | None = None,
@@ -195,7 +195,7 @@ def _build(
     allow_regions: bool = False,
     phase0_recipe: str | None = None,
     descriptor: str | None = None,
-    chunk_ops: int | None = None,
+    chunk_ops: int | str | None = None,
     only_groups: Sequence[Any] = (),
 ) -> dict[str, Any]:
     """``decline`` (op names / group indices) is CELL MODE's own hook: naming every group outside one
@@ -208,7 +208,8 @@ def _build(
 
     ``phase0_recipe`` / ``descriptor`` name the corpus binding every group is stated under.
     ``chunk_ops`` (an open model only) bounds the open build's lowered functions; ``None`` keeps the
-    unchunked program.
+    unchunked program. ``"auto"`` derives the size from an open model's forward and asks nothing of a
+    closed one (it has no host forward to cut), so one build option serves both.
     """
     from merlin.perf import whole_model_build as WMB
     from merlin.perf import whole_model_open as WO
@@ -237,7 +238,9 @@ def _build(
             descriptor=descriptor,
             **({"chunk_ops": chunk_ops} if chunk_ops is not None else {}),
         )
-    if chunk_ops is not None:
+    from merlin.perf.whole_model_chunks import AUTO
+
+    if chunk_ops is not None and str(chunk_ops).strip().lower() != AUTO:
         raise WMB.WholeModelBuildError("chunk_ops bounds an open model's lowered functions; this model is closed")
     record = WMB.build(
         package_dir,

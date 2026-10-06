@@ -122,6 +122,9 @@ def screen_console(
         row: dict[str, Any] = {"group": int(group), "kind": line.kind, "spike_cycles": line.cycles, "local": state}
         if routes:
             row["on"] = routes.get(group)
+        if detail:
+            # The check's own numbers, kept for every group: an exactness contract grades from them.
+            row["check"] = detail
         if detail and state != "correct":
             row["failure"] = detail
         on = (routes or {}).get(group)

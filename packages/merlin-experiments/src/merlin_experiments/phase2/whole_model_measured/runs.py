@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from . import MODE
+from . import capabilities as CAP
 from . import config as CFG
 from .identity import package_digest, program_digest, read_json, write_json_atomic
 
@@ -59,6 +60,8 @@ class PreparedRun:
     roles: tuple[str, ...]
     seed_package_sha256: str
     store_roots: Mapping[str, str]
+    #: What each section's machine lacks against the others its registry declares (:mod:`.capabilities`).
+    machine_warnings: tuple[str, ...] = ()
 
 
 def _default_run_factory(*, target: str, method: str) -> Path:
@@ -185,6 +188,7 @@ def prepare(
     config = _substitute(config, frozen)
     _require_frozen_mechanism_inputs(config, frozen, resumed_from)
     config = CFG.prepare_document(config, target=target)
+    config = CFG.seal_exactness(config, target=target)
     CFG.check_policy(config)
     roots = {k: str(v) for k, v in CFG.store_roots(config, environment=environment).items()}
     moved = {}
@@ -226,6 +230,8 @@ def prepare(
         )
         oot.verify(repo, commit.commit, package_digest(submission))
         oot_record = commit.as_record()
+    capabilities = machine_capabilities(config, environment=environment)
+    write_json_atomic(run_dir / CAP.RECORD, capabilities)
     config_path = run_dir / CONFIG_NAME
     config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     config_path.chmod(0o444)
@@ -270,7 +276,30 @@ def prepare(
             "resumed_from_run": str(resumed_from) if resumed_from is not None else None,
         },
     )
-    return PreparedRun(run_dir, config_path, config_sha256, method, tuple(roles), seed_sha, roots)
+    return PreparedRun(
+        run_dir,
+        config_path,
+        config_sha256,
+        method,
+        tuple(roles),
+        seed_sha,
+        roots,
+        tuple(capabilities["warnings"]),
+    )
+
+
+def machine_capabilities(config: Mapping[str, Any], *, environment: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Each candidate section's machine capability report (:func:`.capabilities.section_report`) and
+    every warning they raise, prefixed with the section -- the record a launch writes and prints."""
+    sections = {
+        name: CAP.section_report(config[name], environment=environment)
+        for name in CFG.CANDIDATE_SECTIONS
+        if config.get(name)
+    }
+    warnings = [
+        f"{name}: {warning}" for name, document in sections.items() for warning in document.get("warnings") or ()
+    ]
+    return {"schema": CAP.SCHEMA, "sections": sections, "warnings": warnings}
 
 
 def _lineage_kind(*, imported: Any, resumed_from: Path | None, phase1_oot: Path | None) -> str:
