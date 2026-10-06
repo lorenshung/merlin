@@ -8,6 +8,7 @@ Compile machinery behind ``merlin-compile``: bundles, the host lane, capacity, a
 
 - `bundles.py` — Capture bundles for the RVV whole-model lane, and the scalar datatype a bundle's IR carries.
 - `capacity.py` — Operand and accumulator capacity of a target's matrix unit, and the tile that fits it.
+- `command.py` — The `merlin-compile` command line: its arguments, the combinations it refuses, and its report.
 - `host_lane.py` — The RVV host lane: which package a compile uses for each datatype, and its provenance pin.
 - `mesh.py` — Execute and certify matmul layers on a target's accelerator mesh.
 - `mesh_backend.py` — Plumbing for running a layer through a target's out-of-tree backend package.
@@ -24,6 +25,8 @@ Compile machinery behind ``merlin-compile``: bundles, the host lane, capacity, a
   `_summarize_route_plan`) stay DEFINED there, because other modules look them up through it at call
   time (`compare.study`, `targetgen.capsule_runner`) and tests replace them there. Everything this
   package defines is re-exported by `compile_cli` for callers.
+  `command.py` holds only the argument parsing, validation and report `main` calls; it dispatches
+  nothing itself, so no test needs to patch it.
 - Patch a name in the module that DEFINES it. A re-export (in `compile_cli`, or a sibling imported by
   name, e.g. `mesh` importing `capacity`'s helpers) is a separate binding the defining module's callers
   never read, so a patch there passes without testing anything.
