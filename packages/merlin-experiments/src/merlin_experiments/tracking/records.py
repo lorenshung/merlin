@@ -551,6 +551,20 @@ class StoreCache:
         return self.results[path]
 
 
+def _standing_result(job_dir: Path) -> dict[str, Any] | None:
+    """The result that stands for a job across all its attempts, read by the measured mode's own reader
+    (:func:`..phase2.whole_model_measured.attempts.effective_result`): a re-queued job whose current
+    attempt was lost to the host still shows the earlier verdict about its bytes, marked
+    ``from_attempt``, instead of the infrastructure outcome that displaced its ``result.json``."""
+    from ..phase2.whole_model_measured import attempts as A
+
+    try:
+        result = A.effective_result(job_dir)
+    except (OSError, ValueError):
+        return None
+    return dict(result) if isinstance(result, Mapping) else None
+
+
 def load_store(root: Path, inventory: Inventory, cache: StoreCache) -> dict[str, Any]:
     """Every job of one measurement store, classified, plus the store's own plateau and board records."""
     from ..phase2.whole_model_measured.machines import INFRA_BOARD_UNAVAILABLE
@@ -573,11 +587,7 @@ def load_store(root: Path, inventory: Inventory, cache: StoreCache) -> dict[str,
             unreadable += 1
             continue
         job_dir = job_path.parent
-        try:
-            result = json.loads((job_dir / "result.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            result = None
-        result = result if isinstance(result, dict) else None
+        result = _standing_result(job_dir)
         try:
             attribution = json.loads((job_dir / J.ATTRIBUTION_FILE).read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -598,6 +608,7 @@ def load_store(root: Path, inventory: Inventory, cache: StoreCache) -> dict[str,
             "solo": bool(job.get("solo")),
             "requested": epoch(job.get("requested_epoch")) or epoch(job.get("requested_at")),
             "finished": epoch((result or {}).get("finished_at")) if result else None,
+            "from_attempt": ((result or {}).get("from_attempt") or {}).get("attempt"),
             "board_ready": epoch(job.get("board_ready_epoch")),
             "timing_status": (result or {}).get("timing_status") or job.get("timing_status"),
             "cycles": _int((result or {}).get("objective_cycles")),

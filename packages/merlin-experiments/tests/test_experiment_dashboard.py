@@ -371,6 +371,39 @@ def test_failure_classes_follow_the_owners_record_fields(out_root):
     assert [e["n"] for e in p2["ledger"]["best"]] == [1]
 
 
+def test_an_earlier_attempts_verdict_stands_over_a_host_lost_retry(out_root):
+    """A re-queued job whose retry was lost to the host still shows the reading it already had."""
+    t0 = 1_790_000_000.0
+    run_dir, store = phase2_run(out_root, t0)
+    key = "9" * 64
+    _job(store, key, requested=t0 + 2.5 * HOUR, label="re-queued")
+    archived = store / key / J.ATTEMPTS_DIR / "1"
+    _write(
+        archived / J.RESULT_FILE,
+        {
+            "schema": J.RESULT_SCHEMA,
+            "package_sha256": key,
+            "finished_at": _stamp(t0 + 3 * HOUR),
+            "timing_status": V.TIMING_MEASURED,
+            "objective_cycles": 850_000,
+            "verdict": {"timing_status": V.TIMING_MEASURED, "whole_window_cycles": 850_000, "groups": []},
+        },
+    )
+    _write(archived / J.ATTEMPT_RECORD, {"kind": "requeue", "why": "worker lost"})
+    _result(
+        store,
+        key,
+        finished=t0 + 4 * HOUR,
+        status=V.TIMING_REFUSED,
+        refusal="worker lost to host pressure",
+        infra_worker_lost=True,
+    )
+    p2 = records.run_summary(run_dir, now=t0 + 5 * HOUR)["phase2"]
+    row = next(c for c in p2["candidates"] if c["key"] == key)
+    assert row["class"] == "measured" and row["cycles"] == 850_000 and row["from_attempt"] == 1
+    assert p2["best"]["cycles"] == 850_000
+
+
 def test_html_carries_the_recorded_numbers_and_is_self_contained(out_root, tmp_path):
     t0 = 1_790_000_000.0
     run_dir, store = phase2_run(out_root, t0)

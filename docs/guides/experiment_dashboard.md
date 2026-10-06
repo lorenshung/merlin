@@ -3,7 +3,7 @@ title: Tracking experiments — the dashboard and the watch view
 kind: guide
 status: current
 owner: experiments
-last_verified: 2026-10-05
+last_verified: 2026-10-06
 related: [storage, reproducibility, phase2_test_justification]
 code_refs:
   - packages/merlin-experiments/src/merlin_experiments/tracking/records.py
@@ -42,7 +42,7 @@ The views **never measure, grade or build**. Every number on the page is a field
 | orchestration | `orchestration.json`, `resolved-plan.json` (state, attempts, plan binding) |
 | phase 1 | `qa_history/verdict_*.json`, `plateau.json`, `oot_commits.jsonl`, `freeze.json`, `run_manifest.yaml`, `qa_loop_summary.yaml`, `environment.yaml` (target) |
 | phase 2 run | `run.json`, `resumed_seed.json` (store roots, seed lineage), `whole_model_objective_config.json` (bar reference, plateau rule, orientation figures), `iterations.jsonl`, `stage/sessions.json`, `stage/rounds/round_*.round.json` |
-| phase 2 store | `<job>/job.json`, `result.json`, `attribution.json`, `plateau.json`, `solo_streak.json`, `batch_runner.json`, `board_outage.json`, `board_outages.jsonl`, `batches/*/batch.json` |
+| phase 2 store | `<job>/job.json`, `result.json` and its archived attempts (`attempts/<n>/`, legacy `*_attempt_<n>/`), `attribution.json`, `plateau.json`, `solo_streak.json`, `batch_runner.json`, `board_outage.json`, `board_outages.jsonl`, `batches/*/batch.json` |
 | target | `out/artifacts/targets/<target>/INDEX.yaml`, the phase run roots, `merlin-experiment runs` |
 
 A few figures are simple arithmetic over those fields, and each one is labelled where it appears:
@@ -51,6 +51,10 @@ A few figures are simple arithmetic over those fields, and each one is labelled 
 - ages and run windows;
 - the total over the per-group rooflines a result records;
 - the package-authored share, which comes from the owner's own `feedback.package_authored` over the stored routes.
+
+A job's result is the one that stands across its attempts, read by the measured mode's own reader
+(`attempts.effective_result`): a re-queued job whose retry was lost to the host still shows the
+verdict an earlier attempt reached, and the row names that attempt (`from_attempt`).
 
 If a record is missing, the page says **"not recorded"**. It never shows a zero or a guess in its place. The
 "Records read" section at the bottom lists every file consulted. Each file is marked as read, absent,
