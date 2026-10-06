@@ -58,9 +58,9 @@ def test_differences_names_the_set_vs_unset_case():
 
 
 def test_the_beam_and_the_runner_both_record_it():
-    from merlin.common.paths import merlin_dir
+    from merlin.common.paths import repo_root
 
-    base = merlin_dir() / "python" / "merlin" / "mining"
+    base = repo_root() / "packages" / "merlin-mining" / "src" / "merlin" / "mining"
     for name in ("beam.py", "runner.py"):
         src = (base / name).read_text()
         assert "codegen_env" in src, name

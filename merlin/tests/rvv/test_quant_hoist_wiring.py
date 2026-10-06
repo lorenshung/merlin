@@ -105,3 +105,96 @@ def test_c_runtime_appends_the_quant_hoist_plan_to_the_forward_abi(tmp_path):
     offset = int(rows[1].split(",")[1].strip().rstrip("L"))
     got = np.frombuffer((out / "weights.bin").read_bytes(), dtype=np.float32, count=2, offset=offset)
     assert np.array_equal(got, lifted)
+
+
+def test_stored_integer_weight_transpose_is_exact_and_activation_stays_runtime():
+    from merlin.frontends.linalg_mlir import parse_mlir_text
+
+    source = """module {
+      func.func @forward(%w: tensor<2x3xi8>, %x: tensor<1xf32>) -> tensor<3x2xi8> {
+        %empty = tensor.empty() : tensor<3x2xi8>
+        %t = linalg.transpose ins(%w : tensor<2x3xi8>)
+            outs(%empty : tensor<3x2xi8>) permutation = [1, 0]
+        return %t : tensor<3x2xi8>
+      }
+    }"""
+    weight = np.array([[-128, 0, 127], [9, -2, 5]], dtype=np.int8)
+    module = parse_mlir_text(source)
+    args, values, count = quant_hoist.apply(module, frozenset({1}), lambda i: weight)
+    module.verify()
+    assert count == 1
+    assert args[0].shape == (3, 2)
+    np.testing.assert_array_equal(values[args[0].key], weight.T)
+    assert values[args[0].key].flags.c_contiguous
+    assert not any(op.name == "linalg.transpose" for op in module.walk())
+    for activation_args, loader in [(frozenset({0}), lambda i: weight), (frozenset({1}), lambda i: None)]:
+        module = parse_mlir_text(source)
+        assert quant_hoist.apply(module, activation_args, loader) == ([], {}, 0)
+        assert any(op.name == "linalg.transpose" for op in module.walk())
+
+
+def _nested_layout_source(extra_return=False):
+    output = "tensor<2x3x2xi8>, tensor<3x4xi8>" if extra_return else "tensor<2x3x2xi8>"
+    ret = "%final, %first : tensor<2x3x2xi8>, tensor<3x4xi8>" if extra_return else "%final : tensor<2x3x2xi8>"
+    return f"""module {{
+      func.func @forward(%w: tensor<4x3xi8>, %x: tensor<1xf32>) -> ({output}) {{
+        %e0 = tensor.empty() : tensor<3x4xi8>
+        %first = linalg.transpose ins(%w : tensor<4x3xi8>)
+          outs(%e0 : tensor<3x4xi8>) permutation = [1, 0]
+        %flat = tensor.collapse_shape %first [[0, 1]] : tensor<3x4xi8> into tensor<12xi8>
+        %view = tensor.expand_shape %flat [[0, 1, 2]] output_shape [3, 2, 2]
+          : tensor<12xi8> into tensor<3x2x2xi8>
+        %e1 = tensor.empty() : tensor<2x3x2xi8>
+        %final = linalg.transpose ins(%view : tensor<3x2x2xi8>)
+          outs(%e1 : tensor<2x3x2xi8>) permutation = [1, 0, 2]
+        return {ret}
+      }}
+    }}"""
+
+
+def test_nested_stored_layout_preserves_order_and_lifts_only_live_frontier():
+    from merlin.frontends.linalg_mlir import parse_mlir_text
+
+    weight = np.arange(-6, 6, dtype=np.int8).reshape(4, 3)
+    module = parse_mlir_text(_nested_layout_source())
+    args, values, count = quant_hoist.apply(module, frozenset({1}), lambda i: weight)
+    module.verify()
+    assert count == len(args) == 1
+    expected = weight.T.reshape(3, 2, 2).transpose(1, 0, 2)
+    np.testing.assert_array_equal(values[args[0].key], expected)
+    assert not np.array_equal(expected, weight.reshape(3, 2, 2).transpose(1, 0, 2))
+    assert not any(op.name in {"linalg.transpose", *quant_hoist.VIEW_OPS} for op in module.walk())
+
+
+def test_nested_stored_layout_preserves_independent_ancestor_consumer():
+    from merlin.frontends.linalg_mlir import parse_mlir_text
+
+    weight = np.arange(-6, 6, dtype=np.int8).reshape(4, 3)
+    module = parse_mlir_text(_nested_layout_source(extra_return=True))
+    args, values, count = quant_hoist.apply(module, frozenset({1}), lambda i: weight)
+    module.verify()
+    assert count == len(args) == 2
+    np.testing.assert_array_equal(values[args[0].key], weight.T)
+    np.testing.assert_array_equal(values[args[1].key], weight.T.reshape(3, 2, 2).transpose(1, 0, 2))
+
+
+def test_nested_stored_layout_leaves_activation_or_unstored_input_unchanged():
+    from merlin.frontends.linalg_mlir import parse_mlir_text
+
+    for indices, loader in [(frozenset({0}), lambda i: np.ones((4, 3), np.int8)), (frozenset({1}), lambda i: None)]:
+        module = parse_mlir_text(_nested_layout_source())
+        assert quant_hoist.apply(module, indices, loader) == ([], {}, 0)
+        assert sum(op.name == "linalg.transpose" for op in module.walk()) == 2
+
+
+def test_nested_stored_layout_rejects_mismatched_payload_before_mutation():
+    import pytest
+
+    from merlin.frontends.linalg_mlir import parse_mlir_text
+
+    for bad in [np.ones((4, 3), np.int32), np.ones((3, 4), np.int8)]:
+        module = parse_mlir_text(_nested_layout_source())
+        with pytest.raises(quant_hoist.QuantHoistRefused, match="tensor type"):
+            quant_hoist.apply(module, frozenset({1}), lambda i: bad)
+        assert sum(op.name == "linalg.transpose" for op in module.walk()) == 2
+        assert len(quant_hoist._forward_func(module).regions[0].blocks[0].args) == 2

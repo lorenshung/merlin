@@ -1,5 +1,9 @@
 """Hoist WEIGHT-INVARIANT dynamic quantization out of `@forward` and into the build.
 
+Stored-weight transposes produced during integer lowering use the same trailing-argument
+channel: their exact byte permutation is evaluated once at build time. Activation
+transposes and weights whose source cannot be resolved remain in the program.
+
 THE WORK THIS REMOVES. `quant_passes.apply_quant` lowers a W8A8 capture by quantizing BOTH operands
 of every contraction at run time: an amax reduce (``math.absf`` + ``arith.maximumf``) finds the
 per-row maximum, a divide turns it into a scale, and a ``roundeven -> clamp -> fptosi`` map applies
@@ -650,6 +654,86 @@ def _plan_absmean_weight_transposes(module, load_arg, start: int):
     return matches, values
 
 
+def _plan_stored_weight_transposes(module, activation_args, load_arg, start):
+    """Precompute static reshape/permutation chains rooted only in stored arguments.
+
+    Nested permutations must be evaluated in order: flattening a permutation's
+    result as though it were the original payload changes the weight values.
+    Plan every byte before editing the IR, then lift only the layout frontiers
+    needed by consumers outside these pure chains.
+    """
+    import numpy as np
+
+    memo = {}
+
+    def resolve(value, depth=0):
+        if depth > 64:
+            raise QuantHoistRefused("stored layout chain longer than 64 hops")
+        key = id(value)
+        if key in memo:
+            return memo[key]
+        index = _arg_index(module, value)
+        if index is not None:
+            arr = None if index in activation_args else load_arg(index)
+            arr = None if arr is None else np.asarray(arr)
+        else:
+            owner = getattr(value, "owner", None)
+            name = getattr(owner, "name", None)
+            if name not in VIEW_OPS and name != "linalg.transpose":
+                memo[key] = None
+                return None
+            arr = resolve(owner.operands[0], depth + 1)
+            if arr is not None:
+                if name == "linalg.transpose":
+                    permutation = tuple(owner.permutation.get_values())
+                    if sorted(permutation) != list(range(arr.ndim)):
+                        raise QuantHoistRefused("weight transpose has invalid permutation")
+                    arr = np.transpose(arr, permutation)
+                else:
+                    shape = _shape_of(value.type)
+                    if any(d < 0 for d in shape) or np.prod(shape) != arr.size:
+                        raise QuantHoistRefused("stored layout view has incompatible static extent")
+                    arr = arr.reshape(shape)
+        if arr is not None and (
+            arr.shape != _shape_of(value.type) or arr.dtype != np.dtype(_np_of(_elem_str(value.type)))
+        ):
+            raise QuantHoistRefused("stored layout bytes disagree with tensor type")
+        memo[key] = arr
+        return arr
+
+    matches, values = [], {}
+    for op in list(module.walk()):
+        if op.name != "linalg.transpose" or len(op.results) != 1:
+            continue
+        packed = resolve(op.results[0])
+        if packed is None:
+            continue
+        dtype = _elem_str(op.results[0].type)
+        matches.append((op, packed, dtype))
+
+    matched_ops = {op for op, _, _ in matches}
+
+    def covered(value, depth=0):
+        if depth > 64:
+            return False
+        for use in value.uses:
+            consumer = use.operation
+            if consumer in matched_ops:
+                continue
+            if consumer.name not in VIEW_OPS or not all(covered(result, depth + 1) for result in consumer.results):
+                return False
+        return True
+
+    frontiers = []
+    for op, packed, dtype in matches:
+        if covered(op.results[0]):
+            continue
+        arg = HoistedArg(f"qhoist::stored_transpose::{start + len(frontiers)}", packed.shape, dtype)
+        values[arg.key] = np.ascontiguousarray(packed)
+        frontiers.append((op, arg))
+    return frontiers, values
+
+
 def _erase_dead_tree(op) -> None:
     """Erase a now-unused pure producer tree; later canonicalization is only a backup."""
     pending = [op]
@@ -678,7 +762,11 @@ def apply(module, activation_args, load_arg):
     chains, values = plan(module, activation_args, load_arg)
     absmean_chains, absmean_values = _plan_absmean_weight_transposes(module, load_arg, len(chains))
     values.update(absmean_values)
-    if not chains and not absmean_chains:
+    stored_chains, stored_values = _plan_stored_weight_transposes(
+        module, activation_args, load_arg, len(chains) + len(absmean_chains)
+    )
+    values.update(stored_values)
+    if not chains and not absmean_chains and not stored_chains:
         return [], {}, 0
 
     func = _forward_func(module)
@@ -697,7 +785,7 @@ def apply(module, activation_args, load_arg):
                 dead.erase()
         args.extend((sa, qa))
 
-    for transpose_op, arg in absmean_chains:
+    for transpose_op, arg in [*absmean_chains, *stored_chains]:
         lifted = block.insert_arg(transpose_op.results[0].type, len(block.args))
         transpose_op.results[0].replace_all_uses_with(lifted)
         _erase_dead_tree(transpose_op)
@@ -706,7 +794,7 @@ def apply(module, activation_args, load_arg):
     func.properties["function_type"] = FunctionType.from_lists(
         [a.type for a in block.args], list(func.function_type.outputs.data)
     )
-    return args, values, len(chains) + len(absmean_chains)
+    return args, values, len(chains) + len(absmean_chains) + len(stored_chains)
 
 
 def ensure_registered() -> str:

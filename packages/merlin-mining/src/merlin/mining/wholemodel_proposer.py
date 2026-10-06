@@ -521,15 +521,15 @@ def family_coverage(family: str) -> tuple[str | None, str | None]:
 
 
 # ---------------------------------------------------------------------------------------------------
-# Composition helpers (the <=1 schedule-replacement rule).
+# Composition helpers (feature alternatives and the <=1 schedule-replacement rule).
 # ---------------------------------------------------------------------------------------------------
 def _composes(features: list[str]) -> bool:
-    """True iff the feature set is co-enable-able (no two full-schedule-replacement features)."""
+    """True iff selection constraints and the schedule-replacement rule allow the set."""
     from ..llvmlower import impr_features as I
 
     try:
         I.normalize(features)
-    except Exception:  # CompositionError (two schedule_replace) or unknown feature
+    except Exception:  # invalid selection or unknown feature
         return False
     reps = [f for f in features if getattr(I.get(f), "schedule_replace", False)]
     return len(reps) <= 1
@@ -538,19 +538,24 @@ def _composes(features: list[str]) -> bool:
 def _feature_fork(
     feat: str, parent_feats: list[str], *, targets: str, evidence: list[str], note: str, action: Any = None
 ) -> ForkProposal | None:
-    """Merge one feature onto the parent's feature stack, honoring the <=1 schedule-replace rule.
+    """Merge one feature onto the parent's feature stack, replacing its declared alternative.
 
     Returns a forkable ForkProposal, or None if the feature is already enabled or cannot compose even
     after dropping the parent's conflicting schedule-replacement feature."""
     if feat in parent_feats:
         return None
-    merged = parent_feats + [feat]
+    from ..llvmlower import impr_features as I
+
+    try:
+        group = I.get(feat).alternative_group
+        base = [f for f in parent_feats if group is None or I.get(f).alternative_group != group]
+    except KeyError:
+        return None
+    merged = base + [feat]
     if not _composes(merged):
         # e.g. a schedule-replace feature on top of a parent that already carries one. Try replacing
         # the conflicting schedule-replacement feature instead of stacking.
-        from ..llvmlower import impr_features as I
-
-        base = [f for f in parent_feats if not getattr(I.get(f), "schedule_replace", False)]
+        base = [f for f in base if not getattr(I.get(f), "schedule_replace", False)]
         merged = base + [feat]
         if not _composes(merged):
             return None

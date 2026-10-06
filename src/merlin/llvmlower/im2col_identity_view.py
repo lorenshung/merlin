@@ -58,16 +58,19 @@ def _rewrite_one(mt) -> None:
 
 def rewrite_module(module) -> ViewReport:
     """Mutate every mechanically identical im2col chain and report all near misses."""
-    from ..common import mlir_query as mq
     from .im2col_pack import PackReport, _match_im2col, _static_shape
 
     report = ViewReport()
     candidates = []
     match_report = PackReport()
-    for op in mq.walk(module, "linalg.generic"):
-        mt = _match_im2col(op, match_report)
-        if mt is not None:
-            candidates.append(mt)
+    # The QDQ contraction rewrite may turn the same proven im2col chain's
+    # final generic into a named linalg.matmul. Inspect both forms so the
+    # identity view survives integer preparation.
+    for op in module.walk():
+        if op.name in ("linalg.generic", "linalg.matmul"):
+            mt = _match_im2col(op, match_report)
+            if mt is not None:
+                candidates.append(mt)
     for mt in candidates:
         inshape = _static_shape(mt.gather.inputs[0])
         if (mt.n, mt.kh, mt.kw, mt.sh, mt.sw, mt.dh, mt.dw) != (1, 1, 1, 1, 1, 1, 1):

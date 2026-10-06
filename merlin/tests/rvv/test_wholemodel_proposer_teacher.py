@@ -122,6 +122,48 @@ def test_composition_never_stacks_two_schedule_replace():
         assert len(reps) <= 1, f"two schedule-replace features co-enabled: {s}"
 
 
+def test_feature_fork_replaces_alternative_and_preserves_prerequisite(monkeypatch):
+    from merlin.llvmlower import impr_features as I
+
+    monkeypatch.setattr(I, "_REGISTRY", dict(I._REGISTRY))
+    for name, kwargs in (
+        ("test_proposer_choice_a", {"alternative_group": "test_proposer_schedule"}),
+        ("test_proposer_choice_b", {"alternative_group": "test_proposer_schedule"}),
+        ("test_proposer_unrelated", {}),
+        (
+            "test_proposer_dependent",
+            {"requires_exactly_one_of": frozenset({"test_proposer_choice_a", "test_proposer_choice_b"})},
+        ),
+    ):
+        I.register(I.ImprFeature(name, "PASS", "proposer selection test", **kwargs))
+    parent = ["test_proposer_choice_a", "test_proposer_unrelated", "test_proposer_dependent"]
+    fork = W._feature_fork("test_proposer_choice_b", parent, targets="selection", evidence=[], note="replace")
+    assert fork is not None
+    selected = fork.overrides["compiler_features"]
+    assert selected == ["test_proposer_unrelated", "test_proposer_dependent", "test_proposer_choice_b"]
+    assert I.normalize(selected) == frozenset(selected)
+    assert parent[0] == "test_proposer_choice_a"  # the parent config is not mutated
+    assert W._feature_fork("test_proposer_dependent", [], targets="selection", evidence=[], note="missing") is None
+
+
+def test_feature_fork_does_not_remove_implying_features_to_force_composition(monkeypatch):
+    from merlin.llvmlower import impr_features as I
+
+    monkeypatch.setattr(I, "_REGISTRY", dict(I._REGISTRY))
+    for name, kwargs in (
+        ("test_proposer_choice_a", {"alternative_group": "test_proposer_schedule"}),
+        ("test_proposer_choice_b", {"alternative_group": "test_proposer_schedule"}),
+        ("test_proposer_wrapper", {"implies": frozenset({"test_proposer_choice_a"})}),
+    ):
+        I.register(I.ImprFeature(name, "PASS", "proposer selection test", **kwargs))
+    assert (
+        W._feature_fork(
+            "test_proposer_choice_b", ["test_proposer_wrapper"], targets="selection", evidence=[], note="conflict"
+        )
+        is None
+    )
+
+
 # --- honest no-teacher path -----------------------------------------------------------------------
 
 
