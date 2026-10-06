@@ -21,11 +21,14 @@ from merlin.common.paths import repo_root
 from merlin.runtime import fp8_formats as ff
 from merlin.targetgen import capsule_common, capsule_golden
 
-ATLAS = repo_root() / "merlin/contract/capsules/atlas"
+CAPSULES = repo_root() / "merlin/contract/capsules"
+ATLAS = CAPSULES / "atlas"
 
 
 def _capsule(name):
-    hits = [p.parent for p in ATLAS.rglob("capsule.yaml") if p.parent.name == name]
+    """A tracked capsule by name, from any target's corpus: the preload contract is dtype-driven, so a
+    bf16 donor serves whichever target's corpus holds it."""
+    hits = [p.parent for p in CAPSULES.rglob("capsule.yaml") if p.parent.name == name]
     if not hits:
         pytest.skip(f"capsule {name} not present")
     cd = hits[0]
@@ -75,7 +78,7 @@ def _recorded(name, tmp_path, *, raw_hex: bool = False):
 
 def test_a_bf16_capsule_supplies_device_operands(tmp_path):
     """The regression that cost atlas 13 capsules: this returned {} and nothing was preloaded."""
-    cap, cd = _recorded("AF6_add_bf16_pt", tmp_path)
+    cap, cd = _recorded("RP18_resadd_bf16_pt", tmp_path)
     raws = capsule_golden.canonical_input_raws(cap, cd)
     assert set(raws) == {"A", "B"}, "a two-operand bf16 capsule must supply BOTH operands"
     for name, raw in raws.items():
@@ -84,7 +87,7 @@ def test_a_bf16_capsule_supplies_device_operands(tmp_path):
 
 def test_supplied_operands_decode_back_to_the_goldens_own_values(tmp_path):
     """Preloading anything other than the operands the golden used grades against the wrong reference."""
-    for name in ("AF6_add_bf16_pt", "AF2_softmax_bf16_pt", "AF5_silu_bf16_pt"):
+    for name in ("RP18_resadd_bf16_pt", "MF1_softmax_bf16_pt", "MF3_silu_bf16_pt"):
         cap, cd = _recorded(name, tmp_path)
         raws = capsule_golden.canonical_input_raws(cap, cd)
         vals = capsule_golden.canonical_input_values(cap, cd)
@@ -119,7 +122,7 @@ def test_every_atlas_capsule_with_representable_float_operands_supplies_them():
 def test_a_lossy_reencoding_is_refused_rather_than_quantized(tmp_path):
     """A golden that stored pre-quantization floats for a narrow format must yield NO preload: handing the
     device quantized operands would grade the kernel against operands the golden never saw."""
-    _, donor = _capsule("AF6_add_bf16_pt")  # a real, schema-valid capsule to vary from
+    _, donor = _capsule("RP18_resadd_bf16_pt")  # a real, schema-valid capsule to vary from
     spec = yaml.safe_load((donor / "capsule.yaml").read_text())
     spec["name"] = "SYN_offgrid"
     spec["inputs"] = [{"name": "X", "role": "input", "shape": [1, 2], "dtype": "fp8_e4m3"}]
