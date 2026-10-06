@@ -874,14 +874,45 @@ class WholeModelObjective:
         return coverage is None or bool(coverage.get("eligible"))
 
     def noise_margin(self) -> float:
-        """What counts as an improvement: the median batched-vs-solo repeat spread actually measured in
-        THIS store, floored at NOISE_FLOOR. A fixed 0.1% floor undercounted this store's own board noise
-        (repeats of one identical package landing up to 0.4% apart): a candidate crowned on a margin
-        narrower than the noise the board itself produces on a rerun is not a measured improvement, it is
-        the spread. NOISE_FLOOR remains the bound for a store too young to have a repeat -- never zero,
-        or a two-candidate store would crown on a single tied board run."""
-        spread = self.repeat_spread()
-        return max(NOISE_FLOOR, spread) if spread is not None else NOISE_FLOOR
+        """What counts as an improvement ON THIS MACHINE: the largest of NOISE_FLOOR, the median
+        batched-vs-solo repeat spread measured in this store, and the machine's own same-day solo spread
+        of an identical program (:func:`.noise.margin`). A fixed 0.1% floor undercounted one board's own
+        noise (repeats of one identical package landing up to 0.4% apart) and another board moved 2.4%
+        between two solo runs of one ELF: a candidate crowned on a margin narrower than the noise the
+        machine itself produces on a rerun is not a measured improvement, it is the spread. NOISE_FLOOR
+        remains the bound for a store too young to have a repeat -- never zero, or a two-candidate store
+        would crown on a single tied board run."""
+        return float(self.noise()["margin"])
+
+    def machine_noise(self) -> dict[str, Any]:
+        """The screen machine's noise (:func:`.noise.machine_noise`), from every solo reading this store
+        and its reference hold; recomputed only when the store holds a different set of results."""
+        from . import noise as NOISE
+
+        root = getattr(self.screen, "root", None)
+        roots = [Path(root)] if root else []
+        reference = self.screen_reference_path
+        extra = [reference] if reference is not None and reference.is_file() else []
+        paths = [p for r in roots for p in NOISE.result_paths(r)]
+        key = (len(paths), tuple(str(p) for p in extra))
+        cached = getattr(self, "_machine_noise_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        readings = NOISE.solo_readings(roots, extra=extra)
+        device = ((self.screen_reference or {}).get("device") or {}).get("binary_sha256")
+        if not device and readings:
+            device = readings[-1]["device"]
+        document = NOISE.machine_noise(readings, device=device)
+        self._machine_noise_cache = (key, document)
+        return document
+
+    def noise(self) -> dict[str, Any]:
+        """The margin, which measurement set it, and the machine's noise behind it (flagged when fewer
+        than two same-day solo repeats exist)."""
+        from . import noise as NOISE
+
+        machine = self.machine_noise()
+        return {**NOISE.margin(machine, floor=NOISE_FLOOR, batched_vs_solo=self.repeat_spread()), "machine": machine}
 
     def repeat_spread(self) -> float | None:
         """The median relative difference between a batched result and its solo repeat -- IS the noise
@@ -1019,6 +1050,22 @@ class WholeModelObjective:
             "reference_is_orientation": True,
         }
 
+    def _noise_brief(self) -> dict[str, Any]:
+        try:
+            noise = self.noise()
+        except Exception as exc:  # noqa: BLE001 -- an unreadable store states its noise as unknown, never zero
+            return {"margin": NOISE_FLOOR, "basis": "floor", "established": False, "flag": f"UNKNOWN: {exc}"}
+        machine = noise.get("machine") or {}
+        return {
+            "margin": noise["margin"],
+            "basis": noise["basis"],
+            "established": noise["established"],
+            "flag": noise.get("flag"),
+            "device": machine.get("device"),
+            "same_day": machine.get("same_day"),
+            "cross_day": machine.get("cross_day"),
+        }
+
     # ---- what the agent and the report read
     def summary(self) -> dict[str, Any]:
         bar = (self.screen_reference or {}).get("verdict") or {}
@@ -1059,6 +1106,8 @@ class WholeModelObjective:
             },
             "certifier_history": self.certifier.history() if self.certifier is not None else [],
             "board": _board_status(self.screen),
+            # WHAT COUNTS AS AN IMPROVEMENT ON THIS MACHINE, and how well its noise is known.
+            "noise": self._noise_brief(),
         }
         if best is not None:
             cycles = int(best["objective_cycles"])

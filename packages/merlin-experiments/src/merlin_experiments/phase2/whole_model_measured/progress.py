@@ -85,6 +85,7 @@ def store_state(root: Path) -> dict[str, Any]:
         "job_states": jobs,
         "disk_hold": read_json(root / SERVICE.DISK_HOLD),
         "board_outage": BATCH.board_outage(root) if root.is_dir() else None,
+        "control_preflight": read_json(root / BATCH.CONTROL_PREFLIGHT),
         "plateau": plateau,
     }
 
@@ -156,6 +157,7 @@ def run_status(run_dir: Path, *, objective: Any = None, poll: bool = False, hist
             "best": summary.get("best"),
             "screen_basis": summary.get("screen_basis"),
             "board": summary.get("board"),
+            "noise": summary.get("noise"),
             "coverage_floor": summary.get("coverage_floor"),
             "history": [_compact(row) for row in (summary.get("history") or [])[-int(history) :]],
         }
@@ -181,6 +183,12 @@ def format_status(document: Mapping[str, Any]) -> str:
     for successor in document.get("resumed_into") or ():
         lines.append(f"  resumed into {successor}")
     objective = document.get("objective") or {}
+    noise = objective.get("noise") or {}
+    if noise:
+        lines.append(
+            f"  noise margin {100 * float(noise.get('margin') or 0):.2f}% ({noise.get('basis')})"
+            + (f"  [{noise['flag']}]" if noise.get("flag") else "")
+        )
     if objective:
         bar = (objective.get("bar") or {}).get("screen_whole_window_cycles")
         best = objective.get("best") or {}
@@ -195,6 +203,8 @@ def format_status(document: Mapping[str, Any]) -> str:
             lines.append(f"    DISK HOLD: {store['disk_hold'].get('reason')}")
         if store.get("board_outage"):
             lines.append(f"    BOARD OUTAGE since {store['board_outage'].get('opened_at')}")
+        if store.get("control_preflight"):
+            lines.append(f"    BATCHES HELD: {store['control_preflight'].get('reason')}")
         plateau = store.get("plateau") or {}
         if plateau:
             lines.append(

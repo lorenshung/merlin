@@ -219,3 +219,26 @@ def test_resume_prepares_the_next_run_of_a_named_run_from_another_seed(tmp_path,
     assert record["prohibited_instruction_roles"] == ["loop_descriptor"] and document["method"] == "m_nofsm"
     assert document["store_roots"] == json.loads((first / "resumed_seed.json").read_text())["store_roots"]
     assert spawned and document["launch"]["pid"] == os.getpid() and MCLI.successors(first) == [str(second)]
+
+
+def test_the_status_says_why_batches_are_held_and_how_well_the_machines_noise_is_known(tmp_path, monkeypatch):
+    from merlin_experiments.phase2.whole_model_measured import batch as B
+    from merlin_experiments.phase2.whole_model_measured import noise as N
+
+    monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "out"))
+    run_dir = _run(tmp_path)
+    store = tmp_path / "store" / "screen"
+    (store / B.CONTROL_PREFLIGHT).write_text(
+        json.dumps({"ok": False, "reason": f"{B.INFRA_CONTROL_UNMEASURED}: the control has no readable solo result"})
+    )
+    objective = _Objective()
+    objective.summary = lambda: {
+        "bar": {},
+        "best": None,
+        "history": [],
+        "noise": {"margin": 0.001, "basis": "floor", "established": False, "flag": N.NOT_ESTABLISHED},
+    }
+    document = P.run_status(run_dir, objective=objective)
+    assert document["stores"]["screen"]["control_preflight"]["ok"] is False
+    text = P.format_status(document)
+    assert "BATCHES HELD: infra_control_unmeasured" in text and N.NOT_ESTABLISHED in text
