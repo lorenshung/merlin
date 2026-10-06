@@ -100,7 +100,18 @@ def _free(path: Path) -> int | None:
 
 
 def _compact(row: Mapping[str, Any]) -> dict[str, Any]:
-    keys = ("package_sha256", "replicate", "label", "attribution", "state", "timing_status", "objective_cycles")
+    keys = (
+        "package_sha256",
+        "replicate",
+        "label",
+        "attribution",
+        "state",
+        "timing_status",
+        "objective_cycles",
+        "package_groups",
+        "package_priced_share",
+        "eligible",
+    )
     out = {k: row.get(k) for k in keys}
     for key in ("refusal", "notice"):
         if row.get(key):
@@ -183,6 +194,13 @@ def run_status(
     return document
 
 
+def _authored(authored: Mapping[str, Any]) -> str:
+    share = authored.get("priced_share")
+    return f"{authored.get('groups_answered')}/{authored.get('groups_total')} groups, " + (
+        "-" if share is None else f"{100 * float(share):.1f}%"
+    )
+
+
 def _cycles(value: Any) -> str:
     return f"{value:,}" if isinstance(value, int) else str(value)
 
@@ -223,9 +241,12 @@ def format_status(document: Mapping[str, Any]) -> str:
     if objective:
         bar = (objective.get("bar") or {}).get("screen_whole_window_cycles")
         best = objective.get("best") or {}
+        authored = best.get("package_authored") or {}
         lines.append(
-            f"  bar {_cycles(bar)}  best {_cycles(best.get('screen_whole_window_cycles'))} "
-            f"({str(best.get('package_sha256') or '-')[:12]}, ratio {best.get('screen_ratio_to_bar')})"
+            f"  vendor bar (context only) {_cycles(bar)}  best {_cycles(best.get('screen_whole_window_cycles'))} "
+            f"({str(best.get('package_sha256') or '-')[:12]}, ratio {best.get('screen_ratio_to_bar')}"
+            + (f", package-authored {_authored(authored)}" if authored else "")
+            + ")"
         )
     for name, store in (document.get("stores") or {}).items():
         jobs = ", ".join(f"{k} {v}" for k, v in sorted((store.get("jobs") or {}).items())) or "no jobs"
@@ -247,9 +268,13 @@ def format_status(document: Mapping[str, Any]) -> str:
     for row in document.get("open_rounds") or ():
         lines.append(f"  round {row['round']}: OPEN since {row.get('started_at')} ({row['requested']} requested)")
     for row in objective.get("history") or ():
+        share = row.get("package_priced_share")
+        authored = (
+            f"pkg {row.get('package_groups')} grp {100 * float(share):.1f}%" if share is not None else "pkg -"
+        ) + ("" if row.get("eligible", True) else " INELIGIBLE")
         lines.append(
             f"    {str(row.get('package_sha256'))[:12]} r{row.get('replicate')} {row.get('state'):>14} "
-            f"{row.get('timing_status') or '-':>10} {_cycles(row.get('objective_cycles')):>14}  "
+            f"{row.get('timing_status') or '-':>10} {_cycles(row.get('objective_cycles')):>14}  {authored:<22} "
             f"{row.get('label') or ''}"
         )
     return "\n".join(lines)
@@ -272,7 +297,8 @@ def snapshot(run_dir: Path, *, objective: Any = None) -> dict[str, Any]:
     if objective is not None:
         found = objective.summary().get("best") or {}
         if found:
-            best = (found.get("package_sha256"), found.get("screen_whole_window_cycles"))
+            share = (found.get("package_authored") or {}).get("priced_share")
+            best = (found.get("package_sha256"), found.get("screen_whole_window_cycles"), share)
     return {
         "jobs": jobs,
         "rounds": {row["round"]: row["status"] for row in ended},
@@ -301,8 +327,9 @@ def changes(before: Mapping[str, Any] | None, after: Mapping[str, Any]) -> list[
         if index not in before["open_rounds"]:
             lines.append(f"round {index} started")
     if after.get("best") != before.get("best") and after.get("best"):
-        digest, cycles = after["best"]
-        lines.append(f"best {str(digest)[:12]} at {_cycles(cycles)} cycles")
+        digest, cycles, share = (list(after["best"]) + [None])[:3]
+        authored = "-" if share is None else f"{100 * float(share):.1f}%"
+        lines.append(f"best {str(digest)[:12]} at {_cycles(cycles)} cycles (package-authored {authored})")
     for name, held in sorted(after["holds"].items()):
         if held != bool(before["holds"].get(name)):
             lines.append(f"{name} {'opened' if held else 'closed'}")

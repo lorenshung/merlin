@@ -242,3 +242,30 @@ def test_the_status_says_why_batches_are_held_and_how_well_the_machines_noise_is
     assert document["stores"]["screen"]["control_preflight"]["ok"] is False
     text = P.format_status(document)
     assert "BATCHES HELD: infra_control_unmeasured" in text and N.NOT_ESTABLISHED in text
+
+
+def test_every_cycle_count_in_the_status_carries_its_package_authored_share(tmp_path, monkeypatch):
+    monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "out"))
+    run_dir = _run(tmp_path)
+    best = {
+        "package_sha256": "a" * 64,
+        "screen_whole_window_cycles": 900,
+        "screen_ratio_to_bar": 0.9,
+        "package_authored": {"groups_answered": 54, "groups_total": 71, "priced_share": 0.932},
+    }
+    objective = _Objective(best=best)
+    objective.summary = lambda: {
+        "bar": {"screen_whole_window_cycles": 1000},
+        "best": best,
+        "history": [
+            {"package_sha256": "a" * 64, "replicate": 0, "state": "done", "objective_cycles": 900,
+             "package_groups": 54, "package_priced_share": 0.932, "eligible": True},
+            {"package_sha256": "b" * 64, "replicate": 0, "state": "done", "objective_cycles": 800,
+             "package_groups": 3, "package_priced_share": 0.05, "eligible": False},
+        ],
+    }  # fmt: skip
+    text = P.format_status(P.run_status(run_dir, objective=objective))
+    assert "vendor bar (context only) 1,000  best 900" in text and "package-authored 54/71 groups, 93.2%" in text
+    assert "pkg 54 grp 93.2%" in text and "pkg 3 grp 5.0% INELIGIBLE" in text
+    after = P.snapshot(run_dir, objective=objective)
+    assert "best aaaaaaaaaaaa at 900 cycles (package-authored 93.2%)" in P.changes(None, after)

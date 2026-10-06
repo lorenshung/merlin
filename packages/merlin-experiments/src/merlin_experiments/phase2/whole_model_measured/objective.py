@@ -172,7 +172,7 @@ class WholeModelObjective:
         best = self._screen_best_unretracted()
         if not best or not best.get("verdict"):
             return None
-        holders = [str(h["group"]) for h in (F.compare(best, self.screen_reference).get("gap_holders") or [])[:top]]
+        holders = [str(h["group"]) for h in (self.feedback(best).get("gap_holders") or [])[:top]]
         if not holders:
             return None
         history = []
@@ -192,6 +192,82 @@ class WholeModelObjective:
             }
             history.append((epoch, counts))
         return F.stagnation(history, holders, since_epoch=self.session_started_epoch, noise=self.noise_margin())
+
+    # ---- what the agent reads about one result
+    def feedback(self, result: Mapping[str, Any]) -> dict[str, Any]:
+        """:func:`.feedback.compare` of ``result`` against the screen's reference, WITH the model's
+        fact-derived rooflines by default (:meth:`rooflines`): a whole-model result carries no diagnostics
+        of its own, and an agent that sees only the vendor's cycles optimizes where the vendor is weak.
+        When the rooflines cannot be derived the feedback says why, never nothing."""
+        diagnosed = dict(result)
+        rooflines = self.rooflines()
+        if not diagnosed.get("diagnostics") and rooflines.get("per_group"):
+            diagnosed["diagnostics"] = {
+                "schema": "merlin_whole_model_diagnostics_v1",
+                "per_group": {g: {"roofline": r} for g, r in rooflines["per_group"].items()},
+                "source": rooflines.get("source"),
+            }
+        document = F.compare(diagnosed, self.screen_reference)
+        if not diagnosed.get("diagnostics") and rooflines.get("why"):
+            document["roofline_unavailable"] = rooflines["why"]
+        return document
+
+    def rooflines(self) -> dict[str, Any]:
+        """Each group's derived roofline for the screen's model (:mod:`.roofline`), computed once per model
+        and machine facts and kept in the store (``rooflines.json``): ``{"per_group", "source"}``, or
+        ``{"why"}`` when it cannot be derived (no model capsule, no facts, an opt-out by the config's
+        ``roofline_feedback: false``)."""
+        cached = getattr(self, "_rooflines", None)
+        if cached is not None:
+            return cached
+        self._rooflines = self._derive_rooflines()
+        return self._rooflines
+
+    def _derive_rooflines(self) -> dict[str, Any]:
+        import hashlib
+
+        from . import roofline as ROOF
+
+        config = self.config or {}
+        if config.get("roofline_feedback") is False:
+            return {"why": "the objective config turned roofline feedback off (roofline_feedback: false)"}
+        capsule = ((config.get("screen") or {}).get("build_options") or {}).get("model_capsule")
+        target = str(getattr(self.screen, "target", "") or "")
+        if not capsule or not Path(str(capsule)).is_dir() or not target:
+            return {"why": "the screen names no model capsule to derive each group's roofline from"}
+        try:
+            from merlin.perf.whole_model_capsule import load_model_capsule
+
+            interface = Path(load_model_capsule(capsule).interface)
+            machine = ROOF.roofline_machine(target)
+            key = hashlib.sha256(
+                json.dumps(
+                    {
+                        "interface": hashlib.sha256(interface.read_bytes()).hexdigest(),
+                        "target": target,
+                        "machine": machine,
+                    },
+                    sort_keys=True,
+                    default=str,
+                ).encode()
+            ).hexdigest()
+            root = getattr(self.screen, "root", None)
+            kept = Path(root) / "rooflines.json" if root else None
+            stored = _load(kept) if kept is not None else None
+            if stored and stored.get("key") == key:
+                return stored
+            shapes = ROOF.group_shapes(capsule, target=target)
+            document = {
+                "key": key,
+                "source": {"model_capsule": str(capsule), "machine": machine.get("provenance"), "schema": ROOF.SCHEMA},
+                "per_group": {g: ROOF.group_roofline(shape, machine) for g, shape in shapes.items()},
+            }
+            if kept is not None:
+                with contextlib.suppress(OSError):
+                    write_json_atomic(kept, document)
+            return document
+        except Exception as exc:  # noqa: BLE001 -- said in the feedback, never a silent absence
+            return {"why": f"the rooflines could not be derived: {type(exc).__name__}: {str(exc)[:300]}"}
 
     # ---- the loop's hook
     def measure(
@@ -259,7 +335,7 @@ class WholeModelObjective:
             return None
         result = newest[1]
         verdict = result.get("verdict") or {}
-        feedback = F.compare(result, self.screen_reference) if result.get("verdict") else None
+        feedback = self.feedback(result) if result.get("verdict") else None
         return {
             "package_sha256": result.get("package_sha256"),
             "finished_at": result.get("finished_at"),
@@ -273,7 +349,7 @@ class WholeModelObjective:
 
     def document(self, digest: str) -> dict[str, Any]:
         screen = self.screen.measurement_for(digest)
-        feedback = F.compare(screen, self.screen_reference) if screen.get("verdict") else None
+        feedback = self.feedback(screen) if screen.get("verdict") else None
         coverage = self.coverage(screen)
         if feedback is not None and coverage is not None and coverage.get("coverage_regression"):
             feedback["coverage_regression"] = coverage["coverage_regression"]
@@ -358,7 +434,7 @@ class WholeModelObjective:
         final = screen.get("verdict") if screen.get("timing_status") != TIMING_PENDING else None
         text = F.render_early(early)
         if final:
-            feedback = F.compare(screen, self.screen_reference)
+            feedback = self.feedback(screen)
             text = F.render(feedback)
         text = prohibited_text(screen) or text
         document = self.compact(digest)
@@ -459,7 +535,10 @@ class WholeModelObjective:
                 ((regression + "\n") if regression else "") + (document.get("feedback_text") or ""), COMPACT_TEXT
             ),
             "bar_cycles": (summary.get("bar") or {}).get("screen_whole_window_cycles"),
-            "best": {k: (summary.get("best") or {}).get(k) for k in ("package_sha256", "screen_whole_window_cycles")}
+            "best": {
+                k: (summary.get("best") or {}).get(k)
+                for k in ("package_sha256", "screen_whole_window_cycles", "package_authored")
+            }
             if summary.get("best")
             else None,
             "latest_measured": {
@@ -1123,6 +1202,9 @@ class WholeModelObjective:
                 "certifier_whole_window_cycles": cert_bar.get("whole_window_cycles"),
                 "certifier_reference_status": (self.certifier_reference or {}).get("timing_status"),
                 "note": "each machine is compared only with its own reference; the two are different devices",
+                # THE VENDOR'S CYCLES ARE CONTEXT: another implementation's number, never the target. The
+                # machine's own fact-derived roofline is what a group's headroom is measured against.
+                "role": "context_only",
             },
             "best": None,
             "candidate_provenance": dict(self.labels) or None,
@@ -1145,9 +1227,12 @@ class WholeModelObjective:
         if best is not None:
             cycles = int(best["objective_cycles"])
             screen_bar = bar.get("whole_window_cycles")
+            coverage = self.coverage(best) or {}
             document["best"] = {
                 "package_sha256": best_digest,
                 "screen_whole_window_cycles": cycles,
+                # WHAT THE PACKAGE AUTHORED of those cycles, beside them -- never a bare count.
+                "package_authored": {k: coverage.get(k) for k in ("groups_answered", "groups_total", "priced_share")},
                 "screen_vendor_also_fails_count": (best.get("verdict") or {}).get("vendor_also_fails_count"),
                 "screen_ratio_to_bar": round(cycles / int(screen_bar), 4) if screen_bar else None,
                 "screen_gap_cycles": cycles - int(screen_bar) if screen_bar else None,
