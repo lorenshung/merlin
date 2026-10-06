@@ -3,7 +3,7 @@ title: Verify selected hardware properties
 kind: guide
 status: current
 owner: verification
-last_verified: 2026-09-27
+last_verified: 2026-10-05
 related: [verification, phase0_specification, simulator_selection]
 code_refs:
   - packages/merlin-experiments/src/merlin_experiments/phase0/hardware_validation.py
