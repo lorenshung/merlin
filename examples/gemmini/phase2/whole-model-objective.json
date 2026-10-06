@@ -22,7 +22,8 @@
       "model_capsule": "{input:model_capsule}",
       "machine": "firesim_gemmini_rocket_u250_30mhz",
       "header": "/ABSOLUTE/full-gemmini/gemmini_params.h",
-      "phase0_recipe": "/ABSOLUTE/examples/gemmini/phase0/recipe.yaml"
+      "phase0_recipe": "/ABSOLUTE/examples/gemmini/phase0/recipe.yaml",
+      "chunk_ops": "auto"
     },
     "reference": "/ABSOLUTE/full-gemmini-reference-arm/result.json",
     "slots": 3,
@@ -36,7 +37,8 @@
       "machine": "gemmini_gsim_emulator",
       "header": "/ABSOLUTE/curated/gemmini_params.h",
       "verify": "host_dump",
-      "phase0_recipe": "/ABSOLUTE/examples/gemmini/phase0/recipe.yaml"
+      "phase0_recipe": "/ABSOLUTE/examples/gemmini/phase0/recipe.yaml",
+      "chunk_ops": "auto"
     },
     "reference": "/ABSOLUTE/certifier-reference/result.json",
     "slots": 2,

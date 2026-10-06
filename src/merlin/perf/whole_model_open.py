@@ -50,7 +50,13 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from merlin.perf.whole_model_chunks import _CHEAP_PRODUCERS, _chunk_bounds, chunk_forward  # noqa: F401
+from merlin.perf.whole_model_chunks import (  # noqa: F401
+    _CHEAP_PRODUCERS,
+    _chunk_bounds,
+    chunk_forward,
+    forward_body_size,
+    resolve_chunk_ops,
+)
 
 __all__ = [
     "DISPATCH_PREFIX",
@@ -94,6 +100,7 @@ from .whole_model_dispatches import (
     _shape_dtype as _shape_dtype,
     externalize_dispatches,
 )
+
 
 def two_harts(machine: str, host_hart: int) -> dict[str, Any]:
     """The hart roles of a two-hart program for ``machine``, from its registry entry's declared harts:
@@ -198,7 +205,6 @@ def module_text(module) -> str:
     if not brace:
         raise OpenModelError("the printed module has no closing brace to place its declarations before")
     return head.rstrip() + "\n" + "\n".join(generic) + "\n}" + tail
-
 
 
 def _sha256(path: str | Path) -> str:
@@ -900,7 +906,7 @@ def build(
     host_hart: int | None = None,
     phase0_recipe: str | Path | None = None,
     descriptor: str | Path | None = None,
-    chunk_ops: int | None = None,
+    chunk_ops: int | str | None = None,
 ) -> dict[str, Any]:
     """Build ``model_capsule`` as one program: its host code and one dispatch per device group.
 
@@ -922,6 +928,8 @@ def build(
     functions before it is lowered (see :func:`chunk_forward`): LLVM's compile cost on the single giant
     function a large open model emits is superlinear in its size. ``None`` (the default) keeps the
     unchunked program byte for byte -- an opt-in path until a real build's gate validates it.
+    ``"auto"`` derives the size from the forward itself (:func:`resolve_chunk_ops`); the record's
+    ``forward_chunks`` carries the size actually used (``None`` when the forward fit in one chunk).
     """
     import os
     import shutil
@@ -938,6 +946,10 @@ def build(
 
     if verify not in ("local", "none"):
         raise OpenModelError(f"verify is 'local' or 'none', not {verify!r}")
+    try:
+        resolve_chunk_ops(chunk_ops)  # a misspelled size is refused before anything is built
+    except ValueError as exc:
+        raise OpenModelError(str(exc)) from exc
     stages = WMB._StageClock()
     capsule = WMB.load_model_capsule(model_capsule)
     abi_header = WMB.machine_header(machine, header, header_sha256)
@@ -990,9 +1002,12 @@ def build(
         program = out / "program"
         program.mkdir(parents=True, exist_ok=True)
         chunks_made = 0
-        if chunk_ops is not None:
+        chunk_size = resolve_chunk_ops(
+            chunk_ops, forward_ops=forward_body_size(main) if chunk_ops is not None else None
+        )
+        if chunk_size is not None:
             with stages("chunk_forward"):
-                chunks_made = chunk_forward(main, chunk_ops=chunk_ops)
+                chunks_made = chunk_forward(main, chunk_ops=chunk_size)
         main_text = module_text(main)
         if profile:
             # WHERE THE HOST CODE'S CYCLES GO: a mark before every top-level op of the host code (the
@@ -1375,7 +1390,11 @@ def build(
         "stage_seconds": stages.record(),
         "corpus_binding": binding.record if binding is not None else None,
         "object_dedup": part["object_dedup"],
-        "forward_chunks": {"chunk_ops": chunk_ops, "chunks": chunks_made},
+        "forward_chunks": {
+            "chunk_ops": chunk_size,
+            "chunks": chunks_made,
+            **({"requested": chunk_ops} if chunk_ops != chunk_size else {}),
+        },
         "oracle_cache": oracle_job.state,
         "capsule": {
             "name": capsule.name,

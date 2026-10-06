@@ -135,7 +135,11 @@ or that a new run passed qualification. Large inputs such as the model capsule a
 content into each run, never copied.
 
 The example leaves `builder` and `store` unset: run preparation selects Merlin's
-shared builder and creates a target-scoped artifact store. Its `mechanism_policy`
+shared builder and creates a target-scoped artifact store. Its `chunk_ops: "auto"`
+build option lets an open model's host forward be cut into bounded functions
+when it is large (an unchunked SmolVLA forward compiled for over two hours,
+against about eleven minutes cut at 1,000 ops); a forward that fits in one chunk,
+and every closed model, builds exactly as without it. Its `mechanism_policy`
 derives whether verified package passes and fused regions are available from the
 frozen model capsule's host/accelerator closure. Closed models can use both;
 open models can use neither. The prepared, read-only objective records the exact

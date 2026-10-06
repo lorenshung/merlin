@@ -448,7 +448,7 @@ def run_model(
     jobs: int | None = None,
     keep_build: bool = False,
     headers: Sequence[str] = (),
-    chunk_ops: int | None = None,
+    chunk_ops: int | str | None = None,
     phase0_recipe: str | Path | None = None,
     descriptor: str | Path | None = None,
 ) -> dict[str, Any]:
