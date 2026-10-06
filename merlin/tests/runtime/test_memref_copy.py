@@ -353,3 +353,74 @@ class TestRankBeyondTheIndexBuffer:
         )
         assert rt.merlin_memref_ranks_too_large() == before
         np.testing.assert_array_equal(dst, src)
+
+
+@pytest.fixture(scope="module")
+def counted_copy_rt(tmp_path_factory):
+    work = tmp_path_factory.mktemp("counted_memref_copy")
+    source = work / "counted.c"
+    runtime = runtime_dir() / "abi" / "mlir_runtime.c"
+    source.write_text(
+        '#define memcpy counted_memcpy\n#include "' + str(runtime) + '"\n'
+        "#undef memcpy\nunsigned long long copy_calls, copy_bytes;\n"
+        "void *counted_memcpy(void *d, const void *s, size_t n) {"
+        "++copy_calls;copy_bytes+=n;return memmove(d,s,n);}\n"
+    )
+    so = work / "counted.so"
+    subprocess.run(["cc", "-O1", "-fno-builtin", "-fPIC", "-shared", str(source), "-lm", "-o", str(so)], check=True)
+    return ctypes.CDLL(str(so))
+
+
+def _reset_copy_counts(rt):
+    ctypes.c_ulonglong.in_dll(rt, "copy_calls").value = 0
+    ctypes.c_ulonglong.in_dll(rt, "copy_bytes").value = 0
+
+
+def test_padding_copy_coalesces_whole_rows_and_preserves_halo(counted_copy_rt):
+    rt = counted_copy_rt
+    src = np.arange(4 * 5 * 7, dtype=np.int8).reshape(4, 5, 7)
+    dst = np.full((6, 7, 7), -23, dtype=np.int8)
+    s = _ranked(src.ctypes.data, [1, 4, 5, 7], [140, 35, 7, 1])
+    d = _ranked(dst.ctypes.data, [1, 4, 5, 7], [294, 49, 7, 1], offset=56)
+    _reset_copy_counts(rt)
+    _copy(rt, 1, _unranked(4, s), _unranked(4, d))
+    expected = np.full_like(dst, -23)
+    expected[1:5, 1:6, :] = src
+    np.testing.assert_array_equal(dst, expected)
+    assert ctypes.c_ulonglong.in_dll(rt, "copy_calls").value == 4
+    assert ctypes.c_ulonglong.in_dll(rt, "copy_bytes").value == src.nbytes
+
+
+def test_overlapping_copy_keeps_original_element_order(counted_copy_rt):
+    rt = counted_copy_rt
+    data = np.arange(9, dtype=np.int8)
+    s = _ranked(data.ctypes.data, [8], [1])
+    d = _ranked(data.ctypes.data, [8], [1], offset=1)
+    _reset_copy_counts(rt)
+    _copy(rt, 1, _unranked(1, s), _unranked(1, d))
+    np.testing.assert_array_equal(data, np.zeros(9, np.int8))
+    assert ctypes.c_ulonglong.in_dll(rt, "copy_calls").value == 8
+
+
+def test_negative_stride_copy_keeps_scalar_fallback(counted_copy_rt):
+    rt = counted_copy_rt
+    src = np.arange(7, dtype=np.int32)
+    dst = np.zeros_like(src)
+    s = _ranked(src.ctypes.data, [7], [-1], offset=6)
+    d = _ranked(dst.ctypes.data, [7], [1])
+    _reset_copy_counts(rt)
+    _copy(rt, 4, _unranked(1, s), _unranked(1, d))
+    np.testing.assert_array_equal(dst, src[::-1])
+    assert ctypes.c_ulonglong.in_dll(rt, "copy_calls").value == 7
+
+
+def test_contiguous_copy_ignores_singleton_axis_stride(counted_copy_rt):
+    rt = counted_copy_rt
+    src = np.arange(20, dtype=np.int32)
+    dst = np.zeros_like(src)
+    s = _ranked(src.ctypes.data, [4, 1, 5], [5, 117, 1])
+    d = _ranked(dst.ctypes.data, [4, 1, 5], [5, 209, 1])
+    _reset_copy_counts(rt)
+    _copy(rt, 4, _unranked(3, s), _unranked(3, d))
+    np.testing.assert_array_equal(dst, src)
+    assert ctypes.c_ulonglong.in_dll(rt, "copy_calls").value == 1
