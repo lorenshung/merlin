@@ -3,6 +3,7 @@
 prepare ...               prepare a run (seed, frozen inputs, policy-stamped config, oot/) and print it
 start <run_dir> ...       run the authoring sessions of a prepared run until evidence or budget stops them
 run ...                   prepare, then start (``--resume`` continues the latest run of the same method)
+launch <run_dir> ...       start a prepared run DETACHED (own session, output to <run_dir>/launch.log)
 watch <run_dir> <pid> ... relaunch a run whose launcher exits, keeping its method and roles
 export-champion <run_dir> export the run's confirmed best (its ``best`` tag) as a retention-pinned champion
 work <job_dir>            run one job to its result (the detached worker)
@@ -21,7 +22,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -172,13 +172,26 @@ def export_champion(args: argparse.Namespace) -> Path:
 
 
 def _spawn_start(prepared, *, profile: str, round_driver: str, price_table: Path | None) -> int:
-    argv = [sys.executable, "-m", __package__, "start", str(prepared.run_dir), "--profile", profile]
-    argv += ["--round-driver", round_driver] + (["--price-table", str(price_table)] if price_table else [])
-    with (Path(prepared.run_dir) / "launch.log").open("ab") as log:
-        process = subprocess.Popen(
-            argv, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True
-        )
-    return process.pid
+    from . import launch as LAUNCH
+
+    return int(
+        LAUNCH.launch(prepared.run_dir, profile=profile, round_driver=round_driver, price_table=price_table)["pid"]
+    )
+
+
+def resolve_run(path: Path) -> Path:
+    """The measured run ``path`` names: a prepared run directory itself, or a phase orchestration
+    directory whose phase-2 record points at one (``phase2/phase_run.json``)."""
+    from . import runs as RUNS
+    from .identity import read_json
+
+    path = Path(path).expanduser().resolve()
+    if (read_json(path / "run.json") or {}).get("schema") == RUNS.RUN_SCHEMA:
+        return path
+    pointer = (read_json(path / "phase2" / "phase_run.json") or {}).get("run_dir")
+    if pointer and (read_json(Path(pointer) / "run.json") or {}).get("schema") == RUNS.RUN_SCHEMA:
+        return Path(pointer).resolve()
+    raise SystemExit(f"{path} is neither a prepared {MODE} run nor an orchestration run that points at one")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -208,6 +221,11 @@ def _parser() -> argparse.ArgumentParser:
             child.add_argument("--price-table", type=Path)
             child.add_argument("--record-dir", type=Path, help="where to write a pointer to the phase run")
     child = sub.add_parser("start")
+    child.add_argument("run_dir", type=Path)
+    child.add_argument("--profile", required=True)
+    child.add_argument("--round-driver", default=DEFAULT_ROUND_DRIVER)
+    child.add_argument("--price-table", type=Path)
+    child = sub.add_parser("launch", help="start a prepared run detached, its output appended to launch.log")
     child.add_argument("run_dir", type=Path)
     child.add_argument("--profile", required=True)
     child.add_argument("--round-driver", default=DEFAULT_ROUND_DRIVER)
@@ -299,6 +317,20 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(json.dumps(document.get("stopped"), default=str))
         return 0
+    if args.command == "launch":
+        from . import launch as LAUNCH
+
+        try:
+            document = LAUNCH.launch(
+                resolve_run(args.run_dir),
+                profile=args.profile,
+                round_driver=args.round_driver,
+                price_table=args.price_table,
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        print(json.dumps(document, default=str))
+        return 0
     if args.command == "watch":
         from . import runs as RUNS
         from . import watchdog as WD
@@ -375,4 +407,4 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
-__all__ = ["main", "start"]
+__all__ = ["main", "resolve_run", "start"]
