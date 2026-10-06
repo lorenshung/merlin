@@ -554,9 +554,7 @@ def simulator_adapter(sim: str, target: str, selection: dict | None = None) -> C
         if sim == "gsim":
             from . import gsim_emulator
 
-            exact, reason = gsim_emulator.selected_firrtl_status(
-                target, env_var=getattr(backend, "GSIM_EMU_ENV", None)
-            )
+            exact, reason = gsim_emulator.selected_firrtl_status(target, env_var=getattr(backend, "GSIM_EMU_ENV", None))
             if not exact:
                 raise OracleUnavailable(reason)
         res = oot_compile.run_on_oracle(cb, llvm_text, simulator=sim, target=target, workdir=workdir, timeout=timeout)
@@ -705,6 +703,108 @@ def run_executables(generated) -> tuple:
     except OSError:
         return ()
     return tuple(found)
+
+
+def graded_prohibited_roles(capsule: dict) -> tuple[str, ...]:
+    """The prohibited instruction roles a graded capsule's program is held to.
+
+    The run's declared policy, from the environment the Phase 1 adapter hands every grader
+    (:data:`merlin.perf.whole_model_gate.ROLES_ENV`), together with the roles the sealed corpus stamped
+    into the capsule's own candidate arm (``performance.arms.candidate.instruction_policy``). Either
+    source alone is enough to make the scan required: a capsule graded outside the adapter keeps the
+    rule its corpus was sealed under."""
+    from merlin.perf.whole_model_gate import ROLES_ENV
+
+    roles = {r.strip() for r in (os.environ.get(ROLES_ENV) or "").split(",") if r.strip()}
+    arm = (((capsule.get("performance") or {}).get("arms") or {}).get("candidate") or {}).get("instruction_policy")
+    if isinstance(arm, dict):
+        roles |= {str(r) for r in arm.get("prohibited_instruction_roles") or () if str(r)}
+    return tuple(sorted(roles))
+
+
+def prohibited_instruction_report(capsule: dict, generated, *, target: str) -> dict | None:
+    """The whole-ELF prohibited-instruction scan of every executable this grade linked, or ``None`` when
+    the capsule's program is held to no role (:func:`graded_prohibited_roles`).
+
+    Every ELF :func:`run_executables` finds is walked in full (:func:`merlin.perf.isa_prohibition.scan_elf`
+    reads every executable section, so an instruction reached only through a function pointer, or never
+    executed, is found exactly like one on the hot path). ``clean`` is ``True`` only when every ELF was
+    measured and none carries a prohibited instruction, ``False`` when any carries one, and ``None``
+    (unmeasured) otherwise -- including a grade that linked no ELF at all, or a target whose facts give
+    the roles no instruction. Unmeasured is never clean."""
+    roles = graded_prohibited_roles(capsule)
+    if not roles:
+        return None
+    from merlin.perf.isa_prohibition import SCHEMA, scan_elf
+
+    elfs = []
+    for path in run_executables(generated):
+        try:
+            with path.open("rb") as handle:
+                if handle.read(4) == b"\x7fELF":
+                    elfs.append(path)
+        except OSError:
+            continue
+    base = {"schema": SCHEMA, "scope": "whole_elf", "roles": list(roles)}
+    if not elfs:
+        return {
+            **base,
+            "status": "unmeasured",
+            "clean": None,
+            "summary": {},
+            "scans": [],
+            "detail": "the grade linked no ELF to scan, so the prohibited-instruction rule was not checked",
+        }
+    scans = [scan_elf(path, target=target, roles=roles) for path in elfs]
+    summary: dict[str, int] = {}
+    for scan in scans:
+        for name, count in (scan.get("summary") or {}).items():
+            summary[name] = summary.get(name, 0) + int(count)
+    measured = all(scan.get("status") == "measured" for scan in scans)
+    return {
+        **base,
+        "status": "measured" if measured else "unmeasured",
+        "clean": False if summary else (True if measured else None),
+        "summary": dict(sorted(summary.items())),
+        "scans": scans,
+        **(
+            {"detail": "; ".join(str(s.get("detail")) for s in scans if s.get("status") != "measured")}
+            if not measured
+            else {}
+        ),
+    }
+
+
+def apply_prohibited_instruction_rule(status: str, failure: dict | None, report: dict | None):
+    """``(status, failure)`` after the instruction rule: a prohibited instruction anywhere in the linked
+    program FAILS the capsule (it is a fact about the submission's bytes), and a passing capsule whose
+    program could not be scanned is ``incomplete`` -- never a pass on an unchecked program."""
+    if report is None:
+        return status, failure
+    if report.get("clean") is False:
+        hits = ", ".join(f"{name} x{count}" for name, count in (report.get("summary") or {}).items())
+        prohibited = {k: v for scan in report.get("scans") or () for k, v in (scan.get("prohibited") or {}).items()}
+        return "fail", {
+            "plane": "instruction_policy",
+            "category": "PROHIBITED_INSTRUCTION",
+            "detail": (
+                f"the linked program carries instruction(s) the experiment prohibits (roles "
+                f"{report.get('roles')}): {hits}. The whole ELF is scanned, so an instruction in code that "
+                f"is never called still counts; emit the work without the prohibited instructions"
+            ),
+            "prohibited_instructions": prohibited,
+            **({"previous_failure": failure} if failure else {}),
+        }
+    if report.get("clean") is not True and status == "pass":
+        return "incomplete", failure or {
+            "plane": "instruction_policy",
+            "category": "PROHIBITION_NOT_MEASURED",
+            "detail": (
+                f"the capsule's program is held to prohibited roles {report.get('roles')}, and the "
+                f"whole-ELF scan could not settle it: {report.get('detail') or 'no measured verdict'}"
+            ),
+        }
+    return status, failure
 
 
 def _tier_certificate_key(capsule_name: str, tier: str, *, target, generated, shas, from_rtl: bool):
@@ -3240,7 +3340,13 @@ def _source_region_execution_verdict(certificate: dict) -> tuple[str, str, str] 
             "the exact source-operation inventory did not reconcile with the runtime outline; "
             "a completed call for one operation cannot certify other operations in its region",
         )
-    if not isinstance(host, list) or not isinstance(mixed, list) or not isinstance(accel, list) or not isinstance(total, int) or total <= 0:
+    if (
+        not isinstance(host, list)
+        or not isinstance(mixed, list)
+        or not isinstance(accel, list)
+        or not isinstance(total, int)
+        or total <= 0
+    ):
         return (
             "incomplete",
             "SOURCE_REGION_EXECUTION_NOT_MEASURED",
@@ -4275,6 +4381,25 @@ def _finalize_capsule_result(
                     ),
                 }
 
+    # THE INSTRUCTION RULE, on every graded capsule's linked program (``applies_to:
+    # phase1_capsule_elfs`` in the sealed policy). Before the screened/not-run rules below, so a capsule
+    # that carries a prohibited instruction fails whatever else is true of it, and one whose program
+    # could not be scanned never reads as a pass.
+    _isa = prohibited_instruction_report(capsule, paths.generated, target=eff_target)
+    if _isa is not None:
+        extra = {**(extra or {}), "isa_prohibition": _isa}
+        if no_oracle and _isa.get("clean") is None and status == "pass":
+            # A structure-only smoke built no executable to scan: not gradeable, never a pass, and not
+            # a "fix this" signal the submission could act on.
+            status = "not_gradeable_no_oracle"
+            failure = failure or {
+                "plane": "not_gradeable_no_oracle",
+                "category": "NOT_GRADEABLE_NO_ORACLE",
+                "detail": f"--no-oracle built no linked program, so the prohibited-role scan did not run: {_isa.get('detail')}",
+            }
+        else:
+            status, failure = apply_prohibited_instruction_rule(status, failure, _isa)
+
     if status == "pass" and any(getattr(t, "budget_deferred", False) for t in tiers.values()):
         # SCREENED, NOT CERTIFIED. Distinct from `incomplete` (something that should have run did not)
         # and from `pass` (it certified). The capsule cleared the cheap screen and the expensive tier was
@@ -4536,33 +4661,41 @@ def run_capsule(
             # submitted whole-program artifact. Collect candidate evidence
             # independently and keep the old verdict as a diagnostic.
             from .native_model_execution import (
-                _digest, execute_candidate_model, independent_frozen_source_eligibility,
+                _digest,
+                execute_candidate_model,
+                independent_frozen_source_eligibility,
             )
 
             result["legacy_model_diagnostic"] = {
-                "status": result.get("status"), "failure": result.get("failure"),
+                "status": result.get("status"),
+                "failure": result.get("failure"),
                 "scope": "runner-owned host-dispatch graph and separately compiled tiles",
             }
             try:
                 result["candidate_source_eligibility"] = independent_frozen_source_eligibility(
-                    capsule, target=eff_target)
+                    capsule, target=eff_target
+                )
             except Exception as exc:  # noqa: BLE001 -- source census failure cannot stop diagnostics
                 result["candidate_source_eligibility_failure"] = {
-                    "type": type(exc).__name__, "detail": str(exc)[:2000],
+                    "type": type(exc).__name__,
+                    "detail": str(exc)[:2000],
                 }
 
             try:
                 _, candidate_cb, candidate_llvm = run_entrypoints(
-                    pkg, package_dir, capsule, paths, contract=contract,
-                    timeout=timeout, fourth_output_name=cfg.fourth_output_name,
+                    pkg,
+                    package_dir,
+                    capsule,
+                    paths,
+                    contract=contract,
+                    timeout=timeout,
+                    fourth_output_name=cfg.fourth_output_name,
                 )
-                source_interface = Path(capsule["__dir__"]) / capsule.get(
-                    "interface_mlir", "capsule.interface.mlir")
+                source_interface = Path(capsule["__dir__"]) / capsule.get("interface_mlir", "capsule.interface.mlir")
                 if source_interface.is_symlink():
                     raise ValueError("frozen model interface cannot be a symlink")
                 result["candidate_emission"] = {
-                    "capsule_declaration": _digest(
-                        (Path(capsule["__dir__"]) / "capsule.yaml").resolve(strict=True)),
+                    "capsule_declaration": _digest((Path(capsule["__dir__"]) / "capsule.yaml").resolve(strict=True)),
                     "source_interface": _digest(source_interface.resolve(strict=True)),
                     "command_buffer": _digest((paths.generated / "command_buffer.json").resolve(strict=True)),
                     "lowered_mlir": _digest((paths.generated / cfg.fourth_output_name).resolve(strict=True)),
@@ -4570,9 +4703,12 @@ def run_capsule(
                 with _model_runtime_bundle(capsule, timeout=timeout) as (bundle, provenance, verify):
                     result["candidate_capture"] = provenance
                     result["candidate_native_execution"] = execute_candidate_model(
-                        command_buffer=candidate_cb, lowered_mlir_text=candidate_llvm,
-                        capsule_dir=capsule["__dir__"], capture_bundle=bundle,
-                        target=eff_target, out_dir=paths.run_path / "candidate_native",
+                        command_buffer=candidate_cb,
+                        lowered_mlir_text=candidate_llvm,
+                        capsule_dir=capsule["__dir__"],
+                        capture_bundle=bundle,
+                        target=eff_target,
+                        out_dir=paths.run_path / "candidate_native",
                         simulator=os.environ.get("MERLIN_MODEL_NATIVE_SIMULATOR") or None,
                         rtl_facts=os.environ.get("MERLIN_MODEL_NATIVE_RTL_FACTS") or None,
                         board_config=os.environ.get("MERLIN_MODEL_NATIVE_BOARD_CONFIG") or None,
@@ -4581,7 +4717,8 @@ def run_capsule(
                     verify()
             except Exception as exc:  # noqa: BLE001 -- absence cannot inherit the host-dispatch pass
                 result["candidate_emission_failure"] = {
-                    "type": type(exc).__name__, "detail": str(exc)[:2000],
+                    "type": type(exc).__name__,
+                    "detail": str(exc)[:2000],
                 }
             from .capsule_grade import enforce_model_execution_check
 
@@ -5980,9 +6117,7 @@ def _pin_model_capsule(capsule: dict, destination: Path) -> dict:
         if lexical.is_symlink() or not canonical.is_relative_to(source):
             raise ValueError(f"model capsule snapshot source is a symlink or escapes its directory: {lexical}")
 
-    content_store.place_tree(
-        source, destination, content_store.store_root(), observe=require_local_source
-    )
+    content_store.place_tree(source, destination, content_store.store_root(), observe=require_local_source)
     # We own these directory entries, not the shared file inodes. Keeping the
     # private directories owner-writable lets cleanup unlink read-only assets
     # without tempfile's permission repair chmodding a shared store object.
