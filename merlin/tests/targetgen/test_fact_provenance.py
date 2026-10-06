@@ -156,8 +156,15 @@ def test_the_ratchet_is_scoped_per_source_so_one_debt_cannot_excuse_another(gate
 
 def test_every_ratchet_entry_is_a_finding_the_gate_actually_produces(gate):
     """A ratchet entry the scan can never emit is worse than no entry: it reads as accounted-for debt
-    while the gate is blind to it. Every entry must correspond to a live finding."""
-    live = {(f["path"], f["source"]) for f in gate.findings() if f["kind"] in ("violation", "ratcheted")}
+    while the gate is blind to it. Every entry must correspond to a live finding.
+
+    Entries are keyed by policy path, exactly as the gate matches them, so a module that moved to a
+    package source root is still the same debt and not a stale line."""
+    live = {
+        (gate._source_layout.policy_path(f["path"]), f["source"])
+        for f in gate.findings()
+        if f["kind"] in ("violation", "ratcheted")
+    }
     stale = set(gate.load_ratchet()) - live
     assert not stale, f"ratchet entries the gate no longer produces (delete them): {sorted(stale)}"
 
