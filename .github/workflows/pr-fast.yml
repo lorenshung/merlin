@@ -59,8 +59,11 @@ jobs:
       # and the coverage gate was wired to no hook and no job at all.
       - name: overfit-register gate (declared coupling may only shrink)
         run: uv run --no-sync python build_tools/scripts/check_overfit_register.py
+      # Source-only, like the mesh-assertion gate below: a hosted runner has no GENERATED capability
+      # contracts, so a target whose contract is one is printed UNQUALIFIED instead of failing; every
+      # other finding still fails, and a run that resolves no target at all cannot pass.
       - name: semantic-coverage gate (generalization debt may only shrink)
-        run: uv run --no-sync python build_tools/scripts/check_semantic_coverage.py
+        run: uv run --no-sync python build_tools/scripts/check_semantic_coverage.py --allow-unresolved
       - name: wiring gate (every instrument has a production caller)
         run: uv run --no-sync python build_tools/scripts/check_wiring.py
       - name: sign coverage (a sign-sensitive capsule can go negative)
