@@ -3,7 +3,7 @@ title: "Design: rules for citable agentic-compiler experiments"
 kind: design
 status: current
 owner: core
-last_verified: 2026-10-05
+last_verified: 2026-10-06
 related: [capsule_generation, capsule_phase_split, radiance_staged_evaluation]
 code_refs:
   - packages/merlin-experiments/src/merlin/targetgen/capsule_grade.py
@@ -121,7 +121,14 @@ attribute and so verified a different, easier program. None was found by reading
 found by mutation.
 
 **Gate.** Mutation tests next to each gate. Examples: the promotion-wiring tests, and the holdout
-check that must fail when it is blind. See `merlin/tests/infra/`.
+check that must fail when it is blind. See `merlin/tests/infra/`. `check_mutation_proofs.py` requires
+every `check_*` gate to name a runnable mutation that makes it fail (`gate_mutations.yaml`), and CI
+runs each recorded proof with `--prove`.
+
+The same rule holds for the instruction policy a capsule is graded under. `capsule_runner` scans every
+ELF a grade linked for the sealed prohibited roles: a prohibited instruction anywhere fails the capsule
+(`PROHIBITED_INSTRUCTION`), and a grade that linked no ELF, a scan that could not run, or roles that
+match no instruction leave it `PROHIBITION_NOT_MEASURED` — incomplete, never passed.
 
 ## 6. Prove the arm was served before blaming the model
 

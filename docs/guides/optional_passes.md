@@ -3,7 +3,7 @@ title: Optional lowering passes — list, select, copy
 kind: guide
 status: current
 owner: compiler
-last_verified: 2026-10-05
+last_verified: 2026-10-06
 related: [model_lowering, whole_model_on_accelerator, extending_the_stack]
 code_refs: [src/merlin/llvmlower/optional_passes.py,
             src/merlin/llvmlower/int_softmax_table.py,

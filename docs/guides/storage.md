@@ -3,7 +3,7 @@ title: Disk under out/ — why it grows and what is safe to reclaim
 kind: guide
 status: current
 owner: infra
-last_verified: 2026-10-05
+last_verified: 2026-10-06
 related: [reproducibility, getting_started, gemmini_experiment]
 code_refs: [src/merlin/common/content_store.py,
             src/merlin/common/oot_repo.py,
@@ -364,11 +364,12 @@ measurements were taken of, exports the tree, and passes it through the publish 
 `.merlin/{manifest.yaml,provenance.yaml,certification.yaml,CHAMPION}`. It adds
 `.merlin/provenance.json` (phase-1 run and frozen commit, phase-2 run and best commit, corpus seal
 digest, phase-0 evidence digest), `measurements.json` (FireSim cycles with the machine, the parameter
-header and the vendor control run in the same batch), `certification.json` (GSIM) and
+header and the vendor control run in the same batch, and the `exactness` record -- the contract's
+`contract_sha256` and `label` -- the cycles were graded under), `certification.json` (GSIM) and
 `isa_prohibition.json` (the whole-ELF prohibited-instruction scan, with the non-empty
 `prohibited_instructions` it held the program to). Each required field is checked and none is
-defaulted; a scan that is not clean, a clean scan that prohibited nothing, or a GSIM verdict that is not
-`pass` refuses the export.
+defaulted; a scan that is not clean, a clean scan that prohibited nothing, a measurement with no
+identifiable exactness contract, or a GSIM verdict that is not `pass` refuses the export.
 
 **A lineage older than these records says so instead of borrowing their shape.** Three optional
 provenance blocks cover it, each printed in `MERLIN_PUBLICATION.md` as well as recorded:
@@ -378,8 +379,8 @@ provenance blocks cover it, each printed in `MERLIN_PUBLICATION.md` as well as r
   were sealed. It stands in for `corpus_seal_digest` / `phase0_evidence_digest` only where the caller
   wrote that digest as an explicit `null` (an absent key is still refused), and the export prints
   `UNSEALED LEGACY LINEAGE` under the title of `MERLIN_PUBLICATION.md` and in `.merlin/CHAMPION`. It
-  covers those two digests and nothing else: the measurements, the GSIM verdict and the whole-ELF scan
-  keep their rules.
+  covers those two digests and nothing else: the measurements (exactness record included), the GSIM
+  verdict and the whole-ELF scan keep their rules.
 - `composition` — `champions.composition(parts, base, ...)` writes the note ("composed by three-way
   merge of cell winners X, Y, Z onto B") from the digests it records; the base must be a package in
   `best`'s history.
@@ -395,4 +396,6 @@ contains or lies inside a pinned pattern as protected, exactly like a lifecycle 
 a lifecycle pin as well, so either alone keeps the evidence.
 
 `merlin experiment lineage --target <target>` prints the index; `merlin experiment lineage <run>`
-adds the index rows that cite that run.
+adds the index rows that cite that run. A champion row says `unsealed_legacy`, `reconstructed` and
+`composed` when its provenance carries those blocks, and a legacy champion is found by the run
+directories its legacy block names.
