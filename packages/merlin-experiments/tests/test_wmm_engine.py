@@ -171,6 +171,24 @@ def test_the_instruction_rule_refuses_a_clean_verdict_that_checked_nothing():
         assert refused["timing_status"] == V.TIMING_REFUSED and "could not be checked" in refused["refusal"]
 
 
+def test_the_instruction_rule_refuses_a_clean_verdict_the_scan_did_not_mark_measured():
+    """A clean scan is recorded with the status the scanner reported; one it did not report is no verdict."""
+    for status in (None, "unmeasured"):
+        report = {"clean": True, "summary": {}, "prohibited": {"8": "LOOP_0"}}
+        if status is not None:
+            report["status"] = status
+        build: dict = {"elf": "/x"}
+        refused = G.isa_gate(
+            _gate_job(prohibited_roles=["loop_descriptor"]),
+            build,
+            None,
+            "t",
+            checker=lambda b, r=report, **k: dict(r),
+        )
+        assert refused["timing_status"] == V.TIMING_REFUSED and "not 'measured'" in refused["refusal"]
+        assert "isa_prohibition" not in build
+
+
 def test_the_instruction_rule_refuses_a_job_with_no_enforceable_sealed_policy():
     def scan(build, **kw):
         raise AssertionError("scanned without a sealed policy")

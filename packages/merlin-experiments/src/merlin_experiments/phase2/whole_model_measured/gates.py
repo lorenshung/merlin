@@ -375,10 +375,14 @@ def isa_gate(
     weaker = scan_weaker_than_sealed(report, sealed, roles)
     if weaker and not report.get("error"):
         report["error"] = weaker
+    status = report.get("status")
+    if report.get("clean") is True and status != "measured" and not report.get("error"):
+        # A clean verdict the scanner did not mark measured is not one this gate can record as such.
+        report["error"] = f"the scan reported clean with status {status!r}, not 'measured'"
     if report.get("clean") is True and not report.get("error"):
         build["isa_prohibition"] = {
             "scope": "whole_elf",
-            "status": report.get("status", "measured"),
+            "status": status,
             "verdict": "clean",
             "roles": list(roles),
             "prohibited": dict(report.get("prohibited") or {}),
