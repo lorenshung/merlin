@@ -8,6 +8,7 @@ resume <run_dir> ...      prepare the next run of THIS run (method, roles, store
 status <run_dir>          the run's status from its own records (``--poll`` advances its objective)
 follow <run_dir>          print each change (jobs, rounds, best, launcher, stop, holds) until it ends
 audit-round <run_dir> N   replay round N's transcript audit, receipts and edits; compare the status
+roofline ...              each group's derived roofline against measured results, per form
 launch <run_dir> ...       start a prepared run DETACHED (own session, output to <run_dir>/launch.log)
 stop <run_dir> --why ...  ask a run to stop at its next session boundary (``stop_requested.json``)
 watch <run_dir> <pid> ... relaunch a run whose launcher exits, keeping its method and roles
@@ -223,6 +224,35 @@ def resume_run(args: argparse.Namespace) -> dict[str, Any]:
     return document
 
 
+def roofline_report(args: argparse.Namespace) -> Path:
+    """Write the roofline report as a versioned product and return its path."""
+    from merlin.common.artifacts import new_product
+
+    from . import roofline as ROOF
+    from . import runs as RUNS
+    from .identity import read_json
+
+    target, capsule = args.target, args.model_capsule
+    if args.run is not None:
+        run_dir = resolve_run(args.run)
+        record = read_json(run_dir / "run.json") or {}
+        config = read_json(run_dir / RUNS.CONFIG_NAME) or {}
+        section = config.get("certifier") or config.get("screen") or {}
+        target = target or record.get("target")
+        capsule = capsule or (section.get("build_options") or {}).get("model_capsule")
+    if not target or not capsule:
+        raise SystemExit("name --target and --model-capsule, or a --run whose config names them")
+    results = _inputs(args.result)
+    if not results:
+        raise SystemExit("name at least one --result label=result.json to confront the rooflines with")
+    document = ROOF.report(str(target), str(capsule), results, emulator=args.emulator)
+    product = new_product("perf-roofline", version=1, target=str(target), sources=[str(p) for p in results.values()])
+    path = product.add_artifact("roofline.json")
+    path.write_text(json.dumps(document, indent=1, default=str) + "\n", encoding="utf-8")
+    product.write_manifest()
+    return path
+
+
 def export_champion(args: argparse.Namespace) -> Path:
     from .ledger import export_best
 
@@ -360,6 +390,12 @@ def _parser() -> argparse.ArgumentParser:
     child.add_argument("round", type=int, help="the round's index, as its files are named (round_NN)")
     child.add_argument("--line", type=int, action="append", default=[], help="also print this transcript line")
     child.add_argument("--json", action="store_true")
+    child = sub.add_parser("roofline", help="every group's derived roofline against measured results, per form")
+    child.add_argument("--run", type=Path, help="take the target and model capsule from this measured run")
+    child.add_argument("--target")
+    child.add_argument("--model-capsule", type=Path)
+    child.add_argument("--result", action="append", default=[], help="label=result.json: one measured arm")
+    child.add_argument("--emulator", type=Path, help="the dump-capable emulator whose elaboration is read")
     child = sub.add_parser("launch", help="start a prepared run detached, its output appended to launch.log")
     child.add_argument("run_dir", type=Path)
     child.add_argument("--profile", required=True)
@@ -497,6 +533,9 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(document, indent=1, default=str) if args.json else AUDIT.format_audit(document))
         for number, text in (document.get("transcript_lines") or {}).items() if not args.json else ():
             print(f"---- line {number}\n{text}")
+        return 0
+    if args.command == "roofline":
+        print(roofline_report(args))
         return 0
     if args.command == "launch":
         from . import launch as LAUNCH
