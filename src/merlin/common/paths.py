@@ -334,16 +334,25 @@ def target_env_name(target: str, what: str) -> str:
     return f"MERLIN_{target.upper()}_{what.upper()}"
 
 
+class ExternalPathUnset(KeyError):
+    """``MERLIN_EXT_<NAME>`` is not configured: this host does not have that external checkout.
+
+    A ``KeyError`` so every existing ``except KeyError`` is unchanged. Its own type is what lets a reader
+    whose contract is "nothing derived when the source is absent" tell an absent checkout apart from a
+    ``KeyError`` raised by a defect somewhere inside the code that would have read it.
+    """
+
+
 def ext_path(name: str) -> Path:
     """Resolve an external, machine-specific dependency location by short key.
 
     Reads ``MERLIN_EXT_<NAME_UPPERCASE>`` from the process environment (wins) or from the
-    gitignored ``<repo>/.env``. Raises ``KeyError`` if unset (copy ``.env.example`` -> ``.env``).
-    Example: ``ext_path('chipyard')`` -> reads ``MERLIN_EXT_CHIPYARD``.
+    gitignored ``<repo>/.env``. Raises :class:`ExternalPathUnset` (a ``KeyError``) if unset (copy
+    ``.env.example`` -> ``.env``). Example: ``ext_path('chipyard')`` -> reads ``MERLIN_EXT_CHIPYARD``.
     """
     key = f"MERLIN_EXT_{name.upper()}"
     val = os.environ.get(key) or _dotenv().get(key)
     if not val:
         known = sorted(k[len("MERLIN_EXT_") :].lower() for k in _dotenv() if k.startswith("MERLIN_EXT_"))
-        raise KeyError(f"external path {name!r} unset — set {key} in .env (copy .env.example). Known: {known}")
+        raise ExternalPathUnset(f"external path {name!r} unset — set {key} in .env (copy .env.example). Known: {known}")
     return Path(val)
