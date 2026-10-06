@@ -158,6 +158,33 @@ def prepare_document(document: Mapping[str, Any], *, target: str) -> dict[str, A
     return out
 
 
+#: The objective config's exactness contract: a path to the target's reviewed contract when authored,
+#: carried BY VALUE once a run is prepared (:func:`seal_exactness`), so a run is graded under the contract
+#: it was launched with however the file changes afterwards.
+EXACTNESS = "exactness"
+
+
+def exactness_contract(document: Mapping[str, Any], *, target: str):
+    """The :class:`merlin.perf.exactness.Contract` a config declares: by value, by path, or the default
+    (every form exact) when it declares none.  A declared contract that cannot be read is an error."""
+    from merlin.perf import exactness as EX
+
+    declared = document.get(EXACTNESS)
+    try:
+        if isinstance(declared, str) and declared:
+            return EX.load(declared)
+        return EX.Contract.from_value(declared if isinstance(declared, Mapping) else None, target=target)
+    except EX.ExactnessError as exc:
+        raise ConfigError(f"the objective config's exactness contract: {exc}") from exc
+
+
+def seal_exactness(document: Mapping[str, Any], *, target: str) -> dict[str, Any]:
+    """``document`` with its exactness contract carried by value (the default's, when it declared none)."""
+    out = json.loads(json.dumps(dict(document), default=str))
+    out[EXACTNESS] = exactness_contract(document, target=target).to_document()
+    return out
+
+
 def store_roots(document: Mapping[str, Any], *, environment: Mapping[str, str] | None = None) -> dict[str, Path]:
     """``{section: store root}`` a config's sections own, computed exactly as :func:`from_config` does."""
     builder = dict(document.get("builder") or {"spec": DEFAULT_BUILDER, "sha256": None})
@@ -194,6 +221,10 @@ def from_config(
     check_policy(document)
     identity = builder_identity(str(builder["spec"]), builder.get("sha256"))
     env = {str(k): str(v) for k, v in (document.get("environment") or {}).items()}
+    exactness = {
+        "contract": exactness_contract(document, target=target).to_document(),
+        "forms": dict(document.get("group_forms") or {}),
+    }
 
     def root_of(section: Mapping[str, Any], machine: Mapping[str, Any]) -> Path:
         return store_root_for(
@@ -234,6 +265,7 @@ def from_config(
                 certifier_root=certifier_root if is_screen else None,
                 min_build_free_bytes=section.get("min_build_free_bytes"),
                 machine_capabilities=CAP.compact(CAP.section_report(section, environment=environment)),
+                exactness=exactness,
             ),
             reference,
         )
@@ -262,8 +294,11 @@ __all__ = [
     "ConfigError",
     "DEFAULT_BUILDER",
     "DEFAULT_REFERENCE_BUILDER",
+    "EXACTNESS",
     "check_policy",
     "declared_roles",
+    "exactness_contract",
+    "seal_exactness",
     "from_config",
     "resolve_machine",
     "store_roots",

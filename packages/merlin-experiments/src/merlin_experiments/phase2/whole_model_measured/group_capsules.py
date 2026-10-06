@@ -123,9 +123,15 @@ def build_arm_programs(
     verify: str = "host_dump",
     jobs: int = 8,
     timeout: int = 600,
+    exactness: Any = None,
 ) -> dict[int, dict[str, Any]]:
     """Each group's one-step program for ``arm``: ``{group: record}`` (plus ``arm``).  The package arm
-    needs ``package_dir`` and asks the package for ``groups`` alone; the reference arm ignores it."""
+    needs ``package_dir`` and asks the package for ``groups`` alone; the reference arm ignores it.
+    ``exactness`` (a :class:`merlin.perf.exactness.Contract`) is the contract BOTH arms' groups are graded
+    under; without one each group is graded by the comparison its op implies."""
+    from .forms import contract_of_entry
+
+    of_entry = contract_of_entry(exactness) if exactness is not None else None
     from merlin.perf import whole_model_group_timing as T
 
     if arm.name == ARM_PACKAGE:
@@ -148,6 +154,7 @@ def build_arm_programs(
             ask_only=True,
             phase0_recipe=arm.phase0_recipe,
             descriptor=arm.descriptor,
+            exactness=of_entry,
         )
     elif arm.name == ARM_REFERENCE:
         records = T.build_reference_group_programs(
@@ -160,6 +167,7 @@ def build_arm_programs(
             out=out,
             verify=verify,
             harness_overrides=arm.harness_overrides,
+            exactness=of_entry,
         )
     else:
         raise GroupCapsuleError(f"no arm named {arm.name!r}")
@@ -266,6 +274,7 @@ def measure_on_gsim(
     max_cycles: int = 60_000_000,
     require_package: bool = False,
     diagnostics: Mapping[str, Any] | None = None,
+    exactness: Any = None,
 ) -> dict[str, Any]:
     """Both arms' one-group programs for ``groups`` on the emulator, each graded exactly and each package
     program's WHOLE ELF held to its arm's instruction rule: ``{"rows": [...]}`` (the validation path; a
@@ -279,7 +288,13 @@ def measure_on_gsim(
     programs: dict[str, dict[str, Any]] = {}
     for name, arm in arms.items():
         built = build_arm_programs(
-            arm, groups, package_dir=package_dir, model_capsule=model_capsule, target=target, out=out / name
+            arm,
+            groups,
+            package_dir=package_dir,
+            model_capsule=model_capsule,
+            target=target,
+            out=out / name,
+            exactness=exactness,
         )
         for group, record in built.items():
             programs[label_of(name, group, model)] = record
@@ -329,7 +344,17 @@ def measure_on_gsim(
             row.update(
                 {
                     k: got.get(k)
-                    for k in ("status", "kind", "cycles", "refusal", "carried", "emulator_sha256", "machine")
+                    for k in (
+                        "status",
+                        "kind",
+                        "cycles",
+                        "refusal",
+                        "carried",
+                        "emulator_sha256",
+                        "machine",
+                        "exactness",
+                        "evidence",
+                    )
                 },
                 correct=bool(got.get("correct")),
             )
@@ -340,6 +365,8 @@ def measure_on_gsim(
             row["efficiency"] = efficiency_row(record, row, diagnostics, target=target, out=out / "efficiency" / label)
         rows.append(row)
     document = {"schema": SCHEMA, "device": DEVICE, "arms": {k: a.to_dict() for k, a in arms.items()}, "rows": rows}
+    if exactness is not None:
+        document["exactness"] = exactness.record()
     out.mkdir(parents=True, exist_ok=True)
     (out / "gsim_rows.json").write_text(json.dumps(document, indent=1, default=str) + "\n", encoding="utf-8")
     return document
@@ -405,6 +432,12 @@ class GroupProgramMeasurer:
             self._arms[name] = arm_from_options(options, name=name)
         return self._arms[name]
 
+    def contract(self):
+        """The exactness contract the cell's programs are graded under (carried by value on the spec)."""
+        from merlin.perf import exactness as EX
+
+        return EX.Contract.from_value(self.spec.get("exactness"), target=self.target)
+
     def programs(self, arm, groups, *, package_dir, member, out):
         built = build_arm_programs(
             self.arm(arm),
@@ -413,6 +446,7 @@ class GroupProgramMeasurer:
             model_capsule=str(member.get("model_capsule")),
             target=str(member.get("target") or self.target),
             out=Path(out) / arm,
+            exactness=self.contract(),
         )
         return {label_of(arm, group, member.get("label")): record for group, record in built.items()}
 

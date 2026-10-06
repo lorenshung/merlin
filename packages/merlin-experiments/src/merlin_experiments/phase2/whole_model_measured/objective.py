@@ -856,6 +856,9 @@ class WholeModelObjective:
         """The lead line for a candidate below the coverage floor: which groups it declined, and what
         each costs when the package lowers it -- from the last eligible measurement's own per-group rows
         against the same-machine reference. Data only: the gap to reduce, never how."""
+        mismatch = self.exactness_mismatch(result)
+        if mismatch:
+            return f"INELIGIBLE -- {mismatch}"
         coverage = self.coverage(result)
         if coverage is None or coverage.get("eligible"):
             return None
@@ -878,7 +881,30 @@ class WholeModelObjective:
 
     def eligible(self, result: Mapping[str, Any] | None) -> bool:
         coverage = self.coverage(result)
-        return coverage is None or bool(coverage.get("eligible"))
+        return (coverage is None or bool(coverage.get("eligible"))) and self.exactness_mismatch(result) is None
+
+    def exactness_mismatch(self, result: Mapping[str, Any] | None) -> str | None:
+        """Why ``result`` was graded under a different exactness contract than this run holds, or None.  A
+        result graded under another contract -- looser or stricter -- is shown and never the best: its
+        correctness answered a different question (re-measuring grades it under this one)."""
+        from merlin.perf import exactness as EX
+
+        verdict = (result or {}).get("verdict")
+        if not verdict:
+            return None
+        carried = (getattr(self.screen, "exactness", None) or {}).get("contract")
+        try:
+            current = EX.Contract.from_value(carried, target=str(getattr(self.screen, "target", "") or ""))
+        except EX.ExactnessError as exc:
+            return f"this run's exactness contract cannot be read: {exc}"
+        # A cell's result records its contract beside its verdict; a whole-model verdict carries its own.
+        graded = EX.graded_semantics({"exactness": (result or {}).get("exactness") or verdict.get("exactness")})
+        if graded == current.semantics_sha256:
+            return None
+        return (
+            f"graded under exactness contract {graded[:12]}, while this run holds {current.semantics_sha256[:12]}; "
+            "re-measure these bytes to grade them under this run's contract"
+        )
 
     def noise_margin(self) -> float:
         """What counts as an improvement ON THIS MACHINE: the largest of NOISE_FLOOR, the median

@@ -150,6 +150,17 @@ decision. This enables mechanisms for the Phase 2 agent, not hand-authored
 Gemmini transformations, and does not make a diagnostic or unreviewed capsule
 eligible for a verified run.
 
+### Exactness: which forms may differ from their reference
+
+[`exactness.yaml`](exactness.yaml) is this target's reviewed exactness contract. Every form is exact
+unless an entry there names it as `bounded`, with its bound in output LSB (optionally a fraction of the
+elements) and the reason it cannot be bit-exact. The objective config names it (`exactness`), and a
+prepared run carries it by value, so later edits never reach a running campaign. Every grader holds each
+group to exactly its form's contract and records it: the measured verdict (`verdict.exactness`), the
+cell and per-group capsule grades, the whole-model gate, and the champion export (which refuses a
+measurement that recorded none). A verdict reads `bounded(<=N LSB)`, never `exact`, for a bounded group,
+and a result graded under another contract is shown but is never the run's best.
+
 ### Operating a measured run
 
 Every command below reads or writes only the run's own records; none signals a

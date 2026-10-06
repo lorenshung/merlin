@@ -90,6 +90,8 @@ def test_the_example_objective_config_names_a_registry_machine_and_a_frozen_inpu
     assert document["screen"]["build_options"]["model_capsule"] == "{input:model_capsule}"
     assert "builder" not in document and C.DEFAULT_BUILDER == "merlin.perf.whole_model_builder:build"
     assert document["mechanism_policy"] == C.DERIVED_MECHANISMS
+    # The run is graded under the target's reviewed exactness contract, which lives beside this config.
+    assert document["exactness"].endswith("examples/gemmini/phase2/exactness.yaml")
 
 
 def test_a_new_run_needs_its_config_and_seed():

@@ -116,6 +116,8 @@ REQUIRED_SCHEMAS = [
     "deployment_profile",
     # Quantization-format registry entry schema (merlin.common.quant_formats).
     "quant_format",
+    # Per-form exactness contract every whole-model gate enforces (merlin.perf.exactness).
+    "exactness_contract",
 ]
 
 REQUIRED_DOCS = [

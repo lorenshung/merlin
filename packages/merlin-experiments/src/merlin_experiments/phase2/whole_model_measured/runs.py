@@ -178,6 +178,7 @@ def prepare(
     config = _substitute(config, frozen)
     _require_frozen_mechanism_inputs(config, frozen, resumed_from)
     config = CFG.prepare_document(config, target=target)
+    config = CFG.seal_exactness(config, target=target)
     CFG.check_policy(config)
     roots = {k: str(v) for k, v in CFG.store_roots(config, environment=environment).items()}
     moved = {}

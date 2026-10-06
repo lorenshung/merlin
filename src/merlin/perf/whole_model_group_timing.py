@@ -41,7 +41,7 @@ import json
 import os
 import subprocess
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -389,8 +389,34 @@ def _addresses(elf: Path) -> dict[str, int]:
     return found
 
 
-def _group_map(elf: Path, one: Mapping[str, Any], full_row: Mapping[str, Any], producers: Mapping[str, int]) -> dict:
-    """A memory map (the build's own schema) for the one group: its output, and its embedded inputs."""
+#: ``exactness(group, entry)``: a group's exactness contract (a dict), or None for the comparison its op implies.
+ContractOf = Callable[[int, Mapping[str, Any]], Mapping[str, Any] | None]
+
+
+def _entries(buffer: Mapping[str, Any]) -> dict[int, dict[str, Any]]:
+    """Each group's statement entry (what its form, and so its exactness contract, is read from)."""
+    return {
+        int(r["group"]): dict(r.get("entry") or {}) for r in (buffer.get("whole_program") or {}).get("per_group") or ()
+    }
+
+
+def _contract(exactness: ContractOf | None, group: int, entries: Mapping[int, Mapping[str, Any]]):
+    if exactness is None:
+        return None
+    found = exactness(int(group), entries.get(int(group)) or {})
+    return dict(found) if found else None
+
+
+def _group_map(
+    elf: Path,
+    one: Mapping[str, Any],
+    full_row: Mapping[str, Any],
+    producers: Mapping[str, int],
+    *,
+    contract: Mapping[str, Any] | None = None,
+) -> dict:
+    """A memory map (the build's own schema) for the one group: its output, and its embedded inputs --
+    and, given one, the exactness ``contract`` the grade holds it to."""
     from . import whole_model_build as W
 
     layout = W.memory_map(elf, one, {"whole_program": {"per_group": []}})
@@ -420,6 +446,8 @@ def _group_map(elf: Path, one: Mapping[str, Any], full_row: Mapping[str, Any], p
         row["lhs"], row["rhs"] = place(str(step["lhs"])), place(str(step["rhs"]))
     layout["dump"] = {"symbols": [row["symbol"]], "bytes": row["bytes"]}
     layout["note"] = "one-group program: inputs are embedded read-only data served from the ELF"
+    if contract:
+        row["exactness"] = dict(contract)
     return layout
 
 
@@ -443,8 +471,13 @@ def build_group_programs(
     ask_only: bool = False,
     phase0_recipe: str | Path | None = None,
     descriptor: str | Path | None = None,
+    exactness: ContractOf | None = None,
 ) -> dict[int, dict[str, Any]]:
     """One small program per group in ``groups``, built for ``machine``: ``{group: record}``.
+
+    ``exactness(group, entry)`` gives a group's exactness contract (:meth:`merlin.perf.exactness.
+    Exactness.to_dict`) from its statement entry; it rides in the group's memory map, so the grade holds
+    the group to exactly that contract and says so (:func:`merlin.perf.whole_model_memory.grade_memory`).
 
     Built the way the whole-model program it stands for is: under the corpus binding ``phase0_recipe``
     declares (required with a package, as for the whole-model build), with ``harness_overrides``
@@ -486,6 +519,7 @@ def build_group_programs(
     values = reference["values"]
     (out / "oracle.json").write_text(json.dumps(reference["oracle"], indent=1) + "\n", encoding="utf-8")
     full_rows = _graded_as(ctx["buffer"])
+    entries = _entries(ctx["buffer"])
     dtypes = ctype_dtypes(header)
     producers = {str(s["out"]): int(s["group"]) for s in ctx["model"]["steps"]}
     if groups is None:  # every DEVICE group of the model: the steps of its program
@@ -537,7 +571,13 @@ def build_group_programs(
                 ),
             )
             _require_headers_read(receipt, abi, overrides)
-            layout = _group_map(Path(receipt["elf"]), one, full_rows[int(group)], producers)
+            layout = _group_map(
+                Path(receipt["elf"]),
+                one,
+                full_rows[int(group)],
+                producers,
+                contract=_contract(exactness, group, entries),
+            )
             (here / "memory_map.json").write_text(json.dumps(layout, indent=1) + "\n", encoding="utf-8")
             record.update(_kept_interface(out / "lower", int(group), here))
             census = {int(c["group"]): c for c in kernels["census"]}.get(int(group)) or {}
@@ -647,8 +687,10 @@ def build_reference_group_programs(
     out: str | Path,
     verify: str = "host_dump",
     harness_overrides: Sequence[str | Path] = (),
+    exactness: ContractOf | None = None,
 ) -> dict[int, dict[str, Any]]:
-    """The REFERENCE arm's one-group programs: the target's library answers the group.
+    """The REFERENCE arm's one-group programs: the target's library answers the group (graded under the
+    same ``exactness`` contract as the package arm, see :func:`build_group_programs`).
 
     :func:`merlin.perf.whole_model_builder.build_reference` restricted to one step -- the same driver,
     header assertion, harness overrides and no instruction rule (the reference arm is the bar, and the
@@ -679,7 +721,9 @@ def build_reference_group_programs(
     )
     reference = reference_context(model_capsule, target=target)
     (out / "oracle.json").write_text(json.dumps(reference["oracle"], indent=1) + "\n", encoding="utf-8")
-    full_rows = _graded_as(W.state(capsule, target=target))
+    stated = W.state(capsule, target=target)
+    full_rows = _graded_as(stated)
+    entries = _entries(stated)
     dtypes = ctype_dtypes(header)
     producers = {str(s["out"]): int(s["group"]) for s in model["steps"]}
     if groups is None:
@@ -696,7 +740,13 @@ def build_reference_group_programs(
             )
             receipt = driver.program.build(one, None, None, here / "program", recipe=recipe, verify=verify)
             _require_headers_read(receipt, abi, overrides)
-            layout = _group_map(Path(receipt["elf"]), one, full_rows[int(group)], producers)
+            layout = _group_map(
+                Path(receipt["elf"]),
+                one,
+                full_rows[int(group)],
+                producers,
+                contract=_contract(exactness, group, entries),
+            )
             (here / "memory_map.json").write_text(json.dumps(layout, indent=1) + "\n", encoding="utf-8")
             record.update(
                 {
@@ -784,7 +834,17 @@ def time_group_programs(
     def carried(program: Mapping[str, Any]) -> Path | None:
         if cache is None or not program.get("elf_sha256") or not engine:
             return None
-        return Path(cache) / engine[:16] / f"{program['elf_sha256']}.json"
+        # A grade is a function of the program AND of the contract it was held to: a contract (in the
+        # memory map, not the ELF) keys its own entry, so a changed contract is never served an old grade.
+        try:
+            rows = json.loads(Path(str(program.get("memory_map"))).read_text(encoding="utf-8")).get("groups") or []
+        except (OSError, ValueError):
+            rows = []
+        contract = next((r.get("exactness") for r in rows if isinstance(r, Mapping) and r.get("exactness")), None)
+        suffix = (
+            "." + hashlib.sha256(json.dumps(contract, sort_keys=True).encode()).hexdigest()[:16] if contract else ""
+        )
+        return Path(cache) / engine[:16] / f"{program['elf_sha256']}{suffix}.json"
 
     def one(group: int, program: Mapping[str, Any]) -> dict[str, Any]:
         kept = carried(program)
@@ -822,6 +882,9 @@ def time_group_programs(
                     "correct": bool(entry["correct"]),
                     "failure": (grade.get("disagree") or grade.get("unverified") or [None])[0],
                     "chained_digest_agrees": str(group) in ((grade.get("chained") or {}).get("agree") or ()),
+                    # Which exactness contract the grade held the group to, and its own numbers.
+                    "exactness": (grade.get("contracts") or {}).get(str(group)),
+                    "evidence": (grade.get("evidence") or {}).get(str(group)),
                 }
             )
             if kept is not None:

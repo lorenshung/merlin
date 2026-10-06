@@ -1,6 +1,7 @@
 {
   "schema": "merlin_whole_model_objective_config_v1",
   "mechanism_policy": "derive_from_capture",
+  "exactness": "/ABSOLUTE/examples/gemmini/phase2/exactness.yaml",
   "primary_name": "objective model",
   "repeats_on_best": 2,
   "stop_at_bar": false,

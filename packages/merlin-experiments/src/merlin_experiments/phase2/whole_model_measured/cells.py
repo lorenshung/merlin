@@ -487,8 +487,17 @@ def measure_cell(job: Mapping[str, Any], job_dir: Path, package: Path, *, target
     cell = dict(spec.get("cell") or {})
     timing = dict(spec.get("timing") or {})
     roles = list((job.get("build_options") or {}).get("prohibited_roles") or ())
+    # THE EXACTNESS CONTRACT the run carries (the cell machine's own when the job carries none): every
+    # program's group is graded under it, and the result records which contract that was.
+    from merlin.perf import exactness as EX
+
+    carried = (job.get("exactness") or {}).get("contract") or spec.get("exactness")
+    contract = EX.Contract.from_value(carried, target=target)
     # The package arm is built by the job's own recipe (its build options), as its whole model would be.
-    measurer = _measurer({**spec, "build_options": dict(job.get("build_options") or {})})
+    measurer = _measurer(
+        {**spec, "build_options": dict(job.get("build_options") or {}), "exactness": contract.to_document()}
+    )
+
     rows: list[dict[str, Any]] = []
     # A member never needs more than its own baseline (two invocations and setup) to show it is no
     # worse; a regression or a deadlock is refused at that bound instead of run to a flat one.
@@ -574,6 +583,20 @@ def measure_cell(job: Mapping[str, Any], job_dir: Path, package: Path, *, target
     diagnostics = diagnostics_of(rows, cell)
     if diagnostics:
         fields["diagnostics"] = diagnostics
+    per_group = {
+        f"{r['model'] + ':' if r.get('model') else ''}g{r['group']}": r.get("exactness")
+        for r in rows
+        if r.get("exactness")
+    }
+    summary: dict[str, int] = {}
+    for label in per_group.values():
+        summary[str(label)] = summary.get(str(label), 0) + 1
+    fields["exactness"] = {
+        "contract": contract.record(),
+        "per_group": per_group,
+        "summary": summary,
+        "label": EX.label_summary({"summary": summary}),
+    }
     return fields
 
 

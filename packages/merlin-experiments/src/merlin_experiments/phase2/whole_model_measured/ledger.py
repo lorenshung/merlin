@@ -178,6 +178,7 @@ def champion_records(
     batch = screen.get("batch") or {}
     control = batch.get("control") or {}
     firesim: dict[str, Any] = {
+        "standing_attempt": screen.get("from_attempt"),
         "cycles": screen.get("objective_cycles"),
         "machine": (screen.get("device") or {}).get("artifact"),
         "header": (screen.get("build") or {}).get("parameter_header_sha256"),
@@ -202,13 +203,33 @@ def champion_records(
             "corpus_seal_digest": corpus_seal_digest,
             "phase0_evidence_digest": phase0_evidence_digest,
         },
-        "measurements": {"package_digest": digest, "firesim": firesim},
+        "measurements": {"package_digest": digest, "firesim": firesim, "exactness": exactness_record(screen)},
         "certification": {"gsim": gsim},
         "isa_prohibition": {
             "scope": "whole_elf",
             "verdict": "clean" if scanned else "not_scanned",
             "prohibited_roles": [str(r) for r in roles],
         },
+    }
+
+
+def exactness_record(result: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The exactness contract a measurement was graded under, as a champion records it: the contract's
+    identity, the label (``exact`` only when every group was held exact) and each group's contract.
+    None when the measurement recorded none -- the export then refuses it rather than assume ``exact``."""
+    from merlin.perf import exactness as EX
+
+    applied = (result.get("verdict") or {}).get("exactness") or result.get("exactness")
+    if not isinstance(applied, Mapping) or not applied.get("contract"):
+        return None
+    contract = applied["contract"]
+    return {
+        "contract_sha256": contract.get("sha256"),
+        "semantics_sha256": contract.get("semantics_sha256"),
+        "contract_path": contract.get("path"),
+        "label": EX.label_summary(applied),
+        "per_group": dict(applied.get("per_group") or {}),
+        "bounded_forms": [form for form in contract.get("forms") or () if form.get("mode") != EX.EXACT],
     }
 
 
@@ -229,4 +250,12 @@ def export_best(
     return champions.export_champion(target, ledger.repo, package_id=package_id, **records)
 
 
-__all__ = ["ITERATIONS", "LedgerError", "OotLedger", "champion_records", "confirmed_best", "export_best"]
+__all__ = [
+    "ITERATIONS",
+    "LedgerError",
+    "OotLedger",
+    "champion_records",
+    "confirmed_best",
+    "exactness_record",
+    "export_best",
+]
