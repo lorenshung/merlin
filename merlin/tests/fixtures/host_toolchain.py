@@ -57,3 +57,28 @@ def requires_checkout_llvm(*tools: str):
     """A ``skipif`` marker for a test of a grader that reads the checkout's pinned LLVM install."""
     absent = missing_checkout_llvm(*tools)
     return pytest.mark.skipif(bool(absent), reason=f"checkout LLVM install not available: {', '.join(absent)}")
+
+
+def missing_host_lane_package(descriptor) -> list[str]:
+    """The host-lane package ``descriptor`` pins, when it is not materialized here; else ``[]``.
+
+    The package is generated output under the out/ root (purgeable), so a clean checkout carries none.
+    Only absence is reported: a package that is present and then refused (masked, symlinked, wrong
+    content) still fails the test that reaches it.
+    """
+    import yaml
+
+    from merlin.common.paths import repo_root
+
+    lane = (yaml.safe_load(Path(descriptor).read_text(encoding="utf-8")) or {}).get("host_lane") or {}
+    profiles = [lane] if "profiles" not in lane else list(lane["profiles"].values())
+    packages = [str(p["package"]) for p in profiles if isinstance(p, dict) and p.get("package")]
+    return [pkg for pkg in packages if not (repo_root() / pkg).is_dir()]
+
+
+def requires_host_lane_package(descriptor):
+    """A ``skipif`` marker for a test that resolves ``descriptor``'s pinned host-lane package."""
+    absent = missing_host_lane_package(descriptor)
+    return pytest.mark.skipif(
+        bool(absent), reason=f"host-lane package not materialized here (generated output): {', '.join(absent)}"
+    )

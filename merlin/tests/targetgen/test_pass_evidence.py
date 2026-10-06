@@ -7,7 +7,10 @@ flattering reading is the one that got quoted for days. These tests pin the dist
 
 from __future__ import annotations
 
+import host_toolchain
 import pytest
+
+from merlin.common.paths import repo_root
 
 pytestmark = pytest.mark.target("gemmini", "atlas", "radiance")
 
@@ -165,6 +168,9 @@ def _grade_model(*, on_mesh, fallback, tiles):
         CCLI.compile_model = real
 
 
+@host_toolchain.requires_host_lane_package(
+    repo_root() / "merlin/experiments/capsule_bench/targets/gemmini/target_experiment.yaml"
+)
 def test_the_model_not_its_tiles_decides_the_model_capsules_tier():
     """A run with every layer on the host once reported '15 of 15 tiles passed'. The tile record proves
     the SHAPE runs; the capstone is a claim about THIS model. Asserted on the GRADE, not on the source
