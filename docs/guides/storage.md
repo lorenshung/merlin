@@ -3,7 +3,7 @@ title: Disk under out/ — why it grows and what is safe to reclaim
 kind: guide
 status: current
 owner: infra
-last_verified: 2026-09-29
+last_verified: 2026-10-05
 related: [reproducibility, getting_started, gemmini_experiment]
 code_refs: [src/merlin/common/content_store.py,
             src/merlin/common/oot_repo.py,
@@ -13,6 +13,7 @@ code_refs: [src/merlin/common/content_store.py,
             packages/merlin-experiments/src/merlin_experiments/phase1/oot_history.py,
             src/merlin/common/storage_cli.py,
             src/merlin/common/storage_lifecycle.py,
+            src/merlin/common/storage_ops.py,
             merlin/contract/storage.yaml,
             .claude/hooks/guard_artifact_writes.py,
             packages/merlin-experiments/src/merlin/targetgen/sandbox/bwrap.py,
@@ -36,6 +37,9 @@ merlin-storage prune --apply caches       # act on one class
 merlin-storage dedup                      # dry run: bytes held under more than one name
 merlin-storage retain --keep 20           # dry run: what a retention depth would drop
 merlin-storage organize                   # dry run: fold stray dirs into their declared concern
+merlin-storage move SRC DST               # dry run: relocate a tree behind a relative symlink
+merlin-storage dedup --peers PATH...      # dry run: hard-link duplicates to each other, no store
+merlin-storage worktrees [REPO]           # read-only: each worktree's state, merge status, size
 ```
 
 ## Is it bloat, or is it accumulation?
@@ -172,6 +176,37 @@ Two things to know before running it with `--apply`:
   have the same content, and that prefilter is what makes a whole-root scan affordable; it is an
   optimisation, never the test. `--min-bytes` (1 MiB by default) keeps the walk off the long tail
   where the saving cannot repay the inode.
+
+## Beyond `out/`: moving a tree, linking peers, surveying worktrees
+
+The commands above reason about the output root. A host also carries checkouts, worktrees, scratch
+trees and a second disk, and three operations reach those (`merlin.common.storage_ops`). Each is a
+dry run until `--apply`, none follows a symlink, and the two that change the disk refuse a path a
+live process holds open:
+
+- **`move SRC DST`** copies `SRC` with `rsync -aH` (symlinks copied as symlinks, hard links kept),
+  verifies the copy with a checksum dry run plus a file/byte count, checks again that no process
+  started using `SRC` during the copy, and only then replaces `SRC` with a **relative** symlink to
+  `DST`, so every path that quoted the old location still resolves. A failure at any step keeps the
+  source; a source that is a symlink, spans a mount point, holds tracked files, or is leased or
+  pinned is refused before anything is copied.
+- **`dedup --peers`** finds the same groups as `dedup` and hard-links each name to the first name
+  holding those bytes on the same filesystem, instead of into the content store. Use it where the
+  store cannot reach (another disk) or should not own the bytes (a tree outside `out/`). Each name
+  is re-digested immediately before its swap, a frozen directory's mode is borrowed and restored
+  exactly, and the kept inode becomes read-only because its mode is now shared.
+- **`worktrees [REPO]`** lists every worktree with `clean`/`dirty` (modified and untracked counts),
+  merged into a base ref (`--base`, default the remote's HEAD or `main`) and commits ahead of it,
+  its size (`du`, without following links), `locked`/`prunable`, and the number of live processes
+  holding it. It runs `git --no-optional-locks`, so surveying another session's tree never refreshes
+  its index.
+
+The open-file check is `lsof` (one listing of this user's processes, queried by path prefix), or
+`fuser` over the walked entries when `lsof` is absent. With neither installed the operation is
+refused rather than assumed safe; `--no-open-file-check` accepts that risk explicitly. Neither tool
+can see another account's processes without privilege, so the check guards against your own
+sessions, not against the whole host. `--deny PATH` (repeatable) names trees a command must not read
+or touch; it is empty unless you pass it.
 
 ## Retention
 
