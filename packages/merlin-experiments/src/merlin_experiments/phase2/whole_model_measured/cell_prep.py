@@ -165,17 +165,24 @@ def cell_objective_config(
     timeout_seconds: float = 7200,
 ) -> dict[str, Any]:
     """The loop's objective config with its screen replaced by the cell ``machine`` and no certifier:
-    the package arm is the loop's certifier recipe, the store is the loop's store base's ``cells``."""
+    the package arm is the loop's certifier recipe, the store is the loop's store base's ``cells``, and
+    the instruction rule is the loop's -- its roles AND the sealed Phase 0 policy they are held to,
+    refused here when the loop carries none it can enforce."""
+    from . import config as CFG
+
     certifier = dict((loop.get("certifier") or {}).get("build_options") or {})
     if not certifier.get("machine") or not certifier.get("header"):
         raise CELLS.CellError("the loop config's certifier names no machine or header for the package arm")
+    roles = list(loop.get("prohibited_instruction_roles") or ())
+    sealed = loop.get(CFG.SEALED_POLICY)
     document = {
         "schema": loop["schema"],
         "builder": loop.get("builder"),
         "store": str(Path(str(loop["store"])) / "cells"),
         "python": loop.get("python"),
         "environment": dict(loop.get("environment") or {}),
-        "prohibited_instruction_roles": list(loop.get("prohibited_instruction_roles") or ()),
+        "prohibited_instruction_roles": roles,
+        **({CFG.SEALED_POLICY: copy.deepcopy(dict(sealed))} if sealed is not None else {}),
         "screen": {
             "machine": dict(machine),
             "build_options": certifier,
@@ -193,6 +200,10 @@ def cell_objective_config(
     }
     if screen is not None:
         document["pre_measure_check"] = dict(screen)
+    try:
+        CFG.check_policy(document)
+    except CFG.ConfigError as exc:
+        raise CELLS.CellError(f"the cell cannot inherit the loop's instruction rule: {exc}") from exc
     return document
 
 

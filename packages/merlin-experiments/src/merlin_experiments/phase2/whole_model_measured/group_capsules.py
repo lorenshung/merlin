@@ -53,6 +53,8 @@ class Arm:
     descriptor: str | None = None
     source: str | None = None
     extra: Mapping[str, Any] = field(default_factory=dict)
+    #: The sealed Phase 0 instruction policy the arm's ``prohibited_roles`` are held to (the job's own).
+    instruction_policy: Mapping[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -67,7 +69,13 @@ class Arm:
         }
 
 
-def arm_from_options(options: Mapping[str, Any], *, name: str, source: str | None = None) -> Arm:
+def arm_from_options(
+    options: Mapping[str, Any],
+    *,
+    name: str,
+    source: str | None = None,
+    instruction_policy: Mapping[str, Any] | None = None,
+) -> Arm:
     """An arm from whole-model ``build_options``.
 
     The reference arm is the bar and is built under no instruction rule, exactly as the service exempts
@@ -92,6 +100,7 @@ def arm_from_options(options: Mapping[str, Any], *, name: str, source: str | Non
         descriptor=str(options["descriptor"]) if options.get("descriptor") else None,
         source=source,
         extra={"model_capsule": options.get("model_capsule"), "verify": options.get("verify")},
+        instruction_policy=dict(instruction_policy) if instruction_policy else None,
     )
 
 
@@ -100,7 +109,12 @@ def arms_from_jobs(package_job: str | Path, reference_job: str | Path) -> dict[s
     loaded = {}
     for name, path in ((ARM_PACKAGE, package_job), (ARM_REFERENCE, reference_job)):
         job = json.loads(Path(path).read_text(encoding="utf-8"))
-        loaded[name] = arm_from_options(job.get("build_options") or {}, name=name, source=str(path))
+        loaded[name] = arm_from_options(
+            job.get("build_options") or {},
+            name=name,
+            source=str(path),
+            instruction_policy=job.get("instruction_policy") if name == ARM_PACKAGE else None,
+        )
     if loaded[ARM_PACKAGE].machine != loaded[ARM_REFERENCE].machine:
         raise GroupCapsuleError(
             f"the arms name different machines ({loaded[ARM_PACKAGE].machine} vs {loaded[ARM_REFERENCE].machine}); "
@@ -168,6 +182,18 @@ def build_arm_programs(
         record["arm_recipe"] = arm.to_dict()
         record["verify"] = verify
     return records
+
+
+def _sealed_scan(record: Mapping[str, Any], arm: Arm, *, target: str) -> dict[str, Any]:
+    """:func:`isa_scan` under ``arm``'s rule, refused (``clean: False``) when the scan prohibits less
+    than the arm's sealed Phase 0 policy."""
+    from . import gates as G
+
+    report = isa_scan(record, target=target, roles=arm.prohibited_roles)
+    weaker = G.scan_weaker_than_sealed(report, arm.instruction_policy, arm.prohibited_roles)
+    if weaker:
+        report = {**report, "clean": False, "error": report.get("error") or weaker}
+    return report
 
 
 def isa_scan(record: Mapping[str, Any], *, target: str, roles: Sequence[str]) -> dict[str, Any]:
@@ -275,7 +301,18 @@ def measure_on_gsim(
     the measurement.
     ``require_package`` refuses, BEFORE any emulator time, a package-arm program the package does not
     answer, quoting the package's own reason."""
+    from . import gates as G
+
     out = Path(out)
+    for name, arm in arms.items():
+        unsealed = G.sealed_policy_problems(arm.instruction_policy, arm.prohibited_roles)
+        if unsealed:
+            # Before any program is built or timed: an arm held to roles no sealed Phase 0 policy
+            # resolved would be scanned against a rule that may forbid nothing.
+            raise GroupCapsuleError(
+                f"the {name} arm declares prohibited roles {list(arm.prohibited_roles)} but carries no "
+                f"enforceable sealed instruction policy ({'; '.join(unsealed)})"
+            )
     programs: dict[str, dict[str, Any]] = {}
     for name, arm in arms.items():
         built = build_arm_programs(
@@ -284,7 +321,7 @@ def measure_on_gsim(
         for group, record in built.items():
             programs[label_of(name, group, model)] = record
     scans = {
-        label: isa_scan(record, target=target, roles=arms[record["arm"]].prohibited_roles)
+        label: _sealed_scan(record, arms[record["arm"]], target=target)
         for label, record in programs.items()
         if arms[record["arm"]].prohibited_roles and not record.get("refusal")
     }
@@ -321,8 +358,12 @@ def measure_on_gsim(
         elif label in unanswered:
             row.update(status="refused", refusal=unanswered[label])
         elif label in scans and not scans[label].get("clean"):
+            scan = scans[label]
+            why = scan.get("error") or scan.get("detail") or "no clean verdict"
             row.update(
-                status="refused", refusal="isa_prohibited: " + ", ".join(sorted(scans[label].get("summary") or {}))
+                status="refused",
+                refusal="isa_prohibited: "
+                + (", ".join(sorted(scan.get("summary") or {})) or f"the program could not be checked ({why})"),
             )
         else:
             got = timed.get(label) or {}
@@ -419,8 +460,10 @@ class GroupProgramMeasurer:
     def scan(self, record, *, roles):
         report = isa_scan(record, target=self.target, roles=roles)
         return {
-            "clean": bool(report.get("clean")),
+            "clean": report.get("clean") is True,
             "summary": report.get("summary") or {},
+            "prohibited": dict(report.get("prohibited") or {}),
+            **({"error": report["detail"]} if report.get("detail") and not report.get("error") else {}),
             "census": (report.get("census") or {}).get("per_group")
             if isinstance(report.get("census"), Mapping)
             else None,

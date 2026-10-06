@@ -12,6 +12,13 @@ options, because the build option is what the builder routes by and what the who
 a relaunch that silently dropped them once ran a no-FSM campaign without its prohibition.  The
 reference arms are measured without the rule by construction (they are the bar).
 
+THE RULE IS THE ONE PHASE 0 SEALED.  Declared roles alone say nothing about which instructions they
+forbid; the sealed Phase 0 corpus's ``instruction_policy`` says that, for this target.  A config that
+declares roles carries that policy by value (``instruction_policy``, stamped at prepare by
+:func:`seal_policy` from ``--phase0-manifest``, the config's ``phase0_manifest``, or the selected
+descriptor's corpus manifest), and is refused unless it resolved, declares every role, and prohibits at
+least one instruction per role: a run whose rule forbids nothing measures a program nobody checked.
+
 A section's ``machine`` is either a full spec or a registry reference::
 
     machine: {registry: /abs/whole-model-machines.yaml, name: <machine>, overrides: {...}}
@@ -27,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from merlin.perf import whole_model_builder
+from merlin_experiments.phase0 import instruction_roles as IR
 
 from . import gates as G
 from . import registry as R
@@ -41,6 +49,10 @@ DERIVED_MECHANISMS = "derive_from_capture"
 DEFAULT_BUILDER = f"{whole_model_builder.__name__}:{whole_model_builder.build.__name__}"
 DEFAULT_REFERENCE_BUILDER = f"{whole_model_builder.__name__}:{whole_model_builder.build_reference.__name__}"
 CANDIDATE_SECTIONS = ("screen", "certifier")
+#: The sealed Phase 0 instruction policy, carried by value in a config that declares roles.
+SEALED_POLICY = "instruction_policy"
+#: Optional config key naming the sealed Phase 0 corpus manifest the policy is read from.
+SEALED_POLICY_MANIFEST = "phase0_manifest"
 
 
 class ConfigError(ValueError):
@@ -72,7 +84,8 @@ def declared_roles(document: Mapping[str, Any]) -> list[str]:
 
 
 def check_policy(document: Mapping[str, Any]) -> list[str]:
-    """The declared roles, after refusing any candidate section whose build options disagree."""
+    """The declared roles, after refusing any candidate section whose build options disagree, and a
+    declaration the sealed Phase 0 instruction policy cannot enforce."""
     roles = declared_roles(document)
     sections = [(name, document.get(name)) for name in CANDIDATE_SECTIONS if document.get(name)]
     sections += [(f"held_out.{name}", body) for name, body in (document.get("held_out") or {}).items()]
@@ -83,7 +96,73 @@ def check_policy(document: Mapping[str, Any]) -> list[str]:
                 f"the {name} section's build options carry prohibited roles {carried!r} but the experiment "
                 f"declares {roles!r}; the rule a build is shaped by and the rule it is judged by must agree"
             )
+    if roles:
+        problems = IR.enforcement_problems(document.get(SEALED_POLICY), roles)
+        if problems:
+            raise ConfigError(
+                f"the config declares prohibited roles {roles!r} but carries no enforceable sealed Phase 0 "
+                f"instruction policy ({'; '.join(problems)}); seal one with --phase0-manifest"
+            )
     return roles
+
+
+def sealed_policy_source(document: Mapping[str, Any], *, target: str, manifest: Path | None = None) -> Path:
+    """Where the sealed Phase 0 instruction policy is read from: ``manifest`` (``--phase0-manifest``),
+    the config's ``phase0_manifest``, else the selected descriptor's corpus ``MANIFEST.yaml``."""
+    if manifest is not None:
+        return Path(manifest)
+    if document.get(SEALED_POLICY_MANIFEST):
+        return Path(str(document[SEALED_POLICY_MANIFEST]))
+    from merlin.targetgen.target_experiment import descriptor_for, load_target_experiment
+
+    descriptor = document.get("descriptor") or descriptor_for(target)
+    if descriptor is None:
+        raise ConfigError(f"no sealed Phase 0 manifest was named and {target!r} has no descriptor to find one")
+    corpus = getattr(load_target_experiment(Path(str(descriptor))), "capsule_corpus", None)
+    if corpus is None:
+        raise ConfigError(f"the descriptor {descriptor} names no capsule corpus, so no sealed policy")
+    return Path(corpus).parent / "MANIFEST.yaml"
+
+
+def read_sealed_policy(path: Path) -> dict[str, Any]:
+    """The ``instruction_policy`` a sealed Phase 0 corpus manifest carries (or a bare policy document)."""
+    import hashlib
+
+    import yaml
+
+    path = Path(path)
+    if not path.is_file():
+        raise ConfigError(f"the sealed Phase 0 manifest {path} does not exist")
+    raw = path.read_bytes()
+    document = yaml.safe_load(raw)
+    if not isinstance(document, Mapping):
+        raise ConfigError(f"{path} is not a mapping")
+    policy = document if document.get("schema") == IR.POLICY_SCHEMA else document.get("instruction_policy")
+    if not isinstance(policy, Mapping):
+        raise ConfigError(f"{path} carries no Phase 0 instruction_policy")
+    return {**dict(policy), "sealed_source": {"path": str(path.resolve()), "sha256": hashlib.sha256(raw).hexdigest()}}
+
+
+def seal_policy(document: Mapping[str, Any], *, target: str, manifest: Path | None = None) -> dict[str, Any]:
+    """``document`` with the sealed Phase 0 instruction policy stamped in by value, when it declares roles.
+
+    A config that already carries one keeps it (a relaunch is held to the policy it was launched under)
+    unless ``manifest`` names another, which then must be the same policy."""
+    out = json.loads(json.dumps(dict(document), default=str))
+    if not declared_roles(out):
+        return out
+    if out.get(SEALED_POLICY) is not None and manifest is None:
+        return out
+    sealed = read_sealed_policy(sealed_policy_source(out, target=target, manifest=manifest))
+    kept = out.get(SEALED_POLICY)
+    if kept is not None:
+        strip = lambda p: {k: v for k, v in dict(p).items() if k != "sealed_source"}  # noqa: E731
+        if strip(kept) != strip(sealed):
+            raise ConfigError(
+                "the named Phase 0 manifest's instruction policy differs from the one this run was sealed under"
+            )
+    out[SEALED_POLICY] = sealed
+    return out
 
 
 def with_policy(document: Mapping[str, Any], roles: list[str]) -> dict[str, Any]:
@@ -231,6 +310,7 @@ def from_config(
                 pre_measure_check=document.get("pre_measure_check"),
                 retain=document.get("retain"),
                 certifier_root=certifier_root if is_screen else None,
+                instruction_policy=document.get(SEALED_POLICY),
             ),
             reference,
         )
@@ -259,10 +339,15 @@ __all__ = [
     "ConfigError",
     "DEFAULT_BUILDER",
     "DEFAULT_REFERENCE_BUILDER",
+    "SEALED_POLICY",
+    "SEALED_POLICY_MANIFEST",
     "check_policy",
     "declared_roles",
     "from_config",
+    "read_sealed_policy",
     "resolve_machine",
+    "seal_policy",
+    "sealed_policy_source",
     "store_roots",
     "with_policy",
 ]

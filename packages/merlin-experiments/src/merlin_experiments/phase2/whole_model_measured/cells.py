@@ -60,6 +60,7 @@ from typing import Any, Protocol
 
 from merlin.perf import whole_model_verdict as V
 
+from . import gates as G
 from . import jobs as J
 from .identity import load_builder, now
 
@@ -98,7 +99,8 @@ class CellMeasurer(Protocol):
     ``programs`` builds one program per group of one member and returns ``{label: record}``; a record
     carries ``group``, ``linked`` (``submission`` when the package answers it), ``cause``, ``elf`` and,
     when it could not be built, ``refusal``.  ``scan`` checks one program's WHOLE ELF for the roles and
-    returns ``{clean, summary}``.  ``time`` runs the given programs and returns ``{label: {status,
+    returns ``{clean, summary, prohibited}`` (``prohibited``: the ``{selector: name}`` it held the
+    program to).  ``time`` runs the given programs and returns ``{label: {status,
     cycles, correct, ...}}``; it is only ever handed programs that may be timed."""
 
     def programs(
@@ -143,12 +145,14 @@ def measure_member(
     roles: Sequence[str],
     out: Path,
     max_cycles: int,
+    sealed: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """One member's rows: built, refused where the rule or coverage refuses, and only the rest timed.
 
     For the PACKAGE arm of the OBJECTIVE member, a group the package does not answer is refused
     before any emulator time.  Every package program's whole ELF is scanned for the roles; a scan that
-    cannot run refuses (it never passes)."""
+    cannot run refuses (it never passes), and so does one that prohibits less than the ``sealed``
+    Phase 0 policy (:func:`.gates.scan_weaker_than_sealed`)."""
     records = dict(measurer.programs(arm, member["groups"], package_dir=package_dir, member=member, out=out))
     refused: dict[str, str] = {}
     census: dict[str, Any] = {}
@@ -168,6 +172,9 @@ def measure_member(
                 scan = dict(measurer.scan(record, roles=roles))
             except Exception as exc:  # noqa: BLE001 -- a scan that cannot run refuses
                 scan = {"clean": False, "summary": {}, "error": f"{type(exc).__name__}: {exc}"}
+            weaker = G.scan_weaker_than_sealed(scan, sealed, roles) if sealed is not None else ""
+            if weaker:
+                scan = {**scan, "clean": False, "error": scan.get("error") or weaker}
             if scan.get("clean") is not True:
                 refused[label] = "isa_prohibited: " + (
                     ", ".join(sorted(scan.get("summary") or {}))
@@ -487,6 +494,12 @@ def measure_cell(job: Mapping[str, Any], job_dir: Path, package: Path, *, target
     cell = dict(spec.get("cell") or {})
     timing = dict(spec.get("timing") or {})
     roles = list((job.get("build_options") or {}).get("prohibited_roles") or ())
+    sealed = job.get("instruction_policy")
+    unsealed = G.sealed_policy_problems(sealed, roles)
+    if unsealed:
+        # Before any program is built: a cell under a rule nobody sealed spends emulator time on
+        # programs whose instruction scan could not have refused them.
+        raise J.ServiceError(f"the cell carries no enforceable sealed instruction policy ({'; '.join(unsealed)})")
     # The package arm is built by the job's own recipe (its build options), as its whole model would be.
     measurer = _measurer({**spec, "build_options": dict(job.get("build_options") or {})})
     rows: list[dict[str, Any]] = []
@@ -513,6 +526,7 @@ def measure_cell(job: Mapping[str, Any], job_dir: Path, package: Path, *, target
                 roles=roles,
                 out=Path(job_dir) / "cell" / (member["label"] or "objective"),
                 max_cycles=bound,
+                sealed=sealed if roles else None,
             )
         ]
     machine = str(timing.get("registry_machine") or spec.get("registry_name") or "cell")

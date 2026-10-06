@@ -51,6 +51,7 @@ class FakeMeasurer:
             "clean": record["group"] not in self.dirty,
             "summary": {f"LOOP in g{record['group']}": 1},
             "census": {"total": 3},
+            "prohibited": dict(self.spec.get("fake", {}).get("prohibited", {"8": "LOOP_A"})),
         }
 
     def time(self, records, *, member, max_cycles, out):
@@ -91,13 +92,14 @@ def _reset():
     FakeMeasurer.instances = []
 
 
-def _job(tmp_path, spec, roles=("loop_descriptor",)):
+def _job(tmp_path, spec, roles=("loop_descriptor",), *, sealed=True):
     job_dir = FX.job_dir_for(
         tmp_path / "store",
         FX.package(tmp_path, "p"),
         machine=spec,
         builder=FX.write_builder(tmp_path),
         build_options={"prohibited_roles": list(roles)},
+        instruction_policy=FX.sealed_policy(roles) if roles and sealed else None,
     )
     return job_dir
 
@@ -131,6 +133,20 @@ def test_a_cell_program_with_a_prohibited_instruction_is_refused_untimed(tmp_pat
     result = W.work(_job(tmp_path, _spec(dirty=[2])))
     assert result["isa_prohibited"]["summary"] == {"g2": 1} and result["refusal"].startswith("isa_prohibited")
     assert not any(label.endswith(":objective:g2") for label in FakeMeasurer.instances[-1].timed)
+
+
+def test_a_cell_under_roles_no_sealed_policy_resolved_is_refused_before_any_program_is_built(tmp_path):
+    result = W.work(_job(tmp_path, _spec(), sealed=False))
+    assert result["timing_status"] == V.TIMING_REFUSED and "sealed instruction policy" in result["refusal"]
+    assert not FakeMeasurer.instances  # refused before the measurer was even made
+
+
+def test_a_cell_scan_that_prohibits_less_than_phase0_sealed_is_refused_untimed(tmp_path):
+    """A scan whose prohibited set is empty (or misses a sealed instruction) checked nothing."""
+    for name, prohibited in (("empty", {}), ("weaker", {"9": "OTHER"})):
+        result = W.work(_job(tmp_path / name, _spec(prohibited=prohibited)))
+        assert result["timing_status"] == V.TIMING_REFUSED and result["refusal"].startswith("isa_prohibited")
+        assert not any(":objective:" in label for label in FakeMeasurer.instances[-1].timed)
 
 
 def test_the_reference_arm_is_measured_unrestricted_by_the_same_path(tmp_path):

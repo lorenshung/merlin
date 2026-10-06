@@ -195,7 +195,17 @@ def champion_records(
             cycles=(certified.get("verdict") or {}).get("whole_window_cycles"),
         )
     census = (screen.get("build") or {}).get("isa_census")
-    scanned = bool(roles) and census is not None and not screen.get("isa_prohibited")
+    # The scan's own record of what it held the program to (the instruction gate keeps it on a clean
+    # build); a clean verdict without one is not evidence, so it is never reported clean here.
+    isa = (screen.get("build") or {}).get("isa_prohibition") or {}
+    prohibited = {str(k): str(v) for k, v in (isa.get("prohibited") or {}).items()}
+    scanned = (
+        bool(roles)
+        and census is not None
+        and not screen.get("isa_prohibited")
+        and isa.get("verdict") == "clean"
+        and bool(prohibited)
+    )
     return {
         "provenance": {
             "phase1": {"run": phase1_run, "frozen_commit": frozen_commit},
@@ -208,6 +218,8 @@ def champion_records(
             "scope": "whole_elf",
             "verdict": "clean" if scanned else "not_scanned",
             "prohibited_roles": [str(r) for r in roles],
+            "prohibited_instructions": prohibited,
+            **({"sealed_source": isa["sealed_source"]} if isa.get("sealed_source") else {}),
         },
     }
 

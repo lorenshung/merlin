@@ -128,6 +128,7 @@ class MeasurementService:
         pre_measure_check: Mapping[str, Any] | None = None,
         retain: Any = None,
         certifier_root: Path | None = None,
+        instruction_policy: Mapping[str, Any] | None = None,
     ) -> None:
         if slots < 1 or max_pending < 1:
             raise J.ServiceError("slots and max_pending must be positive")
@@ -156,6 +157,9 @@ class MeasurementService:
         #: Set by the objective: computes the gate afresh at every candidate request (see :meth:`request`).
         self.coverage_gate_provider: Callable[[], Mapping[str, Any] | None] | None = None
         self.certifier_root = str(certifier_root) if certifier_root else None
+        #: The sealed Phase 0 instruction policy every candidate job carries, so the instruction gate
+        #: holds a program to the rule Phase 0 sealed rather than to whatever the roles derive to today.
+        self.instruction_policy = dict(instruction_policy) if instruction_policy else None
         # The reference is bound PER JOB, at request time, to the bytes the file holds then.
         self.reference_path = Path(reference) if reference is not None else None
 
@@ -369,6 +373,7 @@ class MeasurementService:
                 "coverage_gate": self.coverage_gate if role == J.ROLE_CANDIDATE else None,
                 "certifier_root": self.certifier_root,
                 "timeout_seconds": self.timeout_seconds,
+                "instruction_policy": self.instruction_policy if role != J.ROLE_REFERENCE else None,
             }
             write_json_atomic(job_dir / "job.json", job)
         if job["state"] == J.SCREENING:
