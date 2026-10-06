@@ -10,6 +10,7 @@ import pytest
 from merlin.llvmlower.session_bundle import load
 from merlin.targetgen import _m2m_capture_worker as worker
 from merlin.targetgen.application_inventory import verify_capture_receipt
+from merlin.targetgen.quant_recipe import digest as recipe_digest
 
 LOADER = """
 import torch
@@ -25,6 +26,8 @@ class Prefix(nn.Module):
 
 class Step(nn.Module):
     def forward(self, context, state):
+        if hasattr(self, "layer"):
+            context = self.layer(context)
         result = context + state
         return result, result
 
@@ -65,14 +68,38 @@ def get_model_and_inputs():
 
 
 @pytest.mark.slow
-def test_worker_captures_the_entire_declared_session_with_owned_sidecars(tmp_path):
+@pytest.mark.parametrize("dtype", ["fp32", "int8"])
+@pytest.mark.parametrize("shared", [False, True])
+def test_worker_captures_the_entire_declared_session_with_owned_sidecars(tmp_path, dtype, shared):
     python = os.environ.get("MERLIN_M2M_PYTHON")
     root = os.environ.get("MERLIN_M2M_DIR")
     if not python or not root:
         pytest.skip("an explicit trace-capable capture interpreter is required")
     loader = tmp_path / "loader.py"
-    loader.write_text(LOADER)
+    loader.write_text(
+        LOADER.replace("value = torch.randn", "step.layer = prefix.layer\n        value = torch.randn")
+        if shared
+        else LOADER
+    )
     out = tmp_path / "capture"
+    recipe_args = []
+    if dtype == "int8":
+        tensor = dict(dtype="int8", granularity="tensor", symmetric=True, block=None, mode="static")
+        recipe = dict(
+            schema="quant_recipe_v1",
+            target="t",
+            unit="matrix",
+            status="derived",
+            weight={**tensor, "quant_min": -127, "quant_max": 127},
+            activation={**tensor, "quant_min": -128, "quant_max": 127},
+            families=["contraction"],
+            bias_domain="accumulator",
+            software_numerical_engine="integer_reference",
+        )
+        recipe["recipe_sha256"] = recipe_digest(recipe)
+        recipe_path = tmp_path / "recipe.json"
+        recipe_path.write_text(json.dumps(recipe))
+        recipe_args = ["--recipe", str(recipe_path)]
     result = subprocess.run(
         [
             python,
@@ -82,7 +109,8 @@ def test_worker_captures_the_entire_declared_session_with_owned_sidecars(tmp_pat
             "--loader",
             str(loader),
             "--dtype",
-            "fp32",
+            dtype,
+            *recipe_args,
             "--seed",
             "7",
             "--materialize-bundle",
@@ -102,6 +130,13 @@ def test_worker_captures_the_entire_declared_session_with_owned_sidecars(tmp_pat
     receipt = json.loads((out / "session-receipt.json").read_bytes())
     assert receipt["agentic"] is False
     assert receipt["determinism"]["seed"] == 7
+    if dtype == "int8":
+        assert receipt["recipe_sha256"] == recipe["recipe_sha256"]
+        assert [row["precision_selection"] for row in receipt["programs"]] == [
+            "recipe",
+            "recipe" if shared else "no_recipe_work",
+            "no_recipe_work",
+        ]
     for program in session.programs:
         stage = program.bundle
         assert verify_capture_receipt(stage / "model.mlir")["status"] == "verified_materialized"
@@ -114,3 +149,11 @@ def test_worker_captures_the_entire_declared_session_with_owned_sidecars(tmp_pat
         assert metadata["ok"] and metadata["opaque"] == 0
         assert metadata["loader_provenance"]["synthetic_inputs"] is True
         assert metadata["framework_catalog"]["status"] == "available"
+        if dtype == "int8" and (program.name == "prefix" or (shared and program.name == "step")):
+            assert metadata["recipe_sha256"] == recipe["recipe_sha256"]
+            assert metadata["integerization_receipt"]["golden_agreement"]["status"] == "passed"
+            assert metadata["integerization_receipt"]["golden_agreement"]["reference"] == "pt2e_integer"
+            assert metadata["integerization_receipt"]["exported_integer_mm_count"] > 0
+        elif dtype == "int8":
+            assert metadata["dtype"] == "fp32"
+            assert metadata["recipe_sha256"] is None

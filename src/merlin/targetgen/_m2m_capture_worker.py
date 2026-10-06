@@ -437,15 +437,27 @@ def _framework_catalog(torch) -> dict:
         }
 
 
-def _materialize_session(model, inputs, args, out: Path, *, determinism: dict, dependencies: list, torch) -> int:
+def _materialize_session(
+    model, inputs, args, out: Path, *, loader, determinism: dict, dependencies: list, torch
+) -> int:
     """Capture an explicit multi-program protocol; do not infer stages by model name."""
     if not args.materialize_bundle:
         raise ValueError("deferred multi-program capture requires --materialize-bundle")
-    if args.dtype not in {"fp32", "f32"} or args.recipe or args.scheme or args.already_quantized:
-        raise ValueError(
-            "multi-program capture currently requires an unquantized FP32 selection; "
-            "shared-weight precision/quantization needs its own explicit session policy"
-        )
+    recipe = json.loads(Path(args.recipe).read_text()) if args.recipe else None
+    quantized = args.dtype == "int8" and recipe is not None
+    if (args.dtype not in {"fp32", "f32"} and not quantized) or args.scheme or args.already_quantized:
+        raise ValueError("multi-program capture requires FP32 or an explicit static int8 recipe")
+    if args.quantize_activation_contractions or args.integer_nonlinear:
+        raise ValueError("multi-program capture requires a recipe, not additional numerical rewrites")
+    if recipe is not None:
+        from merlin.targetgen.quant_recipe import digest as recipe_digest
+
+        if (
+            not quantized
+            or recipe.get("recipe_sha256") != recipe_digest(recipe)
+            or (recipe.get("activation") or {}).get("mode") != "static"
+        ):
+            raise ValueError("multi-program int8 capture requires a valid static recipe")
     from m2m.capture.bundle import write_multi_program_bundle
     from m2m.capture.external_runtime import external_runtime_session
     from m2m.coverage import opaque_report
@@ -476,15 +488,69 @@ def _materialize_session(model, inputs, args, out: Path, *, determinism: dict, d
             program.module.eval()
             _, output_abi = _output_abi(program.module(*program.inputs))
             stage_abis[program.name] = {"input_abi": input_abi, "output_abi": output_abi}
+    programs = session.bundle_programs()
+    selections = {program.name: "untransformed" for program in session.programs}
+    stage_quants = {}
+    if quantized:
+        from m2m.capture.bundle import _shared_tensor_inventory
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _recipe_quantizer as RQ
+
+        # Each graph is captured through the SAME recipe/integer-reference path
+        # as an ordinary model. PT2E produces separate GraphModules; it must not
+        # modify the source weights shared by the original stage wrappers.
+        source_owner = torch.nn.ModuleList([program.module for program in session.programs])
+        has_source_state = any(True for _ in source_owner.parameters()) or any(True for _ in source_owner.buffers())
+        source_state = _shared_tensor_inventory(source_owner) if has_source_state else []
+        for program, record in zip(session.programs, programs, strict=True):
+            exported = torch.export.export(program.module.eval(), program.inputs)
+            selected = RQ._has_floating_recipe_work(exported.graph_module, recipe)
+            del exported
+            selections[program.name] = "recipe" if selected else "no_recipe_work"
+            stage_args = argparse.Namespace(**vars(args))
+            stage_args.out = str(out / "stages" / program.name)
+            if not selected:
+                stage_args.dtype, stage_args.recipe = "fp32", ""
+            observed = []
+            status = main(
+                stage_args,
+                prepared_program={
+                    "loader": loader,
+                    "module": program.module,
+                    "inputs": program.inputs,
+                    "dependencies": dependencies,
+                    "session": program.session,
+                    "provenance": _scalars(dict(session.metadata.get("provenance") or {})),
+                },
+                completed=observed.append,
+            )
+            if status != 0:
+                return status
+            capture = observed[0]
+            record.update(
+                model=capture["module"],
+                inputs=capture["inputs"],
+                conversion_result=capture["conversion_result"],
+                metadata=capture["metadata"],
+            )
+            if capture["quant"] is not None:
+                stage_quants[program.name] = capture["quant"]
+        if source_state != (_shared_tensor_inventory(source_owner) if has_source_state else []):
+            raise ValueError("multi-program source weights changed during recipe capture")
+        if not stage_quants:
+            raise ValueError("int8 session has no recipe-realized program")
     # The existing writer owns exported ABI resolution, carried state, goldens
     # and cross-stage bindings; this adapter adds capture-process observations.
     summary = write_multi_program_bundle(
-        session.bundle_programs(),
+        programs,
         dict(session.metadata),
         out,
         capture_trace=True,
         source_path=Path(args.loader),
         metadata=metadata,
+        quantization_by_program=stage_quants if quantized else None,
+        quantization_preapplied=quantized,
     )
     stages = []
     for program in session.programs:
@@ -498,6 +564,8 @@ def _materialize_session(model, inputs, args, out: Path, *, determinism: dict, d
         count = sum(opaque.values())
         meta_path = stage / "meta.json"
         meta = json.loads(meta_path.read_bytes())
+        if any(meta.get(key) != value for key, value in stage_abis[program.name].items()):
+            raise ValueError(f"stage {program.name!r} changed its declared input/output ABI")
         meta.update(stage_abis[program.name])
         meta.update(
             ok=count == 0 and not projected,
@@ -520,6 +588,7 @@ def _materialize_session(model, inputs, args, out: Path, *, determinism: dict, d
         stages.append(
             {
                 "name": program.name,
+                "precision_selection": selections[program.name],
                 "ok": meta["ok"],
                 "opaque": count,
                 "trace_status": trace.get("status", "unknown"),
@@ -532,6 +601,8 @@ def _materialize_session(model, inputs, args, out: Path, *, determinism: dict, d
         "programs": stages,
         "determinism": determinism,
         "agentic": False,
+        "recipe_sha256": recipe.get("recipe_sha256") if recipe else None,
+        "stage_storage": "separate; original source weight bytes verified unchanged" if quantized else "untransformed",
         "session_contract_sha256": hashlib.sha256((out / "session_contract.yaml").read_bytes()).hexdigest(),
         "qualification": "capture only; no target lowering, execution or application accuracy claim",
     }
@@ -593,7 +664,7 @@ def _write_leaf_constants(mdl, inputs, weights_path: str, dest: Path) -> str | N
     return str(dest)
 
 
-def main(argv=None) -> int:
+def main(argv=None, *, prepared_program=None, completed=None) -> int:
     ap = argparse.ArgumentParser(description="m2m capsule capture worker (runs in the m2m venv).")
     ap.add_argument("--loader", required=True, help="path to a .py exposing get_model_and_inputs()")
     ap.add_argument("--dtype", required=True, help="canonical dtype token (fp32/bf16/fp16/int8/fp8)")
@@ -649,7 +720,7 @@ def main(argv=None) -> int:
         action="store_true",
         help="copy raw converted MLIR for inventory with byte hashes, without a capture receipt or Phase 0 admission",
     )
-    a = ap.parse_args(argv)
+    a = argv if isinstance(argv, argparse.Namespace) else ap.parse_args(argv)
     if a.materialize_bundle and a.diagnostic_model_copy:
         ap.error("--materialize-bundle and --diagnostic-model-copy are mutually exclusive")
     if not 0 <= a.seed < 2**32:
@@ -705,16 +776,37 @@ def main(argv=None) -> int:
     out.mkdir(parents=True, exist_ok=True)
     determinism = _seed_capture(a.seed, torch)
     modules_before_loader = set(sys.modules)
-    loader = _load_loader(Path(a.loader))
-    mdl, inputs = loader.get_model_and_inputs()
-    loader_dependency_sources = _loader_dependency_sources(modules_before_loader, Path(a.loader))
+    if prepared_program is None:
+        loader = _load_loader(Path(a.loader))
+        mdl, inputs = loader.get_model_and_inputs()
+        loader_dependency_sources = _loader_dependency_sources(modules_before_loader, Path(a.loader))
+    else:
+        loader = prepared_program["loader"]
+        mdl, inputs = prepared_program["module"], prepared_program["inputs"]
+        loader_dependency_sources = prepared_program["dependencies"]
     if not isinstance(mdl, torch.nn.Module) and callable(getattr(mdl, "external_runtime_session", None)):
         return _materialize_session(
-            mdl, inputs, a, out, determinism=determinism, dependencies=loader_dependency_sources, torch=torch
+            mdl,
+            inputs,
+            a,
+            out,
+            loader=loader,
+            determinism=determinism,
+            dependencies=loader_dependency_sources,
+            torch=torch,
         )
     # BEFORE any cast/quantization: what the loader says about the data it just built. Recorded for
     # every capture, so the capsule can never be silent about whether its inputs were real.
-    provenance = _loader_provenance(loader, mdl, inputs)
+    provenance = (
+        _loader_provenance(loader, mdl, inputs)
+        if prepared_program is None
+        else {
+            "loader_provenance": prepared_program["provenance"],
+            "loader_provenance_status": "declared",
+            "loader_provenance_error": None,
+            "loader_paper_ready": None,
+        }
+    )
     mdl = mdl.eval()
     # A PT2E recipe returns a new GraphModule. Loader-owned streams such as
     # ResNet's session_images live on the original module, while write_bundle
@@ -722,9 +814,13 @@ def main(argv=None) -> int:
     # declaration before replacing the module; its tensor values are the same
     # inputs whose conversion and golden this worker records below.
     session = (
-        loader.get_session_spec(mdl, tuple(inputs))
-        if a.materialize_bundle and hasattr(loader, "get_session_spec")
-        else None
+        prepared_program["session"]
+        if prepared_program is not None
+        else (
+            loader.get_session_spec(mdl, tuple(inputs))
+            if a.materialize_bundle and hasattr(loader, "get_session_spec")
+            else None
+        )
     )
     original_snapshot = {
         "status": "unavailable",
@@ -1183,6 +1279,8 @@ def main(argv=None) -> int:
             capture_trace=True,
             conversion_result=res,
         )
+    if completed is not None:
+        completed({"module": mdl, "inputs": tuple(inputs), "quant": q, "conversion_result": res, "metadata": meta})
     # a machine-readable tail line the parent greps for, even if warnings precede it
     print("__M2M_CAPTURE__ " + json.dumps({"ok": meta["ok"], "opaque": meta["opaque"]}))
     return 0 if (res.ok and n_opaque == 0 and integerization_ok and precision_exact) else 3

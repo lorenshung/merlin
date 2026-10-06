@@ -31,9 +31,11 @@ from typing import Any
 from merlin.targetgen.application_inventory import verify_capture_receipt
 
 SCHEMA = "merlin.capture_execution_attestation.v1"
+SCHEMA_V2 = "merlin.capture_execution_attestation.v2"
 #: The one admitted issuer: the sealed Model2MLIR CPU runner's receipt schema.
 SEALED_M2M_ISSUER = "merlin.sealed_m2m_cpu.v2"
-_VERIFIED_ISSUERS: frozenset[str] = frozenset({SEALED_M2M_ISSUER})
+SEALED_M2M_ISSUER_V3 = "merlin.sealed_m2m_cpu.v3"
+_VERIFIED_ISSUERS: frozenset[str] = frozenset({SEALED_M2M_ISSUER, SEALED_M2M_ISSUER_V3})
 PRESELECTED_REPLAY_SCHEMA = "merlin.phase0.preselected_capture_replay.v1"
 SEALED_M2M_POLICY = {
     "decision": "operator policy decision 2026-10-01: admit the sealed Model2MLIR CPU runner as a verified issuer",
@@ -41,6 +43,14 @@ SEALED_M2M_POLICY = {
     "accepted_residuals": [
         "the sealed M2M receipt is unsigned",
         "the Python runtime closure is the copied selected venv, not an independently pinned dependency set",
+    ],
+}
+SEALED_M2M_POLICY_V3 = {
+    "decision": "operator policy decision: admit only replayed, preselected sealed M2M v3 source and checkpoint bytes",
+    "scope": "one complete saved CPU program or session with exact checkpoint, declared environment and program roster",
+    "accepted_residuals": [
+        "the sealed M2M receipt is unsigned",
+        "the Python runtime closure is a copied selected venv rather than an independently pinned dependency set",
     ],
 }
 SEALED_M2M_ASSESSMENT_SCHEMA = "merlin.phase0.sealed_m2m_assessment.v2"
@@ -197,7 +207,7 @@ def require_verified_execution(document: Mapping[str, Any]) -> None:
     passes only while the selection, sealed receipt, model and materialized receipt
     it names still carry the attested digests and bind the preselected plan.
     """
-    if document.get("schema") != SCHEMA:
+    if document.get("schema") not in {SCHEMA, SCHEMA_V2}:
         raise AttestationNotVerified("unsupported capture execution attestation schema")
     if (
         document.get("status") != "verified_sealed_execution"
@@ -207,8 +217,12 @@ def require_verified_execution(document: Mapping[str, Any]) -> None:
         raise AttestationNotVerified("capture has no verified fresh sealed execution")
     if document.get("issuer") not in _VERIFIED_ISSUERS:
         raise AttestationNotVerified("no supported Merlin sealed execution issuer has verified this capture")
-    if document.get("issuer") == SEALED_M2M_ISSUER:
+    if document.get("issuer") == SEALED_M2M_ISSUER and document.get("schema") == SCHEMA:
         _require_sealed_m2m_bytes(document)
+    elif document.get("issuer") == SEALED_M2M_ISSUER_V3 and document.get("schema") == SCHEMA_V2:
+        _require_sealed_m2m_v3_bytes(document)
+    else:
+        raise AttestationNotVerified("sealed execution issuer and attestation schema do not match")
 
 
 def _is_sha(value) -> bool:
@@ -317,6 +331,138 @@ def attest_sealed_m2m(replay: Mapping[str, Any], *, selection_path: Path, model_
     }
     require_verified_execution(document)
     return document
+
+
+def _sealed_m2m_v3_bindings(selection_path: Path, selection_sha256: str, capture_path: Path) -> dict[str, Any]:
+    """Bind a complete v3 single program or every program of a saved session."""
+    from merlin_experiments.capture_execution import sealed_m2m
+    from merlin_experiments.capture_execution.sealed_static import _canonical_path, _file_digest
+
+    from .capture_selection import SCHEMA_V2 as SELECTION_V2
+    from .capture_selection import load
+
+    try:
+        selected = load(selection_path, expected_sha256=selection_sha256)
+        if selected.get("schema") != SELECTION_V2:
+            raise AttestationNotVerified("session capture lacks a v2 preselection")
+        run = _canonical_path(Path(selected["run_dir"]), exists=True)
+        capture = _canonical_path(Path(capture_path), exists=True)
+        if capture != run / "capture" or not capture.is_dir():
+            raise AttestationNotVerified("session capture is not the selected run's complete output root")
+        pending = run / "sealed_m2m_pending.json"
+        if pending.is_symlink() or not pending.is_file():
+            raise AttestationNotVerified("session sealed receipt is absent or indirect")
+        receipt = json.loads(pending.read_bytes())
+        plan = selected["plan"]
+        if (
+            receipt.get("schema") != sealed_m2m.SCHEMA_V3
+            or receipt.get("status") != "pending_replay"
+            or receipt.get("capture_selection_sha256") != selection_sha256
+            or receipt.get("plan") != plan
+            or receipt.get("policy_sha256") != selected.get("sandbox_policy_sha256")
+            or receipt.get("issuer_sha256") != selected.get("issuer_source_sha256")
+            or receipt.get("bwrap_sha256") != (selected.get("bwrap") or {}).get("sha256")
+            or _file_digest(Path(selected["bwrap"]["path"])) != receipt["bwrap_sha256"]
+        ):
+            raise AttestationNotVerified("session receipt does not bind the selected issuer, policy and tools")
+        source, runtime = run / "snapshots/source", run / "snapshots/guest-root"
+        if sealed_m2m._snapshot_tree(source) != receipt.get("source"):
+            raise AttestationNotVerified("session source bytes differ from the sealed receipt")
+        if sealed_m2m._snapshot_tree(runtime) != receipt.get("guest_root"):
+            raise AttestationNotVerified("session runtime bytes differ from the sealed receipt")
+        if sealed_m2m._snapshot_tree(capture) != receipt.get("output"):
+            raise AttestationNotVerified("session output bytes differ from the sealed receipt")
+        sealed_m2m._verify_staged_selection(plan, source, runtime)
+        materialized = sealed_m2m._materialized_v3(capture, source, capture, plan)
+        if materialized.get("kind") not in {"single", "session"} or materialized != receipt.get("materialized"):
+            raise AttestationNotVerified("capture does not retain its verified materialized program set")
+        bound = {
+            "run_dir": str(run),
+            "capture_path": str(capture),
+            "kind": materialized["kind"],
+            "capture_tree_sha256": receipt["output"]["sha256"],
+            "sealed_receipt_sha256": _file_digest(pending),
+            "integer_contractions": materialized["integer_contractions"],
+        }
+        if materialized["kind"] == "session":
+            bound.update(
+                session_contract_sha256=materialized["session_contract_sha256"],
+                session_receipt_sha256=materialized["session_receipt_sha256"],
+                programs=materialized["programs"],
+            )
+        else:
+            bound.update(
+                model_sha256=_file_digest(capture / "model.mlir"),
+                receipt_sha256=_file_digest(capture / "capture_receipt.json"),
+            )
+        return bound
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        if isinstance(exc, AttestationNotVerified):
+            raise
+        raise AttestationNotVerified(f"sealed session evidence is unreadable or changed: {exc}") from exc
+
+
+def _require_sealed_m2m_v3_bytes(document: Mapping[str, Any]) -> None:
+    capture = document.get("capture") or {}
+    selection = document.get("selection") or {}
+    if (
+        document.get("policy") != SEALED_M2M_POLICY_V3
+        or (document.get("replay") or {}).get("schema") != PRESELECTED_REPLAY_SCHEMA
+        or (document.get("replay") or {}).get("status") != "verified_preselected_replay"
+        or not _is_sha(selection.get("sha256"))
+        or not isinstance(selection.get("path"), str)
+        or not isinstance(capture.get("capture_path"), str)
+    ):
+        raise AttestationNotVerified("session attestation lacks its v3 selection or replay bindings")
+    observed = _sealed_m2m_v3_bindings(Path(selection["path"]), selection["sha256"], Path(capture["capture_path"]))
+    if observed != capture:
+        raise AttestationNotVerified("session attestation differs from selected program or output bytes")
+
+
+def attest_sealed_m2m_v3(replay: Mapping[str, Any], *, selection_path: Path, capture_path: Path) -> dict[str, Any]:
+    """Issue a v3 attestation for a replayed complete program or saved session."""
+    if (
+        not isinstance(replay, Mapping)
+        or replay.get("schema") != PRESELECTED_REPLAY_SCHEMA
+        or replay.get("status") != "verified_preselected_replay"
+        or replay.get("capture_kind") not in {"single", "session"}
+        or not all(
+            _is_sha(replay.get(key)) for key in ("selection_sha256", "sealed_receipt_sha256", "capture_tree_sha256")
+        )
+    ):
+        raise AttestationNotVerified("only a fully replayed v3 capture can be attested")
+    observed = _sealed_m2m_v3_bindings(Path(selection_path), replay["selection_sha256"], Path(capture_path))
+    if observed["kind"] != replay["capture_kind"]:
+        raise AttestationNotVerified("replayed capture kind differs from the selected output")
+    fields = ["sealed_receipt_sha256", "capture_tree_sha256", "integer_contractions"]
+    if observed["kind"] == "session":
+        fields += ["session_contract_sha256", "session_receipt_sha256", "programs"]
+    else:
+        fields += ["model_sha256", "capture_receipt_sha256"]
+    for key in fields:
+        expected = observed["receipt_sha256"] if key == "capture_receipt_sha256" else observed[key]
+        if replay.get(key) != expected:
+            raise AttestationNotVerified("replayed capture or program bytes differ from the selected output")
+    document = {
+        "schema": SCHEMA_V2,
+        "status": "verified_sealed_execution",
+        "source_closure_verified": True,
+        "fresh_execution": True,
+        "issuer": SEALED_M2M_ISSUER_V3,
+        "policy": copy.deepcopy(SEALED_M2M_POLICY_V3),
+        "selection": {"path": str(Path(selection_path).absolute()), "sha256": replay["selection_sha256"]},
+        "replay": {"schema": replay["schema"], "status": replay["status"]},
+        "capture": observed,
+    }
+    require_verified_execution(document)
+    return document
+
+
+def attest_sealed_m2m_session(replay: Mapping[str, Any], *, selection_path: Path, capture_path: Path) -> dict[str, Any]:
+    """Compatibility entry point that refuses a v3 single-program capture."""
+    if replay.get("capture_kind") != "session":
+        raise AttestationNotVerified("the session attester requires a multi-program root")
+    return attest_sealed_m2m_v3(replay, selection_path=selection_path, capture_path=capture_path)
 
 
 def assess_sealed_m2m_capture(

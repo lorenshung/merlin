@@ -1,4 +1,4 @@
-"""Pre-execution selection for one fresh, checkpoint-free CPU M2M capture.
+"""Pre-execution selection for one fresh, source-closed CPU M2M capture.
 
 The selection is created before its run directory exists and is supplied again
 by exact digest to issuance and derivation. A reproducible sandbox replay binds
@@ -24,6 +24,7 @@ from merlin_experiments.capture_execution.sealed_static import (
 )
 
 SCHEMA = "merlin.phase0.capture_selection.v1"
+SCHEMA_V2 = "merlin.phase0.capture_selection.v2"
 MEMBER = "capture-selection.json"
 
 
@@ -43,17 +44,28 @@ def _selected_bytes(plan: dict, run_dir: Path, bwrap: Path) -> dict:
     command = sealed_m2m._command_v2(
         output, dtype=plan["dtype"], recipe=plan.get("recipe") is not None, options=plan.get("worker_options")
     )
+    full_inputs = plan.get("schema") == sealed_m2m.SCHEMA_V3
     return {
-        "schema": SCHEMA,
+        "schema": SCHEMA_V2 if full_inputs else SCHEMA,
         "status": "preselected_before_capture",
         "run_dir": str(run_dir),
         "plan": plan,
         "plan_sha256": _digest(_json(plan)),
-        "checkpoint": {"kind": "none"},
+        "checkpoint": (
+            next(row for row in plan["selected_inputs"] if row["role"] == "checkpoint")
+            if full_inputs
+            else {"kind": "none"}
+        ),
         "system_libraries": _libraries(plan),
         "bwrap": {"path": str(bwrap), "sha256": _file_digest(bwrap)},
         "issuer_source_sha256": _file_digest(Path(sealed_m2m.__file__)),
-        "sandbox_policy_sha256": sealed_m2m._policy(command, output, replayable_logs=True),
+        "sandbox_policy_sha256": sealed_m2m._policy(
+            command,
+            output,
+            replayable_logs=True,
+            loader_env=plan.get("loader_env") if full_inputs else None,
+            timeout_seconds=plan.get("execution_timeout_seconds", sealed_m2m._TIMEOUT_SECONDS),
+        ),
         "phase0_admission": "not_granted",
     }
 
@@ -70,17 +82,25 @@ def select(
     dtype: str = "fp32",
     recipe: Path | None = None,
     checkpoint: Path | None = None,
+    checkpoint_guest_member: str | None = None,
+    extra_inputs: dict[str, Path] | None = None,
+    loader_env: dict[str, str | None] | None = None,
+    execution_timeout_seconds: int | None = None,
     bwrap_binary: Path | None = None,
     worker_options: dict | None = None,
 ) -> dict:
     """Write one owner-only selection before any capture output exists.
 
-    External checkpoints require a separately mounted and inventoried guest
-    input, so this first policy supports only loaders with no checkpoint. The
-    absence is explicit and verifiable instead of silently reading a host path.
+    V1 selects checkpoint-free loaders. V2 inventories one explicit checkpoint,
+    any additional input files, and all declared loader environment reads before
+    the sandbox sees them. Neither selection grants compilation admission.
     """
-    if checkpoint is not None:
-        raise ValueError("external checkpoints require a selected guest mount; v1 supports explicit none only")
+    if checkpoint is not None and checkpoint_guest_member is None:
+        raise ValueError("selected checkpoint requires an exact guest member")
+    if checkpoint is None and any(
+        value is not None for value in (checkpoint_guest_member, extra_inputs, loader_env, execution_timeout_seconds)
+    ):
+        raise ValueError("declared loader environment and extra inputs require a selected checkpoint")
     run = _canonical_path(Path(run_dir), exists=False)
     destination = _canonical_path(Path(output_dir), exists=False)
     if run.exists() or destination.exists():
@@ -98,6 +118,11 @@ def select(
         dtype=dtype,
         recipe=recipe,
         worker_options=worker_options,
+        checkpoint=checkpoint,
+        checkpoint_guest_member=checkpoint_guest_member,
+        extra_inputs=extra_inputs,
+        loader_env=loader_env,
+        execution_timeout_seconds=execution_timeout_seconds,
     )
     selected_inputs = [
         Path(plan[name])
@@ -105,6 +130,8 @@ def select(
     ]
     if plan.get("recipe"):
         selected_inputs.append(Path(plan["recipe"]["path"]))
+    if plan["schema"] == sealed_m2m.SCHEMA_V3:
+        selected_inputs.extend(Path(row["source"]) for row in plan["selected_inputs"])
     if any(
         output == item or output.is_relative_to(item) or item.is_relative_to(output)
         for output in (run, destination)
@@ -122,7 +149,7 @@ def select(
         os.fsync(stream.fileno())
     path.chmod(0o400)
     destination.chmod(0o700)
-    return {"path": str(path), "sha256": _digest(raw), "schema": SCHEMA, "phase0_admission": "not_granted"}
+    return {"path": str(path), "sha256": _digest(raw), "schema": selected["schema"], "phase0_admission": "not_granted"}
 
 
 def load(path: Path, *, expected_sha256: str) -> dict:
@@ -148,13 +175,20 @@ def load(path: Path, *, expected_sha256: str) -> dict:
         raise ValueError("capture selection is unreadable") from exc
     if (
         not isinstance(selected, dict)
-        or selected.get("schema") != SCHEMA
+        or selected.get("schema") not in {SCHEMA, SCHEMA_V2}
         or selected.get("status") != "preselected_before_capture"
         or selected.get("phase0_admission") != "not_granted"
-        or selected.get("checkpoint") != {"kind": "none"}
+        or not isinstance(selected.get("plan"), dict)
         or selected.get("plan_sha256") != _digest(_json(selected.get("plan")))
     ):
         raise ValueError("capture selection has an unsupported or inconsistent policy")
+    if selected["schema"] == SCHEMA:
+        if selected.get("checkpoint") != {"kind": "none"} or selected["plan"].get("schema") != sealed_m2m.SCHEMA:
+            raise ValueError("v1 capture selection has an unsupported checkpoint or issuer policy")
+    elif selected["plan"].get("schema") != sealed_m2m.SCHEMA_V3 or selected.get("checkpoint") != next(
+        (row for row in selected["plan"].get("selected_inputs", []) if row.get("role") == "checkpoint"), None
+    ):
+        raise ValueError("v2 capture selection lacks its exact selected checkpoint")
     return selected
 
 
@@ -175,6 +209,21 @@ def issue(path: Path, *, expected_sha256: str) -> Path:
         recipe=Path(plan["recipe"]["path"]) if plan.get("recipe") else None,
         max_snapshot_bytes=plan["max_snapshot_bytes"],
         worker_options=plan.get("worker_options"),
+        **(
+            {
+                "checkpoint": Path(selected["checkpoint"]["source"]),
+                "checkpoint_guest_member": selected["checkpoint"]["guest_member"],
+                "extra_inputs": {
+                    row["guest_member"]: Path(row["source"])
+                    for row in plan["selected_inputs"]
+                    if row["role"] == "input"
+                },
+                "loader_env": plan["loader_env"],
+                "execution_timeout_seconds": plan["execution_timeout_seconds"],
+            }
+            if selected["schema"] == SCHEMA_V2
+            else {}
+        ),
     )
     bwrap = _bwrap_binary(Path(selected["bwrap"]["path"]))
     if current != plan or _selected_bytes(current, run, bwrap) != selected:
@@ -206,14 +255,17 @@ def verify(path: Path, *, expected_sha256: str, model_path: Path) -> dict:
     if run.stat().st_uid != os.getuid() or run.stat().st_mode & 0o077:
         raise ValueError("selected sealed capture run must remain owner-only")
     model = _canonical_path(Path(model_path), exists=True)
-    if model != run / "capture/model.mlir" or not model.is_file():
+    full_capture = selected["schema"] == SCHEMA_V2
+    if full_capture and (model != run / "capture" or not model.is_dir()):
+        raise ValueError("selected v3 capture must name its complete output root")
+    if not full_capture and (model != run / "capture/model.mlir" or not model.is_file()):
         raise ValueError("selected capture model is not this fresh run's exact output")
     pending = run / "sealed_m2m_pending.json"
     if pending.is_symlink() or not pending.is_file():
         raise ValueError("selected sealed M2M receipt is absent or indirect")
     receipt = json.loads(pending.read_bytes())
     if (
-        receipt.get("schema") != sealed_m2m.SCHEMA
+        receipt.get("schema") != (sealed_m2m.SCHEMA_V3 if selected["schema"] == SCHEMA_V2 else sealed_m2m.SCHEMA)
         or receipt.get("capture_selection_sha256") != expected_sha256
         or receipt.get("plan") != selected["plan"]
         or receipt.get("policy_sha256") != selected["sandbox_policy_sha256"]
@@ -248,12 +300,31 @@ def verify(path: Path, *, expected_sha256: str, model_path: Path) -> dict:
         "schema": "merlin.phase0.preselected_capture_replay.v1",
         "status": "verified_preselected_replay",
         "selection_sha256": expected_sha256,
-        "model_sha256": _file_digest(model),
-        "capture_receipt_sha256": _file_digest(materialized),
         "sealed_receipt_sha256": replay["receipt_sha256"],
         "source_closure_verified": False,
         "phase0_admission": "not_granted",
     }
+    if full_capture:
+        evidence = receipt.get("materialized") or {}
+        result["capture_kind"] = evidence.get("kind")
+        result["capture_tree_sha256"] = sealed_m2m._snapshot_tree(model)["sha256"]
+        if evidence.get("kind") == "session" and isinstance(evidence.get("programs"), list):
+            result.update(
+                session_contract_sha256=evidence["session_contract_sha256"],
+                session_receipt_sha256=evidence["session_receipt_sha256"],
+                programs=evidence["programs"],
+                integer_contractions=evidence.get("integer_contractions", 0),
+            )
+        elif evidence.get("kind") == "single":
+            result.update(
+                model_sha256=_file_digest(model / "model.mlir"),
+                capture_receipt_sha256=_file_digest(model / "capture_receipt.json"),
+                integer_contractions=evidence.get("integer_contractions", 0),
+            )
+        else:
+            raise ValueError("selected v3 capture lacks a complete saved program or session")
+    else:
+        result.update(model_sha256=_file_digest(model), capture_receipt_sha256=_file_digest(materialized))
     if _digest(Path(path).read_bytes()) != expected_sha256:
         raise ValueError("capture selection changed during replay")
     return result
