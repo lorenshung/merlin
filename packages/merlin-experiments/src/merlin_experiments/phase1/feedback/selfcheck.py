@@ -44,8 +44,7 @@ from merlin_experiments.phase1.context import (
 from merlin_experiments.phase1.feedback import qa as _qc
 
 
-def _candidate_selfcheck_row(result: dict, closed: dict | None, *, name: str,
-                             barrier_tier: str) -> tuple[dict, bool]:
+def _candidate_selfcheck_row(result: dict, closed: dict | None, *, name: str, barrier_tier: str) -> tuple[dict, bool]:
     """Project one submitted whole-model artifact from QA's closed candidate fields.
 
     The runner-owned graph's tiers, numeric output, trace, console and executable
@@ -64,35 +63,54 @@ def _candidate_selfcheck_row(result: dict, closed: dict | None, *, name: str,
     components = components if isinstance(components, dict) else {}
     source_coverage = summary.get("source_coverage")
     source_verified = isinstance(source_coverage, dict) and source_coverage.get("status") == "verified"
-    component_pass = all(components.get(key) == expected for key, expected in (
-        ("emitted_host_compute", "clean"), ("source_placement", "clean"),
-        ("completed_dispatch", "verified"), ("candidate_required_tiers", "pass")))
+    component_pass = all(
+        components.get(key) == expected
+        for key, expected in (
+            ("emitted_host_compute", "clean"),
+            ("source_placement", "clean"),
+            ("completed_dispatch", "verified"),
+            ("candidate_required_tiers", "pass"),
+        )
+    )
     bar_used = barrier_tier
     bar = tiers.get(barrier_tier)
     if bar is None:
-        deeper = [tier for tier in required if isinstance(tier, str) and tier > barrier_tier
-                  and tiers.get(tier) == "pass"]
+        deeper = [
+            tier for tier in required if isinstance(tier, str) and tier > barrier_tier and tiers.get(tier) == "pass"
+        ]
         if deeper:
             bar_used = max(deeper)
             bar = tiers[bar_used]
-    certified = bool(projected) and result.get("status") == "pass" and (
-        summary.get("status") == "pass" and required_pass and source_verified
-        and component_pass and bar == "pass")
+    certified = (
+        bool(projected)
+        and result.get("status") == "pass"
+        and (summary.get("status") == "pass" and required_pass and source_verified and component_pass and bar == "pass")
+    )
     row = {
-        "capsule": name, "pass": certified, "execution_digest": None,
-        "barrier_tier": bar_used, "barrier_declared": barrier_tier, "barrier_status": bar,
+        "capsule": name,
+        "pass": certified,
+        "execution_digest": None,
+        "barrier_tier": bar_used,
+        "barrier_declared": barrier_tier,
+        "barrier_status": bar,
         "candidate_native_verification": summary,
     }
     if not certified:
-        numeric = {key: projected.get(field) for key, field in (
-            ("status", "numeric_status"), ("mismatch_count", "mismatch_count"))
-            if projected.get(field) is not None}
-        row.update(tiers=tiers, numeric=numeric, failure={
-            "plane": projected.get("failure_plane"),
-            "category": projected.get("failure_category"),
-            "tier": projected.get("failure_tier"),
-            "detail": projected.get("failure_detail"),
-        })
+        numeric = {
+            key: projected.get(field)
+            for key, field in (("status", "numeric_status"), ("mismatch_count", "mismatch_count"))
+            if projected.get(field) is not None
+        }
+        row.update(
+            tiers=tiers,
+            numeric=numeric,
+            failure={
+                "plane": projected.get("failure_plane"),
+                "category": projected.get("failure_category"),
+                "tier": projected.get("failure_tier"),
+                "detail": projected.get("failure_detail"),
+            },
+        )
     return row, certified
 
 
@@ -262,9 +280,14 @@ def _progress_publisher(
 
 
 def _suite_size(capsules_root: Path) -> int:
-    """How many public capsules exist, so a partial check can say what it did NOT check."""
+    """How many public capsules exist, so a partial check can say what it did NOT check.
+
+    Counted the way the grader DISCOVERS them (:func:`merlin.targetgen.capsule_common.discover_capsules`:
+    every ``capsule.yaml`` below the root, one per directory). A flat listing undercounts a root whose
+    capsules sit in category subdirectories, and the shortfall would read as capsules the check skipped.
+    """
     try:
-        return sum(1 for d in capsules_root.iterdir() if (d / "capsule.yaml").is_file())
+        return len({cy.parent for cy in capsules_root.rglob("capsule.yaml")})
     except OSError:
         return 0
 
@@ -473,17 +496,20 @@ def _gated_without_result_rows(score: dict) -> list[dict]:
     A mixed/unknown empty result set remains a harness fault.
     """
     rows = score.get("per_capsule") if isinstance(score, dict) else None
-    if not isinstance(rows, list) or not rows or not all(
-        isinstance(row, dict)
-        and row.get("kind") == "model"
-        and row.get("status") == "gated"
-        and isinstance(row.get("capsule"), str)
-        for row in rows
+    if (
+        not isinstance(rows, list)
+        or not rows
+        or not all(
+            isinstance(row, dict)
+            and row.get("kind") == "model"
+            and row.get("status") == "gated"
+            and isinstance(row.get("capsule"), str)
+            for row in rows
+        )
     ):
         return []
     return [
-        {"capsule": row["capsule"], "pass": False, "status": "gated", "reason": row.get("gate_reason")}
-        for row in rows
+        {"capsule": row["capsule"], "pass": False, "status": "gated", "reason": row.get("gate_reason")} for row in rows
     ]
 
 
@@ -662,20 +688,23 @@ def _model_layers(
         name = result.get("capsule", result_path.parent.name)
         if _qc._candidate_native_feedback(result) is not None:
             candidate_row, certified = _candidate_selfcheck_row(
-                result, closed_rows.get(name), name=name,
-                barrier_tier=ladder[0] if ladder else "L3")
+                result, closed_rows.get(name), name=name, barrier_tier=ladder[0] if ladder else "L3"
+            )
             summary = candidate_row["candidate_native_verification"]
             failure = candidate_row.get("failure") or {}
-            rows.append({
-                "capsule": name, "status": result.get("status"),
-                "tiers": summary.get("tiers", {}),
-                "failure_plane": failure.get("plane"),
-                "failure_category": failure.get("category"),
-                "failure_detail": failure.get("detail"),
-                "mismatch_count": (candidate_row.get("numeric") or {}).get("mismatch_count"),
-                "candidate_native_verification": summary,
-                "candidate_verified": certified,
-            })
+            rows.append(
+                {
+                    "capsule": name,
+                    "status": result.get("status"),
+                    "tiers": summary.get("tiers", {}),
+                    "failure_plane": failure.get("plane"),
+                    "failure_category": failure.get("category"),
+                    "failure_detail": failure.get("detail"),
+                    "mismatch_count": (candidate_row.get("numeric") or {}).get("mismatch_count"),
+                    "candidate_native_verification": summary,
+                    "candidate_verified": certified,
+                }
+            )
             continue
         failure, numeric = result.get("failure") or {}, result.get("numeric") or {}
         rows.append(
@@ -712,8 +741,11 @@ def _model_layers(
         "n_passed_functional_tier": len(screened),
         "all_pass": bool(rows) and len(screened) == len(rows),
         "per_capsule": rows,
-        "grade_failure": ((score or {}).get("failure") if isinstance(score, dict)
-                          and not any("candidate_native_verification" in row for row in rows) else None),
+        "grade_failure": (
+            (score or {}).get("failure")
+            if isinstance(score, dict) and not any("candidate_native_verification" in row for row in rows)
+            else None
+        ),
     }
     report["tiers_withheld"] = ladder[1:]
     report["graded"] = sorted(row["capsule"] for row in rows)
@@ -1036,8 +1068,7 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
         if want and name not in want:
             continue
         if _qc._candidate_native_feedback(d) is not None:
-            row, certified = _candidate_selfcheck_row(
-                d, closed_rows.get(name), name=name, barrier_tier=barrier_tier)
+            row, certified = _candidate_selfcheck_row(d, closed_rows.get(name), name=name, barrier_tier=barrier_tier)
             rows.append(row)
             npass += int(certified)
             ncert += int(certified)
@@ -1288,8 +1319,8 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
                 "required-tier status and closed verification codes; the separate runner-owned "
                 "graph's trace, console, timing and failure are withheld. An incomplete candidate "
                 "is not a passed screen. Other rows retain their ordinary diagnostic detail."
-                if has_candidate_rows else
-                "You see EVERYTHING your dialect produced — command buffer, decoded trace + instruction "
+                if has_candidate_rows
+                else "You see EVERYTHING your dialect produced — command buffer, decoded trace + instruction "
                 "counts, sim console, and your artifacts copied to ./selfcheck_out/. The diff stats "
                 "(mismatch_count, magnitudes) are YOUR output measured against the operation's own "
                 "definition, which you can reproduce from the declared inputs — there is no answer key; "
