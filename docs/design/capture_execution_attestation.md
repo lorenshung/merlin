@@ -3,7 +3,7 @@ title: Capture execution attestation boundary
 kind: design
 status: current
 owner: targetgen
-last_verified: 2026-09-29
+last_verified: 2026-10-05
 related: [phase0_specification, model2mlir, reproducibility]
 code_refs:
   - packages/merlin-experiments/src/merlin_experiments/phase0/capture_execution_attestation.py
@@ -27,8 +27,8 @@ The diagnostic implementation inventories explicitly selected source bytes and r
 the adjacent materialized receipt. It always writes
 `status: diagnostic_only`, `fresh_execution: false`, and
 `source_closure_verified: false` to a new evidence path outside the capture and
-source trees. Its Phase 0 admission function accepts no verified issuer yet. Editing
-these fields or copying an old receipt cannot make a capture admissible.
+source trees. This diagnostic does not pass Phase 0 admission. Editing these
+fields or copying an old receipt cannot make a capture admissible.
 
 The separate `merlin.sealed-static-capture.v1` issuer exercises the isolation boundary
 for a self-contained static ELF payload. It copies complete selected source and
@@ -52,21 +52,22 @@ dependencies, checkpoints and preprocessing data form the complete
 Model2MLIR/PyTorch closure. Its receipt explicitly says
 `phase0_admissible: false` and `source_closure_verified: false`; Phase 0 rejects it.
 
-A future verified issuer must perform a *fresh* capture in a new output directory.
+A verified issuer must perform a *fresh* capture in a new output directory.
 It must privately snapshot the complete loader/importer source, Python runtime and
 packages, checkpoint and preprocessing inputs; bind their membership and bytes;
 execute only those snapshots with the source and runtime read-only, no network, and
 no ambient checkout, home or cache; then verify the source and output bytes again.
 The issuer must bind the exact command, environment, isolation controls, fresh run
 identity, capture artifact inventory, and materialized receipt into its result.
-Only then may a reviewed Python/model issuer be added to the Phase 0 admission gate.
+The currently admitted issuer is only Merlin's sealed Model2MLIR CPU v2 runner,
+under the preselection and replay policy described below; these requirements do
+not grant admission to another Python/model issuer.
 
 Bubblewrap being installed is insufficient: an ordinary Python virtual environment
 may read dependencies and caches outside the declared source selection. Without
 a sealed runtime/checkpoint root for the selected model capture, the diagnostic
-path must not claim verified source closure. Phase 0's existing
-coverage commitment remains blocked on `source_closure_verified: false` until a new
-capture and independent verifier are ready.
+path must not claim verified source closure. That diagnostic path remains blocked
+on `source_closure_verified: false`; it cannot substitute for preselected sealed execution.
 
 For a proposed Python capture, run the separate preflight with explicit paths:
 
@@ -139,8 +140,8 @@ inputs into a private empty-root process. Replay reconstructs the selected
 command and checks bundled schema membership and bytes. It also checks the
 recipe against capture metadata and independent integer-reference agreement.
 Historical FP32 v1 receipts retain their original replay
-policy. Neither version is an authenticated historical-execution attestation or
-Phase 0 admission; the result explicitly says `phase0_admission: not_granted`.
+policy. Raw replay is not Phase 0 admission; its result explicitly says
+`phase0_admission: not_granted`.
 Loaders that read ambient environment values or require checkpoints outside the
 selected trees remain unsupported by this bounded policy.
 
@@ -161,7 +162,18 @@ the schemas were selected within it; an external schema tree is injected into
 the copied package after its original tree digest was recorded, so its complete
 copied bytes remain bound by the sealed snapshot and the schema's own digest.
 The assessment reports `replay_verified_nonadmissible` and
-`phase0_admission: not_granted` on success. The unsigned M2M plan cannot
-authenticate the original clean Git revision or runtime provenance, and the
-selected Python/framework/model-data closure lacks an independent pin. The
-Phase 0 verified-issuer gate therefore remains closed.
+`phase0_admission: not_granted` on success. It is a diagnostic for a selected
+run, not authority to upgrade an old capture. The unsigned M2M receipt and a
+copied selected virtual environment remain explicit provenance limits.
+
+For newly selected Phase 0 inputs, `phase0.capture_selection` fixes the plan,
+issuer source, sandbox policy and tool bytes **before** the sealed run exists.
+Independent replay of those exact selected bytes yields a
+`verified_preselected_replay` record. The reviewed admission policy permits only
+that sealed CPU v2 issuer: `attest_sealed_m2m` issues
+`verified_sealed_execution` with `source_closure_verified: true`, while
+`require_verified_execution` re-reads the selection, pending sealed receipt,
+materialized receipt and model bytes on each admission. The policy explicitly
+accepts that the receipt is unsigned and the copied virtual environment is not
+an independently pinned dependency set. Neither a raw Model2MLIR receipt nor
+the diagnostic assessment can acquire this status retroactively.

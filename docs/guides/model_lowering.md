@@ -3,7 +3,7 @@ title: Inspecting whole-model MLIR lowering
 kind: guide
 status: current
 owner: ir
-last_verified: 2026-09-28
+last_verified: 2026-10-05
 related: [llvm_toolchain, llvm_integration, triton_kernels]
 code_refs:
   - src/merlin/llvmlower/cli.py
@@ -43,6 +43,9 @@ shared library; `--target riscv` additionally compiles the existing RISC-V objec
 Repeat the option for both. These are code-generation routes, not accelerator support
 or hardware qualification. Neither output is run. `--textual` selects the existing
 text-only preprocessing route; `--feature NAME` selects registered lowering features.
+The lower-level `lower_model(..., data_layout=...)` API can carry the selected target's
+LLVM data-layout string into translation for a bounded whole program. This is not
+inferred from an MLIR filename, and the inspection CLI does not select a device layout.
 
 ## Choosing inspection detail
 

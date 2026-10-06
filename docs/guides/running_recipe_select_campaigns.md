@@ -3,7 +3,7 @@ title: "Running the Gemmini recipe-select agent campaigns"
 kind: guide
 status: current
 owner: core
-last_verified: 2026-09-23
+last_verified: 2026-10-05
 related: [agent_uses_the_compiler_gemmini]
 code_refs: [merlin/experiments/agent_recipe_select_v0/scripts/_track.py, merlin/experiments/agent_recipe_select_v0/scripts/run_census_campaign.py, merlin/experiments/agent_recipe_select_v0/scripts/census_workloads.py, merlin/experiments/agent_recipe_select_v0/scripts/compare_arms.py, merlin/experiments/agent_recipe_select_v0/scripts/agent_compile.py]
 ---
@@ -22,6 +22,10 @@ experiment; they do not certify a different OOT backend or a new model invocatio
 ## Prerequisites
 
 * `.venv/bin/python` in the repo (the project interpreter — see `venv-python`).
+* `MERLIN_RECIPE_FROZEN_PACKAGE_ROOT` set to an absolute path for the historical
+  external compiler package. The track checks that package's pinned `SHA256SUMS`
+  manifest digest and every listed file; a checkout-local placeholder is not a
+  fallback authority. Without this package, historical replay refuses to start.
 * AutoComp's **own** interpreter for that arm, at `$MERLIN_EXT_AUTOCOMP/.venv/bin/python`
   (default: an `autocomp` checkout beside this repo). It is named explicitly and never inherited:
   running the AutoComp arm under merlin's interpreter once made a known-good reference kernel read as

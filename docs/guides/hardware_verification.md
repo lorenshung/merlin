@@ -3,7 +3,7 @@ title: Verify selected hardware properties
 kind: guide
 status: current
 owner: verification
-last_verified: 2026-09-27
+last_verified: 2026-10-05
 related: [verification, phase0_specification, simulator_selection]
 code_refs:
   - packages/merlin-experiments/src/merlin_experiments/phase0/hardware_validation.py
@@ -26,7 +26,8 @@ in Phase 0 and when using Phase 0 tests in Phase 2.
 Author a target-specific HW/Comb reference that implements one numerical or
 interface property. Review its arithmetic semantics independently of the RTL.
 For a selected integer cell, [this reference](../../examples/gemmini/verification/mac_unit_reference.mlir)
-specifies signed 8-bit multiply and 20-bit modular accumulation. Its proof is
+specifies signed 8-bit multiply and 20-bit modular accumulation by sign-extending
+both operands, multiplying at 20 bits and adding the low 20 accumulator bits. Its proof is
 about the cell's input/output function, including every value of the 32-bit
 accumulator input. It does not prove a whole matrix multiplication, DMA command,
 quantization policy, or compiler lowering.

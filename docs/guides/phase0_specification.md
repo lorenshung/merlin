@@ -3,7 +3,7 @@ title: Defining and inspecting Phase 0 inputs
 kind: guide
 status: current
 owner: targetgen
-last_verified: 2026-09-29
+last_verified: 2026-10-05
 related: [generating_capsules, adding_a_target, integrations]
 code_refs:
   - src/merlin/targetgen/software_spec.py
@@ -45,6 +45,12 @@ and base Python remain at selected host paths, native libraries and arbitrary
 loader file reads are not isolated, and old capture receipts gain no historical
 authentication. For a reviewed corpus, select newly materialized, independently
 verified capture inputs rather than promoting this runtime receipt.
+When a completed frozen Phase 0 run is reused for a later release, its recorded
+output, frozen-source seals and generation/capture attestations are checked as
+historical evidence. That completed-artifact check does not reopen the old host
+runtime or claim the current producer reran it. Starting or resuming execution
+still requires the selected live runtime to match; the new Phase 1 source and
+tool bundle is frozen separately.
 
 ## Start with five decisions
 
@@ -323,11 +329,13 @@ do not retroactively identify the tools that produced unstamped old facts. Match
 names, configuration names or dates does not prove that separate HW-MLIR, FIRRTL and hierarchy
 files came from one elaboration.
 
-The examples select `diagnostic` until their required semantics, source consistency and
-coverage are qualified. Diagnostic output cannot become a verified release by relabeling it
-or passing `--phase0-evidence-mode verified`: unresolved evidence must be refused.
-The current selector conservatively emits diagnostic snapshots; editing the spec's
-review-status field alone does not establish a qualified production-evidence path.
+Diagnostic selections remain diagnostic until their required semantics, source
+consistency and coverage are qualified. They cannot become a verified release by
+relabeling them or passing `--phase0-evidence-mode verified`: unresolved evidence
+is refused. Verified generation is an explicit path that requires reviewed,
+coherent software and hardware evidence, source-closed selected captures and
+admitted capsule outputs; editing a spec's review-status field alone does not
+establish it.
 
 ## Inspect the operator split and quantization contract
 

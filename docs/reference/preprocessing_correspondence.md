@@ -3,7 +3,7 @@ title: Typed preprocessing correspondence
 kind: reference
 status: current
 owner: ir
-last_verified: 2026-09-28
+last_verified: 2026-10-05
 related: [lowering_pipeline, architecture]
 code_refs: [src/merlin/llvmlower/typed_preprocessing_correspondence.py, src/merlin/llvmlower/passes_xdsl.py, src/merlin/common/ir_audit.py]
 ---
@@ -22,6 +22,10 @@ one defined single-block function, checks complete ownership of top-level
 preprocessed operations, and compares every mapped source result's MLIR type to
 the corresponding preprocessed result. Tensor dimensions and element types are
 part of that type equality. Any missing, reordered, or mismatched mapping raises.
+The preprocessing pass distinguishes function definitions from declarations with
+explicit attribute dictionaries when attaching the C interface; an attribute
+dictionary is not treated as a function body. Only a defined single-block
+function can supply this correspondence map.
 
 The returned `claim` is `preprocessing_result_types_only`. Source operands are
 observed in the source IR, but this checker does not establish their runtime
