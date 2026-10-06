@@ -8,6 +8,8 @@ ever acts on a launcher that is already gone.
 It does NOT relaunch:
 
 * a run that stopped on EVIDENCE (a plateau, a certified best at the bar) -- that is the answer;
+* a run an operator asked to stop (:func:`.sessions.request_stop`), whether or not its launcher got to
+  record the stop before it exited;
 * a run that lasted under ``min_seconds`` -- a crash loop is reported, not repeated;
 * past ``max_relaunches``.
 
@@ -25,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from . import runs as RUNS
+from . import sessions as SES
 
 #: Written by the session loop (:func:`.sessions.run_sessions`) into the run's stage directory.
 SESSIONS_RECORD = Path("stage") / "sessions.json"
@@ -53,6 +56,11 @@ def memory_available_gib() -> float:
 
 def stop_reason(run_dir: Path) -> dict[str, Any] | None:
     """Why the run's own records say it must not be relaunched, or None."""
+    requested = SES.operator_stop(Path(run_dir) / SES.OPERATOR_STOP_FILE)
+    if requested is not None:
+        # AN OPERATOR'S REQUEST OUTRANKS AN EXIT: a launcher that died before reaching its next session
+        # boundary never recorded the stop, and relaunching it would undo the request.
+        return {"reason": requested["reason"], "kind": SES.OPERATOR_STOP}
     try:
         document = json.loads((Path(run_dir) / SESSIONS_RECORD).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -102,7 +110,8 @@ def watch(
             sleep(policy.poll_seconds)
         lasted = clock() - started
         evidence = stop_reason(run_dir)
-        if evidence is not None and (evidence["kind"] == "evidence" or not memory_guard_stopped(run_dir)):
+        final = evidence is not None and evidence["kind"] in ("evidence", SES.OPERATOR_STOP)
+        if evidence is not None and (final or not memory_guard_stopped(run_dir)):
             return {"stopped": evidence, "relaunches": relaunches}
         if len(relaunches) >= policy.max_relaunches:
             return {"stopped": {"kind": "budget", "reason": "the relaunch budget is spent"}, "relaunches": relaunches}

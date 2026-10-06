@@ -22,6 +22,18 @@ def _source(value: str, catalog_path: Path | None) -> Path:
     return entries[value]
 
 
+def _measured(call):
+    """Run ``call`` with the whole-model measured mode's command module, its refusals as SpecErrors."""
+    from .phase2.whole_model_measured import cli as measured
+
+    try:
+        return call(measured)
+    except SystemExit as exc:
+        if isinstance(exc.code, str):
+            raise SpecError(exc.code) from exc
+        raise
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="merlin experiment", description=__doc__)
     parser.add_argument("--catalog", type=Path, help="catalog YAML; paths inside it are relative to that file")
@@ -72,6 +84,11 @@ def main(argv: list[str] | None = None) -> int:
             "--phase0-m2m-python", type=Path, help="explicit Model2MLIR venv Python for diagnostic capture"
         )
     commands.add_parser("status").add_argument("run_dir", type=Path)
+    stop = commands.add_parser(
+        "stop", help="ask a whole-model measured run to stop at its next session boundary (signals nothing)"
+    )
+    stop.add_argument("run_dir", type=Path, help="the measured run, or an orchestration run that points at one")
+    stop.add_argument("--why", required=True, help="recorded with the request and as the run's stop reason")
     lineage_parser = commands.add_parser(
         "lineage", help="read frozen phase inputs and handoffs without executing engines"
     )
@@ -102,7 +119,10 @@ def main(argv: list[str] | None = None) -> int:
         help="pre-execution selection for each selected capture; omitted legacy captures remain diagnostic",
     )
     derive.add_argument(
-        "--application-quant-policy", action="append", default=[], metavar="LABEL=PATH@SHA256",
+        "--application-quant-policy",
+        action="append",
+        default=[],
+        metavar="LABEL=PATH@SHA256",
         help="independently selected policy bytes for each externally quantized capture",
     )
     derive.add_argument(
@@ -203,7 +223,10 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             elif args.operation == "derive":
                 from .phase0.requirements import (
-                    capture_selection_specs, capture_selections, derive, quantization_policy_specs,
+                    capture_selection_specs,
+                    capture_selections,
+                    derive,
+                    quantization_policy_specs,
                 )
 
                 try:
@@ -270,7 +293,8 @@ def main(argv: list[str] | None = None) -> int:
                         "kind": spec.document.get("kind", "experiment"),
                         "phase1_level": (
                             level_for_phase1(spec.document["phases"]["1"]["config"])
-                            if "1" in spec.document["phases"] else None
+                            if "1" in spec.document["phases"]
+                            else None
                         ),
                     }
                 )
@@ -284,6 +308,8 @@ def main(argv: list[str] | None = None) -> int:
             result = runs(root=args.root, target=args.target, experiment=args.experiment)
         elif args.verb == "status":
             result = runner.status(args.run_dir)
+        elif args.verb == "stop":
+            result = _measured(lambda measured: measured.stop(args.run_dir, why=args.why))
         elif args.verb == "lineage":
             from merlin.targetgen import target_index
 

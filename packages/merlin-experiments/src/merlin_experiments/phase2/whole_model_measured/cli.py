@@ -4,6 +4,7 @@ prepare ...               prepare a run (seed, frozen inputs, policy-stamped con
 start <run_dir> ...       run the authoring sessions of a prepared run until evidence or budget stops them
 run ...                   prepare, then start (``--resume`` continues the latest run of the same method)
 launch <run_dir> ...       start a prepared run DETACHED (own session, output to <run_dir>/launch.log)
+stop <run_dir> --why ...  ask a run to stop at its next session boundary (``stop_requested.json``)
 watch <run_dir> <pid> ... relaunch a run whose launcher exits, keeping its method and roles
 export-champion <run_dir> export the run's confirmed best (its ``best`` tag) as a retention-pinned champion
 work <job_dir>            run one job to its result (the detached worker)
@@ -116,6 +117,7 @@ def start(run_dir: Path, *, profile_name: str, round_driver: str, price_table: P
         total_seconds=float(profile["total_authoring_seconds"]),
         driver=str(profile["driver"]),
         model=str(checked["resolved_model"]),
+        stop_request=Path(run_dir) / SES.OPERATOR_STOP_FILE,
     )
 
 
@@ -194,6 +196,45 @@ def resolve_run(path: Path) -> Path:
     raise SystemExit(f"{path} is neither a prepared {MODE} run nor an orchestration run that points at one")
 
 
+def successors(run_dir: Path) -> list[str]:
+    """The runs prepared by resuming ``run_dir`` (a watchdog relaunch continues in a NEW directory)."""
+    from merlin.common.paths import phase_runs_root
+
+    from .identity import read_json
+
+    record = read_json(Path(run_dir) / "run.json") or {}
+    if not record.get("target"):
+        return []
+    found = []
+    for path in sorted(phase_runs_root(str(record["target"]), 2).glob("*/resumed_seed.json")):
+        previous = (read_json(path) or {}).get("resumed_from_run")
+        if previous and Path(previous).resolve() == Path(run_dir).resolve():
+            found.append(str(path.parent))
+    return found
+
+
+def stop(run_dir: Path, *, why: str) -> dict[str, Any]:
+    """Ask the run to stop at its next session boundary.  The request names the run it was written to;
+    when that run was already resumed into a newer one, the newer run is named so the operator can stop
+    the run that is actually going."""
+    from . import launch as LAUNCH
+    from . import sessions as SES
+
+    run_dir = resolve_run(run_dir)
+    try:
+        request = SES.request_stop(run_dir, why=why)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    return {
+        "run_dir": str(run_dir),
+        "request": request,
+        "request_path": str(run_dir / SES.OPERATOR_STOP_FILE),
+        "launcher_alive": LAUNCH.launcher_alive(run_dir),
+        "resumed_into": successors(run_dir),
+        "note": "the run finishes its current session first; nothing is signalled",
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=MODE, description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -230,6 +271,9 @@ def _parser() -> argparse.ArgumentParser:
     child.add_argument("--profile", required=True)
     child.add_argument("--round-driver", default=DEFAULT_ROUND_DRIVER)
     child.add_argument("--price-table", type=Path)
+    child = sub.add_parser("stop", help="ask a run to stop at its next session boundary")
+    child.add_argument("run_dir", type=Path)
+    child.add_argument("--why", required=True)
     child = sub.add_parser("watch")
     child.add_argument("run_dir", type=Path)
     child.add_argument("pid", type=int)
@@ -331,6 +375,9 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(str(exc)) from exc
         print(json.dumps(document, default=str))
         return 0
+    if args.command == "stop":
+        print(json.dumps(stop(args.run_dir, why=args.why), default=str))
+        return 0
     if args.command == "watch":
         from . import runs as RUNS
         from . import watchdog as WD
@@ -407,4 +454,4 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
-__all__ = ["main", "resolve_run", "start"]
+__all__ = ["main", "resolve_run", "start", "stop", "successors"]
