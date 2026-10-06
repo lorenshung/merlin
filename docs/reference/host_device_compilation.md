@@ -3,7 +3,7 @@ title: Host and device compilation
 kind: reference
 status: current
 owner: runtime
-last_verified: 2026-10-04
+last_verified: 2026-10-05
 related: [runtime, zephyr, adding_a_target, experiment_abi]
 code_refs: [src/merlin/targetgen/contract/build_recipe.py, src/merlin/targetgen/contract/build_service.py, src/merlin/targetgen/contract/compile.py, src/merlin/runtime/backends/base.py, merlin/runtime/c]
 ---
@@ -55,6 +55,9 @@ backend or reference model. The generic
 path translates LLVM MLIR, builds an object with the target recipe's ISA, then
 links it to a runner-owned harness. A target adapter supplies the recipe; core
 code must not select compiler flags or target instructions by target name.
+The recipe resolves the effective RISC-V ABI from an explicit `-mabi` flag or by
+asking the selected compiler, never from a runner default, and the paired build
+records an ABI receipt so the kernel object and its harness link under one ABI.
 
 The existing model C substrate in [`merlin/runtime/c/`](../../merlin/runtime/c)
 builds MLIR memref descriptors and invokes a compiled whole-model function.
@@ -70,6 +73,11 @@ have a separate instruction binary that its host driver loads and starts.
 Gemmini's bounded RoCC path uses the former shape; Atlas's selected diagnostic
 uses the latter. The shared build recipe accepts either target's support
 sources without pretending their launch and memory rules are identical.
+A backend may also declare a whole-model driver
+([`whole_model_driver`](../../src/merlin/runtime/backends/base.py)): the C program
+a whole model runs as on that target, with its fallback calls and timing output.
+The target owns it; the shared runtime only loads the modules the backend names,
+under a per-target module name, and refuses when none is declared.
 
 ## Runtime environment
 
