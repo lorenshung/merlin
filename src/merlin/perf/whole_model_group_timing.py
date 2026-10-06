@@ -443,6 +443,7 @@ def build_group_programs(
     ask_only: bool = False,
     phase0_recipe: str | Path | None = None,
     descriptor: str | Path | None = None,
+    keep_statement: bool = False,
 ) -> dict[int, dict[str, Any]]:
     """One small program per group in ``groups``, built for ``machine``: ``{group: record}``.
 
@@ -455,6 +456,8 @@ def build_group_programs(
     ``verify`` is the driver's verification mode (``host_dump`` for the emulator's memory dump; a
     functional-model check builds ``local_map``, which grades on the core and says where it is wrong).
     ``prohibited_roles`` builds the program under the same instruction rule as the run's own builds.
+    ``keep_statement`` keeps the statement's work tree (``lower/``: each asked group's interface, the
+    package's command buffer and target artifact), which is otherwise removed; an inspection reads it.
 
     Each record names the ELF, its memory map, the oracle (the whole model's, for the chained digest),
     who answered the group and the object's digest. ``expect_objects`` (``{group: object_sha256}``, from
@@ -568,7 +571,8 @@ def build_group_programs(
     # for a ResNet) is regenerable -- the replies are cached by content -- and nothing reads it again.
     import shutil
 
-    shutil.rmtree(out / "lower", ignore_errors=True)
+    if not keep_statement:
+        shutil.rmtree(out / "lower", ignore_errors=True)
     return records
 
 
