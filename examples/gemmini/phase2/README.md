@@ -174,7 +174,8 @@ directory or by the orchestration directory that points at it.
 ```sh
 merlin experiment measured launch RUN --profile codex-gpt-6-sol   # detached; output appends to RUN/launch.log
 merlin experiment status RUN                    # launcher, stop request, rounds, stores, holds, bar and best
-merlin experiment watch RUN                     # one line per change until the run is over
+merlin experiment measured follow RUN           # one line per change until the run is over
+merlin experiment watch RUN                     # the records summary in the terminal, refreshed
 merlin experiment stop RUN --why "..."          # stops at the next session boundary
 merlin experiment measured resume RUN --why "..." --seed PACKAGE --launch --profile codex-gpt-6-sol
 merlin experiment measured audit-round RUN 3    # replay round 3's audit and compare its recorded status
@@ -189,7 +190,7 @@ the same files):
   `start_ticks`, `last_activity` (`at`, `what`) and `last_measured` (the newest MEASURED or
   MEASURED_INVALID candidate across the run's stores, every attempt counted). `status` reports the run
   STALLED when the launcher is gone or nothing was measured within `--stall-hours` (default 6);
-  `watch` (the relauncher) records each stall once in `liveness_events.jsonl` and can run
+  `measured watch` (the relauncher) records each stall once in `liveness_events.jsonl` and can run
   `--notify-command`.
 - `machine_capabilities.json`: each section's machine report (its header's flags and values, its
   declared limits) and what it lacks against the registry's other boards; launches print the warnings.

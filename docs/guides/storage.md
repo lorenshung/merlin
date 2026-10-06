@@ -316,7 +316,8 @@ Every phase writes to one address per unit, and every later phase cites that add
 | its compiler history | `<phase run>/oot/` (a git repo) | the harness only, via `merlin.common.oot_repo` |
 | a sealed phase-0 release | `out/artifacts/protocols/<target>/phase0-<TS>-<sha7>/` | `merlin experiment corpus prepare` (default `--output`) then `seal` |
 | a phase-2 champion | `out/artifacts/targets/<target>/champions/<package_id>/` | `merlin.targetgen.champions.export_champion` |
-| the target index | `out/artifacts/targets/<target>/INDEX.yaml` | `merlin experiment index <target>` (generated, never edited) |
+| the target index | `out/artifacts/targets/<target>/INDEX.yaml` | `merlin experiment index <target>` (generated, never edited); also regenerated when a phase-1 run freezes, a phase-2 `best` moves and a champion is exported |
+| a tracking page | `out/artifacts/experiments/<target>/dashboard/` | `merlin experiment dashboard <run> \| --target <target>` (regenerable, read from records; see [experiment_dashboard](experiment_dashboard.md)) |
 
 The suite of a phase run IS the phase, so `aet runs --suite <target>/phase1` and `merlin-storage
 experiments` see phase runs like any other run. `method` names what ran: the experiment id or recipe

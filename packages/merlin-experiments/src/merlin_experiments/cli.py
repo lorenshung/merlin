@@ -22,11 +22,6 @@ def _source(value: str, catalog_path: Path | None) -> Path:
     return entries[value]
 
 
-def _watch_argv(run_dir: Path, args) -> list[str]:
-    argv = ["follow", str(run_dir), "--interval", str(args.interval)]
-    return argv + (["--max-seconds", str(args.max_seconds)] if args.max_seconds is not None else [])
-
-
 def _measured(call):
     """Run ``call`` with the whole-model measured mode's command module, its refusals as SpecErrors."""
     from .phase2.whole_model_measured import cli as measured
@@ -142,10 +137,6 @@ def main(argv: list[str] | None = None) -> int:
         help="a cell run: `cell prepare <loop run> --cell ID`, `cell launch <run> --profile P`, `cell status`",
         add_help=False,
     )
-    watch = commands.add_parser("watch", help="print each change to a whole-model measured run until it is over")
-    watch.add_argument("run_dir", type=Path, help="the measured run, or an orchestration run that points at one")
-    watch.add_argument("--interval", type=float, default=60.0, help="seconds between looks")
-    watch.add_argument("--max-seconds", type=float, help="stop watching after this long")
     stop = commands.add_parser(
         "stop", help="ask a whole-model measured run to stop at its next session boundary (signals nothing)"
     )
@@ -163,6 +154,33 @@ def main(argv: list[str] | None = None) -> int:
     )
     index.add_argument("target")
     index.add_argument("--check", action="store_true", help="exit 1 when the written index is stale; write nothing")
+    from .tracking.records import DEFAULT_STALL_HOURS
+
+    dashboard = commands.add_parser(
+        "dashboard",
+        help="write one self-contained HTML view of a run or a target, read from existing records only",
+    )
+    dashboard.add_argument("run_dir", type=Path, nargs="?", help="a run directory (orchestration, phase 1 or 2)")
+    dashboard.add_argument("--target", help="every run of this target across phases, with champion lineage")
+    dashboard.add_argument(
+        "--out", type=Path, help="HTML file; defaults to out/artifacts/experiments/<target>/dashboard/<run>.html"
+    )
+    dashboard.add_argument("--open", action="store_true", help="also open the written page in a browser")
+    watch = commands.add_parser("watch", help="live terminal view of a run's records; refreshes until Ctrl-C")
+    watch.add_argument("run_dir", type=Path)
+    watch.add_argument("--interval", type=float, default=30.0, help="seconds between refreshes")
+    watch.add_argument("--once", action="store_true", help="print once and exit")
+    watch.add_argument("--no-color", action="store_true", help="plain text even on a terminal")
+    for view in (dashboard, watch):
+        view.add_argument(
+            "--store", type=Path, help="phase-2 measurement store when the run records none (store_roots.screen)"
+        )
+        view.add_argument(
+            "--stall-hours",
+            type=float,
+            default=DEFAULT_STALL_HOURS,
+            help="hours without a measured candidate (or grade) before a run is STALLED",
+        )
     child = commands.add_parser("resume")
     child.add_argument("run_dir", type=Path)
     child.add_argument("--checkpoint", type=Path, help="sealed native checkpoint for a new model_portfolio segment")
@@ -380,9 +398,6 @@ def main(argv: list[str] | None = None) -> int:
                 if measured_run is not None
                 else runner.status(args.run_dir)
             )
-        elif args.verb == "watch":
-            run_dir = _measured(lambda measured: measured.resolve_run(args.run_dir))
-            return _measured(lambda measured: measured.main(_watch_argv(run_dir, args)))
         elif args.verb == "stop":
             result = _measured(lambda measured: measured.stop(args.run_dir, why=args.why))
         elif args.verb == "lineage":
@@ -405,6 +420,31 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps({"index": str(target_index.index_path(args.target)), "current": current}))
                 return 0 if current else 1
             result = {"index": str(target_index.write_index(args.target))}
+        elif args.verb == "dashboard":
+            from .tracking import write_dashboard
+
+            result = write_dashboard(
+                run_dir=args.run_dir,
+                target=args.target,
+                out=args.out,
+                store=args.store,
+                stall_hours=args.stall_hours,
+            )
+            if args.open:
+                import webbrowser
+
+                webbrowser.open(Path(result["dashboard"]).resolve().as_uri())
+        elif args.verb == "watch":
+            from .tracking import watch as watch_run
+
+            return watch_run(
+                args.run_dir,
+                interval=args.interval,
+                once=args.once,
+                store=args.store,
+                stall_hours=args.stall_hours,
+                colour=False if args.no_color else None,
+            )
         elif args.verb == "resume":
             code = runner.resume(args.run_dir, checkpoint=args.checkpoint)
             print(json.dumps(runner.status(args.run_dir), indent=2))

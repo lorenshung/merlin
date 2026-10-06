@@ -161,7 +161,8 @@ def test_the_command_lines_show_a_measured_runs_status(tmp_path, monkeypatch, ca
     assert "objective_error" in document  # the synthetic run has no objective config; the records still show
     assert TOP.main(["status", str(run_dir)]) == 0
     assert json.loads(capsys.readouterr().out)["method"] == "m_nofsm"
-    assert TOP.main(["watch", str(run_dir), "--max-seconds", "0"]) == 0
+    # One line per change is the measured mode's own `follow`; the top-level `watch` is the records view.
+    assert TOP.main(["measured", "follow", str(run_dir), "--max-seconds", "0"]) == 0
     assert "the follow deadline passed" in capsys.readouterr().out
     assert TOP.main(["measured", "stop", str(run_dir), "--why", "via the top-level command"]) == 0
     assert json.loads((run_dir / SES.OPERATOR_STOP_FILE).read_text())["why"] == "via the top-level command"
