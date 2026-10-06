@@ -14,6 +14,9 @@ Operations (each takes ``--why``, which is required):
 * ``correct-citation --key K --field a.b.c --value JSON`` -- correct one citation field of a job and its
   result (for example a stale builder citation), keeping the old value.  The fields a MEASUREMENT consists
   of (status, cycles, verdict, digests) are refused: a measurement is re-taken, never edited.
+* ``outage-retry-now`` -- the board was reported back: the next batch may try it now instead of at the
+  outage's retry interval.  The outage stays OPEN, with the report recorded on it, until a batch actually
+  runs its workload (which closes it); a report is not evidence the board works.
 
 A running job is never touched, and nothing is ever deleted: an attempt is moved aside under its own
 name, and every operation appends one line to the store's ``admin_log.jsonl``.
@@ -29,6 +32,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from . import batch as BATCH
 from . import jobs as J
 from . import retention as RET
 from . import sessions as SES
@@ -163,6 +167,20 @@ def correct_citation(store: Path, key: str, *, field: str, value: Any, why: str)
     return corrected
 
 
+def outage_retry_now(store: Path, *, why: str) -> dict[str, Any]:
+    """Let the next batch try the board now; the outage stays open until a batch runs its workload."""
+    why = _require_why(why)
+    with locked(Path(store)):
+        outage = BATCH.board_outage(Path(store))
+        if outage is None:
+            raise AdminError(f"{store} has no open board outage")
+        outage["retry_after_epoch"] = time.time()
+        outage.setdefault("reported_back", []).append({"at": now(), "why": why})
+        write_json_atomic(Path(store) / BATCH.BOARD_OUTAGE, outage)
+    _log(store, "outage-retry-now", why, opened_at=outage.get("opened_at"))
+    return outage
+
+
 def _parse_stamp(stamp: str | None) -> float | None:
     if stamp is None:
         return None
@@ -192,6 +210,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     op.add_argument("--key", required=True)
     op.add_argument("--field", required=True)
     op.add_argument("--value", required=True, help="the new value, as JSON")
+    sub.add_parser("outage-retry-now")
     for child in sub.choices.values():
         child.add_argument("--why", required=True)
     args = parser.parse_args(argv)
@@ -212,6 +231,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         rows = json.loads(args.rows.read_text(encoding="utf-8"))
         result = SES.backfill_plateau(store / SES.PLATEAU_FILE, rows, reason=args.why)
         _log(store, "backfill-plateau", args.why, rows=len(result))
+    elif args.operation == "outage-retry-now":
+        result = outage_retry_now(store, why=args.why)
     elif args.operation == "abandon-session":
         result = SES.abandon_session(store / SES.PLATEAU_FILE, run=args.run, session=args.session, reason=args.why)
         _log(store, "abandon-session", args.why, run=args.run, session=args.session)
@@ -225,4 +246,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-__all__ = ["ADMIN_LOG", "AdminError", "correct_citation", "main", "mark_infra", "reopen", "requeue_solo"]
+__all__ = [
+    "ADMIN_LOG",
+    "AdminError",
+    "correct_citation",
+    "main",
+    "mark_infra",
+    "outage_retry_now",
+    "reopen",
+    "requeue_solo",
+]

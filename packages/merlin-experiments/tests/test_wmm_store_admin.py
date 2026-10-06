@@ -107,3 +107,18 @@ def test_the_plateau_operations_run_through_the_command_line(tmp_path, capsys):
     assert cli.main(["admin", str(store), "reset-plateau", "--at", "20260926T175000Z", "--why", "tooling change"]) == 0
     trace = json.loads((store / "plateau.json").read_text())["trace"]
     assert trace[0]["reset_at"] == "20260926T175000Z" and _log(store)[-1]["operation"] == "reset-plateau"
+
+
+def test_a_board_reported_back_is_tried_now_and_the_outage_stays_open(tmp_path, capsys):
+    """A report is not evidence the board works: the next batch may try it at once, and only a batch
+    that runs its workload closes the outage."""
+    from merlin_experiments.phase2.whole_model_measured import batch as B
+
+    store, _key = _store(tmp_path)
+    with pytest.raises(A.AdminError, match="no open board outage"):
+        A.outage_retry_now(store, why="board re-enumerated")
+    write_json_atomic(store / B.BOARD_OUTAGE, {"opened_at": "x", "failures": [{}], "retry_after_epoch": 4e9})
+    assert cli.main(["admin", str(store), "outage-retry-now", "--why", "U250 re-enumerated, xdma probed"]) == 0
+    outage = read_json(store / B.BOARD_OUTAGE)
+    assert outage["retry_after_epoch"] < 4e9 and outage["reported_back"][0]["why"] == "U250 re-enumerated, xdma probed"
+    assert B.board_outage(store) is not None and _log(store)[-1]["operation"] == "outage-retry-now"
