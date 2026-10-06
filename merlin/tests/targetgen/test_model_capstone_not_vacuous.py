@@ -288,8 +288,22 @@ def _statuses(r):
 
 
 def _passed(r):
-    """The tiers that actually certified — the guarantee, independent of how the row is shaped."""
-    return {t: v for t, v in _statuses(r).items() if v == "pass"}
+    """The tiers that actually certified — the guarantee, independent of how the row is shaped.
+
+    The functional SCREEN rung is excluded: it is a cheap simulator every tile clears before the cert
+    oracle sees it, recorded as its own tier (`test_model_earns_screen_tier`). A screen that ran and
+    passed is a true record about the screen; it certifies nothing about the RTL, which is what these
+    cases probe. It is told apart by its own evidence, not by its name."""
+    return {t: v for t, v in _statuses(r).items() if v == "pass" and not _is_screen(r, t)}
+
+
+def _is_screen(r, tier) -> bool:
+    row = (r.get("tiers") or {}).get(tier) or {}
+    return row.get("evidence") == "mesh_tile_verification.per_tile[].screen" and not row.get("derived_from_rtl")
+
+
+def _screen_passed(r) -> set:
+    return {t for t, v in _statuses(r).items() if v == "pass" and _is_screen(r, t)}
 
 
 def _grade_with(mesh_exec: dict, declared=("L0", "L1", "L2", "L3"), *, on_mesh=15, fallback=0, dispatch_ledger=None):
@@ -355,6 +369,8 @@ def _grade_with(mesh_exec: dict, declared=("L0", "L1", "L2", "L3"), *, on_mesh=1
 def test_a_tier_passes_when_every_tile_passed():
     r = _grade_with({"n_tiles": 15, "n_passed": 15, "n_failed": 0, "n_unavailable": 0, "n_unsynthesizable": 0})
     assert _passed(r) == {"L3": "pass"}, r["tiers"]
+    # ...and the screen every tile cleared first is recorded as its own passed rung, not dropped.
+    assert _screen_passed(r) == {"L2"}, r["tiers"]
     assert r["status"] == "pass", r
 
 
@@ -400,6 +416,9 @@ def test_a_tier_that_ran_and_failed_is_not_a_pass():
     r = _grade_with({"n_tiles": 15, "n_passed": 14, "n_failed": 1, "n_unavailable": 0, "n_unsynthesizable": 0})
     assert _statuses(r).get("L3") == "fail", r["tiers"]
     assert _passed(r) == {}, "a failing tile certifies nothing"
+    # The tile cleared the cheap screen and failed the cert: both are recorded, and only the screen,
+    # which is not RTL evidence, reads as passed.
+    assert _screen_passed(r) == {"L2"}, r["tiers"]
     assert r["status"] == "fail", r
     assert r["failure"]["category"] == "FUNCTIONAL_MISMATCH"
 
