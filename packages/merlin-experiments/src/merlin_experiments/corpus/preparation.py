@@ -294,7 +294,6 @@ def _verify_completed_generation(plan: dict, generated: Path) -> None:
         raise SpecError("completed Phase-0 evidence differs from its frozen selection")
     if evidence.status != "verified":
         return  # Diagnostic corpus inspection remains possible, never promoted here.
-    _require_enforceable_instruction_policy(plan, generated)
     views = json.loads(evidence.views_json)
     applications = (views.get("application_inventory") or {}).get("applications")
     attestations = views.get("capture_execution_attestations")
@@ -314,6 +313,9 @@ def _verify_completed_generation(plan: dict, generated: Path) -> None:
                 raise SpecError(f"generation-time capture attestation changed: {member}: {exc}") from exc
         if failure := verified_capture_failure(capsule):
             raise SpecError(f"generation-time capture admission changed: {member}: {failure}")
+    # Last, once the capture evidence is known to be the evidence the corpus was generated from: a
+    # verified corpus whose sealed instruction policy forbids nothing is not released.
+    _require_enforceable_instruction_policy(plan, generated)
 
 
 def _require_enforceable_instruction_policy(plan: dict, generated: Path) -> None:
