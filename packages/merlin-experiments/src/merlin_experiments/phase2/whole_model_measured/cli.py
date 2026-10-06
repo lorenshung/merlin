@@ -95,6 +95,7 @@ def _prepare(args: argparse.Namespace):
 def start(run_dir: Path, *, profile_name: str, round_driver: str, price_table: Path | None) -> dict[str, Any]:
     """Run the authoring sessions of a prepared run, after checking its launch profile."""
     from . import profiles as P
+    from . import rounds as RND
     from . import sessions as SES
     from .identity import load_builder
 
@@ -107,18 +108,37 @@ def start(run_dir: Path, *, profile_name: str, round_driver: str, price_table: P
     seed = Path(run_dir) / "seed" / "submission"
     if seed.is_dir():
         objective.measure(seed, label="seed", seed=True)
+    stage = Path(run_dir) / "stage"
+    _recover_killed_rounds(Path(run_dir), objective)
     run_round = load_builder(round_driver)(profile=profile, run_dir=Path(run_dir), objective=objective)
     return SES.run_sessions(
         objective,
         run_round=run_round,
-        stage_root=Path(run_dir) / "stage",
+        stage_root=stage,
         run=Path(run_dir).name,
         max_sessions=int(profile["max_sessions"]),
         total_seconds=float(profile["total_authoring_seconds"]),
         driver=str(profile["driver"]),
         model=str(checked["resolved_model"]),
         stop_request=Path(run_dir) / SES.OPERATOR_STOP_FILE,
+        first_session=RND.next_session(stage),
     )
+
+
+def _recover_killed_rounds(run_dir: Path, objective) -> list[dict[str, Any]]:
+    """Close the rounds a killed driver left open: this run's own (a relaunched ``start``) and the run it
+    was resumed from (a relaunch by the watchdog), whose store this run keeps."""
+    from . import rounds as RND
+    from .identity import read_json
+
+    recovered = RND.recover_killed_rounds(run_dir / "stage", attribute=objective.attribute, run_name=run_dir.name)
+    previous = (read_json(run_dir / "resumed_seed.json") or {}).get("resumed_from_run")
+    if previous and Path(previous).is_dir():
+        # The previous run's own history is its ledger's; this store's attribution is the shared fact.
+        recovered += RND.recover_killed_rounds(
+            Path(previous) / "stage", attribute=objective.screen.attribute, run_name=Path(previous).name
+        )
+    return recovered
 
 
 def _objective_of(run_dir: Path):

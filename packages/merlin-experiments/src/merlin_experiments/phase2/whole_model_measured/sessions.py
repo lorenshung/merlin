@@ -379,6 +379,7 @@ def run_sessions(
     clock: Callable[[], float] = time.time,
     crash_loop: tuple[int, float] = CRASH_LOOP,
     stop_request: Path | None = None,
+    first_session: int = 1,
 ) -> dict[str, Any]:
     """Run authoring sessions until evidence, budget or an operator stops them, and record why.
 
@@ -391,13 +392,16 @@ def run_sessions(
     "transcript"?, "summaries"?}``.  Before each session: the operator's ``stop_request`` file (read
     FIRST, so a stop starts nothing of the session -- not even its plateau row), the stagnation mark,
     the circuit breaker, the plateau record and the bar.  After it: an exhausted account abandons the
-    session it recorded and stops; a transcript that ran another model is refused and stops."""
+    session it recorded and stops; a transcript that ran another model is refused and stops.
+
+    ``first_session`` > 1 continues a run a previous launcher of the SAME run directory started (see
+    :func:`.rounds.next_session`): ``max_sessions`` still bounds the run's sessions, not this launch's."""
     stage_root = Path(stage_root)
     started = clock()
     rows: list[dict[str, Any]] = []
     stop: dict[str, Any] | None = None
     consecutive_brief_failures = 0
-    for session in range(1, int(max_sessions) + 1):
+    for session in range(max(1, int(first_session)), int(max_sessions) + 1):
         stop = operator_stop(stop_request)
         if stop is not None:
             break  # A CLEAN STOP AT A SESSION BOUNDARY: the last session finished and was recorded.
