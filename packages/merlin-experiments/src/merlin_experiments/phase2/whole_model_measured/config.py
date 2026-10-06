@@ -231,6 +231,7 @@ def from_config(
                 pre_measure_check=document.get("pre_measure_check"),
                 retain=document.get("retain"),
                 certifier_root=certifier_root if is_screen else None,
+                min_build_free_bytes=section.get("min_build_free_bytes"),
             ),
             reference,
         )
