@@ -15,7 +15,7 @@ import selected_driver
 
 from merlin.xdsl_dialects import _common
 
-pytestmark = pytest.mark.skipif(not _common.HAS_XDSL, reason="xDSL not installed")
+pytestmark = [pytest.mark.skipif(not _common.HAS_XDSL, reason="xDSL not installed"), pytest.mark.target("saturn")]
 
 SMOLVLA_DIR = Path("/path/to/model2MLIR/workloads/smolvla")
 SMOLVLA_MLIR = SMOLVLA_DIR / "smolvla.mlir"

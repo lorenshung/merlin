@@ -20,6 +20,8 @@ from merlin.targetgen import oracle_policy as policy
 from merlin.targetgen import program_engine_policy as program_policy
 from merlin.targetgen import program_oracle
 
+pytestmark = pytest.mark.target("muon")
+
 
 def _selected(engine="gsim"):
     return {

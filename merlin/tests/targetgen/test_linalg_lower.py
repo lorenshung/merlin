@@ -13,7 +13,9 @@ import selected_driver
 from merlin.common.paths import repo_root
 from merlin.targetgen.contract import schemas
 from merlin.targetgen.contract.linalg_iface import parse_linalg_mlir
-from merlin.targetgen.linalg_lower import LinalgLowerError, lower_linalg_to_cb
+from merlin.targetgen.linalg_lower import lower_linalg_to_cb
+
+pytestmark = pytest.mark.target("muon")
 
 _CAPS = repo_root() / "merlin" / "contract" / "capsules" / "radiance" / "model_slices"
 

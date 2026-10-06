@@ -26,6 +26,8 @@ import selected_driver
 
 from merlin.common.paths import repo_root
 
+pytestmark = pytest.mark.target("muon")
+
 PACKAGE = repo_root() / "out/artifacts/targets/radiance/hand_v0"
 
 

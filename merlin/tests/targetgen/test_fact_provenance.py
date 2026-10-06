@@ -25,6 +25,8 @@ import selected_driver
 
 from merlin.common.paths import repo_root
 
+pytestmark = pytest.mark.target("muon")
+
 GATE = repo_root() / "build_tools" / "scripts" / "check_fact_provenance.py"
 
 

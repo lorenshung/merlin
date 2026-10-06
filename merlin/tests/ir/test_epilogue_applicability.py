@@ -21,6 +21,8 @@ import selected_driver
 from merlin.verify import epilogue_applicability as EA
 from merlin.verify.epilogue_applicability import ReadoutCapability, StageRoute
 
+pytestmark = pytest.mark.target("gemmini", "muon")
+
 #: A synthetic target with two readouts: one that requantizes and one that dumps the accumulator.
 NARROW = ReadoutCapability("narrow", frozenset({"scale", "activation"}), "applies scale + activation")
 WIDE = ReadoutCapability("wide", frozenset(), "writes the raw accumulator")

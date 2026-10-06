@@ -22,6 +22,8 @@ from merlin.targetgen import corpus_spec as CS
 from merlin.targetgen import corpus_synth as CSY
 from merlin.targetgen.target_experiment import load_target_experiment
 
+pytestmark = pytest.mark.target("gemmini")
+
 
 def _binding():
     desc = merlin_dir() / "experiments" / "capsule_bench" / "targets" / "gemmini" / "target_experiment.yaml"

@@ -21,6 +21,8 @@ import selected_driver
 from merlin.runtime.backends import base
 from merlin.targetgen.contract import build_recipe
 
+pytestmark = pytest.mark.target("gemmini")
+
 
 def _recipe(**over):
     kw = dict(
