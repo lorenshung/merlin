@@ -73,6 +73,7 @@ def test_the_switch_reads_only_affirmative_values(monkeypatch, value, on):
     assert ("counter_configure" in _render()) is on
 
 
+@selected_driver.requires_support("gemmini")
 def test_requested_counter_failure_refuses_the_instrumented_run(monkeypatch):
     # Once explicitly requested, the bracket is campaign evidence. Silently rendering an uninstrumented
     # harness would let the campaign report GO for a measurement it never took.
@@ -109,6 +110,7 @@ def test_warm_condition_executes_one_unmeasured_warmup(monkeypatch):
     assert warmup < got.index("uint64_t c0 = read_cycles()")
 
 
+@selected_driver.requires_support("gemmini")
 def test_unknown_cache_condition_is_refused(monkeypatch):
     monkeypatch.setenv("MERLIN_CACHE_STATE", "wishful")
     with pytest.raises(Exception, match="unsupported cache-state"):

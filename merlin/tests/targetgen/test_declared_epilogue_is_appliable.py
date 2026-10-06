@@ -22,10 +22,11 @@ from __future__ import annotations
 import pathlib
 
 import pytest
+import selected_driver
 
 from merlin.common.paths import repo_root
-from merlin.targetgen.readout_facet import epilogue_readouts, epilogue_stage_routes
 from merlin.targetgen.contract.interface_emit import parse_interface_mlir
+from merlin.targetgen.readout_facet import epilogue_readouts, epilogue_stage_routes
 from merlin.verify.epilogue_applicability import assess, selectors_applying
 
 pytestmark = pytest.mark.target("gemmini")
@@ -35,6 +36,7 @@ CORPUS = repo_root() / "merlin/contract/capsules"
 #: Targets whose corpora live under this root but whose readouts are their own. A capsule for another
 #: target must never be judged against this one's declaration.
 OTHER_TARGET_DIRS = ("/radiance/", "/atlas/", "/saturn_opu/")
+
 
 def _commit_sites(path: pathlib.Path):
     """``(stages, committed_dtype)`` for every commit in one interface that declares an epilogue."""
@@ -55,6 +57,7 @@ def _gemmini_interfaces():
         yield f
 
 
+@selected_driver.requires_support("gemmini")
 def test_every_declared_epilogue_is_applied_by_the_readout_it_commits_at():
     readouts = epilogue_readouts("gemmini")
     routes = epilogue_stage_routes("gemmini")
@@ -79,6 +82,7 @@ def test_every_declared_epilogue_is_applied_by_the_readout_it_commits_at():
     )
 
 
+@selected_driver.requires_support("gemmini")
 @pytest.mark.parametrize("stage", ["relu", "acc_scale", "bias_add", "maxpool"])
 def test_the_target_applies_the_stages_its_requirement_demands(stage):
     """The requirement and the readout declaration must not drift apart again.
@@ -93,31 +97,39 @@ def test_the_target_applies_the_stages_its_requirement_demands(stage):
     )
 
 
+@selected_driver.requires_support("gemmini")
 def test_bias_route_selects_a_contraction_commit_width_without_narrow_readout_bias():
     from merlin.targetgen.corpus_spec import CorpusBinding, _resolve_output_dtype, build_matmul
 
     binding = CorpusBinding(
-        target="gemmini", tile_dim=16, operand_dtype="int8", accum_dtype="i32",
-        integer=True, tiers=[], compare="exact_int",
+        target="gemmini",
+        tile_dim=16,
+        operand_dtype="int8",
+        accum_dtype="i32",
+        integer=True,
+        tiers=[],
+        compare="exact_int",
     )
     roles = frozenset({"bias"})
     assert _resolve_output_dtype(binding, ["bias_add"], {}, available_operand_roles=roles) == "i8"
-    assert _resolve_output_dtype(
-        binding, ["bias_add"], {"output_dtype": "i32"}, available_operand_roles=roles
-    ) == "i32"
+    assert _resolve_output_dtype(binding, ["bias_add"], {"output_dtype": "i32"}, available_operand_roles=roles) == "i32"
     assert _resolve_output_dtype(binding, ["bias_add", "relu"], {}, available_operand_roles=roles) == "i8"
     with pytest.raises(ValueError, match="no readout or contraction route"):
         _resolve_output_dtype(binding, ["bias_add"], {})
     with pytest.raises(ValueError, match="no readout or contraction route"):
-        _resolve_output_dtype(
-            binding, ["relu", "bias_add"], {}, available_operand_roles=roles
-        )
+        _resolve_output_dtype(binding, ["relu", "bias_add"], {}, available_operand_roles=roles)
     assert not selectors_applying(epilogue_readouts("gemmini"), ["bias_add"])
     capsule, interface = build_matmul(
         {
-            "name": "derived_bias_probe", "kind": "layer", "source_role": "derived_sweep",
-            "source_reference": "contraction stage route", "op": "matmul", "epilogue": ["bias_add"],
-            "M": 16, "K": 16, "N": 16,
+            "name": "derived_bias_probe",
+            "kind": "layer",
+            "source_role": "derived_sweep",
+            "source_reference": "contraction stage route",
+            "op": "matmul",
+            "epilogue": ["bias_add"],
+            "M": 16,
+            "K": 16,
+            "N": 16,
         },
         binding,
     )
@@ -129,6 +141,7 @@ def test_bias_route_selects_a_contraction_commit_width_without_narrow_readout_bi
     assert assess(cb, epilogue_readouts("gemmini"), routes=epilogue_stage_routes("gemmini")).status == "applied"
 
 
+@selected_driver.requires_support("gemmini")
 def test_captured_readout_facet_keeps_bias_outside_readout_applies():
     from merlin.targetgen.readout_facet import capture_inputs, derive
 
