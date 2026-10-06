@@ -53,6 +53,9 @@ class Arm:
     descriptor: str | None = None
     source: str | None = None
     extra: Mapping[str, Any] = field(default_factory=dict)
+    #: Whether the package arm may answer adjacent groups as one fused region (the whole-model build
+    #: option of the same name; the reference arm is the library and never claims one).
+    allow_regions: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -64,6 +67,7 @@ class Arm:
             "prohibited_roles": list(self.prohibited_roles),
             "phase0_recipe": self.phase0_recipe,
             "source": self.source,
+            "allow_regions": self.allow_regions,
         }
 
 
@@ -92,6 +96,7 @@ def arm_from_options(options: Mapping[str, Any], *, name: str, source: str | Non
         descriptor=str(options["descriptor"]) if options.get("descriptor") else None,
         source=source,
         extra={"model_capsule": options.get("model_capsule"), "verify": options.get("verify")},
+        allow_regions=bool(options.get("allow_regions")) and name != ARM_REFERENCE,
     )
 
 
@@ -155,6 +160,7 @@ def build_arm_programs(
             phase0_recipe=arm.phase0_recipe,
             descriptor=arm.descriptor,
             exactness=of_entry,
+            allow_regions=arm.allow_regions,
         )
     elif arm.name == ARM_REFERENCE:
         records = T.build_reference_group_programs(

@@ -100,11 +100,15 @@ def _prepare(args: argparse.Namespace):
     from . import runs as RUNS
 
     if args.resume:
+        if args.no_fused_regions:
+            raise SystemExit("--no-fused-regions changes the experiment; resume a named run with a revised config")
         return RUNS.resume(_latest_run(args.target, args.method), why=args.why, oot=_oot(), method=args.method)
     return RUNS.prepare(
         target=args.target,
         method=args.method,
-        objective_config=json.loads(Path(args.objective_config).read_text(encoding="utf-8")),
+        objective_config=_regions_opt_out(
+            json.loads(Path(args.objective_config).read_text(encoding="utf-8")), args.no_fused_regions
+        ),
         seed=Path(args.seed),
         prohibited_roles=list(args.prohibited_instruction_role or ()),
         inputs=_inputs(args.input),
@@ -113,6 +117,13 @@ def _prepare(args: argparse.Namespace):
         oot=_oot(),
         import_evidence=Path(args.import_evidence) if args.import_evidence else None,
     )
+
+
+def _regions_opt_out(config: dict[str, Any], opted_out: bool) -> dict[str, Any]:
+    """``config`` with fused regions turned off when the operator opted out (``--no-fused-regions``)."""
+    from . import config as CFG
+
+    return {**config, CFG.FUSED_REGIONS: False} if opted_out else config
 
 
 def start(run_dir: Path, *, profile_name: str, round_driver: str, price_table: Path | None) -> dict[str, Any]:
@@ -384,6 +395,11 @@ def _parser() -> argparse.ArgumentParser:
             help="the result.json measuring an IMPORTED seed (no Phase 1 freeze); recorded as imported, not frozen",
         )
         child.add_argument("--resume", action="store_true", help="continue the latest run of this method")
+        child.add_argument(
+            "--no-fused-regions",
+            action="store_true",
+            help="opt out of fused regions (on by default for a closed model: a package may claim adjacent groups)",
+        )
         if name == "run":
             child.add_argument("--profile", required=True)
             child.add_argument("--round-driver", default=DEFAULT_ROUND_DRIVER)

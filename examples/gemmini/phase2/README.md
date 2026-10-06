@@ -143,10 +143,14 @@ build option lets an open model's host forward be cut into bounded functions
 when it is large (an unchunked SmolVLA forward compiled for over two hours,
 against about eleven minutes cut at 1,000 ops); a forward that fits in one chunk,
 and every closed model, builds exactly as without it. Its `mechanism_policy`
-derives whether verified package passes and fused regions are available from the
-frozen model capsule's host/accelerator closure. Closed models can use both;
-open models can use neither. The prepared, read-only objective records the exact
-decision. This enables mechanisms for the Phase 2 agent, not hand-authored
+derives whether verified package passes are available from the frozen model
+capsule's host/accelerator closure. Fused regions are on by default for a closed
+model, in whole-model and cell programs alike: a package that opts in may answer
+adjacent groups as one kernel, and every member still counts as package-authored
+only while that kernel is linked. Opt out with `fused_regions: false` in the
+objective config (or `--no-fused-regions` on `prepare`/`run`); open models never
+claim one. The prepared, read-only objective records each decision
+(`mechanism_derivation`, `fused_region_decision`). This enables mechanisms for the Phase 2 agent, not hand-authored
 Gemmini transformations, and does not make a diagnostic or unreviewed capsule
 eligible for a verified run.
 

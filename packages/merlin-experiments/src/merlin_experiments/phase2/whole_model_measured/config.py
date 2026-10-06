@@ -107,6 +107,11 @@ def with_policy(document: Mapping[str, Any], roles: list[str]) -> dict[str, Any]
     return out
 
 
+#: The operator's opt-out of fused regions (``fused_regions: false`` in the objective config, or the
+#: CLI's ``--no-fused-regions``); a section's own ``build_options.allow_regions: false`` opts it out too.
+FUSED_REGIONS = "fused_regions"
+
+
 def prepare_document(document: Mapping[str, Any], *, target: str) -> dict[str, Any]:
     """Resolve output location and candidate mechanisms from selected model inputs.
 
@@ -114,6 +119,11 @@ def prepare_document(document: Mapping[str, Any], *, target: str) -> dict[str, A
     analysis used by the builder. A closed model can exercise package-declared
     passes and regions; an open model cannot. The decision is frozen into the
     run config, never inferred from a target name or a hand-authored kernel.
+
+    FUSED REGIONS ARE ALLOWED BY DEFAULT: a package that opts in may answer adjacent groups as one
+    kernel (whole-model and cell programs alike) unless the operator opts out (:data:`FUSED_REGIONS`)
+    or the model is open.  Passes stay what ``mechanism_policy`` derives.  Every decision, and why, is
+    the run's ``fused_region_decision`` receipt.
     """
     from merlin.common.paths import artifacts_dir
 
@@ -122,17 +132,18 @@ def prepare_document(document: Mapping[str, Any], *, target: str) -> dict[str, A
         if not target or target in (".", "..") or "/" in target or "\\" in target:
             raise ConfigError(f"invalid target name for a generated store: {target!r}")
         out["store"] = str((artifacts_dir() / "perf-studies" / "whole-model" / target).resolve())
+    if "mechanism_derivation" in out and out.get("mechanism_policy") is None:
+        raise ConfigError("mechanism_derivation is a preparation receipt, not an operator declaration")
     policy = out.get("mechanism_policy")
-    if policy is None:
-        if "mechanism_derivation" in out:
-            raise ConfigError("mechanism_derivation is a preparation receipt, not an operator declaration")
-        return out
-    if policy != DERIVED_MECHANISMS:
+    if policy not in (None, DERIVED_MECHANISMS):
         raise ConfigError(f"unknown mechanism_policy {policy!r}")
+    opted_out = out.get(FUSED_REGIONS) is False
+    if out.get(FUSED_REGIONS) not in (None, True, False):
+        raise ConfigError(f"{FUSED_REGIONS} is true or false, not {out.get(FUSED_REGIONS)!r}")
 
     from merlin.perf.whole_model_open import is_open_model
 
-    decisions = {}
+    decisions, regions = {}, {}
     sections = [(name, out.get(name)) for name in CANDIDATE_SECTIONS]
     sections += [(f"held_out.{name}", body) for name, body in (out.get("held_out") or {}).items()]
     for name, section in sections:
@@ -140,21 +151,56 @@ def prepare_document(document: Mapping[str, Any], *, target: str) -> dict[str, A
             continue
         options = dict(section.get("build_options") or {})
         capsule = options.get("model_capsule")
-        if not isinstance(capsule, str) or not Path(capsule).is_dir():
+        has_capsule = isinstance(capsule, str) and Path(capsule).is_dir()
+        if policy == DERIVED_MECHANISMS and not has_capsule:
             raise ConfigError(f"{name} needs a frozen model_capsule directory to derive mechanisms")
-        open_model = is_open_model(capsule, target)
-        enabled = not open_model
-        for key in ("allow_passes", "allow_regions"):
-            if key in options and options[key] is not enabled:
-                raise ConfigError(f"{name}.{key} contradicts the selected model's derived closure")
-            options[key] = enabled
+        open_model, unknown_why = None, "no frozen model capsule to derive the model's closure from"
+        if has_capsule and policy == DERIVED_MECHANISMS:
+            open_model = is_open_model(capsule, target)
+        elif has_capsule:
+            try:
+                from merlin.perf.whole_model_capsule import load_model_capsule
+
+                load_model_capsule(capsule)  # a directory that is not a whole model capsule is refused first
+                open_model = is_open_model(capsule, target)
+            except Exception as exc:  # noqa: BLE001 -- an underivable closure leaves regions off, said why
+                unknown_why = f"the model's closure could not be derived: {type(exc).__name__}: {str(exc)[:200]}"
+        if policy == DERIVED_MECHANISMS:
+            if "allow_passes" in options and options["allow_passes"] is not (not open_model):
+                raise ConfigError(f"{name}.allow_passes contradicts the selected model's derived closure")
+            options["allow_passes"] = not open_model
+        section_out = options.get("allow_regions") is False
+        if options.get("allow_regions") is True and open_model:
+            raise ConfigError(f"{name}.allow_regions contradicts the selected model's derived closure (open)")
+        if opted_out or section_out:
+            options["allow_regions"] = False
+            regions[name] = {"allowed": False, "why": "opted out by the operator"}
+        elif open_model is None:
+            # NOT DERIVABLE: the model's closure is unknown -- left to the builder's own default (off) unless
+            # the operator declared it, and said so, never assumed closed.
+            declared = options.get("allow_regions") is True
+            regions[name] = {
+                "allowed": declared,
+                "why": f"declared by the operator; {unknown_why}" if declared else unknown_why,
+            }
+        else:
+            options["allow_regions"] = not open_model
+            regions[name] = {
+                "allowed": not open_model,
+                "why": "the model is open: its host regions compute between groups"
+                if open_model
+                else "default: a closed model's package may claim fused regions",
+            }
         section["build_options"] = options
-        decisions[name] = {
-            "model_closure": "open" if open_model else "closed",
-            "allow_passes": enabled,
-            "allow_regions": enabled,
-        }
-    out["mechanism_derivation"] = {"source": "merlin.perf.whole_model_open.is_open_model", "sections": decisions}
+        if policy == DERIVED_MECHANISMS:
+            decisions[name] = {
+                "model_closure": "open" if open_model else "closed",
+                "allow_passes": options["allow_passes"],
+                "allow_regions": options["allow_regions"],
+            }
+    if policy == DERIVED_MECHANISMS:
+        out["mechanism_derivation"] = {"source": "merlin.perf.whole_model_open.is_open_model", "sections": decisions}
+    out["fused_region_decision"] = {"default": "allowed", "opted_out": opted_out, "sections": regions}
     return out
 
 
@@ -295,6 +341,7 @@ __all__ = [
     "DEFAULT_BUILDER",
     "DEFAULT_REFERENCE_BUILDER",
     "EXACTNESS",
+    "FUSED_REGIONS",
     "check_policy",
     "declared_roles",
     "exactness_contract",
