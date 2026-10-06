@@ -980,11 +980,6 @@ def _mounts(argv: list[str]) -> list[tuple[str, str, str]]:
     return ops
 
 
-def _is_under(path: Path, base: str) -> bool:
-    b = Path(base)
-    return path == b or b in path.parents
-
-
 class _MountVisibility:
     """One-call lexical mount index; never caches filesystem visibility or mutable argv.
 
