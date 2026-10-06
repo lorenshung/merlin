@@ -72,7 +72,7 @@ def test_a_live_launcher_is_found_by_its_record_and_refuses_a_second_launch(tmp_
 
 def test_the_command_line_launches_a_prepared_run_and_refuses_anything_else(tmp_path, monkeypatch, capsys):
     run_dir = _run_dir(tmp_path)
-    monkeypatch.setattr(LAUNCH.subprocess, "Popen", lambda argv, **kw: SimpleNamespace(pid=77))
+    monkeypatch.setattr(LAUNCH, "spawn_process", lambda argv, **kw: SimpleNamespace(pid=77))
     assert MCLI.main(["launch", str(run_dir), "--profile", "p"]) == 0
     assert json.loads(capsys.readouterr().out)["pid"] == 77
     with pytest.raises(SystemExit, match="neither a prepared"):

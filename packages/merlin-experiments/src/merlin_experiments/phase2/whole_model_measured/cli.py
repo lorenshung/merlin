@@ -3,6 +3,8 @@
 prepare ...               prepare a run (seed, frozen inputs, policy-stamped config, oot/) and print it
 start <run_dir> ...       run the authoring sessions of a prepared run until evidence or budget stops them
 run ...                   prepare, then start (``--resume`` continues the latest run of the same method)
+status <run_dir>          the run's status from its own records (``--poll`` advances its objective)
+follow <run_dir>          print each change (jobs, rounds, best, launcher, stop, holds) until it ends
 launch <run_dir> ...       start a prepared run DETACHED (own session, output to <run_dir>/launch.log)
 stop <run_dir> --why ...  ask a run to stop at its next session boundary (``stop_requested.json``)
 watch <run_dir> <pid> ... relaunch a run whose launcher exits, keeping its method and roles
@@ -173,6 +175,16 @@ def _objective_of(run_dir: Path):
     return record, objective
 
 
+def objective_or_error(run_dir: Path) -> tuple[Any, str | None]:
+    """The run's objective, or None and why it could not be opened (a status never fails for it)."""
+    try:
+        return _objective_of(Path(run_dir))[1], None
+    except SystemExit as exc:
+        return None, str(exc.code)
+    except Exception as exc:  # noqa: BLE001 -- reported beside the records that could be read
+        return None, f"{type(exc).__name__}: {exc}"
+
+
 def export_champion(args: argparse.Namespace) -> Path:
     from .ledger import export_best
 
@@ -286,6 +298,15 @@ def _parser() -> argparse.ArgumentParser:
     child.add_argument("--profile", required=True)
     child.add_argument("--round-driver", default=DEFAULT_ROUND_DRIVER)
     child.add_argument("--price-table", type=Path)
+    child = sub.add_parser("status", help="the run's status, read from its own records")
+    child.add_argument("run_dir", type=Path)
+    child.add_argument("--poll", action="store_true", help="advance the objective first (dispatches pending jobs)")
+    child.add_argument("--json", action="store_true")
+    child.add_argument("--history", type=int, default=10, help="how many recent measurements to show")
+    child = sub.add_parser("follow", help="print each change to the run until it is over")
+    child.add_argument("run_dir", type=Path)
+    child.add_argument("--interval", type=float, default=60.0)
+    child.add_argument("--max-seconds", type=float)
     child = sub.add_parser("launch", help="start a prepared run detached, its output appended to launch.log")
     child.add_argument("run_dir", type=Path)
     child.add_argument("--profile", required=True)
@@ -381,6 +402,32 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(json.dumps(document.get("stopped"), default=str))
         return 0
+    if args.command == "status":
+        from . import progress as PROGRESS
+
+        run_dir = resolve_run(args.run_dir)
+        objective, error = objective_or_error(run_dir)
+        document = PROGRESS.run_status(run_dir, objective=objective, poll=args.poll, history=args.history)
+        if error:
+            document["objective_error"] = error
+        print(json.dumps(document, indent=1, default=str) if args.json else PROGRESS.format_status(document))
+        return 0
+    if args.command == "follow":
+        from . import progress as PROGRESS
+
+        run_dir = resolve_run(args.run_dir)
+        objective, error = objective_or_error(run_dir)
+        if error:
+            print(f"(the objective could not be opened, so no best is followed: {error})", flush=True)
+        ended = PROGRESS.follow(
+            run_dir,
+            objective=objective,
+            interval=args.interval,
+            max_seconds=args.max_seconds,
+            out=lambda line: print(line, flush=True),
+        )
+        print(json.dumps(ended))
+        return 0
     if args.command == "launch":
         from . import launch as LAUNCH
 
@@ -474,4 +521,4 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
-__all__ = ["main", "resolve_run", "start", "stop", "successors"]
+__all__ = ["main", "objective_or_error", "resolve_run", "start", "stop", "successors"]

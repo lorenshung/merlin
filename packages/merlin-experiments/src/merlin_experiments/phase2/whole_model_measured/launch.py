@@ -25,6 +25,11 @@ LAUNCH_SCHEMA = "merlin.phase2.whole_model_measured.launch.v1"
 MODULE = __package__
 
 
+def spawn_process(argv: list[str], **kwargs: Any) -> Any:
+    """Start one detached launcher (the single seam tests replace)."""
+    return subprocess.Popen(argv, **kwargs)
+
+
 def start_argv(
     run_dir: Path, *, profile: str, round_driver: str, price_table: Path | None, python: str | None = None
 ) -> list[str]:
@@ -55,7 +60,7 @@ def launch(
         raise ValueError(f"{run_dir} already has a live launcher (pid {(record(run_dir) or {}).get('pid')})")
     argv = start_argv(run_dir, profile=profile, round_driver=round_driver, price_table=price_table)
     log_path = run_dir / LAUNCH_LOG
-    spawn = spawn or subprocess.Popen
+    spawn = spawn or spawn_process
     with log_path.open("ab") as log:
         process = spawn(argv, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
     previous = record(run_dir)

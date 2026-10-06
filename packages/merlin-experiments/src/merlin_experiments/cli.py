@@ -22,6 +22,11 @@ def _source(value: str, catalog_path: Path | None) -> Path:
     return entries[value]
 
 
+def _watch_argv(run_dir: Path, args) -> list[str]:
+    argv = ["follow", str(run_dir), "--interval", str(args.interval)]
+    return argv + (["--max-seconds", str(args.max_seconds)] if args.max_seconds is not None else [])
+
+
 def _measured(call):
     """Run ``call`` with the whole-model measured mode's command module, its refusals as SpecErrors."""
     from .phase2.whole_model_measured import cli as measured
@@ -34,7 +39,32 @@ def _measured(call):
         raise
 
 
+def _measured_run(path: Path) -> Path | None:
+    """``path`` as a whole-model measured run (itself, or the run an orchestration points at), or None."""
+    try:
+        return _measured(lambda measured: measured.resolve_run(path))
+    except SpecError:
+        return None
+
+
+def _measured_status(run_dir: Path) -> dict:
+    from .phase2.whole_model_measured import cli as measured
+    from .phase2.whole_model_measured import progress
+
+    objective, error = measured.objective_or_error(run_dir)
+    document = progress.run_status(run_dir, objective=objective)
+    if error:
+        document["objective_error"] = error
+    return document
+
+
 def main(argv: list[str] | None = None) -> int:
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw[:1] == ["measured"]:
+        # The whole-model measured mode's own command line, reachable from this one.
+        from .phase2.whole_model_measured import cli as measured
+
+        return measured.main(raw[1:])
     parser = argparse.ArgumentParser(prog="merlin experiment", description=__doc__)
     parser.add_argument("--catalog", type=Path, help="catalog YAML; paths inside it are relative to that file")
     commands = parser.add_subparsers(dest="verb", required=True)
@@ -83,7 +113,18 @@ def main(argv: list[str] | None = None) -> int:
         child.add_argument(
             "--phase0-m2m-python", type=Path, help="explicit Model2MLIR venv Python for diagnostic capture"
         )
-    commands.add_parser("status").add_argument("run_dir", type=Path)
+    commands.add_parser(
+        "status", help="an orchestration's phases, or a whole-model measured run's status from its records"
+    ).add_argument("run_dir", type=Path)
+    commands.add_parser(
+        "measured",
+        help="the whole-model measured mode's own commands: `merlin experiment measured --help`",
+        add_help=False,
+    )
+    watch = commands.add_parser("watch", help="print each change to a whole-model measured run until it is over")
+    watch.add_argument("run_dir", type=Path, help="the measured run, or an orchestration run that points at one")
+    watch.add_argument("--interval", type=float, default=60.0, help="seconds between looks")
+    watch.add_argument("--max-seconds", type=float, help="stop watching after this long")
     stop = commands.add_parser(
         "stop", help="ask a whole-model measured run to stop at its next session boundary (signals nothing)"
     )
@@ -192,7 +233,7 @@ def main(argv: list[str] | None = None) -> int:
     seal.add_argument("--expected-digest", required=True)
     seal.add_argument("--reviewed-by", required=True)
     seal.add_argument("--review-note", required=True)
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw)
     try:
         if args.verb == "corpus":
             if args.operation == "capture":
@@ -307,7 +348,11 @@ def main(argv: list[str] | None = None) -> int:
 
             result = runs(root=args.root, target=args.target, experiment=args.experiment)
         elif args.verb == "status":
-            result = runner.status(args.run_dir)
+            measured_run = None if (args.run_dir / "orchestration.json").is_file() else _measured_run(args.run_dir)
+            result = _measured_status(measured_run) if measured_run is not None else runner.status(args.run_dir)
+        elif args.verb == "watch":
+            run_dir = _measured(lambda measured: measured.resolve_run(args.run_dir))
+            return _measured(lambda measured: measured.main(_watch_argv(run_dir, args)))
         elif args.verb == "stop":
             result = _measured(lambda measured: measured.stop(args.run_dir, why=args.why))
         elif args.verb == "lineage":
