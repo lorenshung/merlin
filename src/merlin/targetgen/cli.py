@@ -116,12 +116,20 @@ def _cmd_stage_capture(args: argparse.Namespace) -> int:
         if args.status_file and not safe_status:
             raise ValueError("capture staging status file must be outside capture and compiler inputs")
         result = stage_compile_inputs(args.capture, args.out)
-        report = {"schema": "merlin.capture_staging_status.v1", "status": "staged",
-                  "out": str(Path(args.out).absolute()), "manifest": result}
+        report = {
+            "schema": "merlin.capture_staging_status.v1",
+            "status": "staged",
+            "out": str(Path(args.out).absolute()),
+            "manifest": result,
+        }
         status = 0
     except (OSError, ValueError, UnicodeError) as exc:
-        report = {"schema": "merlin.capture_staging_status.v1", "status": "compile_input_error",
-                  "out": str(Path(args.out).absolute()), "error": f"{type(exc).__name__}: {exc}"}
+        report = {
+            "schema": "merlin.capture_staging_status.v1",
+            "status": "compile_input_error",
+            "out": str(Path(args.out).absolute()),
+            "error": f"{type(exc).__name__}: {exc}",
+        }
         status = 2
     if safe_status:
         _write_status(Path(args.status_file), report)
@@ -136,8 +144,11 @@ def _cmd_native_build(args: argparse.Namespace) -> int:
     try:
         if bool(args.profile) == bool(args.support):
             raise ValueError("select exactly one native target profile or installed support provider")
-        profile = (NativeTargetProfile.from_record(json.loads(Path(args.profile).read_text()))
-                   if args.profile else load_native_target_binding(args.support).profile())
+        profile = (
+            NativeTargetProfile.from_record(json.loads(Path(args.profile).read_text()))
+            if args.profile
+            else load_native_target_binding(args.support).profile()
+        )
         snapshot = build_native_snapshot(
             profile,
             destination=Path(args.out),
@@ -145,8 +156,12 @@ def _cmd_native_build(args: argparse.Namespace) -> int:
             cargo_target_dir=Path(args.cargo_target_dir),
             source_revision=args.source_revision,
         )
-        report = {"status": "selection_only", "engine": args.engine, "out": str(snapshot.root),
-                  "profile_sha256": snapshot.manifest["profile_sha256"]}
+        report = {
+            "status": "selection_only",
+            "engine": args.engine,
+            "out": str(snapshot.root),
+            "profile_sha256": snapshot.manifest["profile_sha256"],
+        }
     except (OSError, ValueError, RuntimeError) as error:
         report = {"status": "compile_error", "engine": args.engine, "reason": str(error), "out": args.out}
     print(json.dumps(report, sort_keys=True))
@@ -168,26 +183,42 @@ def _cmd_native_select(args: argparse.Namespace) -> int:
         result = snapshot.select(request, fixed_inputs=abi["fixed_inputs"], fixed_outputs=fixed_outputs)
         constants = {binding.node_id: binding for binding in request.constants}
         constant_requirements = [
-            {"value_id": value.id, "storage": value.storage,
-             "address": result.allocation.addresses[value.id], **constants[value.source_node].record()}
+            {
+                "value_id": value.id,
+                "storage": value.storage,
+                "address": result.allocation.addresses[value.id],
+                **constants[value.source_node].record(),
+            }
             for value in (result.graph.values if result.graph else ())
             if value.kind == "constant" and result.allocation is not None
         ]
         report = {
-            "schema": "merlin.native_selection_result.v1", "engine": result.engine,
-            "status": result.status, "scope": "selection_only", "request_digest": result.request_digest,
-            "target_digest": snapshot.profile.digest(), "snapshot": str(snapshot.root),
-            "reason": result.reason, "candidate_attempts": result.candidate_attempts,
-            "ordering_attempts": result.ordering_attempts, "rejected_allocation": result.rejected_allocation,
-            "pruned_orders": result.pruned_orders, "check_fingerprint": result.check_fingerprint,
+            "schema": "merlin.native_selection_result.v1",
+            "engine": result.engine,
+            "status": result.status,
+            "scope": "selection_only",
+            "request_digest": result.request_digest,
+            "target_digest": snapshot.profile.digest(),
+            "snapshot": str(snapshot.root),
+            "reason": result.reason,
+            "candidate_attempts": result.candidate_attempts,
+            "ordering_attempts": result.ordering_attempts,
+            "rejected_allocation": result.rejected_allocation,
+            "pruned_orders": result.pruned_orders,
+            "check_fingerprint": result.check_fingerprint,
             "candidate_digest": result.candidate.digest() if result.candidate else None,
             "selected_graph": asdict(result.graph) if result.graph else None,
             "allocation": asdict(result.allocation) if result.allocation else None,
             "constant_requirements": constant_requirements,
         }
     except (OSError, ValueError, RuntimeError, KeyError, TypeError) as error:
-        report = {"schema": "merlin.native_selection_result.v1", "engine": args.engine,
-                  "status": "compile_error", "scope": "selection_only", "reason": str(error)}
+        report = {
+            "schema": "merlin.native_selection_result.v1",
+            "engine": args.engine,
+            "status": "compile_error",
+            "scope": "selection_only",
+            "reason": str(error),
+        }
     _write_status(output, report)
     print(json.dumps({"status": report["status"], "engine": args.engine, "out": str(output)}, sort_keys=True))
     return 0 if report["status"] == "selected" else 2
@@ -212,8 +243,10 @@ def _cmd_native_compile(args: argparse.Namespace) -> int:
         if args.status_file and Path(args.status_file).resolve().is_relative_to(output.resolve()):
             raise ValueError("native compile status file must be outside the artifact directory")
         abi = json.loads(Path(args.abi).read_text())
-        if set(abi) != {"fixed_inputs", "fixed_outputs"} or not isinstance(abi["fixed_inputs"], dict) or (
-            not isinstance(abi["fixed_outputs"], list)
+        if (
+            set(abi) != {"fixed_inputs", "fixed_outputs"}
+            or not isinstance(abi["fixed_inputs"], dict)
+            or (not isinstance(abi["fixed_outputs"], list))
         ):
             raise ValueError("native compile ABI needs fixed_inputs and fixed_outputs")
         if not all(type(value) is int for value in abi["fixed_inputs"].values()) or (
@@ -226,22 +259,41 @@ def _cmd_native_compile(args: argparse.Namespace) -> int:
         with tempfile.TemporaryDirectory(prefix="native-compile-", dir=output.parent) as temporary:
             staged = Path(temporary) / "compilation"
             manifest = binding.compile(
-                snapshot, request, fixed_inputs=abi["fixed_inputs"],
-                fixed_outputs=tuple(abi["fixed_outputs"]), target_source=Path(args.target_source),
-                destination=staged, limits=SearchLimits(),
+                snapshot,
+                request,
+                fixed_inputs=abi["fixed_inputs"],
+                fixed_outputs=tuple(abi["fixed_outputs"]),
+                target_source=Path(args.target_source),
+                destination=staged,
+                limits=SearchLimits(),
             )
             verify_native_publication(
-                staged, manifest, engine=args.engine, request_digest=request.digest(),
+                staged,
+                manifest,
+                engine=args.engine,
+                request_digest=request.digest(),
                 target_identity=snapshot.profile.target_identity,
             )
             staged.rename(output)
-        report = {"schema": "merlin.native_compilation_status.v1", "status": "emitted",
-                  "engine": args.engine, "support": args.support, "out": str(args.out),
-                  "request_digest": request.digest(), "target_identity": snapshot.profile.target_identity,
-                  "binary_sha256": manifest.get("binary_sha256")}
+        report = {
+            "schema": "merlin.native_compilation_status.v1",
+            "status": "emitted",
+            "engine": args.engine,
+            "support": args.support,
+            "out": str(args.out),
+            "request_digest": request.digest(),
+            "target_identity": snapshot.profile.target_identity,
+            "binary_sha256": manifest.get("binary_sha256"),
+        }
     except (OSError, ValueError, RuntimeError, KeyError, TypeError, ImportError) as error:
-        report = {"schema": "merlin.native_compilation_status.v1", "status": "compile_error",
-                  "engine": args.engine, "support": args.support, "out": str(args.out), "reason": str(error)}
+        report = {
+            "schema": "merlin.native_compilation_status.v1",
+            "status": "compile_error",
+            "engine": args.engine,
+            "support": args.support,
+            "out": str(args.out),
+            "reason": str(error),
+        }
     if args.status_file and not Path(args.status_file).resolve().is_relative_to(Path(args.out).resolve()):
         _write_status(Path(args.status_file), report)
     print(json.dumps(report, sort_keys=True))
@@ -293,7 +345,9 @@ def build_parser() -> argparse.ArgumentParser:
     native_build.add_argument("--out", required=True, help="fresh snapshot directory")
     native_build.set_defaults(func=_cmd_native_build)
 
-    native_select = sub.add_parser("native-select", help="select and allocate one typed kernel; no Atlas emission")
+    native_select = sub.add_parser(
+        "native-select", help="select and allocate one typed kernel; no target-code emission"
+    )
     native_select.add_argument("--engine", choices=("merlin_native",), required=True)
     native_select.add_argument("--snapshot", required=True)
     native_select.add_argument("--request", required=True, help="typed semantic kernel JSON")
