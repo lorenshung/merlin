@@ -5,6 +5,7 @@
                                    [--collateral-share RESULT] [--screen-capsules NAMES] --why TEXT
     merlin-experiment cell launch <cell_run> --profile P
     merlin-experiment cell status [<cell_run> | --target T]
+    merlin-experiment cell board --package-job JOB --reference-job JOB --groups 1,70 [--prepare-only]
 
 ``prepare`` composes the cell's objective config from the loop's own (:func:`.cell_prep.prepare`: the
 held-out groups by form, the reference arm, the baseline and collateral measured on a VERIFIED package)
@@ -23,6 +24,11 @@ never seeded from whatever a workspace holds now.
 
 ``launch`` always DETACHES (:mod:`.launch`): its own session, output appended to ``launch.log`` in the
 run directory, never a pipe.
+
+``board`` confirms a cell result on the BOARD: both arms' one-group programs and the reference control
+in one batch (:func:`.group_capsules_board.measure_on_board`), each count admitted only on its own
+evidence.  The arms are the two whole-model jobs' own build options, and the board, functional model and
+control are the package job's own machine -- nothing restated.
 """
 
 from __future__ import annotations
@@ -364,6 +370,54 @@ def format_cell(document: Mapping[str, Any]) -> str:
     return head + "\n" + PROGRESS.format_status(document)
 
 
+# ------------------------------------------------------------------------------------- the board
+def board_validate(
+    package_job: Path,
+    reference_job: Path,
+    groups: Sequence[int],
+    *,
+    package_dir: Path | None = None,
+    out: Path | None = None,
+    submit: bool = True,
+    timeout_s: float = 1800,
+) -> dict[str, Any]:
+    """Both arms of ``groups`` on the package job's board in one batch with its reference control."""
+    from merlin.common.artifacts import new_product
+
+    from . import group_capsules as GC
+    from . import group_capsules_board as GCB
+
+    job = read_json(Path(package_job))
+    if not job:
+        raise CellRunError(f"{package_job} is not a job record")
+    machine = dict(job.get("machine") or {})
+    if not machine.get("timing") or not machine.get("local"):
+        raise CellRunError(f"{package_job}'s machine has no board half and functional-model half to run both on")
+    target = str(job["target"])
+    arms = GC.arms_from_jobs(package_job, reference_job)
+    package_dir = Path(package_dir) if package_dir is not None else Path(package_job).parent / "package"
+    if out is None:
+        product = new_product(
+            "perf-group-board", version=1, target=target, sources=[str(package_job), str(reference_job)]
+        )
+        out = product.path
+        product.add_artifact("board_rows.json")
+        product.write_manifest()
+    return GCB.measure_on_board(
+        arms,
+        [int(g) for g in groups],
+        package_dir=package_dir,
+        model_capsule=(job.get("build_options") or {})["model_capsule"],
+        target=target,
+        out=Path(out),
+        machine=GCB.board_machine_spec(machine["timing"]),
+        local=machine["local"],
+        control=machine.get("control"),
+        timeout_s=timeout_s,
+        submit=submit,
+    )
+
+
 # ------------------------------------------------------------------------------------- command line
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -390,6 +444,14 @@ def _parser() -> argparse.ArgumentParser:
     child.add_argument("--profile", required=True)
     child.add_argument("--round-driver")
     child.add_argument("--price-table", type=Path)
+    child = sub.add_parser("board", help="time both arms' one-group programs on the board in one batch")
+    child.add_argument("--package-job", type=Path, required=True, help="the package arm's whole-model job.json")
+    child.add_argument("--reference-job", type=Path, required=True, help="the reference arm's job.json")
+    child.add_argument("--groups", required=True, help="the groups, comma-separated")
+    child.add_argument("--package", type=Path, help="the package (default: the package job's own snapshot)")
+    child.add_argument("--out", type=Path, help="default: a perf-group-board product under out/artifacts")
+    child.add_argument("--prepare-only", action="store_true", help="build, check and grade locally; submit nothing")
+    child.add_argument("--timeout", type=float, default=1800)
     child = sub.add_parser("status", help="a cell run's status, or every cell run of a target")
     child.add_argument("run_dir", type=Path, nargs="?")
     child.add_argument("--target")
@@ -422,6 +484,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 functional_model=args.functional_model,
             )
             print(json.dumps(document, indent=1, default=str))
+            return 0
+        if args.command == "board":
+            document = board_validate(
+                args.package_job,
+                args.reference_job,
+                [int(g) for g in args.groups.split(",") if g.strip()],
+                package_dir=args.package,
+                out=args.out,
+                submit=not args.prepare_only,
+                timeout_s=args.timeout,
+            )
+            print(json.dumps({k: document.get(k) for k in ("rows", "control", "run")}, indent=1, default=str))
             return 0
         if args.command == "launch":
             run_dir = CLI.resolve_run(args.run_dir)
@@ -468,6 +542,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 __all__ = [
     "CELL_RECORD",
     "CellRunError",
+    "board_validate",
     "cell_groups",
     "cell_runs",
     "cell_status",

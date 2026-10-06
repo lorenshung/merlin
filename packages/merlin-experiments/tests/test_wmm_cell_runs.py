@@ -170,3 +170,32 @@ def test_the_cell_profile_is_a_valid_launch_profile():
 
     profile = P.load("codex-gpt-6-sol-cell")
     assert profile["round_seconds"] == 2700 and profile["max_sessions"] == 48
+
+
+def test_board_validation_runs_both_arms_on_the_package_jobs_own_machine(tmp_path, monkeypatch, capsys):
+    """The arms are the two jobs' own build options and the board, functional model and control the
+    package job's own machine -- minus the run owner's host preparation step; the output is a product."""
+    from merlin_experiments import cli as TOP
+    from merlin_experiments.phase2.whole_model_measured import group_capsules_board as GCB
+
+    monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "out"))
+    timing = {"hw_config": "hw", "lock_path": "/l", "queue_command": ["q"], "prepare_command": ["glue"]}
+    machine = {"kind": "batched", "timing": timing, "local": {"kind": "spike"}, "control": {"solo_result": "/s"}}
+    jobs = {}
+    for name in ("package", "reference"):
+        job_dir = tmp_path / name
+        job_dir.mkdir()
+        options = {"machine": "m", "header": "/h", "model_capsule": "/cap"}
+        (job_dir / "job.json").write_text(json.dumps({"target": "toy", "machine": machine, "build_options": options}))
+        jobs[name] = job_dir / "job.json"
+    seen = {}
+    monkeypatch.setattr(
+        GCB, "measure_on_board", lambda arms, groups, **kw: seen.update(arms=arms, groups=groups, **kw) or {"rows": []}
+    )
+    argv = ["cell", "board", "--package-job", str(jobs["package"]), "--reference-job", str(jobs["reference"])]
+    assert TOP.main([*argv, "--groups", "1,70", "--prepare-only"]) == 0
+    assert json.loads(capsys.readouterr().out)["rows"] == []
+    assert sorted(seen["arms"]) == ["package", "reference"] and seen["groups"] == [1, 70] and seen["submit"] is False
+    assert seen["machine"] == {k: v for k, v in timing.items() if k != "prepare_command"}
+    assert seen["control"] == machine["control"] and seen["package_dir"] == tmp_path / "package" / "package"
+    assert (tmp_path / "out" / "artifacts" / "perf-studies" / "group-capsules" / "toy") in seen["out"].parents
