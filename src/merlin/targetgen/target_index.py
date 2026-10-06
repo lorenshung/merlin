@@ -148,6 +148,7 @@ def _champions(target: str, artifacts_root: str | Path | None, problems: list) -
             continue
         records = read_champion(root)
         provenance, measured = records["provenance"], records["measurements"]
+        legacy = (provenance.get("lineage") or {}).get("legacy")
         firesim = measured.get("firesim") or {}
         out.append(
             {
@@ -172,6 +173,10 @@ def _champions(target: str, artifacts_root: str | Path | None, problems: list) -
                     "best_commit": (provenance.get("phase2") or {}).get("best_commit"),
                     "corpus_seal_digest": provenance.get("corpus_seal_digest"),
                     "phase0_evidence_digest": provenance.get("phase0_evidence_digest"),
+                    "unsealed_legacy": legacy is not None,
+                    "legacy_run_dirs": list((legacy or {}).get("run_dirs") or ()),
+                    "reconstructed": bool((provenance.get("phase2") or {}).get("reconstructed")),
+                    "composed": provenance.get("composition") is not None,
                 },
             }
         )
@@ -220,7 +225,9 @@ def rows_citing(target: str, run_dir: str | Path, *, artifacts_root: str | Path 
     document = build_index(target, artifacts_root=artifacts_root)
 
     def cites(row: dict) -> bool:
-        values = [row.get("run"), row.get("source_run"), *((row.get("lineage") or {}).values())]
+        lineage = (row.get("lineage") or {}).values()
+        values = [row.get("run"), row.get("source_run")]
+        values += [item for value in lineage for item in (value if isinstance(value, list) else [value])]
         return any(
             isinstance(v, str) and (v in wanted or (Path(v).is_absolute() and _rel(Path(v)) in wanted)) for v in values
         )

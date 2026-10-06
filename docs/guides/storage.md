@@ -3,7 +3,7 @@ title: Disk under out/ — why it grows and what is safe to reclaim
 kind: guide
 status: current
 owner: infra
-last_verified: 2026-09-29
+last_verified: 2026-10-05
 related: [reproducibility, getting_started, gemmini_experiment]
 code_refs: [src/merlin/common/content_store.py,
             src/merlin/common/oot_repo.py,
@@ -326,6 +326,25 @@ digest, phase-0 evidence digest), `measurements.json` (FireSim cycles with the m
 header and the vendor control run in the same batch), `certification.json` (GSIM) and
 `isa_prohibition.json` (the whole-ELF prohibited-instruction scan). Each required field is checked and
 none is defaulted; a scan that is not clean or a GSIM verdict that is not `pass` refuses the export.
+
+**A lineage older than these records says so instead of borrowing their shape.** Three optional
+provenance blocks cover it, each printed in `MERLIN_PUBLICATION.md` as well as recorded:
+
+- `lineage.legacy` — `{reason, predates: "sealed phase 0", bundle_manifest_sha, bundle_name, run_dirs,
+  dates, hops: [{driver, model, ...}]}` for a lineage graded on an input bundle before phase-0 corpora
+  were sealed. It stands in for `corpus_seal_digest` / `phase0_evidence_digest` only where the caller
+  wrote that digest as an explicit `null` (an absent key is still refused), and the export prints
+  `UNSEALED LEGACY LINEAGE` under the title of `MERLIN_PUBLICATION.md` and in `.merlin/CHAMPION`. It
+  covers those two digests and nothing else: the measurements, the GSIM verdict and the whole-ELF scan
+  keep their rules.
+- `composition` — `champions.composition(parts, base, ...)` writes the note ("composed by three-way
+  merge of cell winners X, Y, Z onto B") from the digests it records; the base must be a package in
+  `best`'s history.
+- a history rebuilt by `oot_repo.reconstruct(path, hops, frozen=, best=, reason=)` from stored package
+  bytes, for runs that predate `oot/`. Each hop is committed only if its bytes still hash to the digest
+  it was graded or measured as; every commit and the repo (`.git/merlin-reconstruction.json`) carry
+  `reconstructed: true`, the export records it under `phase2`, and the reconstruction's `frozen` must
+  be the declared one.
 
 **Retention is declared, not remembered.** `retention.pinned` in `merlin/contract/storage.yaml` names
 the sealed releases and the champions; `merlin-storage retain` and `prune` treat a unit that is,
