@@ -200,7 +200,8 @@ class WholeModelObjective:
         of its own, and an agent that sees only the vendor's cycles optimizes where the vendor is weak.
         When the rooflines cannot be derived the feedback says why, never nothing."""
         diagnosed = dict(result)
-        rooflines = self.rooflines()
+        # A result that carries its own diagnostics (a cell's) is read as it is; only the others need the model's.
+        rooflines = self.rooflines() if not diagnosed.get("diagnostics") else {}
         if not diagnosed.get("diagnostics") and rooflines.get("per_group"):
             diagnosed["diagnostics"] = {
                 "schema": "merlin_whole_model_diagnostics_v1",

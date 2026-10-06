@@ -289,7 +289,11 @@ def measure_on_gsim(
     package program's ``efficiency`` row (:func:`efficiency_row`) -- diagnostic only, never a change to
     the measurement.
     ``require_package`` refuses, BEFORE any emulator time, a package-arm program the package does not
-    answer, quoting the package's own reason."""
+    answer, quoting the package's own reason.  ``exactness`` is the contract both arms are graded under
+    (the default -- every form exact, an op's own declared bound kept -- when None), recorded either way."""
+    from merlin.perf import exactness as EX
+
+    exactness = exactness if exactness is not None else EX.Contract.default(target=target)
     out = Path(out)
     programs: dict[str, dict[str, Any]] = {}
     for name, arm in arms.items():
@@ -371,8 +375,7 @@ def measure_on_gsim(
             row["efficiency"] = efficiency_row(record, row, diagnostics, target=target, out=out / "efficiency" / label)
         rows.append(row)
     document = {"schema": SCHEMA, "device": DEVICE, "arms": {k: a.to_dict() for k, a in arms.items()}, "rows": rows}
-    if exactness is not None:
-        document["exactness"] = exactness.record()
+    document["exactness"] = exactness.record()
     out.mkdir(parents=True, exist_ok=True)
     (out / "gsim_rows.json").write_text(json.dumps(document, indent=1, default=str) + "\n", encoding="utf-8")
     return document
