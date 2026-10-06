@@ -3,6 +3,8 @@
 prepare ...               prepare a run (seed, frozen inputs, policy-stamped config, oot/) and print it
 start <run_dir> ...       run the authoring sessions of a prepared run until evidence or budget stops them
 run ...                   prepare, then start (``--resume`` continues the latest run of the same method)
+resume <run_dir> ...      prepare the next run of THIS run (method, roles, store kept), optionally
+                          from another seed (``--seed``) or a revised config, and ``--launch`` it
 status <run_dir>          the run's status from its own records (``--poll`` advances its objective)
 follow <run_dir>          print each change (jobs, rounds, best, launcher, stop, holds) until it ends
 launch <run_dir> ...       start a prepared run DETACHED (own session, output to <run_dir>/launch.log)
@@ -185,6 +187,41 @@ def objective_or_error(run_dir: Path) -> tuple[Any, str | None]:
         return None, f"{type(exc).__name__}: {exc}"
 
 
+def resume_run(args: argparse.Namespace) -> dict[str, Any]:
+    """Prepare the next run of ``args.run_dir`` and, with ``--launch``, start it detached."""
+    from . import launch as LAUNCH
+    from . import runs as RUNS
+
+    if args.launch and not args.profile:
+        raise SystemExit("--launch needs --profile")  # refused before a run is prepared, not after
+    previous = resolve_run(args.run_dir)
+    config = json.loads(Path(args.objective_config).read_text(encoding="utf-8")) if args.objective_config else None
+    try:
+        prepared = RUNS.resume(
+            previous,
+            why=args.why,
+            workspace=Path(args.seed) if args.seed else None,
+            objective_config=config,
+            allow_new_store=args.allow_new_store,
+            oot=_oot(),
+        )
+    except RUNS.RunError as exc:
+        raise SystemExit(str(exc)) from exc
+    document: dict[str, Any] = {
+        "run_dir": str(prepared.run_dir),
+        "resumed_from": str(previous),
+        "method": prepared.method,
+        "config_sha256": prepared.config_sha256,
+        "seed_package_sha256": prepared.seed_package_sha256,
+        "store_roots": dict(prepared.store_roots),
+    }
+    if args.launch:
+        document["launch"] = LAUNCH.launch(
+            prepared.run_dir, profile=args.profile, round_driver=args.round_driver, price_table=args.price_table
+        )
+    return document
+
+
 def export_champion(args: argparse.Namespace) -> Path:
     from .ledger import export_best
 
@@ -298,6 +335,16 @@ def _parser() -> argparse.ArgumentParser:
     child.add_argument("--profile", required=True)
     child.add_argument("--round-driver", default=DEFAULT_ROUND_DRIVER)
     child.add_argument("--price-table", type=Path)
+    child = sub.add_parser("resume", help="prepare the next run of this run, keeping its method, roles and store")
+    child.add_argument("run_dir", type=Path)
+    child.add_argument("--why", required=True)
+    child.add_argument("--seed", type=Path, help="seed the next run from this package, not the run's workspace")
+    child.add_argument("--objective-config", type=Path, help="a revised objective config for the next run")
+    child.add_argument("--allow-new-store", help="why the next run may open a new measurement store")
+    child.add_argument("--launch", action="store_true", help="start the prepared run detached")
+    child.add_argument("--profile")
+    child.add_argument("--round-driver", default=DEFAULT_ROUND_DRIVER)
+    child.add_argument("--price-table", type=Path)
     child = sub.add_parser("status", help="the run's status, read from its own records")
     child.add_argument("run_dir", type=Path)
     child.add_argument("--poll", action="store_true", help="advance the objective first (dispatches pending jobs)")
@@ -401,6 +448,9 @@ def main(argv: list[str] | None = None) -> int:
             args.run_dir, profile_name=args.profile, round_driver=args.round_driver, price_table=args.price_table
         )
         print(json.dumps(document.get("stopped"), default=str))
+        return 0
+    if args.command == "resume":
+        print(json.dumps(resume_run(args), default=str))
         return 0
     if args.command == "status":
         from . import progress as PROGRESS
@@ -521,4 +571,4 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
-__all__ = ["main", "objective_or_error", "resolve_run", "start", "stop", "successors"]
+__all__ = ["main", "objective_or_error", "resolve_run", "resume_run", "start", "stop", "successors"]

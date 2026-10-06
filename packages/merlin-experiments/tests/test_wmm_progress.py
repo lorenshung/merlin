@@ -165,3 +165,57 @@ def test_the_command_lines_show_a_measured_runs_status(tmp_path, monkeypatch, ca
     assert "the follow deadline passed" in capsys.readouterr().out
     assert TOP.main(["measured", "stop", str(run_dir), "--why", "via the top-level command"]) == 0
     assert json.loads((run_dir / SES.OPERATOR_STOP_FILE).read_text())["why"] == "via the top-level command"
+
+
+def test_resume_prepares_the_next_run_of_a_named_run_from_another_seed(tmp_path, monkeypatch, capsys):
+    """The composite-seed relaunch: the same method, roles and store, seeded from a package that is not
+    the run's own workspace, with where it came from recorded."""
+    monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "out"))
+    monkeypatch.setenv("MERLIN_BUNDLE_CAS", str(tmp_path / "cas"))
+    spec, pin = FX.write_builder(tmp_path)
+    config = tmp_path / "objective.json"
+    config.write_text(
+        json.dumps(
+            {
+                "schema": C.CONFIG_SCHEMA,
+                "builder": {"spec": spec, "sha256": pin},
+                "store": str(tmp_path / "store"),
+                "screen": {"machine": FX.spike_machine(tmp_path), "build_options": {}},
+            }
+        )
+    )
+    argv = ["prepare", "--target", "toy", "--method", "m_nofsm", "--why", "first", "--objective-config", str(config)]
+    MCLI.main([*argv, "--seed", str(FX.package(tmp_path, "seed")), "--prohibited-instruction-role", "loop_descriptor"])
+    first = Path(json.loads(capsys.readouterr().out)["run_dir"])
+    composite = FX.package(tmp_path, "composite", argmax=4)
+    with pytest.raises(SystemExit, match="--profile"):
+        MCLI.main(["resume", str(first), "--why", "x", "--seed", str(composite), "--launch"])
+    assert MCLI.successors(first) == []  # refused before any run was prepared
+    capsys.readouterr()
+    spawned = []
+    monkeypatch.setattr(
+        LAUNCH, "spawn_process", lambda argv, **kw: spawned.append(argv) or SimpleNamespace(pid=os.getpid())
+    )
+    assert (
+        MCLI.main(
+            [
+                "resume",
+                str(first),
+                "--why",
+                "seed the composite",
+                "--seed",
+                str(composite),
+                "--launch",
+                "--profile",
+                "p",
+            ]
+        )
+        == 0
+    )
+    document = json.loads(capsys.readouterr().out)
+    second = Path(document["run_dir"])
+    record = json.loads((second / "resumed_seed.json").read_text())
+    assert record["resumed_from_run"] == str(first) and record["seed_package_sha256"] == package_digest(composite)
+    assert record["prohibited_instruction_roles"] == ["loop_descriptor"] and document["method"] == "m_nofsm"
+    assert document["store_roots"] == json.loads((first / "resumed_seed.json").read_text())["store_roots"]
+    assert spawned and document["launch"]["pid"] == os.getpid() and MCLI.successors(first) == [str(second)]
