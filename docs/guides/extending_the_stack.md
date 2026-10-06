@@ -3,7 +3,7 @@ title: Extending the compiler stack
 kind: guide
 status: current
 owner: compiler
-last_verified: 2026-09-29
+last_verified: 2026-10-05
 related: [phase0_specification, model_lowering, model2mlir, triton_kernels, target_resolution, llvm_integration, simulator_selection]
 code_refs:
   - src/merlin/targetgen/software_spec.py
@@ -155,7 +155,10 @@ Authored inputs still have a role. The SW spec supplies behavior not yet establi
 extraction: operation legality, layouts and tails, numerical semantics, ABI ordering,
 quantization eligibility and host/accelerator transfer rules. Workload policy supplies
 test objectives and selection constraints. Do not duplicate extracted geometry or turn
-an unknown into a default. Validate selected declarations through
+an unknown into a default. Where the facts establish a hardware form, an operation can name
+it with `hardware:` so Phase 0 selection fills its hardware-shaped fields from the selected
+facts; narrow a derived value with a reasoned `restrictions` entry rather than re-authoring
+it (see [Phase 0 specification](phase0_specification.md)). Validate selected declarations through
 `merlin.targetgen.software_spec.load_software_spec`; validation checks structure, not truth.
 
 To improve extraction, audit a small exact RTL cone yourself and compare it with the
@@ -367,6 +370,14 @@ ordered stages and hashes. `lower_module(..., ir_audit="both", workdir=...)` pro
 staged kernel audit; [Triton](triton_kernels.md) exposes the same flag. Exact snapshots
 and available native pass views are distinct: this does not promise a complete module
 after every internal pass. See [Model lowering](model_lowering.md) for the full audit contract.
+
+The whole-model reference route has a matching audit:
+`merlin.runtime.dispatch_runtime.run_model(..., transform_audit="exact")` (or
+`MERLIN_MODEL_TRANSFORM_AUDIT=exact`) retains the exact captured, normalized and outlined
+modules with their normalization recipe. The result records the outlined dispatch inventory
+and the audit's qualification, which replays normalization and outlining from the captured
+bytes and requires identical output; that checks archival integrity and deterministic passes, not value
+equivalence. A `compact` audit keeps only hashes and is refused because it cannot be replayed.
 
 Pass the exact executable MLIR, external weights/biases and manifest, input/golden data,
 entrypoint/ABI description, producer identity and stage digest together. The capture trace
