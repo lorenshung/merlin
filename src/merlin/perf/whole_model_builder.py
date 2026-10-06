@@ -111,6 +111,64 @@ def build(
     phase0_recipe: str | None = None,
     descriptor: str | None = None,
     chunk_ops: int | None = None,
+    lowering_passes: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Build one candidate; every option but the last is :func:`_build`'s.
+
+    ``lowering_passes`` selects Merlin's optional lowering passes for this build by registry name
+    (:mod:`merlin.llvmlower.optional_passes`; ``-name`` turns off one that is on by default). It is a
+    launch config's ``build_options`` entry like the rest, empty by default -- so a config that names
+    none builds exactly as before -- and the selection is recorded in the result's ``notes``.
+    """
+    from merlin.llvmlower import optional_passes
+
+    selection = optional_passes.Selection.parse(list(lowering_passes))
+    with optional_passes.applied(selection) as active:
+        record = _build(
+            package_dir,
+            target=target,
+            out_dir=out_dir,
+            model_capsule=model_capsule,
+            machine=machine,
+            header=header,
+            header_sha256=header_sha256,
+            verify=verify,
+            jobs=jobs,
+            timeout=timeout,
+            harness_overrides=harness_overrides,
+            prohibited_roles=prohibited_roles,
+            decline=decline,
+            allow_passes=allow_passes,
+            allow_regions=allow_regions,
+            phase0_recipe=phase0_recipe,
+            descriptor=descriptor,
+            chunk_ops=chunk_ops,
+        )
+    if active:
+        record.setdefault("notes", {})["lowering_passes"] = active.spell()
+    return record
+
+
+def _build(
+    package_dir: str | Path,
+    *,
+    target: str,
+    out_dir: str | Path,
+    model_capsule: str,
+    machine: str,
+    header: str,
+    header_sha256: str | None = None,
+    verify: str = "on_target",
+    jobs: int | None = None,
+    timeout: int = 600,
+    harness_overrides: list[str] | tuple[str, ...] = (),
+    prohibited_roles: Sequence[str] = (),
+    decline: Sequence[Any] = (),
+    allow_passes: bool = False,
+    allow_regions: bool = False,
+    phase0_recipe: str | None = None,
+    descriptor: str | None = None,
+    chunk_ops: int | None = None,
 ) -> dict[str, Any]:
     """``decline`` (op names / group indices) is CELL MODE's own hook: naming every group outside one
     cell routes them all to the target's library, so only the cell's own groups can move whatever this

@@ -146,7 +146,9 @@ def lower_model(
                 raise exc
             raise enriched from exc
         if static_arena is None:
-            static_arena = bool(_os.environ.get("MERLIN_STATIC_ARENA"))
+            from .optional_passes import switched
+
+            static_arena = switched("static-arena", bool(_os.environ.get("MERLIN_STATIC_ARENA")))
         if static_arena:
             # Bind the emitted heap allocations to one statically planned arena. Kept behind a flag, and
             # applied HERE rather than inside the pass pipeline, because this is the last point the

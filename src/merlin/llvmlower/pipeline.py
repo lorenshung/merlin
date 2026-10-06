@@ -88,7 +88,9 @@ def _sink_deallocs() -> bool:
     read per build instead of frozen at import."""
     import os
 
-    return bool(os.environ.get("MERLIN_SINK_DEALLOCS"))
+    from .optional_passes import switched
+
+    return switched("sink-deallocs", bool(os.environ.get("MERLIN_SINK_DEALLOCS")))
 
 
 #: The pass that moves a dealloc to its last user. Named once: the runner keys the placement CHECK
@@ -1481,7 +1483,11 @@ def lower_to_llvm_ir(
     from .quant_scope import ensure_registered as _register_quant_scope
 
     _register_quant_scope()
-    feats = normalize(features)
+    # `--pass` / `--no-pass` / MERLIN_PASSES (merlin.llvmlower.optional_passes) add or remove the
+    # feature-bound optional passes here, in whichever process lowers; an empty selection changes nothing.
+    from .optional_passes import selected_features
+
+    feats = normalize(selected_features(features))
     if {"lower_roundeven_to_intrinsic", "fuse_quantize_round_convert"} <= feats:
         raise PipelineError(
             "lower_roundeven_to_intrinsic and fuse_quantize_round_convert are alternative exact "

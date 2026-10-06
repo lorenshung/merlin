@@ -1304,54 +1304,13 @@ def main(argv: list[str] | None = None) -> int:
 
     ap = command.parser(_RVV_DTYPES, _RUNS, "k1", ("k1", "zephyr", "spike", "verilator"))
     a = ap.parse_args(argv)
+    if a.list_passes:
+        return command.list_passes(a)
+    selection = command.pass_selection(ap, a)
     command.validate(ap, a)
     run = a.run or ("none" if a.model_build else "k1" if a.target == "rvv" else "spike")
     try:
-        if a.model_build:
-            from .compile.baremetal_model import compile_saved_model
-
-            res = compile_saved_model(
-                capture=a.capture_bundle,
-                package=a.package,
-                board_catalog=a.board_catalog,
-                board=a.board,
-                dts=a.host_dts,
-                output=a.output,
-                target=a.target,
-                run=run,
-                arena_mb=a.arena_mb,
-                timeout_s=a.timeout,
-                reference_file=a.reference_file,
-                rtl_facts=a.rtl_facts,
-            )
-        elif a.model_preflight:
-            from .compile.model_preflight import preflight_model
-
-            res = preflight_model(a.capture_bundle, target=a.target, deployment_dtype=a.deployment_dtype)
-        elif a.target == "rvv":
-            res = compile_rvv(
-                a.workload,
-                a.dtype,
-                run=run,
-                verify=a.verify,
-                package=a.package,
-                auto_capture=a.capture,
-                timeout=a.timeout,
-                harts=a.harts,
-                iters=a.iters,
-                warmup=a.warmup,
-                board=a.board,
-            )
-        else:
-            res = compile_oot(
-                a.workload,
-                target=a.target,
-                run=run,
-                verify=a.verify,
-                package=a.package,
-                timeout=a.timeout,
-                corpus_descriptor=a.corpus_descriptor,
-            )
+        res = _dispatch(a, run, selection)
     except SystemExit:
         raise
     except Exception as e:  # noqa: BLE001 — surface any pipeline error honestly, don't fake a pass
@@ -1362,8 +1321,67 @@ def main(argv: list[str] | None = None) -> int:
             "status": "error",
             "error": f"{type(e).__name__}: {e}",
         }
-
     return command.report(a, res)
+
+
+def _dispatch(a, run: str, selection) -> dict:
+    """The selected workflow, run with the optional lowering passes ``selection`` names."""
+    from .llvmlower import optional_passes
+
+    with optional_passes.applied(selection) as passes:
+        res = _workflow(a, run)
+    if passes:
+        res["lowering_passes"] = passes.spell()
+    return res
+
+
+def _workflow(a, run: str) -> dict:
+    """Dispatch to the workflow the arguments select."""
+    if a.model_build:
+        from .compile.baremetal_model import compile_saved_model
+
+        return compile_saved_model(
+            capture=a.capture_bundle,
+            package=a.package,
+            board_catalog=a.board_catalog,
+            board=a.board,
+            dts=a.host_dts,
+            output=a.output,
+            target=a.target,
+            run=run,
+            arena_mb=a.arena_mb,
+            timeout_s=a.timeout,
+            reference_file=a.reference_file,
+            rtl_facts=a.rtl_facts,
+        )
+    elif a.model_preflight:
+        from .compile.model_preflight import preflight_model
+
+        return preflight_model(a.capture_bundle, target=a.target, deployment_dtype=a.deployment_dtype)
+    elif a.target == "rvv":
+        return compile_rvv(
+            a.workload,
+            a.dtype,
+            run=run,
+            verify=a.verify,
+            package=a.package,
+            auto_capture=a.capture,
+            timeout=a.timeout,
+            harts=a.harts,
+            iters=a.iters,
+            warmup=a.warmup,
+            board=a.board,
+        )
+    else:
+        return compile_oot(
+            a.workload,
+            target=a.target,
+            run=run,
+            verify=a.verify,
+            package=a.package,
+            timeout=a.timeout,
+            corpus_descriptor=a.corpus_descriptor,
+        )
 
 
 if __name__ == "__main__":

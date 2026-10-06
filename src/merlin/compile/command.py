@@ -116,7 +116,46 @@ def parser(
     )
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--json", action="store_true", help="emit the result dict as JSON")
+    ap.add_argument(
+        "--list-passes",
+        action="store_true",
+        help="list the optional lowering passes (stage, exactness, default, effect) and exit",
+    )
+    ap.add_argument(
+        "--pass",
+        dest="passes",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="enable an optional lowering pass by name (repeatable; see --list-passes)",
+    )
+    ap.add_argument(
+        "--no-pass",
+        dest="no_passes",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="disable an optional lowering pass that is on by default (repeatable)",
+    )
     return ap
+
+
+def pass_selection(ap: argparse.ArgumentParser, a: argparse.Namespace):
+    """The optional-pass selection ``--pass``/``--no-pass`` name (``ap.error`` on an invalid one)."""
+    from ..llvmlower import optional_passes
+
+    try:
+        return optional_passes.Selection.of(a.passes, a.no_passes)
+    except optional_passes.PassSelectionError as exc:
+        ap.error(str(exc))
+
+
+def list_passes(a: argparse.Namespace) -> int:
+    """``--list-passes``: the registry as a table, or as JSON with ``--json``."""
+    from ..llvmlower import optional_passes
+
+    print(json.dumps(optional_passes.describe(), indent=2) if a.json else optional_passes.table())
+    return 0
 
 
 def validate(ap: argparse.ArgumentParser, a: argparse.Namespace) -> None:
@@ -170,7 +209,7 @@ def report(a: argparse.Namespace, res: dict) -> int:
             + (f"  gate_ok={res['verify'].get('gate_ok')}" if res.get("verify") else "")
             + (f"  reason={res.get('reason') or res.get('error')}" if res.get("reason") or res.get("error") else "")
         )
-        for k in ("binary", "cycles", "vlen", "bundle", "package"):
+        for k in ("binary", "cycles", "vlen", "bundle", "package", "lowering_passes"):
             if res.get(k) is not None:
                 print(f"    {k}: {res[k]}")
     return 0 if res.get("status") in ("compiled", "ran", "verified", "verified_complete_output") else 1
