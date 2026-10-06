@@ -909,7 +909,7 @@ class WholeModelObjective:
         device = ((self.screen_reference or {}).get("device") or {}).get("binary_sha256")
         if not device and readings:
             device = readings[-1]["device"]
-        document = NOISE.machine_noise(readings, device=device)
+        document = NOISE.machine_noise(readings, device=device, controls=NOISE.control_readings(roots))
         self._machine_noise_cache = (key, document)
         return document
 

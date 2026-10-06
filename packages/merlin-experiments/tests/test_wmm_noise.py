@@ -89,6 +89,52 @@ def test_the_drift_tolerance_is_never_narrower_than_declared_and_widens_to_the_m
     assert unknown["tolerance"] == 0.02 and unknown["flag"] == N.NOT_ESTABLISHED
 
 
+def _batched(path: Path, *, device: str, batch: str, ratio: float, ok: bool = True) -> None:
+    _reading(
+        path,
+        device=device,
+        cycles=1,
+        day="20261006",
+        batch={"batch": batch, "size": 8, "control": {"ok": ok, "ratio": ratio}},
+    )
+
+
+def test_the_stock_boards_measured_control_readings(tmp_path):
+    """The stock board, as measured 2026-10: the vendor control's ELF alone on Oct 1 (job 1451) and on
+    Oct 6 (job 1916), and inside the Oct 6 batch (job 1939, ratio 1.0108).  No two solo readings share a
+    day, so the run-to-run noise is NOT established and is flagged -- but the 2.47% the machine moved
+    between the two solo runs is the margin, not the 0.1% floor."""
+    store = tmp_path / "store"
+    _reading(store / "job1451", device=STOCK, cycles=30_214_616, day="20261001")
+    _reading(store / "job1916", device=STOCK, cycles=29_486_974, day="20261006")
+    _batched(store / "job1939_candidate", device=STOCK, batch="b1939", ratio=1.0108)
+    noise = N.machine_noise(N.solo_readings([store]), device=STOCK, controls=N.control_readings([store]))
+    assert not noise["established"] and noise["flag"] == N.NOT_ESTABLISHED
+    assert noise["cross_day"]["max"] == round((30_214_616 - 29_486_974) / 29_486_974, 6) == 0.024677
+    assert noise["control_in_batch"] == {"pairs": 1, "max": 0.0108, "median": 0.0108}
+    margin = N.margin(noise, floor=0.001)
+    assert margin["margin"] == 0.024677 and margin["basis"] == "cross_day_solo_spread"
+    assert margin["flag"] == N.NOT_ESTABLISHED
+    # The Oct 6 batch's control against the same-day Oct 6 solo: within the declared 2%, flagged as unestablished.
+    today = N.drift_tolerance(noise, declared=0.02, same_day=True)
+    assert today["tolerance"] == 0.02 and today["flag"] == N.NOT_ESTABLISHED and abs(1.0108 - 1) <= today["tolerance"]
+    # Against the five-day-old Oct 1 solo reading the machine's own measured drift is the bound.
+    stale = N.drift_tolerance(noise, declared=0.02, same_day=False)
+    assert stale["tolerance"] == 0.024677 and stale["basis"] == "cross_day_solo_spread"
+
+
+def test_a_drifted_batch_control_is_not_the_machines_noise(tmp_path):
+    """MUTATION: a control that did NOT hold must not widen anything -- the drift rule exists to catch it."""
+    store = tmp_path / "store"
+    _batched(store / "held", device=STOCK, batch="b1", ratio=1.004)
+    _batched(store / "drifted", device=STOCK, batch="b2", ratio=1.09, ok=False)
+    _batched(store / "other_board", device=LEAN, batch="b3", ratio=1.05)
+    noise = N.machine_noise([], device=STOCK, controls=N.control_readings([store]))
+    assert noise["control_in_batch"] == {"pairs": 1, "max": 0.004, "median": 0.004}
+    tolerance = N.drift_tolerance(noise, declared=0.02, same_day=True)
+    assert tolerance["tolerance"] == 0.02  # control readings never set the drift bound
+
+
 class _Screen:
     """The objective's view of a screen store: its root and its (empty) job list."""
 
@@ -133,4 +179,5 @@ def test_a_machine_without_two_same_day_repeats_is_flagged_in_the_summary(tmp_pa
     objective = O.WholeModelObjective(screen=_Screen(root), screen_reference=None)
     noise = objective.summary()["noise"]
     assert noise["established"] is False and noise["flag"] == N.NOT_ESTABLISHED
-    assert noise["margin"] == O.NOISE_FLOOR and noise["cross_day"]["max"] == 0.1
+    # Flagged, and still not the floor: the 10% the machine moved between the two days is the margin.
+    assert noise["margin"] == 0.1 and noise["basis"] == "cross_day_solo_spread" and noise["cross_day"]["max"] == 0.1

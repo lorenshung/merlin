@@ -324,7 +324,9 @@ def _machine_noise(root: Path, control: Mapping[str, Any], device: str | None) -
     from . import noise as NOISE
 
     extra = [Path(str(control["solo_result"]))] if control.get("solo_result") else []
-    return NOISE.machine_noise(NOISE.solo_readings([root], extra=extra), device=device)
+    return NOISE.machine_noise(
+        NOISE.solo_readings([root], extra=extra), device=device, controls=NOISE.control_readings([root])
+    )
 
 
 def _control_variant(root: Path, control: Mapping[str, Any], variants: list[dict[str, Any]]):
