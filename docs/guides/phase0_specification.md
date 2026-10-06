@@ -3,7 +3,7 @@ title: Defining and inspecting Phase 0 inputs
 kind: guide
 status: current
 owner: targetgen
-last_verified: 2026-10-05
+last_verified: 2026-10-06
 related: [generating_capsules, adding_a_target, integrations]
 code_refs:
   - src/merlin/targetgen/software_spec.py
@@ -141,7 +141,7 @@ software-visible behavior. It is not a second handwritten hardware geometry tabl
 | Selected capability contract | Target ISA/runner intent and extraction anchors that RTL facts cannot establish; explicit same-target Phase 0 input | Executable OOT support, extracted geometry or certification |
 | Selected OOT provider/backend config | Runtime implementation, ISA vocabulary/protocol ownership, extraction anchors and callable references | A second mandatory software spec to hand-maintain |
 | Hardware selection | Which evidence is required and which source/configuration is selected | A capability declaration or certificate |
-| Extracted RTL facts | Array and memory geometry, interfaces, observed decoder fields, datatype evidence and structural timing where established | Complete operation latency, numerical behavior, endpoint kind or software legality |
+| Extracted RTL facts | Array and memory geometry, interfaces, observed decoder fields, datatype evidence (the array cell's operand and accumulator, and the element format of a lane engine beside it) and structural timing where established | Complete operation latency, numerical behavior, endpoint kind or software legality |
 | Recipe/workload policy | Application roster, semantic seeds, tolerances, oracle tiers, holdouts and performance objectives | Hardware facts or generated capsules |
 
 The authored spec holds `operations`, `numerical_semantics`, `quantization`,
