@@ -2,7 +2,7 @@
 title: "Justifying Phase 2 tests from Phase 0 evidence"
 kind: guide
 status: current
-last_verified: 2026-09-27
+last_verified: 2026-10-05
 owner: experiments
 related: [phase0_specification, generating_capsules, perf_phase2_wiring]
 code_refs:
@@ -45,6 +45,13 @@ negative control, statistical significance or a speedup. Those claims require co
 identity-matched correctness and timing cells and the family's declared analyzer. In particular,
 instruction counts from a functional simulator do not substitute for cycle measurements from the
 selected timing engine.
+
+The shared performance template resolves correctness and timing oracles from the selected
+target's tier policy rather than baking in a simulator name. Its form-performance `PW` members
+derive form classes and source-convolution windows from the declared iteration workloads, then
+plan paired candidate and target-support reference measurements. A generated pair, even with a
+declared acceptance analyzer and replicate band, is still an unmeasured hypothesis; separate
+measured evidence must establish both arms on identical demand and the selected timing oracle.
 
 Read `test_justification.json` next to a frozen `performance_corpus_manifest.json`. First inspect
 `families_not_generated`, then each member's workload and support status. A missing family may be

@@ -126,9 +126,7 @@ def test_runtime_transform_audit_retains_exact_replayable_stages(tmp_path):
     assert index_path is not None
     index = json.loads(index_path.read_text(encoding="utf-8"))
     assert index["outcome"] == "completed"
-    assert [stage["name"] for stage in index["stages"]] == [
-        "captured-model", "normalized-model", "outlined-model"
-    ]
+    assert [stage["name"] for stage in index["stages"]] == ["captured-model", "normalized-model", "outlined-model"]
     assert index["stages"][0]["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
     assert all(
         hashlib.sha256((index_path.parent / stage["file"]).read_bytes()).hexdigest() == stage["sha256"]
@@ -158,8 +156,12 @@ def test_model_transform_audit_replays_normalization_from_captured_ir(tmp_path):
     }
     normalized = parse_mlir_text(CHAIN)
     index_path = record_model_transform_audit(
-        source, tmp_path, normalized, outline_dispatches(normalized),
-        enabled=True, normalization_recipe=recipe,
+        source,
+        tmp_path,
+        normalized,
+        outline_dispatches(normalized),
+        enabled=True,
+        normalization_recipe=recipe,
     )
     assert qualify_model_transform_audit(index_path)["normalization_replay"] == "matched"
 
@@ -167,8 +169,12 @@ def test_model_transform_audit_replays_normalization_from_captured_ir(tmp_path):
     # replay of the declared pass sequence, even when all recorded hashes match.
     changed = parse_mlir_text(CHAIN.replace("arith.constant 0.0", "arith.constant 1.0", 1))
     bad_index = record_model_transform_audit(
-        source, tmp_path, changed, outline_dispatches(changed),
-        enabled=True, normalization_recipe=recipe,
+        source,
+        tmp_path,
+        changed,
+        outline_dispatches(changed),
+        enabled=True,
+        normalization_recipe=recipe,
     )
     with pytest.raises(ValueError, match="normalization differs from replay"):
         qualify_model_transform_audit(bad_index)
@@ -194,13 +200,21 @@ def test_model_transform_audit_replays_the_int8_rewrite_and_abstains_on_custom_s
         "selection_policy": "all",
     }
     index_path = record_model_transform_audit(
-        source, tmp_path, normalized, outline_dispatches(normalized),
-        enabled=True, normalization_recipe=recipe,
+        source,
+        tmp_path,
+        normalized,
+        outline_dispatches(normalized),
+        enabled=True,
+        normalization_recipe=recipe,
     )
     assert qualify_model_transform_audit(index_path)["normalization_replay"] == "matched"
     custom_index = record_model_transform_audit(
-        source, tmp_path, normalized, outline_dispatches(normalized),
-        enabled=True, normalization_recipe={**recipe, "selection_policy": "custom_unreplayable"},
+        source,
+        tmp_path,
+        normalized,
+        outline_dispatches(normalized),
+        enabled=True,
+        normalization_recipe={**recipe, "selection_policy": "custom_unreplayable"},
     )
     assert qualify_model_transform_audit(custom_index)["normalization_replay"] == "unsupported_custom_selection"
 

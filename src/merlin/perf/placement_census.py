@@ -237,9 +237,13 @@ def census(
         asked = region if judged[index] == region.in_dtype else replace(region, in_dtype=judged[index])
         verdict = (
             E.is_eligible(asked, cap_map, undetermined=undetermined, readout=readout)
-            if demands[index].source_formats_complete else E.EligibilityVerdict(
-                False, region.resolved_family(), "captured input roles are incomplete; precision unverified",
-                undetermined=True, refusal="input_dtype",
+            if demands[index].source_formats_complete
+            else E.EligibilityVerdict(
+                False,
+                region.resolved_family(),
+                "captured input roles are incomplete; precision unverified",
+                undetermined=True,
+                refusal="input_dtype",
             )
         )
         unit = unit_of.get(str(index))
@@ -453,8 +457,7 @@ def planned_outlined_alignment(module: Any, target: str, outlined: Any) -> dict[
         }
     one_op_outline = not grouped
     if one_op_outline and (
-        len(roots) != len(dispatches)
-        or any(op.name != dispatch.root_op for op, dispatch in zip(roots, dispatches))
+        len(roots) != len(dispatches) or any(op.name != dispatch.root_op for op, dispatch in zip(roots, dispatches))
     ):
         return {
             "schema": "planned_outlined_alignment_v1",

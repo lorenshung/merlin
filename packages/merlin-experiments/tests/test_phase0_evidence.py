@@ -44,9 +44,9 @@ def test_mx_reference_inventory_selects_only_loaded_file(tmp_path, monkeypatch):
     unrelated.parent.mkdir()
     unrelated.write_text("VALUE = 2\n")
     document = {"numerical_semantics": {"model": {"engine": "mx_block_reference"}}}
-    assert evidence._reference_inventory_members(
-        "numerical_model", tmp_path, document, {".py"}, {"runs"}
-    ) == (reference,)
+    assert evidence._reference_inventory_members("numerical_model", tmp_path, document, {".py"}, {"runs"}) == (
+        reference,
+    )
     monkeypatch.setenv("MERLIN_MLC_DIR", str(tmp_path))
     from merlin_experiments.phase0.numerics import _mx_ref
 
@@ -71,8 +71,13 @@ def _selection(monkeypatch, tmp_path, body=None):
         json.dumps({"facts": body or {"arrays": [{"rows": 4, "cols": 4}], "memories": []}}, indent=4).encode() + b"\n"
     )
     info = target_registry.TargetInfo(
-        name="fixture", kind="external", base=provider, contract_path=contract,
-        dialect_plan_path=provider / "contracts/dialect_plan.yaml", facts_path=raw, backend="fixture",
+        name="fixture",
+        kind="external",
+        base=provider,
+        contract_path=contract,
+        dialect_plan_path=provider / "contracts/dialect_plan.yaml",
+        facts_path=raw,
+        backend="fixture",
     )
     monkeypatch.setattr(target_registry, "resolve", lambda target: info)
     monkeypatch.setattr(facts, "find_facts", lambda target, explicit=None: raw)
@@ -85,14 +90,24 @@ def _selection(monkeypatch, tmp_path, body=None):
 def test_software_fact_derivation_binds_legacy_readers_to_selected_bytes(monkeypatch, tmp_path):
     _, raw, _ = _selection(monkeypatch, tmp_path)
     software = tmp_path / "software.yaml"
-    software.write_text(yaml.safe_dump({
-        "schema": "merlin.software_spec.v1", "target": "fixture", "status": "reviewed",
-        "numerical_semantics": {
-            "model": {"engine": "integer_reference"}, "operand_dtype": "int8", "accumulator_dtype": "i32",
-            "readout_dtype": "i32", "subnormal_operand_flush": False, "overflow": "wrap_internal_mac",
-        },
-        "operations": {"contraction": {"placement": "accelerator", "dtypes": ["int8"]}},
-    }))
+    software.write_text(
+        yaml.safe_dump(
+            {
+                "schema": "merlin.software_spec.v1",
+                "target": "fixture",
+                "status": "reviewed",
+                "numerical_semantics": {
+                    "model": {"engine": "integer_reference"},
+                    "operand_dtype": "int8",
+                    "accumulator_dtype": "i32",
+                    "readout_dtype": "i32",
+                    "subnormal_operand_flush": False,
+                    "overflow": "wrap_internal_mac",
+                },
+                "operations": {"contraction": {"placement": "accelerator", "dtypes": ["int8"]}},
+            }
+        )
+    )
     from merlin.llvmlower.device_shim import tile_edge_for
     from merlin.targetgen import spec_fact_drift
 
@@ -211,6 +226,89 @@ def test_phase0_accepts_symlink_alias_for_byte_bound_rtl_production(monkeypatch,
     assert any(
         row["component"] == "source-consistency" and row["status"] == "contradiction" for row in malformed.diagnostics
     )
+
+
+def test_phase0_snapshots_selected_elaboration_inputs(monkeypatch, tmp_path):
+    _, facts_path, _ = _selection(monkeypatch, tmp_path)
+    source_root = tmp_path / "selected"
+    source_root.mkdir()
+    config = source_root / "configs.py"
+    config.write_text("class SelectedConfig: pass\n")
+    tool = source_root / "elaborator"
+    tool.write_text("selected tool bytes\n")
+    runs = []
+    for index in (1, 2):
+        run = tmp_path / f"run{index}"
+        run.mkdir()
+        firrtl = run / "selected.fir"
+        firrtl.write_text("circuit Top :\n  module Top :\n")
+        (run / "stdout.log").write_text("")
+        (run / "stderr.log").write_text("")
+        runs.append(
+            {
+                "firrtl": str(firrtl),
+                "firrtl_sha256": source_selection.digest(firrtl),
+                "stdout_sha256": source_selection.digest(run / "stdout.log"),
+                "stderr_sha256": source_selection.digest(run / "stderr.log"),
+            }
+        )
+    receipt = tmp_path / "elaboration.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "source": {
+                    "root": str(source_root),
+                    "config_file": "configs.py",
+                    "config_sha256": source_selection.digest(config),
+                },
+                "tool": {"path": str(tool), "sha256": source_selection.digest(tool)},
+                "runs": runs,
+            }
+        )
+    )
+    core = tmp_path / "core.hw.mlir"
+    core.write_text("module {}\n")
+    bundle = tmp_path / "source-selection.json"
+    bundle.write_text(
+        json.dumps(
+            {
+                "schema": source_selection.SCHEMA,
+                "target": "fixture",
+                "sources": {
+                    role: {"path": str(core), "sha256": source_selection.digest(core)}
+                    for role in ("core_hw", "soc_hw", "firrtl", "hierarchy")
+                },
+                "production": {"elaboration": {"path": str(receipt), "sha256": source_selection.digest(receipt)}},
+            }
+        )
+    )
+    monkeypatch.setattr(
+        source_selection,
+        "production_consistency",
+        lambda selected: {
+            "status": "verified",
+            "sources": [{"role": role, **row} for role, row in selected["sources"].items()],
+            "elaboration": {"status": "reproduced_exact_firrtl"},
+        },
+    )
+    facts_path.write_text(
+        json.dumps(
+            {
+                "inputs": {"target": "fixture", "source_bundle_path": str(bundle)},
+                "facts": {"arrays": [{"rows": 4, "cols": 4}], "memories": []},
+            }
+        )
+    )
+    selected = evidence.select_evidence("fixture", facts_path=facts_path)
+    observed = {source.role for source in selected.source_snapshots}
+    assert {
+        "rtl-elaboration-receipt",
+        "rtl-elaboration-config",
+        "rtl-elaboration-tool",
+        "rtl-elaboration-output",
+        "rtl-elaboration-stdout",
+        "rtl-elaboration-stderr",
+    } <= observed
 
 
 def test_rtl_receipt_alias_comparison_refuses_absent_files(tmp_path):

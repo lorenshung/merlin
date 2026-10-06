@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
+import shlex
+import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-import shlex
-import subprocess
-
 
 _RISCV_ABIS = frozenset({"ilp32", "ilp32e", "ilp32f", "ilp32d", "lp64", "lp64f", "lp64d"})
 
@@ -145,15 +144,17 @@ class HarnessBuildRecipe:
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise self.error_cls(f"cannot query selected compiler's effective ABI: {exc}") from exc
             if answer.returncode == 0:
-                values = [parts[1] for line in answer.stdout.splitlines()
-                          if (parts := line.split()) and len(parts) == 2 and parts[0] == "-mabi="]
+                values = [
+                    parts[1]
+                    for line in answer.stdout.splitlines()
+                    if (parts := line.split()) and len(parts) == 2 and parts[0] == "-mabi="
+                ]
                 if len(values) != 1:
                     raise self.error_cls("selected compiler returned no unique effective -mabi")
                 abi = values[0]
             else:
                 # Clang reports its resolved cc1 target ABI in a dry-run driver trace.
-                command = [str(self.compiler), *self.cflags, "-###", "-x", "c", "-c",
-                           "/dev/null", "-o", "/dev/null"]
+                command = [str(self.compiler), *self.cflags, "-###", "-x", "c", "-c", "/dev/null", "-o", "/dev/null"]
                 try:
                     answer = subprocess.run(command, capture_output=True, text=True, timeout=10)
                 except (OSError, subprocess.TimeoutExpired) as exc:
@@ -165,14 +166,16 @@ class HarnessBuildRecipe:
                     args = shlex.split(line)
                     if "-cc1" not in args:
                         continue
-                    values += [args[index + 1] for index, arg in enumerate(args[:-1])
-                               if arg == "-target-abi"]
+                    values += [args[index + 1] for index, arg in enumerate(args[:-1]) if arg == "-target-abi"]
                 if len(values) != 1:
                     raise self.error_cls("selected compiler returned no unique effective -mabi")
                 abi = values[0]
         march = self.march().partition("=")[2]
-        if abi not in _RISCV_ABIS or not march.startswith(("rv32", "rv64")) or not abi.startswith(
-                "ilp32" if march.startswith("rv32") else "lp64"):
+        if (
+            abi not in _RISCV_ABIS
+            or not march.startswith(("rv32", "rv64"))
+            or not abi.startswith("ilp32" if march.startswith("rv32") else "lp64")
+        ):
             raise self.error_cls(f"build recipe has invalid -mabi={abi!s} for -march={march}")
         return f"-mabi={abi}"
 

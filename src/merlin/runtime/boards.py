@@ -168,10 +168,16 @@ _ENUMS: dict[str, tuple[str, ...]] = {
     "simulator": ("spike",),
 }
 #: Fields written as byte sizes, which the registry may spell "<n> KiB|MiB|GiB" for legibility.
-_SIZE_FIELDS = frozenset({
-    "dram_bytes", "code_reserve", "zephyr_default_ram_bytes", "zephyr_link_limit_bytes",
-    "zephyr_external_ram_bytes", "zephyr_external_tail_reserve_bytes",
-})
+_SIZE_FIELDS = frozenset(
+    {
+        "dram_bytes",
+        "code_reserve",
+        "zephyr_default_ram_bytes",
+        "zephyr_link_limit_bytes",
+        "zephyr_external_ram_bytes",
+        "zephyr_external_tail_reserve_bytes",
+    }
+)
 _SIZE_UNITS = {"KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30}
 
 
@@ -241,9 +247,7 @@ def load_boards(path: str | Path | None = None) -> dict[str, Board]:
 
     selected = path if path is not None else os.environ.get(BOARD_CATALOG_ENV)
     if not selected:
-        raise BoardRegistryError(
-            f"no board catalog selected; set {BOARD_CATALOG_ENV} to a target-owned YAML file"
-        )
+        raise BoardRegistryError(f"no board catalog selected; set {BOARD_CATALOG_ENV} to a target-owned YAML file")
     p = Path(selected).expanduser().resolve()
     if not p.is_file():
         raise BoardRegistryError(f"no board catalog at {p}; check {BOARD_CATALOG_ENV}")
@@ -280,10 +284,15 @@ def load_boards(path: str | Path | None = None) -> dict[str, Board]:
             raise BoardRegistryError(f"{where}: missing required fact(s) {missing}")
         conditional = []
         if kwargs["flow"] == FLOW_ZEPHYR:
-            conditional.extend((
-                "ram_label", "fpu_sharing", "zephyr_vector_ext",
-                "zephyr_default_ram_bytes", "zephyr_link_limit_bytes",
-            ))
+            conditional.extend(
+                (
+                    "ram_label",
+                    "fpu_sharing",
+                    "zephyr_vector_ext",
+                    "zephyr_default_ram_bytes",
+                    "zephyr_link_limit_bytes",
+                )
+            )
             if kwargs["console"] == CONSOLE_UART:
                 conditional.append("uart_label")
         if kwargs["flow"] == FLOW_BAREMETAL:
@@ -293,7 +302,11 @@ def load_boards(path: str | Path | None = None) -> dict[str, Board]:
         missing = [key for key in conditional if kwargs.get(key) is None or kwargs.get(key) == ""]
         if missing:
             raise BoardRegistryError(f"{where}: missing required fact(s) for {kwargs['flow']}: {missing}")
-        if kwargs["flow"] == FLOW_ZEPHYR and kwargs.get("vector_harts") is None and kwargs.get("vector_hart_ids") is None:
+        if (
+            kwargs["flow"] == FLOW_ZEPHYR
+            and kwargs.get("vector_harts") is None
+            and kwargs.get("vector_hart_ids") is None
+        ):
             raise BoardRegistryError(f"{where}: declare vector_harts or vector_hart_ids for a Zephyr board")
         if kwargs.get("host_dts_sha256") is not None and (
             len(kwargs["host_dts_sha256"]) != 64

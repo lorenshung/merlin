@@ -206,7 +206,9 @@ def test_codex_continuation_retains_explicit_binary_and_home(tmp_path, monkeypat
     monkeypatch.setattr(driver, "cli_version", lambda binary: "offline")
     monkeypatch.setattr(driver, "_CONTINUE_MAX_TURNS", 2)
     monkeypatch.setattr(driver, "_CONTINUE_MIN_S", 0)
-    monkeypatch.setattr(driver, "prepare_codex_home", lambda home, **kw: homes.append(home) or {"config_sha256": "offline-fixture"})
+    monkeypatch.setattr(
+        driver, "prepare_codex_home", lambda home, **kw: homes.append(home) or {"config_sha256": "offline-fixture"}
+    )
     monkeypatch.setattr(driver, "_verify_frozen_config", lambda *args: None)
     monkeypatch.setattr(driver, "_preflight_candidate_sandbox", lambda *args: None)
     monkeypatch.setattr(driver, "codex_runtime_binds", lambda home: binds.append(home) or [])

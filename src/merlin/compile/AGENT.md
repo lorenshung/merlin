@@ -15,6 +15,7 @@ Compile machinery behind ``merlin-compile``: bundles, the host lane, capacity, a
 - `mesh_backend.py` — Plumbing for running a layer through a target's out-of-tree backend package.
 - `mesh_model.py` — Drivers that run every matmul layer of a whole model, or of an int8 layer chain, on the mesh.
 - `mesh_reference.py` — The host-side reference a mesh tile is checked against.
+- `route_before_build.py` — Source-derived placement and device routing selected before whole-model compilation.
 
 <!-- Purpose/Modules derived from docstrings via build_tools/scripts/gen_package_docs.py.
      Add hand-written notes (invariants, gotchas) below. -->
@@ -24,8 +25,11 @@ Compile machinery behind ``merlin-compile``: bundles, the host lane, capacity, a
 - `merlin.compile_cli` is the front door: `compile_rvv`, `compile_model`, `compile_oot`, `main`, and the
   steps only they use (`_ensure_bundle`, `_workload_features`, `_session_correctness_gate`,
   `_summarize_route_plan`) stay DEFINED there, because other modules look them up through it at call
-  time (`compare.study`, `targetgen.capsule_runner`) and tests replace them there. Everything this
-  package defines is re-exported by `compile_cli` for callers.
+  time (`compare.study`, `targetgen.capsule_runner`) and tests replace them there. The
+  exact historical facade imports from the extracted modules are re-exported by `compile_cli`
+  for existing callers. New module APIs keep their helpers local rather than growing the CLI
+  facade's import surface. The compatibility test pins those historical names explicitly;
+  its monkeypatch scan still discovers all compile modules, including nested packages.
   `command.py` holds only the argument parsing, validation and report `main` calls; it dispatches
   nothing itself, so no test needs to patch it.
 - Patch a name in the module that DEFINES it. A re-export (in `compile_cli`, or a sibling imported by

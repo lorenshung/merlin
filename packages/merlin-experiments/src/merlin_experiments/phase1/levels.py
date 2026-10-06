@@ -10,31 +10,54 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-
 LEVELS = (
     {
-        "id": "EL1", "name": "Raw baseline", "bundle_arm": "raw_baseline",
-        "runner_arm": "raw_baseline", "treatment": "baseline", "parent": None,
+        "id": "EL1",
+        "name": "Raw baseline",
+        "bundle_arm": "raw_baseline",
+        "runner_arm": "raw_baseline",
+        "treatment": "baseline",
+        "parent": None,
     },
     {
-        "id": "EL2", "name": "C++ infrastructure", "bundle_arm": "cpp_merlininfra",
-        "runner_arm": "cpp_merlininfra", "treatment": "baseline", "parent": "EL1",
+        "id": "EL2",
+        "name": "C++ infrastructure",
+        "bundle_arm": "cpp_merlininfra",
+        "runner_arm": "cpp_merlininfra",
+        "treatment": "baseline",
+        "parent": "EL1",
     },
     {
-        "id": "EL3", "name": "Merlin-assisted", "bundle_arm": "merlin_assisted",
-        "runner_arm": "merlin_assisted", "treatment": "baseline", "parent": "EL2",
+        "id": "EL3",
+        "name": "Merlin-assisted",
+        "bundle_arm": "merlin_assisted",
+        "runner_arm": "merlin_assisted",
+        "treatment": "baseline",
+        "parent": "EL2",
     },
     {
-        "id": "EL4", "name": "RTL-informed Merlin", "bundle_arm": "merlin_rtlchecks",
-        "runner_arm": "merlin_assisted", "treatment": "rtlchecks", "parent": "EL3",
+        "id": "EL4",
+        "name": "RTL-informed Merlin",
+        "bundle_arm": "merlin_rtlchecks",
+        "runner_arm": "merlin_assisted",
+        "treatment": "rtlchecks",
+        "parent": "EL3",
     },
     {
-        "id": "EL3-E", "name": "EGraph variant", "bundle_arm": "merlin_eqsat",
-        "runner_arm": "merlin_assisted", "treatment": "baseline", "parent": "EL3",
+        "id": "EL3-E",
+        "name": "EGraph variant",
+        "bundle_arm": "merlin_eqsat",
+        "runner_arm": "merlin_assisted",
+        "treatment": "baseline",
+        "parent": "EL3",
     },
     {
-        "id": "EL4-V", "name": "RTL + verification tools (baseline feedback)", "bundle_arm": "merlin_verify",
-        "runner_arm": "merlin_assisted", "treatment": "baseline", "parent": "EL4",
+        "id": "EL4-V",
+        "name": "RTL + verification tools (baseline feedback)",
+        "bundle_arm": "merlin_verify",
+        "runner_arm": "merlin_assisted",
+        "treatment": "baseline",
+        "parent": "EL4",
     },
 )
 

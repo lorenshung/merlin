@@ -371,9 +371,9 @@ def test_release_derives_admission_from_staged_members(release_fixture, capsys, 
 
 def test_release_rejects_absent_selected_llvm(release_fixture, capsys):
     (release_fixture["root"] / "third_party/llvm-install").rmdir()
-    assert main(
-        ["run", str(release_fixture["definition"]), "--phase", "0", "--run-dir", str(release_fixture["run"])]
-    ) == 0
+    assert (
+        main(["run", str(release_fixture["definition"]), "--phase", "0", "--run-dir", str(release_fixture["run"])]) == 0
+    )
     capsys.readouterr()
     assert main(["corpus", "prepare", str(release_fixture["run"]), "--output", str(release_fixture["release"])]) == 2
     failure = json.loads((release_fixture["release"] / "private/failure.json").read_text())
@@ -764,7 +764,7 @@ def test_prepared_release_binds_exact_generated_facts_to_rtl_arm(release_fixture
         derivation.read_text()
         + "facts=output/'hardware/effective-views/loaded-facts.json'\n"
         + "facts.parent.mkdir(parents=True)\n"
-        + "facts.write_text('{\"facts\":{\"target\":\"fixture-device\",\"selection_marker\":\"phase0\"}}')\n"
+        + 'facts.write_text(\'{"facts":{"target":"fixture-device","selection_marker":"phase0"}}\')\n'
     )
     _prepare(fixture, capsys)
     experiment = fixture["release"] / "payload/experiment"
@@ -860,7 +860,8 @@ def test_selected_capability_view_uses_verified_phase0_export(monkeypatch, tmp_p
     stale.write_text('{"name":"fixture-device","selection_marker":"stale"}\n')
     raw = member.read_bytes()
     monkeypatch.setattr(
-        evidence, "load_exported_evidence",
+        evidence,
+        "load_exported_evidence",
         lambda _: SimpleNamespace(archived_artifacts=(("software/contract.json", raw),)),
     )
     plan = {"phase0_evidence_bundle": str(bundle), "target": "fixture-device"}
@@ -915,7 +916,7 @@ def test_prepared_release_materializes_declared_hardware_links(release_fixture, 
         derivation.read_text()
         + "facts=output/'hardware/effective-views/loaded-facts.json'\n"
         + "facts.parent.mkdir(parents=True)\n"
-        + "facts.write_text('{\"facts\":{\"target\":\"fixture-device\"}}')\n"
+        + 'facts.write_text(\'{"facts":{"target":"fixture-device"}}\')\n'
     )
     hardware = root / "public-hardware"
     hardware.mkdir()
@@ -952,9 +953,7 @@ def test_prepared_release_materializes_declared_hardware_links(release_fixture, 
         ).read_text()
     )
     assert str(staged) in {row["path"] for row in bundle["allowed"]}
-    assert bundle["selected_rtl_facts_file"] == str(
-        fixture["release"] / "payload/experiment/rtl_facts/facts.json"
-    )
+    assert bundle["selected_rtl_facts_file"] == str(fixture["release"] / "payload/experiment/rtl_facts/facts.json")
     sealed = _seal(fixture, report, capsys)
     definition = _phase1_definition(fixture, sealed)
     assert main(["preflight", str(definition), "--phase", "1"]) == 0

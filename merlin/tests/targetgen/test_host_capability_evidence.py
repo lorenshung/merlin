@@ -2,8 +2,7 @@
 
 import pytest
 
-from merlin.targetgen.host_capabilities import validate_host_capabilities
-from merlin.targetgen.host_capabilities import admit_host_operation
+from merlin.targetgen.host_capabilities import admit_host_operation, validate_host_capabilities
 
 
 def _selection():

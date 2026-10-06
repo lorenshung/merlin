@@ -3,7 +3,7 @@ title: Verify a compiler transformation
 kind: guide
 status: current
 owner: verification
-last_verified: 2026-09-27
+last_verified: 2026-10-05
 related: [phase0_specification, model_lowering, simulator_selection]
 code_refs:
   - src/merlin/verify/receipts.py
@@ -164,6 +164,9 @@ matmul, an empty-epilogue `i32` commit, and eviction. Unknown operations or
 attributes abstain. A checked 16×16 instance proves equality for all input
 bit patterns **at that shape**, under this value model. It does not prove the
 physical packed layout, DMA, target RTL, or a mixed host/device program.
+The SMT source reader uses the shared parsed-body signed-`i8`/`i32` contraction
+recognizer, not provenance tags or the mere presence of `linalg.generic`;
+different indexing, arithmetic or yielded values still abstain.
 
 [mlir-matmul]: https://mlir.llvm.org/docs/Dialects/Linalg/#linalgmatmul-linalgmatmulop
 

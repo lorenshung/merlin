@@ -270,11 +270,15 @@ def is_eligible(
         )
         if not complete:
             return EligibilityVerdict(
-                False, family, "captured input roles are incomplete; precision unverified",
-                undetermined=True, refusal="input_dtype",
+                False,
+                family,
+                "captured input roles are incomplete; precision unverified",
+                undetermined=True,
+                refusal="input_dtype",
             )
         region = replace(
-            region, in_dtype=observed[0],
+            region,
+            in_dtype=observed[0],
             weight_dtype=observed[1] if family == "contraction" else region.weight_dtype,
         )
     for c in caps:
@@ -292,13 +296,19 @@ def is_eligible(
                 f"weight dtype {region.weight_dtype!r} not supported by {c.family}",
                 refusal="weight_dtype",
             )
-        if c.family == "contraction" and region.in_dtype is not None and region.weight_dtype is not None \
-                and c.operand_pairs is not None and not any(
-                    _dtype_ok(region.in_dtype, (left,)) and _dtype_ok(region.weight_dtype, (right,))
-                    for left, right in c.operand_pairs
-                ):
+        if (
+            c.family == "contraction"
+            and region.in_dtype is not None
+            and region.weight_dtype is not None
+            and c.operand_pairs is not None
+            and not any(
+                _dtype_ok(region.in_dtype, (left,)) and _dtype_ok(region.weight_dtype, (right,))
+                for left, right in c.operand_pairs
+            )
+        ):
             return EligibilityVerdict(
-                False, family,
+                False,
+                family,
                 f"input/weight pair ({region.in_dtype!r}, {region.weight_dtype!r}) "
                 f"not supported by {c.family}; declared pairs {list(c.operand_pairs)}",
                 refusal="operand_pair",
@@ -306,7 +316,8 @@ def is_eligible(
         if region.out_dtype is not None and c.result_dtypes is not None:
             if not _dtype_ok(region.out_dtype, c.result_dtypes):
                 return EligibilityVerdict(
-                    False, family,
+                    False,
+                    family,
                     f"result dtype {region.out_dtype!r} not in {c.family} result formats {list(c.result_dtypes)}",
                     refusal="result_dtype",
                 )
@@ -317,7 +328,8 @@ def is_eligible(
             and not _dtype_ok(region.out_dtype, (region.in_dtype,))
         ):
             return EligibilityVerdict(
-                False, family,
+                False,
+                family,
                 f"UNDETERMINED: {c.family} input {region.in_dtype!r} changes to result "
                 f"{region.out_dtype!r} without a declared result-format capability",
                 undetermined=True,

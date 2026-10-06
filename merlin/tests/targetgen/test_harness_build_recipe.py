@@ -103,7 +103,9 @@ def test_implicit_compiler_abi_is_queried_then_pinned_for_both_commands(monkeypa
 def test_explicit_recipe_abi_wins_without_query_and_rejects_duplicates(monkeypatch):
     monkeypatch.setattr(build_recipe.subprocess, "run", lambda *args, **kwargs: pytest.fail("queried"))
     assert _recipe(cflags=("-march=rv64gc", "-mabi=lp64")).with_effective_abi().cflags == (
-        "-march=rv64gc", "-mabi=lp64")
+        "-march=rv64gc",
+        "-mabi=lp64",
+    )
     with pytest.raises(ValueError, match="duplicate -mabi"):
         _recipe(cflags=("-march=rv64gc", "-mabi=lp64", "-mabi=lp64d")).mabi()
     with pytest.raises(ValueError, match="invalid -mabi"):

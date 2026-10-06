@@ -125,8 +125,10 @@ def candidate_native_model_check(result: dict, *, target: str) -> dict:
     or claim full transformation semantics from a numerical comparison.
     """
     from .native_model_execution import (
-        audit_candidate_completed_dispatch, audit_candidate_source_placement,
-        audit_candidate_tiers, audit_emitted_host_compute,
+        audit_candidate_completed_dispatch,
+        audit_candidate_source_placement,
+        audit_candidate_tiers,
+        audit_emitted_host_compute,
     )
 
     violations: list[str] = []
@@ -146,7 +148,8 @@ def candidate_native_model_check(result: dict, *, target: str) -> dict:
         violations.append("candidate_emitted_host_compute_unverified")
 
     placement = audit_candidate_source_placement(
-        result.get("candidate_emission"), result.get("candidate_source_eligibility"), target=target)
+        result.get("candidate_emission"), result.get("candidate_source_eligibility"), target=target
+    )
     if placement["status"] == "violation":
         violations.append("candidate_source_placement_violation")
     elif placement["status"] != "clean":
@@ -155,70 +158,106 @@ def candidate_native_model_check(result: dict, *, target: str) -> dict:
     native = result.get("candidate_native_execution")
     expected = host.get("candidate") or {}
     native_candidate = native.get("candidate") if isinstance(native, dict) else None
-    candidate_artifact_identity_ok = (isinstance(native, dict)
-            and isinstance(native_candidate, dict)
-            and all(isinstance(expected.get(key), str)
-                    and native_candidate.get(key) == expected[key]
-                    for key in ("command_buffer_sha256", "lowered_mlir_sha256"))
-            and isinstance(native.get("elf"), dict))
+    candidate_artifact_identity_ok = (
+        isinstance(native, dict)
+        and isinstance(native_candidate, dict)
+        and all(
+            isinstance(expected.get(key), str) and native_candidate.get(key) == expected[key]
+            for key in ("command_buffer_sha256", "lowered_mlir_sha256")
+        )
+        and isinstance(native.get("elf"), dict)
+    )
     native_identity_ok = candidate_artifact_identity_ok and isinstance(native.get("console"), dict)
     required_engine = os.environ.get("MERLIN_REQUIRED_RTL_ENGINE", "").strip()
     if required_engine and (not isinstance(native, dict) or native.get("simulator") != required_engine):
         violations.append("candidate_required_rtl_engine_mismatch")
     dispatch = audit_candidate_completed_dispatch(
-        result.get("candidate_emission"), result.get("candidate_source_eligibility"), native,
-        target=target, entry_symbol=entry)
+        result.get("candidate_emission"),
+        result.get("candidate_source_eligibility"),
+        native,
+        target=target,
+        entry_symbol=entry,
+    )
     numeric_status = (native.get("numeric") or {}).get("status") if isinstance(native, dict) else None
-    if (not native_identity_ok or dispatch.get("status") != "verified"
-            or dispatch.get("numeric_status") not in {"pass", "fail"}
-            or numeric_status != dispatch.get("numeric_status")
-            or native.get("status") != ("numeric_match_diagnostic" if numeric_status == "pass"
-                                        else "numeric_mismatch_diagnostic")):
+    if (
+        not native_identity_ok
+        or dispatch.get("status") != "verified"
+        or dispatch.get("numeric_status") not in {"pass", "fail"}
+        or numeric_status != dispatch.get("numeric_status")
+        or native.get("status")
+        != ("numeric_match_diagnostic" if numeric_status == "pass" else "numeric_mismatch_diagnostic")
+    ):
         violations.append("candidate_full_model_native_unverified")
     if dispatch.get("status") != "verified":
         violations.append("candidate_completed_dispatch_unverified")
     source_coverage: dict = {"status": "unverified", "scope": "candidate-only eligible source operations"}
     if placement.get("status") == "clean" and dispatch.get("status") == "verified":
         eligible = set(placement["eligible_source_op_indices"])
-        completed = {index for task in dispatch.get("eligible_tasks", [])
-                     for index in task.get("source_op_indices", []) if index in eligible}
-        if (completed == eligible and eligible
-                and dispatch.get("source_sha256") == placement.get("source_sha256")):
+        completed = {
+            index
+            for task in dispatch.get("eligible_tasks", [])
+            for index in task.get("source_op_indices", [])
+            if index in eligible
+        }
+        if completed == eligible and eligible and dispatch.get("source_sha256") == placement.get("source_sha256"):
             source_coverage = {
-                "status": "verified", "source_sha256": placement["source_sha256"],
+                "status": "verified",
+                "source_sha256": placement["source_sha256"],
                 "n_source_operations": placement["n_source_operations"],
                 "eligible_source_op_indices": sorted(eligible),
                 "completed_eligible_source_op_indices": sorted(completed),
-                "n_eligible": len(eligible), "n_completed_eligible": len(completed),
+                "n_eligible": len(eligible),
+                "n_completed_eligible": len(completed),
                 "scope": "independent frozen-source eligibility joined to mandatory candidate ELF commands; "
-                         "no claim for unsupported glue, transformed semantics or performance",
+                "no claim for unsupported glue, transformed semantics or performance",
             }
     if source_coverage["status"] != "verified":
         violations.append("candidate_source_coverage_unverified")
     tier_check = audit_candidate_tiers(
-        result.get("candidate_emission"), result.get("candidate_source_eligibility"), native,
-        target=target, entry_symbol=entry, completed_dispatch=dispatch)
+        result.get("candidate_emission"),
+        result.get("candidate_source_eligibility"),
+        native,
+        target=target,
+        entry_symbol=entry,
+        completed_dispatch=dispatch,
+    )
     static_tiers = tier_check.get("tiers") or {}
-    l2_mismatch = (candidate_artifact_identity_ok and placement.get("status") == "clean"
-                   and all((static_tiers.get(tier) or {}).get("status") == "pass"
-                           for tier in ("L0", "L1"))
-                   and (static_tiers.get("L2") or {}).get("status") == "fail")
+    l2_mismatch = (
+        candidate_artifact_identity_ok
+        and placement.get("status") == "clean"
+        and all((static_tiers.get(tier) or {}).get("status") == "pass" for tier in ("L0", "L1"))
+        and (static_tiers.get("L2") or {}).get("status") == "fail"
+    )
     verified_mismatch = (
-        (native_identity_ok and dispatch.get("status") == "verified"
-         and dispatch.get("numeric_status") == "fail" and numeric_status == "fail")
-        or l2_mismatch)
+        native_identity_ok
+        and dispatch.get("status") == "verified"
+        and dispatch.get("numeric_status") == "fail"
+        and numeric_status == "fail"
+    ) or l2_mismatch
     if verified_mismatch:
         violations.append("candidate_verified_numeric_mismatch")
-    if tier_check.get("status") not in {"pass", "fail"} or (
-            tier_check.get("status") == "fail" and not verified_mismatch) or (
+    if (
+        tier_check.get("status") not in {"pass", "fail"}
+        or (tier_check.get("status") == "fail" and not verified_mismatch)
+        or (
             tier_check.get("status") == "fail"
-            and any((tier_check.get("tiers") or {}).get(tier, {}).get("status") != "pass"
-                    for tier in tier_check.get("required_tiers") or []
-                    if tier not in (tier_check.get("failed_tiers") or []))):
+            and any(
+                (tier_check.get("tiers") or {}).get(tier, {}).get("status") != "pass"
+                for tier in tier_check.get("required_tiers") or []
+                if tier not in (tier_check.get("failed_tiers") or [])
+            )
+        )
+    ):
         violations.append("candidate_required_tiers_unverified")
-    known = any(name in violations for name in (
-        "candidate_host_tensor_compute_violation", "candidate_source_placement_violation",
-        "candidate_required_rtl_engine_mismatch", "candidate_verified_numeric_mismatch"))
+    known = any(
+        name in violations
+        for name in (
+            "candidate_host_tensor_compute_violation",
+            "candidate_source_placement_violation",
+            "candidate_required_rtl_engine_mismatch",
+            "candidate_verified_numeric_mismatch",
+        )
+    )
     return {
         "schema": "merlin_candidate_native_model_check_v1",
         "status": "fail" if known else "incomplete" if violations else "pass",
@@ -230,8 +269,8 @@ def candidate_native_model_check(result: dict, *, target: str) -> dict:
         "candidate_required_tiers": tier_check,
         "native_status": native.get("status") if isinstance(native, dict) else None,
         "scope": "submitted whole-program ELF, independent frozen source denominator, "
-                 "mandatory family-matched dispatch, frozen ISA policy and every required tier; "
-                 "not a hardware commit trace or general transform-equivalence theorem",
+        "mandatory family-matched dispatch, frozen ISA policy and every required tier; "
+        "not a hardware commit trace or general transform-equivalence theorem",
     }
 
 
@@ -255,7 +294,8 @@ def model_execution_check(result: dict, capsule: dict | None = None, *, target: 
         # model check. The old ledger cannot certify a different program.
         effective_target = target or (result.get("operation") or {}).get("target")
         candidate_check = candidate_native_model_check(
-            result, target=effective_target if isinstance(effective_target, str) else "")
+            result, target=effective_target if isinstance(effective_target, str) else ""
+        )
         violations.extend(candidate_check["violations"])
         emitted_host_compute = candidate_check["emitted_host_compute"]
         candidate_source_placement = candidate_check["source_placement"]
@@ -267,7 +307,8 @@ def model_execution_check(result: dict, capsule: dict | None = None, *, target: 
             # submitted whole-program ELF, while borrowing it would falsely
             # attest to a different program. Keep it as a diagnostic only.
             return {
-                "status": "pass", "kind": "candidate_whole_program_execution",
+                "status": "pass",
+                "kind": "candidate_whole_program_execution",
                 "candidate_native_model_check": candidate_check,
                 "candidate_required_tiers": candidate_check["candidate_required_tiers"],
                 "emitted_host_compute": emitted_host_compute,
@@ -406,8 +447,7 @@ def model_execution_check(result: dict, capsule: dict | None = None, *, target: 
             and not isinstance(alignment.get("n_planned_accelerator_stages"), bool)
             and alignment["n_planned_accelerator_stages"] >= 0
             and all(
-                isinstance(alignment.get(key), list)
-                for key in ("split_stages", "unjoined_stages", "unresolved_groups")
+                isinstance(alignment.get(key), list) for key in ("split_stages", "unjoined_stages", "unresolved_groups")
             )
         )
         if not valid_alignment or alignment.get("status") == "incomplete":
@@ -733,16 +773,35 @@ def enforce_model_execution_check(result: dict, capsule: dict | None, *, target:
             tier_check = check["candidate_required_tiers"]
             legacy = result.get("legacy_model_diagnostic")
             if not isinstance(legacy, dict):
-                legacy = {"status": result.get("status"), "failure": result.get("failure"),
-                          "scope": "runner-owned host-dispatch graph; not candidate whole-program evidence"}
+                legacy = {
+                    "status": result.get("status"),
+                    "failure": result.get("failure"),
+                    "scope": "runner-owned host-dispatch graph; not candidate whole-program evidence",
+                }
                 result["legacy_model_diagnostic"] = legacy
             legacy_keys = (
-                "coverage_certificate", "placement_census", "placement", "routing_plan",
-                "mesh_execution", "mesh_tile_verification", "mesh_route_symbols",
-                "planned_outlined_alignment", "boundary_expectation", "boundary_execution",
-                "lane_report", "host_execution", "host_reference", "provenance",
-                "contract_obligations", "tiers_unexercised", "advisories", "metrics",
-                "timing", "cycles", "numeric", "tiers",
+                "coverage_certificate",
+                "placement_census",
+                "placement",
+                "routing_plan",
+                "mesh_execution",
+                "mesh_tile_verification",
+                "mesh_route_symbols",
+                "planned_outlined_alignment",
+                "boundary_expectation",
+                "boundary_execution",
+                "lane_report",
+                "host_execution",
+                "host_reference",
+                "provenance",
+                "contract_obligations",
+                "tiers_unexercised",
+                "advisories",
+                "metrics",
+                "timing",
+                "cycles",
+                "numeric",
+                "tiers",
             )
             moved = {key: result.pop(key) for key in legacy_keys if key in result}
             if moved:
@@ -753,10 +812,14 @@ def enforce_model_execution_check(result: dict, capsule: dict | None, *, target:
             result["candidate_source_coverage"] = check["candidate_native_model_check"]["candidate_source_coverage"]
             result["tiers"] = {
                 tier: {
-                    "tier": tier, "status": "pass", "mandatory": True,
-                    "evidence": "candidate_whole_program_same_elf" if tier in {"L2", "L3"}
+                    "tier": tier,
+                    "status": "pass",
+                    "mandatory": True,
+                    "evidence": "candidate_whole_program_same_elf"
+                    if tier in {"L2", "L3"}
                     else "candidate_whole_program_structural_legality",
-                    "derived_from_rtl": tier == "L3", "cycle_accurate": False,
+                    "derived_from_rtl": tier == "L3",
+                    "cycle_accurate": False,
                     "candidate_evidence": tier_check["tiers"][tier],
                 }
                 for tier in tier_check["required_tiers"]
@@ -771,14 +834,27 @@ def enforce_model_execution_check(result: dict, capsule: dict | None, *, target:
         for v in violations
     )
     alignment_unmeasured = "planned_outlined_alignment_unverified" in violations
-    candidate_unmeasured = any(v in violations for v in (
-        "candidate_emitted_host_compute_unverified", "candidate_source_placement_unverified",
-        "candidate_full_model_native_unverified", "candidate_completed_dispatch_unverified",
-        "candidate_required_tiers_unverified"))
-    known_candidate_violation = any(v in violations for v in (
-        "candidate_host_tensor_compute_violation", "candidate_source_placement_violation",
-        "candidate_verified_numeric_mismatch"))
-    evidence_unmeasured = (engine_unmeasured or alignment_unmeasured or candidate_unmeasured) and not known_candidate_violation
+    candidate_unmeasured = any(
+        v in violations
+        for v in (
+            "candidate_emitted_host_compute_unverified",
+            "candidate_source_placement_unverified",
+            "candidate_full_model_native_unverified",
+            "candidate_completed_dispatch_unverified",
+            "candidate_required_tiers_unverified",
+        )
+    )
+    known_candidate_violation = any(
+        v in violations
+        for v in (
+            "candidate_host_tensor_compute_violation",
+            "candidate_source_placement_violation",
+            "candidate_verified_numeric_mismatch",
+        )
+    )
+    evidence_unmeasured = (
+        engine_unmeasured or alignment_unmeasured or candidate_unmeasured
+    ) and not known_candidate_violation
     status = "unavailable" if evidence_unmeasured else "fail"
     detail = "whole-model execution proof failed: " + ", ".join(violations)
     for tier in CR._rtl_tiers_of(target):
@@ -795,14 +871,21 @@ def enforce_model_execution_check(result: dict, capsule: dict | None, *, target:
             "plane": (
                 "required_rtl_engine"
                 if engine_unmeasured
-                else "candidate_model_numeric" if verified_numeric_mismatch
-                else "model_host_compute" if "candidate_host_tensor_compute_violation" in violations
-                else "model_source_placement" if "candidate_source_placement_violation" in violations
-                else "model_placement" if alignment_unmeasured
-                else "candidate_model_execution" if candidate_unmeasured else "model_execution"
+                else "candidate_model_numeric"
+                if verified_numeric_mismatch
+                else "model_host_compute"
+                if "candidate_host_tensor_compute_violation" in violations
+                else "model_source_placement"
+                if "candidate_source_placement_violation" in violations
+                else "model_placement"
+                if alignment_unmeasured
+                else "candidate_model_execution"
+                if candidate_unmeasured
+                else "model_execution"
             ),
-            "category": "NOT_RUN_IS_NOT_PASS" if evidence_unmeasured else (
-                "FUNCTIONAL_MISMATCH" if verified_numeric_mismatch else "PROTOCOL_VIOLATION"),
+            "category": "NOT_RUN_IS_NOT_PASS"
+            if evidence_unmeasured
+            else ("FUNCTIONAL_MISMATCH" if verified_numeric_mismatch else "PROTOCOL_VIOLATION"),
             "detail": detail,
         }
     return result
@@ -991,12 +1074,29 @@ def _candidate_score_view(row: dict) -> dict:
         return row
     view = dict(row)
     for key in (
-        "coverage_certificate", "placement_census", "placement", "routing_plan",
-        "mesh_execution", "mesh_tile_verification", "mesh_route_symbols",
-        "planned_outlined_alignment", "boundary_expectation", "boundary_execution",
-        "lane_report", "host_execution", "host_reference", "provenance",
-        "contract_obligations", "tiers_unexercised", "advisories", "metrics",
-        "timing", "cycles", "tier_reuse", "trace_check", "cost_plane",
+        "coverage_certificate",
+        "placement_census",
+        "placement",
+        "routing_plan",
+        "mesh_execution",
+        "mesh_tile_verification",
+        "mesh_route_symbols",
+        "planned_outlined_alignment",
+        "boundary_expectation",
+        "boundary_execution",
+        "lane_report",
+        "host_execution",
+        "host_reference",
+        "provenance",
+        "contract_obligations",
+        "tiers_unexercised",
+        "advisories",
+        "metrics",
+        "timing",
+        "cycles",
+        "tier_reuse",
+        "trace_check",
+        "cost_plane",
     ):
         view.pop(key, None)
     tier_check = check.get("candidate_required_tiers") or {}
@@ -1005,15 +1105,18 @@ def _candidate_score_view(row: dict) -> dict:
     view["tiers"] = {}
     for tier in required:
         audit = audited.get(tier)
-        if tier not in {"L0", "L1", "L2", "L3"} or not isinstance(audit, dict) \
-                or audit.get("status") not in {"pass", "fail", "unverified"}:
+        if (
+            tier not in {"L0", "L1", "L2", "L3"}
+            or not isinstance(audit, dict)
+            or audit.get("status") not in {"pass", "fail", "unverified"}
+        ):
             continue
-        projected = {"status": audit["status"], "mandatory": True,
-                     "evidence": "candidate_whole_program_same_elf"}
+        projected = {"status": audit["status"], "mandatory": True, "evidence": "candidate_whole_program_same_elf"}
         for field in ("fidelity", "derived_from_rtl", "cycle_accurate"):
             value = audit.get(field)
-            if (field == "fidelity" and isinstance(value, str) and value) \
-                    or (field != "fidelity" and isinstance(value, bool)):
+            if (field == "fidelity" and isinstance(value, str) and value) or (
+                field != "fidelity" and isinstance(value, bool)
+            ):
                 projected[field] = value
         view["tiers"][tier] = projected
     numeric = _score_numeric_status(row)
@@ -1577,7 +1680,9 @@ def grade(
         "rtl_backed": len(_rtl_backed),
         "model_certified": len(_model_certified),
         "cheap_tier_only": len(_passed) - len(_rtl_backed),
-        "rtl_tiers_seen": sorted({n for r in graded for n, t in (r.get("tiers") or {}).items() if _tier_is_rtl(r, n, t)}),
+        "rtl_tiers_seen": sorted(
+            {n for r in graded for n, t in (r.get("tiers") or {}).items() if _tier_is_rtl(r, n, t)}
+        ),
         "fidelity_seen": sorted(
             {f for r in graded for t in (r.get("tiers") or {}).values() if (f := _tier_field(t, "fidelity"))}
         ),

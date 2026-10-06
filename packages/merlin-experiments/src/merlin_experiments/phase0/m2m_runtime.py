@@ -153,9 +153,11 @@ def _runtime(python: Path) -> dict:
 
 def stage(selection: dict, destination: Path) -> dict:
     """Copy selected package bytes once; keep the audited host runtime explicit."""
-    if selection.get("schema") != SCHEMA or observe(
-        Path(selection["root"]), Path(selection["python"]), workload_names=tuple(selection["workloads"])
-    ) != selection:
+    if (
+        selection.get("schema") != SCHEMA
+        or observe(Path(selection["root"]), Path(selection["python"]), workload_names=tuple(selection["workloads"]))
+        != selection
+    ):
         raise ValueError("selected Model2MLIR runtime changed before freezing")
     destination = Path(destination)
     if destination.exists() or destination.is_symlink():
@@ -229,9 +231,7 @@ def verify_frozen_copy(frozen: dict) -> None:
     for member in copied.rglob("*"):
         if member.is_symlink() or not (member.is_dir() or member.is_file()) or member.stat().st_mode & 0o222:
             raise ValueError("frozen Model2MLIR source contains an indirect, nonregular or writable member")
-    if frozen["workloads"] and {member.name for member in (copied / "workloads").iterdir()} != set(
-        frozen["workloads"]
-    ):
+    if frozen["workloads"] and {member.name for member in (copied / "workloads").iterdir()} != set(frozen["workloads"]):
         raise ValueError("frozen Model2MLIR workload membership changed")
     if _source_tree(copied / "m2m") != frozen.get("frozen_package"):
         raise ValueError("frozen Model2MLIR source package changed")

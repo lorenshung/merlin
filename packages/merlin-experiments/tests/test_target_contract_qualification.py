@@ -132,23 +132,35 @@ def test_backend_candidates_and_actual_nested_stages_respect_authored_sw_scope()
     facts = drift.fact_capabilities(
         target="gemmini",
         contract=contract,
-        raw_facts={"facts": {
-            "arrays": [{"name": "mesh", "rows": 4, "cols": 4, "corroborated": True,
-                        "mac_idiom": {"muls": 1, "adds": 1}}],
-            "datapaths": [{"name": "input", "dtype": "i8"}],
-            "interfaces": [{"name": "mesh_dma"}],
-            "storage_datapaths": [{"name": "input", "dtype": "i8"},
-                                  {"name": "accumulator", "dtype": "i32"}],
-        }},
-            readout_facets=[{
-                "unit": "mesh", "readouts": [{"selector": "i8", "applies": ["acc_scale", "relu", "maxpool"],
-                                              "evidence": "test fact view"}],
+        raw_facts={
+            "facts": {
+                "arrays": [
+                    {"name": "mesh", "rows": 4, "cols": 4, "corroborated": True, "mac_idiom": {"muls": 1, "adds": 1}}
+                ],
+                "datapaths": [{"name": "input", "dtype": "i8"}],
+                "interfaces": [{"name": "mesh_dma"}],
+                "storage_datapaths": [{"name": "input", "dtype": "i8"}, {"name": "accumulator", "dtype": "i32"}],
+            }
+        },
+        readout_facets=[
+            {
+                "unit": "mesh",
+                "readouts": [
+                    {"selector": "i8", "applies": ["acc_scale", "relu", "maxpool"], "evidence": "test fact view"}
+                ],
                 "operand_sum": {"operands": 2, "operand_dtype": "i8"},
-                "unknown": {}, "scale": {"granularities": ["tensor"], "granularities_complete": True,
-                                     "carriers": []},
-        }],
-        quantization_candidates=[{"status": "derived", "unit": "mesh", "format": "int8",
-                                  "recipe": {"families": ["contraction", "operand_sum"]}}],
+                "unknown": {},
+                "scale": {"granularities": ["tensor"], "granularities_complete": True, "carriers": []},
+            }
+        ],
+        quantization_candidates=[
+            {
+                "status": "derived",
+                "unit": "mesh",
+                "format": "int8",
+                "recipe": {"families": ["contraction", "operand_sum"]},
+            }
+        ],
         taxonomy={},
     )
     spec, resolution = drift.resolve_spec(spec, facts)

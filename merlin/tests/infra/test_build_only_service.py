@@ -15,8 +15,9 @@ from merlin.targetgen.contract.build_service import BuildOnlyService, load_build
 def service(tmp_path):
     source = tmp_path / "renderer.py"
     source.write_text("trusted build fixture")
-    recipe = HarnessBuildRecipe(Path("/usr/bin/cc"), (), (), Path("/fixture/link.ld"), 0,
-                                ("-march=rv64gc", "-mabi=lp64d"))
+    recipe = HarnessBuildRecipe(
+        Path("/usr/bin/cc"), (), (), Path("/fixture/link.ld"), 0, ("-march=rv64gc", "-mabi=lp64d")
+    )
     return BuildOnlyService(
         "fixture",
         recipe,
@@ -95,10 +96,11 @@ def test_build_translation_refuses_non_llvm_before_tool(tmp_path, monkeypatch):
 def test_build_translation_preserves_upstream_llvm_metadata(tmp_path, monkeypatch):
     """Stock LLVM metadata is validated by the selected translator, not xDSL's older schema."""
     from types import SimpleNamespace
+
     from merlin.llvmlower import codegen
 
     cap = service(tmp_path)
-    text = '''#unroll = #llvm.loop_unroll<disable = true>
+    text = """#unroll = #llvm.loop_unroll<disable = true>
 #annotation = #llvm.loop_annotation<unroll = #unroll>
 "builtin.module"() ({
   "llvm.func"() <{function_type = !llvm.func<void ()>, sym_name = "fixture_entry"}> ({
@@ -108,7 +110,7 @@ def test_build_translation_preserves_upstream_llvm_metadata(tmp_path, monkeypatc
   ^bb1:
     "llvm.return"() : () -> ()
   }) : () -> ()
-}) : () -> ()'''
+}) : () -> ()"""
     calls = []
 
     def translate(command, **kwargs):

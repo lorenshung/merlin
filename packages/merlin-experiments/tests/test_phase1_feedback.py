@@ -44,25 +44,37 @@ def test_qa_keeps_candidate_verification_separate_from_legacy_coverage(tmp_path,
         "completed_dispatch": {"status": "unverified", "console": "PRIVATE_ANSWER_SENTINEL"},
         "candidate_source_coverage": {"status": "unverified"},
         "candidate_required_tiers": {
-            "status": "unverified", "required_tiers": ["L0", "L1", "L3"],
-            "tiers": {"L0": {"status": "pass"}, "L1": {"status": "pass"},
-                      "L3": {"status": "unverified", "numeric": {"expected": "PRIVATE_ANSWER_SENTINEL"}}},
+            "status": "unverified",
+            "required_tiers": ["L0", "L1", "L3"],
+            "tiers": {
+                "L0": {"status": "pass"},
+                "L1": {"status": "pass"},
+                "L3": {"status": "unverified", "numeric": {"expected": "PRIVATE_ANSWER_SENTINEL"}},
+            },
         },
         "native_status": "numeric_match_diagnostic",
     }
     row = {
-        "capsule": "model_case", "status": "incomplete", "numeric": {"status": "pass", "mismatch_count": 0},
+        "capsule": "model_case",
+        "status": "incomplete",
+        "numeric": {"status": "pass", "mismatch_count": 0},
         "tiers": {"L3": {"status": "pass", "cycles": 999}},
-        "model_execution_check": {"lowering_coverage": {
-            "operations": 6, "on_accelerator": 6, "coverage": 1.0}},
-        "failure": {"plane": "legacy_host_graph", "category": "PRIVATE_ANSWER_SENTINEL", "tier": "L2",
-                    "detail": "PRIVATE_ANSWER_SENTINEL"},
+        "model_execution_check": {"lowering_coverage": {"operations": 6, "on_accelerator": 6, "coverage": 1.0}},
+        "failure": {
+            "plane": "legacy_host_graph",
+            "category": "PRIVATE_ANSWER_SENTINEL",
+            "tier": "L2",
+            "detail": "PRIVATE_ANSWER_SENTINEL",
+        },
     }
     if native_numeric is not None:
-        row["candidate_native_execution"] = {"numeric": {
-            "status": native_numeric, "mismatch_count": 3 if native_numeric == "fail" else 0,
-            "first_mismatch": {"expected": "PRIVATE_ANSWER_SENTINEL"},
-        }}
+        row["candidate_native_execution"] = {
+            "numeric": {
+                "status": native_numeric,
+                "mismatch_count": 3 if native_numeric == "fail" else 0,
+                "first_mismatch": {"expected": "PRIVATE_ANSWER_SENTINEL"},
+            }
+        }
     (row["model_execution_check"] if nested else row)["candidate_native_model_check"] = check
     result_path = tmp_path / "runs" / "fixture-suite" / "model_case" / "capsule_result.json"
     result_path.parent.mkdir(parents=True)
@@ -71,11 +83,23 @@ def test_qa_keeps_candidate_verification_separate_from_legacy_coverage(tmp_path,
     monkeypatch.setattr(qa.CR, "qa_checkpoint_adapters", lambda *a: {"L3": object()})
     monkeypatch.setattr(qa, "_emitted_cost", lambda *a: {"dram_movements": 999})
     monkeypatch.setattr(qa, "_liveness_screen", lambda *a: {"status": "ok"})
-    monkeypatch.setattr(qa.CG, "grade", lambda *a, **k: {
-        "n_capsules": 1, "n_passed": 0, "per_capsule": [{
-            "capsule": "model_case", "label": "public", "status": "incomplete", "tiers": {"L3": "unverified"},
-            "cost_plane": {"status": "measured", "measured_cycles": 999}}],
-    })
+    monkeypatch.setattr(
+        qa.CG,
+        "grade",
+        lambda *a, **k: {
+            "n_capsules": 1,
+            "n_passed": 0,
+            "per_capsule": [
+                {
+                    "capsule": "model_case",
+                    "label": "public",
+                    "status": "incomplete",
+                    "tiers": {"L3": "unverified"},
+                    "cost_plane": {"status": "measured", "measured_cycles": 999},
+                }
+            ],
+        },
+    )
     verdict = qa.run("submission", str(tmp_path), tmp_path, {"public"}, False, 1, context=_context(tmp_path))
     projected = verdict["per_capsule"][0]
     feedback = projected["candidate_native_verification"]
@@ -108,16 +132,26 @@ def test_qa_keeps_candidate_verification_separate_from_legacy_coverage(tmp_path,
 
 def test_candidate_verification_feedback_only_exposes_verified_counts(tmp_path):
     check = {
-        "schema": "merlin_candidate_native_model_check_v1", "status": "pass", "violations": [],
+        "schema": "merlin_candidate_native_model_check_v1",
+        "status": "pass",
+        "violations": [],
         "candidate_source_coverage": {
-            "status": "verified", "n_source_operations": 25, "n_eligible": 6, "n_completed_eligible": 6,
-            "golden": "PRIVATE_ANSWER_SENTINEL", "source_sha256": "PRIVATE_ANSWER_SENTINEL",
+            "status": "verified",
+            "n_source_operations": 25,
+            "n_eligible": 6,
+            "n_completed_eligible": 6,
+            "golden": "PRIVATE_ANSWER_SENTINEL",
+            "source_sha256": "PRIVATE_ANSWER_SENTINEL",
         },
     }
     record = {"candidate_native_model_check": check}
     summary = qa._candidate_native_feedback(record)
     assert summary["source_coverage"] == {
-        "status": "verified", "n_source_operations": 25, "n_eligible": 6, "n_completed_eligible": 6}
+        "status": "verified",
+        "n_source_operations": 25,
+        "n_eligible": 6,
+        "n_completed_eligible": 6,
+    }
     assert "PRIVATE_ANSWER_SENTINEL" not in json.dumps(summary)
     for bad_count in (True, -1, 3, 7, "PRIVATE_ANSWER_SENTINEL"):
         check["candidate_source_coverage"]["n_completed_eligible"] = bad_count
@@ -137,10 +171,14 @@ def test_candidate_verification_feedback_only_exposes_verified_counts(tmp_path):
 
 def test_candidate_verified_numeric_mismatch_has_closed_failure_feedback(tmp_path):
     check = {
-        "schema": "merlin_candidate_native_model_check_v1", "status": "fail",
+        "schema": "merlin_candidate_native_model_check_v1",
+        "status": "fail",
         "violations": ["candidate_verified_numeric_mismatch"],
-        "candidate_required_tiers": {"status": "fail", "required_tiers": ["L2", "L3"],
-                                     "tiers": {"L2": {"status": "fail"}, "L3": {"status": "pass"}}},
+        "candidate_required_tiers": {
+            "status": "fail",
+            "required_tiers": ["L2", "L3"],
+            "tiers": {"L2": {"status": "fail"}, "L3": {"status": "pass"}},
+        },
         "native_status": "numeric_match_diagnostic",
     }
     projected = qa._candidate_native_feedback({"candidate_native_model_check": check})
@@ -149,12 +187,18 @@ def test_candidate_verified_numeric_mismatch_has_closed_failure_feedback(tmp_pat
     assert projected["tiers"] == {"L2": "fail", "L3": "pass"}
     result_path = tmp_path / "runs" / "synthetic-suite" / "M" / "capsule_result.json"
     result_path.parent.mkdir(parents=True)
-    result_path.write_text(json.dumps({
-        "capsule": "M", "kind": "model", "status": "fail",
-        "numeric": {"status": "pass"},  # unrelated legacy graph
-        "candidate_native_execution": {"numeric": {"status": "fail", "mismatch_count": 1}},
-        "candidate_native_model_check": check,
-    }))
+    result_path.write_text(
+        json.dumps(
+            {
+                "capsule": "M",
+                "kind": "model",
+                "status": "fail",
+                "numeric": {"status": "pass"},  # unrelated legacy graph
+                "candidate_native_execution": {"numeric": {"status": "fail", "mismatch_count": 1}},
+                "candidate_native_model_check": check,
+            }
+        )
+    )
     row = qa._per_capsule_from_results(tmp_path)["M"]
     assert row["numeric_status"] == "fail"
     assert row["failure_plane"] == "candidate_model_numeric"
@@ -164,14 +208,22 @@ def test_candidate_verified_numeric_mismatch_has_closed_failure_feedback(tmp_pat
 def test_model_only_selfcheck_reports_gate_instead_of_harness_failure():
     score = {
         "per_capsule": [
-            {"capsule": "model_case", "kind": "model", "status": "gated", "gate_reason": "op pass fraction 0.00 < gate 0.8"}
+            {
+                "capsule": "model_case",
+                "kind": "model",
+                "status": "gated",
+                "gate_reason": "op pass fraction 0.00 < gate 0.8",
+            }
         ]
     }
     rows = selfcheck_feedback._gated_without_result_rows(score)
     assert rows == [
         {"capsule": "model_case", "pass": False, "status": "gated", "reason": "op pass fraction 0.00 < gate 0.8"}
     ]
-    assert selfcheck_feedback._gated_without_result_rows({"per_capsule": score["per_capsule"] + [{"status": "fail"}]}) == []
+    assert (
+        selfcheck_feedback._gated_without_result_rows({"per_capsule": score["per_capsule"] + [{"status": "fail"}]})
+        == []
+    )
 
 
 _HOST = r"""

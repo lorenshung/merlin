@@ -101,8 +101,9 @@ def denominator_completeness(linalg_mlir: str | None, *, demands: list | None = 
             inventory_verified = Counter(identity(d) for d in checked if d.family == "contraction") == Counter(
                 identity(d) for d in demands if d.family == "contraction"
             )
-            incomplete_formats = [d.site or d.op for d in checked
-                                  if d.family == "contraction" and not d.source_formats_complete]
+            incomplete_formats = [
+                d.site or d.op for d in checked if d.family == "contraction" and not d.source_formats_complete
+            ]
         except ModelDemandIncomplete:
             pass
 
@@ -119,15 +120,23 @@ def denominator_completeness(linalg_mlir: str | None, *, demands: list | None = 
             "generic_labels": dict(rep.labels),
             "inventory_status": (
                 "verified_structure_operand_formats_incomplete"
-                if incomplete_formats else "verified_against_parsed_contractions"
+                if incomplete_formats
+                else "verified_against_parsed_contractions"
             ),
             "unverified_operand_format_contractions": incomplete_formats[:8],
             "caveats": (
                 [f"{len(rep.unpriceable)} contraction(s) could not be priced from loop extents"]
                 if rep.unpriceable
                 else []
-            ) + ([f"{len(incomplete_formats)} contraction(s) have incomplete captured operand formats; "
-                  "they are excluded from the eligible denominator"] if incomplete_formats else []),
+            )
+            + (
+                [
+                    f"{len(incomplete_formats)} contraction(s) have incomplete captured operand formats; "
+                    "they are excluded from the eligible denominator"
+                ]
+                if incomplete_formats
+                else []
+            ),
         }
     if rep.unlowered:
         caveats.append(
@@ -217,7 +226,11 @@ def source_region_execution(regions: list[dict], execution: dict | None) -> dict
     unattributed = sum(1 for r in regions if r["target_eligible"] and not r["region_id"])
     ledger = (execution or {}).get("dispatch_ledger")
     if not isinstance(ledger, list):
-        return {"status": "not_measured", "n_eligible_source_regions": len(wanted), "unattributed_demands": unattributed}
+        return {
+            "status": "not_measured",
+            "n_eligible_source_regions": len(wanted),
+            "unattributed_demands": unattributed,
+        }
 
     # A region id is NOT an operation id: one frontend operation can yield
     # several linalg roots with the same provenance. Match the complete source
@@ -301,9 +314,9 @@ def source_region_execution(regions: list[dict], execution: dict | None) -> dict
     # only the contraction is an accelerator-placement obligation. An unknown
     # or partial expansion cannot make the source operation appear covered.
     invalid_split_keys = sorted(
-        key for key in set(contraction_keys) | set(requant_keys)
-        if contraction_keys[key] != requant_keys[key]
-        or source_families.get(key) != {"contraction"}
+        key
+        for key in set(contraction_keys) | set(requant_keys)
+        if contraction_keys[key] != requant_keys[key] or source_families.get(key) != {"contraction"}
     )
     ambiguous_source_keys = sorted(key for key, values in source_eligibility.items() if len(values) != 1)
     completed_symbols = {
@@ -338,21 +351,23 @@ def source_region_execution(regions: list[dict], execution: dict | None) -> dict
                 auxiliary_host_symbols.add(sym)
             continue
         if sym in primary_symbols[rid]:
-            observed[rid].append(
-                "accelerator" if lane == "on_mesh" else "host" if lane in host_lanes else "unverified"
-            )
+            observed[rid].append("accelerator" if lane == "on_mesh" else "host" if lane in host_lanes else "unverified")
 
     unobserved = sorted(wanted - observed.keys())
     host = sorted(rid for rid, lanes in observed.items() if lanes and all(lane == "host" for lane in lanes))
-    accelerator = sorted(rid for rid, lanes in observed.items() if lanes and all(lane == "accelerator" for lane in lanes))
+    accelerator = sorted(
+        rid for rid, lanes in observed.items() if lanes and all(lane == "accelerator" for lane in lanes)
+    )
     mixed = sorted(rid for rid, lanes in observed.items() if "accelerator" in lanes and "host" in lanes)
     unresolved = sorted(wanted - set(host) - set(accelerator) - set(mixed) - set(unobserved))
-    outline_complete = (
-        isinstance(manifest, list)
-        and not (
-            invalid_outlined_rows or unmatched or unexpected or invalid_split_keys
-            or ambiguous_source_keys or unoutlined_eligible or unexecuted
-        )
+    outline_complete = isinstance(manifest, list) and not (
+        invalid_outlined_rows
+        or unmatched
+        or unexpected
+        or invalid_split_keys
+        or ambiguous_source_keys
+        or unoutlined_eligible
+        or unexecuted
     )
     return {
         "status": "measured" if outline_complete and not (unattributed or unobserved or unresolved) else "incomplete",
@@ -432,9 +447,14 @@ def build(
         )
         verdict = (
             _el.is_eligible(desc, cap_map)
-            if d.source_formats_complete else _el.EligibilityVerdict(
-                False, desc.resolved_family(), "captured operand formats incomplete; eligibility unverified",
-                undetermined=True, refusal="input_dtype")
+            if d.source_formats_complete
+            else _el.EligibilityVerdict(
+                False,
+                desc.resolved_family(),
+                "captured operand formats incomplete; eligibility unverified",
+                undetermined=True,
+                refusal="input_dtype",
+            )
         )
         family = verdict.family or _sf.from_op(d.op)
         decision = dec.get(id(r), "cpu_fallback")
@@ -457,16 +477,19 @@ def build(
                 "eligibility_weight_format": d.admission_weight_fmt,
                 "requested_format_mismatch": bool(
                     (captured_input is not None and not _el._dtype_ok(captured_input, (d.in_fmt,)))
-                    or (captured_weight is not None and d.weight_fmt is not None
-                        and not _el._dtype_ok(captured_weight, (d.weight_fmt,)))
+                    or (
+                        captured_weight is not None
+                        and d.weight_fmt is not None
+                        and not _el._dtype_ok(captured_weight, (d.weight_fmt,))
+                    )
                 ),
                 "precision_transform_required": (
                     None
                     if (observed is not None and not d.source_formats_complete)
-                    or (observed is None and d.elem_fmt is None
-                        and str(d.carrier_op or "").startswith("linalg."))
-                    else bool(captured_input is not None
-                              and not _el._dtype_ok(captured_input, (d.admission_input_fmt,)))
+                    or (observed is None and d.elem_fmt is None and str(d.carrier_op or "").startswith("linalg."))
+                    else bool(
+                        captured_input is not None and not _el._dtype_ok(captured_input, (d.admission_input_fmt,))
+                    )
                 ),
                 "target_eligible": verdict.eligible,
                 "eligibility_reason": verdict.reason,

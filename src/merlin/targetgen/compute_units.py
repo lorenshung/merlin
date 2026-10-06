@@ -214,16 +214,21 @@ def _sem_cap(raw: dict[str, Any], unit_name: str) -> SemanticCapability:
     raw_pairs = raw.get("operand_pairs")
     if raw_pairs is not None and (
         not isinstance(raw_pairs, list)
-        or any(not isinstance(pair, dict) or set(pair) != {"in", "weight"}
-               or not all(isinstance(pair[key], str) and qf.has(pair[key]) for key in ("in", "weight"))
-               for pair in raw_pairs)
+        or any(
+            not isinstance(pair, dict)
+            or set(pair) != {"in", "weight"}
+            or not all(isinstance(pair[key], str) and qf.has(pair[key]) for key in ("in", "weight"))
+            for pair in raw_pairs
+        )
     ):
         raise ValueError(f"compute unit {unit_name!r}: {family} operand_pairs must name known input/weight formats")
-    operand_pairs = tuple((qf.get(pair["in"]).name, qf.get(pair["weight"]).name)
-                          for pair in raw_pairs) if raw_pairs is not None else None
+    operand_pairs = (
+        tuple((qf.get(pair["in"]).name, qf.get(pair["weight"]).name) for pair in raw_pairs)
+        if raw_pairs is not None
+        else None
+    )
     if operand_pairs is not None and any(
-        left not in {qf.get(name).name for name in dtypes}
-        or right not in {qf.get(name).name for name in dtypes}
+        left not in {qf.get(name).name for name in dtypes} or right not in {qf.get(name).name for name in dtypes}
         for left, right in operand_pairs
     ):
         raise ValueError(f"compute unit {unit_name!r}: {family} operand_pairs exceed semantic dtypes")
@@ -435,11 +440,13 @@ def _merge_caps(a: SemanticCapability, b: SemanticCapability) -> SemanticCapabil
         dtypes=_u(a.dtypes, b.dtypes),
         operand_pairs=(
             _u(a.operand_pairs, b.operand_pairs)
-            if a.operand_pairs is not None and b.operand_pairs is not None else None
+            if a.operand_pairs is not None and b.operand_pairs is not None
+            else None
         ),
         result_dtypes=(
             _u(a.result_dtypes, b.result_dtypes)
-            if a.result_dtypes is not None and b.result_dtypes is not None else None
+            if a.result_dtypes is not None and b.result_dtypes is not None
+            else None
         ),
         ranks=_u(a.ranks, b.ranks),
         transpose=a.transpose or b.transpose,
@@ -485,12 +492,16 @@ def _with_operand_pairs(cap: SemanticCapability, unit: ComputeUnit) -> SemanticC
     if cap.operand_pairs is not None:
         pairs = cap.operand_pairs  # independently declared hardware capability
     elif unit.accumulate:
-        pairs = tuple(dict.fromkeys(
-            (qf.get(rule.inp).name, qf.get(rule.weight).name)
-            for rule in unit.accumulate
-            if qf.has(rule.inp) and qf.has(rule.weight)
-            and qf.get(rule.inp).name in allowed and qf.get(rule.weight).name in allowed
-        ))
+        pairs = tuple(
+            dict.fromkeys(
+                (qf.get(rule.inp).name, qf.get(rule.weight).name)
+                for rule in unit.accumulate
+                if qf.has(rule.inp)
+                and qf.has(rule.weight)
+                and qf.get(rule.inp).name in allowed
+                and qf.get(rule.weight).name in allowed
+            )
+        )
     else:
         # With no matrix, the semantic capability's dtypes are the independent
         # hardware declaration. They may intentionally be broader than the

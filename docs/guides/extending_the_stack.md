@@ -3,7 +3,7 @@ title: Extending the compiler stack
 kind: guide
 status: current
 owner: compiler
-last_verified: 2026-09-29
+last_verified: 2026-10-05
 related: [phase0_specification, model_lowering, model2mlir, triton_kernels, target_resolution, llvm_integration, simulator_selection]
 code_refs:
   - src/merlin/targetgen/software_spec.py
@@ -149,7 +149,9 @@ A malformed declaration or missing pinned interpreter fails that capsule explici
 The generated capsule's `input_provenance.capture_declaration` records the selected
 declaration's relative path, byte count and SHA-256 (or records its absence). This
 is inspectable input lineage, not proof of a sealed PyTorch runtime or Phase 0
-admission; those claims still require the separate capture-execution attestation.
+admission; those claims still require a preselected sealed capture and independent
+replay through the separate capture-execution attestation gate. A raw materialized
+Model2MLIR receipt or a later source-tree digest cannot upgrade an old capture.
 
 Authored inputs still have a role. The SW spec supplies behavior not yet established by
 extraction: operation legality, layouts and tails, numerical semantics, ABI ordering,

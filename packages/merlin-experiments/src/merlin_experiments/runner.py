@@ -270,10 +270,7 @@ def _phase0_synthesis_status(plan: dict) -> dict:
         if command["adapter"] != "capsule_derivation":
             continue
         selected = command["inputs"]
-        diagnostic = (
-            "--evidence-mode" in command["argv"]
-            and _command_value(command, "--evidence-mode") == "diagnostic"
-        )
+        diagnostic = "--evidence-mode" in command["argv"] and _command_value(command, "--evidence-mode") == "diagnostic"
         try:
             results[number] = verify_selected_synthesis(
                 selected.get("synth_profile"),
@@ -929,7 +926,8 @@ def status(run_dir: Path) -> dict:
             "adapter": command["adapter"],
             **(
                 {"level": level_for_phase1(plan["spec"]["phases"][number]["config"])}
-                if command["adapter"] == "capsule_bench" else {}
+                if command["adapter"] == "capsule_bench"
+                else {}
             ),
             "state": latest.get("state", "not_started"),
             "attempt_count": len(attempts),

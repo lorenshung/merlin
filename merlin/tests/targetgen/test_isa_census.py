@@ -1,6 +1,7 @@
 """The source census detects disagreements without certifying instruction legality."""
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -181,6 +182,95 @@ def test_the_format_module_is_found_beside_the_model_from_its_own_import(tmp_pat
     census = derive_source_census(**files, rtl_revision=_RTL_REVISION)
     assert census["rows"][0]["model_candidates"][0]["relation"] == "keyword_encoding_implies_pattern"
     assert census["sources"]["formats"][0]["path"] == str(tmp_path / "tree" / "fmtpkg" / "formats.py")
+
+
+def test_source_revision_verification_binds_both_git_objects(tmp_path: Path) -> None:
+    rtl = tmp_path / "rtl"
+    model = tmp_path / "model"
+    rtl.mkdir()
+    model.mkdir()
+    files = _write_sources(
+        rtl,
+        {"X": _pattern(opcode=1)},
+        "class X(RType, opcode=1): pass\n",
+    )
+    # The model ISA and the format module it is encoded with are both the model's own sources.
+    for key, name in (("model_isa_file", "isa_definition.py"), ("format_file", "formats.py")):
+        moved = model / name
+        moved.write_bytes(files[key].read_bytes())
+        files[key].unlink()
+        files[key] = moved
+
+    def commit(root: Path) -> str:
+        for args in (
+            ["init", "-q"],
+            ["add", "."],
+            [
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-qm",
+                "selected source",
+            ],
+        ):
+            subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+        return subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    rtl_revision = commit(rtl)
+    model_revision = commit(model)
+    census = derive_source_census(
+        **files,
+        rtl_revision=rtl_revision,
+        model_revision=model_revision,
+        verify_revisions=True,
+    )
+    verification = census["source_revision_verification"]
+    assert verification["status"] == "verified"
+    assert [row["path_at_revision"] for row in verification["formats"]] == ["formats.py"]
+    files["format_file"].write_text(files["format_file"].read_text() + "# changed\n")
+    with pytest.raises(ValueError, match="bytes differ"):
+        derive_source_census(
+            **files,
+            rtl_revision=rtl_revision,
+            model_revision=model_revision,
+            verify_revisions=True,
+        )
+    files["format_file"].write_bytes(
+        subprocess.run(
+            ["git", "-C", str(model), "show", f"{model_revision}:formats.py"],
+            check=True,
+            capture_output=True,
+        ).stdout
+    )
+    files["decoder_file"].write_text(files["decoder_file"].read_text() + "// changed\n")
+    with pytest.raises(ValueError, match="bytes differ"):
+        derive_source_census(
+            **files,
+            rtl_revision=rtl_revision,
+            model_revision=model_revision,
+            verify_revisions=True,
+        )
+    files["decoder_file"].write_bytes(
+        subprocess.run(
+            ["git", "-C", str(rtl), "show", f"{rtl_revision}:IDecode.scala"],
+            check=True,
+            capture_output=True,
+        ).stdout
+    )
+    with pytest.raises(ValueError, match="HEAD differs"):
+        derive_source_census(
+            **files,
+            rtl_revision="a" * 40,
+            model_revision=model_revision,
+            verify_revisions=True,
+        )
 
 
 def test_installed_targetgen_audit_writes_status_and_removes_stale_result(

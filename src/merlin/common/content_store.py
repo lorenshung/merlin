@@ -100,9 +100,16 @@ def object_for(root: Path, source: Path) -> Path | None:
     mode = 0o555 if runnable else 0o444
     try:
         for _ in range(4):
+            if obj.is_symlink():
+                return None  # never repair modes through a foreign cache alias
             if obj.is_file():
                 stat = obj.stat()
                 if stat.st_size == size and digest_file(obj)[0] == sha:
+                    # Cleanup of a read-only consumer can chmod a shared inode.
+                    # Revalidate bytes first, then restore the store's typed mode
+                    # before handing out another link (or trusting old aliases).
+                    if stat.st_mode & 0o7777 != mode:
+                        obj.chmod(mode)
                     return obj
                 # Present but not the bytes it claims. Drop it and let this pass recreate it; a
                 # concurrent writer doing the same thing is harmless, since both write the source.

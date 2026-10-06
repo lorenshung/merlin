@@ -20,8 +20,21 @@ def _probe():
 
 def test_selected_gain_above_one_uses_readout_scale_and_full_domain_stays_bounded():
     probe = _probe()
-    report = {"entries": [{"name": "sum", "entry": {"op": "residual_add", "epilogue": ["relu"],
-                 "operand_dtype": "int8", "lhs_scale": 1.5, "rhs_scale": 0.75, "bound_lsb": 2}}]}
+    report = {
+        "entries": [
+            {
+                "name": "sum",
+                "entry": {
+                    "op": "residual_add",
+                    "epilogue": ["relu"],
+                    "operand_dtype": "int8",
+                    "lhs_scale": 1.5,
+                    "rhs_scale": 0.75,
+                    "bound_lsb": 2,
+                },
+            }
+        ]
+    }
     group = probe.select_group(report)
     expected = probe.expected_outputs(group, "full")
     assert len(expected["reference"]) == len(expected["unit_model"]) == 256
@@ -53,12 +66,12 @@ def test_transcript_and_derived_opcode_screen_fail_closed():
     assert tuple(map(len, probe.campaign_values("boundary_cols"))) == (256, 16)
     with pytest.raises(ValueError, match="invalid"):
         probe.parse_full_check("CHECK 2\nDONE\n", pairs=1)
-    names = {"0": "CONFIG_CMD", "2": "LOAD_CMD", "3": "STORE_CMD", "7": "FLUSH_CMD",
-             "8": "LOOP_WS"}
-    facts = {"facts": {"interfaces": [{"name": "funct_decode_table", "custom_opcode": 123,
-                                          "names": names}]}}
+    names = {"0": "CONFIG_CMD", "2": "LOAD_CMD", "3": "STORE_CMD", "7": "FLUSH_CMD", "8": "LOOP_WS"}
+    facts = {"facts": {"interfaces": [{"name": "funct_decode_table", "custom_opcode": 123, "names": names}]}}
+
     def lines(*functs):
         return "\n".join(f"  {i * 4:x}: {(funct << 25) | 123:08x}  .insn" for i, funct in enumerate(functs))
+
     assert len(probe.decode_custom(lines(0, 2, 3, 7), facts)) == 4
     with pytest.raises(ValueError, match="direct command proof"):
         probe.decode_custom(lines(0, 2, 3, 7, 8), facts)

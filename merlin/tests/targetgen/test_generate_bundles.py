@@ -72,9 +72,7 @@ def test_selected_phase0_facts_replace_cache_grants_and_feed_prompt(tmp_path, mo
     assert selected_path in _sets(bundles["merlin_assisted_rtlchecks_hwbringup_v0"])[0]
     assert selected_path in _sets(bundles["merlin_assisted_hwbringup_v0"])[1]
     assert te.rtl_facts_pin not in _sets(bundles["merlin_assisted_rtlchecks_hwbringup_v0"])[0]
-    assert bundles["merlin_assisted_rtlchecks_hwbringup_v0"]["selected_rtl_facts_file"] == str(
-        selected / "facts.json"
-    )
+    assert bundles["merlin_assisted_rtlchecks_hwbringup_v0"]["selected_rtl_facts_file"] == str(selected / "facts.json")
     assert "selected_rtl_facts_file" not in bundles["merlin_assisted_hwbringup_v0"]
 
     from merlin.targetgen.sandbox.bwrap import base_argv
@@ -87,7 +85,9 @@ def test_selected_phase0_facts_replace_cache_grants_and_feed_prompt(tmp_path, mo
     denied = base_argv(tmp_path / "workspace", {"allowed": []}, _policy_test_live_inputs=True)
     selected_index = permitted.index("MERLIN_RTL_FACTS")
     assert permitted[selected_index - 1 : selected_index + 2] == [
-        "--setenv", "MERLIN_RTL_FACTS", str(selected / "facts.json")
+        "--setenv",
+        "MERLIN_RTL_FACTS",
+        str(selected / "facts.json"),
     ]
     assert ["--unsetenv", "MERLIN_RTL_FACTS"] == denied[
         denied.index("MERLIN_RTL_FACTS") - 1 : denied.index("MERLIN_RTL_FACTS") + 1
@@ -264,9 +264,7 @@ def test_new_bundle_can_pin_external_llvm_without_changing_legacy_default(tmp_pa
     for tool in ("clang-23", "mlir-opt"):
         (llvm / "bin" / tool).write_text("fixture\n")
     default = next(iter(generate_bundles(_te(), arms=("merlin_rtlchecks",)).values()))
-    selected = next(
-        iter(generate_bundles(_te(), arms=("merlin_rtlchecks",), llvm_toolchain_root=llvm).values())
-    )
+    selected = next(iter(generate_bundles(_te(), arms=("merlin_rtlchecks",), llvm_toolchain_root=llvm).values()))
     default_paths = {row["path"] for row in default["allowed"]}
     selected_paths = {row["path"] for row in selected["allowed"]}
     assert "third_party/llvm-install/" in default_paths

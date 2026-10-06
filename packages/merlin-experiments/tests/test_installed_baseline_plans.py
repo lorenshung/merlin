@@ -76,22 +76,38 @@ def test_baseline_resolves_installed_entrypoint_without_native_tree(baseline, tr
         assert command["argv"][command["argv"].index("--treatment") + 1] == treatment
 
 
-def test_phase1_launch_overrides_freeze_codex_selection_without_editing_definition(
-    baseline, capsys, monkeypatch
-):
+def test_phase1_launch_overrides_freeze_codex_selection_without_editing_definition(baseline, capsys, monkeypatch):
     authored = baseline.read_bytes()
     flags = [
-        "--phase1-driver", "codex",
-        "--phase1-model", "gpt-6.1-sol",
-        "--phase1-effort", "xhigh",
-        "--phase1-provider", "subscription",
+        "--phase1-driver",
+        "codex",
+        "--phase1-model",
+        "gpt-6.1-sol",
+        "--phase1-effort",
+        "xhigh",
+        "--phase1-provider",
+        "subscription",
     ]
-    assert main([
-        "inspect", str(baseline), "--phase", "1", "--run-dir", str(baseline.parent / "run"), *flags,
-    ]) == 0
+    assert (
+        main(
+            [
+                "inspect",
+                str(baseline),
+                "--phase",
+                "1",
+                "--run-dir",
+                str(baseline.parent / "run"),
+                *flags,
+            ]
+        )
+        == 0
+    )
     plan = json.loads(capsys.readouterr().out)
     assert plan["phase1_launch_overrides"] == {
-        "driver": "codex", "model": "gpt-6.1-sol", "effort": "xhigh", "provider": "subscription",
+        "driver": "codex",
+        "model": "gpt-6.1-sol",
+        "effort": "xhigh",
+        "provider": "subscription",
     }
     argv = plan["phases"]["1"]["argv"]
     for key, value in plan["phase1_launch_overrides"].items():

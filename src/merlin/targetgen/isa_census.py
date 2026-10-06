@@ -17,10 +17,42 @@ from __future__ import annotations
 import ast
 import hashlib
 import itertools
+import subprocess
 from pathlib import Path
 from typing import Any
 
 UNKNOWN = "UNKNOWN"
+
+
+def _git_source_at_revision(path: Path, revision: str) -> dict[str, str]:
+    """Bind an observed source file to bytes in one exact local Git commit."""
+    if len(revision) != 40 or any(char not in "0123456789abcdef" for char in revision):
+        raise ValueError("source revision must be an exact 40-character commit")
+    source = path.resolve(strict=True)
+
+    def git(*arguments: str) -> bytes:
+        result = subprocess.run(
+            ["git", "-C", str(source.parent), *arguments],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode:
+            raise ValueError(
+                f"source revision cannot be verified for {source}: {result.stderr.decode(errors='replace').strip()}"
+            )
+        return result.stdout
+
+    root = Path(git("rev-parse", "--show-toplevel").decode().strip()).resolve()
+    relative = source.relative_to(root).as_posix()
+    head = git("rev-parse", "HEAD").decode().strip()
+    if head != revision:
+        raise ValueError(f"selected source checkout HEAD differs from declared revision: {source}")
+    selected = git("show", f"{revision}:{relative}")
+    observed = source.read_bytes()
+    if selected != observed:
+        raise ValueError(f"selected source bytes differ from declared Git revision: {source}")
+    return {"revision": revision, "path_at_revision": relative, "sha256": hashlib.sha256(observed).hexdigest()}
 
 
 def _source(path: Path) -> tuple[str, dict[str, str]]:
@@ -315,19 +347,43 @@ def derive_source_census(
     model_isa_file: Path,
     rtl_revision: str,
     format_file: Path | None = None,
+    model_revision: str | None = None,
+    verify_revisions: bool = False,
 ) -> dict[str, Any]:
     """Cross-link selected source bytes; retain all unqualified obligations.
 
     ``format_file`` is the model's instruction-format module; when omitted, the modules the model ISA
-    imports from are looked up beside it. Keyword positions come only from those encoders."""
+    imports from are looked up beside it. Keyword positions come only from those encoders.
+
+    With ``verify_revisions`` every source read is bound to its declared commit: the patterns and the
+    decoder to ``rtl_revision``, the model ISA and each format module it is encoded with to
+    ``model_revision``."""
     if not rtl_revision or len(rtl_revision) != 40 or any(c not in "0123456789abcdef" for c in rtl_revision):
         raise ValueError("exact selected RTL commit is required")
+    revision_verification: dict[str, Any] = {"status": "unverified"}
+    if verify_revisions:
+        if model_revision is None:
+            raise ValueError("model revision is required for source revision verification")
+        rtl_patterns = _git_source_at_revision(pattern_file, rtl_revision)
+        rtl_decoder = _git_source_at_revision(decoder_file, rtl_revision)
+        model_source = _git_source_at_revision(model_isa_file, model_revision)
+        revision_verification = {
+            "status": "verified",
+            "rtl_revision": rtl_revision,
+            "model_revision": model_revision,
+            "patterns": rtl_patterns,
+            "decoder": rtl_decoder,
+            "model_isa": model_source,
+        }
     pattern_text, pattern_source = _source(pattern_file)
     decoder_text, decoder_source = _source(decoder_file)
     model_text, model_source = _source(model_isa_file)
     patterns = _patterns(pattern_text)
     decoded = _decode_rows(decoder_text)
     format_paths = [Path(format_file)] if format_file is not None else _format_sources(model_isa_file, model_text)
+    if verify_revisions:
+        # The format modules place every keyword field, so their bytes are bound like the model's own.
+        revision_verification["formats"] = [_git_source_at_revision(path, str(model_revision)) for path in format_paths]
     layouts, format_sources = _layouts_from(format_paths)
     models = _model_classes(model_text, layouts)
 
@@ -395,6 +451,7 @@ def derive_source_census(
         "schema": "merlin.isa_source_census.v1",
         "scope": "source_crosswalk_only_no_legal_or_executable_variant_denominator",
         "rtl_revision": rtl_revision,
+        "source_revision_verification": revision_verification,
         "sources": {
             "patterns": pattern_source,
             "decoder": decoder_source,

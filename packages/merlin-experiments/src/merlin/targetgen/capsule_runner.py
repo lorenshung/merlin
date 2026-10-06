@@ -4826,8 +4826,8 @@ def run_capsule(
         # own declaration. A backend that declares no readouts leaves the check UNAVAILABLE rather
         # than refusing every capsule -- an undeclared target is not a broken one, and the reason is
         # recorded so "not checked" never reads as "checked and fine".
-        from merlin.verify import epilogue_applicability as _EPI
         from merlin.targetgen.readout_facet import epilogue_stage_routes
+        from merlin.verify import epilogue_applicability as _EPI
 
         _declared = _readout_epilogue_capabilities(eff_target)
         if _declared:
@@ -6078,8 +6078,9 @@ def run_suite(*args, **kwargs) -> list[dict]:
     the right place to open the scope — a library function opening one would cache beyond the event it
     describes.
     """
-    from ..common import provenance as PROV
     import tempfile as _tf
+
+    from ..common import provenance as PROV
 
     with PROV.observation_scope():
         # Freeze every model BEFORE package build and the op phase. A staged

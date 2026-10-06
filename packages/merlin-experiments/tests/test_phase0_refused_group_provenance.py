@@ -1,7 +1,6 @@
 """A generated but refused qualifying group is neither authored nor a phase member."""
 
 import yaml
-
 from merlin_experiments.phase0.provenance import update_provenance_manifest
 
 
@@ -20,9 +19,7 @@ def test_refused_generated_group_is_diagnostic_provenance_only(tmp_path) -> None
     assert manifest["generated"] == ["model/SY_source_fixture"]
     assert manifest["refused_generated"] == ["layers/G_residual_fixture"]
     assert manifest["hand_authored"] == []
-    assert manifest["phase_corpora"]["synthetic"]["phase1"]["generated_members"] == [
-        "model/SY_source_fixture"
-    ]
+    assert manifest["phase_corpora"]["synthetic"]["phase1"]["generated_members"] == ["model/SY_source_fixture"]
     assert all(
         "layers/G_residual_fixture" not in selection["generated_members"]
         for role, selection in manifest["phase_corpora"]["synthetic"].items()

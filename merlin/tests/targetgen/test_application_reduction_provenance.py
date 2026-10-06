@@ -1,11 +1,11 @@
 """Adjacent provenance is diagnostic, never authoritative frontend semantics."""
 
 import pytest
+
 from merlin.common import mlir_query as mq
 from merlin.targetgen.application_inventory import _reduction_provenance_hint
 
-
-_SHARED_INITIALIZER = '''"builtin.module"() ({
+_SHARED_INITIALIZER = """"builtin.module"() ({
 "func.func"() <{function_type = (tensor<4x4xf32>) -> (tensor<4xf32>, tensor<4xf32>), sym_name = "forward"}> ({
 ^bb0(%x: tensor<4x4xf32>):
 %c0 = "arith.constant"() <{value = 0.0 : f32}> : () -> f32
@@ -23,7 +23,7 @@ _SHARED_INITIALIZER = '''"builtin.module"() ({
 %v = "tensor.cast"(%b) {prov.region_id = "R", prov.aten = "aten.sum"} : (tensor<4xf32>)->tensor<4xf32>
 "func.return"(%u,%v) : (tensor<4xf32>,tensor<4xf32>)->()
 }) : ()->()
-}) : ()->()'''
+}) : ()->()"""
 
 
 def test_shared_tagged_initializer_cannot_label_two_untagged_reductions():
@@ -41,10 +41,10 @@ def test_shared_tagged_initializer_cannot_label_two_untagged_reductions():
 def test_exclusive_initializer_with_agreeing_consumers_only_suggests_a_tag(body):
     begin = _SHARED_INITIALIZER.index('%b = "linalg.reduce"')
     end = _SHARED_INITIALIZER.index('%u = "tensor.cast"', begin)
-    single = (_SHARED_INITIALIZER[:begin]
-              + '%b = "tensor.cast"(%a) {prov.region_id = "R", prov.aten = "aten.sum"} '
-                ': (tensor<4xf32>)->tensor<4xf32>\n'
-              + _SHARED_INITIALIZER[end:])
+    single = (
+        _SHARED_INITIALIZER[:begin] + '%b = "tensor.cast"(%a) {prov.region_id = "R", prov.aten = "aten.sum"} '
+        ": (tensor<4xf32>)->tensor<4xf32>\n" + _SHARED_INITIALIZER[end:]
+    )
     module = mq.parse(single.replace("arith.addf", body))
     reduction = next(op for op in mq.walk(module) if mq.op_name(op) == "linalg.reduce")
     assert len(tuple(reduction.operands[-1].uses)) == 1

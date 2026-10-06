@@ -109,6 +109,11 @@ Consequences worth knowing:
   after that winner had already linked its inode, so twelve concurrent first-time runs ended on
   twelve separate inodes holding identical bytes — correct, and the saving entirely lost. A loser now
   learns from `EEXIST` to use the winner's object.
+- Before reusing an existing object, the store rechecks its size and digest and restores
+  its typed read-only mode (`0444` or executable `0555`). A consumer cleaning up a
+  hard-linked tree can chmod that shared inode; the next grant must not inherit a
+  writable object merely because its content hash still matches. Existing aliases
+  share the repaired inode mode, but a historical seal still needs its own verification.
 - `merlin-storage report` flags closures that share nothing. Those either predate the store or were
   written with it disabled.
 - **Not every freeze can use it.** A store object's mode belongs to its inode, so every consumer

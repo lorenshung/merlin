@@ -38,7 +38,8 @@ def f32(value: float) -> float:
 
 def select_group(report: dict, name: str | None = None) -> dict:
     rows = [
-        row for row in report.get("entries", ())
+        row
+        for row in report.get("entries", ())
         if row.get("entry", {}).get("op") == "residual_add"
         and row.get("entry", {}).get("epilogue") == ["relu"]
         and not row.get("raw_of")
@@ -52,8 +53,14 @@ def select_group(report: dict, name: str | None = None) -> dict:
     lhs, rhs = f32(float(entry["lhs_scale"])), f32(float(entry["rhs_scale"]))
     if not (0 < lhs < float("inf") and 0 < rhs < float("inf") and max(lhs, rhs) > 1):
         raise ValueError("this witness requires positive finite scales with gain greater than one")
-    return {"name": rows[0]["name"], "lhs": lhs, "rhs": rhs, "bound": entry["bound_lsb"],
-            "source_role": entry.get("source_role"), "source_reference": entry.get("source_reference")}
+    return {
+        "name": rows[0]["name"],
+        "lhs": lhs,
+        "rhs": rhs,
+        "bound": entry["bound_lsb"],
+        "source_role": entry.get("source_role"),
+        "source_reference": entry.get("source_reference"),
+    }
 
 
 def selected_evidence(phase0: Path, vendor: Path) -> tuple[dict, dict]:
@@ -77,10 +84,15 @@ def selected_evidence(phase0: Path, vendor: Path) -> tuple[dict, dict]:
         raise ValueError("selected facts have no unique Gemmini mesh readout")
     facet = facets[0]
     operand_sum = facet.get("operand_sum") or {}
-    if (facet.get("accumulator_kind") != "addressable" or facet.get("accumulator_dtype") != "i32"
-            or operand_sum.get("operands") != 2 or operand_sum.get("operand_dtype") != "i8"
-            or operand_sum.get("operand_rounding") != "half_even" or operand_sum.get("operand_saturates") is not True
-            or facet.get("scale", {}).get("granularities") != ["tensor"]):
+    if (
+        facet.get("accumulator_kind") != "addressable"
+        or facet.get("accumulator_dtype") != "i32"
+        or operand_sum.get("operands") != 2
+        or operand_sum.get("operand_dtype") != "i8"
+        or operand_sum.get("operand_rounding") != "half_even"
+        or operand_sum.get("operand_saturates") is not True
+        or facet.get("scale", {}).get("granularities") != ["tensor"]
+    ):
         raise ValueError("selected operand-sum/readout contract differs from this witness")
     readouts = {row["selector"]: set(row["applies"]) for row in facet.get("readouts", ())}
     if not {"relu", "acc_scale"} <= readouts.get("i8", set()) or readouts.get("i32") != set():
@@ -89,11 +101,13 @@ def selected_evidence(phase0: Path, vendor: Path) -> tuple[dict, dict]:
     for key in ("operand_sum", "scalar_abi"):
         if inputs[key]["provenance"]["params_header_sha256"] != sha(header):
             raise ValueError(f"selected {key} ABI is not this vendor header")
-    source = {"phase0_manifest": {"path": str(manifest_path), "sha256": sha(manifest_path)},
-              "facts": {"path": str(facts_path), "sha256": sha(facts_path)},
-              "readout_facets": {"path": str(facets_path), "sha256": sha(facets_path)},
-              "readout_inputs": {"path": str(inputs_path), "sha256": sha(inputs_path)},
-              "params_header": {"path": str(header), "sha256": sha(header)}}
+    source = {
+        "phase0_manifest": {"path": str(manifest_path), "sha256": sha(manifest_path)},
+        "facts": {"path": str(facts_path), "sha256": sha(facts_path)},
+        "readout_facets": {"path": str(facets_path), "sha256": sha(facets_path)},
+        "readout_inputs": {"path": str(inputs_path), "sha256": sha(inputs_path)},
+        "params_header": {"path": str(header), "sha256": sha(header)},
+    }
     return source, facts
 
 
@@ -112,8 +126,7 @@ def campaign_values(campaign: str) -> tuple[tuple[int, ...], tuple[int, ...]]:
 
 def scales(group: dict) -> dict[str, float]:
     factor = max(1.0, group["lhs"], group["rhs"])
-    return {"lhs_load": f32(group["lhs"] / factor), "rhs_load": f32(group["rhs"] / factor),
-            "readout": f32(factor)}
+    return {"lhs_load": f32(group["lhs"] / factor), "rhs_load": f32(group["rhs"] / factor), "readout": f32(factor)}
 
 
 def expected_outputs(group: dict, campaign: str) -> dict:
@@ -144,20 +157,32 @@ def render_source(group: dict, campaign: str) -> str:
     gain = scales(group)
     if len(aa) % 16 or len(bb) % 16:
         raise ValueError("campaign extents must be full Gemmini tiles")
-    values = ("static const int vals[16] = {" + ", ".join(str(v) for v in SMOKE_VALUES) + "};\n  ") \
-        if campaign != "full" else ""
+    values = (
+        ("static const int vals[16] = {" + ", ".join(str(v) for v in SMOKE_VALUES) + "};\n  ")
+        if campaign != "full"
+        else ""
+    )
     row_value = "vals[i]" if len(aa) == 16 else "i-128"
     col_value = "vals[j]" if len(bb) == 16 else "j-128"
-    init = (values + "for (int i=0;i<ROWS;i++) for (int j=0;j<COLS;j++) "
-            + "{ A[i][j]=" + row_value + "; B[i][j]=" + col_value + "; }")
+    init = (
+        values
+        + "for (int i=0;i<ROWS;i++) for (int j=0;j<COLS;j++) "
+        + "{ A[i][j]="
+        + row_value
+        + "; B[i][j]="
+        + col_value
+        + "; }"
+    )
     if campaign != "smoke":
         # Simulated UART output dominates a 65,536-element RTL campaign. Embed
         # the independently computed expectation and compare every output on
         # the Rocket, emitting only a bounded diagnostic transcript.
         unit = expected_outputs(group, campaign)["unit_model"]
-        table = "static const int8_t expected[ROWS][COLS] = {\n" + "\n".join(
-            "  {" + ", ".join(str(value) for value in row) + "}," for row in unit
-        ) + "\n};\n"
+        table = (
+            "static const int8_t expected[ROWS][COLS] = {\n"
+            + "\n".join("  {" + ", ".join(str(value) for value in row) + "}," for row in unit)
+            + "\n};\n"
+        )
         report = """int mismatches = 0;
   for (int i=0;i<ROWS;i++) for (int j=0;j<COLS;j++) {
     if (C[i][j] != expected[i][j]) {
@@ -189,13 +214,13 @@ int main(void) {{
   const uint32_t acc = (uint32_t)1 << (ADDR_LEN - 1);
   const uint32_t accumulate = (uint32_t)1 << (ADDR_LEN - 2);
   for (int i=0;i<ROWS;i+=DIM) for (int j=0;j<COLS;j+=DIM) {{
-    gemmini_extended4_config_ld(COLS*sizeof(elem_t), {_c_float(gain['lhs_load'])}, true, DIM, 0);
+    gemmini_extended4_config_ld(COLS*sizeof(elem_t), {_c_float(gain["lhs_load"])}, true, DIM, 0);
     gemmini_extended_mvin(&A[i][j], acc, DIM, DIM);
     gemmini_fence();
-    gemmini_extended4_config_ld(COLS*sizeof(elem_t), {_c_float(gain['rhs_load'])}, true, DIM, 0);
+    gemmini_extended4_config_ld(COLS*sizeof(elem_t), {_c_float(gain["rhs_load"])}, true, DIM, 0);
     gemmini_extended_mvin(&B[i][j], acc | accumulate, DIM, DIM);
     gemmini_fence();
-    gemmini_extended_config_st(COLS*sizeof(elem_t), RELU, {_c_float(gain['readout'])});
+    gemmini_extended_config_st(COLS*sizeof(elem_t), RELU, {_c_float(gain["readout"])});
     gemmini_extended_mvout(&C[i][j], acc, DIM, DIM);
     gemmini_fence();
   }}
@@ -247,8 +272,8 @@ def decode_custom(disassembly: str, facts: dict) -> list[dict]:
         if not tokens or len(tokens[0]) != 8 or any(ch not in "0123456789abcdefABCDEF" for ch in tokens[0]):
             continue
         word = int(tokens[0], 16)
-        if word & 0x7f == opcode:
-            funct = (word >> 25) & 0x7f
+        if word & 0x7F == opcode:
+            funct = (word >> 25) & 0x7F
             seen.append({"word": tokens[0], "funct": funct, "class": table["names"].get(str(funct))})
     classes = {row["class"] for row in seen}
     needed = {"CONFIG_CMD", "LOAD_CMD", "STORE_CMD", "FLUSH_CMD"}
@@ -260,15 +285,21 @@ def decode_custom(disassembly: str, facts: dict) -> list[dict]:
 def compare(actual: list[list[int]], expected: dict, bound: int) -> dict:
     differences = [abs(x - y) for row, gold in zip(actual, expected["reference"]) for x, y in zip(row, gold)]
     model_diff = [abs(x - y) for row, gold in zip(actual, expected["unit_model"]) for x, y in zip(row, gold)]
-    return {"max_reference_error": max(differences), "n_over_bound": sum(d > bound for d in differences),
-            "max_unit_model_error": max(model_diff), "n_unit_model_mismatch": sum(d != 0 for d in model_diff)}
+    return {
+        "max_reference_error": max(differences),
+        "n_over_bound": sum(d > bound for d in differences),
+        "max_unit_model_error": max(model_diff),
+        "n_unit_model_mismatch": sum(d != 0 for d in model_diff),
+    }
 
 
 def bind_simulator_attestation(path: Path, *, phase0: Path, numerical: dict) -> dict:
     """Recheck retained exact-rebuild bytes against this execution and CIRCT source."""
     attestation = json.loads(path.read_text(encoding="utf-8"))
-    if (attestation.get("schema") != "merlin.gemmini-verilator-provenance.v1"
-            or attestation.get("status") != "reproduced_exact_binary"):
+    if (
+        attestation.get("schema") != "merlin.gemmini-verilator-provenance.v1"
+        or attestation.get("status") != "reproduced_exact_binary"
+    ):
         raise ValueError("simulator attestation is not an exact-binary rebuild record")
     facts = json.loads((phase0 / "hardware/circt/facts.json").read_text(encoding="utf-8"))
     selected = facts["facts"]["source"]
@@ -276,13 +307,15 @@ def bind_simulator_attestation(path: Path, *, phase0: Path, numerical: dict) -> 
     firrtl = Path(selected["fir_path"])
     executable = Path(numerical["tools"]["verilator"]["path"])
     binary_sha = sha(executable)
-    if (sha(source_selection) != attestation["source_selection_sha256"]
-            or sha(firrtl) != selected["fir_sha256"]
-            or selected["fir_sha256"] != attestation["selected_firrtl_sha256"]
-            or binary_sha != numerical["tools"]["verilator"]["sha256"]
-            or binary_sha != attestation["kernel_tested_binary_sha256"]
-            or binary_sha != attestation["rebuilt_binary_sha256"]
-            or binary_sha != sha(path.parent / "simulator-rebuild")):
+    if (
+        sha(source_selection) != attestation["source_selection_sha256"]
+        or sha(firrtl) != selected["fir_sha256"]
+        or selected["fir_sha256"] != attestation["selected_firrtl_sha256"]
+        or binary_sha != numerical["tools"]["verilator"]["sha256"]
+        or binary_sha != attestation["kernel_tested_binary_sha256"]
+        or binary_sha != attestation["rebuilt_binary_sha256"]
+        or binary_sha != sha(path.parent / "simulator-rebuild")
+    ):
         raise ValueError("attested selected FIRRTL/source/simulator bytes differ from this run")
     hashes = attestation.get("core_rtl_sha256") or {}
     if len(hashes) < 100:
@@ -292,12 +325,15 @@ def bind_simulator_attestation(path: Path, *, phase0: Path, numerical: dict) -> 
     for name, digest in hashes.items():
         if Path(name).name != name or sha(selected_rtl / name) != digest or sha(retained_rtl / name) != digest:
             raise ValueError(f"attested Gemmini RTL file changed: {name}")
-    return {"receipt_sha256": sha(path), "source_selection_sha256": sha(source_selection),
-            "selected_firrtl_sha256": sha(firrtl), "simulator_binary_sha256": binary_sha,
-            "retained_core_rtl_files_checked": len(hashes),
-            "historical_procedure_limit":
-                "The archived prior rebuild receipt records exact firtool/Verilator reproduction; "
-                "its temporary FIRRTL copy and annotations were not retained in the archive."}
+    return {
+        "receipt_sha256": sha(path),
+        "source_selection_sha256": sha(source_selection),
+        "selected_firrtl_sha256": sha(firrtl),
+        "simulator_binary_sha256": binary_sha,
+        "retained_core_rtl_files_checked": len(hashes),
+        "historical_procedure_limit": "The archived prior rebuild receipt records exact firtool/Verilator reproduction; "
+        "its temporary FIRRTL copy and annotations were not retained in the archive.",
+    }
 
 
 def bind_existing_run(args: argparse.Namespace) -> dict:
@@ -319,10 +355,12 @@ def bind_existing_run(args: argparse.Namespace) -> dict:
     if any(row.get("status") != "passed" for row in old["observations"].values()):
         raise ValueError("the prior numerical receipt has an unpassed engine")
     old_dir = old_path.parent
-    for key, filename in (("source", "direct_residual_readout.c"),
-                          ("expected_sha256", "expected.json"),
-                          ("disassembly_sha256", "disassembly.txt"),
-                          ("elf_sha256", "direct_residual_readout.elf")):
+    for key, filename in (
+        ("source", "direct_residual_readout.c"),
+        ("expected_sha256", "expected.json"),
+        ("disassembly_sha256", "disassembly.txt"),
+        ("elf_sha256", "direct_residual_readout.elf"),
+    ):
         recorded = old[key]["sha256"] if key == "source" else old[key]
         if sha(old_dir / filename) != recorded:
             raise ValueError(f"prior receipt does not bind {filename}")
@@ -332,8 +370,7 @@ def bind_existing_run(args: argparse.Namespace) -> dict:
     old_report_path = Path(old["groups"]["path"])
     if sha(old_report_path) != old["groups"]["sha256"]:
         raise ValueError("prior group report changed since the numerical run")
-    previous, current = (json.loads(path.read_text(encoding="utf-8"))
-                         for path in (old_report_path, current_path))
+    previous, current = (json.loads(path.read_text(encoding="utf-8")) for path in (old_report_path, current_path))
     group = select_group(current, args.group)
     if group != old["group"]:
         raise ValueError("current and previously simulated numerical groups differ")
@@ -347,17 +384,17 @@ def bind_existing_run(args: argparse.Namespace) -> dict:
     expected_bytes = json.dumps(expected, separators=(",", ":")) + "\n"
     if (old_dir / "expected.json").read_text(encoding="utf-8") != expected_bytes:
         raise ValueError("current group does not reproduce the numerical expectation bytes")
-    unit_digest = hashlib.sha256(bytes(
-        value & 0xff for row in expected["unit_model"] for value in row
-    )).hexdigest()
+    unit_digest = hashlib.sha256(bytes(value & 0xFF for row in expected["unit_model"] for value in row)).hexdigest()
     if old["campaign"] != "smoke" and old.get("embedded_expected_i8_sha256") != unit_digest:
         raise ValueError("full-domain run does not bind the embedded i8 expectation table")
     manifest = json.loads((phase0 / "evidence-manifest.json").read_text(encoding="utf-8"))
     report_inputs = current["inputs"]
     capture = Path(report_inputs["capture"]["path"]).resolve()
-    if (not capture.is_relative_to(phase0 / "capsules/model")
-            or capture.name != "capsule.interface.mlir"
-            or report_inputs["capture"]["sha256"] != sha(capture)):
+    if (
+        not capture.is_relative_to(phase0 / "capsules/model")
+        or capture.name != "capsule.interface.mlir"
+        or report_inputs["capture"]["sha256"] != sha(capture)
+    ):
         raise ValueError("current report is not bound to a frozen model interface")
     model = yaml.safe_load((capture.parent / "capsule.yaml").read_text(encoding="utf-8"))
     qualified = (model.get("model_qualification") or {}).get("group_capsules") or []
@@ -365,16 +402,15 @@ def bind_existing_run(args: argparse.Namespace) -> dict:
         raise ValueError("frozen model does not name this isolated numerical group")
     source_capture_sha = model["materialized_capture"]["capture_sha256"]
     role = f"application-capture:{model['materialized_capture']['workload_id']}"
-    if not any(row.get("role") == role and row.get("sha256") == source_capture_sha
-               for row in manifest["sources"]):
+    if not any(row.get("role") == role and row.get("sha256") == source_capture_sha for row in manifest["sources"]):
         raise ValueError("frozen source model is absent from Phase 0 evidence")
     facts = phase0 / "hardware/circt/facts.json"
-    if (report_inputs["rtl_facts"]["sha256"] != sha(facts)
-            or manifest["raw_facts_sha256"] != sha(facts)):
+    if report_inputs["rtl_facts"]["sha256"] != sha(facts) or manifest["raw_facts_sha256"] != sha(facts):
         raise ValueError("current group plan did not use the frozen CIRCT facts")
     contract_sha = report_inputs["capability_contract"]["sha256"]
-    if not any(row.get("role") == "target-contract" and row.get("sha256") == contract_sha
-               for row in manifest["sources"]):
+    if not any(
+        row.get("role") == "target-contract" and row.get("sha256") == contract_sha for row in manifest["sources"]
+    ):
         raise ValueError("current group plan did not use the frozen target contract")
     if old["selected_evidence"]["phase0_manifest"]["sha256"] != sha(phase0 / "evidence-manifest.json"):
         raise ValueError("numerical run used a different Phase 0 manifest")
@@ -394,7 +430,8 @@ def bind_existing_run(args: argparse.Namespace) -> dict:
         "simulated_source_sha256": old["source"]["sha256"],
         "simulated_elf_sha256": old["elf_sha256"],
         "independent_expected_i8_sha256": unit_digest,
-        "pairs": old["pairs"], "group": group,
+        "pairs": old["pairs"],
+        "group": group,
         "observations": old["observations"],
     }
     if args.attestation is not None:
@@ -429,14 +466,15 @@ def run(args: argparse.Namespace) -> dict:
     elf = plugin.build(source, "direct_residual_readout", output)
     chipyard = Path(args.chipyard).resolve()
     objdump = chipyard / ".conda-env/riscv-tools/bin/riscv64-unknown-elf-objdump"
-    disassembly = subprocess.run([str(objdump), "-d", str(elf)], capture_output=True, text=True,
-                                 check=True, timeout=30).stdout
+    disassembly = subprocess.run(
+        [str(objdump), "-d", str(elf)], capture_output=True, text=True, check=True, timeout=30
+    ).stdout
     disasm_path = output / "disassembly.txt"
     disasm_path.write_text(disassembly, encoding="utf-8")
     commands = decode_custom(disassembly, facts)
     expected_path = output / "expected.json"
     expected_path.write_text(json.dumps(expected, separators=(",", ":")) + "\n", encoding="utf-8")
-    unit_bytes = bytes(value & 0xff for row in expected["unit_model"] for value in row)
+    unit_bytes = bytes(value & 0xFF for row in expected["unit_model"] for value in row)
     observations = {}
     values = campaign_values(args.campaign)
     for simulator in ("spike", "verilator"):
@@ -448,35 +486,58 @@ def run(args: argparse.Namespace) -> dict:
         transcript.write_text(console, encoding="utf-8")
         if args.campaign != "smoke":
             mismatches = parse_full_check(console, len(values[0]) * len(values[1]))
-            check = {**model_check, "n_unit_model_mismatch": mismatches,
-                     "max_unit_model_error": 0 if mismatches == 0 else None,
-                     "native_comparison": "exact_per_element_against_embedded_independent_unit_model"}
+            check = {
+                **model_check,
+                "n_unit_model_mismatch": mismatches,
+                "max_unit_model_error": 0 if mismatches == 0 else None,
+                "native_comparison": "exact_per_element_against_embedded_independent_unit_model",
+            }
         else:
             actual = parse_rows(console, (len(values[0]), len(values[1])))
             check = compare(actual, expected, group["bound"])
-        observations[simulator] = {"status": "passed" if check["n_over_bound"] == 0
-                                   and check["n_unit_model_mismatch"] == 0 else "failed",
-                                   "console_sha256": sha(transcript), **check}
-    receipt = {"schema": SCHEMA,
-               "status": "passed" if all(row["status"] == "passed" for row in observations.values()) else "incomplete",
-               "campaign": args.campaign, "pairs": len(values[0]) * len(values[1]),
-               "operand_domain": {"lhs_values": list(values[0]), "rhs_values": list(values[1])},
-               "group": group, "scales": expected["gain"], "model_check": model_check,
-               "selected_evidence": evidence, "groups": {"path": str(groups_path), "sha256": sha(groups_path)},
-               "source": {"path": str(output / "direct_residual_readout.c"),
-                          "sha256": sha(output / "direct_residual_readout.c")},
-               "elf_sha256": sha(elf), "disassembly_sha256": sha(disasm_path),
-               "expected_sha256": sha(expected_path),
-               "embedded_expected_i8_sha256": hashlib.sha256(unit_bytes).hexdigest(),
-               "custom_instruction_classes": commands,
-               "tools": {name: {"path": str(path), "sha256": sha(path)} for name, path in (
-                   ("gcc", backend.gcc_path()), ("objdump", objdump), ("spike", backend.spike_path()),
-                   ("libgemmini", backend.libgemmini_dir() / "libgemmini.so"),
-                   ("verilator", backend.verilator_path())) if path.is_file()},
-               "observations": observations,
-               "limits": ["Selected scales and one readout mode only; no compiler code generation is exercised.",
-                          "Verilator binary hash is recorded, but its RTL build identity needs a separate attestation.",
-                          "Finite simulation is not a universal proof of transform correctness."]}
+        observations[simulator] = {
+            "status": "passed" if check["n_over_bound"] == 0 and check["n_unit_model_mismatch"] == 0 else "failed",
+            "console_sha256": sha(transcript),
+            **check,
+        }
+    receipt = {
+        "schema": SCHEMA,
+        "status": "passed" if all(row["status"] == "passed" for row in observations.values()) else "incomplete",
+        "campaign": args.campaign,
+        "pairs": len(values[0]) * len(values[1]),
+        "operand_domain": {"lhs_values": list(values[0]), "rhs_values": list(values[1])},
+        "group": group,
+        "scales": expected["gain"],
+        "model_check": model_check,
+        "selected_evidence": evidence,
+        "groups": {"path": str(groups_path), "sha256": sha(groups_path)},
+        "source": {
+            "path": str(output / "direct_residual_readout.c"),
+            "sha256": sha(output / "direct_residual_readout.c"),
+        },
+        "elf_sha256": sha(elf),
+        "disassembly_sha256": sha(disasm_path),
+        "expected_sha256": sha(expected_path),
+        "embedded_expected_i8_sha256": hashlib.sha256(unit_bytes).hexdigest(),
+        "custom_instruction_classes": commands,
+        "tools": {
+            name: {"path": str(path), "sha256": sha(path)}
+            for name, path in (
+                ("gcc", backend.gcc_path()),
+                ("objdump", objdump),
+                ("spike", backend.spike_path()),
+                ("libgemmini", backend.libgemmini_dir() / "libgemmini.so"),
+                ("verilator", backend.verilator_path()),
+            )
+            if path.is_file()
+        },
+        "observations": observations,
+        "limits": [
+            "Selected scales and one readout mode only; no compiler code generation is exercised.",
+            "Verilator binary hash is recorded, but its RTL build identity needs a separate attestation.",
+            "Finite simulation is not a universal proof of transform correctness.",
+        ],
+    }
     (output / "receipt.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return receipt
 
@@ -490,10 +551,14 @@ def main() -> int:
     parser.add_argument("--campaign", choices=("smoke", "boundary_rows", "boundary_cols", "full"), default="smoke")
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--timeout", type=int, default=1800)
-    parser.add_argument("--rebind-receipt", type=Path,
-                        help="bind an existing passed numerical run to this frozen group if all bytes match")
-    parser.add_argument("--attestation", type=Path,
-                        help="with --rebind-receipt, recheck a retained exact Verilator rebuild attestation")
+    parser.add_argument(
+        "--rebind-receipt",
+        type=Path,
+        help="bind an existing passed numerical run to this frozen group if all bytes match",
+    )
+    parser.add_argument(
+        "--attestation", type=Path, help="with --rebind-receipt, recheck a retained exact Verilator rebuild attestation"
+    )
     args = parser.parse_args()
     if args.rebind_receipt is not None:
         result = bind_existing_run(args)

@@ -34,7 +34,16 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["ReadoutCapability", "StageRoute", "StageVerdict", "Assessment", "assess", "selectors_applying", "STATUSES", "REFUSING_STATUSES"]
+__all__ = [
+    "ReadoutCapability",
+    "StageRoute",
+    "StageVerdict",
+    "Assessment",
+    "assess",
+    "selectors_applying",
+    "STATUSES",
+    "REFUSING_STATUSES",
+]
 
 #: Every verdict this module can reach.
 STATUSES: tuple[str, ...] = (
@@ -91,22 +100,27 @@ class StageRoute:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "stages": [self.stage], "site": self.site, "composed_with": self.composed_with,
-            "readouts": sorted(self.readouts), "producer_opcodes": sorted(self.producer_opcodes),
+            "stages": [self.stage],
+            "site": self.site,
+            "composed_with": self.composed_with,
+            "readouts": sorted(self.readouts),
+            "producer_opcodes": sorted(self.producer_opcodes),
             "consumer_opcodes": sorted(self.consumer_opcodes),
-            "operand_attribute": self.operand_attribute, "operand_role": self.operand_role,
+            "operand_attribute": self.operand_attribute,
+            "operand_role": self.operand_role,
             "evidence": self.evidence,
         }
 
 
-def _route_for(
-    routes: Sequence[StageRoute], stage: str, selector: str, composition: str
-) -> StageRoute | None:
+def _route_for(routes: Sequence[StageRoute], stage: str, selector: str, composition: str) -> StageRoute | None:
     return next(
         (
-            route for route in routes
-            if route.stage == stage and route.composed_with == composition
-            and selector in route.readouts and route.site == "accumulator_seed"
+            route
+            for route in routes
+            if route.stage == stage
+            and route.composed_with == composition
+            and selector in route.readouts
+            and route.site == "accumulator_seed"
         ),
         None,
     )
@@ -207,8 +221,11 @@ def _readout_of(command: Mapping[str, Any]) -> str | None:
 
 
 def selectors_applying(
-    readouts: Sequence[ReadoutCapability], stages: Sequence[str],
-    *, routes: Sequence[StageRoute] = (), composition: str | None = None,
+    readouts: Sequence[ReadoutCapability],
+    stages: Sequence[str],
+    *,
+    routes: Sequence[StageRoute] = (),
+    composition: str | None = None,
 ) -> tuple[str, ...]:
     """The readout selectors that apply EVERY stage in ``stages``, in the target's declaration order.
 
@@ -229,18 +246,21 @@ def selectors_applying(
     ordered = tuple(str(s) for s in stages if str(s))
     want = set(ordered)
     return tuple(
-        r.selector for r in readouts
-        if all(stage in r.applies or (
-            composition is not None and ordered[0] == stage
-            and _route_for(routes, stage, r.selector, composition)
+        r.selector
+        for r in readouts
+        if all(
+            stage in r.applies
+            or (composition is not None and ordered[0] == stage and _route_for(routes, stage, r.selector, composition))
+            for stage in want
         )
-               for stage in want)
     )
 
 
 def assess(
-    command_buffer: Mapping[str, Any], readouts: Sequence[ReadoutCapability],
-    *, routes: Sequence[StageRoute] = (),
+    command_buffer: Mapping[str, Any],
+    readouts: Sequence[ReadoutCapability],
+    *,
+    routes: Sequence[StageRoute] = (),
 ) -> Assessment:
     """Whether every epilogue stage this program declares is applied by a witnessed path.
 
@@ -302,8 +322,14 @@ def assess(
             continue
         for stage in epilogue:
             route = next(
-                (r for r in routes if r.stage == stage and r.site == "accumulator_seed"
-                 and readout in r.readouts and _route_witness(r, command, commands[:index], tensors)),
+                (
+                    r
+                    for r in routes
+                    if r.stage == stage
+                    and r.site == "accumulator_seed"
+                    and readout in r.readouts
+                    and _route_witness(r, command, commands[:index], tensors)
+                ),
                 None,
             )
             applied = stage in capability.applies or route is not None

@@ -10,8 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 from merlin_experiments.phase1.context import InvocationContext
-from merlin_experiments.phase1.providers import execution as E
 from merlin_experiments.phase1.providers import codex_agent as CA
+from merlin_experiments.phase1.providers import execution as E
 
 from merlin.targetgen import target_experiment
 from merlin.targetgen.sandbox import bwrap as BW
@@ -51,8 +51,12 @@ def prepared(tmp_path, monkeypatch):
 
 def _command(prepared, extra):
     return E.sandbox_command(
-        "true", prepared.ws, prepared.bundle, extra,
-        context=prepared.context, private_run_dir=None,
+        "true",
+        prepared.ws,
+        prepared.bundle,
+        extra,
+        context=prepared.context,
+        private_run_dir=None,
     )
 
 
@@ -83,8 +87,12 @@ def test_codex_prefix_does_not_mount_other_provider_secrets_or_inherit_host_env(
 
     monkeypatch.setattr(BW, "claude_runtime_binds", forbidden_claude_runtime_binds)
     argv = E.sandbox_command(
-        "true", prepared.ws, prepared.bundle, CA.codex_runtime_binds(isolated),
-        context=prepared.context, codex_mode=True,
+        "true",
+        prepared.ws,
+        prepared.bundle,
+        CA.codex_runtime_binds(isolated),
+        context=prepared.context,
+        codex_mode=True,
     )
     assert "--clearenv" in argv
     assert not BW.is_exposed(argv, claude_credential)
@@ -100,14 +108,20 @@ def test_agent_composer_keeps_host_run_private_even_through_a_bind_alias(prepare
     private_run.mkdir()
     (private_run / "semantic_search_diagnostic.json").write_text("{}")
     E.sandbox_command(
-        "true", prepared.ws, prepared.bundle,
-        context=prepared.context, private_run_dir=private_run,
+        "true",
+        prepared.ws,
+        prepared.bundle,
+        context=prepared.context,
+        private_run_dir=private_run,
     )
     with pytest.raises(RuntimeError, match="host-private"):
         E.sandbox_command(
-            "true", prepared.ws, prepared.bundle,
+            "true",
+            prepared.ws,
+            prepared.bundle,
             ["--ro-bind", str(private_run), "/agent-visible/run"],
-            context=prepared.context, private_run_dir=private_run,
+            context=prepared.context,
+            private_run_dir=private_run,
         )
 
 
@@ -125,7 +139,12 @@ def test_converse_tool_checks_the_same_final_mount_boundary(prepared, monkeypatc
     monkeypatch.setattr(BW, "wrap", exposed_wrap)
     with pytest.raises(RuntimeError, match="host-private"):
         bedrock_agent._bash_in_sandbox(
-            prepared.target, prepared.ws, prepared.bundle, "true", "bwrap", 5,
+            prepared.target,
+            prepared.ws,
+            prepared.bundle,
+            "true",
+            "bwrap",
+            5,
             private_run_dir=private_run,
         )
 

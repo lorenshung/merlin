@@ -179,25 +179,34 @@ def _scale_block_elems(contract: dict) -> int | None:
 def _structural_mesh_rows(facts: dict) -> int | None:
     """Read source-bound grid geometry without treating it as a compute array."""
     body = facts.get("facts") or {}
-    observations = [o for o in body.get("structural_observations") or []
-                    if isinstance(o, dict) and o.get("kind") == "mesh_tile_grid"]
+    observations = [
+        o
+        for o in body.get("structural_observations") or []
+        if isinstance(o, dict) and o.get("kind") == "mesh_tile_grid"
+    ]
     if not observations:
         return None
     consistency = facts.get("source_consistency") or {}
     fir_sha = (facts.get("inputs") or {}).get("fir_sha256")
     production = consistency.get("production") or {}
-    if (consistency.get("status") != "verified" or not isinstance(fir_sha, str)
-            or len(fir_sha) != 64 or production.get("firrtl_sha256") != fir_sha
-            or (body.get("source") or {}).get("fir_sha256") != fir_sha):
+    if (
+        consistency.get("status") != "verified"
+        or not isinstance(fir_sha, str)
+        or len(fir_sha) != 64
+        or production.get("firrtl_sha256") != fir_sha
+        or (body.get("source") or {}).get("fir_sha256") != fir_sha
+    ):
         raise ValueError("structural mesh lacks a matching verified FIRRTL source")
     if len(observations) != 1:
         raise ValueError("structural mesh geometry is ambiguous")
     observation = observations[0]
     rows, cols, instances = (observation.get(k) for k in ("rows", "cols", "instances"))
-    if (observation.get("source") != "selected_firrtl"
-            or observation.get("firrtl_sha256") != fir_sha
-            or any(type(v) is not int or v < 1 for v in (rows, cols, instances))
-            or rows * cols != instances):
+    if (
+        observation.get("source") != "selected_firrtl"
+        or observation.get("firrtl_sha256") != fir_sha
+        or any(type(v) is not int or v < 1 for v in (rows, cols, instances))
+        or rows * cols != instances
+    ):
         raise ValueError("structural mesh geometry does not match its selected FIRRTL")
     return rows
 
@@ -721,8 +730,7 @@ def _readout_selector_for(
     if not readouts:
         return None
     routes = tuple(
-        route for route in epilogue_stage_routes(binding.target)
-        if route.operand_role in available_operand_roles
+        route for route in epilogue_stage_routes(binding.target) if route.operand_role in available_operand_roles
     )
     applying = selectors_applying(readouts, epilogue, routes=routes, composition="contraction")
     if applying:
@@ -738,8 +746,11 @@ def _readout_selector_for(
 
 
 def _resolve_output_dtype(
-    binding: CorpusBinding, epilogue: list[str], entry: dict | None = None,
-    *, available_operand_roles: frozenset[str] = frozenset(),
+    binding: CorpusBinding,
+    epilogue: list[str],
+    entry: dict | None = None,
+    *,
+    available_operand_roles: frozenset[str] = frozenset(),
 ) -> str:
     """Output dtype: the entry's own declaration if it makes one, else the accumulate dtype, unless a
     REQUANTIZING epilogue narrows the accumulator (the target declares that narrow dtype in its datapath
@@ -781,16 +792,19 @@ def _resolve_output_dtype(
         if epilogue:
             _selectors = _readout_selectors(binding)
             if _selectors is not None:
-                from merlin.verify.epilogue_applicability import selectors_applying
                 from merlin.targetgen.readout_facet import epilogue_stage_routes
+                from merlin.verify.epilogue_applicability import selectors_applying
 
                 routes = tuple(
-                    route for route in epilogue_stage_routes(binding.target)
+                    route
+                    for route in epilogue_stage_routes(binding.target)
                     if route.operand_role in available_operand_roles
                 )
                 _ok = selectors_applying(
-                    _selectors, epilogue,
-                    routes=routes, composition="contraction",
+                    _selectors,
+                    epilogue,
+                    routes=routes,
+                    composition="contraction",
                 )
                 if str(declared) not in _ok:
                     raise ValueError(
@@ -805,9 +819,7 @@ def _resolve_output_dtype(
     # stages someone had thought of -- `relu` was in none of them, so a capsule fusing an activation
     # committed the raw accumulator width and declared a program the hardware cannot run.
     if epilogue:
-        selector = _readout_selector_for(
-            binding, epilogue, available_operand_roles=available_operand_roles
-        )
+        selector = _readout_selector_for(binding, epilogue, available_operand_roles=available_operand_roles)
         if selector is not None:
             dtype_info(selector)  # same fail-closed check an entry's own declaration gets
             return selector
@@ -1002,8 +1014,12 @@ def build_matmul(entry: dict, binding: CorpusBinding) -> tuple[dict, str]:
         epilogue.insert(0, "bias_add")
     acc_scale = entry.get("acc_scale")
     output_dtype = _resolve_output_dtype(
-        binding, epilogue, entry,
-        available_operand_roles=frozenset({"bias"}) if any(stage in _BIAS_STAGES for stage in epilogue) else frozenset(),
+        binding,
+        epilogue,
+        entry,
+        available_operand_roles=frozenset({"bias"})
+        if any(stage in _BIAS_STAGES for stage in epilogue)
+        else frozenset(),
     )
     odt = binding.cap_dtype(output_dtype)
     idt = binding.cap_dtype(binding.operand_dtype)
@@ -1913,8 +1929,12 @@ def build_conv2d(entry: dict, binding: CorpusBinding) -> tuple[dict, str]:
     Kdim = kh * kw * ci
     epilogue = list(entry.get("epilogue", []))
     output_dtype = _resolve_output_dtype(
-        binding, epilogue, entry,
-        available_operand_roles=frozenset({"bias"}) if any(stage in _BIAS_STAGES for stage in epilogue) else frozenset(),
+        binding,
+        epilogue,
+        entry,
+        available_operand_roles=frozenset({"bias"})
+        if any(stage in _BIAS_STAGES for stage in epilogue)
+        else frozenset(),
     )
     idt, odt = binding.cap_dtype(binding.operand_dtype), binding.cap_dtype(output_dtype)
     midt, modt = binding.mlir_dtype(binding.operand_dtype), binding.mlir_dtype(output_dtype)

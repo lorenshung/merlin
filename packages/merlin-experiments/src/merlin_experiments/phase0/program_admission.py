@@ -184,16 +184,17 @@ def _operand_sum_numeric_screens(program: Path, evidence) -> list[dict]:
     """
     spec = getattr(evidence, "software_spec", None) or {}
     if not any(
-        (row.get("derived_from_facts") or {}).get("form") == "fused_operand_sum"
-        for row in spec.get("operations") or ()
+        (row.get("derived_from_facts") or {}).get("form") == "fused_operand_sum" for row in spec.get("operations") or ()
     ):
         return []
     from merlin.targetgen.contract.interface_emit import parse_interface_mlir
     from merlin.targetgen.operand_sum_numeric import audit_i8_operand_sum
 
-    facets = [facet.to_dict() if hasattr(facet, "to_dict") else facet for facet in getattr(evidence, "readout_facets", ())]
+    facets = [
+        facet.to_dict() if hasattr(facet, "to_dict") else facet for facet in getattr(evidence, "readout_facets", ())
+    ]
     selected = [facet for facet in facets if (facet.get("operand_sum") or {}).get("operand_dtype") in {"i8", "int8"}]
-    readout = ((spec.get("numerical_semantics") or {}).get("readout") or {})
+    readout = (spec.get("numerical_semantics") or {}).get("readout") or {}
     commands = parse_interface_mlir(program.read_text(encoding="utf-8")).get("commands") or ()
     screens = []
     for index, command in enumerate(commands):
@@ -209,7 +210,10 @@ def _operand_sum_numeric_screens(program: Path, evidence) -> list[dict]:
             or readout.get("acc_scale_rounding") != "half_even"
             or readout.get("narrowing") != "saturate_to_declared_dtype"
         ):
-            result = {"status": "unknown", "reason": "selected i8 operand-sum/readout numerics are incomplete or ambiguous"}
+            result = {
+                "status": "unknown",
+                "reason": "selected i8 operand-sum/readout numerics are incomplete or ambiguous",
+            }
         else:
             result = audit_i8_operand_sum(
                 lhs_scale=attrs.get("lhs_scale"),
@@ -218,11 +222,13 @@ def _operand_sum_numeric_screens(program: Path, evidence) -> list[dict]:
                 relu="relu" in stages,
                 facet=selected[0],
             )
-        screens.append({
-            "command_index": index,
-            "form": "fused_operand_sum" if attrs.get("epilogue") else "standalone_operand_sum",
-            **result,
-        })
+        screens.append(
+            {
+                "command_index": index,
+                "form": "fused_operand_sum" if attrs.get("epilogue") else "standalone_operand_sum",
+                **result,
+            }
+        )
     return screens
 
 

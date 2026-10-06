@@ -122,7 +122,7 @@ def test_cli_navigates_frozen_phase_handoffs_without_reading_live_inputs(tmp_pat
                         "functional_run_id": "functional-1",
                         "functional_submission_sha256": "e" * 64,
                     }
-                }
+                },
             }
         },
         "phases": {

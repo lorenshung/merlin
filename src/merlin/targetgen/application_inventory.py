@@ -166,15 +166,21 @@ def verify_capture_receipt(path: str | Path) -> dict:
             manifest_path = capture.parent / "quantization-manifest.json"
             try:
                 manifest_bytes = manifest_path.read_bytes()
-                if (manifest_path.is_symlink()
-                        or hashlib.sha256(manifest_bytes).hexdigest() != manifest_record.get("sha256")):
+                if manifest_path.is_symlink() or hashlib.sha256(manifest_bytes).hexdigest() != manifest_record.get(
+                    "sha256"
+                ):
                     raise ValueError("manifest bytes differ from receipt")
                 manifest = json.loads(manifest_bytes)
                 if not isinstance(manifest, dict) or manifest.get("schema") != "m2m.quantization_manifest.v1":
                     raise ValueError("unsupported manifest schema")
-                manifest_sha = hashlib.sha256(json.dumps(
-                    manifest, sort_keys=True, separators=(",", ":"), allow_nan=False,
-                ).encode()).hexdigest()
+                manifest_sha = hashlib.sha256(
+                    json.dumps(
+                        manifest,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    ).encode()
+                ).hexdigest()
                 if manifest_pointer != {
                     "path": "quantization-manifest.json",
                     "sha256": manifest_record["sha256"],
@@ -182,8 +188,7 @@ def verify_capture_receipt(path: str | Path) -> dict:
                 }:
                     raise ValueError("metadata pointer differs from manifest")
                 mlir_bytes = capture.read_bytes()
-                if (capture.is_symlink()
-                        or hashlib.sha256(mlir_bytes).hexdigest() != artifacts["model.mlir"]["sha256"]):
+                if capture.is_symlink() or hashlib.sha256(mlir_bytes).hexdigest() != artifacts["model.mlir"]["sha256"]:
                     raise ValueError("model MLIR bytes differ from receipt")
                 from merlin.common import mlir_query
 
@@ -502,9 +507,13 @@ def _reduction_provenance_hint(op, mq) -> tuple[dict, dict | None]:
     init_prov = mq.provenance(initializer) if hasattr(initializer, "attributes") else {}
     identity = (init_prov.get("prov.region_id"), init_prov.get("prov.aten"))
     users = [use.operation for result in op.results for use in result.uses]
-    if not all(identity) or not users or any(
-        (mq.provenance(user).get("prov.region_id"), mq.provenance(user).get("prov.aten")) != identity
-        for user in users
+    if (
+        not all(identity)
+        or not users
+        or any(
+            (mq.provenance(user).get("prov.region_id"), mq.provenance(user).get("prov.aten")) != identity
+            for user in users
+        )
     ):
         return provenance, None
     return provenance, {
@@ -517,7 +526,11 @@ def _reduction_provenance_hint(op, mq) -> tuple[dict, dict | None]:
 
 
 def _application_operation_inventory(
-    path: str | Path, target: str, cap_map: dict, *, include_graph: bool = False,
+    path: str | Path,
+    target: str,
+    cap_map: dict,
+    *,
+    include_graph: bool = False,
     capability_contract: dict | None = None,
     software_spec: dict | None = None,
     host_capabilities: dict | None = None,
@@ -678,9 +691,14 @@ def _application_operation_inventory(
         else:
             verdict = is_eligible(
                 RegionDescriptor(
-                    op=name.rpartition(".")[2], family=family, in_dtype=input_format,
+                    op=name.rpartition(".")[2],
+                    family=family,
+                    in_dtype=input_format,
                     out_dtype=result_dtypes[0] if len(result_dtypes) == 1 else None,
-                    m=m, k=k, n=n, rank=rank,
+                    m=m,
+                    k=k,
+                    n=n,
+                    rank=rank,
                     form=sf.operation_form(source_op or frontend or name.rpartition(".")[2], carrier_op=name),
                 ),
                 cap_map,
@@ -868,7 +886,10 @@ def application_demand_inventory(
         if cm.is_claim_bundle(label) or cm.is_claim_bundle(Path(path).resolve().parent.name):
             raise ValueError(f"application {label!r} is a held-out claim model and cannot derive Phase 0 demands")
         output[str(label)] = _application_operation_inventory(
-            path, target, cap_map, include_graph=include_graph,
+            path,
+            target,
+            cap_map,
+            include_graph=include_graph,
             capability_contract=capability_contract,
             software_spec=software_spec,
             host_capabilities=host_capabilities,

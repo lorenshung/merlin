@@ -111,11 +111,7 @@ def admit_host_operation(selected: dict | None, row: dict, signature: dict) -> d
             if exact_ops and not any(identity in exact_ops for identity in identities):
                 continue
             operation = next(
-                (
-                    identity
-                    for identity in identities
-                    if identity in exact_ops
-                ),
+                (identity for identity in identities if identity in exact_ops),
                 row["mlir_operation"],
             )
             decision = admit_operation({**document, "operations": [declaration]}, operation, signature, "host")
@@ -127,7 +123,9 @@ def admit_host_operation(selected: dict | None, row: dict, signature: dict) -> d
         )
         status = verdict["status"] if verdict else "unsupported"
         reason = verdict["reason"] if verdict else "no host operation declaration admits the observed signature"
-        if (document["status"] != "reviewed" or (verdict and verdict["review_status"] != "reviewed")) and status == "unsupported":
+        if (
+            document["status"] != "reviewed" or (verdict and verdict["review_status"] != "reviewed")
+        ) and status == "unsupported":
             status, reason = "unknown", "unreviewed host declarations cannot establish absence of operation support"
         if not pinned:
             status, reason = "unknown", "host package and capability spec byte identities are not selected together"
@@ -137,9 +135,9 @@ def admit_host_operation(selected: dict | None, row: dict, signature: dict) -> d
                 "status": status,
                 "reason": reason,
                 "review_status": verdict["review_status"] if verdict else document["status"],
-                "reviewed": document["status"] == "reviewed" and pinned and (
-                    verdict is None or verdict["review_status"] == "reviewed"
-                ),
+                "reviewed": document["status"] == "reviewed"
+                and pinned
+                and (verdict is None or verdict["review_status"] == "reviewed"),
                 "package_sha256": selection.get("package_sha256"),
                 "capability_spec_sha256": selection.get("capability_spec_sha256"),
                 "dtype_strategy": selection.get("dtype_strategy"),

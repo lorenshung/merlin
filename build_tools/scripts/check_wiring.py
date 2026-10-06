@@ -152,25 +152,33 @@ def _module_entrypoint(path: Path) -> bool:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (SyntaxError, UnicodeDecodeError):
         return False
-    has_main = any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "main"
-                   for node in tree.body)
+    has_main = any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "main" for node in tree.body
+    )
     for node in tree.body:
         if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
             continue
         test = node.test
-        if (not isinstance(test.left, ast.Name) or test.left.id != "__name__"
-                or len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq)
-                or len(test.comparators) != 1 or not isinstance(test.comparators[0], ast.Constant)
-                or test.comparators[0].value != "__main__"):
+        if (
+            not isinstance(test.left, ast.Name)
+            or test.left.id != "__name__"
+            or len(test.ops) != 1
+            or not isinstance(test.ops[0], ast.Eq)
+            or len(test.comparators) != 1
+            or not isinstance(test.comparators[0], ast.Constant)
+            or test.comparators[0].value != "__main__"
+        ):
             continue
-        if has_main and any(isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
-                            and call.func.id == "main" for statement in node.body for call in ast.walk(statement)):
+        if has_main and any(
+            isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == "main"
+            for statement in node.body
+            for call in ast.walk(statement)
+        ):
             return True
     return False
 
 
-def _generated_prompt_module_commands(imported_by: dict[str, set[Path]],
-                                      candidates: dict[str, Path]) -> set[str]:
+def _generated_prompt_module_commands(imported_by: dict[str, set[Path]], candidates: dict[str, Path]) -> set[str]:
     """Only commands in the actually rendered, production-called shared prompt are entrypoints.
 
     The prompt generator is the task command definition. Docs, tests, comments and unrelated
@@ -187,13 +195,17 @@ def _generated_prompt_module_commands(imported_by: dict[str, set[Path]],
     template = None
     rendered = False
     for node in tree.body:
-        if (isinstance(node, ast.Assign) and any(isinstance(target, ast.Name)
-                                                  and target.id == "_TEMPLATE" for target in node.targets)
-                and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
+        if (
+            isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "_TEMPLATE" for target in node.targets)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
             template = node.value.value
         elif isinstance(node, ast.FunctionDef) and node.name == "render_prompt":
             rendered = any(
-                isinstance(result, ast.Return) and isinstance(result.value, ast.Call)
+                isinstance(result, ast.Return)
+                and isinstance(result.value, ast.Call)
                 and isinstance(result.value.func, ast.Attribute)
                 and result.value.func.attr == "format"
                 and isinstance(result.value.func.value, ast.Name)

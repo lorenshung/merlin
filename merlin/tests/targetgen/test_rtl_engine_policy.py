@@ -5,6 +5,7 @@ on the same rung across targets. These pin the policy: equal-fidelity engines ar
 Verilator is never chosen while GSIM can run (~23x slower at corpus scale — 45 min vs 115 s per capsule),
 and a tier that cannot run fails closed instead of quietly becoming a model tier.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -26,8 +27,9 @@ def test_gsim_has_five_cross_process_runtime_slots(tmp_path):
     with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root):
         pass
 
-_UP = lambda why="ok": (lambda: (True, why))          # noqa: E731 - table-style probes read better inline
-_DOWN = lambda why: (lambda: (False, why))            # noqa: E731
+
+_UP = lambda why="ok": lambda: (True, why)  # noqa: E731 - table-style probes read better inline
+_DOWN = lambda why: lambda: (False, why)  # noqa: E731
 
 
 def test_gsim_is_preferred_over_verilator():
@@ -69,6 +71,7 @@ def test_every_engine_reports_the_same_fidelity():
 def test_a_broken_probe_is_unavailable_not_a_crash():
     def boom():
         raise OSError("toolchain missing")
+
     sel = P.select("t", {"vcs": boom, "verilator": _UP()})
     assert sel["engine"] == "verilator"
     assert "OSError" in [c["reason"] for c in sel["considered"] if c["engine"] == "vcs"][0]
@@ -77,8 +80,14 @@ def test_a_broken_probe_is_unavailable_not_a_crash():
 def test_lower_priority_probes_are_not_paid_once_one_is_available():
     """Probing an absent VCS license or building a Verilator model is not free."""
     called = []
-    P.select("t", {"vcs": _UP("license"), "gsim": lambda: called.append("gsim") or (True, "x"),
-                   "verilator": lambda: called.append("vl") or (True, "x")})
+    P.select(
+        "t",
+        {
+            "vcs": _UP("license"),
+            "gsim": lambda: called.append("gsim") or (True, "x"),
+            "verilator": lambda: called.append("vl") or (True, "x"),
+        },
+    )
     assert called == []
 
 
@@ -106,23 +115,36 @@ def test_the_reason_survives_on_the_result_not_just_in_a_log():
 # The lineage gate must reach the SELECTION path, not only the module that owns the home layout.
 # ---------------------------------------------------------------------------------------------
 
+
 def test_a_refused_lineage_loses_the_selection_not_just_the_probe(tmp_path, monkeypatch):
     """Measured 2026-09-04: with MERLIN_GSIM_REQUIRE_RECEIPT=1, a target whose engine carried only an
     adoption record had gsim_emulator.probe() answer False and STILL certified on it, because the
     selection path asked only whether the wrapper file existed. A provenance gate the selection routes
     around is not a gate."""
-    from merlin.targetgen import program_oracle as PO
     from merlin.targetgen import gsim_emulator as GE
+    from merlin.targetgen import program_oracle as PO
 
     home = tmp_path / "gsim"
     home.mkdir()
     (home / "gsim_run.py").write_text("def run_program(*a, **k): ...", encoding="utf-8")
     monkeypatch.setenv("MERLIN_GSIM_REQUIRE_RECEIPT", "1")
     monkeypatch.setattr(PO, "_rtl_engine_dir", lambda target, engine: home)
-    monkeypatch.setattr(GE, "resolve_wrapper", lambda target, **k: GE.Resolution(
-        target=target, path=home / "gsim_run.py", source="derived", ok=False, refused=True,
-        reason="lineage ADOPTED, not built-and-bound", flavour="wrapper", digest="d",
-        receipt_status="adopted", receipt=None))
+    monkeypatch.setattr(
+        GE,
+        "resolve_wrapper",
+        lambda target, **k: GE.Resolution(
+            target=target,
+            path=home / "gsim_run.py",
+            source="derived",
+            ok=False,
+            refused=True,
+            reason="lineage ADOPTED, not built-and-bound",
+            flavour="wrapper",
+            digest="d",
+            receipt_status="adopted",
+            receipt=None,
+        ),
+    )
     available, reason = PO._rtl_engine_probe("t", "gsim")()
     assert available is False and "ADOPTED" in reason
 
@@ -130,8 +152,8 @@ def test_a_refused_lineage_loses_the_selection_not_just_the_probe(tmp_path, monk
 def test_an_engine_this_module_does_not_lay_out_is_not_judged_by_it(tmp_path, monkeypatch):
     """A refusal authored by the wrong module would be worse than none: verilator's home is laid out
     and receipted by whoever built it, so the gsim lineage record must not be consulted for it."""
-    from merlin.targetgen import program_oracle as PO
     from merlin.targetgen import gsim_emulator as GE
+    from merlin.targetgen import program_oracle as PO
 
     home = tmp_path / "vsim"
     home.mkdir()
@@ -140,6 +162,7 @@ def test_an_engine_this_module_does_not_lay_out_is_not_judged_by_it(tmp_path, mo
 
     def _boom(*a, **k):
         raise AssertionError("the gsim lineage record was consulted for another engine")
+
     monkeypatch.setattr(GE, "resolve", _boom)
     assert PO._rtl_engine_probe("t", "verilator")()[0] is True
 
@@ -150,19 +173,33 @@ def test_an_engine_this_module_does_not_lay_out_is_not_judged_by_it(tmp_path, mo
 # probe/executor agreement.
 # ---------------------------------------------------------------------------------------------
 
+
 def _binary_flavour_home(tmp_path, monkeypatch, name="gsim"):
     """A home holding the BINARY flavour (a standalone emulator) and no run_program wrapper."""
-    from merlin.targetgen import program_oracle as PO
     from merlin.targetgen import gsim_emulator as GE
+    from merlin.targetgen import program_oracle as PO
 
     home = tmp_path / name
     home.mkdir()
     binary = home / GE.BINARY_NAME
     binary.write_text("#!/bin/sh\n", encoding="utf-8")
     monkeypatch.setattr(PO, "_rtl_engine_dir", lambda target, engine: home)
-    monkeypatch.setattr(GE, "resolve", lambda target, **k: GE.Resolution(
-        target=target, path=binary, source="derived", ok=True, refused=False,
-        reason="built", flavour="binary", digest="d", receipt_status="bound", receipt=None))
+    monkeypatch.setattr(
+        GE,
+        "resolve",
+        lambda target, **k: GE.Resolution(
+            target=target,
+            path=binary,
+            source="derived",
+            ok=True,
+            refused=False,
+            reason="built",
+            flavour="binary",
+            digest="d",
+            receipt_status="bound",
+            receipt=None,
+        ),
+    )
     return home, binary
 
 
@@ -174,10 +211,10 @@ def test_a_built_binary_flavour_is_not_reported_absent(tmp_path, monkeypatch):
 
     _, binary = _binary_flavour_home(tmp_path, monkeypatch)
     available, reason = PO._rtl_engine_probe("t", "gsim")()
-    assert available is False                      # it still cannot be driven from here
+    assert available is False  # it still cannot be driven from here
     assert "IS built" in reason and "binary flavour" in reason
     assert str(binary) in reason
-    assert "absent" not in reason                  # the old answer, and the thing being fixed
+    assert "absent" not in reason  # the old answer, and the thing being fixed
 
 
 def test_the_probe_and_the_executor_agree_about_that_home(tmp_path, monkeypatch):
@@ -193,15 +230,28 @@ def test_the_probe_and_the_executor_agree_about_that_home(tmp_path, monkeypatch)
 
 def test_a_wrapper_flavour_home_still_passes(tmp_path, monkeypatch):
     """The distinction must not cost the flavour this route CAN drive."""
-    from merlin.targetgen import program_oracle as PO
     from merlin.targetgen import gsim_emulator as GE
+    from merlin.targetgen import program_oracle as PO
 
     home = tmp_path / "gsim"
     home.mkdir()
     wrapper = home / "gsim_run.py"
     wrapper.write_text("def run_program(*a, **k): ...", encoding="utf-8")
     monkeypatch.setattr(PO, "_rtl_engine_dir", lambda target, engine: home)
-    monkeypatch.setattr(GE, "resolve", lambda target, **k: GE.Resolution(
-        target=target, path=wrapper, source="derived", ok=True, refused=False, reason="built",
-        flavour="wrapper", digest="d", receipt_status="bound", receipt=None))
+    monkeypatch.setattr(
+        GE,
+        "resolve",
+        lambda target, **k: GE.Resolution(
+            target=target,
+            path=wrapper,
+            source="derived",
+            ok=True,
+            refused=False,
+            reason="built",
+            flavour="wrapper",
+            digest="d",
+            receipt_status="bound",
+            receipt=None,
+        ),
+    )
     assert PO._rtl_engine_probe("t", "gsim")()[0] is True

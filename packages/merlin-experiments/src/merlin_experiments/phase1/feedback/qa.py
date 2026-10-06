@@ -285,16 +285,26 @@ def _per_capsule_from_results(runs_root: Path) -> dict[str, dict]:
             tiers = {tier: {"status": value} for tier, value in candidate_feedback.get("tiers", {}).items()}
             mandatory = candidate_feedback.get("required_tiers", [])
             missing = [tier for tier in mandatory if (tiers.get(tier) or {}).get("status") != "pass"]
-            verified_mismatch = (candidate_feedback["status"] == "fail"
-                                 and "candidate_verified_numeric_mismatch" in candidate_feedback["violations"])
-            fail = {} if candidate_feedback["status"] == "pass" else {
-                "plane": "candidate_model_numeric" if verified_mismatch else "model_execution",
-                "category": ("FUNCTIONAL_MISMATCH" if verified_mismatch else
-                             "PROTOCOL_VIOLATION" if candidate_feedback["status"] == "fail"
-                             else "NOT_RUN_IS_NOT_PASS"),
-                "tier": missing[0] if missing else None,
-                "detail": ", ".join(candidate_feedback.get("violations", [])) or candidate_feedback.get("reason"),
-            }
+            verified_mismatch = (
+                candidate_feedback["status"] == "fail"
+                and "candidate_verified_numeric_mismatch" in candidate_feedback["violations"]
+            )
+            fail = (
+                {}
+                if candidate_feedback["status"] == "pass"
+                else {
+                    "plane": "candidate_model_numeric" if verified_mismatch else "model_execution",
+                    "category": (
+                        "FUNCTIONAL_MISMATCH"
+                        if verified_mismatch
+                        else "PROTOCOL_VIOLATION"
+                        if candidate_feedback["status"] == "fail"
+                        else "NOT_RUN_IS_NOT_PASS"
+                    ),
+                    "tier": missing[0] if missing else None,
+                    "detail": ", ".join(candidate_feedback.get("violations", [])) or candidate_feedback.get("reason"),
+                }
+            )
         out[r.get("capsule", cr.parent.name)] = {
             "status": r.get("status"),
             # Opaque content address of the exact executable plus target/RTL identity. It reveals no
@@ -307,8 +317,9 @@ def _per_capsule_from_results(runs_root: Path) -> dict[str, dict]:
                 num.get("status") if candidate_feedback is None or num.get("status") in ("pass", "fail") else None
             ),
             "mismatch_count": (
-                num.get("mismatch_count") if candidate_feedback is None
-                or (type(num.get("mismatch_count")) is int and num["mismatch_count"] >= 0) else None
+                num.get("mismatch_count")
+                if candidate_feedback is None or (type(num.get("mismatch_count")) is int and num["mismatch_count"] >= 0)
+                else None
             ),
             "trace_status": (r.get("trace_check") or {}).get("status") if candidate_feedback is None else None,
             "trace_violations": (
@@ -417,16 +428,25 @@ def _candidate_native_feedback(result: dict) -> dict | None:
         return value if isinstance(value, str) and value in allowed else "unverified"
 
     allowed_codes = {
-        "candidate_host_tensor_compute_violation", "candidate_emitted_host_compute_unverified",
-        "candidate_source_placement_violation", "candidate_source_placement_unverified",
-        "candidate_full_model_native_unverified", "candidate_required_rtl_engine_mismatch",
-        "candidate_completed_dispatch_unverified", "candidate_source_coverage_unverified",
-        "candidate_required_tiers_unverified", "candidate_verified_numeric_mismatch",
+        "candidate_host_tensor_compute_violation",
+        "candidate_emitted_host_compute_unverified",
+        "candidate_source_placement_violation",
+        "candidate_source_placement_unverified",
+        "candidate_full_model_native_unverified",
+        "candidate_required_rtl_engine_mismatch",
+        "candidate_completed_dispatch_unverified",
+        "candidate_source_coverage_unverified",
+        "candidate_required_tiers_unverified",
+        "candidate_verified_numeric_mismatch",
     }
     violations = check.get("violations")
     codes = []
     for value in violations if isinstance(violations, list) else []:
-        code = value if isinstance(value, str) and value in allowed_codes else "candidate_verification_failure_unrecognized"
+        code = (
+            value
+            if isinstance(value, str) and value in allowed_codes
+            else "candidate_verification_failure_unrecognized"
+        )
         if code not in codes:
             codes.append(code)
     summary = {
@@ -440,17 +460,28 @@ def _candidate_native_feedback(result: dict) -> dict | None:
     }
     native_status = check.get("native_status")
     if isinstance(native_status, str) and native_status in {
-        "incomplete", "compiled_not_run", "numeric_match_diagnostic", "numeric_mismatch_diagnostic"
+        "incomplete",
+        "compiled_not_run",
+        "numeric_match_diagnostic",
+        "numeric_mismatch_diagnostic",
     }:
         summary["native_status"] = native_status
     coverage = check.get("candidate_source_coverage")
-    counts = [coverage.get(key) if isinstance(coverage, dict) else None
-              for key in ("n_source_operations", "n_eligible", "n_completed_eligible")]
-    if (isinstance(coverage, dict) and coverage.get("status") == "verified"
-            and all(type(value) is int for value in counts) and counts[0] >= counts[1] == counts[2] > 0):
+    counts = [
+        coverage.get(key) if isinstance(coverage, dict) else None
+        for key in ("n_source_operations", "n_eligible", "n_completed_eligible")
+    ]
+    if (
+        isinstance(coverage, dict)
+        and coverage.get("status") == "verified"
+        and all(type(value) is int for value in counts)
+        and counts[0] >= counts[1] == counts[2] > 0
+    ):
         summary["source_coverage"] = {
-            "status": "verified", "n_source_operations": counts[0],
-            "n_eligible": counts[1], "n_completed_eligible": counts[2],
+            "status": "verified",
+            "n_source_operations": counts[0],
+            "n_eligible": counts[1],
+            "n_completed_eligible": counts[2],
         }
     else:
         summary["source_coverage"] = {"status": "unverified"}
@@ -798,7 +829,8 @@ def run(
                 "mismatch_count": rich.get("mismatch_count"),
                 "trace_status": rich.get("trace_status", pc.get("trace")),
                 "trace_violations": rich.get("trace_violations", []),
-                "tiers": rich.get("tiers", {}) if rich.get("candidate_native_verification") is not None
+                "tiers": rich.get("tiers", {})
+                if rich.get("candidate_native_verification") is not None
                 else pc.get("tiers", {}),
                 "tier_cycles": rich.get("tier_cycles", {}),
                 "tier_reuse": rich.get("tier_reuse"),
