@@ -13,7 +13,9 @@ import itertools
 from pathlib import Path
 from typing import Any
 
-_FIELDS = {"opcode": (0, 7), "funct3": (12, 3), "funct2": (13, 2), "funct7": (25, 7)}
+#: (shift, width) of the named fields of a 32-bit RISC-V instruction word. The RISC-V base encoding
+#: itself, identical for every RISC-V target; every VALUE in those fields comes from the decoder.
+_FIELDS = {"opcode": (0, 7), "funct3": (12, 3), "funct2": (13, 2), "funct7": (25, 7)}  # derived-ok: RISC-V base encoding field layout (ISA spec), not target-specific  # fmt: skip
 
 
 def _source(path: Path) -> tuple[str, dict[str, str]]:
@@ -31,7 +33,13 @@ def _patterns(source: str) -> dict[str, dict[str, Any]]:
             continue
         name = words[1]
         function, opening, argument = expression.strip().partition("(")
-        if not name.isidentifier() or function.strip() != "BitPat" or not opening or not argument.startswith('"') or not argument.endswith('")'):
+        if (
+            not name.isidentifier()
+            or function.strip() != "BitPat"
+            or not opening
+            or not argument.startswith('"')
+            or not argument.endswith('")')
+        ):
             raise ValueError("instruction source has an unparsed BitPat definition")
         encoded = argument[1:-2]
         bits = encoded.removeprefix("b").replace("_", "")
