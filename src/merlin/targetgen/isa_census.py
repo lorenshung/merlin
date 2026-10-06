@@ -13,7 +13,15 @@ import itertools
 from pathlib import Path
 from typing import Any
 
-_FIELDS = {"opcode": (0, 7), "funct3": (12, 3), "funct2": (13, 2), "funct7": (25, 7)}
+# Field positions of the RISC-V base 32-bit instruction formats the model classes are encoded in
+# (opcode[6:0], funct3[14:12], funct7[31:25]); they locate a field, they do not identify an
+# instruction. Opcode and funct VALUES are always read from the selected model source.
+_FIELDS = {
+    "opcode": (0, 7),  # derived-ok: RISC-V Unprivileged ISA base formats, opcode[6:0]
+    "funct3": (12, 3),  # derived-ok: RISC-V Unprivileged ISA base formats, funct3[14:12]
+    "funct2": (13, 2),
+    "funct7": (25, 7),  # derived-ok: RISC-V Unprivileged ISA base formats, funct7[31:25]
+}
 
 
 def _source(path: Path) -> tuple[str, dict[str, str]]:
@@ -31,7 +39,13 @@ def _patterns(source: str) -> dict[str, dict[str, Any]]:
             continue
         name = words[1]
         function, opening, argument = expression.strip().partition("(")
-        if not name.isidentifier() or function.strip() != "BitPat" or not opening or not argument.startswith('"') or not argument.endswith('")'):
+        if (
+            not name.isidentifier()
+            or function.strip() != "BitPat"
+            or not opening
+            or not argument.startswith('"')
+            or not argument.endswith('")')
+        ):
             raise ValueError("instruction source has an unparsed BitPat definition")
         encoded = argument[1:-2]
         bits = encoded.removeprefix("b").replace("_", "")
