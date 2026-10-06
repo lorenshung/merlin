@@ -228,7 +228,7 @@ def test_a_job_whose_board_objects_are_gone_is_rebuilt_not_linked(tmp_path):
     B.batch_main(store, driver=driver)
     job = read_json(job_dir / "job.json")
     assert job["state"] == J.PENDING and job["board_rebuilds"] and not driver.linked
-    assert (job_dir / "unlinkable_attempt_0").is_dir()
+    assert read_json(job_dir / J.ATTEMPTS_DIR / "0" / J.ATTEMPT_RECORD)["kind"] == "unlinkable_attempt"
 
 
 # --------------------------------------------------------------- solo jobs never starve a new group

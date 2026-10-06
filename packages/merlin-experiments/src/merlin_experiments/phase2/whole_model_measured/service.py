@@ -47,6 +47,7 @@ from typing import Any
 
 from merlin.perf import whole_model_verdict as V
 
+from . import attempts as A
 from . import batch as B
 from . import gates as G
 from . import jobs as J
@@ -246,7 +247,10 @@ class MeasurementService:
         else:
             stale = False
         if existing.get("state") == J.SCREEN_FAILED and (exempt or stale):
-            os.replace(job_dir / "result.json", job_dir / "screen_failed_result.json")
+            # The screen's refusal is set aside as an attempt of its own (moved whole, never renamed over).
+            J.archive_attempt(
+                job_dir, "screen_failed_attempt_", why="re-screened: " + ("seed" if exempt else "infra-caused screen")
+            )
             existing.update(
                 state=J.PENDING,
                 screen_exempt=bool(exempt),
@@ -262,7 +266,7 @@ class MeasurementService:
             return existing
         if existing.get("state") != J.DONE:
             return existing
-        document = read_json(job_dir / "result.json") or {}
+        document = A.annotated(read_json(job_dir / "result.json"), job_dir) or {}
         recorded = ((document.get("builder") or {}).get("module_identity") or {}).get("sha256")
         current = (self.builder.get("module_identity") or {}).get("sha256")
         builder_changed = recorded != current
@@ -271,8 +275,12 @@ class MeasurementService:
         stale_infra = infra and (existing.get("pre_measure_check") != self.pre_measure_check or builder_changed)
         if not (builder_changed or stale_infra):
             return existing
-        losses = [p for p in job_dir.iterdir() if p.is_dir() and p.name.startswith("lost_attempt_")]
-        attempt = J.archive_attempt(job_dir, "lost_attempt_", len(losses))
+        attempt = J.archive_attempt(
+            job_dir,
+            "reopened_attempt_",
+            why="re-measured: "
+            + ("the builder changed" if builder_changed else "an infra-caused refusal predates this harness"),
+        )
         RET.prune_archived_attempt(attempt, existing.get("retain"))
         existing.update(
             state=J.PENDING,
@@ -376,7 +384,13 @@ class MeasurementService:
                 )
             prior = read_json(job_dir / J.ATTRIBUTION_FILE)  # who earned these bytes outlives a supersede
             if job_dir.exists():
-                shutil.rmtree(job_dir)  # a superseded job's directory is replaced by the new request
+                # A superseded job's directory is replaced by the new request -- but never its history: its
+                # own result is set aside as an attempt, and every attempt moves into the new directory.
+                if (job_dir / J.RESULT_FILE).is_file():
+                    J.archive_attempt(job_dir, "superseded_attempt_", why="the job was requested again")
+                if (job_dir / J.ATTEMPTS_DIR).is_dir():
+                    shutil.move(str(job_dir / J.ATTEMPTS_DIR), str(staging / J.ATTEMPTS_DIR))
+                shutil.rmtree(job_dir)
             staging.rename(job_dir)
             record = (
                 J.merge_attribution(prior, attribution, at=now(), created=prior is None)
@@ -459,8 +473,8 @@ class MeasurementService:
             if failed and not exempt:
                 fresh.update(state=J.SCREEN_FAILED, finished_at=now(), timing_status=V.TIMING_REFUSED)
                 finalize = True
-                write_json_atomic(
-                    job_dir / "result.json",
+                J.write_result(
+                    job_dir,
                     J.refused(
                         fresh,
                         f"screen_failed: the required capsule screen failed ({(check or {}).get('summary')}); "
@@ -528,7 +542,7 @@ class MeasurementService:
             loss = {"at": now(), "worker_pid": job.get("worker_pid"), "exit": _worker_exit(job.get("worker_pid"))}
             losses = list(job.get("worker_losses") or [])
             if len(losses) < WORKER_LOSS_REQUEUES:
-                attempt = J.archive_attempt(job_dir, "lost_attempt_", len(losses))
+                attempt = J.archive_attempt(job_dir, "lost_attempt_", why="its worker exited without a result")
                 RET.prune_archived_attempt(attempt, job.get("retain"))
                 loss["moved_to"] = str(attempt)
                 job.update(
@@ -551,8 +565,8 @@ class MeasurementService:
                     failure=f"{J.INFRA_WORKER_LOST}: measurement lost to host pressure {len(losses) + 1} "
                     "times (its worker exited without a result); not a verdict on these bytes",
                 )
-                write_json_atomic(
-                    job_dir / "result.json",
+                J.write_result(
+                    job_dir,
                     J.refused(job, job["failure"], infra_worker_lost=True, worker_losses=job["worker_losses"]),
                 )
         write_json_atomic(job_dir / "job.json", job)
@@ -668,10 +682,12 @@ class MeasurementService:
                 ended_as=outcome,
             )
             write_json_atomic(job_dir / "job.json", job)
-            write_json_atomic(
-                job_dir / "result.json",
-                J.refused(job, f"{outcome}: {reason}", superseded=True, ended_as=outcome, stopped_pids=stopped),
-            )
+            ended = J.refused(job, f"{outcome}: {reason}", superseded=True, ended_as=outcome, stopped_pids=stopped)
+            try:
+                J.write_result(job_dir, ended)
+            except J.ResultExists:
+                # Its worker finished first: that result stands, and the supersede is kept beside it.
+                J.preserve_result(job_dir, ended, why="a supersede that arrived after the job's own result")
         return job
 
     # ---- reading
@@ -679,11 +695,12 @@ class MeasurementService:
         return [job for job in (read_json(p) for p in sorted(self.root.glob("*/job.json"))) if job is not None]
 
     def result(self, digest: str) -> dict[str, Any] | None:
-        """The FIRST run's result for these bytes (replicate 0)."""
-        return read_json(self.root / digest / "result.json")
+        """The FIRST run's result for these bytes (replicate 0): the one that stands across its attempts
+        (:func:`.attempts.effective_result`) -- an infra outcome never hides an earlier verdict."""
+        return A.effective_result(self.root / digest)
 
     def result_by_key(self, key: str | None) -> dict[str, Any] | None:
-        return read_json(self.root / key / "result.json") if key else None
+        return A.effective_result(self.root / key) if key else None
 
     def alias_of(self, digest: str) -> str | None:
         alias = read_json(self.root / "aliases" / f"{digest}.json")
@@ -697,6 +714,14 @@ class MeasurementService:
                 return {**self.measurement_for(target), "aliased_from": digest, "same_program_as": target}
         found = self.result(digest)
         if found is not None:
+            if found.get("from_attempt"):
+                job = read_json(self.root / digest / "job.json") or {}
+                if job.get("state") not in J.TERMINAL:
+                    found = {
+                        **found,
+                        "job_state": job.get("state"),
+                        "notice": f"re-measuring (attempt {found['from_attempt']['attempt']} is the standing result)",
+                    }
             return found
         job = read_json(self.root / digest / "job.json")
         if job is None:
@@ -752,6 +777,8 @@ class MeasurementService:
                     "refusal": (found.get("refusal") or verdict.get("refusal") or "")[:200] or None,
                     "notice": job.get("notice") if job.get("state") in (J.PENDING, J.RUNNING, J.BOARD) else None,
                     "infra_worker_lost": bool(found.get("infra_worker_lost")),
+                    "attempts": A.attempt_count(self.root / key_of(job)),
+                    "from_attempt": (found.get("from_attempt") or {}).get("attempt"),
                     "invalid_reason": verdict.get("invalid_reason"),
                     "failing": J.failing_summary(found),
                 }

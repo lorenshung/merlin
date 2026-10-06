@@ -582,7 +582,13 @@ def worker_main(job_dir: Path) -> int:
             job.update(state=J.BOARD, board_ready_at=now(), board_ready_epoch=time.time())
             write_json_atomic(job_path, job)
         return 0
-    write_json_atomic(job_dir / "result.json", outcome)
+    try:
+        J.write_result(job_dir, outcome)
+    except J.ResultExists:
+        # Something else ended this job while it ran (a supersede, a second worker): its result stands, and
+        # this one is kept beside it as an attempt of its own -- never written over it.
+        J.preserve_result(job_dir, outcome, why=f"worker {os.getpid()} finished after the job already had a result")
+        return 0
     with locked(job_dir):
         job = read_json(job_path) or {}
         job.update(state=J.DONE, finished_at=now(), timing_status=outcome.get("timing_status"))

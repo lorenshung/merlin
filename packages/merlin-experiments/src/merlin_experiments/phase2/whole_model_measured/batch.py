@@ -388,7 +388,14 @@ def batch_main(root: Path, *, driver: Any = None) -> int:
             batch={"batch": batch_id, "position": position, "size": len(variants), "control": record.get("control")},
             job_dir=job_dir,
         )
-        write_json_atomic(job_dir / "result.json", outcome)
+        try:
+            J.write_result(job_dir, outcome)
+        except J.ResultExists:
+            # The job already ended (a supersede, an earlier runner): that result stands; this board reading
+            # is kept as an attempt of its own, never written over it.
+            J.preserve_result(job_dir, outcome, why=f"batch {batch_id} finished after the job already had a result")
+            finalized.append(None)
+            continue
         with locked(job_dir):
             fresh = read_json(job_dir / "job.json") or dict(job)
             fresh.update(state=J.DONE, finished_at=now(), timing_status=outcome.get("timing_status"))

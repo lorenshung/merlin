@@ -47,7 +47,12 @@ def test_every_edit_states_why_and_is_logged(tmp_path):
     assert A.mark_infra(store, [key[:12]], kind="snapshot_contamination", why="uncommitted edit in the snapshot") == [
         key
     ]
-    assert read_json(store / key / "result.json")[A.INFRA_MARK]["kind"] == "snapshot_contamination"
+    # The mark is an annotation BESIDE the result, laid over it on read; the result file is untouched.
+    assert A.INFRA_MARK not in read_json(store / key / "result.json")
+    assert read_json(store / key / J.ANNOTATIONS_FILE)[A.INFRA_MARK]["kind"] == "snapshot_contamination"
+    from merlin_experiments.phase2.whole_model_measured import attempts as AT
+
+    assert AT.effective_result(store / key)[A.INFRA_MARK]["kind"] == "snapshot_contamination"
     assert _log(store)[-1]["operation"] == "mark-infra"
 
 
@@ -81,8 +86,9 @@ def test_requeue_solo_sets_the_attempt_aside_and_never_deletes_it(tmp_path):
     store, key = _store(tmp_path)
     job = A.requeue_solo(store, key, why="control drift before the drift rule existed")
     assert job["state"] == J.PENDING and job["solo"] is True and "requeued by the operator" in job["notice"]
-    attempt = store / key / "paused_attempt_0"
+    attempt = store / key / J.ATTEMPTS_DIR / "0"
     assert (attempt / "result.json").is_file() and not (store / key / "result.json").exists()
+    assert read_json(attempt / J.ATTEMPT_RECORD)["kind"] == "paused_attempt"
 
 
 def test_a_running_job_is_never_touched(tmp_path):
@@ -95,9 +101,13 @@ def test_a_citation_is_corrected_with_its_old_value_and_a_measurement_never_is(t
     store, key = _store(tmp_path, refusal=None)
     with pytest.raises(A.AdminError, match="re-taken"):
         A.correct_citation(store, key, field="objective_cycles", value=1, why="x")
+    before = (store / key / "result.json").read_bytes()
     was = A.correct_citation(store, key, field="builder.note", value="the fixed builder", why="stale citation")
     assert was == {"job.json": None, "result.json": "old"}
-    result = read_json(store / key / "result.json")
+    from merlin_experiments.phase2.whole_model_measured import attempts as AT
+
+    assert (store / key / "result.json").read_bytes() == before  # a result file is never rewritten
+    result = AT.effective_result(store / key)
     assert result["builder"]["note"] == "the fixed builder" and result["citation_corrections"][0]["was"] == "old"
     assert result["objective_cycles"] == 10
 
