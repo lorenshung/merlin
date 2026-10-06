@@ -38,6 +38,7 @@ into the driver reproduces the original op set and dataflow (see
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -86,6 +87,9 @@ class DispatchInfo:
 class OutlineResult:
     module: Any
     dispatches: list[DispatchInfo] = field(default_factory=list)
+    # Permission to retain typed declarations, not evidence of executable implementations.
+    # The caller must close these symbols over its compiled catalog before execution.
+    external_symbols: tuple[str, ...] = ()
 
     @property
     def n_kernels(self) -> int:
@@ -235,7 +239,32 @@ def _group_closure(members):
     return ops
 
 
-def outline_dispatches(module, forward: str | None = None, *, groups=None) -> OutlineResult:
+def _external_declarations(module, external_symbols):
+    """Resolve an explicit permission set to actual bodyless module declarations."""
+    if isinstance(external_symbols, str):
+        raise OutlineError("external_symbols must contain symbol names, not a string")
+    names = tuple(external_symbols)
+    if any(not isinstance(name, str) or not name for name in names) or len(set(names)) != len(names):
+        raise OutlineError("external_symbols must contain unique nonempty symbol names")
+    functions = {}
+    for op in module.body.block.ops:
+        if op.name == "func.func":
+            name = op.sym_name.data
+            if name in functions:
+                raise OutlineError(f"duplicate function symbol @{name}")
+            functions[name] = op
+    declarations = {}
+    for name in names:
+        function = functions.get(name)
+        if function is None or function.body.blocks:
+            raise OutlineError(f"permitted external symbol @{name} must have a bodyless func declaration")
+        declarations[name] = function
+    return declarations
+
+
+def outline_dispatches(
+    module, forward: str | None = None, *, groups=None, external_symbols: Iterable[str] = ()
+) -> OutlineResult:
     """Outline each compute dispatch of ``func @forward`` into its own kernel func.
 
     Returns the rewritten module (driver + kernels) and the per-dispatch table.
@@ -246,6 +275,10 @@ def outline_dispatches(module, forward: str | None = None, *, groups=None) -> Ou
     is joined only along values nothing outside it reads: every operand a member takes from
     outside was defined before that member, and nothing outside waits on a member before the last.
     With no groups the behaviour is the single-op baseline, byte for byte.
+
+    ``external_symbols`` explicitly permits retaining existing typed declarations. It does not
+    supply their implementations: the caller must verify compiled object closure before execution.
+    Missing declarations and all unpermitted external calls still refuse.
     """
     if not HAS_XDSL:
         return OutlineResult(module=module)
@@ -253,6 +286,7 @@ def outline_dispatches(module, forward: str | None = None, *, groups=None) -> Ou
     from xdsl.dialects.func import CallOp, FuncOp, ReturnOp
     from xdsl.ir import Block, Region
 
+    declarations = _external_declarations(module, external_symbols)
     # DECLARATIONS ARE NOT DEFINITIONS. A capture that leaves an operation to an external symbol
     # (a `func.func private @…` with no body) prints that declaration FIRST, so picking `fns[0]`
     # blind used to select it and die on `fn.body.blocks[0]` with a bare IndexError -- naming
@@ -267,6 +301,8 @@ def outline_dispatches(module, forward: str | None = None, *, groups=None) -> Ou
             raise OutlineError(f"func @{forward} not found")
     fn = fns[0]
     fname = fn.sym_name.data
+    if len(fn.body.blocks) != 1:
+        raise OutlineError("outlining requires a single-block model driver")
     src = fn.body.blocks[0]
 
     arg_types = [a.type for a in src.args]
@@ -368,22 +404,17 @@ def outline_dispatches(module, forward: str | None = None, *, groups=None) -> Ou
         if key not in ("sym_name", "function_type", "sym_visibility"):
             new_fn.attributes[key] = val
 
-    # AN OP NOTHING DEFINES IS A CAPTURE GAP, NOT A SYMBOL-TABLE PROBLEM. Calls the source function
-    # made to external symbols are cloned into the driver verbatim, and the declarations that
-    # satisfied them do not survive into the rebuilt module -- so `out.verify()` would fail with
-    # "could not be found in symbol table", pointing at the table instead of at the operation the
-    # capture left undefined (measured: an activation-quant capture whose `torchao.quantize_affine`
-    # reached the runtime as an opaque call). Carrying the declarations across is not the fix
-    # either: every func in this module is compiled as a kernel, so a body-less one fails later and
-    # even further from its cause. Name them here.
-    defined = {k.sym_name.data for k in kernels} | {fname}
+    # Ordinary captures still need bodies for every operation. A catalog caller may explicitly
+    # retain declarations, with the same ABI and attributes, and separately prove object closure.
+    defined = {k.sym_name.data for k in kernels} | {fname} | set(declarations)
     undefined: list[str] = []
-    for op in driver.walk():
-        if op.name != "func.call":
-            continue
-        callee = op.callee.string_value()
-        if callee not in defined and callee not in undefined:
-            undefined.append(callee)
+    for function in (new_fn, *kernels):
+        for op in function.walk():
+            if op.name != "func.call":
+                continue
+            callee = op.callee.string_value()
+            if callee not in defined and callee not in undefined:
+                undefined.append(callee)
     if undefined:
         raise OutlineError(
             f"@{fname} calls {len(undefined)} symbol(s) this module never defines: "
@@ -393,6 +424,6 @@ def outline_dispatches(module, forward: str | None = None, *, groups=None) -> Ou
             "at capture time (or defined here) before this model can execute."
         )
 
-    out = ModuleOp([new_fn, *kernels])
+    out = ModuleOp([new_fn, *kernels, *(declaration.clone() for declaration in declarations.values())])
     out.verify()
-    return OutlineResult(module=out, dispatches=dispatches)
+    return OutlineResult(module=out, dispatches=dispatches, external_symbols=tuple(declarations))

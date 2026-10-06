@@ -1,6 +1,9 @@
 """Per-layer bench core: key identity, console parsing, and the receipt cache."""
 
 import json
+import shutil
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -129,6 +132,62 @@ def test_loaded_bytes_counts_bss_zero_fill(tmp_path):
         loaded_bytes(tmp_path / "bad.elf")
 
 
+def test_explicit_compiler_flags_override_recipe_in_compile_and_link(tmp_path, monkeypatch):
+    """Run real compiled code: strict FP must survive both compiler-driver phases."""
+    from merlin.perf.layer_bench import build_program
+    from merlin.runtime.backends import base as backends
+    from merlin.targetgen import runtime_build
+    from merlin.targetgen.contract.build_recipe import HarnessBuildRecipe
+
+    cc = shutil.which("cc")
+    if cc is None:
+        pytest.skip("requires a native C compiler")
+
+    class NativeRecipe(HarnessBuildRecipe):
+        def link_command(self, *, objects, output, link_script=None):
+            # Native executable uses its system linker layout; retain every recipe flag.
+            cmd = super().link_command(objects=objects, output=output, link_script=link_script)
+            index = cmd.index("-T")
+            return cmd[:index] + cmd[index + 2 :]
+
+    recipe = NativeRecipe(
+        compiler=Path(cc),
+        include_roots=(),
+        support_sources=(),
+        link_script=tmp_path / "unused.ld",
+        load_address=0,
+        cflags=("-O2", "-ffast-math"),
+    )
+    monkeypatch.setattr(backends, "harness_build_recipe", lambda _: recipe)
+    monkeypatch.setattr(runtime_build, "derived_link_script", lambda *_: recipe.link_script)
+    source = tmp_path / "policy.c"
+    source.write_text(
+        "#include <stdint.h>\n"
+        "#include <string.h>\n"
+        "int main(void) {\n"
+        "#ifdef __FAST_MATH__\n"
+        "  return 1;\n"
+        "#else\n"
+        "  volatile float tiny = 0x1p-149f;\n"
+        "  float twice = tiny + tiny;\n"
+        "  uint32_t bits; memcpy(&bits, &twice, sizeof(bits));\n"
+        "  return bits == 2 ? 0 : 2;\n"
+        "#endif\n"
+        "}\n"
+    )
+    default = build_program([source], tmp_path / "default", target="fixture", max_loaded_bytes=None)
+    strict = build_program(
+        [source],
+        tmp_path / "strict",
+        target="fixture",
+        extra_cflags=("-fno-fast-math", "-ffp-contract=off"),
+        max_loaded_bytes=None,
+    )
+    assert subprocess.run([default.elf], check=False).returncode == 1
+    # Fast math at link time can enable startup flush-to-zero even after strict compilation.
+    assert subprocess.run([strict.elf], check=False).returncode == 0
+
+
 def test_cache_refuses_a_receipt_filed_under_the_wrong_key(tmp_path):
     cache = ReceiptCache(tmp_path)
     a, b = _key(), _key(harness_version="v2")
@@ -137,3 +196,102 @@ def test_cache_refuses_a_receipt_filed_under_the_wrong_key(tmp_path):
     cache.path_for(b).write_text(cache.path_for(a).read_text())
     with pytest.raises(ReceiptError):
         cache.get(b)
+
+
+def test_explicit_link_libraries_follow_objects_and_recipe_dependencies(tmp_path, monkeypatch):
+    """Real static archives expose wrong compiler-driver library ordering."""
+    from merlin.perf.layer_bench import BuildError, build_program
+    from merlin.runtime.backends import base as backends
+    from merlin.targetgen import runtime_build
+    from merlin.targetgen.contract.build_recipe import HarnessBuildRecipe
+
+    cc, ar = shutil.which("cc"), shutil.which("ar")
+    if cc is None or ar is None:
+        pytest.skip("requires a native C compiler and archive tool")
+
+    class NativeRecipe(HarnessBuildRecipe):
+        def link_command(self, *, objects, output, link_script=None):
+            cmd = super().link_command(objects=objects, output=output, link_script=link_script)
+            index = cmd.index("-T")
+            return cmd[:index] + cmd[index + 2 :]
+
+    for name, code in [
+        ("leaf", "int leaf(void) { return 37; }\n"),
+        ("wrapper", "extern int leaf(void); int wrapper(void) { return leaf(); }\n"),
+    ]:
+        source, obj = tmp_path / f"{name}.c", tmp_path / f"{name}.o"
+        source.write_text(code)
+        subprocess.run([cc, "-O2", "-c", source, "-o", obj], check=True)
+        subprocess.run([ar, "rcs", tmp_path / f"lib{name}.a", obj], check=True)
+
+    recipe = NativeRecipe(
+        compiler=Path(cc),
+        include_roots=(),
+        support_sources=(),
+        link_script=tmp_path / "unused.ld",
+        load_address=0,
+        cflags=("-O2",),
+        ldflags=(f"-L{tmp_path}", "-lwrapper"),
+    )
+    monkeypatch.setattr(backends, "harness_build_recipe", lambda _: recipe)
+    monkeypatch.setattr(runtime_build, "derived_link_script", lambda *_: recipe.link_script)
+    source = tmp_path / "main.c"
+    source.write_text("extern int wrapper(void); int main(void) { return wrapper() == 37 ? 0 : 1; }\n")
+    with pytest.raises(BuildError, match="leaf"):
+        build_program(
+            [source],
+            tmp_path / "early",
+            target="fixture",
+            extra_cflags=(f"-L{tmp_path}", "-lleaf"),
+            max_loaded_bytes=None,
+        )
+    built = build_program(
+        [source], tmp_path / "late", target="fixture", extra_ldflags=("-lleaf",), max_loaded_bytes=None
+    )
+    assert subprocess.run([built.elf], check=False).returncode == 0
+    assert recipe.ldflags == (f"-L{tmp_path}", "-lwrapper")
+
+
+@pytest.mark.parametrize("support_first", [False, True])
+def test_same_basename_sources_keep_distinct_objects(tmp_path, monkeypatch, support_first):
+    """Both translation units must execute when provider support reuses a basename."""
+    from merlin.perf.layer_bench import build_program
+    from merlin.runtime.backends import base as backends
+    from merlin.targetgen import runtime_build
+    from merlin.targetgen.contract.build_recipe import HarnessBuildRecipe
+
+    cc = shutil.which("cc")
+    if cc is None:
+        pytest.skip("requires a native C compiler")
+
+    class NativeRecipe(HarnessBuildRecipe):
+        def link_command(self, *, objects, output, link_script=None):
+            cmd = super().link_command(objects=objects, output=output, link_script=link_script)
+            index = cmd.index("-T")
+            return cmd[:index] + cmd[index + 2 :]
+
+    for directory, function, value in [("caller", "left", 17), ("provider", "right", 25)]:
+        location = tmp_path / directory
+        location.mkdir()
+        (location / "kernel.c").write_text(f"int {function}(void) {{ return {value}; }}\n")
+    main = tmp_path / "main.c"
+    main.write_text("extern int left(void), right(void); int main(void) { return left()+right()==42 ? 0 : 1; }\n")
+    recipe = NativeRecipe(Path(cc), (), (tmp_path / "provider/kernel.c",), tmp_path / "unused.ld", 0)
+    monkeypatch.setattr(backends, "harness_build_recipe", lambda _: recipe)
+    monkeypatch.setattr(runtime_build, "derived_link_script", lambda *_: recipe.link_script)
+    first = build_program(
+        [main, tmp_path / "caller/kernel.c"],
+        tmp_path / "first",
+        target="fixture",
+        max_loaded_bytes=None,
+        support_first=support_first,
+    )
+    second = build_program(
+        [main, tmp_path / "caller/kernel.c"],
+        tmp_path / "second",
+        target="fixture",
+        max_loaded_bytes=None,
+        support_first=support_first,
+    )
+    assert subprocess.run([first.elf], check=False).returncode == 0
+    assert first.elf_sha256 == second.elf_sha256

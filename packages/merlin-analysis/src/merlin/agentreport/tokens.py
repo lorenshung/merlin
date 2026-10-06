@@ -34,6 +34,109 @@ METERED = "metered"
 NOTIONAL = "subscription_notional"
 UNPRICED = "unpriced"
 
+
+def read_codex_tokens(path: Path, *, since: str | None = None, until: str | None = None) -> "TokenFacts":
+    """Read explicit rollout counters without adding cached/reasoning subsets twice.
+
+    Caller supplies the owned session file; this reader performs no discovery.
+    Window boundaries select completed counter events and subtract the prior
+    cumulative counter. Copied session metadata never determines ownership.
+    Reset, missing or contradictory counters remain unavailable. No price or
+    per-optimization allocation is inferred from session token counts.
+    """
+    import datetime
+    import json
+
+    facts = TokenFacts()
+    keys = (
+        "input_tokens",
+        "cached_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+    )
+
+    def timestamp(value):
+        parsed = datetime.datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            raise ValueError("usage window and events require timezone-aware timestamps")
+        return parsed
+
+    try:
+        lower = timestamp(since) if since is not None else None
+        upper = timestamp(until) if until is not None else None
+        if lower is not None and upper is not None and upper < lower:
+            raise ValueError("usage window is inverted")
+        baseline = dict.fromkeys(keys, 0)
+        latest = previous = None
+        last_timestamp = None
+        with path.open(encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    if not line.endswith("\n"):
+                        break  # A live writer may not have finished its last line.
+                    raise ValueError("rollout contains a malformed complete JSON line")
+                if not isinstance(record, dict):
+                    raise ValueError("rollout contains a non-object JSON record")
+                payload = record.get("payload", {})
+                if not isinstance(payload, dict):
+                    raise ValueError("rollout contains a non-object event payload")
+                if record.get("type") != "event_msg" or payload.get("type") != "token_count":
+                    continue
+                info = payload.get("info")
+                if not info:
+                    continue
+                if not isinstance(info, dict):
+                    raise ValueError("rollout contains malformed token counter info")
+                observed = timestamp(record["timestamp"])
+                if upper is not None and observed > upper:
+                    continue
+                counts = info.get("total_token_usage")
+                if not isinstance(counts, dict) or any(type(counts.get(k)) is not int or counts[k] < 0 for k in keys):
+                    raise ValueError("rollout lacks the complete integer token counter split")
+                counts = {k: counts[k] for k in keys}
+                if (
+                    counts["total_tokens"] != counts["input_tokens"] + counts["output_tokens"]
+                    or counts["cached_input_tokens"] + counts["cache_write_input_tokens"] > counts["input_tokens"]
+                    or counts["reasoning_output_tokens"] > counts["output_tokens"]
+                ):
+                    raise ValueError("rollout token counter subsets contradict their totals")
+                if previous is not None and (observed < last_timestamp or any(counts[k] < previous[k] for k in keys)):
+                    raise ValueError("rollout token counters reset or arrive out of order")
+                increments = {k: counts[k] - (previous[k] if previous is not None else 0) for k in keys}
+                if (
+                    increments["cached_input_tokens"] + increments["cache_write_input_tokens"]
+                    > increments["input_tokens"]
+                    or increments["reasoning_output_tokens"] > increments["output_tokens"]
+                ):
+                    raise ValueError("rollout incremental token subsets contradict their totals")
+                previous, last_timestamp = counts, observed
+                if lower is not None and observed < lower:
+                    baseline = counts
+                else:
+                    latest = counts
+        if latest is None:
+            raise ValueError("no complete token counter event in the requested window")
+        delta = {k: latest[k] - baseline[k] for k in keys}
+        facts.input_tokens = delta["input_tokens"] - delta["cached_input_tokens"] - delta["cache_write_input_tokens"]
+        facts.cache_read_tokens = delta["cached_input_tokens"]
+        facts.cache_creation_tokens = delta["cache_write_input_tokens"]
+        facts.output_tokens = delta["output_tokens"]
+        facts.reasoning_tokens = delta["reasoning_output_tokens"]
+        facts.total_tokens = delta["total_tokens"]
+        facts.availability.set("tokens", measured("owned rollout cumulative token_count events"))
+        facts.availability.set("token_split", measured("cache input and reasoning output remain subsets"))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        facts.availability.set("tokens", unavailable(str(exc)))
+        facts.availability.set("token_split", unavailable("token counter could not be validated"))
+    facts.cost_reason = "session token counters do not establish billing or per-optimization attribution"
+    facts.availability.set("cost", unavailable(facts.cost_reason))
+    return facts
+
+
 #: Deployment/vendor prefixes a model id may be published under. Stripped left to right; each is a
 #: routing fact about WHERE the model was called, never about WHICH model it is.
 _PATH_SEPARATORS = ("/",)

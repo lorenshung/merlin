@@ -28,6 +28,7 @@ Nothing here knows any target, opcode, or unit: a record is (workload, program, 
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -125,6 +126,34 @@ def held_out(
     for p in programs:
         slices.setdefault(getattr(p, by), []).append(p)
     return {name: agreement(ordered_pairs(rows), score, margin=margin) for name, rows in sorted(slices.items())}
+
+
+def interval_agreement(
+    pairs: Sequence[tuple[Program, Program]],
+    intervals: Mapping[str, tuple[float, float]],
+) -> Agreement:
+    """Order only disjoint finite intervals; overlapping estimates are undecided.
+
+    This prevents a midpoint from turning an uncertain prediction into a search
+    decision. Missing predictions and touching endpoints also decide nothing.
+    """
+    for lo, hi in intervals.values():
+        if not math.isfinite(lo) or not math.isfinite(hi) or lo < 0 or hi < lo:
+            raise ValueError("ranking requires finite, nonnegative ordered intervals")
+    decided = agreed = 0
+    for a, b in pairs:
+        ia, ib = intervals.get(a.program), intervals.get(b.program)
+        if ia is None or ib is None:
+            continue
+        if ia[1] < ib[0]:
+            faster = True
+        elif ib[1] < ia[0]:
+            faster = False
+        else:
+            continue
+        decided += 1
+        agreed += int(faster == (a.measured < b.measured))
+    return Agreement(len(pairs), decided, agreed, len(pairs) - decided)
 
 
 def verdict(
