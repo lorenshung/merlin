@@ -63,6 +63,11 @@ jobs:
         run: uv run --no-sync python build_tools/scripts/check_semantic_coverage.py
       - name: wiring gate (every instrument has a production caller)
         run: uv run --no-sync python build_tools/scripts/check_wiring.py
+      # A gate nobody has ever seen fail reads exactly like one that cannot. The structural half runs
+      # pre-commit; this is the half that cannot be faked: it runs each recorded proof and requires the
+      # proof to be observed entering its own gate.
+      - name: mutation-proof gate (every check has a recorded failing direction)
+        run: uv run --no-sync python build_tools/scripts/check_mutation_proofs.py --prove
       # On an evidence path, absent must not read as a value: a fabricated `.get` fallback, a
       # swallowed load error, a discarded subprocess result, a shelled pipeline's last-stage status.
       - name: silent-default gate (a substituted datum may not become a verdict)
