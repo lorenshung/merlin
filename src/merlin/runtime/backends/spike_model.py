@@ -67,8 +67,8 @@ def _run(cmd: list, **kw) -> subprocess.CompletedProcess:
     return _proc.run_checked(cmd, error=SpikeModelError, timeout=timeout, timeout_hint=" (pathological compile)", **kw)
 
 
-# derived-ok: address chosen by this backend's own -m map, not read from a target.
-ARENA_BASE = 0xC0000000  # arena lives here (literal-addressed, in -m memory)
+#: The arena lives here (literal-addressed, inside the -m memory map this backend passes to spike).
+ARENA_BASE = 0xC0000000  # derived-ok: address chosen by this backend's own -m map, not read from a target
 DRAM_BASE = 0x80000000  # derived-ok: RISC-V platform DRAM base used by spike/fesvr; the -m map is passed explicitly
 #: Reserve ahead of the weights blob for everything that is NOT the model's static I/O: code,
 #: rodata, the stack and the runtime's own tables. The model-dependent part (embedded inputs + the
