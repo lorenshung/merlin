@@ -356,3 +356,20 @@ def ext_path(name: str) -> Path:
         known = sorted(k[len("MERLIN_EXT_") :].lower() for k in _dotenv() if k.startswith("MERLIN_EXT_"))
         raise ExternalPathUnset(f"external path {name!r} unset — set {key} in .env (copy .env.example). Known: {known}")
     return Path(val)
+
+
+def is_external_path_unset(exc: BaseException | None) -> bool:
+    """Whether ``exc`` is, or was explicitly raised FROM, an unconfigured external checkout.
+
+    The lookup's error used to escape from deep inside an extractor, crashing readers documented to
+    report "unavailable" -- only on a host without the checkout. Only explicit ``raise ... from`` causes
+    are followed: a declaration naming a checkout this host lacks wraps the lookup that way, whereas an
+    error a defect raises merely *while* handling one is implicit context and is not absence.
+    """
+    for _ in range(16):  # a cause chain is short; the bound only guards a pathological cycle
+        if exc is None:
+            return False
+        if isinstance(exc, ExternalPathUnset):
+            return True
+        exc = exc.__cause__
+    return False

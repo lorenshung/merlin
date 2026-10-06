@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from merlin.common.digest import sha256_file
-from merlin.common.paths import artifacts_dir
+from merlin.common.paths import artifacts_dir, is_external_path_unset
 
 # Re-entrancy guard: ``ensure_facts`` regenerates by importing ``circt_introspect`` (which imports
 # this module) — the guard makes a regeneration that transitively re-asks for the same target fail
@@ -1185,39 +1185,15 @@ def body_if_present(target: str) -> dict[str, Any]:
 
     Twenty-odd consumers spelled this inline as ``(load_facts(t) or {}).get("facts") or {}``. A consumer
     that must not proceed on missing facts should call :func:`facts_body` instead, which refuses with the
-    reason; this one is for code whose own logic already treats an empty body as "nothing derived".
-
-    "None" includes a target whose facts could only be EXTRACTED, from an external checkout this host
-    does not configure. That used to escape as the checkout lookup's ``KeyError`` from deep inside the
-    extractor, so the readers documented to report "unavailable" (an endpoint left unverified, a decode
-    table left empty) crashed instead -- and only on a machine without the checkout. Only that absence
-    is absorbed: an extraction that fails with its checkout present still raises, and nothing is
-    written to the cache, so configuring the checkout later is not masked by a recorded empty artifact.
-    """
+    reason; this one is for code whose own logic already treats an empty body as "nothing derived",
+    including an external checkout this host lacks (:func:`~merlin.common.paths.is_external_path_unset`).
+    Any other failure raises; nothing is cached, so configuring the checkout later is not masked."""
     try:
-        doc = load_facts(target)
+        return (load_facts(target) or {}).get("facts") or {}
     except Exception as exc:  # noqa: BLE001 - re-raised unless it is the absence named above
-        if not _external_source_absent(exc):
+        if not is_external_path_unset(exc):
             raise
         return {}
-    return (doc or {}).get("facts") or {}
-
-
-def _external_source_absent(exc: BaseException | None) -> bool:
-    """Whether ``exc`` is, or was explicitly raised FROM, an unconfigured external checkout.
-
-    Only explicit ``raise ... from`` causes are followed: a declaration naming a checkout this host lacks
-    wraps the lookup's error that way, whereas an error a defect raises merely *while* handling one is
-    implicit context and is not absence."""
-    from merlin.common.paths import ExternalPathUnset
-
-    for _ in range(16):  # a cause chain is short; the bound only guards a pathological cycle
-        if exc is None:
-            return False
-        if isinstance(exc, ExternalPathUnset):
-            return True
-        exc = exc.__cause__
-    return False
 
 
 def hollowed_facts(old: dict, new: dict) -> list[str]:
