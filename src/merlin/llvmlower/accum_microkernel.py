@@ -64,6 +64,8 @@ from .parallel_grain import RUNNER_PRELUDE as _PARALLEL_GRAIN_PRELUDE
 from .parallel_team import RUNNER_PRELUDE as _PARALLEL_TEAM_PRELUDE
 from .parallel_team import STAGE_SRC as _PARALLEL_TEAM_STAGE_SRC
 from .roundeven_intrinsic import RUNNER_PRELUDE as _ROUND_INTRINSIC_PRELUDE
+from .scalar_contraction import RUNNER_PRELUDE as _SCALAR_CONTRACTION_PRELUDE
+from .scalar_pointwise_unroll import RUNNER_PRELUDE as _SCALAR_POINTWISE_UNROLL_PRELUDE
 from .selfcopy import RUNNER_PRELUDE as _SELFCOPY_PRELUDE
 from .transpose_maps import RUNNER_PRELUDE as _TRANSPOSE_MAPS_PRELUDE
 
@@ -426,6 +428,8 @@ def run_source(*, tag_bmm_tails: bool = False) -> str:
         + _PARALLEL_COARSEN_STAGE_SRC
         + _ALLOCA_SCOPE_LOWER_PRELUDE
         + _ROUND_INTRINSIC_PRELUDE
+        + _SCALAR_CONTRACTION_PRELUDE
+        + _SCALAR_POINTWISE_UNROLL_PRELUDE
         + f"\nMARKER = {SCALARIZE_MARKER!r}\n"
         "src_path, out_path, pipeline = sys.argv[1], sys.argv[2], sys.argv[3]\n"
         "passes = pipeline.split(',')\n"
@@ -460,7 +464,11 @@ def run_source(*, tag_bmm_tails: bool = False) -> str:
         "if _CONCAT_DPS:\n"
         "    print('OK concat_dps rewrote', _concat_dps(module, ctx)[0])\n"
         "if stage1:\n"
-        "    PassManager.parse('builtin.module(' + stage1 + ')', ctx).run(module.operation)\n"
+        "    if any(marker in stage1.split(',') for marker in _SC_MARKERS):\n"
+        "        _run_stages(ctx, module, stage1, 0, (), (), (), _PRE_GENERALIZE_STAGES)\n"
+        "        _PRE_GENERALIZE_STAGES = ()\n"
+        "    else:\n"
+        "        PassManager.parse('builtin.module(' + stage1 + ')', ctx).run(module.operation)\n"
         "with ctx, ir.Location.unknown():\n"
         # Sink FIRST: a widening interposed between the A read and its lane extract (the int8
         # `extsi vector<MRx1xi8>` shape, and the f16/bf16 `extf` shape) hides the scalar extract
