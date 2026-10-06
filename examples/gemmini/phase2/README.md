@@ -149,3 +149,31 @@ open models can use neither. The prepared, read-only objective records the exact
 decision. This enables mechanisms for the Phase 2 agent, not hand-authored
 Gemmini transformations, and does not make a diagnostic or unreviewed capsule
 eligible for a verified run.
+
+### Operating a measured run
+
+Every command below reads or writes only the run's own records; none signals a
+process or infers anything from a file's age. A run may be named by its own
+directory or by the orchestration directory that points at it.
+
+```sh
+merlin experiment measured launch RUN --profile codex-gpt-6-sol   # detached; output appends to RUN/launch.log
+merlin experiment status RUN                    # launcher, stop request, rounds, stores, holds, bar and best
+merlin experiment watch RUN                     # one line per change until the run is over
+merlin experiment stop RUN --why "..."          # stops at the next session boundary
+merlin experiment measured resume RUN --why "..." --seed PACKAGE --launch --profile codex-gpt-6-sol
+merlin experiment measured audit-round RUN 3    # replay round 3's audit and compare its recorded status
+merlin experiment measured roofline --run RUN --result ours=RESULT.json --result vendor=RESULT.json
+merlin experiment measured admin STORE outage-retry-now --why "board re-enumerated"
+```
+
+A cell run is the same mode pointed at one cell's own group programs.
+[`cells.yaml`](cells.yaml) names the ResNet-50 cells by group or by form; the
+seed defaults to the loop's confirmed best (or the target's exported champion):
+
+```sh
+merlin experiment cell prepare LOOP_RUN --cells examples/gemmini/phase2/cells.yaml --cell conv3x3 --why "..."
+merlin experiment cell launch CELL_RUN --profile codex-gpt-6-sol-cell
+merlin experiment cell status CELL_RUN          # or: --target gemmini, every cell run
+merlin experiment cell board --package-job JOB.json --reference-job JOB.json --groups 1,70
+```

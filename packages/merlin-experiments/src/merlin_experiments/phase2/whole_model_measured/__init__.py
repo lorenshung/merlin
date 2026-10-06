@@ -24,7 +24,9 @@ store), :mod:`.feedback` / :mod:`.transfer` (what the agent reads), :mod:`.objec
 (the loop's objective), :mod:`.cells` (cell mode), :mod:`.sessions` (plateau, quota, model
 verification, circuit breaker), :mod:`.snapshot` (commit snapshots and preflight), :mod:`.runs` (run
 layout, prepare/resume) and :mod:`.watchdog`, :mod:`.launch` (a detached launch and its record),
-:mod:`.store_admin` (operator surgery), :mod:`.profiles` (launch profiles).
+:mod:`.store_admin` (operator surgery), :mod:`.profiles` (launch profiles), :mod:`.progress` (a run's
+status and its changes), :mod:`.round_audit` (a recorded round judged again) and :mod:`.cell_runs` (cell
+runs prepared, launched, read and confirmed on the board).
 """
 
 MODE = "whole_model_measured"
