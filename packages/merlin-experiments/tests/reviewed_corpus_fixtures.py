@@ -155,7 +155,7 @@ def build_phase0_handoff(tmp_path, *, copy_sources=True):
         PYTHONSAFEPATH="1",
     )
     run = workspace / "out/runs/phase0"
-    release = workspace / "out/artifacts/protocols/review"
+    release = workspace / "out/artifacts/protocols/fixture-device/review"
 
     def cli(*args):
         return subprocess.run(

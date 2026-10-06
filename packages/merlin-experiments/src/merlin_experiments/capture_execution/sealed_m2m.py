@@ -924,6 +924,72 @@ def _materialized_v2(output: Path, source: Path, output_mount: Path, plan: dict[
 
 def _materialized_v3(output: Path, source: Path, output_mount: Path, plan: dict[str, Any]) -> dict[str, Any]:
     """Verify the complete saved ABI, including every declared session program."""
+    from merlin.capture.integerization import contraction_partition
+
+    def integer_partition(meta: dict) -> tuple[int, dict[str, int]]:
+        if not isinstance(meta, dict):
+            raise SealedM2MError("capture lacks verified integer contractions: invalid metadata")
+        receipt = meta.get("integerization_receipt") or {}
+        try:
+            partition = contraction_partition(receipt)
+        except ValueError as exc:
+            raise SealedM2MError(f"capture lacks verified integer contractions: {exc}") from exc
+        agreement = receipt.get("golden_agreement") or {}
+        stats, recipe = meta.get("quantization_stats"), meta.get("recipe")
+        if not all(isinstance(value, dict) for value in (agreement, stats, recipe)):
+            raise SealedM2MError("capture lacks verified integer contractions: malformed numerical evidence")
+        executed = agreement.get("executed_contractions") or {}
+        outputs = agreement.get("outputs")
+        numerical_rows = [agreement, *outputs] if isinstance(outputs, list) and outputs else []
+        by_kind = receipt["quantized_by_kind"]
+        count = receipt.get("exported_integer_mm_count")
+        emitted = receipt.get("integer_mm_emitted")
+        max_k = receipt.get("max_reduction_k")
+        annotated = stats.get("annotated_contractions")
+        engine = recipe.get("software_numerical_engine")
+        if (
+            engine != "integer_reference"
+            or type(annotated) is not int
+            or annotated != partition["seen"]
+            or agreement.get("status") != "passed"
+            or agreement.get("reference") != "pt2e_integer"
+            or type(agreement.get("samples")) is not int
+            or agreement["samples"] < 1
+            or not numerical_rows
+            or any(
+                not isinstance(result, dict)
+                or result.get("finite") is not True
+                or (result is not agreement and result.get("within_tolerance") is not True)
+                or any(
+                    type(result.get(key)) not in (int, float) or result[key] != 0.0
+                    for key in ("atol", "rtol", "max_abs", "max_rel")
+                )
+                for result in numerical_rows
+            )
+            or not isinstance(executed, dict)
+            or any(
+                type(executed.get(key)) is not int
+                for key in ("total", "selected", "observed", "linear", "conv2d", "matmul")
+            )
+            or executed.get("total") != partition["integerized"]
+            or executed.get("selected") != partition["seen"]
+            or executed.get("observed") != partition["seen"]
+            or any(executed.get(kind) != by_kind[kind]["integerized"] for kind in ("linear", "conv2d", "matmul"))
+            or type(count) is not int
+            or count <= 0
+            or type(emitted) is not int
+            or emitted < partition["integerized"]
+            or emitted != count
+            or receipt.get("accumulator_bound_checked") is not True
+            or type(max_k) is not int
+            or max_k < 1
+            or max_k * 128 * 128 > (1 << 31) - 1
+        ):
+            raise SealedM2MError(
+                "capture lacks independently verified integer contractions or complete precision census"
+            )
+        return count, partition
+
     report_path = output / "session-receipt.json"
     contract_path = output / "session_contract.yaml"
     if not report_path.exists():
@@ -987,14 +1053,21 @@ def _materialized_v3(output: Path, source: Path, output_mount: Path, plan: dict[
         integer_work = 0
         if plan["dtype"] == "int8":
             meta = json.loads((output / "meta.json").read_bytes())
-            receipt = meta.get("integerization_receipt") or {}
-            integer_work = receipt.get("exported_integer_mm_count")
-            if type(integer_work) is not int or integer_work <= 0:
-                raise SealedM2MError("single-program int8 capture contains no verified integer contractions")
+            exported, partition = integer_partition(meta)
+            # Preserve the exact historical sealed-v3 materialized summary:
+            # this legacy field counts exported integer operations. The new
+            # ledger distinguishes source contractions only for mixed captures,
+            # which the old verifier never admitted.
+            integer_work = exported
         return {
             "kind": "single",
             **verified,
             "integer_contractions": integer_work,
+            **(
+                {"exported_integer_operations": exported, "contraction_partition": partition}
+                if plan["dtype"] == "int8" and partition["preserved"]
+                else {}
+            ),
             **({"session_contract_sha256": single_contract} if single_contract is not None else {}),
         }
     quantized = plan["dtype"] == "int8"
@@ -1029,11 +1102,13 @@ def _materialized_v3(output: Path, source: Path, output_mount: Path, plan: dict[
         or report.get("recipe_sha256") != (plan["recipe"]["recipe_sha256"] if quantized else None)
         or not isinstance(names, list)
         or not names
+        or any(not isinstance(name, str) for name in names)
         or len(names) != len(set(names))
         or not isinstance(programs, list)
         or not isinstance(rows, list)
         or len(programs) != len(names)
         or len(rows) != len(names)
+        or any(not isinstance(row, dict) for row in [*programs, *rows])
     ):
         raise SealedM2MError("multi-program session roster or contract digest differs")
     for index, name in enumerate(names):
@@ -1062,23 +1137,20 @@ def _materialized_v3(output: Path, source: Path, output_mount: Path, plan: dict[
         stage = stages_root / name
         if stage.is_symlink() or not stage.is_dir():
             raise SealedM2MError("multi-program stage is indirect or absent")
-        meta = json.loads((stage / "meta.json").read_bytes())
+        try:
+            meta = json.loads((stage / "meta.json").read_bytes())
+        except (OSError, ValueError) as exc:
+            raise SealedM2MError("multi-program stage metadata is unreadable") from exc
+        if not isinstance(meta, dict):
+            raise SealedM2MError("multi-program stage metadata is malformed")
         mode = row.get("precision_selection")
         if quantized and mode == "recipe":
-            receipt = meta.get("integerization_receipt") or {}
-            agreement = receipt.get("golden_agreement") or {}
-            count = receipt.get("exported_integer_mm_count")
+            count, partition = integer_partition(meta)
             if (
                 meta.get("dtype") != "int8"
                 or meta.get("scheme") != "int8_static_act_int8_weight"
                 or meta.get("recipe_sha256") != recipe["recipe_sha256"]
                 or (meta.get("quantization_stats") or {}).get("recipe_sha256") != recipe["recipe_sha256"]
-                or agreement.get("status") != "passed"
-                or agreement.get("reference") != "pt2e_integer"
-                or type(count) is not int
-                or count <= 0
-                or receipt.get("quantized_contractions_remaining") != 0
-                or receipt.get("refusals") != []
             ):
                 raise SealedM2MError("multi-program recipe stage lacks verified integer contractions")
             integer_work += count
@@ -1113,6 +1185,11 @@ def _materialized_v3(output: Path, source: Path, output_mount: Path, plan: dict[
                 "model_sha256": _file_digest(stage / "model.mlir"),
                 "receipt_sha256": result["receipt_sha256"],
                 "precision_selection": mode,
+                **(
+                    {"contraction_partition": partition, "exported_integer_operations": count}
+                    if quantized and mode == "recipe" and partition["preserved"]
+                    else {}
+                ),
             }
         )
     if quantized and integer_work == 0:

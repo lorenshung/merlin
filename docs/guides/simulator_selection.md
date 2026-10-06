@@ -3,7 +3,7 @@ title: Selecting and checking a simulator
 kind: guide
 status: current
 owner: runtime
-last_verified: 2026-09-27
+last_verified: 2026-10-05
 related: [phase0_specification, target_resolution, reproducing_whole_model_on_rtl]
 code_refs: [src/merlin/targetgen/gsim_emulator.py, src/merlin/targetgen/program_engine_policy.py, src/merlin/targetgen/program_oracle.py]
 ---
@@ -109,6 +109,10 @@ declared program emitter in its model environment. The generated bundle contains
 the instruction words, encoded input regions, output layout and independent
 program golden. Output directories may be relative to the caller; they remain
 under that run root even though the model assembler uses its own checkout as cwd.
+The emitter's `runner.program_emitter.path` is resolved inside the explicitly
+selected support provider; a missing declaration, escaping path or missing file
+refuses instead of falling back to an in-tree target-specific script. Optional
+declared string arguments are provider policy, not an inferred ISA encoding.
 
 Use a program that exercises nonzero operands, the actual compute instruction,
 memory transfers and a declared termination. Run it with a bounded cycle budget

@@ -179,6 +179,56 @@ def test_private_snapshot_marker_is_masked_through_runtime_alias(private_bundle,
         assert BW.is_exposed(masked, alias / "repo/inputs/public.txt")
 
 
+def test_frozen_corpus_answers_stay_masked_after_source_removal_and_runtime_rebind(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("MERLIN_BUNDLE_CAS", "")
+    repo = tmp_path / "repo"
+    corpus = repo / "merlin/contract/capsules/fixture"
+    member = corpus / "isa/member"
+    member.mkdir(parents=True)
+    (member / "capsule.yaml").write_text("name: public\n")
+    golden = member / "golden.yaml"
+    golden.write_text("private golden\n")
+    weight = member / "model.weights.safetensors"
+    weight.write_bytes(b"private weights")
+    hidden = corpus / "hidden/holdout"
+    hidden.mkdir(parents=True)
+    (hidden / "capsule.yaml").write_text("private holdout\n")
+    workspace = tmp_path / "run/workspace"
+    workspace.mkdir(parents=True)
+    bundle = {"allowed": [{"path": "merlin/contract/capsules"}]}
+    BW.materialize_bundle_inputs(workspace, bundle, repo=repo)
+    exact_workspace = tmp_path / "exact/workspace"
+    exact_workspace.mkdir(parents=True)
+    exact_bundle = {"allowed": [{"path": "merlin/contract/capsules/fixture/isa/member/golden.yaml"}]}
+    BW.materialize_bundle_inputs(exact_workspace, exact_bundle, repo=repo)
+    frozen_root = BW.bundle_snapshot_root(workspace) / "repo/merlin/contract/capsules/fixture"
+    golden.unlink()  # Live discovery alone must not determine frozen answer policy.
+    weight.unlink()
+    monkeypatch.setattr(BW, "answer_surfaces", lambda te: [])
+    te = SimpleNamespace(target="fixture", capsule_corpus=corpus / "isa", corpus_siblings=lambda: [])
+    argv = BW.base_argv(workspace, bundle, repo=repo)
+    argv += ["--ro-bind", str(tmp_path), str(tmp_path)]  # Installed runtime also binds its venv ancestor.
+    argv = BW.reapply_bundle_snapshot(argv, workspace, bundle, repo=repo)
+    assert BW.is_exposed(argv, frozen_root / "isa/member/golden.yaml")
+    assert BW.is_exposed(argv, golden)
+
+    masked = BW.apply_final_answer_masks(argv, te, workspace, bundle, repo=repo)
+    for relative in ("isa/member/golden.yaml", "isa/member/model.weights.safetensors", "hidden/holdout"):
+        assert not BW.is_exposed(masked, corpus / relative)
+        assert not BW.is_exposed(masked, frozen_root / relative)
+    assert BW.is_exposed(masked, member / "capsule.yaml")
+
+    exact_argv = BW.base_argv(exact_workspace, exact_bundle, repo=repo)
+    exact_argv += ["--ro-bind", str(tmp_path), str(tmp_path)]
+    exact_argv = BW.reapply_bundle_snapshot(exact_argv, exact_workspace, exact_bundle, repo=repo)
+    exact_masked = BW.apply_final_answer_masks(exact_argv, te, exact_workspace, exact_bundle, repo=repo)
+    exact_frozen = BW.bundle_snapshot_root(exact_workspace) / "repo" / golden.relative_to(repo)
+    assert not BW.is_exposed(exact_masked, golden)
+    assert not BW.is_exposed(exact_masked, exact_frozen)
+
+
 @pytest.mark.parametrize("scope", ["parent", "file", "hardlink"])
 def test_host_provenance_files_are_masked_without_hiding_public_neighbors(tmp_path, scope):
     archive = tmp_path / "original-run"
@@ -303,7 +353,9 @@ def test_final_toolchain_alias_cannot_expose_private_inputs(private_bundle, monk
     monkeypatch.setattr(TC, "toolchain_binds", lambda te: extra)
     monkeypatch.setattr(BW, "answer_surfaces", lambda te: [])
     assert BW.is_exposed(extra, alias / tail)  # Negative control uses actual source bytes.
-    argv = BW.full_argv(SimpleNamespace(target="fixture-target"), workspace, bundle)
+    argv = BW.full_argv(
+        SimpleNamespace(target="fixture-target", capsule_corpus=None, corpus_siblings=lambda: []), workspace, bundle
+    )
     assert not BW.is_exposed(argv, alias / tail)
     private = BW.host_input_surfaces(argv, workspace, bundle, repo=repo)
     assert BW.coverage_gap(argv, private) == []

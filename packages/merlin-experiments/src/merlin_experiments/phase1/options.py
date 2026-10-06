@@ -55,6 +55,7 @@ class RunOptions:
     with_tool: list[str]
     without_tool: list[str]
     account_config_dir: str
+    private_full_model_spec: str = ""
 
 
 def build_parser(
@@ -244,6 +245,12 @@ def build_parser(
     )
     ap.add_argument("--no-oracle", action="store_true", help="QA = L0+trace only (fast dev)")
     ap.add_argument("--skip-hidden", action="store_true")
+    ap.add_argument(
+        "--private-full-model-spec",
+        default="",
+        metavar="FILE",
+        help="operator-only frozen complete-network validation declaration for the official post-freeze gate",
+    )
     ap.add_argument(
         "--experiment",
         choices=["full", "realistic"],

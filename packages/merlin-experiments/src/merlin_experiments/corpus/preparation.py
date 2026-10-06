@@ -61,6 +61,33 @@ def copy_input(source: Path, destination: Path, *, private: bool = False, expect
     return before
 
 
+def stage_phase1_policy_descriptor(source_descriptor: Path, selected: Path, private: Path) -> tuple[dict, dict]:
+    """Retain an explicit Phase-1-only policy overlay without changing Phase-0 source identity."""
+    selected = selected.expanduser().absolute()
+    ordinary_tree(selected)
+    if not selected.is_file():
+        raise SpecError("selected Phase 1 policy descriptor must be an ordinary file")
+    source_document = read_yaml(source_descriptor)
+    selected_document = read_yaml(selected)
+    if not isinstance(source_document, dict) or not isinstance(selected_document, dict):
+        raise SpecError("Phase 1 policy descriptors must be mappings")
+
+    def without_gates(document: dict) -> dict:
+        return {key: value for key, value in document.items() if key != "phase1_gates"}
+
+    if without_gates(source_document) != without_gates(selected_document):
+        raise SpecError("selected Phase 1 policy descriptor may differ from Phase 0 only in phase1_gates")
+    gates = selected_document.get("phase1_gates")
+    if not isinstance(gates, dict) or not gates:
+        raise SpecError("selected Phase 1 policy descriptor has no phase1_gates")
+    retained = private / "phase1-policy-descriptor.yaml"
+    digest = copy_input(selected, retained, private=True)
+    retained.chmod(0o400)
+    if read_yaml(retained) != selected_document:
+        raise SpecError("retained Phase 1 policy descriptor differs from selected bytes")
+    return {"source_path": str(selected), "sha256": digest}, copy.deepcopy(gates)
+
+
 def copy_curated_harness(source: Path, destination: Path) -> tuple[str, list[str]]:
     """Freeze contained file links as bytes while binding their authored spellings.
 
@@ -731,6 +758,7 @@ def scaffold(
     private: Path,
     selected_facts: Path | None = None,
     selected_contract: tuple[Path, str] | None = None,
+    phase1_gates: dict | None = None,
 ) -> dict:
     """Stage only declared task/selfcheck/harness resources, never prior runs or bundles."""
     from merlin.common.digest import sha256_file
@@ -768,6 +796,8 @@ def scaffold(
         "sha256": copy_input(shim, experiment / "scripts/agent_selfcheck.py"),
     }
     document = copy.deepcopy(read_yaml(te.path))
+    if phase1_gates is not None:
+        document["phase1_gates"] = copy.deepcopy(phase1_gates)
     # A release owns the resources copied below; never retain a pointer to live authored inputs.
     document.pop("resources_root", None)
     document.pop("task_root", None)

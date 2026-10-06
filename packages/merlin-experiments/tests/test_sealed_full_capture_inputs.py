@@ -203,7 +203,8 @@ def test_v3_single_program_accepts_complete_v1_session_contract(tmp_path: Path, 
         sealed_m2m._materialized_v3(output, tmp_path, output, plan)
 
 
-def test_v3_int8_session_requires_selected_recipe_and_nonzero_integer_work(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("preserved", [False, True])
+def test_v3_int8_session_requires_selected_recipe_and_nonzero_integer_work(tmp_path: Path, monkeypatch, preserved):
     source, output = tmp_path / "source", tmp_path / "capture"
     (source / "inputs").mkdir(parents=True)
     (source / "inputs/quant_recipe.json").write_bytes(b"selected recipe")
@@ -227,17 +228,67 @@ def test_v3_int8_session_requires_selected_recipe_and_nonzero_integer_work(tmp_p
             "receipt_sha256": _file_digest(stage / "capture_receipt.json"),
         },
     )
-    agreement = {"status": "passed", "reference": "pt2e_integer"}
+    seen = 3 if preserved else 2
+    remaining = int(preserved)
+    agreement = {
+        "status": "passed",
+        "reference": "pt2e_integer",
+        "atol": 0.0,
+        "rtol": 0.0,
+        "executed_contractions": {
+            "conv2d": 0,
+            "linear": 2,
+            "matmul": 0,
+            "total": 2,
+            "selected": seen,
+            "observed": seen,
+        },
+        "samples": 1,
+        "finite": True,
+        "max_abs": 0.0,
+        "max_rel": 0.0,
+        "outputs": [
+            {"finite": True, "within_tolerance": True, "max_abs": 0.0, "max_rel": 0.0, "atol": 0.0, "rtol": 0.0}
+        ],
+    }
     integer_meta = {
         "dtype": "int8",
         "scheme": "int8_static_act_int8_weight",
         "recipe_sha256": recipe["recipe_sha256"],
-        "quantization_stats": {"recipe_sha256": recipe["recipe_sha256"]},
+        "recipe": {"software_numerical_engine": "integer_reference"},
+        "quantization_stats": {"recipe_sha256": recipe["recipe_sha256"], "annotated_contractions": seen},
         "integerization_receipt": {
+            "schema": "m2m.pt2e-integerize.v1",
             "golden_agreement": agreement,
             "exported_integer_mm_count": 2,
-            "quantized_contractions_remaining": 0,
-            "refusals": [],
+            "integer_mm_emitted": 2,
+            "quantized_contractions_seen": seen,
+            "quantized_contractions_integerized": 2,
+            "quantized_contractions_remaining": remaining,
+            "quantized_by_kind": {
+                "linear": {"seen": seen, "integerized": 2, "remaining": remaining},
+                **{kind: {"seen": 0, "integerized": 0, "remaining": 0} for kind in ("conv2d", "matmul", "unsupported")},
+            },
+            "refusals": [{"kind": "linear", "node": "bf16", "reason": "non-f32 dequantization"}] if preserved else [],
+            "precision_decisions": [
+                {"kind": "linear", "node": name, "decision": "integerized_i32"} for name in ("a", "b")
+            ]
+            + (
+                [
+                    {
+                        "kind": "linear",
+                        "node": "bf16",
+                        "decision": "preserve_float_qdq",
+                        "source_dtype": "torch.bfloat16",
+                        "required_numeric_semantics": "dequantize-before-floating-contraction",
+                    }
+                ]
+                if preserved
+                else []
+            ),
+            "precision_decision_counts": {"integerized_i32": 2, "preserve_float_qdq": remaining, "unresolved": 0},
+            "accumulator_bound_checked": True,
+            "max_reduction_k": 4,
         },
     }
     (output / "stages/integer_stage/meta.json").write_text(json.dumps(integer_meta))
@@ -273,6 +324,36 @@ def test_v3_int8_session_requires_selected_recipe_and_nonzero_integer_work(tmp_p
     plan = {"dtype": "int8", "recipe": recipe}
     verified = sealed_m2m._materialized_v3(output, source, output, plan)
     assert verified["integer_contractions"] == 2
+    integer_stage = verified["programs"][0]
+    if preserved:
+        assert integer_stage["contraction_partition"] == {"seen": 3, "integerized": 2, "preserved": 1}
+    else:
+        assert set(integer_stage) == {"name", "model_sha256", "receipt_sha256", "precision_selection"}
+    import copy
+
+    for mutate in (
+        lambda meta: meta["recipe"].clear(),
+        lambda meta: meta["integerization_receipt"].update(exported_integer_mm_count=100),
+        lambda meta: meta["integerization_receipt"]["golden_agreement"].update(samples=0),
+        lambda meta: meta["integerization_receipt"]["golden_agreement"].update(outputs=[]),
+        lambda meta: meta["integerization_receipt"]["golden_agreement"]["outputs"][0].update(max_abs=1.0),
+        lambda meta: meta["integerization_receipt"]["golden_agreement"].update(atol=False),
+        lambda meta: meta["integerization_receipt"]["golden_agreement"]["executed_contractions"].update(conv2d=False),
+        lambda meta: meta.update(recipe=["invalid"]),
+        lambda meta: meta.update(quantization_stats=["invalid"]),
+        lambda meta: meta["integerization_receipt"].update(golden_agreement=["invalid"]),
+    ):
+        bad = copy.deepcopy(integer_meta)
+        mutate(bad)
+        (output / "stages/integer_stage/meta.json").write_text(json.dumps(bad))
+        with pytest.raises(sealed_m2m.SealedM2MError, match="integer contractions"):
+            sealed_m2m._materialized_v3(output, source, output, plan)
+    if preserved:
+        integer_meta["integerization_receipt"]["precision_decisions"][-1]["source_dtype"] = "torch.float32"
+        (output / "stages/integer_stage/meta.json").write_text(json.dumps(integer_meta))
+        with pytest.raises(sealed_m2m.SealedM2MError, match="integer contractions"):
+            sealed_m2m._materialized_v3(output, source, output, plan)
+        integer_meta["integerization_receipt"]["precision_decisions"][-1]["source_dtype"] = "torch.bfloat16"
     integer_meta["integerization_receipt"]["exported_integer_mm_count"] = 0
     (output / "stages/integer_stage/meta.json").write_text(json.dumps(integer_meta))
     with pytest.raises(sealed_m2m.SealedM2MError, match="integer contractions"):

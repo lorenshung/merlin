@@ -959,10 +959,10 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
         quant_stats = getattr(mdl, "_m2m_quantization_stats", None)
     integerization_receipt = None
     if q is not None and q.scheme == "int8_static_act_int8_weight" and not a.already_quantized:
-        # A static PT2E capture is a W8A8 claim only if every selected
-        # contraction becomes true integer arithmetic. Portable Q/DQ output
-        # remains a diagnostic; an authored integer engine selects the separate
-        # framework-side integer reference as the exact functional gate.
+        # Account for every selected PT2E contraction: genuine integer work or
+        # an explicitly preserved non-FP32 floating Q/DQ operation. Preserving
+        # precision is not accelerator/host admission. The independent reference
+        # compares the complete output and counts only genuine integer work.
         from m2m.capture.pt2e_integerize import integerize_pt2e
 
         selected_engine = recipe.get("software_numerical_engine") if recipe is not None else None
@@ -991,6 +991,13 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
                 independent_error = f"{type(exc).__name__}: {exc}"[:2000]
                 independent = None
         mdl, integerization_receipt = integerize_pt2e(mdl, tuple(inputs))
+        from merlin.capture.integerization import contraction_partition
+
+        try:
+            integer_partition = contraction_partition(integerization_receipt)
+        except ValueError as exc:
+            integer_partition = None
+            integerization_receipt["partition_error"] = str(exc)
         with torch.no_grad():
             integer_output = mdl(*inputs)
         portable_agreement = _integerized_agreement(
@@ -1010,10 +1017,11 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
                 executed = independent.contraction_count
                 selected = quant_stats.get("annotated_contractions") if isinstance(quant_stats, dict) else None
                 seen = integerization_receipt["quantized_contractions_seen"]
-                if executed != seen or selected != seen:
+                integerized = integerization_receipt["quantized_contractions_integerized"]
+                if integer_partition is None or executed != integerized or selected != seen:
                     golden_agreement["status"] = "failed"
                     golden_agreement["reason"] = (
-                        "selected, observed and independently executed contraction counts differ"
+                        "selected/observed census or independently executed integer partition differs"
                     )
                 reference_leaves, reference_abi = _output_abi(independent.output)
                 reference_bytes = (
@@ -1041,6 +1049,8 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
                         "total": executed,
                         "selected": selected,
                         "observed": seen,
+                        "integerized": integerized,
+                        "preserved": integer_partition["preserved"] if integer_partition else None,
                     },
                 )
             integerization_receipt["golden_agreement"] = golden_agreement
@@ -1091,9 +1101,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
     if integerization_receipt is not None:
         integerization_receipt["exported_integer_mm_count"] = _exported_integer_mm_count(res.module)
     integerization_ok = integerization_receipt is None or (
-        integerization_receipt["quantized_contractions_seen"] > 0
-        and integerization_receipt["quantized_contractions_remaining"] == 0
-        and not integerization_receipt["refusals"]
+        integer_partition is not None
         and integerization_receipt.get("accumulator_bound_checked") is True
         and integerization_receipt["exported_integer_mm_count"] > 0
         and integerization_receipt["integer_mm_emitted"] <= integerization_receipt["exported_integer_mm_count"]

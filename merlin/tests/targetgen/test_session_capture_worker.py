@@ -69,18 +69,24 @@ def get_model_and_inputs():
 
 @pytest.mark.slow
 @pytest.mark.parametrize("dtype", ["fp32", "int8"])
-@pytest.mark.parametrize("shared", [False, True])
-def test_worker_captures_the_entire_declared_session_with_owned_sidecars(tmp_path, dtype, shared):
+@pytest.mark.parametrize("variant", ["plain", "shared", "mixed"])
+def test_worker_captures_the_entire_declared_session_with_owned_sidecars(tmp_path, dtype, variant):
     python = os.environ.get("MERLIN_M2M_PYTHON")
     root = os.environ.get("MERLIN_M2M_DIR")
     if not python or not root:
         pytest.skip("an explicit trace-capable capture interpreter is required")
     loader = tmp_path / "loader.py"
-    loader.write_text(
-        LOADER.replace("value = torch.randn", "step.layer = prefix.layer\n        value = torch.randn")
-        if shared
-        else LOADER
-    )
+    shared = variant == "shared"
+    text = LOADER
+    if shared:
+        text = text.replace("value = torch.randn", "step.layer = prefix.layer\n        value = torch.randn")
+    elif variant == "mixed":
+        text = text.replace(
+            "self.layer = nn.Linear(4, 4)",
+            "self.layer = nn.Linear(4, 4)\n        self.bf16_layer = nn.Linear(4, 4).bfloat16()",
+        )
+        text = text.replace("return self.layer(x)", "return self.layer(x) + self.bf16_layer(x.bfloat16()).float()")
+    loader.write_text(text)
     out = tmp_path / "capture"
     recipe_args = []
     if dtype == "int8":
@@ -154,6 +160,12 @@ def test_worker_captures_the_entire_declared_session_with_owned_sidecars(tmp_pat
             assert metadata["integerization_receipt"]["golden_agreement"]["status"] == "passed"
             assert metadata["integerization_receipt"]["golden_agreement"]["reference"] == "pt2e_integer"
             assert metadata["integerization_receipt"]["exported_integer_mm_count"] > 0
+            if variant == "mixed":
+                partition = metadata["integerization_receipt"]["precision_decision_counts"]
+                assert partition == {"integerized_i32": 1, "preserve_float_qdq": 1, "unresolved": 0}
+                executed = metadata["integerization_receipt"]["golden_agreement"]["executed_contractions"]
+                assert executed["total"] == 1
+                assert executed["selected"] == executed["observed"] == 2
         elif dtype == "int8":
             assert metadata["dtype"] == "fp32"
             assert metadata["recipe_sha256"] is None

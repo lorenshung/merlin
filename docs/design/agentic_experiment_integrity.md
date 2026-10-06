@@ -3,7 +3,7 @@ title: "Design: rules for citable agentic-compiler experiments"
 kind: design
 status: current
 owner: core
-last_verified: 2026-09-23
+last_verified: 2026-10-05
 related: [capsule_generation, capsule_phase_split, radiance_staged_evaluation]
 code_refs:
   - packages/merlin-experiments/src/merlin/targetgen/capsule_grade.py
@@ -43,6 +43,10 @@ not reattribute historical experiment evidence or qualify a complete installed c
 The newer implementation-source inventory in `merlin_experiments.phase1.source_inputs` binds
 native and outer Phase-1 owners for freshly frozen runs; it does not retroactively establish
 ownership for legacy freezes that recorded only a repository SHA and submission bytes.
+For a new installed run, the reviewed Phase 0 release, selected tool/provider bytes
+and frozen Phase 1 implementation are separate identities. Reusing an immutable
+historical capture does not relabel its producer as the current tool; launch
+readiness and final grading still bind the current selections independently.
 
 ## 1. Cite the tier, never the bare score
 

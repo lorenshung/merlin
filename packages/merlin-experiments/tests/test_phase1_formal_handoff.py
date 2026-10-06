@@ -184,6 +184,75 @@ def build_handoff(tmp_path, monkeypatch, *, reviewed=None, authored_submission=N
         return rows
 
     monkeypatch.setattr(CR, "run_suite", external_execution)
+    # This fixture exercises the formal->Phase-2 handoff, not a compiler build.
+    # Supply an explicit synthetic external gate boundary just as the capsule
+    # oracle above is synthetic; production PFM.run is never replaced.
+    from merlin_experiments.phase1.feedback import private_full_models as PFM
+
+    from merlin.compile.model_execution_inputs import strict_tree_sha256
+
+    private_spec = tmp_path / "synthetic-private-spec.yaml"
+    private_spec.write_text("synthetic test boundary\n")
+    monkeypatch.setattr(PFM, "requirements_for", lambda _descriptor: ("fixture_complete_model",))
+    monkeypatch.setattr(PFM, "program_requirements_for", lambda _descriptor: {"fixture_complete_model": ("model",)})
+    monkeypatch.setattr(
+        PFM,
+        "loader_env_requirements_for",
+        lambda _descriptor: {"fixture_complete_model": {"required": {}, "forbidden": ()}},
+    )
+
+    def external_private_gate(submission, _spec, *, target, required_models, required_programs, **_kwargs):
+        sha = strict_tree_sha256(Path(submission))["sha256"]
+        return {
+            "schema": PFM.RESULT_SCHEMA,
+            "target": target,
+            "passed": True,
+            "candidate_tree_sha256": sha,
+            "required_models": list(required_models),
+            "required_programs": {name: list(required_programs[name]) for name in required_models},
+            "full_model_numerical_equivalence": "not_run",
+            "paper_accuracy": "not_claimed",
+            "models": [
+                {
+                    "model": "fixture_complete_model",
+                    "status": "pass",
+                    "checks": {
+                        "input_provenance": {
+                            "model": {
+                                "paper_ready": None,
+                                "synthetic_inputs": None,
+                                "meta_sha256": "a" * 64,
+                                "scope": "input provenance only; no paper accuracy or full-model numerical result",
+                            }
+                        },
+                        "build": {
+                            "status": "capture_lower_codegen_link_verified",
+                            "candidate_tree_sha256": sha,
+                            "linked_device_groups": 1,
+                            "programs": [
+                                {
+                                    "program": "model",
+                                    "status": "capture_lower_codegen_link_verified",
+                                    "candidate_tree_sha256": sha,
+                                    "elf_sha256": "e" * 64,
+                                    "linked_device_groups": 1,
+                                    "static_host_compute_audit": [
+                                        {
+                                            "verdict": "clean_static_host_compute_audit",
+                                            "artifact_sha256": "a" * 64,
+                                            "object_sha256": "b" * 64,
+                                            "audit": {"budget": {}, "groups": [{"verdict": "clean"}]},
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(PFM, "run", external_private_gate)
     assert (
         formal.main(
             [
@@ -197,6 +266,8 @@ def build_handoff(tmp_path, monkeypatch, *, reviewed=None, authored_submission=N
                 str(frozen_hidden),
                 "--contract",
                 str(contract),
+                "--private-full-model-spec",
+                str(private_spec),
             ],
             context=load_context(descriptor, repo=repo),
         )

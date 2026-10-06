@@ -1372,6 +1372,8 @@ def execute(prepared: PreparedRun, runtime: AuthoringRuntime) -> int:
             grade_cmd += ["--hidden-capsules", str(_official_hidden_dir)]
         if a.no_oracle:
             grade_cmd.append("--no-oracle")
+        if prepared.private_full_model_spec is not None:
+            grade_cmd += ["--private-full-model-spec", str(prepared.private_full_model_spec)]
         if a.skip_hidden:
             grade_cmd.append("--skip-hidden")
         if execution.selected_rtl_facts is not None:
@@ -1386,7 +1388,14 @@ def execute(prepared: PreparedRun, runtime: AuthoringRuntime) -> int:
             _manifest_doc["run_config"] = _environment_record.get("run_config", _run_config)
             _manifest_doc["feedback_health"] = feedback_health
             _manifest_path.write_text(yaml.safe_dump(_manifest_doc, sort_keys=False))
-        official_grade = CERT._official_grade_result(grade_proc.returncode, run_dir)
+        from merlin_experiments.phase1.feedback import private_full_models as PFM
+
+        official_grade = CERT._official_grade_result(
+            grade_proc.returncode,
+            run_dir,
+            required_models=PFM.requirements_for(context.descriptor),
+            required_programs=PFM.program_requirements_for(context.descriptor),
+        )
     elif wsub.exists() and not feedback_health["healthy"]:
         official_grade["failures"] = ["feedback_channel_unhealthy"]
     elif wsub.exists():

@@ -148,6 +148,7 @@ class PreparedRun:
     reviewed_roots: tuple[Path, ...] | None
     transport: WorkspaceTransport
     stage_task: TaskStager
+    private_full_model_spec: Path | None = None
 
     @property
     def scope_roots(self) -> dict:
@@ -171,6 +172,16 @@ class PreparedRun:
                 self.environment.get("bundle_input_snapshot"),
                 repo=self.request.context.repo,
             )
+        private = self.environment.get("private_full_model_spec")
+        if private is not None:
+            from merlin.compile.model_execution_inputs import file_sha256
+
+            if (
+                self.private_full_model_spec is None
+                or str(self.private_full_model_spec) != private.get("frozen_path")
+                or file_sha256(self.private_full_model_spec) != private.get("frozen_sha256")
+            ):
+                raise RuntimeError("frozen operator-private full-model specification changed")
         corpus_record = self.environment.get("public_corpus_input")
         if corpus_record is not None:
             view = CI.resolve(
@@ -356,6 +367,9 @@ def prepare(
         _operator_errata_record = RI.stage_operator_errata(run_dir, a.operator_errata)
     _archived_bundle_manifest = run_dir / "input_bundle_manifest.yaml"
     _authored_bundle_sha256 = None
+    if a.private_full_model_spec and a.sandbox != "bwrap":
+        raise RuntimeError("operator-private full-model validation requires the isolated bwrap run")
+    _prepared_private_full_model_record = None
     if a.sandbox == "bwrap":
         _prepared_bundle = CI.prepare_bundle(
             run_dir,
@@ -365,8 +379,10 @@ def prepare(
             contract=context.repo / "merlin/contract",
             capsules_root=treatment.capsules_root,
             environment=_environment_record if _resuming else None,
+            private_full_model_spec=Path(a.private_full_model_spec) if a.private_full_model_spec else None,
         )
         bundle, _corpus_record = _prepared_bundle.bundle, _prepared_bundle.corpus_record
+        _prepared_private_full_model_record = _prepared_bundle.private_full_model_record
         _authored_bundle_sha256 = _prepared_bundle.authored_sha256
     elif not _resuming:
         shutil.copy(bundle_dir / "input_bundle_manifest.yaml", _archived_bundle_manifest)
@@ -487,6 +503,32 @@ def prepare(
         os.environ.pop("MERLIN_MODEL_HOST_LANE_SNAPSHOT_RECORD", None)
         os.environ.pop(_MODEL_HOST_SNAPSHOT_REQUIRED_ENV, None)
 
+    _private_full_model_spec = None
+    _private_full_model_record = None
+    if a.private_full_model_spec:
+        from merlin.compile.model_execution_inputs import file_sha256
+
+        _private_source = Path(a.private_full_model_spec).absolute()
+        if _private_source.is_symlink() or not _private_source.is_file():
+            raise RuntimeError("operator-private full-model specification is absent or indirect")
+        _private_full_model_record = _prepared_private_full_model_record
+        if (
+            not isinstance(_private_full_model_record, dict)
+            or _private_full_model_record.get("source") != str(_private_source)
+            or _private_full_model_record.get("source_sha256") != file_sha256(_private_source)
+        ):
+            raise RuntimeError("operator-private full-model source differs from the frozen host input")
+        [_private_full_model_spec] = _BWS.snapshot_input_paths(
+            ws, bundle, [Path(_private_full_model_record["path"])], repo=context.repo
+        )
+        _private_full_model_record = {
+            **_private_full_model_record,
+            "frozen_path": str(_private_full_model_spec),
+            "frozen_sha256": file_sha256(_private_full_model_spec),
+        }
+    if _resuming and _environment_record.get("private_full_model_spec") != _private_full_model_record:
+        raise RuntimeError("resume refused: operator-private full-model specification changed")
+
     if _resuming and _environment_record.get("corpus_review") != _corpus_review:
         raise RuntimeError("resume refused: operator corpus-review identity changed or was removed")
 
@@ -596,6 +638,7 @@ def prepare(
             **({"semantic_search_diagnostic": _semantic_diagnostic} if _corpus_seal else {}),
             "hidden_capsule_snapshot": _hidden_snapshot_record,
             "model_host_lane_snapshot": _model_host_lane_snapshot,
+            "private_full_model_spec": _private_full_model_record,
             "repo_sha": repo_sha(repo=context.repo),
             "bundle_id": bundle["bundle_id"],
             "condition": bundle.get("condition", "legacy"),
@@ -768,4 +811,5 @@ def prepare(
         _reviewed_corpus_roots,
         transport,
         stage_task,
+        _private_full_model_spec,
     )

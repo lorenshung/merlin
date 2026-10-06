@@ -11,7 +11,7 @@ import datetime as _dt
 import json
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -199,7 +199,14 @@ def _formal_completion(
     return bool(numeric_all_pass and workflow_conformant and official_grade_complete and telemetry_complete)
 
 
-def _official_grade_result(returncode: int, run_dir: Path, *, required_tier: str = "L3") -> dict:
+def _official_grade_result(
+    returncode: int,
+    run_dir: Path,
+    *,
+    required_tier: str = "L3",
+    required_models: Sequence[str] = (),
+    required_programs: Mapping[str, Sequence[str]] | None = None,
+) -> dict:
     """Validate the official grader's exit status *and* its claim-bearing manifest.
 
     The subprocess return code is necessary but not sufficient: this rejects a stale/malformed manifest,
@@ -226,6 +233,38 @@ def _official_grade_result(returncode: int, run_dir: Path, *, required_tier: str
             failures.append("grader_reported_incomplete")
         if completion.get("required_tier") != required_tier:
             failures.append("required_tier_mismatch")
+
+    # Recompute the candidate identity locally. A stale gate on an earlier
+    # submission, or a hand-edited status field in the manifest, is not a grade.
+    from merlin.compile.model_execution_inputs import strict_tree_sha256
+    from merlin_experiments.phase1.feedback import private_full_models as PFM
+
+    reported_roster = completion.get("required_full_models") if isinstance(completion, Mapping) else None
+    reported_programs = completion.get("required_full_programs") if isinstance(completion, Mapping) else None
+    if (
+        not required_models
+        or required_programs is None
+        or set(required_programs) != set(required_models)
+        or not all(required_programs.get(name) for name in required_models)
+    ):
+        failures.append("trusted_private_full_model_roster_missing")
+    else:
+        if reported_roster != list(required_models) or reported_programs != {
+            name: list(required_programs[name]) for name in required_models
+        }:
+            failures.append("private_full_model_roster_mismatch")
+        try:
+            candidate_sha = strict_tree_sha256(run_dir / "submission")["sha256"]
+        except Exception as exc:  # noqa: BLE001 -- an unreadable candidate cannot be certified
+            candidate_sha = ""
+            failures.append(f"submission_tree_unreadable:{type(exc).__name__}")
+        if not PFM.complete(
+            manifest.get("private_full_models"),
+            required_models=required_models,
+            required_programs=required_programs,
+            candidate_sha256=candidate_sha,
+        ):
+            failures.append("private_full_model_build_gate_incomplete")
 
     for phase_name in ("public_dev", "hidden"):
         phase = manifest.get(phase_name)
