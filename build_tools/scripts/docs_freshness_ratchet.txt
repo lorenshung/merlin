@@ -53,7 +53,6 @@ guides/firesim.md
 guides/gemmini_experiment.md
 guides/gemmini_oot_package.md
 guides/generated_target_repos.md
-guides/generating_capsules.md
 guides/getting_started.md
 guides/gsim_cert_engine.md
 guides/kernel_mining.md
@@ -70,7 +69,6 @@ guides/target_resolution.md
 guides/targetgen.md
 guides/tinyllama_int8_rvv_zephyr.md
 guides/vision_workloads_rvv_zephyr.md
-guides/whole_model_on_accelerator.md
 guides/zephyr.md
 reference/architecture.md
 reference/contracts.md
