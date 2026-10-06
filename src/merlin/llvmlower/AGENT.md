@@ -421,6 +421,10 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
   cardinality. Complete-domain enumeration proves predicate identity, including
   empty and multiple-pair relations. Ordered floating replay is unchanged;
   actual load scheduling and full producer/correction cost require qualification.
+  Its explicit `source_word_guard` (with a sparse limit and the packed prefix) derives
+  the raw bytes every correction pair must contain on one operand axis; an aligned
+  eight-lane source word holding none of them skips the pair checks without
+  reading the other source or the output. Its runtime hit rate is UNKNOWN.
 - `quantized_affine_rectifier.py` synthesizes optional exact sparse finite-domain
   corrections from the complete ordered binary32 pair certificate. Positional
   keys or clipped per-axis offsets prove singleton indicators over every signed
