@@ -22,13 +22,14 @@ against a corpus whose predicted total is 181 hours.
 
 from __future__ import annotations
 
+import external_sources
 import pytest
 
 from merlin.targetgen import cert_cost as CC
 from merlin.targetgen import conformance as CF
 from merlin.targetgen import corpus_synth as CS
 
-pytestmark = pytest.mark.target("gemmini")
+pytestmark = [pytest.mark.target("gemmini"), external_sources.requires_rtl("gemmini")]
 
 
 def _resolve(token: str, tile: int) -> int:
