@@ -505,7 +505,9 @@ def boundaries(target: str) -> Boundaries:
                 rtl_rows = None
         from_rtl = rtl_rows is not None and edge is not None and int(rtl_rows) == int(edge)
         from_structure = structural_rows is not None and edge is not None and structural_rows == edge
-        b.tile_edge_is_hardware_fact = hw or from_rtl or from_structure or (edge is not None and edge != _DEFAULT_SW_TILE)
+        b.tile_edge_is_hardware_fact = (
+            hw or from_rtl or from_structure or (edge is not None and edge != _DEFAULT_SW_TILE)
+        )
         b.tile_edge_source = (
             "capability manifest (declared mesh/tile rows)"
             if hw
@@ -542,10 +544,7 @@ def boundaries(target: str) -> Boundaries:
         resolved = AS.operand_store(AS.derive_address_space(target))
         if resolved.store is not None and resolved.store.nbytes:
             b.operand_store_bytes = int(resolved.store.nbytes)
-            b.operand_store_source = (
-                f"RTL-derived operand store {resolved.store.name!r} "
-                f"({resolved.basis})"
-            )
+            b.operand_store_source = f"RTL-derived operand store {resolved.store.name!r} ({resolved.basis})"
         else:
             b.operand_store_source = f"RTL operand store unresolved: {resolved.reason}"
     except Exception as e:  # noqa: BLE001
@@ -1397,7 +1396,8 @@ def _epilogue_axis(target: str) -> dict:
         applying = selectors_applying(readouts, [stage], routes=routes, composition="contraction") if readouts else []
         on_readout = selectors_applying(readouts, [stage]) if readouts else []
         routed = any(
-            r.stage == stage and r.composed_with == "contraction"
+            r.stage == stage
+            and r.composed_with == "contraction"
             and any(readout.selector in r.readouts for readout in readouts or ())
             for r in routes
         )
@@ -2794,9 +2794,23 @@ def uncovered(spec_doc: dict, corpus_roots, *, labels=None, tile_dim: int | None
         from merlin.targetgen import memory_regime as MR
 
         mem_corpus = MR.corpus_regimes(corpus_roots, str(spec_doc.get("target") or ""), labels=labels, exclude=exclude)
-        mgap = MR.uncovered_regimes({"by_regime": mem_req}, mem_corpus)
-        mgap["status"] = "ok"
-        mgap["covered_by"] = mem_corpus["by_regime"]
-        mgap["region_counts"] = (spec_doc.get("memory_mapping") or {}).get("region_counts") or {}
-        out["memory_mapping"] = mgap
+        if mem_req and mem_corpus["capacity_rows"] is None:
+            # No capsule could be placed in ANY regime because the operand store itself did not resolve
+            # (no RTL facts for the target on this host). That measures nothing; reporting every required
+            # regime as uncovered would blame the corpus for the host. Same shape as the phase-0 reader.
+            out["memory_mapping"] = {
+                "status": "not_measured",
+                "detail": "the target's operand-store capacity did not resolve here (no RTL facts), so no "
+                "capsule's regime could be measured",
+                "required": mem_req,
+                "n_required": len([r for r in mem_req if r != MR.UNKNOWN]),
+                "n_covered": 0,
+                "uncovered": [],
+            }
+        else:
+            mgap = MR.uncovered_regimes({"by_regime": mem_req}, mem_corpus)
+            mgap["status"] = "ok"
+            mgap["covered_by"] = mem_corpus["by_regime"]
+            mgap["region_counts"] = (spec_doc.get("memory_mapping") or {}).get("region_counts") or {}
+            out["memory_mapping"] = mgap
     return out
