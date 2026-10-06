@@ -266,9 +266,7 @@ def execute(prepared: PreparedRun, runtime: AuthoringRuntime) -> int:
     provider = EX.ProviderConfig(a.driver, a.provider, a.subagent_model, a.background_model)
     from merlin.targetgen.sandbox import bwrap as BW
 
-    selected_rtl_facts = (
-        BW.frozen_selected_rtl_facts(ws, bundle, repo=context.repo) if a.sandbox == "bwrap" else None
-    )
+    selected_rtl_facts = BW.frozen_selected_rtl_facts(ws, bundle, repo=context.repo) if a.sandbox == "bwrap" else None
     execution = EX.ExecutionConfig(
         prepared.request.context,
         provider,

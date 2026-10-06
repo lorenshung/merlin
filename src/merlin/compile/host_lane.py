@@ -7,8 +7,8 @@ provenance registry; ``host_lane_identity`` is the record every compile carries 
 
 from __future__ import annotations
 
-from pathlib import Path
 import hashlib
+from pathlib import Path
 
 from .bundles import ir_scalar_dtype
 
@@ -47,8 +47,10 @@ def _isa_parts(value: str) -> tuple[str, set[str]]:
     extensions = set(tail)
     if position < len(head):
         suffix = head[position:]
-        if not suffix.startswith("z") or len(suffix) == 1 or not all(
-            "a" <= letter <= "z" or "0" <= letter <= "9" for letter in suffix[1:]
+        if (
+            not suffix.startswith("z")
+            or len(suffix) == 1
+            or not all("a" <= letter <= "z" or "0" <= letter <= "9" for letter in suffix[1:])
         ):
             raise ValueError(f"unrecognized RISC-V ISA {value!r}")
         extensions.add(suffix)
@@ -145,9 +147,7 @@ def require_host_isa(cflags: list[str], host_isa: str) -> None:
         )
 
 
-def require_host_isa_dts(
-    cflags: list[str], dts: str | Path, *, expected_sha256: str | None = None
-) -> list[str]:
+def require_host_isa_dts(cflags: list[str], dts: str | Path, *, expected_sha256: str | None = None) -> list[str]:
     """Check every CPU ISA in one DTS, optionally bound to a board-owned digest."""
     source = Path(dts)
     if not source.is_file():

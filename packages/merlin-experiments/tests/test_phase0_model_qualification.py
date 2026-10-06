@@ -159,10 +159,15 @@ def test_same_shape_residual_groups_with_distinct_scales_keep_distinct_goldens(t
     paths = [row["capsule"] for row in record["group_capsules"]]
     assert len(set(paths)) == 2
     assert sorted(
-        yaml.safe_load((tmp_path / "capsules" / path / "capsule.yaml").read_text())["operation"]["attributes"]["rhs_scale"]
+        yaml.safe_load((tmp_path / "capsules" / path / "capsule.yaml").read_text())["operation"]["attributes"][
+            "rhs_scale"
+        ]
         for path in paths
     ) == [0.25, 0.5]
-    assert MQ.qualify(entry, cap, directory, _binding(), tmp_path / "capsules")["group_capsules"] == record["group_capsules"]
+    assert (
+        MQ.qualify(entry, cap, directory, _binding(), tmp_path / "capsules")["group_capsules"]
+        == record["group_capsules"]
+    )
     altered = tmp_path / "capsules" / paths[0] / "capsule.yaml"
     capsule = yaml.safe_load(altered.read_text())
     capsule["operation"]["attributes"]["rhs_scale"] = 0.75

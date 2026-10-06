@@ -463,10 +463,7 @@ def _trace_geometries(path: Path) -> list[ConvGeometry] | None:
     if not convolutions:
         return None
     values = {
-        value.get("id"): value
-        for node in nodes
-        for value in (node.get("results") or [])
-        if isinstance(value, dict)
+        value.get("id"): value for node in nodes for value in (node.get("results") or []) if isinstance(value, dict)
     }
 
     def shape(ref: object) -> tuple[int, ...]:
@@ -480,8 +477,10 @@ def _trace_geometries(path: Path) -> list[ConvGeometry] | None:
     def pair(value: object, name: str) -> tuple[int, int]:
         if type(value) is int:
             value = [value, value]
-        if not isinstance(value, (list, tuple)) or len(value) != 2 or any(
-            type(v) is not int or v < (0 if name == "padding" else 1) for v in value
+        if (
+            not isinstance(value, (list, tuple))
+            or len(value) != 2
+            or any(type(v) is not int or v < (0 if name == "padding" else 1) for v in value)
         ):
             raise ValueError(f"convolution {name} is not a concrete two-dimensional extent")
         return tuple(value)
@@ -508,7 +507,8 @@ def _trace_geometries(path: Path) -> list[ConvGeometry] | None:
             raise ValueError("convolution source batch/output-channel relation is invalid")
         expected = tuple(
             (input_shape[2 + axis] + 2 * padding[axis] - dilation[axis] * (weight_shape[2 + axis] - 1) - 1)
-            // stride[axis] + 1
+            // stride[axis]
+            + 1
             for axis in range(2)
         )
         if expected != output_shape[2:]:

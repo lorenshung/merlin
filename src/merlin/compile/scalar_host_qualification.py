@@ -7,8 +7,8 @@ package, one capture, one board/DTS, one complete single-output numerical run.
 from __future__ import annotations
 
 import argparse
-from contextlib import nullcontext
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -18,10 +18,20 @@ from merlin.common.paths import out_dir
 from merlin.compile.host_lane import dts_string_values, require_host_isa_dts
 from merlin.compile.model_execution_inputs import (
     ModelExecutionInputError as ScalarHostQualificationError,
+)
+from merlin.compile.model_execution_inputs import (
     file_sha256 as _file_sha256,
+)
+from merlin.compile.model_execution_inputs import (
     native_engine as _native_engine,
+)
+from merlin.compile.model_execution_inputs import (
     require_elf_isa_supported as _require_elf_isa_supported,
+)
+from merlin.compile.model_execution_inputs import (
     selected_firrtl as _selected_firrtl,
+)
+from merlin.compile.model_execution_inputs import (
     strict_tree_sha256 as _strict_tree_sha256,
 )
 from merlin.mining.registry import load_rvv_package
@@ -31,8 +41,13 @@ from merlin.runtime.boards import CONSOLE_HTIF, FLOW_BAREMETAL, load_boards
 
 def _single_output_golden(capture: Path) -> np.ndarray:
     required = (
-        "model.mlir", "weights.safetensors", "weights.safetensors.manifest.json",
-        "inputs.npz", "input_order.json", "golden.npy", "capture_receipt.json",
+        "model.mlir",
+        "weights.safetensors",
+        "weights.safetensors.manifest.json",
+        "inputs.npz",
+        "input_order.json",
+        "golden.npy",
+        "capture_receipt.json",
     )
     missing = [name for name in required if not (capture / name).is_file()]
     if missing:
@@ -45,7 +60,11 @@ def _single_output_golden(capture: Path) -> np.ndarray:
     ).get("complete"):
         raise ScalarHostQualificationError("saved capture has no complete materialized ABI receipt")
     recorded = capture_receipt.get("artifacts") or {}
-    if any((recorded.get(name) or {}).get("sha256") != _file_sha256(capture / name) for name in required if name != "capture_receipt.json"):
+    if any(
+        (recorded.get(name) or {}).get("sha256") != _file_sha256(capture / name)
+        for name in required
+        if name != "capture_receipt.json"
+    ):
         raise ScalarHostQualificationError("saved capture artifacts disagree with its capture receipt")
     golden = np.load(capture / "golden.npy", allow_pickle=False)
     if golden.dtype != np.float32 or not np.isfinite(golden).all():
@@ -81,9 +100,17 @@ def _one_out_bits(console: str) -> np.ndarray:
 
 
 def qualify(
-    *, capture: str | Path, package: str | Path, board_catalog: str | Path,
-    board: str, dts: str | Path, output: str | Path, arena_mb: int,
-    timeout_s: int = 300, simulator: str = "spike", rtl_facts: str | Path | None = None,
+    *,
+    capture: str | Path,
+    package: str | Path,
+    board_catalog: str | Path,
+    board: str,
+    dts: str | Path,
+    output: str | Path,
+    arena_mb: int,
+    timeout_s: int = 300,
+    simulator: str = "spike",
+    rtl_facts: str | Path | None = None,
 ) -> dict[str, Any]:
     """Build, run and gate one complete saved-capture result; emit a bounded receipt.
 
@@ -144,26 +171,36 @@ def qualify(
 
     receipt: dict[str, Any] = {
         "schema": (
-            "merlin.scalar_host_spike_qualification.v1" if simulator == "spike"
+            "merlin.scalar_host_spike_qualification.v1"
+            if simulator == "spike"
             else "merlin.scalar_host_native_qualification.v1"
         ),
         "status": "failed",
         "scope": (
             "one saved capture on Spike; not elaborated-RTL execution or an operation-support declaration"
-            if simulator == "spike" else
-            "one saved capture on one selected elaborated-RTL engine; not blanket host-operation approval"
+            if simulator == "spike"
+            else "one saved capture on one selected elaborated-RTL engine; not blanket host-operation approval"
         ),
         "inputs": {
-            "capture": str(capture_path), "capture_tree": capture_tree,
-            "package": str(package_path), "package_tree": package_tree,
-            "board_catalog": str(catalog_path), "board_catalog_sha256": catalog_sha256,
-            "board": board, "board_target": selected.target,
-            "board_dram_base": selected.dram_base, "board_dram_bytes": selected.dram_bytes,
-            "board_harts": selected.harts, "board_code_reserve": selected.code_reserve,
-            "dts": str(dts_path), "dts_sha256": dts_sha256, "host_isa": isas[0],
+            "capture": str(capture_path),
+            "capture_tree": capture_tree,
+            "package": str(package_path),
+            "package_tree": package_tree,
+            "board_catalog": str(catalog_path),
+            "board_catalog_sha256": catalog_sha256,
+            "board": board,
+            "board_target": selected.target,
+            "board_dram_base": selected.dram_base,
+            "board_dram_bytes": selected.dram_bytes,
+            "board_harts": selected.harts,
+            "board_code_reserve": selected.code_reserve,
+            "dts": str(dts_path),
+            "dts_sha256": dts_sha256,
+            "host_isa": isas[0],
             "simulator_isa": simulator_isa,
             "golden_sha256": _file_sha256(capture_path / "golden.npy"),
-            "arena_mb": arena_mb, "timeout_s": timeout_s,
+            "arena_mb": arena_mb,
+            "timeout_s": timeout_s,
             "code_reserve_policy": "spike_model default: fixed base plus generated static IO",
             "simulator": simulator,
         },
@@ -174,10 +211,16 @@ def qualify(
     output_path.mkdir(parents=True)
     try:
         built = spike_model.build(
-            capture_path, output_path / "build", arena_mb=arena_mb,
-            dram_base=selected.dram_base, dram_bytes=selected.dram_bytes,
-            int8_compute=True, backend="scalar", rvv_schedule=None,
-            cflags_override=loaded.cflags, console=selected.console,
+            capture_path,
+            output_path / "build",
+            arena_mb=arena_mb,
+            dram_base=selected.dram_base,
+            dram_bytes=selected.dram_bytes,
+            int8_compute=True,
+            backend="scalar",
+            rvv_schedule=None,
+            cflags_override=loaded.cflags,
+            console=selected.console,
         )
         elf = Path(built["elf"])
         if not elf.is_file():
@@ -187,8 +230,11 @@ def qualify(
         _require_elf_isa_supported(elf_arch, isas[0])
         if native is None:
             result = spike_model.run(
-                elf, harts=selected.harts, mem_bytes=built["mem_bytes"],
-                isa=simulator_isa, timeout=timeout_s,
+                elf,
+                harts=selected.harts,
+                mem_bytes=built["mem_bytes"],
+                isa=simulator_isa,
+                timeout=timeout_s,
             )
             console = str(result.get("console", ""))
             metrics = result.get("metrics") or {}
@@ -239,23 +285,34 @@ def qualify(
         if _file_sha256(elf) != elf_sha256:
             raise ScalarHostQualificationError("ELF changed after execution")
         if selected_firrtl is not None and native is not None:
-            if _selected_firrtl(
-                selected_firrtl["path"], target=selected_firrtl["target"], config=selected_firrtl["config"]
-            ) != selected_firrtl:
+            if (
+                _selected_firrtl(
+                    selected_firrtl["path"], target=selected_firrtl["target"], config=selected_firrtl["config"]
+                )
+                != selected_firrtl
+            ):
                 raise ScalarHostQualificationError("selected RTL facts or FIRRTL changed during qualification")
             native[2]()
-        receipt.update({
-            "status": "passed_saved_capture_spike" if simulator == "spike" else "passed_saved_capture_native_rtl",
-            "output": {
-                "elf": str(elf), "elf_sha256": elf_sha256, "elf_arch_extensions": elf_arch,
-                **({"spike_console": str(console_path), "spike_console_sha256": _file_sha256(console_path)}
-                   if native is None else
-                   {"rtl_console": str(console_path), "rtl_console_sha256": _file_sha256(console_path)}),
-                "elements": int(golden.size), "mismatched_elements": mismatch,
-                "max_absolute_error": max_abs, "metrics": metrics,
-                "build_hash": built.get("build_hash"),
-            },
-        })
+        receipt.update(
+            {
+                "status": "passed_saved_capture_spike" if simulator == "spike" else "passed_saved_capture_native_rtl",
+                "output": {
+                    "elf": str(elf),
+                    "elf_sha256": elf_sha256,
+                    "elf_arch_extensions": elf_arch,
+                    **(
+                        {"spike_console": str(console_path), "spike_console_sha256": _file_sha256(console_path)}
+                        if native is None
+                        else {"rtl_console": str(console_path), "rtl_console_sha256": _file_sha256(console_path)}
+                    ),
+                    "elements": int(golden.size),
+                    "mismatched_elements": mismatch,
+                    "max_absolute_error": max_abs,
+                    "metrics": metrics,
+                    "build_hash": built.get("build_hash"),
+                },
+            }
+        )
     except Exception as exc:
         receipt["failure"] = f"{type(exc).__name__}: {exc}"
         (output_path / "qualification.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
@@ -278,10 +335,16 @@ def main() -> None:
     parser.add_argument("--rtl-facts", type=Path, help="selected FIRRTL facts, required for native RTL engines")
     args = parser.parse_args()
     result = qualify(
-        capture=args.capture, package=args.package, board_catalog=args.board_catalog,
-        board=args.board, dts=args.dts, output=args.output,
-        arena_mb=args.arena_mb, timeout_s=args.timeout_s,
-        simulator=args.simulator, rtl_facts=args.rtl_facts,
+        capture=args.capture,
+        package=args.package,
+        board_catalog=args.board_catalog,
+        board=args.board,
+        dts=args.dts,
+        output=args.output,
+        arena_mb=args.arena_mb,
+        timeout_s=args.timeout_s,
+        simulator=args.simulator,
+        rtl_facts=args.rtl_facts,
     )
     print(json.dumps({"status": result["status"], "receipt": str(Path(args.output) / "qualification.json")}))
 

@@ -109,9 +109,7 @@ def test_movement_form_does_not_equate_dma_copy_with_standalone_permutation():
         kind="systolic",
         dtypes=("int8",),
         ops=("copy",),
-        semantic_capabilities=(
-            SemanticCapability(family="movement", dtypes=("int8",), forms=("copy",)),
-        ),
+        semantic_capabilities=(SemanticCapability(family="movement", dtypes=("int8",), forms=("copy",)),),
     )
     permute = OpDemand(op="permute", family="movement", in_fmt="int8", elem_fmt="int8", form="permutation")
     copy = OpDemand(op="copy", family="movement", in_fmt="int8", elem_fmt="int8", form="copy")
@@ -122,9 +120,7 @@ def test_movement_form_does_not_equate_dma_copy_with_standalone_permutation():
         kind="vector",
         dtypes=("int8",),
         ops=("copy",),
-        semantic_capabilities=(
-            SemanticCapability(family="movement", dtypes=("int8",), forms=("permutation",)),
-        ),
+        semantic_capabilities=(SemanticCapability(family="movement", dtypes=("int8",), forms=("permutation",)),),
     )
     assert route([permute], [permuter])[0].unit == "permuter"
 
@@ -132,7 +128,7 @@ def test_movement_form_does_not_equate_dma_copy_with_standalone_permutation():
 def test_captured_linalg_transpose_is_a_permutation_demand():
     text = (
         "module {\n"
-        '  %0 = linalg.transpose ins(%a : tensor<4x8xi8>) outs(%b : tensor<8x4xi8>) '
+        "  %0 = linalg.transpose ins(%a : tensor<4x8xi8>) outs(%b : tensor<8x4xi8>) "
         'permutation = [1, 0] attrs = {prov.op = "permute", prov.family = "layout"}\n'
         "}\n"
     )
@@ -208,20 +204,23 @@ def test_parsed_operand_roles_control_route_and_coverage_not_requested_precision
     from merlin.targetgen.routing import route
 
     def source(left: str, right: str) -> str:
-        return f'''module {{ func.func @forward(%a:tensor<2x3x{left}>, %w:tensor<3x4x{right}>)
+        return f"""module {{ func.func @forward(%a:tensor<2x3x{left}>, %w:tensor<3x4x{right}>)
             -> tensor<2x4xf32> {{
           %e = tensor.empty() : tensor<2x4xf32>
           %r = linalg.matmul {{prov.op = "matmul", prov.family = "contraction", prov.region_id = "r0"}} ins(%a, %w : tensor<2x3x{left}>, tensor<3x4x{right}>) outs(%e : tensor<2x4xf32>) -> tensor<2x4xf32>
           func.return %r : tensor<2x4xf32>
-        }} }}'''
+        }} }}"""
 
     def unit(name: str, formats: tuple[str, ...], rule: AccumRule) -> ComputeUnit:
-        return ComputeUnit(name=name, kind="systolic", dtypes=formats, ops=("matmul",),
-                           accumulate=(rule,))
+        return ComputeUnit(name=name, kind="systolic", dtypes=formats, ops=("matmul",), accumulate=(rule,))
 
     def certificate(demand, result, formats):
-        plan = {"results": [result], "mesh": [result] if result.unit else [],
-                "fallback": [] if result.unit else [result], "scalar_rvv": []}
+        plan = {
+            "results": [result],
+            "mesh": [result] if result.unit else [],
+            "fallback": [] if result.unit else [result],
+            "scalar_rvv": [],
+        }
         return cc.build(plan, {"contraction": SemanticCapability(family="contraction", dtypes=formats)})
 
     mixed_text = source("f32", "i8")
@@ -273,11 +272,14 @@ def test_parsed_operand_roles_control_route_and_coverage_not_requested_precision
     assert bad_route.unit is None
     bad_plan = {"results": [bad_route], "mesh": [], "fallback": [bad_route], "scalar_rvv": []}
     incomplete_cert = cc.build(
-        bad_plan, {"contraction": SemanticCapability(family="contraction", dtypes=("fp32", "int8"))},
-        linalg_mlir=unrecognized)
+        bad_plan,
+        {"contraction": SemanticCapability(family="contraction", dtypes=("fp32", "int8"))},
+        linalg_mlir=unrecognized,
+    )
     assert incomplete_cert["n_eligible"] == 0
     assert incomplete_cert["denominator_completeness"]["inventory_status"] == (
-        "verified_structure_operand_formats_incomplete")
+        "verified_structure_operand_formats_incomplete"
+    )
 
 
 def test_independent_capability_denominator_preserves_joint_operand_rules():
@@ -288,20 +290,28 @@ def test_independent_capability_denominator_preserves_joint_operand_rules():
     from merlin.targetgen.compute_units import AccumRule, ComputeUnit, SemanticCapability, semantic_capability_map
     from merlin.targetgen.routing import route
 
-    text = '''module { func.func @forward(%a:tensor<2x3xf32>, %w:tensor<3x4xi8>)
+    text = """module { func.func @forward(%a:tensor<2x3xf32>, %w:tensor<3x4xi8>)
         -> tensor<2x4xf32> {
       %e = tensor.empty() : tensor<2x4xf32>
       %r = linalg.matmul {prov.op = "matmul", prov.family = "contraction", prov.region_id = "r0"} ins(%a, %w : tensor<2x3xf32>, tensor<3x4xi8>) outs(%e : tensor<2x4xf32>) -> tensor<2x4xf32>
       func.return %r : tensor<2x4xf32>
-    } }'''
+    } }"""
     (demand,) = model_op_demands_checked(text, "int8", "int8")
-    def unit(name, fmt, rule):
-        return ComputeUnit(name=name, kind="systolic", dtypes=(fmt,), ops=("matmul",),
-                           accumulate=(rule,),
-                           semantic_capabilities=(SemanticCapability(family="contraction", dtypes=(fmt,)),))
 
-    units = [unit("integer", "int8", AccumRule("int8", "int8", "i32")),
-             unit("float", "fp32", AccumRule("fp32", "fp32", "f32"))]
+    def unit(name, fmt, rule):
+        return ComputeUnit(
+            name=name,
+            kind="systolic",
+            dtypes=(fmt,),
+            ops=("matmul",),
+            accumulate=(rule,),
+            semantic_capabilities=(SemanticCapability(family="contraction", dtypes=(fmt,)),),
+        )
+
+    units = [
+        unit("integer", "int8", AccumRule("int8", "int8", "i32")),
+        unit("float", "fp32", AccumRule("fp32", "fp32", "f32")),
+    ]
     (result,) = route([demand], units)
     assert result.unit is None
     plan = {"results": [result], "mesh": [], "fallback": [result], "scalar_rvv": []}
@@ -315,9 +325,15 @@ def test_independent_capability_denominator_preserves_joint_operand_rules():
     from merlin.targetgen import coverage_report
     from merlin.targetgen.eligibility import RegionDescriptor
 
-    assert coverage_report._decline_axis(
-        RegionDescriptor(family="contraction", in_dtype="fp32", weight_dtype="int8"),
-        "contraction", capability, undetermined=False) == "dtype"
+    assert (
+        coverage_report._decline_axis(
+            RegionDescriptor(family="contraction", in_dtype="fp32", weight_dtype="int8"),
+            "contraction",
+            capability,
+            undetermined=False,
+        )
+        == "dtype"
+    )
 
     # A containing unit must not acquire a mixed pair merely by folding its
     # own float capability with an embedded integer unit's capability.
@@ -326,7 +342,10 @@ def test_independent_capability_denominator_preserves_joint_operand_rules():
     assert set(folded.operand_pairs) == {("int8", "int8"), ("fp32", "fp32")}
 
     mixed_unit = ComputeUnit(
-        name="mixed", kind="systolic", dtypes=("fp32", "int8"), ops=("matmul",),
+        name="mixed",
+        kind="systolic",
+        dtypes=("fp32", "int8"),
+        ops=("matmul",),
         accumulate=(AccumRule("fp32", "int8", "f32"),),
         semantic_capabilities=(SemanticCapability(family="contraction", dtypes=("fp32", "int8")),),
     )
@@ -339,15 +358,31 @@ def test_independent_capability_denominator_preserves_joint_operand_rules():
     from merlin.targetgen import compute_units as cu
     from merlin.targetgen import eligibility as el
 
-    independent = cu.compute_units({"compute_units": [{
-        "name": "limited_lowering", "kind": "systolic", "dtypes": ["int8"], "ops": ["matmul"],
-        "accumulate": [{"in": "int8", "weight": "int8", "acc": "i32"}],
-        "semantic_capabilities": [{"family": "contraction", "dtypes": ["int8", "fp32"],
-                                    "operand_pairs": [{"in": "fp32", "weight": "int8"}]}],
-    }]})
+    independent = cu.compute_units(
+        {
+            "compute_units": [
+                {
+                    "name": "limited_lowering",
+                    "kind": "systolic",
+                    "dtypes": ["int8"],
+                    "ops": ["matmul"],
+                    "accumulate": [{"in": "int8", "weight": "int8", "acc": "i32"}],
+                    "semantic_capabilities": [
+                        {
+                            "family": "contraction",
+                            "dtypes": ["int8", "fp32"],
+                            "operand_pairs": [{"in": "fp32", "weight": "int8"}],
+                        }
+                    ],
+                }
+            ]
+        }
+    )
     assert route([demand], independent)[0].unit is None
     assert cc.build(plan, semantic_capability_map(independent), linalg_mlir=text)["n_eligible"] == 1
     # Direct legacy descriptors never supplied joint support. Preserve that API
     # explicitly; it is not a proof for a projected, captured model source.
-    assert el.is_eligible(el.RegionDescriptor(family="contraction", in_dtype="fp32", weight_dtype="int8"),
-                          {"contraction": SemanticCapability(family="contraction", dtypes=("fp32", "int8"))}).eligible
+    assert el.is_eligible(
+        el.RegionDescriptor(family="contraction", in_dtype="fp32", weight_dtype="int8"),
+        {"contraction": SemanticCapability(family="contraction", dtypes=("fp32", "int8"))},
+    ).eligible

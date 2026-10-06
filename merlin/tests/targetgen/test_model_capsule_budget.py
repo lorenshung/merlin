@@ -41,7 +41,9 @@ def _synthetic_model_capsule(tmp_path, monkeypatch):
     a real torch.export or accelerator approval.
     """
     import subprocess
+
     import numpy as np
+
     from merlin.targetgen import capsule_source as source
 
     tmp_path.mkdir(parents=True, exist_ok=True)
@@ -58,23 +60,43 @@ def _synthetic_model_capsule(tmp_path, monkeypatch):
     )
     values = [[1.0, 2.0], [3.0, 4.0]]
     artifact = source.CapsuleArtifacts(
-        op="model", dtype="f32", pytorch_src=loader.read_text(), linalg_mlir=linalg,
-        inputs=[values], golden=values, weights_path=str(weights),
-        meta={"weights_manifest": str(manifest),
-              "input_abi": [{"shape": [2, 2], "dtype": "f32"}],
-              "output_abi": [{"shape": [2, 2], "dtype": "f32"}]},
+        op="model",
+        dtype="f32",
+        pytorch_src=loader.read_text(),
+        linalg_mlir=linalg,
+        inputs=[values],
+        golden=values,
+        weights_path=str(weights),
+        meta={
+            "weights_manifest": str(manifest),
+            "input_abi": [{"shape": [2, 2], "dtype": "f32"}],
+            "output_abi": [{"shape": [2, 2], "dtype": "f32"}],
+        },
     )
     fake_capture = SimpleNamespace(m2m_dir=tmp_path, capture_loader=lambda *_a, **_k: artifact)
     binding = SimpleNamespace(
-        operand_dtype="f32", target="synthetic", cap_dtype=lambda value: value,
-        tiers=["L0", "L1"], compare="tolerance_float", atol=0.0, rtol=0.0,
+        operand_dtype="f32",
+        target="synthetic",
+        cap_dtype=lambda value: value,
+        tiers=["L0", "L1"],
+        compare="tolerance_float",
+        atol=0.0,
+        rtol=0.0,
     )
     monkeypatch.setattr(source, "derived_recipe", lambda *_a: None)
     monkeypatch.setattr(source, "model_accelerator_demand", lambda *_a: (None, []))
     destination = source.write_model_capsule(
-        {"kind": "model", "cat": "model", "name": "SY_identity_bundle",
-         "model": "synthetic_identity", "loader": str(loader)},
-        binding, tmp_path / "capsules", source=fake_capture)
+        {
+            "kind": "model",
+            "cat": "model",
+            "name": "SY_identity_bundle",
+            "model": "synthetic_identity",
+            "loader": str(loader),
+        },
+        binding,
+        tmp_path / "capsules",
+        source=fake_capture,
+    )
     expected_weights = hashlib.sha256(weights.read_bytes()).hexdigest()
     monkeypatch.setattr(source, "_m2m_python", lambda: Path(sys.executable))
 
@@ -83,22 +105,26 @@ def _synthetic_model_capsule(tmp_path, monkeypatch):
         frozen = Path(request["weights"])
         inputs = np.load(request["inputs_npz"], allow_pickle=False)
         golden = np.load(request["golden_npy"], allow_pickle=False)
-        if (hashlib.sha256(frozen.read_bytes()).hexdigest() != expected_weights
-                or not np.array_equal(inputs["in0"], golden)):
+        if hashlib.sha256(frozen.read_bytes()).hexdigest() != expected_weights or not np.array_equal(
+            inputs["in0"], golden
+        ):
             return subprocess.CompletedProcess(cmd, 1, "", "synthetic fixture validation failed")
         report = {
             "manifest": json.loads(Path(request["captured_manifest"]).read_text()),
             "input_order": {"I0": 0},
             "loader_sha256": hashlib.sha256(Path(request["loader"]).read_bytes()).hexdigest(),
             "weights_sha256": expected_weights,
-            "python": str(Path(sys.executable)), "python_version": sys.version.split()[0],
-            "torch_version": None, "torch_export": False,
-            "capture_manifest_validated": True, "loader_input_count": 1,
-            "golden_validated": True, "golden_value_replay": True,
+            "python": str(Path(sys.executable)),
+            "python_version": sys.version.split()[0],
+            "torch_version": None,
+            "torch_export": False,
+            "capture_manifest_validated": True,
+            "loader_input_count": 1,
+            "golden_validated": True,
+            "golden_value_replay": True,
             "weights_validated_exact": True,
         }
-        return subprocess.CompletedProcess(
-            cmd, 0, "__CAPSULE_BUNDLE_ABI__ " + json.dumps(report) + "\n", "")
+        return subprocess.CompletedProcess(cmd, 0, "__CAPSULE_BUNDLE_ABI__ " + json.dumps(report) + "\n", "")
 
     monkeypatch.setattr(subprocess, "run", validate_synthetic_worker)
     return CR.load_capsule(destination)
@@ -347,9 +373,7 @@ def test_must_accelerate_requires_runtime_outline_to_preserve_planned_groups():
     row = _valid_model_row()
     missing = CGR.model_execution_check(row, capsule)
     assert "planned_outlined_alignment_unverified" in missing["violations"]
-    withheld = CGR.enforce_model_execution_check(
-        {**row, "status": "pass", "tiers": {}}, capsule, target="gemmini"
-    )
+    withheld = CGR.enforce_model_execution_check({**row, "status": "pass", "tiers": {}}, capsule, target="gemmini")
     assert withheld["status"] == "incomplete" and withheld["failure"]["plane"] == "model_placement"
 
     alignment = {

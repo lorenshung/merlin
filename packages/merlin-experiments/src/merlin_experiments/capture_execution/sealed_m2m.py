@@ -242,10 +242,15 @@ def _probe_sandbox(bwrap: Path) -> None:
     argv = [
         str(bwrap),
         *_FLAGS,
-        "--ro-bind", "/", "/",
-        "--tmpfs", "/tmp",
-        "--dev", "/dev",
-        "--", "/bin/true",
+        "--ro-bind",
+        "/",
+        "/",
+        "--tmpfs",
+        "/tmp",
+        "--dev",
+        "/dev",
+        "--",
+        "/bin/true",
     ]
     try:
         result = subprocess.run(argv, env={}, cwd="/", stdin=subprocess.DEVNULL, capture_output=True, timeout=15)

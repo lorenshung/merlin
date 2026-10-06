@@ -322,7 +322,8 @@ def test_required_model_cannot_pass_from_a_green_plan_when_source_calls_ran_on_h
         }
 
     assert _source_region_execution_verdict(certificate(host=("add_0",), accelerator=("matmul_0",)))[0:2] == (
-        "fail", "FALLBACK_ON_ELIGIBLE_REGION"
+        "fail",
+        "FALLBACK_ON_ELIGIBLE_REGION",
     )
     assert _source_region_execution_verdict(certificate(mixed=("matmul_0",)))[0] == "fail"
     assert _source_region_execution_verdict(certificate(host=("add_0",), status="incomplete"))[0] == "fail"
@@ -342,15 +343,39 @@ def test_target_model_requires_replay_of_normalization_and_outline():
     from merlin.targetgen.capsule_runner import _model_transform_audit_verdict
 
     assert _model_transform_audit_verdict({})[0] == "incomplete"
-    assert _model_transform_audit_verdict({"transform_audit_qualification": {
-        "status": "structural_replay_matched", "normalization_replay": "not_recorded",
-    }})[0] == "incomplete"
-    assert _model_transform_audit_verdict({"transform_audit_qualification": {
-        "status": "structural_replay_matched", "normalization_replay": "unsupported_custom_selection",
-    }})[0] == "incomplete"
-    assert _model_transform_audit_verdict({"transform_audit_qualification": {
-        "status": "structural_replay_matched", "normalization_replay": "matched",
-    }}) is None
+    assert (
+        _model_transform_audit_verdict(
+            {
+                "transform_audit_qualification": {
+                    "status": "structural_replay_matched",
+                    "normalization_replay": "not_recorded",
+                }
+            }
+        )[0]
+        == "incomplete"
+    )
+    assert (
+        _model_transform_audit_verdict(
+            {
+                "transform_audit_qualification": {
+                    "status": "structural_replay_matched",
+                    "normalization_replay": "unsupported_custom_selection",
+                }
+            }
+        )[0]
+        == "incomplete"
+    )
+    assert (
+        _model_transform_audit_verdict(
+            {
+                "transform_audit_qualification": {
+                    "status": "structural_replay_matched",
+                    "normalization_replay": "matched",
+                }
+            }
+        )
+        is None
+    )
 
     import inspect
 

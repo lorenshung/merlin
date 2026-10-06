@@ -132,7 +132,9 @@ def test_startup_sets_round_to_nearest_only_when_floating_point_is_available():
     """Hardware may leave frm unreset; every FP hart must select RNE before main."""
     import shutil
     import subprocess
+
     import pytest
+
     from merlin.common.paths import runtime_dir
 
     compiler = shutil.which("cc")
@@ -142,11 +144,11 @@ def test_startup_sets_round_to_nearest_only_when_floating_point_is_available():
     for flags, expected in ((["-D__riscv_flen=64"], True), (["-U__riscv_flen"], False)):
         result = subprocess.run(
             [compiler, "-E", "-P", "-x", "assembler-with-cpp", *flags, str(source)],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         )
-        instructions = " ".join(
-            line.partition("#")[0].strip() for line in result.stdout.splitlines()
-        )
+        instructions = " ".join(line.partition("#")[0].strip() for line in result.stdout.splitlines())
         assert ("csrw fcsr, zero" in instructions) is expected
         if expected:
             assert instructions.index("csrs mstatus") < instructions.index("csrw fcsr, zero")

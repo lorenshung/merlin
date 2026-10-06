@@ -99,8 +99,17 @@ def test_baremetal_runtime_source_closure_is_publicly_packaged():
     """Installed model/kernel builds must not borrow runtime sources from a checkout."""
     files = set(json.loads((repo_root() / "build_tools/package_resources.json").read_text())["files"])
     required = {
-        "console_uart.c", "crt.S", "htif.c", "htif.h", "libc_min.c", "link.ld",
-        "merlin_malloc.c", "model_link.ld", "model_main.c", "printf_min.c",
-        "rvv_matmul_i8.S", "vlen_probe.c",
+        "console_uart.c",
+        "crt.S",
+        "htif.c",
+        "htif.h",
+        "libc_min.c",
+        "link.ld",
+        "merlin_malloc.c",
+        "model_link.ld",
+        "model_main.c",
+        "printf_min.c",
+        "rvv_matmul_i8.S",
+        "vlen_probe.c",
     }
     assert {"merlin/runtime/baremetal/spike/" + name for name in required} <= files

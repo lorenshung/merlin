@@ -10,9 +10,9 @@ from merlin_experiments.corpus.coverage import selected_cohort_coverage
 from merlin_experiments.phase0 import coverage_commitment as CC
 from merlin_experiments.phase0 import writer
 from merlin_experiments.phase0.evidence import _materialize_evidence
+from merlin_experiments.phase0.profiles import synthesis_input_identity
 from merlin_experiments.phase0.provenance import _scrub_capsule_dir
 from merlin_experiments.phase0.requirements import _materialized_iteration_capsules, _validate_capture_recipes
-from merlin_experiments.phase0.profiles import synthesis_input_identity
 from merlin_experiments.phase0.writer import _integer_reference_bound, _source_integer_reference_bound, _write_capsule
 
 from merlin.targetgen import capsule_source as source
@@ -187,9 +187,7 @@ def test_preselected_loader_is_copied_into_a_gradeable_source_capsule(tmp_path):
     _materialize_evidence(saved, outputs)
     selected = entries[0]
     selected["materialized_capture"]["path"] = str(saved / selected["materialized_capture"]["path"])
-    selected["materialized_capture"]["loader_path"] = str(
-        saved / selected["materialized_capture"]["loader_path"]
-    )
+    selected["materialized_capture"]["loader_path"] = str(saved / selected["materialized_capture"]["loader_path"])
     binding = CorpusBinding("fixture", 2, "f32", "f32", False, ["L0"], "tolerance_float", atol=1e-5, rtol=1e-5)
     result = _write_capsule(selected, binding, tmp_path / "corpus")
     capsule = yaml.safe_load((result / "capsule.yaml").read_text())
@@ -253,17 +251,28 @@ def test_external_capture_contract_must_match_selected_spec(tmp_path):
     policy_path = tmp_path / "policy.yaml"
     policy_path.write_text("selected: host\n")
     policy_sha = hashlib.sha256(policy_path.read_bytes()).hexdigest()
-    manifest = {"schema": "m2m.quantization_manifest.v1", "contract_sha256": contract_sha,
-                "policy_sha256": policy_sha, "sites": [{"site_id": "one", "status": "host"}]}
-    manifest_sha = hashlib.sha256(json.dumps(
-        manifest, sort_keys=True, separators=(",", ":"),
-    ).encode()).hexdigest()
+    manifest = {
+        "schema": "m2m.quantization_manifest.v1",
+        "contract_sha256": contract_sha,
+        "policy_sha256": policy_sha,
+        "sites": [{"site_id": "one", "status": "host"}],
+    }
+    manifest_sha = hashlib.sha256(
+        json.dumps(
+            manifest,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
     manifest_path = bundle / "quantization-manifest.json"
     manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
     mlir_path = bundle / "model.mlir"
-    mlir_path.write_text(mlir_path.read_text().replace(
-        "prov.weights_file =", f'prov.quantization_manifest_sha256 = "{manifest_sha}", prov.weights_file =',
-    ))
+    mlir_path.write_text(
+        mlir_path.read_text().replace(
+            "prov.weights_file =",
+            f'prov.quantization_manifest_sha256 = "{manifest_sha}", prov.weights_file =',
+        )
+    )
     meta_path = bundle / "meta.json"
     meta = json.loads(meta_path.read_text())
     meta["quantization_manifest"] = {
@@ -276,21 +285,23 @@ def test_external_capture_contract_must_match_selected_spec(tmp_path):
     receipt = json.loads(receipt_path.read_text())
     for path in (mlir_path, meta_path, manifest_path):
         receipt["artifacts"][path.name] = {
-            "bytes": path.stat().st_size, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "bytes": path.stat().st_size,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         }
     receipt_path.write_text(json.dumps(receipt))
     captures = {"iteration": mlir_path}
     selections = {"iteration": (policy_path, policy_sha)}
-    assert _validate_capture_recipes(captures, set(), software_spec_sha256=contract_sha,
-                                     policy_selections=selections) == {"iteration": policy_sha}
+    assert _validate_capture_recipes(
+        captures, set(), software_spec_sha256=contract_sha, policy_selections=selections
+    ) == {"iteration": policy_sha}
     with pytest.raises(ValueError, match="external quantization contract differs"):
-        _validate_capture_recipes(captures, set(), software_spec_sha256="b" * 64,
-                                  policy_selections=selections)
+        _validate_capture_recipes(captures, set(), software_spec_sha256="b" * 64, policy_selections=selections)
     with pytest.raises(ValueError, match="independent policy selection"):
         _validate_capture_recipes(captures, set(), software_spec_sha256=contract_sha)
     with pytest.raises(ValueError, match="selected quantization policy differs"):
-        _validate_capture_recipes(captures, set(), software_spec_sha256=contract_sha,
-                                  policy_selections={"iteration": (policy_path, "0" * 64)})
+        _validate_capture_recipes(
+            captures, set(), software_spec_sha256=contract_sha, policy_selections={"iteration": (policy_path, "0" * 64)}
+        )
 
 
 def test_selected_policy_sidecar_is_rechecked_for_synthesis(tmp_path):
@@ -300,11 +311,17 @@ def test_selected_policy_sidecar_is_rechecked_for_synthesis(tmp_path):
     sidecar.write_bytes(b"selected policy\n")
     digest = hashlib.sha256(sidecar.read_bytes()).hexdigest()
     requirement = tmp_path / "requirements.yaml"
-    requirement.write_text(yaml.safe_dump({"quantization_policy_selections": {
-        "schema": "merlin.phase0.quantization_policy_selections.v1",
-        "status": "byte_selected_not_numerically_reviewed",
-        "applications": {"iteration": {"artifact": member, "sha256": digest}},
-    }}))
+    requirement.write_text(
+        yaml.safe_dump(
+            {
+                "quantization_policy_selections": {
+                    "schema": "merlin.phase0.quantization_policy_selections.v1",
+                    "status": "byte_selected_not_numerically_reviewed",
+                    "applications": {"iteration": {"artifact": member, "sha256": digest}},
+                }
+            }
+        )
+    )
     recipe = tmp_path / "recipe.yaml"
     recipe.write_text("capsules: []\n")
     descriptor = tmp_path / "descriptor.yaml"

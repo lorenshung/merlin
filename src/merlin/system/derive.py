@@ -13,6 +13,7 @@ Two rules, both load-bearing:
 * **No target names.** Everything is keyed on derived properties (endpoint kind, decoder facts,
   declared interfaces), never on which target it happens to be.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -21,6 +22,7 @@ from typing import Any
 from .model import Device, Host, Link, System
 
 # ------------------------------------------------------------------ host
+
 
 def host_from_board(board_name: str, *, board_catalog: Path | None = None, **overrides) -> Host:
     """Derive the Host from a board descriptor (``runtime.boards``).
@@ -63,10 +65,10 @@ def host_from_board(board_name: str, *, board_catalog: Path | None = None, **ove
 #: genuinely determines; the other axes are derived separately below, which is the point of the
 #: decomposition -- two targets sharing an endpoint kind can differ in where their operands live.
 _TRANSPORT_FOR_ENDPOINT = {
-    "inline_asm_insn": "host_instruction",   # the host executes an instruction the device decodes
-    "command_buffer": "command_buffer",      # no command ISA at all; a buffer is handed over
-    "external_backend": "device_native",     # the device fetches and decodes its own stream
-    "upstream_target": None,                 # not a separate device: it lowers through stock LLVM
+    "inline_asm_insn": "host_instruction",  # the host executes an instruction the device decodes
+    "command_buffer": "command_buffer",  # no command ISA at all; a buffer is handed over
+    "external_backend": "device_native",  # the device fetches and decodes its own stream
+    "upstream_target": None,  # not a separate device: it lowers through stock LLVM
 }
 
 
@@ -74,8 +76,9 @@ def _facts(target: str) -> dict[str, Any]:
     """The target's RTL facts body, or ``{}`` when the extractor never grounded them."""
     try:
         from merlin.targetgen.rtl import facts as _f
+
         return _f.body_if_present(target)
-    except Exception:            # noqa: BLE001 -- absent facts are a real answer, not an error
+    except Exception:  # noqa: BLE001 -- absent facts are a real answer, not an error
         return {}
 
 
@@ -90,8 +93,11 @@ def link_for(target: str, endpoint_kind: str | None) -> Link:
     ev: dict[str, str] = {}
 
     transport = _TRANSPORT_FOR_ENDPOINT.get(endpoint_kind or "", None)
-    ev["command_transport"] = (f"endpoint_kind={endpoint_kind!r}" if transport
-                               else f"endpoint_kind={endpoint_kind!r} implies no distinct transport")
+    ev["command_transport"] = (
+        f"endpoint_kind={endpoint_kind!r}"
+        if transport
+        else f"endpoint_kind={endpoint_kind!r} implies no distinct transport"
+    )
 
     # Operand placement. A DMA/TLB interface means the device pulls from host memory given pointers;
     # this is the `interfaces` fact the extractor already derives and that nothing has ever read.
@@ -109,10 +115,11 @@ def link_for(target: str, endpoint_kind: str | None) -> Link:
     translation, offset, dram_base = None, None, None
     try:
         from merlin.targetgen.dram_facts import dram_base_for
+
         db = dram_base_for(target)
         if db:
             dram_base, ev["device_dram_base"] = int(db), f"dram_facts.dram_base_for({target!r})"
-    except Exception:            # noqa: BLE001
+    except Exception:  # noqa: BLE001
         ev["device_dram_base"] = "dram_facts unavailable"
     if placement == "pointer_args":
         # The device walks host page tables (that is what a TLB interface is for), so an address
@@ -124,17 +131,25 @@ def link_for(target: str, endpoint_kind: str | None) -> Link:
     artifact = None
     try:
         from merlin.targetgen.runner_config import ENDPOINT_ARTIFACT
+
         artifact = ENDPOINT_ARTIFACT.get(endpoint_kind or "")
         ev["emitted_artifact"] = f"runner_config.ENDPOINT_ARTIFACT[{endpoint_kind!r}]"
-    except Exception:            # noqa: BLE001
+    except Exception:  # noqa: BLE001
         ev["emitted_artifact"] = "runner_config unavailable"
 
-    return Link(command_transport=transport, operand_placement=placement,
-                address_translation=translation, address_offset=offset,
-                device_dram_base=dram_base, emitted_artifact=artifact, evidence=ev)
+    return Link(
+        command_transport=transport,
+        operand_placement=placement,
+        address_translation=translation,
+        address_offset=offset,
+        device_dram_base=dram_base,
+        emitted_artifact=artifact,
+        evidence=ev,
+    )
 
 
 # ------------------------------------------------------------------ device / system
+
 
 def device_for(target: str) -> Device:
     """Derive one Device from its capability manifest (kind + endpoint), plus its Link."""
@@ -142,18 +157,23 @@ def device_for(target: str) -> Device:
     ev: dict[str, str] = {}
     try:
         from merlin.targetgen.target_experiment import load_capability_manifest
+
         man = load_capability_manifest(target)
         kind, endpoint = getattr(man, "kind", None), getattr(man, "endpoint_kind", None)
         ev["source"] = f"capability manifest for {target!r}"
-    except Exception as exc:     # noqa: BLE001 -- an unresolvable target yields an empty Device
+    except Exception as exc:  # noqa: BLE001 -- an unresolvable target yields an empty Device
         ev["source"] = f"no capability manifest ({type(exc).__name__})"
-    return Device(name=target, kind=kind, endpoint_kind=endpoint,
-                  link=link_for(target, endpoint), evidence=ev)
+    return Device(name=target, kind=kind, endpoint_kind=endpoint, link=link_for(target, endpoint), evidence=ev)
 
 
-def system_for(target: str | None = None, *, targets=None, board: str | None = None,
-               board_catalog: Path | None = None,
-               **board_overrides) -> System:
+def system_for(
+    target: str | None = None,
+    *,
+    targets=None,
+    board: str | None = None,
+    board_catalog: Path | None = None,
+    **board_overrides,
+) -> System:
     """The System a compile runs on: one host, and the device(s) named.
 
     ``target``/``targets`` keep today's single-target callers working unchanged -- a single name
@@ -179,15 +199,18 @@ def host_board_for_experiment(target: str) -> tuple[str | None, str]:
         # descriptor got the board from the in-tree one instead, silently.
         from merlin.targetgen.corpora import descriptor_path
         from merlin.targetgen.target_experiment import load_target_experiment
+
         desc = descriptor_path(target)
         if not desc.is_file():
             return None, f"no experiment descriptor for {target!r} at {desc}"
         board = load_target_experiment(desc).host_board
-    except Exception as exc:                       # noqa: BLE001 -- an unreadable descriptor is not a board
+    except Exception as exc:  # noqa: BLE001 -- an unreadable descriptor is not a board
         return None, f"could not read {target}'s experiment descriptor: {type(exc).__name__}: {exc}"
     if not board:
-        return None, (f"{target}'s descriptor declares no `host: {{board: ...}}`, so the host this "
-                      f"target's lane compiles for is unknown")
+        return None, (
+            f"{target}'s descriptor declares no `host: {{board: ...}}`, so the host this "
+            f"target's lane compiles for is unknown"
+        )
     return board, f"declared by {target}'s experiment descriptor"
 
 
@@ -216,15 +239,17 @@ def system_for_experiment(target: str, **board_overrides) -> tuple[System, str]:
 
         catalog = load_target_experiment(descriptor_path(target)).selected_board_catalog()
         known = set(load_boards(catalog)) if catalog is not None else set(BOARDS)
-    except Exception as exc:                       # noqa: BLE001 -- an unreadable registry is not a board
+    except Exception as exc:  # noqa: BLE001 -- an unreadable registry is not a board
         return system_for(target), f"could not read the board registry: {type(exc).__name__}: {exc}"
     if board not in known:
         return system_for(target), (
             f"{target!r} declares board {board!r}, which did not resolve: it is not in "
             f"merlin.runtime.boards (known: {', '.join(sorted(known))}). Refusing the conservative "
-            f"fallback here, because a defaulted host would be measured as if it were real hardware")
+            f"fallback here, because a defaulted host would be measured as if it were real hardware"
+        )
     try:
         return system_for(target, board=board, board_catalog=catalog, **board_overrides), why
-    except Exception as exc:                       # noqa: BLE001 -- a bad board name is not a host
-        return system_for(target), (f"{target!r} declares board {board!r}, which did not resolve: "
-                                    f"{type(exc).__name__}: {exc}")
+    except Exception as exc:  # noqa: BLE001 -- a bad board name is not a host
+        return system_for(target), (
+            f"{target!r} declares board {board!r}, which did not resolve: {type(exc).__name__}: {exc}"
+        )

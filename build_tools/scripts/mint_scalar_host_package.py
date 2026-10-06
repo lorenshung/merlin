@@ -28,8 +28,11 @@ def mint(recipe_path: Path) -> Path:
     if not isinstance(recipe, dict) or recipe.get("schema") != "merlin.scalar_host_recipe.v1":
         raise ValueError("scalar host recipe must declare merlin.scalar_host_recipe.v1")
     run_id = recipe.get("run_id")
-    if not isinstance(run_id, str) or not run_id or not ("a" <= run_id[0] <= "z") or any(
-        not ("a" <= letter <= "z" or "0" <= letter <= "9" or letter == "_") for letter in run_id[1:]
+    if (
+        not isinstance(run_id, str)
+        or not run_id
+        or not ("a" <= run_id[0] <= "z")
+        or any(not ("a" <= letter <= "z" or "0" <= letter <= "9" or letter == "_") for letter in run_id[1:])
     ):
         raise ValueError("scalar host recipe needs a safe run_id")
     dtype = recipe.get("dtype_strategy")
@@ -48,17 +51,21 @@ def mint(recipe_path: Path) -> Path:
         "run_id": run_id,
         "family": "scalar_linalg",
         "status": "unverified",
-        "authoring": {"mode": "deterministic_generated_from_spec", "generated_by_agent": False,
-                      "author": "Merlin generic scalar lowering"},
-        "inputs": {"recipe_sha256": hashlib.sha256(raw).hexdigest(),
-                   "lowering": "merlin.llvmlower.pipeline:_upstream_pipeline"},
+        "authoring": {
+            "mode": "deterministic_generated_from_spec",
+            "generated_by_agent": False,
+            "author": "Merlin generic scalar lowering",
+        },
+        "inputs": {
+            "recipe_sha256": hashlib.sha256(raw).hexdigest(),
+            "lowering": "merlin.llvmlower.pipeline:_upstream_pipeline",
+        },
         "outputs": {"knobs": "knobs.yaml"},
     }
     knobs = {
         "backend": "scalar",
         "dtype_strategy": dtype,
-        "cflags": [f"-march={march}", "-mabi=lp64d", "-mcmodel=medany", "-O2",
-                   "-ffreestanding", "-fno-builtin"],
+        "cflags": [f"-march={march}", "-mabi=lp64d", "-mcmodel=medany", "-O2", "-ffreestanding", "-fno-builtin"],
         "expected_instructions": [],
     }
     files = {
@@ -69,8 +76,10 @@ def mint(recipe_path: Path) -> Path:
     parent.mkdir(parents=True, exist_ok=True)
     dest = parent / run_id
     if dest.exists():
-        if not dest.is_dir() or {p.name for p in dest.iterdir()} != set(files) or any(
-            (dest / name).read_bytes() != payload for name, payload in files.items()
+        if (
+            not dest.is_dir()
+            or {p.name for p in dest.iterdir()} != set(files)
+            or any((dest / name).read_bytes() != payload for name, payload in files.items())
         ):
             raise ValueError(f"existing scalar package differs from deterministic recipe: {dest}")
         return dest

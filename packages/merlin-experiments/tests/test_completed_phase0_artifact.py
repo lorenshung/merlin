@@ -9,7 +9,6 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
-
 from merlin_experiments.corpus import preparation
 from merlin_experiments.phase0 import evidence as evidence_module
 from merlin_experiments.spec import SpecError

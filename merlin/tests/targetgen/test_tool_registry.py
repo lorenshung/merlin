@@ -222,4 +222,6 @@ def test_the_rtl_mandate_needs_both_rtl_tools_dropped(te):
     ablation table needs that distinction, so pin it rather than leave it to be rediscovered.
     """
     assert "EL4 (RTL-informed Merlin)" in _workflow(te, "merlin_rtlchecks", drop_tools=("rtl_generators",))
-    assert "EL4 (RTL-informed Merlin)" not in _workflow(te, "merlin_rtlchecks", drop_tools=("rtl_generators", "rtl_facts"))
+    assert "EL4 (RTL-informed Merlin)" not in _workflow(
+        te, "merlin_rtlchecks", drop_tools=("rtl_generators", "rtl_facts")
+    )

@@ -535,15 +535,17 @@ def form_perf_entries(
         source = by_signature.get(signature)
         if not signature or source is None or not _matches_source_window(source, window):
             if blocked is not None:
-                blocked.append({
-                    "family": family,
-                    "status": "blocked_unimplemented",
-                    "reason": (
-                        f"independent source convolution window {signature or '<unnamed>'} "
-                        "has no exact derived functional member"
-                    ),
-                    "requirement_sha256": requirement_sha256,
-                })
+                blocked.append(
+                    {
+                        "family": family,
+                        "status": "blocked_unimplemented",
+                        "reason": (
+                            f"independent source convolution window {signature or '<unnamed>'} "
+                            "has no exact derived functional member"
+                        ),
+                        "requirement_sha256": requirement_sha256,
+                    }
+                )
             continue
         entry = copy.deepcopy(base)
         entry.update({k: copy.deepcopy(v) for k, v in source.items() if k not in _TEMPLATE_OWNED})
@@ -578,9 +580,8 @@ def _matches_source_window(entry: Mapping[str, Any], window: Mapping[str, Any]) 
         "dilation": window.get("dilation"),
     }
     attrs = ((entry.get("operation") or {}).get("attributes") or {}) if "operation" in entry else entry
-    return (
-        entry.get("op", (entry.get("operation") or {}).get("op")) == "conv2d"
-        and all(expected[key] is not None and attrs.get(key) == expected[key] for key in expected)
+    return entry.get("op", (entry.get("operation") or {}).get("op")) == "conv2d" and all(
+        expected[key] is not None and attrs.get(key) == expected[key] for key in expected
     )
 
 
@@ -678,7 +679,9 @@ def form_perf_coverage(
             "required_reason": (
                 "unpriced_application_requires_all_forms"
                 if required and unpriced_applications
-                else "predicted_cycle_share_threshold" if required else None
+                else "predicted_cycle_share_threshold"
+                if required
+                else None
             ),
             "unpriced_applications": list(unpriced_applications),
             "capsules": sorted(str(c.get("name")) for c in found),
@@ -715,7 +718,8 @@ def form_perf_coverage(
             "dilation": window.get("dilation"),
         }
         direct = [
-            capsule for capsule in capsules
+            capsule
+            for capsule in capsules
             if ((capsule.get("performance") or {}).get(FORM_BLOCK) or {}).get("source_window_signature")
             == window.get("signature")
             and _matches_source_window(capsule, window)
@@ -728,9 +732,7 @@ def form_perf_coverage(
         for row in classes:
             key = row.get("key") or {}
             geometry = key.get("geometry") or {}
-            if key.get("op") != "conv2d" or any(
-                geometry.get(k) != v for k, v in expected.items() if k != "dilation"
-            ):
+            if key.get("op") != "conv2d" or any(geometry.get(k) != v for k, v in expected.items() if k != "dilation"):
                 continue
             if expected["dilation"] != [1, 1] and geometry.get("dilation") != expected["dilation"]:
                 continue
@@ -744,12 +746,14 @@ def form_perf_coverage(
                 break
         if not represented:
             source_windows_without_form.append(str(window.get("signature") or "unknown"))
-        source_window_rows.append({
-            "signature": str(window.get("signature") or "unknown"),
-            "capsules": sorted({str(capsule.get("name")) for capsule in matched}),
-            "status": "covered" if represented else "missing",
-            "scope": "bounded source-window mechanism; model-scale cost is a separate claim",
-        })
+        source_window_rows.append(
+            {
+                "signature": str(window.get("signature") or "unknown"),
+                "capsules": sorted({str(capsule.get("name")) for capsule in matched}),
+                "status": "covered" if represented else "missing",
+                "scope": "bounded source-window mechanism; model-scale cost is a separate claim",
+            }
+        )
     status = (
         "no_form_scope"
         if not isinstance(scope, dict) or scope.get("schema") != SCHEMA
@@ -765,8 +769,7 @@ def form_perf_coverage(
         "threshold": {
             "min_predicted_cycle_share": threshold,
             "basis": (
-                "per-application predicted issue cycles where priced; "
-                "all forms required for unpriced applications"
+                "per-application predicted issue cycles where priced; all forms required for unpriced applications"
             ),
         },
         "classes": rows,
@@ -878,7 +881,8 @@ def _iteration_extent_shares(
         exemplars = (public.get("entry") for public in row.get("members") or [])
         witnessed = any(
             all(observed >= required for observed, required in zip(gemm_extents(entry), extent))
-            for entry in exemplars if isinstance(entry, Mapping)
+            for entry in exemplars
+            if isinstance(entry, Mapping)
         )
         if witnessed:
             within += float(member["price"][basis])

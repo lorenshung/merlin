@@ -38,9 +38,7 @@ def ordinary_tree(path: Path) -> None:
             raise SpecError("corpus release source contains symlinked or nonregular entries")
 
 
-def copy_input(
-    source: Path, destination: Path, *, private: bool = False, expected_sha256: str | None = None
-) -> str:
+def copy_input(source: Path, destination: Path, *, private: bool = False, expected_sha256: str | None = None) -> str:
     from merlin.common import content_store
 
     from ..runner import fingerprint

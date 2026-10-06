@@ -262,7 +262,10 @@ def test_the_epilogue_axis_evidences_every_stage_it_requires(target):
         assert req["evidenced_by"], f"{target}/{req['stage']} is required with no evidence"
         for src in req["evidenced_by"]:
             assert src in (
-                "manifest_composed_with", "isa_instruction_class", "readout_applies", "contraction_stage_route"
+                "manifest_composed_with",
+                "isa_instruction_class",
+                "readout_applies",
+                "contraction_stage_route",
             )
         if "isa_instruction_class" in req["evidenced_by"]:
             assert req["isa_classes"], "an ISA-evidenced stage must name the class it resolved"
@@ -345,8 +348,7 @@ def test_every_required_stage_becomes_a_capsule(target):
     made = {tuple(e.get("epilogue") or [])[0] for e in CS.synthesize(doc)["capsules"] if _axis(e) == "epilogue"}
     assert made == required, f"{target}: required {sorted(required)}, synthesized {sorted(made)}"
     if any("contraction_stage_route" in r["evidenced_by"] for r in doc["epilogue"]["required"]):
-        routed = {r["stage"] for r in doc["epilogue"]["required"]
-                  if "contraction_stage_route" in r["evidenced_by"]}
+        routed = {r["stage"] for r in doc["epilogue"]["required"] if "contraction_stage_route" in r["evidenced_by"]}
         assert routed <= made, "a selected route must synthesize its capsule without an authored entry"
 
 

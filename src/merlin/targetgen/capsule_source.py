@@ -1799,8 +1799,7 @@ def _ins_slot_formats(line: str) -> tuple[str | None, ...]:
     for chunk in chunks:
         body = chunk.split(">", 1)[0]
         parts = body.split("x")
-        if (len(parts) < 2 or any(not dim.isdigit() or int(dim) <= 0 for dim in parts[:-1])
-                or not qf.has(parts[-1])):
+        if len(parts) < 2 or any(not dim.isdigit() or int(dim) <= 0 for dim in parts[:-1]) or not qf.has(parts[-1]):
             result.append(None)
         else:
             result.append(qf.get(parts[-1]).name)
@@ -2039,9 +2038,7 @@ def _generic_form_linalg_summary(linalg_mlir: str) -> dict:
         shape = shapes.get(id(op))
         if shape is not None and len(shape.parallel) >= 2 and shape.reduction:
             parallel = tuple(int(x) for x in shape.parallel)
-            rows["carrier_extents"].append(
-                (prod(parallel[:-2]), parallel[-2], prod(shape.reduction), parallel[-1])
-            )
+            rows["carrier_extents"].append((prod(parallel[:-2]), parallel[-2], prod(shape.reduction), parallel[-1]))
         else:
             rows["carrier_extents"].append(None)
         fmt = None
@@ -2125,8 +2122,8 @@ def model_op_demands(linalg_mlir: str, in_fmt: str, weight_fmt: str | None = Non
     follows that observed format because the request alone cannot prove a conversion. A whole-model
     capture is routinely mixed -- see :attr:`routing.OpDemand.elem_fmt`.
     """
-    from merlin.targetgen.routing import OpDemand
     from merlin.targetgen import semantic_families as sf
+    from merlin.targetgen.routing import OpDemand
 
     summ = linalg_summary(linalg_mlir)
     ops, fams = summ["prov_ops"], summ["prov_families"]
@@ -2160,11 +2157,11 @@ def model_op_demands(linalg_mlir: str, in_fmt: str, weight_fmt: str | None = Non
                     m=None,
                     k=None,
                     n=None,
-                elem_fmt=formats[i],
-                captured_input_formats=input_formats[i],
-                region_id=region_ids[i],
-                carrier_op=carrier or None,
-                form=sf.operation_form(carrier or op, carrier_op=carrier),
+                    elem_fmt=formats[i],
+                    captured_input_formats=input_formats[i],
+                    region_id=region_ids[i],
+                    carrier_op=carrier or None,
+                    form=sf.operation_form(carrier or op, carrier_op=carrier),
                 )
             )
             continue
@@ -3228,9 +3225,15 @@ def model_accelerator_demand(linalg_mlir: str, binding) -> tuple[str | None, lis
         if not d.source_formats_complete:
             continue
         desc = _el.RegionDescriptor(
-            source=d.site or d.op, op=d.op, family=d.family,
-            in_dtype=d.admission_input_fmt, weight_dtype=d.admission_weight_fmt,
-            m=d.m, k=d.k, n=d.n, form=d.form,
+            source=d.site or d.op,
+            op=d.op,
+            family=d.family,
+            in_dtype=d.admission_input_fmt,
+            weight_dtype=d.admission_weight_fmt,
+            m=d.m,
+            k=d.k,
+            n=d.n,
+            form=d.form,
         )
         if _el.is_eligible(desc, cap_map).eligible:
             eligible_ops.append(d.op)
@@ -3740,7 +3743,11 @@ def write_model_capsule(
         "pytorch_ref": {
             "op": "model",
             "dtype": idt,
-            **({"loader": "capsule.pytorch.py"} if artifact is None or art.meta["materialized_capture"].get("loader_sha256") else {}),
+            **(
+                {"loader": "capsule.pytorch.py"}
+                if artifact is None or art.meta["materialized_capture"].get("loader_sha256")
+                else {}
+            ),
         },
         # WHAT THIS CAPSULE'S INPUTS WERE. On the capsule rather than only in the golden, because the
         # capsule is what a reader has in hand when they quote the result, and a pass on seeded

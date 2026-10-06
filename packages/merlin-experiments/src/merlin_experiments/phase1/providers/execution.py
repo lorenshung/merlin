@@ -306,7 +306,9 @@ def launch(
                 background_model=config.provider.background_model,
                 effort=effort,
                 continue_session=continuous,
-                sandbox_command=partial(sandbox_command, context=config.context, private_run_dir=run_dir, codex_mode=True),
+                sandbox_command=partial(
+                    sandbox_command, context=config.context, private_run_dir=run_dir, codex_mode=True
+                ),
             )
         # claudecode. The claude CLI speaks the Anthropic Messages API, so a NON-Anthropic model reaches
         # it only through the LiteLLM bridge (ANTHROPIC_BASE_URL -> our proxy -> Bedrock). This is what

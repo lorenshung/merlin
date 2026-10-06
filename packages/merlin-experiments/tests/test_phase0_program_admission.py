@@ -23,7 +23,9 @@ _CONTRACT = {
             "semantic_capabilities": [
                 {"family": "contraction", "dtypes": ["int8"], "ranks": [2, 3, 4]},
                 {
-                    "family": "elementwise_map", "dtypes": ["int8"], "result_dtypes": ["i32"],
+                    "family": "elementwise_map",
+                    "dtypes": ["int8"],
+                    "result_dtypes": ["i32"],
                     "composed_with": ["contraction"],
                 },
             ],
@@ -151,10 +153,12 @@ def test_a_written_interface_program_is_admitted_from_its_observations(tmp_path)
 
 @pytest.mark.parametrize("shape", [[2, 3], [1, 4], [3, 5]])
 def test_movement_uses_the_actual_copy_form_and_observed_layout(tmp_path, shape):
-    evidence = _evidence(operations={
-        **_SPEC["operations"],
-        "movement": {"placement": "accelerator", "dtypes": ["int8"], "layouts": ["row_major_contiguous"]},
-    })
+    evidence = _evidence(
+        operations={
+            **_SPEC["operations"],
+            "movement": {"placement": "accelerator", "dtypes": ["int8"], "layouts": ["row_major_contiguous"]},
+        }
+    )
     evidence.contract = deepcopy(_CONTRACT)
     capability = {"family": "movement", "dtypes": ["int8"], "forms": ["copy"], "layouts": ["row_major_contiguous"]}
     evidence.contract["compute_units"][0]["semantic_capabilities"].append(capability)
@@ -164,11 +168,15 @@ def test_movement_uses_the_actual_copy_form_and_observed_layout(tmp_path, shape)
         'merlin_iface.abi_version = "0.1"} {\n'
         f'  %X = merlin_iface.tensor {{name = "X", role = "input"}} : {tensor_type}\n'
         '  %Y = merlin_iface.movement %X {name = "Y", semantic = "mvin_mvout", output_dtype = "i8"} '
-        f': ({tensor_type}) -> {tensor_type}\n'
-        '}\n'
+        f": ({tensor_type}) -> {tensor_type}\n"
+        "}\n"
     )
     capsule, directory = _capsule(
-        tmp_path, "transfer", None, None, text=program,
+        tmp_path,
+        "transfer",
+        None,
+        None,
+        text=program,
     )
     screen = program_admission.screen_written(capsule, directory, target="fixture", evidence=evidence)
     assert screen["status"] == "admitted", screen["reason"]
@@ -213,26 +221,38 @@ def test_standalone_admission_does_not_license_a_fused_stage(tmp_path):
 def test_written_operand_sum_uses_selected_numeric_facts_and_refuses_bad_scales(tmp_path):
     evidence = _evidence()
     evidence.software_spec["numerical_semantics"]["readout"] = {
-        "acc_scale_rounding": "half_even", "narrowing": "saturate_to_declared_dtype"
+        "acc_scale_rounding": "half_even",
+        "narrowing": "saturate_to_declared_dtype",
     }
-    evidence.software_spec["operations"].append({
-        "id": "sum_readout", "families": ["elementwise_map"], "placement": "fused_accelerator",
-        "signature": {"dtypes": ["int8"], "composed_with": ["residual_add"], "epilogues": ["relu"]},
-        "derived_from_facts": {"form": "fused_operand_sum", "family": "elementwise_map"},
-    })
-    evidence.readout_facets = [{
-        "operand_sum": {"operands": 2, "operand_dtype": "i8", "operand_rounding": "half_even",
-                        "operand_saturates": True, "scale_dtype": "f32"},
-        "readouts": [{"selector": "i8", "applies": ["acc_scale", "relu"]}],
-        "scale": {"dtype": "f32", "granularities": ["tensor"]},
-    }]
+    evidence.software_spec["operations"].append(
+        {
+            "id": "sum_readout",
+            "families": ["elementwise_map"],
+            "placement": "fused_accelerator",
+            "signature": {"dtypes": ["int8"], "composed_with": ["residual_add"], "epilogues": ["relu"]},
+            "derived_from_facts": {"form": "fused_operand_sum", "family": "elementwise_map"},
+        }
+    )
+    evidence.readout_facets = [
+        {
+            "operand_sum": {
+                "operands": 2,
+                "operand_dtype": "i8",
+                "operand_rounding": "half_even",
+                "operand_saturates": True,
+                "scale_dtype": "f32",
+            },
+            "readouts": [{"selector": "i8", "applies": ["acc_scale", "relu"]}],
+            "scale": {"dtype": "f32", "granularities": ["tensor"]},
+        }
+    ]
     selected = _RESIDUAL_RELU.replace("output_dtype", "bound_lsb = 2 : i64, output_dtype")
     capsule, directory = _capsule(tmp_path, "selected", None, None, text=selected)
     screen = program_admission.screen_written(capsule, directory, target="fixture", evidence=evidence)
     assert screen["numeric_screens"][0]["status"] == "within_bound"
     assert screen["numeric_screens"][0]["pairs_checked"] == 65536
 
-    raw = selected.replace('epilogue = ["relu"]', 'epilogue = []')
+    raw = selected.replace('epilogue = ["relu"]', "epilogue = []")
     capsule, directory = _capsule(tmp_path, "raw", None, None, text=raw)
     raw_screen = program_admission.screen_written(capsule, directory, target="fixture", evidence=evidence)
     assert raw_screen["numeric_screens"][0]["form"] == "standalone_operand_sum"
@@ -253,23 +273,39 @@ def test_written_operand_sum_uses_selected_numeric_facts_and_refuses_bad_scales(
 def test_reviewed_operand_sum_stage_requires_its_concrete_numeric_witness(tmp_path):
     evidence = _evidence()
     evidence.software_spec["numerical_semantics"]["readout"] = {
-        "acc_scale_rounding": "half_even", "narrowing": "saturate_to_declared_dtype"
+        "acc_scale_rounding": "half_even",
+        "narrowing": "saturate_to_declared_dtype",
     }
-    evidence.software_spec["operations"].append({
-        "id": "sum_readout", "families": ["elementwise_map"], "placement": "fused_accelerator",
-        "numerical_contract": "operand_sum_exhaustive_i8_v1",
-        "signature": {"dtypes": ["int8"], "composed_with": ["residual_add"], "epilogues": ["relu"]},
-        "derived_from_facts": {"form": "fused_operand_sum", "family": "elementwise_map"},
-    })
-    evidence.readout_facets = [{
-        "operand_sum": {"operands": 2, "operand_dtype": "i8", "operand_rounding": "half_even",
-                        "operand_saturates": True, "scale_dtype": "f32"},
-        "readouts": [{"selector": "i8", "applies": ["acc_scale", "relu"]}],
-        "scale": {"dtype": "f32", "granularities": ["tensor"]},
-    }]
+    evidence.software_spec["operations"].append(
+        {
+            "id": "sum_readout",
+            "families": ["elementwise_map"],
+            "placement": "fused_accelerator",
+            "numerical_contract": "operand_sum_exhaustive_i8_v1",
+            "signature": {"dtypes": ["int8"], "composed_with": ["residual_add"], "epilogues": ["relu"]},
+            "derived_from_facts": {"form": "fused_operand_sum", "family": "elementwise_map"},
+        }
+    )
+    evidence.readout_facets = [
+        {
+            "operand_sum": {
+                "operands": 2,
+                "operand_dtype": "i8",
+                "operand_rounding": "half_even",
+                "operand_saturates": True,
+                "scale_dtype": "f32",
+            },
+            "readouts": [{"selector": "i8", "applies": ["acc_scale", "relu"]}],
+            "scale": {"dtype": "f32", "granularities": ["tensor"]},
+        }
+    ]
     signature = {
-        "family": "elementwise_map", "operand_dtype": "i8", "readout_dtype": "i8",
-        "composed_with": ["residual_add"], "epilogues": ["relu"], "scale_granularity": "tensor",
+        "family": "elementwise_map",
+        "operand_dtype": "i8",
+        "readout_dtype": "i8",
+        "composed_with": ["residual_add"],
+        "epilogues": ["relu"],
+        "scale_granularity": "tensor",
     }
     declaration = {**evidence.software_spec, "operations": [evidence.software_spec["operations"][-1]]}
     no_witness = admit_operation(declaration, "relu", signature, "fused_accelerator")
@@ -279,7 +315,9 @@ def test_reviewed_operand_sum_stage_requires_its_concrete_numeric_witness(tmp_pa
     capsule, directory = _capsule(tmp_path, "selected-with-contract", None, None, text=selected)
     screen = program_admission.screen_written(capsule, directory, target="fixture", evidence=evidence)
     assert screen["numeric_screens"][0]["pairs_checked"] == 65536
-    entries = program_admission.account_interface(directory / "capsule.interface.mlir", target="fixture", evidence=evidence)
+    entries = program_admission.account_interface(
+        directory / "capsule.interface.mlir", target="fixture", evidence=evidence
+    )
     [relu] = [row for row in entries if row["operation"] == "relu"]
     [software] = [row for row in relu["software_admissions"] if row["declaration"] == "sum_readout"]
     assert software["status"] == "admitted"
@@ -290,7 +328,9 @@ def test_reviewed_operand_sum_stage_requires_its_concrete_numeric_witness(tmp_pa
     screen = program_admission.screen_written(capsule, directory, target="fixture", evidence=evidence)
     assert screen["status"] == "unsupported"
     assert screen["numeric_screens"][0]["max_error_lsb"] == 5
-    entries = program_admission.account_interface(directory / "capsule.interface.mlir", target="fixture", evidence=evidence)
+    entries = program_admission.account_interface(
+        directory / "capsule.interface.mlir", target="fixture", evidence=evidence
+    )
     [relu] = [row for row in entries if row["operation"] == "relu"]
     [software] = [row for row in relu["software_admissions"] if row["declaration"] == "sum_readout"]
     assert software["status"] == "unsupported"

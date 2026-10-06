@@ -100,9 +100,7 @@ class ToolchainPaths:
         # without exposing an ungranted checkout tree.
         legacy_source = repo / "merlin/python"
         import_roots = (
-            (str(legacy_source), str(python_source_dir()))
-            if legacy_source.is_dir()
-            else (str(python_source_dir()),)
+            (str(legacy_source), str(python_source_dir())) if legacy_source.is_dir() else (str(python_source_dir()),)
         )
         return cls(
             repo=repo,

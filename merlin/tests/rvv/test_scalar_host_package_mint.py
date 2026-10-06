@@ -64,8 +64,11 @@ def test_scalar_package_loader_refuses_vector_march(tmp_path):
     root = repo_root()
     environment = {**os.environ, "MERLIN_OUT_ROOT": str(tmp_path / "out")}
     subprocess.run(
-        [sys.executable, str(root / "build_tools/scripts/mint_scalar_host_package.py"),
-         str(root / "examples/gemmini/target/scalar-host-recipe.yaml")],
+        [
+            sys.executable,
+            str(root / "build_tools/scripts/mint_scalar_host_package.py"),
+            str(root / "examples/gemmini/target/scalar-host-recipe.yaml"),
+        ],
         env=environment,
         check=True,
         capture_output=True,

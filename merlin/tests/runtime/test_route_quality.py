@@ -364,14 +364,15 @@ def test_clean_host_compute_guard_refuses_absent_report_or_host_ir():
 
 def test_direct_llvm_helper_call_cannot_hide_tensor_compute_or_opaque_work():
     """A void helper's work is invisible to a walk limited to the selected kernel function."""
+
     def kernel_with_helper(helper: str, call: str):
         context = make_context()
         context.load_dialect(LLVM)
         module = parse_mlir_text(
-            "builtin.module { " + helper + " llvm.func @kernel(%t: !llvm.ptr, %n: i64) { "
-            + call + " llvm.return } }", context)
-        return next(op for op in module.body.block.ops
-                    if op.name == "llvm.func" and op.sym_name.data == "kernel")
+            "builtin.module { " + helper + " llvm.func @kernel(%t: !llvm.ptr, %n: i64) { " + call + " llvm.return } }",
+            context,
+        )
+        return next(op for op in module.body.block.ops if op.name == "llvm.func" and op.sym_name.data == "kernel")
 
     tensor_helper = """llvm.func @helper(%p: !llvm.ptr) {
       %v = llvm.load %p : !llvm.ptr -> i64
@@ -381,8 +382,7 @@ def test_direct_llvm_helper_call_cannot_hide_tensor_compute_or_opaque_work():
       llvm.return
     }"""
     tensor_call = "llvm.call @helper(%t) {merlin.global_task = 0 : i64} : (!llvm.ptr) -> ()"
-    report = rq.host_compute(_buffer(["convolution"]),
-                             function=kernel_with_helper(tensor_helper, tensor_call))
+    report = rq.host_compute(_buffer(["convolution"]), function=kernel_with_helper(tensor_helper, tensor_call))
     assert report.status == rq.STATUS_REPORTED, report.to_dict()
     assert report.findings[0].on_tensor == 1
     with pytest.raises(rq.HostComputeViolation, match="accepted task"):
@@ -397,20 +397,22 @@ def test_direct_llvm_helper_call_cannot_hide_tensor_compute_or_opaque_work():
       llvm.return
     }"""
     address_call = "llvm.call @helper(%t, %n) {merlin.global_task = 0 : i64} : (!llvm.ptr, i64) -> ()"
-    clean = rq.host_compute(_buffer(["convolution"]),
-                            function=kernel_with_helper(addressing_helper, address_call))
+    clean = rq.host_compute(_buffer(["convolution"]), function=kernel_with_helper(addressing_helper, address_call))
     assert clean.status == rq.STATUS_OK, clean.to_dict()
     assert clean.tasks[0].on_addressing == 1
     rq.require_clean_host_compute(clean)
 
-    opaque = rq.host_compute(_buffer(["convolution"]),
-                             function=kernel_with_helper("llvm.func @helper(!llvm.ptr)", tensor_call))
+    opaque = rq.host_compute(
+        _buffer(["convolution"]), function=kernel_with_helper("llvm.func @helper(!llvm.ptr)", tensor_call)
+    )
     assert opaque.status == rq.STATUS_INCOMPLETE, opaque.to_dict()
     with pytest.raises(rq.HostComputeUnverified, match="no resolved local callee body"):
         rq.require_clean_host_compute(opaque)
 
-    unattributed = rq.host_compute(_buffer(["convolution"]), function=kernel_with_helper(
-        tensor_helper, tensor_call.replace(" {merlin.global_task = 0 : i64}", "")))
+    unattributed = rq.host_compute(
+        _buffer(["convolution"]),
+        function=kernel_with_helper(tensor_helper, tensor_call.replace(" {merlin.global_task = 0 : i64}", "")),
+    )
     assert unattributed.status == rq.STATUS_INCOMPLETE
     with pytest.raises(rq.HostComputeUnverified, match="task attribution"):
         rq.require_clean_host_compute(unattributed)
@@ -421,14 +423,12 @@ def test_direct_llvm_helper_call_cannot_hide_tensor_compute_or_opaque_work():
     }"""
     recursive_call = """%v = llvm.load %t : !llvm.ptr -> i64
       %answer = llvm.call @helper(%v) {merlin.global_task = 0 : i64} : (i64) -> i64"""
-    undecided = rq.host_compute(_buffer(["convolution"]),
-                                 function=kernel_with_helper(recursive, recursive_call))
+    undecided = rq.host_compute(_buffer(["convolution"]), function=kernel_with_helper(recursive, recursive_call))
     assert undecided.status == rq.STATUS_INCOMPLETE, undecided.to_dict()
     with pytest.raises(rq.HostComputeUnverified, match="recursive call"):
         rq.require_clean_host_compute(undecided)
 
-    host_island = rq.host_compute(_buffer(["host"]),
-                                  function=kernel_with_helper(tensor_helper, tensor_call))
+    host_island = rq.host_compute(_buffer(["host"]), function=kernel_with_helper(tensor_helper, tensor_call))
     assert host_island.status == rq.STATUS_OK and host_island.coverage == 1
 
 

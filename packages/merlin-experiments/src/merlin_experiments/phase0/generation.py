@@ -354,8 +354,11 @@ def generate_target(
             raise ValueError(f"derived-only Phase 0 refuses authored capsule membership: {authored}")
     if evidence_mode not in (None, "diagnostic", "verified"):
         raise ValueError("evidence_mode must be diagnostic or verified")
-    if evidence_mode == "verified" and evidence_input is None and software_spec is None and not profile.get(
-        "_software_spec_path"
+    if (
+        evidence_mode == "verified"
+        and evidence_input is None
+        and software_spec is None
+        and not profile.get("_software_spec_path")
     ):
         raise ValueError("verified Phase 0 requires selected software and hardware evidence")
     evidence = None

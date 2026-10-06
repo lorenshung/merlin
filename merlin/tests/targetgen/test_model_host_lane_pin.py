@@ -7,8 +7,8 @@ arrives as ``mesh_package``; the latter is frozen experiment infrastructure decl
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import shutil
 from pathlib import Path
 
@@ -123,21 +123,28 @@ def test_board_catalog_rejects_malformed_host_dts_pin(tmp_path):
     from merlin.runtime.boards import BoardRegistryError, load_boards
 
     catalog = tmp_path / "boards.yaml"
-    catalog.write_text(yaml.safe_dump({
-        "schema_version": 1,
-        "boards": {"rocket": {
-            "dram_bytes": 1 << 28,
-            "dram_base": 0x80000000,
-            "harts": 1,
-            "console": "htif",
-            "flow": "baremetal",
-            "loader": "uart_tsi",
-            "loader_baud": 921600,
-            "code_reserve": 1 << 20,
-            "target": "gemmini",
-            "host_dts_sha256": "not-a-digest",
-        }},
-    }), encoding="utf-8")
+    catalog.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "boards": {
+                    "rocket": {
+                        "dram_bytes": 1 << 28,
+                        "dram_base": 0x80000000,
+                        "harts": 1,
+                        "console": "htif",
+                        "flow": "baremetal",
+                        "loader": "uart_tsi",
+                        "loader_baud": 921600,
+                        "code_reserve": 1 << 20,
+                        "target": "gemmini",
+                        "host_dts_sha256": "not-a-digest",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     with pytest.raises(BoardRegistryError, match="host_dts_sha256 must be a lowercase SHA256"):
         load_boards(catalog)
 

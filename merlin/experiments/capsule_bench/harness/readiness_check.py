@@ -1389,7 +1389,8 @@ def test_oracles_endtoend():
                             "measured_by": "readiness_check",
                         },
                         sort_keys=True,
-                    ) + "\n"
+                    )
+                    + "\n"
                 )
                 _ok("wrote target-bound oracle timing record", True, f"{selected} T_obs={dt:.0f}s")
         # WHICH ENGINE WOULD CERTIFY, AND WHAT IT WAS CHOSEN OVER — reported, never gated.

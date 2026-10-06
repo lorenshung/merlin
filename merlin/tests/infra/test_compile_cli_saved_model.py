@@ -19,9 +19,24 @@ def test_explicit_saved_model_route_and_input_guards(monkeypatch, capsys):
 
     monkeypatch.setattr(baremetal_model, "compile_saved_model", build)
     args = [
-        "--model-build", "--target", "test_device", "--capture-bundle", "/unused/capture",
-        "--package", "/unused/host", "--board-catalog", "/unused/boards.yaml", "--board", "selected",
-        "--host-dts", "/unused/host.dts", "--output", "/unused/out", "--arena-mb", "32", "--json",
+        "--model-build",
+        "--target",
+        "test_device",
+        "--capture-bundle",
+        "/unused/capture",
+        "--package",
+        "/unused/host",
+        "--board-catalog",
+        "/unused/boards.yaml",
+        "--board",
+        "selected",
+        "--host-dts",
+        "/unused/host.dts",
+        "--output",
+        "/unused/out",
+        "--arena-mb",
+        "32",
+        "--json",
     ]
     assert main(args) == 0
     assert json.loads(capsys.readouterr().out)["execution_route"] == "host_baseline"

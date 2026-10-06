@@ -279,9 +279,12 @@ def screen_run(
     # screen into measured evidence. The combined advisory must preserve that
     # uncertainty; the scientific oracle still runs for anything but reject.
     res["verdict"] = (
-        "reject" if fc_fail or rep.verdict == "reject"
-        else "warn" if rep.verdict == "warn"
-        else RC.CheckReport.VACUOUS if rep.verdict == RC.CheckReport.VACUOUS
+        "reject"
+        if fc_fail or rep.verdict == "reject"
+        else "warn"
+        if rep.verdict == "warn"
+        else RC.CheckReport.VACUOUS
+        if rep.verdict == RC.CheckReport.VACUOUS
         else "ok"
     )
     if write:

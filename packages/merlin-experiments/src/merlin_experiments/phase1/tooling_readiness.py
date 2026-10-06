@@ -37,9 +37,7 @@ def _grant_checks(te, bundle: dict, tools: tuple[str, ...]) -> list[dict]:
     # one selected package root from that exact manifest grant, then require
     # each remaining registry path under the same root.
     anchors = {
-        Path(path.rstrip("/")).parent
-        for path in allowed
-        if path.startswith("/") and path.endswith("/merlin/common/")
+        Path(path.rstrip("/")).parent for path in allowed if path.startswith("/") and path.endswith("/merlin/common/")
     }
     if len(anchors) > 1:
         raise RuntimeError("selected bundle has multiple Merlin Python source roots")

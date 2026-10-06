@@ -88,15 +88,24 @@ def test_group_audit_refuses_unverified_selected_facts_before_grouping(monkeypat
     facts.write_text(json.dumps({"facts": {"target": "gemmini"}, "source_consistency": {"status": "unverified"}}))
     selected = declarations.for_target("gemmini")
     monkeypatch.setattr(group_capsules, "_experiment", lambda *_args: (object(), selected))
-    monkeypatch.setattr(group_capsules, "entries", lambda *_args, **_kwargs: pytest.fail("grouped before facts admission"))
+    monkeypatch.setattr(
+        group_capsules, "entries", lambda *_args, **_kwargs: pytest.fail("grouped before facts admission")
+    )
     if not explicit:
         monkeypatch.setenv("MERLIN_RTL_FACTS", str(facts))
     with pytest.raises(ValueError, match="verified RTL facts"):
-        group_capsules.main([
-            "--target", "gemmini", "--capture", str(tmp_path / "unused.mlir"),
-            "--out", str(tmp_path / "report"), "--plan-only",
-            *(["--rtl-facts", str(facts)] if explicit else []),
-        ])
+        group_capsules.main(
+            [
+                "--target",
+                "gemmini",
+                "--capture",
+                str(tmp_path / "unused.mlir"),
+                "--out",
+                str(tmp_path / "report"),
+                "--plan-only",
+                *(["--rtl-facts", str(facts)] if explicit else []),
+            ]
+        )
     assert not (tmp_path / "report").exists()
 
 

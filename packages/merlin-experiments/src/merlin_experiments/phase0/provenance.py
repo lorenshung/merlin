@@ -109,17 +109,15 @@ def _verify_frontend_evidence_dir(directory: Path) -> None:
     portability = evidence.get("source_portability")
     if not isinstance(portability, dict):
         raise ValueError("frontend source portability receipt is absent")
-    if (
-        portability.get("raw_sha256") != evidence.get("raw_source_mlir_sha256")
-        or portability.get("emitted_sha256") != evidence.get("source_mlir_sha256")
-    ):
+    if portability.get("raw_sha256") != evidence.get("raw_source_mlir_sha256") or portability.get(
+        "emitted_sha256"
+    ) != evidence.get("source_mlir_sha256"):
         raise ValueError("frontend source portability receipt is inconsistent")
     declared_mlir = json.loads((directory / "frontend-trace.json").read_bytes()).get("mlir") or {}
     if evidence.get("raw_source_trace_bound"):
-        if (
-            declared_mlir.get("sha256") != evidence["raw_source_mlir_sha256"]
-            or declared_mlir.get("bytes") != evidence.get("raw_source_mlir_bytes")
-        ):
+        if declared_mlir.get("sha256") != evidence["raw_source_mlir_sha256"] or declared_mlir.get(
+            "bytes"
+        ) != evidence.get("raw_source_mlir_bytes"):
             raise ValueError("frontend raw source differs from its selected trace")
     sidecars = evidence.get("weights_sidecars")
     if sidecars is not None and (
@@ -192,6 +190,7 @@ def _capture_failure_reason(exc: Exception) -> str:
     thing that was raised. Taking merely the last non-empty line got this wrong on a real case: the
     export refusal ends with a trailing frame, and the recorded reason came out as ``next(self.gen)``.
     """
+
     def summary(error: Exception) -> str:
         lines = [ln for ln in str(error).splitlines() if ln.strip()]
         flush = [ln for ln in lines if ln[:1] not in (" ", "\t")]
@@ -296,7 +295,8 @@ def update_provenance_manifest(
     man["hand_authored"] = sorted(hand)
     man["refused_generated"] = sorted(refused)
     man["held_out"] = {
-        "n_generated": len(held_gen), "n_hand_authored": len(held_hand),
+        "n_generated": len(held_gen),
+        "n_hand_authored": len(held_hand),
         "n_refused_generated": len(held_refused),
     }
     if target is not None:

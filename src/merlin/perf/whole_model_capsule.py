@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+
 class WholeModelBuildError(RuntimeError):
     """The whole model cannot be built as one program, and the message says which part stopped it."""
 

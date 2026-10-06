@@ -32,7 +32,14 @@ def test_clang_for_another_checkout_reads_that_checkout_not_this_process(tmp_pat
 def test_selected_mlir_install_is_used_consistently(tmp_path, monkeypatch):
     install = tmp_path / "llvm"
     monkeypatch.setenv("MERLIN_MLIR_INSTALL", str(install))
-    for name in ("MERLIN_CLANG", "MERLIN_MLIR_TRANSLATE", "MERLIN_OBJDUMP", "MERLIN_OBJCOPY", "MERLIN_NM", "MERLIN_READELF"):
+    for name in (
+        "MERLIN_CLANG",
+        "MERLIN_MLIR_TRANSLATE",
+        "MERLIN_OBJDUMP",
+        "MERLIN_OBJCOPY",
+        "MERLIN_NM",
+        "MERLIN_READELF",
+    ):
         monkeypatch.delenv(name, raising=False)
     bin_dir = install / "bin"
     bin_dir.mkdir(parents=True)

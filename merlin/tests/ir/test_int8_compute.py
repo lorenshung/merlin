@@ -555,7 +555,8 @@ def test_lower_silu_int_removes_math_exp(tmp_path):
     assert sum(1 for op in module.walk() if op.name == "math.exp") == 0
     assert any(op.name in ("arith.muli", "arith.shrsi") for op in module.walk())
     replacements = [
-        op for op in module.walk()
+        op
+        for op in module.walk()
         if op.name == "linalg.generic" and getattr(op.attributes.get("prov.region_id"), "data", None) == "sigmoid_0"
     ]
     assert len(replacements) == 1

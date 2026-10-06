@@ -730,20 +730,30 @@ def epilogue_stage_routes(target: str):
             continue
         if any(not isinstance(row.get(key), str) or not row[key] for key in scalar_keys):
             continue
-        if any(not isinstance(row.get(key), Sequence) or isinstance(row[key], (str, bytes))
-               or not row[key] or any(not isinstance(x, str) or not x for x in row[key]) for key in vector_keys):
+        if any(
+            not isinstance(row.get(key), Sequence)
+            or isinstance(row[key], (str, bytes))
+            or not row[key]
+            or any(not isinstance(x, str) or not x for x in row[key])
+            for key in vector_keys
+        ):
             continue
         for stage in stages:
             if not isinstance(stage, str) or stage not in EPILOGUE_STAGE_SET:
                 continue
-            routes.append(StageRoute(
-                stage=str(stage), site=str(row["site"]), composed_with=str(row["composed_with"]),
-                readouts=frozenset(str(x) for x in row["readouts"]),
-                producer_opcodes=frozenset(str(x) for x in row["producer_opcodes"]),
-                consumer_opcodes=frozenset(str(x) for x in row["consumer_opcodes"]),
-                operand_attribute=str(row["operand_attribute"]), operand_role=str(row["operand_role"]),
-                evidence=str(row["evidence"]),
-            ))
+            routes.append(
+                StageRoute(
+                    stage=str(stage),
+                    site=str(row["site"]),
+                    composed_with=str(row["composed_with"]),
+                    readouts=frozenset(str(x) for x in row["readouts"]),
+                    producer_opcodes=frozenset(str(x) for x in row["producer_opcodes"]),
+                    consumer_opcodes=frozenset(str(x) for x in row["consumer_opcodes"]),
+                    operand_attribute=str(row["operand_attribute"]),
+                    operand_role=str(row["operand_role"]),
+                    evidence=str(row["evidence"]),
+                )
+            )
     return tuple(routes)
 
 

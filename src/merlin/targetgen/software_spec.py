@@ -58,14 +58,9 @@ def validate_quantization_parameters(parameters: object, *, source: str) -> dict
         or any(type(value) is not int for value in parameters.values())
     ):
         raise ValueError(
-            f"{source}: quantization_parameters must contain exact integer "
-            "zero_point/quant_min/quant_max constraints"
+            f"{source}: quantization_parameters must contain exact integer zero_point/quant_min/quant_max constraints"
         )
-    if (
-        "quant_min" in parameters
-        and "quant_max" in parameters
-        and parameters["quant_min"] > parameters["quant_max"]
-    ):
+    if "quant_min" in parameters and "quant_max" in parameters and parameters["quant_min"] > parameters["quant_max"]:
         raise ValueError(f"{source}: inverted quantization bounds")
     return parameters
 
@@ -210,10 +205,7 @@ def validate_software_spec(document: dict, target: str | None = None, *, source:
             raise ValueError(f"{source}: operation {row['id']!r} has an invalid review status")
         if "numerical_contract" in row and (
             not isinstance(row["numerical_contract"], (str, dict))
-            or (
-                isinstance(row["numerical_contract"], str)
-                and row["numerical_contract"] not in _NUMERICAL_CONTRACTS
-            )
+            or (isinstance(row["numerical_contract"], str) and row["numerical_contract"] not in _NUMERICAL_CONTRACTS)
         ):
             raise ValueError(f"{source}: operation {row['id']!r} has an unsupported numerical contract")
         # The author names constraints directly; consumers keep one canonical
@@ -536,8 +528,10 @@ def admit_operation(spec: dict, op: str, signature: dict, placement: str) -> dic
             )
             if not valid or witness.get("status") not in {"within_bound", "exceeds_bound"}:
                 missing.append("numerical_contract")
-            elif witness["status"] == "exceeds_bound" or witness["n_over_bound"] != 0 or (
-                witness["max_error_lsb"] > parameters["bound_lsb"]
+            elif (
+                witness["status"] == "exceeds_bound"
+                or witness["n_over_bound"] != 0
+                or (witness["max_error_lsb"] > parameters["bound_lsb"])
             ):
                 refused.append("numerical_contract exceeds the selected fact-derived error bound")
         for axis, bounds in (constraints.get("shape_bounds") or {}).items():

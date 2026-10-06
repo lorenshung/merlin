@@ -236,11 +236,17 @@ def fact_capabilities(
                     f"{facet.get('unit')} readout {readout.get('selector')!r}: {readout.get('evidence')}"
                 )
             for route in facet.get("stage_routes") or ():
-                if (not isinstance(route, Mapping) or route.get("composed_with") != "contraction"
-                        or route.get("site") != "accumulator_seed"):
+                if (
+                    not isinstance(route, Mapping)
+                    or route.get("composed_with") != "contraction"
+                    or route.get("site") != "accumulator_seed"
+                ):
                     continue
-                routed = [_stage(stage) for stage in route.get("stages") or ()
-                          if from_op(str(stage)) in (None, "elementwise_map")]
+                routed = [
+                    _stage(stage)
+                    for stage in route.get("stages") or ()
+                    if from_op(str(stage)) in (None, "elementwise_map")
+                ]
                 stages.update(routed)
                 dtypes.update(_dtype(selector) for selector in route.get("readouts") or ())
                 if routed:
@@ -373,8 +379,11 @@ def _forms(*, families, derived, declared, contract, facets, storage) -> dict[st
                         f"{facet.get('unit')} readout {readout.get('selector')!r} applies {sorted(applied)}"
                     )
             for route in facet.get("stage_routes") or ():
-                if (not isinstance(route, Mapping) or route.get("composed_with") != "contraction"
-                        or route.get("site") != "accumulator_seed"):
+                if (
+                    not isinstance(route, Mapping)
+                    or route.get("composed_with") != "contraction"
+                    or route.get("site") != "accumulator_seed"
+                ):
                     continue
                 applied = {_stage(stage) for stage in route.get("stages") or () if from_op(str(stage)) == family}
                 if applied:
@@ -417,9 +426,7 @@ def _forms(*, families, derived, declared, contract, facets, storage) -> dict[st
                     if not isinstance(readout, Mapping) or _dtype(readout.get("selector")) != _dtype(operand_dtype):
                         continue
                     applied = {
-                        _stage(stage)
-                        for stage in readout.get("applies") or ()
-                        if from_op(str(stage)) in (None, family)
+                        _stage(stage) for stage in readout.get("applies") or () if from_op(str(stage)) in (None, family)
                     }
                     if applied:
                         eligible.append((facet, readout, applied))
@@ -631,7 +638,8 @@ def validate_restrictions(spec: Mapping[str, Any]) -> list[dict]:
             raise ValueError("restriction family must be a nonempty string")
         if "declaration" in row:
             matching = [
-                declaration for declaration in spec.get("operations") or ()
+                declaration
+                for declaration in spec.get("operations") or ()
                 if isinstance(declaration, Mapping) and declaration.get("id") == row["declaration"]
             ]
             if (

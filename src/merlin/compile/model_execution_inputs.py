@@ -72,9 +72,14 @@ def require_elf_isa_supported(arch: list[str], host_isa: str, *, require_scalar:
         if "d" in available:
             available.add("zcd")
     missing = sorted(required - available)
-    if elf_xlen != host_xlen or missing or (require_scalar and any(
-        extension == "v" or extension.startswith(("zve", "zvl", "zv")) for extension in required
-    )):
+    if (
+        elf_xlen != host_xlen
+        or missing
+        or (
+            require_scalar
+            and any(extension == "v" or extension.startswith(("zve", "zvl", "zv")) for extension in required)
+        )
+    ):
         compatibility = "scalar-compatible" if require_scalar else "compatible"
         raise ModelExecutionInputError(f"ELF ISA is not {compatibility} with selected CPU: {missing or arch}")
 
@@ -95,13 +100,23 @@ def selected_firrtl(path: str | Path, *, target: str, config: str) -> dict[str, 
     row = rows[0]
     firrtl = Path(str(row.get("path") or ""))
     digest = row.get("sha256")
-    if (not firrtl.is_absolute() or firrtl.is_symlink() or not firrtl.is_file()
-            or not isinstance(digest, str) or len(digest) != 64
-            or digest != inputs.get("fir_sha256") or file_sha256(firrtl) != digest):
+    if (
+        not firrtl.is_absolute()
+        or firrtl.is_symlink()
+        or not firrtl.is_file()
+        or not isinstance(digest, str)
+        or len(digest) != 64
+        or digest != inputs.get("fir_sha256")
+        or file_sha256(firrtl) != digest
+    ):
         raise ModelExecutionInputError("selected RTL facts have no byte-verified FIRRTL input")
     return {
-        "path": str(source), "sha256": file_sha256(source),
-        "firrtl": str(firrtl.resolve()), "firrtl_sha256": digest, "target": target, "config": config,
+        "path": str(source),
+        "sha256": file_sha256(source),
+        "firrtl": str(firrtl.resolve()),
+        "firrtl_sha256": digest,
+        "target": target,
+        "config": config,
     }
 
 
@@ -123,18 +138,23 @@ def native_engine(target: str, simulator: str, facts: dict[str, str]):
         env_var = getattr(backend, "GSIM_EMU_ENV", None)
         citation = gsim_emulator.citation(target, env_var=env_var)
         receipt = citation.get("receipt") or {}
-        if (citation.get("available") is not True or citation.get("refused") is not False
-                or citation.get("flavour") != "binary" or citation.get("receipt_status") != "bound"
-                or receipt.get("schema_version") != gsim_emulator.STRICT_RECEIPT_SCHEMA
-                or receipt.get("firrtl_sha256") != facts["firrtl_sha256"]):
+        if (
+            citation.get("available") is not True
+            or citation.get("refused") is not False
+            or citation.get("flavour") != "binary"
+            or citation.get("receipt_status") != "bound"
+            or receipt.get("schema_version") != gsim_emulator.STRICT_RECEIPT_SCHEMA
+            or receipt.get("firrtl_sha256") != facts["firrtl_sha256"]
+        ):
             raise ModelExecutionInputError("GSIM has no bound v3 receipt for the selected FIRRTL")
         engine_path = Path(str(citation.get("path") or ""))
         selected_path = getattr(backend, "gsim_path", None)
         prepare = getattr(backend, "prepare_gsim_command", None)
         if not callable(selected_path) or not callable(prepare) or not engine_path.is_file():
             raise ModelExecutionInputError("GSIM backend lacks a citable engine or command revalidator")
-        if (Path(selected_path()).resolve() != engine_path.resolve()
-                or file_sha256(engine_path) != citation.get("binary_sha256")):
+        if Path(selected_path()).resolve() != engine_path.resolve() or file_sha256(engine_path) != citation.get(
+            "binary_sha256"
+        ):
             raise ModelExecutionInputError("GSIM backend would run different engine bytes than its citation")
 
         def revalidate() -> None:
@@ -167,16 +187,22 @@ def native_engine(target: str, simulator: str, facts: dict[str, str]):
         if not engine_path.is_file() or file_sha256(engine_path) != binary_pin.digest:
             raise ModelExecutionInputError("Verilator backend would run bytes outside its selected pin")
         citation = {
-            "target": target, "engine": simulator, "path": str(engine_path),
-            "binary_pin": binary_pin.name, "binary_sha256": binary_pin.digest,
-            "firrtl_pin": firrtl_pin.name, "firrtl_sha256": firrtl_pin.digest,
+            "target": target,
+            "engine": simulator,
+            "path": str(engine_path),
+            "binary_pin": binary_pin.name,
+            "binary_sha256": binary_pin.digest,
+            "firrtl_pin": firrtl_pin.name,
+            "firrtl_sha256": firrtl_pin.digest,
             "config": facts["config"],
         }
 
         def revalidate() -> None:
-            if (Path(selected_path()).resolve() != engine_path
-                    or file_sha256(engine_path) != binary_pin.digest
-                    or any(provenance.verify_artifact(item.name).matches is not True for item in selected.values())):
+            if (
+                Path(selected_path()).resolve() != engine_path
+                or file_sha256(engine_path) != binary_pin.digest
+                or any(provenance.verify_artifact(item.name).matches is not True for item in selected.values())
+            ):
                 raise ModelExecutionInputError("Verilator engine or hardware pins changed during qualification")
 
         return backend, citation, revalidate, None

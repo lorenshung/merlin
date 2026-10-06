@@ -15,7 +15,10 @@ from typing import Any
 
 def _validate_normalization_recipe(recipe: dict) -> dict:
     if not isinstance(recipe, dict) or set(recipe) != {
-        "int8_compute", "quant_passes", "prequant_gather", "selection_policy"
+        "int8_compute",
+        "quant_passes",
+        "prequant_gather",
+        "selection_policy",
     }:
         raise ValueError("model normalization recipe is malformed")
     if (
@@ -60,7 +63,10 @@ def record_model_transform_audit(
     from ..xdsl_dialects._common import text as to_text
 
     source_text = source.read_text(encoding="utf-8")
-    if expected_source_sha256 is not None and hashlib.sha256(source_text.encode("utf-8")).hexdigest() != expected_source_sha256:
+    if (
+        expected_source_sha256 is not None
+        and hashlib.sha256(source_text.encode("utf-8")).hexdigest() != expected_source_sha256
+    ):
         raise ValueError("model source changed between parse and transformation audit")
     with IrAudit(
         workdir,
@@ -72,7 +78,10 @@ def record_model_transform_audit(
         if normalization_recipe is not None:
             audit.accounting(
                 "normalization-recipe",
-                {"schema": "merlin.model_normalization_recipe.v1", **_validate_normalization_recipe(normalization_recipe)},
+                {
+                    "schema": "merlin.model_normalization_recipe.v1",
+                    **_validate_normalization_recipe(normalization_recipe),
+                },
             )
         audit.stage("captured-model", source_text)
         # Generic MLIR is the replayable serialization: xDSL's custom printer
@@ -104,7 +113,11 @@ def qualify_model_transform_audit(index_path: Path) -> dict[str, Any]:
         raise ValueError("model transform audit did not complete with exact IR")
     stages = index.get("stages")
     expected = ("captured-model", "normalized-model", "outlined-model")
-    if not isinstance(stages, list) or tuple(stage.get("name") for stage in stages if isinstance(stage, dict)) != expected or len(stages) != 3:
+    if (
+        not isinstance(stages, list)
+        or tuple(stage.get("name") for stage in stages if isinstance(stage, dict)) != expected
+        or len(stages) != 3
+    ):
         raise ValueError("model transform audit has no exact three-stage sequence")
     sidecars = index.get("sidecars")
     if (
@@ -147,7 +160,9 @@ def qualify_model_transform_audit(index_path: Path) -> dict[str, Any]:
     receipts = index.get("accounting_receipts", [])
     if not isinstance(receipts, list):
         raise ValueError("model transform audit receipts are malformed")
-    recipe_descriptors = [row for row in receipts if isinstance(row, dict) and row.get("name") == "normalization-recipe"]
+    recipe_descriptors = [
+        row for row in receipts if isinstance(row, dict) and row.get("name") == "normalization-recipe"
+    ]
     if len(recipe_descriptors) > 1:
         raise ValueError("model transform audit has duplicate normalization recipes")
     if recipe_descriptors:

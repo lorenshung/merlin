@@ -182,7 +182,7 @@ def _captured_input_formats(op) -> tuple[str | None, ...]:
     precision cannot change the format the captured computation actually reads.
     """
     getter = getattr(op, "get_inputs", None)
-    inputs = tuple(getter()) if callable(getter) else tuple(op.operands[:len(op.operands) - len(op.results)])
+    inputs = tuple(getter()) if callable(getter) else tuple(op.operands[: len(op.operands) - len(op.results)])
     formats: list[str | None] = []
     for value in inputs:
         typ = value.type
