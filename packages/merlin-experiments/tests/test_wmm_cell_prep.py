@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 
 import pytest
+import wmm_fixtures as FX
 from merlin_experiments.phase2.whole_model_measured import cell_prep as CP
 from merlin_experiments.phase2.whole_model_measured import cells as CELLS
 from merlin_experiments.phase2.whole_model_measured import forms as FORMS
@@ -28,6 +29,7 @@ LOOP = {
     "builder": {"spec": "b:build", "sha256": None},
     "store": "/store",
     "prohibited_instruction_roles": ["loop_descriptor"],
+    "instruction_policy": FX.sealed_policy(),
     "screen": {"build_options": {"machine": "board", "header": "/b.h", "prohibited_roles": ["loop_descriptor"]}},
     "certifier": {
         "build_options": {
@@ -67,6 +69,10 @@ def test_the_cell_config_is_the_loops_certifier_recipe_and_its_bar_carries_no_ru
     from merlin_experiments.phase2.whole_model_measured import config as CFG
 
     assert CFG.check_policy(config) == ["loop_descriptor"]  # the rule it is built under and judged by agree
+    assert config[CFG.SEALED_POLICY] == LOOP["instruction_policy"]  # and the sealed policy it is held to
+    unsealed = {k: v for k, v in LOOP.items() if k != "instruction_policy"}
+    with pytest.raises(CELLS.CellError, match="sealed Phase 0"):
+        CP.cell_objective_config(unsealed, machine=machine, reference="/ref.json", notice="CELL MODE")
 
 
 def test_prepare_measures_the_collateral_on_the_named_baseline_and_the_reference_once(tmp_path, monkeypatch):

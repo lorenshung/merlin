@@ -151,6 +151,7 @@ def prepare(
     oot: Any = None,
     environment: Mapping[str, str] | None = None,
     import_evidence: Path | None = None,
+    phase0_manifest: Path | None = None,
 ) -> PreparedRun:
     """Prepare one run: freeze its inputs by content, copy and commit its seed, write its objective
     config (policy stamped in, read-only) and the records that say what it is and where it came from.
@@ -159,7 +160,11 @@ def prepare(
     Phase 1 freeze -- another line's store, a champion measured elsewhere.  Its lineage is recorded as
     exactly that (``lineage_kind: imported``, ``frozen: false``) with the evidence by content, and the
     seed's bytes must be the bytes that evidence measured; an imported seed is never presented as a
-    Phase 1 freeze."""
+    Phase 1 freeze.
+
+    ``phase0_manifest`` is the sealed Phase 0 corpus manifest whose ``instruction_policy`` the declared
+    roles are held to (:func:`.config.seal_policy`); a run that declares roles and cannot find an
+    enforceable sealed policy is refused here, before anything is frozen."""
     if not str(why or "").strip():
         raise RunError("a prepared run states why it exists")
     if not method or "/" in method:
@@ -170,6 +175,11 @@ def prepare(
         raise RunError(f"the seed package {seed} is not a directory")
     previous = read_json(Path(resumed_from) / CONFIG_NAME) if resumed_from is not None else None
     config = CFG.with_policy(objective_config, roles)
+    try:
+        config = CFG.seal_policy(config, target=target, manifest=phase0_manifest)
+        CFG.check_policy(config)
+    except (CFG.ConfigError, OSError, ValueError) as exc:
+        raise RunError(f"the run's instruction rule is not enforceable: {exc}") from exc
     run_dir = Path(run_factory(target=target, method=method))
     frozen = freeze_inputs(run_dir, dict(inputs or {}))
     config = _substitute(config, frozen)
@@ -255,6 +265,7 @@ def prepare(
             "target": target,
             "method": method,
             "prohibited_instruction_roles": roles,
+            "instruction_policy_source": (config.get(CFG.SEALED_POLICY) or {}).get("sealed_source"),
             "config_sha256": config_sha256,
             "resumed_from_run": str(resumed_from) if resumed_from is not None else None,
         },
@@ -332,6 +343,7 @@ def resume(
     run_factory: Callable[..., Path] = _default_run_factory,
     oot: Any = None,
     environment: Mapping[str, str] | None = None,
+    phase0_manifest: Path | None = None,
 ) -> PreparedRun:
     """Prepare the next run of ``previous``: its method, roles, target and config carried over, its
     latest workspace as the seed, its store kept.  A caller that names a DIFFERENT method or roles is
@@ -380,6 +392,7 @@ def resume(
         run_factory=run_factory,
         oot=oot,
         environment=environment,
+        phase0_manifest=phase0_manifest,
     )
 
 

@@ -75,8 +75,15 @@ def _oot():
 def _prepare(args: argparse.Namespace):
     from . import runs as RUNS
 
+    manifest = Path(args.phase0_manifest) if getattr(args, "phase0_manifest", None) else None
     if args.resume:
-        return RUNS.resume(_latest_run(args.target, args.method), why=args.why, oot=_oot(), method=args.method)
+        return RUNS.resume(
+            _latest_run(args.target, args.method),
+            why=args.why,
+            oot=_oot(),
+            method=args.method,
+            phase0_manifest=manifest,
+        )
     return RUNS.prepare(
         target=args.target,
         method=args.method,
@@ -88,6 +95,7 @@ def _prepare(args: argparse.Namespace):
         why=args.why,
         oot=_oot(),
         import_evidence=Path(args.import_evidence) if args.import_evidence else None,
+        phase0_manifest=manifest,
     )
 
 
@@ -195,6 +203,12 @@ def _parser() -> argparse.ArgumentParser:
         child.add_argument("--seed", type=Path)
         child.add_argument("--input", action="append", default=[], help="name=path: a large input frozen by content")
         child.add_argument("--prohibited-instruction-role", action="append", default=[])
+        child.add_argument(
+            "--phase0-manifest",
+            type=Path,
+            help="the sealed Phase 0 corpus MANIFEST.yaml whose instruction_policy the roles are held to "
+            "(default: the config's phase0_manifest, else the selected descriptor's corpus manifest)",
+        )
         child.add_argument("--phase1-oot", type=Path)
         child.add_argument(
             "--import-evidence",
