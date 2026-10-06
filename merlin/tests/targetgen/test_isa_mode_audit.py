@@ -494,3 +494,19 @@ def test_cli_phase1_input_scope_succeeds_without_preexisting_dialect(tmp_path, c
     inventory_file.write_text(json.dumps(inventory))
     assert targetgen_main(command) == 1
     assert json.loads(capsys.readouterr().out)["status"] == "SOURCE_MISMATCH"
+
+
+def test_decode_controls_compare_at_the_selected_decoder_width():
+    """Rows of any width compare by value; a width the audit did not expect is not a silent match."""
+    census, inventory, plan = _inputs()
+    narrow = ["Y", "N", "Y"]
+    for row in census["rows"]:
+        row["decode_controls"] = narrow
+    for variant in inventory["variants"]:
+        variant["rtl_decode_controls"] = ",".join(narrow)
+    report = audit_mode_inventory(census, inventory, dialect_plan=plan)
+    assert "rtl_decode_controls_changed" not in report["counts"]["problem_kinds"]
+
+    inventory["variants"][0]["rtl_decode_controls"] = ",".join([*narrow, "N"])
+    report = audit_mode_inventory(census, inventory, dialect_plan=plan)
+    assert report["counts"]["problem_kinds"]["rtl_decode_controls_changed"] == 1

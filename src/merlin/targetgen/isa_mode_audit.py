@@ -79,7 +79,9 @@ def _controls(value: Any) -> tuple[str, ...] | None:
         fields = tuple(part.strip() for part in value)
     else:
         return None
-    return fields if len(fields) == 17 and all(fields) else None
+    # Width is whatever the selected decoder declares; comparing the ledger's row with the
+    # census row decides agreement, so no column count is assumed here.
+    return fields if fields and all(fields) else None
 
 
 def _mode_binding_problems(
