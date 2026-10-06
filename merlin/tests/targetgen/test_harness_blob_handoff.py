@@ -20,28 +20,37 @@ def test_blob_sidecar_assembles_to_exact_aligned_bytes(tmp_path):
     assert (tmp_path / "harness_blob_T_W.bin").read_bytes() == payload
     receipt = json.loads((tmp_path / "harness_blobs.json").read_text())
     assert receipt["schema"] == "merlin.harness_blobs.v1"
-    assert receipt["blobs"] == [{
-        "symbol": "T_W", "file": "harness_blob_T_W.bin",
-        "assembly": "harness_blob_T_W.S", "object": "harness_blob_T_W.o",
-        "sha256": hashlib.sha256(payload).hexdigest(), "bytes": 32,
-        "alignment": 16, "elements": 32,
-    }]
+    assert receipt["blobs"] == [
+        {
+            "symbol": "T_W",
+            "file": "harness_blob_T_W.bin",
+            "assembly": "harness_blob_T_W.S",
+            "object": "harness_blob_T_W.o",
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "bytes": 32,
+            "alignment": 16,
+            "elements": 32,
+        }
+    ]
     assert '.incbin "harness_blob_T_W.bin"' in source.read_text()
-    result = subprocess.run(["cc", "-c", source.name, "-o", "blob.o"], cwd=tmp_path,
-                            capture_output=True, text=True)
+    result = subprocess.run(["cc", "-c", source.name, "-o", "blob.o"], cwd=tmp_path, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    objcopy = subprocess.run(["objcopy", "--dump-section", ".rodata=blob.raw", "blob.o"],
-                             cwd=tmp_path, capture_output=True, text=True)
+    objcopy = subprocess.run(
+        ["objcopy", "--dump-section", ".rodata=blob.raw", "blob.o"], cwd=tmp_path, capture_output=True, text=True
+    )
     assert objcopy.returncode == 0, objcopy.stderr
     assert (tmp_path / "blob.raw").read_bytes() == payload
 
 
-@pytest.mark.parametrize("declaration", [
-    {"T/escape": {"bytes": b"x", "align": 1, "elems": 1}},
-    {"T_W": {"bytes": b"x", "align": 3, "elems": 1}},
-    {"T_W": {"bytes": b"x", "align": 1, "elems": 2}},
-    {"T_W": {"bytes": b"x", "align": 1, "elems": 0}},
-])
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        {"T/escape": {"bytes": b"x", "align": 1, "elems": 1}},
+        {"T_W": {"bytes": b"x", "align": 3, "elems": 1}},
+        {"T_W": {"bytes": b"x", "align": 1, "elems": 2}},
+        {"T_W": {"bytes": b"x", "align": 1, "elems": 0}},
+    ],
+)
 def test_invalid_blob_declarations_fail_closed(tmp_path, declaration):
     with pytest.raises(ValueError):
         stage_harness_blobs(tmp_path, declaration)
@@ -66,6 +75,10 @@ def test_generic_linker_passes_renderer_blobs_to_the_executable(tmp_path, monkey
         support_sources = ()
         error_cls = RuntimeError
 
+        def with_effective_abi(self):
+            # The host compiler's default ABI is the one both halves of this ELF are built for.
+            return self
+
         @staticmethod
         def compile_command(*, source, output):
             return ["cc", "-c", str(source), "-o", str(output)]
@@ -83,8 +96,7 @@ def test_generic_linker_passes_renderer_blobs_to_the_executable(tmp_path, monkey
     monkeypatch.setattr(base, "harness_renderer", lambda target: render)
     monkeypatch.setattr(runtime_build, "derived_link_script", lambda *args: tmp_path / "unused.ld")
     kernel = tmp_path / "kernel.o"
-    subprocess.run(["cc", "-c", "-x", "c", "-", "-o", str(kernel)], input="\n",
-                   text=True, check=True)
+    subprocess.run(["cc", "-c", "-x", "c", "-", "-o", str(kernel)], input="\n", text=True, check=True)
     elf = compiler.link_elf({}, kernel, tmp_path, target="synthetic")
     assert subprocess.run([str(elf)], check=False).returncode == 0
     assert (tmp_path / "harness_blob_T_W.bin").read_bytes() == b"\x07\x08\x09\x0a"
