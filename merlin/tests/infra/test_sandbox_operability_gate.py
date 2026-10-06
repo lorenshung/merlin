@@ -92,7 +92,7 @@ def test_network_isolated_probe_catches_a_netns_only_denial(tmp_path: Path) -> N
     binary = tmp_path / "netns-sensitive-bwrap"
     binary.write_text(
         "#!/bin/sh\n"
-        "case \" $* \" in\n"
+        'case " $* " in\n'
         "  *' --unshare-net '*) "
         "echo 'bwrap: loopback: Failed to create NETLINK_ROUTE socket: Operation not permitted' >&2; "
         "exit 1 ;;\n"
@@ -229,6 +229,7 @@ def test_installed_oracle_and_grader_copies_are_found_without_legacy_path_assump
     for identity, origin in (
         ("merlin.targetgen.program_oracle", "oracle"),
         ("merlin.targetgen.capsule_runner", "grader"),
+        ("merlin.targetgen.native_dispatch_accounting", "grader"),
     ):
         entry = next(item for item in MODULE_ACCESS if item.identity == identity)
         assert entry.origin == origin

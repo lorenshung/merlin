@@ -286,6 +286,107 @@ def test_post_snapshot_answer_file_is_not_mounted_inside_frozen_parent(tmp_path)
         BW.remove_bundle_snapshot(ws)
 
 
+def test_installed_bytecode_alias_uses_effective_frozen_mount(tmp_path):
+    """A late live pyc is absent below the frozen grant, even through lib64 -> lib.
+
+    A bytecode copy actually present in either the frozen grant or the live
+    toolchain remains an answer and must be masked.  The live bwrap checks catch
+    a false file overlay below a read-only frozen directory.
+    """
+    site = tmp_path / "venv"
+    rtl = site / "lib/python3.12/site-packages/merlin/targetgen/rtl"
+    rtl.mkdir(parents=True)
+    (site / "lib64").symlink_to("lib", target_is_directory=True)
+    source = rtl / "private.py"
+    source.write_text("private source\n", encoding="utf-8")
+    public = rtl / "public.py"
+    public.write_text("live public\n", encoding="utf-8")
+    cache = rtl / "__pycache__"
+    cache.mkdir()
+    (cache / "private.cpython-312.pyc").write_bytes(b"private bytecode")
+    alias = site / "lib64/python3.12/site-packages/merlin/targetgen/rtl/__pycache__/private.cpython-312.pyc"
+
+    def mounts(frozen: Path | None) -> list[str]:
+        argv = [
+            "bwrap",
+            "--die-with-parent",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind",
+            "/bin",
+            "/bin",
+            "--ro-bind",
+            "/lib",
+            "/lib",
+            "--ro-bind",
+            "/lib64",
+            "/lib64",
+            "--dev",
+            "/dev",
+            "--proc",
+            "/proc",
+            "--tmpfs",
+            "/tmp",
+            "--ro-bind",
+            str(site),
+            str(site),
+        ]
+        if frozen is not None:
+            argv += ["--ro-bind", str(frozen), str(rtl)]
+        return argv
+
+    late = tmp_path / "frozen-before-bytecode"
+    late.mkdir()
+    (late / "private.py").write_text("private source\n", encoding="utf-8")
+    (late / "public.py").write_text("frozen public\n", encoding="utf-8")
+    late.chmod(0o555)
+    surfaces = [
+        AnswerSurface("private source", source, "file", "grader"),
+        AnswerSurface("private bytecode", alias, "file", "grader"),
+    ]
+    raw = mounts(late)
+    assert {surface.path for surface in BW.coverage_gap(raw, surfaces)} == {source}
+    masked = BW.apply_answer_masks(raw, surfaces)
+    assert BW.coverage_gap(masked, surfaces) == []
+    assert ["--ro-bind", "/dev/null", str(alias)] not in [
+        masked[index : index + 3] for index, token in enumerate(masked[:-2]) if token == "--ro-bind"
+    ]
+
+    present = tmp_path / "frozen-with-bytecode"
+    (present / "__pycache__").mkdir(parents=True)
+    (present / "private.py").write_text("private source\n", encoding="utf-8")
+    (present / "public.py").write_text("frozen public\n", encoding="utf-8")
+    (present / "__pycache__/private.cpython-312.pyc").write_bytes(b"private bytecode")
+    (present / "__pycache__").chmod(0o555)
+    present.chmod(0o555)
+    for raw, expected_public in ((mounts(present), "frozen public\n"), (mounts(None), "live public\n")):
+        assert {surface.path for surface in BW.coverage_gap(raw, surfaces)} == {source, alias}
+        masked_present = BW.apply_answer_masks(raw, surfaces)
+        assert BW.coverage_gap(masked_present, surfaces) == []
+        assert ["--ro-bind", "/dev/null", str(alias)] in [
+            masked_present[index : index + 3] for index, token in enumerate(masked_present[:-2]) if token == "--ro-bind"
+        ]
+        if not _NO_SANDBOX:
+            done = subprocess.run(
+                [*masked_present, "bash", "-c", f'test ! -s "{source}" && test ! -s "{alias}" && cat "{public}"'],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            assert done.returncode == 0, done.stderr
+            assert done.stdout == expected_public
+    if not _NO_SANDBOX:
+        done = subprocess.run(
+            [*masked, "bash", "-c", f'test ! -s "{source}" && test ! -e "{alias}" && cat "{public}"'],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert done.returncode == 0, done.stderr
+        assert done.stdout == "frozen public\n"
+
+
 def test_a_symlinked_toolchain_is_bound_at_its_REAL_path_too(tmp_path):
     """A snapshot checkout LINKS the external toolchain instead of copying it.
 
@@ -419,7 +520,6 @@ def test_tampered_snapshot_marker_cannot_follow_payload_symlink(tmp_path):
 
     manifest = BW.materialize_bundle_inputs(ws, bundle, repo=repo)
     root = BW.bundle_snapshot_root(ws)
-    marker = root / "snapshot.json"
     frozen = root / manifest["grants"][0]["snapshot"]
     try:
         frozen.parent.chmod(0o700)

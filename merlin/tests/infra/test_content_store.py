@@ -50,6 +50,47 @@ def test_disabling_the_store_still_freezes_the_same_bytes(tmp_path, monkeypatch)
     assert landed.stat().st_nlink == 1
 
 
+@pytest.mark.parametrize("executable", [False, True])
+def test_cache_reuse_restores_immutable_modes_for_every_link(tmp_path, executable):
+    source = tmp_path / "source"
+    source.write_bytes(b"unchanged input bytes")
+    source.chmod(0o755 if executable else 0o644)
+    store = tmp_path / "store"
+    first, second = tmp_path / "first", tmp_path / "second"
+    assert CS.place_file(source, first, store)
+    expected_mode = 0o555 if executable else 0o444
+    assert first.stat().st_mode & 0o777 == expected_mode
+
+    # TemporaryDirectory cleanup can chmod a hardlink after an unlink failure.
+    # Reusing the validated object must not hand another consumer a writable inode.
+    first.chmod(0o700)
+    assert CS.place_file(source, second, store)
+    assert first.samefile(second)
+    assert first.read_bytes() == second.read_bytes() == source.read_bytes()
+    assert first.stat().st_mode & 0o777 == expected_mode
+    assert second.stat().st_mode & 0o777 == expected_mode
+    assert source.stat().st_mode & 0o777 == (0o755 if executable else 0o644)
+
+
+def test_cache_mode_repair_never_chmods_a_symlink_target(tmp_path):
+    source, foreign = tmp_path / "source", tmp_path / "foreign"
+    source.write_bytes(b"same bytes")
+    foreign.write_bytes(source.read_bytes())
+    foreign.chmod(0o600)
+    digest, _ = CS.digest_file(source)
+    store = tmp_path / "store"
+    obj = store / digest[:2] / digest
+    obj.parent.mkdir(parents=True)
+    obj.symlink_to(foreign)
+
+    destination = tmp_path / "copy"
+    assert not CS.place_file(source, destination, store)
+    assert destination.read_bytes() == source.read_bytes()
+    assert not destination.is_symlink()
+    assert foreign.stat().st_mode & 0o777 == 0o600
+    assert obj.is_symlink()
+
+
 def test_observer_tracks_each_invocation_even_when_bytes_hit_cache(tmp_path):
     store = tmp_path / "store"
     public, private = tmp_path / "public", tmp_path / "private"

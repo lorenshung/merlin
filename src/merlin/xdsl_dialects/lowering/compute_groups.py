@@ -502,11 +502,8 @@ def _join(scales: Sequence[str | None]) -> str | None:
     return next(iter(kinds)) if len(kinds) == 1 else None
 
 
-def _product(extents: Sequence[int]) -> int:
-    total = 1
-    for extent in extents:
-        total *= int(extent)
-    return total
+# Reuse the same int-per-extent product, retaining this historical binding.
+_product = CC._product
 
 
 def _axis_through(adapters: Sequence[Any], axis: int, source_shape: Sequence[int]) -> int | None:
@@ -1346,8 +1343,12 @@ def gap_class(refusal: str | None) -> str | None:
 
 
 def plan(
-    module, target: str, *, oracle: TargetOracle | None = None,
-    function: str | None = None, groups: Sequence[Group] | None = None,
+    module,
+    target: str,
+    *,
+    oracle: TargetOracle | None = None,
+    function: str | None = None,
+    groups: Sequence[Group] | None = None,
 ) -> dict[str, Any]:
     """The group plan of a model on a target, with its denominators."""
     oracle = oracle or TargetOracle(target)
@@ -1402,6 +1403,7 @@ def plan(
     elementwise_device = sum(row["elements"] for row in device)
     total = elementwise_host + elementwise_device
     from .group_route_report import input_format_changes
+
     return {
         "schema": SCHEMA,
         "target": target,

@@ -2,6 +2,8 @@
 
 import importlib
 import shlex
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +11,90 @@ from types import SimpleNamespace
 import pytest
 
 from merlin.targetgen.sandbox import toolchain as TC
+
+
+@pytest.mark.parametrize("installed", [False, True])
+def test_installed_interpreter_not_shadowed_by_work_root_venv(tmp_path, monkeypatch, installed):
+    repo = tmp_path / "work-root"
+    (repo / ".venv").mkdir(parents=True)
+    active = tmp_path / "qualified-venv"
+    purelib = active / "lib/python3.12/site-packages"
+    purelib.mkdir(parents=True)
+    monkeypatch.setattr(TC, "repo_root", lambda: repo)
+    monkeypatch.setattr(TC, "python_source_dir", lambda: purelib if installed else repo / "src")
+    monkeypatch.setattr(TC, "sys", SimpleNamespace(prefix=str(active), base_prefix=str(tmp_path / "base")))
+    monkeypatch.setattr(TC, "sysconfig", SimpleNamespace(get_path=lambda name: str(purelib)))
+
+    paths = TC.ToolchainPaths.from_checkout()
+    assert paths.venv == str(active if installed else repo / ".venv")
+
+
+def test_installed_public_tool_imports_in_real_bwrap_with_private_mask(tmp_path, monkeypatch):
+    """The selected interpreter, exact public grants and deny overlay must work together."""
+    from merlin.common.paths import python_source_dir
+    from merlin.targetgen import tool_registry as TR
+    from merlin.targetgen.sandbox import bwrap as BW
+    from merlin.targetgen.sandbox import preflight
+    from merlin.targetgen.sandbox.answer_surfaces import AnswerSurface
+
+    if sys.prefix == sys.base_prefix:
+        pytest.skip("requires bwrap and an active virtual environment")
+    if not preflight.probe_sandbox().usable:
+        pytest.skip("this host cannot enter bwrap")
+
+    source = python_source_dir()
+    repo = tmp_path / "operator-work-root"
+    (repo / ".venv").mkdir(parents=True)  # unrelated and missing PyYAML
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    public = tmp_path / "public"
+    public.mkdir()
+    secret = public / "answer.txt"
+    secret.write_text("private answer", encoding="utf-8")
+    allowed = []
+    for name in TR.ARM_TOOLS["merlin_rtlchecks"]:
+        for logical in TR.spec(name).bundle_paths:
+            if logical.startswith("merlin/python/merlin/"):
+                path = source / "merlin" / logical.removeprefix("merlin/python/merlin/")
+                assert path.exists(), logical
+                allowed.append({"path": str(path), "mode": "ro"})
+    bundle = {"allowed": [{"path": str(public), "mode": "ro"}, *allowed], "denied": [{"path": str(secret)}]}
+
+    # Simulate an installed distribution without replacing the public source
+    # modules this checkout test is exercising.
+    from sysconfig import get_path
+
+    monkeypatch.setattr(TC, "repo_root", lambda: repo)
+    monkeypatch.setattr(TC, "python_source_dir", lambda: Path(get_path("purelib")))
+    paths = replace(TC.ToolchainPaths.from_checkout(), python_import_roots=(str(source),))
+    assert paths.venv == str(Path(sys.prefix).resolve())
+    target = SimpleNamespace(target="synthetic")
+    sim = TC.SimToolchain()
+    argv = BW.base_argv(workspace, bundle, repo=repo, _policy_test_live_inputs=True, include_claude_home=False)
+    argv += TC.toolchain_binds(target, paths=paths, sim=sim, harness="", memory_dir="")
+    argv += BW._bundle_mount_args(workspace, bundle, repo, _policy_test_live_inputs=True)
+    assert BW.coverage_gap(argv, (AnswerSurface("answer", secret, "file", "golden"),)) == []
+    imports = (
+        "import yaml, numpy, xdsl; "
+        "from merlin.targetgen.evidence.store import Evidence; "
+        "from merlin.targetgen import synthesize, generate, rtl_backend; "
+        "from merlin.targetgen.rtl import facts, gen_numeric_facts, gen_isa_module, gen_rtl_digest; "
+        "from merlin.kernels import cca_contract, action_catalog; "
+        "from merlin.targetgen.contract.interface_emit import emit_interface_mlir; "
+        "from merlin.runtime.commandbuffer import pool_params; "
+        "from merlin.runtime.tensor import pool_out_dims; "
+        "print('PUBLIC_IMPORTS_OK')"
+    )
+    command = (
+        TC.sandbox_env(target, workspace, paths=paths, sim=sim, harness="")
+        + "python3 -P -c "
+        + shlex.quote(imports)
+        + " && test ! -s "
+        + shlex.quote(str(secret))
+    )
+    result = subprocess.run([*argv, "bash", "-c", command], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "PUBLIC_IMPORTS_OK" in result.stdout
 
 
 def _explicit_selection(tmp_path):

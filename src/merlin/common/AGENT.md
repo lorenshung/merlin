@@ -33,6 +33,9 @@ This is inspection storage, not safetensors conversion or an executable reconstr
 - Keep this directory focused on its stated purpose.
 - Every subdirectory must also contain an AGENT.md.
 - Shared helpers (schema load/validate, yaml, llm summary) are real and dependency-light.
+- CAS-backed snapshots share file modes. Before deleting a read-only bundle, use
+  its snapshot cleanup owner; bare TemporaryDirectory cleanup can chmod shared
+  files after an unlink failure and invalidate other sealed consumers.
 - Frozen imports never fall through to a live owner or unchecked bytecode. This
   provenance boundary is not a Python sandbox and does not propagate to subprocesses
   without an explicit bootstrap. Keep experiment-specific launch policy out of core.
