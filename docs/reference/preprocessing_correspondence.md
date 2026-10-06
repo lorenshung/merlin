@@ -3,7 +3,7 @@ title: Typed preprocessing correspondence
 kind: reference
 status: current
 owner: ir
-last_verified: 2026-09-28
+last_verified: 2026-10-06
 related: [lowering_pipeline, architecture]
 code_refs: [src/merlin/llvmlower/typed_preprocessing_correspondence.py, src/merlin/llvmlower/passes_xdsl.py, src/merlin/common/ir_audit.py]
 ---
