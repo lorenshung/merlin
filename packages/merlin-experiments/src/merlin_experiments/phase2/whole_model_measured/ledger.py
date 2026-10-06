@@ -143,6 +143,9 @@ class OotLedger:
                 event = {"kind": "best", "n": by_digest[winner]["n"], "package_sha256": winner, "at": self.clock()}
                 self._append(event)
                 events.append(event)
+                from merlin.targetgen import target_index
+
+                target_index.refresh_for_run(self.repo.parent, 2)  # the index lists the run's new best
         return events
 
 
