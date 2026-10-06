@@ -167,6 +167,7 @@ class MeasurementService:
         retain: Any = None,
         certifier_root: Path | None = None,
         min_build_free_bytes: int | None = None,
+        machine_capabilities: Mapping[str, Any] | None = None,
     ) -> None:
         if slots < 1 or max_pending < 1:
             raise J.ServiceError("slots and max_pending must be positive")
@@ -200,6 +201,9 @@ class MeasurementService:
         )
         # The reference is bound PER JOB, at request time, to the bytes the file holds then.
         self.reference_path = Path(reference) if reference is not None else None
+        #: What this service's machine can do and lacks (:func:`.capabilities.compact`); every job, and so
+        #: every result, carries it.
+        self.machine_capabilities = dict(machine_capabilities) if machine_capabilities else None
 
     def _reference_binding(self) -> dict[str, Any] | None:
         if self.reference_path is None:
@@ -425,6 +429,7 @@ class MeasurementService:
                 "certifier_root": self.certifier_root,
                 "timeout_seconds": self.timeout_seconds,
             }
+            job["machine_capabilities"] = self.machine_capabilities
             write_json_atomic(job_dir / "job.json", job)
         if job["state"] == J.SCREENING:
             job = self._screen(job_dir, job, exempt=exempt)

@@ -147,6 +147,8 @@ def result(job: Mapping[str, Any], **fields: Any) -> dict[str, Any]:
         "finished_at": now(),
         "machine": job.get("machine"),
         "builder": job.get("builder"),
+        # WHAT THE MACHINE COULD DO when this was measured, and what it lacked against its peers.
+        "machine_capabilities": job.get("machine_capabilities"),
         **fields,
     }
 

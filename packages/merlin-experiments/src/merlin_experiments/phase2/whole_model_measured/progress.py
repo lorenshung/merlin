@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from . import batch as BATCH
+from . import capabilities as CAP
 from . import jobs as J
 from . import launch as LAUNCH
 from . import liveness as LIVE
@@ -148,6 +149,7 @@ def run_status(
             "log": launch.get("log"),
         },
         "stop_requested": (request or {}).get("request"),
+        "machine_warnings": list((read_json(run_dir / CAP.RECORD) or {}).get("warnings") or ()),
         "stopped": sessions.get("stopped"),
         "rounds": ended,
         "open_rounds": opened,
@@ -200,6 +202,8 @@ def format_status(document: Mapping[str, Any]) -> str:
             )
             + "".join(f"\n    {reason}" for reason in liveness.get("reasons") or ())
         )
+    for warning in document.get("machine_warnings") or ():
+        lines.append(f"  MACHINE: {warning}")
     launcher = document.get("launcher") or {}
     alive = {True: "alive", False: "gone", None: "never launched here"}[launcher.get("alive")]
     lines.append(f"  launcher pid {launcher.get('pid')} {alive}; log {launcher.get('log')}")

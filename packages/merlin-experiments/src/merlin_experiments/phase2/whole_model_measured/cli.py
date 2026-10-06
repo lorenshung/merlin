@@ -80,6 +80,22 @@ def _oot():
     return oot_repo
 
 
+def machine_warnings(run_dir: Path) -> list[str]:
+    """The capability warnings the run's launch recorded (``machine_capabilities.json``)."""
+    from . import capabilities as CAP
+    from .identity import read_json
+
+    return list((read_json(Path(run_dir) / CAP.RECORD) or {}).get("warnings") or ())
+
+
+def print_machine_warnings(warnings: list[str] | tuple[str, ...]) -> None:
+    """Every capability warning as its own line, beside the command's JSON (which carries the same list
+    under ``machine_warnings`` on stdout): a launch never removes a lever silently.  The lines go to
+    stderr so stdout stays one JSON document; a detached launch writes both into ``launch.log``."""
+    for warning in warnings:
+        print(f"WARNING (machine capabilities): {warning}", file=sys.stderr, flush=True)
+
+
 def _prepare(args: argparse.Namespace):
     from . import runs as RUNS
 
@@ -108,6 +124,7 @@ def start(run_dir: Path, *, profile_name: str, round_driver: str, price_table: P
 
     profile = P.load(profile_name)
     checked = P.check(profile, price_table=_price_table(price_table))
+    print_machine_warnings(machine_warnings(Path(run_dir)))
     _record, objective = _objective_of(Path(run_dir))
     # THIS PROCESS IS THE LAUNCHER: it writes the run's heartbeat (pid, last activity, last measurement).
     from . import liveness as LIVE
@@ -225,7 +242,9 @@ def resume_run(args: argparse.Namespace) -> dict[str, Any]:
         "config_sha256": prepared.config_sha256,
         "seed_package_sha256": prepared.seed_package_sha256,
         "store_roots": dict(prepared.store_roots),
+        "machine_warnings": list(prepared.machine_warnings),
     }
+    print_machine_warnings(prepared.machine_warnings)
     if args.launch:
         document["launch"] = LAUNCH.launch(
             prepared.run_dir, profile=args.profile, round_driver=args.round_driver, price_table=args.price_table
@@ -488,9 +507,15 @@ def main(argv: list[str] | None = None) -> int:
         if not args.resume and (args.objective_config is None or args.seed is None):
             raise SystemExit("a new run needs --objective-config and --seed (or --resume)")
         prepared = _prepare(args)
+        print_machine_warnings(prepared.machine_warnings)
         print(
             json.dumps(
-                {"run_dir": str(prepared.run_dir), "config_sha256": prepared.config_sha256, "method": prepared.method}
+                {
+                    "run_dir": str(prepared.run_dir),
+                    "config_sha256": prepared.config_sha256,
+                    "method": prepared.method,
+                    "machine_warnings": list(prepared.machine_warnings),
+                }
             )
         )
         if args.command == "prepare":
@@ -569,7 +594,9 @@ def main(argv: list[str] | None = None) -> int:
             )
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
-        print(json.dumps(document, default=str))
+        warnings = machine_warnings(resolve_run(args.run_dir))
+        print_machine_warnings(warnings)
+        print(json.dumps({**document, "machine_warnings": warnings}, default=str))
         return 0
     if args.command == "stop":
         print(json.dumps(stop(args.run_dir, why=args.why), default=str))

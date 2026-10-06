@@ -28,6 +28,7 @@ from typing import Any
 
 from merlin.perf import whole_model_builder
 
+from . import capabilities as CAP
 from . import gates as G
 from . import registry as R
 from .identity import builder_identity, store_root_for
@@ -232,6 +233,7 @@ def from_config(
                 retain=document.get("retain"),
                 certifier_root=certifier_root if is_screen else None,
                 min_build_free_bytes=section.get("min_build_free_bytes"),
+                machine_capabilities=CAP.compact(CAP.section_report(section, environment=environment)),
             ),
             reference,
         )
