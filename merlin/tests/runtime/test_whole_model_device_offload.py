@@ -48,6 +48,23 @@ def _prepare(tmp_path, device):
     return prepared.read_text(encoding="utf-8"), load_sidecar(tmp_path)
 
 
+@pytest.fixture
+def declared_i8_datapath(monkeypatch):
+    """Exercise routing independently of an optional local RTL extraction cache.
+
+    The production query still refuses missing facts. These routing tests supply an
+    explicit device capability; tests of RTL derivation exercise the real query.
+    """
+    from merlin.system import offload
+
+    original = offload.device_dtype_triples
+    monkeypatch.setattr(
+        offload,
+        "device_dtype_triples",
+        lambda device: (("i8", "i8", "i32"),) if device == "gemmini" else original(device),
+    )
+
+
 def test_no_routing_leaves_the_model_alone(tmp_path):
     """Every existing caller passes nothing here, and must be byte-identical."""
     text, side = _prepare(tmp_path, None)
@@ -63,18 +80,67 @@ def test_a_routing_without_a_decision_is_still_inert(tmp_path):
     assert not side.get("signatures")
 
 
-def test_a_routing_with_a_decision_moves_the_contraction(tmp_path):
+def test_a_routing_with_a_decision_moves_the_contraction(tmp_path, declared_i8_datapath):
     text, side = _prepare(tmp_path, _routing(select=lambda _s: True))
     assert "linalg.matmul" not in text, "the contraction should have become a call"
     assert text.count("func.call") == 1
     assert len(side.get("signatures") or {}) == 1
 
 
-def test_the_offloaded_declaration_keeps_its_access_attributes(tmp_path):
+def test_the_offloaded_declaration_keeps_its_access_attributes(tmp_path, declared_i8_datapath):
     """Without these, one-shot-bufferize copies the weight operand of every routed contraction --
     silently, and at real cost in a shipped model."""
     text, _side = _prepare(tmp_path, _routing(select=lambda _s: True))
     assert text.count("bufferization.access") == 3
+
+
+def test_device_transform_precedes_catalog_source_binding(tmp_path, declared_i8_datapath):
+    import hashlib
+    import json
+
+    from xdsl.dialects.builtin import StringAttr
+
+    from merlin.common import mlir_query as mq
+
+    observed = []
+
+    def transform(prepared, work):
+        module = mq.parse(prepared.read_text())
+        next(mq.walk(module, "linalg.matmul")).attributes["prov.region_id"] = StringAttr("mm")
+        work.mkdir(parents=True)
+        output = work / "transformed.mlir"
+        output.write_text(str(module))
+        observed.append(hashlib.sha256(output.read_bytes()).hexdigest())
+        return output
+
+    def catalog(prepared, work):
+        digest = hashlib.sha256(prepared.read_bytes()).hexdigest()
+        assert observed == [digest], "catalog must see transformed bytes"
+        module = mq.parse(prepared.read_text())
+        ordinal = next(index for index, op in enumerate(module.walk()) if op.name == "linalg.matmul")
+        work.mkdir(parents=True)
+        manifest = work / "catalog.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "source_sha256": digest,
+                    "coverage_complete": True,
+                    "bindings": [
+                        {
+                            "region": "mm",
+                            "symbol": "selected_kernel",
+                            "source_operation_ordinal": ordinal,
+                            "tensor_types": ["tensor<16x32xi8>", "tensor<32x16xi8>", "tensor<16x16xi32>"],
+                        }
+                    ],
+                }
+            )
+        )
+        return manifest, work / "unused-by-rewrite.o"
+
+    text, side = _prepare(tmp_path, _routing(prepared_transform=transform, catalog_builder=catalog))
+    assert text.count("func.call") == 1
+    assert side["model_sha256"] == observed[0]
 
 
 def test_a_device_that_declares_no_datapath_moves_nothing(tmp_path):
@@ -124,6 +190,16 @@ def test_build_device_objects_accepts_cflags():
     from merlin.llvmlower.device_build import build_device_objects
 
     assert "cflags" in inspect.signature(build_device_objects).parameters
+
+
+def test_baremetal_harness_uses_the_selected_rocket_isa():
+    from merlin.runtime.backends.spike_model import RVV_CFLAGS, _harness_cflags
+
+    assert _harness_cflags([]) == RVV_CFLAGS
+    flags = _harness_cflags(["-march=rv64gc", "-mabi=lp64d", "-fno-vectorize"])
+    assert "-march=rv64gc" in flags
+    assert "-march=rv64gcv" not in flags
+    assert "-fno-vectorize" not in flags  # a clang-only option
 
 
 # ------------------------------------------------- the decision now has a production source
@@ -193,7 +269,7 @@ def test_one_extent_triple_placed_two_ways_is_declined_rather_than_guessed():
     assert select(ContractionShape(op="linalg.matmul", parallel=(16, 16), reduction=(32,))) is False
 
 
-def test_a_routing_built_from_a_placement_carries_the_placements_own_datapath():
+def test_a_routing_built_from_a_placement_carries_the_placements_own_datapath(declared_i8_datapath):
     """The formats are READ, never defaulted: the operand is what the router matched the contraction
     against, and the accumulate is either the rule the unit matched or -- when the contract declares no
     accumulate matrix, which the reference systolic mesh does not -- the device's own RTL datapath fact
@@ -279,7 +355,7 @@ def test_device_placements_that_disagree_about_the_datapath_refuse_to_become_one
         routing_for_placement(mixed, "gemmini", "/nonexistent")
 
 
-def test_the_offload_rewrite_accepts_the_placement_derived_selector(tmp_path):
+def test_the_offload_rewrite_accepts_the_placement_derived_selector(tmp_path, declared_i8_datapath):
     """End to end through the seam a whole-model build uses: a placement decides, the rewrite moves the
     contraction, and the sidecar the device build reads names a signature. Without this the fused path
     is reachable in principle and unreached in fact."""
@@ -293,3 +369,11 @@ def test_the_offload_rewrite_accepts_the_placement_derived_selector(tmp_path):
     text, side = _prepare(tmp_path, routing)
     assert side.get("signatures"), "the placement's decision must reach the device sidecar"
     assert "func.call" in text and "linalg.matmul" not in text
+
+
+@pytest.mark.parametrize("cap", [0, -1, 2**31, True, 1.5])
+def test_spike_output_dump_cap_rejects_invalid_values(tmp_path, cap):
+    from merlin.runtime.backends import spike_model
+
+    with pytest.raises(ValueError, match="output_dump_cap"):
+        spike_model.build(tmp_path, tmp_path / "build", output_dump_cap=cap)

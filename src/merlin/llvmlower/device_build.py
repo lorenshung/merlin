@@ -56,9 +56,9 @@ class DeviceRouting:
     that enabled offload without saying WHICH device and WHICH backend package would have to guess
     both, and a guessed package emits kernels for the wrong hardware that link and run.
 
-    ``select`` is the placement decision, passed in rather than made here -- see
-    :mod:`merlin.system.place`. ``None`` moves nothing, so the whole path is inert unless a decision
-    has been made.
+    ``select`` is one placement decision, passed in rather than made here -- see
+    :mod:`merlin.system.place`. A source-bound catalog can instead select the exact
+    operations in its manifest. With neither, the path moves nothing.
     """
 
     device: str
@@ -80,6 +80,18 @@ class DeviceRouting:
     #: on the host -- so the choice travels with the routing rather than being a property of whichever
     #: rewrite the build happened to call. See :mod:`merlin.llvmlower.device_offload`.
     granularity: str = "contraction"
+
+    #: Optional source-identified, already compiled device catalog using a declared pointer ABI.
+    catalog_manifest: str | Path | None = None
+    catalog_object: str | Path | None = None
+    #: Target-owned exact graph preparation, before catalog compilation and source binding.
+    prepared_transform: Callable[[Path, Path], Path] | None = None
+    #: Build a source-bound catalog from Merlin's final prepared file, before offload rewrite.
+    catalog_builder: Callable[[Path, Path], tuple[Path, Path]] | None = None
+    #: Target package's binary policy check, run on the final linked image.
+    final_elf_audit: Callable[[Path], None] | None = None
+    #: Provider-owned host ABI preparation after source-bound offload declarations.
+    post_offload_transform: Callable[[Path, Path, Path], Path] | None = None
 
 
 def routing_for_placement(
@@ -701,3 +713,42 @@ def _flags(codegen_target: str, cflags: Sequence[str] | None = None) -> list[str
     from .codegen import RISCV_FLAGS, X86_FLAGS
 
     return list(RISCV_FLAGS if codegen_target == "riscv" else X86_FLAGS)
+
+
+def apply_post_offload_transform(routing, prepared: Path, sidecar: Path, workdir: Path) -> Path:
+    """Apply an explicit host ABI rewrite while preserving the routing sidecar.
+
+    The callback owns any bridge implementation. It receives the exact routed IR,
+    immutable offload sidecar, and private output directory; no target ABI is
+    inferred here. Absent callbacks preserve existing behavior and bytes.
+    """
+    callback = getattr(routing, "post_offload_transform", None)
+    if callback is None:
+        return Path(prepared)
+    import hashlib
+    import json
+
+    prepared, sidecar, workdir = Path(prepared), Path(sidecar), Path(workdir)
+    original_sidecar = sidecar.read_bytes()
+    original_source = prepared.read_bytes()
+    workdir.mkdir(parents=True, exist_ok=True)
+    selected = Path(callback(prepared, sidecar, workdir))
+    if sidecar.read_bytes() != original_sidecar:
+        raise ValueError("post-offload transform changed source routing identity")
+    if not selected.is_file():
+        raise ValueError("post-offload transform returned no model file")
+    digest = lambda data: hashlib.sha256(data).hexdigest()
+    (workdir / "post_offload_transform.json").write_text(
+        json.dumps(
+            {
+                "source_path": str(prepared.resolve()),
+                "source_sha256": digest(original_source),
+                "routing_sidecar_sha256": digest(original_sidecar),
+                "selected_path": str(selected.resolve()),
+                "selected_sha256": digest(selected.read_bytes()),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    return selected

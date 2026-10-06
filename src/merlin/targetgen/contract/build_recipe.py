@@ -4,11 +4,46 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 _RISCV_ABIS = frozenset({"ilp32", "ilp32e", "ilp32f", "ilp32d", "lp64", "lp64f", "lp64d"})
+
+
+def named_object_paths(sources: Sequence[Path], workdir: Path) -> tuple[Path, ...]:
+    """Assign stable distinct objects without overwriting caller-supplied objects.
+
+    Unique source basenames retain their historical output names. Collisions
+    use the original link-position ordinal; link order and recipe are unchanged.
+    This purely names outputs and performs no compilation or backend discovery.
+    """
+    sources = tuple(map(Path, sources))
+    workdir = Path(workdir)
+    suffixes = {".c", ".S", ".s"}
+    counts = Counter(source.stem for source in sources if source.suffix in suffixes)
+    occupied = {source.resolve() for source in sources if source.suffix not in suffixes}
+    preserved = {
+        stem for stem, count in counts.items() if count == 1 and (workdir / f"{stem}.o").resolve() not in occupied
+    }
+    occupied.update((workdir / f"{stem}.o").resolve() for stem in preserved)
+    outputs = []
+    for index, source in enumerate(sources):
+        if source.suffix not in suffixes:
+            outputs.append(source)
+            continue
+        if source.stem in preserved:
+            outputs.append(workdir / f"{source.stem}.o")
+            continue
+        candidate = workdir / f"{index}_{source.stem}.o"
+        retry = 0
+        while candidate.resolve() in occupied:
+            retry += 1
+            candidate = workdir / f"{index}_{source.stem}_{retry}.o"
+        occupied.add(candidate.resolve())
+        outputs.append(candidate)
+    return tuple(outputs)
 
 
 @dataclass(frozen=True)

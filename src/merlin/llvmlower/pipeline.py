@@ -852,8 +852,26 @@ from . import fusion_guard
 from .alloca_scope_lower import RUNNER_PRELUDE as _ALLOCA_SCOPE_LOWER_PRELUDE
 from .broadcast_fold import RUNNER_PRELUDE as _BROADCAST_FOLD_PRELUDE
 from .concat_dps import RUNNER_PRELUDE as _CONCAT_DPS_PRELUDE
+from .contiguous_suffix_copy import MID_STAGE_SRC as _CONTIGUOUS_COPY_MID_SRC
+from .contiguous_suffix_copy import RUNNER_PRELUDE as _CONTIGUOUS_COPY_PRELUDE
 from .copy_expand import MID_STAGE_SRC as _MID_STAGE_SRC
 from .copy_expand import RUNNER_PRELUDE as _COPY_EXPAND_PRELUDE
+from .uniform_fill_copy import MID_STAGE_SRC as _UNIFORM_FILL_COPY_MID_SRC
+from .uniform_fill_copy import RUNNER_PRELUDE as _UNIFORM_FILL_COPY_PRELUDE
+
+# The normal runner already reserves argv[17] for the target data layout.
+# Compose the optional copy stages with their new trailing slots rather than
+# allowing their original standalone gate positions to reinterpret that layout.
+_UNIFORM_FILL_COPY_MID_SRC = _UNIFORM_FILL_COPY_MID_SRC.replace(
+    'if len(sys.argv) > 17 and sys.argv[17] == "1":',
+    'if len(sys.argv) > 18 and sys.argv[18] == "1":',
+)
+_CONTIGUOUS_COPY_MID_SRC = _CONTIGUOUS_COPY_MID_SRC.replace(
+    'if len(sys.argv) > 18 and sys.argv[18] == "1":',
+    'if len(sys.argv) > 19 and sys.argv[19] == "1":',
+)
+from .broadcast_math_hoist import RUNNER_PRELUDE as _BROADCAST_MATH_HOIST_PRELUDE
+from .fma_intrinsic import RUNNER_PRELUDE as _FMA_INTRINSIC_PRELUDE
 from .named_broadcast_fold import RUNNER_PRELUDE as _NAMED_BROADCAST_FOLD_PRELUDE
 from .panel_parallel import MID_STAGE_SRC as _PANEL_PARALLEL_MID_SRC
 from .panel_parallel import RUNNER_PRELUDE as _PANEL_PARALLEL_PRELUDE
@@ -864,6 +882,10 @@ from .parallel_grain import RUNNER_PRELUDE as _PARALLEL_GRAIN_PRELUDE
 from .parallel_team import RUNNER_PRELUDE as _PARALLEL_TEAM_PRELUDE
 from .parallel_team import STAGE_SRC as _PARALLEL_TEAM_STAGE_SRC
 from .roundeven_intrinsic import RUNNER_PRELUDE as _ROUND_INTRINSIC_PRELUDE
+from .scalar_contraction import RUNNER_PRELUDE as _SCALAR_CONTRACTION_PRELUDE
+from .scalar_pointwise_packet import RUNNER_PRELUDE as _SCALAR_POINTWISE_PACKET_PRELUDE
+from .scalar_pointwise_unroll import RUNNER_PRELUDE as _SCALAR_POINTWISE_UNROLL_PRELUDE
+from .scalar_squared_sum import RUNNER_PRELUDE as _SCALAR_SQUARED_SUM_PRELUDE
 from .selfcopy import RUNNER_PRELUDE as _SELFCOPY_PRELUDE
 from .transpose_fuse import RUNNER_PRELUDE as _TRANSPOSE_FUSE_PRELUDE
 from .transpose_maps import RUNNER_PRELUDE as _TRANSPOSE_MAPS_PRELUDE
@@ -1114,18 +1136,28 @@ from torch_mlir.dialects import llvm
     + _BROADCAST_FOLD_PRELUDE
     + _NAMED_BROADCAST_FOLD_PRELUDE
     + _COPY_EXPAND_PRELUDE
+    + _UNIFORM_FILL_COPY_PRELUDE
+    + _CONTIGUOUS_COPY_PRELUDE
     + _CONCAT_DPS_PRELUDE
     + _PARALLEL_GRAIN_PRELUDE
     + _PARALLEL_TEAM_PRELUDE
     + _PARALLEL_COARSEN_PRELUDE
     + _PANEL_PARALLEL_PRELUDE
     + _MID_STAGE_SRC
+    + _CONTIGUOUS_COPY_MID_SRC
+    + _UNIFORM_FILL_COPY_MID_SRC
     + _PANEL_PARALLEL_MID_SRC
     + _PARALLEL_GRAIN_LATE_SRC
     + _PARALLEL_TEAM_STAGE_SRC
     + _PARALLEL_COARSEN_STAGE_SRC
     + _ALLOCA_SCOPE_LOWER_PRELUDE
     + _ROUND_INTRINSIC_PRELUDE
+    + _FMA_INTRINSIC_PRELUDE
+    + _SCALAR_CONTRACTION_PRELUDE
+    + _SCALAR_SQUARED_SUM_PRELUDE
+    + _SCALAR_POINTWISE_UNROLL_PRELUDE
+    + _SCALAR_POINTWISE_PACKET_PRELUDE
+    + _BROADCAST_MATH_HOIST_PRELUDE
     + DEALLOC_CHECK_PRELUDE
     + DEALLOC_CHECK_RUNNER
     + r'''
@@ -1224,18 +1256,28 @@ _RUNNER_ACT_POLY_TAIL = (
     + _BROADCAST_FOLD_PRELUDE
     + _NAMED_BROADCAST_FOLD_PRELUDE
     + _COPY_EXPAND_PRELUDE
+    + _UNIFORM_FILL_COPY_PRELUDE
+    + _CONTIGUOUS_COPY_PRELUDE
     + _CONCAT_DPS_PRELUDE
     + _PARALLEL_GRAIN_PRELUDE
     + _PARALLEL_TEAM_PRELUDE
     + _PARALLEL_COARSEN_PRELUDE
     + _PANEL_PARALLEL_PRELUDE
     + _MID_STAGE_SRC
+    + _CONTIGUOUS_COPY_MID_SRC
+    + _UNIFORM_FILL_COPY_MID_SRC
     + _PANEL_PARALLEL_MID_SRC
     + _PARALLEL_GRAIN_LATE_SRC
     + _PARALLEL_TEAM_STAGE_SRC
     + _PARALLEL_COARSEN_STAGE_SRC
     + _ALLOCA_SCOPE_LOWER_PRELUDE
     + _ROUND_INTRINSIC_PRELUDE
+    + _FMA_INTRINSIC_PRELUDE
+    + _SCALAR_CONTRACTION_PRELUDE
+    + _SCALAR_SQUARED_SUM_PRELUDE
+    + _SCALAR_POINTWISE_UNROLL_PRELUDE
+    + _SCALAR_POINTWISE_PACKET_PRELUDE
+    + _BROADCAST_MATH_HOIST_PRELUDE
     + DEALLOC_CHECK_PRELUDE
     + DEALLOC_CHECK_RUNNER
     + r"""
@@ -1313,12 +1355,12 @@ def _needs_scalarize_runner(pipeline: str, feats: "frozenset[str]") -> bool:
     return any(f in feats for f in _accum_microkernel_v3_features())
 
 
-def _activation_poly_runner(emit: str = EMIT_TRANSLATE) -> str:
+def _activation_poly_runner(emit: str = EMIT_TRANSLATE, *, fused: bool = False) -> str:
     """The lowering runner with the transcendental->polynomial rewriter spliced in (default-off
     feature). Imported here (not at module top) so importing pipeline never pulls act_poly."""
     from .act_poly import rewrite_source
 
-    return _RUNNER_ACT_POLY_HEAD + rewrite_source() + _RUNNER_ACT_POLY_TAIL.replace("__MERLIN_EMIT__", emit)
+    return _RUNNER_ACT_POLY_HEAD + rewrite_source(fused=fused) + _RUNNER_ACT_POLY_TAIL.replace("__MERLIN_EMIT__", emit)
 
 
 def _select_runner(
@@ -1333,8 +1375,8 @@ def _select_runner(
     """
     from .ir_inspection import bind_inspection
 
-    if "vectorized_transcendental_activation" in feats:
-        source = _activation_poly_runner(emit)
+    if {"approximate_transcendental_activation", "vectorized_transcendental_activation"} & feats:
+        source = _activation_poly_runner(emit, fused="fuse_activation_polynomial_fma" in feats)
     elif _needs_scalarize_runner(pipeline, feats):
         from .accum_microkernel import run_source
         from .bmm_tail_pad import FEATURE as _BMM_TAIL_PAD_FEATURE
@@ -1432,6 +1474,13 @@ def lower_to_llvm_ir(
     """
     work = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="merlin_lower_"))
     work.mkdir(parents=True, exist_ok=True)
+    from .lowering_recipe import FILENAME as _RECIPE_FILENAME
+    from .lowering_recipe import LoweringRecipe
+
+    # A refused invocation must not leave the prior build's successful receipt
+    # looking current, including failures before feature/pipeline resolution.
+    (work / _RECIPE_FILENAME).unlink(missing_ok=True)
+    recipe_sources = {"pipeline_driver": Path(__file__)}
     from .impr_features import apply_schedule, normalize
 
     # `normalize` REJECTS an unregistered name, and the lowering runs in forked/child processes that
@@ -1478,10 +1527,25 @@ def lower_to_llvm_ir(
     from .roundeven_intrinsic import ensure_registered as _register_roundeven_intrinsic
 
     _register_roundeven_intrinsic()
+    from .fma_intrinsic import ensure_registered as _register_fma_intrinsic
+
+    _register_fma_intrinsic()
     from .quant_scope import ensure_registered as _register_quant_scope
 
     _register_quant_scope()
     feats = normalize(features)
+    from .llvm_loop_outline import (
+        FEATURE as _OUTLINE_LOOPS,
+    )
+    from .llvm_loop_outline import (
+        MERGE_FEATURE as _OUTLINE_MERGE_LOOPS,
+    )
+    from .llvm_loop_outline import (
+        outline_loops,
+    )
+
+    if _OUTLINE_LOOPS in feats and _OUTLINE_MERGE_LOOPS in feats:
+        raise PipelineError("Select one explicit LLVM loop outlining policy")
     if {"lower_roundeven_to_intrinsic", "fuse_quantize_round_convert"} <= feats:
         raise PipelineError(
             "lower_roundeven_to_intrinsic and fuse_quantize_round_convert are alternative exact "
@@ -1499,6 +1563,7 @@ def lower_to_llvm_ir(
             sched = work / "rvv_schedule.mlir"
             sched_text = apply_schedule(transform_schedule or RVV_TRANSFORM_SCHEDULE, feats)
             sched.write_text(sched_text, encoding="utf-8")
+            recipe_sources["transform_schedule"] = sched
             par_sched = None
             _tile_aligned_parallel = False
             if parallel_harts is not None:
@@ -1512,6 +1577,7 @@ def lower_to_llvm_ir(
                     ),
                     encoding="utf-8",
                 )
+                recipe_sources["parallel_transform_schedule"] = par_sched
                 if parallel_chunks is not None and not parallel_chunks:
                     import sys as _sys
 
@@ -1534,6 +1600,7 @@ def lower_to_llvm_ir(
             if vec_text is not None:
                 vec_sched = work / "rvv_vec_pre_schedule.mlir"
                 vec_sched.write_text(vec_text, encoding="utf-8")
+                recipe_sources["vector_pre_schedule"] = vec_sched
             pipeline = build_rvv_pipeline(
                 sched,
                 hoist_static_allocs=hoist_static_allocs,
@@ -1699,7 +1766,12 @@ def lower_to_llvm_ir(
         _named_broadcast_gate,
         _alloca_scope_gate,
         data_layout or "",
+        "1" if "fold_uniform_fill_copy" in feats else "0",
+        "1" if "specialize_contiguous_copy" in feats else "0",
     ]
+    recipe_sources.update(prepared_mlir=src, runner=runner)
+    recipe = LoweringRecipe(work, features=feats, sources=recipe_sources)
+    recipe.command(command)
     if audit is not None and audit.directory is not None:
         from ..targetgen.provenance import toolchain_provenance
 
@@ -1715,7 +1787,10 @@ def lower_to_llvm_ir(
                 exc.add_note(f"IR inspection prefix could not be recorded: {type(audit_error).__name__}")
         raise
     if proc.returncode != 0 or not stage_out.is_file():
-        error = PipelineError(f"upstream lowering failed:\n{proc.stdout}\n{proc.stderr}")
+        error = PipelineError(
+            f"upstream lowering failed (returncode={proc.returncode}, "
+            f"output_exists={stage_out.is_file()}):\n{proc.stdout}\n{proc.stderr}"
+        )
         if audit is not None:
             try:
                 audit.collect_views()
@@ -1729,6 +1804,20 @@ def lower_to_llvm_ir(
             stage_out.read_text(encoding="utf-8"),
             format="mlir" if omp else "llvm-ir",
         )
+    if "specialize_contiguous_copy" in feats:
+        from .contiguous_suffix_copy import require_report as _require_contiguous_copy_report
+
+        try:
+            _require_contiguous_copy_report(proc.stdout, work)
+        except ValueError as exc:
+            raise PipelineError(str(exc) + f"\n{proc.stdout}") from exc
+    if "fold_uniform_fill_copy" in feats:
+        from .uniform_fill_copy import require_report as _require_uniform_fill_report
+
+        try:
+            _require_uniform_fill_report(proc.stdout, work)
+        except ValueError as exc:
+            raise PipelineError(str(exc) + f"\n{proc.stdout}") from exc
     if _fold_broadcast_gate == "1":
         from .broadcast_fold import require_report as _require_broadcast_fold_report
 
@@ -1797,6 +1886,7 @@ def lower_to_llvm_ir(
         from .toolchain import mlir_translate
 
         translate_command = [str(mlir_translate()), "--mlir-to-llvmir", str(stage_out), "-o", str(out)]
+        recipe.command(translate_command)
         if audit is not None:
             audit.command(translate_command, sources=(__file__,))
         tproc = subprocess.run(translate_command, capture_output=True, text=True, timeout=timeout)
@@ -1805,6 +1895,15 @@ def lower_to_llvm_ir(
     result = _fix_float_literals(out.read_text(encoding="utf-8"))
     if audit is not None:
         audit.stage("llvm-normalized", result, format="llvm-ir")
+    if _OUTLINE_LOOPS in feats or _OUTLINE_MERGE_LOOPS in feats:
+        result = outline_loops(
+            result,
+            work / "llvm-loop-outline",
+            timeout=timeout,
+            audit=audit,
+            merge_identical=_OUTLINE_MERGE_LOOPS in feats,
+        )
+    recipe.returned(result)
     return result
 
 

@@ -22,6 +22,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
+from .build_recipe import named_object_paths
 from .harness_blobs import stage_harness_blobs
 
 
@@ -473,7 +474,8 @@ def link_elf(
     # so reordering could move code and change cycles. This build changes how each object is NAMED,
     # nothing about which objects are linked or in what order.
     objects: list[Path] = []
-    for source in [workdir / "harness.c", obj, *blob_sources, *recipe.support_sources]:
+    sources = [workdir / "harness.c", obj, *blob_sources, *recipe.support_sources]
+    for source, unit in zip(sources, named_object_paths(sources, workdir), strict=True):
         source = Path(source)
         # Assembly counts: the driver assembles a .S through the same temp-named intermediate that
         # a .c goes through, so leaving crt.S to the link step reintroduced the very STT_FILE symbol
@@ -481,7 +483,6 @@ def link_elf(
         if source.suffix not in (".c", ".S", ".s"):
             objects.append(source)
             continue
-        unit = workdir / f"{source.stem}.o"
         # `.incbin` names the staged payload by basename; assemble only these
         # generated stubs from their own directory, leaving existing build
         # command lines and support-source compilation unchanged.

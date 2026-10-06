@@ -500,6 +500,11 @@ def _prepare_model_mlir(
     # choose_qparams/quantize arrive as opaque calls to externs nothing defines, and the two paths
     # diverging here is precisely how a bundle ends up interpretable but unlinkable.
     lower_torchao_affine_quant(module)
+    from ...llvmlower.scalar_square import canonicalize_scalar_squares
+
+    _squares = canonicalize_scalar_squares(module)
+    if _squares:
+        print(f"[canonicalize] replaced {_squares} scalar square power(s) with multiplication")
     collapse_overrank_matmul(module)
     _propagate_quant_inner(module)
     # BIND the quantized-subclass inner tensors on the COMPILED path too. The interpreter binds them
@@ -715,6 +720,11 @@ def _prepare_model_mlir(
             f"extent, {skip_rank} outside the rank bound, {skip_map} on a "
             f"non-projected-permutation indexing map)"
         )
+    from ...llvmlower.splat_inputs import scalarize_splat_inputs
+
+    _splats = scalarize_splat_inputs(module)
+    if _splats:
+        print(f"[canonicalize] kept {_splats} uniform linalg input(s) scalar")
     if op_counts_out is not None:
         # What the PREPARED module actually contains, for the caller to check its levers against.
         # A transform lever finds its work by op NAME; one whose ops are all absent still builds,
@@ -1062,31 +1072,51 @@ def prepare_for_lowering(
     # DEVICE OFFLOAD, for the same reason and in the same place as the matrix routing above: a
     # contraction that has become a call is no longer on the vector path, so the register-block table
     # below must be derived from the IR that REMAINS. Inert unless a routing was supplied, and inert
-    # again unless that routing carries a selector -- the placement decision is made elsewhere
-    # (merlin.system.place) and passed in, never taken here.
+    # again unless that routing carries a selector or source-bound catalog. The placement decision
+    # is made elsewhere (merlin.system.place or the catalog's exact source binding), never here.
     if device is not None and (
-        getattr(device, "select", None) is not None or getattr(device, "exact_selection", None) is not None
+        getattr(device, "select", None) is not None
+        or getattr(device, "exact_selection", None) is not None
+        or getattr(device, "catalog_manifest", None) is not None
+        or getattr(device, "catalog_builder", None) is not None
     ):
         from ...llvmlower.device_offload import BY_CONTRACTION
         from ...llvmlower.device_offload import rewrite_prepared_file as _dev_rewrite
 
+        if getattr(device, "prepared_transform", None) is not None:
+            transformed = Path(device.prepared_transform(Path(prepared), Path(work) / "device_prepared"))
+            if not transformed.is_file():
+                raise ValueError("device prepared transform returned no model file")
+            prepared = transformed
         exact = getattr(device, "exact_selection", None)
         if exact is not None:
             exact.check_package(device.package_dir)
             exact.check_backend_contract()
-        # THE ROUTING SAYS WHAT UNIT MOVES, not this call site. A contraction route and a group route
-        # build different programs, and a build that chose for itself would make the choice invisible
-        # in the artifact it produced.
         _grain = str(getattr(device, "granularity", None) or BY_CONTRACTION)
+        catalog_manifest = getattr(device, "catalog_manifest", None)
+        catalog_object = getattr(device, "catalog_object", None)
+        if getattr(device, "catalog_builder", None) is not None:
+            catalog_manifest, catalog_object = device.catalog_builder(Path(prepared), Path(work) / "device_catalog")
         moved = _dev_rewrite(
             prepared,
             work,
             device.device,
             select=device.select,
             exact_selection=exact,
+            catalog_manifest=catalog_manifest,
+            catalog_object=catalog_object,
             granularity=_grain,
             capture=getattr(device, "capture", None),
             model=str(getattr(device, "model", "") or ""),
+        )
+        from ...llvmlower.device_build import apply_post_offload_transform
+        from ...llvmlower.device_offload import SIDECAR_NAME as _device_sidecar_name
+
+        prepared = apply_post_offload_transform(
+            device,
+            Path(prepared),
+            Path(work) / _device_sidecar_name,
+            Path(work) / "device_host_abi",
         )
         print(
             f"[device] routed {moved.moved} {_grain}(s) to {device.device} across "
@@ -1124,6 +1154,14 @@ def prepare_for_lowering(
                 f"runs with blocking disabled, so "
                 f"no contraction is tagged and no pair can be formed; the lever would build the "
                 f"baseline and report as applied"
+            )
+        if "reuse_tensor_destination" in features:
+            from ...llvmlower.insert_slice_destination import rewrite_prepared_file as _reuse_destination
+
+            prepared = _reuse_destination(
+                prepared,
+                Path(work) / "insert_slice_destination",
+                initialize_border_only="initialize_tensor_border_only" in features,
             )
         _judge_levers_on(prepared)
         return _strip_provenance(prepared, work, features), features
@@ -1401,6 +1439,14 @@ def prepare_for_lowering(
             features = (features - {PEROP_BLOCK_NAME}) | {ensure_perop_block(table, _PEROP_KC, _pairs, _rf_vec)}
         else:
             features = features - {PEROP_BLOCK_NAME}
+    if "reuse_tensor_destination" in features:
+        from ...llvmlower.insert_slice_destination import rewrite_prepared_file as _reuse_destination
+
+        prepared = _reuse_destination(
+            prepared,
+            Path(work) / "insert_slice_destination",
+            initialize_border_only="initialize_tensor_border_only" in features,
+        )
     _judge_levers_on(prepared)
     return _strip_provenance(prepared, work, features), features
 
@@ -2425,7 +2471,7 @@ def build_app(
             from ...llvmlower import op_profile as _op_profile
 
             try:
-                text, prof_table = _op_profile.instrument(Path(prepared).read_text())
+                text, prof_table = _op_profile.instrument(Path(prepared).read_text(), structural=True)
                 prepared = Path(work) / "model_prof.mlir"
                 Path(prepared).write_text(text)
                 _op_profile.write_table(prof_table, Path(work) / "op_profile_table.json")

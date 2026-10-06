@@ -127,6 +127,27 @@ def mlir_translate() -> Path:
     return Path(env) if env else llvm_install() / "bin" / "mlir-translate"
 
 
+def llvm_opt() -> Path:
+    """LLVM optimizer from the selected clang installation, or explicit override.
+
+    A missing selected tool is an error when used; do not silently switch LLVM
+    versions. A clang resolved through PATH uses its resolved installation.
+    """
+    env = _env("MERLIN_LLVM_OPT")
+    if env:
+        return Path(env)
+    import shutil
+
+    selected = clang()
+    return Path(shutil.which(str(selected)) or selected).with_name("opt")
+
+
+def llvm_nm() -> Path:
+    """Bitcode symbol inspector paired with the selected optimizer."""
+    env = _env("MERLIN_LLVM_NM")
+    return Path(env) if env else llvm_opt().with_name("llvm-nm")
+
+
 def available() -> bool:
     return m2m_python().is_file() and clang().is_file()
 

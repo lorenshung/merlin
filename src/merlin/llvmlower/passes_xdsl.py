@@ -926,6 +926,33 @@ def _attach_c_interface(text: str) -> tuple[str, int]:
     while True:
         start = text.find(_FUNC_HEAD, at)
         if start < 0:
+            if '"func.func"' in text:
+                # Generic functions have properties rather than a textual
+                # signature. Attach the public definition's interface through
+                # typed IR; private/external callbacks keep their original ABI.
+                from io import StringIO
+
+                from xdsl.dialects.builtin import UnitAttr
+                from xdsl.dialects.func import FuncOp
+                from xdsl.printer import Printer
+
+                from merlin.frontends.linalg_mlir import parse_mlir_text
+
+                module = parse_mlir_text(text)
+                for fn in module.body.block.ops:
+                    if (
+                        not isinstance(fn, FuncOp)
+                        or not fn.body.blocks
+                        or (fn.sym_visibility is not None and fn.sym_visibility.data != "public")
+                    ):
+                        continue
+                    if "llvm.emit_c_interface" in fn.attributes:
+                        return text, 0
+                    fn.attributes["llvm.emit_c_interface"] = UnitAttr()
+                    module.verify()
+                    stream = StringIO()
+                    Printer(stream=stream, print_generic_format=True).print_op(module)
+                    return stream.getvalue() + "\n", 1
             return text, 0
         at = start + 1
         name_at = start + len(_FUNC_HEAD)
