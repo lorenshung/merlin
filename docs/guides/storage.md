@@ -324,8 +324,10 @@ measurements were taken of, exports the tree, and passes it through the publish 
 `.merlin/provenance.json` (phase-1 run and frozen commit, phase-2 run and best commit, corpus seal
 digest, phase-0 evidence digest), `measurements.json` (FireSim cycles with the machine, the parameter
 header and the vendor control run in the same batch), `certification.json` (GSIM) and
-`isa_prohibition.json` (the whole-ELF prohibited-instruction scan). Each required field is checked and
-none is defaulted; a scan that is not clean or a GSIM verdict that is not `pass` refuses the export.
+`isa_prohibition.json` (the whole-ELF prohibited-instruction scan, with the non-empty
+`prohibited_instructions` it held the program to). Each required field is checked and none is
+defaulted; a scan that is not clean, a clean scan that prohibited nothing, or a GSIM verdict that is not
+`pass` refuses the export.
 
 **Retention is declared, not remembered.** `retention.pinned` in `merlin/contract/storage.yaml` names
 the sealed releases and the champions; `merlin-storage retain` and `prune` treat a unit that is,

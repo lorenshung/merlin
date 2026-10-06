@@ -18,6 +18,8 @@ code_refs:
   - src/merlin/targetgen/group_capsule_entries.py
   - packages/merlin-experiments/src/merlin_experiments/phase0/model_forms.py
   - packages/merlin-experiments/src/merlin_experiments/phase0/form_perf.py
+  - src/merlin/kernels/endpoints.py
+  - src/merlin/perf/isa_prohibition.py
   - packages/merlin-experiments/src/merlin_experiments/phase0/instruction_roles.py
 ---
 
@@ -136,6 +138,23 @@ An experiment's `policy.prohibited_instruction_roles` names closed-vocabulary ro
 and records the result as `instruction_policy` in `MANIFEST.yaml` and `coverage/generation.json`;
 Phase 1 receives it in `MERLIN_PROHIBITED_INSTRUCTION_ROLES` and every phase command carries it.
 Declaring a role does not by itself scan a program; enforcement is a separate whole-ELF check.
+
+The policy fails closed at every step, because a rule that forbids nothing reads exactly like an
+enforced one:
+
+- The taxonomy binds roles through `compute_endpoints.yaml`, read from the selected contract
+  (`MERLIN_CONTRACT_DIR`). A missing declaration raises, and a target that no endpoint binds has an
+  `UNKNOWN` taxonomy.
+- A declared role that matches none of the target's instructions makes the policy `UNKNOWN`, with a
+  `reason`. Verified Phase 0 refuses it, and `corpus prepare` refuses to release a verified corpus
+  whose policy cannot be enforced.
+- Phase 1 scans every ELF that a capsule grade links, including code that nothing calls. A prohibited
+  instruction fails the capsule (`PROHIBITED_INSTRUCTION`). A scan that could not run, or whose roles
+  name no instruction, leaves the capsule `incomplete`.
+- Phase 2 measured mode carries the sealed policy by value. It reads it from `--phase0-manifest`, the
+  config's `phase0_manifest`, or the descriptor's corpus manifest. A run, cell or group arm whose
+  policy is not enforceable is refused before any build. So is a scan that prohibits fewer
+  instructions than Phase 0 sealed.
 
 ## Review before Phase 1
 
