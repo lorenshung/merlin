@@ -129,7 +129,10 @@ each machine is run (host locations are environment references); which device ea
 pin registry's. [`whole-model-objective.json`](whole-model-objective.json) is an example objective
 config; replace each `/ABSOLUTE/...` placeholder with artifacts measured on that *same full design*.
 The Lean board remains an explicitly named historical option, not an interchangeable fallback: it
-lacks full-width accumulator readout. Merely selecting the full board here does not establish that
+lacks full-width accumulator readout. The stock `FireSimGemminiRocketConfig` board
+(`stock_u250_board`, batched as `stock_batched_board`) has that readout; its hw-config
+resolves to the pinned bitstream that declares its generated ABI header, and its chipyard
+is the private tree its host driver was built in (`MERLIN_CHIPYARD_GEMMINI_STOCK`). Merely selecting the full board here does not establish that
 its queue configuration is currently available, that it matches a particular Phase 0 RTL snapshot,
 or that a new run passed qualification. Large inputs such as the model capsule are frozen by
 content into each run, never copied.

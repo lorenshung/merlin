@@ -67,6 +67,23 @@ def test_the_targets_machine_registry_is_valid_data():
     assert "cycle_count" in board["adjudicates"]
 
 
+def test_the_stock_board_is_one_registered_full_width_device():
+    """The stock board's hw-config names exactly one registered bitstream, whose declared ABI header is
+    the one the board's programs are built against -- and not the lean board's narrow-readout header."""
+    from merlin.common import provenance
+    from merlin.perf import design_identity
+
+    machines = R.load(repo_root() / "examples" / "gemmini" / "phase2" / "whole-model-machines.yaml")["machines"]
+    board = machines[machines["stock_batched_board"]["timing"]]
+    assert machines["stock_batched_board"]["kind"] == "batched" and board["kind"] == "firesim"
+    (name,) = design_identity.hw_config_index()[board["hw_config"]]
+    artifact = provenance.load_artifacts()[name]
+    assert artifact.abi_header_sha256 == board["program_header_sha256"]
+    assert artifact.abi_header_sha256 != machines["lean_u250_board"]["program_header_sha256"]
+    assert board["queue_command"][:7] == ["env", "-u", "HOME", "-u", "USER", "-u", "LOGNAME"]
+    assert board["lock_path"] == machines["lean_u250_board"]["lock_path"]  # one physical board
+
+
 def test_the_example_objective_config_names_a_registry_machine_and_a_frozen_input():
     document = json.loads((repo_root() / "examples" / "gemmini" / "phase2" / "whole-model-objective.json").read_text())
     assert document["screen"]["machine"]["name"] == "batched_board"
