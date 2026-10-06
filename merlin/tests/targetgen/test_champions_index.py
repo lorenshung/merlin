@@ -88,7 +88,12 @@ def _evidence(p1_run: Path, frozen, digest: str) -> dict:
             },
         },
         "certification": {"gsim": {"verdict": "pass", "certificate_sha256": "c" * 64}},
-        "isa_prohibition": {"scope": "whole_elf", "verdict": "clean", "prohibited_roles": ["loop_fsm"]},
+        "isa_prohibition": {
+            "scope": "whole_elf",
+            "verdict": "clean",
+            "prohibited_roles": ["loop_fsm"],
+            "prohibited_instructions": {"8": "LOOP_A"},
+        },
     }
 
 
@@ -134,6 +139,10 @@ def test_champion_export_is_the_standalone_layout_of_best(campaign, out_root):
         (lambda e: e["measurements"]["firesim"]["control"].update(in_batch=False), "control.in_batch"),
         (lambda e: e["isa_prohibition"].update(verdict="violations"), "isa_prohibition.verdict"),
         (lambda e: e["isa_prohibition"].update(scope="kernel_only"), "isa_prohibition.scope"),
+        # A clean verdict under a rule that prohibited nothing is no verdict.
+        (lambda e: e["isa_prohibition"].update(prohibited_instructions={}), "prohibited_instructions"),
+        (lambda e: e["isa_prohibition"].pop("prohibited_instructions"), "prohibited_instructions"),
+        (lambda e: e["isa_prohibition"].update(prohibited_roles=[]), "isa_prohibition.prohibited_roles"),
         (lambda e: e["certification"]["gsim"].update(verdict="fail"), "gsim.verdict"),
         (lambda e: e["provenance"].pop("corpus_seal_digest"), "corpus_seal_digest"),
         (lambda e: e["provenance"]["phase1"].update(frozen_commit="e" * 40), "frozen"),

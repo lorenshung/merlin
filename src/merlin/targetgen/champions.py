@@ -13,7 +13,8 @@ would push. This module adds the four JSON records the payload-scoped publish la
 * ``measurements.json`` -- FireSim cycles with the machine, the parameter header and the vendor
   control measured in the same batch;
 * ``certification.json`` -- the GSIM certification;
-* ``isa_prohibition.json`` -- the whole-ELF prohibited-instruction scan.
+* ``isa_prohibition.json`` -- the whole-ELF prohibited-instruction scan, naming the instructions it
+  prohibited (a clean verdict over an empty prohibited set is refused).
 
 Every field listed in :data:`REQUIRED` is required and checked, never defaulted: a champion whose
 cycles came without their machine, or whose scan was not clean, is refused rather than exported with
@@ -59,7 +60,14 @@ REQUIRED: dict[str, dict[str, str]] = {
         "firesim.control.in_batch": "true",
     },
     "certification": {"gsim.verdict": "pass"},
-    "isa_prohibition": {"scope": "whole_elf", "verdict": "clean", "prohibited_roles": "list"},
+    # A clean verdict under a rule that forbids nothing is no verdict: the scan must name what it held
+    # the program to, at least one instruction (``{selector: name}``, the scanner's own record).
+    "isa_prohibition": {
+        "scope": "whole_elf",
+        "verdict": "clean",
+        "prohibited_roles": "nonempty_list",
+        "prohibited_instructions": "nonempty_mapping",
+    },
 }
 
 
@@ -104,6 +112,14 @@ def _check(rule: str, value) -> bool:
         return value is True
     if rule == "list":
         return isinstance(value, list) and all(isinstance(v, str) and v for v in value)
+    if rule == "nonempty_list":
+        return _check("list", value) and bool(value)
+    if rule == "nonempty_mapping":
+        return (
+            isinstance(value, dict)
+            and bool(value)
+            and all(isinstance(k, str) and k and isinstance(v, str) and v for k, v in value.items())
+        )
     return value == rule  # a literal the field must equal (a verdict, a scope)
 
 
