@@ -65,6 +65,10 @@ def main(argv: list[str] | None = None) -> int:
         from .phase2.whole_model_measured import cli as measured
 
         return measured.main(raw[1:])
+    if raw[:1] == ["cell"]:
+        from .phase2.whole_model_measured import cell_runs
+
+        return cell_runs.main(raw[1:])
     parser = argparse.ArgumentParser(prog="merlin experiment", description=__doc__)
     parser.add_argument("--catalog", type=Path, help="catalog YAML; paths inside it are relative to that file")
     commands = parser.add_subparsers(dest="verb", required=True)
@@ -119,6 +123,11 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser(
         "measured",
         help="the whole-model measured mode's own commands: `merlin experiment measured --help`",
+        add_help=False,
+    )
+    commands.add_parser(
+        "cell",
+        help="a cell run: `cell prepare <loop run> --cell ID`, `cell launch <run> --profile P`, `cell status`",
         add_help=False,
     )
     watch = commands.add_parser("watch", help="print each change to a whole-model measured run until it is over")
