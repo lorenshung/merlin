@@ -243,7 +243,8 @@ def test_a_dump_is_graded_under_the_contract_its_row_carries():
     off_by_one[4] = 1
     read, size = _dump(off_by_one)
     plain = grade_memory(read, _layout(size), {}, local=_Local(want))
-    assert plain["disagree"][0]["max_abs"] == 1 and plain["contracts"] == {"3": "exact"}
+    assert plain["disagree"][0]["mismatches"] == 1 and plain["evidence"]["3"]["max_abs"] == 1
+    assert plain["contracts"] == {"3": "exact"}
     bounded = _contract(BOUNDED_CONV).resolve({"op": "conv2d"})
     held = grade_memory(read, _layout(size, exactness=bounded), {}, local=_Local(want))
     assert held["agree"] == ["3"] and held["contracts"] == {"3": "bounded(<=1 LSB)"}
@@ -252,7 +253,8 @@ def test_a_dump_is_graded_under_the_contract_its_row_carries():
     off_by_two[4] = 2
     read, size = _dump(off_by_two)
     beyond = grade_memory(read, _layout(size, exactness=bounded), {}, local=_Local(want))
-    assert beyond["agree"] == [] and beyond["disagree"][0]["contract"] == "bounded(<=1 LSB)"
+    assert beyond["agree"] == [] and beyond["disagree"][0]["group"] == "3"
+    assert beyond["contracts"] == {"3": "bounded(<=1 LSB)"} and beyond["evidence"]["3"]["max_abs"] == 2
 
 
 @pytest.mark.target("gemmini")

@@ -236,7 +236,7 @@ def grade_memory(
                     if passes(group, graded_as, got, want_b, builtin_ok=over == 0):
                         agree.append(group)
                     else:
-                        disagree.append({"group": group, "max_abs": worst, "over": over, "contract": contracts[group]})
+                        disagree.append({"group": group, "max_abs": worst, "over": over})
                     continue
                 want = local.expected(int(row["group"]), {n: held[n] for n in local.inputs_of(int(row["group"]))})
             except (KeyError, _build().WholeModelBuildError) as why:
@@ -248,13 +248,9 @@ def grade_memory(
                 agree.append(group)
             else:
                 disagree.append(
-                    {
-                        "group": group,
-                        "mismatches": int(wrong.size),
-                        "of": int(got.size),
-                        "first": int(wrong[0]) if wrong.size else None,
-                        "contract": contracts[group],
-                    }
+                    {"group": group, "mismatches": int(wrong.size), "of": int(got.size), "first": int(wrong[0])}
+                    if wrong.size
+                    else {"group": group, "mismatches": 0, "of": int(got.size), "first": None}
                 )
             continue
         if row["compare"] == "merged":
@@ -277,7 +273,7 @@ def grade_memory(
             if passes(group, row, got, want, builtin_ok=over == 0):
                 agree.append(group)
             else:
-                disagree.append({"group": group, "max_abs": worst, "over": over, "contract": contracts[group]})
+                disagree.append({"group": group, "max_abs": worst, "over": over})
             continue
         chain = (oracle.get("groups") or {}).get(group) or {}
         digest = ref.fnv1a64_words(np.ascontiguousarray(got, dtype="<i8").tobytes()) & ref.DIGEST_MASK
@@ -297,15 +293,12 @@ def grade_memory(
         if passes(group, row, got, want, builtin_ok=wrong.size == 0):
             agree.append(group)
         else:
+            # The same row as ever; its largest difference and the contract applied are in ``evidence`` and
+            # ``contracts`` (a contract stricter than the op can fail a group with nothing mismatched).
             disagree.append(
-                {
-                    "group": group,
-                    "mismatches": int(wrong.size),
-                    "of": int(got.size),
-                    "first": int(wrong[0]) if wrong.size else None,
-                    "max_abs": evidence[group]["max_abs"],
-                    "contract": contracts[group],
-                }
+                {"group": group, "mismatches": int(wrong.size), "of": int(got.size), "first": int(wrong[0])}
+                if wrong.size
+                else {"group": group, "mismatches": 0, "of": int(got.size), "first": None}
             )
     return {
         "gate": "local",
