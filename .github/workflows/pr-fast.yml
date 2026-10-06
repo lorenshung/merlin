@@ -115,6 +115,11 @@ jobs:
         run: uv run --no-sync python build_tools/scripts/check_contract_copies.py
       - name: fact-provenance gate (a hardware fact derives from RTL, not from prose)
         run: uv run --no-sync python build_tools/scripts/check_fact_provenance.py
+      # Provenance asks which revision a fact came from; this asks what a declared RESTRICTION was read
+      # off. A narrowing claim is the one a wrong answer makes invisible -- it removes demand, so
+      # nothing fails.
+      - name: capability-backing gate (a claim that narrows a target must cite its source)
+        run: uv run --no-sync python build_tools/scripts/check_capability_backing.py
       - name: opcode-documentation gate (every accepted op has ABI semantics)
         run: uv run --no-sync python build_tools/scripts/check_opcode_documentation.py
       # Fresh CI has no generated OOT contracts. Keep new weakenings fatal for contracts it CAN read,

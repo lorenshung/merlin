@@ -104,3 +104,14 @@ proofs:
       Both ways that report could otherwise pass: the pass is not exempt, and the report is present
       and readable -- the companion test pins that a MISSING report is refused rather than called
       clean, which is the absence-reads-as-pass half of the same defect.
+
+  check_capability_backing.py:
+    proof: merlin/tests/infra/test_capability_backing.py::test_the_gate_fails_on_a_reintroduced_unbacked_narrowing
+    mutation: >-
+      Point the gate at one synthetic target whose only contract document declares an elementwise map
+      reachable only behind a contraction, justified by prose alone, and run its main with the ledger
+      ignored.
+    removes: >-
+      Every satisfier the claim could have: no ledger line forgives it, the target declares no hardware
+      pin whose read set could hold a cited file, and the comment names no in-repo path, test or
+      module. The same test then adds a module citation to show the gate passes once one resolves.

@@ -109,6 +109,13 @@ echo "[pre-commit] mutation proofs (every gate can be made to fail)…"
 echo "[pre-commit] silent defaults on the evidence paths…"
 "$PY" build_tools/scripts/check_silent_defaults.py
 
+# Whole-tree (~0.5 s): a contract line that NARROWS a target -- composed_with, ranks, a family narrower
+# than its unit, an unmaterializable or undetermined family, a unit with no families -- must cite the
+# RTL file a declared pin reads, an in-repo test or module, or a derivation. A wrong narrowing removes
+# demand, so nothing else fails on it.
+echo "[pre-commit] capability backing (a narrowing claim cites its source)…"
+"$PY" build_tools/scripts/check_capability_backing.py > /dev/null || "$PY" build_tools/scripts/check_capability_backing.py
+
 echo "[pre-commit] docs freshness…"
 "$PY" build_tools/scripts/check_docs.py
 
