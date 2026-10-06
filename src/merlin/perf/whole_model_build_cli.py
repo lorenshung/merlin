@@ -3,7 +3,8 @@
 The command line of :func:`merlin.perf.whole_model_build.build`, kept apart from it so the builder module
 holds the build alone. Beside the build's own options it takes the compile-debugging ones
 (:mod:`merlin.compile.debug`: ``--list-stages``, ``--dump-ir-after``, ``--dump-ir-before``,
-``--stop-after``, ``--trace-dir``).
+``--stop-after``, ``--trace-dir``) and ``--only-group``, which builds a PARTIAL program
+(:mod:`merlin.perf.whole_model_partial`) that is never graded or measured as the whole model.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from pathlib import Path
 from merlin.common.compile_trace import StopAfterStage
 
 from .whole_model_build import ON_VENDOR, WholeModelBuildError, build, grade
+from .whole_model_partial import MARKER
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -97,6 +99,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="offer the package a legal run of consecutive groups as one kernel, in addition to each group "
         "alone; a package that never asks for a region sees no change; off by default",
     )
+    make.add_argument(
+        "--only-group",
+        action="append",
+        default=[],
+        metavar="gN[,gM]",
+        help="ask the package for these groups only; every other group keeps the target's library call. "
+        "The result is marked a PARTIAL build and is never graded, gated or measured as the whole model",
+    )
     debug.add_arguments(make, list_stages=False)
     check = sub.add_parser("grade", help="grade a run's UART against a build's oracle")
     check.add_argument("--uart", required=True, type=Path)
@@ -132,6 +142,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 prohibited_roles=args.prohibited_role,
                 phase0_recipe=args.phase0_recipe,
                 descriptor=args.descriptor,
+                only_groups=args.only_group,
             )
     except StopAfterStage as stop:  # a requested stop: the IR is written, no program; not an error
         return debug.stopped("merlin-whole-model-build", stop)
@@ -149,6 +160,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"  g{row['group']} ({row.get('op')}) -> vendor [{row.get('cause')}]: {str(row.get('why'))[:120]}")
     if record["oracle"]:
         print(f"oracle: argmax={record['oracle']['argmax']} golden={record['oracle']['golden_argmax']}")
+    if record.get(MARKER):
+        print(f"PARTIAL BUILD (only {', '.join(record[MARKER]['only_groups'])}): not the whole model; never graded")
     if trace is not None:
         print(f"trace: {Path(trace.directory).absolute() / 'trace.json'}")
     return 0

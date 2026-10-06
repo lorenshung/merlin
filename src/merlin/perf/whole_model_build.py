@@ -64,6 +64,7 @@ from merlin.common import compile_trace as _trace
 from merlin.perf.whole_model_memory import MEMORY_MAP_SCHEMA, grade_memory, memory_map
 
 from . import whole_model_object_cache as _OC
+from . import whole_model_partial as _partial
 
 __all__ = [
     "MEMORY_MAP_SCHEMA",
@@ -1022,6 +1023,7 @@ def build(
     allow_regions: bool = False,
     phase0_recipe: str | Path | None = None,
     descriptor: str | Path | None = None,
+    only_groups: Sequence[Any] = (),
 ) -> dict[str, Any]:
     """Build ``model_capsule`` as one runnable program whose kernels are ``package_dir``'s, with its oracle.
 
@@ -1065,7 +1067,10 @@ def build(
       * ``phase0_recipe`` / ``descriptor`` -- the Phase 0 recipe whose ``datapath`` block the corpus is
         built under, and the target descriptor (see :func:`corpus_binder`). Required with a package:
         each group is put to it as the capsule the corpus would write for that group, never under a
-        binding assumed here.
+        binding assumed here;
+      * ``only_groups`` -- ask the package for these groups alone (``["g12"]``); every other group is
+        declined to the target's library and the result is a PARTIAL build, marked so on the record,
+        the oracle and ``PARTIAL_BUILD.json`` and refused as a whole model (:mod:`.whole_model_partial`).
 
     Returns the build record (also written to ``<out>/whole_model_build.json``, with the oracle in
     ``<out>/oracle.json``): the ELF and its digest; per-group ATTRIBUTION -- ``package`` (the kernel is
@@ -1087,6 +1092,8 @@ def build(
     out.mkdir(parents=True, exist_ok=True)
     stages.root = out
     jobs = jobs or min(16, os.cpu_count() or 1)
+    if only_groups:
+        decline = [*decline, *_partial.unasked(capsule, target=target, only=only_groups)]
     binding = corpus_binder(target, phase0_recipe=phase0_recipe, descriptor=descriptor) if package_dir else None
 
     passes_record: dict[str, Any] | None = None
@@ -1375,6 +1382,8 @@ def build(
             extra={"compiler_sources": driver.program._compiler_provenance()},
         ),
     }
+    if only_groups:
+        _partial.mark(record, out, only_groups)
     (out / "whole_model_build.json").write_text(json.dumps(record, indent=1, default=str) + "\n", encoding="utf-8")
     (out / "manifest.yaml").write_text(
         dump_yaml(
@@ -1382,6 +1391,7 @@ def build(
                 "schema": SCHEMA,
                 "target": target,
                 "capsule": capsule.name,
+                **({_partial.MARKER: record[_partial.MARKER]} if only_groups else {}),
                 "git_sha": record["provenance"]["merlin"]["commit"],
                 "elf_sha256": receipt["elf_sha256"],
                 "artifacts": [

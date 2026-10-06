@@ -112,6 +112,7 @@ def build(
     descriptor: str | None = None,
     chunk_ops: int | None = None,
     lowering_passes: Sequence[str] = (),
+    only_groups: Sequence[Any] = (),
     trace_dir: str | None = None,
     dump_ir_after: Sequence[str] | str = (),
     dump_ir_before: Sequence[str] | str = (),
@@ -125,7 +126,9 @@ def build(
     none builds exactly as before -- and the selection is recorded in the result's ``notes``.
 
     The compile-debugging keys (:mod:`merlin.compile.debug`) are ``build_options`` too, all empty by
-    default: ``trace_dir``/``dump_ir_after``/``dump_ir_before``/``stop_after`` keep a trace of the build. A build stopped at a stage produces no program, so here -- where a program is
+    default: ``only_groups`` builds a PARTIAL program (marked on its expectations, so every verdict and
+    measurement refuses it), and ``trace_dir``/``dump_ir_after``/``dump_ir_before``/``stop_after`` keep a
+    trace of the build. A build stopped at a stage produces no program, so here -- where a program is
     what the caller is owed -- the stop is a :class:`WholeModelBuildError` naming where the IR is.
     """
     from merlin.common.compile_trace import StopAfterStage
@@ -162,6 +165,7 @@ def build(
                 phase0_recipe=phase0_recipe,
                 descriptor=descriptor,
                 chunk_ops=chunk_ops,
+                only_groups=only_groups,
             )
     except StopAfterStage as stop:
         raise WMB.WholeModelBuildError(stop.message("whole-model builder")) from None
@@ -192,6 +196,7 @@ def _build(
     phase0_recipe: str | None = None,
     descriptor: str | None = None,
     chunk_ops: int | None = None,
+    only_groups: Sequence[Any] = (),
 ) -> dict[str, Any]:
     """``decline`` (op names / group indices) is CELL MODE's own hook: naming every group outside one
     cell routes them all to the target's library, so only the cell's own groups can move whatever this
@@ -207,12 +212,13 @@ def _build(
     """
     from merlin.perf import whole_model_build as WMB
     from merlin.perf import whole_model_open as WO
+    from merlin.perf import whole_model_partial as PARTIAL
     from merlin.runtime.backends import base as backends
 
     if WO.is_open_model(model_capsule, target):
-        if harness_overrides or decline or allow_passes or allow_regions:
+        if harness_overrides or decline or allow_passes or allow_regions or only_groups:
             raise WMB.WholeModelBuildError(
-                "an open-model build takes no harness overrides, declines, passes or regions"
+                "an open-model build takes no harness overrides, declines, passes, regions or only_groups"
             )
         return WO.service_build(
             package_dir,
@@ -252,6 +258,7 @@ def _build(
         allow_regions=allow_regions,
         phase0_recipe=phase0_recipe,
         descriptor=descriptor,
+        only_groups=only_groups,
     )
     oracle = json.loads(Path(record["oracle"]["path"]).read_text(encoding="utf-8"))
     capsule = WMB.load_model_capsule(model_capsule)
@@ -329,6 +336,8 @@ def _build(
             ),
             "argmax": int(oracle["argmax"]),
             "source": f"{record['oracle']['path']} (golden argmax {oracle.get('golden_argmax')})",
+            # A PARTIAL build carries its marker where every verdict reads, and is refused there.
+            **({PARTIAL.MARKER: record[PARTIAL.MARKER]} if record.get(PARTIAL.MARKER) else {}),
         },
         "groups": routes,
         "protocol": {key: driver.program.UART[key] for key in _PROTOCOL_KEYS if key in driver.program.UART},
@@ -342,6 +351,7 @@ def _build(
             "build_record": str(Path(out_dir) / "whole_model_build.json"),
         },
         "provenance": record.get("provenance"),
+        **({PARTIAL.MARKER: record[PARTIAL.MARKER]} if record.get(PARTIAL.MARKER) else {}),
     }
 
 
