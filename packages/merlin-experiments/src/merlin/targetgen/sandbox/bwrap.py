@@ -992,10 +992,10 @@ class _MountVisibility:
     original destination STRING length and ordered mount index, not path depth.
     """
 
-    def __init__(self, argv: list[str]):
+    def __init__(self, argv: list[str], mounts: list[tuple[str, str, str]] | None = None):
         self._destinations: dict[Path, tuple[int, int, str, str, str]] = {}
         self._next_index = 0
-        for state, src, dest in _mounts(argv):
+        for state, src, dest in _mounts(argv) if mounts is None else mounts:
             self.append(state, src, dest)
 
     def append(self, state: str, src: str, dest: str) -> None:
@@ -1038,8 +1038,9 @@ def is_exposed(argv: list[str], path: Path) -> bool:
 
 def coverage_gap(argv: list[str], surfaces: list[AnswerSurface]) -> list[AnswerSurface]:
     """The answer surfaces STILL reachable under ``argv`` — the drift/cheat guard. Empty == full mask."""
-    visibility = _MountVisibility(argv)
-    return [s for s in _support_bind_surfaces(argv, surfaces) if visibility.is_exposed(s.path)]
+    mounts = _mounts(argv)  # one parse per batch, shared by the index and the bind projection
+    visibility = _MountVisibility(argv, mounts)
+    return [s for s in _support_bind_surfaces(mounts, surfaces) if visibility.is_exposed(s.path)]
 
 
 def apply_answer_masks(argv: list[str], surfaces: list[AnswerSurface]) -> list[str]:
@@ -1047,8 +1048,9 @@ def apply_answer_masks(argv: list[str], surfaces: list[AnswerSurface]) -> list[s
     by deny-by-default is skipped (no redundant overlay, and no mount whose parent tmpfs would fail).
     File surfaces are /dev/null-overlaid; dir surfaces are tmpfs'd. Masks go LAST so they win."""
     out = list(argv)
-    visibility = _MountVisibility(out)
-    for s in _support_bind_surfaces(argv, surfaces):
+    mounts = _mounts(out)  # one parse per batch, shared by the index and the bind projection
+    visibility = _MountVisibility(out, mounts)
+    for s in _support_bind_surfaces(mounts, surfaces):
         if not visibility.is_exposed(s.path):
             continue
         if s.kind == "file":
@@ -1068,7 +1070,7 @@ def _bind_alias(private: Path, kind: str, source: Path, destination: Path) -> tu
     return None
 
 
-def _support_bind_surfaces(argv: list[str], surfaces: list[AnswerSurface]) -> list[AnswerSurface]:
+def _support_bind_surfaces(mounts: list[tuple[str, str, str]], surfaces: list[AnswerSurface]) -> list[AnswerSurface]:
     """Project support denials through every bind, including deeper re-exposures.
 
     Only explicit binds sourced within a surface-declared public subtree are
@@ -1076,17 +1078,23 @@ def _support_bind_surfaces(argv: list[str], surfaces: list[AnswerSurface]) -> li
     source and destination matter: a frozen copy can be bound over a live private
     location, and a live private subtree can be bound somewhere unrelated.
     This is mount-plan reasoning, not a filesystem-race or OS isolation proof.
+
+    The caller's surfaces come back unchanged and in order (one row per query), followed by the
+    projected denials that name a path no caller surface already names.
     """
-    result = {surface.path: surface for surface in surfaces}
-    mounts = _mounts(argv)
+    known = {surface.path for surface in surfaces}
+    result: dict[Path, AnswerSurface] = {}
+
+    def project(path: Path, surface: AnswerSurface) -> None:
+        if path not in known:
+            result.setdefault(path, surface)
+
     for surface in surfaces:
         if surface.origin != "backend":
             continue
         for private in {surface.path.absolute(), surface.path.resolve()}:
             exemptions = tuple(private / sub for sub in surface.grantable)
-            result.setdefault(
-                private, AnswerSurface(surface.label, private, surface.kind, "backend", surface.grantable)
-            )
+            project(private, AnswerSurface(surface.label, private, surface.kind, "backend", surface.grantable))
             for state, raw_source, raw_destination in mounts:
                 if state != "expose":
                     continue
@@ -1107,8 +1115,8 @@ def _support_bind_surfaces(argv: list[str], surfaces: list[AnswerSurface]) -> li
                         continue  # absent bind sources expose no content (including *-try binds)
                     # Projected entries are concrete denials, not new authorities
                     # which could recursively declare a public subtree.
-                    result.setdefault(alias, AnswerSurface("support package bind", alias, kind, "hidden"))
-    return list(result.values())
+                    project(alias, AnswerSurface("support package bind", alias, kind, "hidden"))
+    return [*surfaces, *result.values()]
 
 
 def _frozen_support_surfaces(ws: Path, bundle: dict, surfaces: list[AnswerSurface], repo: Path) -> list[AnswerSurface]:
