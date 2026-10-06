@@ -69,6 +69,7 @@ EVENT_TURN_STARTED = "turn.started"
 EVENT_TURN_COMPLETED = "turn.completed"
 EVENT_TURN_FAILED = "turn.failed"
 EVENT_ITEM_STARTED = "item.started"
+EVENT_ITEM_UPDATED = "item.updated"
 EVENT_ITEM_COMPLETED = "item.completed"
 EVENT_ERROR = "error"
 
@@ -79,7 +80,40 @@ ITEM_ERROR = "error"
 ITEM_FILE_CHANGE = "file_change"
 ITEM_MCP_TOOL_CALL = "mcp_tool_call"
 ITEM_WEB_SEARCH = "web_search"
+# Emitted by the tool and observed in captured sessions, though this driver handles neither: a plan
+# update (``todo_list``, carried by ``item.updated``) and a sub-agent call (``collab_tool_call``).
+ITEM_TODO_LIST = "todo_list"
+ITEM_COLLAB_TOOL_CALL = "collab_tool_call"
 _TOOL_ITEMS = (ITEM_COMMAND_EXECUTION, ITEM_FILE_CHANGE, ITEM_MCP_TOOL_CALL, ITEM_WEB_SEARCH)
+
+#: The whole measured envelope and item vocabularies, ONE declaration. The read audit fails closed on
+#: anything outside them, so a second copy that drifted would turn a real event into UNKNOWN (or, the
+#: dangerous way round, admit one this driver never saw).
+ENVELOPE_TYPES: frozenset[str] = frozenset(
+    (
+        EVENT_THREAD_STARTED,
+        EVENT_TURN_STARTED,
+        EVENT_TURN_COMPLETED,
+        EVENT_TURN_FAILED,
+        EVENT_ITEM_STARTED,
+        EVENT_ITEM_UPDATED,
+        EVENT_ITEM_COMPLETED,
+        EVENT_ERROR,
+    )
+)
+ITEM_TYPES: frozenset[str] = frozenset(
+    (
+        ITEM_COMMAND_EXECUTION,
+        ITEM_AGENT_MESSAGE,
+        ITEM_REASONING,
+        ITEM_ERROR,
+        ITEM_FILE_CHANGE,
+        ITEM_MCP_TOOL_CALL,
+        ITEM_WEB_SEARCH,
+        ITEM_TODO_LIST,
+        ITEM_COLLAB_TOOL_CALL,
+    )
+)
 
 # How this driver's runs are billed, DECLARED so the cost ledger asks the driver instead of guessing
 # from the model id. ChatGPT auth consumes a subscription seat: any USD figure downstream is notional.
@@ -173,8 +207,13 @@ def build_cmd(
     if sandbox == "bwrap":
         # Do not pass --sandbox: the legacy setting overrides permission profiles.
         # --strict-config fails closed on a CLI too old to understand the profile.
-        cmd += ["--strict-config", "-c", f'default_permissions="{_CANDIDATE_PERMISSION_PROFILE}"',
-                "-c", "approval_policy=never"]
+        cmd += [
+            "--strict-config",
+            "-c",
+            f'default_permissions="{_CANDIDATE_PERMISSION_PROFILE}"',
+            "-c",
+            "approval_policy=never",
+        ]
     else:
         # NOT ``--ask-for-approval``: that flag does not exist in 0.147.0 (the
         # CLI offers --approve-for-me / --dangerously-bypass-approvals-and-sandbox),
@@ -249,24 +288,22 @@ def _candidate_permission_config(codex_home: Path) -> str:
     launcher_dir = Path.home() / ".local" / "bin"
     package_roots = dict.fromkeys((real_codex_home() / "packages", Path.home() / ".codex" / "packages"))
     runtime_grants = "".join(
-        f'{json.dumps(str(path))} = "read"\n'
-        for path in (launcher_dir, *package_roots)
-        if path.exists()
+        f'{json.dumps(str(path))} = "read"\n' for path in (launcher_dir, *package_roots) if path.exists()
     )
     return (
-        f'[permissions.{_CANDIDATE_PERMISSION_PROFILE}]\n'
+        f"[permissions.{_CANDIDATE_PERMISSION_PROFILE}]\n"
         'extends = ":workspace"\n'
-        f'[permissions.{_CANDIDATE_PERMISSION_PROFILE}.filesystem]\n'
+        f"[permissions.{_CANDIDATE_PERMISSION_PROFILE}.filesystem]\n"
         '":root" = "deny"\n'
         '":minimal" = "read"\n'
         '"/scratch" = "read"\n'
         '"/scratch2" = "read"\n'
-        f'{runtime_grants}'
+        f"{runtime_grants}"
         f'{json.dumps(str(codex_home))} = "deny"\n'
         f'[permissions.{_CANDIDATE_PERMISSION_PROFILE}.filesystem.":workspace_roots"]\n'
         '"." = "write"\n'
-        f'[permissions.{_CANDIDATE_PERMISSION_PROFILE}.network]\n'
-        'enabled = false\n'
+        f"[permissions.{_CANDIDATE_PERMISSION_PROFILE}.network]\n"
+        "enabled = false\n"
     )
 
 
@@ -331,8 +368,10 @@ def prepare_codex_home(dest: Path, *, model: str, effort: str) -> dict:
 
     provider = _BR.codex_config_fragment(model)
     config = _FROZEN_CONFIG.format(
-        model=json.dumps(_BR.codex_model_name(model)), effort=json.dumps(effort or "high"),
-        profile=_candidate_permission_config(dest), provider=provider,
+        model=json.dumps(_BR.codex_model_name(model)),
+        effort=json.dumps(effort or "high"),
+        profile=_candidate_permission_config(dest),
+        provider=provider,
     )
     config_path = dest / "config.toml"
     config_path.write_text(config)
@@ -647,8 +686,13 @@ def build_resume_cmd(
     cmd = [codex_bin, "exec", "resume", "--json", "--skip-git-repo-check", "--model", model, "-o", str(final_path)]
     cmd += _effort_arg(effort)
     if sandbox == "bwrap":
-        cmd += ["--strict-config", "-c", f'default_permissions="{_CANDIDATE_PERMISSION_PROFILE}"',
-                "-c", "approval_policy=never"]
+        cmd += [
+            "--strict-config",
+            "-c",
+            f'default_permissions="{_CANDIDATE_PERMISSION_PROFILE}"',
+            "-c",
+            "approval_policy=never",
+        ]
     else:
         # `resume` has no --sandbox option; its config override is the same
         # workspace-write policy the first unsandboxed turn selects.
@@ -722,17 +766,29 @@ def _preflight_candidate_sandbox(
         'test ! -r "$CODEX_HOME/auth.json" && test ! -w "$CODEX_HOME/auth.json" && '
         'for proc_auth in /proc/[0-9]*/root"$CODEX_HOME/auth.json"; do '
         'test ! -r "$proc_auth" || exit 1; done && '
-        f'test -r {shlex.quote(str(ws))} && test -w {shlex.quote(str(ws))} && '
-        'command -v python3 >/dev/null && python3 --version >/dev/null'
+        f"test -r {shlex.quote(str(ws))} && test -w {shlex.quote(str(ws))} && "
+        "command -v python3 >/dev/null && python3 --version >/dev/null"
     )
     auth = shlex.quote(str(codex_home / "auth.json"))
     native_probe = shlex.join(
-        (codex_bin, "sandbox", "--permission-profile", _CANDIDATE_PERMISSION_PROFILE,
-         "-C", str(ws), "--", "/bin/sh", "-c", probe)
+        (
+            codex_bin,
+            "sandbox",
+            "--permission-profile",
+            _CANDIDATE_PERMISSION_PROFILE,
+            "-C",
+            str(ws),
+            "--",
+            "/bin/sh",
+            "-c",
+            probe,
+        )
     )
     inner = f"test -r {auth} && test -w {auth} && {native_probe}"
     script = _sandbox_script(
-        rounds, rnd, -1,
+        rounds,
+        rnd,
+        -1,
         sandbox_command(inner, ws, bundle, extra_binds=codex_runtime_binds(codex_home)),
     )
     result = subprocess.run(script, cwd=str(ws), capture_output=True, text=True, timeout=45)
@@ -1079,8 +1135,11 @@ def run_round(
                             etype = event.get("type")
                             if etype == EVENT_THREAD_STARTED:
                                 announced = event.get("thread_id")
-                                if (not isinstance(announced, str) or not announced
-                                        or (thread_id is not None and announced != thread_id)):
+                                if (
+                                    not isinstance(announced, str)
+                                    or not announced
+                                    or (thread_id is not None and announced != thread_id)
+                                ):
                                     errors.append("codex session thread identity changed or is missing")
                                     _kill_tree(proc)
                                 else:
@@ -1213,8 +1272,12 @@ def run_round(
             remaining = deadline - time.monotonic()
             turn_errors = errors[turn_errors_start:]
             retry_capacity = (
-                continue_session and thread_id and turn_failed and not turn_completed
-                and not timed_out and rc != 0
+                continue_session
+                and thread_id
+                and turn_failed
+                and not turn_completed
+                and not timed_out
+                and rc != 0
                 and turn_errors
                 and all(error.lower().startswith("selected model is at capacity") for error in turn_errors)
                 and capacity_retries < _CAPACITY_MAX_RETRIES
@@ -1223,11 +1286,16 @@ def run_round(
             )
             if retry_capacity:
                 capacity_retries += 1
-                tr.emit({
-                    "type": "codex_capacity_retry", "attempt": capacity_retries,
-                    "thread_id": thread_id, "model": resolved,
-                    "backoff_s": _CAPACITY_BACKOFF_S, "arrived_at": _now(),
-                })
+                tr.emit(
+                    {
+                        "type": "codex_capacity_retry",
+                        "attempt": capacity_retries,
+                        "thread_id": thread_id,
+                        "model": resolved,
+                        "backoff_s": _CAPACITY_BACKOFF_S,
+                        "arrived_at": _now(),
+                    }
+                )
                 time.sleep(_CAPACITY_BACKOFF_S)
                 recovered_errors.update(range(turn_errors_start, len(errors)))
                 continue
