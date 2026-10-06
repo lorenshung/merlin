@@ -148,6 +148,9 @@ class WholeModelObjective:
         self.session_started_epoch: float | None = None
         #: The run's OOT history (:class:`.ledger.OotLedger`): a commit per candidate, a tag per measurement.
         self.ledger: Any = None
+        #: The launcher's heartbeat (:class:`.liveness.Heartbeat`), set by the process that runs the sessions;
+        #: a reader that opens the objective (``status``) leaves it None and never writes one.
+        self.heartbeat: Any = None
         # THE SCREEN ARMS ITS OWN COVERAGE GATE AT REQUEST TIME: a gate armed only on poll left the first
         # request after every relaunch without one, and a candidate that handed work back reached the board.
         if hasattr(screen, "coverage_gate_provider"):
@@ -158,6 +161,8 @@ class WholeModelObjective:
         import time
 
         self.session_started_epoch = float(epoch if epoch is not None else time.time())
+        if self.heartbeat is not None:
+            self.heartbeat.tick("session started", force=True)
 
     def stagnation(self, *, top: int = 5) -> dict[str, Any] | None:
         """Whether this session's correct measurements moved the best's top gap-holding groups (a
@@ -542,6 +547,8 @@ class WholeModelObjective:
             self._record_staleness_on_disk()
             if self.ledger is not None:
                 self.ledger.sync(self)
+            if self.heartbeat is not None:
+                self.heartbeat.tick("poll")
 
     def _record_staleness_on_disk(self) -> None:
         """Every certification verdict gets its staleness record, whether or not THIS process promoted

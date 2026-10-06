@@ -26,6 +26,7 @@ from typing import Any
 from . import batch as BATCH
 from . import jobs as J
 from . import launch as LAUNCH
+from . import liveness as LIVE
 from . import rounds as RND
 from . import service as SERVICE
 from . import sessions as SES
@@ -106,9 +107,18 @@ def _compact(row: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-def run_status(run_dir: Path, *, objective: Any = None, poll: bool = False, history: int = 10) -> dict[str, Any]:
+def run_status(
+    run_dir: Path,
+    *,
+    objective: Any = None,
+    poll: bool = False,
+    history: int = 10,
+    stall_hours: float | None = None,
+) -> dict[str, Any]:
     """The run's status document (see the module docstring).  ``objective`` is the run's objective when
-    the caller has one; without it the stores are still read, and the objective's view is omitted."""
+    the caller has one; without it the stores are still read, and the objective's view is omitted.
+    ``liveness`` is :func:`.liveness.assess`: STALLED when the launcher is gone or no candidate was
+    measured within ``stall_hours`` (default :data:`.liveness.DEFAULT_STALL_HOURS`)."""
     from . import cli as CLI
 
     run_dir = Path(run_dir)
@@ -142,6 +152,11 @@ def run_status(run_dir: Path, *, objective: Any = None, poll: bool = False, hist
         "rounds": ended,
         "open_rounds": opened,
         "stores": {name: store_state(root) for name, root in roots.items()},
+        "liveness": LIVE.assess(
+            run_dir,
+            stall_hours=LIVE.DEFAULT_STALL_HOURS if stall_hours is None else float(stall_hours),
+            stores=list(roots.values()),
+        ),
         "resumed_into": CLI.successors(run_dir),
         "disk_free_bytes": {
             "store": _free(roots["screen"]) if "screen" in roots else None,
@@ -173,6 +188,18 @@ def _cycles(value: Any) -> str:
 def format_status(document: Mapping[str, Any]) -> str:
     """The status document as a few lines for a terminal."""
     lines = [f"{document['run_dir']}", f"  {document.get('target')} / {document.get('method')}"]
+    liveness = document.get("liveness") or {}
+    if liveness:
+        measured = (liveness.get("last_measured") or {}).get("at") or "never"
+        lines.append(
+            f"  {liveness.get('state')}: last measured candidate {measured}"
+            + (
+                f" ({liveness['hours_since_measured']} h ago)"
+                if liveness.get("hours_since_measured") is not None
+                else ""
+            )
+            + "".join(f"\n    {reason}" for reason in liveness.get("reasons") or ())
+        )
     launcher = document.get("launcher") or {}
     alive = {True: "alive", False: "gone", None: "never launched here"}[launcher.get("alive")]
     lines.append(f"  launcher pid {launcher.get('pid')} {alive}; log {launcher.get('log')}")
@@ -251,6 +278,7 @@ def snapshot(run_dir: Path, *, objective: Any = None) -> dict[str, Any]:
         "stopped": ((read_json(run_dir / "stage" / "sessions.json") or {}).get("stopped") or {}).get("kind"),
         "holds": holds,
         "best": best,
+        "liveness": LIVE.assess(run_dir, stores=[Path(p) for p in (seed.get("store_roots") or {}).values()])["state"],
     }
 
 
@@ -274,6 +302,8 @@ def changes(before: Mapping[str, Any] | None, after: Mapping[str, Any]) -> list[
     for name, held in sorted(after["holds"].items()):
         if held != bool(before["holds"].get(name)):
             lines.append(f"{name} {'opened' if held else 'closed'}")
+    if after.get("liveness") != before.get("liveness") and after.get("liveness"):
+        lines.append(f"liveness: {after['liveness']}")
     for key, word in (("launcher_alive", "launcher"), ("stop_requested", "stop requested"), ("stopped", "stopped")):
         if after.get(key) != before.get(key) and (after.get(key) or before.get(key) is not None):
             lines.append(f"{word}: {after.get(key)}")

@@ -47,12 +47,12 @@ def _measured_run(path: Path) -> Path | None:
         return None
 
 
-def _measured_status(run_dir: Path) -> dict:
+def _measured_status(run_dir: Path, *, stall_hours: float | None = None) -> dict:
     from .phase2.whole_model_measured import cli as measured
     from .phase2.whole_model_measured import progress
 
     objective, error = measured.objective_or_error(run_dir)
-    document = progress.run_status(run_dir, objective=objective)
+    document = progress.run_status(run_dir, objective=objective, stall_hours=stall_hours)
     if error:
         document["objective_error"] = error
     return document
@@ -117,9 +117,13 @@ def main(argv: list[str] | None = None) -> int:
         child.add_argument(
             "--phase0-m2m-python", type=Path, help="explicit Model2MLIR venv Python for diagnostic capture"
         )
-    commands.add_parser(
+    status = commands.add_parser(
         "status", help="an orchestration's phases, or a whole-model measured run's status from its records"
-    ).add_argument("run_dir", type=Path)
+    )
+    status.add_argument("run_dir", type=Path)
+    status.add_argument(
+        "--stall-hours", type=float, help="a measured run with no candidate measured for this long is STALLED"
+    )
     commands.add_parser(
         "measured",
         help="the whole-model measured mode's own commands: `merlin experiment measured --help`",
@@ -358,7 +362,11 @@ def main(argv: list[str] | None = None) -> int:
             result = runs(root=args.root, target=args.target, experiment=args.experiment)
         elif args.verb == "status":
             measured_run = None if (args.run_dir / "orchestration.json").is_file() else _measured_run(args.run_dir)
-            result = _measured_status(measured_run) if measured_run is not None else runner.status(args.run_dir)
+            result = (
+                _measured_status(measured_run, stall_hours=args.stall_hours)
+                if measured_run is not None
+                else runner.status(args.run_dir)
+            )
         elif args.verb == "watch":
             run_dir = _measured(lambda measured: measured.resolve_run(args.run_dir))
             return _measured(lambda measured: measured.main(_watch_argv(run_dir, args)))

@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -108,6 +109,14 @@ def start(run_dir: Path, *, profile_name: str, round_driver: str, price_table: P
     profile = P.load(profile_name)
     checked = P.check(profile, price_table=_price_table(price_table))
     _record, objective = _objective_of(Path(run_dir))
+    # THIS PROCESS IS THE LAUNCHER: it writes the run's heartbeat (pid, last activity, last measurement).
+    from . import liveness as LIVE
+
+    objective.heartbeat = LIVE.Heartbeat(
+        Path(run_dir),
+        stores=lambda: [objective.screen.root, *([objective.certifier.root] if objective.certifier else [])],
+    )
+    objective.heartbeat.tick("launched", force=True)
     # THE SEED IS MEASURED FIRST: the bar, the coverage floor and the noise margin are all the seed's,
     # and a candidate requested before any of them exists carries no coverage gate.  Idempotent: a
     # relaunch finds the seed's job in the store and requests nothing new.
@@ -378,6 +387,9 @@ def _parser() -> argparse.ArgumentParser:
     child.add_argument("--price-table", type=Path)
     child = sub.add_parser("status", help="the run's status, read from its own records")
     child.add_argument("run_dir", type=Path)
+    child.add_argument(
+        "--stall-hours", type=float, default=None, help="hours without a measured candidate that mean STALLED"
+    )
     child.add_argument("--poll", action="store_true", help="advance the objective first (dispatches pending jobs)")
     child.add_argument("--json", action="store_true")
     child.add_argument("--history", type=int, default=10, help="how many recent measurements to show")
@@ -412,6 +424,12 @@ def _parser() -> argparse.ArgumentParser:
     child.add_argument("--price-table", type=Path)
     child.add_argument("--why", required=True)
     child.add_argument("--max-relaunches", type=int, default=6)
+    child.add_argument("--stall-hours", type=float, default=None, help="hours without a measurement that mean STALLED")
+    child.add_argument(
+        "--notify-command",
+        help="a command run once per stall (split like a shell would, never run by one; {run_dir} and "
+        "{reason} are substituted)",
+    )
     child = sub.add_parser("export-champion")
     child.add_argument("run_dir", type=Path)
     child.add_argument("--package-id", required=True)
@@ -499,7 +517,9 @@ def main(argv: list[str] | None = None) -> int:
 
         run_dir = resolve_run(args.run_dir)
         objective, error = objective_or_error(run_dir)
-        document = PROGRESS.run_status(run_dir, objective=objective, poll=args.poll, history=args.history)
+        document = PROGRESS.run_status(
+            run_dir, objective=objective, poll=args.poll, history=args.history, stall_hours=args.stall_hours
+        )
         if error:
             document["objective_error"] = error
         print(json.dumps(document, indent=1, default=str) if args.json else PROGRESS.format_status(document))
@@ -565,7 +585,11 @@ def main(argv: list[str] | None = None) -> int:
                 prepared, profile=args.profile, round_driver=args.round_driver, price_table=args.price_table
             ),
             why=args.why,
-            policy=WD.WatchPolicy(max_relaunches=args.max_relaunches),
+            policy=WD.WatchPolicy(
+                max_relaunches=args.max_relaunches,
+                **({"stall_hours": args.stall_hours} if args.stall_hours is not None else {}),
+                notify_command=shlex.split(args.notify_command) if args.notify_command else None,
+            ),
             resume=lambda run_dir, *, why: RUNS.resume(run_dir, why=why, oot=_oot()),
         )
         print(json.dumps(document, default=str))
