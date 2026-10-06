@@ -9,6 +9,7 @@ Compile machinery behind ``merlin-compile``: bundles, the host lane, capacity, a
 - `bundles.py` — Capture bundles for the RVV whole-model lane, and the scalar datatype a bundle's IR carries.
 - `capacity.py` — Operand and accumulator capacity of a target's matrix unit, and the tile that fits it.
 - `command.py` — The `merlin-compile` command line: its arguments, the combinations it refuses, and its report.
+- `debug.py` — Compile debugging options (`--list-stages`, `--dump-ir-after/-before`, `--stop-after`, `--trace-dir`), shared by `merlin-compile`, the whole-model builder CLI and launch configs.
 - `host_lane.py` — The RVV host lane: which package a compile uses for each datatype, and its provenance pin.
 - `mesh.py` — Execute and certify matmul layers on a target's accelerator mesh.
 - `mesh_backend.py` — Plumbing for running a layer through a target's out-of-tree backend package.

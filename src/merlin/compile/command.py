@@ -137,6 +137,9 @@ def parser(
         metavar="NAME",
         help="disable an optional lowering pass that is on by default (repeatable)",
     )
+    from .debug import add_arguments
+
+    add_arguments(ap)
     return ap
 
 
@@ -209,7 +212,7 @@ def report(a: argparse.Namespace, res: dict) -> int:
             + (f"  gate_ok={res['verify'].get('gate_ok')}" if res.get("verify") else "")
             + (f"  reason={res.get('reason') or res.get('error')}" if res.get("reason") or res.get("error") else "")
         )
-        for k in ("binary", "cycles", "vlen", "bundle", "package", "lowering_passes"):
+        for k in ("binary", "cycles", "vlen", "bundle", "package", "lowering_passes", "trace"):
             if res.get(k) is not None:
                 print(f"    {k}: {res[k]}")
     return 0 if res.get("status") in ("compiled", "ran", "verified", "verified_complete_output") else 1

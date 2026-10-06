@@ -100,6 +100,16 @@ _RVV_DTYPES = ("fp32", "int8", "fp16", "fp8")
 #: Where ``--run`` can put a compiled result.
 _RUNS = ("none", "host", "k1", "spike", "zephyr", "verilator", "gsim")
 
+from .common import compile_trace as _trace  # noqa: E402
+
+#: The stage the front door itself reaches before any lowering: the model bundle it resolved or captured.
+_STAGES = _trace.declare(
+    "frontend",
+    ("capture",),
+    entry="merlin.compile_cli",
+    summary="merlin-compile resolves (or captures) the model bundle it lowers",
+)
+
 
 def _ensure_bundle(workload: str, dtype: str, *, auto_capture: bool) -> Path:
     """Resolve the RVV capture bundle, auto-capturing via model2MLIR if absent (and allowed)."""
@@ -355,6 +365,7 @@ def compile_rvv(
         multi_program = session_contract_version == 2
     if not (bundle / "model.mlir").is_file() and not multi_program:
         raise FileNotFoundError(f"explicit capture bundle has neither model.mlir nor a version-2 session: {bundle}")
+    _trace.artifact("capture", [bundle / "model.mlir"], pipeline="frontend")
     pkg_dir = package or default_package(dtype, bundle=bundle)
     pkg = load_rvv_package(pkg_dir)
     package_backend = getattr(pkg, "backend", "rvv")
@@ -1300,19 +1311,28 @@ def compile_oot(
 
 
 def main(argv: list[str] | None = None) -> int:
-    from .compile import command
+    from .common.compile_trace import StopAfterStage
+    from .compile import command, debug
 
     ap = command.parser(_RVV_DTYPES, _RUNS, "k1", ("k1", "zephyr", "spike", "verilator"))
     a = ap.parse_args(argv)
     if a.list_passes:
         return command.list_passes(a)
+    if a.list_stages:
+        return debug.list_stages(a)
     selection = command.pass_selection(ap, a)
     command.validate(ap, a)
+    trace = debug.request_from_args(ap, a, target=a.target, workload=str(a.workload))
     run = a.run or ("none" if a.model_build else "k1" if a.target == "rvv" else "spike")
     try:
-        res = _dispatch(a, run, selection)
+        with debug.opened(trace, ["merlin-compile", *(sys.argv[1:] if argv is None else argv)]) as opened:
+            res = _dispatch(a, run, selection)
+        if debug.not_reached(opened):
+            res.update(status="stop_stage_not_reached", reason=debug.not_reached(opened))
     except SystemExit:
         raise
+    except StopAfterStage as stop:  # a requested stop: the IR is written, no artifact; not an error
+        return debug.stopped("merlin-compile", stop, as_json=a.json)
     except Exception as e:  # noqa: BLE001 — surface any pipeline error honestly, don't fake a pass
         res = {
             "tool": "merlin-compile",
@@ -1321,6 +1341,8 @@ def main(argv: list[str] | None = None) -> int:
             "status": "error",
             "error": f"{type(e).__name__}: {e}",
         }
+    if trace is not None:
+        res["trace"] = str(Path(trace.directory).absolute() / "trace.json")
     return command.report(a, res)
 
 

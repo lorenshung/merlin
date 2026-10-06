@@ -112,40 +112,63 @@ def build(
     descriptor: str | None = None,
     chunk_ops: int | None = None,
     lowering_passes: Sequence[str] = (),
+    trace_dir: str | None = None,
+    dump_ir_after: Sequence[str] | str = (),
+    dump_ir_before: Sequence[str] | str = (),
+    stop_after: str | None = None,
 ) -> dict[str, Any]:
-    """Build one candidate; every option but the last is :func:`_build`'s.
+    """Build one candidate; every option up to ``lowering_passes`` is :func:`_build`'s.
 
     ``lowering_passes`` selects Merlin's optional lowering passes for this build by registry name
     (:mod:`merlin.llvmlower.optional_passes`; ``-name`` turns off one that is on by default). It is a
     launch config's ``build_options`` entry like the rest, empty by default -- so a config that names
     none builds exactly as before -- and the selection is recorded in the result's ``notes``.
-    """
-    from merlin.llvmlower import optional_passes
 
+    The compile-debugging keys (:mod:`merlin.compile.debug`) are ``build_options`` too, all empty by
+    default: ``trace_dir``/``dump_ir_after``/``dump_ir_before``/``stop_after`` keep a trace of the build. A build stopped at a stage produces no program, so here -- where a program is
+    what the caller is owed -- the stop is a :class:`WholeModelBuildError` naming where the IR is.
+    """
+    from merlin.common.compile_trace import StopAfterStage
+    from merlin.compile import debug
+    from merlin.llvmlower import optional_passes
+    from merlin.perf import whole_model_build as WMB
+
+    options = {"trace_dir": trace_dir, "dump_ir_after": dump_ir_after, "dump_ir_before": dump_ir_before}
+    trace = debug.request_from_options(
+        {**options, "stop_after": stop_after}, target=target, workload=Path(model_capsule).name
+    )
     selection = optional_passes.Selection.parse(list(lowering_passes))
-    with optional_passes.applied(selection) as active:
-        record = _build(
-            package_dir,
-            target=target,
-            out_dir=out_dir,
-            model_capsule=model_capsule,
-            machine=machine,
-            header=header,
-            header_sha256=header_sha256,
-            verify=verify,
-            jobs=jobs,
-            timeout=timeout,
-            harness_overrides=harness_overrides,
-            prohibited_roles=prohibited_roles,
-            decline=decline,
-            allow_passes=allow_passes,
-            allow_regions=allow_regions,
-            phase0_recipe=phase0_recipe,
-            descriptor=descriptor,
-            chunk_ops=chunk_ops,
-        )
+    try:
+        with (
+            debug.opened(trace, ["merlin.perf.whole_model_builder.build"]),
+            optional_passes.applied(selection) as active,
+        ):
+            record = _build(
+                package_dir,
+                target=target,
+                out_dir=out_dir,
+                model_capsule=model_capsule,
+                machine=machine,
+                header=header,
+                header_sha256=header_sha256,
+                verify=verify,
+                jobs=jobs,
+                timeout=timeout,
+                harness_overrides=harness_overrides,
+                prohibited_roles=prohibited_roles,
+                decline=decline,
+                allow_passes=allow_passes,
+                allow_regions=allow_regions,
+                phase0_recipe=phase0_recipe,
+                descriptor=descriptor,
+                chunk_ops=chunk_ops,
+            )
+    except StopAfterStage as stop:
+        raise WMB.WholeModelBuildError(stop.message("whole-model builder")) from None
     if active:
         record.setdefault("notes", {})["lowering_passes"] = active.spell()
+    if trace is not None:
+        record.setdefault("notes", {})["compile_trace"] = str(Path(trace.directory).absolute() / "trace.json")
     return record
 
 

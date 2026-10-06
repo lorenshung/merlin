@@ -25,6 +25,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from merlin.common import compile_trace
+
 from .toolchain import m2m_python
 
 
@@ -1335,7 +1337,13 @@ def _activation_poly_runner(emit: str = EMIT_TRANSLATE) -> str:
 
 
 def _select_runner(
-    pipeline: str, feats: "frozenset[str]", *, emit: str, inspection_dir: str | None = None, keep_exact: bool = False
+    pipeline: str,
+    feats: "frozenset[str]",
+    *,
+    emit: str,
+    inspection_dir: str | None = None,
+    keep_exact: bool = False,
+    printing: tuple[bool, bool] = (True, True),
 ) -> str:
     """Pick the lowering-runner source for these features and bind how it emits its result.
 
@@ -1356,7 +1364,32 @@ def _select_runner(
     else:
         source = _RUNNER_SRC.replace("__MERLIN_EMIT__", emit)
     # Every variant runs elementwise fusion under the broadcast control function (fusion_guard).
-    return bind_inspection(fusion_guard.inject(source), inspection_dir, keep_exact=keep_exact)
+    return bind_inspection(
+        fusion_guard.inject(source),
+        inspection_dir,
+        keep_exact=keep_exact,
+        print_before=printing[0],
+        print_after=printing[1],
+    )
+
+
+def _harvest_native(traced: "tuple[Path, bool] | None", produced: Path, failure: BaseException | None = None) -> None:
+    """Index a native pass run's dumps into the open compile trace (``(directory, prune)``; None: no
+    trace selects a native pass). A stop selected on a pass that ran before ``failure`` still stops.
+
+    The pass manager ran its whole pipeline in the child before the trace could stop it, so on a stop
+    its output (``produced``, the IR after the LAST pass) is removed: nothing past the stop survives."""
+    if traced is None:
+        return
+    try:
+        compile_trace.harvest_native(traced[0], pipeline="llvm", prune=traced[1])
+    except compile_trace.StopAfterStage as stop:
+        produced.unlink(missing_ok=True)
+        stop.note = "the pass manager ran on in its child process; the output of the passes after it was discarded"
+        if failure is None:
+            raise
+        stop.note += f"; a later pass failed: {str(failure).strip().splitlines()[0][:200]}"
+        raise stop from failure
 
 
 class PipelineError(RuntimeError):
@@ -1583,12 +1616,21 @@ def lower_to_llvm_ir(
         if audit is not None and audit.directory is not None and audit.mode in {"compact", "both"}
         else None
     )
+    # An open compile trace that selects a native pass gets the same printer: into the audit's directory
+    # when an audit already binds it (indexed, never pruned), else into the trace's own.
+    native = compile_trace.native_directory() if inspection_dir is None else None
+    traced = (
+        (native[0], True)
+        if native is not None
+        else ((Path(inspection_dir), False) if inspection_dir and compile_trace.active() else None)
+    )
     runner_src = _select_runner(
         pipeline,
         feats,
         emit=EMIT_DUMP if omp else EMIT_TRANSLATE,
-        inspection_dir=inspection_dir,
+        inspection_dir=inspection_dir or (str(native[0]) if native is not None else None),
         keep_exact=audit is not None and audit.mode == "both",
+        printing=(native[1], native[2]) if native is not None else (True, True),
     )
     runner.write_text(runner_src, encoding="utf-8")
     # argv[4] gates the self-copy erase, so the frozen hand_v0 control keeps its byte-identical
@@ -1730,10 +1772,11 @@ def lower_to_llvm_ir(
     # The runner reads the gate at sys.argv[ARGV_INDEX] (command[0] is the interpreter).
     if len(command) - 2 != _INT_SOFTMAX_ARGV:
         raise PipelineError("the lowering runner's argv layout no longer matches int_softmax_table.ARGV_INDEX")
+    if audit is not None:
+        audit.stage("upstream-scheduled", mlir_text)  # an open compile trace observes it unaudited too
     if audit is not None and audit.directory is not None:
         from ..targetgen.provenance import toolchain_provenance
 
-        audit.stage("upstream-scheduled", mlir_text)
         audit.command(command, sources=(__file__, runner), provenance=toolchain_provenance())
     try:
         proc = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
@@ -1751,9 +1794,12 @@ def lower_to_llvm_ir(
                 audit.collect_views()
             except (OSError, ValueError) as audit_error:
                 error.add_note(f"IR inspection prefix could not be recorded: {type(audit_error).__name__}")
+        _harvest_native(traced, stage_out, failure=error)
         raise error
     if audit is not None:
         audit.collect_views()
+    _harvest_native(traced, stage_out)
+    if audit is not None:
         audit.stage(
             "llvm-dialect" if omp else "llvm-translated",
             stage_out.read_text(encoding="utf-8"),
