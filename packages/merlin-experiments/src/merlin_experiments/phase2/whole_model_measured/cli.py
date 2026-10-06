@@ -7,6 +7,7 @@ resume <run_dir> ...      prepare the next run of THIS run (method, roles, store
                           from another seed (``--seed``) or a revised config, and ``--launch`` it
 status <run_dir>          the run's status from its own records (``--poll`` advances its objective)
 follow <run_dir>          print each change (jobs, rounds, best, launcher, stop, holds) until it ends
+audit-round <run_dir> N   replay round N's transcript audit, receipts and edits; compare the status
 launch <run_dir> ...       start a prepared run DETACHED (own session, output to <run_dir>/launch.log)
 stop <run_dir> --why ...  ask a run to stop at its next session boundary (``stop_requested.json``)
 watch <run_dir> <pid> ... relaunch a run whose launcher exits, keeping its method and roles
@@ -354,6 +355,11 @@ def _parser() -> argparse.ArgumentParser:
     child.add_argument("run_dir", type=Path)
     child.add_argument("--interval", type=float, default=60.0)
     child.add_argument("--max-seconds", type=float)
+    child = sub.add_parser("audit-round", help="replay one recorded round's audit and compare its status")
+    child.add_argument("run_dir", type=Path)
+    child.add_argument("round", type=int, help="the round's index, as its files are named (round_NN)")
+    child.add_argument("--line", type=int, action="append", default=[], help="also print this transcript line")
+    child.add_argument("--json", action="store_true")
     child = sub.add_parser("launch", help="start a prepared run detached, its output appended to launch.log")
     child.add_argument("run_dir", type=Path)
     child.add_argument("--profile", required=True)
@@ -477,6 +483,20 @@ def main(argv: list[str] | None = None) -> int:
             out=lambda line: print(line, flush=True),
         )
         print(json.dumps(ended))
+        return 0
+    if args.command == "audit-round":
+        from . import round_audit as AUDIT
+
+        run_dir = resolve_run(args.run_dir)
+        try:
+            document = AUDIT.audit_round(run_dir, args.round)
+        except AUDIT.RoundAuditError as exc:
+            raise SystemExit(str(exc)) from exc
+        if args.line:
+            document["transcript_lines"] = AUDIT.transcript_lines(run_dir, args.round, args.line)
+        print(json.dumps(document, indent=1, default=str) if args.json else AUDIT.format_audit(document))
+        for number, text in (document.get("transcript_lines") or {}).items() if not args.json else ():
+            print(f"---- line {number}\n{text}")
         return 0
     if args.command == "launch":
         from . import launch as LAUNCH

@@ -445,3 +445,32 @@ def test_a_driver_killed_mid_round_is_closed_by_the_next_start(run):
     assert run.objective.screen.attribution(digest)["state"] == J.ATTRIBUTION_UNAUTHORED
     assert not marker.exists() and (stage / "rounds" / "round_00.round.json").is_file()
     assert R.recover_killed_rounds(stage, attribute=run.objective.attribute, run_name="run") == []
+
+
+# ------------------------------------------------------------------- judging a recorded round again
+def test_a_recorded_round_is_judged_again_from_its_own_evidence(run):
+    """The replay reruns the round driver's own owners over the round's sealed evidence; a recorded
+    status the evidence no longer supports is reported, never rewritten."""
+    from merlin_experiments.phase2.whole_model_measured import round_audit as AUD
+
+    stage = run.run_dir / "stage"
+    target = SimpleNamespace(target="synthetic")
+    driver = _driver(run, dummy_agent(edit=faster))
+    assert driver(session=1, stage_root=stage)["status"] == "authored"
+    document = AUD.audit_round(run.run_dir, 0, target_experiment=target, audit_token_set=TOKENS)
+    assert document["agrees"] is True and document["replayed"]["status"] == "authored"
+    assert document["replayed"]["receipts"]["joined"] is True and document["replayed"]["edits"]["status"] == "allowed"
+    driver.agent = dummy_agent(edit=faster, extra=("cat golden.yaml",))
+    assert driver(session=2, stage_root=stage)["status"] == "refused"
+    refused = AUD.audit_round(run.run_dir, 1, target_experiment=target, audit_token_set=TOKENS)
+    assert refused["agrees"] is True and refused["replayed"]["audit_clean"] is False
+    numbers = sorted({n for lines in refused["replayed"]["hits"].values() for n in lines})
+    assert any("golden.yaml" in text for text in AUD.transcript_lines(run.run_dir, 1, numbers).values())
+    assert "DISAGREES" not in AUD.format_audit(refused)
+    path = stage / "rounds" / "round_00.round.json"
+    record = json.loads(path.read_text())
+    path.write_text(json.dumps({**record, "status": "refused"}))
+    assert AUD.audit_round(run.run_dir, 0, target_experiment=target, audit_token_set=TOKENS)["agrees"] is False
+    assert json.loads(path.read_text())["status"] == "refused"  # the replay wrote nothing
+    with pytest.raises(AUD.RoundAuditError, match="no record of round 7"):
+        AUD.audit_round(run.run_dir, 7, target_experiment=target, audit_token_set=TOKENS)
