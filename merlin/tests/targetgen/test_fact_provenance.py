@@ -21,6 +21,7 @@ import json
 import sys
 
 import pytest
+import selected_driver
 
 from merlin.common.paths import repo_root
 
@@ -188,6 +189,7 @@ def introspect():
     return get_backend("muon").muon_introspect
 
 
+@selected_driver.requires_support("muon")
 def test_absent_elaboration_yields_unknown_not_a_default(introspect, monkeypatch):
     """The regression. Point every input at a path that cannot exist and confirm nothing is invented.
 
@@ -214,6 +216,7 @@ def test_absent_elaboration_yields_unknown_not_a_default(introspect, monkeypatch
     assert facts["facts"]["registers"]["arch_max"] is None
 
 
+@selected_driver.requires_support("muon")
 def test_the_perf_model_is_recorded_as_a_cross_check_never_as_the_source(introspect):
     """The cyclotron config may confirm a derived fact; it may not supply one."""
     facts = introspect.build_facts()

@@ -27,6 +27,24 @@ def require_support(target: str) -> Path:
     return Path(selected)
 
 
+def missing_support(*targets: str) -> list[str]:
+    """The targets among ``targets`` with no support provider selected on ``MERLIN_TARGET_PATH``."""
+    from merlin.targetgen import target_registry
+
+    selected = target_registry.explicit_targets()
+    return [target for target in targets if target not in selected]
+
+
+def requires_support(*targets: str):
+    """A ``skipif`` marker for a test or module whose subject is the named targets' selected support.
+
+    Evaluated when the test module is collected. Only ABSENCE skips, as in :func:`require_support`."""
+    absent = missing_support(*targets)
+    return pytest.mark.skipif(
+        bool(absent), reason=f"requires explicit {', '.join(absent)} support on MERLIN_TARGET_PATH"
+    )
+
+
 def driver_file(target: str, name: str) -> Path:
     """``<selected support>/whole_model/<name>`` for ``target``, or skip when none is selected."""
     from merlin.targetgen import target_registry

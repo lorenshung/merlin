@@ -16,6 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import selected_driver
 
 from merlin.runtime.backends import base
 from merlin.targetgen.contract import build_recipe
@@ -103,7 +104,9 @@ def test_implicit_compiler_abi_is_queried_then_pinned_for_both_commands(monkeypa
 def test_explicit_recipe_abi_wins_without_query_and_rejects_duplicates(monkeypatch):
     monkeypatch.setattr(build_recipe.subprocess, "run", lambda *args, **kwargs: pytest.fail("queried"))
     assert _recipe(cflags=("-march=rv64gc", "-mabi=lp64")).with_effective_abi().cflags == (
-        "-march=rv64gc", "-mabi=lp64")
+        "-march=rv64gc",
+        "-mabi=lp64",
+    )
     with pytest.raises(ValueError, match="duplicate -mabi"):
         _recipe(cflags=("-march=rv64gc", "-mabi=lp64", "-mabi=lp64d")).mabi()
     with pytest.raises(ValueError, match="invalid -mabi"):
@@ -117,6 +120,7 @@ def test_a_backend_without_a_recipe_refuses_by_name():
         base.harness_build_recipe("spike")
 
 
+@selected_driver.requires_support("gemmini")
 def test_the_reference_target_declares_a_complete_recipe():
     """The regression for the migration: if the backend stops declaring one, the generic path loses
     its build entirely rather than falling back to the literals it used to carry."""
@@ -135,6 +139,7 @@ def test_a_backend_without_a_renderer_refuses_by_name():
         base.harness_renderer("spike")
 
 
+@selected_driver.requires_support("gemmini")
 def test_the_renderer_chooses_the_form_from_the_command_buffer():
     """Which harness applies is a property of the target's command vocabulary, so the backend decides.
 

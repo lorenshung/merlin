@@ -27,6 +27,7 @@ gradient. What is legitimately per-target (the RTL oracle) degrades honestly rat
 from __future__ import annotations
 
 import pytest
+import selected_driver
 
 from merlin.common.paths import repo_root
 from merlin.targetgen import rtl_backend as RB
@@ -64,6 +65,7 @@ def _bundles(target):
     return generate_bundles(_te(target))
 
 
+@selected_driver.requires_support("mx_gemmini")
 @pytest.mark.parametrize("target", ["atlas", "radiance", "mx_gemmini"])
 def test_four_arms_generated_for_any_target(target):
     b = _bundles(target)
@@ -71,6 +73,7 @@ def test_four_arms_generated_for_any_target(target):
     assert b["merlin_assisted_hwbringup_v0"]["task"] == f"{target}-mlir-oot-capsule"
 
 
+@selected_driver.requires_support("mx_gemmini")
 @pytest.mark.parametrize("target", ["atlas", "radiance", "mx_gemmini"])
 def test_increasing_help_gradient(target):
     """arm1 ⊂ arm2 ⊂ arm4 additively; arm2→arm3 is the one modality swap (C++ scaffold → xDSL spine)."""

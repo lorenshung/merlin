@@ -5,6 +5,7 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+import selected_driver
 
 from merlin.common.paths import repo_root
 from merlin.targetgen.generate_bundles import generate_bundles
@@ -14,6 +15,7 @@ from merlin.targetgen.target_experiment import load_target_experiment
 pytestmark = pytest.mark.target("atlas", "radiance", "mx_gemmini")
 
 
+@selected_driver.requires_support("mx_gemmini")
 @pytest.mark.parametrize(
     ("target", "bringup", "files"),
     [

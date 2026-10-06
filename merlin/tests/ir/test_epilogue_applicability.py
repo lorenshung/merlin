@@ -16,6 +16,7 @@ backend's declaration only where the point is that it fires on real data.
 from __future__ import annotations
 
 import pytest
+import selected_driver
 
 from merlin.verify import epilogue_applicability as EA
 from merlin.verify.epilogue_applicability import ReadoutCapability, StageRoute
@@ -25,8 +26,15 @@ NARROW = ReadoutCapability("narrow", frozenset({"scale", "activation"}), "applie
 WIDE = ReadoutCapability("wide", frozenset(), "writes the raw accumulator")
 CAPS = (NARROW, WIDE)
 BIAS_ROUTE = StageRoute(
-    "bias_add", "accumulator_seed", "contraction", frozenset({"narrow", "wide"}),
-    frozenset({"CONTRACT"}), frozenset({"COMMIT"}), "bias", "bias", "seed before compute",
+    "bias_add",
+    "accumulator_seed",
+    "contraction",
+    frozenset({"narrow", "wide"}),
+    frozenset({"CONTRACT"}),
+    frozenset({"COMMIT"}),
+    "bias",
+    "bias",
+    "seed before compute",
 )
 
 
@@ -45,18 +53,23 @@ class TestTheRuleIsGeneral:
     def test_route_licenses_contraction_without_claiming_readout_bias(self):
         assert "bias_add" not in NARROW.applies | WIDE.applies
         assert EA.selectors_applying(CAPS, ["bias_add"], routes=(BIAS_ROUTE,), composition="contraction") == (
-            "narrow", "wide"
+            "narrow",
+            "wide",
         )
         assert EA.selectors_applying(CAPS, ["bias_add"], routes=(BIAS_ROUTE,), composition="operand_sum") == ()
-        assert EA.selectors_applying(
-            CAPS, ["activation", "bias_add"], routes=(BIAS_ROUTE,), composition="contraction"
-        ) == ()
+        assert (
+            EA.selectors_applying(CAPS, ["activation", "bias_add"], routes=(BIAS_ROUTE,), composition="contraction")
+            == ()
+        )
         cb = {
             "tensors": {"B": {"role": "bias"}},
             "commands": [
                 {"opcode": "CONTRACT", "operands": {"dst": "acc"}},
-                {"opcode": "COMMIT", "operands": {"src": "acc"},
-                 "attributes": {"output_dtype": "wide", "epilogue": ["bias_add"], "bias": "B"}},
+                {
+                    "opcode": "COMMIT",
+                    "operands": {"src": "acc"},
+                    "attributes": {"output_dtype": "wide", "epilogue": ["bias_add"], "bias": "B"},
+                },
             ],
         }
         assert EA.assess(cb, CAPS, routes=(BIAS_ROUTE,)).status == "applied"
@@ -142,6 +155,7 @@ class TestTheRuleIsGeneral:
         assert d["status"] == "discarded" and d["refusing"] is True and d["n_discarded"] == 2
 
 
+@selected_driver.requires_support("gemmini")
 class TestItFiresOnTheRealTargetDeclaration:
     """The point of the exercise: it catches the live defect a passing capsule hides."""
 
@@ -201,9 +215,11 @@ class TestTheGateIsScopedByWhatATargetDECLARES:
 
         return B.get_backend(name)
 
+    @selected_driver.requires_support("gemmini")
     def test_a_target_that_declares_readouts_activates_the_gate(self):
         assert callable(getattr(self._backend("gemmini"), "readout_epilogue_capability", None))
 
+    @selected_driver.requires_support("muon")
     def test_a_target_that_declares_none_leaves_the_gate_unavailable(self):
         """Exercised by a real second backend, not a mock, so the branch cannot rot."""
         other = self._backend("muon")
@@ -230,6 +246,7 @@ class TestTheGateIsScopedByWhatATargetDECLARES:
         assert block["status"] == "not_applicable" and block["refusing"] is False
         assert block["n_discarded"] == 0 and "readouts_declared" in block
 
+    @selected_driver.requires_support("gemmini")
     def test_a_declared_stage_outside_the_abi_vocabulary_is_caught_by_the_backend_test(self):
         """Guards the declaration itself: a typo'd stage name would silently never be applied."""
         from merlin.runtime.commandbuffer import EPILOGUE_STAGE_SET

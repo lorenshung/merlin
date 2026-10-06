@@ -14,6 +14,7 @@ a reason" and "absent" are different states and only one of them is honest here.
 from __future__ import annotations
 
 import pytest
+import selected_driver
 import yaml
 from merlin_experiments.phase0 import profiles as PROFILES
 from merlin_experiments.phase0 import sweeps as SWEEPS
@@ -139,6 +140,7 @@ def _expanded(target: str):
     return [e for e in entries if (e.get("performance") or {}).get("family") == "PG"], errors
 
 
+@selected_driver.requires_support("mx_gemmini")
 @pytest.mark.parametrize("target", ["atlas", "mx_gemmini"])
 def test_the_encoding_family_compares_two_of_the_targets_own_encodings(target):
     """Both members must come from what the target DECLARES, and they must differ -- a group whose two
@@ -160,6 +162,7 @@ def test_the_encoding_family_compares_two_of_the_targets_own_encodings(target):
         assert len(encs) == 2, f"group {name} compares {encs}, which is not two encodings"
 
 
+@selected_driver.requires_support("mx_gemmini")
 @pytest.mark.parametrize("target", ["atlas", "mx_gemmini"])
 def test_each_encoding_member_accumulates_in_its_own_datapath(target):
     """An accumulator belongs to the datapath its operand feeds. Carrying the corpus binding's
