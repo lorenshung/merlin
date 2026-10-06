@@ -55,9 +55,7 @@ runner:
   model_ext: npu_model
 provenance: >-
   Candidate compute format and MXU intent from the curated Atlas MxuParams.scala,
-  PE.scala and software-spec.yaml; the vector unit is the derived unit recorded
-  above (its bf16 lanes agree with the curated VpuParams.scala); geometry,
-  storage and decoder facts require
+  PE.scala and software-spec.yaml; geometry, storage and decoder facts require
   one explicitly selected FIRRTL/CIRCT source bundle. This reference is not an
   executable backend or a numerical/transfer qualification.
 notes: >-
