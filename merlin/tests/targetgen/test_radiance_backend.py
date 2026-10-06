@@ -18,6 +18,9 @@ ISA. It is NOT a tensor-core result and NOT a certification of the package's han
 
 from __future__ import annotations
 
+import os
+
+import plugin_isolation
 import pytest
 
 from merlin.common.paths import repo_root
@@ -33,9 +36,13 @@ def backend():
     from merlin.runtime.backends import base
 
     # Scoped to this module: leaving MERLIN_TARGET_PATH set would change target discovery for every
-    # later test in the session, which is how one suite silently reconfigures another.
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setenv("MERLIN_TARGET_PATH", str(PACKAGE))
+    # later test in the session, which is how one suite silently reconfigures another. Restoring the
+    # variable is not enough on its own: plugin ownership is process-immutable, so the loaded backend
+    # is unloaded with it, or every later registry query in the worker refuses the dropped selection.
+    # The package is PREPENDED, so a provider the session already selected stays selected.
+    selection = os.pathsep.join(filter(None, (str(PACKAGE), os.environ.get("MERLIN_TARGET_PATH"))))
+    with plugin_isolation.fresh_plugin_state(), pytest.MonkeyPatch.context() as patch:
+        patch.setenv("MERLIN_TARGET_PATH", selection)
         patch.setattr(base, "_oot_env_seen", None)  # re-run OOT discovery with the env now set
         names = [n for n in base.list_backends() if n.startswith("radiance")]
         if not names:
