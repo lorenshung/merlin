@@ -67,6 +67,8 @@ concerns:
   design-pressure: Design-pressure DSE products, per workload.
   dse: Design-space exploration products, per workload.
   dse-guidance: Guidance derived from DSE, per workload.
+  experiments: Experiment-tracking views drawn from a run's own records -- the self-contained HTML
+    dashboard of a run or a target at experiments/<target>/dashboard/. Regenerable; never evidence.
   handoff: Bundles handed to a collaborator, with the note that goes with them.
   kernel-index: Kernel index, per framework.
   kernel-mining: Mined kernels, per target.
@@ -115,6 +117,7 @@ product_roots:
   # new_product().
   phase0-releases: protocols
   target-champions: targets
+  experiment-dashboards: experiments
 
 # Output that retention must never offer to drop, declared as layout rather than as a per-directory
 # pin a writer might forget. Patterns are relative to the out/ root and match one path component per

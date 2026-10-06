@@ -84,6 +84,33 @@ def main(argv: list[str] | None = None) -> int:
     )
     index.add_argument("target")
     index.add_argument("--check", action="store_true", help="exit 1 when the written index is stale; write nothing")
+    from .tracking.records import DEFAULT_STALL_HOURS
+
+    dashboard = commands.add_parser(
+        "dashboard",
+        help="write one self-contained HTML view of a run or a target, read from existing records only",
+    )
+    dashboard.add_argument("run_dir", type=Path, nargs="?", help="a run directory (orchestration, phase 1 or 2)")
+    dashboard.add_argument("--target", help="every run of this target across phases, with champion lineage")
+    dashboard.add_argument(
+        "--out", type=Path, help="HTML file; defaults to out/artifacts/experiments/<target>/dashboard/<run>.html"
+    )
+    dashboard.add_argument("--open", action="store_true", help="also open the written page in a browser")
+    watch = commands.add_parser("watch", help="live terminal view of a run's records; refreshes until Ctrl-C")
+    watch.add_argument("run_dir", type=Path)
+    watch.add_argument("--interval", type=float, default=30.0, help="seconds between refreshes")
+    watch.add_argument("--once", action="store_true", help="print once and exit")
+    watch.add_argument("--no-color", action="store_true", help="plain text even on a terminal")
+    for view in (dashboard, watch):
+        view.add_argument(
+            "--store", type=Path, help="phase-2 measurement store when the run records none (store_roots.screen)"
+        )
+        view.add_argument(
+            "--stall-hours",
+            type=float,
+            default=DEFAULT_STALL_HOURS,
+            help="hours without a measured candidate (or grade) before a run is STALLED",
+        )
     child = commands.add_parser("resume")
     child.add_argument("run_dir", type=Path)
     child.add_argument("--checkpoint", type=Path, help="sealed native checkpoint for a new model_portfolio segment")
@@ -102,7 +129,10 @@ def main(argv: list[str] | None = None) -> int:
         help="pre-execution selection for each selected capture; omitted legacy captures remain diagnostic",
     )
     derive.add_argument(
-        "--application-quant-policy", action="append", default=[], metavar="LABEL=PATH@SHA256",
+        "--application-quant-policy",
+        action="append",
+        default=[],
+        metavar="LABEL=PATH@SHA256",
         help="independently selected policy bytes for each externally quantized capture",
     )
     derive.add_argument(
@@ -203,7 +233,10 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             elif args.operation == "derive":
                 from .phase0.requirements import (
-                    capture_selection_specs, capture_selections, derive, quantization_policy_specs,
+                    capture_selection_specs,
+                    capture_selections,
+                    derive,
+                    quantization_policy_specs,
                 )
 
                 try:
@@ -270,7 +303,8 @@ def main(argv: list[str] | None = None) -> int:
                         "kind": spec.document.get("kind", "experiment"),
                         "phase1_level": (
                             level_for_phase1(spec.document["phases"]["1"]["config"])
-                            if "1" in spec.document["phases"] else None
+                            if "1" in spec.document["phases"]
+                            else None
                         ),
                     }
                 )
@@ -304,6 +338,31 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps({"index": str(target_index.index_path(args.target)), "current": current}))
                 return 0 if current else 1
             result = {"index": str(target_index.write_index(args.target))}
+        elif args.verb == "dashboard":
+            from .tracking import write_dashboard
+
+            result = write_dashboard(
+                run_dir=args.run_dir,
+                target=args.target,
+                out=args.out,
+                store=args.store,
+                stall_hours=args.stall_hours,
+            )
+            if args.open:
+                import webbrowser
+
+                webbrowser.open(Path(result["dashboard"]).resolve().as_uri())
+        elif args.verb == "watch":
+            from .tracking import watch as watch_run
+
+            return watch_run(
+                args.run_dir,
+                interval=args.interval,
+                once=args.once,
+                store=args.store,
+                stall_hours=args.stall_hours,
+                colour=False if args.no_color else None,
+            )
         elif args.verb == "resume":
             code = runner.resume(args.run_dir, checkpoint=args.checkpoint)
             print(json.dumps(runner.status(args.run_dir), indent=2))
