@@ -6,6 +6,7 @@ owner: compiler
 last_verified: 2026-10-05
 related: [model_lowering, whole_model_on_accelerator, extending_the_stack]
 code_refs: [src/merlin/llvmlower/optional_passes.py,
+            src/merlin/llvmlower/int_softmax_table.py,
             src/merlin/compile/command.py,
             src/merlin/perf/whole_model_builder.py]
 ---
@@ -55,6 +56,28 @@ Each entry names the switch that already existed, and selecting it flips that sw
   explicit selection wins over the variable, which still works on its own for A/B builds;
 * a pass of the **integer datapath** (`merlin.llvmlower.quant_passes`), added to or removed from the
   set `apply_quant` runs.
+
+## int-softmax-table
+
+A capture made with integer nonlinears spells softmax per element: a fixed exponent grid index, an
+integer exp, a 64-bit floor division, an i64 row sum, then the next contraction's per-row int8
+quantization of the probabilities. `int-softmax-table` (`merlin.llvmlower.int_softmax_table`)
+restructures that in the captured IR before the lowering pipeline runs, so the capture itself is
+unchanged:
+
+* the numerator becomes a read of a table, evaluated at compile time with the IR's own integer
+  semantics;
+* the clamp's upper bound, which never binds, is dropped, and its lower bound becomes a
+  compare-and-select;
+* the row sum is accumulated in i32 when it cannot overflow;
+* the probabilities are quantized once per row, on their candidate values;
+* the attention scale moves before the reshape that hid it from fusion.
+
+It matches the structure only. Anything that differs is left as it was, and the build prints the
+reason (`int_softmax_table_report.json` beside the lowered IR). `merlin/tests/ir/test_int_softmax_table.py`
+runs the captured and the rewritten modules on the same inputs and requires identical bits. It covers
+the table at every grid index, the softmax alone, and two whole int8 attentions, including flat rows
+whose quantization scale clamps to its eps. The fixtures live in `merlin/tests/data/int_softmax_table/`.
 
 ## Adding one
 

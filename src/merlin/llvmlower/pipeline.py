@@ -856,6 +856,7 @@ from .broadcast_fold import RUNNER_PRELUDE as _BROADCAST_FOLD_PRELUDE
 from .concat_dps import RUNNER_PRELUDE as _CONCAT_DPS_PRELUDE
 from .copy_expand import MID_STAGE_SRC as _MID_STAGE_SRC
 from .copy_expand import RUNNER_PRELUDE as _COPY_EXPAND_PRELUDE
+from .int_softmax_table import RUNNER_PRELUDE as _INT_SOFTMAX_TABLE_PRELUDE
 from .named_broadcast_fold import RUNNER_PRELUDE as _NAMED_BROADCAST_FOLD_PRELUDE
 from .panel_parallel import MID_STAGE_SRC as _PANEL_PARALLEL_MID_SRC
 from .panel_parallel import RUNNER_PRELUDE as _PANEL_PARALLEL_PRELUDE
@@ -1128,6 +1129,7 @@ from torch_mlir.dialects import llvm
     + _PARALLEL_COARSEN_STAGE_SRC
     + _ALLOCA_SCOPE_LOWER_PRELUDE
     + _ROUND_INTRINSIC_PRELUDE
+    + _INT_SOFTMAX_TABLE_PRELUDE
     + DEALLOC_CHECK_PRELUDE
     + DEALLOC_CHECK_RUNNER
     + r'''
@@ -1154,6 +1156,10 @@ ctx = ir.Context()
 with open(src_path) as f:
     module = ir.Module.parse(f.read(), ctx)
 # __MERLIN_INSPECT_PARSED__
+# int_softmax_table (default-off): restructure every integer softmax in the captured IR, exactly,
+# before any other rewrite sees it. See llvmlower/int_softmax_table.py.
+if _INT_SOFTMAX_TABLE:
+    _ist_run_and_report(ctx, module)
 # fuse_transpose_b (default-off): fold `matmul(A, transpose(B))` into a transpose-b matmul BEFORE
 # the pass manager runs, so the (still-named) linalg.matmul carries the transposed-B indexing map
 # and the frozen RVV schedule tiles+vectorizes it while the scalar weight transpose disappears.
@@ -1238,6 +1244,7 @@ _RUNNER_ACT_POLY_TAIL = (
     + _PARALLEL_COARSEN_STAGE_SRC
     + _ALLOCA_SCOPE_LOWER_PRELUDE
     + _ROUND_INTRINSIC_PRELUDE
+    + _INT_SOFTMAX_TABLE_PRELUDE
     + DEALLOC_CHECK_PRELUDE
     + DEALLOC_CHECK_RUNNER
     + r"""
@@ -1253,6 +1260,10 @@ with open(src_path) as f:
 # (hand_v0_int8 package, act_poly + erase_self_copy): the 17 in-loop `@memrefCopy` call sites the
 # erase removes on the plain runner were all still there. Since the whole-model proposer enables
 # act_poly by default, that is every beam fork -- and the erase read as an inert lever.
+# int_softmax_table (default-off): restructure every integer softmax in the captured IR, exactly,
+# before any other rewrite sees it. See llvmlower/int_softmax_table.py.
+if _INT_SOFTMAX_TABLE:
+    _ist_run_and_report(ctx, module)
 if _FUSE_TRANSPOSE_B:
     print("OK fuse_transpose_b", _fuse_transpose_b(module, ctx))
 # fold_weight_transpose (default-off): the general form of the fold above -- a loop-invariant weight
@@ -1483,6 +1494,9 @@ def lower_to_llvm_ir(
     from .quant_scope import ensure_registered as _register_quant_scope
 
     _register_quant_scope()
+    from .int_softmax_table import ensure_registered as _register_int_softmax_table
+
+    _register_int_softmax_table()
     # `--pass` / `--no-pass` / MERLIN_PASSES (merlin.llvmlower.optional_passes) add or remove the
     # feature-bound optional passes here, in whichever process lowers; an empty selection changes nothing.
     from .optional_passes import selected_features
@@ -1681,6 +1695,12 @@ def lower_to_llvm_ir(
     # is verifier-invalid. The pair tags are the durable witness because the user-facing sentinel
     # has already been consumed by per-op schedule derivation.
     _alloca_scope_gate = "1" if omp and "merlin.rqfuse" in mlir_text else "0"
+    # argv[18] gates the integer-softmax restructuring, which runs on the module as parsed, before every
+    # other pre-pipeline rewrite. Appended after the data layout so no existing slot moves.
+    from .int_softmax_table import ARGV_INDEX as _INT_SOFTMAX_ARGV
+    from .int_softmax_table import FEATURE as _INT_SOFTMAX_FEATURE
+
+    _int_softmax_gate = "1" if _INT_SOFTMAX_FEATURE in feats else "0"
     # OpenMP transport: the runner DUMPS the LLVM-dialect module and the standalone
     # mlir-translate produces the .ll out-of-process (the in-process torch-mlir bridge
     # segfaults on omp IR). Otherwise the runner writes the .ll directly.
@@ -1705,7 +1725,11 @@ def lower_to_llvm_ir(
         _named_broadcast_gate,
         _alloca_scope_gate,
         data_layout or "",
+        _int_softmax_gate,
     ]
+    # The runner reads the gate at sys.argv[ARGV_INDEX] (command[0] is the interpreter).
+    if len(command) - 2 != _INT_SOFTMAX_ARGV:
+        raise PipelineError("the lowering runner's argv layout no longer matches int_softmax_table.ARGV_INDEX")
     if audit is not None and audit.directory is not None:
         from ..targetgen.provenance import toolchain_provenance
 
@@ -1773,6 +1797,18 @@ def lower_to_llvm_ir(
             _require_coarsen_report(proc.stdout)
         except ValueError as exc:
             raise PipelineError(str(exc) + f"\n{proc.stdout}") from exc
+    if _int_softmax_gate == "1":
+        from .int_softmax_table import require_report as _require_int_softmax_report
+
+        try:
+            _ist = _require_int_softmax_report(proc.stdout, work)
+        except ValueError as exc:
+            raise PipelineError(str(exc) + f"\n{proc.stdout}") from exc
+        print(
+            f"[int-softmax-table] {_ist['softmax']} softmax(es), {_ist['int32_sums']} int32 row sum(s), "
+            f"{_ist['row_quantizations']} per-row quantization(s), {_ist['scales_moved']} scale(s) moved"
+            + (f"; left alone: {'; '.join(_ist['refused'])}" if _ist["refused"] else "")
+        )
     if fusion_guard.FUSE_PASS in pipeline and fusion_guard.enabled() and fusion_guard.TOKEN not in proc.stdout:
         # The pass ran and the broadcast control function did not: a runner that reached the native
         # PassManager without the guard would silently re-evaluate per-row values per element.

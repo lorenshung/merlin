@@ -74,6 +74,21 @@ _INTEGER_DATAPATH = "on in the integer (int8 compute) datapath"
 
 REGISTRY: tuple[OptionalPass, ...] = (
     OptionalPass(
+        name="int-softmax-table",
+        summary="integer softmax: table-read numerator, int32 row sum, per-row P quantization",
+        changes=(
+            "the integer exp and floor division per element become a table read; the never-binding "
+            "upper clamp is dropped and the lower one becomes a compare-and-select (NaN lands in the "
+            "table); the row sum accumulates in i32 when it cannot overflow; the next contraction's "
+            "per-row int8 quantization of P runs once per row on its candidate values; the attention "
+            "scale moves before the reshape that hid it from fusion"
+        ),
+        exactness=EXACT,
+        default="off",
+        stage="lowering",
+        feature="int_softmax_table",
+    ),
+    OptionalPass(
         name="exact-math-inline",
         summary="inline exactly specified math and bf16 rounding instead of per-element calls",
         changes=(
