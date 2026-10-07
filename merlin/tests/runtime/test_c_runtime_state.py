@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -138,3 +137,59 @@ def test_generation_accepts_explicit_stream_free_state_steps(monkeypatch, tmp_pa
     io = (out / "model_io.h").read_text(encoding="utf-8")
     assert "MERLIN_SESSION_STEPS 3" in gen
     assert "merlin_stream_" not in io
+
+
+@pytest.mark.parametrize(
+    "dtype,words",
+    [
+        ("bf16", [0x3F80, 0x4000, 0x4040, 0x4080, 0x40A0, 0x40C0]),
+        ("f16", [0x3C00, 0x4000, 0x4200, 0x4400, 0x4500, 0x4600]),
+    ],
+)
+@pytest.mark.parametrize("capture_dtype", [np.float16, np.float32, np.float64])
+def test_state_and_stream_use_generated_storage_width(monkeypatch, tmp_path, dtype, words, capture_dtype):
+    """Execute all frame strides and state reset against actual two-byte C arrays."""
+    model, _ = _bundle(tmp_path)
+    np.savez(model / "inputs.npz", in0=np.array([1, 2], capture_dtype), in1=np.array([3, 4], capture_dtype))
+    np.savez(model / "session_inputs.npz", frames=np.array([[1, 2], [3, 4], [5, 6]], capture_dtype))
+    monkeypatch.setattr(c_runtime, "parse_forward_signature", lambda _: [([2], dtype), ([2], dtype)])
+    monkeypatch.setattr(c_runtime, "load_safetensors_header", lambda _: ({}, 0))
+    import merlin.common.mlir_query as query
+
+    monkeypatch.setattr(
+        query, "forward_signature", lambda _: ([([2], dtype), ([2], dtype)], [([2], "f32"), ([2], dtype)])
+    )
+    out = tmp_path / "generated_storage"
+    info = c_runtime.generate(model, out, model / "inputs.npz")
+    assert info["static_io_bytes"] == 84
+    fixture = out / "storage.c"
+    fixture.write_text(
+        '#include "model_gen.h"\n#include "model_io.h"\n'
+        '_Static_assert(sizeof(merlin_in_0) == 4, "input storage");\n'
+        '_Static_assert(sizeof(merlin_initial_1) == 4, "state storage");\n'
+        '_Static_assert(sizeof(merlin_stream_0) == 12, "stream storage");\n'
+        "int main(void) {\n"
+        + "  const unsigned short expected[] = {"
+        + ",".join(map(str, words))
+        + "};\n"
+        + "  merlin_in_1[0] = 0; merlin_in_1[1] = 0;\n"
+        "  merlin_reset_session();\n"
+        "  if (merlin_in_1[0] != expected[2] || merlin_in_1[1] != expected[3]) return 1;\n"
+        "  for (long step = 0; step < 6; ++step) {\n"
+        "    merlin_prepare_step(step);\n"
+        "    const unsigned short *frame = MERLIN_INPUT_PTR[0];\n"
+        "    if (frame != merlin_stream_0 + (step % 3) * 2) return 2;\n"
+        "    if (frame[0] != expected[(step % 3) * 2] || frame[1] != expected[(step % 3) * 2 + 1]) return 3;\n"
+        "  }\n"
+        "  return 0;\n}\n",
+        encoding="utf-8",
+    )
+    executable = out / "storage"
+    compiled = subprocess.run(
+        ["cc", "-std=c11", "-O2", f"-I{runtime_dir() / 'c'}", f"-I{out}", str(fixture), "-lm", "-o", str(executable)],
+        capture_output=True,
+        text=True,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+    completed = subprocess.run([str(executable)], capture_output=True, text=True)
+    assert completed.returncode == 0, completed.stderr

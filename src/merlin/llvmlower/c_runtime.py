@@ -14,6 +14,7 @@ emits, from the model's MLIR signature + safetensors manifest:
 
 Nothing here is target-specific: the same artifacts feed the host and the spike builds.
 """
+
 from __future__ import annotations
 
 import json
@@ -24,12 +25,18 @@ import numpy as np
 from .model_runner import parse_forward_signature
 from .weights_pack import load_safetensors_header
 
-DT_BYTES = {"f32": 4, "f64": 8, "bf16": 2, "f16": 2,
-            "i64": 8, "i32": 4, "i16": 2, "i8": 1, "i1": 1}
-NP_OF = {"f32": np.float32, "f64": np.float64, "i64": np.int64, "i32": np.int32,
-         "i8": np.int8, "i1": np.bool_}
-C_OF = {"f32": "float", "f64": "double", "i64": "long", "i32": "int", "i8": "signed char",
-        "i1": "signed char", "bf16": "unsigned short", "f16": "unsigned short"}
+DT_BYTES = {"f32": 4, "f64": 8, "bf16": 2, "f16": 2, "i64": 8, "i32": 4, "i16": 2, "i8": 1, "i1": 1}
+NP_OF = {"f32": np.float32, "f64": np.float64, "i64": np.int64, "i32": np.int32, "i8": np.int8, "i1": np.bool_}
+C_OF = {
+    "f32": "float",
+    "f64": "double",
+    "i64": "long",
+    "i32": "int",
+    "i8": "signed char",
+    "i1": "signed char",
+    "bf16": "unsigned short",
+    "f16": "unsigned short",
+}
 
 
 def manifest_requires_weight_blob(manifest: dict) -> bool:
@@ -58,7 +65,7 @@ def _out_specs(mlir_path: str | Path) -> list[tuple[list[int], str]]:
     return results
 
 
-def _bf16_bits(f32: "np.ndarray") -> "np.ndarray":
+def _bf16_bits(f32: np.ndarray) -> np.ndarray:
     """Round float32 to bfloat16 (round-to-nearest-even) and return the raw uint16 bit patterns.
 
     numpy has no native bf16, so do it by hand: bf16 is the top 16 bits of the f32 encoding; RNE
@@ -70,7 +77,7 @@ def _bf16_bits(f32: "np.ndarray") -> "np.ndarray":
     return rounded.astype(np.uint16)
 
 
-def _embed_array(arr: "np.ndarray", dt: str) -> str:
+def _embed_array(arr: np.ndarray, dt: str) -> str:
     # 16-bit floats have NO decimal C literal for an ``unsigned short`` storage array: writing
     # `unsigned short x = 0.125` truncates to 0. Emit the RAW 16-bit patterns instead — f16 via
     # numpy's native half, bf16 via RNE from f32 — so the embedded operands are bit-exact.
@@ -87,14 +94,15 @@ def _embed_array(arr: "np.ndarray", dt: str) -> str:
         # bare NAN macro would silently change the input bytes before execution.
         if dt == "f32":
             raw = flat.view(np.uint32)
-            exponent, fraction, quiet, sign_mask, suffix = (
-                0x7F800000, 0x007FFFFF, 0x00400000, 0x80000000, "f"
-            )
+            exponent, fraction, quiet, sign_mask, suffix = (0x7F800000, 0x007FFFFF, 0x00400000, 0x80000000, "f")
         else:
             raw = flat.view(np.uint64)
             exponent, fraction, quiet, sign_mask, suffix = (
-                0x7FF0000000000000, 0x000FFFFFFFFFFFFF, 0x0008000000000000,
-                0x8000000000000000, "",
+                0x7FF0000000000000,
+                0x000FFFFFFFFFFFFF,
+                0x0008000000000000,
+                0x8000000000000000,
+                "",
             )
 
         def literal(value: np.floating, bits: np.unsignedinteger) -> str:
@@ -112,11 +120,22 @@ def _embed_array(arr: "np.ndarray", dt: str) -> str:
     return ",".join(str(int(v) if "i" in dt else float(v)) for v in flat)
 
 
-def generate(model_dir: str | Path, out_dir: str | Path,
-             inputs_npz: str | Path, extra_npz: str | Path | None = None, *,
-             ciface_name: str = "forward", invoke_name: str = "merlin_invoke",
-             max_session_steps: int | None = None,
-             prepared_dir: str | Path | None = None) -> dict:
+def _storage_nbytes(arr: np.ndarray, dt: str) -> int:
+    """Size of the emitted C storage, independent of the capture container dtype."""
+    return int(arr.size) * DT_BYTES[dt]
+
+
+def generate(
+    model_dir: str | Path,
+    out_dir: str | Path,
+    inputs_npz: str | Path,
+    extra_npz: str | Path | None = None,
+    *,
+    ciface_name: str = "forward",
+    invoke_name: str = "merlin_invoke",
+    max_session_steps: int | None = None,
+    prepared_dir: str | Path | None = None,
+) -> dict:
     """Emit the runtime-driving artifacts for a captured model into ``out_dir``.
 
     Non-weight args are embedded as C arrays: real inputs from ``inputs_npz`` (by order),
@@ -141,6 +160,7 @@ def generate(model_dir: str | Path, out_dir: str | Path,
     # nonsense. The preparation step leaves its plan beside this call's work directory precisely so
     # the mistake is detectable here rather than in a wrong result hours later.
     from .weight_panel import guard_planned_pack
+
     guard_planned_pack(model_dir, out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     sig = parse_forward_signature(model_dir / "model.mlir")
@@ -149,7 +169,8 @@ def generate(model_dir: str | Path, out_dir: str | Path,
     if manifest_requires_weight_blob(man):
         if not weights_path.is_file():
             raise FileNotFoundError(
-                f"manifest declares stored parameters but the weight blob is absent: {weights_path}")
+                f"manifest declares stored parameters but the weight blob is absent: {weights_path}"
+            )
         hdr, payload_off = load_safetensors_header(weights_path)
         blob = weights_path.read_bytes()[payload_off:]
     else:
@@ -166,7 +187,7 @@ def generate(model_dir: str | Path, out_dir: str | Path,
     def buffer_array(name: str):
         # manifest buffer name b_a_b_c  <->  extra key buf::a.b.c
         for k in getattr(extra, "files", []):
-            if k.startswith("buf::") and "b_" + k[len("buf::"):].replace(".", "_") == name:
+            if k.startswith("buf::") and "b_" + k[len("buf::") :].replace(".", "_") == name:
                 return np.ascontiguousarray(extra[k])
         raise KeyError(f"buffer {name!r} not in {extra_path}")
 
@@ -185,7 +206,7 @@ def generate(model_dir: str | Path, out_dir: str | Path,
         appended.extend(data)
         return begin
 
-    stub_zero_offsets: dict[int, int] = {}   # byte length -> offset of a shared zero region
+    stub_zero_offsets: dict[int, int] = {}  # byte length -> offset of a shared zero region
 
     out_specs = _out_specs(model_dir / "model.mlir")
     out_shape, out_dt = out_specs[0]
@@ -198,17 +219,16 @@ def generate(model_dir: str | Path, out_dir: str | Path,
     if order_path.is_file():
         input_order = {k: int(v) for k, v in json.loads(order_path.read_text()).items()}
     else:
-        input_order = {"img": 0, "img_mask": 1, "lang_tokens": 2, "lang_masks": 3,
-                       "state": 4, "noise": 5, "ids": 0}
+        input_order = {"img": 0, "img_mask": 1, "lang_tokens": 2, "lang_masks": 3, "state": 4, "noise": 5, "ids": 0}
 
     # arg table: weights -> (offset in blob); inputs/buffers/lifted -> embedded arrays.
-    rows = []          # (kind, offset, rank, dims, elem_size, dtype)
-    io_decls = []      # embedded C arrays
+    rows = []  # (kind, offset, rank, dims, elem_size, dtype)
+    io_decls = []  # embedded C arrays
     embedded_arrays: dict[int, tuple[np.ndarray, str]] = {}
     static_io_bytes = 0  # bytes of STATIC storage the harness needs for the model's I/O (see below)
-    embedded: set[int] = set()   # arg positions that GOT an embedded array (see the ptr table below)
-    n_in = 0           # positional input counter (loaders with a single tuple)
-    li = 0             # lifted-constant counter
+    embedded: set[int] = set()  # arg positions that GOT an embedded array (see the ptr table below)
+    n_in = 0  # positional input counter (loaders with a single tuple)
+    li = 0  # lifted-constant counter
     for i, (shape, dt) in enumerate(sig):
         meta = man[str(i)]
         elem = DT_BYTES[dt]
@@ -242,14 +262,16 @@ def generate(model_dir: str | Path, out_dir: str | Path,
         if meta["kind"] == "buffer":
             arr = buffer_array(name)
         elif name.startswith("c_lifted_tensor_"):
-            arr = np.ascontiguousarray(extra[lifted_names[li]]); li += 1
+            arr = np.ascontiguousarray(extra[lifted_names[li]])
+            li += 1
         elif name in input_order and f"in{input_order[name]}" in inputs.files:
             arr = np.ascontiguousarray(inputs[f"in{input_order[name]}"])
         else:
-            arr = np.ascontiguousarray(inputs[f"in{n_in}"]); n_in += 1
+            arr = np.ascontiguousarray(inputs[f"in{n_in}"])
+            n_in += 1
         io_decls.append(f"static {C_OF[dt]} merlin_in_{i}[] = {{{_embed_array(arr, dt)}}};")
         embedded_arrays[i] = (arr, dt)
-        static_io_bytes += int(arr.nbytes)
+        static_io_bytes += _storage_nbytes(arr, dt)
         embedded.add(i)
         rows.append(("MERLIN_INPUT", i, len(shape), shape, elem, dt))
     # QUANT-INNER ARGUMENTS. A torchao subclass's int8 `int_data`/`scale` are not `@forward`
@@ -260,12 +282,12 @@ def generate(model_dir: str | Path, out_dir: str | Path,
     # compiled binary reads whatever was in memory -- one bundle gating cos 1.0 on the host and
     # computing garbage on the board.
     from . import qinner as _qinner
+
     qinner_args = _qinner.plan_for_bundle(model_dir / "model.mlir")
     if qinner_args:
         for arg, arr in zip(qinner_args, _qinner.resolve(extra, qinner_args)):
             begin = _append_blob(np.ascontiguousarray(arr).tobytes())
-            rows.append(("MERLIN_WEIGHT", begin, len(arg.shape), list(arg.shape),
-                         DT_BYTES[arg.dtype], arg.dtype))
+            rows.append(("MERLIN_WEIGHT", begin, len(arg.shape), list(arg.shape), DT_BYTES[arg.dtype], arg.dtype))
     # BUILD-TIME WEIGHT-INVARIANT RESULTS. `quant_hoist.apply` appends these after qinner's
     # arguments in the prepared @forward signature. The plan and bytes live in `prepared_dir`
     # because they are products of preparation, not capture or C generation. Reading either without
@@ -273,6 +295,7 @@ def generate(model_dir: str | Path, out_dir: str | Path,
     # error: leaving the new descriptors unbound makes a perfectly linked image compute from
     # arbitrary memory.
     from . import quant_hoist as _quant_hoist
+
     quant_hoist_args = _quant_hoist.read_plan(prepared_dir)
     quant_hoist_values = _quant_hoist.read_values(prepared_dir)
     if quant_hoist_args:
@@ -281,10 +304,18 @@ def generate(model_dir: str | Path, out_dir: str | Path,
         if present != expected:
             raise ValueError(
                 "quant-hoist plan/value disagreement: "
-                f"missing={sorted(expected - present)}, extra={sorted(present - expected)}")
-        numpy_dtype = {"f64": np.float64, "f32": np.float32, "f16": np.float16,
-                       "i64": np.int64, "i32": np.int32, "i16": np.int16,
-                       "i8": np.int8, "u8": np.uint8}
+                f"missing={sorted(expected - present)}, extra={sorted(present - expected)}"
+            )
+        numpy_dtype = {
+            "f64": np.float64,
+            "f32": np.float32,
+            "f16": np.float16,
+            "i64": np.int64,
+            "i32": np.int32,
+            "i16": np.int16,
+            "i8": np.int8,
+            "u8": np.uint8,
+        }
         for arg in quant_hoist_args:
             if arg.dtype not in numpy_dtype:
                 raise ValueError(f"quant-hoist argument {arg.key!r} has unsupported {arg.dtype}")
@@ -292,10 +323,10 @@ def generate(model_dir: str | Path, out_dir: str | Path,
             if tuple(arr.shape) != tuple(arg.shape) or arr.dtype != np.dtype(numpy_dtype[arg.dtype]):
                 raise ValueError(
                     f"quant-hoist argument {arg.key!r} bytes are {arr.shape}x{arr.dtype}, "
-                    f"plan requires {arg.shape}x{arg.dtype}")
+                    f"plan requires {arg.shape}x{arg.dtype}"
+                )
             begin = _append_blob(arr.tobytes())
-            rows.append(("MERLIN_WEIGHT", begin, len(arg.shape), list(arg.shape),
-                         DT_BYTES[arg.dtype], arg.dtype))
+            rows.append(("MERLIN_WEIGHT", begin, len(arg.shape), list(arg.shape), DT_BYTES[arg.dtype], arg.dtype))
     n_sig_args = len(sig) + len(qinner_args) + len(quant_hoist_args)
     # Output rows follow the input/weight rows in MLIR result order. Keeping every result is what
     # lets a captured decoder/LSTM expose its updated state instead of the runtime silently dropping
@@ -311,8 +342,10 @@ def generate(model_dir: str | Path, out_dir: str | Path,
     session: dict = {}
     if session_path.is_file():
         from ..common.yaml import load_yaml
+
         session = load_yaml(session_path)
         from ..common.schemas import validate_or_raise
+
         validate_or_raise(session, "session_contract")
         if not isinstance(session, dict) or int(session.get("version", 0)) != 1:
             raise ValueError(f"invalid session contract at {session_path}: expected version 1 mapping")
@@ -330,7 +363,8 @@ def generate(model_dir: str | Path, out_dir: str | Path,
                 raise ValueError(
                     f"{session_path}: state {state.get('name', j)!r} ABI mismatch: "
                     f"input {input_arg} is {in_shape}x{in_dt}, output {output_index} is "
-                    f"{o_shape}x{o_dt}")
+                    f"{o_shape}x{o_dt}"
+                )
             state_pairs.append((input_arg, output_index))
 
     state_input_args = {pair[0] for pair in state_pairs}
@@ -355,8 +389,7 @@ def generate(model_dir: str | Path, out_dir: str | Path,
             arr = np.ascontiguousarray(stream_data[key])
             shape, dt = sig[input_arg]
             if list(arr.shape[1:]) != list(shape) or arr.shape[0] < 1:
-                raise ValueError(
-                    f"{session_path}: stream {key!r} must have shape [steps, {shape}], got {arr.shape}")
+                raise ValueError(f"{session_path}: stream {key!r} must have shape [steps, {shape}], got {arr.shape}")
             stream_specs.append((input_arg, arr, dt))
         step_counts = {int(arr.shape[0]) for _, arr, _ in stream_specs}
         if len(step_counts) != 1:
@@ -364,8 +397,7 @@ def generate(model_dir: str | Path, out_dir: str | Path,
         session_steps = next(iter(step_counts))
     elif session:
         if session_steps < 1 or not state_pairs:
-            raise ValueError(
-                f"{session_path}: a stream-free session needs positive steps and carried state")
+            raise ValueError(f"{session_path}: a stream-free session needs positive steps and carried state")
     else:
         session_steps = 1
 
@@ -390,9 +422,7 @@ def generate(model_dir: str | Path, out_dir: str | Path,
                 raise ValueError(f"{session_path}: {field} trajectory key {key!r} is absent")
             values = np.ascontiguousarray(data[key], dtype=np.float32)
         if list(values.shape[1:]) != list(shape) or values.shape[0] < 1:
-            raise ValueError(
-                f"{session_path}: {field} trajectory must have shape [steps, {shape}], "
-                f"got {values.shape}")
+            raise ValueError(f"{session_path}: {field} trajectory must have shape [steps, {shape}], got {values.shape}")
         return values, output_index
 
     quality_values, quality_output_index = _trajectory_reference("quality")
@@ -422,47 +452,50 @@ def generate(model_dir: str | Path, out_dir: str | Path,
                 quality_values = quality_values[:session_steps]
 
     # model_gen.h
-    h = ["/* Generated by merlin.llvmlower.c_runtime — do not edit. */",
-         "#ifndef MERLIN_MODEL_GEN_H", "#define MERLIN_MODEL_GEN_H",
-         "#include \"merlin_model.h\"",
-         f"#define MERLIN_N_ARGS {len(rows)}",
-         f"#define MERLIN_N_OUTPUTS {len(out_specs)}",
-         f"#define MERLIN_N_STATE_PAIRS {len(state_pairs)}",
-         f"#define MERLIN_SESSION_STEPS {session_steps}",
-         f"#define MERLIN_HAS_SESSION_CORRECTNESS {1 if correctness_values is not None else 0}",
-         f"#define MERLIN_HAS_SESSION_QUALITY {1 if quality_values is not None else 0}",
-         f"#define MERLIN_OUT_ELEMS {int(np.prod(out_shape))}",
-         f"#define MERLIN_OUT_LASTDIM {out_shape[-1] if out_shape else 1}",
-         f"#define MERLIN_OUT_IS_F32 {int(out_dt == 'f32')}",
-         f"#define MERLIN_OUT_IS_I64 {int(out_dt == 'i64')}",
-         f"#define MERLIN_OUT_IS_I1 {int(out_dt == 'i1')}",
-         "static const merlin_arg_t MERLIN_ARGS[MERLIN_N_ARGS] = {"]
+    h = [
+        "/* Generated by merlin.llvmlower.c_runtime — do not edit. */",
+        "#ifndef MERLIN_MODEL_GEN_H",
+        "#define MERLIN_MODEL_GEN_H",
+        '#include "merlin_model.h"',
+        f"#define MERLIN_N_ARGS {len(rows)}",
+        f"#define MERLIN_N_OUTPUTS {len(out_specs)}",
+        f"#define MERLIN_N_STATE_PAIRS {len(state_pairs)}",
+        f"#define MERLIN_SESSION_STEPS {session_steps}",
+        f"#define MERLIN_HAS_SESSION_CORRECTNESS {1 if correctness_values is not None else 0}",
+        f"#define MERLIN_HAS_SESSION_QUALITY {1 if quality_values is not None else 0}",
+        f"#define MERLIN_OUT_ELEMS {int(np.prod(out_shape))}",
+        f"#define MERLIN_OUT_LASTDIM {out_shape[-1] if out_shape else 1}",
+        f"#define MERLIN_OUT_IS_F32 {int(out_dt == 'f32')}",
+        f"#define MERLIN_OUT_IS_I64 {int(out_dt == 'i64')}",
+        f"#define MERLIN_OUT_IS_I1 {int(out_dt == 'i1')}",
+        "static const merlin_arg_t MERLIN_ARGS[MERLIN_N_ARGS] = {",
+    ]
     for kind, off, rank, dims, elem, dt in rows:
         dimstr = ",".join(str(d) for d in dims) or "0"
         h.append(f"  {{{kind}, {off}L, {rank}, {{{dimstr}}}, {elem}}},")
     h += ["};"]
     h.append("#endif")
 
-    io = ["/* Generated. Embedded runtime inputs. */",
-          "#ifndef MERLIN_MODEL_IO_H", "#define MERLIN_MODEL_IO_H", "#include <math.h>",
-          "#include <string.h>"]
+    io = [
+        "/* Generated. Embedded runtime inputs. */",
+        "#ifndef MERLIN_MODEL_IO_H",
+        "#define MERLIN_MODEL_IO_H",
+        "#include <math.h>",
+        "#include <string.h>",
+    ]
     io += io_decls
     for input_arg in sorted(state_input_args):
         arr, dt = embedded_arrays[input_arg]
-        io.append(f"static const {C_OF[dt]} merlin_initial_{input_arg}[] = "
-                  f"{{{_embed_array(arr, dt)}}};")
-        static_io_bytes += int(arr.nbytes)
+        io.append(f"static const {C_OF[dt]} merlin_initial_{input_arg}[] = {{{_embed_array(arr, dt)}}};")
+        static_io_bytes += _storage_nbytes(arr, dt)
     for input_arg, arr, dt in stream_specs:
-        io.append(f"static const {C_OF[dt]} merlin_stream_{input_arg}[] = "
-                  f"{{{_embed_array(arr, dt)}}};")
-        static_io_bytes += int(arr.nbytes)
+        io.append(f"static const {C_OF[dt]} merlin_stream_{input_arg}[] = {{{_embed_array(arr, dt)}}};")
+        static_io_bytes += _storage_nbytes(arr, dt)
     if correctness_values is not None:
-        io.append("static const float merlin_correctness_golden[] = {" +
-                  _embed_array(correctness_values, "f32") + "};")
+        io.append("static const float merlin_correctness_golden[] = {" + _embed_array(correctness_values, "f32") + "};")
         static_io_bytes += int(correctness_values.nbytes)
     if quality_values is not None:
-        io.append("static const float merlin_quality_golden[] = {" +
-                  _embed_array(quality_values, "f32") + "};")
+        io.append("static const float merlin_quality_golden[] = {" + _embed_array(quality_values, "f32") + "};")
         static_io_bytes += int(quality_values.nbytes)
     for i, (shape, dt) in enumerate(out_specs):
         nbytes = int(np.prod(shape)) * DT_BYTES[dt]
@@ -472,81 +505,105 @@ def generate(model_dir: str | Path, out_dir: str | Path,
     # actually emitted -- and not off a re-derived "is it a param" test, which drifts the moment a
     # second kind of arg lives in the blob (an externalized buffer does) and then names a C array
     # that was never declared.
-    io.append("static void *MERLIN_INPUT_PTR[MERLIN_N_ARGS] = {" + ",".join(
-        f"(void*)merlin_in_{i}" if i in embedded else "0"
-        for i in range(n_sig_args)) + "," + ",".join("0" for _ in out_specs) + "};")
-    io.append("static void *MERLIN_OUTPUT_PTR[MERLIN_N_OUTPUTS] = {" + ",".join(
-        f"(void*)merlin_out_{i}" for i in range(len(out_specs))) + "};")
+    io.append(
+        "static void *MERLIN_INPUT_PTR[MERLIN_N_ARGS] = {"
+        + ",".join(f"(void*)merlin_in_{i}" if i in embedded else "0" for i in range(n_sig_args))
+        + ","
+        + ",".join("0" for _ in out_specs)
+        + "};"
+    )
+    io.append(
+        "static void *MERLIN_OUTPUT_PTR[MERLIN_N_OUTPUTS] = {"
+        + ",".join(f"(void*)merlin_out_{i}" for i in range(len(out_specs)))
+        + "};"
+    )
     pair_len = max(1, len(state_pairs))
-    io.append(f"static const int MERLIN_STATE_INPUT_ARGS[{pair_len}] = {{" +
-              (",".join(str(v[0]) for v in state_pairs) if state_pairs else "0") + "};")
-    io.append(f"static const int MERLIN_STATE_OUTPUT_INDICES[{pair_len}] = {{" +
-              (",".join(str(v[1]) for v in state_pairs) if state_pairs else "0") + "};")
+    io.append(
+        f"static const int MERLIN_STATE_INPUT_ARGS[{pair_len}] = {{"
+        + (",".join(str(v[0]) for v in state_pairs) if state_pairs else "0")
+        + "};"
+    )
+    io.append(
+        f"static const int MERLIN_STATE_OUTPUT_INDICES[{pair_len}] = {{"
+        + (",".join(str(v[1]) for v in state_pairs) if state_pairs else "0")
+        + "};"
+    )
     io.append("static void merlin_reset_session(void) {")
     for input_arg in sorted(state_input_args):
-        arr, _ = embedded_arrays[input_arg]
-        io.append(f"  memcpy(merlin_in_{input_arg}, merlin_initial_{input_arg}, {int(arr.nbytes)}UL);")
+        arr, dt = embedded_arrays[input_arg]
+        io.append(f"  memcpy(merlin_in_{input_arg}, merlin_initial_{input_arg}, {_storage_nbytes(arr, dt)}UL);")
     io.append("}")
     io.append("static void merlin_prepare_step(long step) {")
     io.append("  long s = step % MERLIN_SESSION_STEPS;")
-    for input_arg, arr, _ in stream_specs:
-        step_bytes = int(arr[0].nbytes)
-        io.append(f"  MERLIN_INPUT_PTR[{input_arg}] = "
-                  f"(void *)((const unsigned char *)merlin_stream_{input_arg} + s * {step_bytes}L);")
+    for input_arg, arr, dt in stream_specs:
+        step_bytes = _storage_nbytes(arr[0], dt)
+        io.append(
+            f"  MERLIN_INPUT_PTR[{input_arg}] = "
+            f"(void *)((const unsigned char *)merlin_stream_{input_arg} + s * {step_bytes}L);"
+        )
     io.append("  (void)s;")
     io.append("}")
-    io += ["typedef struct {",
-           "  long steps; double min_cos; double max_rel; long top1;",
-           "} merlin_trajectory_metrics_t;",
-           "static merlin_trajectory_metrics_t merlin_correctness_metrics = {0, 1.0, 0.0, 0};",
-           "static merlin_trajectory_metrics_t merlin_quality_metrics = {0, 1.0, 0.0, 0};",
-           "static void merlin_compare_trajectory(const float *got, const float *ref, long n,",
-           "                                      merlin_trajectory_metrics_t *metrics) {",
-           "  double dot = 0.0, gn = 0.0, rn = 0.0, rmax = 0.0, errmax = 0.0;",
-           "  long gi = 0, ri = 0;",
-           "  for (long i = 0; i < n; i++) {",
-           "    double g = got[i], r = ref[i], e = fabs(g - r);",
-           "    dot += g * r; gn += g * g; rn += r * r;",
-           "    if (fabs(r) > rmax) rmax = fabs(r); if (e > errmax) errmax = e;",
-           "    if (got[i] > got[gi]) gi = i; if (ref[i] > ref[ri]) ri = i;",
-           "  }",
-           "  double denom = sqrt(gn) * sqrt(rn);",
-           "  double cos = denom > 0.0 ? dot / denom : (gn == rn ? 1.0 : 0.0);",
-           "  double rel = rmax > 0.0 ? errmax / rmax : errmax;",
-           "  if (cos < metrics->min_cos) metrics->min_cos = cos;",
-           "  if (rel > metrics->max_rel) metrics->max_rel = rel;",
-           "  if (gi == ri) metrics->top1++; metrics->steps++;",
-           "}",
-           "static void merlin_validate_step(long step) {"]
+    io += [
+        "typedef struct {",
+        "  long steps; double min_cos; double max_rel; long top1;",
+        "} merlin_trajectory_metrics_t;",
+        "static merlin_trajectory_metrics_t merlin_correctness_metrics = {0, 1.0, 0.0, 0};",
+        "static merlin_trajectory_metrics_t merlin_quality_metrics = {0, 1.0, 0.0, 0};",
+        "static void merlin_compare_trajectory(const float *got, const float *ref, long n,",
+        "                                      merlin_trajectory_metrics_t *metrics) {",
+        "  double dot = 0.0, gn = 0.0, rn = 0.0, rmax = 0.0, errmax = 0.0;",
+        "  long gi = 0, ri = 0;",
+        "  for (long i = 0; i < n; i++) {",
+        "    double g = got[i], r = ref[i], e = fabs(g - r);",
+        "    dot += g * r; gn += g * g; rn += r * r;",
+        "    if (fabs(r) > rmax) rmax = fabs(r); if (e > errmax) errmax = e;",
+        "    if (got[i] > got[gi]) gi = i; if (ref[i] > ref[ri]) ri = i;",
+        "  }",
+        "  double denom = sqrt(gn) * sqrt(rn);",
+        "  double cos = denom > 0.0 ? dot / denom : (gn == rn ? 1.0 : 0.0);",
+        "  double rel = rmax > 0.0 ? errmax / rmax : errmax;",
+        "  if (cos < metrics->min_cos) metrics->min_cos = cos;",
+        "  if (rel > metrics->max_rel) metrics->max_rel = rel;",
+        "  if (gi == ri) metrics->top1++; metrics->steps++;",
+        "}",
+        "static void merlin_validate_step(long step) {",
+    ]
     if correctness_values is not None:
         correctness_steps = int(correctness_values.shape[0])
         correctness_elems = int(np.prod(correctness_values.shape[1:]))
-        io += [f"  merlin_compare_trajectory((const float *)MERLIN_OUTPUT_PTR[{correctness_output_index}],",
-               f"      merlin_correctness_golden + (step % {correctness_steps}L) * {correctness_elems}L,",
-               f"      {correctness_elems}L, &merlin_correctness_metrics);"]
+        io += [
+            f"  merlin_compare_trajectory((const float *)MERLIN_OUTPUT_PTR[{correctness_output_index}],",
+            f"      merlin_correctness_golden + (step % {correctness_steps}L) * {correctness_elems}L,",
+            f"      {correctness_elems}L, &merlin_correctness_metrics);",
+        ]
     if quality_values is not None:
         quality_steps = int(quality_values.shape[0])
         quality_elems = int(np.prod(quality_values.shape[1:]))
-        io += [f"  merlin_compare_trajectory((const float *)MERLIN_OUTPUT_PTR[{quality_output_index}],",
-               f"      merlin_quality_golden + (step % {quality_steps}L) * {quality_elems}L,",
-               f"      {quality_elems}L, &merlin_quality_metrics);"]
-    io += ["  (void)step;", "}",
-           "static long merlin_correctness_steps(void) { return merlin_correctness_metrics.steps; }",
-           "static long merlin_correctness_min_cos_ppm(void) {",
-           "  return (long)(merlin_correctness_metrics.min_cos * 1000000.0);",
-           "}",
-           "static long merlin_correctness_max_rel_ppm(void) {",
-           "  return (long)(merlin_correctness_metrics.max_rel * 1000000.0);",
-           "}",
-           "static long merlin_correctness_top1(void) { return merlin_correctness_metrics.top1; }",
-           "static long merlin_quality_steps(void) { return merlin_quality_metrics.steps; }",
-           "static long merlin_quality_min_cos_ppm(void) {",
-           "  return (long)(merlin_quality_metrics.min_cos * 1000000.0);",
-           "}",
-           "static long merlin_quality_max_rel_ppm(void) {",
-           "  return (long)(merlin_quality_metrics.max_rel * 1000000.0);",
-           "}",
-           "static long merlin_quality_top1(void) { return merlin_quality_metrics.top1; }"]
+        io += [
+            f"  merlin_compare_trajectory((const float *)MERLIN_OUTPUT_PTR[{quality_output_index}],",
+            f"      merlin_quality_golden + (step % {quality_steps}L) * {quality_elems}L,",
+            f"      {quality_elems}L, &merlin_quality_metrics);",
+        ]
+    io += [
+        "  (void)step;",
+        "}",
+        "static long merlin_correctness_steps(void) { return merlin_correctness_metrics.steps; }",
+        "static long merlin_correctness_min_cos_ppm(void) {",
+        "  return (long)(merlin_correctness_metrics.min_cos * 1000000.0);",
+        "}",
+        "static long merlin_correctness_max_rel_ppm(void) {",
+        "  return (long)(merlin_correctness_metrics.max_rel * 1000000.0);",
+        "}",
+        "static long merlin_correctness_top1(void) { return merlin_correctness_metrics.top1; }",
+        "static long merlin_quality_steps(void) { return merlin_quality_metrics.steps; }",
+        "static long merlin_quality_min_cos_ppm(void) {",
+        "  return (long)(merlin_quality_metrics.min_cos * 1000000.0);",
+        "}",
+        "static long merlin_quality_max_rel_ppm(void) {",
+        "  return (long)(merlin_quality_metrics.max_rel * 1000000.0);",
+        "}",
+        "static long merlin_quality_top1(void) { return merlin_quality_metrics.top1; }",
+    ]
     io.append("#endif")
 
     if not ciface_name.isidentifier() or not invoke_name.isidentifier():
@@ -555,9 +612,11 @@ def generate(model_dir: str | Path, out_dir: str | Path,
     # model_call.c — unrolled ciface invocation
     decl = ",".join(["void*"] * len(rows))
     call = ",".join(f"d[{i}]" for i in range(len(rows)))
-    call_c = ["/* Generated. */",
-              f"extern void _mlir_ciface_{ciface_name}({decl});",
-              f"void {invoke_name}(void **d) {{ _mlir_ciface_{ciface_name}({call}); }}"]
+    call_c = [
+        "/* Generated. */",
+        f"extern void _mlir_ciface_{ciface_name}({decl});",
+        f"void {invoke_name}(void **d) {{ _mlir_ciface_{ciface_name}({call}); }}",
+    ]
 
     (out_dir / "weights.bin").write_bytes(bytes(blob) + bytes(appended))
     (out_dir / "model_gen.h").write_text("\n".join(h) + "\n")
@@ -570,12 +629,19 @@ def generate(model_dir: str | Path, out_dir: str | Path,
     # code-region reserve chosen without it puts the weights blob inside .bss, which surfaces only as
     # a linker "section .weights VMA overlaps section .bss" and reads as anything but a sizing error.
     output_bytes = sum(int(np.prod(shape)) * DT_BYTES[dt] for shape, dt in out_specs)
-    return {"n_args": len(rows), "n_outputs": len(out_specs), "outputs": out_specs,
-            "n_state_pairs": len(state_pairs), "out_shape": out_shape, "out_dt": out_dt,
-            "has_session_correctness": correctness_values is not None,
-            "has_session_quality": quality_values is not None,
-            "ciface_name": ciface_name, "invoke_name": invoke_name,
-            "n_qinner": len(qinner_args),
-            "n_quant_hoist": len(quant_hoist_args),
-            "weights_bytes": len(blob) + len(appended),
-            "static_io_bytes": static_io_bytes + output_bytes}
+    return {
+        "n_args": len(rows),
+        "n_outputs": len(out_specs),
+        "outputs": out_specs,
+        "n_state_pairs": len(state_pairs),
+        "out_shape": out_shape,
+        "out_dt": out_dt,
+        "has_session_correctness": correctness_values is not None,
+        "has_session_quality": quality_values is not None,
+        "ciface_name": ciface_name,
+        "invoke_name": invoke_name,
+        "n_qinner": len(qinner_args),
+        "n_quant_hoist": len(quant_hoist_args),
+        "weights_bytes": len(blob) + len(appended),
+        "static_io_bytes": static_io_bytes + output_bytes,
+    }
