@@ -48,6 +48,13 @@ phase grading semantics. Register access identities before relocating graders or
 Never infer dead runs from age or a directory suffix; use leases and explicit retention pins.
 Do not modify historical evidence during migrations.
 
+## Publication authorization
+
+Do not open a pull request in any repository without explicit user approval.
+An instruction to upstream or push changes does not authorize a new PR.
+Use the user-authorized branch or direct-main workflow, preserving reviewed
+changes and keeping published history intact.
+
 ## Before pushing
 
 Fetch the remote and review **every commit that the push would publish**, including commits
