@@ -297,7 +297,6 @@ backends:
         - --framework-source-sha256
         - "{framework_source_sha256}"
       source_paths:
-        - third_party/baselines/executorch
         - merlin/python/merlin
       framework_source_sha256: unresolved
       external_model_sources:

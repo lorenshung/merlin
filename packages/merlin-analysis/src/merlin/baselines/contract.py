@@ -21,7 +21,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-# The five external baselines (IREE deferred). Matches third_party/baselines/ submodules.
+# The five external baselines (IREE deferred), each selected from an external checkout.
 FRAMEWORKS: tuple[str, ...] = ("tvm", "executorch", "buddy", "exo", "ggml")
 
 # The canonical region taxonomy for the "kernel-style" per-region profile. Runners bracket their
@@ -123,7 +123,7 @@ class BaselineResult:
 
     # --- gaps & provenance ---
     gap_reason: str = ""  # MUST be non-empty when not built/ran; explains why
-    framework_commit: str = ""  # submodule SHA (part of the measurement)
+    framework_commit: str = ""  # selected external framework's full revision, when available
     toolchain: str = ""  # e.g. 'spacemit-clang-19' / 'llvm-23'
     march: str = ""  # e.g. 'rv64gcv'
     cycle_accurate: bool = False  # K1 rdtime -> estimate (spike/FireSim remain authorities)

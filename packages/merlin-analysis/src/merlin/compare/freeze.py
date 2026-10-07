@@ -20,6 +20,16 @@ from .paper import PaperStudySpec
 from .session import validate_capture_session, validate_paper_input_binding
 
 
+def _selected_backend_sources(backend: dict, root: Path) -> list[Path]:
+    values = backend["options"].get("source_paths", ()) or ()
+    paths = [Path(value) if Path(value).is_absolute() else root / value for value in values]
+    if backend.get("adapter") != "executorch":
+        return paths
+    from .executorch_sources import selected_source_paths
+
+    return selected_source_paths(paths)
+
+
 def _require_external_package_registration(spec: PaperStudySpec, study_sha256: str) -> tuple[Path, str, dict]:
     """Bind the freeze to the package workflow's final, five-package publication marker."""
     if spec.source_path is None:
@@ -243,7 +253,7 @@ def freeze_study(
             options["package_sha256"] = policy_digest
         source_values = options.get("source_paths", ()) or ()
         if source_values:
-            source_paths = [Path(value) if Path(value).is_absolute() else root / value for value in source_values]
+            source_paths = _selected_backend_sources(backend, root)
             digest_key = (
                 "kernel_source_sha256"
                 if backend["kind"] in {"kernel_swap", "frozen_baseline"}

@@ -9,7 +9,7 @@ seeded instance to ONNX (``torch.onnx.export``), imports that into Relax, lowers
 and emits a deployable module. The emitted kernel object is RVV-audited exactly like every other
 arm, so "TVM used RVV" is *proven by disassembly*, never assumed.
 
-**Pinned TVM = v0.19.0** (``third_party/baselines/tvm`` @ tag ``v0.19.0``), built against the
+**Selected TVM = v0.19.0** (external ``MERLIN_EXT_TVM`` checkout at tag ``v0.19.0``), built against the
 system **LLVM 18** (``/usr/bin/llvm-config-18``). This is a deliberate re-pin from the earlier
 ``main`` snapshot, which (a) would not compile against LLVM 23, (b) shipped no MetaSchedule, and
 (c) had a bool-op LLVM-codegen bug that blocked every model. v0.19.0 has MetaSchedule + AutoTVM +
@@ -65,16 +65,19 @@ from pathlib import Path
 
 from merlin.baselines import bundle as _bundle
 from merlin.baselines import k1_exec, profile, rvv_audit
+from merlin.baselines.external_source import checkout, optional_checkout
 from merlin.baselines.contract import BaselineResult, RegionProfile, ScalarFallback
 from merlin.common import artifacts
-from merlin.common.paths import build_dir, repo_root
+from merlin.common.paths import build_dir
 from merlin.mining import k1
 
 FRAMEWORK = "tvm"
 
 # --- TVM build layout (gitignored; built by this arm) -------------------------------------------
 _BUILD_ROOT = build_dir() / "baselines" / "tvm"
-_TVM_SRC = repo_root() / "third_party" / "baselines" / "tvm"
+
+def tvm_source_dir() -> Path:
+    return checkout("tvm")
 
 # The RVV target: LLVM riscv64 with the vector extension enabled. ``+zvl256b`` pins the vector
 # register width to the K1's VLEN (256b / vlenb=32) so codegen + MetaSchedule size vscale to the
@@ -109,7 +112,7 @@ def tvm_lib_dir() -> Path:
 
 def tvm_python_path() -> Path:
     """PYTHONPATH entry so the driving venv can ``import tvm`` from the built (uninstalled) tree."""
-    return _TVM_SRC / "python"
+    return tvm_source_dir() / "python"
 
 
 def m2m_python() -> Path | None:
@@ -141,7 +144,9 @@ def driver_python(model: str) -> Path | None:
 def tvm_built() -> bool:
     """True iff the TVM shared libs are present (the Python package needs them to import)."""
     lib = tvm_lib_dir()
-    return any((lib / n).is_file() for n in ("libtvm.so", "libtvm_runtime.so"))
+    return optional_checkout("tvm") is not None and any(
+        (lib / n).is_file() for n in ("libtvm.so", "libtvm_runtime.so")
+    )
 
 
 def tvm_available() -> bool:
@@ -152,7 +157,8 @@ def tvm_available() -> bool:
 def tvm_commit() -> str:
     try:
         r = subprocess.run(
-            ["git", "-C", str(_TVM_SRC), "describe", "--tags", "--always"], capture_output=True, text=True, timeout=15
+            ["git", "-C", str(tvm_source_dir()), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=15,
         )
         return r.stdout.strip() if r.returncode == 0 else ""
     except Exception:  # noqa: BLE001
@@ -673,7 +679,8 @@ def run_model(
         return _finish(res, model, variant, write)
     if not tvm_available():
         why = (
-            "TVM shared lib not built under build/baselines/tvm (run cmake+ninja)"
+            "TVM source or shared lib unavailable (set MERLIN_EXT_TVM to an external checkout; "
+            "build libtvm.so with cmake+ninja)"
             if not tvm_built()
             else "model2MLIR venv (torch) not found"
         )

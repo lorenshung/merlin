@@ -1,27 +1,26 @@
 """Read a GGUF checkpoint: architecture metadata + per-tensor quantization.
 
 GGUF stores quantized weights plus architecture metadata (but no compute graph). This module is the
-arch-independent foundation of GGUF ingestion: it opens a ``.gguf`` with the vendored gguf-py
+arch-independent foundation of GGUF ingestion: it opens a ``.gguf`` with gguf-py
 ``GGUFReader``, normalizes the architecture metadata a decoder needs, and classifies every tensor
 against the target-agnostic :mod:`merlin.common.quant_formats` registry — with a lazy dequantization
 to fp32 (via ``gguf.quants.dequantize``) that serves as the correctness reference. The graph is
 reconstructed elsewhere (the model2MLIR GGUF frontend, from this metadata); the ggml-type ->
 quant_ext mapping is driven purely off ``tensor.tensor_type`` and is fully architecture-independent.
 
-gguf-py ships under ``third_party/baselines/llama.cpp/gguf-py``; :func:`_gguf` adds it to ``sys.path``
-lazily so importing this module never hard-fails when the vendored tree is absent.
+gguf-py may be installed normally, or selected from an external llama.cpp checkout via
+``MERLIN_EXT_LLAMA_CPP``. When selected, imports from another source are refused.
 """
 
 from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from merlin.common import quant_formats as qf
-from merlin.common.paths import repo_root
+from merlin.common.paths import ExternalPathUnset, ext_path
 
 # ggml scalar (non-block) types map straight onto the regular float/int formats.
 _SCALAR_GGML_TO_FORMAT = {"F32": "fp32", "F16": "fp16", "BF16": "bf16"}
@@ -47,13 +46,23 @@ _ARCH_KEYS = {
 }
 
 
-@lru_cache(maxsize=1)
 def _gguf():
-    """Import the vendored gguf-py package (added to sys.path on first use)."""
-    base = repo_root() / "third_party" / "baselines" / "llama.cpp" / "gguf-py"
-    if base.is_dir() and str(base) not in sys.path:
+    """Import installed gguf-py, or exactly the selected external checkout's copy."""
+    try:
+        root = ext_path("llama_cpp")
+    except ExternalPathUnset:
+        import gguf  # noqa: PLC0415
+
+        return gguf
+    base = root / "gguf-py"
+    if not base.is_dir():
+        raise FileNotFoundError(f"selected llama.cpp checkout has no gguf-py at {base}")
+    if str(base) not in sys.path:
         sys.path.insert(0, str(base))
     import gguf  # noqa: PLC0415
+
+    if not Path(gguf.__file__).resolve().is_relative_to(base.resolve()):
+        raise ImportError("gguf was imported from outside MERLIN_EXT_LLAMA_CPP/gguf-py")
 
     return gguf
 

@@ -156,8 +156,8 @@ def render() -> str:
         "",
         "`files` counts TRACKED files at or below that directory, so a parent's count includes its",
         "children. Generated output under `out/` is mostly gitignored; what is tracked there is the",
-        "skeleton plus the curated reports the layout convention keeps. `third_party/` is vendored",
-        "upstream and is not counted.",
+        "skeleton plus the curated reports the layout convention keeps. `third_party/` holds only",
+        "the optional pinned LLVM source, and is not counted.",
         "",
         f"Totals: **{_approx(len(files))} tracked files**, {len(root_files)} of them at the "
         "repository root. Counts of ten or more are rounded to two significant figures, so "

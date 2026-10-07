@@ -13,10 +13,10 @@ from merlin.frontends import gguf_reader as gr
 
 try:
     _gguf = gr._gguf()
-except Exception:  # pragma: no cover - vendored gguf-py absent
+except Exception:  # pragma: no cover - optional gguf-py absent
     _gguf = None
 
-pytestmark = pytest.mark.skipif(_gguf is None, reason="vendored gguf-py unavailable")
+pytestmark = pytest.mark.skipif(_gguf is None, reason="gguf-py unavailable")
 
 
 def _write_tiny_gguf(path):

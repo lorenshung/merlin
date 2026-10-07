@@ -19,7 +19,7 @@ from typing import Any
 _OURS_PREFIX = "ours"
 _KERNEL_BACKENDS = ("xnnpack", "openblas")
 # Independent external compilers/runtimes (see merlin.baselines.contract.FRAMEWORKS and
-# third_party/baselines/). Unlike kernel backends, these run the whole model on their OWN stack;
+# explicit external checkouts). Unlike kernel backends, these run the whole model on their OWN stack;
 # their measurements are produced by the merlin.baselines harness and ingested from its result JSON.
 _EXTERNAL_FRAMEWORKS = ("tvm", "executorch", "buddy", "exo", "ggml")
 _BASELINE = "baseline"

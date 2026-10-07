@@ -217,11 +217,13 @@ call the Anthropic API via `merlin.common.llm.complete`. Set `ANTHROPIC_API_KEY`
 its deterministic mock fallback** — tests still pass, but no real agentic run happens.
 
 **External baseline frameworks** (cross-framework K1 comparison — [integrations](integrations.md)).
-Each arm is an adapter over an external checkout/build, passed by `MERLIN_*` var, and skips
-independently when unset: `MERLIN_XNNPACK_REPO`, `MERLIN_OPENBLAS_REPO`, `MERLIN_TVM_LIBRARY_PATH`
-(+ the `MERLIN_TVM_*` family), `MERLIN_BUDDY_BUILD` / `MERLIN_BUDDY_LLVM_BUILD`, `MERLIN_GGML_BUILD`,
-`MERLIN_ET_VENV` (ExecuTorch). The baseline submodules under `third_party/baselines/` are initialized
-only for the arms you run (`tvm` / `executorch` recurse into their own submodules).
+Each arm is an adapter over an independently selected external checkout/build and skips or reports
+`not_built` when unavailable. Set `MERLIN_EXT_BUDDY_MLIR`, `MERLIN_EXT_TVM`,
+`MERLIN_EXT_EXECUTORCH` (or existing `MERLIN_ET_SOURCE`), `MERLIN_EXT_EXO`, and
+`MERLIN_EXT_LLAMA_CPP` for the frameworks you use. Their builds remain separate: for example,
+`MERLIN_TVM_LIBRARY_PATH`, `MERLIN_BUDDY_BUILD` / `MERLIN_BUDDY_LLVM_BUILD`, `MERLIN_GGML_BUILD`,
+and `MERLIN_ET_VENV`. The exact external framework revision is recorded with each measurement;
+no baseline checkout is supplied by this repository.
 
 ## 6. The CLI surface
 

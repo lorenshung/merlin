@@ -7,10 +7,10 @@ commit for that cost other sessions a regenerate commit each.
 
 `files` counts TRACKED files at or below that directory, so a parent's count includes its
 children. Generated output under `out/` is mostly gitignored; what is tracked there is the
-skeleton plus the curated reports the layout convention keeps. `third_party/` is vendored
-upstream and is not counted.
+skeleton plus the curated reports the layout convention keeps. `third_party/` holds only
+the optional pinned LLVM source, and is not counted.
 
-Totals: **~7.8k tracked files**, 18 of them at the repository root. Counts of ten or more are rounded to two significant figures, so a single added file cannot make this map stale.
+Totals: **~8.6k tracked files**, 18 of them at the repository root. Counts of ten or more are rounded to two significant figures, so a single added file cannot make this map stale.
 
 ## Directories
 
@@ -21,7 +21,7 @@ Totals: **~7.8k tracked files**, 18 of them at the repository root. Counts of te
 | &nbsp;&nbsp;`skills/` | 6 |  |  |
 | `.github/` | 3 |  |  |
 | &nbsp;&nbsp;`workflows/` | 3 |  |  |
-| `build_tools/` | ~240 |  | Build & developer tooling for merlin: `scripts/` (build/sweep/capture orchestration, K1/board measurement & analysis harnesses, repo linters `check_structure.py` / `check_artifact_layout.py` /… |
+| `build_tools/` | ~250 |  | Build & developer tooling for merlin: `scripts/` (build/sweep/capture orchestration, K1/board measurement & analysis harnesses, repo linters `check_structure.py` / `check_artifact_layout.py` /… |
 | &nbsp;&nbsp;`SpacemiT/` | 1 |  |  |
 | &nbsp;&nbsp;`chipyard/` | 2 |  |  |
 | &nbsp;&nbsp;`cmake/` | 2 |  | Reusable CMake modules/helpers for the merlin C++ build. |
@@ -30,22 +30,22 @@ Totals: **~7.8k tracked files**, 18 of them at the repository root. Counts of te
 | &nbsp;&nbsp;`git-hooks/` | 2 |  |  |
 | &nbsp;&nbsp;`k1_openmp/` | 2 |  |  |
 | &nbsp;&nbsp;`plots/` | ~60 |  |  |
-| &nbsp;&nbsp;`scripts/` | ~150 |  | Maintenance/validation scripts (e.g. `check_structure.py`). |
+| &nbsp;&nbsp;`scripts/` | ~160 |  | Maintenance/validation scripts (e.g. `check_structure.py`). |
 | &nbsp;&nbsp;`toolchains/` | 2 |  |  |
 | &nbsp;&nbsp;`upstreams/` | 2 |  | Versioned provenance and qualification records for coordinated local companion-repository changes. These records are not discovery defaults, target hardware facts, or compiler certificates. |
-| `docs/` | ~90 |  | Durable, cross-linked project documentation. Start at the generated hub `docs/README.md`. See the `docs-layout` skill for the full convention. |
+| `docs/` | ~130 |  | Durable, cross-linked project documentation. Start at the generated hub `docs/README.md`. See the `docs-layout` skill for the full convention. |
 | &nbsp;&nbsp;`assets/` | 1 |  |  |
-| &nbsp;&nbsp;`design/` | ~30 |  |  |
+| &nbsp;&nbsp;`design/` | ~40 |  |  |
 | &nbsp;&nbsp;`guides/` | ~40 |  |  |
-| &nbsp;&nbsp;`reference/` | ~20 |  |  |
-| `examples/` | ~220 |  |  |
+| &nbsp;&nbsp;`reference/` | ~50 |  |  |
+| `examples/` | ~290 |  |  |
 | `experiments/` | ~310 |  |  |
-| `merlin/` | ~5.1k |  | Retained contracts, target inputs, native experiment engines and cross-subsystem tests. The installed compiler core is owned by `src/merlin/`, not this directory. |
+| `merlin/` | ~5.5k |  | Retained contracts, target inputs, native experiment engines and cross-subsystem tests. The installed compiler core is owned by `src/merlin/`, not this directory. |
 | &nbsp;&nbsp;`benchmarks/` | ~50 |  | Curated **benchmark/workload INPUTS** the library reads at runtime — things that cannot be regenerated cheaply and are the source-of-record for DSE/kernel analysis. **Not results.** |
-| &nbsp;&nbsp;`contract/` | ~2.2k |  | The **experiment ABI**: the repo-independent, versioned contract an out-of-tree target-backend package is built against (see `README.md`). Hand-authored, **frozen source-of-record** DATA — the… |
+| &nbsp;&nbsp;`contract/` | ~2.1k |  | The **experiment ABI**: the repo-independent, versioned contract an out-of-tree target-backend package is built against (see `README.md`). The *accessor code* lives in… |
 | &nbsp;&nbsp;`experiments/` | ~1.2k |  | Retained native experiment engines, benchmark harnesses and research inputs. Start with the root `experiments/catalog.yaml` and `experiments/README.md` for declarative phase selection. This directory… |
 | &nbsp;&nbsp;&nbsp;&nbsp;`agent_bench/` | 6 | reference |  |
-| &nbsp;&nbsp;&nbsp;&nbsp;`agent_recipe_select_v0/` | ~20 | active | The complementary half of merlin's performance story. The established path is *agent **builds** the compiler*: an agent edits compiler source and the deliverable is a better reusable compiler… |
+| &nbsp;&nbsp;&nbsp;&nbsp;`agent_recipe_select_v0/` | ~20 | blocked | The complementary half of merlin's performance story. The established path is *agent **builds** the compiler*: an agent edits compiler source and the deliverable is a better reusable compiler… |
 | &nbsp;&nbsp;&nbsp;&nbsp;`agentic_report/` | 6 | active | Turn the agentic run directories into a regenerable report: an index, a facts file, a figure kit and the written update. It reads BOTH benches (functional and performance), which is why it sits here… |
 | &nbsp;&nbsp;&nbsp;&nbsp;`capsule_bench/` | ~800 | active | The capsule benchmark: give a coding agent a hardware target it has never seen, let it build a compiler backend, and grade what it produces against an independent oracle. One harness, six targets, a… |
 | &nbsp;&nbsp;&nbsp;&nbsp;`cpu_host_compiler_v0/` | ~20 | active | Four-arm agentic experiment for producing a reusable CPU-host compiler with scalar and RVV paths.  The same frozen generic corpus and grader are used for every arm; only the nested authoring… |
@@ -62,7 +62,7 @@ Totals: **~7.8k tracked files**, 18 of them at the repository root. Counts of te
 | &nbsp;&nbsp;&nbsp;&nbsp;`voyager_h2h/` | ~20 | active | Head-to-head of merlin against the Voyager compiler (github.com/jeffreyyu0602/voyager-compiler, DAC 2026 / arXiv 2509.15205). It answers two questions separately and never mixes them: |
 | &nbsp;&nbsp;`prompts/` | 4 |  | Versioned **agent-instruction templates** (prose preambles) fed to the kernel-mining / RVV-tuning agentic loops. Curated inputs (cannot be generated). |
 | &nbsp;&nbsp;`python/` | 2 |  | Compatibility import root. The `merlin` symlink points to canonical `src/merlin`. Do not add another implementation here; new source belongs under `src/` or `packages/`. |
-| &nbsp;&nbsp;`runtime/` | ~30 |  | The **Merlin-owned, target-INDEPENDENT C runtime substrate** — the dependency-free code that drives a compiled model via its MLIR C-runtime interface. Hand-authored source (cannot be generated). |
+| &nbsp;&nbsp;`runtime/` | ~60 |  | The **Merlin-owned, target-INDEPENDENT C runtime substrate** — the dependency-free code that drives a compiled model via its MLIR C-runtime interface. Hand-authored source (cannot be generated). |
 | &nbsp;&nbsp;`schemas/` | ~40 |  | The **cross-workstream coordination data-model** — every artifact exchanged between the workstreams (TargetGen, kernel-mining, design-pressure/DSE, rvvgen) is defined here as a `*.schema.yaml`. The… |
 | &nbsp;&nbsp;`targets/` | ~30 |  | Legacy compatibility paths for target metadata now authored under `examples/<target>/target/`. Remaining K1 input is deferred; new definitions belong in examples or OOT support providers. |
 | &nbsp;&nbsp;&nbsp;&nbsp;`gemmini_universal/` | 6 |  |  |
@@ -70,51 +70,52 @@ Totals: **~7.8k tracked files**, 18 of them at the repository root. Counts of te
 | &nbsp;&nbsp;&nbsp;&nbsp;`muon/` | 3 |  |  |
 | &nbsp;&nbsp;&nbsp;&nbsp;`saturn/` | 4 |  |  |
 | &nbsp;&nbsp;&nbsp;&nbsp;`voyager_accel/` | 3 |  |  |
-| &nbsp;&nbsp;`tests/` | ~1.6k |  | The cross-subsystem pytest suite for merlin: unit + integration across kernels, MLIR/xDSL compilation, DSE, runtime/backends, model bringup, validation. This is the root project's `testpaths` entry… |
-| &nbsp;&nbsp;&nbsp;&nbsp;`data/` | ~80 |  | Small, checked-in fixture inputs for kernel-mining unit tests. |
+| &nbsp;&nbsp;`tests/` | ~1.9k |  | The cross-subsystem pytest suite for merlin: unit + integration across kernels, MLIR/xDSL compilation, DSE, runtime/backends, model bringup, validation. This is the root project's `testpaths` entry… |
+| &nbsp;&nbsp;&nbsp;&nbsp;`data/` | ~90 |  | Small, checked-in fixture inputs for kernel-mining unit tests. |
 | &nbsp;&nbsp;&nbsp;&nbsp;`dse/` | ~160 |  | Tests for the **dse** subsystem: DSE tools (dse / dse_guidance / design_pressure), cost model, search, compare. |
-| &nbsp;&nbsp;&nbsp;&nbsp;`fixtures/` | ~40 |  |  |
-| &nbsp;&nbsp;&nbsp;&nbsp;`gemmini/` | ~90 |  | Tests for the **gemmini** subsystem: Gemmini target: conformance/cert, RTL checks, OOT runner, bench contract. |
-| &nbsp;&nbsp;&nbsp;&nbsp;`infra/` | ~410 |  | Tests for the **infra** subsystem: repo conventions: artifact layout, smoke/CLI smoke. |
-| &nbsp;&nbsp;&nbsp;&nbsp;`ir/` | ~130 |  | Tests for the **ir** subsystem: xDSL dialects, lowering/passes, dispatch, frontends, llvmlower. |
+| &nbsp;&nbsp;&nbsp;&nbsp;`fixtures/` | ~50 |  |  |
+| &nbsp;&nbsp;&nbsp;&nbsp;`gemmini/` | ~110 |  | Tests for the **gemmini** subsystem: Gemmini target: conformance/cert, RTL checks, OOT runner, bench contract. |
+| &nbsp;&nbsp;&nbsp;&nbsp;`infra/` | ~450 |  | Tests for the **infra** subsystem: repo conventions: artifact layout, smoke/CLI smoke. |
+| &nbsp;&nbsp;&nbsp;&nbsp;`ir/` | ~250 |  | Tests for the **ir** subsystem: xDSL dialects, lowering/passes, dispatch, frontends, llvmlower. |
 | &nbsp;&nbsp;&nbsp;&nbsp;`kernels/` | ~70 |  | Tests for the **kernels** subsystem: kernel mining/ceiling/CCA/policy/features + kernel backend. |
-| &nbsp;&nbsp;&nbsp;&nbsp;`runtime/` | ~90 |  | Tests for the **runtime** subsystem: runtime backends (spike/zephyr/xnnpack/openblas/saturn) + engine. |
-| &nbsp;&nbsp;&nbsp;&nbsp;`rvv/` | ~100 |  | Tests for the **rvv** subsystem: RVV codegen (rvvgen) + RVV/K1 board bringup + model-on-RVV. |
-| &nbsp;&nbsp;&nbsp;&nbsp;`targetgen/` | ~420 |  | Tests for the **targetgen** subsystem: TargetGen synthesis + contract validation. |
-| `out/` | ~200 |  | The **single top-level root for all generated/produced output** (see CLAUDE.md, "Generated-output convention"). Nothing generated goes anywhere else in the repo. |
-| `packages/` | ~690 |  |  |
-| &nbsp;&nbsp;`merlin-analysis/` | ~120 |  |  |
+| &nbsp;&nbsp;&nbsp;&nbsp;`runtime/` | ~150 |  | Tests for the **runtime** subsystem: runtime backends (spike/zephyr/xnnpack/openblas/saturn) + engine. |
+| &nbsp;&nbsp;&nbsp;&nbsp;`rvv/` | ~110 |  | Tests for the **rvv** subsystem: RVV codegen (rvvgen) + RVV/K1 board bringup + model-on-RVV. |
+| &nbsp;&nbsp;&nbsp;&nbsp;`targetgen/` | ~500 |  | Tests for the **targetgen** subsystem: TargetGen synthesis + contract validation. |
+| `out/` | ~110 |  | The **single top-level root for all generated/produced output** (see CLAUDE.md, "Generated-output convention"). Nothing generated goes anywhere else in the repo. |
+| `packages/` | ~930 |  |  |
+| &nbsp;&nbsp;`merlin-analysis/` | ~130 |  |  |
 | &nbsp;&nbsp;&nbsp;&nbsp;`src/` | ~120 |  |  |
 | &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`merlin/` | ~120 |  |  |
 | &nbsp;&nbsp;`merlin-dse/` | ~140 |  |  |
 | &nbsp;&nbsp;&nbsp;&nbsp;`src/` | ~130 |  |  |
 | &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`merlin/` | ~130 |  |  |
 | &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`merlin_dse/` | 3 |  |  |
-| &nbsp;&nbsp;`merlin-experiments/` | ~390 |  |  |
-| &nbsp;&nbsp;&nbsp;&nbsp;`src/` | ~240 |  |  |
+| &nbsp;&nbsp;`merlin-experiments/` | ~630 |  |  |
+| &nbsp;&nbsp;&nbsp;&nbsp;`src/` | ~370 |  |  |
 | &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`merlin/` | ~60 |  |  |
-| &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`merlin_experiments/` | ~190 |  |  |
+| &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`merlin_experiments/` | ~310 |  |  |
 | &nbsp;&nbsp;`merlin-mining/` | ~40 |  |  |
 | &nbsp;&nbsp;&nbsp;&nbsp;`src/` | ~30 |  |  |
 | &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`merlin/` | ~30 |  |  |
-| `src/` | ~870 |  |  |
-| &nbsp;&nbsp;`merlin/` | ~870 |  | The canonical, installed `merlin` Python package. See the repository ownership map and `docs/reference/architecture.md` before introducing a new dependency. |
+| `src/` | ~1.1k |  |  |
+| &nbsp;&nbsp;`merlin/` | ~1.1k |  | The canonical, installed `merlin` Python package. See the repository ownership map and `docs/reference/architecture.md` before introducing a new dependency. |
 | &nbsp;&nbsp;&nbsp;&nbsp;`baselines/` | 6 |  |  |
-| &nbsp;&nbsp;&nbsp;&nbsp;`capture/` | 8 |  |  |
-| &nbsp;&nbsp;&nbsp;&nbsp;`common/` | ~30 |  | Shared utilities: schemas, IO, source/resource paths, storage and access identities. `frozen_imports` provides stdlib-only, process-local source import isolation for trusted bootstraps. Callers own… |
-| &nbsp;&nbsp;&nbsp;&nbsp;`compile/` | ~10 |  | Compile machinery behind ``merlin-compile``: bundles, the host lane, capacity, and mesh execution. |
+| &nbsp;&nbsp;&nbsp;&nbsp;`capture/` | ~10 |  |  |
+| &nbsp;&nbsp;&nbsp;&nbsp;`common/` | ~40 |  | Shared utilities: schemas, IO, source/resource paths, storage and access identities. The common access registry contains only target-neutral identities; the experiments sandbox extends it with… |
+| &nbsp;&nbsp;&nbsp;&nbsp;`compile/` | ~20 |  | Compile machinery behind ``merlin-compile``: bundles, the host lane, capacity, and mesh execution. |
 | &nbsp;&nbsp;&nbsp;&nbsp;`frontends/` | ~20 |  | Frontends that ingest external IR into the Merlin pipeline. Today: linalg-on-tensors MLIR as produced by **model2MLIR** (`/path/to/model2MLIR`) — smolVLA and the other VLA workloads. |
 | &nbsp;&nbsp;&nbsp;&nbsp;`integrations/` | 5 |  |  |
-| &nbsp;&nbsp;&nbsp;&nbsp;`kernels/` | ~150 |  | Kernel abstraction mining: ingest -> features -> emit. |
+| &nbsp;&nbsp;&nbsp;&nbsp;`kernels/` | ~140 |  | Kernel abstraction mining: ingest -> features -> emit. |
 | &nbsp;&nbsp;&nbsp;&nbsp;`liveness/` | 8 |  | HW-agnostic *liveness / progress* oracle — an L2.5 tier between functional (L2) and RTL (L3). |
-| &nbsp;&nbsp;&nbsp;&nbsp;`llvmlower/` | ~70 |  | Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream MLIR pipeline → LLVM IR → x86 (verification) / rv64gcv (deployment) objects. This is the llvm-project plane for running… |
+| &nbsp;&nbsp;&nbsp;&nbsp;`llvmlower/` | ~170 |  | `radix_integer_reconstruct.c_fused_header` and the explicit `source_attention_frontier` fused reconstruction option keep complete immutable integer group planes until one exact local sum and binary64… |
 | &nbsp;&nbsp;&nbsp;&nbsp;`mining/` | 8 |  | Compiler/runtime schedule-package primitives retained in core during staged cutover. Search, agents, fork creation, campaigns and reports belong to `packages/merlin-mining`. The single core-owned… |
-| &nbsp;&nbsp;&nbsp;&nbsp;`perf/` | ~160 |  | The performance layer: what a target's legal choices *cost*. Derives archetypes and traits, emits a performance contract whose terms carry provenance and a validity domain, composes a predicted cycle… |
+| &nbsp;&nbsp;&nbsp;&nbsp;`perf/` | ~200 |  | The performance layer: what a target's legal choices *cost*. Derives archetypes and traits, emits a performance contract whose terms carry provenance and a validity domain, composes a predicted cycle… |
 | &nbsp;&nbsp;&nbsp;&nbsp;`runtime/` | ~60 |  | The Python reference runtimes that execute Merlin command buffers / dispatch programs, plus the per-backend adapters under `backends/`. |
 | &nbsp;&nbsp;&nbsp;&nbsp;`rvvgen/` | 2 |  | Compatibility shim: ``merlin.rvvgen`` is now :mod:`merlin.mining`. |
 | &nbsp;&nbsp;&nbsp;&nbsp;`sched/` | ~30 |  | The schedule-level compiler core: numerics contracts, kernel schedules and the gates that check them. It is the action space the performance loop optimizes over. The loop edits schedules and planner… |
+| &nbsp;&nbsp;&nbsp;&nbsp;`semantic_compiler/` | ~20 |  |  |
 | &nbsp;&nbsp;&nbsp;&nbsp;`system/` | 6 |  | The configuration we compile FOR: one host, N devices, and the **link** joining each device to the host. Everywhere else a "target" is one flat name that means the device; this package is where the… |
-| &nbsp;&nbsp;&nbsp;&nbsp;`targetgen/` | ~220 |  | TargetGen pipeline: ingest -> evidence -> synthesize -> generate -> validate. Turns a target's local docs/examples/source into human-reviewable plans and a generated `merlin-target-<name>/` repo… |
+| &nbsp;&nbsp;&nbsp;&nbsp;`targetgen/` | ~270 |  | TargetGen pipeline: ingest -> evidence -> synthesize -> generate -> validate. Turns a target's local docs/examples/source into human-reviewable plans and a generated `merlin-target-<name>/` repo… |
 | &nbsp;&nbsp;&nbsp;&nbsp;`triton/` | 9 |  | Triton as a target-independent KERNEL FRONTEND to Merlin (not a per-target backend). |
 | &nbsp;&nbsp;&nbsp;&nbsp;`validation/` | 5 |  | Reusable structural/artifact validation predicates shared by the `build_tools/scripts/` check scripts and the `targetgen inspect` command. |
 | &nbsp;&nbsp;&nbsp;&nbsp;`verify/` | ~20 |  | Compiler-pass verification: the **static** (lit/FileCheck) and **formal** (SMT) layers that sit beside the capsule oracle ladder. The bench grades *outcomes*; this package verifies *passes*. Model… |

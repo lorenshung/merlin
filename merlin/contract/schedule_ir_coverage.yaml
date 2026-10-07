@@ -98,7 +98,7 @@ version: 1
 prior_art:
   - id: exo
     what: >-
-      Exo 2's scheduling language, vendored at third_party/baselines/exo and exercised in-repo. Scored
+      Exo 2's scheduling language, examined from the then-pinned external checkout. Scored
       per row by grammar inspection plus a zero-hit grep over its source, which is what makes those
       verdicts checkable rather than remembered.
   - id: halide

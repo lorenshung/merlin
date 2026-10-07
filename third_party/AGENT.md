@@ -14,15 +14,9 @@ Pinned hard build/test dependencies that merlin itself cannot build or test with
 - External analysis repos (XNNPACK, Autocomp, Exo, Triton, ...) — those are integrations.
 - Anything merlin can run without. Prefer a `pyproject.toml` dependency or env-var path.
 
-## Carve-out: `baselines/`
-
-`third_party/baselines/` is a **deliberate, documented exception** to the "hard build deps only /
-integrations go via env-var" rule above. It holds external **baseline compilers/runtimes** (TVM,
-ExecuTorch, Buddy, EXO, llama.cpp/ggml) that we compare merlin against by running the *same* models
-end-to-end on the *same* SpacemiT K1 board with RVV. They are pinned as **submodules** (not env-var
-integrations) specifically so the cross-framework comparison is reproducible — the exact framework
-commit is part of the measurement. See `third_party/baselines/AGENT.md`. Build trees stay in
-`build/`; results in `artifacts/compare/` + `artifacts/measurements/`.
+External baseline compilers and runtimes are selected from independent checkouts through explicit
+environment paths. Their adapters remain in `packages/merlin-analysis`; no baseline source tree is
+tracked below `third_party/`. The selected framework revision remains part of each measurement.
 
 ## Interfaces
 

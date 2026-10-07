@@ -63,7 +63,7 @@ def compiler_python() -> Path:
 
 def _iree_bin(lookup: Callable[[str], str | None] | None = None) -> Path | None:
     """bin/ of the IREE-based Merlin build (ships clang-23), if configured. Set MERLIN_IREE_BIN, or
-    MERLIN_EXT_MERLIN_IREE pointing at the third_party/baselines/merlin-iree submodule build.
+    MERLIN_EXT_MERLIN_IREE pointing at an external Merlin-IREE checkout build.
     Resolved lazily so importing this module never requires the IREE build to be present."""
     if lookup is not None:
         env = lookup("MERLIN_IREE_BIN")

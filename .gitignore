@@ -271,6 +271,7 @@ compile_commands.json
 /third_party/llvm-build/
 /third_party/llvm-install/
 /third_party/llvm-build.log
+/third_party/baselines/
 # legacy retired dse-analysis root (dse now writes under artifacts/dse/)
 /results/
 

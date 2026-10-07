@@ -20,8 +20,8 @@ Pipeline (per model, fp32 first)::
       -> push + run on the K1 (board_lock): bundled-IO Test_result: PASS/FAIL + error stats + timing
 
 Why the AOT export runs in a separate venv: ExecuTorch + its pinned torch are heavy and are NOT in
-merlin's ``.venv``. This runner shells out to ``build/baselines/executorch/et-venv`` (built once by
-``third_party/baselines/executorch/install_executorch.sh``) to produce the ``.bpte``, then does all
+merlin's ``.venv``. This runner shells out to ``build/baselines/executorch/et-venv`` (built once from
+the explicitly selected external ExecuTorch checkout) to produce the ``.bpte``, then does all
 the cross-compile / audit / board work itself. If that venv is absent, the model is a clean
 ``not_built`` gap with a specific reason — never a fabricated result.
 
@@ -55,14 +55,15 @@ from merlin.baselines.executorch_identity import (
     ExecuTorchIdentityError,
     require_matching_executorch,
 )
+from merlin.baselines.external_source import checkout, require_checkout
 from merlin.common import artifacts
 from merlin.common import proc as _proc
-from merlin.common.paths import build_dir, repo_root
+from merlin.common.paths import ExternalPathUnset, build_dir
 from merlin.mining import k1
 
 FRAMEWORK = "executorch"
 
-# --- layout (build/ is gitignored; the ET source tree is the pinned submodule) ------------------
+# --- layout (build/ is gitignored; the ET source tree is an external checkout) ------------------
 _BUILD_ROOT = build_dir() / "baselines" / "executorch"
 _TOOLCHAIN_CMAKE = Path(__file__).with_name("executorch_spacemit_toolchain.cmake")
 _ET_EXPORT_HELPER = Path(__file__).with_name("_et_export.py")
@@ -71,9 +72,15 @@ _ET_OPS_HELPER = Path(__file__).with_name("_et_ops.py")
 
 
 def et_source_dir() -> Path:
-    """Pinned ExecuTorch source tree, optionally shared by an isolated git worktree."""
+    """Explicit ExecuTorch checkout, optionally shared by an isolated git worktree."""
     configured = os.environ.get("MERLIN_ET_SOURCE", "").strip()
-    return Path(configured) if configured else repo_root() / "third_party" / "baselines" / "executorch"
+    try:
+        return require_checkout(configured, "MERLIN_ET_SOURCE") if configured else checkout("executorch")
+    except (ExternalPathUnset, FileNotFoundError) as error:
+        raise ExecuTorchIdentityError(
+            "ExecuTorch source unavailable: set MERLIN_ET_SOURCE or MERLIN_EXT_EXECUTORCH "
+            "to an external checkout"
+        ) from error
 
 
 # Which ExecuTorch kernel library each ``functions.yaml`` in the PINNED source tree stands for, and
@@ -178,7 +185,7 @@ def et_identity_error() -> str:
 def et_commit() -> str:
     try:
         r = subprocess.run(
-            ["git", "-C", str(et_source_dir()), "rev-parse", "--short", "HEAD"],
+            ["git", "-C", str(et_source_dir()), "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
             timeout=15,
@@ -765,7 +772,7 @@ def audit_binary(runner: Path) -> tuple[float | None, list[ScalarFallback], dict
 #
 # executor_runner has no --json mode, so its ET_LOG stdout/stderr IS the contract. The format
 # strings are fixed in the pinned source we build ourselves
-# (third_party/baselines/executorch/examples/portable/executor_runner/executor_runner.cpp):
+# (selected ExecuTorch checkout's examples/portable/executor_runner/executor_runner.cpp):
 #
 #     ET_LOG(Info, "Model loaded in %f ms.", ...)
 #     ET_LOG(Info, "Iteration %" PRIu32 " of %" PRIu32 ": %f ms", ...)
@@ -1205,8 +1212,8 @@ def run_model(
         res.gap_reason = (
             identity_error
             or "ExecuTorch export venv unavailable at "
-            f"{et_venv_python()} (build via third_party/baselines/executorch/"
-            "install_executorch.sh); cannot torch.export -> .pte"
+            f"{et_venv_python()} (install from the selected external ExecuTorch checkout); "
+            "cannot torch.export -> .pte"
         )
         return _finish(res, model, variant, write)
 

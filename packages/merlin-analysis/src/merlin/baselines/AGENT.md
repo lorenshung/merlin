@@ -37,7 +37,8 @@ External-baseline K1-RVV comparison harness.
 
 ## Buddy (buddy.py) — build + int8 SIGSEGV diagnosis
 
-- **Build**: `git submodule update --init llvm` in `third_party/baselines/buddy-mlir`, then build the
+- **Build**: select an external Buddy checkout with `MERLIN_EXT_BUDDY_MLIR`, initialize its LLVM
+  dependency there, then build the
   LLVM fork tools (`mlir-opt mlir-translate llc opt mlir-runner`) into
   `build/baselines/buddy/llvm-build/`. Codegen stays INSIDE the fork (`opt`+`llc`), NOT the IREE
   clang-23 — its IR parser rejects the fork's `float f0x…` hex-float literals.
@@ -101,8 +102,8 @@ Then `aggregate.collect_dir(...)` renders the merlin-vs-baselines matrix into `a
 
 ## TVM arm build (`tvm.py`)
 
-- **Pinned to TVM v0.19.0** (submodule gitlink `c4dc0c2`, tag pinned in `.gitmodules`
-  `branch = v0.19.0`). Re-pinned FROM the `main` snapshot `ff937ff`, which (a) wouldn't compile
+- **Historical TVM v0.19.0 evidence** used that exact externally selected checkout; the repository
+  no longer supplies a TVM gitlink. That revision replaced an earlier `main` snapshot `ff937ff`, which (a) wouldn't compile
   against LLVM 23, (b) shipped no MetaSchedule, and (c) had a bool-op LLVM-codegen bug. v0.19.0 has
   MetaSchedule + AutoTVM + the classic `tvm.contrib.cc`, and its codegen lowers our graphs.
 - **Build against system LLVM 18** (`/usr/bin/llvm-config-18`, 18.1.3, RISC-V + `+v`) — NOT the
@@ -216,7 +217,7 @@ Then `aggregate.collect_dir(...)` renders the merlin-vs-baselines matrix into `a
   `ScalarFallback` per portable compute symbol carry it. tiny_llama fp32 delegated only 10/93 graph
   nodes → **~11.7% binary RVV coverage, 2185 labeled scalar fallbacks** (real, on-board).
 - **Export runs in a dedicated venv** (`build/baselines/executorch/et-venv`, gitignored) built via
-  `third_party/baselines/executorch/install_executorch.sh` — it pulls ExecuTorch's pinned torch
+  the selected `MERLIN_ET_SOURCE` / `MERLIN_EXT_EXECUTORCH` checkout's `install_executorch.sh` — it pulls ExecuTorch's pinned torch
   (2.12) + the ET pip package; `transformers` is added on top for the HF loaders. The main `.venv`
   has none of these. `executorch.py` shells `_et_export.py` into that venv (must strip its own dir
   from `sys.path` first, else the sibling `executorch.py` shadows the installed `executorch` pkg).

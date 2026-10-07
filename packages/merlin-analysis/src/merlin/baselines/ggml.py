@@ -65,18 +65,22 @@ from pathlib import Path
 
 from merlin.baselines import bundle as _bundle
 from merlin.baselines import k1_exec, profile, rvv_audit
+from merlin.baselines.external_source import checkout, optional_checkout
 from merlin.baselines.contract import BaselineResult, RegionProfile, ScalarFallback
 from merlin.common import artifacts
 from merlin.common.artifacts import cache_dir
-from merlin.common.paths import build_dir, repo_root
+from merlin.common.paths import build_dir
 from merlin.mining import k1
 
 FRAMEWORK = "ggml"
 
 # --- llama.cpp build layout (build tree gitignored; built by this arm) --------------------------
 _BUILD_ROOT = build_dir() / "baselines" / "ggml"
-_LLAMA_SRC = repo_root() / "third_party" / "baselines" / "llama.cpp"
 _GGUF_DIR = _BUILD_ROOT / "gguf"
+
+
+def llama_source_dir() -> Path:
+    return checkout("llama_cpp")
 
 # The rv64gcv march llama.cpp's own SpacemiT toolchain file selects (VLEN=256 K1 X60). Zfh/Zvfh are
 # the K1's half-precision vector extensions; Zicbop = cache-block prefetch. rv64gcv is the RVV core.
@@ -135,13 +139,14 @@ def ggml_cpu_so() -> Path | None:
 
 def ggml_available() -> bool:
     """True iff llama-bench + the ggml CPU RVV .so are cross-built for rv64gcv."""
-    return llama_bench() is not None and ggml_cpu_so() is not None
+    return optional_checkout("llama_cpp") is not None and llama_bench() is not None and ggml_cpu_so() is not None
 
 
 def ggml_commit() -> str:
     try:
         r = subprocess.run(
-            ["git", "-C", str(_LLAMA_SRC), "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=15
+            ["git", "-C", str(llama_source_dir()), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=15,
         )
         return r.stdout.strip() if r.returncode == 0 else ""
     except Exception:  # noqa: BLE001
@@ -228,8 +233,8 @@ def build_logits_dumper() -> Path:
             "-O2",
             f"-march={GGML_MARCH}",
             "-mabi=lp64d",
-            f"-I{_LLAMA_SRC / 'include'}",
-            f"-I{_LLAMA_SRC / 'ggml' / 'include'}",
+            f"-I{llama_source_dir() / 'include'}",
+            f"-I{llama_source_dir() / 'ggml' / 'include'}",
             str(src),
             f"-L{bindir}",
             f"-Wl,-rpath-link,{bindir}",
@@ -361,8 +366,9 @@ def convert_to_gguf(model: str, *, outtype: str = "f16", timeout: int = 1200) ->
     py = os.environ.get("MERLIN_GGUF_PYTHON", "/path/to/model2MLIR/.venv/bin/python")
     if not Path(py).is_file():
         raise GgmlError(f"GGUF-conversion python not found: {py} (set MERLIN_GGUF_PYTHON)")
-    conv = _LLAMA_SRC / "convert_hf_to_gguf.py"
-    env = dict(os.environ, PYTHONPATH=f"{_LLAMA_SRC / 'gguf-py'}:{os.environ.get('PYTHONPATH', '')}")
+    source = llama_source_dir()
+    conv = source / "convert_hf_to_gguf.py"
+    env = dict(os.environ, PYTHONPATH=f"{source / 'gguf-py'}:{os.environ.get('PYTHONPATH', '')}")
     r = subprocess.run(
         [py, str(conv), str(snap), "--outfile", str(out), "--outtype", outtype],
         capture_output=True,
@@ -434,12 +440,10 @@ def _load_safetensors_f32(path: Path) -> dict:
 def build_small_llama_gguf() -> Path:
     """Build a GGUF for small_llama directly from its fp32 capture bundle (idempotent).
 
-    Uses llama.cpp's bundled ``gguf-py`` (added to ``sys.path``) to emit a ``general.architecture=llama``
+    Uses the selected llama.cpp checkout's ``gguf-py`` to emit a ``general.architecture=llama``
     GGUF with ``tokenizer.ggml.model="none"`` (dummy 256-token vocab — our logits dumper feeds explicit
     ids, no tokenizer needed) and the HF-permuted Q/K weights. Raises :class:`GgmlError` on any gap.
     """
-    import sys
-
     import numpy as np
 
     out = gguf_path("small_llama", "f16")
@@ -452,13 +456,12 @@ def build_small_llama_gguf() -> Path:
         raise GgmlError(f"small_llama fp32 capture weights not found at {bnd.weights}")
     W = _load_safetensors_f32(bnd.weights)
     hp = _SMALL_LLAMA_HP
-    ggpy = str(_LLAMA_SRC / "gguf-py")
-    if ggpy not in sys.path:
-        sys.path.insert(0, ggpy)
+    from merlin.frontends.gguf_reader import _gguf
+
     try:
-        import gguf  # noqa: PLC0415
+        gguf = _gguf()
     except Exception as e:  # noqa: BLE001
-        raise GgmlError(f"cannot import gguf-py from {ggpy}: {e}") from e
+        raise GgmlError(f"cannot import selected gguf-py: {e}") from e
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_suffix(".gguf.tmp")
     w = gguf.GGUFWriter(str(tmp), "llama")
@@ -781,8 +784,8 @@ def run_model(
 
     if not ggml_available():
         res.gap_reason = (
-            "llama.cpp not cross-built for rv64gcv under build/baselines/ggml/build "
-            "(need llama-bench + libggml-cpu.so; see AGENT.md)"
+            "llama.cpp source or rv64gcv build unavailable (set MERLIN_EXT_LLAMA_CPP; "
+            "need llama-bench + libggml-cpu.so; see AGENT.md)"
         )
         return _finish(res, model, variant, write)
 

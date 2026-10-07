@@ -165,6 +165,10 @@ def test_small_llama_gguf_built_directly(monkeypatch):
     # small_llama's op surface IS a Llama block, so we build its GGUF DIRECTLY from the capture
     # bundle (gguf-py, HF-permuted Q/K). It is therefore `built`; off-board it stops at `not_run`
     # (board skipped) with the board-unavailable reason — never a fabricated pass.
+    try:
+        ggml.llama_source_dir()
+    except (KeyError, FileNotFoundError):
+        pytest.skip("external llama.cpp checkout unavailable")
     monkeypatch.setattr(ggml, "ggml_available", lambda: True)
     monkeypatch.setattr(ggml, "ggml_cpu_so", lambda: None)  # skip the audit path cleanly
     r = ggml.run_model("small_llama", "fp32", write=False, run_board=False)
@@ -179,9 +183,14 @@ def test_small_llama_gguf_writer_is_llama_arch():
     # The direct GGUF builder emits a valid `llama`-arch GGUF with the right hparams + none-vocab.
     import sys
 
+    try:
+        source = ggml.llama_source_dir()
+    except (KeyError, FileNotFoundError):
+        pytest.skip("external llama.cpp checkout unavailable")
+
     p = ggml.build_small_llama_gguf()
     assert p.is_file() and p.stat().st_size > 0
-    sys.path.insert(0, str(ggml._LLAMA_SRC / "gguf-py"))
+    sys.path.insert(0, str(source / "gguf-py"))
     import gguf  # noqa: PLC0415
 
     r = gguf.GGUFReader(str(p))
@@ -193,6 +202,30 @@ def test_small_llama_gguf_writer_is_llama_arch():
     names = {t.name for t in r.tensors}
     assert "token_embd.weight" in names and "output.weight" in names
     assert "blk.0.ffn_gate.weight" in names  # SwiGLU present
+
+
+def test_selected_gguf_writer_refuses_preloaded_installed_copy(monkeypatch, tmp_path):
+    from types import ModuleType
+    from types import SimpleNamespace
+    import sys
+
+    from merlin.baselines import bundle
+    from merlin.frontends import gguf_reader
+
+    selected = tmp_path / "llama.cpp"
+    (selected / "gguf-py").mkdir(parents=True)
+    installed = ModuleType("gguf")
+    installed.__file__ = str(tmp_path / "site-packages/gguf/__init__.py")
+    monkeypatch.setitem(sys.modules, "gguf", installed)
+    monkeypatch.setattr(gguf_reader, "ext_path", lambda _name: selected)
+    monkeypatch.setattr(ggml, "gguf_path", lambda *_args: tmp_path / "new.gguf")
+    weights = tmp_path / "weights.safetensors"
+    weights.write_bytes(b"fixture")
+    monkeypatch.setattr(bundle, "resolve", lambda *_args: SimpleNamespace(weights=weights))
+    monkeypatch.setattr(ggml, "_load_safetensors_f32", lambda _path: {})
+
+    with pytest.raises(ggml.GgmlError, match="outside MERLIN_EXT_LLAMA_CPP"):
+        ggml.build_small_llama_gguf()
 
 
 def test_bitvla_inputs_embeds_out_of_gguf_shape(monkeypatch):

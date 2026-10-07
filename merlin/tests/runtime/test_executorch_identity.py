@@ -61,8 +61,15 @@ def test_et_venv_available_uses_identity_gate(monkeypatch):
 def test_executorch_source_can_be_shared_with_an_isolated_worktree(monkeypatch, tmp_path):
     source = tmp_path / "executorch"
     source.mkdir()
+    (source / ".git").mkdir()
     monkeypatch.setenv("MERLIN_ET_SOURCE", str(source))
     assert et.et_source_dir() == source
+
+
+def test_missing_explicit_executorch_source_refuses(monkeypatch, tmp_path):
+    monkeypatch.setenv("MERLIN_ET_SOURCE", str(tmp_path / "missing"))
+    with pytest.raises(identity.ExecuTorchIdentityError, match="source unavailable"):
+        et.et_source_dir()
 
 
 @pytest.mark.parametrize("quantize", [False, True], ids=["fp32", "w8a8"])

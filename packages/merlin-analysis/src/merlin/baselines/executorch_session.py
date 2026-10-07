@@ -32,7 +32,6 @@ from merlin.baselines.executorch_identity import (
     ExecuTorchIdentity,
     ExecuTorchIdentityError,
 )
-from merlin.common.paths import repo_root
 from merlin.mining import k1
 from merlin.common import jsonio as _mjson
 
@@ -1402,7 +1401,9 @@ def write_runner_project(plan: SessionPlan, work: str | Path, *, xnnpack: bool =
     source = work / "executorch_session_runner.cpp"
     source.write_text(render_runner_source(plan))
     cmake = work / "CMakeLists.txt"
-    et_root = repo_root() / "third_party/baselines/executorch"
+    from merlin.baselines.executorch import et_source_dir
+
+    et_root = et_source_dir()
     cmake.write_text(f"""cmake_minimum_required(VERSION 3.19)
 project(merlin_executorch_session LANGUAGES C CXX)
 set(EXECUTORCH_ROOT \"{et_root}\")

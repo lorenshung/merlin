@@ -1,7 +1,7 @@
 """External-baseline K1-RVV comparison harness.
 
 Runs the SAME models we support through independent external compilers/runtimes (TVM, ExecuTorch,
-Buddy, EXO, ggml — pinned under ``third_party/baselines/``) end-to-end on the SAME SpacemiT K1 board
+Buddy, EXO, ggml — selected from explicit external checkouts) end-to-end on the SAME SpacemiT K1 board
 with RVV, and profiles them at two levels (whole-model E2E + per-region "kernel-style"), while being
 mechanically honest about any scalar fallback.
 

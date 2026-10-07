@@ -5,6 +5,7 @@ import dataclasses
 import hashlib
 import json
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +17,7 @@ from merlin.common.paths import bench_dir
 from merlin.common.yaml import write_yaml
 from merlin.baselines import executorch_session
 from merlin.compare import executorch_packages as packages
+from merlin.compare import executorch_sources as sources
 from merlin.compare.executorch_packages import ExecuTorchPackagesNotReady, PackageTask
 from merlin.compare.freeze import sha256_paths
 from merlin.compare.paper import PaperStudySpec
@@ -95,6 +97,7 @@ def _patch_preflight_dependencies(monkeypatch):
         packages, "et_identity", lambda: SimpleNamespace(as_dict=lambda: dict(IDENTITY)))
     monkeypatch.setattr(
         packages, "et_venv_python", lambda: Path("/exact/et-venv/bin/python"))
+    monkeypatch.setattr(packages, "et_source_dir", lambda: Path("/exact/executorch"))
     monkeypatch.setattr(
         packages, "_model2mlir_identity", lambda root, study: ({
             "path": str(root), "git_sha": "d" * 40,
@@ -124,13 +127,18 @@ def _patch_preflight_dependencies(monkeypatch):
     monkeypatch.setattr(packages, "_external_model_sources", lambda *_args: ({}, []))
 
 
-def test_curated_package_framework_identity_covers_complete_executed_source_roots():
+def test_curated_package_framework_identity_covers_complete_executed_source_roots(monkeypatch, tmp_path):
+    selected = tmp_path / "executorch"
+    selected.mkdir()
+    (selected / ".git").mkdir()
+    (selected / "source.py").write_text("# selected source\n", encoding="utf-8")
+    monkeypatch.setattr(sources, "et_source_dir", lambda: selected)
     study = PaperStudySpec.from_yaml(STUDY)
     backend = packages._external_backend(study)
     paths, digest = packages._framework_sources(backend)
     assert packages._is_sha256(digest)
-    assert packages.repo_root() / "merlin" / "python" / "merlin" in paths
-    assert packages.repo_root() / "third_party" / "baselines" / "executorch" in paths
+    assert (packages.repo_root() / "merlin" / "python" / "merlin").resolve() in paths
+    assert selected in paths
 
     incomplete = dataclasses.replace(
         backend, options={**backend.options, "source_paths": [
@@ -139,6 +147,64 @@ def test_curated_package_framework_identity_covers_complete_executed_source_root
         ]})
     with pytest.raises(ValueError, match="complete executed/imported source closure"):
         packages._framework_sources(incomplete)
+
+
+def test_package_and_freeze_bind_actual_producer_namespaces(monkeypatch, tmp_path):
+    from merlin.compare import freeze
+
+    checkout = tmp_path / "checkout"
+    core = checkout / "merlin/python/merlin"
+    analysis = tmp_path / "analysis/merlin"
+    mining = tmp_path / "mining/merlin"
+    external = tmp_path / "executorch"
+    module_files = {
+        "merlin.common.paths": core / "common/paths.py",
+        "merlin.baselines.executorch": analysis / "baselines/executorch.py",
+        "merlin.compare.executorch_packages": analysis / "compare/executorch_packages.py",
+        sources._PRODUCER_MODULES[-1]: mining / "mining/k1.py",
+    }
+    for path in [*module_files.values(), external / "source.py"]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# selected source\n", encoding="utf-8")
+    monkeypatch.setattr(sources, "module_source_path", lambda module: module_files[module])
+    monkeypatch.setattr(sources, "repo_root", lambda: checkout)
+    monkeypatch.setattr(sources, "et_source_dir", lambda: external)
+    backend = SimpleNamespace(options={"source_paths": [str(core)]})
+
+    planned, original = packages._framework_sources(backend)
+    frozen = freeze._selected_backend_sources(
+        {"adapter": "executorch", "options": backend.options}, checkout
+    )
+    assert planned == frozen == [core, analysis, mining, external]
+    assert original == sha256_paths(frozen)
+    (analysis / "baselines/executorch.py").write_text("# changed adapter\n", encoding="utf-8")
+    assert packages._framework_sources(backend)[1] != original
+    (analysis / "baselines/executorch.py").write_text("# selected source\n", encoding="utf-8")
+    (mining / "mining/k1.py").write_text("# changed mining\n", encoding="utf-8")
+    assert packages._framework_sources(backend)[1] != original
+
+
+def test_non_executorch_freeze_does_not_import_optional_source_closure():
+    script = """
+import importlib.abc
+import sys
+from pathlib import Path
+
+class BlockOptionalClosure(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == 'merlin.compare.executorch_sources':
+            raise AssertionError('non-ExecuTorch freeze imported the optional source closure')
+        return None
+
+sys.meta_path.insert(0, BlockOptionalClosure())
+from merlin.compare import freeze
+assert freeze._selected_backend_sources(
+    {'adapter': 'merlin_compile', 'options': {'source_paths': ['/selected/source']}},
+    Path('/'),
+) == [Path('/selected/source')]
+"""
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
 
 
 def test_default_is_five_package_preflight_and_never_runs_builder(tmp_path, monkeypatch):

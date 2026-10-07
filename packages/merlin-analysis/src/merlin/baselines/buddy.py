@@ -40,6 +40,7 @@ from pathlib import Path
 
 from merlin.baselines import bundle as _bundle
 from merlin.baselines import k1_exec, k1_workload_policy, profile, rvv_audit
+from merlin.baselines.external_source import checkout, optional_checkout
 from merlin.baselines.buddy_harness import (
     _buddy_model_call_c,
     _m2m_harness_c,
@@ -48,7 +49,7 @@ from merlin.baselines.buddy_harness import (
 from merlin.baselines.contract import BaselineResult, RegionProfile, ScalarFallback
 from merlin.common import artifacts
 from merlin.common import proc as _proc
-from merlin.common.paths import build_dir, python_import_roots, repo_root, runtime_dir
+from merlin.common.paths import build_dir, python_import_roots, runtime_dir
 from merlin.mining import k1
 
 FRAMEWORK = "buddy"
@@ -60,7 +61,9 @@ _BUDDY_MMAP_WEIGHTS_THRESHOLD = 256 * 1024 * 1024
 
 # --- buddy-mlir build layout (gitignored; built by this arm) ------------------------------------
 _BUILD_ROOT = build_dir() / "baselines" / "buddy"
-_BUDDY_SRC = repo_root() / "third_party" / "baselines" / "buddy-mlir"
+
+def buddy_source_dir() -> Path:
+    return checkout("buddy_mlir")
 
 
 def _env_path(name: str, default: Path) -> Path:
@@ -115,13 +118,15 @@ def buddy_available() -> bool:
     SAME LLVM fork's ``llc`` (not the repo's IREE clang-23, whose IR parser rejects the fork's
     ``float f0x…`` hex-float literals — a version-skew we sidestep by staying inside one build).
     """
-    return buddy_opt() is not None and mlir_translate() is not None and llvm_llc() is not None
+    return (optional_checkout("buddy_mlir") is not None and buddy_opt() is not None
+            and mlir_translate() is not None and llvm_llc() is not None)
 
 
 def buddy_commit() -> str:
     try:
         r = subprocess.run(
-            ["git", "-C", str(_BUDDY_SRC), "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=15
+            ["git", "-C", str(buddy_source_dir()), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=15,
         )
         return r.stdout.strip() if r.returncode == 0 else ""
     except Exception:  # noqa: BLE001
@@ -959,8 +964,8 @@ def run_model(
 
     if not buddy_available():
         res.gap_reason = (
-            "buddy-mlir lowering toolchain not built under build/baselines/buddy "
-            "(need buddy-opt/mlir-opt + mlir-translate)"
+            "buddy-mlir source or lowering toolchain unavailable: set MERLIN_EXT_BUDDY_MLIR "
+            "to an external checkout and build buddy-opt/mlir-opt + mlir-translate"
         )
         return _finish(res, model, variant, write)
 

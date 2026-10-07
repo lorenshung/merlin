@@ -43,6 +43,7 @@ import numpy as np
 
 from merlin.baselines import bundle, k1_exec, profile, rvv_audit
 from merlin.baselines.contract import BaselineResult, ScalarFallback
+from merlin.baselines.external_source import optional_checkout
 from merlin.common import proc as _proc
 from merlin.common.artifacts import new_measurement
 from merlin.common.paths import repo_root
@@ -151,7 +152,7 @@ def compile_exo_gemm(out_dir: Path) -> Path:
     exocc = _exocc()
     if exocc is None:
         raise RuntimeError(
-            "EXO venv/exocc missing — run: build/baselines/exo/venv pip install -e third_party/baselines/exo"
+            "EXO venv/exocc missing — install the selected MERLIN_EXT_EXO checkout into the EXO venv"
         )
     lib = out_dir / "exo_gemm_lib.py"
     lib.write_text("from __future__ import annotations\nfrom merlin.baselines.exo_kernels.gemm import gemm_nt_rvv\n")
@@ -735,6 +736,9 @@ def run(
         timestamp=ts,
         cycle_accurate=False,
     )
+    if optional_checkout("exo") is None:
+        res.gap_reason = "EXO source unavailable: set MERLIN_EXT_EXO to an external Git checkout"
+        return res.validate()
     if autosched and variant != "int8":
         kdesc = (
             "EXO-AUTOSCHEDULED transpose-free f32 dot GEMM (autosched.py fdot_nk_ref): EXO's "
@@ -991,10 +995,13 @@ def run(
 
 
 def _submodule_sha() -> str:
+    source = optional_checkout("exo")
+    if source is None:
+        return ""
     try:
         r = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            cwd=repo_root() / "third_party/baselines/exo",
+            cwd=source,
             capture_output=True,
             text=True,
             timeout=15,

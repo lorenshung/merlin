@@ -1,7 +1,7 @@
 """GGUF frontend adapter — lift a ``.gguf`` checkpoint into the quant_ext dialect.
 
 GGUF is the source of the INT8 (Q8_0), FP6-analogous (Q6_K), and FP4-analogous (Q4_K) weights in the
-model download matrix, plus true MXFP4/NVFP4. This adapter reads a GGUF with the vendored gguf-py
+model download matrix, plus true MXFP4/NVFP4. This adapter reads a GGUF with gguf-py
 ``GGUFReader`` and emits the same linalg-on-tensors + ``quant_ext``-typed bundle the torch path
 produces, so GGUF-quantized models flow through the identical Merlin pipeline as torchAO ones. Each
 GGML quantization type maps onto a canonical :mod:`merlin.common.quant_formats` entry

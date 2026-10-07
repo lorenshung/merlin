@@ -112,8 +112,8 @@ class TestRepoProvenance:
         rec = prov.repo_provenance()
         assert rec["available"] is True
         assert len(rec["head"]) == 40
-        # This repo vendors baselines as submodules; the pins are what makes an RTL/IREE claim
-        # reproducible, so an empty map here means the parser regressed.
+        # The optional LLVM submodule pin is part of repository provenance. External baseline
+        # checkouts are selected and attributed separately, never inferred from this map.
         assert rec["submodules"], "expected submodule pins for this checkout"
         for path, sha in rec["submodules"].items():
             assert path and sha and sha[0].isalnum(), (path, sha)

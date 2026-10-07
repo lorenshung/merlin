@@ -18,7 +18,7 @@ try:
 except Exception:  # pragma: no cover
     _gguf = None
 
-pytestmark = pytest.mark.skipif(_gguf is None, reason="vendored gguf-py unavailable")
+pytestmark = pytest.mark.skipif(_gguf is None, reason="gguf-py unavailable")
 
 
 def _write(path):

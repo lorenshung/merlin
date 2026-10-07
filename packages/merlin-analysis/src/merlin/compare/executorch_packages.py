@@ -26,7 +26,8 @@ from typing import Any, Callable
 import yaml
 
 from merlin.baselines import executorch_session
-from merlin.baselines.executorch import et_identity, et_venv_python
+from merlin.baselines.executorch import et_identity, et_source_dir, et_venv_python
+from merlin.baselines.executorch_identity import ExecuTorchIdentityError
 from merlin.baselines.executorch_session import (
     ExecuTorchSessionError,
     capture_session_identity,
@@ -40,6 +41,7 @@ from merlin.common.paths import repo_root
 from merlin.common.yaml import write_yaml
 
 from .capture_workflow import _render_environment
+from .executorch_sources import selected_source_paths
 from .freeze import sha256_paths
 from .paper import BackendSpec, ModelSpec, PaperStudySpec
 from .session import validate_capture_session
@@ -47,6 +49,7 @@ from .session import validate_capture_session
 _SHA256_HEX = frozenset("0123456789abcdef")
 _EXACT_ENV_KEYS = (
     "MERLIN_ET_VENV",
+    "MERLIN_ET_SOURCE",
     "MERLIN_MODEL2MLIR",
     "MERLIN_M2M_DIR",
     "MERLIN_K1_TOOLCHAIN",
@@ -275,17 +278,7 @@ def _framework_sources(backend: BackendSpec) -> tuple[list[Path], str]:
     values = backend.options.get("source_paths", ()) or ()
     if not isinstance(values, list) or not values:
         raise ValueError("ExecuTorch backend source_paths are absent")
-    paths = [_resolve(value) for value in values]
-    required_roots = {
-        repo_root() / "third_party" / "baselines" / "executorch",
-        repo_root() / "merlin" / "python" / "merlin",
-    }
-    if not required_roots <= set(paths):
-        missing = sorted(str(path) for path in required_roots - set(paths))
-        raise ValueError(
-            "ExecuTorch framework_source_sha256 must cover the complete executed/imported "
-            f"source closure; missing roots: {missing}"
-        )
+    paths = selected_source_paths([_resolve(value) for value in values])
     return paths, sha256_paths(paths)
 
 
@@ -445,6 +438,7 @@ def _exact_environment(
     exact.update(
         {
             "MERLIN_ET_VENV": str(et_venv_python().absolute().parent.parent),
+            "MERLIN_ET_SOURCE": str(et_source_dir().resolve()),
             "MERLIN_MODEL2MLIR": str(model2mlir),
             "MERLIN_M2M_DIR": str(model2mlir),
             "MERLIN_K1_TOOLCHAIN": toolchain_root,
@@ -504,7 +498,7 @@ def _tasks(
     errors.extend(environment_errors)
     try:
         framework_paths, framework_digest = _framework_sources(backend)
-    except (FileNotFoundError, ValueError) as exc:
+    except (FileNotFoundError, ValueError, ExecuTorchIdentityError) as exc:
         framework_paths, framework_digest = [], "unresolved"
         errors.append(str(exc))
     try:

@@ -66,13 +66,11 @@ certification needs an external simulator:
 examples/triton/run.sh preflight
 ```
 
-**Cloning & submodules.** The Python package needs no submodules. The heavy trees under
-`third_party/` are opt-in per task: `third_party/llvm-project` is the LLVM monorepo (multi-GB — the
-dominant clone cost) and the cross-framework baselines (`third_party/baselines/{tvm,executorch,
-buddy-mlir,exo,llama.cpp,merlin-iree}`) are only needed for baseline comparisons (`tvm`/`executorch`
-recurse into their own submodules). So a plain `git clone` (no `--recursive`) is enough to start;
-initialize submodules selectively as needed, e.g. `git submodule update --init --depth 1
-third_party/llvm-project`.
+**Cloning & submodules.** The Python package needs no submodules. The only tracked optional heavy
+tree is `third_party/llvm-project` (the multi-GB LLVM monorepo). Cross-framework baselines are
+independent external checkouts, selected with `MERLIN_EXT_*` paths; they are not vendored. A plain
+`git clone` is enough to start. Initialize LLVM only for tasks that need it, e.g.
+`git submodule update --init --depth 1 third_party/llvm-project`.
 
 `merlin` groups experiment, compile, target, storage and verification entrypoints. Specialized
 console scripts remain available from their owning distributions; the generated
@@ -130,7 +128,7 @@ kernel-derived policies stay as schemas/YAML/JSON.
 | `merlin/` | Schemas, tests, native runtime, and legacy engine/resource trees during migration; `python/merlin` is a compatibility symlink |
 | `docs/` | Durable docs — `reference/` (code-derived), `guides/` (how-to), `design/` (rationale); start at [`docs/README.md`](docs/README.md) |
 | `build_tools/` | Toolchains, scripts, structure/docs/artifact-layout gates, git hooks |
-| `third_party/` | Submodules: LLVM + cross-framework baselines (TVM, ExecuTorch, Buddy, EXO, llama.cpp, and the IREE-based Merlin baseline) |
+| `third_party/` | Optional pinned LLVM submodule; cross-framework baseline sources are separately selected external checkouts |
 | `out/` | All generated output — `out/{runs,artifacts,build}` (gitignored except tracked scaffolding + curated reports) |
 
 For a target study, start at its example definition, not at an output folder.

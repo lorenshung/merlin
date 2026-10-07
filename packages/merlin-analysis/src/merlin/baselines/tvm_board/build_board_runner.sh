@@ -6,7 +6,8 @@
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/../../../../.." && pwd)"
 TC="${MERLIN_SPACEMIT_TC:-/path/to/merlin-iree/build_tools/riscv-tools-spacemit/spacemit-toolchain-linux-glibc-x86_64-v1.1.2/bin}"
-TVM="$REPO/third_party/baselines/tvm"
+TVM="${MERLIN_EXT_TVM:?set MERLIN_EXT_TVM to the external TVM checkout}"
+test -d "$TVM/.git" -o -f "$TVM/.git" || { echo "MERLIN_EXT_TVM must name a Git checkout" >&2; exit 1; }
 OUT="$REPO/build/baselines/tvm-rv64/board_runner"
 mkdir -p "$OUT"
 "$TC/clang++" -march=rv64gcv -mabi=lp64d -O2 -std=c++17 \
