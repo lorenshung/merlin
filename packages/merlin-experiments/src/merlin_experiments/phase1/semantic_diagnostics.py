@@ -58,11 +58,12 @@ def assert_private_mounts(argv: list[str], run_dir: Path) -> None:
     immediately before launching an agent. A source bound at another destination
     needs checking too; testing only the receipt's original path misses aliases.
     """
+    private_trees = [path.resolve(strict=True) for path in (run_dir / "qa_history",) if path.exists()]
     private = [
         path.resolve(strict=True)
         for path in (run_dir, run_dir / "environment.yaml", run_dir / _RECEIPT)
         if path.exists()
-    ]
+    ] + private_trees
     if not private:
         raise RuntimeError("semantic-search host-private run directory is missing before agent launch")
     if any(BW.is_exposed(argv, path) for path in private):
@@ -78,6 +79,13 @@ def assert_private_mounts(argv: list[str], run_dir: Path) -> None:
                     raise RuntimeError(
                         "semantic-search host-private run metadata is visible through an agent bind alias"
                     )
+        # A direct bind of a private descendant does not include its parent at
+        # the alias. Protect history trees without rejecting intentionally
+        # public frozen views elsewhere below the host-owned run directory.
+        if any(source_path.is_relative_to(tree) for tree in private_trees) and BW.is_exposed(
+            argv, Path(destination)
+        ):
+            raise RuntimeError("host-private QA history is visible through an agent bind alias")
 
 
 def _public_linalg_files(public_root: Path, contract_root: Path) -> list[tuple[str, Path]]:

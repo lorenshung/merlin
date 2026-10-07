@@ -276,3 +276,21 @@ def test_final_mount_plan_rejects_direct_and_aliased_receipt_exposure(tmp_path, 
     environment_alias = [*hidden, "--ro-bind", str(environment), "/agent-visible/environment.yaml"]
     with pytest.raises(RuntimeError, match="bind alias"):
         SD.assert_private_mounts(environment_alias, run)
+
+
+@pytest.mark.parametrize("member", ["qa_history", "qa_history/nested/build.json"])
+def test_final_mount_plan_protects_private_history_descendants(tmp_path, monkeypatch, member):
+    run, workspace, public, contract, model = _inputs(tmp_path, monkeypatch)
+    private_receipt = run / "qa_history/nested/build.json"
+    private_receipt.parent.mkdir(parents=True)
+    private_receipt.write_text('{"host_tool": "/operator-only/compiler"}')
+    hidden = ["bwrap", "--tmpfs", str(tmp_path), "--bind", str(workspace), str(workspace)]
+    exposed = [*hidden, "--ro-bind", str(run / member), "/agent-visible-history"]
+    with pytest.raises(RuntimeError, match="bind alias"):
+        SD.assert_private_mounts(exposed, run)
+    SD.assert_private_mounts([*exposed, "--tmpfs", "/agent-visible-history"], run)
+
+    # Frozen public views can legitimately live below the host-owned run root.
+    public_view = run / "public-view"
+    public_view.mkdir()
+    SD.assert_private_mounts([*hidden, "--ro-bind", str(public_view), "/agent-public-view"], run)
