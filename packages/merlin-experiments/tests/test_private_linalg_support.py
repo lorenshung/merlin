@@ -23,6 +23,20 @@ def _op(operation: str, *, false_constant: bool = False, scalar_first: bool = Fa
             "f32",
             '%v = "arith.addf"(%a, %b) <{fastmath = #arith.fastmath<none>}> : (f32, f32) -> f32',
         ),
+        "arith.addi": (
+            "tensor<2x1xi64>",
+            "tensor<2x3xi64>",
+            "i64",
+            "i64",
+            '%v = "arith.addi"(%a, %b) : (i64, i64) -> i64',
+        ),
+        "arith.cmpf": (
+            "tensor<2x1xf32>",
+            "tensor<2x3xf32>",
+            "f32",
+            "i1",
+            '%v = "arith.cmpf"(%a, %b) <{predicate = 5 : i64, fastmath = #arith.fastmath<none>}> : (f32, f32) -> i1',
+        ),
         "math.sin": (
             "tensor<2x3xf32>",
             None,
@@ -64,8 +78,8 @@ def _op(operation: str, *, false_constant: bool = False, scalar_first: bool = Fa
     }
     first, second, input_type, output_type, body = forms[operation]
     if scalar_first:
-        assert operation == "i1_mul_singleton_projected"
-        first = "tensor<i1>"
+        assert operation in {"i1_mul_singleton_projected", "arith.addi"}
+        first = f"tensor<{input_type}>"
     if false_constant:
         body = body.replace("value = true", "value = false")
     output = f"tensor<2x3x{output_type}>"
@@ -81,7 +95,7 @@ def _op(operation: str, *, false_constant: bool = False, scalar_first: bool = Fa
         "affine_map<(d0, d1) -> ()>"
         if scalar_first
         else "affine_map<(d0, d1) -> (d0, 0)>"
-        if operation == "i1_mul_singleton_projected"
+        if operation in {"i1_mul_singleton_projected", "arith.addi", "arith.cmpf"}
         else "affine_map<(d0, d1) -> (d0, d1)>"
     )
     identity = "affine_map<(d0, d1) -> (d0, d1)>"
@@ -105,13 +119,17 @@ def _op(operation: str, *, false_constant: bool = False, scalar_first: bool = Fa
 def _case(schema: str, operation: str, *, scalar_first: bool = False):
     types = {
         "arith.addf": ["f32", "f32", "f32"],
+        "arith.addi": ["i64", "i64", "i64"],
+        "arith.cmpf": ["f32", "f32", "i1"],
         "math.sin": ["f32", "f32"],
         "math.cos": ["f32", "f32"],
         "i1_not": ["i1", "i1"],
         "f32_nonzero_to_i1": ["f32", "i1"],
         "i1_mul_singleton_projected": ["i1", "i1", "i1"],
     }[operation]
-    result = "f32" if operation in {"arith.addf", "math.sin", "math.cos"} else "i1"
+    result = (
+        "i64" if operation == "arith.addi" else "f32" if operation in {"arith.addf", "math.sin", "math.cos"} else "i1"
+    )
     parsed = (_op(operation, scalar_first=scalar_first), _op(operation, scalar_first=scalar_first))
     selected = {
         "host": {
@@ -132,7 +150,11 @@ def _case(schema: str, operation: str, *, scalar_first: bool = False):
                             "ordered_result_dtypes": [result],
                             "ranks": [2],
                         },
-                        "source_body": {"schema": schema, "operation": operation},
+                        "source_body": {
+                            "schema": schema,
+                            "operation": operation,
+                            **({"predicate": "ole"} if operation == "arith.cmpf" else {}),
+                        },
                     }
                 ],
                 "evidence": {"scope": "synthetic declaration only"},
@@ -291,6 +313,49 @@ def test_rank_zero_scalar_tensor_projection_is_source_bound_and_linked():
     assert support.linked_complete(json.loads(json.dumps(source)), entry, "d" * 64)
     source["linalg_host_support"]["occurrences"][0]["input_maps"] = ["(d0, d1) -> (d0)", occurrence["input_maps"][1]]
     assert not support.linked_complete(source, entry, "d" * 64)
+
+
+@pytest.mark.parametrize("operation", ["arith.addi", "arith.cmpf"])
+def test_projected_pointwise_source_body_requires_exact_map_roster_and_link(operation):
+    schema = "merlin.static_projected_pointwise_body.v1"
+    source, entry = _linked(*_case(schema, operation))
+    occurrence = source["linalg_host_support"]["occurrences"][0]
+    assert occurrence["input_shapes"] == ((2, 1), (2, 3))
+    assert occurrence["input_maps"][0] == "(d0, d1) -> (d0, 0)"
+    assert support.linked_complete(json.loads(json.dumps(source)), entry, "d" * 64)
+    original = deepcopy(source["linalg_host_support"]["occurrences"])
+    for change in (
+        {"input_shapes": [[2, 2], [2, 3]]},
+        {"input_maps": ["(d0, d1) -> (d1, 0)", original[0]["input_maps"][1]]},
+        {"input_maps": []},
+        {"schema": "merlin.static_pointwise_source_body.v1"},
+        {"ordered_types": ["i1", *original[0]["ordered_types"][1:]]},
+    ):
+        source["linalg_host_support"]["occurrences"] = [{**original[0], **change}, original[1]]
+        assert not support.linked_complete(source, entry, "d" * 64), change
+    source["linalg_host_support"]["occurrences"] = original
+    assert not support.linked_complete(source, {**entry, "elf_sha256": "f" * 64}, "d" * 64)
+
+
+def test_projected_rank_zero_scalar_input_and_selected_byte_bounds():
+    source, entry = _linked(*_case("merlin.static_projected_pointwise_body.v1", "arith.addi", scalar_first=True))
+    occurrence = source["linalg_host_support"]["occurrences"][0]
+    assert occurrence["input_shapes"][0] == ()
+    assert occurrence["input_maps"][0] == "(d0, d1) -> ()"
+    selected, actual = _index_lowering(6)
+    proof = support.begin("a" * 64, "a" * 64, 2, selected)
+    parsed, row, joined, _, admission = _case("merlin.static_projected_pointwise_body.v1", "arith.addi")
+    support.record(proof, row, admission, parsed, joined)
+    with pytest.raises(ValueError, match="signed index address span"):
+        support.link(
+            {"selected_index_observation": selected, "linalg_host_support": proof},
+            actual,
+            {
+                "candidate_tree_sha256": "d" * 64,
+                "capture_tree_sha256": "c" * 64,
+                "elf_sha256": "e" * 64,
+            },
+        )
 
 
 def test_math_witness_refuses_changed_body_roster_schema_and_linked_identity():

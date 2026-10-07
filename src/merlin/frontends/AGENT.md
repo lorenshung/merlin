@@ -12,6 +12,10 @@ Frontends that ingest external IR into the Merlin pipeline. Today: linalg-on-ten
 - `facts.py` — lifting the inventory to contract-level reuse facts, driving the core pipeline with real model shapes, residency-variant DSE measurement.
 - `linalg_math_patterns.py` — source-only, closed unary f32 sine/cosine scalar-region checks;
   no host admission or numerical-equivalence claim. Scalar-literal power remains refused.
+- `linalg_patterns.py` has separate strict identity and opt-in static singleton-projected
+  pointwise schemas. The latter reuses the same closed scalar-region proof, retains each
+  positive-static input shape and exact affine map (including rank-zero scalar inputs),
+  and grants no host placement, index-width bound, or numerical equivalence by itself.
 - `linalg_integer_reductions.py` — closed static i64 sum and masked prefix-sum source checks,
   with an explicit index-width premise; no host admission or linked-build verdict.
 - `bucketize_source.py` — a source-only, trace-bound proof of the closed f32

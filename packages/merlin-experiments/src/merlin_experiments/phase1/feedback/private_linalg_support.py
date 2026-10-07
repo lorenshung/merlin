@@ -33,10 +33,15 @@ from merlin.frontends.linalg_math_patterns import (
 )
 from merlin.frontends.linalg_patterns import (
     STATIC_POINTWISE_SOURCE_BODY_SCHEMA,
+    STATIC_PROJECTED_POINTWISE_BODY_SCHEMA,
     InvalidLinalgPattern,
     recognize_static_pointwise,
+    recognize_static_projected_pointwise,
     static_pointwise_ordered_types,
+    static_projected_pointwise_ordered_types,
+    validate_serialized_static_projected_pointwise_pattern,
     validate_static_pointwise_source_body,
+    validate_static_projected_pointwise_source_body,
 )
 from merlin_experiments.phase1.feedback import private_control_support as control_support
 
@@ -89,6 +94,12 @@ def _contract(schema: object, operation: object, predicate: object) -> tuple[dic
             raw["predicate"] = predicate
         declaration = validate_static_pointwise_source_body(raw)
         return declaration, recognize_static_pointwise, static_pointwise_ordered_types(declaration)
+    if schema == STATIC_PROJECTED_POINTWISE_BODY_SCHEMA:
+        raw = {"schema": schema, "operation": operation}
+        if predicate is not None:
+            raw["predicate"] = predicate
+        declaration = validate_static_projected_pointwise_source_body(raw)
+        return declaration, recognize_static_projected_pointwise, static_projected_pointwise_ordered_types(declaration)
     if schema == STATIC_F32_MATH_SOURCE_BODY_SCHEMA:
         if predicate is not None:
             raise InvalidLinalgPattern("unary f32 math source body does not declare a predicate")
@@ -190,6 +201,11 @@ def record(
                 validate_serialized_static_boolean_pattern(pattern)
             except InvalidLinalgPattern as exc:
                 raise ValueError("static Boolean proof has an invalid serialized source pattern") from exc
+        if body["schema"] == STATIC_PROJECTED_POINTWISE_BODY_SCHEMA:
+            try:
+                validate_serialized_static_projected_pointwise_pattern(pattern)
+            except InvalidLinalgPattern as exc:
+                raise ValueError("projected pointwise proof has an invalid serialized source pattern") from exc
         if dynamic:
             try:
                 validate_serialized_dynamic_boolean_cast_pattern(pattern)
@@ -307,7 +323,7 @@ def _all_shapes_fit(occurrences: object, index_bits: int) -> bool:
         shape, types, inputs = item.get("shape"), item.get("ordered_types"), item.get("input_shapes")
         if not isinstance(types, (list, tuple)) or len(types) < 2 or not fits(shape, types[-1]):
             return False
-        if item.get("schema") == STATIC_BOOLEAN_SOURCE_BODY_SCHEMA:
+        if item.get("schema") in {STATIC_BOOLEAN_SOURCE_BODY_SCHEMA, STATIC_PROJECTED_POINTWISE_BODY_SCHEMA}:
             if not isinstance(inputs, (list, tuple)) or len(inputs) != len(types) - 2:
                 return False
             if any(
@@ -456,6 +472,16 @@ def linked_complete(source: Mapping[str, Any], entry: Mapping[str, Any], candida
             try:
                 validate_serialized_static_boolean_pattern(
                     {key: item[key] for key in ("operation", "shape", "ordered_types", "input_shapes", "input_maps")}
+                )
+            except InvalidLinalgPattern:
+                return False
+        if item["schema"] == STATIC_PROJECTED_POINTWISE_BODY_SCHEMA:
+            try:
+                validate_serialized_static_projected_pointwise_pattern(
+                    {
+                        key: item[key]
+                        for key in ("operation", "predicate", "shape", "ordered_types", "input_shapes", "input_maps")
+                    }
                 )
             except InvalidLinalgPattern:
                 return False

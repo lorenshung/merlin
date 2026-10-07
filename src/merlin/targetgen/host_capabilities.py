@@ -62,7 +62,11 @@ def validate_host_capabilities(
                 STATIC_F32_MATH_SOURCE_BODY_SCHEMA,
                 validate_static_f32_math_source_body,
             )
-            from merlin.frontends.linalg_patterns import validate_static_pointwise_source_body
+            from merlin.frontends.linalg_patterns import (
+                STATIC_PROJECTED_POINTWISE_BODY_SCHEMA,
+                validate_static_pointwise_source_body,
+                validate_static_projected_pointwise_source_body,
+            )
 
             allowed = {
                 "id",
@@ -86,6 +90,8 @@ def validate_host_capabilities(
                 validate_dynamic_boolean_cast_source_body(body)
             elif isinstance(body, dict) and body.get("schema") == STATIC_F32_MATH_SOURCE_BODY_SCHEMA:
                 validate_static_f32_math_source_body(body)
+            elif isinstance(body, dict) and body.get("schema") == STATIC_PROJECTED_POINTWISE_BODY_SCHEMA:
+                validate_static_projected_pointwise_source_body(body)
             else:
                 validate_static_pointwise_source_body(body)
         if "quantization_parameters" in row["signature"]:
@@ -117,7 +123,12 @@ def _screen_source_body(declaration: dict, row: dict, signature: dict, source_op
         STATIC_F32_MATH_SOURCE_BODY_SCHEMA,
         recognize_static_f32_math_body,
     )
-    from merlin.frontends.linalg_patterns import InvalidLinalgPattern, recognize_static_pointwise
+    from merlin.frontends.linalg_patterns import (
+        STATIC_PROJECTED_POINTWISE_BODY_SCHEMA,
+        InvalidLinalgPattern,
+        recognize_static_pointwise,
+        recognize_static_projected_pointwise,
+    )
 
     if source_operations is None or not source_operations:
         return {"status": "unknown", "reason": "source_body requires parsed source operations"}
@@ -134,6 +145,7 @@ def _screen_source_body(declaration: dict, row: dict, signature: dict, source_op
             STATIC_BOOLEAN_SOURCE_BODY_SCHEMA: recognize_static_boolean_body,
             DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA: recognize_dynamic_boolean_cast_body,
             STATIC_F32_MATH_SOURCE_BODY_SCHEMA: recognize_static_f32_math_body,
+            STATIC_PROJECTED_POINTWISE_BODY_SCHEMA: recognize_static_projected_pointwise,
         }.get(body["schema"], recognize_static_pointwise)
         patterns = tuple(recognizer(op) for op in source_operations)
     except InvalidLinalgPattern as exc:

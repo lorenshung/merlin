@@ -5,21 +5,23 @@ import pytest
 from merlin.targetgen.host_capabilities import admit_host_operation, validate_host_capabilities
 
 
-def _pointwise_source(scalar: str = "arith.addf", *, flags: str = "none", shape: str = "3x5"):
+def _pointwise_source(scalar: str = "arith.addf", *, flags: str = "none", shape: str = "3x5", projected: bool = False):
     from merlin.common import mlir_query as mq
 
+    first_shape = "3x1" if projected else shape
+    first_map = "(d0, 0)" if projected else "(d0, d1)"
     text = f'''builtin.module {{
-  func.func @f(%x: tensor<{shape}xf32>, %y: tensor<{shape}xf32>,
+  func.func @f(%x: tensor<{first_shape}xf32>, %y: tensor<{shape}xf32>,
                %init: tensor<{shape}xf32>) -> tensor<{shape}xf32> {{
     %out = "linalg.generic"(%x, %y, %init) <{{indexing_maps = [
-      affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0, d1)>,
+      affine_map<(d0, d1) -> {first_map}>, affine_map<(d0, d1) -> (d0, d1)>,
       affine_map<(d0, d1) -> (d0, d1)>], iterator_types = [
       #linalg.iterator_type<parallel>, #linalg.iterator_type<parallel>],
       operandSegmentSizes = array<i32: 2, 1>}}> ({{
       ^bb0(%a: f32, %b: f32, %old: f32):
         %v = "{scalar}"(%a, %b) <{{fastmath = #arith.fastmath<{flags}>}}> : (f32, f32) -> f32
         "linalg.yield"(%v) : (f32) -> ()
-    }}) : (tensor<{shape}xf32>, tensor<{shape}xf32>, tensor<{shape}xf32>) -> tensor<{shape}xf32>
+    }}) : (tensor<{first_shape}xf32>, tensor<{shape}xf32>, tensor<{shape}xf32>) -> tensor<{shape}xf32>
     func.return %out : tensor<{shape}xf32>
   }}
 }}'''
@@ -167,5 +169,29 @@ def test_pointwise_source_body_schema_is_closed_and_never_nested_silently():
             validate_host_capabilities(selected["host"]["capability_spec"])
     declaration.pop("source_body")
     declaration["signature"]["source_body"] = {"schema": "merlin.static_pointwise_source_body.v1"}
+    with pytest.raises(ValueError, match="source_body"):
+        validate_host_capabilities(selected["host"]["capability_spec"])
+
+
+def test_projected_pointwise_needs_explicit_separate_schema_and_every_source_occurrence():
+    selected = _pointwise_selection()
+    declaration = selected["host"]["capability_spec"]["operations"][0]
+    row = {"mlir_operation": "linalg.generic", "count": 2}
+    observed = {
+        "family": "elementwise_map",
+        "ordered_operand_dtypes": ["f32", "f32", "f32"],
+        "ordered_result_dtypes": ["f32"],
+        "rank": 2,
+    }
+    projected = (_pointwise_source(projected=True), _pointwise_source(projected=True))
+    assert admit_host_operation(selected, row, observed, source_operations=projected)["status"] == "unsupported"
+    declaration["source_body"] = {"schema": "merlin.static_projected_pointwise_body.v1", "operation": "arith.addf"}
+    validate_host_capabilities(selected["host"]["capability_spec"])
+    admitted = admit_host_operation(selected, row, observed, source_operations=projected)
+    assert admitted["status"] == "admitted"  # synthetic reviewed declaration, never a policy edit
+    assert admitted["source_body_proof"]["patterns"][0]["input_shapes"] == ((3, 1), (3, 5))
+    assert admit_host_operation(selected, row, observed)["status"] == "unknown"
+    assert admit_host_operation(selected, row, observed, source_operations=(projected[0],))["status"] == "unsupported"
+    declaration["source_body"] = {"schema": "merlin.static_projected_pointwise_body.v1", "operation": "arith.cmpf"}
     with pytest.raises(ValueError, match="source_body"):
         validate_host_capabilities(selected["host"]["capability_spec"])

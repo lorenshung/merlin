@@ -57,6 +57,10 @@ It rechecks each parsed operation and joins the same linked whole-program build;
 this source witness does not establish numerical equivalence.
 `private_linalg_support.py` is the current versioned, mandatory empty-or-
 populated witness for exact pointwise, Boolean and unary f32 sine/cosine source-body declarations.
+Its opt-in projected-pointwise schema independently rechecks every static input
+shape and singleton-projection map, with selected signed-index per-tensor byte
+bounds; the older identity-only schema stays strict. Neither schema creates a
+host admission or proves executable numerical behavior.
 Its separate dynamic Boolean cast schema requires the same ordinal in the
 closed internal-compaction proof and bounds its allocation by the selected
 signed index width. Every body is rechecked against parsed source and joined

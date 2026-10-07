@@ -36,6 +36,27 @@ class StaticPointwiseSource:
 
 
 @dataclass(frozen=True)
+class StaticProjectedPointwisePattern:
+    """A closed static input projection and scalar body, not an admission."""
+
+    operation: str
+    shape: tuple[int, ...]
+    ordered_types: tuple[str, ...]
+    input_shapes: tuple[tuple[int, ...], ...]
+    input_maps: tuple[str, ...]
+    predicate: str | None = None
+
+
+@dataclass(frozen=True)
+class StaticProjectedPointwiseSource:
+    """Exact prepared-source identity and ordinal roster; no linked proof."""
+
+    raw_sha256: str
+    normalized_sha256: str
+    ordinals: tuple[tuple[int, StaticProjectedPointwisePattern], ...]
+
+
+@dataclass(frozen=True)
 class _StaticLinalgShell:
     shape: tuple[int, ...]
     args: tuple[Any, ...]
@@ -176,11 +197,19 @@ _POINTWISE_TYPES = {
 _FLOAT_PREDICATES = {1: "oeq", 2: "ogt", 3: "oge", 4: "olt", 5: "ole", 6: "one"}
 _SIGNED_PREDICATES = {0: "eq", 1: "ne", 2: "slt", 3: "sle", 4: "sgt", 5: "sge"}
 STATIC_POINTWISE_SOURCE_BODY_SCHEMA = "merlin.static_pointwise_source_body.v1"
+STATIC_PROJECTED_POINTWISE_BODY_SCHEMA = "merlin.static_projected_pointwise_body.v1"
 
 
 def static_pointwise_ordered_types(declaration: object) -> tuple[str, ...]:
     """Return exact input/init/result types of one validated source body."""
     body = validate_static_pointwise_source_body(declaration)
+    inputs, result = _POINTWISE_TYPES[body["operation"]]
+    return (*inputs, result, result)
+
+
+def static_projected_pointwise_ordered_types(declaration: object) -> tuple[str, ...]:
+    """Return exact input/init/result types for a projected scalar body."""
+    body = validate_static_projected_pointwise_source_body(declaration)
     inputs, result = _POINTWISE_TYPES[body["operation"]]
     return (*inputs, result, result)
 
@@ -201,6 +230,64 @@ def validate_static_pointwise_source_body(declaration: object) -> dict[str, str]
         if declaration["predicate"] not in allowed.values():
             raise InvalidLinalgPattern("source_body comparison predicate is not ordered/signed")
     return dict(declaration)
+
+
+def validate_static_projected_pointwise_source_body(declaration: object) -> dict[str, str]:
+    """Validate a separate opt-in projection schema, never the strict v1 schema."""
+    if not isinstance(declaration, dict) or declaration.get("schema") != STATIC_PROJECTED_POINTWISE_BODY_SCHEMA:
+        raise InvalidLinalgPattern("source_body requires the static projected pointwise v1 schema")
+    strict = {**declaration, "schema": STATIC_POINTWISE_SOURCE_BODY_SCHEMA}
+    validate_static_pointwise_source_body(strict)
+    return dict(declaration)
+
+
+def validate_serialized_static_projected_pointwise_pattern(pattern: object) -> None:
+    """Independently recheck recorded types, static shapes, and exact input maps."""
+    from collections.abc import Mapping
+
+    from xdsl.context import Context
+    from xdsl.parser import Parser
+
+    if not isinstance(pattern, Mapping) or set(pattern) != {
+        "operation",
+        "shape",
+        "ordered_types",
+        "input_shapes",
+        "input_maps",
+        "predicate",
+    }:
+        raise InvalidLinalgPattern("serialized projected pointwise pattern is not closed")
+    declaration = {"schema": STATIC_PROJECTED_POINTWISE_BODY_SCHEMA, "operation": pattern["operation"]}
+    if pattern["predicate"] is not None:
+        declaration["predicate"] = pattern["predicate"]
+    expected_types = static_projected_pointwise_ordered_types(declaration)
+    shape, shapes, maps = pattern["shape"], pattern["input_shapes"], pattern["input_maps"]
+    if (
+        not isinstance(shape, (tuple, list))
+        or not shape
+        or any(type(dim) is not int or dim <= 0 for dim in shape)
+        or not isinstance(shapes, (tuple, list))
+        or len(shapes) != len(expected_types) - 2
+        or not isinstance(maps, (tuple, list))
+        or len(maps) != len(shapes)
+        or not isinstance(pattern["ordered_types"], (tuple, list))
+        or tuple(pattern["ordered_types"]) != expected_types
+    ):
+        raise InvalidLinalgPattern("serialized projected pointwise tensor roster is invalid")
+    for input_shape, text in zip(shapes, maps, strict=True):
+        if (
+            not isinstance(input_shape, (tuple, list))
+            or any(type(dim) is not int or dim <= 0 for dim in input_shape)
+            or not isinstance(text, str)
+        ):
+            raise InvalidLinalgPattern("serialized projected pointwise input is malformed")
+        try:
+            mapping = Parser(Context(), text).parse_affine_map()
+        except Exception as exc:  # noqa: BLE001 - untrusted serialized map must refuse
+            raise InvalidLinalgPattern("serialized projected pointwise input map does not parse") from exc
+        if str(mapping) != text:
+            raise InvalidLinalgPattern("serialized projected pointwise input map is not canonical")
+        validate_singleton_projection_map(mapping, tuple(shape), tuple(input_shape))
 
 
 def validate_singleton_projection_map(mapping, output_shape: tuple[int, ...], input_shape: tuple[int, ...]) -> None:
@@ -302,11 +389,29 @@ def recognize_static_pointwise(op) -> StaticPointwisePattern:
     similar regions, broadcasts, reductions, init reads and flagged arithmetic
     need different proofs and must not enter by an operation-name match.
     """
+    return _recognize_static_scalar_pointwise(op, _checked_static_linalg_shell(op))
+
+
+def recognize_static_projected_pointwise(op) -> StaticProjectedPointwisePattern:
+    """Prove static singleton-projected inputs with one exact scalar/yield body."""
+    shell = _checked_static_linalg_shell(op, singleton_projection_inputs=True)
+    scalar = _recognize_static_scalar_pointwise(op, shell)
+    return StaticProjectedPointwisePattern(
+        scalar.operation,
+        scalar.shape,
+        scalar.ordered_types,
+        tuple(tuple(value.type.get_shape()) for value in op.inputs),
+        tuple(str(mapping) for mapping in shell.input_maps),
+        scalar.predicate,
+    )
+
+
+def _recognize_static_scalar_pointwise(op, shell: _StaticLinalgShell) -> StaticPointwisePattern:
+    """Common closed scalar body for strict identity and opt-in projections."""
     from xdsl.dialects import arith
     from xdsl.dialects.linalg.ops import YieldOp
     from xdsl.traits import Pure
 
-    shell = _checked_static_linalg_shell(op)
     shape, args, body, ordered_types = shell.shape, shell.args, shell.body, shell.ordered_types
     if len(body) != 2:
         raise InvalidLinalgPattern("pointwise body is not one scalar operation and yield")
@@ -407,6 +512,12 @@ def screen_static_pointwise_source(path: Path, ordinals: tuple[int, ...]) -> Sta
     """Bind each proved pointwise body to exact raw/normalized source bytes and ordinal."""
     raw_sha256, normalized_sha256, evidence = _screen_static_linalg_source(path, ordinals, recognize_static_pointwise)
     return StaticPointwiseSource(raw_sha256, normalized_sha256, evidence)
+
+
+def screen_static_projected_pointwise_source(path: Path, ordinals: tuple[int, ...]) -> StaticProjectedPointwiseSource:
+    """Bind proved projected bodies to exact raw/normalized source ordinals."""
+    raw, normalized, evidence = _screen_static_linalg_source(path, ordinals, recognize_static_projected_pointwise)
+    return StaticProjectedPointwiseSource(raw, normalized, evidence)
 
 
 def recognize_signed_i8_i32_matmul(op) -> tuple:
