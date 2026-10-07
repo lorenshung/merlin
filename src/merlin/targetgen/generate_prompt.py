@@ -683,6 +683,20 @@ counted. The typed `merlin/contract/schemas/mixed_program_plan.schema.json` docu
 plan record. After emission, run `python -m merlin.targetgen.oot_starterkit.plan validate --source
 <capsule.interface.mlir> --command-buffer <command_buffer.json> --lowered-mlir <lowered.mlir>`.
 This is a public structural preflight, not a qualification verdict.
+Read its `findings` and `authoring_guidance` before a costly grade.
+For an emitted whole-program command buffer at `submission/command_buffer.json`, run
+`python agent_selfcheck.py --caller-layout command_buffer.json` before lowering pointer arithmetic. This
+answer-free host probe reports the selected caller's physical extents and element strides
+for every declared pointer, bound to the command buffer, facts and harness source. It is
+not a numerical or source-placement pass. If the selected provider cannot describe its
+caller layout, stop and report the missing contract; do not assume compact rows from the
+logical tensor shape.
+Hoisted constants alone do not establish task work. Even with tags, source work must be
+represented by executable, source-owned operations or an explicitly supported constant-folding
+proof. Every planned task must be covered on each returning CFG path. For a genuine fused loop,
+group the exact direct source indices it implements under one task and retain independent
+transformation evidence: cross-task reverse CFG edges violate the declared task order.
+Renumbering tags is not a proof.
 Use `merlin.source_op_index` and the source's `prov.region_id` on device-work commands;
 several operations may share a region ID. Fused commands require independently checked
 transformation evidence, not one opcode relabelled as many source operations.

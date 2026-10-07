@@ -192,6 +192,11 @@ TOOLS: dict[str, ToolSpec] = {
             f"{_PY}targetgen/contract/interface_emit.py",
             f"{_PY}targetgen/contract/linalg_iface.py",
             f"{_PY}targetgen/oot_starterkit/",
+            # Answer-free structural CFG checks used by the public plan preflight.
+            # Never grant perf/ as a directory: it also contains private evaluators.
+            f"{_PY}perf/__init__.py",
+            f"{_PY}perf/host_cfg_index.py",
+            f"{_PY}perf/task_cfg_evidence.py",
         ),
         note="ALLOWED tool: xDSL kit / CCA spine",
     ),

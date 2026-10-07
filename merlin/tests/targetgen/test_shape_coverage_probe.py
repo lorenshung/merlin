@@ -1,20 +1,16 @@
-"""Shape COVERAGE is answerable without a golden, and that is why this probe exists.
+"""Shape EMISSION outcomes are observable without a golden.
 
 The numerical generalization difftest needs a CPU reference for the operand format, so it cannot run on
 an MX/fp8 datapath -- and those are exactly the targets whose shape coverage is most in doubt. Measured
 while building this: all four multi-tile probes on an fp8 target were skipped for want of a golden and
 the suite reported ``0 graded``, which reads as "nothing to report" rather than "could not look".
 
-The instrument here is a structural invariant instead: **a program that computes a larger problem cannot
-be smaller than the one that computes the smaller problem.** It needs no ISA knowledge, no oracle and no
-reference values -- only the emitted artifact. A backend that silently declines a shape emits its
-terminator and nothing else, so its artifact COLLAPSES, and that is visible for the cost of one call to
-the emit path.
+The probe directly records declines, empty command buffers and emitter errors per axis. Artifact
+size is advisory: a larger problem can select a compact runtime loop instead of an unrolled path.
+Neither nonempty emission nor size proves executed work or numerical correctness.
 
-Measured on the frozen submission this was built for: 418 instruction words at one tile, 5 at two
-M-tiles (a bare ECALL), 1187 at two K-tiles, 1205 at two N-tiles -- the same M-versus-K/N boundary a
-post-freeze holdout took a paid run to find. The control target lowers all four and its work grows
-monotonically.
+An older frozen submission emitted 418 lines at one tile and 5 at two M-tiles; that was a useful
+diagnostic clue, but the size difference alone was not a general proof of noncoverage.
 """
 
 from __future__ import annotations
@@ -51,7 +47,7 @@ def test_tail_corners_cover_subtile_and_each_independent_remainder_axis():
     assert LC.TAIL_CORNERS["n_tail"] == (0, 0, 1)
 
 
-# --------------------------------------------------------------- the invariant
+# --------------------------------------------------------------- emit outcomes and advisory size
 
 
 def _sweep(monkeypatch, work_by_corner, declined=()):
@@ -119,15 +115,24 @@ def test_tail_failures_are_named_per_axis_without_a_golden(monkeypatch):
     assert result["all_covered"] is False
 
 
-def test_a_program_that_shrinks_on_a_bigger_problem_is_a_silent_refusal(monkeypatch):
-    """The measured atlas shape: 418 words at one tile, 5 at two M-tiles."""
+def test_a_shrinking_artifact_is_reported_without_claiming_a_silent_refusal(monkeypatch):
+    """The historical 418-to-5 size difference remains visible, but is not a verdict."""
     r = _sweep(monkeypatch, {"tile": 418, "m_2tiles": 5, "k_2tiles": 1187, "n_2tiles": 1205})
     by = {c["corner"]: c["outcome"] for c in r["corners"]}
-    assert by["m_2tiles"] == "collapsed"
-    assert by["k_2tiles"] == by["n_2tiles"] == "lowered"
-    assert r["multi_tile_axes_uncovered"] == ["m"], "names the AXIS, which is the actionable part"
-    assert r["all_covered"] is False
-    assert "cannot compute more by doing less" in next(c["detail"] for c in r["corners"] if c["corner"] == "m_2tiles")
+    assert by["m_2tiles"] == by["k_2tiles"] == by["n_2tiles"] == "lowered"
+    assert r["smaller_emitted_artifacts"] == ["m_2tiles"]
+    assert r["multi_tile_axes_uncovered"] == []
+    assert r["all_covered"] is True
+    assert r["scope"] == "public_emit_only"
+    assert "not executed work or numerical correctness" in r["note"]
+
+
+def test_smaller_nonempty_multitile_artifact_is_advisory_not_a_coverage_failure(monkeypatch):
+    """A larger shape may select a compact runtime loop instead of an unrolled tile path."""
+    r = _sweep(monkeypatch, {"tile": 30, "m_2tiles": 20, "k_2tiles": 30, "n_2tiles": 30})
+    assert {c["corner"]: c["outcome"] for c in r["corners"]}["m_2tiles"] == "lowered"
+    assert r["all_covered"] is True
+    assert r["smaller_emitted_artifacts"] == ["m_2tiles"]
 
 
 def test_work_that_grows_on_every_axis_is_covered(monkeypatch):
@@ -148,11 +153,7 @@ def test_a_stated_decline_is_uncovered_but_not_a_collapse(monkeypatch):
 
 
 def test_equal_work_is_not_flagged(monkeypatch):
-    """The invariant is 'must not SHRINK', deliberately not 'must grow'.
-
-    A backend may legitimately emit a loop whose text does not grow with the trip count. Flagging that
-    would make the probe produce false accusations, which is worse than missing a case.
-    """
+    """A backend may emit a loop whose text does not grow with the trip count."""
     r = _sweep(monkeypatch, {"tile": 100, "m_2tiles": 100, "k_2tiles": 100, "n_2tiles": 100})
     assert r["all_covered"] is True
     assert r["n_collapsed"] == 0
@@ -180,15 +181,14 @@ def test_a_failing_baseline_refuses_to_attribute_anything_to_shape(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "target,pkg,expected_axes",
+    "target,pkg,expected_smaller",
     [
-        ("atlas", "out/runs/atlas/capsule-bench/merlin_assisted/merlincirct_atlas_arm4_v1/submission", ["m"]),
+        ("atlas", "out/runs/atlas/capsule-bench/merlin_assisted/merlincirct_atlas_arm4_v1/submission", ["m_2tiles"]),
         ("gemmini", "out/runs/gemmini/capsule-bench/merlin_assisted/merlincirct_gemarm4_codex/submission", []),
     ],
 )
-def test_the_frozen_submissions_reproduce_their_measured_holdout_boundary(target, pkg, expected_axes, monkeypatch):
-    """The whole point, end to end: this finds -- with no holdout, no golden and no oracle -- the same
-    boundary that previously took a post-freeze holdout on a paid run."""
+def test_the_frozen_submissions_preserve_size_observations_as_advisory(target, pkg, expected_smaller, monkeypatch):
+    """Retain the historical size observation without turning it into a coverage verdict."""
     from merlin.common.paths import repo_root
 
     p = repo_root() / pkg
@@ -205,4 +205,5 @@ def test_the_frozen_submissions_reproduce_their_measured_holdout_boundary(target
     )
     cov = LC.sweep(p, target=target, contract=str(repo_root() / "merlin/contract"))
     assert cov["baseline_tile_lowered"] is True, "the one-tile baseline must lower for this to mean anything"
-    assert cov["multi_tile_axes_uncovered"] == expected_axes
+    multi_tile = {"m_2tiles", "k_2tiles", "n_2tiles"}
+    assert sorted(set(cov["smaller_emitted_artifacts"]) & multi_tile) == expected_smaller

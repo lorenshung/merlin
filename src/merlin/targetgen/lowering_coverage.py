@@ -58,7 +58,7 @@ TAIL_CORNERS: dict[str, tuple[int, int, int]] = {
 class CoverageResult:
     corner: str
     shape: tuple[int, int, int]
-    outcome: str  # lowered | declined | collapsed | empty | error
+    outcome: str  # lowered | declined | empty | error
     detail: str | None = None
     work: int = 0  # size of the emitted target artifact (see `sweep`)
 
@@ -126,8 +126,8 @@ def probe_shape(
     what makes this cheap enough to run every round and usable on a datapath whose operand format has
     no CPU reference.
 
-    Returns ``(outcome, detail, work)`` where ``work`` is the size of the emitted target artifact. The
-    caller compares that across shapes; see :func:`sweep` for why the comparison is the real instrument.
+    Returns ``(outcome, detail, work)`` where ``work`` is the size of the emitted target artifact.
+    Size is an advisory observation, not evidence that a larger shape was refused.
     """
     with tempfile.TemporaryDirectory(prefix="lowcov_") as td:
         cdir = Path(td) / "capsule"
@@ -239,33 +239,16 @@ def sweep(
         work[name] = w
         results.append(CoverageResult(name, (m, k, n), outcome, detail, w))
 
-    # WORK MUST NOT SHRINK WHEN THE PROBLEM GROWS. This is the instrument, and it is target-agnostic:
-    # it needs no ISA knowledge, no golden and no simulator, only the observation that a program which
-    # computes a 2x larger contraction cannot be SMALLER than the one that computes the 1x case. A
-    # backend that silently declines emits its terminator and nothing else, so the artifact collapses.
-    #
-    # Measured on a real submission, from the emitted artifact alone: 418 instruction words at one tile,
-    # 5 at two M-tiles (a bare ECALL), 1187 at two K-tiles and 1205 at two N-tiles. That is the same
-    # M-versus-K/N boundary a post-freeze holdout took a paid run to find, reproduced here for the cost
-    # of four calls to the emit path -- and it says WHICH axis, which is the actionable part.
-    #
-    # Necessary, not sufficient: a program that grows may still compute the wrong thing. This probe is
-    # about COVERAGE (did you write code for this shape), and the numeric tiers keep their own job.
+    # A shorter artifact may be a silent refusal, but it can also be a correct runtime loop replacing
+    # an unrolled special case. Record the size observation without changing the emitter's outcome.
+    # Explicit decline, empty commands and emit errors remain the structural coverage failures;
+    # neither nonempty emission nor text size proves numerical or dispatch correctness.
     base_work = work.get("tile", 0)
-    for i, r in enumerate(results):
+    smaller_emitted_artifacts = []
+    for r in results:
         is_larger = all(x >= tile for x in r.shape) and any(x > tile for x in r.shape)
         if r.corner != "tile" and is_larger and r.outcome == "lowered" and base_work and r.work < base_work:
-            results[i] = CoverageResult(
-                r.corner,
-                r.shape,
-                "collapsed",
-                (
-                    f"emitted {r.work} instruction word(s) for a problem {r.shape} that is LARGER than the "
-                    f"{tile}x{tile}x{tile} baseline, which took {base_work}. A program cannot compute more "
-                    f"by doing less -- this is a silent refusal. Declare `declined` instead, or lower it."
-                ),
-                r.work,
-            )
+            smaller_emitted_artifacts.append(r.corner)
 
     by = {r.corner: r.outcome for r in results}
     baseline_ok = by.get("tile") == "lowered"
@@ -279,8 +262,14 @@ def sweep(
         "baseline_tile_lowered": baseline_ok,
         "n_declined": sum(1 for r in results if r.outcome == "declined"),
         "n_empty": sum(1 for r in results if r.outcome == "empty"),
-        "n_collapsed": sum(1 for r in results if r.outcome == "collapsed"),
+        "n_collapsed": 0,  # Historical field; artifact-size shrink no longer implies refusal.
         "emitted_work": work,
+        "smaller_emitted_artifacts": smaller_emitted_artifacts,
+        "scope": "public_emit_only",
+        "note": (
+            "The sweep checks emit outcomes only, not executed work or numerical correctness. "
+            "A smaller artifact may implement a runtime loop; size shrink is advisory."
+        ),
     }
     if baseline_ok:
         out["multi_tile_axes_uncovered"] = sorted(

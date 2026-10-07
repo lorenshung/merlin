@@ -20,7 +20,8 @@ SOURCE = """builtin.module {
 LOWERED = """builtin.module {
   llvm.func @kernel(%0: !llvm.ptr) {
     %1 = llvm.mlir.constant(0 : i64) : i64
-    %2 = llvm.getelementptr %0[%1] {merlin.global_task = 0 : i64, merlin.source_op_index = 1 : i64} : (!llvm.ptr, i64) -> !llvm.ptr, i32
+    %2 = llvm.getelementptr %0[%1]
+      {merlin.global_task = 0 : i64, merlin.source_op_index = 1 : i64} : (!llvm.ptr, i64) -> !llvm.ptr, i32
     llvm.return
   }
 }"""
@@ -92,6 +93,10 @@ def test_public_preflight_rejects_misnumbering_duplicate_region_and_crossing():
     cb = _buffer()
     cb["params"]["global_program_plan"]["tasks"][0]["reads"] = ["missing"]
     assert "absent tensor" in " ".join(validate_mixed_program_plan(SOURCE, cb)["findings"])
+    cb = _buffer()
+    values = cb["params"]["global_program_plan"]["source_values"]
+    values.append(dict(values[0]))
+    assert "duplicate source binding" in " ".join(validate_mixed_program_plan(SOURCE, cb)["findings"])
 
 
 def test_public_preflight_rejects_byte_drift_and_wrong_lowered_owner():
@@ -100,6 +105,36 @@ def test_public_preflight_rejects_byte_drift_and_wrong_lowered_owner():
     assert not validate_mixed_program_plan(
         SOURCE, cb, LOWERED.replace("merlin.global_task = 0", "merlin.global_task = 1")
     )["ok"]
+
+
+def test_public_preflight_rejects_orphan_constant_task_markers():
+    lowered = """builtin.module {
+      llvm.func @kernel(%p: !llvm.ptr) {
+        %anchor = "llvm.mlir.constant"() <{value = 0 : i64}>
+          {merlin.global_task = 0 : i64} : () -> i64
+        llvm.return
+      }
+    }"""
+    result = validate_mixed_program_plan(SOURCE, _buffer(), lowered)
+    assert not result["ok"]
+    assert "planned task emits no owned computation or control flow" in result["findings"]
+
+
+def test_public_preflight_rejects_optional_path_only_task():
+    lowered = """builtin.module {
+      llvm.func @kernel(%p: !llvm.ptr) {
+        %condition = llvm.mlir.constant(true) : i1
+        llvm.cond_br %condition, ^work, ^exit {merlin.global_task = -1 : i64}
+      ^work:
+        %v = llvm.load %p {merlin.global_task = 0 : i64} : !llvm.ptr -> i32
+        llvm.br ^exit {merlin.global_task = 0 : i64}
+      ^exit:
+        llvm.return
+      }
+    }"""
+    result = validate_mixed_program_plan(SOURCE, _buffer(), lowered)
+    assert not result["ok"]
+    assert "a returning CFG path bypasses an entire planned task" in result["findings"]
 
 
 def test_public_preflight_reads_declared_physical_shape_without_claiming_encoding_proof():
@@ -122,6 +157,21 @@ def test_public_preflight_reads_declared_physical_shape_without_claiming_encodin
     assert not validate_mixed_program_plan(SOURCE, cb)["ok"]
 
 
+def test_compiler_temporary_keeps_exact_source_result_dtype():
+    cb = _buffer()
+    cb["tensors"]["tmp"] = {"shape": [2], "dtype": "i32", "role": "intermediate"}
+    cb["kernel_abi"]["args"].insert(0, {"tensor": "tmp", "access": "readwrite"})
+    plan = cb["params"]["global_program_plan"]
+    plan["compiler_temporaries"] = [
+        {"tensor": "tmp", "source_op_index": 0, "source_result_index": 0, "purpose": "source result staging"}
+    ]
+    plan["tasks"][0]["writes"].append("tmp")
+    correct = validate_mixed_program_plan(SOURCE, cb)
+    assert correct["ok"], correct["findings"]
+    cb["tensors"]["tmp"]["dtype"] = "f32"
+    assert "dtype" in " ".join(validate_mixed_program_plan(SOURCE, cb)["findings"])
+
+
 def test_cli_inventory_and_validation(tmp_path, capsys):
     source = tmp_path / "capsule.interface.mlir"
     source.write_text(SOURCE)
@@ -137,3 +187,25 @@ def test_cli_inventory_and_validation(tmp_path, capsys):
     bad["params"]["global_program_plan"]["source_op_count"] = 1
     cb.write_text(json.dumps(bad))
     assert main(["validate", "--source", str(source), "--command-buffer", str(cb)]) == 1
+
+
+def test_cli_explains_unowned_hoisted_constant_without_changing_refusal(tmp_path, capsys):
+    source = tmp_path / "capsule.interface.mlir"
+    source.write_text(SOURCE)
+    cb = tmp_path / "command_buffer.json"
+    cb.write_text(json.dumps(_buffer()))
+    lowered = tmp_path / "lowered.mlir"
+    lowered.write_text(
+        """builtin.module {
+          llvm.func @kernel(%p: !llvm.ptr) {
+            %anchor = "llvm.mlir.constant"() <{value = 0 : i64}>
+              {merlin.global_task = 0 : i64} : () -> i64
+            llvm.return
+          }
+        }"""
+    )
+    assert main(["validate", "--source", str(source), "--command-buffer", str(cb), "--lowered-mlir", str(lowered)]) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert not result["ok"]
+    assert "planned task emits no owned computation or control flow" in result["findings"]
+    assert any("hoisted constant" in row and "source-owned" in row for row in result["authoring_guidance"])

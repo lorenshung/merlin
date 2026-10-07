@@ -201,6 +201,9 @@ def _source_plan_problems(
     values: dict[tuple[Any, ...], str] = {}
 
     def bind(key, name, typ):
+        if key in values:
+            problems.append(f"duplicate source binding {key}")
+            return
         if name not in names:
             problems.append(f"source value names absent tensor {name!r}")
             return
@@ -224,8 +227,6 @@ def _source_plan_problems(
             )
         if not shape_ok:
             problems.append(f"tensor {name!r} changes source shape or dtype")
-        if key in values and values[key] != name:
-            problems.append(f"source value {key} has conflicting tensor bindings")
         values[key] = name
 
     for i, name in enumerate(plan["entry_bindings"][: len(inventory["arguments"])]):
@@ -266,9 +267,10 @@ def _source_plan_problems(
             or (
                 tensors[name].get("role") != "intermediate"
                 or tensors[name].get("shape") != inventory["operations"][i]["results"][j].get("shape")
+                or tensors[name].get("dtype") != inventory["operations"][i]["results"][j].get("dtype")
             )
         ):
-            problems.append(f"compiler temporary {name!r} lacks matching intermediate storage")
+            problems.append(f"compiler temporary {name!r} lacks matching intermediate shape/dtype storage")
         temporary_names.add(name)
     if names != set(values.values()) | temporary_names:
         problems.append("materialized tensors lack source or temporary provenance")
@@ -288,16 +290,14 @@ def _source_plan_problems(
 
 
 def _lowered_task_problems(text: str, plan: Mapping[str, Any], command_buffer: Mapping[str, Any]) -> list[str]:
-    from xdsl.context import Context
-    from xdsl.dialects.builtin import Builtin
-    from xdsl.dialects.llvm import LLVM
     from xdsl.parser import Parser
 
-    ctx = Context(allow_unregistered=True)
-    ctx.load_dialect(Builtin)
-    ctx.load_dialect(LLVM)
+    from merlin.perf.task_cfg_evidence import analyze_task_cfg
+    from merlin.targetgen.oot_starterkit.llvm_context import make_llvm_context
+
     with IR_LOCK:
-        module = Parser(ctx, text).parse_module()
+        module = Parser(make_llvm_context(), text).parse_module()
+        module.verify()
     functions = [op for op in module.body.block.ops if op.name == "llvm.func" and op.body.blocks]
     if len(functions) != 1:
         return ["lowered artifact requires one defined llvm.func kernel"]
@@ -314,10 +314,11 @@ def _lowered_task_problems(text: str, plan: Mapping[str, Any], command_buffer: M
             continue
         ident = getattr(attr, "value", None)
         ident = getattr(ident, "data", ident)
-        if not isinstance(ident, int) or ident not in task_ids:
+        if type(ident) is not int or ident not in task_ids | {-1, -2}:
             problems.append("lowered operation names an absent global task")
             continue
-        seen.add(ident)
+        if ident in task_ids:
+            seen.add(ident)
         source = op.attributes.get("merlin.source_op_index")
         if source is not None:
             index = getattr(source, "value", None)
@@ -326,6 +327,9 @@ def _lowered_task_problems(text: str, plan: Mapping[str, Any], command_buffer: M
                 problems.append("lowered source_op_index differs from owning global task")
     if seen != task_ids:
         problems.append(f"planned tasks have no tagged lowered operation: {sorted(task_ids - seen)}")
+    # Reuse only generic structural checks, never the private grading pipeline.
+    # Tagged constants and optional branches cannot stand in for executable tasks.
+    problems.extend(analyze_task_cfg(fn, sorted(task_ids))["problems"])
     return problems
 
 
@@ -333,7 +337,7 @@ def validate_mixed_program_plan(
     source: bytes | str, command_buffer: Mapping[str, Any], lowered_mlir: str | None = None
 ) -> dict[str, Any]:
     """Public preflight only; a successful result is never a grading certificate."""
-    from xdsl.utils.exceptions import ParseError
+    from xdsl.utils.exceptions import ParseError, VerifyException
 
     try:
         if not isinstance(command_buffer, Mapping):
@@ -356,8 +360,30 @@ def validate_mixed_program_plan(
             "source_op_count": inventory["source_op_count"],
             "scope": "public structural preflight only",
         }
-    except (ValueError, UnicodeError, ParseError) as exc:
+    except (ValueError, UnicodeError, ParseError, VerifyException) as exc:
         return {"ok": False, "findings": [f"invalid source or plan: {exc}"]}
+
+
+def _authoring_guidance(findings: list[str]) -> list[str]:
+    """Explain public CFG refusals without relaxing the structural preflight."""
+    explanations = {
+        "planned task emits no owned computation or control flow": (
+            "A hoisted constant or tag-only marker does not establish source-owned task work. "
+            "Bind actual materialization/computation to the task, or use an explicitly supported "
+            "constant-folding proof; relabelling unrelated operations is insufficient."
+        ),
+        "a returning CFG path bypasses an entire planned task": (
+            "Every planned task must have owned executable work on each returning CFG path. "
+            "A task present only on an optional path cannot prove mandatory source coverage."
+        ),
+        "kernel control-flow edge reverses scheduled task order": (
+            "A cross-task reverse CFG edge, including a fused-loop backedge, contradicts the "
+            "declared linear task order. A genuine fused task must own the exact direct source "
+            "indices it represents and retain independent transformation evidence; changing "
+            "task tags alone is not proof."
+        ),
+    }
+    return [explanations[problem] for problem in explanations if problem in findings]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -379,6 +405,7 @@ def main(argv: list[str] | None = None) -> int:
             json.loads(args.command_buffer.read_text()),
             args.lowered_mlir.read_text() if args.lowered_mlir else None,
         )
+        result = {**result, "authoring_guidance": _authoring_guidance(result["findings"])}
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if args.action == "inventory" or result["ok"] else 1
 
