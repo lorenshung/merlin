@@ -538,3 +538,13 @@ uncertainty is never scaled; unknown batches retain rigorous bounds and provider
 refusal uses original source fallback. This policy supplies no exact enclosure
 or source-consumer theorem and must never use the exact-observation binder.
 Target products, ABI and ISA capabilities remain OOT.
+
+### Explicit rounded polynomial monotonicity evidence
+
+`rounded_polynomial_monotonicity` consumes an explicit caller theorem for a
+complete finite binary32 domain and exact rounded source evaluator. It binds
+plan words, evaluator/evidence/header identities and numerical effect permission;
+these identities authenticate a supplied theorem rather than establishing it.
+Only encoded-word endpoint expansion is removed after existing preparation and
+runtime plan/domain/environment checks. Other plans, modes and non-word bounds
+retain their original path. Target evaluator equivalence remains provider-owned.
