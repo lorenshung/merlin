@@ -10,6 +10,13 @@ Frontends that ingest external IR into the Merlin pipeline. Today: linalg-on-ten
   Its standard memref and bufferization dialect registrations admit prepared
   fresh borrowed writer wrappers without an unregistered custom-syntax fallback.
 - `facts.py` — lifting the inventory to contract-level reuse facts, driving the core pipeline with real model shapes, residency-variant DSE measurement.
+- `linalg_math_patterns.py` — source-only, closed unary f32 sine/cosine scalar-region checks;
+  no host admission or numerical-equivalence claim. Scalar-literal power remains refused.
+- `linalg_integer_reductions.py` — closed static i64 sum and masked prefix-sum source checks,
+  with an explicit index-width premise; no host admission or linked-build verdict.
+- `bucketize_source.py` — a source-only, trace-bound proof of the closed f32
+  bucketize counting reduction. It does not grant host placement, prove sorted
+  boundaries, or certify generated code and numerical equivalence.
 
 ## What does not belong here
 
