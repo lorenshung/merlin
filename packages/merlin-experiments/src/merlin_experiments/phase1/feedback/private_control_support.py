@@ -647,6 +647,7 @@ def prove_bounded_assertions(
     ordinals = {id(op): position for position, op in enumerate(parsed)}
     guards = []
     index_data_support = []
+    index_data_refusals = []
     seen_casts: set[int] = set()
     for ordinal, op in enumerate(parsed):
         if mq.op_name(op) != "cf.assert":
@@ -706,10 +707,11 @@ def prove_bounded_assertions(
             seen_casts.add(id(cast))
             try:
                 index_data_support.append(_index_data_chain(dim, cast, count_mask, extent, ordinals))
-            except ValueError:
+            except ValueError as exc:
                 # Assertion tautology does not imply a complete cursor/data proof.
-                # Exact unsupported index operations remain in the source ledger.
-                pass
+                # Exact unsupported index operations remain in the source ledger;
+                # the refused chain is recorded so it cannot read as absent.
+                index_data_refusals.append({"cast_ordinal": ordinals[id(cast)], "reason": str(exc)})
     return {
         "status": PENDING,
         "scope": SCOPE,
@@ -720,4 +722,5 @@ def prove_bounded_assertions(
         "count": len(guards),
         "guards": guards,
         "index_data_support": index_data_support,
+        "index_data_refusals": index_data_refusals,
     }

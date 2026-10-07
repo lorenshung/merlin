@@ -118,6 +118,7 @@ def test_exact_unsigned_mask_count_guards_are_source_tautologies(extent: int) ->
 def test_complete_mask_compaction_and_scatter_proves_only_exact_index_ordinals(extent: int) -> None:
     proof = _prove(_source_scatter(extent))
     assert len(proof["index_data_support"]) == 1
+    assert proof["index_data_refusals"] == []
     chain = proof["index_data_support"][0]
     assert chain["extent"] == extent
     for operation, ordinals in (
@@ -175,6 +176,10 @@ def test_index_data_support_refuses_nearby_cursor_or_mask_changes(changed) -> No
     proof = _prove(changed(_source_scatter()))
     assert proof["count"] == 2  # The independent assertion proof remains intact.
     assert proof["index_data_support"] == []
+    # A refused data chain is recorded, never indistinguishable from no chain.
+    assert len(proof["index_data_refusals"]) == 1
+    assert type(proof["index_data_refusals"][0]["cast_ordinal"]) is int
+    assert proof["index_data_refusals"][0]["reason"].startswith("source bounded-control proof:")
 
 
 def test_guard_predicate_result_must_not_feed_another_control_or_data_user() -> None:
