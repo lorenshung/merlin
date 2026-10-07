@@ -133,6 +133,14 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
   remains defined. Only LLVM's exact function comparison grants merging; source
   arithmetic, observable stores and public function-address rules remain intact.
   Smaller code does not establish a cycle improvement.
+- `source_expression_interval.py` and its typed LLVM companion provide explicit
+  source-wide binary32 interval tables for closed integer observations. Each
+  fixed-bit cell encloses every member under the original scalar operation order.
+  Callers choose partition and storage budget, bind the complete typed use DAG,
+  and supply nontrapping, stable RNE and unobserved floating effects. Unsupported
+  values and ambiguous consumer bins retain the original source continuation;
+  immutable tables share only exact canonical source semantics. This utility
+  selects no workload, target, storage policy or profitable implementation.
 - `immutable_llvm_base.py` offers explicit immutable global-address binding
   through an unchanged public wrapper to a hidden out-of-line implementation.
   Typed pointer-use closure permits only GEPs and nonpointer loads from an
