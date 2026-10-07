@@ -87,9 +87,15 @@ launching, capsule grading, golden generation, sandboxing and certification. The
   the scientific oracle. The runner selects one owner for all three operations;
   compiled assertions are not cached by mutable capsule names or object identities.
 - `rtl_engine_policy.gsim_runtime_slot` admits synchronous native runs under one per-user
-  mutex by counting both kernel slot reservations and an upper bound on same-user native
-  plusarg processes. A verified same-user live PID whose argv remains empty after bounded
-  stabilization counts as one potential native; missing, unreadable or malformed `/proc`
+  mutex from the union of kernel slot reservations and an upper bound on same-user native
+  plusarg processes. It discounts a duplicate only when a unique kernel FLOCK owner has a
+  matching open slot FD and one stable same-UID direct native child with complete plusargs,
+  verified before and after the join; ambiguous or legacy holders without that proof count
+  separately. A single PID holding multiple slots lacks a child-to-slot pairing proof and may
+  therefore use fewer than five workers. The caller's pending reservation always counts. A
+  verified same-user live PID whose argv remains empty after bounded stabilization counts
+  as one potential native;
+  missing, unreadable or malformed `/proc`
   evidence refuses admission. This is conservative: unrelated empty-argv processes or a
   different simulator using the same plusargs can consume capacity, and uncoordinated
   launches after a census cannot be prevented. Do not describe the advisory protocol as

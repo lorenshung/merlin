@@ -41,6 +41,7 @@ import threading
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -138,7 +139,89 @@ def _verified_uids(status: bytes, member: Path) -> tuple[int, ...]:
     return credentials
 
 
-def _native_gsim_count(*, proc_root: Path = Path("/proc")) -> int:
+@dataclass(frozen=True)
+class _ProcessIdentity:
+    pid: int
+    ppid: int
+    starttime: int
+    argv: tuple[bytes, ...] | None = None
+
+
+@dataclass(frozen=True)
+class _NativeCensus:
+    count: int
+    matchable: tuple[_ProcessIdentity, ...]
+
+
+@dataclass(frozen=True)
+class _HeldSlot:
+    index: int
+    device: int
+    inode: int
+
+
+@dataclass(frozen=True)
+class _SlotCensus:
+    count: int  # Includes this caller's pending reservation.
+    held: tuple[_HeldSlot, ...]
+
+
+def _process_identity(member: Path, status: bytes, *, uid: int, argv: bytes | None = None) -> _ProcessIdentity | None:
+    """Return only a stable, same-real/effective/saved/filesystem-UID process identity.
+
+    Missing or malformed ancestry is not proof of an overlap. It must never
+    subtract from the conservative native count or the kernel-held slot count.
+    """
+    try:
+        if not member.name.isdecimal() or any(value != uid for value in _verified_uids(status, member)):
+            return None
+        parent_rows = _status_rows(status, b"PPid")
+        state_rows = _status_rows(status, b"State")
+        if len(parent_rows) != 1 or len(parent_rows[0]) != 1 or len(state_rows) != 1 or not state_rows[0]:
+            return None
+        if len(state_rows[0][0]) != 1 or not state_rows[0][0].isalpha():
+            return None
+        if state_rows[0][0] in {b"Z", b"X"}:
+            return None
+        stat_bytes = _read_process_evidence(member / "stat", member)
+        if stat_bytes is None:
+            return None
+        prefix, separator, suffix = stat_bytes.strip().rpartition(b") ")
+        fields = suffix.split()
+        if not separator or b" (" not in prefix or len(fields) < 20:
+            return None
+        pid = int(member.name)
+        if int(prefix.split(b" (", 1)[0]) != pid or int(fields[1]) != int(parent_rows[0][0]):
+            return None
+        if fields[0] != state_rows[0][0] or int(fields[19]) <= 0:
+            return None
+        parsed_argv = None
+        if argv is not None:
+            if not argv.endswith(b"\0"):
+                return None
+            parsed_argv = tuple(argv[:-1].split(b"\0"))
+            if not parsed_argv or any(not arg for arg in parsed_argv):
+                return None
+        return _ProcessIdentity(pid, int(fields[1]), int(fields[19]), parsed_argv)
+    except (OSError, RuntimeError, ValueError, IndexError):
+        return None
+
+
+def _complete_native_argv(argv: tuple[bytes, ...] | None) -> bool:
+    if not argv:
+        return False
+    loads = [arg.removeprefix(b"+loadmem=") for arg in argv if arg.startswith(b"+loadmem=")]
+    limits = [arg.removeprefix(b"+max-cycles=") for arg in argv if arg.startswith(b"+max-cycles=")]
+    return (
+        len(loads) == len(limits) == 1
+        and bool(loads[0])
+        and 0 < len(limits[0]) <= 32
+        and limits[0].isdigit()
+        and int(limits[0]) > 0
+    )
+
+
+def _native_gsim_census(*, proc_root: Path = Path("/proc")) -> _NativeCensus:
     """Bound same-user native plusarg load without assuming an emulator name or path.
 
     The kernel-reported UID is checked before reading an argv. Missing or unreadable
@@ -153,6 +236,7 @@ def _native_gsim_count(*, proc_root: Path = Path("/proc")) -> int:
         raise RuntimeError(f"cannot verify native process census: {exc}") from exc
     current_uid = os.getuid()
     count = 0
+    matchable: list[_ProcessIdentity] = []
     for member in members:
         if not member.name.isdecimal():
             continue
@@ -199,12 +283,21 @@ def _native_gsim_count(*, proc_root: Path = Path("/proc")) -> int:
         argv = cmdline[:-1].split(b"\0")
         if any(arg.startswith((b"+loadmem=", b"+max-cycles=")) for arg in argv):
             count += 1
-    return count
+            identity = _process_identity(member, status, uid=current_uid, argv=cmdline)
+            if identity is not None and _complete_native_argv(identity.argv):
+                matchable.append(identity)
+    return _NativeCensus(count, tuple(matchable))
 
 
-def _locked_slot_count(root: Path, *, own_index: int) -> int:
+def _native_gsim_count(*, proc_root: Path = Path("/proc")) -> int:
+    """Conservative scalar census for diagnostics and legacy callers."""
+    return _native_gsim_census(proc_root=proc_root).count
+
+
+def _locked_slot_census(root: Path, *, own_index: int) -> _SlotCensus:
     """Include this pending reservation and all old/new kernel file-lock holders."""
     count = 1
+    held: list[_HeldSlot] = []
     for index in range(CAPSULE_WORKER_CAP["gsim"]):
         if index == own_index:
             continue
@@ -214,11 +307,170 @@ def _locked_slot_count(root: Path, *, own_index: int) -> int:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 count += 1
+                info = os.fstat(fd)
+                held.append(_HeldSlot(index, info.st_dev, info.st_ino))
             else:
                 fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             _close_gsim_fd(fd)
-    return count
+    return _SlotCensus(count, tuple(held))
+
+
+def _locked_slot_count(root: Path, *, own_index: int) -> int:
+    """Conservative scalar slot census for diagnostics and legacy callers."""
+    return _locked_slot_census(root, own_index=own_index).count
+
+
+def _lock_owners(locks: bytes, held: tuple[_HeldSlot, ...]) -> dict[_HeldSlot, int]:
+    """Return only exact held inodes with one unambiguous kernel FLOCK owner."""
+    owners: dict[_HeldSlot, list[int]] = {slot: [] for slot in held}
+    by_inode = {(os.major(slot.device), os.minor(slot.device), slot.inode): slot for slot in held}
+    if len(by_inode) != len(held):
+        return {}  # Hardlinked slot names have no independent ownership proof.
+    invalid: set[_HeldSlot] = set()
+    for line in locks.splitlines():
+        fields = line.split()
+        if len(fields) < 6 or fields[1] != b"FLOCK":
+            continue
+        try:
+            major, minor, inode = fields[5].split(b":")
+            key = (int(major, 16), int(minor, 16), int(inode))
+            slot = by_inode.get(key)
+            if slot is None:
+                continue
+            if len(fields) != 8 or fields[2:4] != [b"ADVISORY", b"WRITE"]:
+                invalid.add(slot)
+                continue
+            if fields[6:] != [b"0", b"EOF"] or int(fields[4]) <= 0:
+                invalid.add(slot)
+                continue
+            owners[slot].append(int(fields[4]))
+        except (ValueError, IndexError):
+            return {}  # A malformed lock record cannot prove any overlap.
+    return {slot: matched[0] for slot, matched in owners.items() if len(matched) == 1 and slot not in invalid}
+
+
+def _matching_owner_fd(member: Path, slot: _HeldSlot) -> bool:
+    try:
+        for descriptor in (member / "fd").iterdir():
+            if not descriptor.name.isdecimal():
+                continue
+            info = descriptor.stat()
+            if stat.S_ISREG(info.st_mode) and (info.st_dev, info.st_ino) == (slot.device, slot.inode):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def _fresh_identity(member: Path, *, uid: int, native: bool) -> _ProcessIdentity | None:
+    try:
+        status = _read_process_evidence(member / "status", member)
+        if status is None:
+            return None
+        argv = _read_process_evidence(member / "cmdline", member) if native else None
+        if native and argv is None:
+            return None
+        identity = _process_identity(member, status, uid=uid, argv=argv)
+        if native and (identity is None or not _complete_native_argv(identity.argv)):
+            return None
+        return identity
+    except (OSError, RuntimeError):
+        return None
+
+
+def _verified_native_slot_overlap(
+    root: Path,
+    slots: _SlotCensus,
+    natives: _NativeCensus,
+    *,
+    proc_root: Path = Path("/proc"),
+    locks_path: Path = Path("/proc/locks"),
+) -> int:
+    """Discount only independently proven, stable direct-child native/slot pairs.
+
+    This is not a trust decision from a lock-file payload. The kernel FLOCK
+    owner, open FD inode, process UID/PPid/starttime and complete native argv
+    must agree before *and* after the join. Unknown evidence means zero
+    discount for that slot, including old holders with no independently proven
+    child. A same-PID multi-slot holder cannot pair children to particular
+    slots, so it receives no discount and may use fewer than five workers.
+    """
+    if not slots.held or not natives.matchable:
+        return 0
+    try:
+        first = _lock_owners(locks_path.read_bytes(), slots.held)
+    except OSError:
+        return 0
+    uid = os.getuid()
+    proven: list[tuple[_HeldSlot, _ProcessIdentity, _ProcessIdentity]] = []
+    for slot, owner_pid in first.items():
+        # A multi-slot owner has no unique slot-to-child association.
+        if list(first.values()).count(owner_pid) != 1:
+            continue
+        owner_member = proc_root / str(owner_pid)
+        owner = _fresh_identity(owner_member, uid=uid, native=False)
+        if owner is None or not _matching_owner_fd(owner_member, slot):
+            continue
+        children = [
+            child
+            for child in natives.matchable
+            if child.ppid == owner_pid and child.starttime > owner.starttime
+        ]
+        if len(children) != 1:
+            continue
+        proven.append((slot, owner, children[0]))
+    try:
+        last = _lock_owners(locks_path.read_bytes(), slots.held)
+    except OSError:
+        return 0
+    matched_children: set[tuple[int, int]] = set()
+    accepted: list[tuple[_HeldSlot, int]] = []
+    for slot, owner, child in proven:
+        if last.get(slot) != owner.pid or (child.pid, child.starttime) in matched_children:
+            continue
+        try:
+            current = (root / f"slot_{slot.index}.lock").lstat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != (slot.device, slot.inode):
+            continue
+        owner_member = proc_root / str(owner.pid)
+        child_member = proc_root / str(child.pid)
+        if _fresh_identity(owner_member, uid=uid, native=False) != owner:
+            continue
+        if not _matching_owner_fd(owner_member, slot):
+            continue
+        if _fresh_identity(child_member, uid=uid, native=True) != child:
+            continue
+        matched_children.add((child.pid, child.starttime))
+        accepted.append((slot, owner.pid))
+    # The owner may have released/replaced a slot during the post-identity
+    # checks; never discount it using only the earlier lock snapshot.
+    try:
+        final = _lock_owners(locks_path.read_bytes(), slots.held)
+    except OSError:
+        return 0
+    return sum(final.get(slot) == owner_pid for slot, owner_pid in accepted)
+
+
+def _admitted_load(
+    root: Path,
+    *,
+    own_index: int,
+    proc_root: Path = Path("/proc"),
+    locks_path: Path = Path("/proc/locks"),
+) -> int:
+    """Conservative union of natives and reservations, including our pending slot."""
+    natives = _native_gsim_census(proc_root=proc_root)
+    slots = _locked_slot_census(root, own_index=own_index)
+    raw_load = natives.count + slots.count
+    if raw_load <= CAPSULE_WORKER_CAP["gsim"]:
+        return raw_load
+    overlap = _verified_native_slot_overlap(root, slots, natives, proc_root=proc_root, locks_path=locks_path)
+    if not 0 <= overlap <= min(natives.count, len(natives.matchable), len(slots.held)):
+        raise RuntimeError("invalid GSim native/slot overlap evidence")
+    return raw_load - overlap
 
 
 @contextmanager
@@ -257,6 +509,7 @@ def gsim_runtime_slot(*, wait_timeout_s: float | None = None, slot_root: Path | 
     uncoordinated launches after that snapshot cannot be prevented by this protocol.
     Nested synchronous calls in the same thread reuse its slot. Other threads and
     forked children acquire their own; do not launch concurrent children inside one slot.
+    Ambiguous multi-slot ownership can conservatively reduce utilization below five.
     """
     root = slot_root or Path("/tmp") / f"merlin_gsim_slots_{os.getuid()}"
     root.mkdir(mode=0o700, parents=False, exist_ok=True)
@@ -287,9 +540,10 @@ def gsim_runtime_slot(*, wait_timeout_s: float | None = None, slot_root: Path | 
                         _close_gsim_fd(opened)
                         raise
                     try:
-                        # The census includes verified live empty-argv PIDs as potential
-                        # natives, so this sum is a conservative admission upper bound.
-                        admitted_load = _native_gsim_count() + _locked_slot_count(root, own_index=index)
+                        # The census includes live empty-argv PIDs as potential
+                        # natives. A proven owner/child pair counts once; all
+                        # ambiguous slots and native processes count separately.
+                        admitted_load = _admitted_load(root, own_index=index)
                         if admitted_load <= CAPSULE_WORKER_CAP["gsim"]:
                             fd = opened
                             break

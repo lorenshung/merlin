@@ -22,19 +22,47 @@ import pytest
 
 from merlin.targetgen import rtl_engine_policy as P
 
-
 _HOLD_SLOT_CODE = """\
 import os
 from pathlib import Path
 from merlin.targetgen import rtl_engine_policy as P
 
 # Keep this process-lock fixture independent of unrelated live host jobs.
-P._native_gsim_count = lambda: 0
+P._native_gsim_census = lambda **_kwargs: P._NativeCensus(0, ())
 with P.gsim_runtime_slot(wait_timeout_s=10, slot_root=Path(root)):
     ready.put(os.getpid())
     if not release.poll(30):
         raise RuntimeError("test holder release was never signaled")
     release.recv()
+"""
+
+
+_HOLD_NEUTRAL_NATIVE_CODE = """\
+import os
+import subprocess
+import sys
+from pathlib import Path
+from merlin.targetgen import rtl_engine_policy as P
+
+# The child is an ordinary sleeping Python process with complete plusargs,
+# not an emulator or a user workload. The private fixture slot is held by its
+# direct parent, so real /proc and kernel FLOCK evidence can be joined.
+P._native_gsim_census = lambda **_kwargs: P._NativeCensus(0, ())
+with P.gsim_runtime_slot(wait_timeout_s=10, slot_root=Path(root)):
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(10)",
+         "+loadmem=/neutral/input", "+max-cycles=100"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        ready.put((os.getpid(), child.pid))
+        if not release.poll(10):
+            raise RuntimeError("neutral child fixture release was never signaled")
+        release.recv()
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
 """
 
 
@@ -73,8 +101,25 @@ def _held_by_processes(root, count):
         ready.close()
 
 
+def _stub_native_count(monkeypatch, count, matchable=()):
+    monkeypatch.setattr(P, "_native_gsim_census", lambda **_kwargs: P._NativeCensus(count, matchable))
+
+
+def _fake_proc_member(proc, pid, ppid, starttime, argv):
+    member = proc / str(pid)
+    member.mkdir()
+    uid = os.getuid()
+    (member / "status").write_text(
+        f"State:\tS (sleeping)\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nPPid:\t{ppid}\n"
+    )
+    fields = ["S", str(ppid), *(["0"] * 17), str(starttime)]
+    (member / "stat").write_text(f"{pid} (neutral fixture) {' '.join(fields)}\n")
+    (member / "cmdline").write_bytes(b"\0".join(argv) + b"\0")
+    return member
+
+
 def test_gsim_has_five_cross_process_runtime_slots(tmp_path, monkeypatch):
-    monkeypatch.setattr(P, "_native_gsim_count", lambda: 0, raising=False)
+    _stub_native_count(monkeypatch, 0)
     root = tmp_path / "slots"
     assert P.capsule_worker_cap("gsim") == 5
     with _held_by_processes(root, 5) as processes:
@@ -92,7 +137,7 @@ def test_gsim_has_five_cross_process_runtime_slots(tmp_path, monkeypatch):
 
 
 def test_nested_thread_reuses_one_slot_but_unrelated_thread_does_not(tmp_path, monkeypatch):
-    monkeypatch.setattr(P, "_native_gsim_count", lambda: 0, raising=False)
+    _stub_native_count(monkeypatch, 0)
     root = tmp_path / "slots"
     with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root):
         with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root):
@@ -118,7 +163,7 @@ def test_nested_thread_reuses_one_slot_but_unrelated_thread_does_not(tmp_path, m
 
 
 def test_fork_child_cannot_borrow_parents_slot(tmp_path, monkeypatch):
-    monkeypatch.setattr(P, "_native_gsim_count", lambda: 0, raising=False)
+    _stub_native_count(monkeypatch, 0)
     root = tmp_path / "slots"
     parent_slot = P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root)
     parent_slot.__enter__()
@@ -172,7 +217,7 @@ def test_fork_child_cannot_borrow_parents_slot(tmp_path, monkeypatch):
 
 
 def test_gsim_slot_releases_on_exception(tmp_path, monkeypatch):
-    monkeypatch.setattr(P, "_native_gsim_count", lambda: 0, raising=False)
+    _stub_native_count(monkeypatch, 0)
     root = tmp_path / "slots"
     with pytest.raises(RuntimeError, match="fixture refusal"):
         with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root):
@@ -183,7 +228,7 @@ def test_gsim_slot_releases_on_exception(tmp_path, monkeypatch):
 
 def test_external_native_census_and_pending_reservation_share_five_slots(tmp_path, monkeypatch):
     root = tmp_path / "slots"
-    monkeypatch.setattr(P, "_native_gsim_count", lambda: 4, raising=False)
+    _stub_native_count(monkeypatch, 4)
     with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root):
         outcome = []
 
@@ -203,7 +248,7 @@ def test_external_native_census_and_pending_reservation_share_five_slots(tmp_pat
 
 
 def test_five_external_native_processes_refuse_any_new_slot(tmp_path, monkeypatch):
-    monkeypatch.setattr(P, "_native_gsim_count", lambda: 5, raising=False)
+    _stub_native_count(monkeypatch, 5)
     with pytest.raises(TimeoutError, match="five GSim slots"):
         with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=tmp_path / "slots"):
             pass
@@ -211,8 +256,187 @@ def test_five_external_native_processes_refuse_any_new_slot(tmp_path, monkeypatc
 
 def test_external_census_and_legacy_file_lock_fail_closed(tmp_path, monkeypatch):
     root = tmp_path / "slots"
-    monkeypatch.setattr(P, "_native_gsim_count", lambda: 4, raising=False)
+    _stub_native_count(monkeypatch, 4)
     with _held_by_processes(root, 1):
+        with pytest.raises(TimeoutError, match="five GSim slots"):
+            with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root):
+                pass
+
+
+def test_verified_native_children_do_not_double_count_held_slots(tmp_path, monkeypatch):
+    root = tmp_path / "slots"
+    # Two kernel-held slots already own two of the three counted natives. The
+    # third native is uncoordinated: 3 + (2 held + our pending) - 2 = 4.
+    _stub_native_count(monkeypatch, 3, (P._ProcessIdentity(1, 2, 3), P._ProcessIdentity(4, 5, 6)))
+    monkeypatch.setattr(P, "_verified_native_slot_overlap", lambda *_args, **_kwargs: 2, raising=False)
+    with _held_by_processes(root, 2):
+        with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root):
+            pass
+
+
+def test_real_proc_child_and_kernel_owner_admit_only_one_overlap(tmp_path, monkeypatch):
+    # One short-lived neutral Python plusarg process is added to the host; it
+    # never executes an emulator. The extra count is synthetic so this test
+    # cannot consume more than one actual same-user native-like process.
+    assert P._native_gsim_count() <= P.CAPSULE_WORKER_CAP["gsim"] - 1
+    root = tmp_path / "slots"
+    ctx = multiprocessing.get_context("spawn")
+    ready = ctx.Queue()
+    reader, writer = ctx.Pipe(duplex=False)
+    owner = ctx.Process(
+        target=exec,
+        args=(_HOLD_NEUTRAL_NATIVE_CODE, {"root": str(root), "ready": ready, "release": reader}),
+    )
+    try:
+        owner.start()
+        reader.close()
+        owner_pid, child_pid = ready.get(timeout=10)
+        assert owner.pid == owner_pid and owner.is_alive()
+        observed = None
+        for _ in range(40):
+            candidates = [native for native in P._native_gsim_census().matchable if native.pid == child_pid]
+            if candidates:
+                observed = candidates[0]
+                break
+            time.sleep(0.05)
+        assert observed is not None, "neutral child never reached a complete real /proc census"
+        assert observed.ppid == owner_pid
+        monkeypatch.setattr(P, "_native_gsim_census", lambda **_kwargs: P._NativeCensus(4, (observed,)))
+        with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root):
+            pass  # 4 counted natives + held + pending - one real overlap = 5.
+    finally:
+        if owner.is_alive():
+            writer.send(True)
+        writer.close()
+        if owner.pid is not None:
+            owner.join(timeout=5)
+            if owner.is_alive():
+                owner.terminate()
+                owner.join(timeout=5)
+        ready.close()
+
+
+def test_kernel_owner_fd_and_direct_children_close_cross_process_overlap(tmp_path, monkeypatch):
+    root = tmp_path / "slots"
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    with _held_by_processes(root, 2):
+        slots = P._locked_slot_census(root, own_index=4)
+        assert slots.count == 3 and len(slots.held) == 2
+        owners = P._lock_owners(Path("/proc/locks").read_bytes(), slots.held)
+        assert len(owners) == 2 and len(set(owners.values())) == 2
+        children = []
+        for number, (slot, pid) in enumerate(owners.items()):
+            owner = _fake_proc_member(proc, pid, 1, 100 + number, [b"/neutral/owner"])
+            (owner / "fd").mkdir()
+            (owner / "fd" / "7").symlink_to(root / f"slot_{slot.index}.lock")
+            child = _fake_proc_member(
+                proc,
+                pid + 1_000_000,
+                pid,
+                200 + number,
+                [b"/neutral/native", b"+loadmem=/neutral/program", b"+max-cycles=100"],
+            )
+            children.append(child)
+        for number in range(2):
+            _fake_proc_member(
+                proc,
+                4_000_000 + number,
+                42,
+                300 + number,
+                [b"/neutral/uncoordinated", b"+loadmem=/neutral/program", b"+max-cycles=100"],
+            )
+        census = P._native_gsim_census(proc_root=proc)
+        assert census.count == 4 and len(census.matchable) == 4
+        assert P._verified_native_slot_overlap(root, slots, census, proc_root=proc) == 2
+        unknown = P._HeldSlot(3, slots.held[0].device, 987_654_321)
+        partial = P._SlotCensus(slots.count + 1, (*slots.held, unknown))
+        assert P._verified_native_slot_overlap(root, partial, census, proc_root=proc) == 2
+        with P._admission_mutex(root, None):
+            assert P._admitted_load(root, own_index=4, proc_root=proc) == 5
+
+        # A grandchild is not the kernel lock owner's directly launched native.
+        child = children[0]
+        child_pid = int(child.name)
+        original_stat = (child / "stat").read_bytes()
+        original_status = (child / "status").read_bytes()
+        altered_fields = ["S", "999", *(["0"] * 17), "200"]
+        (child / "stat").write_text(f"{child_pid} (neutral fixture) {' '.join(altered_fields)}\n")
+        (child / "status").write_text(
+            f"State:\tS (sleeping)\nUid:\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\n"
+            "PPid:\t999\n"
+        )
+        assert P._admitted_load(root, own_index=4, proc_root=proc) == 6
+
+        (child / "stat").write_bytes(original_stat)
+        (child / "status").write_bytes(original_status)
+        # A reused PID between the initial census and overlap recheck cannot
+        # turn an old native observation into a discount for a new process.
+        initial = P._native_gsim_census(proc_root=proc)
+        (child / "stat").write_bytes(original_stat.replace(b" 200\n", b" 900\n"))
+        assert P._verified_native_slot_overlap(root, slots, initial, proc_root=proc) == 1
+        (child / "stat").write_bytes(original_stat)
+
+        # An incomplete executable argv remains in the conservative count but
+        # has no owner/child overlap proof.
+        (child / "cmdline").write_bytes(b"")
+        assert P._admitted_load(root, own_index=4, proc_root=proc) == 6
+        (child / "cmdline").write_bytes(
+            b"/neutral/native\0+loadmem=/neutral/program\0+max-cycles=100\0"
+        )
+        original_identity = P._fresh_identity
+        altered_owner = str(owners[slots.held[0]])
+        owner_reads = 0
+
+        def reused_owner(member, *, uid, native):
+            nonlocal owner_reads
+            identity = original_identity(member, uid=uid, native=native)
+            if member.name == altered_owner and not native:
+                owner_reads += 1
+                if owner_reads == 2 and identity is not None:
+                    return P._ProcessIdentity(identity.pid, identity.ppid, identity.starttime + 1)
+            return identity
+
+        with monkeypatch.context() as patch:
+            patch.setattr(P, "_fresh_identity", reused_owner)
+            assert P._verified_native_slot_overlap(root, slots, census, proc_root=proc) == 1
+        owner = proc / str(owners[slots.held[0]])
+        (owner / "fd" / "7").unlink()
+        assert P._admitted_load(root, own_index=4, proc_root=proc) == 6
+
+
+def test_ambiguous_kernel_lock_owner_cannot_discount(tmp_path):
+    slot = P._HeldSlot(0, os.stat(tmp_path).st_dev, 1234)
+    key = f"{os.major(slot.device):02x}:{os.minor(slot.device):02x}:{slot.inode}"
+    line = f"1: FLOCK ADVISORY WRITE 123 {key} 0 EOF\n".encode()
+    assert P._lock_owners(line, (slot,)) == {slot: 123}
+    assert P._lock_owners(line + line, (slot,)) == {}
+    other = P._HeldSlot(1, slot.device, 5678)
+    other_key = f"{os.major(other.device):02x}:{os.minor(other.device):02x}:{other.inode}"
+    other_line = f"2: FLOCK ADVISORY WRITE 456 {other_key} 0 EOF\n".encode()
+    assert P._lock_owners(line + line + other_line, (slot, other)) == {other: 456}
+
+
+def test_one_owner_of_multiple_slots_has_no_unproven_child_pairing(tmp_path, monkeypatch):
+    slots = P._SlotCensus(
+        3,
+        (P._HeldSlot(0, os.stat(tmp_path).st_dev, 11), P._HeldSlot(1, os.stat(tmp_path).st_dev, 12)),
+    )
+    children = (
+        P._ProcessIdentity(201, 100, 20, (b"/native", b"+loadmem=/a", b"+max-cycles=1")),
+        P._ProcessIdentity(202, 100, 21, (b"/native", b"+loadmem=/b", b"+max-cycles=1")),
+    )
+    monkeypatch.setattr(P, "_lock_owners", lambda *_args: {slot: 100 for slot in slots.held})
+    lock_file = tmp_path / "locks"
+    lock_file.write_bytes(b"")
+    assert P._verified_native_slot_overlap(tmp_path, slots, P._NativeCensus(2, children), locks_path=lock_file) == 0
+
+
+def test_verified_overlap_still_counts_pending_and_uncoordinated_natives(tmp_path, monkeypatch):
+    root = tmp_path / "slots"
+    _stub_native_count(monkeypatch, 5, (P._ProcessIdentity(1, 2, 3), P._ProcessIdentity(4, 5, 6)))
+    monkeypatch.setattr(P, "_verified_native_slot_overlap", lambda *_args, **_kwargs: 2)
+    with _held_by_processes(root, 2):
         with pytest.raises(TimeoutError, match="five GSim slots"):
             with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root):
                 pass
@@ -220,7 +444,7 @@ def test_external_census_and_legacy_file_lock_fail_closed(tmp_path, monkeypatch)
 
 def test_parallel_reservations_cannot_outpace_native_start(tmp_path, monkeypatch):
     root = tmp_path / "slots"
-    monkeypatch.setattr(P, "_native_gsim_count", lambda: 4, raising=False)
+    _stub_native_count(monkeypatch, 4)
     start = threading.Barrier(4)
     release = threading.Event()
     outcomes = []
@@ -249,10 +473,10 @@ def test_parallel_reservations_cannot_outpace_native_start(tmp_path, monkeypatch
 
 
 def test_unreadable_native_census_refuses_admission(tmp_path, monkeypatch):
-    def unavailable():
+    def unavailable(**_kwargs):
         raise RuntimeError("native process evidence unreadable")
 
-    monkeypatch.setattr(P, "_native_gsim_count", unavailable, raising=False)
+    monkeypatch.setattr(P, "_native_gsim_census", unavailable)
     with pytest.raises(RuntimeError, match="evidence unreadable"):
         with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=tmp_path / "slots"):
             pass
@@ -433,8 +657,8 @@ def test_verified_live_empty_argv_consumes_native_capacity(tmp_path, monkeypatch
     monkeypatch.setattr(P.time, "sleep", lambda _delay: None)
     count = P._native_gsim_count(proc_root=proc)
     assert count == known + potential
-    census = P._native_gsim_count
-    monkeypatch.setattr(P, "_native_gsim_count", lambda: census(proc_root=proc))
+    census = P._native_gsim_census
+    monkeypatch.setattr(P, "_native_gsim_census", lambda **_kwargs: census(proc_root=proc))
     if admitted:
         with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=tmp_path / "slots"):
             pass
