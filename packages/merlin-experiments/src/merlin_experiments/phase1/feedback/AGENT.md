@@ -88,6 +88,12 @@ It never creates a host declaration or proves numerical equivalence.
 `private_integer_reduction_support.py` rechecks the exact source bodies of
 reviewed integer sum, prefix-sum and paired minimum admissions. Its selected
 index-width premise must match the producer-owned linked build observation.
+`private_index_source.py` is a grant-none diagnostic for two independent
+prepared tensor-index forms: an i1 mask's closed i64 count, and an indexed
+extract whose literal range/offset extrema are in bounds under a caller-supplied
+index-width premise. It verifies receipt, trace, parsed SSA and static maps,
+but does not associate distinct prepared index nodes, admit their host lowering,
+or prove compiler execution or original-frontend numerical equivalence.
 `private_ordered_scan_support.py` independently checks a closed prepared f32
 prefix scan with f64 carry, ordered loop/lane reset and exact source ancestry.
 The v7 gate requires its empty-or-populated reviewed semantic tensor-root
