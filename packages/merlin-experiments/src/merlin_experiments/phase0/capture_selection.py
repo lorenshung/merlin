@@ -9,11 +9,11 @@ fresh verified replay. Neither establishes that the target compiler ran the mode
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from typing import Any
 
+from merlin.common import strict_json
 from merlin_experiments.capture_execution import sealed_m2m
 from merlin_experiments.capture_execution.sealed_static import (
     _bwrap_binary,
@@ -172,7 +172,7 @@ def load(path: Path, *, expected_sha256: str) -> dict:
     if _digest(raw) != expected_sha256:
         raise ValueError("capture selection bytes differ from the pre-execution identity")
     try:
-        selected = json.loads(raw)
+        selected = strict_json.loads(raw)
     except (UnicodeDecodeError, ValueError) as exc:
         raise ValueError("capture selection is unreadable") from exc
     if (
@@ -266,7 +266,7 @@ def verify(path: Path, *, expected_sha256: str, model_path: Path) -> dict:
     pending = run / "sealed_m2m_pending.json"
     if pending.is_symlink() or not pending.is_file():
         raise ValueError("selected sealed M2M receipt is absent or indirect")
-    receipt = json.loads(pending.read_bytes())
+    receipt = strict_json.loads(pending.read_bytes())
     if (
         receipt.get("schema") != (sealed_m2m.SCHEMA_V3 if selected["schema"] == SCHEMA_V2 else sealed_m2m.SCHEMA)
         or receipt.get("capture_selection_sha256") != expected_sha256

@@ -44,3 +44,6 @@ never swallowed as a per-group failure.
 - Frozen imports never fall through to a live owner or unchecked bytecode. This
   provenance boundary is not a Python sandbox and does not propagate to subprocesses
   without an explicit bootstrap. Keep experiment-specific launch policy out of core.
+
+`strict_json` rejects ambiguous keys, non-finite numbers and oversized authority
+records before consumers interpret them; it does not confer provenance or admission.

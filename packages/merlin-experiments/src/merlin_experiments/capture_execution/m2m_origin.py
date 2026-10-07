@@ -8,11 +8,12 @@ of its Git worktree.
 from __future__ import annotations
 
 import hashlib
-import json
 import stat
 import subprocess
 from pathlib import Path
 from typing import Any
+
+from merlin.common import strict_json
 
 ORIGIN_SCHEMA = "merlin.selected_m2m_git_origin.v1"
 FROZEN_SCHEMA = "merlin.phase0.frozen_m2m_origin.v1"
@@ -161,8 +162,8 @@ def verify_frozen_receipt(selector: Any, raw: bytes, root: Path, package: dict) 
     if _sha256(raw) != selector["sha256"]:
         raise M2MOriginError("frozen M2M origin receipt changed")
     try:
-        document = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        document = strict_json.loads(raw)
+    except (UnicodeDecodeError, ValueError) as exc:
         raise M2MOriginError("frozen M2M origin receipt is malformed") from exc
     if type(document) is not dict or document.get("schema") != _SELECTION_SCHEMA:
         raise M2MOriginError("frozen M2M origin receipt is not a staged selection")

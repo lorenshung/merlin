@@ -21,6 +21,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from merlin.common import strict_json
+
 from . import runtime_store, sealed_m2m
 from .sealed_static import _file_digest
 
@@ -71,7 +73,7 @@ def _inventory(
             raise RuntimeRecoveryError(f"duplicate distribution name: {name}")
         seen_names.add(name)
         direct_path = dist / "direct_url.json"
-        direct = json.loads(direct_path.read_bytes()) if direct_path.is_file() else None
+        direct = strict_json.loads(direct_path.read_bytes()) if direct_path.is_file() else None
         editable = isinstance(direct, dict) and (direct.get("dir_info") or {}).get("editable") is True
         omitted = name in omitted_editables
         if omitted != editable:

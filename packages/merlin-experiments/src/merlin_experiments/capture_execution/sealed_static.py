@@ -19,6 +19,8 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from merlin.common import strict_json
+
 SCHEMA = "merlin.capture_execution_attestation.v1"
 ISSUER = "merlin.sealed-static-capture.v1"
 _FLAGS = (
@@ -275,7 +277,7 @@ def replay_verify(run_dir: Path, *, bwrap_binary: Path | None = None) -> dict[st
     if receipt.is_symlink() or not receipt.is_file():
         raise SealedCaptureError("sealed execution receipt is absent or indirect")
     try:
-        document = json.loads(receipt.read_bytes())
+        document = strict_json.loads(receipt.read_bytes())
     except (ValueError, UnicodeDecodeError) as exc:
         raise SealedCaptureError("sealed execution receipt is unreadable") from exc
     if not isinstance(document, dict) or (

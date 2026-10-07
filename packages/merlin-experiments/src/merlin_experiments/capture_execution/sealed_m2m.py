@@ -20,6 +20,8 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from merlin.common import strict_json
+
 from .m2m_origin import M2MOriginError, git_origin, verify_frozen_receipt, verify_frozen_selector
 from .precision_staging import STAGING_API_REQUIREMENTS, output_staging_error
 from .python_preflight import _loader_env_reads
@@ -151,7 +153,7 @@ def _recipe_selection(path: Path | None, *, dtype: str) -> dict[str, Any] | None
     if not path.is_file() or path.is_symlink():
         raise SealedM2MError("selected quantization recipe is absent or indirect")
     try:
-        recipe = json.loads(path.read_bytes())
+        recipe = strict_json.loads(path.read_bytes())
         from merlin.targetgen.quant_recipe import digest as recipe_digest
 
         valid = (
@@ -890,7 +892,7 @@ def _materialized(
     pointer = "prov.weights_file = " + json.dumps(str(output_mount / "weights.safetensors"))
     if mlir.count("prov.weights_file") != 1 or pointer not in mlir:
         raise SealedM2MError("saved MLIR does not identify host-resolvable, receipt-bound weights")
-    payload = json.loads((output / "capture_receipt.json").read_bytes())
+    payload = strict_json.loads((output / "capture_receipt.json").read_bytes())
     loader = payload.get("source") or {}
     entry = (payload.get("tool") or {}).get("executed_entrypoint") or {}
     worker = source / worker_member
@@ -928,7 +930,7 @@ def _materialized_v2(output: Path, source: Path, output_mount: Path, plan: dict[
     result = _materialized(
         output, source, output_mount, worker_member="merlin-src/merlin/targetgen/_m2m_capture_worker.py"
     )
-    metadata = json.loads((output / "meta.json").read_bytes())
+    metadata = strict_json.loads((output / "meta.json").read_bytes())
     if not isinstance(metadata, dict) or metadata.get("dtype") != plan.get("dtype"):
         raise SealedM2MError("capture metadata does not identify the selected dtype")
     stage_reason = output_staging_error(
@@ -1096,7 +1098,7 @@ def _materialized_v3(output: Path, source: Path, output_mount: Path, plan: dict[
         verified = _materialized_v2(output, source, output_mount, plan)
         integer_work = 0
         if plan["dtype"] == "int8":
-            meta = json.loads((output / "meta.json").read_bytes())
+            meta = strict_json.loads((output / "meta.json").read_bytes())
             exported, partition = integer_partition(meta)
             # Preserve the exact historical sealed-v3 materialized summary:
             # this legacy field counts exported integer operations. The new
@@ -1130,7 +1132,7 @@ def _materialized_v3(output: Path, source: Path, output_mount: Path, plan: dict[
     try:
         import yaml
 
-        report = json.loads(report_path.read_bytes())
+        report = strict_json.loads(report_path.read_bytes())
         contract = yaml.safe_load(contract_path.read_bytes())
     except (OSError, ValueError, yaml.YAMLError) as exc:
         raise SealedM2MError("multi-program session evidence is unreadable") from exc
@@ -1185,7 +1187,7 @@ def _materialized_v3(output: Path, source: Path, output_mount: Path, plan: dict[
         if stage.is_symlink() or not stage.is_dir():
             raise SealedM2MError("multi-program stage is indirect or absent")
         try:
-            meta = json.loads((stage / "meta.json").read_bytes())
+            meta = strict_json.loads((stage / "meta.json").read_bytes())
         except (OSError, ValueError) as exc:
             raise SealedM2MError("multi-program stage metadata is unreadable") from exc
         if not isinstance(meta, dict):
@@ -1227,7 +1229,7 @@ def _materialized_v3(output: Path, source: Path, output_mount: Path, plan: dict[
             output_mount / "stages" / name,
             worker_member="merlin-src/merlin/targetgen/_m2m_capture_worker.py",
         )
-        stage_receipt = json.loads((stage / "capture_receipt.json").read_bytes())
+        stage_receipt = strict_json.loads((stage / "capture_receipt.json").read_bytes())
         if (
             row.get("receipt_sha256") != result["receipt_sha256"]
             or (row.get("materialized_abi") or {}).get("complete") is not True
@@ -1514,7 +1516,7 @@ def replay_verify(run_dir: Path, *, bwrap_binary: Path | None = None) -> dict[st
     if receipt.is_symlink() or not receipt.is_file():
         raise SealedM2MError("pending M2M receipt is absent or indirect")
     try:
-        doc = json.loads(receipt.read_bytes())
+        doc = strict_json.loads(receipt.read_bytes())
     except (ValueError, UnicodeDecodeError) as exc:
         raise SealedM2MError("pending M2M receipt is unreadable") from exc
     plan = doc.get("plan") or {}

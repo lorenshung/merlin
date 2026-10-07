@@ -17,6 +17,8 @@ import tomllib
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from merlin.common import strict_json
+
 SCHEMA = "merlin.python_capture_preflight.v1"
 _CACHE_ENV = {"HF_HOME", "TORCH_HOME", "TRANSFORMERS_CACHE"}
 
@@ -199,8 +201,8 @@ def _receipt_audit(receipt: Path, loader: Path, m2m_root: Path) -> dict[str, Any
         result["errors"].append("Selected capture receipt is absent")
         return result
     try:
-        payload = json.loads(receipt.read_text())
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        payload = strict_json.loads(receipt.read_text())
+    except (OSError, UnicodeError, ValueError):
         result["errors"].append("Selected capture receipt is not readable JSON")
         return result
     if not isinstance(payload, dict) or payload.get("schema") != "m2m.capture-receipt.v1":
@@ -287,8 +289,8 @@ def _observed_imports(
         result["errors"].append("Capture metadata bytes differ from the receipt")
         return result
     try:
-        meta = json.loads((receipt.parent / "meta.json").read_text())
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        meta = strict_json.loads((receipt.parent / "meta.json").read_text())
+    except (OSError, UnicodeError, ValueError):
         result["errors"].append("Capture metadata is not readable JSON")
         return result
     dependencies = meta.get("loader_dependency_sources") if isinstance(meta, dict) else None

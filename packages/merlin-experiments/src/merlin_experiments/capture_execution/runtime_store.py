@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from merlin.common import strict_json
+
 
 def _identity(plan: dict[str, Any]) -> str:
     from .sealed_static import _digest, _json
@@ -90,7 +92,7 @@ def verified_cached_entry(
                 return None
         if not root.is_dir() or not entry.is_dir() or not marker.is_file():
             return None
-        if json.loads(marker.read_bytes()) != {
+        if strict_json.loads(marker.read_bytes()) != {
             "identity": entry.name,
             "base": plan["base"],
             "system_libs": plan["system_libs"],
@@ -153,7 +155,10 @@ def verified_cached_entry(
             return None
         after = entry.stat()
         if marker_sha256 != _file_digest(marker) or entry_identity != (
-            after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns
+            after.st_dev,
+            after.st_ino,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
         ):
             return None
         return VerifiedRuntimeCache(
@@ -243,7 +248,10 @@ def store_entry(plan: dict[str, Any]) -> Path:
 
 
 def link_runtime(
-    plan: dict[str, Any], runtime: Path, *, verified_cache: VerifiedRuntimeCache | None = None,
+    plan: dict[str, Any],
+    runtime: Path,
+    *,
+    verified_cache: VerifiedRuntimeCache | None = None,
     selected_system_libraries: list[dict[str, Any]] | None = None,
 ) -> None:
     """Hard-link the plan's stored runtime into ``runtime`` with the stored directory modes."""

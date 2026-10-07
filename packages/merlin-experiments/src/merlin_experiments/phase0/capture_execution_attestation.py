@@ -28,6 +28,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from merlin.common import strict_json
 from merlin.targetgen.application_inventory import verify_capture_receipt
 
 SCHEMA = "merlin.capture_execution_attestation.v1"
@@ -255,7 +256,7 @@ def _sealed_m2m_bindings(selection_path: Path, selection_sha256: str, model_path
     if any(path.is_symlink() or not path.is_file() for path in (pending, materialized)):
         raise AttestationNotVerified("sealed M2M receipt or materialized capture receipt is absent or indirect")
     try:
-        receipt = json.loads(pending.read_bytes())
+        receipt = strict_json.loads(pending.read_bytes())
         digests = {
             name: _sha256(path)[1]
             for name, path in (
@@ -359,7 +360,7 @@ def _sealed_m2m_v3_bindings(selection_path: Path, selection_sha256: str, capture
         pending = run / "sealed_m2m_pending.json"
         if pending.is_symlink() or not pending.is_file():
             raise AttestationNotVerified("session sealed receipt is absent or indirect")
-        receipt = json.loads(pending.read_bytes())
+        receipt = strict_json.loads(pending.read_bytes())
         plan = selected["plan"]
         if (
             receipt.get("schema") != sealed_m2m.SCHEMA_V3

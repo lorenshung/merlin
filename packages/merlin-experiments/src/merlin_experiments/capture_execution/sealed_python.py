@@ -10,7 +10,6 @@ separately reviewed policy before Phase 0 may admit a capture.
 
 from __future__ import annotations
 
-import json
 import os
 import secrets
 import shutil
@@ -18,6 +17,8 @@ import subprocess
 import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+from merlin.common import strict_json
 
 from .sealed_static import _bwrap_binary, _canonical_path, _digest, _file_digest, _json, _tree
 
@@ -219,7 +220,7 @@ def replay_verify(run_dir: Path, *, bwrap_binary: Path | None = None) -> dict[st
     if receipt.is_symlink() or not receipt.is_file():
         raise SealedPythonError("sealed Python diagnostic receipt is absent or indirect")
     try:
-        document = json.loads(receipt.read_bytes())
+        document = strict_json.loads(receipt.read_bytes())
     except (ValueError, UnicodeDecodeError) as exc:
         raise SealedPythonError("sealed Python diagnostic receipt is unreadable") from exc
     if not isinstance(document, dict) or (
