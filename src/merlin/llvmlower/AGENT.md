@@ -2,6 +2,12 @@
 
 ## Purpose
 
+`produced_bf16_row_facts` is an explicit default-off source/effects composition
+seam. Complete finite BF16 writes and private immutable source/metadata closure
+permit producer max/min facts to replace repeated packing and already selected
+RMS4 maximum scans. Original equality, scalar DAG, epochs/quotas and fallback
+remain mandatory. It supplies neither automatic routing nor numerical permission.
+
 `radix_integer_reconstruct.c_fused_header` and the explicit
 `source_attention_frontier` fused reconstruction option keep complete immutable
 integer group planes until one exact local sum and binary64 conversion. Callback

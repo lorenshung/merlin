@@ -17,6 +17,7 @@ from .bf16_integer_observer import BF16IntegerObserverContract
 from .exact_bound_conversion import ExactBoundConversionContract
 from .frontier_point_cells import FrontierPointCellsContract
 from .independent_lane_schedule import LaneEffects
+from .produced_bf16_row_facts import ProducedBF16RowFactsContract
 from .source_product_family import SourceProductFamilyContract
 from .source_roundoff_policy import ApproximateSourceRoundoffPolicy
 
@@ -135,6 +136,7 @@ def emit_source_attention_frontier(
     bf16_integer_observer: BF16IntegerObserverContract | None = None,
     frontier_point_cells: FrontierPointCellsContract | None = None,
     source_product_family: SourceProductFamilyContract | None = None,
+    produced_bf16_row_facts: ProducedBF16RowFactsContract | None = None,
 ) -> str:
     """Emit portable C; nonzero result records complete output publication.
 
@@ -211,6 +213,11 @@ def emit_source_attention_frontier(
     Optional exact BF16 integer observations retain the scale/inverse/product
     DAG. Pure source, standard-copy and floating-effect contracts permit exact
     integer decoding after any finite-point specialization; defaults are intact.
+
+    Optional owned BF16 producer facts replace repeated finite/max/min packing
+    scans and any already selected RMS4 maximum scan. Complete producer/source,
+    private storage, immutable epoch/quota and effects contracts remain required.
+    Original equality, scalar DAG, numerical policy and fallback are retained.
     """
     if type(fuse_encoded_witness) is not bool:
         raise ValueError("fused encoded witness policy must be bool")
@@ -330,16 +337,17 @@ def emit_source_attention_frontier(
         text = text.replace("@" + placeholder + "@\n", replacement)
     fragments = {
         "PRODUCT_DOMAIN_INCLUDE": '#include "prepared_fma_product_bounds.h"\n',
-        "PRODUCT_DOMAIN_COLUMNS": " merlin_fma_product_columns product_columns=merlin_fma_product_columns_prepare(bnp,enp,br,n,k);\n",
-        "PRODUCT_DOMAIN_ROW": " merlin_fma_product_row product_row=merlin_fma_product_row_prepare(&gamma,&product_columns,&anp,&rnp,&aep,uncertainty,used,center+r*n);\n",
+        "PRODUCT_DOMAIN_COLUMNS": " merlin_fma_product_columns product_columns=merlin_fma_product_columns_p"
+        "repare(bnp,enp,br,n,k);\n",
+        "PRODUCT_DOMAIN_ROW": " merlin_fma_product_row product_row=merlin_fma_product_row_prepare(&gamm"
+        "a,&product_columns,&anp,&rnp,&aep,uncertainty,used,center+r*n);\n",
     }
     for key, fragment in fragments.items():
         text = text.replace("@" + key + "@\n", fragment if prepare_product_domain else "")
     checked = "merlin_fma_zero_gamma_batch_apply(&gamma,chunk,&lo[r*n+j],&hi[r*n+j])"
     selected = (
-        "(product_row.valid?merlin_fma_product_row_apply(&product_row,j,chunk.absolute_upper,chunk.representation_error_upper,&lo[r*n+j],&hi[r*n+j]):"
-        + checked
-        + ")"
+        "(product_row.valid?merlin_fma_product_row_apply(&product_row,j,chunk.abs"
+        "olute_upper,chunk.representation_error_upper,&lo[r*n+j],&hi[r*n+j]):" + checked + ")"
     )
     text = text.replace("@PRODUCT_DOMAIN_APPLY@", selected if prepare_product_domain else checked)
     if separable_source_radius:
@@ -350,15 +358,21 @@ def emit_source_attention_frontier(
             ),
             (
                 "merlin_fma_product_columns_prepare(bnp,enp,br,n,k);",
-                "merlin_fma_product_columns_prepare(bnp,enp,br,n,k);\n merlin_fma_exact_columns exact_columns=merlin_fma_exact_columns_prepare(&product_columns,bnp,enp);",
+                "merlin_fma_product_columns_prepare(bnp,enp,br,n,k);\n merlin_fma_exact_co"
+                "lumns exact_columns=merlin_fma_exact_columns_prepare(&product_columns,bn"
+                "p,enp);",
             ),
             (
                 "&anp,&rnp,&aep,uncertainty,used,center+r*n);",
-                "&anp,&rnp,&aep,uncertainty,used,center+r*n);\n merlin_fma_separable_radius radius_plan=merlin_fma_separable_radius_prepare(&product_row,&exact_columns,&anp,&aep,used);",
+                "&anp,&rnp,&aep,uncertainty,used,center+r*n);\n merlin_fma_separable_radiu"
+                "s radius_plan=merlin_fma_separable_radius_prepare(&product_row,&exact_co"
+                "lumns,&anp,&aep,used);",
             ),
             (
                 "  for(int j=0;j<n;j++){\n   double e=",
-                "  for(int j=0;j<n;j++){\n   if(radius_plan.valid){if(!merlin_fma_separable_radius_apply(&radius_plan,j,&lo[r*n+j],&hi[r*n+j]))return 0;continue;}\n   double e=",
+                "  for(int j=0;j<n;j++){\n   if(radius_plan.valid){if(!merlin_fma_separabl"
+                "e_radius_apply(&radius_plan,j,&lo[r*n+j],&hi[r*n+j]))return 0;continue;}"
+                "\n   double e=",
             ),
         )
         for before, after in radius_replacements:
@@ -372,7 +386,8 @@ def emit_source_attention_frontier(
         replacements = (
             (
                 " merlin_fma_product_columns product_columns=",
-                " merlin_dot_norm_requirements requirements=merlin_reconstruction_norm_requirements(enp,n);\n merlin_fma_product_columns product_columns=",
+                " merlin_dot_norm_requirements requirements=merlin_reconstruction_norm_re"
+                "quirements(enp,n);\n merlin_fma_product_columns product_columns=",
             ),
             (
                 "  merlin_dot_norms an=",
@@ -380,7 +395,8 @@ def emit_source_attention_frontier(
             ),
             (
                 "merlin_dot_norms_add(&rn,MERLIN_SOURCE_F64_ABS(ar[t]));",
-                "if(requirements.require_l2)merlin_dot_norms_add(&rn,MERLIN_SOURCE_F64_ABS(ar[t]));else merlin_l1_norm_add(&rnl1,MERLIN_SOURCE_F64_ABS(ar[t]));",
+                "if(requirements.require_l2)merlin_dot_norms_add(&rn,MERLIN_SOURCE_F64_AB"
+                "S(ar[t]));else merlin_l1_norm_add(&rnl1,MERLIN_SOURCE_F64_ABS(ar[t]));",
             ),
             ("merlin_dot_norms_finish(&rn);", "if(requirements.require_l2)merlin_dot_norms_finish(&rn);"),
             (
@@ -393,7 +409,9 @@ def emit_source_attention_frontier(
             ),
             (
                 "&anp,&rnp,&aep,uncertainty,used,center+r*n);",
-                "&anp,&rnp,&aep,uncertainty,used,center+r*n):merlin_fma_product_row_prepare_l1(&gamma,&product_columns,&anp,&rnl1,&aep,uncertainty,used,center+r*n);",
+                "&anp,&rnp,&aep,uncertainty,used,center+r*n):merlin_fma_product_row_prepa"
+                "re_l1(&gamma,&product_columns,&anp,&rnl1,&aep,uncertainty,used,center+r*"
+                "n);",
             ),
         )
         for before, after in replacements:
@@ -433,16 +451,19 @@ def emit_source_attention_frontier(
     if prepare_probability_bins:
         replacements = (
             (
-                "    if(mask[off+j] && merlin_interval_bits(merlin_interval_bf16(y.lo)) != merlin_interval_bits(merlin_interval_bf16(y.hi))) {",
+                "    if(mask[off+j] && merlin_interval_bits(merlin_interval_bf16(y.lo)) !"
+                "= merlin_interval_bits(merlin_interval_bf16(y.hi))) {",
                 "    merlin_bf16_interval_bins bins=merlin_bf16_interval_prepare(y);\n"
                 "    if(mask[off+j] && bins.low_bits != bins.high_bits) {",
             ),
             (
                 "y=merlin_interval_point(source_poly(exact*SCORE_SCALE-mx)); counts[2]++;",
-                "y=merlin_interval_point(source_poly(exact*SCORE_SCALE-mx)); bins=merlin_bf16_interval_prepare(y); counts[2]++;",
+                "y=merlin_interval_point(source_poly(exact*SCORE_SCALE-mx)); bins=merlin_"
+                "bf16_interval_prepare(y); counts[2]++;",
             ),
             (
-                "pl[off+j]=merlin_interval_bf16(y.lo);ph[off+j]=merlin_interval_bf16(y.hi);p[off+j]=merlin_interval_bf16((float)(((double)y.lo+y.hi)*.5));",
+                "pl[off+j]=merlin_interval_bf16(y.lo);ph[off+j]=merlin_interval_bf16(y.hi"
+                ");p[off+j]=merlin_interval_bf16((float)(((double)y.lo+y.hi)*.5));",
                 "pl[off+j]=bins.lo;ph[off+j]=bins.hi;p[off+j]=merlin_bf16_interval_midpoint(y,bins);",
             ),
         )
@@ -461,7 +482,8 @@ def emit_source_attention_frontier(
             (
                 " if(!(root_prepared.fast_valid))return 0;\n",
                 " if(!(root_prepared.fast_valid))return 0;\n"
-                " merlin_prepared_softmax_domain domain=merlin_softmax_domain_prepare(&root_env,&root_prepared,SCORE_SCALE,CHUNK,LANES,2);\n"
+                " merlin_prepared_softmax_domain domain=merlin_softmax_domain_prepare(&ro"
+                "ot_env,&root_prepared,SCORE_SCALE,CHUNK,LANES,2);\n"
                 " if(!domain.valid||!merlin_softmax_admit_active_spans(&domain,lo,hi,mask,(size_t)rows*KEYS))\n"
                 "  return soft_details_checked(q,k,mask,lo,hi,p,pl,ph,dl,dh,alpha,rows,counts,yl,yh,maxima);\n",
             ),
@@ -470,12 +492,16 @@ def emit_source_attention_frontier(
                 "merlin_soft_interval lanes[LANES];for(int j=0;j<LANES;j++)lanes[j]=(merlin_soft_interval){0,0};",
             ),
             (
-                "merlin_f32_interval x=merlin_interval_sub(merlin_interval_positive_scale(merlin_interval(lo[off+j],hi[off+j]),SCORE_SCALE),merlin_interval_point(mx));",
-                "merlin_soft_interval score=merlin_softmax_score(&domain,lo[off+j],hi[off+j],mx);merlin_f32_interval x={score.lo,score.hi,1};",
+                "merlin_f32_interval x=merlin_interval_sub(merlin_interval_positive_scale"
+                "(merlin_interval(lo[off+j],hi[off+j]),SCORE_SCALE),merlin_interval_point"
+                "(mx));",
+                "merlin_soft_interval score=merlin_softmax_score(&domain,lo[off+j],hi[off"
+                "+j],mx);merlin_f32_interval x={score.lo,score.hi,1};",
             ),
             (
                 "lanes[j%LANES]=merlin_interval_add(lanes[j%LANES],y);",
-                "if(!y.valid)return 0;lanes[j%LANES]=merlin_softmax_lane_add(lanes[j%LANES],(merlin_soft_interval){y.lo,y.hi});",
+                "if(!y.valid)return 0;lanes[j%LANES]=merlin_softmax_lane_add(lanes[j%LANE"
+                "S],(merlin_soft_interval){y.lo,y.hi});",
             ),
             (
                 "lanes[j]=merlin_interval_add(lanes[j],lanes[j+n]);",
@@ -569,6 +595,12 @@ def emit_source_attention_frontier(
         from .bf16_integer_observer import prepare_bf16_integer_observer
 
         text = prepare_bf16_integer_observer(text, contract=bf16_integer_observer)
+    if produced_bf16_row_facts is not None:
+        if not prepare_probability_points or not prepare_readonly_rhs or not fuse_encoded_witness:
+            raise ValueError("owned BF16 facts require complete point, prepared RHS and fused encoding proofs")
+        from .produced_bf16_row_facts import prepare_produced_bf16_row_facts
+
+        text = prepare_produced_bf16_row_facts(text, plan=plan, contract=produced_bf16_row_facts)
     definitions = {
         "HEADS": plan.heads,
         "ROWS": plan.query_rows,

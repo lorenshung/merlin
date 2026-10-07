@@ -2,6 +2,11 @@
 
 ## Purpose
 
+`source_rms_produced_maximum.h` consumes complete immutable finite BF16 producer
+facts only after original reconstructed equality checks. It preserves the
+separately selected RMS4 numerical policy, original radius/prefix safety and
+rigorous fallback. Unknown source/storage/effects/lifetime facts grant no reuse.
+
 The **Merlin C runtime**: a generic, data-driven driver that executes a compiled whole model (`_mlir_ciface_forward`) by building MLIR memref descriptors from a generated argument table. Target-agnostic core; the same code runs on host (verification) and bare-metal spike/Zephyr.
 
 ## What belongs here
