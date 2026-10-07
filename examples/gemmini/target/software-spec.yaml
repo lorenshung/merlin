@@ -210,6 +210,49 @@ operations:
     families: [reduction]
     placement: host
     signature: {family: reduction, ordered_operand_dtypes: [f32], ordered_result_dtypes: [f32], compute_dtypes: [f64]}
+  # Closed prepared math forms: build/link/host placement only, not numerical equivalence.
+  host_review_literal_clamp_f32:
+    status: reviewed
+    ops: [aten.clamp.default]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [f32, f32], ordered_result_dtypes: [f32]}
+  host_review_reciprocal_f32:
+    status: reviewed
+    ops: [aten.reciprocal.default]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [f32, f32], ordered_result_dtypes: [f32]}
+  host_review_reciprocal_i64_to_f32:
+    status: reviewed
+    ops: [aten.reciprocal.default]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [i64, f32], ordered_result_dtypes: [f32]}
+  host_review_literal_base_pow_f32:
+    status: reviewed
+    ops: [aten.pow.Scalar]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [f32, f32], ordered_result_dtypes: [f32]}
+  host_review_tanh_gelu_f32:
+    status: reviewed
+    ops: [aten.gelu.default]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [f32, f32], ordered_result_dtypes: [f32]}
+  # These sum/compare declarations cover only their pointwise prepared bodies.
+  # A sum reduction root requires a separate closed reduction admission.
+  host_review_i64_scalar_ge:
+    status: reviewed
+    ops: [aten.ge.Scalar]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [i64, i64, i1], ordered_result_dtypes: [i1]}
+  host_review_i64_scalar_lt:
+    status: reviewed
+    ops: [aten.lt.Scalar]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [i64, i64, i1], ordered_result_dtypes: [i1]}
+  host_review_boolean_sum_extension:
+    status: reviewed
+    ops: [aten.sum.dim_IntList]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [i1, i64], ordered_result_dtypes: [i64]}
 restrictions:
   # Keep this guard if a later readout declaration claims bias: a two-load operand sum has no
   # reviewed bias seed, and this restriction prevents that claim from entering its derived form.

@@ -433,6 +433,115 @@ operations:
       status: unreviewed
       semantics: {scope: selected_prepared_scan_build_link_routing_only, input: f32, ordered_carry: f64, per_prefix_output: f32, reset: source_proved_axis_lane, selected_isa_f64: required, rne_result_claim: withheld_without_linked_rounding_state_proof, pytorch_original_to_prepared_equivalence: not_proved, nonfinite_and_snan: unqualified, existing_numerical_tolerance: unchanged}
       evidence: {mandatory_private_source_witness: ordered_f32_scan_support_v7, finite_neutral_raw_outputs: 22_of_22_exact, selected_index_and_elf_join: existing, compiled_numeric_equivalence: not_proved}
+  - id: host_review_literal_clamp_upper_f32
+    status: reviewed
+    ops: [aten.clamp.default]
+    families: [elementwise_map]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [f32, f32], ordered_result_dtypes: [f32]}
+    source_body: {schema: merlin.static_composite_math_body.v1, operation: clamp_upper_literal}
+    numerical_contract:
+      status: unreviewed
+      semantics: {scope: selected_prepared_source_build_link_host_placement_only, literal_identity: exact_source_f32_bits, ordered_operations: exact_closed_source_body, pytorch_equivalence: not_proved, existing_numerical_tolerance: unchanged}
+      evidence: {source_schema: merlin.static_composite_math_source.v1, selected_index_and_elf_join: required}
+  - id: host_review_literal_clamp_lower_f32
+    status: reviewed
+    ops: [aten.clamp.default]
+    families: [elementwise_map]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [f32, f32], ordered_result_dtypes: [f32]}
+    source_body: {schema: merlin.static_composite_math_body.v1, operation: clamp_lower_literal}
+    numerical_contract:
+      status: unreviewed
+      semantics: {scope: selected_prepared_source_build_link_host_placement_only, literal_identity: exact_source_f32_bits, ordered_operations: exact_closed_source_body, pytorch_equivalence: not_proved, existing_numerical_tolerance: unchanged}
+      evidence: {source_schema: merlin.static_composite_math_source.v1, selected_index_and_elf_join: required}
+  - id: host_review_reciprocal_f32
+    status: reviewed
+    ops: [aten.reciprocal.default]
+    families: [elementwise_map]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [f32, f32], ordered_result_dtypes: [f32]}
+    source_body: {schema: merlin.static_composite_math_body.v1, operation: reciprocal_f32}
+    numerical_contract:
+      status: unreviewed
+      semantics: {scope: selected_prepared_source_build_link_host_placement_only, literal_identity: exact_source_f32_bits, ordered_operations: exact_closed_source_body, pytorch_equivalence: not_proved, existing_numerical_tolerance: unchanged}
+      evidence: {source_schema: merlin.static_composite_math_source.v1, selected_index_and_elf_join: required}
+  - id: host_review_reciprocal_i64_to_f32
+    status: reviewed
+    ops: [aten.reciprocal.default]
+    families: [elementwise_map]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [i64, f32], ordered_result_dtypes: [f32]}
+    source_body: {schema: merlin.static_composite_math_body.v1, operation: reciprocal_signed_i64_to_f32}
+    numerical_contract:
+      status: unreviewed
+      semantics: {scope: selected_prepared_source_build_link_host_placement_only, literal_identity: exact_source_f32_bits, ordered_operations: exact_closed_source_body, pytorch_equivalence: not_proved, existing_numerical_tolerance: unchanged}
+      evidence: {source_schema: merlin.static_composite_math_source.v1, selected_index_and_elf_join: required}
+  - id: host_review_literal_base_pow_f32
+    status: reviewed
+    ops: [aten.pow.Scalar]
+    families: [elementwise_map]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [f32, f32], ordered_result_dtypes: [f32]}
+    source_body: {schema: merlin.static_composite_math_body.v1, operation: literal_base_pow_f32}
+    linkage_contract:
+      schema: merlin.host_linkage_contract.v1
+      supplier: selected_math_archive
+      archive_sha256: 38965f2df6e94d3389596fcf414caf37040294fc0f43f3afa3e4369acb837934
+      symbols: [powf]
+    numerical_contract:
+      status: unreviewed
+      semantics: {scope: selected_prepared_source_build_link_host_placement_only, literal_identity: exact_source_f32_bits, ordered_operations: exact_closed_source_body, pytorch_equivalence: not_proved, existing_numerical_tolerance: unchanged}
+      evidence: {source_schema: merlin.static_composite_math_source.v1, selected_index_and_elf_join: required, selected_archive_supplier_join: required, source_call_to_symbol_routing: not_proved}
+  - id: host_review_tanh_gelu_f32
+    status: reviewed
+    ops: [aten.gelu.default]
+    families: [elementwise_map]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [f32, f32], ordered_result_dtypes: [f32]}
+    source_body: {schema: merlin.static_composite_math_body.v1, operation: tanh_gelu_f32}
+    linkage_contract:
+      schema: merlin.host_linkage_contract.v1
+      supplier: selected_math_archive
+      archive_sha256: 38965f2df6e94d3389596fcf414caf37040294fc0f43f3afa3e4369acb837934
+      symbols: [tanhf]
+    numerical_contract:
+      status: unreviewed
+      semantics: {scope: selected_prepared_source_build_link_host_placement_only, literal_identity: exact_source_f32_bits, ordered_operations: exact_closed_source_body, pytorch_equivalence: not_proved, existing_numerical_tolerance: unchanged}
+      evidence: {source_schema: merlin.static_composite_math_source.v1, selected_index_and_elf_join: required, selected_archive_supplier_join: required, source_call_to_symbol_routing: not_proved}
+  - id: host_review_i64_scalar_ge
+    status: reviewed
+    ops: [aten.ge.Scalar]
+    families: [elementwise_map]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [i64, i64, i1], ordered_result_dtypes: [i1]}
+    source_body: {schema: merlin.static_projected_pointwise_body.v1, operation: arith.cmpi, predicate: sge}
+    numerical_contract:
+      status: unreviewed
+      semantics: {scope: selected_prepared_source_build_link_host_placement_only, operation: signed_integer_sge, frontend_numerical_equivalence: not_proved, existing_numerical_tolerance: unchanged}
+      evidence: {source_schema: merlin.static_projected_pointwise_body.v1, selected_index_and_elf_join: required}
+  - id: host_review_i64_scalar_lt
+    status: reviewed
+    ops: [aten.lt.Scalar]
+    families: [elementwise_map]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [i64, i64, i1], ordered_result_dtypes: [i1]}
+    source_body: {schema: merlin.static_projected_pointwise_body.v1, operation: arith.cmpi, predicate: slt}
+    numerical_contract:
+      status: unreviewed
+      semantics: {scope: selected_prepared_source_build_link_host_placement_only, operation: signed_integer_slt, frontend_numerical_equivalence: not_proved, existing_numerical_tolerance: unchanged}
+      evidence: {source_schema: merlin.static_projected_pointwise_body.v1, selected_index_and_elf_join: required}
+  - id: host_review_boolean_sum_extension
+    status: reviewed
+    ops: [aten.sum.dim_IntList]
+    families: [elementwise_map]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [i1, i64], ordered_result_dtypes: [i64]}
+    source_body: {schema: merlin.static_pointwise_source_body.v1, operation: arith.extui}
+    numerical_contract:
+      status: unreviewed
+      semantics: {scope: selected_prepared_source_build_link_host_placement_only, operation: unsigned_boolean_to_i64_extension, frontend_numerical_equivalence: not_proved, existing_numerical_tolerance: unchanged}
+      evidence: {source_schema: merlin.static_pointwise_source_body.v1, selected_index_and_elf_join: required}
 evidence:
   source: Content identity of the host package selected by descriptor.yaml.
   inspected_package:

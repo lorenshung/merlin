@@ -136,6 +136,13 @@ No tolerance is relaxed, and no accelerator eligibility is replaced by host
 placement. Literal ranges and ordered scans also require their dedicated
 source, selected-index and linked-build witnesses.
 
+Literal clamps, reciprocals, literal-base powers and tanh-form GELU opt in to
+closed parsed source-body checks. Literal bits and operation order are recorded,
+not inferred from a model name. The power/GELU forms additionally require actual
+selected-archive `powf`/`tanhf` supplier evidence. These declarations cover only
+build/link/host placement; PyTorch numerical equivalence and source-call-to-symbol
+routing remain unproved. Source-free declarations cannot admit these forms.
+
 The selected Rocket CPUs have no V extension. Mint the descriptor's scalar
 host package from the checked-in recipe before deriving a new Phase 0 corpus:
 
