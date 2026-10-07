@@ -108,6 +108,83 @@ def test_native_compilation_failure_keeps_search_status() -> None:
     assert failure.reason == "bounded search exhausted"
     with pytest.raises(ValueError, match="known status"):
         NativeCompilationError("selected", "cannot be a failure")
+    with pytest.raises(ValueError, match="known status"):
+        NativeCompilationError("tool_unavailable", "")
+
+
+def test_native_compile_reports_the_target_binding_failure_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A diagnosed handoff failure keeps its earliest boundary instead of becoming compile_error."""
+    from merlin.semantic_compiler import snapshot as snapshot_module
+    from merlin.semantic_compiler import target_binding
+    from merlin.targetgen import cli
+
+    dtype = TensorType((1,), "i32", "exact-i32")
+    request = KernelRequest(
+        nodes=(SemanticNode("x", "input", (), dtype, effect="input"), SemanticNode("y", "identity", ("x",), dtype)),
+        outputs=("y",),
+        output_storages=("external",),
+        input_storages=(("x", "external"),),
+        target_identity="synthetic-handoff-1",
+    )
+    identity = InstructionDescriptor(
+        "identity",
+        "identity",
+        ("external",),
+        "external",
+        "i32",
+        "exact-i32",
+        (1,),
+        input_dtypes=("i32",),
+        input_numerical_policies=("exact-i32",),
+    )
+    profile = NativeTargetProfile("synthetic-handoff-1", (identity,), (StorageBank("external", "dram", 2, "tile"),))
+
+    class _Snapshot:
+        def __init__(self) -> None:
+            self.profile = profile
+
+    class _Binding:
+        def profile(self) -> NativeTargetProfile:
+            return profile
+
+        def compile(self, *_args: object, **_kwargs: object) -> dict[str, object]:
+            raise NativeCompilationError("tool_unavailable", "generated target parser absent")
+
+    monkeypatch.setattr(snapshot_module, "open_native_snapshot", lambda _root: _Snapshot())
+    monkeypatch.setattr(target_binding, "load_native_target_binding", lambda _name: _Binding())
+    request_path, abi_path = tmp_path / "request.json", tmp_path / "abi.json"
+    request_path.write_text(json.dumps(request.record()))
+    abi_path.write_text(json.dumps({"fixed_inputs": {"x": 0}, "fixed_outputs": [1]}))
+    status_path, output = tmp_path / "status.json", tmp_path / "compiled"
+    returned = cli.main(
+        [
+            "native-compile",
+            "--engine",
+            "merlin_native",
+            "--support",
+            "synthetic-support",
+            "--snapshot",
+            str(tmp_path / "snapshot"),
+            "--request",
+            str(request_path),
+            "--abi",
+            str(abi_path),
+            "--target-source",
+            str(tmp_path),
+            "--mode",
+            request.lowering_policy,
+            "--out",
+            str(output),
+            "--status-file",
+            str(status_path),
+        ]
+    )
+    assert returned == 2 and not output.exists()
+    status = json.loads(status_path.read_text())
+    assert status["status"] == "tool_unavailable"
+    assert "generated target parser absent" in status["reason"]
 
 
 def test_native_select_abi_reservations_are_optional_and_checked(tmp_path: Path) -> None:
