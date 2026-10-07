@@ -139,6 +139,13 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
   placement attributes. Empty selection preserves source bytes; unsupported
   calls, memory, control flow and contexts refuse transactionally. No target ISA,
   source arithmetic change or automatic profitability policy is supplied.
+- The interval-table bridge also supports explicit direct signed-byte publication
+  when complete typed all-use proof closes the original rounded multiply, clamp
+  and RNE integer observer. Accepted bins use the already certified integer;
+  ambiguity and unsupported values execute the unchanged source continuation and
+  finish. This requires the existing explicit nontrapping and unobserved floating
+  effects; no floating escape, source precision/order change or numeric tolerance
+  relaxation is allowed. Empty selection and ordinary source bytes are unchanged.
 - `source_expression_interval.py` and its typed LLVM companion provide explicit
   source-wide binary32 interval tables for closed integer observations. Each
   fixed-bit cell encloses every member under the original scalar operation order.

@@ -530,6 +530,48 @@ __attribute__((always_inline)) float {lookup_name}(float x,float up,float scale)
 """
 
 
+def emit_source_interval_i8_lookup(*, table_name, activation_name, quantizer_name, lookup_name, leading_bits):
+    """Return only the already-certified integer observation, explicitly opt-in.
+
+    The typed all-use closure and unobserved/nontrapping floating effect contract
+    must authorize removing the redundant floating finish. The original source
+    activation and each rounded finishing multiply execute on every refusal.
+    Table partition/cells and the original quantizer remain unchanged. A caller
+    guard retains original source arithmetic for unsupported floating modes.
+    """
+    # Reuse the existing identifier/partition admission, never a second grammar.
+    emit_source_interval_lookup(
+        table_name=table_name,
+        activation_name=activation_name,
+        quantizer_name=quantizer_name,
+        lookup_name=lookup_name,
+        leading_bits=leading_bits,
+    )
+    nonfinite = "||".join(f"({word}&0x7f800000u)==0x7f800000u" for word in ("w", "bits(up)", "bits(scale)"))
+    return f"""#include <stdint.h>
+extern const float {table_name}[{1 << leading_bits}][2];
+extern float {activation_name}(float);
+extern signed char {quantizer_name}(float);
+static inline uint32_t bits(float x){{uint32_t w;__builtin_memcpy(&w,&x,4);return w;}}
+__attribute__((always_inline)) signed char {lookup_name}(float x,float up,float scale){{
+ uint32_t w=bits(x);
+ if({nonfinite})goto source_fallback;
+ const float*cell={table_name}[w>>{32 - leading_bits}];float lo=cell[0],hi=cell[1];
+ if(!(lo<=hi))goto source_fallback;
+ float low_product=lo*up,high_product=hi*up;
+ float low_scaled=low_product*scale,high_scaled=high_product*scale;
+ signed char low_word={quantizer_name}(low_scaled),high_word={quantizer_name}(high_scaled);
+ if(low_word!=high_word)goto source_fallback;
+ return low_word;
+source_fallback:;
+ float original={activation_name}(x);
+ float product=original*up;
+ float scaled=product*scale;
+ return {quantizer_name}(scaled);
+}}
+"""
+
+
 def emit_immutable_bytes_llvm(data: bytes, *, symbol: str, alignment: int = 1):
     """Emit one read-only byte owner inside the normal compiled host module.
 

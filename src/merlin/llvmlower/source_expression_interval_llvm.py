@@ -142,13 +142,14 @@ def _compiled_tree(value, definitions, cut, *, dtype="float", visited=None):
     return (code, result_type, tuple(arguments)), nodes
 
 
-def rewrite_source_interval_lookup(
+def _rewrite_source_interval_lookup(
     source,
     *,
     proofs=(),
     table: SourceIntervalTable | None = None,
     lookup_symbol=None,
     effects: IntervalEffectContract | None = None,
+    integer_result=False,
 ):
     """Explicit structural binding before any target RNE/ISA legalization.
 
@@ -158,7 +159,9 @@ def rewrite_source_interval_lookup(
     Empty selection returns exactly the original bytes without parsing.
     """
     report = {
-        "schema": "source_expression_interval_llvm_binding_v1",
+        "schema": "source_expression_interval_i8_llvm_binding_v1"
+        if integer_result
+        else "source_expression_interval_llvm_binding_v1",
         "routes": [],
         "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
     }
@@ -293,14 +296,17 @@ def rewrite_source_interval_lookup(
                         any(user not in allowed for user in uses.get(name, [])) for name in allowed - {final.result}
                     ):
                         continue
-                    # The exact source DAG is still in place. Replace only the
-                    # final endpoint at its original location; ordinary LLVM
-                    # handles unused pure source nodes, never load motion here.
+                    # Both routes retain complete source/consumer closure. The
+                    # integer route publishes precisely that closed observation
+                    # at its source location, eliminating only dead pure nodes
+                    # under the explicit unobserved-effects contract.
+                    replaced = final if integer_result else endpoint
+                    result_type = "i8" if integer_result else "float"
                     edits.append(
                         (
-                            endpoint.start,
-                            endpoint.end,
-                            f"{endpoint.result} = call float @{lookup_symbol}(float {cut}, float {up}, float {factor})",
+                            replaced.start,
+                            replaced.end,
+                            f"{replaced.result} = call {result_type} @{lookup_symbol}(float {cut}, float {up}, float {factor})",
                         )
                     )
                     report["routes"].append(
@@ -317,6 +323,13 @@ def rewrite_source_interval_lookup(
                             "source_observer_proof": rne,
                         }
                     )
+                    if integer_result:
+                        report["routes"][-1].update(
+                            integer_source_span=[final.start, final.end],
+                            result_type="i8",
+                            floating_carrier_retained=False,
+                            effect_contract="RNE/gradual/nontrapping/flags-and-signed-zero-unobserved",
+                        )
                     break
                 else:
                     continue
@@ -326,10 +339,37 @@ def rewrite_source_interval_lookup(
     for start, end, replacement in sorted(edits, reverse=True):
         source = source[:start] + replacement + source[end:]
     if edits:
-        source += f"\ndeclare float @{lookup_symbol}(float,float,float)\n"
+        result_type = "i8" if integer_result else "float"
+        source += f"\ndeclare {result_type} @{lookup_symbol}(float,float,float)\n"
     report.update(
         table_sha256=table.sha256,
         leading_bits=table.leading_bits,
         rewritten_sha256=hashlib.sha256(source.encode()).hexdigest(),
     )
     return source, report
+
+
+def rewrite_source_interval_lookup(source, *, proofs=(), table=None, lookup_symbol=None, effects=None):
+    """Retain the default floating carrier route and its original byte output."""
+    return _rewrite_source_interval_lookup(
+        source, proofs=proofs, table=table, lookup_symbol=lookup_symbol, effects=effects
+    )
+
+
+def rewrite_source_interval_i8_lookup(source, *, proofs=(), table=None, lookup_symbol=None, effects=None):
+    """Publish the existing closed i8 observation through an explicit callback.
+
+    Complete source and compiled SSA-use closure must prove no floating escape.
+    The callback retains original rounded finishing operations on refusal and
+    returns the endpoint certificate's original saturated ties-even i8 on success.
+    Unknown floating modes require the caller's retained original-source guard;
+    this API supplies no target ISA, arithmetic relaxation or default policy.
+    """
+    return _rewrite_source_interval_lookup(
+        source,
+        proofs=proofs,
+        table=table,
+        lookup_symbol=lookup_symbol,
+        effects=effects,
+        integer_result=True,
+    )
