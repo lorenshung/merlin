@@ -14,6 +14,7 @@ import pytest
 import yaml
 from merlin_experiments.phase1.feedback import private_bucketize_support as bucketize
 from merlin_experiments.phase1.feedback import private_compilation_inputs as compilation
+from merlin_experiments.phase1.feedback import private_f32_maximum_support as maximum
 from merlin_experiments.phase1.feedback import private_full_models as gate
 from merlin_experiments.phase1.feedback import private_index_host_support as prepared_index
 from merlin_experiments.phase1.feedback import private_integer_reduction_support as integer_reductions
@@ -162,6 +163,7 @@ def test_complete_requires_current_candidate_all_programs_and_device_work(monkey
         "scope": compilation.SCOPE,
     }
     monkeypatch.setattr(compilation, "verify", lambda *args, **kwargs: deepcopy(verified_compilation))
+    monkeypatch.setattr(maximum, "_captured", lambda *_args: True)  # noqa: PLC2701 -- synthetic fixture only
     programs = {"a": ("prefix", "decode"), "b": ("model",)}
     selected_index = {
         "schema": "merlin.selected-index-lowering.v1",
@@ -254,6 +256,22 @@ def test_complete_requires_current_candidate_all_programs_and_device_work(monkey
                         integer_reductions.FIELD: {
                             **integer_reductions.begin("d" * 64, "e" * 64, 5, deepcopy(selected_index)),
                             "status": integer_reductions.LINKED,
+                            "linked_build": {
+                                "capture_tree_sha256": "c" * 64,
+                                "elf_sha256": "2" * 64,
+                                "candidate_tree_sha256": "1" * 64,
+                            },
+                        },
+                        maximum.FIELD: {
+                            **maximum.begin(
+                                "d" * 64,
+                                "e" * 64,
+                                "f" * 64,
+                                tuple(SimpleNamespace(attributes={}, properties={}) for _ in range(5)),
+                                deepcopy(selected_index),
+                            ),
+                            "status": maximum.LINKED,
+                            "source_capture_path": "/operator/synthetic-capture",
                             "linked_build": {
                                 "capture_tree_sha256": "c" * 64,
                                 "elf_sha256": "2" * 64,
@@ -440,7 +458,12 @@ def test_complete_requires_current_candidate_all_programs_and_device_work(monkey
     assert not gate.complete(record, **kwargs)
     record["schema"] = "merlin.phase1.private_full_model_build_gate.v12"
     assert not gate.complete(record, **kwargs)
+    record["schema"] = "merlin.phase1.private_full_model_build_gate.v13"
+    assert not gate.complete(record, **kwargs)
     record["schema"] = gate.RESULT_SCHEMA
+    record["models"][0]["checks"]["source"]["prefix"].pop(maximum.FIELD)
+    assert not gate.complete(record, **kwargs)
+    record["models"][0] = model("a", programs["a"])
     record["models"][0]["checks"]["source"]["prefix"].pop("n_internal_mask_compactions")
     assert not gate.complete(record, **kwargs)
     record["models"][0] = model("a", programs["a"])
@@ -1578,6 +1601,13 @@ def test_shared_postbuild_verifier_rehashes_prebuilt_elf(tmp_path):
         "linalg_host_support": linalg.begin("3" * 64, "3" * 64, 3, deepcopy(selected)),
         "literal_arange_host_support": arange.begin("3" * 64, "3" * 64, 3, deepcopy(selected)),
         integer_reductions.FIELD: integer_reductions.begin("3" * 64, "3" * 64, 3, deepcopy(selected)),
+        maximum.FIELD: maximum.begin(
+            "3" * 64,
+            "3" * 64,
+            "a" * 64,
+            tuple(SimpleNamespace(attributes={}, properties={}) for _ in range(3)),
+            deepcopy(selected),
+        ),
         prepared_index.FIELD: _empty_prepared_index("3" * 64, "3" * 64, "a" * 64, 3, selected),
         ordered_scan.FIELD: {
             "status": ordered_scan.PENDING,

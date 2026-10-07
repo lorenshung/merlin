@@ -100,6 +100,11 @@ index-width premise must match the producer-owned linked build observation.
 An opt-in closed integer-reduction `source_body` admission is routed here, not
 to the pointwise Linalg witness; its declaration/profile/context and every
 parsed ordinal pattern are rechecked before the mandatory linked-build join.
+`private_f32_maximum_support.py` similarly requires a separate reviewed host
+decision before accepting a closed prepared maximumf reduction. It reparses
+every selected source ordinal and the capture tree after build, and binds the
+selected index observation plus candidate/capture/ELF bytes. It neither grants
+host placement nor equates signed-zero or reduction-order behavior with PyTorch.
 `private_index_source.py` is a grant-none diagnostic for two independent
 prepared tensor-index forms: an i1 mask's closed i64 count, and an indexed
 extract whose literal range/offset extrema are in bounds under a caller-supplied
