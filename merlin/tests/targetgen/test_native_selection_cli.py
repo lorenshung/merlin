@@ -110,6 +110,30 @@ def test_native_compilation_failure_keeps_search_status() -> None:
         NativeCompilationError("selected", "cannot be a failure")
 
 
+def test_native_select_abi_reservations_are_optional_and_checked(tmp_path: Path) -> None:
+    from merlin.semantic_compiler.allocate import Reservation
+    from merlin.targetgen.cli import _load_native_select_abi
+
+    assert _load_native_select_abi(None) == ({}, None, ())
+    abi_path = tmp_path / "abi.json"
+    abi_path.write_text(json.dumps({"fixed_inputs": {"x": 0}, "fixed_outputs": [2]}))
+    assert _load_native_select_abi(str(abi_path)) == ({"x": 0}, (2,), ())
+    row = {"storage": "external", "start": 1, "extent": 1}
+    abi_path.write_text(json.dumps({"fixed_inputs": {"x": 0}, "fixed_outputs": None, "reservations": [row]}))
+    assert _load_native_select_abi(str(abi_path)) == ({"x": 0}, None, (Reservation("external", 1, 1),))
+    refused = (
+        ({"fixed_inputs": {"x": 0}, "reservations": [row]}, "fixed_inputs and fixed_outputs"),
+        ({"fixed_inputs": {}, "fixed_outputs": None, "samples": []}, "fixed_inputs and fixed_outputs"),
+        ({"fixed_inputs": {}, "fixed_outputs": None, "reservations": row}, "storage/start/extent"),
+        ({"fixed_inputs": {}, "fixed_outputs": None, "reservations": [{**row, "end": 2}]}, "storage/start/extent"),
+        ({"fixed_inputs": {}, "fixed_outputs": None, "reservations": [{**row, "extent": 0}]}, "positive extent"),
+    )
+    for abi, message in refused:
+        abi_path.write_text(json.dumps(abi))
+        with pytest.raises(ValueError, match=message):
+            _load_native_select_abi(str(abi_path))
+
+
 def test_installed_native_build_select_and_failure_replace_stale_result(tmp_path: Path) -> None:
     dtype = TensorType((1,), "i32", "exact-i32")
     descriptor = InstructionDescriptor(
@@ -184,6 +208,50 @@ def test_installed_native_build_select_and_failure_replace_stale_result(tmp_path
     assert report["scope"] == "selection_only" and report["check_fingerprint"]
     assert report["allocation"]["addresses"] and report["selected_graph"]
     assert report["diagnostic_only"] is False and report["diagnostic_ablations"] == []
+    assert report["reservations"] == []
+
+    reservation = {"storage": "external", "start": 1, "extent": 1}
+    abi_path.write_text(json.dumps({"fixed_inputs": {"x": 0}, "fixed_outputs": [2], "reservations": [reservation]}))
+    reserved = _invoke(
+        "native-select",
+        "--engine",
+        "merlin_native",
+        "--snapshot",
+        snapshot,
+        "--request",
+        request_path,
+        "--abi",
+        abi_path,
+        "--out",
+        output,
+    )
+    assert reserved.returncode == 0, reserved.stderr + reserved.stdout
+    reserved_report = json.loads(output.read_text())
+    assert reserved_report["status"] == "selected"
+    assert reserved_report["reservations"] == [reservation]
+    assert reserved_report["check_fingerprint"] != report["check_fingerprint"]
+    occupied = range(reservation["start"], reservation["start"] + reservation["extent"])
+    assert not set(reserved_report["allocation"]["addresses"].values()) & set(occupied)
+
+    abi_path.write_text(json.dumps({"fixed_inputs": {"x": 0}, "fixed_outputs": [1], "reservations": [reservation]}))
+    blocked = _invoke(
+        "native-select",
+        "--engine",
+        "merlin_native",
+        "--snapshot",
+        snapshot,
+        "--request",
+        request_path,
+        "--abi",
+        abi_path,
+        "--out",
+        output,
+    )
+    assert blocked.returncode == 2, blocked.stderr + blocked.stdout
+    blocked_report = json.loads(output.read_text())
+    assert blocked_report["status"] != "selected" and blocked_report["allocation"] is None
+    assert blocked_report["reservations"] == [reservation]
+    abi_path.write_text(json.dumps({"fixed_inputs": {"x": 0}, "fixed_outputs": [1]}))
 
     limits = {
         "schema": "merlin.native_search_limits.v1",
