@@ -3,6 +3,7 @@
 from dataclasses import replace
 
 import pytest
+from test_ordered_fma_groups import contraction, module, narrow
 from xdsl.dialects import arith, builtin, func, memref
 from xdsl.ir import Block
 
@@ -13,7 +14,6 @@ from merlin.llvmlower.closed_group_writer import (
     source_function_semantic_sha256,
 )
 from merlin.llvmlower.ordered_bf16_group_binding import SourceExactGroupPreparation
-from merlin.tests.ir.test_ordered_fma_groups import contraction, module, narrow
 from merlin.xdsl_dialects._common import text
 
 

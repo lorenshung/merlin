@@ -3,6 +3,7 @@
 from dataclasses import replace
 
 import pytest
+from test_ordered_fma_groups import contraction, module, narrow, scale
 from xdsl.dialects import builtin, func
 from xdsl.ir import Block
 
@@ -17,7 +18,6 @@ from merlin.llvmlower.quantized_consumer_frontier import (
     analyze_quantized_consumer_frontier,
     quantized_consumer_semantic_sha256,
 )
-from merlin.tests.ir.test_ordered_fma_groups import contraction, module, narrow, scale
 from merlin.xdsl_dialects._common import text
 
 
@@ -250,9 +250,8 @@ def test_normal_callback_cached_source_owns_its_output_directory(tmp_path):
 
 
 def test_normal_observed_callback_reuses_one_explicit_private_workspace(tmp_path):
+    from test_private_writer_workspace import workspace
     from xdsl.dialects import memref
-
-    from merlin.tests.ir.test_private_writer_workspace import workspace
 
     ir, receipt, provider, proof, Preparation = preparation_contracts(tmp_path)
     original = next(
@@ -274,9 +273,8 @@ def test_normal_observed_callback_reuses_one_explicit_private_workspace(tmp_path
 
 @pytest.mark.parametrize("invalid_path", ["multiple_owners", "symbolic_escape"])
 def test_combined_workspace_preflight_refuses_before_any_producer_replacement(tmp_path, invalid_path):
+    from test_private_writer_workspace import workspace
     from xdsl.dialects import arith
-
-    from merlin.tests.ir.test_private_writer_workspace import workspace
 
     ir, receipt, provider, proof, Preparation = preparation_contracts(tmp_path)
     if invalid_path == "multiple_owners":
@@ -309,11 +307,12 @@ def test_combined_workspace_preflight_refuses_before_any_producer_replacement(tm
 
 
 def test_pooled_maxima_overflow_refuses_before_any_producer_replacement(tmp_path):
+    from test_private_writer_workspace import workspace
+
     from merlin.llvmlower.consumer_observed_group_writer import (
         ConsumerObservationContract,
         ConsumerObservedGroupPreparation,
     )
-    from merlin.tests.ir.test_private_writer_workspace import workspace
 
     ir, receipt, contracts, witnesses = prepare(tmp_path, different_source=True)
     large, small = workspace(1 << 62, 1), workspace(1, 1)

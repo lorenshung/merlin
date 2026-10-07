@@ -7,6 +7,7 @@ from dataclasses import replace
 
 import numpy as np
 import pytest
+from test_closed_group_writer import contract, prepared
 from xdsl.dialects import builtin, func, memref
 
 from merlin.llvmlower.closed_group_writer import (
@@ -14,7 +15,6 @@ from merlin.llvmlower.closed_group_writer import (
     source_function_semantic_sha256,
     writer_contract_sha256,
 )
-from merlin.tests.ir.test_closed_group_writer import contract, prepared
 from merlin.xdsl_dialects._common import text
 
 
@@ -91,7 +91,7 @@ def test_default_source_fallback_contract_hash_remains_compatible(tmp_path):
 
 
 @pytest.mark.parametrize("optimization", ["-O0", "-O2"])
-def test_actual_upstream_borrowed_writer_calls_original_source_fallback(tmp_path, optimization):
+def test_actual_upstream_borrowed_writer_calls_original_source_fallback(tmp_path, optimization, upstream_host_tools):
     from merlin.llvmlower.abi import HostModel
     from merlin.llvmlower.codegen import mlir_runtime_c
     from merlin.llvmlower.pipeline import lower_to_llvm_ir

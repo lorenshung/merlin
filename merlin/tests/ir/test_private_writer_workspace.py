@@ -7,10 +7,10 @@ from dataclasses import replace
 
 import numpy as np
 import pytest
+from test_fresh_tensor_writer import contract, fixture
 from xdsl.dialects import func, memref
 
 from merlin.llvmlower.fresh_tensor_writer import PrivateWorkspaceContract, rewrite_fresh_tensor_writers
-from merlin.tests.ir.test_fresh_tensor_writer import contract, fixture
 from merlin.xdsl_dialects._common import text
 
 
@@ -65,8 +65,9 @@ def test_private_workspace_is_not_a_tensor_argument_or_result():
 def test_workspace_contract_hash_keeps_empty_default_compatible(tmp_path):
     from dataclasses import asdict
 
+    from test_consumer_observed_group_writer import prepare
+
     from merlin.llvmlower.closed_group_writer import writer_contract_sha256
-    from merlin.tests.ir.test_consumer_observed_group_writer import prepare
 
     _, _, contracts, _ = prepare(tmp_path)
     value = next(iter(contracts.values()))
@@ -78,7 +79,7 @@ def test_workspace_contract_hash_keeps_empty_default_compatible(tmp_path):
 
 
 @pytest.mark.parametrize("optimization", ["-O0", "-O2"])
-def test_actual_upstream_private_workspace_native(tmp_path, optimization):
+def test_actual_upstream_private_workspace_native(tmp_path, optimization, upstream_host_tools):
     from merlin.llvmlower.abi import HostModel
     from merlin.llvmlower.codegen import mlir_runtime_c
     from merlin.llvmlower.pipeline import lower_to_llvm_ir

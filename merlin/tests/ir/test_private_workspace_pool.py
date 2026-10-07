@@ -5,14 +5,14 @@ from dataclasses import replace
 
 import numpy as np
 import pytest
+from test_fresh_tensor_writer import contract
+from test_private_writer_workspace import workspace
 from xdsl.dialects import func, memref, tensor
 from xdsl.dialects.builtin import ArrayAttr, DictionaryAttr, StringAttr, SymbolRefAttr
 from xdsl.parser import Parser
 
 from merlin.llvmlower.fresh_tensor_writer import rewrite_fresh_tensor_writers
 from merlin.llvmlower.private_workspace_pool import pool_private_writer_workspaces
-from merlin.tests.ir.test_fresh_tensor_writer import contract
-from merlin.tests.ir.test_private_writer_workspace import workspace
 from merlin.xdsl_dialects._common import make_context, text
 
 SOURCE = """module {
@@ -95,7 +95,7 @@ def test_unsupported_pooling_refuses_before_mutation(mutation):
 
 
 @pytest.mark.parametrize("optimization", ["-O0", "-O2"])
-def test_actual_upstream_pooled_workspace_native(tmp_path, optimization):
+def test_actual_upstream_pooled_workspace_native(tmp_path, optimization, upstream_host_tools):
     from merlin.llvmlower.abi import HostModel
     from merlin.llvmlower.codegen import mlir_runtime_c
     from merlin.llvmlower.pipeline import lower_to_llvm_ir

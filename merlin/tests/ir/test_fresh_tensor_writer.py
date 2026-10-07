@@ -75,7 +75,9 @@ def test_empty_selection_is_unchanged():
 @pytest.mark.parametrize("optimization", ["-O0", "-O2"])
 @pytest.mark.parametrize("declaration_abi", ["ranked_c", "expanded_memref"])
 @pytest.mark.parametrize("live_destination", [False, True])
-def test_multiple_full_writers_native_default_deallocation(tmp_path, optimization, declaration_abi, live_destination):
+def test_multiple_full_writers_native_default_deallocation(
+    tmp_path, optimization, declaration_abi, live_destination, upstream_host_tools
+):
     from merlin.llvmlower.abi import HostModel
     from merlin.llvmlower.codegen import mlir_runtime_c
     from merlin.llvmlower.pipeline import lower_to_llvm_ir

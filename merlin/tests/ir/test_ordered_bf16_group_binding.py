@@ -3,12 +3,12 @@
 import hashlib
 
 import pytest
+from test_ordered_fma_groups import contraction, module, narrow, simple
 from xdsl.dialects import arith, builtin, func
 from xdsl.ir import Block
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.ordered_bf16_group_binding import SourceExactGroupPreparation, verify_group_call_coverage
-from merlin.tests.ir.test_ordered_fma_groups import contraction, module, narrow, simple
 from merlin.xdsl_dialects._common import text
 
 

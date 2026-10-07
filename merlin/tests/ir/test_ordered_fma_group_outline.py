@@ -5,6 +5,7 @@ import subprocess
 
 import numpy as np
 import pytest
+from test_ordered_fma_groups import simple
 from xdsl.dialects import builtin, func
 
 from merlin.llvmlower.abi import HostModel
@@ -13,7 +14,6 @@ from merlin.llvmlower.ordered_fma_group_outline import outline_ordered_fma_group
 from merlin.llvmlower.ordered_fma_groups import analyze_ordered_fma_groups
 from merlin.llvmlower.pipeline import lower_to_llvm_ir
 from merlin.llvmlower.toolchain import clang
-from merlin.tests.ir.test_ordered_fma_groups import simple
 from merlin.xdsl_dialects._common import text
 
 
@@ -79,7 +79,7 @@ def compile_and_run(tmp_path, source, arguments):
 
 
 @pytest.mark.parametrize("values", ["independent", "cancellation", "special"])
-def test_actual_compiled_source_partition_matches_original_bits(tmp_path, values):
+def test_actual_compiled_source_partition_matches_original_bits(tmp_path, values, upstream_host_tools):
     module, root, scaled, endpoint = simple()
     module.body.block.first_op.attributes["llvm.emit_c_interface"] = builtin.UnitAttr()
     original = text(module)
