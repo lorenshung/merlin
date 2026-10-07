@@ -5,6 +5,7 @@ review:
   decision: "operator decision 2026-10-01 via coordinating session, approving W1_DECLARATIONS_DRAFT.md"
   scope: the 150 host placements proposed by the RTL facts in W1_SEAL_REVIEW.md
   addendum: "operator approval 2026-10-03 in this session: exact rank-3/4 i8/f32/i64 dequantize_per_tensor host contract only; finite native checks do not prove device execution"
+  primitive_addendum: "operator approval 2026-10-06 in this session: only the eight exact typed scalar-host primitive declarations below; finite saved probes do not certify all inputs, emitted compiler, accelerator, or RTL execution"
 compiler:
   package_sha256: 89e00e39c929ec0310b0a60d1860d2d8fa833b7ef1a57af5775092c24d5ebb9a
   dtype_strategy: int8_w8a8
@@ -84,6 +85,26 @@ operations:
       status: reviewed
       semantics: {arithmetic: exact_copy, index_dtype: i64, index_domain: "0 <= index < num_embeddings (out-of-range not admitted)"}
       evidence: {reviewed_by: "operator decision 2026-10-01 via coordinating session, approving W1_DECLARATIONS_DRAFT.md", basis: "observed i64,f32->f32 signature with linalg.index/arith.index_cast/tensor.extract body (pure gather) in the captured graph"}
+  - id: host_f32_value_only_max_pool
+    status: reviewed
+    ops: [aten.max_pool2d_with_indices.default]
+    families: [reduction]
+    placement: host
+    signature: {ordered_operand_dtypes: [f32, f32, f32], ordered_result_dtypes: [f32], ranks: [4]}
+    numerical_contract:
+      status: reviewed
+      semantics:
+        arithmetic: ieee754_binary32
+        layout: static_nchw
+        output: values_only_indices_must_be_unused
+        geometry: floor
+        padding: negative_infinity
+        reduction_order: selected_lowering
+        equal_values: first_maximum
+        nan: last_encountered_nan
+      evidence:
+        reviewed_by: "operator approval 2026-10-06 in this session"
+        basis: "Independent selected scalar-package Spike geometry and tie checks matched exactly (six and three output values). Admission additionally requires the fail-closed source check of static geometry, floor mode, unused indices, negative-infinity padding and exact ordered reduction. Finite checks do not prove all values, Rocket RTL execution or whole-model correctness; no BF16 or accelerator support is admitted."
   - id: host_f32_batched_contraction
     ops: [aten.bmm.default]
     families: [contraction]
@@ -94,6 +115,88 @@ operations:
       semantics: {arithmetic: ieee754_binary32, product_rounding: round_to_nearest_even, accumulator: f32,
                   reduction_order: selected_lowering, subnormals: preserved, fma_contraction: selected_lowering}
       evidence: {reviewed_by: "operator decision 2026-10-01 via coordinating session, approving W1_DECLARATIONS_DRAFT.md", basis: "observed f32 bmm signature (accum f32, rank 3); RTL facts admit only int8 operands on the accelerator datapath; emitted scalar-package execution remains an obligation"}
+  # The ordered operands below include the output/init operand of each lowering.
+  # Only these exact typed/rank selectors were approved on 2026-10-06.
+  - id: host_f32_neg_rank4
+    status: reviewed
+    ops: [aten.neg.default]
+    families: [elementwise_map]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [f32, f32], ordered_result_dtypes: [f32], ranks: [4]}
+    numerical_contract:
+      status: reviewed
+      semantics: {operation: ieee754_binary32_sign_bit_negation, flags: none, native_nonfinite: unqualified}
+      evidence: {reviewed_by: "operator approval 2026-10-06", basis: "Exact typed source/IR screen and independent finite selected-scalar-package probe; nonfinite native execution and all-input correctness remain unqualified."}
+  - id: host_f32_ge_scalar_rank4
+    status: reviewed
+    ops: [aten.ge.Scalar]
+    families: [elementwise_map]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [f32, f32, i1], ordered_result_dtypes: [i1], ranks: [4]}
+    numerical_contract:
+      status: reviewed
+      semantics: {comparison: ordered_greater_or_equal, signed_zero: compares_equal, nan: false}
+      evidence: {reviewed_by: "operator approval 2026-10-06", basis: "Exact typed source/IR screen and independent finite selected-scalar-package probe; all-input and RTL execution remain unqualified."}
+  - id: host_f32_where_rank4
+    status: reviewed
+    ops: [aten.where.self]
+    families: [elementwise_map]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [i1, f32, f32, f32], ordered_result_dtypes: [f32], ranks: [4]}
+    numerical_contract:
+      status: reviewed
+      semantics: {selection: predicate_selected_operand, arithmetic_on_selected_value: none}
+      evidence: {reviewed_by: "operator approval 2026-10-06", basis: "Exact typed source/IR screen and independent finite selected-scalar-package probe; all-input and RTL execution remain unqualified."}
+  - id: host_i64_scalar_eq_le_rank1
+    status: reviewed
+    ops: [aten.eq.Scalar, aten.le.Scalar, aten.eq.Tensor]
+    families: [elementwise_map]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [i64, i64, i1], ordered_result_dtypes: [i1], ranks: [1]}
+    numerical_contract:
+      status: reviewed
+      semantics: {comparison: exact_signed_integer_equality_or_order, integer_dtype: i64}
+      evidence: {reviewed_by: "operator approval 2026-10-06", basis: "Exact typed source/IR screen and saved rank-1 signed-endpoint Spike probe; 18 output words matched, not an all-input or RTL proof."}
+  - id: host_i64_tensor_le_rank1_rank4
+    status: reviewed
+    ops: [aten.le.Tensor]
+    families: [elementwise_map]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [i64, i64, i1], ordered_result_dtypes: [i1], ranks: [1, 4]}
+    numerical_contract:
+      status: reviewed
+      semantics: {comparison: exact_signed_integer_order, integer_dtype: i64}
+      evidence: {reviewed_by: "operator approval 2026-10-06", basis: "Exact typed source/IR screen and independent rank-1/rank-4 finite probes; no all-input or RTL proof."}
+  - id: host_i64_add_rank1
+    status: reviewed
+    ops: [aten.add.Tensor]
+    families: [elementwise_map]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [i64, i64, i64], ordered_result_dtypes: [i64], ranks: [1]}
+    numerical_contract:
+      status: reviewed
+      semantics: {arithmetic: twos_complement_modulo_2_64, signed_no_wrap: false}
+      evidence: {reviewed_by: "operator approval 2026-10-06", basis: "Exact typed source/IR screen and independent selected-scalar-package probe checking every result bit; no all-input or RTL proof."}
+  - id: host_i1_to_f32_rank1_rank4
+    status: reviewed
+    ops: [aten._to_copy.default]
+    families: [elementwise_map]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [i1, f32], ordered_result_dtypes: [f32], ranks: [1, 4]}
+    numerical_contract:
+      status: reviewed
+      semantics: {conversion: unsigned_boolean_to_ieee754_binary32, exact_values: [0, 1], signed_i1_conversion: excluded}
+      evidence: {reviewed_by: "operator approval 2026-10-06", basis: "Exact typed source/IR screen; saved signed-endpoint compare capture lowers Boolean conversion as uitofp i1 and matches all 18 output words on Spike, not RTL or all-input proof."}
+  - id: host_i64_to_f32_rank1_rank3
+    status: reviewed
+    ops: [aten._to_copy.default]
+    families: [elementwise_map]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [i64, f32], ordered_result_dtypes: [f32], ranks: [1, 3]}
+    numerical_contract:
+      status: reviewed
+      semantics: {conversion: signed_int64_to_ieee754_binary32, rounding: round_to_nearest_even, execution: selected_startup_and_isa_path}
+      evidence: {reviewed_by: "operator approval 2026-10-06", basis: "Exact typed source/IR screen and independent finite selected-scalar-package probe; all-input and RTL execution remain unqualified."}
 evidence:
   source: Content identity of the host package selected by descriptor.yaml.
   inspected_package:

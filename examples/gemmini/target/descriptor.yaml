@@ -109,6 +109,9 @@ workload_spec:
     model_scale: [deepjscc_int8_consistent, lstmnetvit_fp8_consistent,
                   lstmnetvit_int8_consistent, lstmnetvit_int8_w8a8_consistent]
   cert_budget_s: 300
+  # Every generated member must require direct RTL certification; costs remain
+  # unknown until measured. Larger application shapes are not L2-only substitutes.
+  certification_floor: L3
   precision_preference: [int8, fp8_e4m3, mxfp8, fp16, bf16, fp32]
   max_synthesized_capsules: 160
 

@@ -149,6 +149,12 @@ If the installed checkout has no `third_party/llvm-install`, set `MERLIN_CLANG`
 to the absolute `bin/clang-23` in the selected LLVM/MLIR install before preparing
 the release. New generated bundle manifests then name that exact install, and
 the sandbox uses the same compiler and `mlir-opt`; old manifests are unchanged.
+When the graded scope contains model capsules, explicitly set `MERLIN_M2M_PYTHON`
+to the absolute reference interpreter that imports Torch, NumPy and safetensors.
+Startup probes it before authoring and records its path and interpreter bytes;
+resume refuses a changed or missing selection. This binding is independent of
+`MERLIN_COMPILER_PYTHON` and does not qualify the framework dependency closure or
+add BF16 support to the target host. A sibling checkout is not an installed runtime.
 
 The direct installed CLI below selects the same treatment. For an installed
 **baseline** catalog route instead, use the shared

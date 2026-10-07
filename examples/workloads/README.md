@@ -17,6 +17,11 @@ Their smaller shapes are deliberate. Inspect exact frontend and MLIR signatures,
 layouts, storage/compute/accumulator precision and transfer obligations before
 making a property-specific comparison. A matching operator name alone is insufficient.
 
+The [host-control/math probes](host_control_math/README.md) independently exercise
+scalar arithmetic, masks, selection and trigonometry with an exact saved-capture
+checker. They are diagnostic inputs, not permission for host fallback or evidence
+of accelerator support.
+
 The [per-tensor dequantization probes](quant_boundary/loader.py) are separate,
 target-independent operation diagnostics. The [rank-4 companion](quant_boundary/loader_rank4.py)
 checks every int8 input value at a non-power-of-two scale; each has one result because the native-host

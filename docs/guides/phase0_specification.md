@@ -19,6 +19,8 @@ code_refs:
   - packages/merlin-experiments/src/merlin_experiments/phase0/m2m_runtime.py
   - packages/merlin-experiments/src/merlin_experiments/phase0/evidence_status.py
   - src/merlin/targetgen/spec_fact_drift.py
+  - src/merlin/targetgen/_m2m_capture_worker.py
+  - packages/merlin-experiments/src/merlin_experiments/capture_execution/precision_staging.py
 ---
 
 # Define the software contract before generating tests
@@ -389,6 +391,36 @@ establish model accuracy. Preserve the original FP32 capture as reference lineag
 and derive a fresh corpus from the actual quantized capture before claiming its
 precision coverage. Scoped dynamic module transforms are not currently supported
 by this signature-screened recipe route.
+
+If the selected host contract admits FP32 but not the source model's BF16,
+explicitly select `--stage-fp32` before the recipe transformation. A sealed
+capture binds the same choice as `worker_options: {stage_fp32: true}`; it does
+not inherit a precision choice from the shell. This requires Model2MLIR's
+audited, schema-owned floating-dtype retargeting API. It changes the captured
+static program, not dtype-dependent Python branches, and does not add BF16 host
+support. The option supports FP32 capture or an explicitly selected int8 recipe,
+not additional ad hoc quantization rewrites.
+
+Inspect `meta.json`'s `precision_conversion` and `fp32_staging`: original and
+staged graph identities, typed input/output ABIs, source-layer placement plan,
+and original-to-FP32 output differences observed **before** quantization.
+Loader-owned calibration is collected from the original module before export,
+copying each yielded sample before its producer can reuse storage. Collection
+is bounded by the quantizer's calibration/agreement budgets, then staged to
+FP32. `calibration_input_abis` records original and staged shapes/dtypes;
+it is not a numerical-equivalence certificate.
+For a semantic session, the audited FP32 stage also freezes its independent
+pre-quantization trajectory in `session_quality_fp32.npz`. Floating observation
+streams are staged to the actual input ABI; integer/bool streams remain exact.
+The integerized trajectory is separately saved in `session_goldens.npz`.
+These are stage-local references over declared inputs and recurrence, not a
+claim of whole-application FP32 accuracy or BF16 target-host support.
+Integer/bool output values and types must remain exact. The recipe agreement
+then compares quantized execution against the FP32 stage, while the integer
+reference checks the integerized graph independently. None of these selected
+input observations proves full-model accuracy; residual unsupported precision
+or incomplete precision evidence still blocks admission. Changed producer
+bytes or staging options require a fresh capture selection, not edited receipts.
 
 Reviewed operation declarations can carry `numerical_contract` with `status`,
 structured `semantics` and review `evidence`, or name a supported contract. The named
