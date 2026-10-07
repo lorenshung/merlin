@@ -39,6 +39,7 @@ selfcheck_out/
 /out/build/agent-workspaces/**
 /out/build/*-install-check/**
 /out/build/upstreams/**
+/out/build/worktrees/**
 /out/**/cmake-out/**
 /out/**/third-party/**
 /out/**/third_party/**

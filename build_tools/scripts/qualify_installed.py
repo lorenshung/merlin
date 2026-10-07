@@ -1,7 +1,9 @@
 """Qualify committed core+experiments distributions outside the source checkout.
 
 Usage: python build_tools/scripts/qualify_installed.py --ref HEAD --suite phase1
-phase1 replays controller, CLI and RTL-feedback tests with the declared core[xdsl] extra.
+phase1 replays controller, CLI, RTL-feedback and private model-gate tests with core[xdsl].
+runtime-admission checks cross-process simulator reservations without launching native simulators.
+device-shim replays native C-interface ABI and numerical shim tests from the installed core.
 phase0-inputs replays explicit recipe loading and declaration resolution, not hardware derivation.
 reviewed-corpus joins derivation, explicit review, installed Phase-1 authoring,
 formal receipts and the Phase-2 checkpoint lifecycle against the same candidate
@@ -62,6 +64,75 @@ import uuid
 from pathlib import Path
 
 SUITES = {
+    "readback": {
+        # The policy tests exercise core builds and experiments-owned oracle adapters.
+        "include_experiments": True,
+        "tests_root": "merlin/tests",
+        "tests": (
+            "runtime/test_out_b64.py",
+            "targetgen/test_invocation_readback_policy.py",
+            "infra/test_elf_build_cache.py",
+        ),
+        "core_extras": ("xdsl",),
+        "probe_modules": ("merlin.runtime.out_b64", "merlin.targetgen.contract.readback_policy"),
+        "required_modules": ("xdsl",),
+    },
+    "runtime-admission": {
+        "include_experiments": False,
+        "tests_root": "merlin/tests",
+        "tests": ("targetgen/test_rtl_engine_policy.py",),
+        "core_extras": ("xdsl",),
+        "probe_modules": ("merlin.targetgen.rtl_engine_policy", "merlin.runtime.backends.base"),
+        "required_modules": ("xdsl",),
+    },
+    "host-output": {
+        "include_experiments": False,
+        "tests_root": "merlin/tests",
+        "tests": (
+            "runtime/test_spike_model_exit.py",
+            "rvv/test_scalar_host_qualification.py",
+            "ir/test_quant_host_precision_policy.py",
+            "ir/test_outline.py",
+            "ir/test_quant_scope.py",
+            "rvv/test_quant_passes.py",
+            "runtime/test_compilation_recipe.py",
+        ),
+        "core_extras": ("xdsl",),
+        "probe_modules": (
+            "merlin.compile.scalar_host_qualification",
+            "merlin.llvmlower.c_runtime",
+            "merlin.runtime.backends.spike_model",
+        ),
+        "required_modules": ("xdsl",),
+    },
+    "llvm-schema": {
+        "include_experiments": False,
+        "tests_root": "merlin/tests/targetgen",
+        "tests": (
+            "test_public_llvm_metadata.py",
+            "test_model_demand_canonical_family.py",
+            "test_public_mixed_program_plan.py",
+        ),
+        "core_extras": ("xdsl", "targetgen"),
+        "probe_modules": ("merlin.targetgen.oot_starterkit.llvm_context", "merlin.targetgen.capsule_source"),
+        "required_modules": ("xdsl", "jsonschema"),
+    },
+    "device-abi": {
+        "include_experiments": False,
+        "tests_root": "merlin/tests/infra",
+        "tests": ("test_device_abi_resources.py",),
+        "core_extras": (),
+        "probe_modules": ("merlin.llvmlower.device_shim", "merlin.targetgen.contract.schemas"),
+        "required_modules": (),
+    },
+    "device-shim": {
+        "include_experiments": False,
+        "tests_root": "merlin/tests/ir",
+        "tests": ("test_device_shim_abi.py",),
+        "core_extras": (),
+        "probe_modules": ("merlin.llvmlower.device_shim",),
+        "required_modules": (),
+    },
     "portfolio-cli": {
         "guarded_tests": True,
         "tests": ("test_portfolio_cli.py", "test_portfolio_catalog.py", "test_portfolio_launch.py"),
@@ -191,7 +262,17 @@ SUITES = {
         "required_modules": ("xdsl",),
     },
     "phase0-inputs": {
-        "tests": ("test_phase0_explicit_inputs.py", "test_phase0_declarations.py", "test_phase0_comparison.py"),
+        "tests": (
+            "test_phase0_explicit_inputs.py",
+            "test_phase0_declarations.py",
+            "test_phase0_comparison.py",
+            "test_certification_floor.py",
+        ),
+        "source_inputs": (
+            "examples/*/experiment.yaml",
+            "examples/*/target/descriptor.yaml",
+            "examples/*/phase0/recipe.yaml",
+        ),
         "core_extras": (),
         "probe_modules": (
             "merlin_experiments.phase0.profiles",
@@ -200,21 +281,43 @@ SUITES = {
         ),
         "required_modules": (),
     },
+    "capture-staging": {
+        "tests": (
+            "test_sealed_generation_capture.py",
+            "test_sealed_m2m_capture.py",
+            "test_sealed_runtime_budget.py",
+            "test_runtime_rehydrate.py",
+        ),
+        "core_extras": (),
+        "probe_modules": (
+            "merlin_experiments.capture_execution.precision_staging",
+            "merlin_experiments.capture_execution.sealed_m2m",
+            "merlin_experiments.capture_execution.runtime_rehydrate",
+            "merlin_experiments.phase0.sealed_generation",
+        ),
+        "required_modules": (),
+    },
     "reviewed-corpus": {
         "tests": (
+            "test_phase0_comparison_screen.py",
             "test_reviewed_corpus_phase1_handoff.py",
             "test_phase1_formal_handoff.py",
             "test_checkpoint_lifecycle.py",
             "test_corpus_release.py",
             "test_exact_offload_release_binding.py",
+            "test_private_source_freeze.py",
+            "test_private_full_models.py",
         ),
         "support_files": ("reviewed_corpus_fixtures.py", "phase1_feedback_fixtures.py"),
-        "source_inputs": ("examples/gemmini/target/descriptor.yaml",),  # target-ok: these tests' fixture descriptor
+        "source_inputs": ("examples/*/target/descriptor.yaml",),
         "core_extras": ("xdsl",),
         "probe_modules": (
             "merlin_experiments.phase0",
             "merlin_experiments.corpus.release",
             "merlin_experiments.phase1.corpus_inputs",
+            "merlin_experiments.phase1.feedback.private_source_freeze",
+            "merlin_experiments.phase1.feedback.private_full_models",
+            "merlin_experiments.phase1.feedback.formal",
             "merlin_experiments.phase2.functional_inputs",
         ),
         "required_modules": ("xdsl",),
@@ -223,20 +326,80 @@ SUITES = {
             "merlin_experiments.corpus.release:verify_exact_offload_binding",
         ),
     },
-    "phase1": {
-        "tests": ("test_phase1_controller.py", "test_phase1_cli.py", "test_phase1_rtlchecks.py"),
+    "model-source-lifecycle": {
+        "tests_root": "merlin/tests/targetgen",
+        "tests": (
+            "test_model_capsule_budget.py",
+            "test_coverage_certificate.py",
+            "test_public_mixed_program_plan.py",
+        ),
         "core_extras": ("xdsl",),
-        "probe_modules": tuple(
+        "probe_modules": (
+            "merlin.targetgen.capsule_runner",
+            "merlin.targetgen.capsule_grade",
+            "merlin.targetgen.native_model_execution",
+            "merlin.targetgen.coverage_certificate",
+            "merlin.targetgen.oot_starterkit.plan",
+        ),
+        "required_modules": ("xdsl",),
+    },
+    "phase1": {
+        "tests": (
+            "test_phase1_controller.py",
+            "test_phase1_session.py",
+            "test_phase1_readback_selection.py",
+            "test_phase1_cli.py",
+            "test_phase1_feedback.py",
+            "test_phase1_codegen_scalability.py",
+            "test_phase1_rtlchecks.py",
+            "test_native_model_execution.py",
+            "test_private_full_models.py",
+            "test_private_pointwise_support.py",
+            "test_private_linalg_support.py",
+            "test_private_literal_arange.py",
+            "test_private_integer_reduction_support.py",
+            "test_private_ordered_scan_support.py",
+            "test_private_bucketize_support.py",
+            "test_private_source_freeze.py",
+            "test_private_control_support.py",
+            "test_private_pool_support.py",
+            "test_private_pure_stage_support.py",
+            "test_capsule_suite_dependencies.py",
+            "test_public_caller_layout.py",
+        ),
+        "support_files": ("phase1_feedback_fixtures.py",),
+        "source_inputs": ("examples/*/target/descriptor.yaml",),
+        "core_extras": ("xdsl",),
+        "probe_modules": ("merlin.targetgen.contract.readback_policy", "merlin.runtime.out_b64")
+        + tuple(
             "merlin_experiments.phase1." + tail
             for tail in (
                 "authoring",
                 "audit",
                 "runtime_environment",
+                "session",
                 "controller",
                 "task_staging",
                 "workspace_transport",
                 "feedback.certification",
+                "feedback.qa",
+                "feedback.codegen_scalability",
                 "feedback.rtlchecks",
+                "feedback.private_full_models",
+                "feedback.private_capture_roster",
+                "feedback.private_pointwise_support",
+                "feedback.private_linalg_support",
+                "feedback.private_literal_arange",
+                "feedback.private_literal_arange_admission",
+                "feedback.private_integer_reduction_support",
+                "feedback.private_ordered_scan_support",
+                "feedback.private_bucketize_support",
+                "feedback.private_source_freeze",
+                "feedback.private_pool_support",
+                "feedback.private_pure_stage_support",
+                "feedback.private_group_provenance",
+                "feedback.private_device_audit",
+                "feedback.caller_layout",
             )
         ),
         "required_modules": ("xdsl",),
@@ -608,6 +771,42 @@ def only_artifact(directory, pattern):
     return files[0]
 
 
+def source_input_archive_roots(patterns):
+    """Archive literal owners; expand patterns only inside the selected commit."""
+    roots = []
+    for pattern in patterns:
+        member = Path(pattern)
+        if member.is_absolute() or ".." in member.parts or not member.parts:
+            raise QualificationFailed(f"unsafe source input pattern: {pattern}")
+        literal = []
+        for part in member.parts:
+            if any(char in part for char in "*?["):
+                break
+            literal.append(part)
+        if not literal:
+            raise QualificationFailed(f"source input pattern has no literal owner: {pattern}")
+        roots.append(Path(*literal).as_posix())
+    return tuple(dict.fromkeys(roots))
+
+
+def selected_source_inputs(snapshot, patterns):
+    source_input_archive_roots(patterns)
+    names = set()
+    for pattern in patterns:
+        matched = sorted(snapshot.glob(pattern))
+        if not matched:
+            raise QualificationFailed(f"selected committed source input is missing: {pattern}")
+        for source_path in matched:
+            member = source_path.relative_to(snapshot)
+            symlinked = any(
+                snapshot.joinpath(*member.parts[:index]).is_symlink() for index in range(1, len(member.parts) + 1)
+            )
+            if not source_path.is_file() or symlinked or not source_path.resolve().is_relative_to(snapshot.resolve()):
+                raise QualificationFailed(f"selected committed source input is unsafe: {member}")
+            names.add(member.as_posix())
+    return tuple(sorted(names))
+
+
 def qualify(root, output, commit, suite, timeout, *, requested_ref=None, invocation=None):
     own = Path(__file__).resolve()
     helper = own.with_name("installed_qualification_probe.py")
@@ -667,7 +866,7 @@ def qualify(root, output, commit, suite, timeout, *, requested_ref=None, invocat
             "packages/merlin-experiments/setup.py",
             "packages/merlin-experiments/pyproject.toml",
             *[(tests_root / n).as_posix() for n in test_files],
-            *source_inputs,
+            *source_input_archive_roots(source_inputs),
             *resources,
         ]
         archive = output / "source.tar"
@@ -679,20 +878,7 @@ def qualify(root, output, commit, suite, timeout, *, requested_ref=None, invocat
         for name in test_files:
             if not (snapshot / tests_root / name).is_file():
                 raise QualificationFailed(f"selected committed test/support file is missing: {name}")
-        for name in source_inputs:
-            member = Path(name)
-            source_path = snapshot / member
-            symlinked = any(
-                snapshot.joinpath(*member.parts[:index]).is_symlink() for index in range(1, len(member.parts) + 1)
-            )
-            if (
-                member.is_absolute()
-                or ".." in member.parts
-                or not source_path.is_file()
-                or symlinked
-                or not source_path.resolve().is_relative_to(snapshot.resolve())
-            ):
-                raise QualificationFailed(f"selected committed source input is missing or unsafe: {name}")
+        source_inputs = selected_source_inputs(snapshot, source_inputs)
         report["source_archive_sha256"] = digest(archive)
         report["source_files"] = {str(p.relative_to(snapshot)): digest(p) for p in snapshot.rglob("*") if p.is_file()}
         report["projects"] = projects(
@@ -749,6 +935,7 @@ def qualify(root, output, commit, suite, timeout, *, requested_ref=None, invocat
         tests = external / "qualification-tests"
         tests.mkdir()
         for name in test_files:
+            (tests / name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(snapshot / tests_root / name, tests / name)
         for name in source_inputs:
             retained = tests / "source-inputs" / name

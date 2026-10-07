@@ -25,6 +25,30 @@ def load(name):
 Q = load("qualify_installed")
 
 
+def test_source_input_patterns_are_target_neutral_and_archive_bound(tmp_path):
+    pattern = "examples/*/target/descriptor.yaml"
+    for target in ("neutral_a", "neutral_b"):
+        member = tmp_path / "examples" / target / "target" / "descriptor.yaml"
+        member.parent.mkdir(parents=True)
+        member.write_text("selected committed descriptor")
+    assert Q.source_input_archive_roots((pattern,)) == ("examples",)
+    assert Q.selected_source_inputs(tmp_path, (pattern,)) == (
+        "examples/neutral_a/target/descriptor.yaml",
+        "examples/neutral_b/target/descriptor.yaml",
+    )
+    for unsafe in ("../escape", "/absolute", "*.yaml"):
+        with pytest.raises(Q.QualificationFailed):
+            Q.source_input_archive_roots((unsafe,))
+    with pytest.raises(Q.QualificationFailed, match="missing"):
+        Q.selected_source_inputs(tmp_path, ("missing/*.yaml",))
+    (tmp_path / "examples/neutral_a/target/descriptor.yaml").unlink()
+    (tmp_path / "examples/neutral_a/target/descriptor.yaml").symlink_to(
+        tmp_path / "examples/neutral_b/target/descriptor.yaml"
+    )
+    with pytest.raises(Q.QualificationFailed, match="unsafe"):
+        Q.selected_source_inputs(tmp_path, (pattern,))
+
+
 def test_guarded_test_entrypoint_blocks_execution_before_pytest_main(monkeypatch):
     import runpy
     import socket
@@ -87,8 +111,15 @@ def test_output_refuses_existing_even_empty_and_linked_ancestors(tmp_path):
 
 def test_environment_removes_source_and_provider_overrides(monkeypatch):
     for key in (
-        "PYTHONPATH", "PYTHONHOME", "MERLIN_TARGET_PATH", "AET_CONFIG", "CHIA_CONFIG",
-        "UV_OVERRIDE", "UV_EXCLUDE", "UV_CONSTRAINT", "UV_BUILD_CONSTRAINT",
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "MERLIN_TARGET_PATH",
+        "AET_CONFIG",
+        "CHIA_CONFIG",
+        "UV_OVERRIDE",
+        "UV_EXCLUDE",
+        "UV_CONSTRAINT",
+        "UV_BUILD_CONSTRAINT",
     ):
         monkeypatch.setenv(key, "must not leak")
     environment = Q.clean_environment()
@@ -215,7 +246,7 @@ def test_pipeline_uses_archived_versions_extra_and_probe_before_pytest(monkeypat
         elif label == "source-archive":
             core = '[project]\nname="merlin"\nversion="7.8.9"\n'
             if not missing_extra:
-                core += '[project.optional-dependencies]\nxdsl=["xdsl>=0.68"]\n'
+                core += '[project.optional-dependencies]\nxdsl=["xdsl>=0.68"]\ntargetgen=["jsonschema>=4"]\n'
             files = {
                 "pyproject.toml": core,
                 "packages/merlin-experiments/pyproject.toml": '[project]\nname="merlin-experiments"\nversion="9.8.7"\n',
@@ -223,6 +254,8 @@ def test_pipeline_uses_archived_versions_extra_and_probe_before_pytest(monkeypat
             for name in (*Q.SUITES[suite]["tests"], *Q.SUITES[suite].get("support_files", ())):
                 tests_root = Q.SUITES[suite].get("tests_root", "packages/merlin-experiments/tests")
                 files[tests_root + "/" + name] = "# committed synthetic test\n"
+            for pattern in Q.SUITES[suite].get("source_inputs", ()):
+                files[pattern.replace("*", "neutral")] = "# committed synthetic input\n"
             with tarfile.open(stdout, "w") as archive:
                 for name, text in files.items():
                     data = text.encode()
@@ -255,7 +288,8 @@ def test_pipeline_uses_archived_versions_extra_and_probe_before_pytest(monkeypat
     )
     install = dict(calls)["install"]
     assert "pytest" not in install
-    assert any(item.endswith(".whl[xdsl]") for item in install) == bool(Q.SUITES[suite]["core_extras"])
+    extra_suffix = ".whl[" + ",".join(Q.SUITES[suite]["core_extras"]) + "]"
+    assert any(item.endswith(extra_suffix) for item in install) == bool(Q.SUITES[suite]["core_extras"])
     assert report["selected_tests"] == list(Q.SUITES[suite]["tests"])
     assert report["support_files"] == list(Q.SUITES[suite].get("support_files", ()))
     assert report["probe_modules"] == list(Q.SUITES[suite]["probe_modules"])
