@@ -21,7 +21,7 @@ import json
 import os
 import struct
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -427,6 +427,7 @@ def build(
     rvv_schedule: str | None = None,
     host_vectorize: bool | None = None,
     host_math_policy: str = "native",
+    math_archive_symbols: Sequence[str] | None = None,
     host_llvm_transform: Callable[[Path, Path], Path] | None = None,
     host_provider_builder: Callable | None = None,
     cflags_override: list[str] | None = None,
@@ -453,6 +454,11 @@ def build(
     ``expf_via_double`` changes libm returned-value precision; callers must
     qualify their original numerical contract. It does not preserve errno or
     floating-point exception equivalence to native expf.
+
+    ``math_archive_symbols`` optionally requests actual-link defining-supplier
+    traces for caller-selected C symbols. Each must resolve to the selected
+    byte-pinned math archive; the default link and receipt are unchanged. This
+    does not prove source-call routing or numerical equivalence.
 
     ``output_dump_cap`` limits raw output values printed after model timing. Set
     it to the full output size for whole-output target correctness validation.
@@ -515,9 +521,11 @@ def build(
     """
     from ...llvmlower.compilation_recipe import FILENAME as COMPILATION_RECIPE
     from ...llvmlower.compilation_recipe import CompilationRecipe
+    from ...llvmlower.link_supplier_trace import trace_symbol_flags
 
     # Refusal during validation must not leave a previous build's success receipt.
     (Path(work) / COMPILATION_RECIPE).unlink(missing_ok=True)
+    supplier_flags = () if math_archive_symbols is None else trace_symbol_flags(math_archive_symbols)
     from ...llvmlower.quant_passes import compute_passes
 
     if not int8_compute and quant_passes is not None:
@@ -1025,7 +1033,7 @@ def build(
 
     # 5. link: weights blob at its absolute high address.
     elf = work / "model.elf"
-    compilation.run(
+    link_result = compilation.run(
         [
             gcc,
             *gcc_cflags,
@@ -1037,6 +1045,7 @@ def build(
             h / "model_link.ld",
             *objs,
             *math_link_flags,
+            *supplier_flags,
             libm_archive,
             "-o",
             elf,
@@ -1045,6 +1054,8 @@ def build(
         inputs=[h / "model_link.ld", *objs, libm_archive],
         output=elf,
     )
+    if math_archive_symbols is not None:
+        compilation.record_link_suppliers({symbol: libm_archive for symbol in math_archive_symbols}, link_result)
     if device is not None and getattr(device, "final_elf_audit", None) is not None:
         device.final_elf_audit(elf)
     close_host_provider(host_provider_receipt, objs, elf, inspector=provider_inspector, link_flags=math_link_flags)

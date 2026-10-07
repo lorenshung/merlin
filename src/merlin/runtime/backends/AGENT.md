@@ -66,7 +66,11 @@ Merlin runtime **execution backends**: run the same Merlin command buffers the P
   default math archive is an explicit exception: resolve `libm.a` with the selected
   GCC ISA/ABI flags, link its absolute regular-archive path, bind its bytes and
   driver to the marker and recipe, and refuse changed bytes before completion.
-  This is no proof of other library/header closure or numerical host support.
+  Callers may additionally request a closed symbol roster from this archive:
+  the actual link traces each defining member into the recipe, and the reader
+  must independently select that roster. The default stays unchanged. This is
+  no proof of source-call routing, other library/header closure or numerical
+  host support.
 - Device host ABI preparation is optional and source-bound. The provider's
   post-offload callback receives exact routed IR and an immutable sidecar; its
   selected host file enters the normal lowering/object identity path. ABI bridge

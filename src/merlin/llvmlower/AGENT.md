@@ -76,7 +76,14 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
   completed recipe against a caller-selected full digest, current explicit
   tool/input/output bytes and the final executable. It checks direct argv file
   inputs and command order without claiming implicit headers, library symbol
-  suppliers, transitive toolchain closure or numerical correctness.
+  suppliers, transitive toolchain closure or numerical correctness by default.
+- `link_supplier_trace.py` is an opt-in conservative GNU-compatible defining-symbol
+  observation from the *actual* link's `--trace-symbol` diagnostics. A completed
+  recipe binds the selected driver, diagnostic-emitting linker, explicit archive
+  and ELF bytes. The member label is a linker observation within that archive,
+  not independently extracted member bytes. The verifier needs an independently
+  selected symbol-to-input roster; ambiguous, absent or overridden definitions refuse. This proves no
+  source-call routing, transitive toolchain closure or numerical equivalence.
 - `late_quant_rne.py` owns reusable bounded binary32 round/clamp recognition on
   emitted LLVM, an explicit typed SSA tokenizer, portable native emission and
   explicitly selected CPU ISA legalization. The empty host policy leaves source

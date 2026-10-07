@@ -2,14 +2,15 @@
 
 This is compilation evidence, not a hermetic toolchain lock or a cache identity.
 Headers, library resolution, imported providers and non-project environment need
-their own closure. Callers name inputs; this module never infers a target ABI.
+their own closure. An explicit linker trace may bind named symbol suppliers;
+none are inferred by default. Callers name inputs, never a target ABI here.
 """
 
 from __future__ import annotations
 
 import json
 import shutil
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ from merlin.common.digest import is_sha256, sha256_file
 from merlin.common.jsonio import write_pretty_json
 
 from . import codegen_env
+from .link_supplier_trace import observe_link_suppliers, verify_link_suppliers
 
 FILENAME = "compilation_recipe.json"
 SCHEMA = "merlin.compilation_recipe.v1"
@@ -47,6 +49,36 @@ class CompilationRecipe:
         if self.record["status"] != "prepared" or not name or not path.is_file():
             raise ValueError("compilation preparation is absent or already invoked")
         self.record.setdefault("preparation", {})[name] = _identity(path)
+        write_pretty_json(self.path, self.record)
+
+    def record_link_suppliers(self, expected_suppliers: Mapping[str, Path], result: Any) -> None:
+        """Retain actual linker diagnostics before declaring this build complete.
+
+        A missing or ambiguous definition leaves the recipe invoked. The
+        independently selected expected supplier is not inferred from an
+        archive merely appearing in the link argv.
+        """
+        commands = self.record["commands"]
+        if (
+            self.record["status"] != "invoked"
+            or not commands
+            or commands[-1]["status"] != "returned"
+            or "link_suppliers" in self.record
+        ):
+            raise ValueError("link supplier proof needs one returned final link")
+        link = commands[-1]
+        if (
+            getattr(result, "returncode", None) != 0
+            or [str(argument) for argument in getattr(result, "args", ())] != link["argv"]
+        ):
+            raise ValueError("link supplier proof has no matching returned invocation")
+        observation = observe_link_suppliers(
+            argv=link["argv"],
+            input_identities=link["inputs"],
+            expected_suppliers=expected_suppliers,
+            stderr=result.stderr,
+        )
+        self.record["link_suppliers"] = observation
         write_pretty_json(self.path, self.record)
 
     def run(
@@ -224,11 +256,18 @@ def _checked_command(value: object, prior_outputs: set[str], *, final: bool) -> 
     return value
 
 
-def verify_completed_recipe(recipe_path: Path, *, executable: Path, expected_recipe_sha256: str) -> dict[str, Any]:
+def verify_completed_recipe(
+    recipe_path: Path,
+    *,
+    executable: Path,
+    expected_recipe_sha256: str,
+    expected_link_suppliers: Mapping[str, Path] | None = None,
+) -> dict[str, Any]:
     """Recheck a completed v1 observation against current explicit file bytes.
 
-    This does not infer imported headers, library symbol suppliers, ambient tool
-    dependencies, or numerical behavior from the observed commands.
+    Imported headers, ambient tool dependencies and numerical behavior are not
+    inferred. A supplier claim requires the opt-in trace plus an independent
+    ``expected_link_suppliers`` selection; argv archive presence alone is not proof.
     """
     if not is_sha256(expected_recipe_sha256):
         raise ValueError("compilation recipe has no selected full digest")
@@ -242,11 +281,9 @@ def verify_completed_recipe(recipe_path: Path, *, executable: Path, expected_rec
         raise ValueError("compilation recipe is not valid JSON") from exc
     if (
         not isinstance(record, dict)
+        or not {"schema", "scope", "producer", "status", "commands", "executable"}.issubset(record)
         or set(record)
-        not in (
-            {"schema", "scope", "producer", "status", "commands", "executable"},
-            {"schema", "scope", "producer", "status", "commands", "executable", "preparation"},
-        )
+        - {"schema", "scope", "producer", "status", "commands", "executable", "preparation", "link_suppliers"}
         or record.get("schema") != SCHEMA
         or record.get("scope") != SCOPE
         or record.get("status") != "completed"
@@ -270,6 +307,16 @@ def verify_completed_recipe(recipe_path: Path, *, executable: Path, expected_rec
     final = _checked_identity(record["executable"], "final executable")
     if final != commands[-1]["output"] or final["path"] != str(selected_elf):
         raise ValueError("compilation recipe final executable differs from link output")
+    observation = record.get("link_suppliers")
+    if expected_link_suppliers is not None and observation is None:
+        raise ValueError("compilation recipe has no requested link supplier proof")
+    if observation is not None:
+        verify_link_suppliers(
+            observation,
+            argv=commands[-1]["argv"],
+            input_identities=commands[-1]["inputs"],
+            expected_suppliers=expected_link_suppliers,
+        )
     if sha256_file(recipe) != expected_recipe_sha256:
         raise ValueError("compilation recipe changed during verification")
     return record

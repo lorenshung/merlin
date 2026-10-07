@@ -48,6 +48,7 @@ def test_actual_link_records_selected_libm_bytes(tmp_path, policy):
         arena_mb=1,
         backend="scalar",
         host_math_policy=policy,
+        math_archive_symbols=["sinf"] if policy == "native" else None,
         cflags_override=["-march=rv64gc", "-mabi=lp64d", "-mcmodel=medany", "-O2", "-ffreestanding", "-fno-builtin"],
     )
     record = json.loads((tmp_path / "build/compilation_recipe.json").read_text())
@@ -60,6 +61,13 @@ def test_actual_link_records_selected_libm_bytes(tmp_path, policy):
     assert "-lm" not in link["argv"]
     assert ("-Wl,--wrap=expf" in link["argv"]) == (policy == "expf_via_double")
     assert archive_inputs[0]["sha256"] == hashlib.sha256(Path(archive_inputs[0]["path"]).read_bytes()).hexdigest()
+    if policy == "native":
+        assert record["link_suppliers"]["symbols"]["sinf"]["selected_input"] == archive_inputs[0]
+        assert record["link_suppliers"]["symbols"]["sinf"]["definition"].startswith(
+            archive_inputs[0]["path"] + "("
+        )
+    else:
+        assert "link_suppliers" not in record
     assert (
         "sinf"
         in subprocess.run(
