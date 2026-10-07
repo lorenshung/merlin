@@ -26,7 +26,7 @@ from merlin.runtime.commandbuffer import (
     apply_pool_stage,
     bias_tensor_name,
     conv_im2col,
-    conv_out_dims,
+    conv_out_dims,  # noqa: F401 - preserve the legacy evaluator helper export
 )
 from merlin.runtime.tensor import Tensor
 
@@ -412,20 +412,36 @@ def is_independent_float_golden(capsule: dict, capsule_dir: str | Path | None = 
 # --------------------------------------------------------------------------------------------
 # golden dispatch
 # --------------------------------------------------------------------------------------------
+class UnavailableGolden(ValueError):
+    """A matching source oracle is absent or its operation is unsupported."""
+
+
+class UnsupportedGoldenFormat(UnavailableGolden):
+    """The integer oracle cannot grade the capsule's declared operand formats."""
+
+
 def golden(capsule: dict, capsule_dir: str | Path | None = None) -> dict[str, list]:
     """Return the capsule's expected outputs (name -> nested list).
 
     A whole model with a declared independent golden reads that captured oracle
     regardless of whether its output is integer or floating point: the scalar
     Tensor engine cannot recompute an arbitrary ``op: model`` graph. Non-model
-    integer capsules still recompute their golden on that engine.
+    integer capsules still recompute their golden on that engine. A missing
+    floating oracle must not fall through to a different integer stimulus and
+    arithmetic model.
     """
     if capsule_dir is None:
         capsule_dir = capsule.get("__dir__")
     independent_model = capsule.get("kind") == "model" and golden_source(capsule, capsule_dir) != "merlin_tensor_int"
     if independent_model or is_independent_float_golden(capsule, capsule_dir):
-        outs = (_load_golden_yaml(capsule_dir) or {}).get("outputs")
-        if not outs:
+        document = _load_golden_yaml(capsule_dir)
+        if document is None:
+            raise UnavailableGolden(
+                f"independent source oracle is unavailable "
+                f"({Path(capsule_dir) / 'golden.yaml' if capsule_dir else '<no dir>'})"
+            )
+        outs = document.get("outputs")
+        if not isinstance(outs, dict) or not outs:
             raise ValueError(
                 f"independent golden declared (golden_source="
                 f"{golden_source(capsule, capsule_dir)!r}) but golden.yaml has no 'outputs' "
@@ -450,6 +466,13 @@ def golden(capsule: dict, capsule_dir: str | Path | None = None) -> dict[str, li
         if {name: _exact_integers(value) for name, value in observed.items()} != recomputed:
             raise ValueError("exact PyTorch integer slice host-eager output differs from captured-input recomputation")
         return recomputed
+    for leaf in capsule.get("inputs", []):
+        dtype = leaf.get("dtype", "i8")
+        if _int_dtype_bits(dtype) is None:
+            raise UnsupportedGoldenFormat(
+                f"integer golden cannot grade declared operand {leaf.get('name')!r} "
+                f"with format {dtype!r}; a matching independent source golden is required"
+            )
     return _recompute_golden(capsule)
 
 
@@ -717,7 +740,7 @@ def _recompute_golden(capsule: dict) -> dict[str, list]:
         t = _batched_matmul(env[attrs.get("lhs", _pick("input"))], env[attrs.get("weight", _pick("weight"))])
         return {out_name: _nested_list(_apply_epilogue(t, attrs, env))}
 
-    raise ValueError(f"golden: unsupported operation {op!r}")
+    raise UnavailableGolden(f"golden: unsupported operation {op!r}")
 
 
 # --------------------------------------------------------------------------------------------

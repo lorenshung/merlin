@@ -18,3 +18,13 @@ evidence: broken providers refuse admission; missing coverage is never a pass.
 Simulator identity and ISA class must not select a target-specific compiler.
 Prompt queries select an already-loaded evaluator's callbacks without importing
 the optional evaluator; its adapters must delegate to pure queries, not selectors.
+`numeric_falsifiability.audit_outputs` checks the existing constant candidates
+against already selected outputs. Strict callers must report unavailable,
+non-finite or unsizeable oracle outputs as unmeasured, never as an assessed pass.
+The public CI gate may explicitly allow a partial audit; it never changes a
+numeric policy, writes an answer key or grants full corpus numerical coverage.
+The integer capsule golden must refuse noninteger operand formats when no
+matching independent golden was selected. Integer surrogate stimuli cannot
+establish fidelity or falsifiability for a declared floating program.
+Only typed `UnavailableGolden` refusals may pass an explicitly partial audit.
+Malformed stored outputs or archives and evaluator failures stay hard failures.

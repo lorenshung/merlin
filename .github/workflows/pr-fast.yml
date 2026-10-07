@@ -149,6 +149,10 @@ jobs:
       # through the validator. Ten seconds against a launch that discovers it after a 13.7 GB snapshot.
       - name: capsule corpus loads
         run: uv run --no-sync python -m pytest merlin/tests/targetgen/test_every_tracked_capsule_loads.py -q
+      # Independent answer keys are absent in a fresh clone. Their audit stays
+      # explicitly UNMEASURED; load failures and assessed constant answers fail.
+      - name: numeric falsifiability (partial public audit; missing oracles unmeasured)
+        run: uv run --no-sync python build_tools/scripts/check_numeric_falsifiability.py --allow-unmeasured
       # Conformance coverage against the TRACKED spec. The workflow README lists this script as
       # out-of-band at ">4 min", which is true of `--write`/re-derivation: it reads every capture and
       # rebuilds the requirement. Comparing the corpus against the spec already in the tree skips all of

@@ -19,3 +19,7 @@ Maintenance/validation scripts (e.g. `check_structure.py`).
 - Never commit generated artifacts here.
 - Write generated products beneath the configured `out/` root using the shared path helpers.
 - Keep checks source-layout-aware across core and optional distributions.
+- Numeric falsifiability uses the optional evaluator's constant-candidate audit.
+  Its default public scope is tracked capsule declarations outside hidden paths.
+  Missing oracle outputs are unmeasured; an explicitly partial CI invocation must
+  still fail on measured accepted constants or malformed public declarations.

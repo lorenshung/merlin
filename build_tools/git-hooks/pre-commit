@@ -69,6 +69,11 @@ echo "[pre-commit] kernel ABI contract/probe order (static; renderer not certifi
 echo "[pre-commit] no-answer-keys (tracked)…"
 "$PY" build_tools/scripts/check_no_answer_keys.py
 
+# Whole public corpus. Absent independent goldens remain explicitly UNMEASURED;
+# use the command without this flag for a complete release audit.
+echo "[pre-commit] numeric falsifiability (partial public audit; missing oracles UNMEASURED)…"
+"$PY" build_tools/scripts/check_numeric_falsifiability.py --allow-unmeasured
+
 # Whole-tree and pure data (~0.05 s): an exchange rate is only a rate if exactly one term moved
 # between its windows, and an edit that breaks that isolation is invisible until a campaign has been
 # spent measuring two things at once.

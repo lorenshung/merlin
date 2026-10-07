@@ -30,6 +30,16 @@ proofs:
       supply or forgive a home, and no unrelated cell or member failures. A
       restored structural operation must return the verdict to clean.
 
+  check_numeric_falsifiability.py:
+    proof: merlin/tests/infra/test_numeric_falsifiability_gate_can_fail.py::test_the_verdict_and_not_only_the_finding_changes
+    mutation: >-
+      Derive the same small capsule twice, with tolerance above and below its
+      golden half-spread, and invoke the real gate for both.
+    removes: >-
+      The answer key is not stored, the tolerance policy is applicable, and the
+      golden has spread. The failing case admits a midrange constant; the clean
+      companion proves that findings actually control the exit status.
+
   check_mutation_proofs.py:
     proof: merlin/tests/infra/test_mutation_proofs_gate_can_fail.py::test_a_gate_with_no_recorded_mutation_is_reported
     mutation: >-

@@ -63,19 +63,45 @@ def audit_capsule(capsule: dict, capsule_dir: str | Path | None = None) -> list[
         golden = capsule_golden.golden(capsule, capsule_dir)
     except Exception:  # noqa: BLE001 - a golden we cannot read is not a verdict
         return []
+    return audit_outputs(policy, golden)
+
+
+class UnmeasuredPolicy(ValueError):
+    """A numeric policy cannot be assessed from the supplied oracle outputs."""
+
+
+def audit_outputs(policy: dict, outputs, *, require_measurable: bool = False) -> list[dict[str, Any]]:
+    """Test the existing constant candidates against already selected outputs.
+
+    Strict callers distinguish unavailable, empty, ragged or non-finite outputs
+    from an assessed policy. Legacy capsule queries retain their skip behavior.
+    This function never discovers files, computes an oracle or changes a policy.
+    """
+    if policy.get("compare") != "tolerance_float":
+        return []
     atol, rtol = float(policy.get("atol", 0.0)), float(policy.get("rtol", 0.0))
+    if require_measurable and (not np.isfinite([atol, rtol]).all() or atol < 0 or rtol < 0):
+        raise UnmeasuredPolicy("tolerances must be finite and nonnegative")
+    if require_measurable and (not isinstance(outputs, dict) or not outputs):
+        raise UnmeasuredPolicy("no named oracle outputs could be measured")
     found: list[dict[str, Any]] = []
-    for name, values in (golden or {}).items():
+    for name, values in (outputs or {}).items():
         try:
             exp = np.asarray(values, dtype=np.float64)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as exc:
+            if require_measurable:
+                raise UnmeasuredPolicy(f"output {name!r} is not a comparable numeric tensor") from exc
             # A RAGGED golden (per-output arrays of differing shape) is not one comparable tensor, so
             # "the constant nearest every element" is not defined over it. Skip that output rather than
             # crash: a checker that dies on one corpus shape takes the whole gate down with it, and a
             # gate that cannot run is indistinguishable from one that found nothing.
             continue
         if exp.dtype == object or exp.size == 0:
+            if require_measurable:
+                raise UnmeasuredPolicy(f"output {name!r} is empty or nonnumeric")
             continue
+        if require_measurable and not np.isfinite(exp).all():
+            raise UnmeasuredPolicy(f"output {name!r} contains non-finite values")
         for answer, cand in degenerate_answers(exp).items():
             if _accepts(cand, exp, atol, rtol):
                 found.append(
