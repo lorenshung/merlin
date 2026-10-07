@@ -5,7 +5,7 @@
 # nothing; fix it, or delete the declaration. Regenerate with:
 #   build_tools/scripts/check_inert_capabilities.py --write-ratchet
 #
-# count: 70
+# count: 55
 unchecked-subprocess-input build_tools/scripts/k1_int8_fair_compare.py:main
 unchecked-subprocess-input merlin/python/merlin/verify/evaluate.py:_ver
 unchecked-subprocess-input merlin/python/merlin/verify/evaluate.py:_write_product
@@ -56,3 +56,11 @@ unreferenced-def merlin/python/merlin/targetgen/program_oracle.py:_load_verilato
 unreferenced-def merlin/python/merlin/targetgen/rtl/gen_rocc_replay.py:_arg_roles
 unreferenced-def merlin/python/merlin/targetgen/rtl/introspect.py:_fir_lines
 unreferenced-def merlin/python/merlin/verify/faults.py:_cb_drop_requant
+# growth-accepted: five data-selected option members kept by reviewed decision (2026-10-06). Each is a
+#   value a contract, bundle or operator flag selects; none is selected by any data in the tree today,
+#   and deleting it would either change a fail-closed path or drop a live option. Net vs main: 68 -> 55.
+unproduced-member packages/merlin-experiments/src/merlin_experiments/phase2/claims/affine.py:_VARIABLE_KINDS:input_elements  # selected by a phase-0 performance claim's fit.variable_source.kind; stays because it is the structural read for an elementwise/movement claim whose cost scales with input size, and no claim template declares one yet
+unproduced-member merlin/python/merlin/perf/layer_bench/reference.py:ELEM_MODES:sparse_binary  # selected by the operator flag `firesim_gemm_windows.py --elem-mode` (outside the census roots); stays because an arm that reads the accumulator at scale 1 needs it, or its digest checks a saturation pattern instead of values
+unproduced-member merlin/python/merlin/sched/mach/model.py:COMPLETION_KINDS:polled  # selected by a target schedule contract's latency rule `completion:`; stays because derive falls back to `immediate` for an unknown kind, so removing it would silently read a declared polled (data-dependent) completion as immediate
+unproduced-member merlin/python/merlin/targetgen/bundle_gate.py:REFERENCE_KINDS:w8a8_execution  # selected by a bundle contract's `reference:`; stays because its scope text is what gate_for quotes when a W8A8 device run is graded against the host's own int8 arithmetic (cos 1.0 by construction)
+unproduced-member merlin/python/merlin/targetgen/bundle_gate.py:REFERENCE_KINDS:weight_only_int8  # selected by a bundle contract's `reference:`; stays because its scope text is the refusal that names the cos 0.484 case (grading a W8A8 run against a weight-only reference)
