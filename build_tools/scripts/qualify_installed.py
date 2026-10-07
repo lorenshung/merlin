@@ -112,6 +112,7 @@ SUITES = {
             "merlin.targetgen.host_linkage_contract",
             "merlin.frontends.linalg_composite_math",
             "merlin.frontends.linalg_reduction_source_body",
+            "merlin.frontends.prepared_index_source_body",
         ),
         "required_modules": ("xdsl",),
     },
@@ -388,6 +389,7 @@ SUITES = {
             "merlin.targetgen.capsule_runner",
             "merlin.runtime.out_b64",
             "merlin.frontends.linalg_reduction_source_body",
+            "merlin.frontends.prepared_index_source_body",
         )
         + tuple(
             "merlin_experiments.phase1." + tail
@@ -411,6 +413,8 @@ SUITES = {
                 "feedback.private_linkage_support",
                 "feedback.private_literal_arange",
                 "feedback.private_index_source",
+                "feedback.private_index_host_support",
+                "feedback.private_host_source_dispatch",
                 "feedback.private_literal_arange_admission",
                 "feedback.private_integer_reduction_support",
                 "feedback.private_ordered_scan_support",

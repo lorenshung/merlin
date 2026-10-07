@@ -15,43 +15,25 @@ from pathlib import Path
 from typing import Any
 
 from merlin.common import mlir_query as mq
+from merlin.common.jsonio import strict_json_equal as _same_json_value
 from merlin.frontends.capture_normalization import normalize_capture_mlir
 from merlin.frontends.linalg_integer_reductions import recognize_static_integer_reduction
 from merlin.frontends.linalg_patterns import (
     _checked_static_linalg_shell,
     recognize_static_projected_pointwise,
 )
+from merlin.frontends.prepared_index_source_body import PROOF_SCHEMA, PROOF_SCOPE, PROOF_STATUS
 from merlin.targetgen.application_inventory import verify_capture_receipt
 from merlin_experiments.phase1.feedback import private_control_support as control
 from merlin_experiments.phase1.feedback.private_literal_arange import _range, prove_literal_arange_source
 
-PENDING = "source_index_forms_pending_build"
-SCOPE = (
-    "prepared Boolean-mask count and independently literal-bounded indexed extract only; "
-    "no cross-node association, host admission, compiled bounds, or numerical equivalence"
-)
+PENDING = PROOF_STATUS
+SCOPE = PROOF_SCOPE
 
 
 def _need(condition: bool, reason: str) -> None:
     if not condition:
         raise ValueError(f"index source refusal: {reason}")
-
-
-def _same_json_value(observed: Any, expected: Any) -> bool:
-    """Compare closed JSON values without Python's bool/int or tuple/list aliases."""
-    if type(observed) is not type(expected):
-        return False
-    if type(expected) is dict:
-        return (
-            all(type(key) is str for key in observed)
-            and observed.keys() == expected.keys()
-            and all(_same_json_value(observed[key], value) for key, value in expected.items())
-        )
-    if type(expected) is list:
-        return len(observed) == len(expected) and all(
-            _same_json_value(item, value) for item, value in zip(observed, expected, strict=True)
-        )
-    return type(expected) in (str, int, bool, type(None)) and observed == expected
 
 
 def _ids(op: Any) -> tuple[str, ...]:
@@ -493,6 +475,7 @@ def prove_index_source(capture: Path, *, index_bits: int) -> dict[str, Any]:
         "capture source, trace or receipt changed during proof",
     )
     return {
+        "schema": PROOF_SCHEMA,
         "status": PENDING,
         "scope": SCOPE,
         "index_bits_premise": index_bits,

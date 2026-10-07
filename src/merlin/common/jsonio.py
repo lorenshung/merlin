@@ -41,14 +41,35 @@ def canonical_sha256(
     )
 
 
-def write_canonical_json(path: "str | Path", value: Any) -> None:
+def strict_json_equal(observed: object, expected: object) -> bool:
+    """Compare closed JSON values without Python's bool/int or tuple/list aliases.
+
+    Floats, unknown containers and non-string object keys are deliberately not
+    authority-bearing values under this comparator.
+    """
+    if type(observed) is not type(expected):
+        return False
+    if type(expected) is dict:
+        return (
+            all(type(key) is str for key in observed)
+            and observed.keys() == expected.keys()
+            and all(strict_json_equal(observed[key], value) for key, value in expected.items())
+        )
+    if type(expected) is list:
+        return len(observed) == len(expected) and all(
+            strict_json_equal(item, value) for item, value in zip(observed, expected, strict=True)
+        )
+    return type(expected) in (str, int, bool, type(None)) and observed == expected
+
+
+def write_canonical_json(path: str | Path, value: Any) -> None:
     """Write ``value`` as strict canonical JSON plus a trailing newline, creating the parent directory."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(canonical_json(value) + b"\n")
 
 
-def write_pretty_json(path: "str | Path", value: Any, *, mkdir: bool = False) -> None:
+def write_pretty_json(path: str | Path, value: Any, *, mkdir: bool = False) -> None:
     """Write ``value`` indented (2), key-sorted, newline-terminated, for files a human reads."""
     path = Path(path)
     if mkdir:

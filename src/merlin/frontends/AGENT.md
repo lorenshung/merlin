@@ -24,6 +24,10 @@ Frontends that ingest external IR into the Merlin pipeline. Today: linalg-on-ten
 - `linalg_reduction_source_body.py` names the closed integer sum/prefix-sum/paired-minimum
   frontend/root-operation kinds shared by host admission and the independent linked
   witness. Its declaration validator grants no placement or numerical equivalence.
+- `prepared_index_source_body.py` screens three exact tensor-index compute roles against
+  a caller-reproved, receipt/trace-bound record. It validates parsed types, shapes,
+  maps and ordinals but does not produce that record, grant placement, associate
+  prepared nodes or establish original/compiled numerical equivalence.
 - `bucketize_source.py` — a source-only, trace-bound proof of the closed f32
   bucketize counting reduction. It does not grant host placement, prove sorted
   boundaries, or certify generated code and numerical equivalence.

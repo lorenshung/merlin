@@ -89,6 +89,15 @@ def validate_host_capabilities(
                 STATIC_INTEGER_REDUCTION_SOURCE_BODY_SCHEMA,
                 validate_static_integer_reduction_source_body,
             )
+            from merlin.frontends.prepared_index_source_body import (
+                ROLES as INDEX_ROLES,
+            )
+            from merlin.frontends.prepared_index_source_body import (
+                SCHEMA as PREPARED_INDEX_SOURCE_BODY_SCHEMA,
+            )
+            from merlin.frontends.prepared_index_source_body import (
+                validate_declaration as validate_prepared_index_source_body,
+            )
 
             allowed = {
                 "id",
@@ -147,6 +156,29 @@ def validate_host_capabilities(
                     or results != (["i64", "i64"] if body["operation"] == "i64_min_first_index" else ["i64"])
                 ):
                     raise ValueError("integer-reduction source_body needs one exact frontend selector and typed ABI")
+            elif isinstance(body, dict) and body.get("schema") == PREPARED_INDEX_SOURCE_BODY_SCHEMA:
+                validate_prepared_index_source_body(body)
+                operands = row["signature"].get("ordered_operand_dtypes")
+                results = row["signature"].get("ordered_result_dtypes")
+                expected = INDEX_ROLES[body["operation"]]
+                if (
+                    row.get("ops") != ["aten.index.Tensor"]
+                    or "families" in row
+                    or "family" in row
+                    or not isinstance(row["signature"].get("family"), str)
+                    or not row["signature"]["family"]
+                    or (expected[1] is not None and operands != list(expected[1]))
+                    or (
+                        expected[1] is None
+                        and (
+                            type(operands) is not list
+                            or len(operands) < 2
+                            or operands != ["i64"] * (len(operands) - 1) + ["i1"]
+                        )
+                    )
+                    or results != list(expected[2])
+                ):
+                    raise ValueError("prepared-index source_body needs one exact frontend role and typed ABI")
             else:
                 validate_static_pointwise_source_body(body)
         if "quantization_parameters" in row["signature"]:
@@ -166,41 +198,11 @@ def validate_host_capabilities(
 
 def _selected_index_bits(source_context: Mapping | None) -> int | None:
     """Read one caller-owned compiler observation, never inventing an index width."""
-    from merlin.llvmlower.target_data_layout import default_index_bits
+    from merlin.llvmlower.target_data_layout import selected_index_bits
 
     if not isinstance(source_context, Mapping) or set(source_context) != {"selected_index_observation"}:
         return None
-    observed = source_context["selected_index_observation"]
-    if not isinstance(observed, Mapping) or set(observed) != {
-        "schema",
-        "compiler_requested",
-        "compiler_resolved",
-        "compiler_sha256",
-        "cross_flags",
-        "data_layout",
-        "index_bits",
-        "scope",
-    }:
-        return None
-    if (
-        observed.get("schema") != "merlin.selected-index-lowering.v1"
-        or type(observed.get("index_bits")) is not int
-        or not isinstance(observed.get("compiler_requested"), str)
-        or not observed["compiler_requested"]
-        or not isinstance(observed.get("compiler_resolved"), str)
-        or not observed["compiler_resolved"]
-        or not is_sha256(observed.get("compiler_sha256"))
-        or not isinstance(observed.get("cross_flags"), list)
-        or not observed["cross_flags"]
-        or any(not isinstance(flag, str) or not flag for flag in observed["cross_flags"])
-        or not isinstance(observed.get("data_layout"), str)
-        or not isinstance(observed.get("scope"), str)
-    ):
-        return None
-    try:
-        return observed["index_bits"] if default_index_bits(observed["data_layout"]) == observed["index_bits"] else None
-    except ValueError:
-        return None
+    return selected_index_bits(source_context["selected_index_observation"])
 
 
 def _screen_integer_reduction_source_body(
@@ -299,9 +301,13 @@ def _screen_source_body(
         recognize_static_projected_pointwise,
     )
     from merlin.frontends.linalg_reduction_source_body import STATIC_INTEGER_REDUCTION_SOURCE_BODY_SCHEMA
+    from merlin.frontends.prepared_index_source_body import SCHEMA as PREPARED_INDEX_SOURCE_BODY_SCHEMA
+    from merlin.frontends.prepared_index_source_body import screen_source_body as screen_prepared_index_source_body
 
     if declaration["source_body"]["schema"] == STATIC_INTEGER_REDUCTION_SOURCE_BODY_SCHEMA:
         return _screen_integer_reduction_source_body(declaration, row, signature, source_operations, source_context)
+    if declaration["source_body"]["schema"] == PREPARED_INDEX_SOURCE_BODY_SCHEMA:
+        return screen_prepared_index_source_body(declaration, row, signature, source_operations, source_context)
 
     if source_operations is None or not source_operations:
         return {"status": "unknown", "reason": "source_body requires parsed source operations"}

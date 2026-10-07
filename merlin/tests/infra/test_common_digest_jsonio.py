@@ -14,7 +14,13 @@ import math
 import pytest
 
 from merlin.common.digest import is_sha256, sha256_bytes, sha256_file, sha256_text
-from merlin.common.jsonio import canonical_json, canonical_sha256, write_canonical_json, write_pretty_json
+from merlin.common.jsonio import (
+    canonical_json,
+    canonical_sha256,
+    strict_json_equal,
+    write_canonical_json,
+    write_pretty_json,
+)
 
 CORPUS = [
     {"b": 1, "a": [1, 2.5, None, True]},
@@ -59,12 +65,22 @@ def test_nan_is_refused_unless_the_lax_contract_is_asked_for():
     assert canonical_json({"x": math.nan}, allow_nan=True) == lax
 
 
+def test_strict_json_equality_has_no_python_numeric_or_container_aliases():
+    expected = {"kind": "index", "ordinals": [0, 1], "checked": True, "none": None}
+    assert strict_json_equal(expected, json.loads(canonical_json(expected)))
+    assert not strict_json_equal({**expected, "ordinals": [False, 1]}, expected)
+    assert not strict_json_equal({**expected, "ordinals": [0.0, 1]}, expected)
+    assert not strict_json_equal({**expected, "ordinals": (0, 1)}, expected)
+    assert not strict_json_equal({**expected, "extra": 1}, expected)
+    assert not strict_json_equal({**expected, "ordinals": [0, math.nan]}, expected)
+
+
 def test_pinned_vectors():
     v = {"b": 1, "a": [1, 2.5, None, True], "u": "é"}
     assert canonical_json(v) == b'{"a":[1,2.5,null,true],"b":1,"u":"\\u00e9"}'
     assert canonical_sha256(v) == hashlib.sha256(b'{"a":[1,2.5,null,true],"b":1,"u":"\\u00e9"}').hexdigest()
     assert sha256_bytes(b"") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    assert sha256_text("é") == hashlib.sha256("é".encode("utf-8")).hexdigest()
+    assert sha256_text("é") == hashlib.sha256("é".encode()).hexdigest()
 
 
 def test_sha256_file_streams_and_matches_the_whole_read(tmp_path):

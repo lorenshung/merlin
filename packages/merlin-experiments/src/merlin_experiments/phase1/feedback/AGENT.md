@@ -106,6 +106,12 @@ extract whose literal range/offset extrema are in bounds under a caller-supplied
 index-width premise. It verifies receipt, trace, parsed SSA and static maps,
 but does not associate distinct prepared index nodes, admit their host lowering,
 or prove compiler execution or original-frontend numerical equivalence.
+`private_index_host_support.py` consumes that versioned proof for exact
+reviewed compute-root admissions. It redoes the source/trace/receipt proof,
+requires every root to have its own matching typed host declaration, and
+joins the selected compiler index observation and candidate/capture/ELF.
+`private_host_source_dispatch.py` routes only recognized source-body schemas
+to their mandatory owning witnesses; unknown bodies keep the old refusal.
 `private_ordered_scan_support.py` independently checks a closed prepared f32
 prefix scan with f64 carry, ordered loop/lane reset and exact source ancestry.
 The v7 gate requires its empty-or-populated reviewed semantic tensor-root

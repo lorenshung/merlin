@@ -34,6 +34,11 @@ launching, capsule grading, golden generation, sandboxing and certification. The
   occurrence; absent context is unknown. Structural validation accepts drafts,
   while only reviewed, pinned declarations can admit host placement. The private
   source/build witness remains mandatory and numerical equivalence unproved.
+- Opt-in prepared tensor-index host source-body declarations name one exact
+  Boolean extension, mask-sum or literal-indexed-extract role. Admission is
+  conditional on a caller-reproved closed source/trace record, selected index
+  width and every parsed typed ordinal. A separate private source/build witness
+  must reprove the captured bytes; this is no original/compiled numerical grant.
 - `group_capsule_entries.py` — deterministic capture-group restatement used by compiler diagnostics.
   Corpus writes, promotion, grading and measured capacity probes belong to experiments-owned
   `group_capsules` and `store_probe`, which keep their stable import names.

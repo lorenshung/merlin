@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import subprocess
 import threading
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from merlin.common.digest import sha256_file
+from merlin.common.digest import is_sha256, sha256_file
 
 _PREFIX = 'target datalayout = "'
 _KNOWN: dict[tuple[str, ...], str] = {}
@@ -59,6 +59,42 @@ def default_index_bits(layout: str) -> int:
     if len(selected) != 1:
         raise ValueError("compiler data layout has no unique declared default pointer index width")
     return selected[0]
+
+
+def selected_index_bits(observed: object) -> int | None:
+    """Validate a complete compiler-owned index observation without rerunning it.
+
+    Consumers must separately bind the selected observation to their actual
+    compiler invocation and source/capture identities.
+    """
+    if not isinstance(observed, Mapping) or set(observed) != {
+        "schema",
+        "compiler_requested",
+        "compiler_resolved",
+        "compiler_sha256",
+        "cross_flags",
+        "data_layout",
+        "index_bits",
+        "scope",
+    }:
+        return None
+    if (
+        observed.get("schema") != "merlin.selected-index-lowering.v1"
+        or type(observed.get("index_bits")) is not int
+        or not all(
+            type(observed.get(key)) is str and bool(observed[key])
+            for key in ("compiler_requested", "compiler_resolved", "data_layout", "scope")
+        )
+        or not is_sha256(observed.get("compiler_sha256"))
+        or type(observed.get("cross_flags")) is not list
+        or not observed["cross_flags"]
+        or any(type(flag) is not str or not flag for flag in observed["cross_flags"])
+    ):
+        return None
+    try:
+        return observed["index_bits"] if default_index_bits(observed["data_layout"]) == observed["index_bits"] else None
+    except ValueError:
+        return None
 
 
 def _query(clang: str | Path, cross_flags: Sequence[str]) -> str:

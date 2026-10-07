@@ -77,6 +77,9 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
   tool/input/output bytes and the final executable. It checks direct argv file
   inputs and command order without claiming implicit headers, library symbol
   suppliers, transitive toolchain closure or numerical correctness by default.
+- `target_data_layout.selected_index_bits` validates one complete caller-owned
+  compiler observation and declared default-pointer index width. It does not
+  observe a compiler, bind an invocation, or prove tensor byte bounds itself.
 - `link_supplier_trace.py` is an opt-in conservative GNU-compatible defining-symbol
   observation from the *actual* link's `--trace-symbol` diagnostics. A completed
   recipe binds the selected driver, diagnostic-emitting linker, explicit archive

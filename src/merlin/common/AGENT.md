@@ -47,6 +47,8 @@ never swallowed as a per-group failure.
 
 `strict_json` rejects ambiguous keys, non-finite numbers and oversized authority
 records before consumers interpret them; it does not confer provenance or admission.
+`jsonio.strict_json_equal` compares closed JSON records without Python bool/int,
+float/int, or tuple/list aliases; callers still own source and receipt identity.
 
 `provenance_lost` records explicitly declared unrecoverable artifact identities.
 Pin and artifact loaders reject redeclaring those identities as live; build products

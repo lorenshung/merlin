@@ -33,6 +33,23 @@ def test_missing_or_ambiguous_default_pointer_width_refuses(layout):
         TDL.default_index_bits(layout)
 
 
+def test_selected_index_observation_requires_complete_nonempty_compiler_flags():
+    selected = {
+        "schema": "merlin.selected-index-lowering.v1",
+        "compiler_requested": "neutral-clang",
+        "compiler_resolved": "/neutral/clang",
+        "compiler_sha256": "a" * 64,
+        "cross_flags": ["--target=neutral"],
+        "data_layout": "e-p:64:64",
+        "index_bits": 64,
+        "scope": "neutral compiler observation",
+    }
+    assert TDL.selected_index_bits(selected) == 64
+    for key, value in (("cross_flags", []), ("cross_flags", [""]), ("index_bits", True), ("data_layout", "")):
+        assert TDL.selected_index_bits({**selected, key: value}) is None
+    assert TDL.selected_index_bits({**selected, "extra": 0}) is None
+
+
 def test_absent_selected_compiler_cannot_supply_a_width(tmp_path):
     with pytest.raises((FileNotFoundError, ValueError)):
         TDL.observe_index_width(tmp_path / "no-clang", ["--target=unknown"])

@@ -15,6 +15,7 @@ import yaml
 from merlin_experiments.phase1.feedback import private_bucketize_support as bucketize
 from merlin_experiments.phase1.feedback import private_compilation_inputs as compilation
 from merlin_experiments.phase1.feedback import private_full_models as gate
+from merlin_experiments.phase1.feedback import private_index_host_support as prepared_index
 from merlin_experiments.phase1.feedback import private_integer_reduction_support as integer_reductions
 from merlin_experiments.phase1.feedback import private_linalg_support as linalg
 from merlin_experiments.phase1.feedback import private_linkage_support as linkage
@@ -29,6 +30,27 @@ from merlin.targetgen.sandbox.answer_surfaces import AnswerSurface
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _empty_prepared_index(raw, normalized, receipt, count, selected, linked=None):
+    witness = {
+        "status": prepared_index.LINKED if linked else prepared_index.PENDING,
+        "scope": prepared_index.SCOPE,
+        "raw_source_sha256": raw,
+        "normalized_source_sha256": normalized,
+        "capture_receipt_sha256": receipt,
+        "n_source_operations": count,
+        "selected_index_observation": deepcopy(selected),
+        "source_proof": None,
+        "source_proof_sha256": None,
+        "expected_ordinals": [],
+        "admissions": [],
+        "source_verified": True,
+    }
+    if linked:
+        witness["linked_build"] = dict(linked)
+        witness["source_capture_path"] = None
+    return witness
 
 
 def test_private_capture_binds_sealed_and_compiler_tree_algorithms_independently(tmp_path):
@@ -238,6 +260,18 @@ def test_complete_requires_current_candidate_all_programs_and_device_work(monkey
                                 "candidate_tree_sha256": "1" * 64,
                             },
                         },
+                        prepared_index.FIELD: _empty_prepared_index(
+                            "d" * 64,
+                            "e" * 64,
+                            "f" * 64,
+                            5,
+                            selected_index,
+                            {
+                                "capture_tree_sha256": "c" * 64,
+                                "elf_sha256": "2" * 64,
+                                "candidate_tree_sha256": "1" * 64,
+                            },
+                        ),
                         ordered_scan.FIELD: {
                             "status": ordered_scan.LINKED,
                             "scope": ordered_scan.SCOPE,
@@ -1541,6 +1575,7 @@ def test_shared_postbuild_verifier_rehashes_prebuilt_elf(tmp_path):
         "linalg_host_support": linalg.begin("3" * 64, "3" * 64, 3, deepcopy(selected)),
         "literal_arange_host_support": arange.begin("3" * 64, "3" * 64, 3, deepcopy(selected)),
         integer_reductions.FIELD: integer_reductions.begin("3" * 64, "3" * 64, 3, deepcopy(selected)),
+        prepared_index.FIELD: _empty_prepared_index("3" * 64, "3" * 64, "a" * 64, 3, selected),
         ordered_scan.FIELD: {
             "status": ordered_scan.PENDING,
             "scope": ordered_scan.SCOPE,

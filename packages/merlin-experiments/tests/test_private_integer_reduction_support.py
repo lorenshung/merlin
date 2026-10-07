@@ -190,7 +190,7 @@ def test_reviewed_source_and_exact_linked_build(kind, tmp_path):
 
 @pytest.mark.parametrize("kind", ["sum", "cumsum", "min"])
 def test_host_screen_routes_exact_reduction_proof_to_mandatory_integer_witness(kind, tmp_path):
-    from merlin_experiments.phase1.feedback import private_full_models as full
+    from merlin_experiments.phase1.feedback import private_host_source_dispatch as dispatch
     from merlin_experiments.phase1.feedback import private_linalg_support as linalg
 
     from merlin.targetgen.application_inventory import operation_structure
@@ -258,7 +258,7 @@ def test_host_screen_routes_exact_reduction_proof_to_mandatory_integer_witness(k
             len(parsed),
             source["selected_index_observation"],
         )
-        full._record_linalg_or_integer_source(pointwise, integer, row, proof, parsed, {ordinal: row}, None)
+        dispatch.record(pointwise, integer, {"expected_ordinals": []}, row, proof, parsed, {ordinal: row}, None)
         return pointwise, integer
 
     pointwise, integer = record(decision)
@@ -271,15 +271,17 @@ def test_host_screen_routes_exact_reduction_proof_to_mandatory_integer_witness(k
         lambda bad: bad["source_body_proof"]["selected_index_observation"].update(index_bits=64.0),
         lambda bad: bad["source_body_proof"]["patterns"][0].update(axis=[True] if kind != "min" else True),
         lambda bad: bad["source_body_proof"]["patterns"][0].update(input_shape=[2.0, 3 if kind != "min" else 5]),
-        lambda bad: bad["source_body_proof"]["patterns"][0].update(index_bits_premise=64.0)
-        if kind != "min"
-        else bad["source_body_proof"]["patterns"][0].update(index_bits=64.0),
+        lambda bad: (
+            bad["source_body_proof"]["patterns"][0].update(index_bits_premise=64.0)
+            if kind != "min"
+            else bad["source_body_proof"]["patterns"][0].update(index_bits=64.0)
+        ),
         lambda bad: bad["profiles"][0]["decisions"][0]["source_body_proof"]["patterns"][0].update(
             input_shape=[2.0, 3 if kind != "min" else 5]
         ),
-        lambda bad: bad["profiles"][0]["decisions"][0]["source_body_proof"][
-            "selected_index_observation"
-        ].update(index_bits=64.0),
+        lambda bad: bad["profiles"][0]["decisions"][0]["source_body_proof"]["selected_index_observation"].update(
+            index_bits=64.0
+        ),
         lambda bad: bad["source_body_proof"].update(declaration="forged"),
         lambda bad: bad.pop("source_body_proof"),
     ):
