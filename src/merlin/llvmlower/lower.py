@@ -26,6 +26,7 @@ from .concat_dps import ensure_registered as _register_concat_dps
 # entry exists. Idempotent, so a second import is a no-op.
 from .epilogue_fusion import ensure_registered as _register_epilogue_fusion
 from .im2col_pack import ensure_registered as _register_im2col_panel_pack
+from .masked_contraction import MaskEffectContract
 from .named_broadcast_fold import ensure_registered as _register_named_broadcast_fold
 from .passes_xdsl import PREPROCESS_STAGES, preprocess_text
 from .pipeline import lower_to_llvm_ir
@@ -88,6 +89,7 @@ def lower_model(
     audit_sidecars: tuple[str | Path, ...] = (),
     data_layout: str | None = None,
     index_bits: int | None = None,
+    masked_contraction_effects: MaskEffectContract | None = None,
 ) -> LowerResult:
     """Lower MLIR text end to end; emit per-target artifacts in ``workdir``.
 
@@ -95,6 +97,10 @@ def lower_model(
     :func:`merlin.llvmlower.pipeline.lower_to_llvm_ir`). ``index_bits`` explicitly binds every LLVM
     index conversion pass and is returned with the effective pipeline in ``stats``. A selected build
     supplies it from its compiler observation; this generic API does not infer a host/runtime ABI.
+
+    ``masked_contraction_effects`` forwards the caller's explicit nontrapping,
+    unobserved-floating-flags contract for closed-mask scheduling. Selection
+    still requires its scalar schedule and feature; no effects are inferred.
 
     ``ir_audit=True`` retains exact named-stage IR and a completion/failure index
     in a fresh workdir child. ``audit_sidecars`` binds existing weights/manifests
@@ -154,6 +160,7 @@ def lower_model(
                 data_layout=data_layout,
                 index_bits=index_bits,
                 lowering_selection=lowering_selection,
+                masked_contraction_effects=masked_contraction_effects,
             )
         except Exception as exc:
             # A module MLIR refuses to PARSE fails before any pass, and the reader's dump names a line
@@ -232,6 +239,7 @@ def lower_model_file(
     audit_sidecars: tuple[str | Path, ...] = (),
     data_layout: str | None = None,
     index_bits: int | None = None,
+    masked_contraction_effects: MaskEffectContract | None = None,
 ) -> LowerResult:
     audit_mode(ir_audit)
     return lower_model(
@@ -251,4 +259,5 @@ def lower_model_file(
         audit_sidecars=audit_sidecars,
         data_layout=data_layout,
         index_bits=index_bits,
+        masked_contraction_effects=masked_contraction_effects,
     )

@@ -234,6 +234,95 @@ def test_normal_pipeline_emits_identical_selected_llvm(tmp_path, integer_softmax
     assert (tmp_path / "normal/int_softmax_table_report.json").exists() == integer_softmax
 
 
+@pytest.mark.parametrize("file_route", [False, True])
+@pytest.mark.parametrize("m,n,k,rewrites", [(4, 8, 5, 1), (6, 12, 7, 1), (3, 5, 7, 0)])
+def test_public_model_lowering_delivers_masked_outputs(tmp_path, file_route, m, n, k, rewrites):
+    import json
+
+    from merlin.llvmlower.lower import lower_model, lower_model_file
+    from merlin.llvmlower.masked_contraction import FEATURE
+    from merlin.llvmlower.scalar_contraction import RECTANGULAR_FEATURE
+
+    original = source(m=m, n=n, k=k)
+    control = compile_native(tmp_path / "control", original)
+    work = tmp_path / "normal"
+    options = dict(
+        targets=(),
+        features=frozenset({FEATURE, RECTANGULAR_FEATURE}),
+        masked_contraction_effects=EFFECTS,
+    )
+    if file_route:
+        path = tmp_path / "source.mlir"
+        path.write_text(original)
+        result = lower_model_file(path, work, **options)
+    else:
+        result = lower_model(original, work, **options)
+    report = json.loads((work / "masked_contraction_report.json").read_text())
+    # The rectangular schedule refuses partial tiles; effects do not authorize
+    # weakening its independent shape legality checks.
+    assert report["rewritten_contractions"] == rewrites
+    # Pytest may recycle a successful temporary directory while ctypes keeps
+    # its DSO loaded. Distinct code needs a distinct loader pathname.
+    shared = work / ("selected_" + hashlib.sha256(result.ll_path.read_bytes()).hexdigest()[:16] + ".so")
+    subprocess.run(
+        [
+            str(clang()),
+            "-O2",
+            "-fPIC",
+            "-shared",
+            "-ffp-contract=off",
+            str(result.ll_path),
+            str(mlir_runtime_c()),
+            "-lm",
+            "-o",
+            str(shared),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    selected = HostModel.load(str(shared))
+    rng = np.random.default_rng(721)
+    arrays = [rng.standard_normal(shape).astype(np.float32) for shape in ((2, m, k), (2, k, n), (2, m, n))]
+    before = [a.tobytes() for a in arrays]
+    for mask in (
+        np.zeros((1, 1, m, n), np.bool_),
+        np.ones((1, 1, m, n), np.bool_),
+        rng.integers(0, 2, (1, 1, m, n), dtype=np.uint8).astype(np.bool_),
+    ):
+        args = [*arrays, mask]
+        outputs = [np.empty((1, 2, m, n), dtype=np.float32) for _ in range(2)]
+        for model, out in zip((control, selected), outputs, strict=True):
+            model([(a.ctypes.data, a.shape) for a in [*args, out]])
+        np.testing.assert_array_equal(outputs[0].view(np.uint32), outputs[1].view(np.uint32))
+        assert [a.tobytes() for a in arrays] == before
+
+
+@pytest.mark.parametrize("file_route", [False, True])
+@pytest.mark.parametrize(
+    "effects,selected",
+    [(None, True), (EFFECTS, False), (MaskEffectContract(False, True), True), (MaskEffectContract(True, False), True)],
+)
+def test_public_model_lowering_refuses_missing_or_unselected_effects(tmp_path, file_route, effects, selected):
+    from merlin.llvmlower.lower import lower_model, lower_model_file
+    from merlin.llvmlower.masked_contraction import FEATURE
+    from merlin.llvmlower.pipeline import PipelineError
+    from merlin.llvmlower.scalar_contraction import RECTANGULAR_FEATURE
+
+    features = {RECTANGULAR_FEATURE}
+    if selected:
+        features.add(FEATURE)
+    options = dict(targets=(), features=frozenset(features), masked_contraction_effects=effects)
+    work = tmp_path / "refused"
+    with pytest.raises((PipelineError, ValueError), match="effects|Contract|flags"):
+        if file_route:
+            path = tmp_path / "source.mlir"
+            path.write_text(source())
+            lower_model_file(path, work, **options)
+        else:
+            lower_model(source(), work, **options)
+    assert not (work / "model.ll").exists()
+
+
 def test_captured_outer_mask_refuses_without_fabricated_dominance():
     text = source()
     prefix, body = text.split("attributes {llvm.emit_c_interface} {", 1)

@@ -31,6 +31,7 @@ from merlin.common.paths import runtime_dir
 
 from ...llvmlower import c_runtime, toolchain
 from ...llvmlower.lower import lower_model_file
+from ...llvmlower.masked_contraction import MaskEffectContract
 from . import spike as _spike
 from .firesim_runner import FireSimRunner, select_runner
 
@@ -2405,6 +2406,7 @@ def build_app(
     completion_metric_prefix: str | None = None,
     device: Any | None = None,
     prepared_model_transform: Callable[[Path, Path], Path] | None = None,
+    masked_contraction_effects: MaskEffectContract | None = None,
 ) -> dict:
     """Lower the model, generate the Zephyr app, and build ``zephyr.elf``.
 
@@ -2436,6 +2438,10 @@ def build_app(
 
     ``completion_metric_prefix`` is an optional terminal cycle marker required
     by some out-of-tree runners. It is folded into the image build hash.
+
+    ``masked_contraction_effects`` forwards an explicit nontrapping,
+    unobserved-floating-flags contract to closed-mask scalar scheduling. It
+    requires separate feature/schedule selection; the default adds no permission.
     """
     _completion_metric_line(completion_metric_prefix)
     if board is None:
@@ -2565,6 +2571,7 @@ def build_app(
             # tagged this IR with; None for a package with no per-op block table,
             # which keeps the legacy class-wide split.
             parallel_chunks=parallel_arms(work),
+            masked_contraction_effects=masked_contraction_effects,
         )
     # What this lowering will ask the heap for, read off the IR that is about to be compiled. Measured
     # here rather than estimated later: the file exists for exactly this build, and the number decides the

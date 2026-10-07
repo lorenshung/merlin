@@ -14,6 +14,12 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
 
 ## What belongs here
 
+- The ordinary text/file model lowering APIs forward the existing explicit
+  `MaskEffectContract` through `masked_contraction_effects`. Backend model
+  builders use the same parameter. Separate closed-mask feature and scalar
+  schedule selection remain required; defaults infer no floating effects.
+  Complete use/shape legality and original output gates stay authoritative.
+
 - `prepared_model_transform.py` provides an explicit invocation-local callback
   after all shared model preparation, before profiling/upstream lowering. It
   supplies an immutable private source snapshot, verifies returned typed MLIR

@@ -33,6 +33,7 @@ from merlin.common.paths import runtime_dir
 
 from ...llvmlower import c_runtime, target_data_layout, toolchain
 from ...llvmlower.lower import lower_model_file
+from ...llvmlower.masked_contraction import MaskEffectContract
 from ..boards import CONSOLE_HTIF, CONSOLE_UART
 from . import spike as _spike  # toolchain paths (gcc/spike/objdump)
 
@@ -429,6 +430,7 @@ def build(
     host_math_policy: str = "native",
     math_archive_symbols: Sequence[str] | None = None,
     prepared_model_transform: Callable[[Path, Path], Path] | None = None,
+    masked_contraction_effects: MaskEffectContract | None = None,
     host_llvm_transform: Callable[[Path, Path], Path] | None = None,
     host_provider_builder: Callable | None = None,
     cflags_override: list[str] | None = None,
@@ -525,6 +527,11 @@ def build(
     verified public entry types and exact selected bytes enter the recipe.
     Source semantics, effects and provider proofs remain caller obligations.
     Empty selection preserves the ordinary build route.
+
+    ``masked_contraction_effects`` explicitly forwards nontrapping and
+    unobserved-floating-flags permission to the selected closed-mask scalar
+    schedule. The caller must separately select its feature and schedule.
+    The default grants no permission and changes no policy.
     """
     from ...llvmlower.compilation_recipe import FILENAME as COMPILATION_RECIPE
     from ...llvmlower.compilation_recipe import CompilationRecipe
@@ -700,6 +707,7 @@ def build(
             features=features,
             data_layout=index_observation["data_layout"],
             index_bits=index_observation["index_bits"],
+            masked_contraction_effects=masked_contraction_effects,
         )  # produce only the .ll
     # BACKEND-level feature flags, on the MODEL OBJECT ONLY (the GCC-built harness units keep
     # `gcc_cflags`): a feature like the register-group width is an LLVM backend query no tile size
