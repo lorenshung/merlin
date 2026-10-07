@@ -249,3 +249,7 @@ exact point/reconstruction witnesses and deterministic subnormal allowance remai
 representation and interval errors use the unchanged rigorous producer. No
 normal default caller is changed. Independent original output validation and
 retained source fallback are mandatory provider obligations.
+
+## Complete integer product families
+
+Exact product families require complete prefix bounds, all live output planes, immutable inputs, private disjoint outputs, synchronous completion and preserved host effects. Target storage, scheduling and callback implementation proofs remain provider obligations.

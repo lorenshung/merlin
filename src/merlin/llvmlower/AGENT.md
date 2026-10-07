@@ -631,3 +631,7 @@ obligations. The source score interval is preserved: zero implementation budget
 removes only extra polynomial rounding expansion, not input uncertainty. Exact
 F32 endpoint values remain available to the unchanged denominator. Constant
 specialization is not a numerical approximation or a default emitter policy.
+
+## Complete integer product families
+
+Exact product families require complete prefix bounds, all live output planes, immutable inputs, private disjoint outputs, synchronous completion and preserved host effects. Target storage, scheduling and callback implementation proofs remain provider obligations.
