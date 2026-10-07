@@ -98,3 +98,11 @@ plus moved bytes, never one without the other). It is validated as an ORDER agai
 groups (`merlin/tests/dse/test_schedule_proxy.py`, points in `examples/<target>/phase2/`) and is the
 `cost_proxy` rung of `merlin/contract/measurement_ladder.yaml`: ranking only, never a cycle count.
 Its production caller is `group_headroom.group_rank`, reported beside each stated group's bound.
+
+`load_state_residency`/`load_state_claim`, `stationary_residency`/`stationary_claim` and
+`movein_placement`/`movein_claim` decide the template's EMITS families (PD, PA, PJ) from a
+candidate's own decoded stream. Every bound is derived through the selected support (the
+load-configuration layout and retain sentinel via `targetgen.rocc.decode`) or the target's RTL
+facts, and an underivable one REFUSES. Callers: `trace_check`'s declared residency modes and
+`merlin_experiments.phase2.claims.dispatch`. The measured-claims coordinator refuses to seal them:
+they read no cycles.

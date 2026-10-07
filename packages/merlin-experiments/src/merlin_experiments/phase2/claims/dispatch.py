@@ -214,6 +214,20 @@ def _registry() -> dict[str, Callable[..., dict]]:
     except Exception:  # noqa: BLE001
         pass
     try:
+        # The EMITS families are decided from the CANDIDATE's own emitted stream, not from cycles, so
+        # they have no arms and no fitted cohort. They register like any other: dispatch still keys
+        # only on the identity each contract froze, which is what keeps a new claim SHAPE from needing
+        # a new caller.
+        from merlin.perf import load_state_claim as LS
+        from merlin.perf import movein_claim as MI
+        from merlin.perf import stationary_claim as ST
+
+        table[LS.ANALYZER] = LS.analyze_load_state_claim
+        table[ST.ANALYZER] = ST.analyze_stationary_claim
+        table[MI.ANALYZER] = MI.analyze_movein_claim
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         # A form-perf member against its vendor-reference bar (the form-perf family): the candidate
         # arm held to the declared instruction policy, the vendor bar unrestricted.
         from . import vendor_reference as VR

@@ -699,8 +699,8 @@ def analyze_whole_model_emission(
                     ),
                 }
             else:
-                base_check = TCK.check(base_trace, expected, baseline_buffer)
-                cand_check = TCK.check(cand_trace, expected, candidate_buffer)
+                base_check = TCK.check(base_trace, expected, baseline_buffer, target=target)
+                cand_check = TCK.check(cand_trace, expected, candidate_buffer, target=target)
                 base_residency = TCK.residency_findings(base_trace)
                 cand_residency = TCK.residency_findings(cand_trace)
                 movement_bound = TCK.movement_bound_for(target)
