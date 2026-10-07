@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 from merlin.common.paths import data_path
 
+from .bf16_integer_observer import BF16IntegerObserverContract
 from .exact_bound_conversion import ExactBoundConversionContract
 from .frontier_point_cells import FrontierPointCellsContract
 from .independent_lane_schedule import LaneEffects
@@ -131,6 +132,7 @@ def emit_source_attention_frontier(
     prepare_readonly_rhs: bool = False,
     radius_stage_effects: LaneEffects | None = None,
     source_roundoff_estimate: ApproximateSourceRoundoffPolicy | None = None,
+    bf16_integer_observer: BF16IntegerObserverContract | None = None,
     frontier_point_cells: FrontierPointCellsContract | None = None,
     source_product_family: SourceProductFamilyContract | None = None,
 ) -> str:
@@ -205,6 +207,10 @@ def emit_source_attention_frontier(
     Optional finite-point observations remove duplicate endpoint quantization
     only under a separate pure integer-observation/effects contract. Stable
     source-scale checks, original fallback and approximate-policy gates remain.
+
+    Optional exact BF16 integer observations retain the scale/inverse/product
+    DAG. Pure source, standard-copy and floating-effect contracts permit exact
+    integer decoding after any finite-point specialization; defaults are intact.
     """
     if type(fuse_encoded_witness) is not bool:
         raise ValueError("fused encoded witness policy must be bool")
@@ -559,6 +565,10 @@ def emit_source_attention_frontier(
         from .frontier_point_cells import prepare_frontier_point_cells
 
         text = prepare_frontier_point_cells(text, contract=frontier_point_cells)
+    if bf16_integer_observer is not None:
+        from .bf16_integer_observer import prepare_bf16_integer_observer
+
+        text = prepare_bf16_integer_observer(text, contract=bf16_integer_observer)
     definitions = {
         "HEADS": plan.heads,
         "ROWS": plan.query_rows,

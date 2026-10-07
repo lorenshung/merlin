@@ -257,3 +257,7 @@ Exact product families require complete prefix bounds, all live output planes, i
 ## Finite point observations at the BF16 quantization frontier
 
 Finite-point row observations require pure returned-value quantization, stable RNE, nontrapping arithmetic, unobserved flags, immutable endpoints and private disjoint outputs. Approximate product permission and arbitrary interposed rounding calls do not establish these facts.
+
+## Exact BF16 integer observations
+
+Exact BF16 integer observations preserve the original scale/product DAG and require pure roundeven values, integer-only observations, stable RNE, nontrapping arithmetic, unobserved flags and standard unobserved representation copies. Compose after finite-point specialization; each contract remains independently required.

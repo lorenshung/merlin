@@ -9,6 +9,8 @@ import numpy as np
 import pytest
 
 from merlin.common.paths import data_path, merlin_dir
+from merlin.llvmlower.bf16_integer_observer import BF16IntegerObserverContract
+from merlin.llvmlower.frontier_point_cells import FrontierPointCellsContract
 from merlin.llvmlower.source_attention_frontier import emit_source_attention_frontier
 from merlin.llvmlower.source_product_family import SourceProductFamilyContract
 
@@ -24,16 +26,17 @@ CONTRACT = SourceProductFamilyContract(*([True] * 6))
 @pytest.fixture(
     scope="module",
     params=[
-        (p, prepared)
+        (p, prepared, observers)
         for p in (
             fixture.PLAN,
             replace(fixture.PLAN, heads=3, query_rows=5, depth=8, chunk=12, segment=5, denominator_lanes=4),
         )
         for prepared in (False, True)
+        for observers in (False, True)
     ],
 )
 def pair(tmp_path_factory, request):
-    plan, prepared = request.param
+    plan, prepared, observers = request.param
     work = tmp_path_factory.mktemp("complete-source-family")
     libraries = []
     for selected in (False, True):
@@ -45,6 +48,8 @@ def pair(tmp_path_factory, request):
             fuse_integer_reconstruction=True,
             prepare_readonly_rhs=prepared,
             source_product_family=CONTRACT if selected else None,
+            frontier_point_cells=FrontierPointCellsContract(*([True] * 7)) if selected and observers else None,
+            bf16_integer_observer=BF16IntegerObserverContract(*([True] * 7)) if selected and observers else None,
             **(rhs.FLAGS if prepared else {}),
         )
         extra = fixture.EXTRA
