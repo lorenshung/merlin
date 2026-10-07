@@ -197,11 +197,12 @@ def _quant_for(dtype: str, override: str | None = None):
 
 
 def _to_native(t):
-    """A torch tensor -> nested python lists of floats/ints (json-safe), via float64 for exactness."""
+    """A torch tensor -> JSON-safe lists without rounding integer or boolean values."""
     import torch
 
     if isinstance(t, torch.Tensor):
-        return t.detach().to(torch.float64).cpu().tolist()
+        value = t.detach().cpu()
+        return (value if not (value.is_floating_point() or value.is_complex()) else value.to(torch.float64)).tolist()
     if isinstance(t, (list, tuple)):
         return [_to_native(x) for x in t]
     return t
@@ -307,6 +308,20 @@ def _input_abi(inputs):
     return leaves, [{"shape": list(x.shape), "dtype": _mlir_dtype(x.dtype)} for x in leaves]
 
 
+def _freeze_calibration(samples, *, limit, normalize, torch):
+    """Own bounded sample values before a generator can reuse its scratch storage."""
+    from itertools import islice
+
+    calibration = []
+    for sample in islice(samples, limit):
+        sample = normalize(sample)
+        leaves, _ = _input_abi(sample)
+        if any(leaf.is_complex() for leaf in leaves):
+            raise RuntimeError("FP32 staging does not admit complex calibration inputs")
+        calibration.append(torch.utils._pytree.tree_map(lambda leaf: leaf.detach().clone(), sample))
+    return calibration
+
+
 def _float_reference(mdl, inputs, torch) -> dict:
     """The untransformed model's outputs on ``inputs``, in the golden's JSON shape.
 
@@ -319,13 +334,14 @@ def _float_reference(mdl, inputs, torch) -> dict:
     try:
         with torch.no_grad():
             y = mdl(*inputs)
-        leaves, _abi = _output_abi(y)
+        leaves, abi = _output_abi(y)
+        leaves = [leaf.detach().clone() for leaf in leaves]
         values = [_to_native(x) for x in leaves]
     finally:
         random.setstate(states[0])
         np.random.set_state(states[1])
         torch.set_rng_state(states[2])
-    return {"outputs": values[0] if len(values) == 1 else values}
+    return {"outputs": values[0] if len(values) == 1 else values, "output_abi": abi, "leaves": leaves}
 
 
 def _output_abi(outputs):
@@ -390,6 +406,63 @@ def _integerized_agreement(before, after, *, atol: float, rtol: float) -> dict:
         "max_rel": max((row["max_rel"] for row in rows), default=0.0),
         "outputs": rows,
         "finite": compatible and all(row["finite"] for row in rows),
+    }
+
+
+def _fp32_stage_observation(
+    original: dict, staged_leaves, original_input_abi: list[dict], staged_input_abi: list[dict]
+) -> dict:
+    """Measure a selected precision change; this is not an accuracy or quantization gate."""
+    import torch
+
+    before = original["leaves"]
+    _, after_abi = _output_abi(tuple(staged_leaves))
+    before_abi = original["output_abi"]
+    if len(before) != len(staged_leaves) or not before:
+        raise RuntimeError("FP32 staging changed output cardinality")
+    rows = []
+    for left, right, old, new in zip(before, staged_leaves, before_abi, after_abi, strict=True):
+        if left.shape != right.shape:
+            raise RuntimeError("FP32 staging changed output shape")
+        if not left.is_floating_point():
+            if right.dtype != left.dtype or not torch.equal(left, right):
+                raise RuntimeError("FP32 staging changed an exact integer/bool result")
+            rows.append(
+                {
+                    "shape": list(left.shape),
+                    "original_dtype": old["dtype"],
+                    "staged_dtype": new["dtype"],
+                    "comparison": "exact_nonfloating",
+                    "max_abs": 0.0,
+                    "max_rel": 0.0,
+                }
+            )
+            continue
+        if right.dtype != torch.float32:
+            raise RuntimeError("FP32 staging retained a non-FP32 floating output")
+        lhs, rhs = left.detach().to(torch.float64), right.detach().to(torch.float64)
+        if not bool(torch.isfinite(lhs).all() and torch.isfinite(rhs).all()):
+            raise RuntimeError("FP32 staging output comparison is nonfinite")
+        delta = (lhs - rhs).abs()
+        rows.append(
+            {
+                "shape": list(left.shape),
+                "original_dtype": old["dtype"],
+                "staged_dtype": new["dtype"],
+                "comparison": "observed_floating",
+                "max_abs": float(delta.max()) if delta.numel() else 0.0,
+                "max_rel": float((delta / lhs.abs().clamp_min(1e-12)).max()) if delta.numel() else 0.0,
+            }
+        )
+    return {
+        "status": "observed",
+        "scope": "original computation versus staged FP32; not accuracy equivalence",
+        "original_input_abi": original_input_abi,
+        "staged_input_abi": staged_input_abi,
+        "original_output_abi": before_abi,
+        "staged_output_abi": after_abi,
+        "output_cardinality": len(rows),
+        "output_metrics": rows,
     }
 
 
@@ -478,39 +551,43 @@ def _materialize_session(
         "loader_provenance_error": None,
         "loader_paper_ready": session.metadata.get("paper_ready"),
     }
-    # Observe every stage's real tensor ABI before export can mutate Python-side
-    # caches. Do not infer result cardinality or precision from golden.npy, which
-    # intentionally stores only result zero and widens floating outputs to f32.
-    stage_abis = {}
+    # Observe every real stage ABI before export; golden.npy stores only result zero.
+    stage_abis, stage_references = {}, {}
     with torch.no_grad():
         for program in session.programs:
             _, input_abi = _input_abi(program.inputs)
             program.module.eval()
-            _, output_abi = _output_abi(program.module(*program.inputs))
+            reference = _float_reference(program.module, program.inputs, torch) if args.stage_fp32 else None
+            if reference is None:
+                _, output_abi = _output_abi(program.module(*program.inputs))
+            else:
+                stage_references[program.name] = reference
+                output_abi = reference["output_abi"]
             stage_abis[program.name] = {"input_abi": input_abi, "output_abi": output_abi}
     programs = session.bundle_programs()
     selections = {program.name: "untransformed" for program in session.programs}
     stage_quants = {}
-    if quantized:
+    if quantized or args.stage_fp32:
         from m2m.capture.bundle import _shared_tensor_inventory
 
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        import _recipe_quantizer as RQ
+        if quantized:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import _recipe_quantizer as RQ
 
-        # Each graph is captured through the SAME recipe/integer-reference path
-        # as an ordinary model. PT2E produces separate GraphModules; it must not
-        # modify the source weights shared by the original stage wrappers.
+        # PT2E stage rewrites must leave shared source weights unchanged.
         source_owner = torch.nn.ModuleList([program.module for program in session.programs])
         has_source_state = any(True for _ in source_owner.parameters()) or any(True for _ in source_owner.buffers())
         source_state = _shared_tensor_inventory(source_owner) if has_source_state else []
         for program, record in zip(session.programs, programs, strict=True):
-            exported = torch.export.export(program.module.eval(), program.inputs)
-            selected = RQ._has_floating_recipe_work(exported.graph_module, recipe)
-            del exported
-            selections[program.name] = "recipe" if selected else "no_recipe_work"
+            selected = False
+            exported = None
+            if quantized:
+                exported = torch.export.export(program.module.eval(), program.inputs)
+                selected = RQ._has_floating_recipe_work(exported.graph_module, recipe)
+            selections[program.name] = "recipe" if selected else "no_recipe_work" if quantized else "fp32_staged"
             stage_args = argparse.Namespace(**vars(args))
             stage_args.out = str(out / "stages" / program.name)
-            if not selected:
+            if quantized and not selected:
                 stage_args.dtype, stage_args.recipe = "fp32", ""
             observed = []
             status = main(
@@ -522,6 +599,8 @@ def _materialize_session(
                     "dependencies": dependencies,
                     "session": program.session,
                     "provenance": _scalars(dict(session.metadata.get("provenance") or {})),
+                    "source_exported": exported if args.stage_fp32 else None,
+                    "float_reference": stage_references.get(program.name),
                 },
                 completed=observed.append,
             )
@@ -531,17 +610,19 @@ def _materialize_session(
             record.update(
                 model=capture["module"],
                 inputs=capture["inputs"],
+                session=capture["session"],
                 conversion_result=capture["conversion_result"],
                 metadata=capture["metadata"],
             )
+            if args.stage_fp32:
+                stage_abis[program.name] = {key: capture["metadata"][key] for key in ("input_abi", "output_abi")}
             if capture["quant"] is not None:
                 stage_quants[program.name] = capture["quant"]
         if source_state != (_shared_tensor_inventory(source_owner) if has_source_state else []):
-            raise ValueError("multi-program source weights changed during recipe capture")
-        if not stage_quants:
+            raise ValueError("multi-program source weights changed during precision capture")
+        if quantized and not stage_quants:
             raise ValueError("int8 session has no recipe-realized program")
-    # The existing writer owns exported ABI resolution, carried state, goldens
-    # and cross-stage bindings; this adapter adds capture-process observations.
+    # The writer owns exported ABI, carried state, goldens and cross-stage bindings.
     summary = write_multi_program_bundle(
         programs,
         dict(session.metadata),
@@ -602,7 +683,12 @@ def _materialize_session(
         "determinism": determinism,
         "agentic": False,
         "recipe_sha256": recipe.get("recipe_sha256") if recipe else None,
-        "stage_storage": "separate; original source weight bytes verified unchanged" if quantized else "untransformed",
+        "stage_storage": (
+            "separate; original source weight bytes verified unchanged"
+            if quantized or args.stage_fp32
+            else "untransformed"
+        ),
+        **({"source_state_unchanged": True} if args.stage_fp32 else {}),
         "session_contract_sha256": hashlib.sha256((out / "session_contract.yaml").read_bytes()).hexdigest(),
         "qualification": "capture only; no target lowering, execution or application accuracy claim",
     }
@@ -623,15 +709,11 @@ def _materialize_session(
 
 
 def _write_leaf_constants(mdl, inputs, weights_path: str, dest: Path) -> str | None:
-    """Write the ``@forward`` leaves the weights file does not store; the path, or ``None`` if none.
+    """Write manifest-listed ``@forward`` buffers and lifted constants omitted from weights.
 
-    Externalization stores PARAMETERS. A registered buffer and a tensor constant the export lifts out
-    of the graph stay ``@forward`` arguments with nothing behind them, so a capsule missing them is not
-    self-contained: a consumer has to find the values in some other capture's files, which are another
-    capture's constants unless someone checks. Written in the layout m2m's bundle writer uses and
-    :func:`merlin.perf.whole_model_open.forward_arguments` reads -- ``buf::<dotted name>`` for a
-    buffer, the manifest's own name for a lifted constant -- and only for leaves the manifest names.
-    Lifted constants are recovered by m2m's own re-export, whose graph order is the importer's.
+    Use m2m's bundle layout: ``buf::<dotted name>`` for buffers and the
+    manifest name for constants. Missing leaves fail closed; another capture's
+    constants cannot complete this capsule.
     """
     import numpy as np
 
@@ -698,6 +780,11 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
     ap.add_argument("--agreement-atol", type=float, default=1e-3)
     ap.add_argument("--agreement-rtol", type=float, default=1e-3)
     ap.add_argument(
+        "--stage-fp32",
+        action="store_true",
+        help="explicitly stage the captured floating frontend to FP32 with audited dtype operands",
+    )
+    ap.add_argument(
         "--materialize-bundle",
         action="store_true",
         help="also emit the full model2MLIR runtime bundle from this exact conversion and model instance",
@@ -733,6 +820,14 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
         # Defined only on top of the int8 contractions (the softmax's int8 numerators are the next
         # contraction's own operand), so it is refused without them rather than mixed into a float program.
         ap.error("--integer-nonlinear is defined on top of --quantize-activation-contractions only")
+    if a.stage_fp32 and (
+        (a.dtype not in {"fp32", "f32"} and not (a.dtype == "int8" and a.recipe))
+        or a.scheme
+        or a.already_quantized
+        or a.quantize_activation_contractions
+        or a.integer_nonlinear
+    ):
+        ap.error("--stage-fp32 requires FP32 or an explicit int8 recipe without additional rewrites")
 
     if a.m2m_dir and a.m2m_dir not in sys.path:
         sys.path.insert(0, a.m2m_dir)
@@ -746,6 +841,16 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
     from m2m.coverage import opaque_report
 
     capture_api = _capture_api_report(m2m)
+
+    if a.stage_fp32:
+        if capture_api["frontend_trace_missing"]:
+            raise RuntimeError(
+                "FP32 staging requires frontend trace APIs: " + ", ".join(capture_api["frontend_trace_missing"])
+            )
+        from m2m.capture.trace import materialize_frontend_precision
+
+        if "retarget_float_dtype_arguments" not in inspect.signature(materialize_frontend_precision).parameters:
+            raise RuntimeError("FP32 staging requires audited frontend dtype-argument retargeting")
 
     if a.materialize_bundle and capture_api["same_conversion_missing"]:
         raise RuntimeError(
@@ -807,12 +912,16 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
             "loader_paper_ready": None,
         }
     )
-    mdl = mdl.eval()
-    # A PT2E recipe returns a new GraphModule. Loader-owned streams such as
-    # ResNet's session_images live on the original module, while write_bundle
-    # must still receive the integerized graph. Freeze the loader's session
-    # declaration before replacing the module; its tensor values are the same
-    # inputs whose conversion and golden this worker records below.
+    mdl.eval()
+    source_layer_inventory = None
+    if a.stage_fp32 and a.recipe:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _recipe_quantizer as RQ
+
+        source_layer_inventory = RQ.layer_inventory(mdl)
+    source_reference = prepared_program.get("float_reference") if prepared_program else None
+    if a.stage_fp32 and source_reference is None:
+        source_reference = _float_reference(mdl, inputs, torch)
     session = (
         prepared_program["session"]
         if prepared_program is not None
@@ -822,6 +931,23 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
             else None
         )
     )
+    # Capture loader-owned calibration at original precision before export.
+    calibration = None
+    if a.stage_fp32 and a.recipe:
+        hook = getattr(loader, "get_calibration_inputs", None)
+        samples = None
+        if callable(hook):
+            samples = hook(mdl, tuple(inputs))
+        else:
+            stream = getattr(mdl, "session_images", None)
+            if isinstance(stream, torch.Tensor) and stream.shape[0] > 0:
+                samples = ((stream[i],) for i in range(int(stream.shape[0])))
+        if samples is not None:
+            calibration_limit = max(
+                inspect.signature(RQ.apply_recipe).parameters["calibration_samples"].default,
+                inspect.signature(RQ.agreement).parameters["limit"].default,
+            )
+            calibration = _freeze_calibration(samples, limit=calibration_limit, normalize=RQ._as_tuple, torch=torch)
     original_snapshot = {
         "status": "unavailable",
         "stage": "original",
@@ -832,7 +958,12 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
         try:
             from m2m.capture.trace import capture_frontend_snapshot
 
-            original_snapshot = capture_frontend_snapshot(mdl, tuple(inputs), stage="original")
+            source_exported = prepared_program.get("source_exported") if a.stage_fp32 and prepared_program else None
+            if a.stage_fp32 and source_exported is None:
+                source_exported = torch.export.export(mdl, tuple(inputs))
+            original_snapshot = capture_frontend_snapshot(
+                source_exported if source_exported is not None else mdl, tuple(inputs), stage="original"
+            )
         except Exception as exc:  # noqa: BLE001 -- unknown source counts are not fabricated
             original_snapshot = {
                 "status": "unavailable",
@@ -846,15 +977,44 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
     # below is the transformed model -- what the compiler must reproduce -- and so can say nothing about
     # how far the transformation moved the network; this is the reference that can.
     transforms = (
-        cast is not None
+        a.stage_fp32
+        or cast is not None
         or bool(a.recipe)
         or bool(a.scheme)
         or a.quantize_activation_contractions
         or a.integer_nonlinear
         or (not a.already_quantized and _quant_for(a.dtype, None) is not None)
     )
-    float_reference = _float_reference(mdl, inputs, torch) if transforms and not a.already_quantized else None
+    float_reference = source_reference if a.stage_fp32 else None
+    if not a.stage_fp32 and transforms and not a.already_quantized:
+        float_reference = _float_reference(mdl, inputs, torch)
+    original_input_abi = _input_abi(inputs)[1] if a.stage_fp32 else None
     precision_conversion = None
+    if a.stage_fp32:
+        if original_snapshot.get("status") != "complete":
+            raise RuntimeError("FP32 staging requires a complete original frontend snapshot")
+        mdl, inputs, original_snapshot, precision_conversion = materialize_frontend_precision(
+            source_exported,
+            tuple(inputs),
+            dtype=torch.float32,
+            original_frontend_snapshot=original_snapshot,
+            retarget_float_dtype_arguments=True,
+        )
+        audit = precision_conversion.get("staged_precision_audit") if isinstance(precision_conversion, dict) else None
+        if (
+            precision_conversion.get("original_graph_sha256") != original_snapshot["sha256"]
+            or not isinstance(precision_conversion.get("staged_graph_sha256"), str)
+            or len(precision_conversion["staged_graph_sha256"]) != 64
+            or precision_conversion.get("graph_dtype_retargeting") != "schema_float_dtype_operands"
+            or not isinstance(precision_conversion.get("dtype_decisions"), list)
+            or not isinstance(audit, dict)
+            or audit.get("status") != "complete"
+            or audit.get("target_dtype") != "torch.float32"
+            or audit.get("non_target_floating_values") != 0
+            or type(audit.get("checked_floating_values")) is not int
+            or audit["checked_floating_values"] < 1
+        ):
+            raise RuntimeError("FP32 staging lacks a complete exact-source precision audit")
     if cast is not None:
         try:
             from m2m.capture.trace import materialize_frontend_precision
@@ -877,6 +1037,40 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
     # PyTorch's public exported-model train/eval helper may return None.
     # The owned GraphModule remains the conversion source.
     mdl.eval()
+    fp32_staging = None
+    if a.stage_fp32:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from _capture_session_reference import freeze_fp32_session_reference
+
+        session = freeze_fp32_session_reference(mdl, inputs, session)
+        staged_reference = _float_reference(mdl, inputs, torch)
+        fp32_staging = _fp32_stage_observation(
+            float_reference, staged_reference["leaves"], original_input_abi, _input_abi(inputs)[1]
+        )
+        fp32_staging.update(
+            original_graph_sha256=original_snapshot["sha256"],
+            staged_graph_sha256=precision_conversion["staged_graph_sha256"],
+        )
+        if calibration is not None:
+            before_calibration = [_input_abi(sample)[1] for sample in calibration]
+            calibration = [
+                torch.utils._pytree.tree_map(
+                    lambda leaf: leaf.to(torch.float32) if leaf.is_floating_point() else leaf, sample
+                )
+                for sample in calibration
+            ]
+            fp32_staging["calibration_source"] = "loader_declared_pre_transform"
+            fp32_staging["calibration_sample_limit"] = calibration_limit
+            fp32_staging["calibration_input_abis"] = [
+                {"original": before, "staged": _input_abi(sample)[1]}
+                for before, sample in zip(before_calibration, calibration, strict=True)
+            ]
+        if source_layer_inventory is not None:
+            inventory_bytes = json.dumps(source_layer_inventory, sort_keys=True, separators=(",", ":")).encode()
+            fp32_staging.update(
+                source_layer_inventory=source_layer_inventory,
+                source_layer_inventory_sha256=hashlib.sha256(inventory_bytes).hexdigest(),
+            )
 
     weights_path = str(out / "weights.safetensors")
     recipe = json.loads(Path(a.recipe).read_text(encoding="utf-8")) if a.recipe else None
@@ -899,14 +1093,14 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
         import _recipe_quantizer as RQ
         from m2m.capture.torchao_pipeline import QuantizationConfig
 
-        calibration = None
-        hook = getattr(loader, "get_calibration_inputs", None)
-        if callable(hook):
-            calibration = list(hook(mdl, tuple(inputs)))
-        else:
-            stream = getattr(mdl, "session_images", None)
-            if isinstance(stream, torch.Tensor) and stream.shape[0] > 0:
-                calibration = [(stream[i],) for i in range(int(stream.shape[0]))]
+        if not a.stage_fp32:
+            hook = getattr(loader, "get_calibration_inputs", None)
+            if callable(hook):
+                calibration = list(hook(mdl, tuple(inputs)))
+            else:
+                stream = getattr(mdl, "session_images", None)
+                if isinstance(stream, torch.Tensor) and stream.shape[0] > 0:
+                    calibration = [(stream[i],) for i in range(int(stream.shape[0]))]
         reference = mdl
         static = recipe["activation"]["mode"] == "static"
         if not static:
@@ -919,8 +1113,13 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
             example_inputs=tuple(inputs),
             calibration_inputs=calibration,
             original_frontend_snapshot=original_snapshot if trace_supported else None,
+            source_layer_inventory=source_layer_inventory,
         )
         quant_stats = getattr(mdl, "_recipe_quantization_stats", None)
+        if fp32_staging is not None:
+            fp32_staging["source_layer_plan_sha256"] = (
+                quant_stats.get("plan_sha256") if isinstance(quant_stats, dict) else None
+            )
         # The receipt: the recipe-quantized model against the floating-point one, on the
         # calibration stream and the capture input. Recorded, not judged here.
         agreement = RQ.agreement(reference, mdl, [tuple(inputs), *(calibration or [])])
@@ -1180,6 +1379,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
         "ok": bool(res.ok) and precision_exact,
         "precision_realization": precision if precision else {"status": "unknown"},
         "precision_conversion": precision_conversion,
+        **({"fp32_staging": fp32_staging} if fp32_staging is not None else {}),
         "opaque": int(n_opaque),
         "opaque_detail": opaque,
         # WHICH quantization actually produced this program. Without it a weight-only capture and a
@@ -1288,7 +1488,9 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
             conversion_result=res,
         )
     if completed is not None:
-        completed({"module": mdl, "inputs": tuple(inputs), "quant": q, "conversion_result": res, "metadata": meta})
+        completed(
+            dict(module=mdl, inputs=tuple(inputs), session=session, quant=q, conversion_result=res, metadata=meta)
+        )
     # a machine-readable tail line the parent greps for, even if warnings precede it
     print("__M2M_CAPTURE__ " + json.dumps({"ok": meta["ok"], "opaque": meta["opaque"]}))
     return 0 if (res.ok and n_opaque == 0 and integerization_ok and precision_exact) else 3

@@ -10,3 +10,11 @@ the accepted residuals (unsigned receipt, copied venv rather than a pinned
 dependency closure). Do not widen it to another runner or schema without a new
 reviewed decision. Replay the fixed sandbox policy and compare every input/output
 byte before admitting a receipt. Keep this package separate from Phase 0 source hashing.
+
+`m2m_origin.py` owns the narrow Git-origin inspection and staged Phase 0
+runtime-receipt binding used by checkpoint-free sealed M2M captures. Its Git
+revision is only an origin hint; copied package bytes remain execution authority.
+`runtime_rehydrate.py` owns offline recovery of a new source venv from an
+independently selected, fully verified runtime CAS. It records a new byte
+identity and excludes stale editable origins explicitly; it never restores an
+old venv path or promotes historical capture evidence.

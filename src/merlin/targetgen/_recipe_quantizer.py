@@ -159,10 +159,21 @@ def _has_floating_recipe_work(exported: Any, recipe: Mapping[str, Any]) -> bool:
     )
 
 
+def _source_weight_geometry_matches(
+    source_layers: list[dict[str, Any]], owner: str, observed_shape: list[int] | None
+) -> bool:
+    """A staged weight can inherit only its exact, unique source module's placement."""
+    matching = [row for row in source_layers if row.get("fqn") == owner]
+    return bool(
+        len(matching) == 1 and isinstance(observed_shape, list) and matching[0].get("weight_shape") == observed_shape
+    )
+
+
 def build_quantizer(
     recipe: Mapping[str, Any],
     *,
     layer_plan: Mapping[str, Any],
+    source_layer_inventory: list[dict[str, Any]] | None = None,
     eps: float = DEFAULT_OBSERVER_EPSILON,
     fold_candidates: list | None = None,
 ):
@@ -259,6 +270,12 @@ def build_quantizer(
             and stored_floating_weight(value.args[0])
         )
 
+    def stored_weight_shape(value: Any) -> list[int] | None:
+        while isinstance(value, torch.fx.Node) and value.op == "call_function" and value.target in weight_views:
+            value = value.args[0] if value.args else None
+        tensor = value.meta.get("val") if isinstance(value, torch.fx.Node) and value.op == "get_attr" else None
+        return list(tensor.shape) if isinstance(tensor, torch.Tensor) else None
+
     def eligible(node: Any, family: str) -> bool:
         if not software_allows(node, family):
             return False
@@ -274,6 +291,9 @@ def build_quantizer(
             return False
         if path:
             decision = decisions.get(path)
+            if source_layer_inventory is not None and family == "contraction":
+                if not _source_weight_geometry_matches(source_layer_inventory, path, stored_weight_shape(node.args[1])):
+                    return False
             if decision is not None:
                 return bool(decision.get("placement") == "device" and decision.get("family") == family)
             # The inventory contains leaves only. A container still owns functional
@@ -547,7 +567,9 @@ def build_fqn_config(recipe: Mapping[str, Any], layer_plan: Mapping[str, Any]):
     return _FqnToConfig(mapping), notes
 
 
-def _plan_layers(recipe: Mapping[str, Any], model: Any) -> dict[str, Any]:
+def _plan_layers(
+    recipe: Mapping[str, Any], model: Any, *, source_layer_inventory: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
     """The per-layer plan for ``model`` under ``recipe``, decided by the rule both sides share.
 
     The rule lives in :mod:`quant_layer_plan`, which imports neither merlin nor a framework, so the
@@ -562,7 +584,9 @@ def _plan_layers(recipe: Mapping[str, Any], model: Any) -> dict[str, Any]:
         sys.path.insert(0, here)
     import quant_layer_plan as QLP
 
-    return QLP.plan(recipe, layer_inventory(model)).to_dict()
+    return QLP.plan(
+        recipe, layer_inventory(model) if source_layer_inventory is None else source_layer_inventory
+    ).to_dict()
 
 
 def _as_tuple(sample: Any) -> tuple:
@@ -625,6 +649,7 @@ def apply_recipe(
     calibration_inputs: Iterable[Any] | None = None,
     calibration_samples: int = 100,
     original_frontend_snapshot: dict[str, Any] | None = None,
+    source_layer_inventory: list[dict[str, Any]] | None = None,
 ) -> Any:
     """Quantize ``model`` under ``recipe`` and return the module the capture should lower."""
     import torch
@@ -686,7 +711,10 @@ def apply_recipe(
 
     if not example_inputs:
         raise RecipeError("a static recipe needs example inputs to export the model")
-    exported_program = torch.export.export(model.eval(), tuple(example_inputs))
+    # An ExportedProgram.module() GraphModule may return None from eval(); the
+    # owned module, not that method's return value, remains the export input.
+    model.eval()
+    exported_program = torch.export.export(model, tuple(example_inputs))
     if original_frontend_snapshot is not None:
         from m2m.capture.trace import (
             attach_original_identity,
@@ -702,9 +730,46 @@ def apply_recipe(
         # node order or tensor shape after quantization.
         exported_program = tuple_selection_trace_program(exported_program)
     exported = exported_program.module()
+    # The selected frontend owns the semantic rewrite from string-padding
+    # Conv2d to the numeric overload TorchAO observes. Apply it to the exact
+    # exported graph before either the integral-input check or PT2E folding:
+    # the recipe's operator table must never misread an unnormalized floating
+    # Conv as absent. This does not rewrite the source model or its recipe.
+    from m2m.capture.pt2e_padding import normalize_conv2d_padding
+
+    padding_normalizations = normalize_conv2d_padding(exported)
+    if original_frontend_snapshot is not None:
+        source_nodes = {row["id"]: row for row in original_frontend_snapshot.get("nodes", ())}
+        source_padding_schema = torch.ops.aten.conv2d.padding._schema.arguments
+        padding_index = next(
+            index for index, argument in enumerate(source_padding_schema) if argument.name == "padding"
+        )
+        padding_argument = source_padding_schema[padding_index]
+        for row in padding_normalizations:
+            origins = set(row["source_ids"]).intersection(source_nodes)
+            # Precision staging may add intermediate identities. Exactly one
+            # original string-padding Conv must own this rewritten node. The
+            # selected source spelling must also agree on the literal padding
+            # mode: an unrelated same-shaped Conv is not semantic ancestry.
+            source = source_nodes[next(iter(origins))] if len(origins) == 1 else {}
+            args, kwargs = source.get("args"), source.get("kwargs")
+            if isinstance(args, list) and isinstance(kwargs, Mapping) and "padding" not in kwargs:
+                source_padding = (
+                    args[padding_index]
+                    if len(args) > padding_index
+                    else padding_argument.default_value
+                    if padding_argument.has_default_value()
+                    else None
+                )
+            elif isinstance(args, list) and isinstance(kwargs, Mapping) and len(args) <= padding_index:
+                source_padding = kwargs.get("padding")
+            else:
+                source_padding = None
+            if source.get("target") != "aten.conv2d.padding" or source_padding != row["padding"]:
+                raise RecipeError("Conv2d string-padding normalization lost original source ancestry")
     if integral_inputs and not _has_floating_recipe_work(exported, recipe):
         return skip_already_integer()
-    layer_plan = _plan_layers(recipe, model)
+    layer_plan = _plan_layers(recipe, model, source_layer_inventory=source_layer_inventory)
     policy = recipe.get("framework_capture_policy") or {}
     epsilon = policy.get("observer_epsilon", DEFAULT_OBSERVER_EPSILON)
     if type(epsilon) not in (int, float) or not math.isfinite(epsilon) or epsilon <= 0:
@@ -727,7 +792,13 @@ def apply_recipe(
                 "selected model2MLIR lacks pt2e_conv_bn_fold_candidates; "
                 "cannot prove PT2E Conv+BatchNorm source identity for this graph"
             )
-    quantizer = build_quantizer(recipe, layer_plan=layer_plan, eps=epsilon, fold_candidates=fold_candidates)
+    quantizer = build_quantizer(
+        recipe,
+        layer_plan=layer_plan,
+        source_layer_inventory=source_layer_inventory,
+        eps=epsilon,
+        fold_candidates=fold_candidates,
+    )
     prepared = prepare_pt2e(exported, quantizer)
     samples = calibration_inputs if calibration_inputs is not None else (tuple(example_inputs),)
     calibrated = 0
@@ -776,6 +847,7 @@ def apply_recipe(
         "activation_granularity": recipe["activation"]["granularity"],
         "software_admission": quantizer.software_decisions,
         "fold_provenance_api": fold_provenance_api,
+        "conv2d_padding_normalizations": padding_normalizations,
         "framework_capture_policy": {
             "activation_observer": _observer_name(recipe["activation"], is_weight=False),
             "weight_observer": _observer_name(recipe["weight"], is_weight=True),

@@ -50,7 +50,9 @@ def test_model_numeric_policy_uses_captured_output_not_operand_dtype() -> None:
 
 def test_microvit_example_captures_its_existing_integer_graph(tmp_path: Path) -> None:
     root = repo_root()
-    recipe = yaml.safe_load((root / "examples/gemmini/phase0/recipe.yaml").read_text())
+    # Historical authored integer graphs remain regression seeds, not members
+    # of the live facts/spec-derived Phase 0 recipe.
+    recipe = yaml.safe_load((root / "examples/gemmini/phase0/regression-seeds.yaml").read_text())
     entry = next(row for row in recipe["capsules"] if row["name"] == "M2_microvit_gemmini")
     assert entry["capture_quantization"] == "already_materialized"
 
@@ -75,7 +77,7 @@ def test_microvit_example_captures_its_existing_integer_graph(tmp_path: Path) ->
 def test_host_island_example_preserves_its_authored_integer_matmuls(tmp_path: Path) -> None:
     """An int8→float host island→int8 graph is not an unconverted PT2E model."""
     root = repo_root()
-    recipe = yaml.safe_load((root / "examples/gemmini/phase0/recipe.yaml").read_text())
+    recipe = yaml.safe_load((root / "examples/gemmini/phase0/regression-seeds.yaml").read_text())
     entry = next(row for row in recipe["capsules"] if row["name"] == "M3_host_island_seam_gemmini")
     assert entry["capture_quantization"] == "already_materialized"
     assert entry["loader"] == "examples/gemmini/phase0/inputs/host_island_seam.py"

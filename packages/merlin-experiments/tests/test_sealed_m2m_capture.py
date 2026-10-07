@@ -1,5 +1,6 @@
 """Small policy checks; the real M2M/PyTorch process smoke is run separately."""
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -9,11 +10,13 @@ from pathlib import Path
 
 import pytest
 from merlin_experiments.capture_execution import sealed_m2m
+from merlin_experiments.capture_execution.precision_staging import staging_error
 from merlin_experiments.capture_execution.sealed_m2m import (
     SealedM2MError,
     _capture_api_missing,
     _command,
     _command_v2,
+    _fp32_stage_api_missing,
     _frontend_trace_api_missing,
     _ldd_library_path,
     _policy,
@@ -88,6 +91,19 @@ def test_selected_optional_capture_features_are_reported_separately(tmp_path):
         "m2m/api.py:convert(original_frontend_snapshot)",
         "m2m/capture/trace.py",
     )
+    assert _fp32_stage_api_missing(m2m) == ("m2m/capture/trace.py",)
+    (package / "capture").mkdir()
+    (package / "capture/trace.py").write_text(
+        "def materialize_frontend_precision(model, inputs, *, dtype, original_frontend_snapshot): pass\n"
+    )
+    assert _fp32_stage_api_missing(m2m) == (
+        "m2m/capture/trace.py:materialize_frontend_precision(retarget_float_dtype_arguments)",
+    )
+    (package / "capture/trace.py").write_text(
+        "def materialize_frontend_precision(model, inputs, *, dtype, original_frontend_snapshot, "
+        "retarget_float_dtype_arguments=False): pass\n"
+    )
+    assert _fp32_stage_api_missing(m2m) == ()
     assert _static_integer_reference_api_missing(m2m) == (
         "m2m/capture/pt2e_integerize.py",
         "m2m/capture/pt2e_integer_reference.py",
@@ -254,10 +270,15 @@ def test_preselected_runs_record_a_log_floor_so_their_stderr_replays(tmp_path, m
     for replayable in (False, True):
         sealed_m2m._execute(tmp_path / "bwrap", tmp_path, tmp_path, output, command, output, replayable_logs=replayable)
     plain, quiet = seen
-    floor = ["--setenv", *sealed_m2m._REPLAYABLE_LOG_ENV[0]]
-    assert not any(plain[i : i + 3] == floor for i in range(len(plain)))
-    (at,) = [i for i in range(len(quiet)) if quiet[i : i + 3] == floor]
-    assert quiet[:at] + quiet[at + 3 :] == plain
+    expected = {"TORCH_CPP_LOG_LEVEL": "ERROR", "HF_HUB_DISABLE_PROGRESS_BARS": "1", "TQDM_DISABLE": "1"}
+    assert dict(sealed_m2m._REPLAYABLE_LOG_ENV) == expected
+    remaining = quiet
+    for name, value in expected.items():
+        setting = ["--setenv", name, value]
+        assert not any(plain[i : i + 3] == setting for i in range(len(plain)))
+        (at,) = [i for i in range(len(remaining)) if remaining[i : i + 3] == setting]
+        remaining = remaining[:at] + remaining[at + 3 :]
+    assert remaining == plain
 
 
 def test_int8_command_binds_selected_recipe_and_never_uses_host_path(tmp_path):
@@ -459,7 +480,100 @@ def test_int8_materialization_refuses_recipe_or_integer_reference_mismatch(tmp_p
         sealed_m2m._materialized_v2(output, source, output, plan)
 
 
-@pytest.mark.parametrize("version", ["v1", "v2"])
+def test_selected_fp32_staging_requires_audited_original_and_staged_abi(tmp_path, monkeypatch):
+    source, output = tmp_path / "source", tmp_path / "capture"
+    source.mkdir()
+    output.mkdir()
+    (output / "meta.json").write_text(json.dumps({"dtype": "fp32"}))
+    monkeypatch.setattr(sealed_m2m, "_materialized", lambda *_, **__: {"status": "verified_materialized"})
+    plan = {"dtype": "fp32", "recipe": None, "worker_options": {"stage_fp32": True}}
+    with pytest.raises(SealedM2MError, match="FP32 staging"):
+        sealed_m2m._materialized_v2(output, source, output, plan)
+    abi = [{"shape": [1, 2], "dtype": "f32"}]
+    meta = {
+        "dtype": "fp32",
+        "input_abi": abi,
+        "output_abi": abi,
+        "precision_conversion": {
+            "original_graph_sha256": "a" * 64,
+            "staged_graph_sha256": "b" * 64,
+            "graph_dtype_retargeting": "schema_float_dtype_operands",
+            "dtype_decisions": [{"source_node_id": "node"}],
+            "staged_precision_audit": {
+                "status": "complete",
+                "target_dtype": "torch.float32",
+                "non_target_floating_values": 0,
+                "checked_floating_values": 1,
+            },
+        },
+        "fp32_staging": {
+            "status": "observed",
+            "scope": "original computation versus staged FP32; not accuracy equivalence",
+            "original_graph_sha256": "a" * 64,
+            "staged_graph_sha256": "b" * 64,
+            "original_input_abi": [{"shape": [1, 2], "dtype": "bf16"}],
+            "staged_input_abi": abi,
+            "original_output_abi": [{"shape": [1, 2], "dtype": "bf16"}],
+            "staged_output_abi": abi,
+            "output_cardinality": 1,
+            "output_metrics": [
+                {
+                    "shape": [1, 2],
+                    "original_dtype": "bf16",
+                    "staged_dtype": "f32",
+                    "comparison": "observed_floating",
+                    "max_abs": 0.0,
+                    "max_rel": 0.0,
+                }
+            ],
+        },
+    }
+    trace = {"graphs": {"original": {"status": "complete", "sha256": "a" * 64}}}
+    (output / "frontend-trace.json").write_text(json.dumps(trace))
+    (output / "meta.json").write_text(json.dumps(meta))
+    assert sealed_m2m._materialized_v2(output, source, output, plan)["status"] == "verified_materialized"
+    float_to_int = json.loads(json.dumps(meta))
+    float_to_int["fp32_staging"]["staged_input_abi"][0]["dtype"] = "i32"
+    float_to_int["input_abi"][0]["dtype"] = "i32"
+    assert "non-FP32 floating" in staging_error(float_to_int, selected=True, recipe=False, trace=trace)
+    integer_widened = json.loads(json.dumps(meta))
+    integer_widened["fp32_staging"]["original_input_abi"][0]["dtype"] = "i32"
+    integer_widened["fp32_staging"]["staged_input_abi"][0]["dtype"] = "i64"
+    integer_widened["input_abi"][0]["dtype"] = "i64"
+    assert "exact integer/bool tensor dtype" in staging_error(integer_widened, selected=True, recipe=False, trace=trace)
+    exact_changed = json.loads(json.dumps(meta))
+    exact_changed["fp32_staging"]["original_output_abi"][0]["dtype"] = "i32"
+    exact_changed["fp32_staging"]["staged_output_abi"][0]["dtype"] = "i32"
+    exact_changed["output_abi"][0]["dtype"] = "i32"
+    exact_changed["fp32_staging"]["output_metrics"][0].update(
+        original_dtype="i32", staged_dtype="i32", comparison="exact_nonfloating", max_abs=1.0
+    )
+    assert "changed an exact integer/bool output" in staging_error(
+        exact_changed, selected=True, recipe=False, trace=trace
+    )
+    inventory = [{"fqn": "layer", "kind": "Linear", "weight_shape": [2, 2], "stores_operand": True}]
+    meta["fp32_staging"].update(
+        source_layer_inventory=inventory,
+        source_layer_inventory_sha256=hashlib.sha256(
+            json.dumps(inventory, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        source_layer_plan_sha256="d" * 64,
+    )
+    meta["quantization_stats"] = {"plan_sha256": "d" * 64}
+    assert staging_error(meta, selected=True, recipe=True, trace=trace) is None
+    meta["fp32_staging"]["source_layer_inventory"][0]["weight_shape"] = [3, 2]
+    assert "source-layer" in staging_error(meta, selected=True, recipe=True, trace=trace)
+    meta["fp32_staging"]["source_layer_inventory"][0]["weight_shape"] = [2, 2]
+    meta["precision_conversion"]["staged_graph_sha256"] = "c" * 64
+    (output / "meta.json").write_text(json.dumps(meta))
+    with pytest.raises(SealedM2MError, match="FP32 staging"):
+        sealed_m2m._materialized_v2(output, source, output, plan)
+    plan.pop("worker_options")
+    with pytest.raises(SealedM2MError, match="FP32 staging"):
+        sealed_m2m._materialized_v2(output, source, output, plan)
+
+
+@pytest.mark.parametrize("version", ["v1", "v2", "v3"])
 def test_cpu_receipts_replay_only_under_their_selected_policy(tmp_path, monkeypatch, version):
     run = tmp_path / "run"
     source, runtime, output = run / "snapshots/source", run / "snapshots/guest-root", run / "capture"
@@ -468,7 +582,8 @@ def test_cpu_receipts_replay_only_under_their_selected_policy(tmp_path, monkeypa
     input_identity, output_identity = {"sha256": "input"}, {"sha256": "output"}
     process, materialized = {"returncode": 0}, {"status": "verified_materialized"}
     old = version == "v1"
-    schema = sealed_m2m.SCHEMA_V1 if old else sealed_m2m.SCHEMA
+    full = version == "v3"
+    schema = sealed_m2m.SCHEMA_V1 if old else sealed_m2m.SCHEMA_V3 if full else sealed_m2m.SCHEMA
     command = _command(output) if old else _command_v2(output, dtype="int8", recipe=True)
     template = (
         (sealed_m2m._LAUNCH_PREFIX + sealed_m2m._LAUNCH_SUFFIX)
@@ -491,6 +606,15 @@ def test_cpu_receipts_replay_only_under_their_selected_policy(tmp_path, monkeypa
                 },
             }
         )
+    if full:
+        plan.update(
+            execution_timeout_seconds=3600,
+            loader_env={},
+            loader_env_reads=[],
+            selected_inputs=[{"role": "checkpoint", "guest_member": "weights.bin"}],
+        )
+        (source / "workload").mkdir()
+        (source / "workload/loader.py").write_text("def get_model_and_inputs(): pass\n")
     receipt = {
         "schema": schema,
         "status": "pending_replay",
@@ -498,8 +622,10 @@ def test_cpu_receipts_replay_only_under_their_selected_policy(tmp_path, monkeypa
         "nonce": "0" * 32,
         "plan": plan,
         "command": list(command),
-        "policy_sha256": _policy(command, output),
-        "scope": sealed_m2m._V1_SCOPE if old else sealed_m2m._V2_SCOPE,
+        "policy_sha256": _policy(
+            command, output, loader_env={} if full else None, timeout_seconds=3600 if full else 120
+        ),
+        "scope": sealed_m2m._V1_SCOPE if old else sealed_m2m._V3_SCOPE if full else sealed_m2m._V2_SCOPE,
         "source": input_identity,
         "guest_root": input_identity,
         **({"schemas": input_identity} if not old else {}),
@@ -521,6 +647,9 @@ def test_cpu_receipts_replay_only_under_their_selected_policy(tmp_path, monkeypa
     )
     monkeypatch.setattr(sealed_m2m, "_materialized", lambda *_: materialized)
     monkeypatch.setattr(sealed_m2m, "_materialized_v2", lambda *_: materialized)
+    monkeypatch.setattr(sealed_m2m, "_materialized_v3", lambda *_: materialized)
+    monkeypatch.setattr(sealed_m2m, "_declared_loader_env", lambda *_: ({}, []))
+    monkeypatch.setattr(sealed_m2m, "_verify_selected_input", lambda *_: None)
     monkeypatch.setattr(sealed_m2m, "_execute", lambda *_args, **_kwargs: process)
     monkeypatch.setattr(sealed_m2m, "_bwrap_binary", lambda *_: tmp_path / "bwrap")
     monkeypatch.setattr(
@@ -540,6 +669,16 @@ def test_cpu_receipts_replay_only_under_their_selected_policy(tmp_path, monkeypa
     assert result["phase0_admission"] == "not_granted"
     assert result["status"] == "verified_sandbox_replay"
     if not old:
+        receipt["issuer_sha256"] = sealed_m2m._PRE_FROZEN_ORIGIN_ISSUER_SHA256
+        (run / "sealed_m2m_pending.json").write_text(json.dumps(receipt))
+        assert sealed_m2m.replay_verify(run)["status"] == "verified_sandbox_replay"
+        receipt["issuer_sha256"] = "current-issuer"
+        if full:
+            receipt["plan"]["frozen_origin"] = {"schema": "unselected"}
+            (run / "sealed_m2m_pending.json").write_text(json.dumps(receipt))
+            with pytest.raises(SealedM2MError, match="not a v2 source selection"):
+                sealed_m2m.replay_verify(run)
+            receipt["plan"].pop("frozen_origin")
         receipt["schemas"] = {"sha256": "unselected"}
         (run / "sealed_m2m_pending.json").write_text(json.dumps(receipt))
         with pytest.raises(SealedM2MError, match="schema bytes differ"):
@@ -561,6 +700,246 @@ def test_plan_cannot_raise_snapshot_cap(tmp_path):
             schemas_root=tmp_path,
             max_snapshot_bytes=16_000_000_001,
         )
+
+
+def test_plan_rejects_enclosing_git_repository_as_m2m_origin(tmp_path, monkeypatch):
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    subprocess.run(["git", "init", "-q", str(outer)], check=True)
+    subprocess.run(["git", "-C", str(outer), "config", "user.name", "test"], check=True)
+    subprocess.run(["git", "-C", str(outer), "config", "user.email", "test@example.invalid"], check=True)
+    (outer / "marker").write_text("first\n")
+    subprocess.run(["git", "-C", str(outer), "add", "marker"], check=True)
+    subprocess.run(["git", "-C", str(outer), "commit", "-qm", "outer only"], check=True)
+    frozen = outer / "frozen-m2m"
+    (frozen / "m2m").mkdir(parents=True)
+    (frozen / "m2m/api.py").write_text("# frozen package\n")
+    workload = tmp_path / "workload"
+    workload.mkdir()
+    (workload / "loader.py").write_text("def get_model_and_inputs(): pass\n")
+    base = tmp_path / "base"
+    (base / "bin").mkdir(parents=True)
+    (base / "bin/python3.12").write_text("python\n")
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin/python").symlink_to(base / "bin/python3.12")
+    site = venv / "lib/python3.12/site-packages"
+    (site / "torch").mkdir(parents=True)
+    (site / "torch/_C.so").write_bytes(b"torch")
+    (site / "numpy/_core").mkdir(parents=True)
+    (site / "numpy/_core/_multiarray_umath.so").write_bytes(b"numpy")
+    monkeypatch.setattr(sealed_m2m, "_capture_api_missing", lambda *_: ())
+    monkeypatch.setattr(sealed_m2m, "_venv_home", lambda *_: base)
+    monkeypatch.setattr(sealed_m2m, "_system_libs", lambda *_: ())
+    with pytest.raises(SealedM2MError, match="own its Git repository"):
+        prepare_plan(
+            m2m_root=frozen,
+            workload_root=workload,
+            worker=module_source_path("merlin").parent / "targetgen/_m2m_capture_worker.py",
+            venv=venv,
+            schemas_root=schemas_dir(),
+        )
+
+
+def test_frozen_m2m_origin_ignores_outer_git_head_but_binds_copied_bytes(tmp_path, monkeypatch):
+    from merlin_experiments.capture_execution.m2m_origin import frozen_selector, verify_frozen_receipt
+    from merlin_experiments.phase0 import m2m_runtime
+
+    def commit(root, message):
+        subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(root), "commit", "-qm", message], check=True)
+
+    def init(root):
+        root.mkdir()
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        subprocess.run(["git", "-C", str(root), "config", "user.name", "test"], check=True)
+        subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.invalid"], check=True)
+
+    source = tmp_path / "true-m2m"
+    init(source)
+    (source / "m2m").mkdir()
+    (source / "m2m/__init__.py").write_text("# package\n")
+    (source / "m2m/api.py").write_text("# source bytes\n")
+    commit(source, "selected M2M")
+    outer = tmp_path / "outer-merlin"
+    init(outer)
+    (outer / "marker").write_text("one\n")
+    commit(outer, "first outer revision")
+    base = tmp_path / "base"
+    (base / "bin").mkdir(parents=True)
+    (base / "bin/python3.12").write_text("python\n")
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin/python").symlink_to(base / "bin/python3.12")
+    site = venv / "lib/python3.12/site-packages"
+    (site / "torch").mkdir(parents=True)
+    (site / "torch/_C.so").write_bytes(b"torch")
+    (site / "numpy/_core").mkdir(parents=True)
+    (site / "numpy/_core/_multiarray_umath.so").write_bytes(b"numpy")
+    monkeypatch.setattr(
+        m2m_runtime,
+        "_runtime",
+        lambda *_: {
+            "base": str(base),
+            "venv": {"members": 1, "bytes": 0, "sha256": "0" * 64},
+            "base_python": {"members": 1, "bytes": 0, "sha256": "0" * 64},
+            "python_sha256": "0" * 64,
+        },
+    )
+    selected = m2m_runtime.observe(source, venv / "bin/python", require_source_origin=True)
+    (source / "marker").write_text("new source revision\n")
+    commit(source, "new selected M2M revision")
+    with pytest.raises(ValueError, match="runtime changed before freezing"):
+        m2m_runtime.stage(selected, outer / "private/m2m-source")
+    selected = m2m_runtime.observe(source, venv / "bin/python", require_source_origin=True)
+    (source / "m2m/api.py").write_text("# edited source bytes\n")
+    with pytest.raises(ValueError, match="clean pinned commit"):
+        m2m_runtime.stage(selected, outer / "private/m2m-source")
+    (source / "m2m/api.py").write_text("# source bytes\n")
+    frozen = m2m_runtime.stage(selected, outer / "private/m2m-source")
+    receipt_path = outer / "private/m2m-runtime.json"
+    receipt_path.write_bytes(m2m_runtime.receipt(frozen))
+    receipt_path.chmod(0o444)
+    selector = frozen_selector(receipt_path)
+    workload = tmp_path / "workload"
+    workload.mkdir()
+    (workload / "loader.py").write_text("def get_model_and_inputs(): pass\n")
+    monkeypatch.setattr(sealed_m2m, "_capture_api_missing", lambda *_: ())
+    monkeypatch.setattr(sealed_m2m, "_venv_home", lambda *_: base)
+    monkeypatch.setattr(sealed_m2m, "_system_libs", lambda *_: ())
+    arguments = {
+        "m2m_root": Path(frozen["frozen_root"]),
+        "frozen_origin": selector,
+        "workload_root": workload,
+        "worker": module_source_path("merlin").parent / "targetgen/_m2m_capture_worker.py",
+        "venv": venv,
+        "schemas_root": schemas_dir(),
+    }
+    first = prepare_plan(**arguments)
+    assert first["m2m_commit"] == selected["source_origin"]["commit"]
+    assert first["selected_trees"]["m2m"] == frozen["frozen_package"]
+    assert first["estimate_bytes"] == sum(row["bytes"] for row in first["selected_trees"].values()) + len(
+        receipt_path.read_bytes()
+    )
+    staged_source = tmp_path / "staged-source"
+    staged_source.mkdir()
+    (staged_source / "m2m-origin.json").write_bytes(receipt_path.read_bytes())
+    with pytest.raises(SealedM2MError, match="revision differs from selected plan"):
+        sealed_m2m._verify_staged_selection({**first, "m2m_commit": "0" * 40}, staged_source, tmp_path / "runtime")
+    (outer / "marker").write_text("two\n")
+    commit(outer, "second outer revision")
+    assert prepare_plan(**arguments) == first
+    receipt_bytes = receipt_path.read_bytes()
+    receipt_path.chmod(0o644)
+    forged = json.loads(receipt_bytes)
+    forged["source_origin"]["readonly_package"]["sha256"] = "0" * 64
+    receipt_path.write_text(json.dumps(forged))
+    receipt_path.chmod(0o444)
+    with pytest.raises(SealedM2MError, match="origin receipt changed"):
+        prepare_plan(**arguments)
+    with pytest.raises(SealedM2MError, match="does not bind the selected copy"):
+        prepare_plan(**{**arguments, "frozen_origin": frozen_selector(receipt_path)})
+    receipt_path.chmod(0o644)
+    receipt_path.write_bytes(receipt_bytes)
+    receipt_path.chmod(0o444)
+    with pytest.raises(SealedM2MError, match="only supported for v2"):
+        prepare_plan(**arguments, checkpoint=source / "checkpoint", loader_env={}, execution_timeout_seconds=120)
+    copied_root = Path(frozen["frozen_root"])
+    old_mode = copied_root.stat().st_mode & 0o777
+    copied_root.chmod(old_mode | 0o200)
+    (copied_root / ".git").mkdir()
+    with pytest.raises(SealedM2MError, match="invalid frozen M2M origin selector"):
+        prepare_plan(**arguments)
+    assert verify_frozen_receipt(selector, receipt_bytes, copied_root, frozen["frozen_package"]) == first["m2m_commit"]
+    (copied_root / ".git").rmdir()
+    copied_root.chmod(old_mode)
+    copied = Path(frozen["frozen_root"]) / "m2m/api.py"
+    copied.chmod(0o644)
+    copied.write_text("# changed copied bytes\n")
+    with pytest.raises(SealedM2MError, match="does not bind the selected copy"):
+        prepare_plan(**arguments)
+    receipt_path.unlink()
+    assert (
+        verify_frozen_receipt(selector, receipt_bytes, Path(frozen["frozen_root"]), frozen["frozen_package"])
+        == first["m2m_commit"]
+    )
+
+
+def test_m2m_git_origin_is_own_repository_and_ignores_git_redirect_environment(tmp_path, monkeypatch):
+    from merlin_experiments.capture_execution.m2m_origin import M2MOriginError, git_origin
+
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    subprocess.run(["git", "init", "-q", str(outer)], check=True)
+    subprocess.run(["git", "-C", str(outer), "config", "user.name", "test"], check=True)
+    subprocess.run(["git", "-C", str(outer), "config", "user.email", "test@example.invalid"], check=True)
+    (outer / "marker").write_text("outer\n")
+    subprocess.run(["git", "-C", str(outer), "add", "marker"], check=True)
+    subprocess.run(["git", "-C", str(outer), "commit", "-qm", "outer"], check=True)
+    source = outer / "true-m2m"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "test"], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.email", "test@example.invalid"], check=True)
+    (source / "m2m").mkdir()
+    (source / "m2m/__init__.py").write_text("# source\n")
+    subprocess.run(["git", "-C", str(source), "add", "m2m"], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "source"], check=True)
+    selected = git_origin(source, clean=True)
+    monkeypatch.setenv("GIT_DIR", str(outer / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(outer))
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.worktree")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(outer))
+    assert git_origin(source, clean=True) == selected
+    (outer / "not-a-repository").mkdir()
+    with pytest.raises(M2MOriginError, match="own its Git repository"):
+        git_origin(outer / "not-a-repository", clean=True)
+    (source / "m2m/__init__.py").write_text("# modified\n")
+    with pytest.raises(M2MOriginError, match="clean pinned commit"):
+        git_origin(source, clean=True)
+
+
+def test_prefreeze_source_guard_recomputes_verified_m2m_origin(tmp_path, monkeypatch):
+    from merlin_experiments import SpecError, runner
+    from merlin_experiments.phase0 import m2m_runtime
+
+    entrypoint = tmp_path / "installed/merlin_experiments/phase0/__main__.py"
+    entrypoint.parent.mkdir(parents=True)
+    entrypoint.write_text("# selected Phase 0 entrypoint\n")
+    name = "phase0:source:__main__.py"
+    monkeypatch.setattr(runner, "_phase0_source_inputs", lambda: (entrypoint, {name: str(entrypoint)}))
+    selected = {
+        "root": str(tmp_path / "selected-m2m"),
+        "python": str(tmp_path / "selected-venv/bin/python"),
+        "source_origin": {"commit": "a" * 40},
+    }
+    observed = []
+
+    def observe(*_args, require_source_origin=False, **_kwargs):
+        observed.append(require_source_origin)
+        return (
+            selected
+            if require_source_origin
+            else {key: value for key, value in selected.items() if key != "source_origin"}
+        )
+
+    monkeypatch.setattr(m2m_runtime, "observe", observe)
+    command = {
+        "adapter": "capsule_derivation",
+        "module": runner.PHASE0_MODULE,
+        "argv": [str(tmp_path / "python"), "-m", runner.PHASE0_MODULE],
+        "inputs": {},
+        "phase0_m2m_selection": selected,
+        "env": {"PYTHONSAFEPATH": "1", "PYTHONPATH": str(entrypoint.parent.parent.parent)},
+        "entrypoint": str(entrypoint),
+    }
+    plan = {"phases": {"0": command}, "input_paths": {name: str(entrypoint)}}
+    runner._verify_phase0_sources(plan)
+    assert observed == [True]
+    command["phase0_m2m_selection"] = {**selected, "source_origin": {"commit": "b" * 40}}
+    with pytest.raises(SpecError, match="runtime changed before freezing"):
+        runner._verify_phase0_sources(plan)
 
 
 def test_ldd_dependency_parser_accepts_only_structural_library_paths():

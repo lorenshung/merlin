@@ -19,6 +19,7 @@ import os
 import secrets
 import shutil
 import stat
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,141 @@ def _store_root() -> Path:
     from merlin.common.artifacts import cache_dir
 
     return Path(cache_dir("sealed-m2m-runtime"))
+
+
+@dataclass(frozen=True)
+class VerifiedRuntimeCache:
+    """One exact, local store entry; never an authority to rebuild or change the plan."""
+
+    entry: Path
+    device: int
+    inode: int
+    marker_sha256: str
+    runtime_bytes: int
+    inventory_sha256: str
+
+
+def verified_cached_entry(
+    plan: dict[str, Any], destination: Path, selected_system_libraries: list[dict[str, Any]] | None = None
+) -> VerifiedRuntimeCache | None:
+    """Discount only a complete, owned, byte-verified runtime that can be hard-linked here.
+
+    This is intentionally a full inventory, not a marker-presence check. The issuer
+    rechecks the token immediately before and after linking; a discounted issue
+    must never silently fall back to a fresh runtime copy.
+    """
+    from .sealed_static import _canonical_path, _digest, _file_digest, _json, _tree
+
+    try:
+        root = _canonical_path(_store_root(), exists=False)
+        entry = root / _identity(plan)
+        marker = root / f"{entry.name}.complete.json"
+        destination = _canonical_path(destination, exists=True)
+        device = destination.stat().st_dev
+        uid = os.getuid()
+        for path in (root, entry, marker):
+            info = path.lstat()
+            if info.st_dev != device or info.st_uid != uid or path.is_symlink():
+                return None
+        if not root.is_dir() or not entry.is_dir() or not marker.is_file():
+            return None
+        if json.loads(marker.read_bytes()) != {
+            "identity": entry.name,
+            "base": plan["base"],
+            "system_libs": plan["system_libs"],
+        }:
+            return None
+        marker_sha256 = _file_digest(marker)
+        entry_stat = entry.stat()
+        entry_identity = (entry_stat.st_dev, entry_stat.st_ino, entry_stat.st_mtime_ns, entry_stat.st_ctime_ns)
+        rows = _tree(entry)
+        for name in rows:
+            member = entry if name == "." else entry / name
+            info = member.lstat()
+            if info.st_dev != device or info.st_uid != uid:
+                return None
+        prefixes = {"venv": "opt/capture-venv", "base": Path(plan["base"]).relative_to("/").as_posix()}
+        allowed: set[str] = {"."}
+        for prefix in prefixes.values():
+            parts = Path(prefix).parts
+            allowed.update("/".join(parts[:index]) for index in range(1, len(parts) + 1))
+        libraries = plan["system_libs"]
+        if selected_system_libraries is not None and (
+            not isinstance(selected_system_libraries, list)
+            or [row.get("path") for row in selected_system_libraries] != libraries
+        ):
+            return None
+        for index, name in enumerate(libraries):
+            relative = Path(name).relative_to("/").as_posix()
+            if any(relative == prefix or relative.startswith(f"{prefix}/") for prefix in prefixes.values()):
+                return None
+            parts = Path(relative).parts
+            allowed.update("/".join(parts[:part]) for part in range(1, len(parts) + 1))
+            row = rows.get(relative)
+            if row is None or row["kind"] != "file":
+                return None
+            if selected_system_libraries is None:
+                source = Path(name)
+                if row["bytes"] != source.stat().st_size or row["sha256"] != _file_digest(source):
+                    return None
+            elif row["bytes"] != selected_system_libraries[index].get("bytes") or row["sha256"] != (
+                selected_system_libraries[index].get("sha256")
+            ):
+                return None
+        runtime_bytes = sum(rows[Path(name).relative_to("/").as_posix()]["bytes"] for name in libraries)
+        for key, prefix in prefixes.items():
+            subset = {
+                "." if name == prefix else name[len(prefix) + 1 :]: row
+                for name, row in rows.items()
+                if name == prefix or name.startswith(f"{prefix}/")
+            }
+            if "." not in subset:
+                return None
+            digest = _digest(_json(sorted((name, *sorted(row.items())) for name, row in subset.items())))
+            selected = plan["selected_trees"][key]
+            size = sum(row.get("bytes", 0) for row in subset.values())
+            if {"members": len(subset), "bytes": size, "sha256": digest} != selected:
+                return None
+            runtime_bytes += size
+            allowed.update(name for name in rows if name == prefix or name.startswith(f"{prefix}/"))
+        if set(rows) != allowed:
+            return None
+        after = entry.stat()
+        if marker_sha256 != _file_digest(marker) or entry_identity != (
+            after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns
+        ):
+            return None
+        return VerifiedRuntimeCache(
+            entry=entry,
+            device=device,
+            inode=entry_stat.st_ino,
+            marker_sha256=marker_sha256,
+            runtime_bytes=runtime_bytes,
+            inventory_sha256=_digest(_json(sorted((name, *sorted(row.items())) for name, row in rows.items()))),
+        )
+    except (KeyError, TypeError, ValueError, OSError):
+        return None
+
+
+def snapshot_space_requirement(
+    plan: dict[str, Any], destination: Path, selected_system_libraries: list[dict[str, Any]] | None = None
+) -> tuple[int, VerifiedRuntimeCache | None]:
+    """Price unshared selected bytes plus conservative directory/inode block overhead."""
+    cache = verified_cached_entry(plan, destination, selected_system_libraries)
+    estimate = plan["estimate_bytes"]
+    if isinstance(estimate, bool) or not isinstance(estimate, int) or estimate < 0:
+        raise ValueError("invalid selected snapshot estimate")
+    if cache is not None:
+        if cache.runtime_bytes > estimate:
+            cache = None
+        else:
+            estimate -= cache.runtime_bytes
+    members = sum(row["members"] for row in plan.get("selected_trees", {}).values())
+    members += len(plan.get("system_libs", ())) + len(plan.get("selected_inputs", ())) + 1024
+    if isinstance(members, bool) or not isinstance(members, int) or members < 1024:
+        raise ValueError("invalid selected snapshot member count")
+    block_bytes = os.statvfs(destination).f_frsize
+    return estimate + members * block_bytes, cache
 
 
 def _build(plan: dict[str, Any], destination: Path) -> None:
@@ -106,9 +242,19 @@ def store_entry(plan: dict[str, Any]) -> Path:
     return entry
 
 
-def link_runtime(plan: dict[str, Any], runtime: Path) -> None:
+def link_runtime(
+    plan: dict[str, Any], runtime: Path, *, verified_cache: VerifiedRuntimeCache | None = None,
+    selected_system_libraries: list[dict[str, Any]] | None = None,
+) -> None:
     """Hard-link the plan's stored runtime into ``runtime`` with the stored directory modes."""
-    entry = store_entry(plan)
+    if verified_cache is None:
+        entry = store_entry(plan)
+    else:
+        from .sealed_m2m import SealedM2MError
+
+        if verified_cached_entry(plan, runtime, selected_system_libraries) != verified_cache:
+            raise SealedM2MError("cached runtime changed after discounted admission")
+        entry = verified_cache.entry
     directories: list[tuple[Path, int]] = []
     for current, names, files in os.walk(entry, followlinks=False):
         here = Path(current)
@@ -128,3 +274,7 @@ def link_runtime(plan: dict[str, Any], runtime: Path) -> None:
     for path, mode in sorted(directories, key=lambda row: len(row[0].parts), reverse=True):
         if path != runtime:
             path.chmod(mode)
+    if verified_cache is not None and (
+        verified_cached_entry(plan, runtime, selected_system_libraries) != verified_cache
+    ):
+        raise SealedM2MError("cached runtime changed during hard-link snapshot")

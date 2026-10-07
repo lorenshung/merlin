@@ -3212,13 +3212,16 @@ def model_accelerator_demand(linalg_mlir: str, binding) -> tuple[str | None, lis
 
     in_fmt = binding.cap_dtype(binding.operand_dtype)
     try:
-        demands = model_op_demands(linalg_mlir, in_fmt)
+        # A provenance family is not authority by itself. The checked reader joins every claimed
+        # contraction to a parsed, typed contraction of the same shape and refuses omissions/extras.
+        demands = model_op_demands_checked(linalg_mlir, in_fmt)
     except Exception:  # noqa: BLE001 — unreadable capture: demand nothing
         return None, []
 
     # Ops of the model this target's hardware is declared able to run. Asked of the eligibility oracle,
     # the same independent denominator ARR uses -- not of routing, which is the thing under test.
     eligible_ops: list[str] = []
+    eligible_families: list[str] = []
     for d in demands:
         if d.op in eligible_ops:
             continue
@@ -3237,6 +3240,13 @@ def model_accelerator_demand(linalg_mlir: str, binding) -> tuple[str | None, lis
         )
         if _el.is_eligible(desc, cap_map).eligible:
             eligible_ops.append(d.op)
+            # ``int_matmul`` is a capture/routing spelling, not a semantic-family key. Its family
+            # was independently checked against typed IR above; retain that canonical result.
+            # Other operations keep the pre-existing op-vocabulary path rather than allowing an
+            # unverified provenance label to create a new whole-model demand.
+            family = d.family if d.family == "contraction" else _sf.from_op(d.op)
+            if family:
+                eligible_families.append(family)
     if not eligible_ops:
         return None, []
 
@@ -3245,7 +3255,7 @@ def model_accelerator_demand(linalg_mlir: str, binding) -> tuple[str | None, lis
     # ``model`` entry to the vocabulary -- is what lets the eligibility oracle resolve the capsule at all,
     # and therefore what lets must_accelerate mean anything. Contraction when present (every declared
     # matrix unit exists for it); otherwise the first eligible family, in program order.
-    families = [f for f in (_sf.from_op(op) for op in eligible_ops) if f]
+    families = eligible_families
     if not families:
         return None, []
     family = "contraction" if "contraction" in families else families[0]

@@ -20,6 +20,8 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .m2m_origin import M2MOriginError, git_origin, verify_frozen_receipt, verify_frozen_selector
+from .precision_staging import STAGING_API_REQUIREMENTS, output_staging_error
 from .python_preflight import _loader_env_reads
 from .sealed_python import _FLAGS, _TIMEOUT_SECONDS
 from .sealed_static import _bwrap_binary, _canonical_path, _digest, _file_digest, _json, _tree
@@ -32,6 +34,9 @@ SCHEMA_V3 = "merlin.sealed_m2m_cpu.v3"
 _V1_ISSUER_SHA256 = "f8ca017999a5cb40d44ed29bc9412bef842fe8f3edd8d85170879d1df15d1dd6"
 _HISTORICAL_V2_ISSUER_SHA256 = "36aa1528481a9630e2e31394f45fdde62a0bfea738b8e1855085029f9574344b"
 _PRE_V3_ISSUER_SHA256 = "596e8828727b3835f384a264fe9fb4a3ee1c975e869ed2130d7d20022ed06a2a"
+# Exact pre-frozen-origin issuer from 0e66019b. Its already-issued v2/v3
+# snapshots may be replayed, but no new selection/issue may use those bytes.
+_PRE_FROZEN_ORIGIN_ISSUER_SHA256 = "16aa775b37791164c1546b987245f8e359231acd3bd3ad2e4b8662d1834465d5"
 # Exact v3 producer archived by commit 2cdc08c27ea9dec74f25a20a530c7179230c505b.
 # Accept its already-issued pending receipts for fresh byte-for-byte replay; the
 # selected receipt must still bind this same digest and every source/output byte.
@@ -79,8 +84,10 @@ def _worker_options(options: Any) -> dict[str, Any]:
     """Validate the worker options a plan may select; nothing outside this vocabulary is accepted."""
     if options is None:
         return {}
-    if not isinstance(options, dict) or set(options) - {"agreement_tolerance"}:
-        raise SealedM2MError("sealed capture worker options support only an agreement tolerance")
+    if not isinstance(options, dict) or set(options) - {"agreement_tolerance", "stage_fp32"}:
+        raise SealedM2MError("sealed capture worker options are unsupported")
+    if "stage_fp32" in options and type(options["stage_fp32"]) is not bool:
+        raise SealedM2MError("sealed capture stage_fp32 must be a boolean")
     tolerance = options.get("agreement_tolerance")
     if tolerance is not None and (
         not isinstance(tolerance, list)
@@ -98,6 +105,8 @@ def _command_v2(
     if not ((dtype in _FLOAT_DTYPES and not recipe) or (dtype == "int8" and recipe)):
         raise SealedM2MError("CPU capture requires fp32 without a recipe or int8 with a selected recipe")
     options = _worker_options(options)
+    if options.get("stage_fp32") and dtype not in _FLOAT_DTYPES and (dtype, recipe) != ("int8", True):
+        raise SealedM2MError("FP32 staging requires a float capture or selected int8 recipe")
     worker = "/source/merlin-src/merlin/targetgen/_m2m_capture_worker.py"
     argv = [
         worker,
@@ -118,6 +127,8 @@ def _command_v2(
     if options.get("agreement_tolerance") is not None:
         atol, rtol = options["agreement_tolerance"]
         argv += ["--agreement-atol", repr(float(atol)), "--agreement-rtol", repr(float(rtol))]
+    if options.get("stage_fp32"):
+        argv.append("--stage-fp32")
     program = (
         "import runpy,sys;"
         "sys.path[:0]=['/source/m2m-src','/source/merlin-src',"
@@ -164,11 +175,11 @@ def _recipe_selection(path: Path | None, *, dtype: str) -> dict[str, Any] | None
     }
 
 
-# Framework C++ warnings carry wall-clock timestamps (for example the NNPACK initialization
-# warning emitted when the sandbox hides /proc/cpuinfo), so a run that prints one can never replay
-# its own stderr bytes. Preselected runs raise the framework's C++ log floor to errors; the
-# variable is part of the recorded sandbox policy. Unselected historical receipts keep their policy.
-_REPLAYABLE_LOG_ENV = (("TORCH_CPP_LOG_LEVEL", "ERROR"),)
+_REPLAYABLE_LOG_ENV = (
+    ("TORCH_CPP_LOG_LEVEL", "ERROR"),
+    ("HF_HUB_DISABLE_PROGRESS_BARS", "1"),
+    ("TQDM_DISABLE", "1"),
+)
 
 
 def _guest_env(
@@ -324,6 +335,11 @@ def _frontend_trace_api_missing(m2m_root: Path) -> tuple[str, ...]:
     )
 
 
+def _fp32_stage_api_missing(m2m_root: Path) -> tuple[str, ...]:
+    """Require the opt-in typed-retarget API before a sealed stage is selected."""
+    return _source_api_missing(m2m_root, STAGING_API_REQUIREMENTS)
+
+
 def _static_integer_reference_api_missing(m2m_root: Path) -> tuple[str, ...]:
     """Report APIs needed before a static W8A8 capture can claim integer arithmetic."""
     return _source_api_missing(
@@ -360,14 +376,21 @@ def _source_api_missing(m2m_root: Path, required: dict[str, dict[str, set[str]]]
     return tuple(missing)
 
 
-def _source_tree(root: Path, *, skip_lib64: bool = False, skip_python_cache: bool = False) -> dict[str, Any]:
+def _source_tree(
+    root: Path,
+    *,
+    skip_lib64: bool = False,
+    skip_python_cache: bool = False,
+    readonly_modes: bool = False,
+) -> dict[str, Any]:
     """Digest normalized file bytes, names and modes without retaining a huge manifest.
 
     The selected Python package may exclude validated transient bytecode caches;
     the venv may skip its known directory alias. File symlinks are
     dereferenced by copytree and thus by this inventory; outside targets are
     permitted only for the three CPython executable aliases, whose selected
-    base interpreter is independently snapshotted.
+    base interpreter is independently snapshotted. The opt-in readonly view
+    removes only write bits to predict the exact mode transformation at freeze.
     """
     if not root.is_dir() or root.is_symlink():
         raise SealedM2MError(f"selected tree is absent or indirect: {root}")
@@ -393,13 +416,14 @@ def _source_tree(root: Path, *, skip_lib64: bool = False, skip_python_cache: boo
         for name in directories:
             if (here / name).is_symlink():
                 raise SealedM2MError(f"directory link is outside the supported snapshot policy: {here / name}")
+        directory_mode = stat.S_IMODE(here.stat().st_mode)
         records.append(
             (
                 relative,
                 *sorted(
                     {
                         "kind": "directory",
-                        "mode": stat.S_IMODE(here.stat().st_mode),
+                        "mode": directory_mode & ~0o222 if readonly_modes else directory_mode,
                         "members": sorted([*directories, *files]),
                     }.items()
                 ),
@@ -420,13 +444,14 @@ def _source_tree(root: Path, *, skip_lib64: bool = False, skip_python_cache: boo
                 raise SealedM2MError(f"non-regular source member: {member}")
             info = path.stat()
             total += info.st_size
+            file_mode = stat.S_IMODE(info.st_mode)
             records.append(
                 (
                     member,
                     *sorted(
                         {
                             "kind": "file",
-                            "mode": stat.S_IMODE(info.st_mode),
+                            "mode": file_mode & ~0o222 if readonly_modes else file_mode,
                             "bytes": info.st_size,
                             "sha256": _file_digest(path),
                         }.items()
@@ -669,6 +694,7 @@ def _system_libs(interpreter: Path, torch_so: Path, numpy_so: Path) -> tuple[Pat
 def prepare_plan(
     *,
     m2m_root: Path,
+    frozen_origin: dict[str, str] | None = None,
     workload_root: Path,
     worker: Path,
     venv: Path,
@@ -694,6 +720,8 @@ def prepare_plan(
     schemas_root = _canonical_path(schemas_root, exists=True)
     selected_recipe = _recipe_selection(recipe, dtype=dtype)
     version = SCHEMA_V3 if checkpoint is not None or extra_inputs is not None or loader_env is not None else SCHEMA
+    if frozen_origin is not None and version != SCHEMA:
+        raise SealedM2MError("frozen Phase 0 M2M origin is only supported for v2 captures")
     if version == SCHEMA_V3:
         if (
             type(execution_timeout_seconds) is not int
@@ -718,6 +746,11 @@ def prepare_plan(
         raise SealedM2MError(
             "selected Model2MLIR lacks same-conversion materialization/receipt API: " + ", ".join(missing_api)
         )
+    if options.get("stage_fp32"):
+        _command_v2(Path("/capture-out"), dtype=dtype, recipe=selected_recipe is not None, options=options)
+        missing_stage_api = _fp32_stage_api_missing(m2m_root)
+        if missing_stage_api:
+            raise SealedM2MError("selected Model2MLIR lacks FP32 staging API: " + ", ".join(missing_stage_api))
     loader_source = (workload_root / "loader.py").read_text()
     if version == SCHEMA_V3:
         selected_env, loader_reads = _declared_loader_env(loader_source, loader_env)
@@ -730,19 +763,10 @@ def prepare_plan(
         selected_env, loader_reads, input_rows = {}, [], []
     if not worker.is_file() or worker.suffix != ".py":
         raise SealedM2MError("worker must be a selected Python source file")
-    selected = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=m2m_root, capture_output=True, text=True, timeout=5, check=True
-    ).stdout.strip()
-    dirty = subprocess.run(
-        ["git", "status", "--porcelain", "--", "m2m"],
-        cwd=m2m_root,
-        capture_output=True,
-        text=True,
-        timeout=5,
-        check=True,
-    ).stdout
-    if (version == SCHEMA and dirty) or len(selected) != 40:
-        raise SealedM2MError("selected M2M package must have a clean pinned commit")
+    try:
+        origin = git_origin(m2m_root, clean=version == SCHEMA) if frozen_origin is None else None
+    except M2MOriginError as exc:
+        raise SealedM2MError(str(exc)) from exc
     base = _venv_home(venv)
     interpreter = venv / "bin/python"
     if not interpreter.is_file() or interpreter.resolve() != (base / "bin/python3.12").resolve():
@@ -767,7 +791,18 @@ def prepare_plan(
         "merlin": _source_tree(merlin_root, skip_python_cache=True),
         "schemas": _source_tree(schemas_root),
     }
+    if frozen_origin is not None:
+        try:
+            selected = verify_frozen_selector(frozen_origin, m2m_root, selected_trees["m2m"])
+        except M2MOriginError as exc:
+            raise SealedM2MError(str(exc)) from exc
+        dirty = ""
+    else:
+        assert origin is not None
+        selected, dirty = origin["commit"], origin["worktree_status"]
     estimate = sum(row["bytes"] for row in selected_trees.values())
+    if frozen_origin is not None:
+        estimate += Path(frozen_origin["path"]).stat().st_size
     estimate += sum(path.stat().st_size for path in libs)
     if selected_recipe is not None:
         estimate += selected_recipe["bytes"]
@@ -779,6 +814,7 @@ def prepare_plan(
         "status": "plan_only",
         "m2m_root": str(m2m_root),
         "m2m_commit": selected,
+        **({"frozen_origin": frozen_origin} if frozen_origin is not None else {}),
         **(
             {"m2m_worktree_status": dirty, "m2m_commit_role": "origin_hint_not_execution_authority"}
             if version == SCHEMA_V3
@@ -895,6 +931,14 @@ def _materialized_v2(output: Path, source: Path, output_mount: Path, plan: dict[
     metadata = json.loads((output / "meta.json").read_bytes())
     if not isinstance(metadata, dict) or metadata.get("dtype") != plan.get("dtype"):
         raise SealedM2MError("capture metadata does not identify the selected dtype")
+    stage_reason = output_staging_error(
+        output,
+        metadata,
+        selected=_worker_options(plan.get("worker_options")).get("stage_fp32", False),
+        recipe=plan.get("recipe") is not None,
+    )
+    if stage_reason is not None:
+        raise SealedM2MError(stage_reason)
     recipe = plan.get("recipe")
     if plan.get("dtype") in _FLOAT_DTYPES:
         if recipe is not None or metadata.get("recipe_sha256") is not None:
@@ -1092,6 +1136,9 @@ def _materialized_v3(output: Path, source: Path, output_mount: Path, plan: dict[
         raise SealedM2MError("multi-program session evidence is unreadable") from exc
     if not isinstance(report, dict) or not isinstance(contract, dict):
         raise SealedM2MError("multi-program session evidence is malformed")
+    selected_stage = _worker_options(plan.get("worker_options")).get("stage_fp32", False)
+    if selected_stage and report.get("source_state_unchanged") is not True:
+        raise SealedM2MError("FP32 staging lacks unchanged shared source state")
     names = contract.get("stages")
     programs = contract.get("programs")
     rows = report.get("programs")
@@ -1143,6 +1190,14 @@ def _materialized_v3(output: Path, source: Path, output_mount: Path, plan: dict[
             raise SealedM2MError("multi-program stage metadata is unreadable") from exc
         if not isinstance(meta, dict):
             raise SealedM2MError("multi-program stage metadata is malformed")
+        stage_reason = output_staging_error(
+            stage,
+            meta,
+            selected=selected_stage,
+            recipe=quantized and row.get("precision_selection") == "recipe",
+        )
+        if stage_reason is not None:
+            raise SealedM2MError(stage_reason)
         mode = row.get("precision_selection")
         if quantized and mode == "recipe":
             count, partition = integer_partition(meta)
@@ -1211,6 +1266,8 @@ def _stage_source(plan: dict[str, Any], source: Path) -> None:
         symlinks=False,
         ignore=lambda _directory, names: {name for name in names if name == "__pycache__"},
     )
+    if plan.get("frozen_origin") is not None:
+        shutil.copy2(plan["frozen_origin"]["path"], source / "m2m-origin.json")
     shutil.copytree(Path(plan["workload_root"]), source / "workload", symlinks=False)
     shutil.copytree(
         Path(plan["merlin_root"]),
@@ -1247,6 +1304,18 @@ def _verify_staged_selection(plan: dict[str, Any], source: Path, runtime: Path) 
         "schemas": source / "merlin-src/merlin/_data/schemas",
     }
     selected_trees = plan["selected_trees"]
+    if plan.get("frozen_origin") is not None:
+        try:
+            origin_commit = verify_frozen_receipt(
+                plan["frozen_origin"],
+                (source / "m2m-origin.json").read_bytes(),
+                Path(plan["m2m_root"]),
+                selected_trees["m2m"],
+            )
+        except (M2MOriginError, OSError) as exc:
+            raise SealedM2MError("staged frozen M2M origin differs from selection") from exc
+        if origin_commit != plan["m2m_commit"]:
+            raise SealedM2MError("staged frozen M2M origin revision differs from selected plan")
     for name, path in roots.items():
         if _snapshot_tree(path) != selected_trees[name]:
             raise SealedM2MError(f"staged {name} bytes differ from the pre-execution selection")
@@ -1287,6 +1356,7 @@ def issue(
         raise SealedM2MError("selected system-library roster differs from the plan")
     selected = prepare_plan(
         m2m_root=Path(plan["m2m_root"]),
+        frozen_origin=plan.get("frozen_origin"),
         workload_root=Path(plan["workload_root"]),
         worker=Path(plan["worker"]),
         venv=Path(plan["venv"]),
@@ -1320,7 +1390,10 @@ def issue(
     run_dir = _canonical_path(run_dir, exists=False)
     # The source venv is read-only.  The copy and capture live on the selected
     # run filesystem, so only that destination's capacity is relevant here.
-    if plan["estimate_bytes"] > shutil.disk_usage(run_dir.parent).free:
+    from .runtime_store import snapshot_space_requirement
+
+    required_bytes, verified_cache = snapshot_space_requirement(plan, run_dir.parent, selected_system_libraries)
+    if required_bytes > shutil.disk_usage(run_dir.parent).free:
         raise SealedM2MError("normalized snapshot bytes exceed selected run filesystem free space")
     inputs = [
         Path(plan[key])
@@ -1347,7 +1420,7 @@ def issue(
     # root. Every byte is still re-verified against the plan before anything executes.
     from .runtime_store import link_runtime
 
-    link_runtime(plan, runtime)
+    link_runtime(plan, runtime, verified_cache=verified_cache, selected_system_libraries=selected_system_libraries)
     output = run_dir / "capture"
     for name in ("source", "capture-out", "tmp", "dev"):
         (runtime / name).mkdir()
@@ -1494,6 +1567,8 @@ def replay_verify(run_dir: Path, *, bwrap_binary: Path | None = None) -> dict[st
             )
         )
     )
+    if schema in {SCHEMA, SCHEMA_V3} and "frozen_origin" not in plan:
+        supported_issuer.add(_PRE_FROZEN_ORIGIN_ISSUER_SHA256)
     if (
         doc.get("status") != "pending_replay"
         or doc.get("issuer_sha256") not in supported_issuer
@@ -1551,6 +1626,22 @@ def replay_verify(run_dir: Path, *, bwrap_binary: Path | None = None) -> dict[st
         selected_roots["base"] = runtime / base.lstrip("/")
         if set(selected_trees) != set(selected_roots) | {"merlin"}:
             raise SealedM2MError("v2 plan lacks exact selected source/runtime tree identities")
+        if plan.get("frozen_origin") is not None:
+            if schema != SCHEMA:
+                raise SealedM2MError("frozen M2M origin is not a v2 source selection")
+            try:
+                if (
+                    verify_frozen_receipt(
+                        plan["frozen_origin"],
+                        (source / "m2m-origin.json").read_bytes(),
+                        Path(plan["m2m_root"]),
+                        selected_trees["m2m"],
+                    )
+                    != commit
+                ):
+                    raise SealedM2MError("frozen M2M origin revision differs from selected plan")
+            except (M2MOriginError, OSError) as exc:
+                raise SealedM2MError("frozen M2M origin receipt differs from replayed source") from exc
         # The external-schema policy adds the selected schema tree to the
         # Merlin package after its original selected-tree digest was taken.
         if plan.get("schemas_root") == str(Path(str(plan.get("merlin_root"))) / "_data/schemas"):
