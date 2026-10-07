@@ -1149,8 +1149,24 @@ def test_source_obligations_joins_typed_hardware_exclusion_before_host_check(tmp
             }
         ],
     }
-    with pytest.raises(ValueError, match="unaccounted or unjustified"):
+    with pytest.raises(gate.SourceAdmissionError) as failure:
         gate._source_obligations(capture, "fixture", {"operations": []}, capability, {})
+    assert str(failure.value) == "source has 1 unaccounted or unjustified operation signature(s)"
+    private = failure.value._private_unresolved
+    assert len(private) == 1
+    assert private[0]["row"]["frontend_op"] == "aten.arange.start_step"
+    assert private[0]["row"]["ordered_operand_types"]
+    assert private[0]["admission"]["observed_admission_signature"]["ordered_result_dtypes"] == ["i64"]
+    assert private[0]["admission"]["host_admission"]["status"] != "admitted"
+    assert private[0]["reason"] == "host operation lacks exact reviewed admission"
+    private[0]["row"]["frontend_op"] = "caller mutation"
+    private[0]["admission"]["host_admission"]["status"] = "caller mutation"
+    assert failure.value._private_unresolved[0]["row"]["frontend_op"] == "aten.arange.start_step"
+    assert failure.value._private_unresolved[0]["admission"]["host_admission"]["status"] != "caller mutation"
+    assert "aten.arange" not in str(failure.value)
+    assert gate._public_failure_reason(failure.value) == (
+        "ValueError: source has 1 unaccounted or unjustified operation signature(s)"
+    )
     original_admission = oa.admit_operation_row
     hardware_status = "unsupported"
     missing_precision = False
@@ -1184,6 +1200,15 @@ def test_source_obligations_joins_typed_hardware_exclusion_before_host_check(tmp
     unknown_precision = True
     with pytest.raises(ValueError, match="unknown hardware eligibility"):
         gate._source_obligations(capture, "fixture", {"operations": []}, capability, {})
+
+
+def test_source_admission_error_copies_mutable_input_records():
+    records = [{"row": {"ordered_operand_types": ["i64"]}, "admission": {"host_admission": {"status": "unknown"}}}]
+    failure = gate.SourceAdmissionError(records)
+    records[0]["row"]["ordered_operand_types"][0] = "f32"
+    records[0]["admission"]["host_admission"]["status"] = "admitted"
+    assert failure._private_unresolved[0]["row"]["ordered_operand_types"] == ["i64"]
+    assert failure._private_unresolved[0]["admission"]["host_admission"]["status"] == "unknown"
 
 
 def test_selected_input_roster_requires_transitive_dependency_exactly():

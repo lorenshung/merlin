@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -105,6 +106,23 @@ _EXPLICIT_HARDWARE_EXCLUSIONS = frozenset(
         "form",
     }
 )
+
+
+class SourceAdmissionError(ValueError):
+    """Count-only public failure with copied, operator-private source diagnostics."""
+
+    def __init__(self, unresolved: Sequence[Mapping[str, Any]]) -> None:
+        super().__init__(f"source has {len(unresolved)} unaccounted or unjustified operation signature(s)")
+        self.__unresolved = deepcopy(tuple(unresolved))
+
+    @property
+    def _private_unresolved(self) -> tuple[dict[str, Any], ...]:
+        return deepcopy(self.__unresolved)
+
+
+def _public_failure_reason(exc: Exception) -> str:
+    kind = "ValueError" if isinstance(exc, SourceAdmissionError) else type(exc).__name__
+    return f"{kind}: {exc}"
 
 
 def requirements_for(descriptor: str | Path) -> tuple[str, ...]:
@@ -760,16 +778,18 @@ def _source_obligations(
             # The exact source linalg inventory above must carry this demand.  A
             # standalone eligible op absent from grouping cannot disappear into host.
             if not row["mlir_operation"].startswith("linalg."):
-                unresolved.append({"ordinals": row["ordinals"], "reason": "eligible operation is not outlined"})
+                unresolved.append({"row": row, "admission": admission, "reason": "eligible operation is not outlined"})
         elif host_decision["status"] != "admitted" or host_decision.get("reviewed") is not True:
-            unresolved.append({"ordinals": row["ordinals"], "reason": "host operation lacks exact reviewed admission"})
+            unresolved.append(
+                {"row": row, "admission": admission, "reason": "host operation lacks exact reviewed admission"}
+            )
         else:
             linalg_support.record(linalg, row, host_decision, parsed, source_rows, control_proof=bounded_control)
             arange_support.record(arange, capture, row, host_decision, parsed, source_rows)
             integer_support.record(integer_reductions, row, host_decision, parsed, source_rows)
             bucketize_support.record(bucketize, row, host_decision, source_rows)
     if unresolved:
-        raise ValueError(f"source has {len(unresolved)} unaccounted or unjustified operation signature(s)")
+        raise SourceAdmissionError(unresolved)
     integer_support.verify_source(integer_reductions, source)
     group_metrics = {}
     group_provenance = []
@@ -1303,7 +1323,7 @@ def run(
                 item["checks"]["prebuilt_receipts"] = diagnostic_receipts
             item["status"] = "diagnostic_static_checks_passed" if diagnostic else "pass"
         except Exception as exc:  # noqa: BLE001 -- one model's refusal must not hide the others
-            item["reason"] = f"{type(exc).__name__}: {exc}"
+            item["reason"] = _public_failure_reason(exc)
     result = {
         "schema": RESULT_SCHEMA,
         "target": target,
