@@ -81,3 +81,14 @@ Its production caller is `merlin experiment inspect --trace` (the group build's 
 `fast_estimate_validation` is called by `whole_model_screen.fit_calibration`, which validates every
 refit of the structure screen's calibration against held-out board-measured groups under the board's
 derived noise margin and records the screen's ranking as `unvalidated` whenever that does not hold.
+
+
+`execution_boundaries` summarizes explicit provider-decoded instruction extents,
+execution counts, call classifications, stack access widths and frame facts.
+Every instruction is covered once; unknown facts remain unknown. Entry-normalized
+counts and repeated stack sites are descriptive features, not physical traffic,
+peak stack usage, interprocedural dependencies or cycle prices. Its training-only
+boundary envelope checks an unpriced subdomain and never approves a ranking.
+The provider owns decoding/ABI and exact artifact verification; the existing
+fitter and held-out ordering gate remain separate. Independent expanded event
+traces and multiple provider geometries test the summary and refusal behavior.
