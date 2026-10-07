@@ -208,6 +208,13 @@ def host_input_surfaces(
         if path_kind(path) != kind or path.is_symlink():
             raise RuntimeError("private validation path changed kind or became indirect")
         records.append((str(path), path, path))
+        if not _policy_test_live_inputs:
+            for _, destination, frozen_grant in grants:
+                if path.is_relative_to(destination):
+                    frozen_private = frozen_grant / path.relative_to(destination)
+                    if path_kind(frozen_private) != kind:
+                        raise RuntimeError("private validation source is absent from its frozen public parent")
+                    records.append((str(path), path, frozen_private))
     return _private_path_surfaces(argv, records, approved)
 
 

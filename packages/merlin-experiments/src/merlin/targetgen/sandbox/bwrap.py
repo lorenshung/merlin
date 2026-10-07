@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 from collections.abc import Callable, Sequence
 from itertools import chain
 from pathlib import Path
@@ -226,26 +227,63 @@ def _private_validation_paths(bundle: dict) -> list[tuple[Path, str]]:
     return out
 
 
-def _validate_host_sources(grants: list[tuple[str, Path]], hosts: list[tuple[str, Path]]) -> None:
+def _validate_host_sources(
+    grants: list[tuple[str, Path]], hosts: list[tuple[str, Path]], private_denials: Sequence[Path] = ()
+) -> None:
     """Reject public aliases before dereferencing sources into the content store.
 
     A broader public directory may contain private inputs: the mount layer hides
     those paths unconditionally. An explicit child grant or a second symlink/hardlink
     name for private bytes must not reopen that denial.
     """
-    if not hosts:
+    if not hosts and not private_denials:
         return
-    private = [path.absolute() for _, path in hosts]
+    private = [path.absolute() for _, path in hosts] + [path.absolute() for path in private_denials]
     private_inodes = set()
-    for path in private:
+    for _, path in hosts:
         if path.resolve() != path or path.is_symlink():
             raise RuntimeError("host-only inputs cannot use symlink aliases")
         for member in (path, *path.rglob("*")) if path.is_dir() else (path,):
             if member.is_symlink():
                 raise RuntimeError("host-only inputs cannot contain symlinks")
             if member.is_file():
-                stat = member.stat()
-                private_inodes.add((stat.st_dev, stat.st_ino))
+                info = member.stat()
+                private_inodes.add((info.st_dev, info.st_ino))
+
+    # Private validation roots are denials, not host grants. Their trees may
+    # legitimately contain selected-source symlinks; protect the referent
+    # inodes too, without copying any of their bytes into the public CAS.
+    seen_directories: set[tuple[int, int]] = set()
+    for root in private_denials:
+        if path_kind(root) == "missing":
+            continue
+        if root.is_symlink() or root.resolve() != root:
+            raise RuntimeError("private validation source is indirect")
+        pending = [root]
+        while pending:
+            member = pending.pop()
+            try:
+                info = member.lstat()
+                if stat.S_ISLNK(info.st_mode):
+                    referent = member.resolve(strict=True)
+                    info = referent.stat()
+                    if not stat.S_ISREG(info.st_mode):
+                        raise RuntimeError("private validation directory alias cannot be bounded")
+            except OSError as exc:
+                raise RuntimeError("private validation source alias cannot be verified") from exc
+            key = (info.st_dev, info.st_ino)
+            if stat.S_ISREG(info.st_mode):
+                private_inodes.add(key)
+            elif stat.S_ISDIR(info.st_mode):
+                if key in seen_directories:
+                    continue
+                seen_directories.add(key)
+                try:
+                    pending.extend(member.iterdir())
+                except OSError as exc:
+                    raise RuntimeError("private validation source tree cannot be verified") from exc
+            else:
+                raise RuntimeError("private validation source has an unsupported member")
 
     def inspect(member: Path, ancestry: tuple[tuple[int, int], ...]) -> None:
         if any(member == path or path in member.parents for path in private):
@@ -616,7 +654,10 @@ def materialize_bundle_inputs(
     missing = [rel for rel, source in inputs if path_kind(source) == "missing"]
     if missing:
         raise FileNotFoundError("bundle declares unresolvable allowed grant(s): " + ", ".join(sorted(missing)))
-    _validate_host_sources(grants, hosts)
+    private_validation = _private_validation_paths(bundle)
+    if any(path_kind(path) not in {"missing", kind} for path, kind in private_validation):
+        raise RuntimeError("private validation path changed kind before input freezing")
+    _validate_host_sources(grants, hosts, [path for path, _ in private_validation])
     from .answer_surfaces import _support_package_dirs
 
     owner_paths = set(_support_package_dirs())
@@ -681,7 +722,11 @@ def materialize_bundle_inputs(
                 source == private.absolute()
                 or source in private.absolute().parents
                 or private.absolute() in source.parents
-                for private in [*(path for _, path in hosts), *private_sources]
+                for private in [
+                    *(path for _, path in hosts),
+                    *private_sources,
+                    *(path for path, _ in private_validation),
+                ]
             )
             input_store = None if private_copy else store
             if source.is_dir():
@@ -779,7 +824,7 @@ def _bundle_mount_args(ws: Path, bundle: dict, repo: Path, *, _policy_test_live_
         if _policy_test_live_inputs:
             public = _grant_sources(bundle, repo)
             private = [(path, resolve_grant(path, repo)) for path in _host_input_paths(bundle)]
-            _validate_host_sources(public, private)
+            _validate_host_sources(public, private, [path for path, _ in _private_validation_paths(bundle)])
             host_records = [(path, source.absolute(), source) for path, source in private]
         else:
             manifest, _ = _snapshot_grants(ws, bundle, repo)

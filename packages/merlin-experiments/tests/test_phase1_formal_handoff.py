@@ -34,7 +34,7 @@ def handoff(tmp_path, monkeypatch):
     return build_handoff(tmp_path, monkeypatch)
 
 
-def build_handoff(tmp_path, monkeypatch, *, reviewed=None, authored_submission=None):
+def build_handoff(tmp_path, monkeypatch, *, reviewed=None, authored_submission=None, post_freeze_failure=False):
     """Join real frozen inputs and formal receipts; external oracle observations stay synthetic."""
     # The explicit legacy context updates environment during formal.main.
     monkeypatch.setattr(os, "environ", os.environ.copy())
@@ -203,10 +203,18 @@ def build_handoff(tmp_path, monkeypatch, *, reviewed=None, authored_submission=N
 
     def external_private_gate(submission, _spec, *, target, required_models, required_programs, **_kwargs):
         sha = strict_tree_sha256(Path(submission))["sha256"]
+        spec_sha = hashlib.sha256(Path(_spec).read_bytes()).hexdigest()
         return {
             "schema": PFM.RESULT_SCHEMA,
             "target": target,
             "passed": True,
+            "private_spec_sha256": spec_sha,
+            "authored_source_freeze": {
+                "schema": "merlin.phase1.private_source_freeze.v1",
+                "spec_sha256": spec_sha,
+                "record_sha256": "f" * 64,
+                "root": str(run / "private_full_model_input" / "sources"),
+            },
             "candidate_tree_sha256": sha,
             "required_models": list(required_models),
             "required_programs": {name: list(required_programs[name]) for name in required_models},
@@ -253,26 +261,36 @@ def build_handoff(tmp_path, monkeypatch, *, reviewed=None, authored_submission=N
         }
 
     monkeypatch.setattr(PFM, "run", external_private_gate)
-    assert (
-        formal.main(
-            [
-                "--run-dir",
-                str(run),
-                "--arm",
-                "merlin_assisted",
-                "--capsules",
-                str(frozen_public),
-                "--hidden-capsules",
-                str(frozen_hidden),
-                "--contract",
-                str(contract),
-                "--private-full-model-spec",
-                str(private_spec),
-            ],
-            context=load_context(descriptor, repo=repo),
-        )
-        == 0
+    # This synthetic handoff fixture replaces the complete external private
+    # build boundary, including its separately frozen authored-source record.
+    freeze_checks = 0
+
+    def synthetic_source_freeze(*_args, **_kwargs):
+        nonlocal freeze_checks
+        freeze_checks += 1
+        if post_freeze_failure and freeze_checks == 2:
+            raise RuntimeError("frozen workspace source changed after linked build")
+        return {"fixture": True}
+
+    monkeypatch.setattr(formal, "_private_source_freeze_for_formal", synthetic_source_freeze)
+    status = formal.main(
+        [
+            "--run-dir",
+            str(run),
+            "--arm",
+            "merlin_assisted",
+            "--capsules",
+            str(frozen_public),
+            "--hidden-capsules",
+            str(frozen_hidden),
+            "--contract",
+            str(contract),
+            "--private-full-model-spec",
+            str(private_spec),
+        ],
+        context=load_context(descriptor, repo=repo),
     )
+    assert status == (1 if post_freeze_failure else 0)
     assert events == ["public", "hidden"]
     digest = hash_tree(run / "submission")["sha256"]
     return SimpleNamespace(run=run, runs=runs, digest=digest, environment=environment, events=events)
@@ -286,6 +304,15 @@ def test_formal_receipts_admit_without_mocking_phase2(handoff):
     )
     assert binding["public_passed"] == binding["public_total"] == 1
     assert len(binding["evidence_sha256"]) == 6
+
+
+def test_successful_private_build_cannot_survive_postbuild_snapshot_refusal(tmp_path, monkeypatch):
+    handoff = build_handoff(tmp_path, monkeypatch, post_freeze_failure=True)
+    manifest = yaml.safe_load((handoff.run / "run_manifest.yaml").read_text())
+    assert manifest["private_full_models"]["passed"] is False
+    assert "changed after linked build" in manifest["private_full_models"]["reason"]
+    assert manifest["completion"]["formal_grade_complete"] is False
+    assert "private_full_models:incomplete" in manifest["completion"]["failures"]
 
 
 def test_actual_diagnostic_observations_still_refuse(handoff):

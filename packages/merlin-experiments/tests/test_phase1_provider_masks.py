@@ -33,7 +33,7 @@ def prepared(tmp_path, monkeypatch):
     BW.materialize_bundle_inputs(workspace, bundle, repo=repo)
     [frozen] = BW.snapshot_input_paths(workspace, bundle, [hidden], repo=repo)
     context = InvocationContext(repo, repo / "descriptor", repo, "fixture", repo, repo, repo, ())
-    target = SimpleNamespace(target="fixture")
+    target = SimpleNamespace(target="fixture", capsule_corpus=None, corpus_siblings=lambda: [])
     monkeypatch.setattr(target_experiment, "load_target_experiment", lambda path: target)
     monkeypatch.setattr(BW, "repo_root", lambda: repo)
     monkeypatch.setattr(BW, "claude_runtime_binds", lambda: [])

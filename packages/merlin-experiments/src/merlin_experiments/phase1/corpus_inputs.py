@@ -98,6 +98,8 @@ def prepare_bundle(
     effective = run_dir / "input_bundle_manifest.yaml"
     private_source = None
     private_paths = None
+    frozen_authored = None
+    frozen_authored_root = run_dir.absolute() / "private_full_model_input" / "sources"
     if environment is None and private_full_model_spec is not None:
         from merlin_experiments.phase1.feedback.private_full_models import (
             loader_env_requirements_for,
@@ -112,11 +114,16 @@ def prepare_bundle(
             or private_source.is_relative_to(run_dir.absolute())
         ):
             raise ValueError("operator-private full-model specification is absent, indirect or inside the run")
+        from .feedback import private_source_freeze
+
+        frozen_authored = private_source_freeze.stage(private_source, frozen_authored_root, target=te.target)
         private_paths = private_input_paths(
             private_source,
             target=te.target,
             required_models=requirements_for(te.path),
             scope_requirements=loader_env_requirements_for(te.path),
+            source_freeze=frozen_authored,
+            source_freeze_root=frozen_authored_root,
         )
         # The host writes these only after authoring.  A resumed agent must not
         # see private model evidence or its paths through a broad run grant.
@@ -144,6 +151,9 @@ def prepare_bundle(
             document.setdefault("host_inputs", []).append(
                 {"path": str(staged), "note": "operator-only frozen complete-network validation specification"}
             )
+            document["host_inputs"].append(
+                {"path": str(frozen_authored_root), "note": "operator-only frozen authored source ownership"}
+            )
             document["private_validation_paths"] = private_paths
             private_record = {
                 "source": str(private_source),
@@ -151,6 +161,7 @@ def prepare_bundle(
                 "path": str(staged),
                 "sha256": file_sha256(staged),
                 "masked_paths": private_paths,
+                "source_freeze": frozen_authored,
             }
         with os.fdopen(os.open(effective, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
             yaml.safe_dump(document, stream, sort_keys=False)
@@ -181,6 +192,19 @@ def prepare_bundle(
                     "note": "operator-only frozen complete-network validation specification",
                 }
             )
+            frozen_authored = private_record.get("source_freeze")
+            if frozen_authored is not None:
+                from .feedback import private_source_freeze
+
+                private_source_copy = Path(str(private_record.get("path") or ""))
+                if private_source_copy != run_dir.absolute() / "private_full_model_input" / "spec.yaml":
+                    raise RuntimeError("resume refused: private specification belongs to another run")
+                private_source_freeze.verify(
+                    private_source_copy, frozen_authored, root=frozen_authored_root, target=te.target
+                )
+                expected_bundle["host_inputs"].append(
+                    {"path": str(frozen_authored_root), "note": "operator-only frozen authored source ownership"}
+                )
             expected_bundle["private_validation_paths"] = private_record.get("masked_paths")
         if document != expected_bundle:
             raise RuntimeError("resume refused: effective bundle changed candidate grants or declared inputs")

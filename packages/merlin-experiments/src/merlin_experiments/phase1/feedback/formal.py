@@ -19,7 +19,13 @@ import yaml
 from merlin.benchharness import hash_tree
 from merlin.targetgen import capsule_grade as CG
 from merlin.targetgen import capsule_runner as CR
-from merlin_experiments.phase1.context import InvocationContext, add_context_arguments, resolve_context
+from merlin_experiments.phase1.context import (
+    InvocationContext,
+    add_context_arguments,
+    readback_kwargs,
+    resolve_context,
+    verify_readback_record,
+)
 from merlin_experiments.phase1.feedback import freeze as freeze_run
 from merlin_experiments.phase1.feedback import private_full_models as PFM
 
@@ -27,6 +33,85 @@ from merlin_experiments.phase1.feedback import private_full_models as PFM
 # useful iteration feedback, but is not a completed formal run.  Keep the requirement next to the
 # post-freeze grader: this is the only process allowed to read the hidden capsules.
 FORMAL_REQUIRED_TIER = "L3"
+
+
+def _private_source_freeze_for_formal(
+    run_dir: Path, spec: Path, target: str, *, workspace: Path | None = None, repo: Path | None = None
+) -> dict | None:
+    """Use only the host-owned fresh-run input record, never a caller's receipt."""
+    environment_path = run_dir / "environment.yaml"
+    expected_root = run_dir.absolute() / "private_full_model_input" / "sources"
+    if environment_path.is_symlink():
+        raise ValueError("formal private run environment is indirect")
+    if not environment_path.is_file():
+        if expected_root.exists():
+            raise ValueError("fresh private authored-source freeze has no run environment")
+        return None  # historical diagnostic runs have no certifiable source freeze
+    environment = yaml.safe_load(environment_path.read_bytes())
+    if not isinstance(environment, Mapping):
+        raise ValueError("formal private run environment is malformed")
+    private = environment.get("private_full_model_spec")
+    if private is None:
+        if expected_root.exists():
+            raise ValueError("fresh private authored-source freeze was removed from the run record")
+        return None
+    from merlin.compile.model_execution_inputs import file_sha256
+
+    if (
+        not isinstance(private, Mapping)
+        or private.get("frozen_path") != str(spec.absolute())
+        or private.get("frozen_sha256") != file_sha256(spec)
+    ):
+        raise ValueError("formal private model spec differs from the frozen run input")
+    record = private.get("source_freeze")
+    if record is None:
+        if expected_root.exists():
+            raise ValueError("fresh private authored-source freeze was removed from the run record")
+        return None
+    expected_spec = run_dir.absolute() / "private_full_model_input" / "spec.yaml"
+    root = expected_root
+    if (
+        private.get("path") != str(expected_spec)
+        or private.get("sha256") != file_sha256(expected_spec)
+        or private.get("source_sha256") != private.get("sha256")
+        or private.get("frozen_sha256") != private.get("sha256")
+    ):
+        raise ValueError("formal private model source belongs to another run")
+    from ..run_inputs import bundle_manifest_identity
+    from . import private_source_freeze
+
+    resolved = private_source_freeze.verify(spec, record, root=root, target=target)
+    effective_path = run_dir / "input_bundle_manifest.yaml"
+    if effective_path.is_symlink() or not effective_path.is_file():
+        raise ValueError("formal private source has no effective input bundle")
+    effective = yaml.safe_load(effective_path.read_bytes())
+    if not isinstance(effective, dict) or environment.get("bundle_manifest_sha256") != bundle_manifest_identity(
+        effective_path, effective
+    ):
+        raise ValueError("formal private source differs from frozen effective bundle")
+    host_inputs = {entry.get("path") for entry in effective.get("host_inputs", []) if isinstance(entry, Mapping)}
+    masks = effective.get("private_validation_paths")
+    denied = {entry.get("path") for entry in masks or [] if isinstance(entry, Mapping)}
+    if (
+        str(root) not in host_inputs
+        or str(root) not in denied
+        or any(original not in denied for original, _field in resolved)
+        or masks != private.get("masked_paths")
+    ):
+        raise ValueError("formal private authored sources are not frozen and masked")
+    if workspace is None or repo is None:
+        raise ValueError("formal private authored sources require the frozen workspace")
+    from merlin.targetgen.sandbox import bwrap
+
+    snapshot = environment.get("bundle_input_snapshot")
+    bwrap.verify_snapshot_binding(workspace, effective, snapshot, repo=repo)
+    [frozen_root] = bwrap.snapshot_input_paths(workspace, effective, [root], repo=repo)
+    for row in (*record["archives"], *record["sources"]):
+        relative = Path(row["frozen_path"]).relative_to(root)
+        frozen_member = frozen_root / relative
+        if file_sha256(frozen_member) != row.get("sha256", row.get("manifest_sha256")):
+            raise ValueError("formal private authored source differs from frozen workspace input")
+    return dict(record)
 
 
 def _formal_model_simulator(target: str) -> dict:
@@ -246,11 +331,12 @@ def _score(pkg, capsules, runs_root, labels, no_oracle, *, context: InvocationCo
     # chipyard->spike/verilator, else arc) — never pass None here, which historically fell back to the
     # gemmini spike/verilator MLIR-lowering oracle and mis-graded atlas (torch-mlir run_lowering.py crash).
     # `{}` = honest no-oracle (L0/L1/trace only). sim_via is self-resolved from the contract.
-    adapters = {} if no_oracle else CR.oracle_adapters(context.target)
+    adapters = {} if no_oracle else CR.oracle_adapters(context.target, **readback_kwargs(context))
     return CG.grade(
         pkg,
         capsules_root=_roots(capsules),
         runs_root=runs_root,
+        model_snapshot_root=Path(runs_root).resolve() / ".private_model_sources",
         labels=labels,
         contract=str(Path(contract).resolve()) if contract else str(context.repo / "merlin/contract"),
         oracle_adapters=adapters,
@@ -272,6 +358,20 @@ def _cost_phrase(proc: dict) -> str:
     if notional is not None:
         return f"cost=n/a ({proc.get('billing_mode') or 'notional'}: ${notional} notional)"
     return f"cost=n/a ({proc.get('cost_unavailable_reason') or 'no usage metadata'})"
+
+
+def _verify_formal_readback_policy(run_dir: Path, context: InvocationContext) -> None:
+    """Formal grading cannot select a different transport from the admitted run."""
+    path = run_dir / "environment.yaml"
+    if path.is_symlink():
+        raise RuntimeError("formal run environment must not be indirect")
+    if not path.is_file():
+        verify_readback_record(context, None)
+        return
+    record = yaml.safe_load(path.read_bytes())
+    if not isinstance(record, dict):
+        raise RuntimeError("formal run environment is malformed")
+    verify_readback_record(context, record.get("readback_policy"))
 
 
 def main(argv: list[str] | None = None, *, context: InvocationContext | None = None) -> int:
@@ -326,6 +426,7 @@ def main(argv: list[str] | None = None, *, context: InvocationContext | None = N
         if a.hidden_capsules is None and not a.skip_hidden:
             ap.error("installed formal grading requires --hidden-capsules or explicit --skip-hidden")
     run_dir = Path(a.run_dir)
+    _verify_formal_readback_policy(run_dir, context)
     pkg = run_dir / "submission"
 
     # Pin whole-model tile certification to the simulator assigned to the formal RTL tier by the
@@ -419,6 +520,11 @@ def main(argv: list[str] | None = None, *, context: InvocationContext | None = N
     }
     if required_full_models and a.private_full_model_spec is not None:
         try:
+            source_freeze = _private_source_freeze_for_formal(
+                run_dir, a.private_full_model_spec, context.target, workspace=a.workspace, repo=context.repo
+            )
+            if source_freeze is None:
+                raise ValueError("private full-model certification requires a fresh run-owned authored-source freeze")
             private_models = PFM.run(
                 pkg,
                 a.private_full_model_spec,
@@ -427,8 +533,18 @@ def main(argv: list[str] | None = None, *, context: InvocationContext | None = N
                 required_programs=required_full_programs,
                 loader_env_requirements=required_loader_env,
                 out=run_dir / "grading_private_full_models",
+                source_freeze=source_freeze,
+                source_freeze_root=(run_dir / "private_full_model_input" / "sources") if source_freeze else None,
             )
+            if (
+                _private_source_freeze_for_formal(
+                    run_dir, a.private_full_model_spec, context.target, workspace=a.workspace, repo=context.repo
+                )
+                != source_freeze
+            ):
+                raise ValueError("run-owned private source snapshot changed during linked builds")
         except Exception as exc:  # noqa: BLE001 -- missing private evidence is an incomplete run
+            private_models["passed"] = False
             private_models["reason"] = f"{type(exc).__name__}: {exc}"
     # A descriptor with no private full-model declaration cannot silently make a new
     # Phase 1 success claim.  Older diagnostic experiments remain runnable, incomplete.

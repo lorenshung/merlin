@@ -46,6 +46,11 @@ views even after original aliases or selected providers change.
   metadata. Invoke it after grant reapplication; never append new runtime binds afterward. It
   preserves the existing snapshot verification authority and does not rehash full corpus payloads
   per shell command. Argv visibility tests are not operating-system isolation qualification.
+- A declared operator-private validation path is a pre-copy alias authority, not a public input.
+  Reject public symlink/hardlink aliases before freezing; a broad public parent containing a
+  private child must bypass shared CAS, and the copied child must be masked at its frozen
+  snapshot path too. Existing private file referents are checked without following
+  unbounded directory symlinks. Do not convert validation denials into `host_inputs`.
 - The coverage guard cannot see a rule that was DROPPED, so `answer_surfaces.dropped_declarations(te)` is its required companion for required paths and plugin discovery. `answer_surfaces()` filters to paths that exist because masking an absent path is a no-op mount that fails. A caller making a fairness claim checks BOTH (`Sandbox.containment_record()` returns them together); the registry-driven eviction sweep returns its failure instead of swallowing it. Logical module identities in `merlin.common.access` are different: historical OOT and optional research implementations may be absent, and `unresolved_modules` records them for migration audits while `module_locations` masks every installed physical copy.
 - A target's codegen packages are withheld by DIRECTORY (`out/artifacts/targets/<target>/`), not by the descriptor's list of names — an enumeration is stale the next time a mining/autotune/targetgen run mints a package, not the next time somebody edits the descriptor (measured on gemmini: 4 of 40 named, hand-authored `hand_v0` uncovered). A way in exists only where the descriptor's `answer_surfaces.prior_backend_exemptions` declares one, and an exemption naming a package that does not exist is itself a dropped declaration. Only THIS target's subdir is withheld: another target's packages are legitimately granted as cross-target baselines.
 - Continuously guarded by `merlin/tests/infra/test_sandbox_isolation.py` (hermetic policy assertions for every roster target + a guarded live bwrap probe).

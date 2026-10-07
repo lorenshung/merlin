@@ -12,16 +12,49 @@ import json
 import os
 import subprocess
 from collections.abc import Mapping, Sequence
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from merlin.compile.model_execution_inputs import file_sha256, strict_tree_sha256
+from merlin_experiments.phase1.feedback import private_bucketize_support as bucketize_support
+from merlin_experiments.phase1.feedback import private_control_support as control_support
+from merlin_experiments.phase1.feedback import private_data_movement as data_movement
+from merlin_experiments.phase1.feedback import private_integer_reduction_support as integer_support
+from merlin_experiments.phase1.feedback import private_linalg_support as linalg_support
+from merlin_experiments.phase1.feedback import private_literal_arange_admission as arange_support
+from merlin_experiments.phase1.feedback import private_ordered_scan_support as ordered_scan_support
+from merlin_experiments.phase1.feedback import private_pure_stage_support as pure_stage
+from merlin_experiments.phase1.feedback import private_source_freeze as source_freeze_api
+from merlin_experiments.phase1.feedback.private_capture_roster import captured_programs as _captured_programs
+from merlin_experiments.phase1.feedback.private_device_audit import (
+    audit_built_device_host_compute as _audit_built_device_host_compute,
+)
+from merlin_experiments.phase1.feedback.private_device_audit import (
+    require_static_build_inputs as _require_static_build_inputs,
+)
+from merlin_experiments.phase1.feedback.private_group_provenance import (
+    eligible_source_identity as _eligible_source_identity,
+)
+from merlin_experiments.phase1.feedback.private_group_provenance import (
+    join_routed_source_groups as _join_routed_source_groups,
+)
+from merlin_experiments.phase1.feedback.private_group_provenance import (
+    routed_kernel_symbols as _routed_kernel_symbols,
+)
+from merlin_experiments.phase1.feedback.private_prebuilt_receipt import load_diagnostic_receipt
+from merlin_experiments.phase1.feedback.private_source_support_join import (
+    linked_source_support_complete as _linked_source_support_complete,
+)
 
 SCHEMA = "merlin.phase1.private_full_models.v1"
-RESULT_SCHEMA = "merlin.phase1.private_full_model_build_gate.v1"
+RESULT_SCHEMA = "merlin.phase1.private_full_model_build_gate.v7"
 BUILD_BOARD_SCOPE = "static_memory_layout_and_host_ISA_only; no board execution"
+TRANSPOSE_DATA_SUPPORT_SCOPE = data_movement.SCOPE
+_transpose_data_support = data_movement.prove_transpose_source
+_verify_transpose_data_support = data_movement.verify_transpose
 _CONTROL_DATA_SUPPORT = frozenset(
     {
         "arith.constant",
@@ -56,6 +89,19 @@ _CONTROL_DATA_SUPPORT = frozenset(
         "scf.for",
         "scf.if",
         "scf.while",
+    }
+)
+_EXPLICIT_HARDWARE_EXCLUSIONS = frozenset(
+    {
+        "undeclared_family",
+        "input_dtype",
+        "weight_dtype",
+        "operand_pair",
+        "result_dtype",
+        "rank",
+        "batch",
+        "layout",
+        "form",
     }
 )
 
@@ -164,6 +210,8 @@ def private_input_paths(
     target: str,
     required_models: Sequence[str],
     scope_requirements: Mapping[str, Mapping[str, Any]] | None = None,
+    source_freeze: Mapping[str, Any] | None = None,
+    source_freeze_root: str | Path | None = None,
 ) -> list[dict[str, str]]:
     """Derive sandbox denials from the operator's selected validation inputs.
 
@@ -182,6 +230,7 @@ def private_input_paths(
         or [row.get("id") for row in rows] != list(required_models)
     ):
         raise ValueError("operator-private full-model roster is malformed")
+    resolved_sources = source_freeze_api.resolve_optional(spec, source_freeze, source_freeze_root, target=target)
     denied: dict[str, str] = {}
 
     def add(value: Any, kind: str) -> None:
@@ -226,11 +275,12 @@ def private_input_paths(
             row,
             plan,
             target=target,
-            software_sha256=file_sha256(_file(spec, row["software_spec"], row.get("software_spec_sha256"))),
+            software_sha256=file_sha256(_authored_file(spec, row, "software_spec", resolved_sources)),
             capability_sha256=file_sha256(
                 _file(spec, row["capability_contract"], row.get("capability_contract_sha256"))
             ),
             facts_sha256=file_sha256(_file(spec, row["rtl_facts"], row.get("rtl_facts_sha256"))),
+            host_capabilities_sha256=file_sha256(_authored_file(spec, row, "host_capabilities", resolved_sources)),
         )
         add(str(derivation_root), "dir")
         if scope_requirements is not None:
@@ -278,17 +328,15 @@ def private_input_paths(
             value = row.get(key)
             if isinstance(value, str) and value:
                 add(str(Path(value).parent), "dir")
+    if resolved_sources is not None:
+        add(str(source_freeze_root), "dir")
+        for original, _field in resolved_sources:
+            add(original, "file")
     return [{"path": path, "kind": kind} for path, kind in sorted(denied.items())]
 
 
-def _file(spec: Path, value: Any, digest: Any) -> Path:
-    if not isinstance(value, str) or not value or not isinstance(digest, str) or len(digest) != 64:
-        raise ValueError("private model input needs a path and SHA256")
-    path = Path(value)
-    path = path if path.is_absolute() else spec.parent / path
-    if path.is_symlink() or not path.is_file() or file_sha256(path) != digest:
-        raise ValueError(f"private model input is absent, indirect, or changed: {path}")
-    return path.resolve(strict=True)
+_file = source_freeze_api.pinned_file
+_authored_file = source_freeze_api.authored_file
 
 
 def _expected_input_provenance(row: Mapping[str, Any]) -> dict[str, bool | None]:
@@ -349,6 +397,19 @@ def _tree(spec: Path, value: Any, digest: Any) -> Path:
     return path.resolve(strict=True)
 
 
+def _capture_tree_bindings(capture: Path, pinned_strict: Any, attested_sealed: Any) -> dict[str, str]:
+    """Check independent compiler and sealed-issuer identities of one capture."""
+    from merlin_experiments.phase0.capture_execution_attestation import sealed_m2m_tree_snapshot
+
+    strict = strict_tree_sha256(capture)["sha256"]
+    if not isinstance(pinned_strict, str) or pinned_strict != strict:
+        raise ValueError("full-model capture differs from an explicitly pinned compiler tree")
+    sealed = sealed_m2m_tree_snapshot(capture)["sha256"]
+    if not isinstance(attested_sealed, str) or attested_sealed != sealed:
+        raise ValueError("verified source-execution attestation names another complete capture")
+    return {"compiler_strict_tree_sha256": strict, "issuer_sealed_tree_sha256": sealed}
+
+
 def _recipe_derivation(
     spec: Path,
     row: Mapping[str, Any],
@@ -358,13 +419,16 @@ def _recipe_derivation(
     software_sha256: str,
     capability_sha256: str,
     facts_sha256: str,
-) -> dict[str, str]:
+    host_capabilities_sha256: str,
+) -> tuple[dict[str, str], dict, dict]:
     """Bind the selected capture recipe to canonical current-spec derivation.
 
     The Phase 0 export is a diagnostic transformation input, not an admission
     or a model-validation result.  Its independently checked source snapshots
     must match the very contracts used by this build, and its derived recipe
-    must match the sealed capture preselection's actual recipe bytes.
+    must match the sealed capture preselection's actual recipe bytes. Return
+    its resolved software and selected host views for independent source
+    admission screening; never reinterpret the raw authored YAML here.
     """
     from merlin.targetgen.quant_recipe import digest as recipe_digest
     from merlin_experiments.phase0.evidence import load_exported_evidence
@@ -386,6 +450,17 @@ def _recipe_derivation(
         snapshots = [source for source in evidence.source_snapshots if source.role == role]
         if len(snapshots) != 1 or snapshots[0].sha256 != digest:
             raise ValueError(f"recipe derivation does not bind selected {role} bytes")
+    host_profiles = evidence.host_capabilities
+    if not isinstance(host_profiles, Mapping):
+        raise ValueError("recipe derivation has no selected host profiles")
+    host_sources = [
+        source
+        for source in evidence.source_snapshots
+        if source.role.startswith("host-capability-spec:") and source.sha256 == host_capabilities_sha256
+    ]
+    if len(host_sources) != 1 or host_sources[0].role.removeprefix("host-capability-spec:") not in host_profiles:
+        raise ValueError("recipe derivation does not bind selected host-capability bytes")
+    selected_host_name = host_sources[0].role.removeprefix("host-capability-spec:")
     artifacts = dict(evidence.archived_artifacts)
     index_raw = artifacts.get("software/quantization-recipes.json")
     if index_raw is None:
@@ -427,12 +502,68 @@ def _recipe_derivation(
         or raw != selected_file.read_bytes()
     ):
         raise ValueError("selected capture recipe has no verified current-spec content identity")
-    return {
+    proof = {
         "evidence_manifest_sha256": file_sha256(manifest),
         "recipe_sha256": candidates[0]["sha256"],
         "recipe_semantic_sha256": candidates[0]["recipe_sha256"],
         "scope": "current-spec diagnostic recipe derivation only; no model or hardware admission",
     }
+    return proof, evidence.software_spec, {selected_host_name: host_profiles[selected_host_name]}
+
+
+def _selected_admission_views(
+    software: Any,
+    profiles: Any,
+    *,
+    target: str,
+    host_package: Path,
+    host_package_sha256: str,
+    host_capabilities_path: Path,
+    host_capabilities_sha256: str,
+) -> tuple[dict, dict]:
+    """Use only a resolved exported spec and the exact selected host profile."""
+    from merlin.targetgen.host_capabilities import validate_host_capabilities
+    from merlin.targetgen.software_spec import validate_software_spec
+
+    if not isinstance(software, Mapping) or not isinstance(software.get("operations"), list):
+        raise ValueError("selected software admission view is not a normalized specification")
+    checked_software = validate_software_spec(dict(software), target=target, source="verified Phase 0 export")
+    if (
+        checked_software != software
+        or checked_software.get("status") != "reviewed"
+        or any("hardware" in operation for operation in checked_software["operations"])
+    ):
+        raise ValueError("selected software admission view is not a reviewed resolved specification")
+    if (
+        not isinstance(profiles, Mapping)
+        or host_capabilities_path.is_symlink()
+        or file_sha256(host_capabilities_path) != host_capabilities_sha256
+        or strict_tree_sha256(host_package)["sha256"] != host_package_sha256
+    ):
+        raise ValueError("selected host profile has no pinned package and capability document")
+    document = yaml.safe_load(host_capabilities_path.read_bytes())
+    if not isinstance(document, dict) or document.get("status") != "reviewed":
+        raise ValueError("selected host profile has no reviewed capability document")
+    compiler = document.get("compiler")
+    if not isinstance(compiler, Mapping) or not isinstance(compiler.get("dtype_strategy"), str):
+        raise ValueError("selected host profile has no precision lane")
+    dtype_strategy = compiler["dtype_strategy"]
+    validate_host_capabilities(document, package_sha256=host_package_sha256, dtype_strategy=dtype_strategy)
+    if len(profiles) != 1:
+        raise ValueError("selected host profile is not unique")
+    profile_name, profile = next(iter(profiles.items()))
+    if (
+        not isinstance(profile_name, str)
+        or not profile_name
+        or not isinstance(profile, Mapping)
+        or profile.get("status") != "reviewed"
+        or profile.get("package_sha256") != host_package_sha256
+        or profile.get("capability_spec_sha256") != host_capabilities_sha256
+        or profile.get("dtype_strategy") != dtype_strategy
+        or profile.get("capability_spec") != document
+    ):
+        raise ValueError("selected host profile differs from the pinned package or capability document")
+    return checked_software, {profile_name: dict(profile)}
 
 
 def _noncompute_support(row: Mapping[str, Any]) -> bool:
@@ -449,7 +580,14 @@ def _noncompute_support(row: Mapping[str, Any]) -> bool:
     raise ValueError(f"support-required source operation has no audited lowering class: {operation}")
 
 
-def _source_obligations(capture: Path, target: str, software: Mapping, capability: Mapping, host: Mapping) -> dict:
+def _source_obligations(
+    capture: Path,
+    target: str,
+    software: Mapping,
+    capability: Mapping,
+    host: Mapping,
+    selected_index_observation: Mapping[str, Any] | None = None,
+) -> dict:
     """Recompute eligibility over the actual source, independently of the candidate route."""
     from merlin.common import mlir_query as mq
     from merlin.frontends.capture_normalization import normalize_capture_mlir
@@ -458,6 +596,7 @@ def _source_obligations(capture: Path, target: str, software: Mapping, capabilit
     from merlin.targetgen import operation_accounting as OA
     from merlin.targetgen.eligibility import capability_map_from_contract, is_eligible
     from merlin.xdsl_dialects.lowering import compute_groups as CG
+    from merlin_experiments.phase1.feedback.private_pool_support import prove_pool_source
 
     source = capture / "model.mlir"
     checked = AI.verify_capture_receipt(source)
@@ -471,21 +610,11 @@ def _source_obligations(capture: Path, target: str, software: Mapping, capabilit
     owners = {id(member): group for group in groups for member in group.members}
     descriptors = MC.regions_from_module(module)
     operations = MC.region_ops(module)
-    if not descriptors or len(descriptors) != len(operations):
-        raise ValueError("source linalg inventory is empty or incomplete")
+    if len(descriptors) != len(operations):
+        raise ValueError("source linalg inventory is incomplete")
     cap_map = capability_map_from_contract(dict(capability))
-    eligible = []
-    for index, (op, descriptor) in enumerate(zip(operations, descriptors, strict=True)):
-        verdict = is_eligible(descriptor, cap_map)
-        if verdict.undetermined:
-            raise ValueError(f"source operation {index} has unknown hardware eligibility")
-        if not verdict.eligible:
-            continue
-        group = owners.get(id(op))
-        if group is None or group.placement == CG.HOST:
-            raise ValueError(f"eligible source operation {index} has no accelerator group")
-        eligible.append(group.index)
-
+    source_sha = file_sha256(source)
+    normalized_sha = sha256(text.encode("utf-8")).hexdigest()
     inventory = AI._application_operation_inventory(  # noqa: PLC2701 -- trusted exact inventory primitive
         source,
         target,
@@ -494,17 +623,125 @@ def _source_obligations(capture: Path, target: str, software: Mapping, capabilit
         software_spec=dict(software),
         host_capabilities=dict(host),
     )
+    bounded_control = control_support.prove_if_selected(
+        module,
+        inventory,
+        raw_sha256=source_sha,
+        normalized_sha256=normalized_sha,
+        selected_observation=selected_index_observation,
+    )
+    direct_return_support = pure_stage.prove_if_empty(
+        capture, module, host, source_sha, normalized_sha, inventory, descriptors
+    )
+    transpose_support = _transpose_data_support(
+        module,
+        inventory,
+        raw_sha256=source_sha,
+        normalized_sha256=normalized_sha,
+    )
+    generic_copy_support = data_movement.prove_generic_copy_source(
+        module,
+        inventory,
+        raw_sha256=source_sha,
+        normalized_sha256=normalized_sha,
+    )
+    parsed = tuple(mq.walk(module))
+    source_rows = data_movement.source_inventory_by_ordinal(parsed, inventory, source_sha, normalized_sha)
+    ordered_scan = ordered_scan_support.begin(
+        source, source_sha, normalized_sha, checked["receipt_sha256"], selected_index_observation
+    )
+    ordered_scan_ordinals = ordered_scan_support.admit(
+        ordered_scan, parsed, source_rows, software, capability, cap_map, host
+    )
+    linalg = linalg_support.begin(source_sha, normalized_sha, len(parsed), selected_index_observation)
+    arange = arange_support.begin(source_sha, normalized_sha, len(parsed), selected_index_observation)
+    integer_reductions = integer_support.begin(source_sha, normalized_sha, len(parsed), selected_index_observation)
+    bucketize = bucketize_support.begin(capture, parsed, source_sha, normalized_sha, selected_index_observation)
+    source_ordinals = {id(op): ordinal for ordinal, op in enumerate(parsed)}
+    proven_ordinals = [*transpose_support["ordinals"], *generic_copy_support["ordinals"]]
+    if len(proven_ordinals) != len(set(proven_ordinals)):
+        raise ValueError("source movement proofs overlap")
+    proven_movement = {id(parsed[ordinal]) for ordinal in proven_ordinals}
+    eligible = []
+    for index, (op, descriptor) in enumerate(zip(operations, descriptors, strict=True)):
+        if id(op) in proven_movement:
+            # Typed yield-only movement is a linked-build support obligation,
+            # never an arithmetic eligibility or host-compute waiver.
+            continue
+        verdict = is_eligible(descriptor, cap_map)
+        if verdict.undetermined:
+            row = source_rows[source_ordinals[id(op)]]
+            if row.get("disposition") not in {"host_required", "unclassified"}:
+                raise ValueError(f"source operation {index} has unknown hardware eligibility")
+            admission = OA.admit_operation_row(
+                row,
+                software_spec=dict(software),
+                capability_contract=dict(capability),
+                capability_map=cap_map,
+                host_capabilities=dict(host),
+                source_operations=tuple(parsed[ordinal] for ordinal in row["ordinals"]),
+            )
+            observed = admission["observed_admission_signature"]
+            hardware = admission["hardware_admission"]
+            if (
+                hardware.get("status") == "unsupported"
+                and hardware.get("basis") == "selected_capability_contract"
+                and hardware.get("refusal") in _EXPLICIT_HARDWARE_EXCLUSIONS
+                and isinstance(observed.get("family"), str)
+                and isinstance(observed.get("operand_dtype"), str)
+                and isinstance(observed.get("ordered_result_dtypes"), list)
+                and observed["ordered_result_dtypes"]
+                and all(isinstance(dtype, str) and dtype for dtype in observed["ordered_result_dtypes"])
+            ):
+                # The independent typed, source-joined screen positively excludes
+                # this arithmetic from the selected hardware. Its exact reviewed
+                # host admission is still mandatory in the loop below.
+                continue
+            raise ValueError(f"source operation {index} has unknown hardware eligibility")
+        if not verdict.eligible:
+            continue
+        group = owners.get(id(op))
+        if group is None or group.placement == CG.HOST:
+            raise ValueError(f"eligible source operation {index} has no accelerator group")
+        eligible.append(group.index)
+
+    pool_support = prove_pool_source(
+        capture,
+        module,
+        inventory,
+        raw_sha256=source_sha,
+        normalized_sha256=normalized_sha,
+    )
     unresolved = []
     support_lowering = 0
     for row in inventory["signatures"]:
+        if ordered_scan_ordinals.intersection(row["ordinals"]):
+            if not set(row["ordinals"]) <= ordered_scan_ordinals:
+                raise ValueError("source ordered scan row mixes proved and unproved operations")
+            # The exact source algorithm root was reviewed before iteration;
+            # only its source-proved closed body belongs to that admission.
+            continue
         if row["disposition"] in {"structural", "component"}:
             continue
+        if control_support.assertion_row_proven(row, bounded_control):
+            continue
         if row["disposition"] == "support_required":
-            if _noncompute_support(row):
+            if row["mlir_operation"] == "linalg.transpose":
+                # Every source occurrence was joined to a parsed, typed,
+                # yield-only permutation above. The whole-program build below
+                # must still lower and link this data movement.
+                support_lowering += row["count"]
+                continue
+            elif row["mlir_operation"] == "linalg.generic" and row.get("semantic_family") == "movement":
+                # Every such source ordinal has a typed, yield-only projected
+                # copy proof above; the exact linked build is still required.
+                support_lowering += row["count"]
+                continue
+            elif _noncompute_support(row):
                 # These are control/data-support instructions, not independent
                 # compute decisions.  The real whole-program build below must
                 # lower and link them; an unknown support op is not waived.
-                support_lowering += 1
+                support_lowering += row["count"]
                 continue
             # A linalg movement is computation-carrying and its accelerator
             # eligibility/placement was checked in the source roster above.
@@ -514,6 +751,7 @@ def _source_obligations(capture: Path, target: str, software: Mapping, capabilit
             capability_contract=dict(capability),
             capability_map=cap_map,
             host_capabilities=dict(host),
+            source_operations=tuple(parsed[ordinal] for ordinal in row["ordinals"]),
         )
         accelerator = admission["accelerator_admission"]
         host_decision = admission["host_admission"]
@@ -524,12 +762,27 @@ def _source_obligations(capture: Path, target: str, software: Mapping, capabilit
                 unresolved.append({"ordinals": row["ordinals"], "reason": "eligible operation is not outlined"})
         elif host_decision["status"] != "admitted" or host_decision.get("reviewed") is not True:
             unresolved.append({"ordinals": row["ordinals"], "reason": "host operation lacks exact reviewed admission"})
+        else:
+            linalg_support.record(linalg, row, host_decision, parsed, source_rows)
+            arange_support.record(arange, capture, row, host_decision, parsed, source_rows)
+            integer_support.record(integer_reductions, row, host_decision, parsed, source_rows)
+            bucketize_support.record(bucketize, row, host_decision, source_rows)
     if unresolved:
         raise ValueError(f"source has {len(unresolved)} unaccounted or unjustified operation signature(s)")
+    integer_support.verify_source(integer_reductions, source)
     group_metrics = {}
+    group_provenance = []
+    seen_regions = set()
     for group in groups:
         if group.index not in eligible:
             continue
+        region, nodes = _eligible_source_identity(group.root)
+        if region in seen_regions:
+            raise ValueError("eligible source groups repeat a provenance region")
+        seen_regions.add(region)
+        group_provenance.append(
+            {"source_group": group.index, "source_region_id": region, "source_node_ids": list(nodes)}
+        )
         values = (value for member in reversed(group.members) for value in member.results)
         for value in values:
             shape, _dtype = mq.type_shape_dtype(value.type)
@@ -542,17 +795,32 @@ def _source_obligations(capture: Path, target: str, software: Mapping, capabilit
                 break
         if group.index not in group_metrics:
             raise ValueError(f"eligible source group {group.index} has no exact static output extent")
-    return {
-        "source_sha256": file_sha256(source),
+    result = {
+        "source_sha256": source_sha,
+        "normalized_source_sha256": normalized_sha,
         "capture_receipt_sha256": checked["receipt_sha256"],
         "n_source_operations": inventory["n_operations"],
+        "n_linalg_regions": len(descriptors),
         "n_groups": len(groups),
         "n_support_lowering_operations": support_lowering,
+        "transpose_data_support": transpose_support,
+        "generic_copy_data_support": generic_copy_support,
+        "pool_value_support": pool_support,
+        "linalg_host_support": linalg,
+        "literal_arange_host_support": arange,
+        integer_support.FIELD: integer_reductions,
+        ordered_scan_support.FIELD: ordered_scan,
+        bucketize_support.FIELD: bucketize,
         "eligible_groups": sorted(set(eligible)),
+        "eligible_group_provenance": group_provenance,
         "eligible_group_metrics": group_metrics,
         "host_groups": [group.index for group in groups if group.placement == CG.HOST],
         "host_justification": "source group reasons and exact reviewed host/software admissions",
     }
+    control_support.attach_source_record(result, bounded_control)
+    if direct_return_support is not None:
+        result["direct_return_support"] = direct_return_support
+    return result
 
 
 def _linked_symbols(elf: Path, symbols: set[str]) -> None:
@@ -566,202 +834,96 @@ def _linked_symbols(elf: Path, symbols: set[str]) -> None:
         raise ValueError(f"linked ELF omits {len(missing)} routed device symbol(s): {missing[:8]}")
 
 
-def _require_static_build_inputs(
-    receipt: Mapping[str, Any], *, target: str, board: str, catalog: Path, dts: Path
-) -> None:
-    inputs = receipt.get("inputs") or {}
+def _verify_compiled_program(
+    receipt: Mapping[str, Any],
+    *,
+    program: str,
+    source: dict[str, Any],
+    stage_tree: Mapping[str, Any],
+    package_digest: Mapping[str, Any],
+    target: str,
+    board: str,
+    catalog: Path,
+    dts: Path,
+    device_selected: bool,
+) -> dict[str, Any]:
+    """Canonical post-build checks shared by freshly built and diagnostic images."""
+    from merlin.llvmlower.device_offload import BY_GROUP
+
+    expected_route = "device_requested_dispatch_unverified" if device_selected else "host_baseline"
     if (
-        not isinstance(inputs, Mapping)
-        or inputs.get("target") != target
-        or inputs.get("board") != board
-        or inputs.get("board_catalog") != str(catalog)
-        or inputs.get("dts") != str(dts)
-        or inputs.get("board_catalog_sha256") != file_sha256(catalog)
-        or inputs.get("dts_sha256") != file_sha256(dts)
-        or inputs.get("run") != "none"
+        receipt.get("status") != "compiled"
+        or receipt.get("execution_route") != expected_route
+        or receipt.get("inputs", {}).get("capture_tree") != stage_tree
     ):
-        raise ValueError("linked image used another board or implied model execution")
+        raise ValueError(f"{program} did not capture/lower/codegen/link the selected source")
+    _require_static_build_inputs(receipt, target=target, board=board, catalog=catalog, dts=dts)
+    if device_selected and (receipt.get("inputs", {}).get("device") or {}).get("package_tree") != package_digest:
+        raise ValueError(f"{program} build used a different candidate compiler tree")
+    output = receipt.get("output") or {}
+    elf = Path(str(output.get("elf") or ""))
+    if not elf.is_file() or file_sha256(elf) != output.get("elf_sha256"):
+        raise ValueError(f"{program} linked ELF is absent or changed")
+    sidecar_sha = None
+    linked = 0
+    host_compute_audit = []
+    if device_selected:
+        sidecar_record = output.get("device_sidecar") or {}
+        sidecar = Path(str(sidecar_record.get("path") or ""))
+        if not sidecar.is_file() or file_sha256(sidecar) != sidecar_record.get("sha256"):
+            raise ValueError(f"{program} candidate device sidecar is absent or changed")
+        emitted = json.loads(sidecar.read_text(encoding="utf-8"))
+        if emitted.get("granularity") != BY_GROUP or emitted.get("device") != target:
+            raise ValueError(f"{program} emitted another device or a partial route")
+        assigned = emitted.get("routed")
+        if not assigned or emitted.get("skipped"):
+            raise ValueError(f"{program} linked roster differs from eligible source groups")
+        _join_routed_source_groups(assigned, source)
+        symbols = _routed_kernel_symbols(emitted)
+        _linked_symbols(elf, symbols)
+        host_compute_audit = _audit_built_device_host_compute(elf.parent, assigned, source, target)
+        sidecar_sha, linked = sidecar_record["sha256"], len(assigned)
+    linked_build = {
+        "capture_tree_sha256": stage_tree["sha256"],
+        "elf_sha256": output["elf_sha256"],
+        "candidate_tree_sha256": package_digest["sha256"],
+    }
+    transpose_support = source["transpose_data_support"]
+    if transpose_support["status"] != "source_structural_data_support_pending_build":
+        raise ValueError(f"{program} has no pending source-bound transpose support proof")
+    transpose_support["status"] = "source_structural_data_support_linked"
+    transpose_support["linked_build"] = linked_build
+    generic_copy_support = source["generic_copy_data_support"]
+    if generic_copy_support["status"] != "source_structural_data_support_pending_build":
+        raise ValueError(f"{program} has no pending source-bound generic copy proof")
+    generic_copy_support["status"] = "source_structural_data_support_linked"
+    generic_copy_support["linked_build"] = dict(linked_build)
+    from merlin_experiments.phase1.feedback.private_pool_support import LINKED, PENDING
 
-
-def _audit_built_device_host_compute(
-    build: Path, assigned: Sequence[Mapping[str, Any]], source: Mapping[str, Any], target: str
-) -> list[dict[str, Any]]:
-    """Audit the package's actual per-group build inputs, not a fresh diagnostic emission.
-
-    The trusted whole-model builder saves each package stdout as ``.device.mlir``
-    before translating and compiling it to the neighboring linked object.  We
-    read those exact files and the independently sourced group output extents.
-    All defined functions are judged as accelerator work; an extra helper
-    cannot self-label as a permitted host group.
-    """
-    from xdsl.context import Context
-    from xdsl.dialects import builtin, func, llvm
-    from xdsl.parser import Parser
-
-    from merlin.llvmlower.device_shim import kernel_abi_for
-    from merlin.verify import host_compute_audit as HA
-
-    abi = kernel_abi_for(target)
-    if abi is None:
-        raise ValueError("selected device has no readable kernel ABI for host-compute audit")
-    device_dir = build / "device"
-    if device_dir.is_symlink() or not device_dir.is_dir():
-        raise ValueError("linked build has no ordinary device-artifact directory")
-    metrics = source["eligible_group_metrics"]
-    records = []
-    for entry in assigned:
-        symbol, index = entry["symbol"], entry["group"]
-        if not isinstance(symbol, str) or not symbol or Path(symbol).name != symbol or symbol in {".", ".."}:
-            raise ValueError("routed group has no safe built-artifact stem")
-        metric = metrics.get(index)
-        if not isinstance(metric, Mapping):
-            raise ValueError(f"routed group {index} has no source-derived output extent")
-        artifact, llvm_ir, obj = (
-            device_dir / f"{symbol}.device.mlir",
-            device_dir / f"{symbol}.ll",
-            device_dir / f"{symbol}.o",
-        )
-        for path in (artifact, llvm_ir, obj):
-            if path.is_symlink() or not path.is_file():
-                raise ValueError(f"linked group {index} lacks its exact built artifact: {path}")
-        context = Context(allow_unregistered=True)
-        for dialect in (builtin.Builtin, llvm.LLVM, func.Func):
-            context.load_dialect(dialect)
-        module = Parser(context, artifact.read_text(encoding="utf-8")).parse_module()
-        functions = HA._functions(module)  # noqa: PLC2701 -- shared independent host-code reader
-        if abi.symbol not in functions:
-            raise ValueError(f"linked group {index} has no body for its target ABI kernel")
-        sites = [
-            HA.GroupSite(
-                group=index,
-                placement=target,
-                symbol=name,
-                elements=metric["elements"],
-                element_bytes=metric["element_bytes"],
-            )
-            for name in functions
-        ]
-        report = HA.audit(module, sites)
-        HA.require_clean(report)
-        if report.get("proven_clean") is not True or report.get("accelerator_groups_clean") != len(sites):
-            raise ValueError(f"linked group {index} host-compute audit is unknown, not clean")
-        from merlin.llvmlower import toolchain
-
-        undefined = subprocess.run(
-            [str(toolchain.nm()), "--undefined-only", "--extern-only", str(obj)],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=True,
-        )
-        if undefined.stdout.strip():
-            raise ValueError(f"linked group {index} calls an unaudited external host helper")
-        records.append(
-            {
-                "group": index,
-                "symbol": symbol,
-                "defined_functions_audited": len(sites),
-                "artifact_sha256": file_sha256(artifact),
-                "llvm_sha256": file_sha256(llvm_ir),
-                "object_sha256": file_sha256(obj),
-                "verdict": "clean_static_host_compute_audit",
-                "audit": {
-                    "scope": (
-                        "all defined LLVM functions of the exact built device artifact; command-scale static budget"
-                    ),
-                    "budget": report["budget"],
-                    "groups": [
-                        {
-                            key: group.get(key)
-                            for key in (
-                                "symbol",
-                                "verdict",
-                                "elements",
-                                "host_arithmetic",
-                                "host_value_arithmetic",
-                                "host_payload_bytes",
-                                "arithmetic_per_element",
-                                "value_arithmetic_per_element",
-                                "payload_ratio",
-                            )
-                        }
-                        for group in report["groups"]
-                    ],
-                },
-            }
-        )
-    return records
-
-
-def _captured_programs(capture: Path, expected: Sequence[str]) -> list[tuple[str, Path]]:
-    """Use every program in the attested root session, never an operator-picked slice."""
-    # A complete single-network capture may also carry a version-1 execution
-    # session contract (for example an image stream). Only a root session
-    # receipt identifies the version-2 multi-program capture protocol.
-    if tuple(expected) == ("model",) and not (capture / "session-receipt.json").exists():
-        if (capture / "stages").exists():
-            raise ValueError("single-network declaration received an unbound stage directory")
-        if any(
-            path.is_symlink() or not path.is_file()
-            for path in (capture / "model.mlir", capture / "capture_receipt.json")
-        ):
-            raise ValueError("single-network declaration has no ordinary source model and receipt")
-        contract_path = capture / "session_contract.yaml"
-        if contract_path.exists():
-            if contract_path.is_symlink() or not contract_path.is_file():
-                raise ValueError("single-network execution contract is indirect or malformed")
-            contract = yaml.safe_load(contract_path.read_bytes())
-            if not isinstance(contract, Mapping) or contract.get("version") != 1:
-                raise ValueError("single-network execution contract is not version 1")
-        return [("model", capture)]
-    contract_path = capture / "session_contract.yaml"
-    receipt_path = capture / "session-receipt.json"
-    if any(path.is_symlink() or not path.is_file() for path in (contract_path, receipt_path)):
-        raise ValueError("complete multi-program capture has no ordinary root session contract/receipt")
-    contract = yaml.safe_load(contract_path.read_bytes())
-    receipt = json.loads(receipt_path.read_bytes())
-    if not isinstance(contract, Mapping) or not isinstance(receipt, Mapping):
-        raise ValueError("complete session contract/receipt is malformed")
-    names = list(expected)
-    programs = contract.get("programs")
-    observed = receipt.get("programs")
-    if (
-        contract.get("version") != 2
-        or contract.get("stages") != names
-        or not isinstance(programs, list)
-        or not isinstance(observed, list)
-        or receipt.get("schema") != "merlin.model_session_capture.v1"
-        or receipt.get("session_contract_sha256") != file_sha256(contract_path)
-        or len(programs) != len(names)
-        or len(observed) != len(names)
-        or (len(names) > 1 and not contract.get("bindings"))
-    ):
-        raise ValueError("root session does not bind the declared complete program roster")
-    stage_root = capture / "stages"
-    if (
-        stage_root.is_symlink()
-        or not stage_root.is_dir()
-        or sorted(p.name for p in stage_root.iterdir()) != sorted(names)
-    ):
-        raise ValueError("capture contains missing or extra session stage directories")
-    result = []
-    for name, entry, attested in zip(names, programs, observed, strict=True):
-        stage = stage_root / name
-        if (
-            not isinstance(entry, Mapping)
-            or entry.get("name") != name
-            or entry.get("bundle") != f"stages/{name}"
-            or not isinstance(attested, Mapping)
-            or attested.get("name") != name
-            or attested.get("ok") is not True
-            or attested.get("opaque") != 0
-            or attested.get("receipt_sha256") != file_sha256(stage / "capture_receipt.json")
-            or stage.is_symlink()
-            or not stage.is_dir()
-        ):
-            raise ValueError(f"session stage {name} is unverified, opaque, or not contract-bound")
-        result.append((name, stage))
-    return result
+    pool_support = source["pool_value_support"]
+    if pool_support["status"] != PENDING:
+        raise ValueError(f"{program} has no pending source-bound pool-value proof")
+    pool_support["status"] = LINKED
+    pool_support["linked_build"] = dict(linked_build)
+    pure_stage.link_direct_return(source, linked_build)
+    index_lowering = control_support.link_selected_build(source, receipt, linked_build)
+    linalg_support.link(source, index_lowering, linked_build)
+    arange_support.link(source, index_lowering, linked_build)
+    integer_support.link(source, index_lowering, linked_build)
+    ordered_scan_support.link(source, index_lowering, linked_build)
+    bucketize_support.link(source, index_lowering, linked_build)
+    return {
+        "program": program,
+        "status": "capture_lower_codegen_link_verified",
+        "capture_tree_sha256": stage_tree["sha256"],
+        "source_sha256": source["source_sha256"],
+        "elf_sha256": output["elf_sha256"],
+        "sidecar_sha256": sidecar_sha,
+        "linked_device_groups": linked,
+        "static_host_compute_audit": host_compute_audit,
+        "candidate_tree_sha256": package_digest["sha256"],
+        "index_lowering": index_lowering,
+    }
 
 
 def _captured_input_provenance(
@@ -812,8 +974,12 @@ def run(
     required_programs: Mapping[str, Sequence[str]],
     loader_env_requirements: Mapping[str, Mapping[str, Any]],
     out: str | Path,
+    diagnostic_model: str | None = None,
+    prebuilt_receipts: Mapping[str, str | Path] | None = None,
+    source_freeze: Mapping[str, Any] | None = None,
+    source_freeze_root: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Build every frozen full model with the current candidate, without running a model simulator."""
+    """Build the frozen roster, or inspect one prebuilt model without producer attribution."""
     from merlin.compile.baremetal_model import compile_saved_model
     from merlin.compile.model_execution_inputs import selected_firrtl
     from merlin.compile.route_before_build import plan_before_build
@@ -823,7 +989,12 @@ def run(
     spec = Path(private_spec)
     if spec.is_symlink() or not spec.is_file():
         raise ValueError("operator-private full-model specification is absent or indirect")
-    document = yaml.safe_load(spec.read_bytes())
+    spec_bytes = spec.read_bytes()
+    spec_digest = sha256(spec_bytes).hexdigest()
+    document = yaml.safe_load(spec_bytes)
+    frozen_authored = source_freeze_api.resolve_optional(
+        spec.absolute(), source_freeze, source_freeze_root, target=target
+    )
     rows = document.get("models") if isinstance(document, Mapping) else None
     names = (
         [row.get("id") for row in rows]
@@ -841,13 +1012,25 @@ def run(
         or set(loader_env_requirements) != set(required_models)
     ):
         raise ValueError("private full-model specification differs from required target roster")
+    diagnostic = diagnostic_model is not None
+    if not diagnostic and frozen_authored is None:
+        raise ValueError("canonical private full-model builds require a run-owned authored-source freeze")
+    if diagnostic:
+        if diagnostic_model not in required_models or not isinstance(prebuilt_receipts, Mapping):
+            raise ValueError("prebuilt diagnostic must select one required model and its receipts")
+        if set(prebuilt_receipts) != set(required_programs[diagnostic_model]):
+            raise ValueError("prebuilt diagnostic receipts differ from the complete selected model")
+    elif prebuilt_receipts is not None:
+        raise ValueError("prebuilt receipts cannot enter the canonical full-model build")
     package = Path(submission)
     package_digest = strict_tree_sha256(package)
     base = Path(out)
-    base.mkdir(parents=True, exist_ok=True)
+    base.mkdir(mode=0o700, parents=True, exist_ok=True)
     results = []
     for row in rows:
         name = row["id"]
+        if diagnostic and name != diagnostic_model:
+            continue
         item: dict[str, Any] = {"model": name, "status": "fail", "checks": {}}
         results.append(item)
         try:
@@ -882,16 +1065,14 @@ def run(
             capture = capture if capture.is_absolute() else spec.parent / capture
             if capture.is_symlink() or capture.resolve() != Path(selection["run_dir"]) / "capture":
                 raise ValueError("full-model capture is not the preselected sealed run output")
-            capture_digest = strict_tree_sha256(capture)["sha256"]
-            if row.get("capture_tree_sha256") not in (None, capture_digest):
-                raise ValueError("full-model capture differs from an explicitly pinned tree")
             from merlin_experiments.phase0.capture_execution_attestation import require_verified_execution
 
             attestation_path = Path(str(row.get("capture_execution_attestation") or ""))
             attestation_path = attestation_path if attestation_path.is_absolute() else spec.parent / attestation_path
             if attestation_path.is_symlink() or not attestation_path.is_file():
                 raise ValueError("preselected capture has no safe post-execution attestation")
-            if row.get("capture_execution_attestation_sha256") not in (None, file_sha256(attestation_path)):
+            attestation_sha = file_sha256(attestation_path)
+            if row.get("capture_execution_attestation_sha256") not in (None, attestation_sha):
                 raise ValueError("capture execution attestation differs from an explicitly pinned digest")
             attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
             require_verified_execution(attestation)
@@ -902,13 +1083,16 @@ def run(
             ):
                 raise ValueError("capture execution attestation names another preselection")
             attested_capture = attestation.get("capture") or {}
+            capture_identity = _capture_tree_bindings(
+                capture, row.get("capture_tree_sha256"), attested_capture.get("capture_tree_sha256")
+            )
+            item["checks"]["capture_identity"] = capture_identity
             expected_stages = tuple(required_programs[name])
             captured_kind = "session" if (capture / "session-receipt.json").exists() else "single"
             if (
                 attestation.get("issuer") != "merlin.sealed_m2m_cpu.v3"
                 or attested_capture.get("kind") != captured_kind
                 or Path(str(attested_capture.get("capture_path") or "")).resolve() != capture
-                or attested_capture.get("capture_tree_sha256") != capture_digest
             ):
                 raise ValueError("verified source-execution attestation names another complete capture")
             if captured_kind == "single":
@@ -937,14 +1121,14 @@ def run(
             if not ambient_facts or file_sha256(Path(ambient_facts)) != facts["sha256"]:
                 raise ValueError("formal source and placement readers are not bound to selected RTL facts")
             host_package = _tree(spec, row.get("host_package"), row.get("host_package_tree_sha256"))
-            software_path = _file(spec, row.get("software_spec"), row.get("software_spec_sha256"))
+            software_path = _authored_file(spec, row, "software_spec", frozen_authored)
             capability_path = _file(spec, row.get("capability_contract"), row.get("capability_contract_sha256"))
-            host_path = _file(spec, row.get("host_capabilities"), row.get("host_capabilities_sha256"))
+            host_path = _authored_file(spec, row, "host_capabilities", frozen_authored)
             catalog = _file(spec, row.get("board_catalog"), row.get("board_catalog_sha256"))
             dts = _file(spec, row.get("host_dts"), row.get("host_dts_sha256"))
             board_catalog_sha256 = file_sha256(catalog)
             board_dts_sha256 = file_sha256(dts)
-            item["checks"]["recipe_derivation"] = _recipe_derivation(
+            recipe_proof, exported_software, exported_host_profiles = _recipe_derivation(
                 spec,
                 row,
                 selected_plan,
@@ -952,25 +1136,36 @@ def run(
                 software_sha256=file_sha256(software_path),
                 capability_sha256=file_sha256(capability_path),
                 facts_sha256=facts["sha256"],
+                host_capabilities_sha256=file_sha256(host_path),
             )
-            software = yaml.safe_load(software_path.read_bytes())
+            item["checks"]["recipe_derivation"] = recipe_proof
+            software, host = _selected_admission_views(
+                exported_software,
+                exported_host_profiles,
+                target=target,
+                host_package=host_package,
+                host_package_sha256=row["host_package_tree_sha256"],
+                host_capabilities_path=host_path,
+                host_capabilities_sha256=file_sha256(host_path),
+            )
             capability = yaml.safe_load(capability_path.read_bytes())
-            host = yaml.safe_load(host_path.read_bytes())
-            if any(not isinstance(value, Mapping) for value in (software, capability, host)):
+            if not isinstance(capability, Mapping):
                 raise ValueError("selected software, capability or host declaration is malformed")
             if software.get("target") != target or capability.get("name") != target:
                 raise ValueError("selected software or capability declaration names another target")
-            if software.get("status") != "reviewed" or host.get("status") != "reviewed":
-                raise ValueError("selected software or host declaration is not reviewed")
+            selected_index_observation = control_support.selected_build_observation(
+                host_package, catalog, str(row["board"]), target
+            )
             with target_registry.observed_contract(target, dict(capability), source_path=capability_path):
                 sources = {
-                    program: _source_obligations(stage, target, software, capability, host)
+                    program: _source_obligations(stage, target, software, capability, host, selected_index_observation)
                     for program, stage in programs
                 }
             if not any(source["eligible_groups"] for source in sources.values()):
                 raise ValueError("full model has no independently eligible accelerator computation")
             item["checks"]["source"] = sources
             compiled = []
+            diagnostic_receipts = {}
             for program, stage in programs:
                 source = sources[program]
                 stage_tree = strict_tree_sha256(stage)
@@ -991,88 +1186,100 @@ def run(
                         raise ValueError(
                             f"{program} has no buildable accelerator route: {routed.get('device_routing_why')}"
                         )
-                with target_registry.observed_contract(target, dict(capability), source_path=capability_path):
-                    receipt = compile_saved_model(
+                if diagnostic:
+                    receipt_path = Path(prebuilt_receipts[program])
+                    receipt = load_diagnostic_receipt(
+                        receipt_path,
                         capture=stage,
-                        package=host_package,
-                        board_catalog=catalog,
-                        board=str(row["board"]),
-                        dts=dts,
-                        output=base / name / program,
-                        target=target,
-                        run="none",
+                        host_package=host_package,
+                        candidate=package,
+                        host_package_tree=strict_tree_sha256(host_package),
+                        candidate_tree=package_digest,
                         arena_mb=int(row["arena_mb"]),
-                        device=device,
+                        target=target,
+                        device_selected=device is not None,
+                        selected_rtl_facts=facts,
                     )
-                expected_route = "device_requested_dispatch_unverified" if device is not None else "host_baseline"
-                if (
-                    receipt.get("status") != "compiled"
-                    or receipt.get("execution_route") != expected_route
-                    or receipt.get("inputs", {}).get("capture_tree") != stage_tree
-                ):
-                    raise ValueError(f"{program} did not capture/lower/codegen/link the selected source")
-                _require_static_build_inputs(
-                    receipt,
-                    target=target,
-                    board=str(row["board"]),
-                    catalog=catalog,
-                    dts=dts,
-                )
-                if (
-                    device is not None
-                    and (receipt.get("inputs", {}).get("device") or {}).get("package_tree") != package_digest
-                ):
-                    raise ValueError(f"{program} build used a different candidate compiler tree")
-                output = receipt.get("output") or {}
-                elf = Path(str(output.get("elf") or ""))
-                if not elf.is_file() or file_sha256(elf) != output.get("elf_sha256"):
-                    raise ValueError(f"{program} linked ELF is absent or changed")
-                sidecar_sha = None
-                linked = 0
-                host_compute_audit = []
-                if device is not None:
-                    sidecar_record = output.get("device_sidecar") or {}
-                    sidecar = Path(str(sidecar_record.get("path") or ""))
-                    if not sidecar.is_file() or file_sha256(sidecar) != sidecar_record.get("sha256"):
-                        raise ValueError(f"{program} candidate device sidecar is absent or changed")
-                    emitted = json.loads(sidecar.read_text(encoding="utf-8"))
-                    if emitted.get("granularity") != BY_GROUP or emitted.get("device") != target:
-                        raise ValueError(f"{program} emitted another device or a partial route")
-                    assigned = emitted.get("routed") or []
-                    indices = [entry.get("group") for entry in assigned]
-                    if (
-                        not assigned
-                        or any(type(index) is not int for index in indices)
-                        or len(indices) != len(set(indices))
-                        or sorted(indices) != source["eligible_groups"]
-                        or emitted.get("skipped")
-                    ):
-                        raise ValueError(f"{program} linked roster differs from eligible source groups")
-                    symbols = {entry.get("symbol") for entry in assigned}
-                    if None in symbols or len(symbols) != len(assigned):
-                        raise ValueError(f"{program} candidate dispatch symbols are missing or duplicated")
-                    _linked_symbols(elf, symbols)
-                    host_compute_audit = _audit_built_device_host_compute(
-                        Path(str(output["elf"])).parent, assigned, source, target
-                    )
-                    sidecar_sha, linked = sidecar_record["sha256"], len(assigned)
-                compiled.append(
-                    {
-                        "program": program,
-                        "status": "capture_lower_codegen_link_verified",
-                        "elf_sha256": output["elf_sha256"],
-                        "sidecar_sha256": sidecar_sha,
-                        "linked_device_groups": linked,
-                        "static_host_compute_audit": host_compute_audit,
-                        "candidate_tree_sha256": package_digest["sha256"],
+                    diagnostic_receipts[program] = {
+                        "path": str(receipt_path),
+                        "sha256": file_sha256(receipt_path),
+                        "historical_rtl_facts_identity": (
+                            "unavailable_in_prebuilt_receipt"
+                            if receipt["inputs"].get("rtl_facts_identity") is None
+                            else "recorded_exact_selected"
+                        ),
                     }
+                else:
+                    with target_registry.observed_contract(target, dict(capability), source_path=capability_path):
+                        receipt = compile_saved_model(
+                            capture=stage,
+                            package=host_package,
+                            board_catalog=catalog,
+                            board=str(row["board"]),
+                            dts=dts,
+                            output=base / name / program,
+                            target=target,
+                            run="none",
+                            arena_mb=int(row["arena_mb"]),
+                            device=device,
+                        )
+                compiled.append(
+                    _verify_compiled_program(
+                        receipt,
+                        program=program,
+                        source=source,
+                        stage_tree=stage_tree,
+                        package_digest=package_digest,
+                        target=target,
+                        board=str(row["board"]),
+                        catalog=catalog,
+                        dts=dts,
+                        device_selected=device is not None,
+                    )
                 )
-            if strict_tree_sha256(capture)["sha256"] != capture_digest:
+            if (
+                _capture_tree_bindings(
+                    capture, row.get("capture_tree_sha256"), attested_capture.get("capture_tree_sha256")
+                )
+                != capture_identity
+            ):
                 raise ValueError("private model changed during candidate build")
             if selected_firrtl(facts_path, target=target, config=facts["config"]) != facts:
                 raise ValueError("selected RTL facts changed during candidate build")
             if strict_tree_sha256(package) != package_digest:
                 raise ValueError("candidate compiler changed during model build")
+            if diagnostic and any(
+                file_sha256(Path(entry["path"])) != entry["sha256"] for entry in diagnostic_receipts.values()
+            ):
+                raise ValueError("prebuilt diagnostic receipt changed during static verification")
+            pinned_files = (
+                (selection_path, row["capture_selection_sha256"]),
+                (attestation_path, attestation_sha),
+                (facts_path, row["rtl_facts_sha256"]),
+                (software_path, row["software_spec_sha256"]),
+                (capability_path, row["capability_contract_sha256"]),
+                (host_path, row["host_capabilities_sha256"]),
+                (catalog, row["board_catalog_sha256"]),
+                (dts, row["host_dts_sha256"]),
+            )
+            if any(file_sha256(path) != digest for path, digest in pinned_files):
+                raise ValueError("reviewed model input changed during linked-build verification")
+            if strict_tree_sha256(host_package)["sha256"] != row["host_package_tree_sha256"]:
+                raise ValueError("selected host package changed during linked-build verification")
+            if (
+                _recipe_derivation(
+                    spec,
+                    row,
+                    selected_plan,
+                    target=target,
+                    software_sha256=file_sha256(software_path),
+                    capability_sha256=file_sha256(capability_path),
+                    facts_sha256=facts["sha256"],
+                    host_capabilities_sha256=file_sha256(host_path),
+                )[0]
+                != recipe_proof
+            ):
+                raise ValueError("selected recipe derivation changed during linked-build verification")
             item["checks"]["build"] = {
                 "programs": compiled,
                 "linked_device_groups": sum(entry["linked_device_groups"] for entry in compiled),
@@ -1087,24 +1294,53 @@ def run(
                 "accelerator_rtl_config": facts["config"],
                 "status": "capture_lower_codegen_link_verified",
             }
-            item["status"] = "pass"
+            if diagnostic:
+                item["checks"]["prebuilt_receipts"] = diagnostic_receipts
+            item["status"] = "diagnostic_static_checks_passed" if diagnostic else "pass"
         except Exception as exc:  # noqa: BLE001 -- one model's refusal must not hide the others
             item["reason"] = f"{type(exc).__name__}: {exc}"
     result = {
         "schema": RESULT_SCHEMA,
         "target": target,
-        "private_spec_sha256": file_sha256(spec),
+        "private_spec_sha256": spec_digest,
         "candidate_tree_sha256": package_digest["sha256"],
         "required_models": list(required_models),
         "required_programs": {name: list(required_programs[name]) for name in required_models},
         "models": results,
-        "passed": bool(results) and all(item["status"] == "pass" for item in results),
-        "scope": "complete captured networks, static source and linked-ELF evidence; full-model execution deferred",
+        "passed": not diagnostic and bool(results) and all(item["status"] == "pass" for item in results),
+        "scope": (
+            "diagnostic selected prebuilt model only; producer and toolchain unbound; not a full-model gate"
+            if diagnostic
+            else "complete captured networks, static source and linked-ELF evidence; full-model execution deferred"
+        ),
         "full_model_numerical_equivalence": "not_run",
         "paper_accuracy": "not_claimed",
     }
-    (base / "private_full_model_gate.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    if file_sha256(spec) != spec_digest:
+        raise ValueError("operator-private full-model specification changed during verification")
+    result.update(source_freeze_api.claim_binding(spec.absolute(), source_freeze, source_freeze_root, target=target))
+    if diagnostic:
+        result["mode"] = "prebuilt_diagnostic"
+        result["diagnostic_model"] = diagnostic_model
+        result["diagnostic_passed"] = len(results) == 1 and results[0]["status"] == "diagnostic_static_checks_passed"
+        result["producer_binding"] = "unavailable_in_prebuilt_receipt"
+    report = base / "private_full_model_gate.json"
+    with os.fdopen(os.open(report, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as stream:
+        stream.write(json.dumps(result, indent=2) + "\n")
     return result
+
+
+def _complete_capture_identity(checks: Mapping[str, Any]) -> bool:
+    identity = checks.get("capture_identity")
+    if not isinstance(identity, Mapping) or set(identity) != {
+        "compiler_strict_tree_sha256",
+        "issuer_sealed_tree_sha256",
+    }:
+        return False
+    return all(
+        isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
+        for value in identity.values()
+    )
 
 
 def complete(
@@ -1115,9 +1351,16 @@ def complete(
     candidate_sha256: str,
 ) -> bool:
     """Revalidate the claim-bearing roster and exact current submission identity."""
-    if not isinstance(record, Mapping) or record.get("schema") != RESULT_SCHEMA or record.get("passed") is not True:
+    if (
+        not isinstance(record, Mapping)
+        or record.get("schema") != RESULT_SCHEMA
+        or record.get("passed") is not True
+        or record.get("mode") == "prebuilt_diagnostic"
+    ):
         return False
     if record.get("full_model_numerical_equivalence") != "not_run" or record.get("paper_accuracy") != "not_claimed":
+        return False
+    if not source_freeze_api.valid_binding(record.get("authored_source_freeze"), record.get("private_spec_sha256")):
         return False
     rows = record.get("models")
     if not isinstance(rows, list) or len(rows) != len(required_models):
@@ -1125,6 +1368,7 @@ def complete(
     if any(
         not isinstance(row, Mapping)
         or not isinstance(row.get("checks"), Mapping)
+        or not _complete_capture_identity(row["checks"])
         or not isinstance(row["checks"].get("input_provenance"), Mapping)
         or set(row["checks"]["input_provenance"]) != set(required_programs.get(row.get("model"), ()))
         or any(
@@ -1137,6 +1381,9 @@ def complete(
             for provenance in row["checks"]["input_provenance"].values()
         )
         or not isinstance(row["checks"].get("build"), Mapping)
+        or not _linked_source_support_complete(
+            row["checks"], required_programs.get(row.get("model"), ()), candidate_sha256
+        )
         or not isinstance(row["checks"].get("recipe_derivation"), Mapping)
         or row["checks"]["recipe_derivation"].get("scope")
         != "current-spec diagnostic recipe derivation only; no model or hardware admission"
