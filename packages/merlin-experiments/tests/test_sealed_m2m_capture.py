@@ -669,12 +669,12 @@ def test_cpu_receipts_replay_only_under_their_selected_policy(tmp_path, monkeypa
     assert result["phase0_admission"] == "not_granted"
     assert result["status"] == "verified_sandbox_replay"
     if version == "v2":
-        # This exact historical issuer differed only in JSON reader strictness.
-        # The current replay gate must still recheck its policy, command, and trees.
+        # These exact historical issuers differ only in strict JSON reads and
+        # historical replay admission. Selected v2 still rechecks every byte.
         legacy_policy = receipt["policy_sha256"]
         receipt["capture_selection_sha256"] = "a" * 64
         receipt["policy_sha256"] = _policy(command, output, replayable_logs=True)
-        receipt["issuer_sha256"] = "f1f36bc57807fbc4e93360757e9b0f891f38a70326ffc10c8067bfb0b5b11920"
+        receipt["issuer_sha256"] = "73f2463303b3a7274c666e44c99845dbe44953663aff3bfd346633fc7d391fea"
         pending = run / "sealed_m2m_pending.json"
         pending.write_text(json.dumps(receipt))
         assert sealed_m2m.replay_verify(run)["status"] == "verified_sandbox_replay"
@@ -694,10 +694,36 @@ def test_cpu_receipts_replay_only_under_their_selected_policy(tmp_path, monkeypa
         pending.write_bytes(raw.replace(b'"issuer_sha256":', b'"issuer_sha256":"unknown","issuer_sha256":', 1))
         with pytest.raises(ValueError, match="unreadable"):
             sealed_m2m.replay_verify(run)
-        receipt["issuer_sha256"] = "current-issuer"
+        receipt["issuer_sha256"] = "f1f36bc57807fbc4e93360757e9b0f891f38a70326ffc10c8067bfb0b5b11920"
+        pending.write_text(json.dumps(receipt))
+        assert sealed_m2m.replay_verify(run)["status"] == "verified_sandbox_replay"
+        receipt["issuer_sha256"] = "73f2463303b3a7274c666e44c99845dbe44953663aff3bfd346633fc7d391fea"
         receipt["policy_sha256"] = legacy_policy
         receipt.pop("capture_selection_sha256")
         pending.write_text(json.dumps(receipt))
+        with pytest.raises(SealedM2MError, match="unsupported policy"):
+            sealed_m2m.replay_verify(run)
+        receipt["issuer_sha256"] = "current-issuer"
+        pending.write_text(json.dumps(receipt))
+    elif version == "v3":
+        legacy_policy = receipt["policy_sha256"]
+        receipt["capture_selection_sha256"] = "a" * 64
+        receipt["policy_sha256"] = _policy(command, output, replayable_logs=True, loader_env={}, timeout_seconds=3600)
+        receipt["issuer_sha256"] = "73f2463303b3a7274c666e44c99845dbe44953663aff3bfd346633fc7d391fea"
+        (run / "sealed_m2m_pending.json").write_text(json.dumps(receipt))
+        assert sealed_m2m.replay_verify(run)["status"] == "verified_sandbox_replay"
+        receipt.pop("capture_selection_sha256")
+        receipt["policy_sha256"] = legacy_policy
+        (run / "sealed_m2m_pending.json").write_text(json.dumps(receipt))
+        with pytest.raises(SealedM2MError, match="unsupported policy"):
+            sealed_m2m.replay_verify(run)
+        receipt["issuer_sha256"] = "current-issuer"
+    else:
+        receipt["issuer_sha256"] = "73f2463303b3a7274c666e44c99845dbe44953663aff3bfd346633fc7d391fea"
+        (run / "sealed_m2m_pending.json").write_text(json.dumps(receipt))
+        with pytest.raises(SealedM2MError, match="unsupported policy"):
+            sealed_m2m.replay_verify(run)
+        receipt["issuer_sha256"] = sealed_m2m._V1_ISSUER_SHA256
     if not old:
         receipt["issuer_sha256"] = sealed_m2m._PRE_FROZEN_ORIGIN_ISSUER_SHA256
         (run / "sealed_m2m_pending.json").write_text(json.dumps(receipt))

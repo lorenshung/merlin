@@ -313,6 +313,8 @@ SUITES = {
         "tests": (
             "test_sealed_generation_capture.py",
             "test_sealed_m2m_capture.py",
+            "test_phase0_capture_selection.py",
+            "test_sealed_m2m_issuer_admission.py",
             "test_sealed_runtime_budget.py",
             "test_runtime_rehydrate.py",
         ),
