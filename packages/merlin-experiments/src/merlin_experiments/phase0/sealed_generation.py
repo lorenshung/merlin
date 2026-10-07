@@ -128,6 +128,15 @@ class SealedCaptureSource(PytorchRefSource):
             raise M2MUnavailable("a sealed capture admits no declared loader environment")
         if Path(request["interpreter"]) != self.python:
             raise M2MUnavailable("a sealed capture runs only the selected runtime's interpreter")
+        stage_fp32 = request.get("stage_fp32", False)
+        if type(stage_fp32) is not bool:
+            raise M2MUnavailable("stage_fp32 must be an explicit boolean")
+        if (
+            stage_fp32
+            and str(request["dtype"]) not in {"fp32", "f32"}
+            and not (str(request["dtype"]) == "int8" and request.get("recipe_path") is not None)
+        ):
+            raise M2MUnavailable("FP32 staging requires a float capture or selected int8 recipe")
         root = Path(self.config["runs_root"])
         root.mkdir(parents=True, exist_ok=True)
         slot = root / f"{len(list(root.iterdir())):04d}-{request['op']}-{request['dtype']}"
@@ -143,6 +152,7 @@ class SealedCaptureSource(PytorchRefSource):
         merlin_root, schemas_root = self._staged_merlin(Path(module_source_path("merlin")).parent, Path(schemas_dir()))
         identity = select(
             m2m_root=Path(self.config["m2m_root"]),
+            frozen_origin=self.config.get("frozen_origin"),
             workload_root=workload,
             worker=merlin_root / "targetgen/_m2m_capture_worker.py",
             venv=Path(self.config["venv"]),
@@ -152,7 +162,11 @@ class SealedCaptureSource(PytorchRefSource):
             dtype=str(request["dtype"]),
             recipe=recipe,
             bwrap_binary=Path(self.config["bwrap"]) if self.config.get("bwrap") else None,
-            worker_options={"agreement_tolerance": [float(value) for value in tolerance]} if tolerance else None,
+            worker_options={
+                **({"agreement_tolerance": [float(value) for value in tolerance]} if tolerance else {}),
+                **({"stage_fp32": True} if stage_fp32 else {}),
+            }
+            or None,
         )
         selection = Path(identity["path"])
         expected_package = self.config.get("package")

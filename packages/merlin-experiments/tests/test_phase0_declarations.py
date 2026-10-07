@@ -8,6 +8,16 @@ from merlin_experiments.phase0 import declarations as D
 from merlin_experiments.spec import SpecError
 
 
+def authored_inputs(monkeypatch):
+    """Use the qualifier's committed YAML copies without importing checkout code."""
+    from merlin.common.paths import repo_root
+
+    retained = Path(__file__).with_name("source-inputs")
+    root = retained if retained.is_dir() else repo_root()
+    monkeypatch.setenv("MERLIN_REPO_ROOT", str(root))
+    return root / "examples/gemmini/experiment.yaml", root / "examples/gemmini/target/descriptor.yaml"
+
+
 def definition(tmp_path, name="one", **overrides):
     config = dict(
         descriptor="inputs/device.yaml",
@@ -100,8 +110,7 @@ def test_requirement_derivation_selects_authored_capability_contract(tmp_path, m
     from merlin.common.paths import repo_root
     from merlin.targetgen.target_experiment import load_target_experiment
 
-    definition = repo_root() / "examples/gemmini/experiment.yaml"
-    descriptor = repo_root() / "examples/gemmini/target/descriptor.yaml"
+    definition, descriptor = authored_inputs(monkeypatch)
     roster = load_target_experiment(descriptor).workload_spec["applications"]
 
     class ContractObserved(Exception):
@@ -123,11 +132,9 @@ def test_requirement_derivation_selects_authored_capability_contract(tmp_path, m
 def test_requirement_derivation_observes_the_preselected_capture_python(tmp_path, monkeypatch):
     from merlin_experiments.phase0 import capture_execution_attestation, capture_selection, requirements
 
-    from merlin.common.paths import repo_root
     from merlin.targetgen.target_experiment import load_target_experiment
 
-    definition = repo_root() / "examples/gemmini/experiment.yaml"
-    descriptor = repo_root() / "examples/gemmini/target/descriptor.yaml"
+    definition, descriptor = authored_inputs(monkeypatch)
     roster = load_target_experiment(descriptor).workload_spec["applications"]
     interpreter = tmp_path / "capture-venv" / "bin" / "python"
     monkeypatch.setattr(capture_selection, "verify", lambda *args, **kwargs: {"status": "verified_preselected_replay"})

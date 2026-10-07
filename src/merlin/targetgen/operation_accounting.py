@@ -332,6 +332,7 @@ def admit_operation_row(
     capability_map: dict | None = None,
     host_capabilities: dict | None = None,
     observed: dict | None = None,
+    source_operations: tuple | None = None,
 ) -> dict:
     """Every lane's admission of ONE observed operation, exactly as a captured application's are judged.
 
@@ -350,7 +351,7 @@ def admit_operation_row(
     software = _software_admissions(software_spec, row, observed)
     hardware = _hardware_admission(row, observed, capability_contract, capability_map)
     accelerator = _accelerator_admission(row, software, hardware, software_spec is not None)
-    host = admit_host_operation(host_capabilities, row, observed)
+    host = admit_host_operation(host_capabilities, row, observed, source_operations=source_operations)
     return {
         "observed_admission_signature": observed,
         "software_admissions": software,

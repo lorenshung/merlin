@@ -273,13 +273,14 @@ def stage(plan: dict) -> dict:
         command["env"].update(m2m_runtime.environment(selected_m2m))
         from .sealed_generation import CONFIG_ENV
 
+        m2m_receipt = artifact_root / "private" / "m2m-runtime.json"
+        with m2m_receipt.open("xb") as stream:
+            stream.write(m2m_runtime.receipt(selected_m2m))
+        m2m_receipt.chmod(0o444)
         if CONFIG_ENV in command["env"]:
             command["env"][CONFIG_ENV] = json.dumps(
                 m2m_runtime.sealed_capture_config(selected_m2m, artifact_root), sort_keys=True
             )
-        m2m_receipt = artifact_root / "private" / "m2m-runtime.json"
-        with m2m_receipt.open("xb") as stream:
-            stream.write(m2m_runtime.receipt(selected_m2m))
         frozen["phase0_m2m_runtime_receipt"] = str(m2m_receipt)
         frozen["input_paths"]["phase0:m2m_runtime_receipt"] = str(m2m_receipt)
     model = (evidence.software_spec.get("numerical_semantics") or {}).get("model") or {}

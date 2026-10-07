@@ -68,9 +68,24 @@ def test_worker_options_are_bound_into_the_command_and_absent_ones_keep_it():
     tolerant = sealed_m2m._command_v2(output, dtype="int8", recipe=True, options={"agreement_tolerance": [0.5, 0.25]})
     assert "'--agreement-atol', '0.5', '--agreement-rtol', '0.25'" in tolerant[-1]
     assert "--dtype', 'f32'" in sealed_m2m._command_v2(output, dtype="f32", recipe=False)[-1]
+    staged = sealed_m2m._command_v2(output, dtype="fp32", recipe=False, options={"stage_fp32": True})
+    assert "'--stage-fp32'" in staged[-1]
+    assert staged != plain
+    assert (
+        "'--stage-fp32'"
+        not in sealed_m2m._command_v2(output, dtype="fp32", recipe=False, options={"stage_fp32": False})[-1]
+    )
     for bad in ({"scheme": "x"}, {"agreement_tolerance": [1.0]}, {"agreement_tolerance": [-1.0, 0.0]}):
         with pytest.raises(sealed_m2m.SealedM2MError):
             sealed_m2m._command_v2(output, dtype="int8", recipe=True, options=bad)
+    for bad in (1, "true", None):
+        with pytest.raises(sealed_m2m.SealedM2MError):
+            sealed_m2m._command_v2(output, dtype="fp32", recipe=False, options={"stage_fp32": bad})
+    assert (
+        "'--stage-fp32'" in sealed_m2m._command_v2(output, dtype="int8", recipe=True, options={"stage_fp32": True})[-1]
+    )
+    with pytest.raises(sealed_m2m.SealedM2MError):
+        sealed_m2m._command_v2(output, dtype="int8", recipe=False, options={"stage_fp32": True})
 
 
 def _source(tmp_path):
@@ -92,6 +107,8 @@ def test_requests_the_seal_cannot_express_fail_closed(tmp_path):
         ({"scheme": "w8a8"}, "scheme"),
         ({"already_quantized": True}, "scheme"),
         ({"declared_env": {"DATA": "x"}}, "environment"),
+        ({"stage_fp32": "true"}, "stage_fp32"),
+        ({"stage_fp32": True, "dtype": "int8"}, "FP32 staging"),
         ({"interpreter": tmp_path / "other/python"}, "interpreter"),
     ):
         with pytest.raises(M2MUnavailable, match=match):
@@ -138,6 +155,7 @@ def test_a_sealed_capture_is_copied_with_its_attestation(tmp_path, monkeypatch):
         workdir=workdir,
         interpreter=source.python,
         agreement_tolerance=(0.1, 0.2),
+        stage_fp32=True,
     )
     assert result.returncode == 0
     assert json.loads((workdir / "meta.json").read_text())["capture_execution_attestation"] == {"issuer": "sealed"}
@@ -146,7 +164,10 @@ def test_a_sealed_capture_is_copied_with_its_attestation(tmp_path, monkeypatch):
     # Bundle-relative members resolve in the copy; bundle-only files stay with the sealed run.
     assert meta["frontend_trace"]["path"] == str(workdir / "frontend-trace.json")
     assert (workdir / "integer-reference.json").is_file() and not (workdir / "capture_receipt.json").exists()
-    assert calls["select"]["worker_options"] == {"agreement_tolerance": [0.1, 0.2]}
+    assert calls["select"]["worker_options"] == {
+        "agreement_tolerance": [0.1, 0.2],
+        "stage_fp32": True,
+    }
     assert (Path(calls["select"]["workload_root"]) / "loader.py").read_text() == loader.read_text()
 
 

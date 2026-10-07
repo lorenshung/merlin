@@ -762,6 +762,7 @@ def _application_operation_inventory(
                 capability_contract=capability_contract,
                 capability_map=cap_map,
                 host_capabilities=host_capabilities,
+                source_operations=(op,),
             )
             if (
                 admission["host_admission"]["status"] == "admitted"

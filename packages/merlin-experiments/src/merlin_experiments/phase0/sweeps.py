@@ -1081,6 +1081,7 @@ def expand_sweeps(
 
         template = str(sweep.get("name") or "{id}_{i:02d}")
         index = 0
+        sweep_generated: list[dict] = []
         for combo in combos:
             for variant in variants:
                 entry = copy.deepcopy(base)
@@ -1149,7 +1150,31 @@ def expand_sweeps(
                             }
                         )
                         continue
-                generated.append(entry)
+                sweep_generated.append(entry)
+
+        if evidence is not None and _groups and sweep_generated:
+            from .comparison_screen import refused_emitted_part
+
+            refusal = refused_emitted_part(sweep_generated, binding=binding, evidence=evidence)
+            if refusal is not None:
+                if skipped is not None:
+                    skipped.append(
+                        {
+                            "family": sweep_id,
+                            "sweep": sweep_id,
+                            "status": "skipped_inapplicable",
+                            "reason": (
+                                f"comparison part {refusal['member']!r} is refused by its builder-emitted "
+                                f"typed interface: {refusal['reason']}"
+                            ),
+                            "refused_part": refusal,
+                            "gate": gate_decision,
+                            "fit_axes": list(sweep.get("fit_axes") or []),
+                            "comparison_roles": _comparison_roles(sweep),
+                        }
+                    )
+                continue
+        generated.extend(sweep_generated)
 
     # A GROUP REDUCED TO ONE MEMBER IS NOT A COMPARISON. The declaration-time check above refuses a
     # group AUTHORED with a single member, but a member can also disappear afterwards: materialization

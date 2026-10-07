@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from collections.abc import Collection, Mapping, Sequence
+from math import prod
 from typing import Any
 
 SCHEMA = "group_capsules_v1"
@@ -197,9 +198,24 @@ def entries(
             continue
         entry = dict(stated.entry)
         key = _numerical_identity(entry) if numerical_variants else _identity(entry)
-        row = found.setdefault(key, {"entry": entry, "count": 0, "groups": [], "program": stated})
+        row = found.setdefault(
+            key,
+            {
+                "entry": entry,
+                "count": 0,
+                "groups": [],
+                "program": stated,
+                "group_batch_shapes": [],
+                "slice_instances": 0,
+            },
+        )
         row["count"] += 1
         row["groups"].append(group.index)
+        slices = prod(stated.batch_shape) if stated.batch_shape else 1
+        row["slice_instances"] += slices
+        row["group_batch_shapes"].append(
+            {"group": group.index, "batch_shape": list(stated.batch_shape), "slices": slices}
+        )
     out: list[dict[str, Any]] = []
     for row in sorted(found.values(), key=lambda r: (-r["count"], _label(r["entry"]))):
         entry = row["entry"]
@@ -227,13 +243,19 @@ def entries(
             # cannot fail it.
             entry["stimulus_range"] = list(SIGNED_STIMULUS_RANGE)
         entry.pop("scale_granularity", None)
+        # The capsule and its representative program describe one slice. Batch multiplicity belongs
+        # to each group, not to the first group selected by deduplication.
+        slice_program = row["program"].to_dict()
+        slice_program.pop("batch_shape", None)
         out.append(
             {
                 "name": name,
                 "count": row["count"],
                 "groups": row["groups"],
+                "slice_instances": row["slice_instances"],
+                "group_batch_shapes": row["group_batch_shapes"],
                 "entry": entry,
-                "program": row["program"].to_dict(),
+                "program": slice_program,
             }
         )
         if with_raw and entry.get("epilogue"):
@@ -247,7 +269,15 @@ def entries(
             raw["source_reference"] = f"the bare-accumulator sibling of {name}"
             if not any(other["name"] == raw["name"] for other in out):
                 out.append(
-                    {"name": raw["name"], "count": row["count"], "groups": row["groups"], "entry": raw, "raw_of": name}
+                    {
+                        "name": raw["name"],
+                        "count": row["count"],
+                        "groups": row["groups"],
+                        "slice_instances": row["slice_instances"],
+                        "group_batch_shapes": row["group_batch_shapes"],
+                        "entry": raw,
+                        "raw_of": name,
+                    }
                 )
     return {
         "schema": SCHEMA,

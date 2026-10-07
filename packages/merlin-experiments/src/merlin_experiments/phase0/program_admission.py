@@ -142,15 +142,24 @@ def account_program(program: Path, *, name: str, target: str, evidence) -> list[
 
 def account_interface(program: Path, *, target: str, evidence, numeric_screens: list[dict] | None = None) -> list[dict]:
     """Per-command admission entries of one accelerator-interface program."""
+    return account_interface_text(
+        program.read_text(encoding="utf-8"), target=target, evidence=evidence, numeric_screens=numeric_screens
+    )
+
+
+def account_interface_text(
+    mlir: str, *, target: str, evidence, numeric_screens: list[dict] | None = None
+) -> list[dict]:
+    """Screen builder-emitted interface bytes before a capsule or golden is written."""
     from merlin.targetgen.contract.interface_emit import parse_interface_mlir
     from merlin.targetgen.interface_observations import command_rows
     from merlin.targetgen.operation_accounting import admit_operation_row
 
-    parsed = parse_interface_mlir(program.read_text(encoding="utf-8"))
+    parsed = parse_interface_mlir(mlir)
     if parsed.get("target") != target:
         raise ValueError("written interface program names a different target")
     if numeric_screens is None:
-        numeric_screens = _operand_sum_numeric_screens(program, evidence)
+        numeric_screens = _operand_sum_numeric_screens_text(mlir, evidence)
     by_command = {screen["command_index"]: screen for screen in numeric_screens}
     entries = []
     for row in command_rows(parsed):
@@ -177,6 +186,10 @@ def account_interface(program: Path, *, target: str, evidence, numeric_screens: 
 
 
 def _operand_sum_numeric_screens(program: Path, evidence) -> list[dict]:
+    return _operand_sum_numeric_screens_text(program.read_text(encoding="utf-8"), evidence)
+
+
+def _operand_sum_numeric_screens_text(mlir: str, evidence) -> list[dict]:
     """Bound only a selected, fact-derived sum/readout composition.
 
     This is a deterministic software-model refusal screen, not a replacement
@@ -195,7 +208,7 @@ def _operand_sum_numeric_screens(program: Path, evidence) -> list[dict]:
     ]
     selected = [facet for facet in facets if (facet.get("operand_sum") or {}).get("operand_dtype") in {"i8", "int8"}]
     readout = (spec.get("numerical_semantics") or {}).get("readout") or {}
-    commands = parse_interface_mlir(program.read_text(encoding="utf-8")).get("commands") or ()
+    commands = parse_interface_mlir(mlir).get("commands") or ()
     screens = []
     for index, command in enumerate(commands):
         attrs = command.get("attributes") or {}

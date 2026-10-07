@@ -73,6 +73,7 @@ def _selected_bytes(plan: dict, run_dir: Path, bwrap: Path) -> dict:
 def select(
     *,
     m2m_root: Path,
+    frozen_origin: dict | None = None,
     workload_root: Path,
     worker: Path,
     venv: Path,
@@ -111,6 +112,7 @@ def select(
         raise ValueError("capture and selection output parents must already exist")
     plan = sealed_m2m.prepare_plan(
         m2m_root=m2m_root,
+        frozen_origin=frozen_origin,
         workload_root=workload_root,
         worker=worker,
         venv=venv,
@@ -201,6 +203,7 @@ def issue(path: Path, *, expected_sha256: str) -> Path:
     plan = selected["plan"]
     current = sealed_m2m.prepare_plan(
         m2m_root=Path(plan["m2m_root"]),
+        frozen_origin=plan.get("frozen_origin"),
         workload_root=Path(plan["workload_root"]),
         worker=Path(plan["worker"]),
         venv=Path(plan["venv"]),

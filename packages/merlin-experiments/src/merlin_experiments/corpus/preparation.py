@@ -951,7 +951,20 @@ def _admission(te, *, coverage_output: Path | None) -> dict:
         validate_materialized_cohort,
     )
 
-    capsule_runner.discover_capsules(te.graded_roots(), labels={"public", "dev"})
+    from ..phase0.certification_floor import require_direct_tier, selected_floor
+
+    source_public = capsule_runner.discover_capsules(te.graded_roots(), labels={"public", "dev"})
+    source_hidden = None
+    if (te.workload_spec or {}).get("certification_floor") is not None:
+        source_hidden = capsule_runner.discover_capsules(te.hidden_roots(), labels={"hidden"})
+        declared_tiers = sorted(
+            {tier for cap in [*source_public, *source_hidden] for tier in (cap.get("required_oracle_tiers") or [])}
+        )
+        try:
+            floor = selected_floor(te.workload_spec, declared_tiers)
+            require_direct_tier([*source_public, *source_hidden], floor=floor)
+        except ValueError as exc:
+            raise SpecError(f"release certification-floor preflight failed: {exc}") from exc
     # Read the immutable build behind the published per-target link: coverage observation refuses
     # to traverse links, and the link is this module's own swap point, not a corpus input.
     materialized = resolve_published_cohort(materialize_public_cohort(te, tier_ceiling=_TIER_ORDER[-1]))
@@ -976,7 +989,11 @@ def _admission(te, *, coverage_output: Path | None) -> dict:
     workload_required = requires_workload_coverage(te, coverage_inputs)
     if coverage_output is not None:
         private_json(coverage_output, completeness)
-    hidden = capsule_runner.discover_capsules(te.hidden_roots(), labels={"hidden"})
+    hidden = (
+        source_hidden
+        if source_hidden is not None
+        else capsule_runner.discover_capsules(te.hidden_roots(), labels={"hidden"})
+    )
     _, withheld = capsule_runner._split_ineligible([cap for cap in hidden if cap.get("kind") != "model"], te.target)
     excluded = {row["capsule"] for row in withheld}
     count = len(hidden)

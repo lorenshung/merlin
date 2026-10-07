@@ -18,6 +18,7 @@ from merlin.targetgen.rtl.facts import observed_facts
 from merlin.targetgen.target_experiment import load_target_experiment
 from merlin_experiments.spec import load_spec
 
+from .certification_floor import require_direct_tier, selected_floor
 from .declarations import from_definition
 from .evidence import _materialize_evidence, export_evidence, select_evidence
 from .performance_scope import derive_performance_scope
@@ -29,6 +30,21 @@ from .typed_scope import typed_required_instances
 
 def _json(value) -> bytes:
     return (json.dumps(value, sort_keys=True, indent=2) + "\n").encode()
+
+
+def _recipe_tier_declarations(path: Path) -> tuple[dict, list[str]]:
+    recipe_doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    planned_tiers = (
+        (recipe_doc.get("datapath") or {}).get("required_oracle_tiers") if isinstance(recipe_doc, dict) else None
+    )
+    if planned_tiers is not None and (
+        not isinstance(planned_tiers, list)
+        or any(
+            not isinstance(tier, str) or not tier.startswith("L") or not tier[1:].isdigit() for tier in planned_tiers
+        )
+    ):
+        raise ValueError("selected recipe required_oracle_tiers must be a list of fidelity tiers")
+    return recipe_doc, list(planned_tiers or [])
 
 
 def _materialized_iteration_capsules(
@@ -308,6 +324,12 @@ def derive(
     hardware = spec.resolve(config["hardware_spec"]) if config.get("hardware_spec") else None
     if software is None:
         raise ValueError("deterministic derivation requires an explicit software spec in the recipe")
+    recipe_doc = None
+    planned_tiers = None
+    certification_floor = None
+    if (te.workload_spec or {}).get("certification_floor") is not None:
+        recipe_doc, planned_tiers = _recipe_tier_declarations(declaration.recipe)
+        certification_floor = selected_floor(te.workload_spec, planned_tiers)
     selected = select_evidence(
         te.target,
         descriptor=declaration.descriptor,
@@ -342,6 +364,7 @@ def derive(
             oracle_tiers=[],
             corpus_roots=[],
             cert_budget_s=(te.workload_spec or {}).get("cert_budget_s"),
+            certification_floor=certification_floor,
             application_inventory_options=options,
         )
     if full["status"] != "inventoried" and config.get("evidence_mode") != "diagnostic":
@@ -414,18 +437,15 @@ def derive(
     # was constructed. Keep it separate from ``oracle_tiers`` (which remains
     # observed-only) so synthesis can cap unaffordable members to a declared
     # functional screen without claiming that screen executed at derivation.
-    recipe_doc = yaml.safe_load(declaration.recipe.read_text(encoding="utf-8")) or {}
-    planned_tiers = (
-        (recipe_doc.get("datapath") or {}).get("required_oracle_tiers") if isinstance(recipe_doc, dict) else None
-    )
-    if planned_tiers is not None and (
-        not isinstance(planned_tiers, list)
-        or any(
-            not isinstance(tier, str) or not tier.startswith("L") or not tier[1:].isdigit() for tier in planned_tiers
-        )
-    ):
-        raise ValueError("selected recipe required_oracle_tiers must be a list of fidelity tiers")
-    requirement["oracle_tiers_declared"] = list(planned_tiers or [])
+    if recipe_doc is None:
+        # Preserve the historical no-floor observation point: reading the recipe
+        # earlier changes which selected-input error wins during legacy derivation.
+        recipe_doc, planned_tiers = _recipe_tier_declarations(declaration.recipe)
+    requirement["oracle_tiers_declared"] = planned_tiers
+    if certification_floor is not None:
+        if (requirement.get("certification_floor") or {}).get("tier") != certification_floor:
+            raise ValueError("core requirement omitted the selected certification floor")
+        requirement["certification_floor"]["source"] = "descriptor.workload_spec.certification_floor"
     requirement["scope"]["performance"] = derive_performance_scope(requirement["scope"], selected.software_spec)
     # The two capture-derived stages share ONE grouping and ONE binding (the corpus binding under the
     # selected recipe, contract and facts), read only the declared ITERATION captures, and refuse any
@@ -503,6 +523,9 @@ def derive(
     gradeable_sources = [entry for entry in source_entries if entry["materialized_capture"].get("loader_sha256")]
     if plan.get("status") != "blocked":
         plan["capsules"] = [*plan.get("capsules", []), *model_forms["entries"], *gradeable_sources]
+        require_direct_tier(
+            plan["capsules"], floor=certification_floor, declared_tiers=requirement["oracle_tiers_declared"]
+        )
     plan.setdefault("provenance", {})["model_forms"] = model_forms["provenance"]
     screens = []
     for index, entry in enumerate(plan.get("capsules") or []):

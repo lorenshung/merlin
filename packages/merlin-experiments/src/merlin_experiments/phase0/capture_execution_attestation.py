@@ -225,6 +225,13 @@ def require_verified_execution(document: Mapping[str, Any]) -> None:
         raise AttestationNotVerified("sealed execution issuer and attestation schema do not match")
 
 
+def sealed_m2m_tree_snapshot(root: Path) -> dict[str, Any]:
+    """Use the sealed issuer's exact member/size/mode digest, not a compiler tree hash."""
+    from merlin_experiments.capture_execution import sealed_m2m
+
+    return sealed_m2m._snapshot_tree(Path(root))
+
+
 def _is_sha(value) -> bool:
     return isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
 
@@ -370,7 +377,7 @@ def _sealed_m2m_v3_bindings(selection_path: Path, selection_sha256: str, capture
             raise AttestationNotVerified("session source bytes differ from the sealed receipt")
         if sealed_m2m._snapshot_tree(runtime) != receipt.get("guest_root"):
             raise AttestationNotVerified("session runtime bytes differ from the sealed receipt")
-        if sealed_m2m._snapshot_tree(capture) != receipt.get("output"):
+        if sealed_m2m_tree_snapshot(capture) != receipt.get("output"):
             raise AttestationNotVerified("session output bytes differ from the sealed receipt")
         sealed_m2m._verify_staged_selection(plan, source, runtime)
         materialized = sealed_m2m._materialized_v3(capture, source, capture, plan)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from fake_quant_layer import Oracle as _Oracle
 from im2col_conv_layer import module as _conv
 
@@ -33,6 +35,33 @@ def test_names_are_a_function_of_the_program_not_of_the_group_index() -> None:
     first = _stated(image=4, taps=3, pad=1)["entries"][0]["name"]
     assert first == _stated(image=4, taps=3, pad=1)["entries"][0]["name"]
     assert first != _stated(image=8, taps=3, pad=1)["entries"][0]["name"]
+
+
+def test_deduped_capsule_is_per_slice_with_each_group_batch_recorded(monkeypatch) -> None:
+    from merlin.xdsl_dialects.lowering import group_command as command
+
+    groups = [SimpleNamespace(index=i, placement="device", root=object()) for i in (3, 7)]
+    monkeypatch.setattr(
+        command,
+        "program",
+        lambda group, **_kwargs: command.GroupProgram(
+            entry={"op": "matmul", "M": 3, "K": 4, "N": 6, "epilogue": ["relu"]},
+            stored_operand=1,
+            transposed=False,
+            batch_shape=(2,) if group.index == 3 else (5,),
+        ),
+    )
+    row, raw = GC.entries("synthetic", None, groups=groups)["entries"]
+    assert (row["count"], row["slice_instances"], row["groups"]) == (2, 7, [3, 7])
+    assert row["group_batch_shapes"] == [
+        {"group": 3, "batch_shape": [2], "slices": 2},
+        {"group": 7, "batch_shape": [5], "slices": 5},
+    ]
+    assert (row["entry"]["M"], row["entry"]["K"], row["entry"]["N"]) == (3, 4, 6)
+    assert "batch_shape" not in row["program"]
+    assert raw["raw_of"] == row["name"]
+    assert raw["group_batch_shapes"] == row["group_batch_shapes"]
+    assert (raw["count"], raw["slice_instances"]) == (2, 7)
 
 
 def test_a_group_that_cannot_be_restated_is_counted_with_its_reason() -> None:

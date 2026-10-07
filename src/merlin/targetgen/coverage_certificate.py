@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 
 from merlin.targetgen import eligibility as _el
 from merlin.targetgen import semantic_families as _sf
@@ -57,6 +58,89 @@ def _flops(demand, family: str | None) -> int:
 def _ratio(num: int, den: int):
     """num/den, or ``None`` when the denominator is empty (no eligible work to recall)."""
     return (num / den) if den else None
+
+
+def _typed_source_witnesses(linalg_mlir: str | None, results: list) -> list[dict | None]:
+    """Observe exact source value types, separately from routing-format admission.
+
+    The pretty ``ins`` reader intentionally cannot assign one accelerator format to
+    constants, shape operations, or mixed data/control operands.  Their parsed SSA
+    types can nevertheless close the *source* precision census.  This witness
+    says nothing about host lowering, numerical equivalence, or device support.
+    An incomplete operation/order/type join yields no witness, never a guessed
+    requested format.
+    """
+    absent = [None] * len(results)
+    if not linalg_mlir or not results:
+        return absent
+    try:
+        from xdsl.dialects import builtin
+
+        from merlin.common import mlir_query as mq
+        from merlin.common.ir_lock import IR_LOCK
+
+        with IR_LOCK:
+            module = mq.parse(linalg_mlir)
+            funcs = [op for op in module.body.block.ops if mq.op_name(op) == "func.func"]
+            if len(funcs) != 1 or len(funcs[0].body.blocks) != 1:
+                return absent
+            ops = [
+                op
+                for op in funcs[0].body.blocks[0].ops
+                if mq.op_name(op) not in ("func.return", "linalg.fill")
+            ]
+            if len(ops) != len(results):
+                return absent
+
+            def value_type(value):
+                typ = value.type
+                is_tensor = isinstance(typ, builtin.TensorType)
+                element = typ.element_type if is_tensor else typ
+                if not isinstance(element, (builtin.IntegerType, builtin.IndexType, builtin.AnyFloat)):
+                    return None
+                if is_tensor:
+                    shape = typ.get_shape()
+                    if shape is None or any(type(dim) is not int or dim < 0 for dim in shape):
+                        return None
+                return str(typ), str(element), is_tensor
+
+            witnesses: list[dict | None] = []
+            for op, result in zip(ops, results, strict=True):
+                demand = result.demand
+                name = mq.op_name(op)
+                tag = mq.attr_str(op, "prov.op")
+                region = mq.attr_str(op, "prov.region_id")
+                if (
+                    demand.carrier_op != name
+                    or demand.region_id != region
+                    or tag is None
+                    or (demand.op != tag if name.startswith("linalg.") else demand.op != name)
+                ):
+                    return absent
+                operands = [value_type(value) for value in op.operands]
+                outputs = [value_type(value) for value in op.results]
+                if not outputs or any(row is None for row in (*operands, *outputs)):
+                    witnesses.append(None)
+                    continue
+                typed_operands = [row for row in operands if row is not None]
+                typed_outputs = [row for row in outputs if row is not None]
+                witnesses.append(
+                    {
+                        "status": "typed_source"
+                        if any(row[2] for row in (*typed_operands, *typed_outputs))
+                        else "not_applicable",
+                        "operand_types": [row[0] for row in typed_operands],
+                        "result_types": [row[0] for row in typed_outputs],
+                        "operand_element_types": [row[1] for row in typed_operands],
+                        "result_element_types": [row[1] for row in typed_outputs],
+                        "operand_is_tensor": [row[2] for row in typed_operands],
+                        "result_is_tensor": [row[2] for row in typed_outputs],
+                        "scope": "parsed source types only; no host/device support or emitted-code equivalence",
+                    }
+                )
+            return witnesses
+    except Exception:  # noqa: BLE001 -- a source type parse failure remains unknown
+        return absent
 
 
 def denominator_completeness(linalg_mlir: str | None, *, demands: list | None = None) -> dict | None:
@@ -427,7 +511,9 @@ def build(
     eligible_flops = accelerated_eligible_flops = 0
     accelerated_ineligible = 0
 
-    for r in plan.get("results", []):
+    results = list(plan.get("results", []))
+    typed_witnesses = _typed_source_witnesses(linalg_mlir, results)
+    for r, source_witness in zip(results, typed_witnesses, strict=True):
         d = r.demand
         observed = d.captured_input_formats
         captured_input = observed[0] if observed else d.elem_fmt
@@ -461,44 +547,92 @@ def build(
         accelerated = decision == "accelerator"
         flops = _flops(d, family)
 
-        regions.append(
-            {
-                "source": d.site or d.op,
-                "op": d.op,
-                "region_id": d.region_id,
-                "source_family": d.source_family,
-                "carrier_op": d.carrier_op,
-                "form": d.form,
-                "semantic_family": family,
-                "requested_input_format": d.in_fmt,
-                "captured_input_format": captured_input,
-                "captured_weight_format": captured_weight,
-                "eligibility_input_format": d.admission_input_fmt,
-                "eligibility_weight_format": d.admission_weight_fmt,
-                "requested_format_mismatch": bool(
-                    (captured_input is not None and not _el._dtype_ok(captured_input, (d.in_fmt,)))
-                    or (
-                        captured_weight is not None
-                        and d.weight_fmt is not None
-                        and not _el._dtype_ok(captured_weight, (d.weight_fmt,))
-                    )
-                ),
-                "precision_transform_required": (
-                    None
-                    if (observed is not None and not d.source_formats_complete)
-                    or (observed is None and d.elem_fmt is None and str(d.carrier_op or "").startswith("linalg."))
-                    else bool(
-                        captured_input is not None and not _el._dtype_ok(captured_input, (d.admission_input_fmt,))
-                    )
-                ),
-                "target_eligible": verdict.eligible,
-                "eligibility_reason": verdict.reason,
-                "decision": decision,
-                "unit": r.unit,
-                "gap": r.gap,
-                "estimated_work_flops": flops,
-            }
+        precision_transform_required = (
+            None
+            if (observed is not None and not d.source_formats_complete)
+            or (observed is None and d.elem_fmt is None and str(d.carrier_op or "").startswith("linalg."))
+            else bool(captured_input is not None and not _el._dtype_ok(captured_input, (d.admission_input_fmt,)))
         )
+        # Typed source-only CPU operations do not request a hidden conversion
+        # into an accelerator format. A missing operand format may not, however,
+        # hide a potentially eligible contraction or other hardware operation.
+        # Recheck the selected capability map without claiming source admission;
+        # only a definitive hardware refusal permits this source census.
+        possible_hardware = (
+            _el.is_eligible(replace(desc, captured_input_formats=d.captured_input_formats), cap_map)
+            if source_witness is not None
+            else None
+        )
+        hardware_dtype_refusal = False
+        if possible_hardware is not None and possible_hardware.undetermined:
+            tensor_elements = [
+                element
+                for element, is_tensor in zip(
+                    source_witness["operand_element_types"], source_witness["operand_is_tensor"], strict=True
+                )
+                if is_tensor
+            ]
+            # A mixed index/data operation has no single routing format. Ask
+            # the existing selected-capability oracle about *each* actual
+            # tensor operand as a possible data input, without guessing roles.
+            # Only a definite input-dtype refusal for *every* assignment is
+            # enough. A form/shape refusal with missing source roles may itself
+            # depend on absent metadata. Contractions with one compatible
+            # operand cannot be excused by an incompatible weight or index.
+            hardware_dtype_refusal = bool(
+                tensor_elements
+                and all(
+                    not candidate.eligible and not candidate.undetermined and candidate.refusal == "input_dtype"
+                    for candidate in (
+                        _el.is_eligible(
+                            replace(desc, in_dtype=element, captured_input_formats=None), cap_map
+                        )
+                        for element in tensor_elements
+                    )
+                )
+            )
+        source_witness_applied = (
+            precision_transform_required is None
+            and source_witness is not None
+            and possible_hardware is not None
+            and not possible_hardware.eligible
+            and (not possible_hardware.undetermined or hardware_dtype_refusal)
+            and decision == "cpu_fallback"
+        )
+        if source_witness_applied:
+            precision_transform_required = False
+        row = {
+            "source": d.site or d.op,
+            "op": d.op,
+            "region_id": d.region_id,
+            "source_family": d.source_family,
+            "carrier_op": d.carrier_op,
+            "form": d.form,
+            "semantic_family": family,
+            "requested_input_format": d.in_fmt,
+            "captured_input_format": captured_input,
+            "captured_weight_format": captured_weight,
+            "eligibility_input_format": d.admission_input_fmt,
+            "eligibility_weight_format": d.admission_weight_fmt,
+            "requested_format_mismatch": bool(
+                (captured_input is not None and not _el._dtype_ok(captured_input, (d.in_fmt,)))
+                or (
+                    captured_weight is not None
+                    and d.weight_fmt is not None
+                    and not _el._dtype_ok(captured_weight, (d.weight_fmt,))
+                )
+            ),
+            "precision_transform_required": precision_transform_required,
+            "target_eligible": verdict.eligible,
+            "eligibility_reason": verdict.reason,
+            "decision": decision,
+            "unit": r.unit,
+            "gap": r.gap,
+            "estimated_work_flops": flops,
+        }
+        if source_witness_applied:
+            row["source_precision_witness"] = source_witness
+        regions.append(row)
 
         if verdict.eligible:
             n_eligible += 1

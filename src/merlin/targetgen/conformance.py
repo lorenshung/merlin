@@ -805,8 +805,14 @@ def host_only_dtypes(captures: dict, families) -> dict:
 _DEFAULT_CERT_BUDGET_S = 300.0
 
 
-def _application_axis(target: str, *, captures: dict | None = None, budget_s: float | None = None) -> dict:
-    """The shapes this target's declared APPLICATIONS contain, sized to what a cert costs.
+def _application_axis(
+    target: str,
+    *,
+    captures: dict | None = None,
+    budget_s: float | None = None,
+    certification_floor: str | None = None,
+) -> dict:
+    """The shapes this target's declared APPLICATIONS contain.
 
     The corpus gives every synthesized capsule one of two tile-relative shapes, and real models do
     not look like that -- 757 contraction regions across six captures carry shapes like
@@ -815,8 +821,9 @@ def _application_axis(target: str, *, captures: dict | None = None, budget_s: fl
 
     It emits at most two capsules per behavioural class, and the split is what makes the whole thing
     runnable: one sized to be affordable cycle-accurately, and -- where the application is larger --
-    one at the true shape that EXTENDS it. See :mod:`merlin.targetgen.applications` for why K is
-    never clamped and why a class with no cost model is refused rather than sized by convention.
+    one at the true shape that EXTENDS it. An explicit direct-certification floor instead preserves
+    the full shape and a tile-scale functional anchor without reading ambient cost history or claiming
+    either affordable. See :mod:`merlin.targetgen.applications` for why K is never clamped.
 
     Empty and inert for a target declaring no applications, which is every target today.
     """
@@ -826,14 +833,24 @@ def _application_axis(target: str, *, captures: dict | None = None, budget_s: fl
     budget = float(budget_s) if budget_s else _DEFAULT_CERT_BUDGET_S
     basis = {
         "axis_basis": (
-            "the contraction shapes this target's DECLARED applications contain, grouped by what the "
+            "declared application contraction classes retain a tile-scale functional anchor and "
+            "their full observed shape; both require direct certification and their cost is unknown"
+            if certification_floor is not None
+            else "the contraction shapes this target's DECLARED applications contain, grouped by what the "
             "compiler must do with them and sized to what a certification costs. A capsule at an "
             "application's real shape is worthless if nobody can afford to certify it, so each class "
             "yields a cycle-accurate capsule at an affordable size plus, when the application is "
             "larger, an L2 capsule at the true shape that extends it -- never one without the other"
         ),
-        "cert_budget_s": budget,
-        "budget_source": "declared" if budget_s else "default",
+        "cert_budget_s": budget if certification_floor is None else None,
+        "budget_source": (
+            "not_used_direct_floor" if certification_floor is not None else "declared" if budget_s else "default"
+        ),
+        **(
+            {"cost_status": "unknown_not_priced", "declared_budget_s": budget_s}
+            if certification_floor is not None
+            else {}
+        ),
     }
     if not captures:
         return {"required": [], "refused": [], "declared_applications": 0, **basis}
@@ -885,7 +902,7 @@ def _application_axis(target: str, *, captures: dict | None = None, budget_s: fl
     # average, because the shape has to be payable on whichever engine the run picks. Falls back to the
     # unattributed fit only when no engine can be priced, which keeps a target with no per-engine
     # history working exactly as before.
-    fit = _binding_engine_fit(target) or CC.fit_for(target)
+    fit = None if certification_floor is not None else (_binding_engine_fit(target) or CC.fit_for(target))
     try:
         from merlin.targetgen.corpus_spec import _tile_dim  # noqa: PLC2701
         from merlin.targetgen.target_registry import load_contract
@@ -893,6 +910,15 @@ def _application_axis(target: str, *, captures: dict | None = None, budget_s: fl
         tile = int(_tile_dim(target, load_contract(target)) or 0)
     except Exception:  # noqa: BLE001 -- no edge is a real answer
         tile = 0
+    if certification_floor is not None and tile <= 0:
+        needs_anchor = any(
+            not admitted_pairs or (str(row["family"]), str(row["dtype"])) in admitted_pairs
+            for row in grouped.get("classes") or ()
+        )
+        if needs_anchor:
+            raise ValueError(
+                f"{target}: direct {certification_floor} application anchors require selected positive tile geometry"
+            )
 
     required, refused = [], []
     for row in grouped.get("classes") or ():
@@ -926,7 +952,14 @@ def _application_axis(target: str, *, captures: dict | None = None, budget_s: fl
             work_complete=bool(row["work_complete"]),
             source=str(row["source"]),
         )
-        sized, refusal = APP.size_class(evidence, target=target, budget_s=budget, tile=tile or None, fit=fit)
+        sized, refusal = APP.size_class(
+            evidence,
+            target=target,
+            budget_s=budget,
+            tile=tile or None,
+            fit=fit,
+            certification_floor=certification_floor,
+        )
         if refusal:
             refused.append(refusal)
             continue
@@ -1881,6 +1914,7 @@ def derive_spec(
     applications: dict[str, str | Path] | None = None,
     corpus_roots=None,
     cert_budget_s: float | None = None,
+    certification_floor: str | None = None,
     application_inventory_options: dict | None = None,
 ) -> dict:
     """Derive a conformance spec from explicitly supplied tier evidence.
@@ -1893,6 +1927,12 @@ def derive_spec(
     exactly once, at the historical field's observation point after preceding
     derivation succeeds. It is never cached; core performs no default discovery.
     """
+    if certification_floor is not None and (
+        not isinstance(certification_floor, str)
+        or not certification_floor.startswith("L")
+        or not certification_floor[1:].isdigit()
+    ):
+        raise ValueError("certification_floor must be a fidelity tier")
     cells, diag = required_cells(target, captures, declared=declared)
     bnd = boundaries(target)
     from merlin.targetgen import boundary as BD
@@ -1912,14 +1952,46 @@ def derive_spec(
         )
     except Exception as _exc:  # noqa: BLE001 -- an underivable depth is not zero
         _reduction_depth = {"unavailable": f"{type(_exc).__name__}: {_exc}"}
-    _reduction_depth["certified"], _reduction_depth["certified_refusal"] = _certified_depth(
-        target, tile=bnd.tile_edge or 0, budget_s=cert_budget_s
-    )
+    if certification_floor is None:
+        _reduction_depth["certified"], _reduction_depth["certified_refusal"] = _certified_depth(
+            target, tile=bnd.tile_edge or 0, budget_s=cert_budget_s
+        )
+    else:
+        # A minimum direct tier is a requirement, not a measured-cost certificate.
+        # Retain the two-pass functional anchor without reading ambient cost history.
+        tile = int(bnd.tile_edge or 0)
+        _reduction_depth["certified"] = (
+            {
+                "M": tile,
+                "K": 2 * tile,
+                "N": tile,
+                "K_tiles": 2,
+                "predicted_seconds": None,
+                "budget_s": None,
+                "sized_by": "functional_two_pass_minimum",
+                "cost_status": "unknown_not_priced",
+                "why": "two K tiles require at least two accumulation passes",
+            }
+            if tile > 0
+            else None
+        )
+        _reduction_depth["certified_refusal"] = None if tile > 0 else "no tile edge for two-pass anchor"
     _regime_extents = MR.required_regime_extents(
         target, sorted((mem.get("by_regime") or {}).keys()), tile_dim=bnd.tile_edge or 0, dtype=_regime_dtype
     )
     return {
         "target": target,
+        **(
+            {
+                "certification_floor": {
+                    "tier": certification_floor,
+                    "source": "derive_spec.certification_floor argument",
+                    "scope": "direct per-capsule certification; no execution or affordability claim",
+                }
+            }
+            if certification_floor is not None
+            else {}
+        ),
         "generated_by": "merlin.targetgen.conformance.spec",
         "derivation": {
             "admitted": "capability manifest compute_units[].semantic_capabilities (family x dtype)",
@@ -1982,7 +2054,9 @@ def derive_spec(
         # THE USER'S OWN APPLICATIONS. Empty unless the target declares some; when it does, this is
         # the only axis whose capsules carry a shape a real model contains rather than a tile
         # multiple, and the only one whose sizing is bounded by what a certification costs.
-        "application_shapes": _application_axis(target, captures=applications, budget_s=cert_budget_s),
+        "application_shapes": _application_axis(
+            target, captures=applications, budget_s=cert_budget_s, certification_floor=certification_floor
+        ),
         # All operations in each DECLARED derivation application, including host and unknown work.
         # Grouping identical signatures keeps the tracked requirement reviewable; `ordinals` still
         # accounts for every parsed operation. Claim/held-out models never enter this input mapping.
@@ -1991,7 +2065,16 @@ def derive_spec(
         ),
         # WHAT A CERTIFICATION COSTS HERE, so an axis can size against it instead of assuming every
         # capsule it derives is affordable at the deepest tier.
-        "cert_affordability": _cert_affordability(target, budget_s=cert_budget_s),
+        "cert_affordability": (
+            _cert_affordability(target, budget_s=cert_budget_s)
+            if certification_floor is None
+            else {
+                "status": "unknown_not_priced",
+                "max_elements": None,
+                "budget_s": cert_budget_s,
+                "basis": "explicit direct certification floor; no ambient cost history selected",
+            }
+        ),
         # THE TIERS THIS TARGET ACTUALLY DECLARES. Published because a capsule too large to certify has
         # to be capped to a tier that EXISTS here, and "L2" is not a universal name: one target in this
         # repo declares `[L3]` alone, so capping to L2 there names a tier nothing can run. The

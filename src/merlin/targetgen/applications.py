@@ -524,9 +524,19 @@ def _round_down_to_tile(value: int, tile: int) -> int:
 
 
 def size_class(
-    evidence: ClassEvidence, *, target: str, budget_s: float, tile: int | None = None, fit=None
+    evidence: ClassEvidence,
+    *,
+    target: str,
+    budget_s: float,
+    tile: int | None = None,
+    fit=None,
+    certification_floor: str | None = None,
 ) -> tuple[list[SizedCapsule], str | None]:
     """``([capsules], refusal)`` for one behavioural class.
+
+    An explicitly selected direct-certification floor takes the source/facts-only branch below:
+    a tile-scale functional anchor and the true application shape both require that tier. Their
+    certification cost remains unknown until execution, independent of any ambient run history.
 
     THE CONSTRAINT THAT DECIDES WHETHER ANY OF THIS IS USABLE. A capsule at an application's real
     shape is worthless if nobody can afford to certify it: the heaviest class measured here carries a
@@ -553,8 +563,48 @@ def size_class(
     """
     from merlin.targetgen import cert_cost as CC
 
+    if certification_floor is not None and (type(tile) is not int or tile <= 0):
+        return [], (
+            f"{evidence.region_class.key()}: direct {certification_floor} functional anchor "
+            "requires selected positive tile geometry; none was derived"
+        )
     tile = int(tile or 0) or 1
     k = int(evidence.k)
+    if certification_floor is not None:
+        # A direct-certification floor is a functional requirement, not a cost prediction.
+        # Keep the model's real shape and a tile-scale anchor of the same source class.
+        # Neither is called affordable before an actual oracle run proves it.
+        anchor_m, anchor_n = min(int(evidence.m), tile), min(int(evidence.n), tile)
+        common = {
+            "cost_status": "unknown_not_priced",
+            "certification_floor": certification_floor,
+            "representative_of": evidence.multiplicity,
+            "work": evidence.work,
+            "source": evidence.source,
+        }
+        anchor = SizedCapsule(
+            region_class=evidence.region_class,
+            m=anchor_m,
+            k=k,
+            n=anchor_n,
+            batch=int(evidence.batch),
+            tier=certification_floor,
+            extends=None,
+            basis={**common, "sized_by": "functional_tile_anchor", "member": "anchor"},
+        )
+        if (anchor_m, anchor_n) == (int(evidence.m), int(evidence.n)):
+            return [anchor], None
+        full = SizedCapsule(
+            region_class=evidence.region_class,
+            m=int(evidence.m),
+            k=k,
+            n=int(evidence.n),
+            batch=int(evidence.batch),
+            tier=certification_floor,
+            extends=evidence.region_class.key(),
+            basis={**common, "sized_by": "application_shape", "member": "full_shape"},
+        )
+        return [anchor, full], None
     budget_elements = CC.max_elements_within(fit, budget_s) if fit is not None else None
     if budget_elements is None:
         # NO MEASUREMENT, NO CAPSULE. A tile-convention fallback suggests itself and is wrong: the

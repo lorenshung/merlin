@@ -16,6 +16,12 @@ from pathlib import Path
 
 import yaml
 
+from merlin_experiments.capture_execution.m2m_origin import (
+    frozen_selector,
+    git_origin,
+    selected_source_origin,
+    verify_frozen_selector,
+)
 from merlin_experiments.capture_execution.sealed_m2m import (
     _capture_api_missing,
     _frontend_trace_api_missing,
@@ -83,7 +89,12 @@ def _check_workload_declarations(root: Path, names: tuple[str, ...], python: Pat
 
 
 def observe(
-    root: Path, python: Path, *, synth_profile: Path | None = None, workload_names: tuple[str, ...] | None = None
+    root: Path,
+    python: Path,
+    *,
+    synth_profile: Path | None = None,
+    workload_names: tuple[str, ...] | None = None,
+    require_source_origin: bool = False,
 ) -> dict:
     """Bind the source package, venv and base Python selected by an operator."""
     root = _canonical_path(Path(root), exists=True)
@@ -100,6 +111,15 @@ def observe(
     _check_workload_declarations(root, names, python)
     workloads = {name: _source_tree(root / "workloads" / name) for name in names}
     package_inventory = _source_tree(package, skip_python_cache=True)
+    source_origin = (
+        selected_source_origin(
+            root,
+            package_inventory,
+            _source_tree(package, skip_python_cache=True, readonly_modes=True),
+        )
+        if require_source_origin
+        else None
+    )
     missing_capture_api = _capture_api_missing(root)
     missing_frontend_trace_api = _frontend_trace_api_missing(root)
     missing_static_integer_api = _static_integer_reference_api_missing(root)
@@ -112,6 +132,7 @@ def observe(
         "root": str(root),
         "python": str(python),
         "package": package_inventory,
+        **({"source_origin": source_origin} if source_origin is not None else {}),
         "same_conversion_capture_api": {
             "status": "available_for_sealed_preflight" if not missing_capture_api else "incompatible",
             "missing": list(missing_capture_api),
@@ -155,7 +176,12 @@ def stage(selection: dict, destination: Path) -> dict:
     """Copy selected package bytes once; keep the audited host runtime explicit."""
     if (
         selection.get("schema") != SCHEMA
-        or observe(Path(selection["root"]), Path(selection["python"]), workload_names=tuple(selection["workloads"]))
+        or observe(
+            Path(selection["root"]),
+            Path(selection["python"]),
+            workload_names=tuple(selection["workloads"]),
+            require_source_origin="source_origin" in selection,
+        )
         != selection
     ):
         raise ValueError("selected Model2MLIR runtime changed before freezing")
@@ -188,10 +214,21 @@ def stage(selection: dict, destination: Path) -> dict:
     for path in (p for p in destination.rglob("*") if p.is_dir()):
         path.chmod(path.stat().st_mode & ~0o222)
     destination.chmod(destination.stat().st_mode & ~0o222)
+    if "source_origin" in selection:
+        # The source remains owned by its Git repository through the copy; a
+        # concurrent commit or edit is real selected-origin drift.
+        if (
+            git_origin(Path(selection["root"]), clean=True)["commit"] != selection["source_origin"]["commit"]
+            or _source_tree(Path(selection["root"]) / "m2m", skip_python_cache=True) != selection["package"]
+        ):
+            raise ValueError("selected Model2MLIR origin changed while staging")
+    frozen_package = _source_tree(destination / "m2m")
+    if "source_origin" in selection and frozen_package != selection["source_origin"]["readonly_package"]:
+        raise ValueError("selected Model2MLIR readonly copy differs from source bytes or executable modes")
     return {
         **selection,
         "frozen_root": str(destination),
-        "frozen_package": _source_tree(destination / "m2m"),
+        "frozen_package": frozen_package,
         "frozen_workloads": {name: _source_tree(destination / "workloads" / name) for name in selection["workloads"]},
     }
 
@@ -235,6 +272,10 @@ def verify_frozen_copy(frozen: dict) -> None:
         raise ValueError("frozen Model2MLIR workload membership changed")
     if _source_tree(copied / "m2m") != frozen.get("frozen_package"):
         raise ValueError("frozen Model2MLIR source package changed")
+    if "source_origin" in frozen:
+        origin = frozen["source_origin"]
+        if not isinstance(origin, dict) or origin.get("readonly_package") != frozen["frozen_package"]:
+            raise ValueError("frozen Model2MLIR source package differs from selected readonly origin")
     if not isinstance(frozen.get("frozen_workloads"), dict) or set(frozen["frozen_workloads"]) != set(
         frozen["workloads"]
     ):
@@ -266,10 +307,15 @@ def sealed_capture_config(selected: dict, artifact_root: Path) -> dict:
     """Bind generation captures to the selected owner, using copied sources after freezing."""
     copied = "frozen_root" in selected
     private = artifact_root / "private"
-    return {
+    config = {
         "m2m_root": selected["frozen_root" if copied else "root"],
         "package": selected["frozen_package" if copied else "package"],
         "venv": str(Path(selected["python"]).parent.parent),
         "runs_root": str(private / "sealed-captures"),
         "tmp_root": str(private / "tmp"),
     }
+    if copied and "source_origin" in selected:
+        selector = frozen_selector(private / "m2m-runtime.json")
+        verify_frozen_selector(selector, Path(selected["frozen_root"]), selected["frozen_package"])
+        config["frozen_origin"] = selector
+    return config

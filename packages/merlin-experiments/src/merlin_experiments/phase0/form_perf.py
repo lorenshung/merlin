@@ -31,6 +31,7 @@ import copy
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
+from math import prod
 from pathlib import Path
 from typing import Any
 
@@ -100,13 +101,23 @@ def gemm_extents(entry: Mapping[str, Any]) -> tuple[int, int, int]:
     return int(entry["M"]), int(entry.get("K") or 1), int(entry["N"])
 
 
-def predict(entry: Mapping[str, Any], machine, *, placement: str | None = None) -> dict[str, Any]:
-    """Price array contractions only; expose forms without a matching cycle model."""
+def predict(
+    entry: Mapping[str, Any], machine, *, placement: str | None = None, batch_slices: int = 1
+) -> dict[str, Any]:
+    """Price every disjoint slice of a group, retaining the one-slice device form."""
     from merlin.perf.derived_bound import is_unknown
     from merlin.perf.mesh_occupancy import tile_issue_cycles
 
     rows, depth, cols = gemm_extents(entry)
-    out: dict[str, Any] = {"macs": int(rows) * int(depth) * int(cols), "rows": rows, "depth": depth, "cols": cols}
+    if type(batch_slices) is not int or batch_slices < 1:
+        raise ValueError("batch_slices must be a positive integer")
+    out: dict[str, Any] = {
+        "macs": int(rows) * int(depth) * int(cols) * batch_slices,
+        "rows": rows,
+        "depth": depth,
+        "cols": cols,
+        "batch_slices": batch_slices,
+    }
     if placement == "host" or entry.get("op") not in ("matmul", "conv2d"):
         out["predicted_cycles"] = None
         out["unpriced_reason"] = (
@@ -120,9 +131,10 @@ def predict(entry: Mapping[str, Any], machine, *, placement: str | None = None) 
         out["predicted_cycles"] = None
         out["unpriced_reason"] = refusals.get("array_rows") or "the array geometry is not derivable from the facts"
         return out
-    out["predicted_cycles"] = tile_issue_cycles(
+    per_slice_cycles = tile_issue_cycles(
         rows, depth, cols, array_rows=int(machine.array_rows), array_cols=int(machine.array_cols)
     )
+    out["predicted_cycles"] = per_slice_cycles * batch_slices
     out["pricing"] = "merlin.perf.mesh_occupancy.tile_issue_cycles over the RTL-derived array geometry"
     return out
 
@@ -153,7 +165,16 @@ def application_members(target: str, module, binding, *, weight_args=None, oracl
             if k not in ("name", "scale_granularity")
         }
         key = device_class_key(entry, activation=G.activation_source(group, stated.stored_operand))
-        members.append({"group": group.index, "placement": group.placement, "key": key, "entry": entry})
+        members.append(
+            {
+                "group": group.index,
+                "placement": group.placement,
+                "key": key,
+                "entry": entry,
+                "batch_shape": list(stated.batch_shape),
+                "batch_slices": prod(stated.batch_shape) if stated.batch_shape else 1,
+            }
+        )
     operand = str(binding.operand_dtype)
     for form in G.host_reduction_forms(groups):
         stated_reduction = G.reduction_entry(form, operand_dtype=operand)
@@ -170,7 +191,9 @@ def application_members(target: str, module, binding, *, weight_args=None, oracl
             }
         )
     for member in members:
-        member["price"] = predict(member["entry"], machine, placement=member["placement"])
+        member["price"] = predict(
+            member["entry"], machine, placement=member["placement"], batch_slices=member.get("batch_slices", 1)
+        )
     return {"members": members, "unstated": unstated, "groups": len(groups)}
 
 
@@ -247,6 +270,8 @@ def aggregate(applications: Mapping[str, Mapping[str, Any]], *, tolerance_graded
                     "group": member["group"],
                     "placement": member["placement"],
                     "entry": member["entry"],
+                    "batch_shape": member.get("batch_shape", []),
+                    "batch_slices": member.get("batch_slices", 1),
                     "price": member["price"],
                     "share_weight": weight,
                     **({"host_region": member["host_region"]} if "host_region" in member else {}),
@@ -856,7 +881,8 @@ def claim_model_form_statistics(
         "within_iteration_extent_share": (within_extents / total) if total else None,
         "outside_iteration_extent_share": (outside_extents / total) if total else None,
         "extent_qualification": (
-            "One public group of the same form class must dominate all three GEMM extents. "
+            "One public group of the same form class must dominate all three per-slice GEMM extents "
+            "and the disjoint batch-slice multiplicity. "
             "This is only a conservative scale diagnostic, not a performance or correctness proof."
         ),
         "uncovered_classes": sorted({class_id(m["key"]) for m in found["members"]} - covered),
@@ -870,7 +896,8 @@ def _iteration_extent_shares(
     """Cost in/out of the public iteration groups' observed extent envelope, without leaking shapes.
 
     A per-axis maximum assembled from different examples would falsely cover a combination that no
-    example exercised. Require one actual member to dominate all three extents instead.
+    example exercised. Require one actual member to dominate all three per-slice extents and the
+    batch-slice multiplicity instead.
     """
     within = outside = 0.0
     for member in claim_members:
@@ -878,11 +905,12 @@ def _iteration_extent_shares(
         if row is None:
             continue  # Already reported by uncovered_classes / covered_share.
         extent = gemm_extents(member["entry"])
-        exemplars = (public.get("entry") for public in row.get("members") or [])
+        exemplars = row.get("members") or []
         witnessed = any(
-            all(observed >= required for observed, required in zip(gemm_extents(entry), extent))
-            for entry in exemplars
-            if isinstance(entry, Mapping)
+            all(observed >= required for observed, required in zip(gemm_extents(public["entry"]), extent))
+            and int(public.get("batch_slices", 1)) >= int(member.get("batch_slices", 1))
+            for public in exemplars
+            if isinstance(public, Mapping) and isinstance(public.get("entry"), Mapping)
         )
         if witnessed:
             within += float(member["price"][basis])

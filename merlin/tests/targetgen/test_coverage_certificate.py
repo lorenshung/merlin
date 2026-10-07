@@ -12,6 +12,7 @@ So it must state its own evidence, and carry the run beside the plan when a run 
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 
 from merlin.targetgen import coverage_certificate as CC
 from merlin.targetgen.compute_units import SemanticCapability
@@ -158,6 +159,107 @@ def test_requested_precision_is_not_a_verified_capture_conversion():
     )
     assert unknown_cert["n_unknown_capture_formats"] == 1
     assert unknown_cert["precision_transform_verification"]["status"] == "unknown_capture_format"
+
+
+def test_typed_host_source_operations_have_a_complete_precision_census():
+    """Frozen typed scalar/control/result values are evidence, not a target capability."""
+    from merlin.targetgen.capsule_source import model_op_demands_checked
+    from merlin.targetgen.routing import route_plan_on
+
+    source = '''"builtin.module"() ({
+      "func.func"() <{sym_name = "forward", function_type = (tensor<2xf32>) -> tensor<2xi8>}> ({
+      ^bb0(%x: tensor<2xf32>):
+        %scale = "arith.constant"() <{value = 1.000000e+00 : f32}> {prov.op = "quantize", prov.family = "quantize"} : () -> f32
+        %s = "tensor.splat"(%scale) {prov.op = "quantize", prov.family = "quantize"} : (f32) -> tensor<f32>
+        %zero = "arith.constant"() <{value = 0 : i64}> {prov.op = "quantize", prov.family = "quantize"} : () -> i64
+        %z = "tensor.splat"(%zero) {prov.op = "quantize", prov.family = "quantize"} : (i64) -> tensor<i64>
+        %q = "quant_ext.quantize_per_tensor"(%x, %s, %z) <{quant_min = -128 : i64, quant_max = 127 : i64}> {prov.op = "quantize", prov.family = "quantize", prov.region_id = "q0"} : (tensor<2xf32>, tensor<f32>, tensor<i64>) -> tensor<2xi8>
+        "func.return"(%q) : (tensor<2xi8>) -> ()
+      }) : () -> ()
+    }) : () -> ()'''
+    demands = model_op_demands_checked(source, "int8")
+    assert len(demands) == 5
+    plan = route_plan_on(demands, [])
+    certificate = CC.build(plan, {}, linalg_mlir=source)
+    assert certificate["n_eligible"] == 0
+    assert certificate["n_unknown_capture_formats"] == 0
+    assert certificate["n_precision_transform_obligations"] == 0
+    assert certificate["precision_transform_verification"]["status"] == "not_required"
+    assert all(row["target_eligible"] is False for row in certificate["regions"])
+    assert certificate["regions"][4]["source_precision_witness"]["operand_types"] == [
+        "tensor<2xf32>", "tensor<f32>", "tensor<i64>"
+    ]
+
+    # A typed operation may not be lent to another demand by a reordered plan.
+    reordered = route_plan_on([demands[1], demands[0], *demands[2:]], [])
+    assert CC.build(reordered, {}, linalg_mlir=source)["n_unknown_capture_formats"] == 5
+
+    # A dynamic tensor shape is not a complete source type witness.
+    dynamic = source.replace("tensor<2xf32>", "tensor<?xf32>")
+    dynamic_demands = model_op_demands_checked(dynamic, "int8")
+    dynamic_cert = CC.build(route_plan_on(dynamic_demands, []), {}, linalg_mlir=dynamic)
+    assert dynamic_cert["n_unknown_capture_formats"] > 0
+
+    # A known bf16 source remains a known source type, not host admission.
+    bf16 = source.replace("f32", "bf16")
+    bf16_demands = model_op_demands_checked(bf16, "int8")
+    assert len(bf16_demands) == len(demands)
+    bf16_cert = CC.build(route_plan_on(bf16_demands, []), {}, linalg_mlir=bf16)
+    assert bf16_cert["n_unknown_capture_formats"] == 0
+    assert "bf16" in bf16_cert["regions"][4]["source_precision_witness"]["operand_types"][0]
+
+
+def test_typed_source_cannot_clear_unverified_accelerator_contraction():
+    from merlin.targetgen.capsule_source import model_op_demands_checked
+    from merlin.targetgen.routing import route_plan_on
+
+    source = '''builtin.module {
+      func.func @forward(%a: tensor<2x2xi8>, %b: tensor<2x2xi8>, %c: tensor<2x2xi32>) -> tensor<2x2xi32> {
+        %r = "linalg.matmul"(%a, %b, %c) {prov.op = "matmul", prov.family = "contraction", prov.region_id = "m0"} : (tensor<2x2xi8>, tensor<2x2xi8>, tensor<2x2xi32>) -> tensor<2x2xi32>
+        func.return %r : tensor<2x2xi32>
+      }
+    }'''
+    parsed = model_op_demands_checked(source, "int8")
+    assert len(parsed) == 1 and parsed[0].captured_input_formats == ("int8", "int8")
+    incomplete = replace(parsed[0], captured_input_formats=(None, "int8"))
+    plan = route_plan_on([incomplete], [])
+    supported = {"contraction": SemanticCapability(family="contraction", dtypes=("int8",))}
+    guarded = CC.build(plan, supported, linalg_mlir=source)
+    assert guarded["n_eligible"] == 0
+    assert guarded["n_unknown_capture_formats"] == 1
+    assert "source_precision_witness" not in guarded["regions"][0]
+
+    # Without a declared contraction capability, the same source is a
+    # definitive hardware noncandidate; this does not admit host semantics.
+    unsupported = CC.build(plan, {}, linalg_mlir=source)
+    assert unsupported["n_unknown_capture_formats"] == 0
+    assert unsupported["regions"][0]["source_precision_witness"]["status"] == "typed_source"
+
+
+def test_mixed_source_closes_only_when_every_possible_tensor_input_is_hardware_refused():
+    from merlin.targetgen.capsule_source import model_op_demands_checked
+    from merlin.targetgen.routing import route_plan_on
+
+    source = '''builtin.module {
+      func.func @forward(%idx: tensor<2xi64>, %weight: tensor<2xf32>) -> tensor<2xf32> {
+        %r = "linalg.generic"(%idx, %weight) {prov.op = "embedding", prov.family = "gather_scatter", prov.region_id = "g0"} : (tensor<2xi64>, tensor<2xf32>) -> tensor<2xf32>
+        func.return %r : tensor<2xf32>
+      }
+    }'''
+    demands = model_op_demands_checked(source, "int8")
+    assert len(demands) == 1 and demands[0].captured_input_formats == (None,)
+    plan = route_plan_on(demands, [])
+    int8_copy = {"movement": SemanticCapability(family="movement", dtypes=("int8",), forms=("copy",))}
+    refused = CC.build(plan, int8_copy, linalg_mlir=source)
+    assert refused["n_unknown_capture_formats"] == 0
+    assert refused["regions"][0]["source_precision_witness"]["operand_element_types"] == ["i64", "f32"]
+
+    # One supported tensor format is enough to keep eligibility unresolved;
+    # the census may not decide which of mixed index/data operands is hardware.
+    f32_copy = {"movement": SemanticCapability(family="movement", dtypes=("fp32",), forms=("copy",))}
+    possible = CC.build(plan, f32_copy, linalg_mlir=source)
+    assert possible["n_unknown_capture_formats"] == 1
+    assert "source_precision_witness" not in possible["regions"][0]
 
 
 def test_unconverted_elementwise_is_not_eligible_at_requested_integer_format():

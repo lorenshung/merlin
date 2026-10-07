@@ -1318,6 +1318,12 @@ def synthesize(
     callers freezing a new experiment must supply the selected contract.
     """
     target = str(spec_doc.get("target") or "")
+    floor_record = spec_doc.get("certification_floor")
+    if floor_record is not None:
+        floor = floor_record.get("tier") if isinstance(floor_record, dict) else None
+        declared_tiers = [*(spec_doc.get("oracle_tiers") or ()), *(spec_doc.get("oracle_tiers_declared") or ())]
+        if not isinstance(floor, str) or floor not in declared_tiers:
+            raise SynthesisError("direct certification floor is absent from selected oracle-tier declarations")
     cells = list(spec_doc.get("cells") or ())
     probes = list((spec_doc.get("boundaries") or {}).get("extent_probes") or ())
     ws = dict(workload_spec or {})
@@ -2334,8 +2340,13 @@ def synthesize(
                         f"passes, the shallowest reduction that writes the accumulator more than once. "
                         f"Emitted only because this target's residency regimes yield no depth of their "
                         f"own; where they do, they produce deeper capsules and this would duplicate one. "
-                        f"Costs {_cert_pt['predicted_seconds']}s against a {_cert_pt['budget_s']}s "
-                        f"budget -- priced on the OUTPUT tile, which the reduction depth does not move"
+                        + (
+                            "Certification cost is unknown: this is a direct functional obligation, "
+                            "not a cost-model affordability claim"
+                            if _cert_pt.get("cost_status") == "unknown_not_priced"
+                            else f"Costs {_cert_pt['predicted_seconds']}s against a {_cert_pt['budget_s']}s "
+                            f"budget -- priced on the OUTPUT tile, which the reduction depth does not move"
+                        )
                     ),
                 )
             )
@@ -2379,9 +2390,10 @@ def synthesize(
     # target with a different edge; an application shape is the opposite by design -- it is evidence
     # about one model, and it is not portable, which is why it carries its own provenance.
     #
-    # The requirement side has already done the hard part: grouped the application's regions by what
-    # the compiler must do with them, and sized each class against what a certification costs. Here we
-    # only turn each sized capsule into an entry. A class that could not be sized is not in `required`
+    # The requirement side has already grouped the application's regions by what the compiler must
+    # do with them and selected each shape. Without a direct floor it prices the anchor and caps a
+    # larger extension; with a floor both the functional anchor and full shape require direct oracle
+    # execution, with cost unknown. A class that could not be sized is not in `required`
     # at all -- it is in the axis's `refused` list with its reason, which is reported rather than
     # raised because an unaffordable behaviour is a fact about the budget, not a broken corpus.
     _app = spec_doc.get("application_shapes") or {}
@@ -2394,6 +2406,12 @@ def synthesize(
     for _cap in _app.get("required") or ():
         _cls = str(_cap.get("class") or "")
         _tier = str(_cap.get("tier") or "L3")
+        _floor_tier = (spec_doc.get("certification_floor") or {}).get("tier")
+        _direct_floor_member = (
+            isinstance(_floor_tier, str)
+            and _tier == _floor_tier
+            and (_cap.get("basis") or {}).get("cost_status") == "unknown_not_priced"
+        )
         _dtype = _cls.split("/")[1] if "/" in _cls else ""
         if not _dtype:
             continue
@@ -2401,7 +2419,7 @@ def synthesize(
         if _op is None:
             unwritable.append(f"application class {_cls}: no op materializes a contraction at {_dtype!r}")
             continue
-        if _tier != "L3" and _cls not in _certified_classes:
+        if _tier != "L3" and not _direct_floor_member and _cls not in _certified_classes:
             unwritable.append(
                 f"application class {_cls}: its L2 capsule extends a cycle-accurate sibling that was "
                 f"not emitted, so it would rest on nothing; dropped rather than shipped as a large "
@@ -2409,10 +2427,13 @@ def synthesize(
             )
             continue
         _slug = _cls.replace("/", "_").replace("-", "_")
+        _member = str((_cap.get("basis") or {}).get("member") or "")
+        _suffix = f"full_{_tier.lower()}" if _member == "full_shape" else _tier.lower()
+        _anchor_name = f"{SYNTH_PREFIX}_app_{_slug}_{_tier.lower()}"
         entry = {
             "cat": "layers",
             "kind": "layer",
-            "name": f"{SYNTH_PREFIX}_app_{_slug}_{_tier.lower()}",
+            "name": f"{SYNTH_PREFIX}_app_{_slug}_{_suffix}",
             "op": _op,
             "operand_dtype": _dtype,
             "lhs": "A0",
@@ -2434,7 +2455,10 @@ def synthesize(
                     else ""
                 )
                 + (
-                    f"; extends {_cap['extends']}, which carries the cycle-accurate guarantee this "
+                    f"; has functional anchor {_anchor_name}, which also requires direct "
+                    f"{_tier} certification; neither member is priced or certified by derivation"
+                    if _member == "full_shape" and _cap.get("extends")
+                    else f"; extends {_cap['extends']}, which carries the cycle-accurate guarantee this "
                     f"larger shape rests on"
                     if _cap.get("extends")
                     else ""
@@ -2443,7 +2467,9 @@ def synthesize(
             "label": "public",
             "generalization": {"generalization_axis": "application"},
         }
-        if _tier != "L3":
+        if (_cap.get("basis") or {}).get("cost_status") == "unknown_not_priced":
+            entry["certification_cost"] = "unknown_not_priced"
+        if _tier != "L3" and not _direct_floor_member:
             # AN L2-ONLY CAPSULE IS AN EXTENSION, NEVER A SUBSTITUTE. The tier is capped because this
             # shape is too large to certify, and `extends` names the sibling that was -- so a reader
             # (and the gate) can tell a large capsule resting on a guarantee from one resting on
@@ -2462,7 +2488,7 @@ def synthesize(
         _mark_source(entry)
         entry["pass_requirements"] = pass_requirements_for(entry, spec_doc)
         entries.append(entry)
-        if _tier == "L3":
+        if _tier == "L3" or _direct_floor_member:
             _certified_classes.add(_cls)
 
     # ---- the HELD-OUT CLAIM axis --------------------------------------------------------------------

@@ -208,6 +208,26 @@ def test_model_snapshot_does_not_launder_source_aliases(tmp_path, alias):
         )
 
 
+def test_retained_model_snapshot_root_rejects_alias(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "capsule.yaml").write_text("name: M\nkind: model\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(CR, "_run_suite", lambda *_args, **_kwargs: [])
+
+    with pytest.raises(ValueError, match="may not traverse a symlink"):
+        CR.run_suite(
+            [{"name": "M", "kind": "model", "__dir__": str(source)}],
+            tmp_path / "package",
+            runs_root=tmp_path / "runs",
+            model_snapshot_root=alias,
+        )
+    assert list(outside.iterdir()) == []
+
+
 def test_model_suite_cleanup_preserves_shared_store_permissions(tmp_path, monkeypatch):
     from merlin.common import content_store
 
@@ -366,15 +386,18 @@ def test_native_host_call_is_accounted_without_claiming_target_host_execution():
     assert "required_model_lane_unexercised" not in check["violations"]
 
 
-def test_must_accelerate_requires_runtime_outline_to_preserve_planned_groups():
+def test_must_accelerate_does_not_grade_the_legacy_outline():
     from merlin.targetgen import capsule_grade as CGR
 
     capsule = {"semantic": {"must_accelerate": True}}
     row = _valid_model_row()
     missing = CGR.model_execution_check(row, capsule)
-    assert "planned_outlined_alignment_unverified" in missing["violations"]
+    assert missing["kind"] == "candidate_whole_program_execution"
+    assert "candidate_source_placement_unverified" in missing["violations"]
+    assert "planned_outlined_alignment_unverified" not in missing["violations"]
+    assert "dynamic_dispatch_ledger_missing_or_malformed" not in missing["violations"]
     withheld = CGR.enforce_model_execution_check({**row, "status": "pass", "tiers": {}}, capsule, target="gemmini")
-    assert withheld["status"] == "incomplete" and withheld["failure"]["plane"] == "model_placement"
+    assert withheld["status"] == "incomplete" and withheld["failure"]["plane"] == "candidate_model_execution"
 
     alignment = {
         "schema": "planned_outlined_alignment_v1",
@@ -387,11 +410,11 @@ def test_must_accelerate_requires_runtime_outline_to_preserve_planned_groups():
     }
     row["mesh_execution"]["planned_outlined_alignment"] = alignment
     split = CGR.model_execution_check(row, capsule)
-    assert "planned_accelerator_group_split_in_outline" in split["violations"]
+    assert split["violations"] == missing["violations"]
 
     row["mesh_execution"]["planned_outlined_alignment"] = {**alignment, "status": "matched", "split_stages": []}
     matched = CGR.model_execution_check(row, capsule)
-    assert not [v for v in matched["violations"] if "outlined" in v]
+    assert matched["violations"] == missing["violations"]
 
 
 def _remove_scalar_lane(row: dict) -> None:
@@ -466,6 +489,94 @@ def test_budgeted_grade_pins_capsule_assets_before_starting_child(tmp_path, monk
     assert observed["pinned"].parent != observed["original"].parent
 
 
+def test_candidate_grade_uses_the_same_budgeted_child_and_pinned_source(tmp_path, monkeypatch):
+    capsule = _synthetic_model_capsule(tmp_path / "source", monkeypatch)
+    original = Path(capsule["__dir__"])
+    context = {
+        "runs_root": str(tmp_path / "runs"),
+        "run_id": "one-model",
+        "suite": "synthetic",
+        "dtype": "f32",
+        "contract": None,
+        "fourth_output_name": "lowered.llvm.mlir",
+    }
+    observed = {}
+
+    class _FinishedChild:
+        returncode = 0
+        pid = 1
+
+        def __init__(self, cmd, **_kwargs):
+            spec = json.loads(Path(cmd[cmd.index("--model-grade") + 1]).read_text())
+            pinned = Path(spec["capsule"]["__dir__"])
+            observed.update(context=spec["candidate_context"], pinned=pinned)
+            assert spec["candidate_context"] == context
+            assert spec["numeric_policy"] is None
+            assert pinned != original and (pinned / "capsule.yaml").is_file()
+            Path(cmd[cmd.index("--model-grade-out") + 1]).write_text(
+                json.dumps(
+                    {"status": "incomplete", "model_execution_check": {"kind": "candidate_whole_program_execution"}}
+                )
+            )
+
+        def communicate(self, timeout=None):
+            assert timeout == 11
+            return ("", None)
+
+    import subprocess as sp
+
+    monkeypatch.setattr(sp, "Popen", _FinishedChild)
+    result = CR._grade_model_capsule_unlocked(
+        capsule, target="synthetic", timeout=7, budget_s=11, candidate_context=context
+    )
+    assert result["status"] == "incomplete"
+    assert result["model_execution_check"]["kind"] == "candidate_whole_program_execution"
+    assert observed["pinned"].parent != original.parent
+
+
+def test_candidate_budget_child_retains_suite_owned_source_pin(tmp_path, monkeypatch):
+    capsule = _synthetic_model_capsule(tmp_path / "source", monkeypatch)
+    pinned = Path(capsule["__dir__"])
+    source_sha = hashlib.sha256((pinned / "capsule.yaml").read_bytes()).hexdigest()
+    context = {
+        "runs_root": str(tmp_path / "runs"),
+        "run_id": "M",
+        "suite": "synthetic",
+        "dtype": "f32",
+        "contract": None,
+        "fourth_output_name": "lowered.llvm.mlir",
+    }
+
+    class _FinishedChild:
+        returncode = 0
+        pid = 1
+
+        def __init__(self, cmd, **_kwargs):
+            spec = json.loads(Path(cmd[cmd.index("--model-grade") + 1]).read_text())
+            assert spec["capsule"]["__dir__"] == str(pinned)
+            Path(cmd[cmd.index("--model-grade-out") + 1]).write_text(
+                json.dumps({"status": "incomplete", "candidate_source_pin": str(pinned / "capsule.yaml")})
+            )
+
+        def communicate(self, timeout=None):
+            return ("", None)
+
+    import subprocess as sp
+
+    monkeypatch.setattr(sp, "Popen", _FinishedChild)
+    result = CR._grade_model_capsule_unlocked(
+        capsule,
+        target="synthetic",
+        timeout=7,
+        budget_s=11,
+        candidate_context=context,
+        candidate_source_pinned=CR._SUITE_MODEL_PIN,
+    )
+    source_pin = Path(result["candidate_source_pin"])
+    assert source_pin.is_file(), "the candidate source pin must survive child return and postcheck"
+    assert hashlib.sha256(source_pin.read_bytes()).hexdigest() == source_sha
+
+
 def test_suite_pins_model_assets_before_build_and_op_grading(tmp_path, monkeypatch):
     """The public-cache generation may be collected while the preceding op phase is still running.
 
@@ -477,7 +588,13 @@ def test_suite_pins_model_assets_before_build_and_op_grading(tmp_path, monkeypat
     source.mkdir(parents=True)
     (source / "capsule.yaml").write_text("name: M\nkind: model\n", encoding="utf-8")
     original = source.resolve()
-    model = {"name": "M", "kind": "model", "__dir__": str(original), "gate": {"after_op_pass_fraction": 0.0}}
+    model = {
+        "name": "M",
+        "kind": "model",
+        "__dir__": str(original),
+        "gate": {"after_op_pass_fraction": 0.0},
+        "semantic": {"must_accelerate": True},
+    }
     op = {"name": "A", "kind": "isa"}
     observed = {}
 
@@ -492,6 +609,7 @@ def test_suite_pins_model_assets_before_build_and_op_grading(tmp_path, monkeypat
             return {"capsule": "A", "kind": "isa", "status": "pass"}
         pinned = Path(capsule["__dir__"])
         observed["pinned"] = pinned
+        assert capsule["__suite_model_pin"] is CR._SUITE_MODEL_PIN
         assert pinned != original
         assert (pinned / "capsule.yaml").is_file()
         return {"capsule": "M", "kind": "model", "status": "pass"}
@@ -502,6 +620,108 @@ def test_suite_pins_model_assets_before_build_and_op_grading(tmp_path, monkeypat
     assert [row["status"] for row in out] == ["pass", "pass"]
     assert "pinned" in observed
     assert not observed["pinned"].exists(), "suite pin must be cleaned after the model result lands"
+
+
+def test_grade_rechecks_durable_model_source_pin_after_suite_returns(tmp_path, monkeypatch):
+    """The score's second native audit must rehash the same source bytes after suite return."""
+    from merlin.targetgen import capsule_grade as grade_module
+    from merlin.targetgen.native_model_execution import _pinned_native_file
+
+    source = tmp_path / "source" / "M"
+    source.mkdir(parents=True)
+    (source / "capsule.yaml").write_text("name: M\nkind: model\n", encoding="utf-8")
+    (source / "capsule.interface.mlir").write_bytes(b"module { func.func @entry() { return } }\n")
+    (source / "golden.yaml").write_text("withheld: [1, 2, 3]\n", encoding="utf-8")
+    capsule = {"name": "M", "kind": "model", "label": "public", "__dir__": str(source)}
+    package = tmp_path / "package"
+    package.mkdir()
+    runs_root = tmp_path / "runs"
+    observed = {}
+
+    monkeypatch.setattr(grade_module, "load_package", lambda *a, **k: SimpleNamespace(integrity_exempt=False))
+    monkeypatch.setattr(grade_module, "integrity_scan", lambda *a, **k: None)
+    monkeypatch.setattr(grade_module, "build_package", lambda *a, **k: None)
+    monkeypatch.setattr(grade_module.CR, "discover_capsules", lambda *a, **k: [capsule])
+
+    def suite(frozen, *_args, **_kwargs):
+        pinned = Path(frozen[0]["__dir__"]) / "capsule.interface.mlir"
+        observed["pin"] = pinned
+        return [
+            {
+                "capsule": "M",
+                "kind": "model",
+                "label": "public",
+                "status": "incomplete",
+                "tiers": {},
+                "candidate_emission": {
+                    "source_interface": {
+                        "path": str(pinned),
+                        "sha256": hashlib.sha256(pinned.read_bytes()).hexdigest(),
+                        "size_bytes": pinned.stat().st_size,
+                    }
+                },
+            }
+        ]
+
+    monkeypatch.setattr(grade_module.CR, "_run_suite", suite)
+    monkeypatch.setattr(
+        grade_module.CV,
+        "aggregate",
+        lambda *a, **k: {
+            "by_tier_reached": {},
+            "instruction_class_coverage": {},
+            "mode_coverage": {},
+            "unavailable": {},
+            "acceleratable_coverage": {},
+        },
+    )
+
+    def second_audit(result, *_args, **_kwargs):
+        observed["rehash"] = _pinned_native_file(result["candidate_emission"], "source_interface")
+        return result
+
+    monkeypatch.setattr(grade_module, "enforce_model_execution_check", second_audit)
+    original_bytes = (source / "capsule.interface.mlir").read_bytes()
+    grade_module.grade(
+        package,
+        capsules_root=source.parent,
+        runs_root=runs_root,
+        target="synthetic",
+        oracle_adapters={},
+        model_snapshot_root=runs_root / ".private_model_sources",
+    )
+    assert observed["rehash"] == observed["pin"]
+    assert observed["pin"].is_file(), "native source pin must remain inspectable after grading"
+    first_pin = observed["pin"]
+    assert first_pin.read_bytes() == original_bytes
+    assert first_pin.stat().st_mode & 0o222 == 0
+    assert first_pin.parent.stat().st_mode & 0o777 == 0o700
+    (source / "capsule.interface.mlir").write_bytes(b"module { func.func @changed() { return } }\n")
+    grade_module.grade(
+        package,
+        capsules_root=source.parent,
+        runs_root=runs_root,
+        target="synthetic",
+        oracle_adapters={},
+        model_snapshot_root=runs_root / ".private_model_sources",
+    )
+    assert observed["pin"] != first_pin
+    assert observed["pin"].read_bytes() != original_bytes
+    assert first_pin.read_bytes() == original_bytes, "later attempts may not rewrite earlier native source pins"
+
+    # An agent-facing diagnostic gets the exact same second audit while its
+    # source closure is temporary; no golden is retained in its output tree.
+    diagnostic_root = tmp_path / "selfcheck_out"
+    grade_module.grade(
+        package,
+        capsules_root=source.parent,
+        runs_root=diagnostic_root,
+        target="synthetic",
+        oracle_adapters={},
+    )
+    assert observed["rehash"] == observed["pin"]
+    assert not observed["pin"].exists()
+    assert not list(diagnostic_root.rglob("golden.yaml"))
 
 
 @pytest.mark.parametrize("budget", [3.0])
@@ -520,8 +740,11 @@ def test_budget_stops_a_grade_that_overruns(tmp_path, monkeypatch, budget):
 
     monkeypatch.setattr(sp, "Popen", _fake_popen)
     t0 = time.monotonic()
+    # Exercise the real lock and child supervisor without contending with an
+    # operator's live target grade: lock admission precedes the capsule timer.
+    target = f"budget-test-{tmp_path.name}"
     out = CR._grade_model_capsule(
-        {"name": "GX0", "label": "public"}, target="gemmini", timeout=900, budget_s=budget, numeric_policy=None
+        {"name": "GX0", "label": "public"}, target=target, timeout=900, budget_s=budget, numeric_policy=None
     )
     elapsed = time.monotonic() - t0
     assert budget <= elapsed < budget + 20, elapsed
@@ -670,7 +893,8 @@ def test_model_rows_use_execution_evidence_without_fabricating_an_instruction_tr
     assert model["model_execution_check"]["status"] == "pass"
 
 
-def test_grade_persists_and_withholds_a_model_pass_from_the_wrong_required_engine(tmp_path, monkeypatch):
+@pytest.mark.parametrize("rtl_tiers", [frozenset({"L3"}), frozenset()])
+def test_grade_persists_and_withholds_a_model_pass_from_the_wrong_required_engine(tmp_path, monkeypatch, rtl_tiers):
     """Durable QA must not retain ``status/L3=pass`` when the in-memory proof rejects the engine."""
     pkg, caps = tmp_path / "pkg", tmp_path / "caps"
     pkg.mkdir()
@@ -703,6 +927,7 @@ def test_grade_persists_and_withholds_a_model_pass_from_the_wrong_required_engin
     durable.parent.mkdir(parents=True)
     durable.write_text(json.dumps(result))
     monkeypatch.setenv("MERLIN_REQUIRED_RTL_ENGINE", "gsim")
+    monkeypatch.setattr(CGR.CR, "_rtl_tiers_of", lambda _target: rtl_tiers)
     monkeypatch.setattr(CGR, "load_package", lambda d, contract=None: _StubPkg())
     monkeypatch.setattr(CGR, "integrity_scan", lambda p: None)
     monkeypatch.setattr(CGR, "build_package", lambda p: None)
@@ -960,6 +1185,29 @@ def test_child_entry_writes_a_result(tmp_path, monkeypatch):
     monkeypatch.setattr(CR, "_grade_model_capsule_inline", lambda c, **kw: {"capsule": c["name"], "status": "pass"})
     assert CR.main(["--model-grade", str(spec), "--model-grade-out", str(out)]) == 0
     assert json.loads(out.read_text()) == {"capsule": "M0", "status": "pass"}
+
+
+def test_candidate_child_entry_runs_candidate_only(tmp_path, monkeypatch):
+    spec, out = tmp_path / "spec.json", tmp_path / "res.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "capsule": {"name": "M0"},
+                "target": "synthetic",
+                "timeout": 30,
+                "package_dir": str(tmp_path),
+                "candidate_context": {"run_id": "M0"},
+            }
+        )
+    )
+    monkeypatch.setattr(CR, "_grade_model_capsule_inline", lambda *a, **kw: pytest.fail("legacy child ran"))
+    monkeypatch.setattr(
+        CR,
+        "_grade_candidate_model_capsule_inline",
+        lambda c, **kw: {"capsule": c["name"], "status": "incomplete", "context": kw["context"]},
+    )
+    assert CR.main(["--model-grade", str(spec), "--model-grade-out", str(out)]) == 0
+    assert json.loads(out.read_text()) == {"capsule": "M0", "status": "incomplete", "context": {"run_id": "M0"}}
 
 
 def test_the_kill_reaches_a_grandchild_that_left_the_process_group(tmp_path):

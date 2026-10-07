@@ -49,6 +49,41 @@ def validate_host_capabilities(
             raise ValueError(f"host capability {row['id']} has an invalid review status")
         if row.get("placement") != "host" or not isinstance(row.get("signature"), dict) or not row["signature"]:
             raise ValueError("host capability operations require host placement and typed signature constraints")
+        if "source_body" in row["signature"]:
+            raise ValueError("source_body must be an explicit host declaration field, not a signature constraint")
+        if "source_body" in row:
+            from merlin.frontends.linalg_boolean_patterns import (
+                STATIC_BOOLEAN_SOURCE_BODY_SCHEMA,
+                validate_static_boolean_source_body,
+            )
+            from merlin.frontends.linalg_math_patterns import (
+                STATIC_F32_MATH_SOURCE_BODY_SCHEMA,
+                validate_static_f32_math_source_body,
+            )
+            from merlin.frontends.linalg_patterns import validate_static_pointwise_source_body
+
+            allowed = {
+                "id",
+                "ops",
+                "families",
+                "family",
+                "placement",
+                "signature",
+                "status",
+                "numerical_contract",
+                "evidence",
+                "description",
+                "source_body",
+            }
+            if set(row) - allowed or not (row.get("ops") or row.get("families") or row.get("family")):
+                raise ValueError(f"host capability {row['id']} has unsupported fields or no selector")
+            body = row["source_body"]
+            if isinstance(body, dict) and body.get("schema") == STATIC_BOOLEAN_SOURCE_BODY_SCHEMA:
+                validate_static_boolean_source_body(body)
+            elif isinstance(body, dict) and body.get("schema") == STATIC_F32_MATH_SOURCE_BODY_SCHEMA:
+                validate_static_f32_math_source_body(body)
+            else:
+                validate_static_pointwise_source_body(body)
         if "quantization_parameters" in row["signature"]:
             validate_quantization_parameters(
                 row["signature"]["quantization_parameters"], source=f"host capability {row['id']!r}"
@@ -64,7 +99,73 @@ def validate_host_capabilities(
     return document
 
 
-def admit_host_operation(selected: dict | None, row: dict, signature: dict) -> dict:
+def _screen_source_body(declaration: dict, row: dict, signature: dict, source_operations: tuple | None) -> dict:
+    """Match every supplied parsed occurrence; never treat an omitted source as evidence."""
+    from dataclasses import asdict
+
+    from merlin.frontends.linalg_boolean_patterns import (
+        STATIC_BOOLEAN_SOURCE_BODY_SCHEMA,
+        recognize_static_boolean_body,
+    )
+    from merlin.frontends.linalg_math_patterns import (
+        STATIC_F32_MATH_SOURCE_BODY_SCHEMA,
+        recognize_static_f32_math_body,
+    )
+    from merlin.frontends.linalg_patterns import InvalidLinalgPattern, recognize_static_pointwise
+
+    if source_operations is None or not source_operations:
+        return {"status": "unknown", "reason": "source_body requires parsed source operations"}
+    if (
+        not isinstance(source_operations, tuple)
+        or ("count" in row and (type(row["count"]) is not int or row["count"] != len(source_operations)))
+        or row.get("mlir_operation") != "linalg.generic"
+        or len({id(op) for op in source_operations}) != len(source_operations)
+    ):
+        return {"status": "unsupported", "reason": "source_body occurrence roster differs from source row"}
+    try:
+        body = declaration["source_body"]
+        recognizer = {
+            STATIC_BOOLEAN_SOURCE_BODY_SCHEMA: recognize_static_boolean_body,
+            STATIC_F32_MATH_SOURCE_BODY_SCHEMA: recognize_static_f32_math_body,
+        }.get(body["schema"], recognize_static_pointwise)
+        patterns = tuple(recognizer(op) for op in source_operations)
+    except InvalidLinalgPattern as exc:
+        return {"status": "unsupported", "reason": f"source_body structural proof refused: {exc}"}
+    if any(
+        pattern.operation != body["operation"] or getattr(pattern, "predicate", None) != body.get("predicate")
+        for pattern in patterns
+    ):
+        return {"status": "unsupported", "reason": "source_body operation or predicate differs"}
+    operands, results, rank = (
+        signature.get("ordered_operand_dtypes"),
+        signature.get("ordered_result_dtypes"),
+        signature.get("rank"),
+    )
+    if not isinstance(operands, list) or not isinstance(results, list) or type(rank) is not int:
+        return {"status": "unknown", "reason": "source_body has no complete observed typed signature"}
+    if any(
+        operands != list(pattern.ordered_types[:-1])
+        or results != [pattern.ordered_types[-1]]
+        or rank != len(pattern.shape)
+        for pattern in patterns
+    ):
+        return {"status": "unsupported", "reason": "source_body differs from observed typed signature"}
+    return {
+        "status": "admitted",
+        "reason": "every parsed occurrence matches the declared static source body",
+        "proof": {
+            "schema": body["schema"],
+            "declaration": declaration["id"],
+            "operation": body["operation"],
+            "predicate": body.get("predicate"),
+            "patterns": [asdict(pattern) for pattern in patterns],
+        },
+    }
+
+
+def admit_host_operation(
+    selected: dict | None, row: dict, signature: dict, *, source_operations: tuple | None = None
+) -> dict:
     """Screen every selected host profile independently from accelerator admission."""
     if selected is None:
         return {
@@ -116,6 +217,12 @@ def admit_host_operation(selected: dict | None, row: dict, signature: dict) -> d
             )
             decision = admit_operation({**document, "operations": [declaration]}, operation, signature, "host")
             if "declaration" in decision:
+                if "source_body" in declaration:
+                    screened = _screen_source_body(declaration, row, signature, source_operations)
+                    if decision["status"] == "admitted" or source_operations is None:
+                        decision = {**decision, "status": screened["status"], "reason": screened["reason"]}
+                        if screened.get("proof") is not None:
+                            decision["source_body_proof"] = screened["proof"]
                 decisions.append(decision)
         verdict = next(
             (decision for decision in decisions if decision["status"] == "admitted"),
@@ -142,6 +249,11 @@ def admit_host_operation(selected: dict | None, row: dict, signature: dict) -> d
                 "capability_spec_sha256": selection.get("capability_spec_sha256"),
                 "dtype_strategy": selection.get("dtype_strategy"),
                 "decisions": decisions,
+                **(
+                    {"source_body_proof": verdict["source_body_proof"]}
+                    if verdict and "source_body_proof" in verdict
+                    else {}
+                ),
             }
         )
     verdict = next(
@@ -159,4 +271,15 @@ def admit_host_operation(selected: dict | None, row: dict, signature: dict) -> d
         **copy.deepcopy({key: verdict[key] for key in ("status", "review_status", "reviewed", "reason")}),
         "profiles": profiles,
         "qualification": "selected declaration screen; host lowering remains unverified",
+        **(
+            {
+                "source_body_proof": {
+                    **verdict["source_body_proof"],
+                    "profile": verdict["profile"],
+                    "capability_spec_sha256": verdict["capability_spec_sha256"],
+                }
+            }
+            if "source_body_proof" in verdict
+            else {}
+        ),
     }

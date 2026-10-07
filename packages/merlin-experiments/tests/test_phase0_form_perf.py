@@ -101,6 +101,54 @@ def test_non_array_forms_are_unpriced_and_require_conservative_coverage():
     assert all(row["required_reason"] == "unpriced_application_requires_all_forms" for row in coverage["classes"])
 
 
+def test_batch_price_multiplies_per_slice_issue_cycles_without_flattening_rows(monkeypatch):
+    machine = SimpleNamespace(array_rows=4, array_cols=4, refusals={})
+    entry = {"op": "matmul", "M": 3, "K": 5, "N": 6}
+    one = FP.predict(entry, machine)
+    five = FP.predict(entry, machine, batch_slices=5)
+    assert (five["rows"], five["depth"], five["cols"], five["batch_slices"]) == (3, 5, 6, 5)
+    assert five["macs"] == 5 * one["macs"]
+    assert five["predicted_cycles"] == 5 * one["predicted_cycles"]
+    # A nonlinear neutral cost witness distinguishes B separate invocations from flattened M.
+    from merlin.perf import mesh_occupancy
+
+    monkeypatch.setattr(mesh_occupancy, "tile_issue_cycles", lambda rows, *_args, **_kwargs: rows**2)
+    assert FP.predict(entry, machine, batch_slices=5)["predicted_cycles"] == 5 * 3**2
+    assert FP.predict({**entry, "M": 15}, machine)["predicted_cycles"] == 15**2
+    with pytest.raises(ValueError, match="positive integer"):
+        FP.predict(entry, machine, batch_slices=0)
+
+
+def test_application_members_retain_each_batch_shape_without_changing_slice_form(monkeypatch):
+    from merlin.targetgen import group_capsule_entries as capsules
+    from merlin.xdsl_dialects.lowering import compute_groups as groups_module
+    from merlin.xdsl_dialects.lowering import group_command as command
+
+    groups = [SimpleNamespace(index=i, placement="device", root=object()) for i in (0, 1)]
+    monkeypatch.setattr(groups_module, "form_groups", lambda *_args, **_kwargs: groups)
+    monkeypatch.setattr(capsules, "activation_source", lambda *_args: "intermediate")
+    monkeypatch.setattr(capsules, "host_reduction_forms", lambda *_args: [])
+    monkeypatch.setattr(
+        command,
+        "program",
+        lambda group, **_kwargs: command.GroupProgram(
+            entry={"op": "matmul", "M": 3, "K": 5, "N": 6, "epilogue": []},
+            stored_operand=1,
+            transposed=False,
+            batch_shape=(2,) if group.index == 0 else (5,),
+        ),
+    )
+    machine = SimpleNamespace(array_rows=4, array_cols=4, refusals={})
+    found = FP.application_members("synthetic", None, SimpleNamespace(operand_dtype="int8"), machine=machine)
+    first, second = found["members"]
+    assert (first["batch_shape"], second["batch_shape"]) == ([2], [5])
+    assert (first["batch_slices"], second["batch_slices"]) == (2, 5)
+    assert first["entry"] == second["entry"]
+    assert second["price"]["predicted_cycles"] * 2 == first["price"]["predicted_cycles"] * 5
+    (form,) = FP.aggregate({"iteration": found})["classes"]
+    assert [row["batch_shape"] for row in form["members"]] == [[2], [5]]
+
+
 def test_every_class_gets_a_model_shaped_member_with_a_vendor_bar():
     requirement = {"scope": {"performance": {"forms": _scope()}}}
     entries = FP.form_perf_entries(_pw(), requirement, "f" * 64)
@@ -442,6 +490,10 @@ def test_claim_extent_audit_requires_one_observed_public_group_to_dominate_all_a
         ),
     ]
     assert FP._iteration_extent_shares(claims, public, "predicted_cycles") == (5.0, 10.0)
+
+    # Matching per-slice M/K/N does not witness an unobserved batch multiplicity.
+    larger_batch = [{**claims[0], "batch_slices": 3}]
+    assert FP._iteration_extent_shares(larger_batch, public, "predicted_cycles") == (0.0, 5.0)
 
     # Maxima from different public groups must not combine into an unseen 3-D regime.
     key = _BODY

@@ -262,7 +262,9 @@ def test_client_drift_during_successful_child_fails_only_outer_attribution(corpu
     record = status(destination)
     assert record["state"] == "execution_failed"
     assert record["attempts"][-1]["engine_returncode"] == 0
-    assert "input identity changed during execution" in record["attempts"][-1]["error"]
+    error = record["attempts"][-1]["error"]
+    assert "phase1 handoff identity not established; engine evidence unchanged" in error
+    assert "frozen input changed: phase1:client:merlin_experiments.phase1.tools.simjob" in error
     assert evidence.read_text() == '{"transport_finished": true}\n'
 
 

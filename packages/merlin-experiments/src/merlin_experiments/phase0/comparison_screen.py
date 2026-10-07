@@ -13,6 +13,7 @@ unresolved constraint is left to the written program's own screen.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 
@@ -53,5 +54,49 @@ def refused_part(variants: list[dict], base: dict, *, software_spec: dict | None
                 "family": family,
                 "reason": "; ".join(sorted({decision["reason"] for decision in decisions})),
                 "decisions": decisions,
+            }
+    return None
+
+
+def refused_emitted_part(entries: list[dict], *, binding, evidence) -> dict | None:
+    """Definite refusal of a comparison part from its builder's typed interface.
+
+    This is a pre-write SW/host admission screen, not a numerical or execution
+    proof. Unknown admissions remain for the written capsule's full screen.
+    """
+    from merlin.targetgen import corpus_spec as CS
+    from merlin.targetgen.semantic_families import from_op
+
+    from .program_admission import account_interface_text, summarize
+
+    for entry in entries:
+        group = entry.get("comparison_group")
+        if not isinstance(group, dict) or group.get("role") != "part":
+            continue
+        if entry.get("source") not in (None, "direct"):
+            continue  # A non-builder source has no interface to screen here.
+        op = entry.get("op")
+        if op not in CS.BUILDERS:
+            continue
+        try:
+            _, selected_binding = CS.entry_binding(entry, binding)
+            capsule, mlir = CS.build(entry, selected_binding)
+            observed = account_interface_text(mlir, target=binding.target, evidence=evidence)
+        except (KeyError, TypeError, ValueError):
+            # The ordinary writer reports a malformed or unavailable builder;
+            # it must not become an inapplicability skip at this early screen.
+            continue
+        semantic = capsule.get("semantic") or {}
+        host_only = semantic.get("must_accelerate") is False and semantic.get("eligible") is False
+        decision = summarize(observed, host_only=host_only, scope="builder-emitted typed comparison part")
+        if decision["status"] == "unsupported":
+            return {
+                "member": op,
+                "name": entry.get("name"),
+                "family": from_op(op),
+                "reason": decision["reason"],
+                "decisions": decision["decisions"],
+                "interface_sha256": hashlib.sha256(mlir.encode()).hexdigest(),
+                "basis": "builder_emitted_typed_interface",
             }
     return None
