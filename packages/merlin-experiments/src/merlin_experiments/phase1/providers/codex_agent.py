@@ -265,12 +265,13 @@ def usage_to_claude_shape(usage: dict) -> tuple[dict, bool]:
 
 
 #: The frozen per-experiment Codex config. Deliberately minimal: the user's own
-#: config.toml carries per-project trust levels and notice state that have nothing
-#: to do with the experiment and would differ between machines.
+#: config.toml and unrelated project trust/notice state are never copied. The
+#: exact prepared workspace's trust is declared below before the config is
+#: hashed, so Codex need not persist it during its first turn.
 _FROZEN_CONFIG = (
     "model = {model}\nmodel_reasoning_effort = {effort}\n"
     f'default_permissions = "{_CANDIDATE_PERMISSION_PROFILE}"\n'
-    "{provider}\n{profile}"
+    "{provider}\n{profile}{trust}"
 )
 
 
@@ -339,7 +340,7 @@ def real_codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
 
 
-def prepare_codex_home(dest: Path, *, model: str, effort: str) -> dict:
+def prepare_codex_home(dest: Path, *, model: str, effort: str, workspace: Path) -> dict:
     """Build an ISOLATED ``CODEX_HOME`` at *dest* and describe it.
 
     Why not just bind the real ``~/.codex``: it contains ``sessions/`` — every
@@ -359,6 +360,8 @@ def prepare_codex_home(dest: Path, *, model: str, effort: str) -> dict:
     build its home the same way, or the cache-hit rate varies between arms for a
     reason that has nothing to do with the treatment.
     """
+    if not workspace.is_absolute() or not workspace.is_dir() or workspace.resolve(strict=True) != workspace:
+        raise ValueError("Codex workspace must be an existing canonical absolute directory")
     dest.mkdir(parents=True, exist_ok=True)
     # A non-OpenAI model reaches codex-cli only through the LiteLLM bridge: codex 0.147 speaks the
     # Responses API and nothing else, so the provider block points it at our proxy and declares the
@@ -372,6 +375,7 @@ def prepare_codex_home(dest: Path, *, model: str, effort: str) -> dict:
         effort=json.dumps(effort or "high"),
         profile=_candidate_permission_config(dest),
         provider=provider,
+        trust=f'[projects.{json.dumps(str(workspace))}]\ntrust_level = "trusted"\n',
     )
     config_path = dest / "config.toml"
     config_path.write_text(config)
@@ -936,7 +940,7 @@ def run_round(
         codex_home = home_root / f"{run_dir.name}_r{rnd:02d}"
         if codex_home.resolve().is_relative_to(ws.resolve()) or ws.resolve().is_relative_to(codex_home.resolve()):
             raise ValueError("isolated CODEX_HOME must not overlap the candidate workspace")
-        home_info = prepare_codex_home(codex_home, model=resolved, effort=effort)
+        home_info = prepare_codex_home(codex_home, model=resolved, effort=effort, workspace=ws)
         _verify_frozen_config(codex_home, home_info["config_sha256"])
         _preflight_candidate_sandbox(ws, codex_home, codex_bin, bundle, sandbox_command, rounds, rnd)
         inner = " ".join(shlex.quote(c) for c in run_cmd)

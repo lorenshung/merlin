@@ -592,7 +592,9 @@ def test_the_driver_does_not_author_instruction_files_itself(tmp_path):
 
 
 def test_the_isolated_home_holds_a_frozen_config_and_no_credential(tmp_path):
-    info = CA.prepare_codex_home(tmp_path / "home", model="gpt-5.6-sol", effort="high")
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    info = CA.prepare_codex_home(tmp_path / "home", model="gpt-5.6-sol", effort="high", workspace=ws)
 
     config = (tmp_path / "home" / "config.toml").read_text()
     assert 'model = "gpt-5.6-sol"' in config
@@ -600,19 +602,68 @@ def test_the_isolated_home_holds_a_frozen_config_and_no_credential(tmp_path):
     assert 'default_permissions = "merlin-candidate"' in config
     assert f'{json.dumps(str(tmp_path / "home"))} = "deny"' in config
     assert '":root" = "deny"' in config
-    # The user's own config carries per-project trust levels and notice state;
-    # none of it belongs in a measured run.
-    assert "trust_level" not in config and "[projects" not in config
+    # Only the exact prepared workspace's trust is frozen. The user's own
+    # unrelated project trust and notice state are never copied.
+    assert tomllib.loads(config)["projects"] == {str(ws): {"trust_level": "trusted"}}
 
     assert info["auth_copied"] is False
     assert not (tmp_path / "home" / "auth.json").exists(), "the credential is bind-mounted, never written into the tree"
     assert info["config_sha256"] and info["isolated_from_real_home"] is True
 
-    bridged = CA.prepare_codex_home(tmp_path / "bridged", model="nemotron", effort="high")
+    bridged = CA.prepare_codex_home(tmp_path / "bridged", model="nemotron", effort="high", workspace=ws)
     bridged_config = tomllib.loads((tmp_path / "bridged/config.toml").read_text())
     assert bridged_config["model_provider"] == "merlinproxy"
     assert bridged_config["default_permissions"] == "merlin-candidate"
     assert bridged["config_sha256"]
+
+
+def test_isolated_home_freezes_exact_workspace_trust_before_cli_startup(tmp_path):
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    home = tmp_path / "isolated-codex"
+    info = CA.prepare_codex_home(home, model="gpt-5.6-sol", effort="high", workspace=ws)
+    config_path = home / "config.toml"
+    config = config_path.read_text()
+    assert tomllib.loads(config)["projects"] == {str(ws): {"trust_level": "trusted"}}
+    CA._verify_frozen_config(home, info["config_sha256"])
+
+    for changed in (
+        config.replace('trust_level = "trusted"', 'trust_level = "untrusted"'),
+        config + '\n[projects."/other/workspace"]\ntrust_level = "trusted"\n',
+        config.replace('model_reasoning_effort = "high"', 'model_reasoning_effort = "low"'),
+    ):
+        config_path.write_text(changed)
+        with pytest.raises(RuntimeError, match="config changed after it was frozen"):
+            CA._verify_frozen_config(home, info["config_sha256"])
+
+    alias = tmp_path / "workspace-alias"
+    alias.symlink_to(ws, target_is_directory=True)
+    for invalid in (Path("relative-workspace"), tmp_path / "missing-workspace", alias):
+        with pytest.raises(ValueError, match="existing canonical absolute"):
+            CA.prepare_codex_home(tmp_path / "refused-home", model="gpt-5.6-sol", effort="high", workspace=invalid)
+    assert not (tmp_path / "refused-home").exists()
+
+
+def test_selected_cli_config_load_preserves_exact_workspace_trust(tmp_path):
+    """No model request: exercise the real CLI's project config parser/startup."""
+    codex_bin = shutil.which("codex")
+    if codex_bin is None:
+        pytest.skip("selected Codex CLI is unavailable")
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    home = tmp_path / "isolated-codex"
+    info = CA.prepare_codex_home(home, model="gpt-5.6-sol", effort="high", workspace=ws)
+    config_path = home / "config.toml"
+    before = config_path.read_bytes()
+    result = subprocess.run(
+        [codex_bin, "-C", str(ws), "features", "list"],
+        env={**os.environ, "CODEX_HOME": str(home)},
+        capture_output=True,
+        timeout=15,
+    )
+    assert result.returncode == 0
+    assert config_path.read_bytes() == before
+    CA._verify_frozen_config(home, info["config_sha256"])
 
 
 def test_native_candidate_profile_blocks_synthetic_auth_inside_outer_bwrap(tmp_path, monkeypatch):
@@ -628,7 +679,7 @@ def test_native_candidate_profile_blocks_synthetic_auth_inside_outer_bwrap(tmp_p
     ws = tmp_path / "workspace"
     ws.mkdir()
     home = tmp_path / "isolated-codex"
-    info = CA.prepare_codex_home(home, model="gpt-5.6-sol", effort="high")
+    info = CA.prepare_codex_home(home, model="gpt-5.6-sol", effort="high", workspace=ws)
     assert tomllib.loads((home / "config.toml").read_text())["default_permissions"] == "merlin-candidate"
     CA._verify_frozen_config(home, info["config_sha256"])
 
@@ -682,7 +733,7 @@ def test_native_candidate_cannot_reach_parent_open_auth_or_relogin(tmp_path, mon
     ws = tmp_path / "workspace"
     ws.mkdir()
     home = tmp_path / "isolated-codex"
-    CA.prepare_codex_home(home, model="gpt-5.6-sol", effort="high")
+    CA.prepare_codex_home(home, model="gpt-5.6-sol", effort="high", workspace=ws)
 
     candidate = """
 import ctypes, json, os, subprocess
