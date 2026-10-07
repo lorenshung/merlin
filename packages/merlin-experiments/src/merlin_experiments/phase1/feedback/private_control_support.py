@@ -878,6 +878,8 @@ def prove_bounded_assertions(
     guards = []
     index_data_support = []
     internal_compaction_support = []
+    index_data_refusals = []
+    internal_compaction_refusals = []
     seen_casts: set[int] = set()
     for ordinal, op in enumerate(parsed):
         if mq.op_name(op) != "cf.assert":
@@ -937,10 +939,11 @@ def prove_bounded_assertions(
             seen_casts.add(id(cast))
             try:
                 index_data_support.append(_index_data_chain(dim, cast, count_mask, extent, ordinals))
-            except ValueError:
+            except ValueError as exc:
                 # Assertion tautology does not imply a complete cursor/data proof.
-                # Exact unsupported index operations remain in the source ledger.
-                pass
+                # Exact unsupported index operations remain in the source ledger;
+                # the refused chain is recorded so it cannot read as absent.
+                index_data_refusals.append({"cast_ordinal": ordinals[id(cast)], "reason": str(exc)})
     for cast in parsed:
         if mq.op_name(cast) != "arith.index_cast" or len(cast.operands) != 1 or len(cast.results) != 1:
             continue
@@ -949,9 +952,10 @@ def prove_bounded_assertions(
             internal_compaction_support.append(
                 _internal_compaction_chain(cast, count_mask, extent, ordinals, guards, index_bits)
             )
-        except ValueError:
-            # A typed cast alone is not an internal compaction proof.
-            continue
+        except ValueError as exc:
+            # A typed cast alone is not an internal compaction proof; the refusal is
+            # recorded beside the admitted chains so a cast that was tried is not absent.
+            internal_compaction_refusals.append({"cast_ordinal": ordinals[id(cast)], "reason": str(exc)})
     return {
         "status": PENDING,
         "scope": SCOPE,
@@ -963,4 +967,6 @@ def prove_bounded_assertions(
         "guards": guards,
         "index_data_support": index_data_support,
         "internal_compaction_support": internal_compaction_support,
+        "index_data_refusals": index_data_refusals,
+        "internal_compaction_refusals": internal_compaction_refusals,
     }

@@ -142,6 +142,24 @@ def test_closed_source_including_negative_empty_and_wrapped_intermediate(tmp_pat
     assert proof["occurrences"][0]["original_to_prepared_equivalence"] == "not_proved"
 
 
+def test_omitted_range_options_are_decided_by_the_observed_result(tmp_path):
+    def omit_options(trace):
+        for graph in trace["graphs"].values():
+            graph["nodes"][0]["kwargs"] = {}
+
+    proof = prove_literal_arange_source(_write_capture(tmp_path, change_trace=omit_options), index_bits=64)
+    assert proof["count"] == 1
+
+    def omit_and_change_result(trace):
+        omit_options(trace)
+        trace["graphs"]["prepared"]["nodes"][0]["results"][0]["device"] = "meta"
+
+    changed = tmp_path / "changed"
+    changed.mkdir()
+    with pytest.raises(ValueError, match="literal arange source refusal"):
+        prove_literal_arange_source(_write_capture(changed, change_trace=omit_and_change_result), index_bits=64)
+
+
 def test_original_linspace_ancestry_is_recorded_without_equivalence_claim(tmp_path):
     def linspace(trace):
         original = trace["graphs"]["original"]["nodes"][0]
@@ -220,6 +238,10 @@ def test_invalid_typed_source_or_unconsumed_result_refuses(tmp_path, mutation):
         lambda trace: trace["graphs"]["prepared"]["nodes"][0]["origin_node_ids"].clear(),
         lambda trace: trace["mlir"]["source_correspondence"][0]["mlir_ordinals"].pop(),
         lambda trace: trace["mlir"].__setitem__("sha256", "0" * 64),
+        lambda trace: trace["graphs"]["prepared"]["nodes"][0]["kwargs"].__setitem__("pin_memory", 0),
+        lambda trace: trace["graphs"]["prepared"]["nodes"][0]["kwargs"].__setitem__(
+            "device", {"kind": "device", "value": "meta"}
+        ),
     ],
 )
 def test_changed_trace_literal_lineage_or_ordinal_refuses(tmp_path, mutation):

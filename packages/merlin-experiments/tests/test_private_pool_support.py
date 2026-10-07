@@ -248,6 +248,20 @@ def test_indices_or_full_tuple_are_not_value_only(tmp_path, kwargs):
         _prove(tmp_path, **kwargs)
 
 
+@pytest.mark.parametrize("change", [lambda node: node.pop("args"), lambda node: node.__setitem__("args", [])])
+def test_pool_trace_without_an_input_argument_is_refused(tmp_path, change):
+    capture, module, inventory, digest = _capture(tmp_path)
+    trace_path = capture / "frontend-trace.json"
+    trace = json.loads(trace_path.read_text())
+    change(next(node for node in trace["graphs"]["prepared"]["nodes"] if node["id"] == SOURCE_NODE))
+    trace_path.write_text(json.dumps(trace), encoding="utf-8")
+    receipt = json.loads((capture / "capture_receipt.json").read_text())
+    receipt["artifacts"]["frontend-trace.json"]["sha256"] = _hash(trace_path.read_bytes())
+    (capture / "capture_receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+    with pytest.raises(ValueError, match="pool trace has no input argument"):
+        prove_pool_source(capture, module, inventory, raw_sha256=digest, normalized_sha256=digest)
+
+
 def test_boolean_ordinal_is_not_an_integer_source_occurrence(tmp_path):
     capture, module, inventory, digest = _capture(tmp_path)
     inventory["signatures"][0]["ordinals"] = [True]

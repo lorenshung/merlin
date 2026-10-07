@@ -326,7 +326,9 @@ def prove_pool_source(
             and all(result.get("shape") == list(output_shape) for result in results),
             "pool trace has no typed values-and-indices result",
         )
-        input_ref = node.get("args", [None])[0]
+        node_args = node.get("args")
+        _need(isinstance(node_args, list) and bool(node_args), "pool trace has no input argument")
+        input_ref = node_args[0]
         incoming = [
             edge for edge in edges if edge.get("consumer_node_id") == node_id and edge.get("argument_path") == "args/0"
         ]
