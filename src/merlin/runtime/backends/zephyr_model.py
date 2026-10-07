@@ -932,6 +932,7 @@ def prepare_for_lowering(
     matrix: MatrixRouting | None = None,
     device: Any | None = None,
     outline_int8: bool = False,
+    prepared_model_transform: Callable[[Path, Path], Path] | None = None,
 ) -> tuple[Path, frozenset[str]]:
     """``(prepared_mlir, concrete_features)`` — everything that must happen to a captured module
     before ``lower_model_file``, shared by every whole-model backend.
@@ -950,6 +951,12 @@ def prepare_for_lowering(
     arm to match and every contraction silently falls to convert-linalg-to-loops (measured: deepjscc
     484M -> 1242M cycles at bit-identical output — a 2.56x regression that looks like a bad block but
     is an untagged build).
+    ``prepared_model_transform`` runs after every preparation step, including
+    destination reuse and provenance removal. The callback receives a private
+    immutable input snapshot and output directory, and must retain verified
+    public function types. Its successful selection receipt binds exact source
+    and output bytes; semantic, effect and provider proofs remain caller-owned.
+    No callback preserves the ordinary preparation path and bytes.
     """
     from ...llvmlower.impr_features import vec_noncontraction_lanes as _vec_lanes
     from ...llvmlower.impr_features import vec_noncontraction_max_rank as _vec_max_rank
@@ -1007,6 +1014,15 @@ def prepare_for_lowering(
     # model.perop_tagged.mlir matmul=15), so a matmul-keyed lever that WOULD fire was being named as
     # one that could not. A check that reports the wrong answer is worse than no check.
     _applicability_source = _op_counts
+
+    def _finish_preparation(path: Path) -> tuple[Path, frozenset[str]]:
+        from ...llvmlower.prepared_model_transform import apply_prepared_model_transform
+
+        stripped = _strip_provenance(path, work, features)
+        return (
+            apply_prepared_model_transform(stripped, Path(work) / "prepared_model_transform", prepared_model_transform),
+            features,
+        )
 
     def _judge_levers_on(mod_path) -> None:
         """Report inapplicable levers against the module LOWERING actually receives.
@@ -1204,7 +1220,7 @@ def prepare_for_lowering(
                 initialize_border_only="initialize_tensor_border_only" in features,
             )
         _judge_levers_on(prepared)
-        return _strip_provenance(prepared, work, features), features
+        return _finish_preparation(prepared)
     from ...llvmlower import im2col_identity_view as _iv
     from ...llvmlower import im2col_pack as _ip
     from ...llvmlower import perop_blocks as _pb
@@ -1488,7 +1504,7 @@ def prepare_for_lowering(
             initialize_border_only="initialize_tensor_border_only" in features,
         )
     _judge_levers_on(prepared)
-    return _strip_provenance(prepared, work, features), features
+    return _finish_preparation(prepared)
 
 
 def _strip_provenance(prepared: Path, work: Path, features: frozenset[str]) -> Path:
@@ -2388,6 +2404,7 @@ def build_app(
     matrix_scalar_tile: bool = False,
     completion_metric_prefix: str | None = None,
     device: Any | None = None,
+    prepared_model_transform: Callable[[Path, Path], Path] | None = None,
 ) -> dict:
     """Lower the model, generate the Zephyr app, and build ``zephyr.elf``.
 
@@ -2503,6 +2520,7 @@ def build_app(
             vlen=vlen,
             matrix=matrix,
             device=device,
+            prepared_model_transform=prepared_model_transform,
         )
         # A DEBUG image interleaves a mark between the top-level ops of @forward. Two things come out
         # of it: a per-op cost table at the end of a successful run, and -- the reason it is here at

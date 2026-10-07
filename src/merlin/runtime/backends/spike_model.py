@@ -428,6 +428,7 @@ def build(
     host_vectorize: bool | None = None,
     host_math_policy: str = "native",
     math_archive_symbols: Sequence[str] | None = None,
+    prepared_model_transform: Callable[[Path, Path], Path] | None = None,
     host_llvm_transform: Callable[[Path, Path], Path] | None = None,
     host_provider_builder: Callable | None = None,
     cflags_override: list[str] | None = None,
@@ -518,6 +519,12 @@ def build(
     its cycles went rather than only how many there were, which is what pricing a compute unit needs. It
     changes the emitted code, so a profiled image is for measuring per-op cost, never for a cycle count
     compared against an unprofiled one.
+    ``prepared_model_transform`` selects an invocation-local typed MLIR callback
+    after all ordinary preparation and before profiling/upstream lowering. It
+    receives an immutable private input snapshot and a private output directory;
+    verified public entry types and exact selected bytes enter the recipe.
+    Source semantics, effects and provider proofs remain caller obligations.
+    Empty selection preserves the ordinary build route.
     """
     from ...llvmlower.compilation_recipe import FILENAME as COMPILATION_RECIPE
     from ...llvmlower.compilation_recipe import CompilationRecipe
@@ -617,7 +624,9 @@ def build(
         # report, so a bundle that needs the lift may not take the unprepared branch.
         from ...llvmlower import qinner as _qinner
 
-        if not (int8_compute or features or rvv_schedule) and _qinner.plan_for_bundle(prepared_path):
+        if not (
+            int8_compute or features or rvv_schedule or prepared_model_transform is not None
+        ) and _qinner.plan_for_bundle(prepared_path):
             raise SpikeModelError(
                 f"{model_dir} carries quant-inner tensors, which are bound by lifting them in "
                 "prepare_for_lowering; build it with int8_compute/features/rvv_schedule so the "
@@ -627,6 +636,7 @@ def build(
             int8_compute
             or features
             or rvv_schedule
+            or prepared_model_transform is not None
             or (
                 device is not None
                 and (
@@ -647,10 +657,15 @@ def build(
                 vlen=vlen,
                 matrix=matrix,
                 device=device,
+                prepared_model_transform=prepared_model_transform,
             )
             vectorize = selected_vectorize
         if int8_compute:
             compilation.bind_preparation("quantization_policy", work / "quantization-policy.json")
+        if prepared_model_transform is not None:
+            from ...llvmlower.prepared_model_transform import RECEIPT
+
+            compilation.bind_preparation("prepared_model_transform", work / "prepared_model_transform" / RECEIPT)
         if op_profile:
             # Instrumented AFTER preparation, so the ids name the ops that actually run -- instrumenting
             # the raw module would number ops the rewrites go on to split, fuse or route away, and the

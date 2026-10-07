@@ -14,6 +14,14 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
 
 ## What belongs here
 
+- `prepared_model_transform.py` provides an explicit invocation-local callback
+  after all shared model preparation, before profiling/upstream lowering. It
+  supplies an immutable private source snapshot, verifies returned typed MLIR
+  and public entry types, and publishes exact selected identities only on
+  success. Empty selection performs no I/O. Source semantics, effects, provider
+  proofs and profitability remain caller obligations; production policy must
+  derive from source semantics rather than workload identity.
+
 - `host_llvm_helpers.py` offers explicit immutable helper IR linkage through the
   existing normal host-transform callback. The selected upstream linker and
   always-inline pass must remove every required call/address reference while
