@@ -81,6 +81,35 @@ def freeze(plan):
     return {**plan, "inputs": report["inputs"]}
 
 
+@pytest.mark.parametrize("explicit", [True, False])
+def test_verified_capture_plan_preserves_selected_runtime_store(authored, monkeypatch, tmp_path, explicit):
+    """Reach the actual plan assembly without importing the model frameworks."""
+    from merlin_experiments.capture_execution.runtime_store import STORE_ENV
+    from merlin_experiments.phase0 import freeze as phase0_freeze, m2m_runtime
+    from merlin.common.artifacts import cache_dir
+
+    make, definitions, config = authored
+    (definitions / "software.yaml").write_text("{}\n")
+    selected = {**config, "software_spec": "software.yaml", "evidence_mode": "verified"}
+    monkeypatch.setattr(m2m_runtime, "observe", lambda *args, **kwargs: {"base": str(tmp_path / "base")})
+    monkeypatch.setattr(m2m_runtime, "sealed_capture_config", lambda *args, **kwargs: {})
+    monkeypatch.setattr(phase0_freeze, "selected_inputs", lambda *args, **kwargs: ({}, {}))
+    make(selected)
+    store = tmp_path / "selected-shared-runtime-store"
+    if explicit:
+        monkeypatch.setenv(STORE_ENV, str(store))
+    else:
+        monkeypatch.delenv(STORE_ENV, raising=False)
+    plan = runner.resolve_plan(
+        load_spec(definitions / "experiment.yaml"),
+        phase="0",
+        run_dir=tmp_path / "run",
+        phase0_m2m_root=tmp_path / "m2m",
+        phase0_m2m_python=tmp_path / "venv/bin/python",
+    )
+    assert plan["phases"]["0"]["env"][STORE_ENV] == str(store if explicit else cache_dir("sealed-m2m-runtime"))
+
+
 def test_versioned_phase0_artifacts_can_be_selected_without_editing_definition(authored):
     make, root, _ = authored
     original = make()

@@ -629,7 +629,10 @@ def resolve_plan(
                     sealed_capture_config(selection, destination / "phase0"),
                     sort_keys=True,
                 )
-                command["env"][STORE_ENV] = str(cache_dir("sealed-m2m-runtime"))
+                # Keep the operator's shared store selection in the frozen
+                # command. Substituting a checkout-local cache prevents reuse
+                # and can copy the entire runtime onto another filesystem.
+                command["env"][STORE_ENV] = os.environ.get(STORE_ENV) or str(cache_dir("sealed-m2m-runtime"))
         commands[number] = command
         inputs[f"phase{number}:entrypoint"] = command["entrypoint"]
         for name, value in command["inputs"].items():
