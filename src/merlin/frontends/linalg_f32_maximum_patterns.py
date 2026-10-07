@@ -7,11 +7,31 @@ signed-zero selection and reduction order may differ.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import asdict, dataclass
 from math import isinf, prod
 from pathlib import Path
 
 from merlin.frontends.linalg_patterns import InvalidLinalgPattern, _screen_static_linalg_source
+
+STATIC_F32_MAXIMUM_SOURCE_BODY_SCHEMA = "merlin.static_f32_maximum_source_body.v1"
+
+
+def validate_static_f32_maximum_source_body(declaration: object) -> dict[str, str]:
+    """Validate a closed prepared-source selector without granting placement."""
+    if (
+        not isinstance(declaration, dict)
+        or set(declaration) != {"schema", "operation"}
+        or declaration.get("schema") != STATIC_F32_MAXIMUM_SOURCE_BODY_SCHEMA
+        or declaration.get("operation") != "arith.maximumf"
+    ):
+        raise InvalidLinalgPattern("source_body requires a closed f32 maximum v1 declaration")
+    return dict(declaration)
+
+
+def serialized_f32_maximum_pattern(pattern: StaticF32MaximumPattern) -> dict:
+    """Persist only JSON-typed fields from the independently recognized source."""
+    return json.loads(json.dumps(asdict(pattern), allow_nan=False))
 
 
 @dataclass(frozen=True)
@@ -62,11 +82,7 @@ def _negative_infinity_init(value) -> None:
 
     splat = value.owner
     _closed(splat, tensor.SplatOp, set())
-    if (
-        tuple(splat.operands) != (splat.input,)
-        or tuple(splat.results) != (value,)
-        or splat.dynamicSizes
-    ):
+    if tuple(splat.operands) != (splat.input,) or tuple(splat.results) != (value,) or splat.dynamicSizes:
         raise InvalidLinalgPattern("maximum source init is not a static splat")
     constant = splat.input.owner
     _closed(constant, arith.ConstantOp, {"value"})

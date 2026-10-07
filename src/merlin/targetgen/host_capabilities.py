@@ -80,6 +80,10 @@ def validate_host_capabilities(
                 STATIC_COMPOSITE_MATH_SOURCE_BODY_SCHEMA,
                 validate_static_composite_math_source_body,
             )
+            from merlin.frontends.linalg_f32_maximum_patterns import (
+                STATIC_F32_MAXIMUM_SOURCE_BODY_SCHEMA,
+                validate_static_f32_maximum_source_body,
+            )
             from merlin.frontends.linalg_math_patterns import (
                 STATIC_F32_MATH_SOURCE_BODY_SCHEMA,
                 validate_static_f32_math_source_body,
@@ -200,6 +204,22 @@ def validate_host_capabilities(
                     or row["numerical_contract"].get("status") != "unreviewed"
                 ):
                     raise ValueError("bucketize source_body needs one exact typed placement-only selector")
+            elif isinstance(body, dict) and body.get("schema") == STATIC_F32_MAXIMUM_SOURCE_BODY_SCHEMA:
+                validate_static_f32_maximum_source_body(body)
+                if (
+                    row.get("ops") != ["aten.amax.default"]
+                    or "families" in row
+                    or "family" in row
+                    or row["signature"]
+                    != {
+                        "family": "reduction",
+                        "ordered_operand_dtypes": ["f32", "f32"],
+                        "ordered_result_dtypes": ["f32"],
+                    }
+                    or not isinstance(row.get("numerical_contract"), dict)
+                    or row["numerical_contract"].get("status") != "unreviewed"
+                ):
+                    raise ValueError("f32 maximum source_body needs one exact typed placement-only selector")
             else:
                 validate_static_pointwise_source_body(body)
         if "quantization_parameters" in row["signature"]:
@@ -295,6 +315,72 @@ def _screen_integer_reduction_source_body(
     }
 
 
+def _screen_f32_maximum_source_body(
+    declaration: dict, row: dict, signature: dict, source_operations: tuple | None, source_context: Mapping | None
+) -> dict:
+    """Screen every exact prepared amax root against the selected-width source form."""
+    from merlin.common import mlir_query as mq
+    from merlin.frontends.linalg_f32_maximum_patterns import (
+        recognize_static_f32_maximum,
+        serialized_f32_maximum_pattern,
+    )
+    from merlin.frontends.linalg_patterns import InvalidLinalgPattern
+    from merlin.targetgen.application_inventory import operation_structure
+
+    width = _selected_index_bits(source_context)
+    if width is None:
+        return {"status": "unknown", "reason": "f32 maximum source_body needs a selected compiler index observation"}
+    if source_operations is None or not source_operations:
+        return {"status": "unknown", "reason": "source_body requires parsed source operations"}
+    if (
+        not isinstance(source_operations, tuple)
+        or type(row.get("count")) is not int
+        or row["count"] != len(source_operations)
+        or row.get("mlir_operation") != "linalg.reduce"
+        or row.get("frontend_op") != "aten.amax.default"
+        or len({id(op) for op in source_operations}) != len(source_operations)
+    ):
+        return {"status": "unsupported", "reason": "f32 maximum source-body occurrence roster differs"}
+    patterns = []
+    for op in source_operations:
+        if mq.op_name(op) != "linalg.reduce" or mq.attr_str(op, "prov.aten") != "aten.amax.default":
+            return {"status": "unsupported", "reason": "f32 maximum parsed operation identity differs"}
+        try:
+            pattern = recognize_static_f32_maximum(op, index_bits=width)
+        except InvalidLinalgPattern as exc:
+            return {"status": "unsupported", "reason": f"f32 maximum structural proof refused: {exc}"}
+        structure = operation_structure(op)
+        inputs, outputs = structure["ordered_operand_types"], structure["ordered_result_types"]
+        if (
+            row.get("ordered_operand_types") != inputs
+            or row.get("ordered_result_types") != outputs
+            or signature.get("family") != "reduction"
+            or signature.get("ordered_operand_dtypes") != ["f32", "f32"]
+            or signature.get("ordered_result_dtypes") != ["f32"]
+            or type(signature.get("rank")) is not int
+            or signature["rank"] != len(pattern.output_shape)
+            or inputs
+            != [
+                {"shape": list(pattern.input_shape), "dtype": "f32"},
+                {"shape": list(pattern.output_shape), "dtype": "f32"},
+            ]
+            or outputs != [{"shape": list(pattern.output_shape), "dtype": "f32"}]
+        ):
+            return {"status": "unsupported", "reason": "f32 maximum source differs from observed typed tensor ABI"}
+        patterns.append(serialized_f32_maximum_pattern(pattern))
+    return {
+        "status": "admitted",
+        "reason": "every parsed occurrence matches the selected-width prepared f32 maximum body",
+        "proof": {
+            "schema": declaration["source_body"]["schema"],
+            "declaration": declaration["id"],
+            "operation": declaration["source_body"]["operation"],
+            "selected_index_observation": copy.deepcopy(dict(source_context["selected_index_observation"])),
+            "patterns": patterns,
+        },
+    }
+
+
 def _screen_source_body(
     declaration: dict, row: dict, signature: dict, source_operations: tuple | None, source_context: Mapping | None
 ) -> dict:
@@ -317,6 +403,7 @@ def _screen_source_body(
         STATIC_COMPOSITE_MATH_SOURCE_BODY_SCHEMA,
         recognize_static_composite_math_body,
     )
+    from merlin.frontends.linalg_f32_maximum_patterns import STATIC_F32_MAXIMUM_SOURCE_BODY_SCHEMA
     from merlin.frontends.linalg_math_patterns import (
         STATIC_F32_MATH_SOURCE_BODY_SCHEMA,
         recognize_static_f32_math_body,
@@ -333,6 +420,8 @@ def _screen_source_body(
 
     if declaration["source_body"]["schema"] == STATIC_INTEGER_REDUCTION_SOURCE_BODY_SCHEMA:
         return _screen_integer_reduction_source_body(declaration, row, signature, source_operations, source_context)
+    if declaration["source_body"]["schema"] == STATIC_F32_MAXIMUM_SOURCE_BODY_SCHEMA:
+        return _screen_f32_maximum_source_body(declaration, row, signature, source_operations, source_context)
     if declaration["source_body"]["schema"] == PREPARED_INDEX_SOURCE_BODY_SCHEMA:
         return screen_prepared_index_source_body(declaration, row, signature, source_operations, source_context)
     if declaration["source_body"]["schema"] == STATIC_BUCKETIZE_SOURCE_BODY_SCHEMA:

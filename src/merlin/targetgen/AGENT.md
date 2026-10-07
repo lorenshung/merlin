@@ -34,6 +34,12 @@ launching, capsule grading, golden generation, sandboxing and certification. The
   occurrence; absent context is unknown. Structural validation accepts drafts,
   while only reviewed, pinned declarations can admit host placement. The private
   source/build witness remains mandatory and numerical equivalence unproved.
+- Opt-in prepared f32 maximum source-body screening accepts only an exact
+  `aten.amax.default`/`linalg.reduce` typed source roster, selected index-width
+  observation and the closed unflagged `arith.maximumf` body. Structural
+  validation does not review a declaration; the independent private linked
+  witness remains mandatory. In particular, signed-zero and reduction-order
+  equivalence to PyTorch are not established.
 - Opt-in prepared tensor-index host source-body declarations name one exact
   Boolean extension, mask-sum or literal-indexed-extract role. Admission is
   conditional on a caller-reproved closed source/trace record, selected index
