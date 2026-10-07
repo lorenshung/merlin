@@ -329,6 +329,12 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
   cardinality. Complete-domain enumeration proves predicate identity, including
   empty and multiple-pair relations. Ordered floating replay is unchanged;
   actual load scheduling and full producer/correction cost require qualification.
+- `quantized_affine_rectifier.py` synthesizes optional exact sparse finite-domain
+  corrections from the complete ordered binary32 pair certificate. Positional
+  keys or clipped per-axis offsets prove singleton indicators over every signed
+  byte pair, including intermediate prefixes and final source observations.
+  Source inputs, buffer lifetimes, target arithmetic and full transfer costs
+  remain provider obligations; no target implementation or routing is inferred.
 
 `merlin/python/tests/test_llvmlower.py` — synthetic slice e2e (host execution vs Python reference); toolchain-gated tests auto-skip when clang/m2m venv are absent.
 
