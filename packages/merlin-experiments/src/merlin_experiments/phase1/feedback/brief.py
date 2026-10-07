@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime
 from pathlib import Path
 
 
@@ -80,6 +81,81 @@ def _passing(v: dict) -> set:
         for e in (v.get("per_capsule") or [])
         if str(e.get("status", "")).lower() == "pass" and e.get("capsule")
     }
+
+
+def _public_build_section(run_dir: Path) -> list[str]:
+    """Pair the latest archived round with its exact-key public advisory.
+
+    Continuous rounds use keys such as ``r0000_t000007``. The historical
+    numeric progress reader intentionally ignores those keys, but an advisory
+    must still follow the latest actual archived candidate, never an older
+    projection with a coincidentally matching numeric round.
+    """
+    history = run_dir / "qa_history"
+    rounds = []
+    for path in history.glob("verdict_round_*.json"):
+        try:
+            verdict = json.loads(path.read_text())
+            stamp = datetime.fromisoformat(verdict["graded_at"])
+            if stamp.tzinfo is None:
+                continue
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            continue
+        rounds.append((stamp, path.name, verdict))
+    if not rounds:
+        return []
+    _stamp, name, verdict = max(rounds)
+    candidate = verdict.get("graded_candidate_sha256")
+    if not isinstance(candidate, str) or len(candidate) != 64:
+        return []
+    key = name.removeprefix("verdict_round_").removesuffix(".json")
+    path = history / f"codegen_scalability_public_round_{key}.json"
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return []
+    if (
+        not isinstance(record, dict)
+        or record.get("schema") != "merlin.public_object_build_feedback.v1"
+        or record.get("candidate_sha256") != candidate
+        or record.get("scope") != "public_emit_and_build_only_advisory"
+    ):
+        return []
+    rows = record.get("samples")
+    if record.get("ran") is not True or not isinstance(rows, list) or len(rows) != 4:
+        return []
+    lines = [
+        "## Public object-build scalability (advisory only)",
+        "",
+        "These public fact-derived samples compile emitted objects only; they do not execute or certify them.",
+        "",
+        "| scale | emit | object build | emitted bytes | object bytes | compile seconds |",
+        "|---:|---|---|---:|---:|---:|",
+    ]
+    for row, scale in zip(rows, (1, 2, 4, 8), strict=True):
+        if not isinstance(row, dict) or row.get("extent_scale") != scale:
+            return []
+        emit, status = row.get("emit_outcome"), row.get("build_status")
+        if emit not in ("lowered", "empty", "declined", "error") or status not in (
+            "compiled",
+            "compile_error",
+            "not_emitted",
+            "selection_changed",
+            "source_exceeds_probe_budget",
+        ):
+            return []
+        size = row.get("emitted_artifact_bytes")
+        obj = row.get("object_bytes")
+        wall = row.get("compile_wall_s")
+        if any(type(value) is not int or value < 0 for value in (size, obj) if value is not None):
+            return []
+        if wall is not None and (type(wall) not in (int, float) or not 0 <= wall < 1_000_000):
+            return []
+        lines.append(
+            f"| {scale} | {emit} | {status} | {size if size is not None else '-'} | "
+            f"{obj if obj is not None else '-'} | {wall if wall is not None else '-'} |"
+        )
+    return lines + [""]
 
 
 def _regression_section(verdicts: list[tuple[int, dict]]) -> list[str]:
@@ -184,6 +260,7 @@ def build(run_dir: Path, ws: Path, rnd: int, *, notes_stale: bool = False) -> st
 
     if verdicts:
         L += _focus_section(verdicts[-1][1])
+    L += _public_build_section(run_dir)
 
     notes = ws / "submission" / "docs" / "iteration_notes.md"
     body = notes.read_text(encoding="utf-8", errors="replace") if notes.is_file() else ""

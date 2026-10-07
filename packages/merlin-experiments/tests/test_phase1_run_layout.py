@@ -58,6 +58,32 @@ def test_capsule_bench_engine_output_is_the_phase_run(tmp_path, monkeypatch):
     assert command["engine_output"] == str(run_dir)
 
 
+def test_capsule_catalog_maps_explicit_bounded_object_build_budget(tmp_path, monkeypatch):
+    from merlin_experiments.adapters import ADAPTERS
+    from merlin_experiments.spec import SpecError
+
+    monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "out"))
+    adapter = ADAPTERS["capsule_bench"]
+    spec = SimpleNamespace(target="alpha", id="functional", path=tmp_path / "x.yaml", resolve=lambda v: tmp_path / v)
+    config = {
+        "descriptor": "d.yaml",
+        "arm": "merlin_assisted",
+        "model": "neutral",
+        "effort": "low",
+        "max_wall_s": 60,
+        "round_timeout": 30,
+        "public_object_build_budget_s": 7,
+    }
+    option = adapter.options["public_object_build_budget_s"]
+    option.validate("public_object_build_budget_s", 7)
+    command = adapter.resolve(spec, config, tmp_path, tmp_path / "out/run")
+    assert command["argv"].count("--public-object-build-budget-s") == 1
+    assert command["argv"][command["argv"].index("--public-object-build-budget-s") + 1] == "7"
+    for bad in (0, 121, True):
+        with pytest.raises(SpecError):
+            option.validate("public_object_build_budget_s", bad)
+
+
 def test_phase2_finds_a_functional_run_under_the_phase_root(tmp_path):
     from merlin_experiments.phase2.campaign import CampaignGateError, inspect_functional_run
 

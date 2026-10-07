@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import FrozenInstanceError, replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -187,6 +188,91 @@ def test_interleaved_invocations_keep_snapshot_policy_order_and_publication(tmp_
             ("promote", config.context.target),
         ]
         events.clear()
+
+
+def test_selected_object_build_reaches_grade_and_candidate_matched_continuous_brief(tmp_path, monkeypatch):
+    from merlin_experiments.phase1.feedback import brief, promotion
+    from merlin_experiments.phase1.feedback import codegen_scalability as S
+
+    ws, run = tmp_path / "ws", tmp_path / "run"
+    (ws / "submission").mkdir(parents=True)
+    (ws / "submission/manifest.yaml").write_text("language: python\n")
+    service = object()
+    private_selection = {"selected_tool": "/host/private/tool", "sha256": "a" * 64}
+    seen = []
+    monkeypatch.setattr(S, "_selected_build_inputs", lambda actual, target: private_selection)
+
+    def observe(candidate, **kwargs):
+        seen.append(kwargs)
+        assert kwargs["build_service"] is service
+        assert kwargs["build_timeout_s"] == 7
+        return {
+            "schema": "merlin.codegen_scalability_probe.v2",
+            "samples": [
+                {
+                    "extent_scale": scale,
+                    "outcome": "lowered",
+                    "build_only": {
+                        "status": "compiled",
+                        "build_selection": private_selection,
+                        "artifact_bytes": 100 * scale,
+                        "object_bytes": 20 * scale,
+                        "compile_wall_s": 0.25,
+                    },
+                }
+                for scale in (1, 2, 4, 8)
+            ],
+        }
+
+    monkeypatch.setattr(S, "run", observe)
+    monkeypatch.setattr(G, "_write_stage_ledger", lambda *a, **kw: None)
+    monkeypatch.setattr(G, "_attach_shape_generalization", lambda *a, **kw: None)
+    monkeypatch.setattr(G, "_record_plateau", lambda *a: None)
+    monkeypatch.setattr(G.FL, "record_channel_health", lambda *a: None)
+    monkeypatch.setattr(promotion, "resolve_tiers", lambda *a, **kw: (None, None, None))
+    inputs = G.GradingInputs(
+        context(tmp_path),
+        "raw_baseline",
+        tmp_path / "public",
+        (),
+        None,
+        public_build_service=service,
+        public_build_selection=private_selection,
+        public_build_budget_s=7,
+    )
+    result = G.grade(
+        ws,
+        run,
+        0,
+        False,
+        10,
+        scratch_key="r0000_t000007",
+        inputs=inputs,
+        qa_runner=lambda *a, **kw: {"all_pass": False, "n_passed": 0, "n_capsules": 1, "per_capsule": []},
+    )
+    archive = json.loads((run / "qa_history/verdict_round_r0000_t000007.json").read_text())
+    host = json.loads((run / "qa_history/codegen_scalability_round_r0000_t000007.json").read_text())
+    public = json.loads((run / "qa_history/codegen_scalability_public_round_r0000_t000007.json").read_text())
+    assert len(seen) == 1 and archive["graded_candidate_sha256"] == public["candidate_sha256"]
+    assert host["graded_candidate_sha256"] == public["candidate_sha256"]
+    assert private_selection["selected_tool"] in json.dumps(host)
+    assert private_selection["selected_tool"] not in json.dumps(result)
+    assert result["codegen_scalability"] == public
+    text = brief.build(run, ws, 0)
+    assert "Public object-build scalability (advisory only)" in text
+    assert "| 8 | lowered | compiled | 800 | 160 | 0.25 |" in text
+    assert private_selection["selected_tool"] not in text
+
+    # A grader-side mutation invalidates the pre-grade candidate identity;
+    # the later round cannot borrow this candidate's earlier projection.
+    def mutate(candidate, *args, **kwargs):
+        (Path(candidate) / "postgrade.py").write_text("changed after candidate selection\n")
+        return {"all_pass": False, "n_passed": 0, "n_capsules": 1, "per_capsule": []}
+
+    later = G.grade(ws, run, 0, False, 10, scratch_key="r0000_t000008", inputs=inputs, qa_runner=mutate)
+    assert len(seen) == 1
+    assert later["codegen_scalability"]["ran"] is False
+    assert "Public object-build scalability" not in brief.build(run, ws, 0)
 
 
 def test_source_receipt_rejects_loop_grading_drift(tmp_path, monkeypatch):

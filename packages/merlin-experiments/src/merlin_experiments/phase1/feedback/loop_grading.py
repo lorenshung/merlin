@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import math
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from pathlib import Path
 
 import yaml
 
+from merlin.common.tree_hash import hash_tree
 from merlin.targetgen.target_experiment import load_target_experiment
 from merlin_experiments.phase1 import oot_history as OH
 from merlin_experiments.phase1 import run_inputs as RI
@@ -44,6 +46,9 @@ class GradingInputs:
     contract: Path | None
     promotion_root: Path | None = None
     additional_forbidden: tuple[str, ...] = ()
+    public_build_service: object | None = None
+    public_build_selection: dict | None = None
+    public_build_budget_s: int = 0
 
 
 def declared_loop_tiers(policy_roots: tuple[Path, ...]) -> set:
@@ -206,6 +211,7 @@ def grade(
         RI.strip_build_state(cand)  # clean, relocatable build per grade (abc9 L3-build bug)
         # The harness commits exactly the bytes about to be graded; the agent never touches the repo.
         oot_commit = OH.commit_graded(run_dir, cand, label=label, key=_key, sandbox_roots=(ws.parent,))
+        candidate_sha256 = hash_tree(cand)["sha256"] if inputs.public_build_service is not None else None
         public_root = inputs.public_root() if callable(inputs.public_root) else inputs.public_root
         out = run_dir / "qa_history" / f"verdict_{label}_{_key}.json"
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -235,6 +241,8 @@ def grade(
             **({"contract": inputs.contract} if inputs.contract is not None else {}),
             **({"additional_forbidden": inputs.additional_forbidden} if inputs.additional_forbidden else {}),
         )
+        if candidate_sha256 is not None:
+            verdict["graded_candidate_sha256"] = candidate_sha256
         verdict = write_verdict(out, verdict)
         _write_stage_ledger(
             run_dir,
@@ -266,6 +274,16 @@ def grade(
             context=inputs.context,
             contract=inputs.contract,
             additional_forbidden=inputs.additional_forbidden,
+            **(
+                {
+                    "build_service": inputs.public_build_service,
+                    "build_selection": inputs.public_build_selection,
+                    "build_budget_s": inputs.public_build_budget_s,
+                    "candidate_sha256": candidate_sha256,
+                }
+                if inputs.public_build_service is not None
+                else {}
+            ),
         )
         _record_plateau(run_dir)  # operator-side; deliberately not in the agent's verdict
         FL.record_channel_health(ws, run_dir)
@@ -546,6 +564,48 @@ def _attach_shape_generalization(
         )
 
 
+def _public_object_build_projection(observation: dict, *, budget_s: int, candidate_sha256: str) -> dict:
+    """Copy only public measurement scalars into the agent-visible verdict."""
+    if observation.get("schema") != "merlin.codegen_scalability_probe.v2":
+        raise ValueError("public object-build observation has the wrong schema")
+    samples = observation.get("samples")
+    if not isinstance(samples, list) or len(samples) != 4:
+        raise ValueError("public object-build observation has no complete scale roster")
+    projected = []
+    for row, scale in zip(samples, (1, 2, 4, 8), strict=True):
+        build = row.get("build_only") if isinstance(row, dict) else None
+        if not isinstance(build, dict) or row.get("extent_scale") != scale:
+            raise ValueError("public object-build sample is malformed")
+        outcome = row.get("outcome")
+        status = build.get("status")
+        if outcome not in ("lowered", "empty", "declined", "error") or status not in (
+            "compiled",
+            "compile_error",
+            "not_emitted",
+            "selection_changed",
+            "source_exceeds_probe_budget",
+        ):
+            raise ValueError("public object-build status is not recognized")
+        item = {"extent_scale": scale, "emit_outcome": outcome, "build_status": status}
+        for source, dest in (("artifact_bytes", "emitted_artifact_bytes"), ("object_bytes", "object_bytes")):
+            value = build.get(source)
+            if type(value) is int and value >= 0:
+                item[dest] = value
+        elapsed = build.get("compile_wall_s")
+        if type(elapsed) in (int, float) and math.isfinite(elapsed) and elapsed >= 0:
+            item["compile_wall_s"] = elapsed
+        projected.append(item)
+    return {
+        "ran": True,
+        "schema": "merlin.public_object_build_feedback.v1",
+        "scope": "public_emit_and_build_only_advisory",
+        "candidate_sha256": candidate_sha256,
+        "per_sample_budget_s": budget_s,
+        "samples": projected,
+        "note": "Public object compilation only; no execution, numerical result, or certification claim.",
+    }
+
+
 def _attach_codegen_scalability(
     verdict: dict,
     cand,
@@ -557,30 +617,94 @@ def _attach_codegen_scalability(
     artifact_key: str | None = None,
     contract: Path | None = None,
     additional_forbidden: tuple[str, ...] = (),
+    build_service=None,
+    build_selection: dict | None = None,
+    build_budget_s: int = 0,
+    candidate_sha256: str | None = None,
 ) -> None:
     """Publish answer-free public size observations without changing scientific grades."""
     from . import codegen_scalability
 
     key = artifact_key or f"{rnd:02d}"
     out = run_dir / "qa_history" / f"codegen_scalability_round_{key}.json"
+    public_out = run_dir / "qa_history" / f"codegen_scalability_public_round_{key}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     try:
+        if build_service is not None:
+            if (
+                type(build_budget_s) is not int
+                or not 0 < build_budget_s <= 120
+                or not isinstance(build_selection, dict)
+                or not isinstance(candidate_sha256, str)
+                or len(candidate_sha256) != 64
+                or hash_tree(Path(cand))["sha256"] != candidate_sha256
+            ):
+                raise ValueError("frozen public object-build selection or candidate changed")
+            if codegen_scalability._selected_build_inputs(build_service, context.target) != build_selection:
+                raise ValueError("frozen public object-build source/tool selection changed")
         observation = codegen_scalability.run(
             cand,
             target=context.target,
             contract=contract,
             timeout=min(timeout, 30),
             additional_forbidden=additional_forbidden,
+            **(
+                {"build_service": build_service, "build_timeout_s": build_budget_s} if build_service is not None else {}
+            ),
         )
+        if build_service is not None:
+            observation["graded_candidate_sha256"] = candidate_sha256
         out.write_text(json.dumps(observation, indent=2))
-        verdict["codegen_scalability"] = {"ran": True, **observation}
+        if build_service is None:
+            verdict["codegen_scalability"] = {"ran": True, **observation}
+        else:
+            if (
+                hash_tree(Path(cand))["sha256"] != candidate_sha256
+                or codegen_scalability._selected_build_inputs(build_service, context.target) != build_selection
+                or any(
+                    build.get("build_selection") != build_selection
+                    for row in observation.get("samples", [])
+                    if isinstance(row, dict)
+                    for build in (row.get("build_only"),)
+                    if isinstance(build, dict) and build.get("status") == "compiled"
+                )
+            ):
+                raise ValueError("frozen public object-build selection changed during observation")
+            visible = _public_object_build_projection(
+                observation, budget_s=build_budget_s, candidate_sha256=candidate_sha256
+            )
+            public_out.write_text(json.dumps(visible, indent=2))
+            verdict["codegen_scalability"] = visible
     except Exception as exc:  # noqa: BLE001 -- missing advisory measurements are not numerical failures
-        verdict["codegen_scalability"] = {
-            "ran": False,
-            "error": f"{type(exc).__name__}: {exc}",
-            "scope": "public_emit_only",
-            "note": "No scalability measurement was obtained; this is not a pass or a numerical verdict.",
-        }
+        if build_service is None:
+            verdict["codegen_scalability"] = {
+                "ran": False,
+                "error": f"{type(exc).__name__}: {exc}",
+                "scope": "public_emit_only",
+                "note": "No scalability measurement was obtained; this is not a pass or a numerical verdict.",
+            }
+        else:
+            if not out.is_file():
+                out.write_text(
+                    json.dumps(
+                        {
+                            "scope": "host_private_public_build_diagnostic",
+                            "candidate_sha256": candidate_sha256,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        },
+                        indent=2,
+                    )
+                )
+            visible = {
+                "ran": False,
+                "schema": "merlin.public_object_build_feedback.v1",
+                "scope": "public_emit_and_build_only_advisory",
+                "candidate_sha256": candidate_sha256,
+                "error": "public object-build measurement unavailable",
+                "note": "No object-build result was obtained; the numerical grade is unchanged.",
+            }
+            public_out.write_text(json.dumps(visible, indent=2))
+            verdict["codegen_scalability"] = visible
 
 
 def write_verdict(path: Path, verdict: dict) -> dict:

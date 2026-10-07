@@ -277,6 +277,15 @@ def execute(prepared: PreparedRun, runtime: AuthoringRuntime) -> int:
         selected_rtl_facts,
     )
 
+    public_build_service = None
+    public_build_selection = None
+    if a.public_object_build_budget_s:
+        from .feedback.codegen_scalability import selected_build_service
+
+        public_build_service, public_build_selection = selected_build_service(context.target)
+        if public_build_selection != _environment_record.get("public_object_build_selection"):
+            raise RuntimeError("frozen public object-build tool/source selection changed before authoring")
+
     grading_inputs = LG.GradingInputs(
         context=prepared.request.context,
         arm=arm,
@@ -287,6 +296,9 @@ def execute(prepared: PreparedRun, runtime: AuthoringRuntime) -> int:
         additional_forbidden=("xdsl_dialects.lowering", "xdsl_dialects/lowering", "outputs_match")
         if a.experiment == "realistic" and arm == "merlin_assisted"
         else (),
+        public_build_service=public_build_service,
+        public_build_selection=public_build_selection,
+        public_build_budget_s=a.public_object_build_budget_s,
     )
     _grade = T.timed(
         partial(

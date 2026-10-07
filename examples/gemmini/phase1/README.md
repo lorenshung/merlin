@@ -167,6 +167,16 @@ does not count as compiler or grading evidence. An agent-visible search helper
 would be a separately declared and frozen treatment so its results can be
 compared fairly with the current experiment.
 
+For a fresh run, `--public-object-build-budget-s 30` explicitly enables bounded
+object-build feedback on the public scalability samples. The default is off;
+an enabled run records the selection and cannot change it on resume. Each of
+at most four samples receives the selected 1–120 second build budget. The agent
+sees emitted size, build status, compile time and object size for its exact
+candidate, not private model inputs or host tool paths. Use this advisory to
+identify code-size and compilation-cost regressions; it is neither a device
+performance measurement nor numerical certification. Selecting it requires a
+new frozen run rather than modifying a stored experiment.
+
 For direct invocation, set the variables below to actual operator-selected inputs.
 `CORPUS_SEAL` is the release's `private/seal.json`; `DESCRIPTOR` must belong to
 that release. `RESOURCE_ROOT` resolves declared resource paths. `BUNDLE_ID` must

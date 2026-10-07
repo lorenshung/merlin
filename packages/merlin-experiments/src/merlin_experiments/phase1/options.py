@@ -57,6 +57,17 @@ class RunOptions:
     account_config_dir: str
     private_full_model_spec: str = ""
     readback_policy: str = ""
+    public_object_build_budget_s: int = 0
+
+
+def _public_object_build_budget(value: str) -> int:
+    try:
+        budget = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("public object-build budget must be 0..120 seconds") from exc
+    if not 0 <= budget <= 120:
+        raise argparse.ArgumentTypeError("public object-build budget must be 0..120 seconds")
+    return budget
 
 
 def build_parser(
@@ -246,6 +257,14 @@ def build_parser(
     )
     ap.add_argument("--no-oracle", action="store_true", help="QA = L0+trace only (fast dev)")
     ap.add_argument("--skip-hidden", action="store_true")
+    ap.add_argument(
+        "--public-object-build-budget-s",
+        type=_public_object_build_budget,
+        default=0,
+        metavar="SECONDS",
+        help="fresh-run operator opt-in: compile each of four public scalability emissions as an advisory "
+        "object-only probe, with this per-sample subprocess budget (0 = emit-only default)",
+    )
     ap.add_argument(
         "--readback-policy",
         choices=("out_b64_v1",),

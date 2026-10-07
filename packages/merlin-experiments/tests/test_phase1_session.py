@@ -249,6 +249,26 @@ def test_readback_selection_is_frozen_across_real_admission_and_resume(project, 
         _run(_request(project, resume=True), lambda _: pytest.fail("resume dropped frozen output transport"))
 
 
+def test_public_object_build_selection_is_frozen_and_cannot_be_enabled_on_resume(project, monkeypatch):
+    _external_substitutes(monkeypatch)
+    selection = {"trusted_source_pins_sha256": "a" * 64, "clang": {"sha256": "b" * 64}}
+    monkeypatch.setattr(S, "_public_build_selection", lambda target, budget: selection if budget else None)
+    base = _request(project)
+    selected = dataclasses.replace(base, options=dataclasses.replace(base.options, public_object_build_budget_s=15))
+
+    def admitted(prepared):
+        prepared.verify_inputs()
+        assert prepared.environment["public_object_build_selection"] == selection
+        assert prepared.environment["run_config"]["public_object_build_budget_s"] == 15
+        return 0
+
+    assert _run(selected, admitted) == 0
+    resumed = dataclasses.replace(selected, options=dataclasses.replace(selected.options, resume=True))
+    assert _run(resumed, admitted) == 0
+    with pytest.raises(RuntimeError, match="public object-build"):
+        _run(_request(project, resume=True), lambda _: pytest.fail("resume dropped selected advisory"))
+
+
 def test_model_scope_refuses_missing_explicit_torch_interpreter_before_authoring(project, monkeypatch):
     capsule = project / "corpus/isa/public_member/capsule.yaml"
     declaration = yaml.safe_load(capsule.read_text())

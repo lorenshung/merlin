@@ -24,6 +24,16 @@ def test_readback_policy_is_explicit_and_closed():
         parse_options(["--run-id", "probe", "--readback-policy", "digest_only"])
 
 
+def test_public_object_build_probe_is_explicit_and_bounded():
+    assert parse_options(["--run-id", "probe"], environ={}).public_object_build_budget_s == 0
+    assert (
+        parse_options(["--run-id", "probe", "--public-object-build-budget-s", "15"]).public_object_build_budget_s == 15
+    )
+    for bad in ("-1", "121", "abc"):
+        with pytest.raises(SystemExit):
+            parse_options(["--run-id", "probe", "--public-object-build-budget-s", bad], environ={})
+
+
 def test_environment_defaults_are_invocation_inputs_not_import_state(monkeypatch):
     explicit = {"AWS_REGION": "region-a", "AWS_PROFILE": "profile-a", "CLAUDE_CONFIG_DIR": "account-a"}
     args = parse_options(["--run-id", "probe"], environ=explicit)

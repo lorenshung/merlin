@@ -15,6 +15,14 @@ from pathlib import Path
 _MAX_BUILD_PROBE_BYTES = 16 * 1024 * 1024
 
 
+def selected_build_service(target: str):
+    """Select the exact trusted host capability before authoring, never in the agent sandbox."""
+    from merlin.targetgen.native_model_execution import _build_service_for
+
+    service = _build_service_for(target)
+    return service, _selected_build_inputs(service, target)
+
+
 def _selected_build_inputs(service, target: str) -> dict:
     """Pin only the direct tools and trusted build capability this observation uses.
 
@@ -85,8 +93,11 @@ def _compile_observation(artifact: str, work: Path, *, target: str, service, bud
         started = time.monotonic()
         try:
             obj = llvm_mlir_to_object(
-                artifact, work / "scalability_object", target=target,
-                _build_service=service, build_timeout_s=budget_s,
+                artifact,
+                work / "scalability_object",
+                target=target,
+                _build_service=service,
+                build_timeout_s=budget_s,
             )
         finally:
             result["compile_wall_s"] = time.monotonic() - started
@@ -111,14 +122,18 @@ def _compile_observation(artifact: str, work: Path, *, target: str, service, bud
             or abi.get("abi") != selected["recipe_mabi"].partition("=")[2]
         ):
             raise ValueError("public object build receipts do not match the measured object")
-        result.update({
-            "status": "compiled", "object_bytes": obj.stat().st_size, "object_sha256": object_sha,
-            "emitted_llvm_ir_sha256": file_digest(build_root / "kernel.ll"),
-            "compiled_llvm_ir_sha256": stack["llvm_ir_sha256"],
-            "stack_frame_receipt_sha256": file_digest(stack_path),
-            "abi_receipt_sha256": file_digest(abi_path),
-            "stack_repair": stack.get("repair") is not None,
-        })
+        result.update(
+            {
+                "status": "compiled",
+                "object_bytes": obj.stat().st_size,
+                "object_sha256": object_sha,
+                "emitted_llvm_ir_sha256": file_digest(build_root / "kernel.ll"),
+                "compiled_llvm_ir_sha256": stack["llvm_ir_sha256"],
+                "stack_frame_receipt_sha256": file_digest(stack_path),
+                "abi_receipt_sha256": file_digest(abi_path),
+                "stack_repair": stack.get("repair") is not None,
+            }
+        )
     except Exception as exc:  # noqa: BLE001 -- optional diagnostics cannot become a grade
         result["error"] = f"{type(exc).__name__}: {str(exc)[:400]}"
     return result
@@ -203,15 +218,15 @@ def run(
         }
         if build_service is not None:
             sample["build_only"] = build_record or {
-                "status": "not_emitted", "scope": "public_build_only; no object compiled"
+                "status": "not_emitted",
+                "scope": "public_build_only; no object compiled",
             }
         if detail:
             sample["detail"] = detail
         samples.append(sample)
     result = {
         "schema": (
-            "merlin.codegen_scalability_probe.v1"
-            if build_service is None else "merlin.codegen_scalability_probe.v2"
+            "merlin.codegen_scalability_probe.v1" if build_service is None else "merlin.codegen_scalability_probe.v2"
         ),
         "scope": "public_emit_only" if build_service is None else "public_emit_and_build_only",
         "tile_edge": tile,
@@ -223,8 +238,8 @@ def run(
             "Public fact-derived emit-only observations: not compilation, executed work, numerical "
             "equivalence or certification. Constant-sized or smaller looped code can be correct. "
             "Use the existing compiler/build and native numerical checks before claiming success."
-            if build_service is None else
-            "Public fact-derived emitted-text and optional object-build observations only: no link, "
+            if build_service is None
+            else "Public fact-derived emitted-text and optional object-build observations only: no link, "
             "execution, numerical equivalence or certification. Object size, compile time and failure "
             "are advisory; neither loop syntax nor a size trend is a correctness condition."
         ),

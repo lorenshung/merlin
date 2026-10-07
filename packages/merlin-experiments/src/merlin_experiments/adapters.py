@@ -138,6 +138,8 @@ class Option:
             valid = isinstance(value, str) and bool(value.strip()) and "\x00" not in value
         if not valid or (self.choices and value not in self.choices):
             raise SpecError(f"invalid {name}: expected {self.kind}" + (f" in {self.choices}" if self.choices else ""))
+        if name == "public_object_build_budget_s" and value > 120:
+            raise SpecError("public_object_build_budget_s must be at most 120 seconds per public sample")
         if name.endswith("sha256") and (len(value) != 64 or any(c not in "0123456789abcdef" for c in value)):
             raise SpecError(f"{name} must be a lowercase SHA-256 digest")
 
@@ -420,6 +422,7 @@ ADAPTERS = {
             "round_timeout": _REQUIRED_POSITIVE,
             "grade_interval": _POSITIVE,
             "qa_timeout": _POSITIVE,
+            "public_object_build_budget_s": _POSITIVE,
             "readback_policy": Option(choices=("out_b64_v1",)),
             "sim_max_jobs": _POSITIVE,
             "model_budget_s": _POSITIVE,

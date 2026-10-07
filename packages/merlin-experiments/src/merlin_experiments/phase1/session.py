@@ -37,6 +37,23 @@ _MODEL_HOST_SNAPSHOT_ROOT_ENV = "MERLIN_MODEL_HOST_LANE_SNAPSHOT_ROOT"
 _MODEL_HOST_SNAPSHOT_REQUIRED_ENV = "MERLIN_MODEL_HOST_LANE_SNAPSHOT_REQUIRED"
 
 
+def _public_build_selection(target: str, budget_s: int) -> dict | None:
+    """Observe an operator-selected pure build capability, never candidate input."""
+    if not budget_s:
+        return None
+    from .feedback.codegen_scalability import selected_build_service
+
+    _, selection = selected_build_service(target)
+    return selection
+
+
+def _verify_public_build_budget(options: RunOptions, environment: dict) -> None:
+    recorded = environment.get("run_config") or {}
+    prior = recorded.get("public_object_build_budget_s", 0) if type(recorded) is dict else None
+    if type(prior) is not int or prior != options.public_object_build_budget_s:
+        raise RuntimeError("resume refused: public object-build advisory selection changed")
+
+
 def _verify_phase0_handoff(corpus_review: dict | None, workload_coverage: dict | None) -> None:
     """Bind the reviewed Phase 0 handoff to the frozen corpus view.
 
@@ -94,6 +111,11 @@ class RunRequest:
             "grade_interval_s": a.grade_interval,
             "selfcheck_protocol": 3,
             "launcher_argv": list(self.launcher_argv),
+            **(
+                {"public_object_build_budget_s": a.public_object_build_budget_s}
+                if a.public_object_build_budget_s
+                else {}
+            ),
             **({"readback_policy": readback_record(self.context)} if self.context.readback_policy is not None else {}),
         }
 
@@ -162,6 +184,11 @@ class PreparedRun:
 
     def verify_inputs(self) -> None:
         verify_readback_record(self.request.context, self.environment.get("readback_policy"))
+        _verify_public_build_budget(self.request.options, self.environment)
+        if self.environment.get("public_object_build_selection") != _public_build_selection(
+            self.request.context.target, self.request.options.public_object_build_budget_s
+        ):
+            raise RuntimeError("public object-build tool/source selection changed")
         sources = self.environment["implementation_sources"]
         SI.verify(sources, **self.request.source_context)
         if T.record(self.request.treatment, sources) != self.environment["invocation_treatment"]:
@@ -388,6 +415,7 @@ def prepare(
         if not isinstance(_environment_record, dict):
             raise RuntimeError("resume refused: environment record is not a mapping")
         verify_readback_record(context, _environment_record.get("readback_policy"))
+        _verify_public_build_budget(a, _environment_record)
         _implementation_sources = _environment_record.get("implementation_sources")
         SI.verify(_implementation_sources, **_source_context)
     else:
@@ -618,6 +646,9 @@ def prepare(
         return 4
     if _resuming and _environment_record.get("model_python_selection") != _model_python_selection:
         raise RuntimeError("resume refused: selected model Python path or bytes changed")
+    _public_build_selection_record = _public_build_selection(context.target, a.public_object_build_budget_s)
+    if _resuming and _environment_record.get("public_object_build_selection") != _public_build_selection_record:
+        raise RuntimeError("resume refused: public object-build tool/source selection changed")
 
     # Stage every prompt/document before provenance is written.  On resume these bytes are NEVER rebuilt
     # from the current worktree; they must match the treatment record from the first invocation.
@@ -705,6 +736,11 @@ def prepare(
             "sandbox": a.sandbox,
             "qa_loop": True,
             "run_config": _run_config,
+            **(
+                {"public_object_build_selection": _public_build_selection_record}
+                if _public_build_selection_record is not None
+                else {}
+            ),
             **({"readback_policy": readback_record(context)} if context.readback_policy is not None else {}),
             "task_scope": _task_scope_record,
             **({"model_python_selection": _model_python_selection} if _model_python_selection is not None else {}),
