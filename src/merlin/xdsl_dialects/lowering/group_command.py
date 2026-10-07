@@ -52,9 +52,11 @@ class GroupProgram:
     bias_arg: int | None = None
     column_order: tuple[str, ...] | None = None
     notes: tuple[str, ...] = field(default_factory=tuple)
+    #: Disjoint matrix slices. The entry itself describes ONE slice, not flattened batch rows.
+    batch_shape: tuple[int, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        record = {
             "schema": SCHEMA,
             "entry": dict(self.entry),
             "stored_operand": self.stored_operand,
@@ -64,6 +66,9 @@ class GroupProgram:
             "column_order": list(self.column_order) if self.column_order else None,
             "notes": list(self.notes),
         }
+        if self.batch_shape:
+            record["batch_shape"] = list(self.batch_shape)
+        return record
 
 
 def _source_argument(value) -> int | None:
@@ -154,44 +159,71 @@ def device_orientation(entry: Mapping[str, Any], program: Mapping[str, Any] | No
     return {**entry, "M": 1, "K": int(entry["K"]), "N": int(entry["M"]), STATIONARY_KEY: STATIONARY_ACTIVATION}
 
 
-def _is_plain_contraction(root, rows: int, reduced: int, columns: int) -> bool:
-    """``root`` reads ``lhs[M, K] @ rhs[K, N] -> [M, N]`` exactly: two rank-2 operands in that
-    orientation and index maps that do not transpose either. Read off the types and the maps; a named
-    op without maps is admitted only when its operand types already say the orientation."""
+def _is_plain_contraction(root, rows: int, reduced: int, columns: int, batch: int | None = None) -> bool:
+    """Prove the matrix orientation and, if present, a shared independent batch axis.
+
+    Shapes and index maps must read ``lhs[..., M, K] @ rhs[..., K, N]``
+    without a transpose or broadcast. Named ops lacking maps must still carry
+    those exact operand types.
+    """
     operands = list(root.operands)
     if len(operands) < 2:
         return False
     lhs, _ = mq.type_shape_dtype(operands[0].type)
     rhs, _ = mq.type_shape_dtype(operands[1].type)
-    if [int(v) for v in lhs] != [rows, reduced] or [int(v) for v in rhs] != [reduced, columns]:
+    prefix = [] if batch is None else [batch]
+    if list(lhs) != [*prefix, rows, reduced] or list(rhs) != [*prefix, reduced, columns]:
         return False
     maps = KS.indexing_maps(root)
     if maps is None:
-        return mq.op_name(root) == "linalg.matmul"
-    if len(maps) < 3 or any(len(m) != 2 for m in maps[:3]):
+        return mq.op_name(root) == ("linalg.matmul" if batch is None else "linalg.batch_matmul")
+    rank = 2 if batch is None else 3
+    if len(maps) != 3 or any(len(m) != rank for m in maps):
         return False
     dims = [[KS._dim_position(e) for e in m] for m in maps[:3]]
     if any(d is None for m in dims for d in m):
         return False
-    (m0, k0), (k1, n1), (m2, n2) = dims
-    return m0 == m2 and n1 == n2 and k0 == k1 and len({m0, n1, k0}) == 3
+    (m0, k0), (k1, n1), (m2, n2) = [m[-2:] for m in dims]
+    if not (m0 == m2 and n1 == n2 and k0 == k1 and len({m0, n1, k0}) == 3):
+        return False
+    if batch is None:
+        return True
+    b0, b1, b2 = [m[0] for m in dims]
+    loops = KS._iterator_types(root)
+    return (
+        b0 == b1 == b2
+        and {b0, m0, n1, k0} == set(range(4))
+        and loops is not None
+        and len(loops) == 4
+        and all(kind == ("reduction" if i == k0 else "parallel") for i, kind in enumerate(loops))
+    )
 
 
 def _activation_contraction(group: CG.Group, base: dict[str, Any]) -> GroupProgram:
-    """A contraction whose operands are BOTH activations, in device form.
+    """A contraction over two runtime-bound operands in their captured orientation.
 
-    Nothing is stored, so there is nothing to prepack and nothing to transpose: the left operand
-    streams and the right is the stationary one, both handed over at run time, in the orientation the
-    capture already reads them. That is the only orientation stated -- a windowed gather, a transposing
-    index map, a bias or a readout that needs a stored operand's scale is refused by name."""
+    The left operand streams and the right is stationary. A closed batch uses
+    each operand's own slice, including an immutable right operand, without
+    prepacking or transposing it. A windowed gather, transposing index map, bias,
+    or readout needing a stored operand's scale is refused by name.
+    """
     shape, _ = mq.type_shape_dtype(group.root.results[0].type)
-    if len(shape) != 2:
-        raise CG.NoCapsuleForm("a batched contraction of two activations is not one device command yet")
+    if len(shape) not in (2, 3):
+        raise CG.NoCapsuleForm("this contraction's batch rank has no proved slice ABI")
     rows, reduced, columns = int(base["M"]), int(base["K"]), int(base["N"])
-    if not _is_plain_contraction(group.root, rows, reduced, columns):
+    batch = None
+    if len(shape) == 3:
+        batch, rows, columns = map(int, shape)
+        if min(batch, rows, reduced, columns) <= 0:
+            raise CG.NoCapsuleForm("a batch needs static positive matrix extents")
+        from .interface_lowering import init_contributes_nothing
+
+        if len(group.root.operands) != 3 or not init_contributes_nothing(group.root.operands[2]):
+            raise CG.NoCapsuleForm("a batched matrix command cannot drop a nonzero or unknown accumulator seed")
+    if not _is_plain_contraction(group.root, rows, reduced, columns, batch):
         raise CG.NoCapsuleForm(
-            "neither operand of the contraction is a stored tensor, and the two activations are not read as "
-            "lhs[M, K] @ rhs[K, N]"
+            "the contraction's operand orientation or batch coordinates are not "
+            "lhs[..., M, K] @ rhs[..., K, N]"
         )
     if _window(group, 0, reduced) is not None or _window(group, 1, reduced) is not None:
         raise CG.NoCapsuleForm("a windowed contraction over two activations is not stated")
@@ -214,7 +246,8 @@ def _activation_contraction(group: CG.Group, base: dict[str, Any]) -> GroupProgr
         entry=entry,
         stored_operand=None,
         transposed=False,
-        notes=("both operands are activations: the stationary operand is handed over at run time, not stored",),
+        notes=("both operands are runtime-bound in their captured orientation; no prepack is applied",),
+        batch_shape=() if batch is None else (batch,),
     )
 
 
@@ -445,6 +478,11 @@ def program(
     if base["op"] == "conv2d":
         return GroupProgram(entry=base, stored_operand=1, transposed=False)  # already a windowed root
     shape, _ = mq.type_shape_dtype(group.root.results[0].type)
+    if len(shape) == 3:
+        # A dense batch passes both integer operands slice by slice, including an
+        # immutable argument. No weight reorientation, bias folding or prepack is
+        # licensed: the exact operand maps and closed readout are checked below.
+        return _activation_contraction(group, base)
     if len(shape) != 2:
         raise CG.NoCapsuleForm("a batched contraction is not restated as one device command yet")
     try:

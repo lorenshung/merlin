@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Collection, Sequence
+from math import prod
 from typing import Any
 
 
@@ -26,11 +27,18 @@ def demand(groups: Sequence[Any], *, weight_args: Collection[int] | None = None)
             unstated["a region placed on a unit has no contraction root to state"] += 1
             continue
         try:
-            entry = group_command.program(group, weight_args=weight_args).entry
+            program = group_command.program(group, weight_args=weight_args)
+            entry = program.entry
         except compute_groups.NoCapsuleForm as error:
             unstated[str(error)] += 1
             continue
         numbers = ("name", "acc_scale", "lhs_scale", "rhs_scale")
         key = repr(sorted((k, repr(v)) for k, v in entry.items() if k not in numbers))
-        entries.setdefault(key, {**entry, "count": 0})["count"] += 1
+        row = entries.setdefault(key, {**entry, "count": 0, "slice_instances": 0, "group_batch_shapes": []})
+        row["count"] += 1  # Compute groups, not matrix slices.
+        slices = prod(program.batch_shape) if program.batch_shape else 1
+        row["slice_instances"] += slices
+        row["group_batch_shapes"].append(
+            {"group": group.index, "batch_shape": list(program.batch_shape), "slices": slices}
+        )
     return {"entries": sorted(entries.values(), key=lambda e: -e["count"]), "unstated": dict(unstated)}

@@ -87,6 +87,31 @@ def test_a_routing_with_a_decision_moves_the_contraction(tmp_path, declared_i8_d
     assert len(side.get("signatures") or {}) == 1
 
 
+def test_group_route_retains_exact_source_identity_in_sidecar(tmp_path, declared_i8_datapath):
+    from merlin.llvmlower.device_offload import BY_GROUP, rewrite_prepared_file
+
+    prepared = tmp_path / "prepared.mlir"
+    prepared.write_text(
+        _MODEL.replace(
+            "linalg.matmul ins",
+            'linalg.matmul {prov.region_id = "region-a", prov.source_node_ids = ["node-b", "node-a"]} ins',
+        )
+    )
+    rewrite = rewrite_prepared_file(
+        prepared,
+        tmp_path,
+        "gemmini",
+        select=lambda _shape: True,
+        granularity=BY_GROUP,
+        weight_args={1},
+        model="neutral",
+    )
+    assert rewrite.moved == 1
+    (routed,) = load_sidecar(tmp_path)["routed"]
+    assert routed["source_region_id"] == "region-a"
+    assert routed["source_node_ids"] == ["node-a", "node-b"]
+
+
 def test_the_offloaded_declaration_keeps_its_access_attributes(tmp_path, declared_i8_datapath):
     """Without these, one-shot-bufferize copies the weight operand of every routed contraction --
     silently, and at real cost in a shipped model."""

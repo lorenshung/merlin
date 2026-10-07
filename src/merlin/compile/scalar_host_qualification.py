@@ -38,6 +38,12 @@ from merlin.mining.registry import load_rvv_package
 from merlin.runtime.backends import spike_model
 from merlin.runtime.boards import CONSOLE_HTIF, FLOW_BAREMETAL, load_boards
 
+_OUTPUT_DTYPES = {
+    np.dtype(np.float32): ("f32", np.uint32),
+    np.dtype(np.int64): ("i64", np.uint64),
+    np.dtype(np.bool_): ("i1", np.uint8),
+}
+
 
 def _single_output_golden(capture: Path) -> np.ndarray:
     required = (
@@ -67,9 +73,17 @@ def _single_output_golden(capture: Path) -> np.ndarray:
     ):
         raise ScalarHostQualificationError("saved capture artifacts disagree with its capture receipt")
     golden = np.load(capture / "golden.npy", allow_pickle=False)
-    if golden.dtype != np.float32 or not np.isfinite(golden).all():
-        raise ScalarHostQualificationError("single-output golden must be finite float32")
-    if golden.size == 0 or golden.size > 4096:
+    if golden.dtype not in _OUTPUT_DTYPES or not np.isfinite(golden).all():
+        raise ScalarHostQualificationError("single-output golden must be finite float32, int64 or bool")
+    if golden.dtype == np.bool_ and np.any(golden.view(np.uint8) > 1):
+        raise ScalarHostQualificationError("Boolean golden must contain canonical zero/one bytes")
+    from merlin.common.mlir_query import forward_signature
+
+    _arguments, outputs = forward_signature(capture / "model.mlir")
+    expected_dtype = _OUTPUT_DTYPES[golden.dtype][0]
+    if len(outputs) != 1 or outputs[0] != (list(golden.shape), expected_dtype):
+        raise ScalarHostQualificationError("golden shape/dtype differs from the single parsed model output ABI")
+    if golden.size > 4096:
         raise ScalarHostQualificationError("bare-metal OUT prints at most 4096 elements; full output is required")
     return golden.reshape(-1)
 
@@ -85,18 +99,10 @@ def _output_root(path: str | Path) -> Path:
 
 
 def _one_out_bits(console: str) -> np.ndarray:
-    lines = [line for line in console.splitlines() if line.startswith("OUT ")]
-    if len(lines) != 1:
-        raise ScalarHostQualificationError("model must emit exactly one OUT line")
-    fields = lines[0].split()
     try:
-        count = int(fields[1])
-        values = [int(value) for value in fields[2:]]
-    except (IndexError, ValueError) as exc:
-        raise ScalarHostQualificationError("model OUT line contains malformed count or bits") from exc
-    if count != len(values) or count < 1 or count > 4096 or any(value < 0 or value > 0xFFFFFFFF for value in values):
-        raise ScalarHostQualificationError("model OUT line has incomplete or invalid bits")
-    return np.asarray(values, dtype=np.uint32)
+        return spike_model.parse_console(console)["raw_output_bits"]
+    except spike_model.SpikeModelError as exc:
+        raise ScalarHostQualificationError(str(exc)) from exc
 
 
 def qualify(
@@ -132,6 +138,7 @@ def qualify(
     capture_tree = _strict_tree_sha256(capture_path)
     package_tree = _strict_tree_sha256(package_path)
     golden = _single_output_golden(capture_path)
+    output_dtype, unsigned = _OUTPUT_DTYPES[golden.dtype]
     if not catalog_path.is_file() or catalog_path.is_symlink():
         raise ScalarHostQualificationError(f"board catalog is missing or a symlink: {catalog_path}")
     catalog_sha256 = _file_sha256(catalog_path)
@@ -199,6 +206,7 @@ def qualify(
             "host_isa": isas[0],
             "simulator_isa": simulator_isa,
             "golden_sha256": _file_sha256(capture_path / "golden.npy"),
+            "output_dtype": output_dtype,
             "arena_mb": arena_mb,
             "timeout_s": timeout_s,
             "code_reserve_policy": "spike_model default: fixed base plus generated static IO",
@@ -238,7 +246,7 @@ def qualify(
             )
             console = str(result.get("console", ""))
             metrics = result.get("metrics") or {}
-            observed = np.asarray(result["outputs"], dtype=np.float32).reshape(-1)
+            observed = np.asarray(result["outputs"]).reshape(-1)
         else:
             backend, citation, revalidate, prepare = native
             revalidate()
@@ -261,19 +269,30 @@ def qualify(
             revalidate()
             parsed = spike_model.parse_console(console)
             metrics = parsed["metrics"]
-            observed = np.asarray(parsed["outputs"], dtype=np.float32).reshape(-1)
+            observed = np.asarray(parsed["outputs"]).reshape(-1)
         console_path = output_path / ("spike-console.log" if native is None else "rtl-console.log")
         console_path.write_text(console, encoding="utf-8")
         out_bits = _one_out_bits(console)
-        observed = np.asarray(observed, dtype=np.float32).reshape(-1)
+        if observed.dtype != golden.dtype:
+            raise ScalarHostQualificationError(f"output dtype {observed.dtype} differs from golden {golden.dtype}")
         if observed.size != golden.size or not np.isfinite(observed).all():
             raise ScalarHostQualificationError(
                 f"partial or nonfinite output: observed {observed.size}, golden {golden.size} elements"
             )
-        if out_bits.size != observed.size or not np.array_equal(out_bits, observed.view(np.uint32)):
+        if (
+            out_bits.dtype != unsigned
+            or out_bits.size != observed.size
+            or not np.array_equal(out_bits, observed.view(unsigned))
+        ):
             raise ScalarHostQualificationError("parsed output disagrees with its raw OUT bits")
-        mismatch = int(np.count_nonzero(observed.view(np.uint32) != golden.view(np.uint32)))
-        max_abs = float(np.max(np.abs(observed.astype(np.float64) - golden.astype(np.float64))))
+        mismatch = int(np.count_nonzero(observed.view(unsigned) != golden.view(unsigned)))
+        max_abs = (
+            max(
+                (abs(int(actual) - int(expected)) for actual, expected in zip(observed, golden, strict=True)), default=0
+            )
+            if golden.dtype == np.int64
+            else float(np.max(np.abs(observed.astype(np.float64) - golden.astype(np.float64)), initial=0))
+        )
         if metrics.get("memref_rank_mismatch") != 0:
             raise ScalarHostQualificationError("missing or nonzero memref_rank_mismatch diagnostic")
         if mismatch:
@@ -306,6 +325,11 @@ def qualify(
                         else {"rtl_console": str(console_path), "rtl_console_sha256": _file_sha256(console_path)}
                     ),
                     "elements": int(golden.size),
+                    "element_dtype": output_dtype,
+                    "numerical_output_checked": bool(golden.size),
+                    "comparison": "exact_output_bits"
+                    if golden.size
+                    else "empty_output_ABI_and_completed_execution_only",
                     "mismatched_elements": mismatch,
                     "max_absolute_error": max_abs,
                     "metrics": metrics,

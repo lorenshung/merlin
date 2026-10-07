@@ -10,11 +10,15 @@ order, so the int8 datapath stays byte-identical — the registry is a seam, not
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 # Canonical order (the historical sequence in dispatch_runtime / zephyr_model). Static — no import.
 _ORDER = ("contraction_int8", "conv_int8", "softmax_int", "gelu_int", "silu_int", "rsqrt_int")
+# W8A8 compute selects integer contractions, not an unrelated host numerical policy.
+# The four nonlinear approximations remain available through an explicit pass list.
+_COMPUTE_DEFAULT = ("contraction_int8", "conv_int8")
 
 
 @dataclass(frozen=True)
@@ -55,17 +59,42 @@ def known() -> tuple[str, ...]:
     return _ORDER
 
 
+def _explicit_passes(passes: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+    """Validate an already selected numerical pass set in canonical order."""
+    if not isinstance(passes, (list, tuple)) or any(type(name) is not str for name in passes):
+        raise ValueError("quantization passes must be an explicit list of registered names")
+    if len(passes) != len(set(passes)) or set(passes) - set(_ORDER):
+        raise ValueError("quantization passes contain a duplicate or unregistered name")
+    return tuple(name for name in _ORDER if name in passes)
+
+
+def compute_passes(passes: list[str] | tuple[str, ...] | None = None) -> tuple[str, ...]:
+    """Resolve a W8A8 caller's exact numerical pass selection.
+
+    ``None`` starts with contraction/conv only. An explicitly selected optional
+    quantization pass may alter that set; callers bind this returned effective
+    policy before invoking ``apply_quant`` with an explicit pass list. The
+    low-level ``apply_quant(None)`` historical all-six behavior is separate.
+    """
+    from .optional_passes import selected_quant_passes
+
+    requested = _COMPUTE_DEFAULT if passes is None else _explicit_passes(passes)
+    selected = selected_quant_passes(requested)
+    return tuple(name for name in _ORDER if name in selected)
+
+
 def apply_quant(
     module: Any,
-    passes: "list[str] | None" = None,
+    passes: list[str] | None = None,
     *,
     named_contraction: bool = False,
     prequant_gather: bool = False,
-    report_out: "dict[str, dict] | None" = None,
-    select: "Callable[[Any], bool] | None" = None,
+    report_out: dict[str, dict] | None = None,
+    select: Callable[[Any], bool] | None = None,
 ) -> dict[str, int]:
-    """Run the selected int8 quant passes IN CANONICAL ORDER (mutating ``module``). ``passes=None`` runs
-    all six = the historical sequence (byte-identical datapath). Returns per-pass lowered-op counts.
+    """Run the selected int8 quant passes IN CANONICAL ORDER (mutating ``module``). ``passes=None`` starts
+    with all six historical passes and applies the optional-pass selection. An explicit list is
+    authoritative, ordinarily from ``compute_passes``. Returns per-pass lowered-op counts.
 
     ``select`` is an ``(op) -> bool`` predicate restricting WHICH ops the selected passes may
     rewrite (default None = every op the pass recognizes, i.e. the shipped datapath). It makes the
@@ -91,9 +120,10 @@ def apply_quant(
     from .optional_passes import selected_quant_passes
 
     reg = registry()
-    # `--pass int-gelu` / `--no-pass int-gelu` (merlin.llvmlower.optional_passes) edit the set here, so
-    # an unselected build runs exactly the requested sequence.
-    want = set(selected_quant_passes(_ORDER if passes is None else passes))
+    # The historical low-level default remains all six, with optional-pass
+    # selection applied at this edge. An explicit list is already the caller's
+    # selected and recorded numerical policy; do not widen it a second time.
+    want = set(selected_quant_passes(_ORDER)) if passes is None else set(_explicit_passes(passes))
     out: dict[str, int] = {}
     for n in _ORDER:
         if n not in want:

@@ -81,6 +81,34 @@ def _embed_array(arr: "np.ndarray", dt: str) -> str:
         bits = _bf16_bits(np.ascontiguousarray(arr)).ravel()
         return ",".join(str(int(v)) for v in bits)
     flat = arr.astype(NP_OF.get(dt, np.float32)).ravel()
+    if dt in {"f32", "f64"}:
+        # Decimal `nan`/`inf` are not C constants.  C compiler NaN builtins also
+        # need the captured sign, quiet/signaling bit and payload explicitly: a
+        # bare NAN macro would silently change the input bytes before execution.
+        if dt == "f32":
+            raw = flat.view(np.uint32)
+            exponent, fraction, quiet, sign_mask, suffix = (
+                0x7F800000, 0x007FFFFF, 0x00400000, 0x80000000, "f"
+            )
+        else:
+            raw = flat.view(np.uint64)
+            exponent, fraction, quiet, sign_mask, suffix = (
+                0x7FF0000000000000, 0x000FFFFFFFFFFFFF, 0x0008000000000000,
+                0x8000000000000000, "",
+            )
+
+        def literal(value: np.floating, bits: np.unsignedinteger) -> str:
+            encoded = int(bits)
+            if encoded & exponent != exponent:
+                return str(float(value))  # preserve the existing finite C spelling
+            sign = "-" if encoded & sign_mask else ""
+            payload = encoded & fraction
+            if payload == 0:
+                return f"{sign}__builtin_inf{suffix}()"
+            kind = "nan" if payload & quiet else "nans"
+            return f'{sign}__builtin_{kind}{suffix}("0x{payload & ~quiet:x}")'
+
+        return ",".join(literal(value, bits) for value, bits in zip(flat, raw, strict=True))
     return ",".join(str(int(v) if "i" in dt else float(v)) for v in flat)
 
 
@@ -405,6 +433,9 @@ def generate(model_dir: str | Path, out_dir: str | Path,
          f"#define MERLIN_HAS_SESSION_QUALITY {1 if quality_values is not None else 0}",
          f"#define MERLIN_OUT_ELEMS {int(np.prod(out_shape))}",
          f"#define MERLIN_OUT_LASTDIM {out_shape[-1] if out_shape else 1}",
+         f"#define MERLIN_OUT_IS_F32 {int(out_dt == 'f32')}",
+         f"#define MERLIN_OUT_IS_I64 {int(out_dt == 'i64')}",
+         f"#define MERLIN_OUT_IS_I1 {int(out_dt == 'i1')}",
          "static const merlin_arg_t MERLIN_ARGS[MERLIN_N_ARGS] = {"]
     for kind, off, rank, dims, elem, dt in rows:
         dimstr = ",".join(str(d) for d in dims) or "0"

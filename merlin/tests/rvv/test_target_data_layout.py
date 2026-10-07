@@ -13,6 +13,71 @@ def test_the_layout_line_is_read_structurally():
     assert TDL.parse("no layout here\n") is None
 
 
+@pytest.mark.parametrize(
+    ("layout", "expected"),
+    [
+        ("e-m:e-p:32:32-i64:64-n32-S128", 32),
+        ("e-m:e-p:64:64-i64:64-n32:64-S128", 64),
+    ],
+)
+def test_default_pointer_index_width_is_derived_from_reported_layout(layout, expected):
+    assert TDL.default_index_bits(layout) == expected
+
+
+@pytest.mark.parametrize(
+    "layout",
+    ["", "e-i64:64", "e-p:64", "e-p:64:64-p0:32:32", "e-p:64:64:64:nope", "e-p0:64:64:64:32"],
+)
+def test_missing_or_ambiguous_default_pointer_width_refuses(layout):
+    with pytest.raises(ValueError):
+        TDL.default_index_bits(layout)
+
+
+def test_absent_selected_compiler_cannot_supply_a_width(tmp_path):
+    with pytest.raises((FileNotFoundError, ValueError)):
+        TDL.observe_index_width(tmp_path / "no-clang", ["--target=unknown"])
+
+
+def test_all_index_converters_share_explicit_width():
+    from merlin.llvmlower import pipeline
+
+    for bits in (32, 64):
+        selected = pipeline._bind_index_width(pipeline._upstream_pipeline(), bits)
+        for name in (
+            "convert-index-to-llvm",
+            "convert-arith-to-llvm",
+            "finalize-memref-to-llvm",
+            "convert-func-to-llvm",
+            "convert-cf-to-llvm",
+        ):
+            assert selected.count(f"{name}{{index-bitwidth={bits}}}") == 1
+    with pytest.raises(ValueError):
+        pipeline._bind_index_width("builtin.module(convert-index-to-llvm)", 32)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "convert-index-to-llvm",
+        "convert-arith-to-llvm",
+        "finalize-memref-to-llvm",
+        "convert-func-to-llvm",
+        "convert-cf-to-llvm",
+    ],
+)
+def test_preconfigured_duplicate_cannot_hide_beside_a_bare_converter(name):
+    from merlin.llvmlower import pipeline
+
+    passes = ",".join(pipeline._INDEX_CONVERSION_PASSES)
+    for extra in (name, f"{name}{{index-bitwidth=32}}", f"{name}{{index-bitwidth=64}}"):
+        with pytest.raises(ValueError, match="no unique bare"):
+            pipeline._bind_index_width(f"builtin.module({passes},{extra})", 64)
+    for before, after in ((" ", ""), ("", " "), ("\t", "\n"), ("\n ", " \t")):
+        extra = f"{before}{name}{after}{{index-bitwidth=32}}"
+        with pytest.raises(ValueError, match="no unique bare"):
+            pipeline._bind_index_width(f"builtin.module({passes},{extra})", 64)
+
+
 def test_the_layout_is_asked_of_the_compiler_for_its_flags():
     from merlin.llvmlower import toolchain
 
@@ -21,6 +86,103 @@ def test_the_layout_is_asked_of_the_compiler_for_its_flags():
         pytest.skip("no cross clang in this checkout")
     layout = TDL.of(clang, ["--target=riscv64-unknown-elf", "-march=rv64gc", "-O2"])
     assert layout.startswith("e-") and "i64:64" in layout
+
+
+@pytest.mark.parametrize(
+    ("flags", "bits"),
+    [
+        (["--target=riscv32-unknown-elf", "-march=rv32gc", "-mabi=ilp32d"], 32),
+        (["--target=riscv64-unknown-elf", "-march=rv64gc", "-mabi=lp64d"], 64),
+    ],
+)
+def test_fresh_selected_compiler_observation_binds_exact_cross_flags(flags, bits):
+    from merlin.llvmlower import toolchain
+
+    clang = toolchain.clang()
+    if not clang or not __import__("pathlib").Path(str(clang)).is_file():
+        pytest.skip("no cross clang in this checkout")
+    selected = TDL.observe_index_width(clang, flags)
+    assert selected["cross_flags"] == flags
+    assert selected["index_bits"] == bits
+    from merlin.common.digest import sha256_file
+
+    assert selected["compiler_sha256"] == sha256_file(selected["compiler_resolved"])
+
+
+def test_selected_index_width_changes_actual_llvm_argument_type(tmp_path):
+    from merlin.llvmlower.pipeline import lower_to_llvm_ir
+
+    src = """module {
+      func.func @f(%arg0: index) -> i64 {
+        %0 = arith.index_cast %arg0 : index to i64
+        return %0 : i64
+      }
+    }"""
+    passes = (
+        "convert-index-to-llvm,convert-arith-to-llvm,finalize-memref-to-llvm,"
+        "convert-func-to-llvm,convert-cf-to-llvm,reconcile-unrealized-casts"
+    )
+    for bits in (32, 64):
+        selected = {}
+        ll = lower_to_llvm_ir(
+            src,
+            workdir=tmp_path / str(bits),
+            pipeline=passes,
+            data_layout=f"e-p:{bits}:{bits}",
+            index_bits=bits,
+            lowering_selection=selected,
+        )
+        assert f"define i64 @f(i{bits}" in ll
+        assert selected["index_bits"] == bits
+        assert selected["effective_pipeline"].count(f"index-bitwidth={bits}") == 5
+
+
+def test_selected_width_and_effective_pipeline_survive_lower_model_receipt(tmp_path):
+    from merlin.llvmlower.lower import lower_model
+
+    src = """module {
+      func.func @f(%arg0: index) -> i64 {
+        %0 = arith.index_cast %arg0 : index to i64
+        return %0 : i64
+      }
+    }"""
+    lowered = lower_model(src, tmp_path, targets=(), data_layout="e-p:64:64", index_bits=64)
+    selection = lowered.stats["index_lowering"]
+    assert selection["index_bits"] == 64
+    assert selection["data_layout"] == "e-p:64:64"
+    assert selection["effective_pipeline"].count("index-bitwidth=64") == 5
+    assert 'target datalayout = "e-p:64:64"' in lowered.ll_path.read_text()
+
+
+def test_selfcopy_effective_pipeline_is_exact_runner_argument(tmp_path, monkeypatch):
+    from merlin.llvmlower import pipeline
+    from merlin.llvmlower.selfcopy import FEATURE
+
+    original_run = pipeline.subprocess.run
+    commands = []
+
+    def observed_run(command, **kwargs):
+        commands.append(command)
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr(pipeline.subprocess, "run", observed_run)
+    src = """module {
+      func.func @f(%arg0: index) -> i64 {
+        %0 = arith.index_cast %arg0 : index to i64
+        return %0 : i64
+      }
+    }"""
+    selected = {}
+    pipeline.lower_to_llvm_ir(
+        src,
+        workdir=tmp_path,
+        features=frozenset({FEATURE}),
+        data_layout="e-p:64:64",
+        index_bits=64,
+        lowering_selection=selected,
+    )
+    assert commands and selected["effective_pipeline"] == commands[0][4]
+    assert selected["effective_pipeline"].count("index-bitwidth=64") == 5
 
 
 def test_a_lowering_with_the_layout_aligns_64_bit_accesses_naturally(tmp_path):

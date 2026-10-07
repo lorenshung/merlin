@@ -248,6 +248,11 @@ def compile_saved_model(
         )
         if not isinstance(built.get("build_hash"), str) or not built["build_hash"]:
             raise BaremetalModelError("bare-metal build returned no citable build hash")
+        if (
+            not isinstance(built.get("index_lowering"), dict)
+            or built["index_lowering"].get("schema") != "merlin.selected-index-lowering.v1"
+        ):
+            raise BaremetalModelError("bare-metal build returned no selected index-lowering record")
         elf = Path(built["elf"])
         if not elf.is_file() or elf.is_symlink() or not elf.resolve().is_relative_to(output_path):
             raise BaremetalModelError("bare-metal build returned no safe ELF in its output")
@@ -259,6 +264,7 @@ def compile_saved_model(
             "elf_sha256": elf_sha,
             "elf_arch_extensions": arch,
             "build_hash": built.get("build_hash"),
+            "index_lowering": built["index_lowering"],
             "matrix_routing": built.get("matrix_routing"),
         }
         from merlin.llvmlower.device_offload import SIDECAR_NAME

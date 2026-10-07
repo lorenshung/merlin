@@ -1,8 +1,9 @@
 """The C adapter between compiled host code and a device kernel.
 
-The host side of an offloaded contraction is an MLIR function call, and MLIR's lowered convention
+The host side of an offloaded contraction is an MLIR function call. Its lowered private declaration
 passes a memref as ``(allocated, aligned, offset, sizes..., strides...)`` -- seven scalars for a rank-2
-operand. The device side is the target's own kernel, whose ABI the OOT backend contract states:
+operand -- but calls the external ``_mlir_ciface_*`` as a result-descriptor pointer followed by one
+pointer per operand descriptor. The device side is the target's own kernel, whose ABI states:
 ``void {target}_kernel(weight, lhs_0.., out_0..)``, row-major, edge tiles zero-padded to the tile edge.
 Neither side can call the other directly, so something has to unpack one convention into the other.
 That is all this emits.
@@ -76,6 +77,9 @@ static int merlin_span(const void *aligned, intptr_t offset, intptr_t rows, intp
   uintptr_t r = (uintptr_t)rows, c = (uintptr_t)cols;
   if (r > UINTPTR_MAX / c || off > UINTPTR_MAX / elem_bytes) return 0;
   uintptr_t elements = r * c;
+  /* MLIR descriptor indexing is signed intptr_t, including byte scaling. */
+  uintptr_t index_limit = (uintptr_t)INTPTR_MAX / elem_bytes;
+  if (elements > index_limit || off > index_limit - elements) return 0;
   if (elements > UINTPTR_MAX / elem_bytes) return 0;
   uintptr_t delta = off * elem_bytes, bytes = elements * elem_bytes;
   if (delta > UINTPTR_MAX - base) return 0;
@@ -248,7 +252,7 @@ merlin_memref_3d {symbol}(
     void *c_alloc, void *c_aligned, intptr_t c_off, intptr_t c_s0, intptr_t c_s1, intptr_t c_s2,
     intptr_t c_st0, intptr_t c_st1, intptr_t c_st2)
 {{
-  if (a_s0 != {b} || a_s1 != {m} || a_s2 != {k} || b_s1 != {k} || b_s2 != {n}
+  if (a_s0 != {b} || a_s1 != {m} || a_s2 != {k} || b_s0 != {b} || b_s1 != {k} || b_s2 != {n}
       || c_s0 != {b} || c_s1 != {m} || c_s2 != {n}) {{
     merlin_memref_3d bad;
     bad.allocated = 0; bad.aligned = 0; bad.offset = 0;
@@ -256,16 +260,23 @@ merlin_memref_3d {symbol}(
     bad.strides[0] = 0; bad.strides[1] = 0; bad.strides[2] = 0;
     return bad;
   }}
-  (void)a_alloc; (void)b_alloc; (void)b_s0; (void)a_st1; (void)a_st2;
-  (void)b_st1; (void)b_st2; (void)c_st1; (void)c_st2;
+  /* One command per disjoint dense slice, never a guessed broadcast or stride. */
+  if (a_st0 != {a_slice} || a_st1 != {k} || a_st2 != 1 ||
+      b_st0 != {b_slice} || b_st1 != {n} || b_st2 != 1 ||
+      c_st0 != {c_slice} || c_st1 != {n} || c_st2 != 1) __builtin_trap();
+  (void)a_alloc; (void)b_alloc;
+  uintptr_t a_addr, b_addr, c_addr, a_bytes, b_bytes, c_bytes;
+  if (!merlin_span(a_aligned, a_off, {a_rows}, {k}, {lhs_bytes}u, &a_addr, &a_bytes) ||
+      !merlin_span(b_aligned, b_off, {b_rows}, {n}, {rhs_bytes}u, &b_addr, &b_bytes) ||
+      !merlin_span(c_aligned, c_off, {c_rows}, {n}, {out_bytes}u, &c_addr, &c_bytes) ||
+      !merlin_disjoint((void *)a_addr, a_bytes, (void *)c_addr, c_bytes) ||
+      !merlin_disjoint((void *)b_addr, b_bytes, (void *)c_addr, c_bytes)) __builtin_trap();
   {{
     long slice;
     for (slice = 0; slice < {b}; ++slice) {{
-      const unsigned char *src_a = (const unsigned char *)a_aligned
-                                 + (a_off + slice * a_st0) * {lhs_bytes};
-      const unsigned char *src_b = (const unsigned char *)b_aligned
-                                 + (b_off + slice * b_st0) * {rhs_bytes};
-      unsigned char *dst_c = (unsigned char *)c_aligned + (c_off + slice * c_st0) * {out_bytes};
+      const unsigned char *src_a = (const unsigned char *)(a_addr + (uintptr_t)slice * {a_slice} * {lhs_bytes});
+      const unsigned char *src_b = (const unsigned char *)(b_addr + (uintptr_t)slice * {b_slice} * {rhs_bytes});
+      unsigned char *dst_c = (unsigned char *)(c_addr + (uintptr_t)slice * {c_slice} * {out_bytes});
 {body}
     }}
   }}
@@ -303,6 +314,29 @@ static unsigned char {symbol}_b[{kp} * {np_} * {rhs_bytes}];
 static unsigned char {symbol}_c[{mp} * {np_} * {out_bytes}];"""
 
 
+def _c_interface_wrapper(symbol: str, rank: int) -> str:
+    """Bridge the exact MLIR C interface to this shim's flattened descriptor entry.
+
+    ``llvm.emit_c_interface`` lowers an external result-bearing memref function to
+    ``void _mlir_ciface_name(result*, arg0*, arg1*, arg2*)``. The private MLIR
+    function builds these descriptors and reads the result back after the call.
+    """
+    descriptor = f"merlin_memref_{rank}d"
+    groups = []
+    for name in ("a", "b", "c"):
+        fields = [f"{name}->{field}" for field in ("allocated", "aligned", "offset")]
+        fields.extend(f"{name}->sizes[{axis}]" for axis in range(rank))
+        fields.extend(f"{name}->strides[{axis}]" for axis in range(rank))
+        groups.append(", ".join(fields))
+    call = ",\n      ".join(groups)
+    return (
+        f"\n/* MLIR's emitted external C interface: result first, then descriptor pointers. */\n"
+        f"void _mlir_ciface_{symbol}({descriptor} *result, const {descriptor} *a,\n"
+        f"                          const {descriptor} *b, const {descriptor} *c)\n"
+        f"{{\n  *result = {symbol}(\n      {call});\n}}\n"
+    )
+
+
 @dataclass(frozen=True)
 class KernelAbi:
     """The device kernel's symbol and argument order, from the OOT backend contract."""
@@ -334,19 +368,14 @@ def kernel_abi_for(device: str) -> KernelAbi | None:
     names its entry differently changes a declaration and not this emitter.
     """
     try:
-        import yaml as _yaml
+        from merlin.targetgen.contract.schemas import render_backend_contract
 
-        from merlin.common.paths import merlin_dir
-
-        path = merlin_dir() / "contract/mlir_oot_backend_contract.yaml"
-        blk = (_yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("kernel_abi") or {}
+        blk = render_backend_contract(device).get("kernel_abi") or {}
         sym = str(blk.get("symbol") or "")
         if not sym:
             return None
         return KernelAbi(
-            symbol=sym.replace("{target}", str(device)),
-            arg_order=str(blk.get("arg_order") or ""),
-            pointee_layout=str(blk.get("pointee_layout") or ""),
+            symbol=sym, arg_order=str(blk.get("arg_order") or ""), pointee_layout=str(blk.get("pointee_layout") or "")
         )
     except Exception:  # noqa: BLE001 -- an unreadable contract is a real answer: decline
         return None
@@ -503,7 +532,8 @@ def emit_translation_unit(
 ) -> ShimUnit:
     """One entry per signature, adapting the MLIR ABI to ``device``'s kernel.
 
-    ``signatures`` is ``{symbol: (M, N, K)}`` as minted by the offload rewrite; ``dtypes`` is
+    ``signatures`` is ``{symbol: (M, N, K)}``, or ``(B, M, N, K)`` for
+    independent dense matrix slices, as minted by the offload rewrite; ``dtypes`` is
     ``{symbol: (lhs, rhs, acc)}`` from the same rewrite. They exist as separate symbols only because
     MLIR function types are monomorphic.
 
@@ -576,17 +606,24 @@ def emit_translation_unit(
             entries.append(
                 _ENTRY_3D.format(
                     b=int(batch),
+                    a_slice=m * k,
+                    b_slice=k * n,
+                    c_slice=m * n,
+                    a_rows=int(batch) * m,
+                    b_rows=int(batch) * k,
+                    c_rows=int(batch) * m,
                     staging=staging,
                     body=body,
                     padnote=(f", tile edge {int(edge)} (staged)" if needs_pad else ""),
                     **shape,
                 )
             )
+        entries.append(_c_interface_wrapper(sym, 2 if batch is None else 3))
         emitted.append(sym)
 
     kernels = sorted({kernel_for(sym) for sym in emitted})
     externs = "\n".join(f"extern void {k}(void *weight, void *lhs_0, void *out_0);" for k in kernels)
-    pointer_guard = _RANK2_POINTER_GUARD if any(len(signatures[sym]) == 3 for sym in emitted) else ""
+    pointer_guard = _RANK2_POINTER_GUARD
     text = (
         _PREAMBLE.format(
             device=device, pointer_guard=pointer_guard, externs=externs, entries="".join(entries), n=len(emitted)

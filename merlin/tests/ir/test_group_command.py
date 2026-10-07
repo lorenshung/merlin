@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from fake_quant_layer import Oracle as _Oracle
 from fake_quant_layer import module as _linear
@@ -100,6 +102,31 @@ def test_an_operand_sum_is_stated_as_a_residual_add_with_its_computed_bound() ->
     # Multipliers are numbers one program runs with: two sums that differ only there are one demand.
     other = CG.form_groups(mq.parse(residual_module(lhs_scale=1.25, rhs_scale=0.5)), "synthetic", oracle=oracle)
     assert len(CG.demand([group, *other])["entries"]) == 1
+
+
+def test_demand_keeps_group_count_and_records_every_batch_multiplicity(monkeypatch) -> None:
+    from merlin.xdsl_dialects.lowering import group_command as command
+
+    groups = [SimpleNamespace(index=i, placement="device", root=object()) for i in (0, 1, 2)]
+    shapes = {0: (2,), 1: (5,), 2: ()}
+    monkeypatch.setattr(
+        command,
+        "program",
+        lambda group, **_kwargs: command.GroupProgram(
+            entry={"op": "matmul", "M": 3, "K": 4, "N": 6},
+            stored_operand=1,
+            transposed=False,
+            batch_shape=shapes[group.index],
+        ),
+    )
+    (row,) = CG.demand(groups)["entries"]
+    assert (row["count"], row["slice_instances"]) == (3, 8)
+    assert row["group_batch_shapes"] == [
+        {"group": 0, "batch_shape": [2], "slices": 2},
+        {"group": 1, "batch_shape": [5], "slices": 5},
+        {"group": 2, "batch_shape": [], "slices": 1},
+    ]
+    assert (row["M"], row["K"], row["N"]) == (3, 4, 6)
 
 
 def test_a_window_mean_is_oriented_as_the_program_holds_it_and_nothing_else_is() -> None:

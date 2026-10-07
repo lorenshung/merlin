@@ -1074,6 +1074,11 @@ def whole_program_buffer(
             )
         except CG.NoCapsuleForm as refusal:
             raise WholeProgramError(f"group {group.index} cannot be stated as a device program: {refusal}") from refusal
+        if stated.batch_shape:
+            raise WholeProgramError(
+                f"group {group.index} has batch shape {stated.batch_shape}: this command buffer "
+                "does not yet express the required per-slice bindings"
+            )
         entry = stated.entry
         opcode = _OPCODE_OF_OP.get(str(entry.get("op")))
         if opcode is None:

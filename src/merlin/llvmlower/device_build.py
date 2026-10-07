@@ -421,6 +421,19 @@ def _run(argv: Sequence[str], *, timeout: int) -> subprocess.CompletedProcess:
     return subprocess.run([str(a) for a in argv], capture_output=True, text=True, timeout=timeout)
 
 
+def _run_build_tool(argv: Sequence[str], *, timeout: int) -> subprocess.CompletedProcess:
+    """Keep tool timeouts in the per-symbol failure roster, never admit partial outputs."""
+    try:
+        return _run(argv, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            argv,
+            124,
+            stdout="",
+            stderr=f"timed out after {timeout} seconds; incomplete outputs are not admitted",
+        )
+
+
 def kernel_entry(
     symbol: str, extents: Sequence[int], stated: Mapping[str, Any] | None, device: str
 ) -> tuple[dict[str, Any] | None, str, str]:
@@ -612,7 +625,11 @@ def build_device_objects(
         ifc = stem.with_suffix(".iface.mlir")
         ifc.write_text(iface, encoding="utf-8")
 
-        r = run_entrypoint(pkg, "emit_target_artifact", ifc, timeout=timeout)
+        try:
+            r = run_entrypoint(pkg, "emit_target_artifact", ifc, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            skipped.append((sym, f"emit_target_artifact: timed out after {timeout} seconds"))
+            continue
         if r.returncode != 0:
             shape = f"{m}x{k}x{n}" if m is not None else str(entry.get("op") or "this program")
             skipped.append((sym, f"package declined {shape}: {(r.stderr or '').strip()[:200]}"))
@@ -624,13 +641,13 @@ def build_device_objects(
         art.write_text(r.stdout, encoding="utf-8")
 
         ll = stem.with_suffix(".ll")
-        t = _run([mlir_translate(), "--mlir-to-llvmir", str(art), "-o", str(ll)], timeout=timeout)
+        t = _run_build_tool([mlir_translate(), "--mlir-to-llvmir", str(art), "-o", str(ll)], timeout=timeout)
         if t.returncode != 0:
             skipped.append((sym, f"mlir-translate: {(t.stderr or '').strip()[:200]}"))
             continue
 
         raw = stem.with_suffix(".raw.o")
-        c = _run([clang(), *_flags(codegen_target, cflags), "-c", str(ll), "-o", str(raw)], timeout=timeout)
+        c = _run_build_tool([clang(), *_flags(codegen_target, cflags), "-c", str(ll), "-o", str(raw)], timeout=timeout)
         if c.returncode != 0:
             skipped.append((sym, f"clang: {(c.stderr or '').strip()[:200]}"))
             continue
@@ -639,7 +656,7 @@ def build_device_objects(
         if oc is None:
             skipped.append((sym, "no objcopy available to give this kernel a distinct symbol"))
             continue
-        rn = _run([oc, f"--redefine-sym={abi.symbol}={want}", str(raw), str(obj)], timeout=timeout)
+        rn = _run_build_tool([oc, f"--redefine-sym={abi.symbol}={want}", str(raw), str(obj)], timeout=timeout)
         if rn.returncode != 0:
             skipped.append((sym, f"symbol rename: {(rn.stderr or '').strip()[:200]}"))
             continue
@@ -681,7 +698,7 @@ def build_device_objects(
     shim_c = work / "device_shim.c"
     shim_c.write_text(unit.text, encoding="utf-8")
     shim_o = work / "device_shim.o"
-    s = _run([clang(), *_flags(codegen_target, cflags), "-c", str(shim_c), "-o", str(shim_o)], timeout=timeout)
+    s = _run_build_tool([clang(), *_flags(codegen_target, cflags), "-c", str(shim_c), "-o", str(shim_o)], timeout=timeout)
     if s.returncode != 0:
         skipped.append(("shim", f"clang: {(s.stderr or '').strip()[:300]}"))
         return DeviceBuild(

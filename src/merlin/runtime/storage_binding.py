@@ -121,6 +121,7 @@ def resolve_storage_bindings(
     max_storage_bytes: int,
     reference_only_allow_prepack: bool = False,
     prepack_authorizations: Mapping[str, Any] | None = None,
+    describe_only: bool = False,
 ) -> dict[str, StorageBinding] | None:
     """Validate all storage before materializing inputs, or return None for the legacy ABI.
 
@@ -130,6 +131,8 @@ def resolve_storage_bindings(
 
     ``reference_only_allow_prepack`` permits testing the data-format copy itself; it is
     NOT an authorization to exclude candidate-selected input work from a timed invocation.
+    ``describe_only`` validates the same allocation map without creating even synthetic
+    input values. It reports a format contract, not an executable caller or prepack grant.
     ``prepack_authorizations`` is an out-of-band host grant, never command-buffer
     metadata. Binding is checked here; the exact initializer words are checked by
     ``pack_words`` before relocation. Missing authorized inputs never materialize
@@ -204,6 +207,8 @@ def resolve_storage_bindings(
     provided = {} if inputs is None else inputs
     if not isinstance(provided, Mapping) or set(provided) - set(tensors):
         raise ValueError("explicit logical inputs must name declared tensors")
+    if describe_only and provided:
+        raise ValueError("layout description cannot consume input values")
     authorizations = {} if prepack_authorizations is None else prepack_authorizations
     if not isinstance(authorizations, Mapping) or set(authorizations) - set(tensors):
         raise ValueError("host prepack authorizations must name declared tensors")
@@ -217,7 +222,7 @@ def resolve_storage_bindings(
                 raise ValueError("authorized prepack requires an explicit read-only logical input")
             authorization.validate_binding(cb, name, encodings[name])
     missing = {name: obligation for name, obligation in prepack.items() if name not in authorizations}
-    if missing and not reference_only_allow_prepack:
+    if missing and not reference_only_allow_prepack and not describe_only:
         raise StoragePrepackRequired(missing)
     result = {}
     for name, encoding in encodings.items():
@@ -227,7 +232,7 @@ def resolve_storage_bindings(
                 raise ValueError("write-only output cannot be initialized from supplied inputs")
         elif name in provided:
             values = _logical_values(provided[name], encoding.logical_shape, encoding.dtype, name=name)
-        else:
+        elif not describe_only:
             values = tuple(Tensor.deterministic(name, encoding.logical_shape, encoding.dtype).data)
         result[name] = StorageBinding(encoding, access[name], values, authorizations.get(name))
     return result

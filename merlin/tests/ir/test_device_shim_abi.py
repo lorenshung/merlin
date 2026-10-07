@@ -17,7 +17,7 @@ import subprocess
 
 import pytest
 
-from merlin.llvmlower.device_shim import emit_translation_unit, kernel_abi_for
+from merlin.llvmlower.device_shim import KernelAbi, emit_translation_unit, kernel_abi_for
 
 pytestmark = pytest.mark.target("gemmini")
 
@@ -109,8 +109,11 @@ def test_padded_rank2_bridge_is_numerical_and_refuses_bad_pointer_descriptors(tm
     host pointer/transfer bridge, not accelerator execution or model equivalence.
     """
     unit = emit_translation_unit(
-        "gemmini", {"selected": (3, 7, 5)}, {"selected": ("i8", "i8", "i32")},
-        kernel_symbol_for=lambda _sym: "selected_kernel", tile_edge=16,
+        "gemmini",
+        {"selected": (3, 7, 5)},
+        {"selected": ("i8", "i8", "i32")},
+        kernel_symbol_for=lambda _sym: "selected_kernel",
+        tile_edge=16,
     )
     (tmp_path / "shim.c").write_text(unit.text, encoding="utf-8")
     (tmp_path / "kernel.c").write_text(
@@ -126,7 +129,8 @@ void selected_kernel(void *weight, void *lhs, void *out) {
       c[i*16+j] = sum;
     }
 }
-""", encoding="utf-8",
+""",
+        encoding="utf-8",
     )
     (tmp_path / "driver.c").write_text(
         """
@@ -155,13 +159,24 @@ int main(int argc, char **argv) {
     }
   return 0;
 }
-""", encoding="utf-8",
+""",
+        encoding="utf-8",
     )
     exe = tmp_path / "bridge"
     build = subprocess.run(
-        [_CC, "-Wall", "-Wextra", "-Werror", str(tmp_path / "shim.c"),
-         str(tmp_path / "kernel.c"), str(tmp_path / "driver.c"), "-o", str(exe)],
-        capture_output=True, text=True,
+        [
+            _CC,
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            str(tmp_path / "shim.c"),
+            str(tmp_path / "kernel.c"),
+            str(tmp_path / "driver.c"),
+            "-o",
+            str(exe),
+        ],
+        capture_output=True,
+        text=True,
     )
     assert build.returncode == 0, build.stderr
     assert subprocess.run([str(exe)], capture_output=True).returncode == 0
@@ -227,8 +242,9 @@ def test_extents_on_the_tile_edge_need_no_staging(tmp_path):
     if _CC is not None:
         (tmp_path / "direct.c").write_text(unit.text, encoding="utf-8")
         built = subprocess.run(
-            [_CC, "-Wall", "-Wextra", "-Werror", "-c", str(tmp_path / "direct.c"),
-             "-o", str(tmp_path / "direct.o")], capture_output=True, text=True,
+            [_CC, "-Wall", "-Wextra", "-Werror", "-c", str(tmp_path / "direct.c"), "-o", str(tmp_path / "direct.o")],
+            capture_output=True,
+            text=True,
         )
         assert built.returncode == 0, built.stderr
 
@@ -271,9 +287,18 @@ def test_a_padded_entry_compiles_and_round_trips(tmp_path):
     assert p.returncode == 0, p.stderr
 
 
-def test_the_tile_edge_is_derived_from_the_device_not_assumed():
+def test_the_tile_edge_is_derived_from_the_device_not_assumed(monkeypatch):
     """Padding to a guessed edge is worse than not padding: it is differently wrong."""
     from merlin.llvmlower.device_shim import tile_edge_for
+    from merlin.targetgen.rtl import facts
+
+    # An explicit MERLIN_RTL_FACTS selection is not scoped by the requested name.
+    # State the missing evidence this negative case tests without discarding the
+    # caller's selection for the positive provider case.
+    selected_body = facts.body_if_present
+    monkeypatch.setattr(
+        facts, "body_if_present", lambda target: {} if target == "definitely_not_a_target" else selected_body(target)
+    )
 
     assert tile_edge_for("definitely_not_a_target") is None
     edge = tile_edge_for("gemmini")
@@ -286,17 +311,28 @@ def test_rectangular_or_ambiguous_mesh_does_not_mint_a_square_shim_edge(monkeypa
     from merlin.llvmlower.device_shim import tile_edge_for
     from merlin.targetgen.rtl import facts
 
-    monkeypatch.setattr(facts, "body_if_present", lambda _target: {
-        "arrays": [{"rows": 16, "cols": 32}],
-    })
+    monkeypatch.setattr(
+        facts,
+        "body_if_present",
+        lambda _target: {
+            "arrays": [{"rows": 16, "cols": 32}],
+        },
+    )
     assert tile_edge_for("example") is None
-    monkeypatch.setattr(facts, "body_if_present", lambda _target: {
-        "arrays": [{"rows": 16, "cols": 16}, {"rows": 32, "cols": 32}],
-    })
+    monkeypatch.setattr(
+        facts,
+        "body_if_present",
+        lambda _target: {
+            "arrays": [{"rows": 16, "cols": 16}, {"rows": 32, "cols": 32}],
+        },
+    )
     assert tile_edge_for("example") is None
 
 
-def test_an_underivable_edge_declines_rather_than_guessing():
+def test_an_underivable_edge_declines_rather_than_guessing(monkeypatch):
+    from merlin.targetgen.rtl import facts
+
+    monkeypatch.setattr(facts, "body_if_present", lambda _target: {})
     unit = emit_translation_unit("definitely_not_a_target", {"s": (8, 24, 8)}, {"s": ("i8", "i8", "i32")})
     assert unit.symbols == () or "s" not in unit.symbols
 
@@ -376,3 +412,125 @@ def test_each_batch_slice_gets_its_own_call_at_its_own_offset(tmp_path):
     assert build.returncode == 0, build.stderr
     run = subprocess.run([str(exe)], capture_output=True, text=True)
     assert run.returncode == 0, f"batch loop wrong: {run.stdout} {run.stderr}"
+
+
+@pytest.mark.skipif(_CC is None, reason="no C compiler available")
+@pytest.mark.parametrize("rank,padded", [(2, False), (2, True), (3, False), (3, True)])
+def test_mlir_c_interface_uses_result_and_operand_descriptor_pointers(tmp_path, monkeypatch, rank, padded):
+    """Call the ABI emitted by llvm.emit_c_interface, not the shim's flat helper ABI.
+
+    The lowered host function calls ``void _mlir_ciface_<name>(result*, A*, B*, C*)``.
+    A native call checks the symbol, descriptor order, returned output ownership and
+    actual matrix numerics through both direct and zero-padded batch/ordinary paths.
+    """
+    m = n = k = 3 if padded else 2
+    batch = 2 if rank == 3 else 1
+    monkeypatch.setattr(
+        "merlin.llvmlower.device_shim.kernel_abi_for", lambda _device: KernelAbi(symbol="unused_kernel")
+    )
+    sym = f"selected_{rank}_{int(padded)}"
+    kernel = f"kernel_{rank}_{int(padded)}"
+    signature = (batch, m, n, k) if rank == 3 else (m, n, k)
+    unit = emit_translation_unit(
+        "gemmini",
+        {sym: signature},
+        {sym: ("i8", "i8", "i32")},
+        kernel_symbol_for=lambda _sym: kernel,
+        tile_edge=2,
+    )
+    assert unit.symbols == (sym,), unit.skipped
+    (tmp_path / "shim.c").write_text(unit.text, encoding="utf-8")
+    edge = 4 if padded else 2
+    (tmp_path / "kernel.c").write_text(
+        """
+#include <stdint.h>
+#define EDGE %EDGE%
+void %KERNEL%(void *weight, void *lhs, void *out) {
+  const int8_t *b = weight, *a = lhs;
+  int32_t *c = out;
+  for (int i = 0; i < EDGE; ++i)
+    for (int j = 0; j < EDGE; ++j) {
+      int32_t sum = 0;
+      for (int p = 0; p < EDGE; ++p) sum += a[i*EDGE+p] * b[p*EDGE+j];
+      c[i*EDGE+j] = sum;
+    }
+}
+""".replace("%EDGE%", str(edge)).replace("%KERNEL%", kernel),
+        encoding="utf-8",
+    )
+    (tmp_path / "driver.c").write_text(
+        """
+#include <stdint.h>
+#define BATCH %BATCH%
+#define M %M%
+#define N %N%
+#define K %K%
+#define RANK %RANK%
+#if RANK == 2
+typedef struct { void *allocated, *aligned; intptr_t offset, sizes[2], strides[2]; } mr;
+#else
+typedef struct { void *allocated, *aligned; intptr_t offset, sizes[3], strides[3]; } mr;
+#endif
+extern void _mlir_ciface_%SYMBOL%(mr *, const mr *, const mr *, const mr *);
+int main(void) {
+  int8_t a[1+BATCH*M*K], b[1+BATCH*K*N];
+  int32_t c[1+BATCH*M*N];
+  for (int i = 0; i < 1+BATCH*M*K; ++i) a[i] = (int8_t)(i % 7 - 3);
+  for (int i = 0; i < 1+BATCH*K*N; ++i) b[i] = (int8_t)(i % 5 - 2);
+  for (int i = 0; i < 1+BATCH*M*N; ++i) c[i] = -999;
+#if RANK == 2
+  mr aa = {a, a, 1, {M,K}, {K,1}};
+  mr bb = {b, b, 1, {K,N}, {N,1}};
+  mr cc = {c, c, 1, {M,N}, {N,1}};
+#else
+  mr aa = {a, a, 1, {BATCH,M,K}, {M*K,K,1}};
+  mr bb = {b, b, 1, {BATCH,K,N}, {K*N,N,1}};
+  mr cc = {c, c, 1, {BATCH,M,N}, {M*N,N,1}};
+#endif
+  mr result = {0};
+  _mlir_ciface_%SYMBOL%(&result, &aa, &bb, &cc);
+  if (result.allocated != c || result.aligned != c || result.offset != 1) return 1;
+  for (int axis = 0; axis < RANK; ++axis)
+    if (result.sizes[axis] != cc.sizes[axis] || result.strides[axis] != cc.strides[axis]) return 5;
+  for (int slice = 0; slice < BATCH; ++slice)
+    for (int i = 0; i < M; ++i)
+      for (int j = 0; j < N; ++j) {
+        int32_t want = 0;
+        for (int p = 0; p < K; ++p)
+          want += a[1+slice*M*K+i*K+p] * b[1+slice*K*N+p*N+j];
+        if (c[1+slice*M*N+i*N+j] != want) return 2;
+      }
+  if (c[0] != -999) return 3;
+  aa.sizes[0] += 1;
+  result = cc;
+  _mlir_ciface_%SYMBOL%(&result, &aa, &bb, &cc);
+  if (result.allocated || result.aligned || result.sizes[0]) return 4;
+  return 0;
+}
+""".replace("%BATCH%", str(batch))
+        .replace("%M%", str(m))
+        .replace("%N%", str(n))
+        .replace("%K%", str(k))
+        .replace("%RANK%", str(rank))
+        .replace("%SYMBOL%", sym),
+        encoding="utf-8",
+    )
+    exe = tmp_path / "ciface"
+    built = subprocess.run(
+        [
+            _CC,
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            str(tmp_path / "shim.c"),
+            str(tmp_path / "kernel.c"),
+            str(tmp_path / "driver.c"),
+            "-o",
+            str(exe),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert built.returncode == 0, built.stderr
+    run = subprocess.run([str(exe)], capture_output=True, text=True)
+    assert run.returncode == 0, f"C-interface bridge failed: {run.stdout} {run.stderr}"

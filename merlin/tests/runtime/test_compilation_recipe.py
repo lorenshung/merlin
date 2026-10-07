@@ -105,6 +105,7 @@ def test_normal_model_compile_runtime_and_link_are_observed(tmp_path, monkeypatc
         "model.o",
         "weights_blob.o",
         "host_math.o",
+        "libm.a",
     ]
     for command in commands:
         for identity in [command["executable"], *command["inputs"], command["output"]]:

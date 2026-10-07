@@ -118,7 +118,12 @@ def test_two_devices_mint_different_symbols():
     assert symbol_stem("a-b") == symbol_stem("a_b"), "punctuation must not survive into a symbol"
 
 
-def test_an_underivable_device_declines_with_a_reason():
+def test_an_underivable_device_declines_with_a_reason(monkeypatch):
+    from merlin.targetgen.rtl import facts
+
+    # Missing evidence is distinct from an explicitly selected facts override,
+    # which intentionally supplies the caller's facts regardless of this name.
+    monkeypatch.setattr(facts, "body_if_present", lambda _target: {})
     with IR_LOCK:
         m = _parse(I8_MATMUL)
         r = rewrite_contractions_to_device(m, "definitely_not_a_target", select=lambda _s: True)

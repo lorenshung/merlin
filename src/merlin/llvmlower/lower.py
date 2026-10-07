@@ -87,11 +87,14 @@ def lower_model(
     ir_audit: bool | str = False,
     audit_sidecars: tuple[str | Path, ...] = (),
     data_layout: str | None = None,
+    index_bits: int | None = None,
 ) -> LowerResult:
     """Lower MLIR text end to end; emit per-target artifacts in ``workdir``.
 
     ``data_layout`` is the target's LLVM data layout, set on the module before translation (see
-    :func:`merlin.llvmlower.pipeline.lower_to_llvm_ir`).
+    :func:`merlin.llvmlower.pipeline.lower_to_llvm_ir`). ``index_bits`` explicitly binds every LLVM
+    index conversion pass and is returned with the effective pipeline in ``stats``. A selected build
+    supplies it from its compiler observation; this generic API does not infer a host/runtime ABI.
 
     ``ir_audit=True`` retains exact named-stage IR and a completion/failure index
     in a fresh workdir child. ``audit_sidecars`` binds existing weights/manifests
@@ -135,6 +138,7 @@ def lower_model(
         (work / "model.upstream.mlir").write_text(upstream_text, encoding="utf-8")
 
         audit.stage("upstream", upstream_text)
+        lowering_selection: dict[str, Any] = {}
         try:
             ll_text = lower_to_llvm_ir(
                 upstream_text,
@@ -148,6 +152,8 @@ def lower_model(
                 parallel_harts=parallel_harts,
                 parallel_chunks=parallel_chunks,
                 data_layout=data_layout,
+                index_bits=index_bits,
+                lowering_selection=lowering_selection,
             )
         except Exception as exc:
             # A module MLIR refuses to PARSE fails before any pass, and the reader's dump names a line
@@ -165,6 +171,10 @@ def lower_model(
             except Exception:  # noqa: BLE001 -- an exotic constructor: keep the original
                 raise exc
             raise enriched from exc
+        if index_bits is not None:
+            if lowering_selection.get("index_bits") != index_bits or not lowering_selection.get("effective_pipeline"):
+                raise ValueError("selected index lowering lost its effective compiler pipeline")
+            stats["index_lowering"] = lowering_selection
         if static_arena is None:
             from .optional_passes import switched
 
@@ -220,6 +230,8 @@ def lower_model_file(
     static_arena: bool | None = None,
     ir_audit: bool | str = False,
     audit_sidecars: tuple[str | Path, ...] = (),
+    data_layout: str | None = None,
+    index_bits: int | None = None,
 ) -> LowerResult:
     audit_mode(ir_audit)
     return lower_model(
@@ -237,4 +249,6 @@ def lower_model_file(
         static_arena=static_arena,
         ir_audit=ir_audit,
         audit_sidecars=audit_sidecars,
+        data_layout=data_layout,
+        index_bits=index_bits,
     )

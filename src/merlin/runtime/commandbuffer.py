@@ -186,6 +186,10 @@ def batched_matmul_geometry(
 #: million-value output and was killed at its time limit, twice, on two designs.
 CONSOLE_VALUE_CAP_PARAM = "console_value_cap"
 OUTPUT_DIGEST_LINE = "OUTSUM"
+# Opt-in full-value transport: only the wire representation changes. Unlike
+# OUTSUM it reconstructs every integer container word before numeric checking.
+CONSOLE_OUTPUT_TRANSPORT_PARAM = "console_output_transport"
+CONSOLE_OUTPUT_TRANSPORT_B64_V1 = "out_b64_v1"
 _FNV_OFFSET, _FNV_PRIME, _U64 = 1469598103934665603, 1099511628211, (1 << 64) - 1
 
 

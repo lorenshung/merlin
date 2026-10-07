@@ -227,6 +227,43 @@ def _upstream_pipeline(features: "frozenset[str] | None" = None) -> str:
     return _splice(passes)
 
 
+_INDEX_CONVERSION_PASSES = (
+    "convert-index-to-llvm",
+    "convert-arith-to-llvm",
+    "finalize-memref-to-llvm",
+    "convert-func-to-llvm",
+    "convert-cf-to-llvm",
+)
+
+
+def _bind_index_width(pipeline: str, index_bits: int) -> str:
+    """Bind every LLVM index converter, refusing missing or preconfigured passes."""
+    if type(index_bits) is not int or index_bits <= 0:
+        raise ValueError("selected index width must be a positive integer")
+    selected = pipeline
+    for name in _INDEX_CONVERSION_PASSES:
+        positions = []
+        start = 0
+        while (at := selected.find(name, start)) >= 0:
+            before = at - 1
+            while before >= 0 and selected[before].isspace():
+                before -= 1
+            end = at + len(name)
+            while end < len(selected) and selected[end].isspace():
+                end += 1
+            if (
+                (before < 0 or selected[before] in "(,")
+                and (end == len(selected) or selected[end] in ",){")
+            ):
+                positions.append((at, end))
+            start = at + len(name)
+        if len(positions) != 1 or selected[positions[0][1] :].startswith("{"):
+            raise ValueError(f"selected pipeline has no unique bare {name} pass")
+        at, _end = positions[0]
+        selected = selected[:at] + f"{name}{{index-bitwidth={index_bits}}}" + selected[at + len(name) :]
+    return selected
+
+
 def _parallel_pipeline(features: "frozenset[str] | None" = None) -> str:
     """The scalar pipeline, re-targeted for **multicore** via OpenMP.
 
@@ -1499,6 +1536,8 @@ def lower_to_llvm_ir(
     parallel_chunks: "list | None" = None,
     audit=None,
     data_layout: str | None = None,
+    index_bits: int | None = None,
+    lowering_selection: dict | None = None,
 ) -> str:
     """Lower upstream-MLIR text to LLVM IR text via the m2m venv. Returns .ll text.
 
@@ -1666,6 +1705,10 @@ def lower_to_llvm_ir(
             pipeline = _parallel_pipeline(feats)  # multicore (OpenMP) scalar path — K1 big models
         else:
             pipeline = _upstream_pipeline(feats)
+    if index_bits is not None:
+        if not data_layout:
+            raise ValueError("explicit index width requires selected compiler data layout")
+        pipeline = _bind_index_width(pipeline, index_bits)
     src = work / "model.mlir"
     out = work / "model.ll"
     runner = work / "run_lowering.py"
@@ -1709,6 +1752,12 @@ def lower_to_llvm_ir(
     _erase = "1" if _SELFCOPY_FEATURE in feats else "0"
     if _erase == "1":
         pipeline = _with_canon(pipeline)
+    if index_bits is not None and lowering_selection is not None:
+        # Self-copy selection may append canonicalize/cse. This is the final
+        # pass string actually given to the runner, not the pre-feature plan.
+        lowering_selection.update(
+            {"index_bits": index_bits, "data_layout": data_layout, "effective_pipeline": pipeline}
+        )
     # argv[5] gates fuse_transpose_b (default-off). Every runner variant honors it (the act_poly tail
     # used to drop it along with the self-copy erase); with the feature off the lowering stays
     # byte-identical.

@@ -76,6 +76,9 @@ class Routed:
     source_operation_ordinal: int = -1
     source_region: str = ""
     tensor_types: tuple[str, str, str] = ()
+    #: Exact captured root identity, when complete provenance survived preparation.
+    source_region_id: str | None = None
+    source_node_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -138,6 +141,11 @@ class DeviceRewrite:
                     "source_operation_ordinal": r.source_operation_ordinal,
                     "source_region": r.source_region,
                     "tensor_types": list(r.tensor_types),
+                    **(
+                        {"source_region_id": r.source_region_id, "source_node_ids": list(r.source_node_ids)}
+                        if r.source_region_id is not None and r.source_node_ids
+                        else {}
+                    ),
                 }
                 for r in self.routed
             ],
@@ -825,17 +833,42 @@ def rewrite_groups_to_device(
         if pair is None:
             skipped.append((name, why))
             continue
+        if stated.batch_shape:
+            batch = stated.batch_shape[0]
+            rows, columns, reduced = _entry_extents(stated.entry)
+            expected = ((batch, rows, reduced), (batch, reduced, columns), (batch, rows, columns))
+            actual = tuple(tuple(t.get_shape()) for t in (pair[0].type, pair[1].type, result_type))
+            if actual != expected:
+                skipped.append((name, "the batch slice ABI cannot reinterpret operand or result views"))
+                continue
+
+        region_attr = group.root.attributes.get("prov.region_id")
+        nodes_attr = group.root.attributes.get("prov.source_node_ids")
+        region_id = region_attr.data if isinstance(region_attr, StringAttr) and region_attr.data else None
+        node_ids = (
+            tuple(sorted(value.data for value in nodes_attr.data))
+            if isinstance(nodes_attr, ArrayAttr)
+            and nodes_attr.data
+            and all(isinstance(value, StringAttr) and value.data for value in nodes_attr.data)
+            else ()
+        )
+        if len(node_ids) != len(set(node_ids)):
+            node_ids = ()
 
         entry = capsule_entry_for(stated.entry, index=group.index, name=name, device=device, model=model)
-        identity = _kernel_identity(entry)
         param_types = (pair[0].type, pair[1].type, result_type)
+        identity = _kernel_identity(entry)
+        if stated.batch_shape:
+            # Different batch counts are different monomorphic host wrappers,
+            # while their stated per-slice device programs remain identical.
+            identity += "|batch_abi:" + json.dumps([str(t) for t in param_types])
         sym = symbols.get(identity)
         if sym is None:
             sym = f"{stem}_{len(symbols)}"
             symbols[identity] = sym
             declared[sym] = param_types
             returns[sym] = result_type
-            minted[sym] = _entry_extents(entry)
+            minted[sym] = (*stated.batch_shape, *_entry_extents(entry))
             programs[sym] = stated.to_dict()
             entries[sym] = entry
             access[sym] = CONTRACTION_ACCESS
@@ -870,6 +903,8 @@ def rewrite_groups_to_device(
                 dtypes=tuple(_element_token(t) for t in param_types),  # type: ignore[arg-type]
                 fqn=str(entry.get("source_reference", "")),
                 group=int(group.index),
+                source_region_id=region_id,
+                source_node_ids=node_ids,
             )
         )
         placed.append(group)

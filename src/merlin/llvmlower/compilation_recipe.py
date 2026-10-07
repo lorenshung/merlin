@@ -38,6 +38,13 @@ class CompilationRecipe:
         }
         write_pretty_json(self.path, self.record)
 
+    def bind_preparation(self, name: str, path: Path) -> None:
+        """Bind a caller-selected numerical preparation input before compilation."""
+        if self.record["status"] != "prepared" or not name or not path.is_file():
+            raise ValueError("compilation preparation is absent or already invoked")
+        self.record.setdefault("preparation", {})[name] = _identity(path)
+        write_pretty_json(self.path, self.record)
+
     def run(
         self,
         argv: Sequence[str | Path],
@@ -80,5 +87,11 @@ class CompilationRecipe:
         """Bind the final executable only after successful linking and audits."""
         if not self.record["commands"] or any(command["status"] != "returned" for command in self.record["commands"]):
             raise ValueError("compilation has no complete successful command sequence")
+        if any(
+            not Path(identity["path"]).is_file()
+            or _identity(Path(identity["path"])) != identity
+            for identity in self.record.get("preparation", {}).values()
+        ):
+            raise ValueError("compilation preparation changed before completion")
         self.record.update(status="completed", executable=_identity(executable))
         write_pretty_json(self.path, self.record)

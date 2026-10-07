@@ -187,13 +187,19 @@ def qualify_model_transform_audit(index_path: Path) -> dict[str, Any]:
         if recipe["selection_policy"] == "all":
             # The replay invokes the same runtime normalizer, but only on
             # independently re-parsed captured bytes, never on archived IR.
+            from ..llvmlower.quant_passes import known
             from .dispatch_runtime import _normalize_model_module
 
             replay_normalized = parse_mlir_text(contents[0])
+            # Archived v1 None selected all six. New receipts retain their
+            # effective pass selection explicitly; never reinterpret old bytes.
+            replay_passes = (
+                list(known()) if recipe["int8_compute"] and recipe["quant_passes"] is None else recipe["quant_passes"]
+            )
             _normalize_model_module(
                 replay_normalized,
                 int8_compute=recipe["int8_compute"],
-                quant_passes=recipe["quant_passes"],
+                quant_passes=replay_passes,
                 prequant_gather=recipe["prequant_gather"],
             )
             if to_text(replay_normalized, generic=True) != contents[1]:

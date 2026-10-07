@@ -4,16 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import subprocess
-import sys
 from contextlib import nullcontext
 
 import numpy as np
 import pytest
 import yaml
 
-from merlin.common.paths import artifacts_dir, repo_root
 from merlin.compile.scalar_host_qualification import ScalarHostQualificationError, qualify
 from merlin.runtime.backends import base as backends
 from merlin.runtime.backends import spike_model
@@ -23,20 +19,33 @@ ROCKET_ISA = "rv64imafdcbzicsr_zifencei_zihpm_zfh_zba_zbb_zbs_xrocket"
 
 
 def _inputs(tmp_path, monkeypatch):
-    root = repo_root()
     generated = tmp_path / "out"
     monkeypatch.setenv("MERLIN_OUT_ROOT", str(generated))
-    subprocess.run(
-        [
-            sys.executable,
-            str(root / "build_tools/scripts/mint_scalar_host_package.py"),
-            str(root / "examples/gemmini/target/scalar-host-recipe.yaml"),
-        ],
-        env={**os.environ, "MERLIN_OUT_ROOT": str(generated)},
-        check=True,
-        capture_output=True,
+    # Package minting has its own tests. This fixture must also work from a
+    # core-only wheel, with no checkout or optional experiment distribution.
+    package = generated / "synthetic-host-package"
+    package.mkdir(parents=True)
+    (package / "manifest.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "target": "host",
+                "run_id": "scalar_fixture",
+                "family": "scalar_linalg",
+                "status": "unverified",
+                "authoring": {"mode": "test_fixture", "generated_by_agent": False},
+                "outputs": {"knobs": "knobs.yaml"},
+            }
+        )
     )
-    package = artifacts_dir() / "targets" / "host" / "gemmini_rocket_scalar_int8_v0"
+    (package / "knobs.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "backend": "scalar",
+                "dtype_strategy": "int8_w8a8",
+                "cflags": ["-march=rv64gc_zba_zbb_zbs_zfh", "-mabi=lp64d", "-O2"],
+            }
+        )
+    )
     capture = tmp_path / "capture"
     capture.mkdir()
     for name in (
@@ -47,6 +56,9 @@ def _inputs(tmp_path, monkeypatch):
         "input_order.json",
     ):
         (capture / name).write_bytes(name.encode())
+    (capture / "model.mlir").write_text(
+        "module { func.func @forward(%arg0: tensor<3xf32>) -> tensor<3xf32> { return %arg0 : tensor<3xf32> } }"
+    )
     np.save(capture / "golden.npy", np.array([0.5, -1.0, 2.0], dtype=np.float32))
     names = (
         "model.mlir",
@@ -109,7 +121,9 @@ def _stub_spike(monkeypatch, *, outputs, console):
     def run(_elf, **kwargs):
         seen["run"] = kwargs
         return {
-            "outputs": np.asarray(outputs, dtype=np.float32),
+            "outputs": np.asarray(outputs)
+            if isinstance(outputs, np.ndarray)
+            else np.asarray(outputs, dtype=np.float32),
             "console": console,
             "metrics": {"memref_rank_mismatch": 0, "cycles": 10},
         }
@@ -123,6 +137,95 @@ def _stub_spike(monkeypatch, *, outputs, console):
 def _console(values):
     bits = np.asarray(values, dtype=np.float32).view(np.uint32)
     return "OUT " + str(len(bits)) + " " + " ".join(str(int(value)) for value in bits) + "\nDONE\n"
+
+
+@pytest.mark.parametrize("mismatch", [False, True])
+def test_integer_qualification_compares_raw_bits_not_rounded_floats(tmp_path, monkeypatch, mismatch):
+    capture, package, catalog, dts, generated = _inputs(tmp_path, monkeypatch)
+    golden = np.array([2**53 + 1, -(2**63), 2**63 - 1], dtype=np.int64)
+    np.save(capture / "golden.npy", golden)
+    (capture / "model.mlir").write_text(
+        "module { func.func @forward(%arg0: tensor<3xi64>) -> tensor<3xi64> { return %arg0 : tensor<3xi64> } }"
+    )
+    path = capture / "capture_receipt.json"
+    document = json.loads(path.read_text())
+    document["artifacts"]["golden.npy"]["sha256"] = hashlib.sha256((capture / "golden.npy").read_bytes()).hexdigest()
+    document["artifacts"]["model.mlir"]["sha256"] = hashlib.sha256((capture / "model.mlir").read_bytes()).hexdigest()
+    path.write_text(json.dumps(document))
+    observed = golden.copy()
+    if mismatch:
+        observed[0] -= 1  # Both values round to the same float64.
+    words = [word for value in observed.view(np.uint64) for word in (int(value) & 0xFFFFFFFF, int(value) >> 32)]
+    console = "OUT_I64 3 " + " ".join(map(str, words)) + "\nDONE\n"
+    _stub_spike(monkeypatch, outputs=observed, console=console)
+    output = generated / "qualifications" / "integer"
+    if mismatch:
+        with pytest.raises(ScalarHostQualificationError, match="exact golden mismatch"):
+            qualify(
+                capture=capture,
+                package=package,
+                board_catalog=catalog,
+                board="rocket",
+                dts=dts,
+                output=output,
+                arena_mb=32,
+            )
+    else:
+        receipt = qualify(
+            capture=capture, package=package, board_catalog=catalog, board="rocket", dts=dts, output=output, arena_mb=32
+        )
+        assert receipt["output"]["element_dtype"] == "i64"
+        assert receipt["output"]["mismatched_elements"] == 0
+
+
+def test_golden_precision_cannot_override_the_parsed_model_output(tmp_path, monkeypatch):
+    capture, package, catalog, dts, generated = _inputs(tmp_path, monkeypatch)
+    np.save(capture / "golden.npy", np.array([1, 2, 3], dtype=np.int64))
+    path = capture / "capture_receipt.json"
+    document = json.loads(path.read_text())
+    document["artifacts"]["golden.npy"]["sha256"] = hashlib.sha256((capture / "golden.npy").read_bytes()).hexdigest()
+    path.write_text(json.dumps(document))
+    monkeypatch.setattr(spike_model, "build", lambda *_a, **_kw: pytest.fail("build before output ABI check"))
+    with pytest.raises(ScalarHostQualificationError, match="parsed model output ABI"):
+        qualify(
+            capture=capture,
+            package=package,
+            board_catalog=catalog,
+            board="rocket",
+            dts=dts,
+            output=generated / "qualifications" / "wrong-dtype",
+            arena_mb=32,
+        )
+
+
+@pytest.mark.parametrize("mismatch", [False, True])
+def test_boolean_qualification_checks_all_canonical_output_bytes(tmp_path, monkeypatch, mismatch):
+    capture, package, catalog, dts, generated = _inputs(tmp_path, monkeypatch)
+    golden = np.array([False, True, False], dtype=np.bool_)
+    np.save(capture / "golden.npy", golden)
+    (capture / "model.mlir").write_text(
+        "module { func.func @forward(%arg0: tensor<3xi1>) -> tensor<3xi1> { return %arg0 : tensor<3xi1> } }"
+    )
+    path = capture / "capture_receipt.json"
+    document = json.loads(path.read_text())
+    for name in ("model.mlir", "golden.npy"):
+        document["artifacts"][name]["sha256"] = hashlib.sha256((capture / name).read_bytes()).hexdigest()
+    path.write_text(json.dumps(document))
+    observed = golden.copy()
+    if mismatch:
+        observed[-1] = True
+    console = "OUT_I1 3 " + " ".join(map(str, observed.view(np.uint8))) + "\nDONE\n"
+    _stub_spike(monkeypatch, outputs=observed, console=console)
+    output = generated / "qualifications" / "boolean"
+    if mismatch:
+        with pytest.raises(ScalarHostQualificationError, match="exact golden mismatch"):
+            qualify(capture=capture, package=package, board_catalog=catalog, board="rocket", dts=dts,
+                    output=output, arena_mb=32)
+    else:
+        receipt = qualify(capture=capture, package=package, board_catalog=catalog, board="rocket", dts=dts,
+                          output=output, arena_mb=32)
+        assert receipt["output"]["element_dtype"] == "i1"
+        assert receipt["output"]["mismatched_elements"] == 0
 
 
 def _stub_native_gsim(tmp_path, monkeypatch, *, console):
