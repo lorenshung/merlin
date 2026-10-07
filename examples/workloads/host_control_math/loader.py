@@ -33,6 +33,9 @@ CASES = (
     "boolean_mul_rhs_singleton",
     "tensor_not_equal",
     "tensor_bitwise_xor",
+    "f32_eq_scalar_rank4",
+    "f32_amax_rank4_axis3",
+    "f32_amax_rank4_axis3_finite",
     "min_values",
     "f32_cumsum_rows",
     "f32_cumsum_columns",
@@ -197,6 +200,10 @@ class HostControlMath(torch.nn.Module):
             return torch.ne(x, y)
         if self.case == "tensor_bitwise_xor":
             return torch.bitwise_xor(x, y)
+        if self.case == "f32_eq_scalar_rank4":
+            return torch.eq(x, 0.0)
+        if self.case in {"f32_amax_rank4_axis3", "f32_amax_rank4_axis3_finite"}:
+            return torch.amax(x, dim=-1)
         if self.case == "min_values":
             return torch.min(x, dim=1).values
         if self.case == "f32_cumsum_columns":
@@ -235,6 +242,35 @@ def get_model_and_inputs():
         sample = torch.tensor([False, True, False, True, True, False, True, False, True], dtype=torch.bool)
         other = torch.tensor([True, True, False, False, True, True, False, False, False], dtype=torch.bool)
         return model, (sample, other)
+    elif case == "f32_eq_scalar_rank4":
+        sample = _periodic_tensor(
+            (0.0, -0.0, float("nan"), float("inf"), -float("inf"), 1.0, -1.0),
+            (2, 2, 3, 7),
+            torch.float32,
+        )
+        return model, (sample,)
+    elif case == "f32_amax_rank4_axis3":
+        rows = (
+            (-0.0, 0.0, *([-float("inf")] * 5)),
+            (0.0, -0.0, *([-float("inf")] * 5)),
+            (float("nan"), 1.0, 0.0, -3.0, -float("inf"), 2.0, 7.0),
+            (-float("inf"),) * 7,
+            (3.0, 1.0, 2.0, -1.0, 0.0, 2.0, 1.0),
+            (float("inf"), 0.0, -1.0, 1.0, 2.0, -2.0, -float("inf")),
+        )
+        sample = torch.tensor(rows * 2, dtype=torch.float32).reshape(2, 2, 3, 7)
+        return model, (sample,)
+    elif case == "f32_amax_rank4_axis3_finite":
+        rows = (
+            (-0.0, 0.0, -10.0, -9.0, -8.0, -7.0, -6.0),
+            (0.0, -0.0, -10.0, -9.0, -8.0, -7.0, -6.0),
+            (1.0, 5.0, -1.0, 3.0, 2.0, 4.0, -2.0),
+            (-3.0, -5.0, -4.0, -2.0, -6.0, -7.0, -8.0),
+            (-0.0,) * 7,
+            (0.0,) * 7,
+        )
+        sample = torch.tensor(rows * 2, dtype=torch.float32).reshape(2, 2, 3, 7)
+        return model, (sample,)
     elif case in {"boolean_mul_lhs_singleton", "boolean_mul_rhs_singleton"}:
         dense = torch.tensor(
             [

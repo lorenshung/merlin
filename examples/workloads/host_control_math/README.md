@@ -55,6 +55,17 @@ Native execution still needs to populate the caller's output correctly; merely
 linking an empty compute body does not establish that ABI behavior. The sample
 also retains a negative-zero value for raw-bit comparison.
 
+`f32_eq_scalar_rank4` is one ordered FP32 equality comparison against a scalar,
+returning raw Boolean values for independent NaN, infinities, signed zeros and
+finite inputs at a small neutral rank-four shape. `f32_amax_rank4_axis3` reduces
+one axis to a rank-three FP32 result and includes NaN and infinities. Its
+`f32_amax_rank4_axis3_finite` sibling uses the same operation on finite inputs
+with both signed-zero orders, so the native checker can run while retaining a
+strict numerical counterexample. These are separate source/body and native
+probes, not a host admission. The selected MLIR `arith.maximumf` gives positive
+zero priority over negative zero, whereas PyTorch CPU `amax` may retain the
+first zero sign; a strict mismatch must remain a failed numerical check.
+
 Use the existing `merlin.compile.scalar_host_qualification` command with an explicit
 scalar package, board catalog and pinned DTS. That checker requires bit-identical
 saved-capture outputs: a mismatch must remain a mismatch. Sine/cosine library

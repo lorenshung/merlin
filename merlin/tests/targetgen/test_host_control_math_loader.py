@@ -120,3 +120,38 @@ def test_tensor_comparison_does_not_round_i64_inputs_to_float(monkeypatch):
     rounded_equal = inputs[0].to(torch.float32) == inputs[1].to(torch.float32)
     assert (rounded_equal & result).any()
     assert result[0, -1] and inputs[0][0, -1].item() == 2**63 - 1
+
+
+def test_float_scalar_equality_keeps_nonfinite_and_signed_zero_inputs(monkeypatch):
+    monkeypatch.setenv("M2M_HOST_PROBE_CASE", "f32_eq_scalar_rank4")
+    model, inputs = _PROBE.get_model_and_inputs()
+    result = model(*inputs)
+    assert tuple(inputs[0].shape) == (2, 2, 3, 7)
+    assert result.dtype == torch.bool and tuple(result.shape) == tuple(inputs[0].shape)
+    assert torch.isnan(inputs[0]).any()
+    assert torch.isinf(inputs[0]).any()
+    assert ((inputs[0] == 0) & torch.signbit(inputs[0])).any()
+    assert ((inputs[0] == 0) & ~torch.signbit(inputs[0])).any()
+    assert torch.equal(result, torch.eq(inputs[0], 0.0))
+
+
+def test_float_maximum_reduction_exposes_signed_zero_order(monkeypatch):
+    monkeypatch.setenv("M2M_HOST_PROBE_CASE", "f32_amax_rank4_axis3")
+    model, inputs = _PROBE.get_model_and_inputs()
+    result = model(*inputs)
+    assert tuple(inputs[0].shape) == (2, 2, 3, 7)
+    assert result.dtype == torch.float32 and tuple(result.shape) == (2, 2, 3)
+    assert torch.isnan(result).any() and torch.isneginf(result).any()
+    assert torch.signbit(result[0, 0, 0]) and result[0, 0, 0] == 0
+    assert not torch.signbit(result[0, 0, 1]) and result[0, 0, 1] == 0
+
+
+def test_float_maximum_finite_probe_keeps_zero_sign_counterexample(monkeypatch):
+    monkeypatch.setenv("M2M_HOST_PROBE_CASE", "f32_amax_rank4_axis3_finite")
+    model, inputs = _PROBE.get_model_and_inputs()
+    result = model(*inputs)
+    assert tuple(result.shape) == (2, 2, 3)
+    assert torch.isfinite(inputs[0]).all() and torch.isfinite(result).all()
+    assert torch.signbit(result[0, 0, 0]) and result[0, 0, 0] == 0
+    assert not torch.signbit(result[0, 0, 1]) and result[0, 0, 1] == 0
+    assert result[0, 0, 2] == 5 and result[0, 1, 0] == -2
