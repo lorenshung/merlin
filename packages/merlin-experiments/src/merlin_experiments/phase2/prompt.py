@@ -78,6 +78,12 @@ class PerfCell:
         return "/".join((self.family, self.capsule, self.simulator, self.replicate))
 
 
+#: The claim shapes a generated performance family may declare. ``EMITS`` is decided from the
+#: candidate's own emitted instruction stream by the analyzer its contract names, so it declares no
+#: fitted parameters and is not a paired delta.
+CANONICAL_CLAIMS = ("RECOVERS", "PREDICTS", "DIFFERENTIAL", "EMITS")
+
+
 @dataclass(frozen=True)
 class PerfFamily:
     """The declaration that gives one generated family a falsifiable interpretation."""
@@ -91,7 +97,7 @@ class PerfFamily:
 
     def validate(self) -> None:
         _simple_name(self.family, label="performance family")
-        if self.claim not in ("RECOVERS", "PREDICTS", "DIFFERENTIAL"):
+        if self.claim not in CANONICAL_CLAIMS:
             raise PerfPromptContractError(f"family {self.family!r} has a non-canonical claim {self.claim!r}")
         _text(self.negative_control, label=f"family {self.family} negative control")
         _text(self.falsifier_observation, label=f"family {self.family} falsifier observation")

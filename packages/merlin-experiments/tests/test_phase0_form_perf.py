@@ -544,7 +544,7 @@ def test_claim_form_statistics_require_the_actual_frozen_submission(tmp_path):
         FP._verified_phase1_freeze_digest(receipt)
 
 
-def test_the_shared_template_loads_the_form_family_and_the_blocked_stream_families(tmp_path):
+def test_the_shared_template_loads_the_form_family_and_the_stream_families(tmp_path):
     profile: dict = {"capsules": []}
     profiles._merge_shared_perf(
         profile,
@@ -555,10 +555,10 @@ def test_the_shared_template_loads_the_form_family_and_the_blocked_stream_famili
     assert families["PW"]["claim"] == "DIFFERENTIAL"
     assert {"PD", "PA", "PJ"} <= set(families) and families["PD"]["claim"] == "EMITS"
     blocked = {row["family"] for row in profile["_performance_template"]["blocked_unimplemented"]}
-    assert {"PD", "PA", "PJ", "PT"} <= blocked
+    assert "PT" in blocked and blocked.isdisjoint({"PD", "PA", "PJ"})
     with pytest.raises(ValueError, match="performance.claim"):
         profiles._validate_performance_block(
-            {**next(s for s in _template()["sweeps"] if s["id"] == "PK")["base"]["performance"], "claim": "EMITS"},
+            {**next(s for s in _template()["sweeps"] if s["id"] == "PK")["base"]["performance"], "claim": "CERTIFIES"},
             owner="PK",
         )
 

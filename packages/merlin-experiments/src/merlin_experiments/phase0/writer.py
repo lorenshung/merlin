@@ -665,7 +665,16 @@ def _stamp_member_geometry(cap: dict, binding) -> bool:
     # None and a block saying `in_census: false` are different answers: the first is "this member's
     # geometry is unreadable here", the second is "it was read and no capture presents it". Writing
     # the first as the second would turn an unpriced op into a coverage claim.
-    if block is None or perf.get("shape_geometry") == block:
+    if block is None:
+        return False
+    # THE GRANULARITY THE EXTENTS WERE MINTED AGAINST, recorded beside them. Sweep axes are written as
+    # multiples of the target's own tile, so an extent alone does not say how many array row blocks it
+    # spans -- and that count decides, for the array-side stream families, whether a member can
+    # exercise their lever at all or is their control. A record, never a bound: nothing fails on it.
+    tile = getattr(binding, "tile_dim", None)
+    if isinstance(tile, int) and not isinstance(tile, bool) and tile >= 1:
+        block = {**block, "row_block": int(tile)}
+    if perf.get("shape_geometry") == block:
         return False
     perf["shape_geometry"] = block
     return True
