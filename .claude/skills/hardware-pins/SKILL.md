@@ -55,6 +55,25 @@ is the raising form — use it where proceeding under drift would be meaningless
    (`kernels.opu_cert.provenance_stamp`) and the report should compare the console's stamp against the
    expected one. A path and a timestamp cannot tell a stale ELF from a fresh one; a stamp can.
 
+5. **Pin a build product by `build_products`, never by `requires_paths` alone.** `requires_paths` asks
+   whether a file EXISTS. A compiled artifact inside a pinned checkout is normally gitignored, so git
+   reports it neither modified nor untracked and a digest under `local_edits` is never compared — a check
+   that cannot fail. `build_products` compares the bytes on every `verify()`, unconditionally. Measured:
+   the GSIM emitter at an ignored `build/gsim/gsim` was rebuilt in place and `verify()` stayed ok while
+   244 artifacts cited a digest no file on the host had.
+
+## When bytes are gone
+
+Sometimes the artifact a body of results is attributed to no longer exists and cannot be rebuilt.
+**Record the loss; do not repair it.** `lost_artifacts:` in the registry, read by
+`merlin.common.provenance_lost` (`load_lost`, `lost_for_digest`, state `UNRECOVERABLE`). A record says
+what was lost, when, why it cannot be rebuilt and what still verifies, and it **claims** its digest: the
+loaders refuse any pin or artifact that re-declares those bytes. The two moves that look like fixes are
+worse than the loss — repointing the declaration at whatever is on disk now (every citation becomes
+silently wrong) and deleting it (every citation dangles). A citing artifact never re-hashes, so it never
+fails; `lost_for_digest()` is how a reader who meets the digest finds out, and `check_provenance.py`
+prints every loss record on each run.
+
 ## Never
 
 - **Never mutate someone's checkout to satisfy a pin.** Other people and sessions work in those trees on a

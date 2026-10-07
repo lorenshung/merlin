@@ -482,3 +482,161 @@ class TestArtifactsAreIdentifiedByContent:
         # Purely additive: the existing pin path must not care that the section is absent.
         assert P.load_artifacts() == {} or all(a.path for a in P.load_artifacts().values())
         assert P.load_pins(), "pins must still load"
+
+
+class TestABuildProductIsVerifiedByItsBytes:
+    """A gitignored build product is invisible to every git-shaped check, which is how one was lost.
+
+    A simulator-compiler binary sat at an ignored path inside a pinned checkout, declared only under
+    ``requires_paths`` -- which asks whether the file EXISTS. It was rebuilt in place and ``verify()`` kept
+    returning ok. The first test shows a digest written under ``local_edits`` for such a path is a check
+    that cannot fail, which is why ``build_products`` is a separate field.
+    """
+
+    def _ignored_build(self, tmp_path):
+        root, sha = _repo(tmp_path, "withbuild")
+        # Left uncommitted on purpose: git honours a worktree .gitignore either way, and this also proves
+        # the ignored product stays invisible in a DIRTY tree, the state the real checkout is in.
+        (root / ".gitignore").write_text("build/\n", encoding="utf-8")
+        (root / "build").mkdir()
+        product = root / "build" / "emitter"
+        product.write_bytes(b"the bytes a corpus of results was attributed to")
+        return root, sha, product
+
+    def test_the_product_really_is_invisible_to_git(self, tmp_path):
+        root, _, _ = self._ignored_build(tmp_path)
+        seen = P.observe(root)
+        assert seen.present and not any("build/emitter" in d for d in seen.dirty_paths)
+
+    def test_local_edits_on_an_ignored_product_is_a_check_that_cannot_fail(self, tmp_path):
+        root, sha, product = self._ignored_build(tmp_path)
+        pins = _pins(
+            tmp_path,
+            f'  p:\n    commit: "{sha}"\n    requires_paths: [build/emitter]\n'
+            f'    local_edits:\n      build/emitter: "{"0" * 64}"\n',
+        )
+        product.write_bytes(b"completely different bytes")
+        got = P.verify("p", checkout=root, path=pins)
+        assert got.ok, "if this ever fails, local_edits has started covering ignored paths"
+
+    def test_build_products_reports_an_in_place_rebuild_as_drift(self, tmp_path):
+        root, sha, product = self._ignored_build(tmp_path)
+        before = P.file_digest(product)
+        pins = _pins(
+            tmp_path,
+            f'  p:\n    commit: "{sha}"\n    requires_paths: [build/emitter]\n'
+            f'    build_products:\n      build/emitter: "{before}"\n',
+        )
+        assert P.verify("p", checkout=root, path=pins).ok
+        product.write_bytes(b"rebuilt in place by another workstream")
+        got = P.verify("p", checkout=root, path=pins)
+        assert not got.ok
+        assert any("rebuilt or replaced in place" in d and before[:16] in d for d in got.drift)
+
+    def test_a_build_product_that_is_gone_is_drift_not_silence(self, tmp_path):
+        root, sha, product = self._ignored_build(tmp_path)
+        digest = P.file_digest(product)
+        pins = _pins(tmp_path, f'  p:\n    commit: "{sha}"\n    build_products:\n      build/emitter: "{digest}"\n')
+        product.unlink()
+        got = P.verify("p", checkout=root, path=pins)
+        assert not got.ok and any("no file at" in d for d in got.drift)
+
+    def test_an_unquoted_product_digest_is_refused(self, tmp_path):
+        pins = _pins(tmp_path, '  p:\n    commit: "' + "a" * 40 + '"\n    build_products:\n      x: 12345678\n')
+        with pytest.raises(P.PinsError, match="quoted sha256"):
+            P.load_pins(pins)
+
+    def test_the_shipped_pins_leave_no_build_product_on_an_existence_check(self):
+        """Any required path under a build directory carries a content digest -- as a property of the
+        registry, so a second pin acquiring the same shape is covered without editing this test."""
+        for name, p in P.load_pins().items():
+            declared = {rel for rel, _ in p.build_products}
+            for rel in p.requires_paths:
+                if rel.startswith("build/"):
+                    assert rel in declared, f"{name}: requires {rel} but declares no build_products digest"
+
+
+class TestBytesThatAreGoneAreRecordedAsGone:
+    """An UNRECOVERABLE record, and the two repairs it forbids: the digest is CLAIMED by the record and
+    the loaders refuse a registry that declares it anywhere else."""
+
+    _LOST = (
+        "lost_artifacts:\n"
+        "  gone:\n"
+        '    digest: "' + "b" * 64 + '"\n'
+        "    what: a compiled emitter\n"
+        '    lost_on: "2026-09-08T10:40Z"\n'
+        "    why_unrecoverable: its build stamps the wall-clock second into the binary\n"
+        "    still_verifies: [the model it emitted]\n"
+    )
+
+    def _reg(self, tmp_path, body: str, lost: str | None = None):
+        p = tmp_path / "pins.yaml"
+        p.write_text("version: 1\n" + body + (self._LOST if lost is None else lost), encoding="utf-8")
+        return p
+
+    def test_a_loss_record_loads_and_resolves_a_citation(self, tmp_path):
+        reg = self._reg(tmp_path, "pins: {}\n")
+        assert P.load_lost(reg)["gone"].state == P.UNRECOVERABLE
+        assert P.lost_for_digest("b" * 64, path=reg).name == "gone"
+        assert P.lost_for_digest(("b" * 64).upper(), path=reg).name == "gone"  # a citation copied upper-cased
+        assert P.lost_for_digest("c" * 64, path=reg) is None
+
+    def test_a_record_that_does_not_say_what_was_lost_is_refused(self, tmp_path):
+        for field in ("what", "lost_on", "why_unrecoverable", "still_verifies"):
+            body = "\n".join(line for line in self._LOST.splitlines() if not line.strip().startswith(field + ":"))
+            reg = self._reg(tmp_path, "pins: {}\n", lost=body + "\n")
+            with pytest.raises(P.PinsError, match=field):
+                P.load_lost(reg)
+
+    def test_a_pin_may_not_re_declare_the_lost_bytes(self, tmp_path):
+        for field in ("local_edits", "build_products"):
+            reg = self._reg(
+                tmp_path,
+                'pins:\n  p:\n    commit: "' + "a" * 40 + '"\n' + f'    {field}:\n      x: "' + "b" * 64 + '"\n',
+            )
+            with pytest.raises(P.PinsError, match="UNRECOVERABLE"):
+                P.load_pins(reg)
+
+    def test_an_artifact_may_not_re_declare_the_lost_bytes(self, tmp_path):
+        reg = self._reg(tmp_path, 'artifacts:\n  a:\n    path: /x\n    digest: "' + "b" * 64 + '"\n')
+        with pytest.raises(P.PinsError, match="UNRECOVERABLE"):
+            P.load_artifacts(reg)
+
+    def test_a_state_other_than_unrecoverable_is_refused(self, tmp_path):
+        reg = self._reg(tmp_path, "pins: {}\n", lost=self._LOST + "    state: probably_fine\n")
+        with pytest.raises(P.PinsError, match="records only"):
+            P.load_lost(reg)
+
+    def test_a_successor_equal_to_the_lost_digest_is_refused(self, tmp_path):
+        reg = self._reg(tmp_path, "pins: {}\n", lost=self._LOST + '    superseded_by: "' + "b" * 64 + '"\n')
+        with pytest.raises(P.PinsError, match="replaced themselves"):
+            P.load_lost(reg)
+
+    def test_the_cross_check_parses_the_registry_once(self, tmp_path, monkeypatch):
+        """The loss cross-check reads the document the loader already parsed, not the file again."""
+        import yaml
+
+        reg = self._reg(tmp_path, 'pins:\n  p:\n    commit: "' + "a" * 40 + '"\n')
+        calls = []
+        real = yaml.safe_load
+        monkeypatch.setattr(yaml, "safe_load", lambda text: calls.append(1) or real(text))
+        P.load_pins(reg)
+        assert len(calls) == 1
+
+    def test_the_shipped_registry_records_the_emitter_loss_and_nothing_re_declares_it(self):
+        lost = P.load_lost()
+        assert lost, "the registry records no loss; the emitter loss must stay written down"
+        claimed = {rec.digest for rec in lost.values()}
+        for rec in lost.values():
+            assert rec.still_verifies and rec.do_not, rec.name
+            assert rec.superseded_by not in claimed, "a successor must not itself be recorded as lost"
+        for p in P.load_pins().values():
+            assert not {digest for _, digest in (*p.local_edits, *p.build_products)} & claimed
+        assert not {a.digest.lower() for a in P.load_artifacts().values()} & claimed
+
+    def test_the_emitter_loss_names_the_weaker_witness_that_replaced_it(self):
+        """A weaker attestation is a decision, and a decision has to be findable to be disagreed with."""
+        rec = P.load_lost()["gsim_emitter_246bfdac"]
+        assert "WEAKER" in rec.attestation_decision.upper()
+        assert rec.to_dict()["attestation_decision"] == rec.attestation_decision

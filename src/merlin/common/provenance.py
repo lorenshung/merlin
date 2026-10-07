@@ -34,6 +34,14 @@ last is not a softer version of the second: "this is the wrong revision" tells y
 checkout, "nobody could tell which revision this is" tells you not to publish the claim at all, and a
 check that renders the second as either the first or as OK is how an off-pin header read as pinned.
 
+**A BUILD PRODUCT is verified by its bytes, never by git's opinion of it.** Third measured failure: a
+pinned simulator-compiler binary lived at a gitignored path inside a pinned checkout, declared only under
+``requires_paths``. Git reports an ignored file neither modified nor untracked, so every check here asked
+only whether it EXISTS; it was rebuilt in place and ``verify()`` kept saying ok while 244 artifacts cited
+the old digest. :attr:`Pin.build_products` compares such a path's bytes on every verify. Bytes that are
+gone are recorded as gone (:mod:`merlin.common.provenance_lost`): a loss record CLAIMS its digest, so no
+pin or artifact can re-declare those bytes as its own.
+
 **Nothing here mutates a checkout.** It verifies and records. On a shared host other people are working in
 those trees, and a tool that quietly moves someone's HEAD to satisfy a pin would be a worse failure than
 the one it prevents.
@@ -54,16 +62,24 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+# Re-exported so callers keep one import for "the pin registry": the loss records live in the same file,
+# under the same review, and the loaders below are cross-checked against them.
+from .provenance_lost import UNRECOVERABLE, LostArtifact, claimed_digests, load_lost, lost_for_digest
+
 __all__ = [
     "Artifact",
     "ArtifactCheck",
+    "LostArtifact",
     "Observation",
     "Pin",
     "PinsError",
     "SourceStatus",
+    "UNRECOVERABLE",
     "Verification",
     "load_artifacts",
+    "load_lost",
     "load_pins",
+    "lost_for_digest",
     "observe",
     "pin",
     "pins_path",
@@ -170,6 +186,16 @@ class Pin:
     #: would re-litigate every existing pin's declared dirty-tree debt at once, and the ratchet
     #: convention says that debt shrinks on purpose, not in a burst.
     content_check: bool | None = None
+    #: BUILD PRODUCTS inside the checkout, as ``(repo-relative path, sha256)`` pairs, compared by CONTENT
+    #: on every verify with no git question asked first.
+    #:
+    #: Not ``local_edits``, although both are path -> sha256: ``local_edits`` is compared only for paths
+    #: git reports DIRTY, and a build product is normally gitignored, so git never reports it and a digest
+    #: declared there is never once compared -- a check that cannot fail. Measured: an emitter binary at
+    #: an ignored ``build/`` path, declared only under ``requires_paths`` (which asks whether it EXISTS),
+    #: was rebuilt in place and ``verify()`` kept returning ok. A declared product that is absent or
+    #: unreadable is drift, never "nothing to report".
+    build_products: tuple[tuple[str, str], ...] = ()
 
     @property
     def checks_content(self) -> bool:
@@ -478,6 +504,17 @@ def load_artifacts(path: "str | Path | None" = None) -> dict[str, Artifact]:
             abi_header_sha256=str(body.get("abi_header_sha256") or ""),
             hwdb_digest=str(hwdb_digest),
         )
+    # An artifact may not re-declare bytes the registry records as UNRECOVERABLE: repointing a live
+    # declaration at dead bytes is exactly the move a loss record forbids.
+    lost = claimed_digests(p, document=raw)
+    for name, art in out.items():
+        rec = lost.get(art.digest.lower())
+        if rec is not None:
+            raise PinsError(
+                f"{p}: artifact {name!r} declares digest {art.digest[:12]}, which lost_artifacts"
+                f"[{rec.name!r}] records as {UNRECOVERABLE}; an artifact declaration claims the bytes can "
+                "be verified, and by the registry's own record these cannot"
+            )
     return out
 
 
@@ -586,8 +623,10 @@ def load_pins(path: "str | Path | None" = None) -> dict[str, Pin]:
             nested_path=str(body.get("nested_path") or ""),
             covers=tuple(str(c) for c in (body.get("covers") or ())),
             content_check=_tri(p, name, "content_check", body.get("content_check")),
+            build_products=_digest_map(p, name, "build_products", body.get("build_products")),
         )
     _check_references(p, out)
+    _check_not_lost(p, out, document=raw)
     if memo_key is not None:
         _PINS_MEMO[memo_key] = dict(out)
     return out
@@ -661,27 +700,52 @@ def _check_references(src: Path, pins: "Mapping[str, Pin]") -> None:
                 raise PinsError(f"{src}: pin {name!r} covers itself")
 
 
-def _local_edits(src: Path, name: str, raw: Any) -> tuple[tuple[str, str], ...]:
-    """Parse a pin's ``local_edits`` mapping of repo-relative path -> sha256 of the expected content."""
+def _digest_map(src: Path, name: str, field_name: str, raw: Any) -> tuple[tuple[str, str], ...]:
+    """Parse a pin's mapping of repo-relative path -> sha256 of the expected content."""
     if raw in (None, {}, ()):
         return ()
     if not isinstance(raw, dict):
-        raise PinsError(f"{src}: pin {name!r} local_edits must be a mapping of path -> sha256")
+        raise PinsError(f"{src}: pin {name!r} {field_name} must be a mapping of path -> sha256")
     out = []
     for rel, digest in raw.items():
         if not isinstance(digest, str):
             # Same trap as the commit: an all-digit digest is valid hex and YAML reads it as a number.
             raise PinsError(
-                f"{src}: pin {name!r} local_edits[{rel!r}] must be a quoted sha256 string; "
+                f"{src}: pin {name!r} {field_name}[{rel!r}] must be a quoted sha256 string; "
                 f"YAML read {type(digest).__name__}"
             )
         if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest.lower()):
             raise PinsError(
-                f"{src}: pin {name!r} local_edits[{rel!r}] is not a 64-character sha256 "
+                f"{src}: pin {name!r} {field_name}[{rel!r}] is not a 64-character sha256 "
                 f"({digest!r}); a partial digest does not identify content"
             )
         out.append((str(rel), digest.lower()))
     return tuple(sorted(out))
+
+
+def _local_edits(src: Path, name: str, raw: Any) -> tuple[tuple[str, str], ...]:
+    """Parse a pin's ``local_edits`` mapping of repo-relative path -> sha256 of the expected content."""
+    return _digest_map(src, name, "local_edits", raw)
+
+
+def _check_not_lost(src: Path, pins: "Mapping[str, Pin]", *, document: Any) -> None:
+    """No pin may declare bytes the registry already records as UNRECOVERABLE.
+
+    Those bytes do not exist. A pin declaring them as the content it expects is either the dead digest
+    copied into a live check -- which can then never pass, and reads as ordinary drift rather than as
+    the loss it is -- or an attempt to make the lost attribution look satisfied. Refused at load.
+    """
+    by_digest = claimed_digests(src, document=document)
+    for name, p in pins.items():
+        for field_name, pairs in (("local_edits", p.local_edits), ("build_products", p.build_products)):
+            for rel, digest in pairs:
+                rec = by_digest.get(digest)
+                if rec is not None:
+                    raise PinsError(
+                        f"{src}: pin {name!r} {field_name}[{rel!r}] declares {digest[:12]}, which "
+                        f"lost_artifacts[{rec.name!r}] records as {UNRECOVERABLE}; declare the bytes that "
+                        "ARE there and leave the loss record to account for the ones that are not"
+                    )
 
 
 def pin(name: str, path: "str | Path | None" = None) -> Pin:
@@ -936,6 +1000,9 @@ def verify(
     * the BYTES of every read path against the same path at the pin's commit (``content_check``), which is
       the only comparison that is right when HEAD itself is off the pin,
     * the pins this one ``covers``, folded in, so verifying the coarse pin cannot miss a nested surface.
+
+    And ``build_products``, unconditionally: git has nothing to say about a gitignored build product, so
+    a compiled binary listed only under ``requires_paths`` was checked for existence, never identity.
     """
     p = pin(name, path)
     target = Path(checkout) if checkout is not None else p.checkout()
@@ -1043,6 +1110,9 @@ def verify(
                 )
             elif not touched:
                 notes.append(f"{got.dirty_files} uncommitted change(s), none of them a source this reads")
+        product_drift, product_notes = _build_product_findings(p, Path(got.path))
+        drift.extend(product_drift)
+        notes.extend(product_notes)
         if (
             p.repo_canonical
             and got.remote not in (UNKNOWN, "")
@@ -1089,6 +1159,37 @@ def verify(
         sources=statuses,
         covered=tuple(covered),
     )
+
+
+def _build_product_findings(p: Pin, root: Path) -> tuple[list[str], list[str]]:
+    """``(drift, notes)`` for every declared build product, compared by its bytes.
+
+    Every other check in :func:`verify` asks git first, and git has NO answer about an ignored file: it
+    is never "modified" (untracked) and never "untracked" (ignored). So these are compared always, and
+    three-state: the bytes match, they DIFFER (both digests named), or they could not be read (drift).
+    """
+    drift: list[str] = []
+    notes: list[str] = []
+    for rel, want in p.build_products:
+        full = root / rel
+        if not full.is_file():
+            drift.append(
+                f"build product {rel} is declared at {want[:16]} but there is no file at {full}; a product "
+                "that is not there cannot be the one a result was attributed to"
+            )
+            continue
+        have = file_digest(full)
+        if have == UNKNOWN:
+            drift.append(f"build product {rel} could not be read, so whether it is the declared {want[:16]} is UNKNOWN")
+        elif have != want:
+            drift.append(
+                f"build product {rel} is {have[:16]} but the pin declares {want[:16]}; it was rebuilt or "
+                "replaced in place, and results attributed to the declared bytes cite bytes this host no "
+                "longer has"
+            )
+        else:
+            notes.append(f"build product {rel} matches the declared {want[:16]}")
+    return drift, notes
 
 
 def _nested_gitlink(p: Pin, got: Observation, path: "str | Path | None") -> tuple[str, list[str], list[str]]:
