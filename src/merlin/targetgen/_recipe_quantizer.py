@@ -26,6 +26,7 @@ dispatch table.
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Iterable, Mapping
 from typing import Any
@@ -439,6 +440,14 @@ def build_quantizer(
                     input_qspec_map={operand: self.activation, kernel: self.weight}, _annotated=True
                 )
                 self.annotated += 1
+            # Closed sum/mean candidates form a set. Its fixpoint can revisit a
+            # reader in any object-hash order, so keep every decision (including
+            # repeated screens) but expose the complete report rows canonically.
+            # Otherwise equivalent captures disagree only in metadata and fail
+            # byte-exact independent replay.
+            self.software_decisions.sort(
+                key=lambda row: json.dumps(row, sort_keys=True, separators=(",", ":"), allow_nan=False)
+            )
             return graph_module
 
         def validate(self, graph_module: Any) -> None:
