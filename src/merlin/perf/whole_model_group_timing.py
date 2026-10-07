@@ -1002,7 +1002,8 @@ def time_group_programs(
             if kept is not None:
                 kept.parent.mkdir(parents=True, exist_ok=True)
                 kept.write_text(json.dumps(row, indent=1) + "\n", encoding="utf-8")
-        return row
+        # Where THIS run's console, dump and verdict are. Not cached: a carried row names no run of its own.
+        return {**row, "run_dir": str(out / f"g{group}")}
 
     with ThreadPoolExecutor(max_workers=max(1, max_parallel)) as pool:
         pending, running = list(todo), {}

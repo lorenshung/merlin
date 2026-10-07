@@ -13,7 +13,8 @@ code_refs: [src/merlin/common/compile_trace.py,
             src/merlin/llvmlower/pipeline.py,
             src/merlin/perf/whole_model_build_cli.py,
             src/merlin/perf/whole_model_partial.py,
-            packages/merlin-experiments/src/merlin_experiments/group_inspect.py]
+            packages/merlin-experiments/src/merlin_experiments/group_inspect.py,
+            packages/merlin-experiments/src/merlin_experiments/group_probes.py]
 ---
 
 # Compile debugging
@@ -106,7 +107,7 @@ refusal too, because a program is what its caller is owed.
 ## Inspect one group of a candidate
 
 ```bash
-merlin experiment inspect <job-dir> --group g12 [--stage S] [--trace] [--run-to N]
+merlin experiment inspect <job-dir> --group g12 [--stage S] [--trace] [--run-to N] [--time] [--profile]
 merlin experiment inspect <package-dir> --group g12 --target T --build-options opts.yaml ...
 ```
 
@@ -133,6 +134,18 @@ whole-model driver. The rebuild runs inside a trace that dumps every stage, and 
   cycles, and not a measured region. If any step cannot be taken (no functional model, no companion,
   a companion that differs, no symbolizer in the target's toolchain) the attribution is `UNKNOWN` and
   the command says why.
+- `--time`: the group's program on the elaborated-RTL emulator, on the model's own inputs to the group,
+  graded exactly against the reference recomputed from those inputs (the fast tier's own per-group run,
+  never served from its cache). The cycles are that emulator's own device, tagged a **ranking signal**
+  with the run's measurement-ladder adjudication: the board alone adjudicates a cycle count.
+- `--profile`: the group's hardware-counter facts and its instruction census by role. Counter names
+  come from the target's own counter header (the per-engine busy/overlap block, and every other
+  duration counter it declares). Values are read from the `--time` run's console, or from
+  `--counter-console FILE` printed by `--counter-engine E`, and are admitted only when that engine's
+  counters are declared real in `merlin/contract/counter_trust.yaml` and the console's counter schema
+  (if it prints one) is the same header. A console with no readings, or an untrusted engine, leaves the
+  values `UNKNOWN` or refused, never zero. The census counts every custom instruction in the linked
+  one-group program by its derived role, split into the group's kernel and the program's own code.
 
 Each step uses a hook the target provides: its whole-model driver, and a functional-model machine.
 If the target or candidate lacks the hook, you get "not available for this target" and the reason.
