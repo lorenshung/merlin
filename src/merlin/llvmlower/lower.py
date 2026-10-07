@@ -31,6 +31,7 @@ from .named_broadcast_fold import ensure_registered as _register_named_broadcast
 from .passes_xdsl import PREPROCESS_STAGES, preprocess_text
 from .pipeline import lower_to_llvm_ir
 from .prov_cse import ensure_registered as _register_cse_through_provenance
+from .source_expression_interval import IntervalEffectContract
 from .transpose_maps import ensure_registered as _register_fold_weight_transpose
 
 _register_epilogue_fusion()
@@ -90,6 +91,7 @@ def lower_model(
     data_layout: str | None = None,
     index_bits: int | None = None,
     masked_contraction_effects: MaskEffectContract | None = None,
+    source_observation_effects: IntervalEffectContract | None = None,
 ) -> LowerResult:
     """Lower MLIR text end to end; emit per-target artifacts in ``workdir``.
 
@@ -161,6 +163,7 @@ def lower_model(
                 index_bits=index_bits,
                 lowering_selection=lowering_selection,
                 masked_contraction_effects=masked_contraction_effects,
+                source_observation_effects=source_observation_effects,
             )
         except Exception as exc:
             # A module MLIR refuses to PARSE fails before any pass, and the reader's dump names a line
@@ -178,6 +181,8 @@ def lower_model(
             except Exception:  # noqa: BLE001 -- an exotic constructor: keep the original
                 raise exc
             raise enriched from exc
+        if "source_observation" in lowering_selection:
+            stats["source_observation"] = lowering_selection["source_observation"]
         if index_bits is not None:
             if lowering_selection.get("index_bits") != index_bits or not lowering_selection.get("effective_pipeline"):
                 raise ValueError("selected index lowering lost its effective compiler pipeline")
@@ -240,6 +245,7 @@ def lower_model_file(
     data_layout: str | None = None,
     index_bits: int | None = None,
     masked_contraction_effects: MaskEffectContract | None = None,
+    source_observation_effects: IntervalEffectContract | None = None,
 ) -> LowerResult:
     audit_mode(ir_audit)
     return lower_model(
@@ -260,4 +266,5 @@ def lower_model_file(
         data_layout=data_layout,
         index_bits=index_bits,
         masked_contraction_effects=masked_contraction_effects,
+        source_observation_effects=source_observation_effects,
     )

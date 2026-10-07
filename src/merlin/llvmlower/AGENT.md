@@ -14,6 +14,15 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
 
 ## What belongs here
 
+- `source_observation_stage.py` is an explicit default-off native tensor
+  checkpoint after ordinary fusion/generalization and before scheduling or
+  bufferization. Normal APIs forward `source_observation_effects`, the existing
+  explicit `IntervalEffectContract`; an installed parent rederives closed
+  scalar i8 proofs from exact current source. Checkpoint/report identity and
+  all effects are rechecked on loading. This read-only analysis preserves
+  ordinary generated code and grants no rewrite, ownership or cost policy.
+  Model names and binding ordinals never select a production transformation.
+
 - The ordinary text/file model lowering APIs forward the existing explicit
   `MaskEffectContract` through `masked_contraction_effects`. Backend model
   builders use the same parameter. Separate closed-mask feature and scalar

@@ -34,6 +34,7 @@ from merlin.common.paths import runtime_dir
 from ...llvmlower import c_runtime, target_data_layout, toolchain
 from ...llvmlower.lower import lower_model_file
 from ...llvmlower.masked_contraction import MaskEffectContract
+from ...llvmlower.source_expression_interval import IntervalEffectContract
 from ..boards import CONSOLE_HTIF, CONSOLE_UART
 from . import spike as _spike  # toolchain paths (gcc/spike/objdump)
 
@@ -431,6 +432,7 @@ def build(
     math_archive_symbols: Sequence[str] | None = None,
     prepared_model_transform: Callable[[Path, Path], Path] | None = None,
     masked_contraction_effects: MaskEffectContract | None = None,
+    source_observation_effects: IntervalEffectContract | None = None,
     host_llvm_transform: Callable[[Path, Path], Path] | None = None,
     host_provider_builder: Callable | None = None,
     cflags_override: list[str] | None = None,
@@ -708,6 +710,7 @@ def build(
             data_layout=index_observation["data_layout"],
             index_bits=index_observation["index_bits"],
             masked_contraction_effects=masked_contraction_effects,
+            source_observation_effects=source_observation_effects,
         )  # produce only the .ll
     # BACKEND-level feature flags, on the MODEL OBJECT ONLY (the GCC-built harness units keep
     # `gcc_cflags`): a feature like the register-group width is an LLVM backend query no tile size
@@ -721,6 +724,10 @@ def build(
     ):
         raise SpikeModelError("selected index width was not bound by the effective lowering pipeline")
     index_lowering = {**index_observation, "effective_pipeline": lowered_index["effective_pipeline"]}
+    if source_observation_effects is not None:
+        from ...llvmlower.source_observation_stage import REPORT
+
+        compilation.bind_preparation("source_observation", work / "lower" / REPORT)
     from merlin.common.digest import sha256_file
 
     model_ir, host_ir_receipt = _transform_host_ir(res.ll_path, work / "host_llvm", host_llvm_transform)

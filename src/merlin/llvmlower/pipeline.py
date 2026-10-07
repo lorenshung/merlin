@@ -1435,6 +1435,8 @@ def _select_runner(
     multicore path carry the feature rewrites — see the EMIT_* comment.
     """
     from .ir_inspection import bind_inspection
+    from .source_observation_stage import FEATURE as _SOURCE_OBSERVATION_FEATURE
+    from .source_observation_stage import bind_runner as _bind_source_observation_runner
 
     if {"approximate_transcendental_activation", "vectorized_transcendental_activation"} & feats:
         source = _activation_poly_runner(emit, fused="fuse_activation_polynomial_fma" in feats)
@@ -1445,6 +1447,7 @@ def _select_runner(
         source = run_source(tag_bmm_tails=_BMM_TAIL_PAD_FEATURE in feats).replace("__MERLIN_EMIT__", emit)
     else:
         source = _RUNNER_SRC.replace("__MERLIN_EMIT__", emit)
+    source = _bind_source_observation_runner(source, selected=_SOURCE_OBSERVATION_FEATURE in feats)
     # Every variant runs elementwise fusion under the broadcast control function (fusion_guard).
     return bind_inspection(
         fusion_guard.inject(source),
@@ -1542,6 +1545,7 @@ def lower_to_llvm_ir(
     index_bits: int | None = None,
     lowering_selection: dict | None = None,
     masked_contraction_effects=None,
+    source_observation_effects=None,
 ) -> str:
     """Lower upstream-MLIR text to LLVM IR text via the m2m venv. Returns .ll text.
 
@@ -1574,6 +1578,11 @@ def lower_to_llvm_ir(
     # A refused invocation must not leave the prior build's successful receipt
     # looking current, including failures before feature/pipeline resolution.
     (work / _RECIPE_FILENAME).unlink(missing_ok=True)
+    from .source_observation_stage import CHECKPOINT as _SOURCE_CHECKPOINT
+    from .source_observation_stage import REPORT as _SOURCE_REPORT
+
+    (work / _SOURCE_CHECKPOINT).unlink(missing_ok=True)
+    (work / _SOURCE_REPORT).unlink(missing_ok=True)
     recipe_sources = {"pipeline_driver": Path(__file__)}
     from .impr_features import apply_schedule, normalize
 
@@ -1643,6 +1652,15 @@ def lower_to_llvm_ir(
         masked_contraction_effects.validate()
     elif masked_contraction_effects is not None:
         raise PipelineError("masked arithmetic effects supplied without masked-contraction policy")
+    from .source_expression_interval import IntervalEffectContract
+    from .source_observation_stage import FEATURE as _SOURCE_OBSERVATION_FEATURE
+
+    if _SOURCE_OBSERVATION_FEATURE in feats:
+        if not isinstance(source_observation_effects, IntervalEffectContract):
+            raise PipelineError("source observation requires explicit IntervalEffectContract")
+        source_observation_effects.validate()
+    elif source_observation_effects is not None:
+        raise PipelineError("source observation effects supplied without selected discovery feature")
     from .llvm_loop_outline import (
         FEATURE as _OUTLINE_LOOPS,
     )
@@ -1726,6 +1744,10 @@ def lower_to_llvm_ir(
         if not data_layout:
             raise ValueError("explicit index width requires selected compiler data layout")
         pipeline = _bind_index_width(pipeline, index_bits)
+    if _SOURCE_OBSERVATION_FEATURE in feats:
+        from .source_observation_stage import validate_pipeline as _validate_observation_pipeline
+
+        _validate_observation_pipeline(pipeline)
     src = work / "model.mlir"
     out = work / "model.ll"
     runner = work / "run_lowering.py"
@@ -1946,6 +1968,13 @@ def lower_to_llvm_ir(
     if audit is not None:
         audit.collect_views()
     _harvest_native(traced, stage_out)
+    if _SOURCE_OBSERVATION_FEATURE in feats:
+        from .source_observation_stage import require_report as _require_source_observation_report
+
+        observed_source = _require_source_observation_report(proc.stdout, work, effects=source_observation_effects)
+        recipe.bind_source("source_observation", work / _SOURCE_CHECKPOINT)
+        if lowering_selection is not None:
+            lowering_selection["source_observation"] = observed_source
     if audit is not None:
         audit.stage(
             "llvm-dialect" if omp else "llvm-translated",

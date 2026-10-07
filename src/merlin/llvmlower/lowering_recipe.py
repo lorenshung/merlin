@@ -60,3 +60,8 @@ class LoweringRecipe:
             returned_llvm_ir={"sha256": sha256_bytes(payload), "bytes": len(payload)},
         )
         write_pretty_json(self.path, self.record)
+
+    def bind_source(self, name: str, path: Path) -> None:
+        """Bind an exact native-stage source that later lowering consumed."""
+        self.record["sources"][name] = _identity(Path(path))
+        write_pretty_json(self.path, self.record)

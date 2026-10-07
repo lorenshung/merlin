@@ -32,6 +32,7 @@ from merlin.common.paths import runtime_dir
 from ...llvmlower import c_runtime, toolchain
 from ...llvmlower.lower import lower_model_file
 from ...llvmlower.masked_contraction import MaskEffectContract
+from ...llvmlower.source_expression_interval import IntervalEffectContract
 from . import spike as _spike
 from .firesim_runner import FireSimRunner, select_runner
 
@@ -2407,6 +2408,7 @@ def build_app(
     device: Any | None = None,
     prepared_model_transform: Callable[[Path, Path], Path] | None = None,
     masked_contraction_effects: MaskEffectContract | None = None,
+    source_observation_effects: IntervalEffectContract | None = None,
 ) -> dict:
     """Lower the model, generate the Zephyr app, and build ``zephyr.elf``.
 
@@ -2572,6 +2574,7 @@ def build_app(
             # which keeps the legacy class-wide split.
             parallel_chunks=parallel_arms(work),
             masked_contraction_effects=masked_contraction_effects,
+            source_observation_effects=source_observation_effects,
         )
     # What this lowering will ask the heap for, read off the IR that is about to be compiled. Measured
     # here rather than estimated later: the file exists for exactly this build, and the number decides the
