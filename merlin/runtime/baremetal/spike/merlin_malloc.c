@@ -94,6 +94,17 @@ void *aligned_alloc(size_t alignment, size_t size) {
 }
 
 void *calloc(size_t nmemb, size_t size) {
+  /* A wrapped product can look like a small valid allocation and silently
+   * overwrite a buffer whose caller requested an unrepresentable byte count.
+   * Refuse before changing the bump cursor or writing any arena bytes. */
+  if (size && nmemb > SIZE_MAX / size) {
+    htif_puts("\nFATAL: model arena -- calloc size multiplication overflow\n  elements ");
+    htif_puthex((unsigned long long)nmemb);
+    htif_puts(", element bytes ");
+    htif_puthex((unsigned long long)size);
+    htif_putc('\n');
+    htif_exit(0x900);
+  }
   size_t n = nmemb * size;
   char *p = (char *)bump(n, 64);
   if (p)
