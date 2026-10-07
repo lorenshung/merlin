@@ -329,7 +329,10 @@ def recipe_token(recipe: Any) -> "dict | None":
                     return None
                 # The first -I root containing this direct include name wins.
                 # Refuse a declaration that hashes a later, shadowed file.
-                if next((root / resolved.name for root in include_roots if (root / resolved.name).is_file()), None) != resolved:
+                first_match = next(
+                    (root / resolved.name for root in include_roots if (root / resolved.name).is_file()), None
+                )
+                if first_match != resolved:
                     return None
                 sha = _file_sha(resolved)
                 if sha is None:

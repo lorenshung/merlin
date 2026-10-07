@@ -10,7 +10,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from merlin_experiments.capture_execution import runtime_store, sealed_m2m
 
 

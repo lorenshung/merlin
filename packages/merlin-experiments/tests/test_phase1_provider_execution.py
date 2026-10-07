@@ -195,7 +195,13 @@ def test_provider_owner_is_private_and_byte_drift_invalidates_existing_source_re
     arguments = dict(repo=tmp_path, entrypoint=tmp_path / "transport.py")
     record = SI.record(**arguments)
     assert "phase1:source:providers/execution.py" in record["inputs"]
-    for key in ("arrival_stamp", "sandbox_bwrap", "sandbox_host_surfaces", "sandbox_toolchain", "answer_surface_policy"):
+    for key in (
+        "arrival_stamp",
+        "sandbox_bwrap",
+        "sandbox_host_surfaces",
+        "sandbox_toolchain",
+        "answer_surface_policy",
+    ):
         assert f"phase1:startup:{key}" in record["inputs"]
     SI.verify(record, **arguments)
     member = package / "providers/execution.py"

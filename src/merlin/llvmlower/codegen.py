@@ -63,15 +63,20 @@ def _run(cmd: list[str], *, timeout_s: float | None = None) -> None:
         or timeout_s <= 0
     ):
         raise ValueError("explicit compile timeout must be positive")
-    limit = (_COMPILE_TIMEOUT_S or None)
+    limit = _COMPILE_TIMEOUT_S or None
     if timeout_s is not None:
         limit = min(limit, timeout_s) if limit is not None else timeout_s
-    _proc.run_checked(cmd, error=CodegenError, timeout=limit,
-                      timeout_hint=" (pathological compile)")
+    _proc.run_checked(cmd, error=CodegenError, timeout=limit, timeout_hint=" (pathological compile)")
 
 
-def compile_ll(ll_path: str | Path, out_obj: str | Path, target: str = "riscv", *,
-               extra_flags: tuple[str, ...] = (), timeout_s: float | None = None) -> Path:
+def compile_ll(
+    ll_path: str | Path,
+    out_obj: str | Path,
+    target: str = "riscv",
+    *,
+    extra_flags: tuple[str, ...] = (),
+    timeout_s: float | None = None,
+) -> Path:
     """Compile LLVM IR, optionally under a tighter per-call diagnostic limit."""
     flags = RISCV_FLAGS if target == "riscv" else X86_FLAGS
     _run([clang(), *flags, *extra_flags, "-c", ll_path, "-o", out_obj], timeout_s=timeout_s)

@@ -698,7 +698,9 @@ def build_device_objects(
     shim_c = work / "device_shim.c"
     shim_c.write_text(unit.text, encoding="utf-8")
     shim_o = work / "device_shim.o"
-    s = _run_build_tool([clang(), *_flags(codegen_target, cflags), "-c", str(shim_c), "-o", str(shim_o)], timeout=timeout)
+    s = _run_build_tool(
+        [clang(), *_flags(codegen_target, cflags), "-c", str(shim_c), "-o", str(shim_o)], timeout=timeout
+    )
     if s.returncode != 0:
         skipped.append(("shim", f"clang: {(s.stderr or '').strip()[:300]}"))
         return DeviceBuild(

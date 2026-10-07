@@ -169,11 +169,15 @@ def test_typed_host_source_operations_have_a_complete_precision_census():
     source = '''"builtin.module"() ({
       "func.func"() <{sym_name = "forward", function_type = (tensor<2xf32>) -> tensor<2xi8>}> ({
       ^bb0(%x: tensor<2xf32>):
-        %scale = "arith.constant"() <{value = 1.000000e+00 : f32}> {prov.op = "quantize", prov.family = "quantize"} : () -> f32
+        %scale = "arith.constant"() <{value = 1.000000e+00 : f32}>
+          {prov.op = "quantize", prov.family = "quantize"} : () -> f32
         %s = "tensor.splat"(%scale) {prov.op = "quantize", prov.family = "quantize"} : (f32) -> tensor<f32>
         %zero = "arith.constant"() <{value = 0 : i64}> {prov.op = "quantize", prov.family = "quantize"} : () -> i64
         %z = "tensor.splat"(%zero) {prov.op = "quantize", prov.family = "quantize"} : (i64) -> tensor<i64>
-        %q = "quant_ext.quantize_per_tensor"(%x, %s, %z) <{quant_min = -128 : i64, quant_max = 127 : i64}> {prov.op = "quantize", prov.family = "quantize", prov.region_id = "q0"} : (tensor<2xf32>, tensor<f32>, tensor<i64>) -> tensor<2xi8>
+        %q = "quant_ext.quantize_per_tensor"(%x, %s, %z)
+          <{quant_min = -128 : i64, quant_max = 127 : i64}>
+          {prov.op = "quantize", prov.family = "quantize", prov.region_id = "q0"}
+          : (tensor<2xf32>, tensor<f32>, tensor<i64>) -> tensor<2xi8>
         "func.return"(%q) : (tensor<2xi8>) -> ()
       }) : () -> ()
     }) : () -> ()'''
@@ -215,7 +219,9 @@ def test_typed_source_cannot_clear_unverified_accelerator_contraction():
 
     source = '''builtin.module {
       func.func @forward(%a: tensor<2x2xi8>, %b: tensor<2x2xi8>, %c: tensor<2x2xi32>) -> tensor<2x2xi32> {
-        %r = "linalg.matmul"(%a, %b, %c) {prov.op = "matmul", prov.family = "contraction", prov.region_id = "m0"} : (tensor<2x2xi8>, tensor<2x2xi8>, tensor<2x2xi32>) -> tensor<2x2xi32>
+        %r = "linalg.matmul"(%a, %b, %c)
+          {prov.op = "matmul", prov.family = "contraction", prov.region_id = "m0"}
+          : (tensor<2x2xi8>, tensor<2x2xi8>, tensor<2x2xi32>) -> tensor<2x2xi32>
         func.return %r : tensor<2x2xi32>
       }
     }'''
@@ -242,7 +248,9 @@ def test_mixed_source_closes_only_when_every_possible_tensor_input_is_hardware_r
 
     source = '''builtin.module {
       func.func @forward(%idx: tensor<2xi64>, %weight: tensor<2xf32>) -> tensor<2xf32> {
-        %r = "linalg.generic"(%idx, %weight) {prov.op = "embedding", prov.family = "gather_scatter", prov.region_id = "g0"} : (tensor<2xi64>, tensor<2xf32>) -> tensor<2xf32>
+        %r = "linalg.generic"(%idx, %weight)
+          {prov.op = "embedding", prov.family = "gather_scatter", prov.region_id = "g0"}
+          : (tensor<2xi64>, tensor<2xf32>) -> tensor<2xf32>
         func.return %r : tensor<2xf32>
       }
     }'''

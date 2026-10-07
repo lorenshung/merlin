@@ -19,7 +19,6 @@ from merlin.runtime.dispatch_runtime import (
 from merlin.xdsl_dialects._common import text as mlir_text
 from merlin.xdsl_dialects.lowering.outline import outline_dispatches
 
-
 _FLOAT_ERF = """builtin.module {
   func.func @forward(%x: tensor<2x8xf32>) -> tensor<2x8xf32> {
     %e = tensor.empty() : tensor<2x8xf32>
