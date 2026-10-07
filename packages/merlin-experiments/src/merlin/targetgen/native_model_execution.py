@@ -156,8 +156,8 @@ def _bind_inputs(
     rtl_facts: str | Path | None = None,
     board_config: str | None = None,
 ):
-    """Bind every read pointer by parsed source-argument index, never by heuristic order."""
-    from merlin.targetgen.bundle_pack import plan
+    """Bind exact frozen entry leaves, never treating source-owned scratch as an input."""
+    from merlin.targetgen.bundle_pack import parse_arg_index, plan
     from merlin.targetgen.capability_probes import tile_edge
     from merlin.targetgen.capture_source import capture_tensor_source
 
@@ -190,27 +190,161 @@ def _bind_inputs(
     else:
         pitch = tile_edge(target)
     packed = plan(command_buffer, row_pitch_elements=pitch, weight_manifest=manifest)
-    source, source_report = capture_tensor_source(capture_bundle, packed, weight_manifest=manifest)
+    capture_source, source_report = capture_tensor_source(capture_bundle, packed, weight_manifest=manifest)
     inputs: dict[str, Any] = {}
     for row in packed.const:
         if row.role != "argument":
             raise NativeModelExecutionError("carried model state needs an explicit session execution contract")
         if not row.weight:
             raise NativeModelExecutionError(f"{row.tensor}: no frozen source key in weight manifest")
-        inputs[row.tensor] = _logical_values(source(row.weight), tensor=row.tensor, dtype=row.dtype, shape=row.shape)
-    read = [
-        str(arg["tensor"]) for arg in command_buffer["kernel_abi"]["args"] if arg["access"] in ("read", "readwrite")
-    ]
-    if set(inputs) != set(read) or len(inputs) != len(read):
-        raise NativeModelExecutionError("captured leaf binding does not cover the exact read-pointer ABI")
+        inputs[row.tensor] = _logical_values(
+            capture_source(row.weight), tensor=row.tensor, dtype=row.dtype, shape=row.shape
+        )
+    # An ABI readwrite pointer is not necessarily a captured entry operand. A
+    # source-produced intermediate is read by later tasks, but its initial
+    # bytes belong to the submitted program, not to the frozen model capture.
+    # Conversely, a true entry-bound readwrite pointer needs a carried-state
+    # seed; this one-shot model runner has no such session contract. Check the
+    # complete source/plan join before treating any mutable buffer as scratch.
+    from merlin.runtime.commandbuffer import whole_program_entry_bindings
+    from merlin.targetgen.oot_starterkit.plan import source_operation_inventory, validate_mixed_program_plan
+
+    source_path = capture_bundle / "model.mlir"
+    if source_path.is_symlink() or not source_path.is_file():
+        raise NativeModelExecutionError("frozen model interface is absent or indirect")
+    source_bytes = source_path.read_bytes()
+    validation = validate_mixed_program_plan(source_bytes, command_buffer)
+    if not validation.get("ok"):
+        raise NativeModelExecutionError(
+            f"candidate source/entry plan is incomplete: {validation.get('findings', [])[:2]}"
+        )
+    entry = whole_program_entry_bindings(command_buffer)
+    abi = command_buffer["kernel_abi"]["args"]
+    read = {str(arg["tensor"]) for arg in abi if arg["access"] == "read"}
+    if entry is None or set(entry) != read or len(entry) != len(read):
+        raise NativeModelExecutionError("frozen source entry bindings differ from exact read-only pointer ABI")
+    # The packer resolves captured bytes by the physical arg<N> index, while
+    # entry_bindings maps those physical names to source argument positions.
+    # Equal shapes/types cannot prove this correspondence: a swap would run the
+    # right program on the wrong frozen input/weight bytes.
+    if any(parse_arg_index(name) != source_index for source_index, name in enumerate(entry)):
+        raise NativeModelExecutionError("physical captured argument index differs from source argument index")
+    if set(inputs) != read or len(inputs) != len(read):
+        raise NativeModelExecutionError("captured leaf binding does not cover the exact source entry ABI")
+
+    tensors = command_buffer["tensors"]
+    mutable = {
+        str(arg["tensor"])
+        for arg in abi
+        if arg["access"] in ("write", "readwrite") and tensors[arg["tensor"]]["role"] == "intermediate"
+    }
+    readwrite = {str(arg["tensor"]) for arg in abi if arg["access"] == "readwrite"}
+    if readwrite - mutable:
+        raise NativeModelExecutionError("readwrite entry/output requires an explicit carried-state seed")
+    outputs = set(command_buffer["kernel_abi"]["outputs"])
+    if (
+        len(outputs) != len(command_buffer["kernel_abi"]["outputs"])
+        or set(tensors) != read | mutable | outputs
+        or any(tensors[name]["role"] != "output" for name in outputs)
+    ):
+        raise NativeModelExecutionError("one-shot model ABI has an unsupported writable pointer role")
+    plan = command_buffer["params"]["global_program_plan"]
+    inventory = source_operation_inventory(source_bytes)
+    source_values = {row["tensor"]: (row["op_index"], row["result_index"]) for row in plan["source_values"]}
+    if len(source_values) != len(plan["source_values"]):
+        raise NativeModelExecutionError("mutable source values alias one pointer without a carry contract")
+    temporary_owners = {row["tensor"]: row["source_op_index"] for row in plan["compiler_temporaries"]}
+    if len(temporary_owners) != len(plan["compiler_temporaries"]):
+        raise NativeModelExecutionError("compiler temporaries have duplicate pointer identity")
+    if read.intersection(set(source_values) | set(temporary_owners)):
+        raise NativeModelExecutionError("source-produced value aliases a captured read-only entry")
+    # This one-shot runner has no input/output alias or epilogue-copy contract.
+    # A named output must be written once by the task that owns its exact
+    # source result; merely listing it in the ABI proves no produced bytes.
+    for name in command_buffer["kernel_abi"]["outputs"]:
+        producer = source_values.get(name)
+        writers = [task for task in plan["tasks"] if name in task["writes"]]
+        if (
+            not any(arg["tensor"] == name and arg["access"] == "write" for arg in abi)
+            or producer is None
+            or len(writers) != 1
+            or producer[0] not in writers[0]["source_op_indices"]
+        ):
+            raise NativeModelExecutionError(f"output writer lacks exact source-result task ownership: {name!r}")
+
+    def has_source_initializer(name: str, task: Mapping[str, Any]) -> bool:
+        binding = source_values.get(name)
+        if binding is None or binding[0] not in task["source_op_indices"]:
+            return False
+        operation = inventory["operations"][binding[0]]
+        result_index = binding[1]
+        results = operation["results"]
+        operands = operation["operands"]
+        init_index = len(operands) - len(results) + result_index
+        if operation["operation"] not in ("linalg.generic", "linalg.reduce") or not 0 <= init_index < len(operands):
+            return False
+        init = operands[init_index]
+        origin = init.get("source") or {}
+        producer = origin.get("op_index")
+        if (
+            type(producer) is not int
+            or not 0 <= producer < binding[0]
+            or origin.get("result_index") != 0
+            or init.get("shape") != results[result_index].get("shape")
+            or init.get("dtype") != results[result_index].get("dtype")
+            or inventory["operations"][producer]["operation"] != "tensor.splat"
+            or any(row["op_index"] == producer for row in plan["source_values"])
+        ):
+            return False
+        splat = inventory["operations"][producer]
+        if len(splat["operands"]) != 1:
+            return False
+        scalar_origin = splat["operands"][0].get("source") or {}
+        constant = scalar_origin.get("op_index")
+        return (
+            type(constant) is int
+            and 0 <= constant < producer
+            and scalar_origin.get("result_index") == 0
+            and splat["operands"][0].get("type") == results[result_index].get("dtype")
+            and inventory["operations"][constant]["operation"] == "arith.constant"
+        )
+
+    initialized: set[str] = set()
+    for task in plan["tasks"]:
+        if read.intersection(task["writes"]):
+            raise NativeModelExecutionError("task writes a captured read-only entry")
+        for name in task["writes"]:
+            if name in mutable:
+                owner = source_values[name][0] if name in source_values else temporary_owners.get(name)
+                if owner not in task["source_op_indices"]:
+                    raise NativeModelExecutionError(f"mutable intermediate {name!r} has no source-owned writer")
+        for name in task["reads"]:
+            if (
+                name in mutable
+                and name not in initialized
+                and not (name in task["writes"] and has_source_initializer(name, task))
+            ):
+                raise NativeModelExecutionError(f"mutable intermediate {name!r} is read before a source-owned write")
+        initialized.update(name for name in task["writes"] if name in mutable)
+    if initialized != mutable:
+        raise NativeModelExecutionError("mutable intermediate lacks a source-owned writer")
+    if hashlib.sha256(source_path.read_bytes()).hexdigest() != validation["source_sha256"]:
+        raise NativeModelExecutionError("frozen model interface changed during source binding")
     return inputs, {
         "pack": packed.to_dict(),
         "source": source_report.to_dict(),
         "weight_manifest": _digest(manifest_path),
+        "source_entry_binding": {
+            "source_sha256": validation["source_sha256"],
+            "entry_bindings": entry,
+            "source_owned_mutables": sorted(mutable),
+            "n_source_owned_mutable_intermediates": len(mutable),
+            "scope": "source/plan initial-byte ownership, not compiled memory-dataflow or numerical proof",
+        },
     }
 
 
-def _build_service_for(target: str):
+def _build_service_for(target: str, *, source_owned_mutables: tuple[str, ...] | None = None):
     """Pin the host-selected target renderer and bypass the model importer for finished LLVM."""
     from merlin.runtime.backends import base as backends
     from merlin.targetgen.contract.build_service import BuildOnlyService, file_digest
@@ -219,19 +353,25 @@ def _build_service_for(target: str):
     root = Path(backend.__file__).resolve().parent
     providers = list(root.rglob("*.py"))
     extra = backend.build_source_paths() if callable(getattr(backend, "build_source_paths", None)) else ()
-    declared = [*providers, *map(Path, extra)]
+    recipe = backends.harness_build_recipe(target)
+    declared = [*providers, *map(Path, extra), *getattr(recipe, "header_dependencies", ())]
     if not declared or any(
         not p.is_absolute() or p.is_symlink() or p.resolve() != p or not p.is_file() for p in declared
     ):
         raise NativeModelExecutionError("selected target renderer has no stable source closure")
     sources = sorted(set(declared))
 
-    def render(cb, *, inputs):
-        return backend.render_harness(cb, target=target, inputs=inputs)
+    def render(cb, *, inputs, readback_policy=None):
+        policy = {"readback_policy": readback_policy} if readback_policy is not None else {}
+        if not source_owned_mutables:
+            return backend.render_harness(cb, target=target, inputs=inputs, **policy)
+        return backend.render_harness(
+            cb, target=target, inputs=inputs, source_owned_mutables=source_owned_mutables, **policy
+        )
 
     return BuildOnlyService(
         target=target,
-        recipe=backends.harness_build_recipe(target),
+        recipe=recipe,
         renderer=render,
         source_pins=tuple((str(p), file_digest(p)) for p in sources),
     )
@@ -247,17 +387,15 @@ def _host_compute_report(command_buffer: Mapping[str, Any], lowered_mlir_text: s
     from merlin.runtime.route_quality import host_compute
 
     try:
-        from xdsl.context import Context
-        from xdsl.dialects import builtin, llvm
         from xdsl.parser import Parser
+
+        from merlin.targetgen.oot_starterkit.llvm_context import make_llvm_context
 
         # LLVM metadata that xDSL does not model (for example loop-unroll
         # hints) must not hide a task-scoped function that upstream MLIR can
         # compile.  Unregistered operations are still handled conservatively
         # by route_quality, which marks unknown dataflow incomplete.
-        context = Context(allow_unregistered=True)
-        context.load_dialect(builtin.Builtin)
-        context.load_dialect(llvm.LLVM)
+        context = make_llvm_context()
         module = Parser(context, lowered_mlir_text).parse_module()
         matches = [
             op
@@ -473,6 +611,20 @@ def audit_candidate_source_placement(
         if not isinstance(receipt, Mapping):
             raise NativeModelExecutionError("candidate emitted no global_program_plan")
         problems: list[str] = []
+        source_plan_validation = None
+        if any(isinstance(row, Mapping) and row.get("source_precision_witness") for row in regions):
+            # Parsed source types close only the *source* census. The existing
+            # whole-program protocol checks every materialized source binding,
+            # including entry/return values, against exact source type/shape;
+            # candidate-volunteered source_values alone cannot establish that.
+            # Lowered task tags are structural, not arithmetic equivalence.
+            from merlin.targetgen.oot_starterkit.plan import validate_mixed_program_plan
+
+            source_plan_validation = validate_mixed_program_plan(
+                source, cb, _read_pinned_payload(emission, "lowered_mlir").decode("utf-8")
+            )
+            if not source_plan_validation.get("ok"):
+                problems.extend(f"candidate typed source plan: {issue}" for issue in source_plan_validation["findings"])
         if receipt.get("schema") != "mixed_program_plan_v1":
             problems.append("candidate global-plan schema is not mixed_program_plan_v1")
         if receipt.get("source_sha256") != source_sha:
@@ -542,6 +694,7 @@ def audit_candidate_source_placement(
             ],
             "eligible_host_source_op_indices": [],
             "task_source_regions": task_regions,
+            **({"source_plan_validation": source_plan_validation} if source_plan_validation is not None else {}),
             "scope": "static source/task/eligibility join; no completed candidate dispatch proof",
         }
     except Exception as exc:  # noqa: BLE001 -- absent independent identity never permits placement
@@ -718,15 +871,12 @@ def audit_candidate_static_tiers(
         host = audit_emitted_host_compute(emission, entry_symbol=entry_symbol)
         if host.get("status") != "clean":
             raise NativeModelExecutionError("candidate task-scoped host compute is not clean")
-        from xdsl.context import Context
-        from xdsl.dialects import builtin, llvm
         from xdsl.parser import Parser
 
         from merlin.perf.compiler_plan_evidence import verify_compiler_global_plan
+        from merlin.targetgen.oot_starterkit.llvm_context import make_llvm_context
 
-        context = Context(allow_unregistered=True)
-        context.load_dialect(builtin.Builtin)
-        context.load_dialect(llvm.LLVM)
+        context = make_llvm_context()
         module = Parser(context, lowered).parse_module()
         plan = verify_compiler_global_plan(
             source_text=source,
@@ -1011,6 +1161,7 @@ def execute_candidate_model(
     numeric_policy: Mapping[str, Any] | None = None,
     rtl_facts: str | Path | None = None,
     board_config: str | None = None,
+    readback_policy=None,
 ) -> dict[str, Any]:
     """Build one candidate whole-model ELF; optionally run and compare its entire output.
 
@@ -1021,7 +1172,10 @@ def execute_candidate_model(
     execution still need their independent mandatory gates.
     """
     from merlin.targetgen.bundle_harness import emitted_entry_arity, is_executable_emission
+    from merlin.targetgen.contract.readback_policy import selected
     from merlin.targetgen.golden_store import load_golden
+
+    readback_policy = selected(readback_policy)
 
     source = Path(capsule_dir)
     capture = Path(capture_bundle)
@@ -1104,7 +1258,8 @@ def execute_candidate_model(
             require_clean_host_compute,
         )
 
-        service = _build_service_for(target)
+        scratch = tuple(binding["source_entry_binding"]["source_owned_mutables"])
+        service = _build_service_for(target, source_owned_mutables=scratch or None)
         entry_symbol = service.recipe.require_kernel_stack_frame().entry_symbol
         host_report = _host_compute_report(cb, lowered_mlir_text, entry_symbol=entry_symbol)
         record["host_compute"] = host_report.to_dict()
@@ -1120,9 +1275,26 @@ def execute_candidate_model(
         from merlin.targetgen.contract.compile import compile_lowered_to_elf
 
         record["host_build_sources"] = [{"path": p, "sha256": digest} for p, digest in service.source_pins]
+        policy_kwargs = {"readback_policy": readback_policy} if readback_policy is not None else {}
         elf = compile_lowered_to_elf(
-            cb, lowered_mlir_text, output / "build", target=target, inputs=inputs, _build_service=service
+            cb, lowered_mlir_text, output / "build", target=target, inputs=inputs,
+            _build_service=service, **policy_kwargs,
         )
+        if readback_policy is not None:
+            from merlin.targetgen.contract.readback_policy import (
+                BUILD_RECEIPT,
+                require_build_receipt,
+                selected_build_inputs,
+            )
+
+            recipe_record, source_pins = selected_build_inputs(target, service.recipe.with_effective_abi(), service)
+            record["readback_build"] = require_build_receipt(
+                output / "build" / BUILD_RECEIPT,
+                policy=readback_policy, cb=cb, target=target,
+                recipe_record=recipe_record, source_pins=source_pins,
+                object_path=output / "build" / "kernel.o",
+                harness_path=output / "build" / "harness.c", elf_path=elf,
+            )
         record["elf"] = _digest(Path(elf))
         revalidate_source()
         if rtl_facts is not None and board_config:
@@ -1155,9 +1327,23 @@ def execute_candidate_model(
             revalidate_source()
             if _digest(Path(elf)) != record["elf"]:
                 raise NativeModelExecutionError("candidate ELF changed during L2 functional execution")
+            if readback_policy is not None:
+                recipe_now, sources_now = selected_build_inputs(target, service.recipe.with_effective_abi(), service)
+                if (recipe_now, sources_now) != (recipe_record, source_pins):
+                    raise NativeModelExecutionError("full-value build inputs changed during L2 execution")
+                require_build_receipt(
+                    output / "build" / BUILD_RECEIPT, policy=readback_policy, cb=cb, target=target,
+                    recipe_record=recipe_record, source_pins=source_pins,
+                    object_path=output / "build" / "kernel.o",
+                    harness_path=output / "build" / "harness.c", elf_path=elf,
+                )
             functional_path = output / "console_l2.txt"
             functional_path.write_text(functional_console, encoding="utf-8")
             functional_observed, functional_metrics = functional_backend.parse_output(functional_console)
+            if readback_policy is not None:
+                from merlin.targetgen.contract.readback_policy import require_full_value_roster
+
+                require_full_value_roster(cb, functional_console, functional_observed)
             functional_observed = backends.decode_float_readback(functional_observed, declared_output_dtypes(cb))
             functional_numeric = compare(
                 golden["outputs"],
@@ -1205,9 +1391,23 @@ def execute_candidate_model(
         revalidate_source()
         if _digest(Path(elf))["sha256"] != record["elf"]["sha256"]:
             raise NativeModelExecutionError("candidate ELF bytes changed during execution")
+        if readback_policy is not None:
+            recipe_now, sources_now = selected_build_inputs(target, service.recipe.with_effective_abi(), service)
+            if (recipe_now, sources_now) != (recipe_record, source_pins):
+                raise NativeModelExecutionError("full-value build inputs changed during L3 execution")
+            require_build_receipt(
+                output / "build" / BUILD_RECEIPT, policy=readback_policy, cb=cb, target=target,
+                recipe_record=recipe_record, source_pins=source_pins,
+                object_path=output / "build" / "kernel.o",
+                harness_path=output / "build" / "harness.c", elf_path=elf,
+            )
         console_path = output / "console.txt"
         console_path.write_text(console, encoding="utf-8")
         observed, metrics = backend.parse_output(console)
+        if readback_policy is not None:
+            from merlin.targetgen.contract.readback_policy import require_full_value_roster
+
+            require_full_value_roster(cb, console, observed)
         observed = backends.decode_float_readback(observed, declared_output_dtypes(cb))
         comparison = compare(
             golden["outputs"], observed, policy, golden_source=str(golden.get("golden_source") or "independent_capsule")
@@ -1231,6 +1431,11 @@ def execute_candidate_model(
         }
         return record
     except Exception as exc:  # noqa: BLE001 -- always retain a build/receipt on failure
+        if record.get("status") == "numeric_match_diagnostic":
+            record["status"] = "incomplete"
+            record.pop("numeric", None)
+        if record.get("tiers", {}).get("L3", {}).get("status") == "pass":
+            record["tiers"]["L3"] = {"status": "unavailable", "detail": "post-run source or build check failed"}
         record["failure"] = {"type": type(exc).__name__, "detail": str(exc)[:2000]}
         return record
     finally:

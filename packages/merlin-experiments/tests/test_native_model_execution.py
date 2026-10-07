@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -23,6 +25,7 @@ from merlin.targetgen.native_dispatch_accounting import (
 from merlin.targetgen.native_model_execution import (
     NativeModelExecutionError,
     _build_artifacts,
+    _build_service_for,
     _digest,
     _frozen_model_policy,
     _functional_engine,
@@ -39,6 +42,296 @@ def test_logical_leaf_binding_preserves_dtype_shape_and_values():
     assert _logical_values(raw, tensor="arg0", dtype="f32", shape=(2, 2)) == [[1.25, -2.5], [0.0, 3.0]]
     with pytest.raises(NativeModelExecutionError, match="captured 4 element"):
         _logical_values(raw, tensor="arg0", dtype="f32", shape=(2, 3))
+
+
+def test_build_renderer_forwards_scratch_only_when_source_claim_is_nonempty(tmp_path, monkeypatch):
+    from merlin.runtime.backends import base as backends
+
+    source = tmp_path / "backend.py"
+    source.write_text("# pinned renderer source\n")
+    observed = []
+
+    def legacy_render(cb, *, target, inputs):
+        observed.append((cb, target, inputs, None))
+        return "legacy"
+
+    backend = SimpleNamespace(__file__=str(source), build_source_paths=lambda: (), render_harness=legacy_render)
+    monkeypatch.setattr(backends, "get_backend", lambda _target: backend)
+    monkeypatch.setattr(backends, "harness_build_recipe", lambda _target: object())
+    cb, inputs = {}, {"arg0": [1]}
+    assert _build_service_for("synthetic", source_owned_mutables=()).renderer(cb, inputs=inputs) == "legacy"
+    assert observed == [(cb, "synthetic", inputs, None)]
+
+    def scratch_render(cb, *, target, inputs, source_owned_mutables):
+        observed.append((cb, target, inputs, source_owned_mutables))
+        return "scratch"
+
+    backend.render_harness = scratch_render
+    assert _build_service_for("synthetic", source_owned_mutables=("tmp0",)).renderer(cb, inputs=inputs) == "scratch"
+    assert observed[-1] == (cb, "synthetic", inputs, ("tmp0",))
+
+
+def test_native_frozen_leaf_binding_excludes_source_written_intermediate(tmp_path, monkeypatch):
+    """Exercise the real native binder with an owned mixed-program scratch pointer."""
+    from merlin.targetgen import capability_probes, capture_source
+    from merlin.targetgen.capture_source import SourceReport
+    from merlin.targetgen.native_model_execution import _bind_inputs
+
+    source = (
+        "module { func.func @main(%x: tensor<1xf32>) -> tensor<1xf32> { "
+        '%a = "test.make"(%x) : (tensor<1xf32>) -> tensor<1xf32> '
+        '%b = "test.copy"(%a) : (tensor<1xf32>) -> tensor<1xf32> '
+        "func.return %b : tensor<1xf32> } }"
+    )
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "model.mlir").write_text(source)
+    (bundle / "weights.safetensors.manifest.json").write_text(json.dumps({"0": {"name": "input"}}))
+    monkeypatch.setattr(capability_probes, "tile_edge", lambda _target: 4)
+    monkeypatch.setattr(
+        capture_source,
+        "capture_tensor_source",
+        lambda *_args, **_kwargs: (
+            lambda _key: np.asarray([3.0], dtype=np.float32).tobytes(),
+            SourceReport(origin={"arg0": "runtime_input"}),
+        ),
+    )
+    plan = {
+        "schema": "mixed_program_plan_v1",
+        "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
+        "source_op_count": 2,
+        "entry_bindings": ["arg0"],
+        "source_values": [
+            {"op_index": 0, "result_index": 0, "tensor": "tmp0"},
+            {"op_index": 1, "result_index": 0, "tensor": "out"},
+        ],
+        "output_bindings": ["out"],
+        "compiler_temporaries": [],
+        "schedule_instruction_count": 2,
+        "prologue_instruction_range": [0, 0],
+        "epilogue_instruction_range": [2, 2],
+        "tasks": [
+            {
+                "task_index": 0,
+                "kind": "host",
+                "source_op_indices": [0],
+                "instruction_start": 0,
+                "instruction_end": 1,
+                "reads": ["arg0"],
+                "writes": ["tmp0"],
+            },
+            {
+                "task_index": 1,
+                "kind": "host",
+                "source_op_indices": [1],
+                "instruction_start": 1,
+                "instruction_end": 2,
+                "reads": ["tmp0"],
+                "writes": ["out"],
+            },
+        ],
+    }
+    command = {
+        "kernel_abi": {
+            "kind": "whole_program",
+            "args": [
+                {"tensor": "arg0", "access": "read"},
+                {"tensor": "tmp0", "access": "readwrite"},
+                {"tensor": "out", "access": "write"},
+            ],
+            "outputs": ["out"],
+        },
+        "tensors": {
+            "arg0": {"shape": [1], "dtype": "f32", "role": "input"},
+            "tmp0": {"shape": [1], "dtype": "f32", "role": "intermediate"},
+            "out": {"shape": [1], "dtype": "f32", "role": "output"},
+        },
+        "params": {"global_program_plan": plan},
+    }
+    inputs, binding = _bind_inputs(command, bundle, target="synthetic")
+    assert inputs == {"arg0": [3.0]}
+    assert binding["pack"]["const"][0]["tensor"] == "arg0"
+    assert binding["source_entry_binding"]["n_source_owned_mutable_intermediates"] == 1
+    assert binding["source_entry_binding"]["source_owned_mutables"] == ["tmp0"]
+
+    before_write = copy.deepcopy(command)
+    before_write["params"]["global_program_plan"]["tasks"][0]["reads"].append("tmp0")
+    with pytest.raises(NativeModelExecutionError, match="read before a source-owned write"):
+        _bind_inputs(before_write, bundle, target="synthetic")
+
+    no_writer = copy.deepcopy(command)
+    no_writer["params"]["global_program_plan"]["tasks"][0]["writes"] = []
+    with pytest.raises(NativeModelExecutionError, match="read before a source-owned write"):
+        _bind_inputs(no_writer, bundle, target="synthetic")
+
+    wrong_writer = copy.deepcopy(command)
+    wrong_writer["params"]["global_program_plan"]["tasks"][0]["writes"] = []
+    wrong_writer["params"]["global_program_plan"]["tasks"][1]["writes"].append("tmp0")
+    with pytest.raises(NativeModelExecutionError, match="no source-owned writer"):
+        _bind_inputs(wrong_writer, bundle, target="synthetic")
+
+    output_carry = copy.deepcopy(command)
+    output_carry["kernel_abi"]["args"][-1]["access"] = "readwrite"
+    with pytest.raises(NativeModelExecutionError, match="carried-state seed"):
+        _bind_inputs(output_carry, bundle, target="synthetic")
+
+    wrong_entry = copy.deepcopy(command)
+    wrong_entry["params"]["global_program_plan"]["entry_bindings"] = ["tmp0"]
+    with pytest.raises(NativeModelExecutionError, match="source/entry plan is incomplete"):
+        _bind_inputs(wrong_entry, bundle, target="synthetic")
+
+    overwritten_entry = copy.deepcopy(command)
+    overwritten_entry["kernel_abi"]["args"].pop(1)
+    overwritten_entry["tensors"].pop("tmp0")
+    overwritten_entry["params"]["global_program_plan"]["source_values"][0]["tensor"] = "arg0"
+    overwritten_entry["params"]["global_program_plan"]["tasks"][0]["writes"] = ["arg0"]
+    overwritten_entry["params"]["global_program_plan"]["tasks"][1]["reads"] = ["arg0"]
+    with pytest.raises(NativeModelExecutionError, match="captured read-only entry"):
+        _bind_inputs(overwritten_entry, bundle, target="synthetic")
+    alias_without_task_write = copy.deepcopy(overwritten_entry)
+    alias_without_task_write["params"]["global_program_plan"]["tasks"][0]["writes"] = []
+    with pytest.raises(NativeModelExecutionError, match="source-produced value aliases"):
+        _bind_inputs(alias_without_task_write, bundle, target="synthetic")
+    task_write_entry = copy.deepcopy(command)
+    task_write_entry["params"]["global_program_plan"]["tasks"][0]["writes"].append("arg0")
+    with pytest.raises(NativeModelExecutionError, match="task writes a captured read-only entry"):
+        _bind_inputs(task_write_entry, bundle, target="synthetic")
+
+    wrong_output_writer = copy.deepcopy(command)
+    wrong_output_writer["params"]["global_program_plan"]["tasks"][0]["writes"].append("out")
+    wrong_output_writer["params"]["global_program_plan"]["tasks"][1]["writes"] = []
+    with pytest.raises(NativeModelExecutionError, match="output writer"):
+        _bind_inputs(wrong_output_writer, bundle, target="synthetic")
+    missing_output_writer = copy.deepcopy(command)
+    missing_output_writer["params"]["global_program_plan"]["tasks"][1]["writes"] = []
+    with pytest.raises(NativeModelExecutionError, match="output writer"):
+        _bind_inputs(missing_output_writer, bundle, target="synthetic")
+    undeclared_writable_role = copy.deepcopy(command)
+    undeclared_writable_role["tensors"]["tmp0"]["role"] = "input"
+    undeclared_writable_role["kernel_abi"]["args"][1]["access"] = "write"
+    with pytest.raises(NativeModelExecutionError, match="writable pointer role"):
+        _bind_inputs(undeclared_writable_role, bundle, target="synthetic")
+
+    # Both source operands have the same type.  The source/plan type checker
+    # accepts a swapped physical mapping, but the captured manifest identifies
+    # its bytes by parsed arg<N> index; a set comparison would seed them wrong.
+    two_source = source.replace("%x: tensor<1xf32>)", "%x: tensor<1xf32>, %y: tensor<1xf32>)").replace(
+        '"test.make"(%x) : (tensor<1xf32>)',
+        '"test.make"(%x, %y) : (tensor<1xf32>, tensor<1xf32>)',
+    )
+    (bundle / "model.mlir").write_text(two_source)
+    (bundle / "weights.safetensors.manifest.json").write_text(
+        json.dumps({"0": {"name": "input0"}, "1": {"name": "input1"}})
+    )
+    monkeypatch.setattr(
+        capture_source,
+        "capture_tensor_source",
+        lambda *_args, **_kwargs: (
+            lambda key: np.asarray([3.0 if key == "input0" else 7.0], dtype=np.float32).tobytes(),
+            SourceReport(origin={"arg0": "runtime_input", "arg1": "runtime_input"}),
+        ),
+    )
+    two = copy.deepcopy(command)
+    two["kernel_abi"]["args"].insert(1, {"tensor": "arg1", "access": "read"})
+    two["tensors"]["arg1"] = {"shape": [1], "dtype": "f32", "role": "input"}
+    two["params"]["global_program_plan"]["entry_bindings"] = ["arg0", "arg1"]
+    two["params"]["global_program_plan"]["source_sha256"] = hashlib.sha256(two_source.encode()).hexdigest()
+    two["params"]["global_program_plan"]["tasks"][0]["reads"].append("arg1")
+    bound, _ = _bind_inputs(two, bundle, target="synthetic")
+    assert bound == {"arg0": [3.0], "arg1": [7.0]}
+    swapped = copy.deepcopy(two)
+    swapped["params"]["global_program_plan"]["entry_bindings"] = ["arg1", "arg0"]
+    with pytest.raises(NativeModelExecutionError, match="source argument index"):
+        _bind_inputs(swapped, bundle, target="synthetic")
+
+
+def test_native_same_task_readwrite_requires_explicit_source_initializer(tmp_path, monkeypatch):
+    from merlin.targetgen import capability_probes, capture_source
+    from merlin.targetgen.capture_source import SourceReport
+    from merlin.targetgen.native_model_execution import _bind_inputs
+
+    source = (
+        '"builtin.module"() ({ "func.func"() <{sym_name = "main", '
+        "function_type = (tensor<1x2xf32>) -> tensor<1xf32>}> ({ ^bb0(%x: tensor<1x2xf32>): "
+        '%c = "arith.constant"() <{value = 0.000000e+00 : f32}> : () -> f32 '
+        '%init = "tensor.splat"(%c) : (f32) -> tensor<1xf32> '
+        '%sum = "linalg.reduce"(%x, %init) <{dimensions = array<i64: 1>}> ({ '
+        "^bb1(%a: f32, %b: f32): "
+        '%z = "arith.addf"(%a, %b) <{fastmath = #arith.fastmath<none>}> : (f32, f32) -> f32 '
+        '"linalg.yield"(%z) : (f32) -> () '
+        "}) : (tensor<1x2xf32>, tensor<1xf32>) -> tensor<1xf32> "
+        '%out = "test.copy"(%sum) : (tensor<1xf32>) -> tensor<1xf32> '
+        '"func.return"(%out) : (tensor<1xf32>) -> () }) : () -> () }) : () -> ()'
+    )
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    interface = bundle / "model.mlir"
+    interface.write_text(source)
+    (bundle / "weights.safetensors.manifest.json").write_text(json.dumps({"0": {"name": "input"}}))
+    monkeypatch.setattr(capability_probes, "tile_edge", lambda _target: 4)
+    monkeypatch.setattr(
+        capture_source,
+        "capture_tensor_source",
+        lambda *_args, **_kwargs: (
+            lambda _key: np.asarray([[3.0, 4.0]], dtype=np.float32).tobytes(),
+            SourceReport(origin={"arg0": "runtime_input"}),
+        ),
+    )
+    task_rows = [
+        {
+            "task_index": index,
+            "kind": "host",
+            "source_op_indices": [index],
+            "instruction_start": index,
+            "instruction_end": index + 1,
+            "reads": reads,
+            "writes": writes,
+        }
+        for index, reads, writes in ((0, [], []), (1, [], []), (2, ["arg0", "tmp2"], ["tmp2"]), (3, ["tmp2"], ["out"]))
+    ]
+    plan = {
+        "schema": "mixed_program_plan_v1",
+        "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
+        "source_op_count": 4,
+        "entry_bindings": ["arg0"],
+        "source_values": [
+            {"op_index": 2, "result_index": 0, "tensor": "tmp2"},
+            {"op_index": 3, "result_index": 0, "tensor": "out"},
+        ],
+        "output_bindings": ["out"],
+        "compiler_temporaries": [],
+        "schedule_instruction_count": 4,
+        "prologue_instruction_range": [0, 0],
+        "epilogue_instruction_range": [4, 4],
+        "tasks": task_rows,
+    }
+    command = {
+        "kernel_abi": {
+            "kind": "whole_program",
+            "args": [
+                {"tensor": "arg0", "access": "read"},
+                {"tensor": "tmp2", "access": "readwrite"},
+                {"tensor": "out", "access": "write"},
+            ],
+            "outputs": ["out"],
+        },
+        "tensors": {
+            "arg0": {"shape": [1, 2], "dtype": "f32", "role": "input"},
+            "tmp2": {"shape": [1], "dtype": "f32", "role": "intermediate"},
+            "out": {"shape": [1], "dtype": "f32", "role": "output"},
+        },
+        "params": {"global_program_plan": plan},
+    }
+    inputs, binding = _bind_inputs(command, bundle, target="synthetic")
+    assert inputs == {"arg0": [[3.0, 4.0]]}
+    assert binding["source_entry_binding"]["n_source_owned_mutable_intermediates"] == 1
+    assert binding["source_entry_binding"]["source_owned_mutables"] == ["tmp2"]
+
+    empty_init = source.replace('"tensor.splat"(%c) : (f32)', '"tensor.empty"() : ()')
+    interface.write_text(empty_init)
+    plan["source_sha256"] = hashlib.sha256(empty_init.encode()).hexdigest()
+    with pytest.raises(NativeModelExecutionError, match="read before a source-owned write"):
+        _bind_inputs(command, bundle, target="synthetic")
 
 
 def test_non_whole_program_never_builds_and_leaves_failure_receipt(tmp_path):
@@ -877,6 +1170,102 @@ def test_all_host_relabel_cannot_hide_independently_eligible_source_operation(tm
     emission["command_buffer"] = _digest(cb_path)
     assert audit_candidate_source_placement(emission, certificate, target="synthetic")["status"] == "clean"
 
+    # Source-only precision witnesses require the complete public plan
+    # protocol, not merely whatever source_values the candidate volunteers.
+    certificate["regions"][1]["source_precision_witness"] = {
+        "status": "typed_source",
+        "operand_types": ["tensor<1xf32>"],
+        "result_types": ["tensor<1xf32>"],
+    }
+    plan["entry_bindings"] = ["arg0"]
+    plan["source_values"] = [
+        {"op_index": 0, "result_index": 0, "tensor": "tmp0"},
+        {"op_index": 1, "result_index": 0, "tensor": "out"},
+    ]
+    plan["output_bindings"] = ["out"]
+    plan["compiler_temporaries"] = []
+    plan["schedule_instruction_count"] = 2
+    plan["prologue_instruction_range"] = [0, 0]
+    plan["epilogue_instruction_range"] = [2, 2]
+    plan["tasks"][0].update(instruction_start=0, instruction_end=1, reads=["arg0"], writes=["tmp0"])
+    plan["tasks"][1].update(instruction_start=1, instruction_end=2, reads=["tmp0"], writes=["out"])
+    artifact_path.write_text(
+        "builtin.module { llvm.func @kernel(%0: !llvm.ptr, %1: !llvm.ptr, %2: !llvm.ptr) { "
+        "%i = llvm.mlir.constant(0 : i64) : i64 "
+        "%a = llvm.getelementptr %0[%i] {merlin.global_task = 0 : i64, "
+        "merlin.source_op_index = 0 : i64} : (!llvm.ptr, i64) -> !llvm.ptr, f32 "
+        "%b = llvm.getelementptr %1[%i] {merlin.global_task = 1 : i64, "
+        "merlin.source_op_index = 1 : i64} : (!llvm.ptr, i64) -> !llvm.ptr, f32 "
+        "llvm.return } }"
+    )
+    emission["lowered_mlir"] = _digest(artifact_path)
+    candidate = {
+        "kernel_abi": {
+            "kind": "whole_program",
+            "args": [
+                {"tensor": name, "access": access}
+                for name, access in (("arg0", "read"), ("tmp0", "readwrite"), ("out", "write"))
+            ],
+            "outputs": ["out"],
+        },
+        "params": {"global_program_plan": plan},
+        "tensors": {
+            name: {"shape": [1], "dtype": "f32", "role": role}
+            for name, role in (("arg0", "input"), ("tmp0", "intermediate"), ("out", "output"))
+        },
+    }
+    candidate["tensors"]["out"]["dtype"] = "i8"
+    cb_path.write_text(json.dumps(candidate))
+    emission["command_buffer"] = _digest(cb_path)
+    mismatched = audit_candidate_source_placement(emission, certificate, target="synthetic")
+    assert mismatched["status"] == "violation"
+    assert "changes source shape or dtype" in " ".join(mismatched["problems"])
+    candidate["tensors"]["out"]["dtype"] = "f32"
+    cb_path.write_text(json.dumps(candidate))
+    emission["command_buffer"] = _digest(cb_path)
+    valid = audit_candidate_source_placement(emission, certificate, target="synthetic")
+    assert valid["status"] == "clean", valid
+    assert valid["source_plan_validation"]["ok"] is True
+
+    bf16_source = source.replace("f32", "bf16")
+    source_path.write_text(bf16_source)
+    emission["source_interface"] = _digest(source_path)
+    plan["source_sha256"] = hashlib.sha256(bf16_source.encode()).hexdigest()
+    certificate["source_mlir_sha256"] = plan["source_sha256"]
+    cb_path.write_text(json.dumps(candidate))
+    emission["command_buffer"] = _digest(cb_path)
+    bf16_relabel = audit_candidate_source_placement(emission, certificate, target="synthetic")
+    assert bf16_relabel["status"] == "violation"
+    assert "changes source shape or dtype" in " ".join(bf16_relabel["problems"])
+    source_path.write_text(source)
+    emission["source_interface"] = _digest(source_path)
+    plan["source_sha256"] = hashlib.sha256(source.encode()).hexdigest()
+    certificate["source_mlir_sha256"] = plan["source_sha256"]
+    cb_path.write_text(json.dumps(candidate))
+    emission["command_buffer"] = _digest(cb_path)
+
+    plan["source_values"] = plan["source_values"][:1]
+    cb_path.write_text(json.dumps(candidate))
+    emission["command_buffer"] = _digest(cb_path)
+    omitted = audit_candidate_source_placement(emission, certificate, target="synthetic")
+    assert omitted["status"] == "violation"
+    assert "output_bindings" in " ".join(omitted["problems"])
+
+    plan["source_values"] = [plan["source_values"][0], plan["source_values"][0]]
+    cb_path.write_text(json.dumps(candidate))
+    emission["command_buffer"] = _digest(cb_path)
+    duplicate = audit_candidate_source_placement(emission, certificate, target="synthetic")
+    assert duplicate["status"] == "violation"
+    assert "duplicate source binding" in " ".join(duplicate["problems"])
+
+    plan["source_values"] = [
+        {"op_index": 0, "result_index": 0, "tensor": "tmp0"},
+        {"op_index": 1, "result_index": 0, "tensor": "out"},
+    ]
+    cb_path.write_text(json.dumps(candidate))
+    emission["command_buffer"] = _digest(cb_path)
+    certificate["regions"][1].pop("source_precision_witness")
+
     certificate["regions"][0]["precision_transform_required"] = None
     certificate["n_unknown_capture_formats"] = 1
     certificate["precision_transform_verification"]["status"] = "unknown_capture_format"
@@ -930,31 +1319,21 @@ def test_all_host_relabel_cannot_hide_independently_eligible_source_operation(tm
     assert audit_candidate_source_placement(emission, certificate, target="synthetic")["status"] == "violation"
 
 
-@pytest.mark.parametrize("legacy_status", ["pass", "incomplete"])
-def test_model_runner_emits_submitted_whole_program_before_pass_admission(tmp_path, monkeypatch, legacy_status):
+@pytest.mark.parametrize("verification_fails", [False, True])
+def test_model_runner_grades_submitted_whole_program_without_legacy_baseline(tmp_path, monkeypatch, verification_fails):
     from merlin.targetgen import capsule_runner as runner
     from merlin.targetgen import native_model_execution as native
 
     generated, run_path = tmp_path / "generated", tmp_path / "run"
+    source = tmp_path / "capsule"
+    source.mkdir()
     generated.mkdir()
-    (tmp_path / "capsule.interface.mlir").write_text("module {}")
-    (tmp_path / "capsule.yaml").write_text("name: model\nkind: model\n")
+    (source / "capsule.interface.mlir").write_text("module {}")
+    (source / "capsule.yaml").write_text("name: model\nkind: model\n")
     monkeypatch.setattr(
         runner, "make_run_paths", lambda *a, **k: SimpleNamespace(generated=generated, run_path=run_path)
     )
-    monkeypatch.setattr(
-        runner,
-        "_grade_model_capsule",
-        lambda capsule, **kw: {
-            "capsule": capsule["name"],
-            "kind": "model",
-            "status": legacy_status,
-            "tiers": {},
-            "failure": {"plane": "legacy_model", "category": "DIAGNOSTIC", "detail": "legacy path"}
-            if legacy_status != "pass"
-            else None,
-        },
-    )
+    monkeypatch.setattr(runner, "_grade_model_capsule", lambda *a, **k: pytest.fail("legacy model grade ran"))
     calls = []
 
     def emit(pkg, package_dir, capsule, paths, **kwargs):
@@ -966,7 +1345,11 @@ def test_model_runner_emits_submitted_whole_program_before_pass_admission(tmp_pa
 
     @contextmanager
     def bundle(capsule, *, timeout):
-        yield tmp_path, {"construction": "frozen"}, lambda: None
+        def verify():
+            if verification_fails:
+                raise ValueError("frozen source changed during candidate execution")
+
+        yield tmp_path, {"construction": "frozen"}, verify
 
     def execute(**kwargs):
         calls.append("submitted_native_build")
@@ -975,6 +1358,11 @@ def test_model_runner_emits_submitted_whole_program_before_pass_admission(tmp_pa
 
     monkeypatch.setattr(runner, "run_entrypoints", emit)
     monkeypatch.setattr(runner, "_model_runtime_bundle", bundle)
+    monkeypatch.setattr(
+        native,
+        "independent_frozen_source_eligibility",
+        lambda *a, **k: {"source_mlir_sha256": "a" * 64, "eligible_source_op_indices": [0]},
+    )
     monkeypatch.setattr(native, "execute_candidate_model", execute)
     for key in ("MERLIN_MODEL_NATIVE_SIMULATOR", "MERLIN_MODEL_NATIVE_RTL_FACTS", "MERLIN_MODEL_NATIVE_BOARD_CONFIG"):
         monkeypatch.delenv(key, raising=False)
@@ -985,13 +1373,145 @@ def test_model_runner_emits_submitted_whole_program_before_pass_admission(tmp_pa
         force_match_policy=None,
         fourth_output_name="lowered.llvm.mlir",
     )
-    capsule = {"name": "model", "kind": "model", "__dir__": str(tmp_path), "semantic": {"must_accelerate": True}}
+    capsule = {"name": "model", "kind": "model", "__dir__": str(source), "semantic": {"must_accelerate": True}}
     result = runner.run_capsule(
-        capsule, tmp_path, runs_root=tmp_path, target="synthetic", config=config, oracle_adapters={}
+        capsule, tmp_path, runs_root=tmp_path, target="synthetic", config=config, oracle_adapters={}, pkg=object()
     )
     assert calls == ["submitted_four_stage_entrypoints", "submitted_native_build"]
     assert result["status"] == "incomplete"
     assert result["candidate_emission"]["lowered_mlir"]["sha256"]
-    assert result["legacy_model_diagnostic"]["status"] == legacy_status
-    assert result["candidate_source_eligibility_failure"]  # malformed synthetic source is not borrowed
+    assert result["legacy_model_diagnostic"]["status"] == "not_run"
+    retained = run_path / ".private_model_sources" / "capsule"
+    assert (retained / "capsule.yaml").is_file()
+    source_pin = result["candidate_emission"]["source_interface"]
+    assert source_pin["path"] == str(retained / "capsule.interface.mlir")
+    assert source_pin["sha256"] == _digest(retained / "capsule.interface.mlir")["sha256"]
+    assert source_pin["sha256"] == _digest(source / "capsule.interface.mlir")["sha256"]
+    (source / "capsule.interface.mlir").write_text("module { changed }")
+    assert source_pin["sha256"] == _digest(retained / "capsule.interface.mlir")["sha256"]
+    with pytest.raises(ValueError, match="source snapshot already exists"):
+        runner.run_capsule(
+            capsule, tmp_path, runs_root=tmp_path, target="synthetic", config=config, oracle_adapters={}, pkg=object()
+        )
+    assert source_pin["sha256"] == _digest(retained / "capsule.interface.mlir")["sha256"]
+    assert "candidate_source_eligibility_failure" not in result
+    assert result["model_execution_check"]["kind"] == "candidate_whole_program_execution"
     assert "candidate_full_model_native_unverified" in result["model_execution_check"]["violations"]
+    assert "dynamic_dispatch_ledger_missing_or_malformed" not in result["model_execution_check"]["violations"]
+    if verification_fails:
+        assert result["candidate_emission_failure"]["type"] == "ValueError"
+        assert "candidate_native_execution" not in result
+
+
+def test_non_accelerating_model_keeps_legacy_runner(tmp_path, monkeypatch):
+    from merlin.targetgen import capsule_runner as runner
+
+    paths = SimpleNamespace(generated=tmp_path / "generated", run_path=tmp_path / "run")
+    monkeypatch.setattr(runner, "make_run_paths", lambda *a, **k: paths)
+    monkeypatch.setattr(
+        runner,
+        "_grade_model_capsule",
+        lambda capsule, **kw: {"capsule": capsule["name"], "kind": "model", "status": "incomplete"},
+    )
+    monkeypatch.setattr(
+        runner, "_grade_model_capsule_unlocked", lambda *a, **k: pytest.fail("candidate model grade ran")
+    )
+    config = SimpleNamespace(
+        target="synthetic",
+        suite="synthetic-capsules",
+        dtype="i8",
+        force_match_policy=None,
+        fourth_output_name="lowered.llvm.mlir",
+    )
+    result = runner.run_capsule(
+        {"name": "host-model", "kind": "model", "semantic": {"must_accelerate": False}},
+        tmp_path,
+        runs_root=tmp_path,
+        target="synthetic",
+        config=config,
+        oracle_adapters={},
+    )
+    assert result["status"] == "incomplete"
+    assert "candidate_native_model_check" not in result
+
+
+def test_candidate_source_census_failure_never_runs_legacy_or_native(tmp_path, monkeypatch):
+    from merlin.targetgen import capsule_runner as runner
+    from merlin.targetgen import native_model_execution as native
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "capsule.yaml").write_text("name: M\nkind: model\n")
+    paths = SimpleNamespace(generated=tmp_path / "generated", run_path=tmp_path / "run")
+    monkeypatch.setattr(runner, "make_run_paths", lambda *a, **k: paths)
+    monkeypatch.setattr(runner, "_grade_model_capsule", lambda *a, **k: pytest.fail("legacy grade ran"))
+    monkeypatch.setattr(
+        runner, "run_entrypoints", lambda *a, **k: pytest.fail("candidate emitted without source census")
+    )
+    monkeypatch.setattr(
+        native, "independent_frozen_source_eligibility", lambda *a, **k: (_ for _ in ()).throw(ValueError("no census"))
+    )
+    config = SimpleNamespace(
+        target="synthetic",
+        suite="synthetic-capsules",
+        dtype="i8",
+        force_match_policy=None,
+        fourth_output_name="lowered.llvm.mlir",
+    )
+    result = runner.run_capsule(
+        {"name": "M", "kind": "model", "__dir__": str(source), "semantic": {"must_accelerate": True}},
+        tmp_path,
+        runs_root=tmp_path,
+        target="synthetic",
+        config=config,
+        oracle_adapters={},
+        pkg=object(),
+    )
+    assert result["status"] != "pass"
+    assert result["candidate_source_eligibility_failure"]["type"] == "ValueError"
+    assert result["model_execution_check"]["kind"] == "candidate_whole_program_execution"
+    assert "L3" not in result.get("tiers", {}) or result["tiers"]["L3"]["status"] != "pass"
+
+
+@pytest.mark.parametrize("prebuilt", [False, True])
+def test_candidate_child_reloads_selected_package_without_racing_suite_build(tmp_path, monkeypatch, prebuilt):
+    from merlin.targetgen import capsule_runner as runner
+    from merlin.targetgen import native_model_execution as native
+
+    selected = object()
+    calls = []
+    monkeypatch.setattr(runner, "load_package", lambda *a, **k: calls.append("load") or selected)
+    monkeypatch.setattr(runner, "integrity_scan", lambda pkg: calls.append("scan") or None)
+    monkeypatch.setattr(runner, "build_package", lambda pkg: calls.append("build") or None)
+    monkeypatch.setattr(native, "independent_frozen_source_eligibility", lambda *a, **k: {})
+    monkeypatch.setattr(
+        runner,
+        "make_run_paths",
+        lambda *a, **k: SimpleNamespace(generated=tmp_path / "generated", run_path=tmp_path / "run"),
+    )
+
+    def stop_after_selection(pkg, *a, **k):
+        assert pkg is selected
+        calls.append("entrypoints")
+        raise ValueError("synthetic candidate emission refusal")
+
+    monkeypatch.setattr(runner, "run_entrypoints", stop_after_selection)
+    context = {
+        "runs_root": str(tmp_path),
+        "run_id": "M",
+        "suite": "synthetic",
+        "dtype": "f32",
+        "contract": None,
+        "fourth_output_name": "lowered.llvm.mlir",
+        "package_prebuilt": prebuilt,
+    }
+    result = runner._grade_candidate_model_capsule_inline(
+        {"name": "M", "kind": "model", "semantic": {"must_accelerate": True}},
+        target="synthetic",
+        timeout=1,
+        package_dir=tmp_path,
+        context=context,
+    )
+    assert calls == ["load", "scan", *([] if prebuilt else ["build"]), "entrypoints"]
+    assert result["status"] == "incomplete"
+    assert result["candidate_emission_failure"]["type"] == "ValueError"

@@ -300,23 +300,20 @@ def model_execution_check(result: dict, capsule: dict | None = None, *, target: 
         emitted_host_compute = candidate_check["emitted_host_compute"]
         candidate_source_placement = candidate_check["source_placement"]
         candidate_completed_dispatch = candidate_check["completed_dispatch"]
-        if candidate_check["status"] == "pass":
-            # This is a separate candidate-only proof. The older mesh ledger
-            # was produced by a runner-owned host graph with separately built
-            # tiles; requiring it here would reject an independently proven
-            # submitted whole-program ELF, while borrowing it would falsely
-            # attest to a different program. Keep it as a diagnostic only.
-            return {
-                "status": "pass",
-                "kind": "candidate_whole_program_execution",
-                "candidate_native_model_check": candidate_check,
-                "candidate_required_tiers": candidate_check["candidate_required_tiers"],
-                "emitted_host_compute": emitted_host_compute,
-                "candidate_source_placement": candidate_source_placement,
-                "candidate_completed_dispatch": candidate_completed_dispatch,
-                "legacy_scope": "diagnostic_only_distinct_runner_owned_program",
-                "violations": [],
-            }
+        # This is a separate candidate-only verdict at every status, not just
+        # pass. A missing candidate receipt must not acquire unrelated legacy
+        # host-graph ledger violations or inherit that graph's successful tiers.
+        return {
+            "status": candidate_check["status"],
+            "kind": "candidate_whole_program_execution",
+            "candidate_native_model_check": candidate_check,
+            "candidate_required_tiers": candidate_check["candidate_required_tiers"],
+            "emitted_host_compute": emitted_host_compute,
+            "candidate_source_placement": candidate_source_placement,
+            "candidate_completed_dispatch": candidate_completed_dispatch,
+            "legacy_scope": "diagnostic_only_distinct_runner_owned_program",
+            "violations": list(candidate_check["violations"]),
+        }
     execution = result.get("mesh_execution")
     tiles = result.get("mesh_tile_verification")
     requested_engine = execution.get("simulator_requested") if isinstance(execution, dict) else None
@@ -857,15 +854,28 @@ def enforce_model_execution_check(result: dict, capsule: dict | None, *, target:
     ) and not known_candidate_violation
     status = "unavailable" if evidence_unmeasured else "fail"
     detail = "whole-model execution proof failed: " + ", ".join(violations)
-    for tier in CR._rtl_tiers_of(target):
-        record = (result.get("tiers") or {}).get(tier)
+    tiers = result.get("tiers") or {}
+    rtl_tiers = set(CR._rtl_tiers_of(target))
+    # A missing descriptor cannot preserve a stale hardware pass. These flags
+    # only extend rejection of runner-owned evidence; they never admit a tier.
+    rtl_tiers.update(
+        tier
+        for tier, record in tiers.items()
+        if isinstance(record, dict) and (record.get("derived_from_rtl") is True or record.get("cycle_accurate") is True)
+    )
+    for tier in rtl_tiers:
+        record = tiers.get(tier)
         if isinstance(record, dict) and record.get("status") == "pass":
             record.update(status=status, reason=detail, cycles=None, derived_from_rtl=False, cycle_accurate=False)
 
     # Preserve a pre-existing stronger failure.  The dangerous case is the flattering pass that escaped
     # into durable QA; convert that to an honest no-measurement or protocol verdict.
     verified_numeric_mismatch = "candidate_verified_numeric_mismatch" in violations
-    if result.get("status") == "pass" or verified_numeric_mismatch:
+    if (
+        result.get("status") == "pass"
+        or verified_numeric_mismatch
+        or check.get("kind") == "candidate_whole_program_execution"
+    ):
         result["status"] = "incomplete" if evidence_unmeasured else "fail"
         result["failure"] = {
             "plane": (
@@ -1149,6 +1159,7 @@ def grade(
     capability_admission: bool = False,
     target_experiment=None,
     additional_forbidden: tuple[str, ...] = (),
+    model_snapshot_root: str | Path | None = None,
 ) -> dict:
     """Run the capsule suite over a submitted package; return a score dict (also schema-checkable).
 
@@ -1297,7 +1308,32 @@ def grade(
     workers = _bounded_grade_workers(workers, oracle_adapters)
     import time as _time
 
+    def _enforce_and_persist_models(results: list[dict]) -> None:
+        # This callback executes before run_suite releases its model source
+        # snapshot. Trusted callers additionally retain that closure under an
+        # explicit host-private root for later independent pin inspection.
+        _caps_by_name = {str(cap.get("name")): cap for cap in caps}
+        for result in results:
+            if result.get("kind") != "model":
+                continue
+            enforce_model_execution_check(result, _caps_by_name.get(str(result.get("capsule"))), target=target)
+            # The runner persisted the model result before this suite-level cross-record proof existed.
+            # Keep the durable row in sync because QA/selfcheck/checkpoint consumers deliberately re-glob
+            # it rather than trusting this function's in-memory score.
+            result_path = (
+                Path(runs_root) / "runs" / CR.suite_for(target) / str(result.get("capsule")) / "capsule_result.json"
+            )
+            if result_path.is_file():
+                result_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+
     _suite_t0 = _time.perf_counter()
+    _model_audit_ran = False
+
+    def _post_suite(results: list[dict]) -> None:
+        nonlocal _model_audit_ran
+        _enforce_and_persist_models(results)
+        _model_audit_ran = True
+
     results = CR.run_suite(
         caps,
         pkg_dir,
@@ -1308,23 +1344,15 @@ def grade(
         max_workers=workers,
         target=target,
         no_oracle=no_oracle,
+        model_snapshot_root=model_snapshot_root,
+        post_suite=_post_suite,
     )
     _suite_wall = _time.perf_counter() - _suite_t0
-
-    # A whole model has no single model-level instruction stream.  Attach its distinct execution
-    # obligation before roll-up; never synthesize a trace_check=pass for an artifact that did not exist.
-    _caps_by_name = {str(cap.get("name")): cap for cap in caps}
-    for result in results:
-        if result.get("kind") == "model":
-            enforce_model_execution_check(result, _caps_by_name.get(str(result.get("capsule"))), target=target)
-            # The runner persisted the model result before this suite-level cross-record proof existed.
-            # Keep the durable row in sync because QA/selfcheck/checkpoint consumers deliberately re-glob
-            # it rather than trusting this function's in-memory score.
-            result_path = (
-                Path(runs_root) / "runs" / CR.suite_for(target) / str(result.get("capsule")) / "capsule_result.json"
-            )
-            if result_path.is_file():
-                result_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    if not _model_audit_ran:
+        # Synthetic graders may replace run_suite with a result fixture. Keep
+        # the same enforcement on that path; production run_suite always calls
+        # the hook while the frozen model sources are still available.
+        _enforce_and_persist_models(results)
 
     # collect decoded traces for coverage — read from the TARGET's own suite dir (run_capsule writes
     # under cfg.suite, e.g. atlas-capsule-bench), not the gemmini SUITE literal (which left the atlas

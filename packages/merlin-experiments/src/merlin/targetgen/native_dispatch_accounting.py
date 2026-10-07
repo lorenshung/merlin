@@ -213,20 +213,17 @@ def _audit_candidate_completed_dispatch(
             raise NativeModelExecutionError("native build is not bound to exact candidate bytes")
 
         import yaml
-        from xdsl.context import Context
-        from xdsl.dialects import builtin, llvm
         from xdsl.parser import Parser
 
         from merlin.common.facts_view import interface as facts_interface
         from merlin.compile.model_execution_inputs import native_engine, selected_firrtl
         from merlin.perf.compiler_plan_evidence import verify_compiler_global_plan
         from merlin.targetgen.contract.schemas import contract_dir
+        from merlin.targetgen.oot_starterkit.llvm_context import make_llvm_context
         from merlin.targetgen.oracle_policy import selected_l3_engine_report
         from merlin.targetgen.rocc.decode import decode_module
 
-        context = Context(allow_unregistered=True)
-        context.load_dialect(builtin.Builtin)
-        context.load_dialect(llvm.LLVM)
+        context = make_llvm_context()
         module = Parser(context, lowered_text).parse_module()
         functions = [
             op

@@ -538,12 +538,16 @@ def _readout_epilogue_capabilities(target: str):
     return reader() if callable(reader) else None
 
 
-def simulator_adapter(sim: str, target: str, selection: dict | None = None) -> Callable:
+def simulator_adapter(sim: str, target: str, selection: dict | None = None, *, readback_policy=None) -> Callable:
     """Adapter for one declared chipyard sim engine. ``selection`` is the engine-policy record that
     CHOSE this engine — carried into the result so the tier can record not just which simulator answered
     but what it was chosen over and why. The choice was previously made, printed once to a log nobody
     keeps, and then discarded; a cert that ran on the slow engine because the fast one was missing looked
     exactly like one that ran on the slow engine because it was the only one."""
+
+    from merlin.targetgen.contract.readback_policy import selected
+
+    readback_policy = selected(readback_policy)
 
     def run(cb, llvm_text, workdir, timeout):
         from ..runtime.backends import base as _backends
@@ -557,13 +561,49 @@ def simulator_adapter(sim: str, target: str, selection: dict | None = None) -> C
             exact, reason = gsim_emulator.selected_firrtl_status(target, env_var=getattr(backend, "GSIM_EMU_ENV", None))
             if not exact:
                 raise OracleUnavailable(reason)
-        res = oot_compile.run_on_oracle(cb, llvm_text, simulator=sim, target=target, workdir=workdir, timeout=timeout)
+        policy_kwargs = {"readback_policy": readback_policy} if readback_policy is not None else {}
+        res = oot_compile.run_on_oracle(
+            cb, llvm_text, simulator=sim, target=target, workdir=workdir, timeout=timeout, **policy_kwargs
+        )
         if selection and isinstance(res.get("oracle"), dict):
             res["oracle"]["selection"] = dict(selection)
         return res
 
     run._merlin_simulator_engine = sim
+    run._merlin_readback_policy = readback_policy
+    run._merlin_with_readback_policy = lambda policy: simulator_adapter(
+        sim, target, selection=selection, readback_policy=policy
+    )
     return run
+
+
+def _with_readback_policy(adapters: dict[str, Callable], readback_policy) -> dict[str, Callable]:
+    """Retarget only declared native simulator adapters; never silently ignore policy."""
+    from merlin.targetgen.contract.readback_policy import selected
+
+    policy = selected(readback_policy)
+    if policy is None:
+        return adapters
+    if not adapters:
+        raise NotImplementedError("no oracle can consume explicit full-value readback policy")
+    bound = {}
+    for tier, adapter in adapters.items():
+        factory = getattr(adapter, "_merlin_with_readback_policy", None)
+        if not callable(factory):
+            raise NotImplementedError(f"{tier} oracle cannot consume explicit full-value readback policy")
+        bound[tier] = factory(policy)
+    return bound
+
+
+def _adapter_readback_policy(adapters: dict[str, Callable]):
+    """A model child may inherit only one unanimous, constructed adapter choice."""
+    from merlin.targetgen.contract.readback_policy import selected
+
+    policies = [selected(getattr(adapter, "_merlin_readback_policy", None)) for adapter in adapters.values()]
+    chosen = next((policy for policy in policies if policy is not None), None)
+    if chosen is not None and (not policies or any(policy != chosen for policy in policies)):
+        raise ValueError("model oracle adapters disagree on explicit full-value readback policy")
+    return chosen
 
 
 def _cb_with_leaf_values(cb: dict) -> dict:
@@ -1057,7 +1097,7 @@ def _sim_engine_adapters(sim_via: str, target: str) -> dict[str, Callable]:
     return {}
 
 
-def oracle_adapters(target: str, sim_via: str | None = None) -> dict[str, Callable]:
+def oracle_adapters(target: str, sim_via: str | None = None, *, readback_policy=None) -> dict[str, Callable]:
     """The oracle adapters per tier for a target. The mlc ARC model is the DEFAULT RTL tier (works for
     ANY mlc target, no bespoke sim); a target that DECLARES a bespoke sim (``sim_via``) additionally gets
     its higher-fidelity sim tiers (chipyard -> spike L2 / verilator L3), preserving the gemmini path.
@@ -1080,7 +1120,7 @@ def oracle_adapters(target: str, sim_via: str | None = None) -> dict[str, Callab
         sim_via = _bespoke_sim_via(target)
     so = _SIM_ORACLES.get(sim_via)
     if so is not None and so.exclusive:  # self-hosted SIMT: replaces arc/program default
-        return so.adapters(target)
+        return _with_readback_policy(so.adapters(target), readback_policy)
     endpoint_kind, model_ext = _endpoint_of(target)
     if endpoint_kind == "external_backend":
         # Self-hosted-ISA program oracle. ``model_ext`` (the model project that lays out operands + owns
@@ -1106,11 +1146,11 @@ def oracle_adapters(target: str, sim_via: str | None = None) -> dict[str, Callab
         if "L3" in plan.tiers:
             rtl = program_verilator_adapter(target, model_ext=model_ext, selection=plan.selection)
             adapters["L3"] = rtl
-        return adapters
+        return _with_readback_policy(adapters, readback_policy)
     adapters: dict[str, Callable] = {"L3": mlc_arc_adapter(target)}  # arc default (RTL-derived)
     if so is not None:  # optional ADDITIVE bespoke sim (chipyard)
         adapters.update(so.adapters(target))
-    return adapters
+    return _with_readback_policy(adapters, readback_policy)
 
 
 def oracle_available(target: str, sim_via: str | None = None) -> tuple[bool, str]:
@@ -1297,7 +1337,8 @@ def _resolve_oracle_adapters(target: str) -> dict[str, Callable]:
 
 
 def qa_loop_adapters(
-    target: str, sim_via: str | None = None, *, declared_tiers: set[str] | None = None
+    target: str, sim_via: str | None = None, *, declared_tiers: set[str] | None = None,
+    readback_policy=None,
 ) -> dict[str, Callable]:
     """The FAST per-round QA-loop oracle set for ``target`` — resolved from :func:`oracle_adapters`, never
     hardwired. It keeps ONE tier (the fastest) and reserves the slower cycle-accurate tiers for the bounded
@@ -1314,7 +1355,11 @@ def qa_loop_adapters(
 
     Omitting ``declared_tiers`` keeps the legacy "fastest available tier" behavior for callers that have
     no corpus in hand."""
-    full = oracle_adapters(target, sim_via)
+    full = (
+        oracle_adapters(target, sim_via)
+        if readback_policy is None
+        else oracle_adapters(target, sim_via, readback_policy=readback_policy)
+    )
     if not full:
         return {}
     if declared_tiers:
@@ -1326,12 +1371,14 @@ def qa_loop_adapters(
     return {lowest: full[lowest]}
 
 
-def qa_checkpoint_adapters(target: str, sim_via: str | None = None) -> dict[str, Callable]:
+def qa_checkpoint_adapters(target: str, sim_via: str | None = None, *, readback_policy=None) -> dict[str, Callable]:
     """The cycle-accurate QA CHECKPOINT oracle set for ``target`` = its full oracle ladder from
     :func:`oracle_adapters` (chipyard: spike L2 + verilator L3; arc/mlc: the RTL-derived arc model). This
     is the higher-fidelity barrier run once the fast loop (:func:`qa_loop_adapters`) has converged — not
     every round. Kept as a named seam so the loop driver never re-hardwires ``{L2: spike, L3: verilator}``."""
-    return oracle_adapters(target, sim_via)
+    if readback_policy is None:
+        return oracle_adapters(target, sim_via)
+    return oracle_adapters(target, sim_via, readback_policy=readback_policy)
 
 
 def _exact_match(a: dict, b: dict) -> bool:
@@ -2647,6 +2694,7 @@ def _kill_tree(pid: int, *, grace: float = 5.0) -> None:
 
 
 _MODEL_NUMERIC_UNSET = object()
+_SUITE_MODEL_PIN = object()
 
 
 def _grade_model_capsule(
@@ -2701,6 +2749,9 @@ def _grade_model_capsule_unlocked(
     budget_s: float | None = None,
     numeric_policy=_MODEL_NUMERIC_UNSET,
     numeric_policy_identity: dict | None = None,
+    candidate_context: dict | None = None,
+    candidate_pkg: Package | None = None,
+    candidate_source_pinned: object | None = None,
 ) -> dict:
     """Grade a whole-model capsule, under a wall-clock budget when one is set.
 
@@ -2729,16 +2780,35 @@ def _grade_model_capsule_unlocked(
             "label": capsule.get("label"),
             "contract_version": CONTRACT_VERSION,
             "status": status,
+            **(
+                {
+                    "legacy_model_diagnostic": {
+                        "status": "not_run",
+                        "scope": "runner-owned host-dispatch graph; not candidate whole-program evidence",
+                    }
+                }
+                if candidate_context is not None
+                else {}
+            ),
             **extra,
             "failure": {"plane": "model", "category": "NOT_RUN_IS_NOT_PASS", "detail": detail},
         }
 
-    if numeric_policy is _MODEL_NUMERIC_UNSET:
+    if candidate_context is None and numeric_policy is _MODEL_NUMERIC_UNSET:
         try:
             numeric_policy, numeric_policy_identity = _resolve_model_numeric_policy(target)
         except Exception as exc:  # noqa: BLE001 — unavailable declared inputs cannot authorize a child
             return _stopped(f"declared model numerical policy unavailable: {type(exc).__name__}: {exc}")
     if not budget or budget <= 0:
+        if candidate_context is not None:
+            return _grade_candidate_model_capsule_inline(
+                capsule,
+                target=target,
+                timeout=timeout,
+                package_dir=package_dir,
+                context=candidate_context,
+                pkg=candidate_pkg,
+            )
         return _grade_model_capsule_inline(
             capsule,
             target=target,
@@ -2752,7 +2822,11 @@ def _grade_model_capsule_unlocked(
         spec_p, out_p = Path(_td) / "spec.json", Path(_td) / "result.json"
         # The child may outlive the materializer's cache generation. Keep the
         # capsule bytes under the grade's own lifetime before handing it a path.
-        child_capsule = _pin_model_capsule(capsule, Path(_td) / "capsule")
+        child_capsule = (
+            capsule
+            if candidate_context is not None and candidate_source_pinned is _SUITE_MODEL_PIN
+            else _pin_model_capsule(capsule, Path(_td) / "capsule")
+        )
         spec_p.write_text(
             json.dumps(
                 {
@@ -2760,8 +2834,9 @@ def _grade_model_capsule_unlocked(
                     "target": target,
                     "timeout": timeout,
                     "package_dir": str(package_dir) if package_dir else None,
-                    "numeric_policy": numeric_policy,
+                    "numeric_policy": numeric_policy if candidate_context is None else None,
                     "numeric_policy_identity": numeric_policy_identity,
+                    "candidate_context": candidate_context,
                 }
             ),
             encoding="utf-8",
@@ -2806,6 +2881,116 @@ def _grade_model_capsule_unlocked(
             return json.loads(out_p.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             return _stopped(f"whole-model grade result unreadable: {type(exc).__name__}: {exc}")
+
+
+def _grade_candidate_model_capsule_inline(
+    capsule: dict,
+    *,
+    target: str,
+    timeout: int,
+    package_dir: str | Path,
+    context: dict,
+    pkg: Package | None = None,
+) -> dict:
+    """Grade only the submitted whole-program model under the shared model budget.
+
+    The parent or suite retains a frozen capsule copy until this function has
+    enforced the candidate-only source, native and mandatory-tier checks.
+    """
+    from .capsule_grade import enforce_model_execution_check
+    from .native_model_execution import _digest, execute_candidate_model, independent_frozen_source_eligibility
+
+    attrs = (capsule.get("operation") or {}).get("attributes") or {}
+    result: dict = {
+        "capsule": capsule["name"],
+        "kind": "model",
+        "label": capsule.get("label"),
+        "operation": {
+            "op": "model",
+            "model": attrs.get("model"),
+            "dtype": attrs.get("compile_dtype", "fp32"),
+            "run": "submitted_whole_program",
+            "target": target,
+        },
+        "contract_version": CONTRACT_VERSION,
+        "status": "incomplete",
+        "legacy_model_diagnostic": {
+            "status": "not_run",
+            "scope": "runner-owned host-dispatch graph; not candidate whole-program evidence",
+        },
+    }
+    try:
+        result["candidate_source_eligibility"] = independent_frozen_source_eligibility(capsule, target=target)
+    except Exception as exc:  # noqa: BLE001 -- no source denominator means no submitted-program run
+        result["candidate_source_eligibility_failure"] = {"type": type(exc).__name__, "detail": str(exc)[:2000]}
+        return enforce_model_execution_check(result, capsule, target=target)
+
+    try:
+        # The child receives a JSON context, not a Python capability. Reconstruct
+        # only the exact operator-selected policy record; absent means legacy.
+        readback_record = context.get("readback_policy")
+        if readback_record is not None:
+            from merlin.targetgen.contract.readback_policy import ReadbackPolicy
+
+            readback_policy = ReadbackPolicy.from_record(readback_record)
+        else:
+            readback_policy = None
+        selected_pkg = pkg
+        if selected_pkg is None:
+            selected_pkg = load_package(package_dir, contract=context["contract"])
+            integrity_scan(selected_pkg)
+            if not context["package_prebuilt"]:
+                build_package(selected_pkg)
+        paths = make_run_paths(
+            context["runs_root"],
+            context["run_id"],
+            suite=context["suite"],
+            target=target,
+            dtype=context["dtype"],
+            benchmark=capsule["name"],
+        )
+        _, candidate_cb, candidate_llvm = run_entrypoints(
+            selected_pkg,
+            package_dir,
+            capsule,
+            paths,
+            contract=context["contract"],
+            timeout=timeout,
+            fourth_output_name=context["fourth_output_name"],
+        )
+        source_interface = Path(capsule["__dir__"]) / capsule.get("interface_mlir", "capsule.interface.mlir")
+        if source_interface.is_symlink():
+            raise ValueError("frozen model interface cannot be a symlink")
+        result["candidate_emission"] = {
+            "capsule_declaration": _digest((Path(capsule["__dir__"]) / "capsule.yaml").resolve(strict=True)),
+            "source_interface": _digest(source_interface.resolve(strict=True)),
+            "command_buffer": _digest((paths.generated / "command_buffer.json").resolve(strict=True)),
+            "lowered_mlir": _digest((paths.generated / context["fourth_output_name"]).resolve(strict=True)),
+        }
+        with _model_runtime_bundle(capsule, timeout=timeout) as (bundle, provenance, verify):
+            result["candidate_capture"] = provenance
+            policy_kwargs = {"readback_policy": readback_policy} if readback_policy is not None else {}
+            result["candidate_native_execution"] = execute_candidate_model(
+                command_buffer=candidate_cb,
+                lowered_mlir_text=candidate_llvm,
+                capsule_dir=capsule["__dir__"],
+                capture_bundle=bundle,
+                target=target,
+                out_dir=paths.run_path / "candidate_native",
+                simulator=os.environ.get("MERLIN_MODEL_NATIVE_SIMULATOR") or None,
+                rtl_facts=os.environ.get("MERLIN_MODEL_NATIVE_RTL_FACTS") or None,
+                board_config=os.environ.get("MERLIN_MODEL_NATIVE_BOARD_CONFIG") or None,
+                timeout=timeout,
+                **policy_kwargs,
+            )
+            verify()
+    except Exception as exc:  # noqa: BLE001 -- candidate exceptions cannot borrow a legacy pass
+        result["candidate_emission_failure"] = {"type": type(exc).__name__, "detail": str(exc)[:2000]}
+        # A post-execution source/bundle verification failure invalidates even
+        # a numerically green native receipt. Keep its durable run artifacts
+        # for diagnosis, but never feed that receipt to the pass gate.
+        result.pop("candidate_native_execution", None)
+    return enforce_model_execution_check(result, capsule, target=target)
 
 
 def _resolve_model_host_lane(target: str, dtype: str):
@@ -4716,85 +4901,55 @@ def run_capsule(
             ),
             encoding="utf-8",
         )
-        result = _grade_model_capsule(
-            capsule, target=eff_target, timeout=timeout, package_dir=package_dir, budget_s=_budget
-        )
         if bool((capsule.get("semantic") or {}).get("must_accelerate")):
-            # The historical model path compiles a trusted host-dispatch graph
-            # and checks candidate tiles separately. Its status, including a
-            # failure before its own model compile, is not authority over the
-            # submitted whole-program artifact. Collect candidate evidence
-            # independently and keep the old verdict as a diagnostic.
-            from .native_model_execution import (
-                _digest,
-                execute_candidate_model,
-                independent_frozen_source_eligibility,
+            # The submitted program is the only certification authority for
+            # a model demanding acceleration. The legacy runner-owned host
+            # graph is not run, so its own model budget cannot starve this one.
+            suite_pinned = capsule.get("__suite_model_pin") is _SUITE_MODEL_PIN
+            readback_policy = _adapter_readback_policy(adapters)
+            candidate_capsule = {key: value for key, value in capsule.items() if key != "__suite_model_pin"}
+            if not suite_pinned and candidate_capsule.get("__dir__"):
+                private_root = paths.run_path / ".private_model_sources"
+                if private_root.resolve().is_relative_to(Path(candidate_capsule["__dir__"]).resolve()):
+                    raise ValueError("candidate model source snapshot cannot be nested inside its source")
+                if private_root.exists() or private_root.is_symlink():
+                    raise ValueError(f"candidate model source snapshot already exists: {private_root}")
+                private_root.mkdir(mode=0o700)
+                candidate_capsule = _pin_model_capsule(candidate_capsule, private_root / "capsule")
+            result = _grade_model_capsule_unlocked(
+                candidate_capsule,
+                target=eff_target,
+                timeout=timeout,
+                package_dir=package_dir,
+                budget_s=_budget,
+                candidate_pkg=pkg,
+                candidate_source_pinned=_SUITE_MODEL_PIN,
+                candidate_context={
+                    "runs_root": str(Path(runs_root).resolve()),
+                    "run_id": run_id,
+                    "suite": cfg.suite,
+                    "dtype": cfg.dtype,
+                    "contract": str(contract) if contract is not None else None,
+                    "fourth_output_name": cfg.fourth_output_name,
+                    "package_prebuilt": pkg is not None,
+                    **({"readback_policy": readback_policy.record()} if readback_policy is not None else {}),
+                },
             )
-
-            result["legacy_model_diagnostic"] = {
-                "status": result.get("status"),
-                "failure": result.get("failure"),
-                "scope": "runner-owned host-dispatch graph and separately compiled tiles",
-            }
-            try:
-                result["candidate_source_eligibility"] = independent_frozen_source_eligibility(
-                    capsule, target=eff_target
-                )
-            except Exception as exc:  # noqa: BLE001 -- source census failure cannot stop diagnostics
-                result["candidate_source_eligibility_failure"] = {
-                    "type": type(exc).__name__,
-                    "detail": str(exc)[:2000],
-                }
-
-            try:
-                _, candidate_cb, candidate_llvm = run_entrypoints(
-                    pkg,
-                    package_dir,
-                    capsule,
-                    paths,
-                    contract=contract,
-                    timeout=timeout,
-                    fourth_output_name=cfg.fourth_output_name,
-                )
-                source_interface = Path(capsule["__dir__"]) / capsule.get("interface_mlir", "capsule.interface.mlir")
-                if source_interface.is_symlink():
-                    raise ValueError("frozen model interface cannot be a symlink")
-                result["candidate_emission"] = {
-                    "capsule_declaration": _digest((Path(capsule["__dir__"]) / "capsule.yaml").resolve(strict=True)),
-                    "source_interface": _digest(source_interface.resolve(strict=True)),
-                    "command_buffer": _digest((paths.generated / "command_buffer.json").resolve(strict=True)),
-                    "lowered_mlir": _digest((paths.generated / cfg.fourth_output_name).resolve(strict=True)),
-                }
-                with _model_runtime_bundle(capsule, timeout=timeout) as (bundle, provenance, verify):
-                    result["candidate_capture"] = provenance
-                    result["candidate_native_execution"] = execute_candidate_model(
-                        command_buffer=candidate_cb,
-                        lowered_mlir_text=candidate_llvm,
-                        capsule_dir=capsule["__dir__"],
-                        capture_bundle=bundle,
-                        target=eff_target,
-                        out_dir=paths.run_path / "candidate_native",
-                        simulator=os.environ.get("MERLIN_MODEL_NATIVE_SIMULATOR") or None,
-                        rtl_facts=os.environ.get("MERLIN_MODEL_NATIVE_RTL_FACTS") or None,
-                        board_config=os.environ.get("MERLIN_MODEL_NATIVE_BOARD_CONFIG") or None,
-                        timeout=timeout,
-                    )
-                    verify()
-            except Exception as exc:  # noqa: BLE001 -- absence cannot inherit the host-dispatch pass
-                result["candidate_emission_failure"] = {
-                    "type": type(exc).__name__,
-                    "detail": str(exc)[:2000],
-                }
-            from .capsule_grade import enforce_model_execution_check
-
-            enforce_model_execution_check(result, capsule, target=eff_target)
-        # A whole model is compiled as many buffers, not one, so there is no single command buffer to
-        # price it from. Say that explicitly rather than leaving the keys off: a performance consumer
-        # reading an absent key concludes the compute axis does not apply, and would then attribute
-        # this row's cycles to nothing at all.
+        else:
+            result = _grade_model_capsule(
+                capsule, target=eff_target, timeout=timeout, package_dir=package_dir, budget_s=_budget
+            )
+        # This model verdict does not independently price command-buffer work.
+        # A candidate has one submitted whole-program buffer; the legacy graph
+        # has many. Neither absence may be mistaken for a zero-work claim.
         from merlin.perf.work_volume import command_buffer_evidence as _cb_evidence
 
-        _mw, _ma = _cb_evidence(None, compiler_provenance="whole-model compilation (no single command buffer)")
+        volume_scope = (
+            "candidate whole-program buffer; volume not independently priced here"
+            if bool((capsule.get("semantic") or {}).get("must_accelerate"))
+            else "whole-model compilation (no single command buffer)"
+        )
+        _mw, _ma = _cb_evidence(None, compiler_provenance=volume_scope)
         result.setdefault("work_volume", _mw)
         result.setdefault("command_buffer_artifact", _ma)
         (paths.run_path / "capsule_result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
@@ -6144,8 +6299,21 @@ def run_suite(*args, **kwargs) -> list[dict]:
     describes.
     """
     import tempfile as _tf
+    from contextlib import nullcontext
 
     from ..common import provenance as PROV
+
+    # A trusted grader may retain its source closure so the result's native
+    # file pins remain independently rehashable after this call returns. The
+    # default stays temporary for direct/agent-facing suite probes. A caller's
+    # post-suite audit runs while even that temporary closure still exists.
+    model_snapshot_root = kwargs.pop("model_snapshot_root", None)
+    post_suite = kwargs.pop("post_suite", None)
+
+    def finish(results):
+        if post_suite is not None:
+            post_suite(results)
+        return results
 
     with PROV.observation_scope():
         # Freeze every model BEFORE package build and the op phase. A staged
@@ -6154,15 +6322,37 @@ def run_suite(*args, **kwargs) -> list[dict]:
         # all model results have landed, including in the budgeted-child path.
         capsules = args[0] if args else kwargs["capsules"]
         if not any(c.get("kind") == "model" and c.get("__dir__") for c in capsules):
-            return _run_suite(*args, **kwargs)
-        with _tf.TemporaryDirectory(prefix="merlin-model-suite-") as temp:
-            frozen = [
-                _pin_model_capsule(c, Path(temp) / str(i)) if c.get("kind") == "model" else c
-                for i, c in enumerate(capsules)
-            ]
+            return finish(_run_suite(*args, **kwargs))
+        if model_snapshot_root is None:
+            snapshot_scope = _tf.TemporaryDirectory(prefix="merlin-model-suite-")
+        else:
+            root = Path(model_snapshot_root)
+            if not root.is_absolute():
+                raise ValueError("model snapshot root must be absolute")
+            if root.is_symlink() or root.parent.resolve() != root.parent:
+                raise ValueError("model snapshot root may not traverse a symlink")
+            root.mkdir(parents=True, mode=0o700, exist_ok=True)
+            if root.is_symlink() or root.resolve(strict=True) != root or not root.is_dir():
+                raise ValueError("model snapshot root must be an ordinary canonical directory")
+            if root.stat().st_uid != os.geteuid():
+                raise ValueError("model snapshot root must be owned by the grader")
+            root.chmod(0o700)
+            snapshot_scope = nullcontext(_tf.mkdtemp(prefix="merlin-model-suite-", dir=root))
+        with snapshot_scope as temp:
+            frozen = []
+            for i, capsule in enumerate(capsules):
+                if capsule.get("kind") != "model":
+                    frozen.append(capsule)
+                    continue
+                pinned = _pin_model_capsule(capsule, Path(temp) / str(i))
+                if bool((capsule.get("semantic") or {}).get("must_accelerate")):
+                    pinned["__suite_model_pin"] = _SUITE_MODEL_PIN
+                frozen.append(pinned)
             if args:
-                return _run_suite(frozen, *args[1:], **kwargs)
-            return _run_suite(**{**kwargs, "capsules": frozen})
+                results = _run_suite(frozen, *args[1:], **kwargs)
+            else:
+                results = _run_suite(**{**kwargs, "capsules": frozen})
+            return finish(results)
 
 
 def _pin_model_capsule(capsule: dict, destination: Path) -> dict:
@@ -6184,15 +6374,44 @@ def _pin_model_capsule(capsule: dict, destination: Path) -> dict:
             raise ValueError(f"model capsule snapshot source is a symlink or escapes its directory: {lexical}")
 
     content_store.place_tree(source, destination, content_store.store_root(), observe=require_local_source)
-    # We own these directory entries, not the shared file inodes. Keeping the
-    # private directories owner-writable lets cleanup unlink read-only assets
-    # without tempfile's permission repair chmodding a shared store object.
+    # We own these directory entries, not the shared file inodes. Owner-only
+    # directories keep withheld assets private and allow cleanup to unlink
+    # read-only assets without chmodding a shared store object.
     for directory in [destination, *destination.rglob("*")]:
         if directory.is_dir():
-            directory.chmod(directory.stat().st_mode | 0o700)
+            directory.chmod(0o700)
     if not (destination / "capsule.yaml").is_file():
         raise ValueError(f"model capsule snapshot has no capsule.yaml: {raw}")
     return {**capsule, "__dir__": str(destination)}
+
+
+def _capsule_dependency_waves(capsules: list[dict]) -> list[list[dict]]:
+    """Finish selected ``extends`` siblings before screening their dependents.
+
+    Preserve the caller's priority within each independent wave. Missing
+    siblings remain missing: the oracle still records an unverified extension,
+    rather than discovering another corpus or dropping the screened member.
+    Completion ordering does not grant a sibling a pass or change any tier.
+    """
+    names = [str(cap.get("name") or "") for cap in capsules]
+    if any(not name for name in names) or len(set(names)) != len(names):
+        raise ValueError("capsule dependency scheduling requires unique nonempty names")
+    selected = set(names)
+    dependencies = {
+        name: {str(cap["extends"])} if cap.get("extends") and str(cap["extends"]) in selected else set()
+        for name, cap in zip(names, capsules, strict=True)
+    }
+    pending = list(zip(names, capsules, strict=True))
+    completed: set[str] = set()
+    waves = []
+    while pending:
+        ready = [(name, cap) for name, cap in pending if dependencies[name] <= completed]
+        if not ready:
+            raise ValueError("cyclic capsule extends dependencies: " + ", ".join(name for name, _ in pending))
+        waves.append([cap for _, cap in ready])
+        completed.update(name for name, _ in ready)
+        pending = [(name, cap) for name, cap in pending if name not in completed]
+    return waves
 
 
 def _run_suite(
@@ -6291,7 +6510,7 @@ def _run_suite(
                 workers=workers,
             )
 
-    def _run_all(caps: list[dict]) -> list[dict]:
+    def _run_independent(caps: list[dict]) -> list[dict]:
         if max_workers <= 1 or not caps:
             return [_one(c) for c in caps]
         # CALIBRATE BEFORE FANNING OUT. Tier order is learned from observed cost, and a worker that
@@ -6331,6 +6550,12 @@ def _run_suite(
             _n = min(max_workers, len(rest))
             return head + list(ex.map(lambda c: _one(c, _n), rest))
 
+    def _run_all(caps: list[dict]) -> list[dict]:
+        # Lexical/covering-set order alone can put an L2 extension ahead of its
+        # L3 sibling. Parallel submission order is insufficient too: a sibling
+        # must finish and publish its result before a dependent cites it.
+        return [result for wave in _capsule_dependency_waves(caps) for result in _run_independent(wave)]
+
     # A whole-model (kind == "model") capsule is the GATED capstone: it is scheduled only after the op
     # suite proves itself (its ``gate.after_op_pass_fraction`` of the graded op capsules passed). Grade the
     # op capsules first; if no model capsule is present this is exactly the original single-pass behavior.
@@ -6338,6 +6563,9 @@ def _run_suite(
 
     op_caps = [c for c in capsules if c.get("kind") != "model"]
     model_caps = [c for c in capsules if c.get("kind") == "model"]
+    model_names = {str(cap.get("name") or "") for cap in model_caps}
+    if any(str(cap.get("extends") or "") in model_names for cap in op_caps):
+        raise ValueError("operator capsule extends a gated model; dependency conflicts with the model gate")
 
     # DO NOT GRADE what this target provably cannot do. A capsule outside the contract's declared
     # capability can never pass, so grading it (a) spends oracle time on a foregone conclusion, (b)
@@ -6458,14 +6686,23 @@ def main(argv: list[str] | None = None) -> int:
         sa, _ = sub.parse_known_args(_av)
         _die_with_parent()
         spec = json.loads(Path(sa.model_grade).read_text(encoding="utf-8"))
-        res = _grade_model_capsule_inline(
-            spec["capsule"],
-            target=spec.get("target"),
-            timeout=int(spec["timeout"]),
-            package_dir=spec.get("package_dir"),
-            numeric_policy=spec.get("numeric_policy", _MODEL_NUMERIC_UNSET),
-            numeric_policy_identity=spec.get("numeric_policy_identity"),
-        )
+        if spec.get("candidate_context") is not None:
+            res = _grade_candidate_model_capsule_inline(
+                spec["capsule"],
+                target=spec["target"],
+                timeout=int(spec["timeout"]),
+                package_dir=spec["package_dir"],
+                context=spec["candidate_context"],
+            )
+        else:
+            res = _grade_model_capsule_inline(
+                spec["capsule"],
+                target=spec.get("target"),
+                timeout=int(spec["timeout"]),
+                package_dir=spec.get("package_dir"),
+                numeric_policy=spec.get("numeric_policy", _MODEL_NUMERIC_UNSET),
+                numeric_policy_identity=spec.get("numeric_policy_identity"),
+            )
         Path(sa.model_grade_out).write_text(json.dumps(res, indent=2), encoding="utf-8")
         return 0
 
