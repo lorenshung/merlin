@@ -36,6 +36,10 @@ SCHEMA_V3 = "merlin.sealed_m2m_cpu.v3"
 _V1_ISSUER_SHA256 = "f8ca017999a5cb40d44ed29bc9412bef842fe8f3edd8d85170879d1df15d1dd6"
 _HISTORICAL_V2_ISSUER_SHA256 = "36aa1528481a9630e2e31394f45fdde62a0bfea738b8e1855085029f9574344b"
 _PRE_V3_ISSUER_SHA256 = "596e8828727b3835f384a264fe9fb4a3ee1c975e869ed2130d7d20022ed06a2a"
+# Byte-exact selected v2 issuer before strict JSON reads replaced json.loads.
+# Its already-issued receipts still undergo this verifier's strict parsing,
+# selected-policy, source/runtime/output identity, and fresh replay checks.
+_STRICT_JSON_PREDECESSOR_V2_ISSUER_SHA256 = "f1f36bc57807fbc4e93360757e9b0f891f38a70326ffc10c8067bfb0b5b11920"
 # Exact pre-frozen-origin issuer from 0e66019b. Its already-issued v2/v3
 # snapshots may be replayed, but no new selection/issue may use those bytes.
 _PRE_FROZEN_ORIGIN_ISSUER_SHA256 = "16aa775b37791164c1546b987245f8e359231acd3bd3ad2e4b8662d1834465d5"
@@ -1560,7 +1564,7 @@ def replay_verify(run_dir: Path, *, bwrap_binary: Path | None = None) -> dict[st
         {expected_issuer, _PRE_V3_ISSUER_SHA256, _HISTORICAL_V2_ISSUER_SHA256}
         if schema == SCHEMA and doc.get("capture_selection_sha256") is None
         else (
-            {expected_issuer, _PRE_V3_ISSUER_SHA256}
+            {expected_issuer, _PRE_V3_ISSUER_SHA256, _STRICT_JSON_PREDECESSOR_V2_ISSUER_SHA256}
             if schema == SCHEMA
             else (
                 {expected_issuer, _ARCHIVED_V3_ISSUER_SHA256, _PRE_CACHE_NORMALIZATION_V3_ISSUER_SHA256}

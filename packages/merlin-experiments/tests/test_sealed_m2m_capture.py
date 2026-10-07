@@ -668,6 +668,36 @@ def test_cpu_receipts_replay_only_under_their_selected_policy(tmp_path, monkeypa
     assert result.get("capture_dtype") == (None if old else "int8")
     assert result["phase0_admission"] == "not_granted"
     assert result["status"] == "verified_sandbox_replay"
+    if version == "v2":
+        # This exact historical issuer differed only in JSON reader strictness.
+        # The current replay gate must still recheck its policy, command, and trees.
+        legacy_policy = receipt["policy_sha256"]
+        receipt["capture_selection_sha256"] = "a" * 64
+        receipt["policy_sha256"] = _policy(command, output, replayable_logs=True)
+        receipt["issuer_sha256"] = "f1f36bc57807fbc4e93360757e9b0f891f38a70326ffc10c8067bfb0b5b11920"
+        pending = run / "sealed_m2m_pending.json"
+        pending.write_text(json.dumps(receipt))
+        assert sealed_m2m.replay_verify(run)["status"] == "verified_sandbox_replay"
+        for field, changed in (
+            ("issuer_sha256", "f" * 64),
+            ("policy_sha256", "f" * 64),
+            ("command", ["/unselected/runner"]),
+            ("source", {"sha256": "different"}),
+        ):
+            original = receipt[field]
+            receipt[field] = changed
+            pending.write_text(json.dumps(receipt))
+            with pytest.raises(SealedM2MError):
+                sealed_m2m.replay_verify(run)
+            receipt[field] = original
+        raw = json.dumps(receipt).encode()
+        pending.write_bytes(raw.replace(b'"issuer_sha256":', b'"issuer_sha256":"unknown","issuer_sha256":', 1))
+        with pytest.raises(ValueError, match="unreadable"):
+            sealed_m2m.replay_verify(run)
+        receipt["issuer_sha256"] = "current-issuer"
+        receipt["policy_sha256"] = legacy_policy
+        receipt.pop("capture_selection_sha256")
+        pending.write_text(json.dumps(receipt))
     if not old:
         receipt["issuer_sha256"] = sealed_m2m._PRE_FROZEN_ORIGIN_ISSUER_SHA256
         (run / "sealed_m2m_pending.json").write_text(json.dumps(receipt))
