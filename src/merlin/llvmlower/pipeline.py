@@ -251,10 +251,7 @@ def _bind_index_width(pipeline: str, index_bits: int) -> str:
             end = at + len(name)
             while end < len(selected) and selected[end].isspace():
                 end += 1
-            if (
-                (before < 0 or selected[before] in "(,")
-                and (end == len(selected) or selected[end] in ",){")
-            ):
+            if (before < 0 or selected[before] in "(,") and (end == len(selected) or selected[end] in ",){"):
                 positions.append((at, end))
             start = at + len(name)
         if len(positions) != 1 or selected[positions[0][1] :].startswith("{"):
