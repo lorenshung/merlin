@@ -83,6 +83,85 @@ def test_gemmini_software_spec_does_not_admit_integer_shift_as_fused_readout():
     assert any(row["role"] == "epilogue" and row["status"] == "unsupported" for row in decision["decisions"])
 
 
+def test_generation_screens_mixed_host_and_device_entries_with_their_writer_bindings():
+    from merlin_experiments.phase0.generation import _screen_selected_entry
+    from merlin_experiments.phase0.software_screen import screen_entry
+
+    binding = CorpusBinding(
+        target="fixture",
+        tile_dim=4,
+        operand_dtype="i8",
+        accum_dtype="i32",
+        integer=True,
+        tiers=["L0"],
+        compare="exact_int",
+    )
+    package = "a" * 64
+    capabilities = {
+        "host": {
+            "package_sha256": package,
+            "capability_spec_sha256": "b" * 64,
+            "dtype_strategy": "fixture",
+            "capability_spec": {
+                "schema": "merlin.host_capabilities.v1",
+                "status": "reviewed",
+                "compiler": {"package_sha256": package, "dtype_strategy": "fixture"},
+                "operations": [
+                    {
+                        "id": "host_f32_bmm",
+                        "ops": ["aten.bmm.default"],
+                        "placement": "host",
+                        "signature": {
+                            "operand_dtypes": ["f32"],
+                            "accumulator_dtype": "f32",
+                            "ordered_operand_dtypes": ["f32", "f32", "f32"],
+                        },
+                    }
+                ],
+                "evidence": {},
+            },
+        }
+    }
+    host = {
+        "op": "batch_matmul",
+        "frontend_op": "aten.bmm.default",
+        "operand_dtype": "f32",
+        "generalization": {"must_accelerate": False, "eligible": False},
+    }
+    stale = screen_entry(
+        {}, host,
+        defaults={"operand_dtype": binding.operand_dtype, "accumulator_dtype": binding.accum_dtype},
+        host_capabilities=capabilities,
+    )
+    assert stale["status"] == "unsupported"
+    assert "accum_dtype" in stale["profiles"][0]["decisions"][0]["reason"]
+    decision = _screen_selected_entry({}, host, binding=binding, host_capabilities=capabilities)
+    assert decision["status"] == "unknown"  # Ordered source operands still need the emitted program.
+    assert "accum_dtype" not in decision["reason"]
+    assert _screen_selected_entry(
+        {}, {**host, "operand_dtype": "i8"}, binding=binding, host_capabilities=capabilities
+    )["status"] == "unsupported"
+    assert _screen_selected_entry(
+        {}, {**host, "accum_dtype": "i32"}, binding=binding, host_capabilities=capabilities
+    )["status"] == "unsupported"  # An explicit conflicting entry cannot be silently repaired.
+    accelerator_spec = {
+        "status": "reviewed",
+        "operations": [
+            {
+                "id": "fixture_i8_matmul",
+                "ops": ["matmul"],
+                "placement": "accelerator",
+                "signature": {"operand_dtypes": ["i8"], "accumulator_dtype": "i32"},
+            }
+        ],
+    }
+    device = {"op": "matmul", "operand_dtype": "i8", "placement": "accelerator"}
+    assert _screen_selected_entry(accelerator_spec, device, binding=binding)["status"] == "admitted"
+    assert _screen_selected_entry(accelerator_spec, {**device, "accum_dtype": "f32"}, binding=binding)[
+        "status"
+    ] == "unsupported"
+
+
 def test_recipe_selects_only_contained_oot_software_spec(tmp_path, monkeypatch):
     provider = tmp_path / "provider"
     (provider / "contracts").mkdir(parents=True)

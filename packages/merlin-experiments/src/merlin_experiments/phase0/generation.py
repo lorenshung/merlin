@@ -27,6 +27,25 @@ from .sweeps import _performance_facts, _resolve_flat_extents, expand_sweeps
 from .writer import SYNTH_ROLE, UnprovableForbid, _write_capsule
 
 
+def _screen_selected_entry(
+    spec: dict,
+    entry: dict,
+    *,
+    binding: CS.CorpusBinding,
+    host_capabilities: dict | None = None,
+    capsule: dict | None = None,
+) -> dict:
+    """Screen the numeric binding that the writer selects for this entry."""
+    _, selected = CS.entry_binding(entry, binding)
+    return screen_entry(
+        spec,
+        entry,
+        defaults={"operand_dtype": selected.operand_dtype, "accumulator_dtype": selected.accum_dtype},
+        host_capabilities=host_capabilities,
+        capsule=capsule,
+    )
+
+
 def _selected_capture_recipe(evidence_root: Path, *, target: str, operand_dtype: str, accumulator_dtype: str) -> dict:
     """Read exactly one frozen SW-scoped recipe for a live integer model capture.
 
@@ -471,13 +490,10 @@ def generate_target(
     if evidence is not None and evidence.software_spec:
         screened = []
         for entry in entries:
-            decision = screen_entry(
+            decision = _screen_selected_entry(
                 evidence.software_spec,
                 entry,
-                defaults={
-                    "operand_dtype": binding.operand_dtype,
-                    "accumulator_dtype": binding.accum_dtype,
-                },
+                binding=binding,
                 host_capabilities=evidence.host_capabilities,
             )
             screened.append(diagnostic_entry(entry, decision) if entry_refusal_is_final(entry, decision) else entry)
@@ -565,13 +581,10 @@ def generate_target(
                 binding=binding,
             )
             if evidence is not None and evidence.software_spec:
-                decision = screen_entry(
+                decision = _screen_selected_entry(
                     evidence.software_spec,
                     e,
-                    defaults={
-                        "operand_dtype": binding.operand_dtype,
-                        "accumulator_dtype": binding.accum_dtype,
-                    },
+                    binding=binding,
                     host_capabilities=evidence.host_capabilities,
                 )
                 admission.append({"capsule": e.get("name"), **decision})
@@ -662,13 +675,10 @@ def generate_target(
                 actual = yaml.safe_load((Path(w) / "capsule.yaml").read_bytes())
                 observed = screen_written(actual, Path(w), target=hardware_target, evidence=evidence)
                 if observed is None:
-                    observed = screen_entry(
+                    observed = _screen_selected_entry(
                         evidence.software_spec,
                         e,
-                        defaults={
-                            "operand_dtype": binding.operand_dtype,
-                            "accumulator_dtype": binding.accum_dtype,
-                        },
+                        binding=binding,
                         capsule=actual,
                         host_capabilities=evidence.host_capabilities,
                     )
