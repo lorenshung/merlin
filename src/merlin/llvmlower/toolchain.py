@@ -148,6 +148,12 @@ def llvm_nm() -> Path:
     return Path(env) if env else llvm_opt().with_name("llvm-nm")
 
 
+def llvm_link() -> Path:
+    """LLVM IR linker paired with the selected optimizer, or explicit override."""
+    env = _env("MERLIN_LLVM_LINK")
+    return Path(env) if env else llvm_opt().with_name("llvm-link")
+
+
 def available() -> bool:
     return m2m_python().is_file() and clang().is_file()
 

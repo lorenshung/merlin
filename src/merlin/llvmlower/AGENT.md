@@ -14,6 +14,17 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
 
 ## What belongs here
 
+- `host_llvm_helpers.py` offers explicit immutable helper IR linkage through the
+  existing normal host-transform callback. The selected upstream linker and
+  always-inline pass must remove every required call/address reference while
+  preserving original public definitions. Every shared function declaration
+  must match scalar/pointer types, calling convention and extension attributes.
+  Unsupported pointer/helper ABIs, changed inputs, conflicting module contexts
+  and definition replacement refuse before invoking the linker.
+  Empty selection preserves source bytes and performs no compilation. Helper
+  numeric/effect equivalence and final object/link qualification remain caller
+  obligations; the completed recipe identifies LLVM IR, not an executable.
+
 - `exact_row_radix_pack.py` offers an explicit source-exact producer row proof
   for the existing canonical BF16 signed radix128 representation. The mandatory
   finite source scan proves a nonzero normal row's exponent span fits the grid;

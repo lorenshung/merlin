@@ -47,6 +47,33 @@ def test_failed_compiler_keeps_old_object_unqualified(tmp_path):
         recipe.completed(obj)
 
 
+@pytest.mark.parametrize("kind", ["executable", "object", "llvm_ir"])
+def test_completed_product_records_actual_kind_and_rejects_unknown_kind(tmp_path, kind):
+    compiler = shutil.which("cc")
+    if compiler is None:
+        pytest.skip("native compiler unavailable")
+    source, obj = tmp_path / "source.c", tmp_path / "source.o"
+    source.write_text("int value(void) { return 7; }\n")
+    recipe = CompilationRecipe(tmp_path, producer=Path(spike_model.__file__))
+    recipe.run(
+        [compiler, "-c", source, "-o", obj],
+        runner=lambda argv: subprocess.run(argv, capture_output=True),
+        inputs=[source],
+        output=obj,
+    )
+    with pytest.raises(ValueError, match="supported compilation product kind"):
+        recipe.completed_product(obj, kind="unknown")
+    assert _read(tmp_path)["status"] == "invoked"
+    if kind == "executable":
+        recipe.completed(obj)
+    else:
+        recipe.completed_product(obj, kind=kind)
+    record = _read(tmp_path)
+    assert record["status"] == "completed"
+    assert record[kind]["sha256"] == hashlib.sha256(obj.read_bytes()).hexdigest()
+    assert not {"executable", "object", "llvm_ir"}.difference({kind}).intersection(record)
+
+
 def test_normal_model_compile_runtime_and_link_are_observed(tmp_path, monkeypatch):
     if not spike.available() or not toolchain.m2m_python().is_file() or not toolchain.clang().is_file():
         pytest.skip("bare-metal and upstream toolchain unavailable")
