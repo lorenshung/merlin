@@ -9,7 +9,8 @@ Source moves invalidate new implementation identities, never rewrite old evidenc
 
 `private_capture_roster.py` binds every single- or multi-program capture stage to
 the ordinary root contract and receipts. It refuses missing, extra, opaque or
-indirect stage inputs; it neither selects a validation subset nor certifies code.
+indirect stage inputs, and reports only the attested loader's declared input
+provenance without private paths. It neither selects a validation subset nor certifies code.
 
 `caller_layout.py` gives an answer-free, layout-only projection from an explicitly
 selected harness provider for a submission-owned command buffer. It never grades or
@@ -20,12 +21,17 @@ whole-model build. The shared post-build verifier still checks linked bytes and
 source obligations, but an old receipt without exact producer/toolchain closure
 cannot become a full-roster gate result or a build-cache hit.
 
-The v8 private complete-model build gate consumes the producer-bound completed
+The private complete-model build gate consumes the producer-bound completed
 compilation recipe and independently rehashes its explicit compiler/link inputs
 and final ELF. Missing historical recipes remain diagnostic-only, never newly
-certified. This evidence does not prove transitive toolchain closure, archive
-symbol suppliers, or frontend/executable numerical equivalence; library-specific
-numerical declarations retain their separate obligations.
+certified. The v10 gate additionally requires an empty-or-complete
+`private_linkage_support.py` source roster. A reviewed f32 sine/cosine declaration
+with a closed linkage contract records only a pending source requirement; the
+consumer reselects host package, GCC, ISA flags and archive bytes independently
+before rechecking the actual link's defining-supplier trace against the same
+source/candidate/capture/ELF identity. It never infers source-call routing,
+transitive toolchain closure, frontend/executable numerical equivalence, or a
+host numerical grant from the trace or ignored metadata.
 
 `private_source_freeze.py` owns host-only run copies of authored software and
 host-capability inputs selected by a verified Phase 0 derivation export. Bind

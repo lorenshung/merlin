@@ -10,6 +10,7 @@ from merlin_experiments.phase1.feedback import private_control_support as contro
 from merlin_experiments.phase1.feedback import private_data_movement as movement
 from merlin_experiments.phase1.feedback import private_integer_reduction_support as integer_reductions
 from merlin_experiments.phase1.feedback import private_linalg_support as linalg
+from merlin_experiments.phase1.feedback import private_linkage_support as linkage
 from merlin_experiments.phase1.feedback import private_literal_arange_admission as arange
 from merlin_experiments.phase1.feedback import private_ordered_scan_support as ordered_scan
 from merlin_experiments.phase1.feedback import private_pure_stage_support as pure_stage
@@ -35,6 +36,8 @@ def linked_source_support_complete(checks: Mapping[str, Any], stages: Sequence[s
         if not linked_pool_complete(source, entry, candidate_sha256):
             return False
         if not linalg.linked_complete(source, entry, candidate_sha256):
+            return False
+        if not linkage.linked_complete(source, entry, candidate_sha256):
             return False
         if not pure_stage.linked_direct_return_complete(source, entry, candidate_sha256):
             return False

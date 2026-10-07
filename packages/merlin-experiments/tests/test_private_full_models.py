@@ -17,6 +17,7 @@ from merlin_experiments.phase1.feedback import private_compilation_inputs as com
 from merlin_experiments.phase1.feedback import private_full_models as gate
 from merlin_experiments.phase1.feedback import private_integer_reduction_support as integer_reductions
 from merlin_experiments.phase1.feedback import private_linalg_support as linalg
+from merlin_experiments.phase1.feedback import private_linkage_support as linkage
 from merlin_experiments.phase1.feedback import private_literal_arange_admission as arange
 from merlin_experiments.phase1.feedback import private_ordered_scan_support as ordered_scan
 from merlin_experiments.phase1.feedback import private_pool_support as pool
@@ -210,6 +211,15 @@ def test_complete_requires_current_candidate_all_programs_and_device_work(monkey
                                 "candidate_tree_sha256": "1" * 64,
                             },
                         },
+                        linkage.FIELD: {
+                            **linkage.begin("d" * 64, "e" * 64, 5),
+                            "status": linkage.LINKED,
+                            "linked_build": {
+                                "capture_tree_sha256": "c" * 64,
+                                "elf_sha256": "2" * 64,
+                                "candidate_tree_sha256": "1" * 64,
+                            },
+                        },
                         "literal_arange_host_support": {
                             **arange.begin("d" * 64, "e" * 64, 5, deepcopy(selected_index)),
                             "status": arange.LINKED,
@@ -389,6 +399,8 @@ def test_complete_requires_current_candidate_all_programs_and_device_work(monkey
     assert not gate.complete(record, **kwargs)
     record["schema"] = "merlin.phase1.private_full_model_build_gate.v8"
     assert not gate.complete(record, **kwargs)
+    record["schema"] = "merlin.phase1.private_full_model_build_gate.v9"
+    assert not gate.complete(record, **kwargs)
     record["schema"] = gate.RESULT_SCHEMA
     record["models"][0]["checks"]["source"]["prefix"].pop("n_internal_mask_compactions")
     assert not gate.complete(record, **kwargs)
@@ -427,7 +439,7 @@ def test_complete_requires_current_candidate_all_programs_and_device_work(monkey
     ]
     assert not gate.complete(record, **kwargs)
     record["models"][0] = model("a", programs["a"])
-    for field in (integer_reductions.FIELD, bucketize.FIELD, ordered_scan.FIELD):
+    for field in (integer_reductions.FIELD, bucketize.FIELD, ordered_scan.FIELD, linkage.FIELD):
         record["models"][0]["checks"]["source"]["prefix"].pop(field)
         assert not gate.complete(record, **kwargs)
         record["models"][0] = model("a", programs["a"])

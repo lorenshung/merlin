@@ -26,10 +26,14 @@ from merlin_experiments.phase1.feedback import private_control_support as contro
 from merlin_experiments.phase1.feedback import private_data_movement as data_movement
 from merlin_experiments.phase1.feedback import private_integer_reduction_support as integer_support
 from merlin_experiments.phase1.feedback import private_linalg_support as linalg_support
+from merlin_experiments.phase1.feedback import private_linkage_support as linkage_support
 from merlin_experiments.phase1.feedback import private_literal_arange_admission as arange_support
 from merlin_experiments.phase1.feedback import private_ordered_scan_support as ordered_scan_support
 from merlin_experiments.phase1.feedback import private_pure_stage_support as pure_stage
 from merlin_experiments.phase1.feedback import private_source_freeze as source_freeze_api
+from merlin_experiments.phase1.feedback.private_capture_roster import (
+    captured_input_provenance as _captured_input_provenance,
+)
 from merlin_experiments.phase1.feedback.private_capture_roster import captured_programs as _captured_programs
 from merlin_experiments.phase1.feedback.private_device_audit import (
     audit_built_device_host_compute as _audit_built_device_host_compute,
@@ -52,7 +56,7 @@ from merlin_experiments.phase1.feedback.private_source_support_join import (
 )
 
 SCHEMA = "merlin.phase1.private_full_models.v1"
-RESULT_SCHEMA = "merlin.phase1.private_full_model_build_gate.v9"
+RESULT_SCHEMA = "merlin.phase1.private_full_model_build_gate.v10"
 BUILD_BOARD_SCOPE = "static_memory_layout_and_host_ISA_only; no board execution"
 TRANSPOSE_DATA_SUPPORT_SCOPE = data_movement.SCOPE
 _transpose_data_support = data_movement.prove_transpose_source
@@ -673,6 +677,7 @@ def _source_obligations(
         ordered_scan, parsed, source_rows, software, capability, cap_map, host
     )
     linalg = linalg_support.begin(source_sha, normalized_sha, len(parsed), selected_index_observation)
+    linkage = linkage_support.begin(source_sha, normalized_sha, len(parsed))
     arange = arange_support.begin(source_sha, normalized_sha, len(parsed), selected_index_observation)
     integer_reductions = integer_support.begin(source_sha, normalized_sha, len(parsed), selected_index_observation)
     bucketize = bucketize_support.begin(capture, parsed, source_sha, normalized_sha, selected_index_observation)
@@ -785,6 +790,7 @@ def _source_obligations(
             )
         else:
             linalg_support.record(linalg, row, host_decision, parsed, source_rows, control_proof=bounded_control)
+            linkage_support.record(linkage, row, host_decision, source_rows, linalg)
             arange_support.record(arange, capture, row, host_decision, parsed, source_rows)
             integer_support.record(integer_reductions, row, host_decision, parsed, source_rows)
             bucketize_support.record(bucketize, row, host_decision, source_rows)
@@ -828,6 +834,7 @@ def _source_obligations(
         "generic_copy_data_support": generic_copy_support,
         "pool_value_support": pool_support,
         "linalg_host_support": linalg,
+        linkage_support.FIELD: linkage,
         "literal_arange_host_support": arange,
         integer_support.FIELD: integer_reductions,
         ordered_scan_support.FIELD: ordered_scan,
@@ -867,6 +874,8 @@ def _verify_compiled_program(
     catalog: Path,
     dts: Path,
     device_selected: bool,
+    host_package: Path | None = None,
+    host_package_tree_sha256: str | None = None,
     require_compilation_recipe: bool = True,
 ) -> dict[str, Any]:
     """Canonical post-build checks shared by freshly built and diagnostic images."""
@@ -935,7 +944,7 @@ def _verify_compiled_program(
     integer_support.link(source, index_lowering, linked_build)
     ordered_scan_support.link(source, index_lowering, linked_build)
     bucketize_support.link(source, index_lowering, linked_build)
-    return {
+    result = {
         "program": program,
         "status": "capture_lower_codegen_link_verified",
         "capture_tree_sha256": stage_tree["sha256"],
@@ -948,44 +957,9 @@ def _verify_compiled_program(
         "index_lowering": index_lowering,
         "compilation_recipe": compilation_binding,
     }
-
-
-def _captured_input_provenance(
-    programs: Sequence[tuple[str, Path]], expected: Mapping[str, bool | None]
-) -> dict[str, dict[str, Any]]:
-    """Report the attested loader's input claim, without its private file path."""
-    result = {}
-    for name, stage in programs:
-        meta_path = stage / "meta.json"
-        if meta_path.is_symlink() or not meta_path.is_file():
-            raise ValueError(f"{name} has no ordinary capture input-provenance record")
-        meta = json.loads(meta_path.read_bytes())
-        if not isinstance(meta, Mapping):
-            raise ValueError(f"{name} has malformed capture input provenance")
-        declared = meta.get("loader_provenance")
-        if meta.get("loader_provenance_status") != "declared" or not isinstance(declared, Mapping):
-            raise ValueError(f"{name} has no declared loader input provenance")
-        paper_ready = meta.get("loader_paper_ready")
-        synthetic_fields = [declared[key] for key in ("synthetic_inputs", "synthetic_tokens") if key in declared]
-        if len(synthetic_fields) > 1 and synthetic_fields[0] is not synthetic_fields[1]:
-            raise ValueError(f"{name} has conflicting synthetic-input declarations")
-        synthetic = synthetic_fields[0] if synthetic_fields else None
-        if paper_ready is not None and type(paper_ready) is not bool:
-            raise ValueError(f"{name} has a malformed paper-readiness declaration")
-        if synthetic is not None and type(synthetic) is not bool:
-            raise ValueError(f"{name} has a malformed synthetic-input declaration")
-        observed = {"paper_ready": paper_ready, "synthetic_inputs": synthetic}
-        if any(observed.get(key) is not value for key, value in expected.items()):
-            raise ValueError(f"{name} input provenance differs from the selected complete-model scope")
-        input_source = declared.get("input_source", declared.get("token_source"))
-        input_sha256 = declared.get("input_sha256", declared.get("token_sha256"))
-        result[name] = {
-            **observed,
-            "input_source": input_source if isinstance(input_source, str) else None,
-            "input_sha256": input_sha256 if isinstance(input_sha256, str) else None,
-            "meta_sha256": file_sha256(meta_path),
-            "scope": "input provenance only; no paper accuracy or full-model numerical result",
-        }
+    linkage_support.link_compiled(
+        source, result, receipt, host_package, host_package_tree_sha256, catalog, board, dts, linked_build
+    )
     return result
 
 
@@ -1235,6 +1209,7 @@ def run(
                     }
                 else:
                     with target_registry.observed_contract(target, dict(capability), source_path=capability_path):
+                        math_symbols = linkage_support.symbols(source)
                         receipt = compile_saved_model(
                             capture=stage,
                             package=host_package,
@@ -1246,6 +1221,7 @@ def run(
                             run="none",
                             arena_mb=int(row["arena_mb"]),
                             device=device,
+                            **({"math_archive_symbols": math_symbols} if math_symbols else {}),
                         )
                 compiled.append(
                     _verify_compiled_program(
@@ -1259,6 +1235,8 @@ def run(
                         catalog=catalog,
                         dts=dts,
                         device_selected=device is not None,
+                        host_package=host_package,
+                        host_package_tree_sha256=row["host_package_tree_sha256"],
                         require_compilation_recipe=not diagnostic,
                     )
                 )

@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 
 from merlin.common.digest import is_sha256
+from merlin.targetgen.host_linkage_contract import validate_linkage_contract
 from merlin.targetgen.software_spec import admit_operation, validate_quantization_parameters
 
 SCHEMA = "merlin.host_capabilities.v1"
@@ -51,6 +52,16 @@ def validate_host_capabilities(
             raise ValueError("host capability operations require host placement and typed signature constraints")
         if "source_body" in row["signature"]:
             raise ValueError("source_body must be an explicit host declaration field, not a signature constraint")
+        if "linkage_contract" in row:
+            from merlin.frontends.linalg_math_patterns import STATIC_F32_MATH_SOURCE_BODY_SCHEMA
+
+            if (
+                not isinstance(row.get("source_body"), dict)
+                or row["source_body"].get("schema") != STATIC_F32_MATH_SOURCE_BODY_SCHEMA
+                or row["source_body"].get("operation") not in {"math.sin", "math.cos"}
+            ):
+                raise ValueError("linkage contract needs a static unary f32 math declaration")
+            validate_linkage_contract(row["linkage_contract"])
         if "source_body" in row:
             from merlin.frontends.linalg_boolean_patterns import (
                 DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA,
@@ -80,6 +91,7 @@ def validate_host_capabilities(
                 "evidence",
                 "description",
                 "source_body",
+                "linkage_contract",
             }
             if set(row) - allowed or not (row.get("ops") or row.get("families") or row.get("family")):
                 raise ValueError(f"host capability {row['id']} has unsupported fields or no selector")
@@ -242,6 +254,10 @@ def admit_host_operation(
                         decision = {**decision, "status": screened["status"], "reason": screened["reason"]}
                         if screened.get("proof") is not None:
                             decision["source_body_proof"] = screened["proof"]
+                            if "linkage_contract" in declaration and decision["status"] == "admitted":
+                                decision["linkage_requirement"] = validate_linkage_contract(
+                                    declaration["linkage_contract"]
+                                )
                 decisions.append(decision)
         verdict = next(
             (decision for decision in decisions if decision["status"] == "admitted"),
@@ -273,6 +289,11 @@ def admit_host_operation(
                     if verdict and "source_body_proof" in verdict
                     else {}
                 ),
+                **(
+                    {"linkage_requirement": verdict["linkage_requirement"]}
+                    if verdict and "linkage_requirement" in verdict and status == "admitted"
+                    else {}
+                ),
             }
         )
     verdict = next(
@@ -299,6 +320,21 @@ def admit_host_operation(
                 }
             }
             if "source_body_proof" in verdict
+            else {}
+        ),
+        **(
+            {
+                "linkage_requirement": {
+                    "profile": verdict["profile"],
+                    "capability_spec_sha256": verdict["capability_spec_sha256"],
+                    "declaration": verdict["source_body_proof"]["declaration"],
+                    "contract": copy.deepcopy(verdict["linkage_requirement"]),
+                }
+            }
+            if verdict.get("status") == "admitted"
+            and verdict.get("reviewed") is True
+            and "source_body_proof" in verdict
+            and "linkage_requirement" in verdict
             else {}
         ),
     }

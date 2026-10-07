@@ -11,6 +11,45 @@ import yaml
 from merlin.compile.model_execution_inputs import file_sha256
 
 
+def captured_input_provenance(
+    programs: Sequence[tuple[str, Path]], expected: Mapping[str, bool | None]
+) -> dict[str, dict]:
+    """Report the attested loader's input claim, without its private file path."""
+    result = {}
+    for name, stage in programs:
+        meta_path = stage / "meta.json"
+        if meta_path.is_symlink() or not meta_path.is_file():
+            raise ValueError(f"{name} has no ordinary capture input-provenance record")
+        meta = json.loads(meta_path.read_bytes())
+        if not isinstance(meta, Mapping):
+            raise ValueError(f"{name} has malformed capture input provenance")
+        declared = meta.get("loader_provenance")
+        if meta.get("loader_provenance_status") != "declared" or not isinstance(declared, Mapping):
+            raise ValueError(f"{name} has no declared loader input provenance")
+        paper_ready = meta.get("loader_paper_ready")
+        synthetic_fields = [declared[key] for key in ("synthetic_inputs", "synthetic_tokens") if key in declared]
+        if len(synthetic_fields) > 1 and synthetic_fields[0] is not synthetic_fields[1]:
+            raise ValueError(f"{name} has conflicting synthetic-input declarations")
+        synthetic = synthetic_fields[0] if synthetic_fields else None
+        if paper_ready is not None and type(paper_ready) is not bool:
+            raise ValueError(f"{name} has a malformed paper-readiness declaration")
+        if synthetic is not None and type(synthetic) is not bool:
+            raise ValueError(f"{name} has a malformed synthetic-input declaration")
+        observed = {"paper_ready": paper_ready, "synthetic_inputs": synthetic}
+        if any(observed.get(key) is not value for key, value in expected.items()):
+            raise ValueError(f"{name} input provenance differs from the selected complete-model scope")
+        input_source = declared.get("input_source", declared.get("token_source"))
+        input_sha256 = declared.get("input_sha256", declared.get("token_sha256"))
+        result[name] = {
+            **observed,
+            "input_source": input_source if isinstance(input_source, str) else None,
+            "input_sha256": input_sha256 if isinstance(input_sha256, str) else None,
+            "meta_sha256": file_sha256(meta_path),
+            "scope": "input provenance only; no paper accuracy or full-model numerical result",
+        }
+    return result
+
+
 def captured_programs(capture: Path, expected: Sequence[str]) -> list[tuple[str, Path]]:
     """Use every program in the attested root session, never an operator-picked slice."""
     # A complete single-network capture may also carry a version-1 execution

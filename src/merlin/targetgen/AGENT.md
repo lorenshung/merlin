@@ -23,6 +23,11 @@ launching, capsule grading, golden generation, sandboxing and certification. The
   availability is not successful evaluator construction or a certification result.
 - `elf_lanes.py` — shared execution-artifact/evidence vocabulary and static inspection. Required
   execution and negative static evidence remain distinct.
+- `host_linkage_contract.py` structurally validates closed draft or reviewed contracts for a
+  caller-selected math-archive digest and symbol roster. Only reviewed admission records a pending
+  requirement; only an independently selected actual-link trace can prove the defining supplier.
+  Neither source-call routing nor numerical
+  equivalence follows from that trace or from `numerical_contract` metadata.
 - `group_capsule_entries.py` — deterministic capture-group restatement used by compiler diagnostics.
   Corpus writes, promotion, grading and measured capacity probes belong to experiments-owned
   `group_capsules` and `store_probe`, which keep their stable import names.

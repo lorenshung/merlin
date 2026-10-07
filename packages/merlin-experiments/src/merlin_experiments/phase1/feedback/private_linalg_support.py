@@ -43,6 +43,7 @@ from merlin.frontends.linalg_patterns import (
     validate_static_pointwise_source_body,
     validate_static_projected_pointwise_source_body,
 )
+from merlin.targetgen.host_linkage_contract import validate_linkage_contract
 from merlin_experiments.phase1.feedback import private_control_support as control_support
 
 PENDING = "source_linalg_host_support_pending_build"
@@ -72,6 +73,7 @@ _OCCURRENCE = {
     "ordered_types",
     "input_shapes",
     "input_maps",
+    "linkage_requirement",
 }
 _DYNAMIC_OCCURRENCE = _OCCURRENCE | {"shape_source", "dynamic_bound"}
 
@@ -176,6 +178,18 @@ def record(
         raise ValueError("static Linalg host admission has an invalid source-body contract") from exc
     seen = {item["ordinal"] for item in witness["occurrences"]}
     dynamic = body["schema"] == DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA
+    linkage = admission.get("linkage_requirement")
+    if linkage is not None:
+        if (
+            body["schema"] != STATIC_F32_MATH_SOURCE_BODY_SCHEMA
+            or body["operation"] not in {"math.sin", "math.cos"}
+            or not isinstance(linkage, Mapping)
+            or set(linkage) != {"profile", "capability_spec_sha256", "declaration", "contract"}
+            or (linkage["profile"], linkage["capability_spec_sha256"], linkage["declaration"])
+            != (body["profile"], body["capability_spec_sha256"], body["declaration"])
+        ):
+            raise ValueError("static Linalg linkage requirement differs from reviewed source body")
+        linkage = validate_linkage_contract(linkage["contract"])
     if dynamic and not _control_proof_matches_source(control_proof, witness):
         raise ValueError("dynamic Boolean cast has no closed internal compaction proof")
     for ordinal, pattern in zip(ordinals, patterns, strict=True):
@@ -230,6 +244,7 @@ def record(
             "ordered_types": pattern["ordered_types"],
             "input_shapes": pattern.get("input_shapes", ()),
             "input_maps": pattern.get("input_maps", ()),
+            "linkage_requirement": deepcopy(linkage),
         }
         if dynamic:
             occurrence["shape_source"] = pattern["shape_source"]
@@ -450,6 +465,16 @@ def linked_complete(source: Mapping[str, Any], entry: Mapping[str, Any], candida
             return False
         if tuple(types) != expected_types:
             return False
+        if item["linkage_requirement"] is not None:
+            if item["schema"] != STATIC_F32_MATH_SOURCE_BODY_SCHEMA or item["operation"] not in {
+                "math.sin",
+                "math.cos",
+            }:
+                return False
+            try:
+                validate_linkage_contract(item["linkage_requirement"])
+            except ValueError:
+                return False
         if item["schema"] == DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA:
             try:
                 validate_serialized_dynamic_boolean_cast_pattern(

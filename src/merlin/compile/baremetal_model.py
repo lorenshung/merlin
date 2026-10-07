@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from collections.abc import Sequence
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -119,6 +120,7 @@ def compile_saved_model(
     reference_file: str | None = None,
     rtl_facts: str | Path | None = None,
     device: Any | None = None,
+    math_archive_symbols: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Compile one saved model; ``none`` makes no execution or numerical claim.
 
@@ -231,6 +233,7 @@ def compile_saved_model(
         )
         if selection is not None:
             receipt["engine_selection"] = selection
+        build_options = {"math_archive_symbols": math_archive_symbols} if math_archive_symbols is not None else {}
         built = spike_model.build(
             capture_path,
             output_path / "build",
@@ -245,6 +248,7 @@ def compile_saved_model(
             vlen=selected.vlen if pkg.backend == "rvv" else None,
             console=selected.console,
             device=device,
+            **build_options,
         )
         if not isinstance(built.get("build_hash"), str) or not built["build_hash"]:
             raise BaremetalModelError("bare-metal build returned no citable build hash")
