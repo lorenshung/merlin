@@ -34,7 +34,7 @@ from merlin.common.artifacts import cache_dir  # noqa: E402 — purgeable work t
 from merlin.targetgen import capsule_grade as CG  # noqa: E402
 from merlin.targetgen import capsule_runner as CR  # noqa: E402
 from merlin.targetgen import tier_integrity as _TI  # noqa: E402
-from merlin_experiments.phase1.context import InvocationContext, add_context_arguments, resolve_context
+from merlin_experiments.phase1.context import InvocationContext, add_context_arguments, readback_kwargs, resolve_context
 
 # Allowed (answer-free) numeric fields. Everything else in the numeric block is dropped.
 _SAFE_NUMERIC = {"status", "policy", "mismatch_count"}
@@ -415,11 +415,24 @@ def _candidate_native_feedback(result: dict) -> dict | None:
     This projection does not grade or upgrade the underlying result.
     """
     owner = result
-    if "candidate_native_model_check" not in owner:
+    top_level_candidate = "candidate_native_model_check" in owner
+    if not top_level_candidate:
         owner = result.get("model_execution_check")
     if not isinstance(owner, dict) or "candidate_native_model_check" not in owner:
         return None
     check = owner["candidate_native_model_check"]
+    model_check = result.get("model_execution_check")
+    if (
+        check is None
+        and not top_level_candidate
+        and "legacy_model_diagnostic" not in result
+        and isinstance(model_check, dict)
+        and model_check.get("kind") == "model_accelerator_execution"
+    ):
+        # Non-must-accelerate models use the legacy model grade. Its owner
+        # serializes a null candidate slot; that is not a malformed candidate
+        # record. The candidate branch marks its distinct legacy diagnostic.
+        return None
     if not isinstance(check, dict) or check.get("schema") != "merlin_candidate_native_model_check_v1":
         return {"status": "unverified", "reason": "candidate_verification_record_unrecognized"}
 
@@ -790,7 +803,7 @@ def run(
     # Grading the round on the screen alone is unsound in exactly one direction, and it was measured:
     # one submission passed the cheap functional tier on 20 of 20 capsules while the RTL tier passed 1.
     # A screen may eliminate; it may never certify (see merlin.targetgen.tier_policy).
-    _loop_adapters = {} if no_oracle else CR.qa_checkpoint_adapters(_target, _sim_via)
+    _loop_adapters = {} if no_oracle else CR.qa_checkpoint_adapters(_target, _sim_via, **readback_kwargs(context))
     # Refuse ONLY when the endpoint exposes tiers but none of them is declared — substituting one there is
     # the defect. An endpoint that reaches nothing at all is an honestly ABSENT oracle: leave the adapter
     # set empty and let each capsule report its missing tier as unavailable, exactly as before.
@@ -806,6 +819,7 @@ def run(
         submission,
         capsules_root=capsules_root,
         runs_root=str(runs_root),
+        model_snapshot_root=runs_root.resolve() / ".private_model_sources",
         labels=labels,
         contract=str(contract if contract is not None else context.repo / "merlin/contract"),
         oracle_adapters=_loop_adapters,

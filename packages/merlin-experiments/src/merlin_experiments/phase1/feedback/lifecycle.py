@@ -19,7 +19,7 @@ from typing import Protocol
 from merlin.common.paths import module_source_path
 from merlin.targetgen import tool_registry as _TR
 
-from ..context import InvocationContext
+from ..context import InvocationContext, context_argv
 
 FIRST_BACKGROUND_TICK = 900
 FIRST_GRADE_POLL_S = 30
@@ -115,7 +115,11 @@ def start_brokers(ws: Path, config: BrokerConfig):
                 "merlin_experiments.phase1.brokers.selfcheck",
                 "merlin_experiments.phase1.brokers.simjob",
             }:
-                argv += ["--descriptor", str(config.context.descriptor), "--repo", str(config.context.repo)]
+                if name == "merlin_experiments.phase1.brokers.isa_tools":
+                    # ISA inspection does not execute or grade output buffers.
+                    argv += ["--descriptor", str(config.context.descriptor), "--repo", str(config.context.repo)]
+                else:
+                    argv += context_argv(config.context)
             if config.selected_rtl_facts is not None and name in {
                 "merlin_experiments.phase1.brokers.isa_tools",
                 "merlin_experiments.phase1.brokers.cca",

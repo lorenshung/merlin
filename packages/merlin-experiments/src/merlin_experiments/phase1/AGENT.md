@@ -57,6 +57,10 @@ Bundle manifests use the canonical `input_bundle_manifest.yaml` filename; altern
 are refused before mutation rather than reading one declaration and freezing another.
 Fresh repository attribution uses the explicit context root (not an unrelated ambient root);
 resume preserves the original environment record, including its repository identity.
+An optional invocation readback policy is recorded separately from capsule bytes and
+is immutable during resume and formal grading. Context arguments carry that same
+selection to trusted grading children; absent selection preserves legacy calls.
+The transport changes output serialization, never numerical tolerances or host placement.
 
 `run_inputs.py` owns private seed/errata/treatment and frozen-input verification helpers.
 It is a grader identity; context itself is not. Preserve original observation order,

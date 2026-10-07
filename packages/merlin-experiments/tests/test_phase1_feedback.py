@@ -31,6 +31,82 @@ def _context(root):
     )
 
 
+def test_legacy_model_failure_without_candidate_branch_keeps_its_failure_plane(tmp_path):
+    result_path = tmp_path / "runs" / "fixture-suite" / "model_case" / "capsule_result.json"
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text(
+        json.dumps(
+            {
+                "capsule": "model_case",
+                "kind": "model",
+                "status": "incomplete",
+                "failure": {
+                    "plane": "model",
+                    "category": "NOT_RUN_IS_NOT_PASS",
+                    "detail": "model runtime unavailable",
+                },
+                "model_execution_check": {
+                    "kind": "model_accelerator_execution",
+                    "candidate_native_model_check": None,
+                },
+            }
+        )
+    )
+
+    projected = qa._per_capsule_from_results(tmp_path)["model_case"]
+    assert projected["candidate_native_verification"] is None
+    assert projected["failure_plane"] == "model"
+    assert projected["failure_detail"] == "model runtime unavailable"
+
+
+def test_entered_candidate_branch_with_missing_verification_stays_unverified(tmp_path):
+    result_path = tmp_path / "runs" / "fixture-suite" / "model_case" / "capsule_result.json"
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text(
+        json.dumps(
+            {
+                "capsule": "model_case",
+                "kind": "model",
+                "status": "incomplete",
+                "legacy_model_diagnostic": {"status": "incomplete"},
+                "model_execution_check": {
+                    "kind": "model_accelerator_execution",
+                    "candidate_native_model_check": None,
+                },
+            }
+        )
+    )
+
+    projected = qa._per_capsule_from_results(tmp_path)["model_case"]
+    assert projected["candidate_native_verification"] == {
+        "status": "unverified",
+        "reason": "candidate_verification_record_unrecognized",
+    }
+    assert projected["failure_plane"] == "model_execution"
+
+
+def test_null_top_level_candidate_record_is_not_treated_as_legacy(tmp_path):
+    result_path = tmp_path / "runs" / "fixture-suite" / "model_case" / "capsule_result.json"
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text(
+        json.dumps(
+            {
+                "capsule": "model_case",
+                "kind": "model",
+                "status": "incomplete",
+                "candidate_native_model_check": None,
+                "model_execution_check": {"kind": "model_accelerator_execution"},
+            }
+        )
+    )
+
+    projected = qa._per_capsule_from_results(tmp_path)["model_case"]
+    assert projected["candidate_native_verification"] == {
+        "status": "unverified",
+        "reason": "candidate_verification_record_unrecognized",
+    }
+
+
 @pytest.mark.parametrize("nested", [False, True])
 @pytest.mark.parametrize("native_numeric", [None, "pass", "fail"])
 def test_qa_keeps_candidate_verification_separate_from_legacy_coverage(tmp_path, monkeypatch, nested, native_numeric):

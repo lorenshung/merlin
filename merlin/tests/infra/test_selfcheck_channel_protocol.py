@@ -7,6 +7,7 @@ clients; otherwise one fresh self-check can sit behind hours of replayed grading
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import json
 import math
@@ -25,6 +26,10 @@ HARNESS = merlin_dir() / "experiments/capsule_bench/harness"
 
 
 def _module(name: str):
+    if name == "selfcheck_broker":
+        # Production launches this broker with ``python -m``; a fabricated
+        # top-level module name cannot resolve its package-relative imports.
+        return importlib.import_module("merlin_experiments.phase1.brokers.selfcheck")
     if str(HARNESS) not in sys.path:
         sys.path.insert(0, str(HARNESS))
     source = (

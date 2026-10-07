@@ -240,6 +240,11 @@ def main(argv=None):
     # got "unrecognized arguments" for it.
     ap.add_argument("--offload-census", action="store_true")
     ap.add_argument("--model-layers", action="store_true")
+    ap.add_argument(
+        "--caller-layout",
+        default="",
+        help="inspect an emitted submission-relative command buffer's physical caller layout without grading",
+    )
     # WALL-CLOCK BOUND, and the reason it exists is measured. The caller of this shim is an agent whose
     # shell tool kills any command at 600s. A full-suite check runs 2.4-14.7 min, so the blocking wait
     # below was routinely killed mid-flight: the request stayed alive broker-side, the agent got back
@@ -263,7 +268,7 @@ def main(argv=None):
     )
     a = ap.parse_args(argv)
 
-    policy_error = _sim_policy_error(a.sim)
+    policy_error = None if a.caller_layout else _sim_policy_error(a.sim)
     if policy_error:
         txt = json.dumps(
             {"error": policy_error, "all_pass": False, "sim": a.sim, "required_rtl_engine": _required_rtl_engine()}
@@ -308,7 +313,7 @@ def main(argv=None):
                     "deadline_unix_ns": int(deadline * 1_000_000_000),
                     # Omitted entirely when the caller named none: an ABSENT key lets the driver
                     # resolve the engine, where a present one is a choice the broker must honour.
-                    **({"sim": a.sim} if a.sim else {}),
+                    **({"sim": a.sim} if a.sim and not a.caller_layout else {}),
                     **({"tiers": a.tiers} if a.tiers else {}),
                     "capsules": a.capsules,
                     "workers": a.workers,
@@ -316,6 +321,7 @@ def main(argv=None):
                     "shape_coverage": bool(a.shape_coverage),
                     "offload_census": bool(a.offload_census),
                     "model_layers": bool(a.model_layers),
+                    "caller_layout": a.caller_layout,
                 }
             ),
         )
@@ -393,6 +399,8 @@ def main(argv=None):
             # the shape-coverage report has no `all_pass`; its verdict is `all_covered`
             if a.shape_coverage:
                 return 0 if _v.get("all_covered") else 1
+            if _v.get("status") == "layout_only":
+                return 0 if _v.get("schema") == "public_caller_layout_receipt_v1" else 2
             return 0 if _v.get("all_pass") else 1
         time.sleep(0.4)
     if a.wait_budget > 0 and time.time() < deadline:

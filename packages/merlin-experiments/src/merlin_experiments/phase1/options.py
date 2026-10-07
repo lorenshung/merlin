@@ -56,6 +56,7 @@ class RunOptions:
     without_tool: list[str]
     account_config_dir: str
     private_full_model_spec: str = ""
+    readback_policy: str = ""
 
 
 def build_parser(
@@ -245,6 +246,12 @@ def build_parser(
     )
     ap.add_argument("--no-oracle", action="store_true", help="QA = L0+trace only (fast dev)")
     ap.add_argument("--skip-hidden", action="store_true")
+    ap.add_argument(
+        "--readback-policy",
+        choices=("out_b64_v1",),
+        default="",
+        help="explicit full-value output transport; recorded for the run and immutable on resume",
+    )
     ap.add_argument(
         "--private-full-model-spec",
         default="",

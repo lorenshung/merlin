@@ -102,6 +102,13 @@ def test_interleaved_invocations_keep_snapshot_policy_order_and_publication(tmp_
         verdict["shape_coverage"] = {"all_covered": True}
 
     monkeypatch.setattr(G, "_attach_shape_generalization", shape)
+
+    def scalability(verdict, *args, context, **kwargs):
+        assert kwargs["additional_forbidden"] == config.additional_forbidden
+        events.append(("scalability", context.target))
+        verdict["codegen_scalability"] = {"ran": True, "scope": "public_emit_only"}
+
+    monkeypatch.setattr(G, "_attach_codegen_scalability", scalability)
     monkeypatch.setattr(G, "_record_plateau", lambda *a: events.append("plateau"))
     monkeypatch.setattr(G.FL, "record_channel_health", lambda *a: events.append("health"))
 
@@ -173,6 +180,7 @@ def test_interleaved_invocations_keep_snapshot_policy_order_and_publication(tmp_
             ("grade", config.context.target),
             "ledger",
             ("shape", config.context.target),
+            ("scalability", config.context.target),
             "plateau",
             "health",
             ("policy", config.context.target, config.promotion_root),

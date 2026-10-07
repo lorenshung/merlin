@@ -174,6 +174,7 @@ def _verify_phase0_sources(plan: dict) -> None:
                     Path(selection["root"]),
                     Path(selection["python"]),
                     synth_profile=Path(profile) if profile else None,
+                    require_source_origin="source_origin" in selection,
                 )
             except (OSError, ValueError) as exc:
                 raise SpecError(f"selected Model2MLIR runtime is unavailable: {exc}") from exc
@@ -609,6 +610,7 @@ def resolve_plan(
                     Path(choice["m2m_root"]),
                     Path(choice["m2m_python"]),
                     synth_profile=Path(profile) if profile else None,
+                    require_source_origin=config.get("evidence_mode") != "diagnostic",
                 )
                 command["input_owner_roots"].append(command["phase0_m2m_selection"]["base"])
             except (OSError, ValueError) as exc:

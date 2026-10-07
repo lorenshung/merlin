@@ -420,6 +420,7 @@ ADAPTERS = {
             "round_timeout": _REQUIRED_POSITIVE,
             "grade_interval": _POSITIVE,
             "qa_timeout": _POSITIVE,
+            "readback_policy": Option(choices=("out_b64_v1",)),
             "sim_max_jobs": _POSITIVE,
             "model_budget_s": _POSITIVE,
             "plateau_rounds": _POSITIVE,

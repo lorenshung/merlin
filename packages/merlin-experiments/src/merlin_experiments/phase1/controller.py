@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -50,6 +51,10 @@ def run(
     """
     if source_entrypoint is not None and not require_native_source:
         raise ValueError("a source entrypoint override requires native source verification")
+    if options.readback_policy:
+        if context.readback_policy is not None and context.readback_policy != options.readback_policy:
+            raise ValueError("context and invocation readback policies differ")
+        context = replace(context, readback_policy=options.readback_policy)
 
     from . import authoring, runtime_environment, session, task_staging, treatments
 

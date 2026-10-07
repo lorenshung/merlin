@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -28,7 +29,7 @@ from . import oot_history as _oot_history
 from . import run_inputs as RI
 from . import source_inputs as SI
 from . import treatments as T
-from .context import InvocationContext
+from .context import InvocationContext, readback_record, verify_readback_record
 from .options import RunOptions
 from .workspaces import select_workspace_root
 
@@ -93,6 +94,7 @@ class RunRequest:
             "grade_interval_s": a.grade_interval,
             "selfcheck_protocol": 3,
             "launcher_argv": list(self.launcher_argv),
+            **({"readback_policy": readback_record(self.context)} if self.context.readback_policy is not None else {}),
         }
 
     @property
@@ -159,6 +161,7 @@ class PreparedRun:
         }
 
     def verify_inputs(self) -> None:
+        verify_readback_record(self.request.context, self.environment.get("readback_policy"))
         sources = self.environment["implementation_sources"]
         SI.verify(sources, **self.request.source_context)
         if T.record(self.request.treatment, sources) != self.environment["invocation_treatment"]:
@@ -182,6 +185,16 @@ class PreparedRun:
                 or file_sha256(self.private_full_model_spec) != private.get("frozen_sha256")
             ):
                 raise RuntimeError("frozen operator-private full-model specification changed")
+            source_freeze = private.get("source_freeze")
+            if source_freeze is not None:
+                from .feedback import private_source_freeze
+
+                private_source_freeze.verify(
+                    self.private_full_model_spec,
+                    source_freeze,
+                    root=self.run_dir / "private_full_model_input" / "sources",
+                    target=self.request.context.target,
+                )
         corpus_record = self.environment.get("public_corpus_input")
         if corpus_record is not None:
             view = CI.resolve(
@@ -220,6 +233,58 @@ def task_scope(
         "held_out_capsules": len(hidden),
         "sandbox": sandbox,
         "scope_source": "TargetExperiment.graded_roots + labels public,dev + formal cohort policy",
+    }
+
+
+def model_python_selection(
+    te, *, repo: Path, public_roots=None, hidden_roots=None, contract: Path | None = None, prior: dict | None = None
+) -> dict | None:
+    """Bind an explicit host Torch interpreter only when the graded scope contains models.
+
+    The core model loader already honors ``MERLIN_M2M_PYTHON``. Select that same
+    operator-owned value here before authoring; a sibling checkout is not runtime
+    authority for an installed Phase 1 invocation.
+    """
+    from merlin.compile.model_execution_inputs import file_sha256
+    from merlin.targetgen.capsule_common import discover_capsules
+
+    contract = contract if contract is not None else repo / "merlin" / "contract"
+    public = discover_capsules(
+        te.graded_roots() if public_roots is None else public_roots, labels={"public", "dev"}, contract=contract
+    )
+    hidden = discover_capsules(
+        te.hidden_roots() if hidden_roots is None else hidden_roots, labels={"hidden"}, contract=contract
+    )
+    excluded = set(te.effective_exclusions(cap.get("name") for cap in public))
+    if not any(cap.get("kind") == "model" and cap.get("name") not in excluded for cap in public) and not any(
+        cap.get("kind") == "model" for cap in hidden
+    ):
+        return None
+    if prior is not None and "model_python_selection" not in prior:
+        raise RuntimeError("resume refused: model run has no bound Python selection; start a fresh run")
+    value = os.environ.get("MERLIN_M2M_PYTHON", "")
+    selected = Path(value)
+    if not value or not selected.is_absolute() or not selected.is_file() or not os.access(selected, os.X_OK):
+        raise ValueError("graded model capsules require an explicit executable MERLIN_M2M_PYTHON")
+    resolved = selected.resolve(strict=True)
+    marker = "MERLIN_MODEL_PYTHON_READY"
+    try:
+        probe = subprocess.run(
+            [str(selected), "-I", "-B", "-c", f"import torch, numpy, safetensors; print({marker!r})"],
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError("selected MERLIN_M2M_PYTHON could not complete the bounded Torch import probe") from exc
+    if probe.returncode != 0 or probe.stdout.strip().splitlines()[-1:] != [marker]:
+        raise ValueError("selected MERLIN_M2M_PYTHON cannot import Torch, NumPy and safetensors")
+    return {
+        "path": str(selected),
+        "resolved_path": str(resolved),
+        "sha256": file_sha256(selected),
+        "size_bytes": selected.stat().st_size,
     }
 
 
@@ -322,6 +387,7 @@ def prepare(
             raise RuntimeError(f"resume refused: environment record unreadable: {exc}") from exc
         if not isinstance(_environment_record, dict):
             raise RuntimeError("resume refused: environment record is not a mapping")
+        verify_readback_record(context, _environment_record.get("readback_policy"))
         _implementation_sources = _environment_record.get("implementation_sources")
         SI.verify(_implementation_sources, **_source_context)
     else:
@@ -538,6 +604,20 @@ def prepare(
         "contract": _contract_root,
     }
     _task_scope_record = task_scope(_te(), a.sandbox, repo=context.repo, **_scope_roots)
+    try:
+        _model_python_selection = model_python_selection(
+            _te(),
+            repo=context.repo,
+            public_roots=_scope_roots["public_roots"],
+            hidden_roots=_scope_roots["hidden_roots"],
+            contract=_contract_root,
+            prior=_environment_record if _resuming else None,
+        )
+    except (OSError, ValueError) as exc:
+        print(f"NO_GO: {exc}. Refusing model authoring before grade or agent spend.", file=sys.stderr)
+        return 4
+    if _resuming and _environment_record.get("model_python_selection") != _model_python_selection:
+        raise RuntimeError("resume refused: selected model Python path or bytes changed")
 
     # Stage every prompt/document before provenance is written.  On resume these bytes are NEVER rebuilt
     # from the current worktree; they must match the treatment record from the first invocation.
@@ -625,7 +705,9 @@ def prepare(
             "sandbox": a.sandbox,
             "qa_loop": True,
             "run_config": _run_config,
+            **({"readback_policy": readback_record(context)} if context.readback_policy is not None else {}),
             "task_scope": _task_scope_record,
+            **({"model_python_selection": _model_python_selection} if _model_python_selection is not None else {}),
             "workspace_path": str(ws),
             "workspace_copy_report": copy_report,
             "seed_submission": _seed_submission_record,

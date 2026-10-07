@@ -66,6 +66,30 @@ def test_real_canonical_tool_broker_request_and_shutdown(tmp_path, monkeypatch):
     assert not (workspace / "merlin_experiments").exists()
 
 
+def test_output_transport_selection_does_not_break_isa_broker_startup(tmp_path, monkeypatch):
+    monkeypatch.setattr(L._TR, "COMMON_BROKERS", ())
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(map(str, python_import_roots())))
+    config = _config(tmp_path, tools=("isa_tools",))
+    config.context.descriptor.write_text("target: fixture\n")
+    config = replace(config, context=replace(config.context, readback_policy="out_b64_v1"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    real_popen, observed = subprocess.Popen, []
+
+    def spawn(argv, **kwargs):
+        observed.append(argv)
+        return real_popen(argv, **kwargs)
+
+    monkeypatch.setattr(L.subprocess, "Popen", spawn)
+    brokers = L.start_brokers(workspace, config)
+    try:
+        assert len(brokers) == 1 and "--readback-policy" not in observed[0]
+        assert brokers[0].poll() is None
+    finally:
+        L.stop_brokers(workspace, brokers)
+    assert brokers[0].returncode == 0
+
+
 def test_host_tool_broker_uses_only_selected_frozen_facts(tmp_path, monkeypatch):
     from merlin_experiments.phase1.frozen_facts import select
 

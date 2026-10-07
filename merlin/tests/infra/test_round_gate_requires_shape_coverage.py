@@ -50,10 +50,10 @@ _M_UNCOVERED = {
     "baseline_tile_lowered": True,
     "all_covered": False,
     "multi_tile_axes_uncovered": ["m"],
-    "emitted_work": {"tile": 418, "m_2tiles": 5},
+    "emitted_work": {"tile": 418, "m_2tiles": 0},
     "corners": [
         {"corner": "tile", "outcome": "lowered"},
-        {"corner": "m_2tiles", "outcome": "collapsed", "detail": "cannot compute more by doing less"},
+        {"corner": "m_2tiles", "outcome": "declined", "detail": "no M-axis lowering"},
     ],
 }
 
@@ -74,6 +74,20 @@ def test_a_covered_backend_still_converges(loop, monkeypatch, tmp_path):
     assert v["shape_coverage"]["all_covered"] is True
 
 
+def test_a_tail_decline_remains_a_required_failure_with_accurate_feedback(loop, monkeypatch, tmp_path):
+    cov = {
+        **_COVERED,
+        "all_covered": False,
+        "tail_cases_uncovered": ["n_tail"],
+        "tail_axes_uncovered": ["n"],
+        "corners": [*_COVERED["corners"], {"corner": "n_tail", "outcome": "declined"}],
+    }
+    v = _run(loop, monkeypatch, tmp_path, {"all_pass": True}, cov=cov)
+    assert v["all_pass"] is False
+    assert v["shape_coverage"]["tail_cases_uncovered"] == ["n_tail"]
+    assert "tail case(s) ['n_tail']" in v["not_converged_reason"]
+
+
 def test_the_gate_never_flips_a_failing_round_to_passing(loop, monkeypatch, tmp_path):
     v = _run(loop, monkeypatch, tmp_path, {"all_pass": False, "n_passed": 3, "n_capsules": 26}, cov=_COVERED)
     assert v["all_pass"] is False
@@ -87,6 +101,8 @@ def test_a_probe_that_could_not_run_is_recorded_as_not_run(loop, monkeypatch, tm
     assert sc["ran"] is False
     assert "no oracle venv" in sc["error"]
     assert "NOT a pass" in sc["note"]
+    assert v["all_pass"] is False
+    assert "did not run" in v["not_converged_reason"]
 
 
 def test_a_down_baseline_is_reported_without_naming_axes(loop, monkeypatch, tmp_path):

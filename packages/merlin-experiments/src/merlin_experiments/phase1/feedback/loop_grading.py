@@ -20,7 +20,7 @@ from merlin.targetgen.target_experiment import load_target_experiment
 from merlin_experiments.phase1 import oot_history as OH
 from merlin_experiments.phase1 import run_inputs as RI
 from merlin_experiments.phase1 import treatments as T
-from merlin_experiments.phase1.context import InvocationContext
+from merlin_experiments.phase1.context import InvocationContext, readback_kwargs
 from merlin_experiments.phase1.feedback import lifecycle as FL
 
 
@@ -81,9 +81,14 @@ def cert_tiers_beyond_loop(
 
     try:
         te = load_target_experiment(context.descriptor)
-        ck = _CR.qa_checkpoint_adapters(te.target, te.sim_via)
-        loop = _CR.qa_loop_adapters(te.target, te.sim_via, declared_tiers=declared_loop_tiers(policy_roots))
+        ck = _CR.qa_checkpoint_adapters(te.target, te.sim_via, **readback_kwargs(context))
+        loop = _CR.qa_loop_adapters(
+            te.target, te.sim_via, declared_tiers=declared_loop_tiers(policy_roots), **readback_kwargs(context)
+        )
     except Exception:  # noqa: BLE001 — no resolvable checkpoint oracle -> nothing to gate on
+        if context.readback_policy is not None:
+            # An explicit transport must never silently remove certification tiers.
+            raise
         ck, loop = {}, {}
     cert_tiers = set(ck) - set(loop)  # the cycle-accurate cert tiers held back from the fast loop
     if not cert_tiers:
@@ -251,6 +256,17 @@ def grade(
             contract=inputs.contract,
             additional_forbidden=inputs.additional_forbidden,
         )
+        _attach_codegen_scalability(
+            verdict,
+            cand,
+            run_dir,
+            rnd,
+            timeout=timeout,
+            artifact_key=scratch_key,
+            context=inputs.context,
+            contract=inputs.contract,
+            additional_forbidden=inputs.additional_forbidden,
+        )
         _record_plateau(run_dir)  # operator-side; deliberately not in the agent's verdict
         FL.record_channel_health(ws, run_dir)
     # PROMOTE off the round grade too. Promotion is hooked into both BROKERS, but a broker only sees a
@@ -390,7 +406,12 @@ def fast_grade(
     RI.strip_build_state(cand)
     fruns = run_dir / "_qa_work" / f"fruns_{tick}"
     te = load_target_experiment(inputs.context.descriptor)
-    adapters = _CR.qa_loop_adapters(te.target, te.sim_via, declared_tiers=declared_loop_tiers(inputs.policy_roots))
+    adapters = _CR.qa_loop_adapters(
+        te.target,
+        te.sim_via,
+        declared_tiers=declared_loop_tiers(inputs.policy_roots),
+        **readback_kwargs(inputs.context),
+    )
     _, _withheld = cert_tiers_beyond_loop(
         context=inputs.context,
         policy_roots=inputs.policy_roots,
@@ -401,6 +422,7 @@ def fast_grade(
             str(cand),
             capsules_root=str(inputs.public_root() if callable(inputs.public_root) else inputs.public_root),
             runs_root=str(fruns),
+            model_snapshot_root=fruns.resolve() / ".private_model_sources",
             labels={"public", "dev"},
             contract=str(inputs.contract if inputs.contract is not None else inputs.context.repo / "merlin/contract"),
             oracle_adapters=adapters,
@@ -447,10 +469,9 @@ def _attach_shape_generalization(
 ) -> None:
     """Probe whether this round's candidate LOWERS shapes past a single tile, and fold it into the gate.
 
-    Structural, not numerical: it runs only the emit half of the contract and compares the size of the
-    emitted artifact across shapes, so it costs no oracle, needs no golden, and works on an operand
-    format that has no CPU reference. See :mod:`merlin.targetgen.lowering_coverage` for the invariant
-    ("a program for a bigger problem cannot be smaller") and why it is per-axis.
+    Structural, not numerical: it runs only the emit half of the contract, so it costs no oracle,
+    needs no golden, and works on an operand format that has no CPU reference. Artifact size is
+    reported separately as an advisory observation; a larger shape may use a smaller runtime loop.
 
     Failure to run is RECORDED, never treated as clean -- a probe that did not run reading as a pass is
     the same class of bug as an unavailable oracle scoring as one.
@@ -475,26 +496,36 @@ def _attach_shape_generalization(
             "error": f"{type(e).__name__}: {e}",
             "note": "the shape-coverage probes did NOT run this round; this is NOT a pass.",
         }
+        if verdict.get("all_pass"):
+            verdict["all_pass"] = False
+            verdict["not_converged_reason"] = (
+                "every public capsule passes, but the required shape-coverage probes did not run; "
+                "shape generalization is unmeasured, not a pass"
+            )
         return
 
     verdict["shape_coverage"] = {
         "ran": True,
+        "scope": "public_emit_only",
         "tile_edge": cov.get("tile_edge"),
         "baseline_tile_lowered": cov.get("baseline_tile_lowered"),
         "per_corner": {c["corner"]: c["outcome"] for c in cov.get("corners", [])},
         "emitted_work": cov.get("emitted_work"),
+        "smaller_emitted_artifacts": cov.get("smaller_emitted_artifacts") or [],
         "multi_tile_axes_uncovered": cov.get("multi_tile_axes_uncovered") or [],
+        "tail_cases_uncovered": cov.get("tail_cases_uncovered") or [],
+        "tail_axes_uncovered": cov.get("tail_axes_uncovered") or [],
         "all_covered": bool(cov.get("all_covered")),
         "unmeasured": cov.get("unmeasured"),
         "detail": {c["corner"]: c.get("detail") for c in cov.get("corners", []) if c.get("detail")},
         "note": (
             "DERIVED shape probes, not corpus capsules: the SAME contraction at one tile and at two "
             "tiles in each of M, K and N, at this target's derived tile edge. `emitted_work` is the "
-            "size of the program you emitted for each -- a bigger problem cannot need a SMALLER "
-            "program, so a corner marked `collapsed` is a shape you silently refused. "
-            "`multi_tile_axes_uncovered` names the axis your lowering does not loop over: fix the "
-            "loop, not the arithmetic. If you genuinely cannot lower a shape, DECLARE it "
-            "(`declined` on the command buffer) instead of emitting a terminator."
+            "size of the program you emitted for each. Smaller text is advisory: a runtime loop can "
+            "correctly be more compact. An uncovered axis or tail means its emit probe declined, "
+            "errored or returned no commands; it is not a numerical verdict. If you cannot lower a "
+            "shape, DECLARE it (`declined` on the command buffer) instead of emitting a terminator. "
+            "Compilation and native numerical checks remain separate."
         ),
     }
     # THE GATE. Passing every public capsule while lowering only the shapes they happen to use is exactly
@@ -502,13 +533,54 @@ def _attach_shape_generalization(
     if verdict.get("all_pass") and not verdict["shape_coverage"]["all_covered"]:
         verdict["all_pass"] = False
         verdict["not_converged_reason"] = (
-            "every public capsule passes, but the derived shape probes show the backend does not lower "
+            "every public capsule passes, but the derived shape probes did not confirm lowering "
             + (
                 f"past one tile on axis/axes {verdict['shape_coverage']['multi_tile_axes_uncovered']}"
                 if verdict["shape_coverage"]["multi_tile_axes_uncovered"]
-                else "the baseline tile itself (nothing about shape can be concluded yet)"
+                else (
+                    f"for tail case(s) {verdict['shape_coverage']['tail_cases_uncovered']}"
+                    if verdict["shape_coverage"]["tail_cases_uncovered"]
+                    else "the baseline tile itself (nothing about shape can be concluded yet)"
+                )
             )
         )
+
+
+def _attach_codegen_scalability(
+    verdict: dict,
+    cand,
+    run_dir,
+    rnd: int,
+    *,
+    timeout: int,
+    context: InvocationContext,
+    artifact_key: str | None = None,
+    contract: Path | None = None,
+    additional_forbidden: tuple[str, ...] = (),
+) -> None:
+    """Publish answer-free public size observations without changing scientific grades."""
+    from . import codegen_scalability
+
+    key = artifact_key or f"{rnd:02d}"
+    out = run_dir / "qa_history" / f"codegen_scalability_round_{key}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        observation = codegen_scalability.run(
+            cand,
+            target=context.target,
+            contract=contract,
+            timeout=min(timeout, 30),
+            additional_forbidden=additional_forbidden,
+        )
+        out.write_text(json.dumps(observation, indent=2))
+        verdict["codegen_scalability"] = {"ran": True, **observation}
+    except Exception as exc:  # noqa: BLE001 -- missing advisory measurements are not numerical failures
+        verdict["codegen_scalability"] = {
+            "ran": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "scope": "public_emit_only",
+            "note": "No scalability measurement was obtained; this is not a pass or a numerical verdict.",
+        }
 
 
 def write_verdict(path: Path, verdict: dict) -> dict:

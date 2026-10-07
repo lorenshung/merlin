@@ -17,6 +17,13 @@ def test_parser_fields_have_exactly_one_typed_owner():
     assert dataclasses.asdict(parse_options(["--run-id", "probe"], environ={})) == values
 
 
+def test_readback_policy_is_explicit_and_closed():
+    assert parse_options(["--run-id", "probe"], environ={"MERLIN_READBACK_POLICY": "out_b64_v1"}).readback_policy == ""
+    assert parse_options(["--run-id", "probe", "--readback-policy", "out_b64_v1"]).readback_policy == "out_b64_v1"
+    with pytest.raises(SystemExit):
+        parse_options(["--run-id", "probe", "--readback-policy", "digest_only"])
+
+
 def test_environment_defaults_are_invocation_inputs_not_import_state(monkeypatch):
     explicit = {"AWS_REGION": "region-a", "AWS_PROFILE": "profile-a", "CLAUDE_CONFIG_DIR": "account-a"}
     args = parse_options(["--run-id", "probe"], environ=explicit)

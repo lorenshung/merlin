@@ -39,6 +39,7 @@ from merlin_experiments.phase1.context import (
     InvocationContext,
     add_context_arguments,
     context_argv,
+    readback_kwargs,
     resolve_context,
 )
 from merlin_experiments.phase1.feedback import qa as _qc
@@ -412,7 +413,7 @@ def _sim_policy_error(sim: str, sim_via: str | None) -> str | None:
     return None
 
 
-def _adapters(sim: str, target: str, sim_via: str | None) -> tuple[dict, str]:
+def _adapters(sim: str, target: str, sim_via: str | None, *, readback_policy=None) -> tuple[dict, str]:
     """Resolve the self-check oracle tiers from the TARGET's contract (target-agnostic, mirrors the driver
     grade). A chipyard target (gemmini) exposes the spike/verilator/vcs ladder selectable via --sim; any
     other target grades on its OWN contract-derived RTL tier (atlas external_backend -> the program oracle;
@@ -421,14 +422,17 @@ def _adapters(sim: str, target: str, sim_via: str | None) -> tuple[dict, str]:
     policy_error = _sim_policy_error(sim, sim_via)
     if policy_error:
         raise ValueError(policy_error)
+    kwargs = {} if readback_policy is None else {"readback_policy": readback_policy}
+    if sim == "vcs" and readback_policy is not None:
+        raise ValueError("VCS self-check does not support the selected invocation readback policy")
     if sim_via == "chipyard":
-        ad = {"L2": CR.simulator_adapter("spike", target)}
+        ad = {"L2": CR.simulator_adapter("spike", target, **kwargs)}
         if sim in ("verilator", "gsim"):
             # Build L3 from the engine the caller NAMED. This used to hardcode "verilator", which made
             # --sim gsim silently certify on verilator -- a result attributed to the wrong engine. The
             # adapter factory is engine-generic (it forwards simulator=sim and gates on
             # backend.available(sim)), so an absent engine fails closed here rather than substituting.
-            ad["L3"] = CR.simulator_adapter(sim, target)
+            ad["L3"] = CR.simulator_adapter(sim, target, **kwargs)
         if sim == "vcs":
             # In the unpinned legacy ladder VCS is an L4 addition above Verilator L3.  An experiment-wide
             # VCS pin, however, means *no other RTL engine may run*, so do not build that Verilator rung.
@@ -449,7 +453,7 @@ def _adapters(sim: str, target: str, sim_via: str | None) -> tuple[dict, str]:
                 sim = "verilator"
         return ad, sim
     # non-chipyard target: its contract-resolved tiers (arc / program oracle); --sim does not apply.
-    return CR.oracle_adapters(target, sim_via), sim
+    return CR.oracle_adapters(target, sim_via, **kwargs), sim
 
 
 def _log_telemetry(out: dict, capsules_arg: str) -> None:
@@ -646,7 +650,7 @@ def _model_layers(
                 if member.is_file():
                     (narrowed / name / member.name).symlink_to(member.resolve())
         root = narrowed
-    adapters = CR.oracle_adapters(context.target, experiment.sim_via) or {}
+    adapters = CR.oracle_adapters(context.target, experiment.sim_via, **readback_kwargs(context)) or {}
     # The functional tier only: an elaborated-RTL simulator spends about twenty minutes on ONE such
     # layer. Every row names the tiers withheld, so a pass here reads as the screen it is.
     ladder = tier_policy.tier_depth_order(adapters)
@@ -798,6 +802,11 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
     ap.add_argument("--timeout", type=int, default=1800)
     ap.add_argument("--out", default="", help="optional: also write the redacted JSON here")
     ap.add_argument("--progress-out", default="", help=argparse.SUPPRESS)
+    ap.add_argument(
+        "--caller-layout",
+        default="",
+        help="INSTEAD of grading, inspect a submission-relative command buffer's selected physical pointer layout",
+    )
     # THE FLAG select_tiers WAS WRITTEN FOR. It existed as a function with six tests pinning it and no
     # way to reach it: argparse never accepted --tiers, so the broker's promotion jobs -- which always
     # forward `--tiers <cert_tier>` -- died on "unrecognized arguments: --tiers L3" before doing any
@@ -841,6 +850,25 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
 
         select(Path.cwd(), a.rtl_facts)
     context = resolve_context(a, ap, context)
+    if a.caller_layout:
+        try:
+            if a.rtl_facts is None:
+                raise ValueError("selected frozen RTL facts are required")
+            from .caller_layout import inspect_caller_layout
+
+            result = inspect_caller_layout(
+                submission=Path(a.submission),
+                command_buffer_member=a.caller_layout,
+                target=context.target,
+                facts_path=a.rtl_facts,
+            )
+        except Exception as exc:  # noqa: BLE001 -- never print private host paths or provider text
+            result = {"status": "unavailable", "error": f"caller layout refused: {type(exc).__name__}"}
+        txt = json.dumps(result, indent=2, sort_keys=True)
+        print(txt)
+        if a.out:
+            Path(a.out).write_text(txt)
+        return 0 if result.get("status") == "layout_only" else 2
     if a.sim is None:
         a.sim = _default_sim(context)
     contract = a.contract if a.contract is not None else contract
@@ -890,7 +918,7 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
 
     _tgt, _sim_via = _target_sim_via(context)
     try:
-        adapters, sim = _adapters(a.sim, _tgt, _sim_via)
+        adapters, sim = _adapters(a.sim, _tgt, _sim_via, **readback_kwargs(context))
     except ValueError as exc:
         out = {"error": str(exc), "all_pass": False, "sim": a.sim, "required_rtl_engine": _required_rtl_engine()}
         txt = json.dumps(out, indent=2)
@@ -903,7 +931,7 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
         # Validate the REQUEST against everything the endpoint can reach, not against the cheap loop
         # ladder -- that conflation is exactly what select_tiers documents, and it is why a cert tier
         # (derived as oracle_adapters - qa_loop_adapters) could never be asked for.
-        _full = dict(CR.oracle_adapters(_tgt, _sim_via))
+        _full = dict(CR.oracle_adapters(_tgt, _sim_via, **readback_kwargs(context)))
         _full.update(adapters)  # a --sim-selected tier is reachable by definition
         adapters, _tier_err = select_tiers(_full, adapters, a.tiers)
         if _tier_err:

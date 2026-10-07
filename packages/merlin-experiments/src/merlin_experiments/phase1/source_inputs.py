@@ -149,6 +149,7 @@ def paths(
         ("frozen_import_resolver", "merlin.common.frozen_imports"),
         ("arrival_stamp", "merlin.common.arrival_stamp"),
         ("sandbox_bwrap", "merlin.targetgen.sandbox.bwrap"),
+        ("sandbox_host_surfaces", "merlin.targetgen.sandbox.host_surfaces"),
         ("sandbox_toolchain", "merlin.targetgen.sandbox.toolchain"),
         ("source_discovery_helper", "merlin.common.source_membership"),
         ("provider_selection", "merlin.targetgen.target_registry"),
@@ -175,6 +176,8 @@ def paths(
         ("semantic_search", "merlin.targetgen.semantic_search.search"),
         ("linalg_inventory", "merlin.targetgen.contract.linalg_iface"),
         ("instruction_semantics", "merlin.targetgen.instruction_semantics"),
+        ("readback_policy", "merlin.targetgen.contract.readback_policy"),
+        ("readback_codec", "merlin.runtime.out_b64"),
     ):
         inputs[f"phase1:startup:{key}"] = str(_source(module).resolve())
     try:

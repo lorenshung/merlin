@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import json
 import sys
@@ -20,6 +21,10 @@ HARNESS = merlin_dir() / "experiments/capsule_bench/harness"
 
 
 def _module(name: str):
+    if name in {"selfcheck_broker", "simjob_broker"}:
+        # The launcher invokes brokers with ``python -m``.  Loading a source file
+        # under an invented top-level name breaks its legitimate relative imports.
+        return importlib.import_module(f"merlin_experiments.phase1.brokers.{name.removesuffix('_broker')}")
     if str(HARNESS) not in sys.path:
         sys.path.insert(0, str(HARNESS))
     source = (

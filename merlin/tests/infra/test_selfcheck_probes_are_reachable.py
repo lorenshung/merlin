@@ -52,6 +52,18 @@ def test_the_shim_writes_the_keys_the_broker_reads() -> None:
         assert f'"{key}": bool(a.{key})' in shim, f"the shim never writes request key {key!r}"
 
 
+def test_caller_layout_probe_is_forwarded_without_a_grade() -> None:
+    real = feedback_source("agent_selfcheck").read_text(encoding="utf-8")
+    shim = module_source_path("merlin_experiments.phase1.tools.selfcheck").read_text(encoding="utf-8")
+    broker = feedback_source("selfcheck_broker").read_text(encoding="utf-8")
+    assert 'ap.add_argument(\n        "--caller-layout"' in real
+    assert 'ap.add_argument(\n        "--caller-layout"' in shim
+    assert '"caller_layout": a.caller_layout' in shim
+    assert 'if r.get("caller_layout"):' in broker
+    assert 'argv2.extend(("--caller-layout", str(r["caller_layout"])))' in broker
+    assert 'if a.caller_layout:' in real and 'status") == "layout_only"' in real
+
+
 def test_the_model_layer_probe_honors_the_capsule_names_it_is_given() -> None:
     """A probe that widens a one-capsule request back to the whole corpus wastes the agent's only
     self-check slot, and says nothing about having done it. Held by source, because running the

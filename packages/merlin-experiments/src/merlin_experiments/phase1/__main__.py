@@ -69,7 +69,8 @@ def main(argv: list[str] | None = None) -> int:
     # launcher, checkout discovery or machine-specific library default is used.
     from .context import load_context
 
-    context = load_context(descriptor, repo=repo)
+    context_kwargs = {"readback_policy": options.readback_policy} if options.readback_policy else {}
+    context = load_context(descriptor, repo=repo, **context_kwargs)
     from .controller import run
 
     treatment = None

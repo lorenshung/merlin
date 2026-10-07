@@ -32,6 +32,7 @@ from merlin_experiments.phase1 import run_inputs as RI
 from merlin_experiments.phase1 import spend as SPEND
 from merlin_experiments.phase1 import treatments as T
 from merlin_experiments.phase1.audit import AnswerAudit
+from merlin_experiments.phase1.context import context_argv
 from merlin_experiments.phase1.feedback import certification as CERT
 from merlin_experiments.phase1.feedback import lifecycle as FL
 from merlin_experiments.phase1.feedback import loop_grading as LG
@@ -965,6 +966,7 @@ def execute(prepared: PreparedRun, runtime: AuthoringRuntime) -> int:
                 str(vcand),
                 capsules_root=_roots,
                 runs_root=str(vruns),
+                model_snapshot_root=vruns.resolve() / ".private_model_sources",
                 labels={"public", "dev"},
                 contract=str(_contract_root if _contract_root is not None else context.repo / "merlin/contract"),
                 oracle_adapters=adapters,
@@ -1348,10 +1350,7 @@ def execute(prepared: PreparedRun, runtime: AuthoringRuntime) -> int:
             sys.executable,
             "-m",
             "merlin_experiments.phase1.feedback.formal",
-            "--descriptor",
-            str(context.descriptor),
-            "--repo",
-            str(context.repo),
+            *context_argv(context),
             "--contract",
             str(_contract_root if _contract_root is not None else context.repo / "merlin/contract"),
             "--run-dir",

@@ -412,7 +412,7 @@ def main(
                 _atomic_write(resp, json.dumps(doc))
                 _atomic_write(ch / f"done_{rid}", "err")
                 continue
-        sim = str(r.get("sim") or _default_sim() or "") or None
+        sim = None if r.get("caller_layout") else str(r.get("sim") or _default_sim() or "") or None
         policy_error = _sim_policy_error(sim) if sim else None
         if policy_error:
             doc = _decorate_response(
@@ -466,6 +466,8 @@ def main(
         for key, flag in FORWARDED_PROBES.items():
             if key != "shape_coverage" and r.get(key):
                 argv2.append(flag)
+        if r.get("caller_layout"):
+            argv2.extend(("--caller-layout", str(r["caller_layout"])))
         try:
             # Run the REAL self-check OUTSIDE the sandbox (oracle available); cwd=ws so the agent's own
             # artifacts land in <ws>/selfcheck_out/ (visible to the agent through the bind mount).

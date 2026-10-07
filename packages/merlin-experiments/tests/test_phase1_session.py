@@ -225,6 +225,109 @@ def test_tooling_no_go_refuses_before_codegen_or_authoring(project, monkeypatch)
     assert observed == [("fixture", "fixture", ("after-stage",))]
 
 
+def test_readback_selection_is_frozen_across_real_admission_and_resume(project, monkeypatch):
+    from merlin_experiments.phase1.context import readback_record
+
+    _external_substitutes(monkeypatch)
+    base = _request(project)
+    request = dataclasses.replace(
+        base,
+        context=dataclasses.replace(base.context, readback_policy="out_b64_v1"),
+        options=dataclasses.replace(base.options, readback_policy="out_b64_v1"),
+    )
+
+    def admitted(prepared):
+        prepared.verify_inputs()
+        assert prepared.environment["readback_policy"] == readback_record(request.context)
+        assert prepared.environment["run_config"]["readback_policy"] == readback_record(request.context)
+        return 0
+
+    assert _run(request, admitted) == 0
+    resumed = dataclasses.replace(request, options=dataclasses.replace(request.options, resume=True))
+    assert _run(resumed, admitted) == 0
+    with pytest.raises(RuntimeError, match="readback policy"):
+        _run(_request(project, resume=True), lambda _: pytest.fail("resume dropped frozen output transport"))
+
+
+def test_model_scope_refuses_missing_explicit_torch_interpreter_before_authoring(project, monkeypatch):
+    capsule = project / "corpus/isa/public_member/capsule.yaml"
+    declaration = yaml.safe_load(capsule.read_text())
+    declaration["kind"] = "model"
+    declaration["operation"] = {"op": "model", "attributes": {}}
+    capsule.write_text(yaml.safe_dump(declaration))
+    monkeypatch.setenv("MERLIN_M2M_DIR", str(project / "missing-model2MLIR"))
+    monkeypatch.delenv("MERLIN_M2M_PYTHON", raising=False)
+    monkeypatch.delenv("MERLIN_M2M_VENV", raising=False)
+    _external_substitutes(monkeypatch)
+
+    assert _run(_request(project), lambda _: pytest.fail("authoring continued with no model Python")) == 4
+
+
+def test_hidden_model_scope_also_requires_selected_torch_interpreter(project, monkeypatch):
+    capsule = project / "corpus/hidden/hidden_member/capsule.yaml"
+    declaration = yaml.safe_load(capsule.read_text())
+    declaration["kind"] = "model"
+    declaration["operation"] = {"op": "model", "attributes": {}}
+    capsule.write_text(yaml.safe_dump(declaration))
+    monkeypatch.delenv("MERLIN_M2M_PYTHON", raising=False)
+    _external_substitutes(monkeypatch)
+
+    assert _run(_request(project), lambda _: pytest.fail("authoring continued with no hidden-model Python")) == 4
+
+
+def test_model_scope_binds_selected_python_and_refuses_resume_drift(project, monkeypatch):
+    capsule = project / "corpus/isa/public_member/capsule.yaml"
+    declaration = yaml.safe_load(capsule.read_text())
+    declaration["kind"] = "model"
+    declaration["operation"] = {"op": "model", "attributes": {}}
+    capsule.write_text(yaml.safe_dump(declaration))
+    selected = project / "selected-python"
+    selected.write_text("#!/bin/sh\necho MERLIN_MODEL_PYTHON_READY\n")
+    selected.chmod(0o755)
+    monkeypatch.setenv("MERLIN_M2M_PYTHON", str(selected))
+    _external_substitutes(monkeypatch)
+
+    def admitted(prepared):
+        binding = prepared.environment["model_python_selection"]
+        assert binding["path"] == str(selected)
+        assert binding["resolved_path"] == str(selected.resolve())
+        assert binding["sha256"]
+        child = subprocess.check_output(
+            [sys.executable, "-B", "-c", "import os; print(os.environ['MERLIN_M2M_PYTHON'])"], text=True
+        )
+        assert child.strip() == str(selected)
+        return 0
+
+    assert _run(_request(project), admitted) == 0
+    assert _run(_request(project, resume=True), admitted) == 0
+    changed = project / "same-bytes-different-selection"
+    changed.symlink_to(selected)
+    monkeypatch.setenv("MERLIN_M2M_PYTHON", str(changed))
+    with pytest.raises(RuntimeError, match="selected model Python path or bytes changed"):
+        _run(_request(project, resume=True), lambda _: pytest.fail("resume admitted changed interpreter"))
+    record = project / "out/runs/fixture/phase1/one/environment.yaml"
+    environment = yaml.safe_load(record.read_text())
+    environment.pop("model_python_selection")
+    record.write_text(yaml.safe_dump(environment))
+    with pytest.raises(RuntimeError, match="no bound Python selection; start a fresh run"):
+        _run(_request(project, resume=True), lambda _: pytest.fail("resume admitted unbound interpreter"))
+
+
+def test_model_scope_refuses_selected_python_without_torch_before_authoring(project, monkeypatch):
+    capsule = project / "corpus/isa/public_member/capsule.yaml"
+    declaration = yaml.safe_load(capsule.read_text())
+    declaration["kind"] = "model"
+    declaration["operation"] = {"op": "model", "attributes": {}}
+    capsule.write_text(yaml.safe_dump(declaration))
+    selected = project / "python-without-torch"
+    selected.write_text("#!/bin/sh\nexit 23\n")
+    selected.chmod(0o755)
+    monkeypatch.setenv("MERLIN_M2M_PYTHON", str(selected))
+    _external_substitutes(monkeypatch)
+
+    assert _run(_request(project), lambda _: pytest.fail("authoring continued without Torch")) == 4
+
+
 def test_real_prepare_retains_views_and_post_staging_tool_observation(project, monkeypatch):
     _external_substitutes(monkeypatch)
     request = _request(project)
