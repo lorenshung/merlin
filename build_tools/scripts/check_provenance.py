@@ -11,6 +11,9 @@ WHAT IS CHECKED, in increasing severity:
 
 1. The pin registry loads and every pin declares a full sha (always enforced -- a malformed registry means
    nothing downstream can be verified).
+1b. Bytes the registry records as UNRECOVERABLE are printed on every run. A loss record exists because
+   the artifacts citing the lost digest do NOT fail -- they never re-hash it -- so nothing else would
+   ever mention them. A malformed loss section is fatal, like a malformed registry.
 2. Tracked reports that CLAIM a verdict (``certified: true``) carry a ``provenance`` block naming the
    revision. Enforced for reports not in the ratchet list below.
 3. Where the checkout is reachable, pins are verified and material drift is reported.
@@ -260,6 +263,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"provenance: FAILED — pin registry unusable: {exc}", file=sys.stderr)
         return _hook_result(stop_hook, f"provenance: pin registry unusable: {exc}")
     notes.append(f"{len(pins)} pin(s) declared: {', '.join(sorted(pins))}")
+
+    # 1b. Bytes recorded as UNRECOVERABLE, surfaced on every run (not only under --verify-pins): the
+    # artifacts citing them never re-hash, so this is the only place anyone is told.
+    try:
+        lost = P.load_lost()
+    except Exception as exc:  # noqa: BLE001 — an unreadable account of a loss is not an account
+        print(f"provenance: FAILED — loss registry unusable: {exc}", file=sys.stderr)
+        return _hook_result(stop_hook, f"provenance: loss registry unusable: {exc}")
+    for name in sorted(lost):
+        rec = lost[name]
+        notes.append(
+            f"{rec.state} {name}: {rec.digest[:12]} lost {rec.lost_on} ({rec.path or 'path unrecorded'}); "
+            f"do not re-declare these bytes; {len(rec.still_verifies)} thing(s) still verify"
+        )
 
     # 2. Tracked reports that claim a verdict.
     allow = _ratcheted()

@@ -47,3 +47,7 @@ never swallowed as a per-group failure.
 
 `strict_json` rejects ambiguous keys, non-finite numbers and oversized authority
 records before consumers interpret them; it does not confer provenance or admission.
+
+`provenance_lost` records explicitly declared unrecoverable artifact identities.
+Pin and artifact loaders reject redeclaring those identities as live; build products
+use ordinary checkout-relative paths and are hashed independently of git status.

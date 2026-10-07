@@ -34,6 +34,14 @@ last is not a softer version of the second: "this is the wrong revision" tells y
 checkout, "nobody could tell which revision this is" tells you not to publish the claim at all, and a
 check that renders the second as either the first or as OK is how an off-pin header read as pinned.
 
+**A BUILD PRODUCT is verified by its bytes, never by git's opinion of it.** Third measured failure: a
+pinned simulator-compiler binary lived at a gitignored path inside a pinned checkout, declared only under
+``requires_paths``. Git reports an ignored file neither modified nor untracked, so every check here asked
+only whether it EXISTS; it was rebuilt in place and ``verify()`` kept saying ok while 244 artifacts cited
+the old digest. :attr:`Pin.build_products` compares such a path's bytes on every verify. Bytes that are
+gone are recorded as gone (:mod:`merlin.common.provenance_lost`): a loss record CLAIMS its digest, so no
+pin or artifact can re-declare those bytes as its own.
+
 **Nothing here mutates a checkout.** It verifies and records. On a shared host other people are working in
 those trees, and a tool that quietly moves someone's HEAD to satisfy a pin would be a worse failure than
 the one it prevents.
@@ -50,20 +58,28 @@ import contextlib
 import hashlib
 import subprocess
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+# Re-exported so callers keep one import for "the pin registry": the loss records live in the same file,
+# under the same review, and the loaders below are cross-checked against them.
+from .provenance_lost import UNRECOVERABLE, LostArtifact, claimed_digests, load_lost, lost_for_digest
 
 __all__ = [
     "Artifact",
     "ArtifactCheck",
+    "LostArtifact",
     "Observation",
     "Pin",
     "PinsError",
     "SourceStatus",
+    "UNRECOVERABLE",
     "Verification",
     "load_artifacts",
+    "load_lost",
     "load_pins",
+    "lost_for_digest",
     "observe",
     "pin",
     "pins_path",
@@ -170,6 +186,16 @@ class Pin:
     #: would re-litigate every existing pin's declared dirty-tree debt at once, and the ratchet
     #: convention says that debt shrinks on purpose, not in a burst.
     content_check: bool | None = None
+    #: BUILD PRODUCTS inside the checkout, as ``(repo-relative path, sha256)`` pairs, compared by CONTENT
+    #: on every verify with no git question asked first.
+    #:
+    #: Not ``local_edits``, although both are path -> sha256: ``local_edits`` is compared only for paths
+    #: git reports DIRTY, and a build product is normally gitignored, so git never reports it and a digest
+    #: declared there is never once compared -- a check that cannot fail. Measured: an emitter binary at
+    #: an ignored ``build/`` path, declared only under ``requires_paths`` (which asks whether it EXISTS),
+    #: was rebuilt in place and ``verify()`` kept returning ok. A declared product that is absent or
+    #: unreadable is drift, never "nothing to report".
+    build_products: tuple[tuple[str, str], ...] = ()
 
     @property
     def checks_content(self) -> bool:
@@ -301,7 +327,7 @@ class Verification:
     sources: tuple[SourceStatus, ...] = ()
     #: Verifications of the pins this one ``covers``. Their material findings are also folded into
     #: ``drift`` (name-prefixed) so ``ok`` and :func:`require`'s message cannot silently omit them.
-    covered: tuple["Verification", ...] = ()
+    covered: tuple[Verification, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -435,7 +461,7 @@ class ArtifactCheck:
         }
 
 
-def load_artifacts(path: "str | Path | None" = None) -> dict[str, Artifact]:
+def load_artifacts(path: str | Path | None = None) -> dict[str, Artifact]:
     """Every declared built artifact. An empty mapping when the registry declares none."""
     import yaml
 
@@ -478,10 +504,21 @@ def load_artifacts(path: "str | Path | None" = None) -> dict[str, Artifact]:
             abi_header_sha256=str(body.get("abi_header_sha256") or ""),
             hwdb_digest=str(hwdb_digest),
         )
+    # An artifact may not re-declare bytes the registry records as UNRECOVERABLE: repointing a live
+    # declaration at dead bytes is exactly the move a loss record forbids.
+    lost = claimed_digests(p, document=raw)
+    for name, art in out.items():
+        rec = lost.get(art.digest.lower())
+        if rec is not None:
+            raise PinsError(
+                f"{p}: artifact {name!r} declares digest {art.digest[:12]}, which lost_artifacts"
+                f"[{rec.name!r}] records as {UNRECOVERABLE}; an artifact declaration claims the bytes can "
+                "be verified, and by the registry's own record these cannot"
+            )
     return out
 
 
-def verify_artifact(name: str, *, path: "str | Path | None" = None) -> ArtifactCheck:
+def verify_artifact(name: str, *, path: str | Path | None = None) -> ArtifactCheck:
     """Compare a built artifact against its declaration.
 
     Reports rather than raises, and distinguishes the three states that matter: absent, present with a
@@ -528,7 +565,7 @@ def verify_artifact(name: str, *, path: "str | Path | None" = None) -> ArtifactC
 _PINS_MEMO: dict = {}
 
 
-def load_pins(path: "str | Path | None" = None) -> dict[str, Pin]:
+def load_pins(path: str | Path | None = None) -> dict[str, Pin]:
     """Every declared pin. Raises on a malformed file rather than returning a partial registry.
 
     Parsed at most once per (file, mtime, size): the registry is read once per pin lookup and a grade
@@ -586,8 +623,10 @@ def load_pins(path: "str | Path | None" = None) -> dict[str, Pin]:
             nested_path=str(body.get("nested_path") or ""),
             covers=tuple(str(c) for c in (body.get("covers") or ())),
             content_check=_tri(p, name, "content_check", body.get("content_check")),
+            build_products=_digest_map(p, name, "build_products", body.get("build_products")),
         )
     _check_references(p, out)
+    _check_not_lost(p, out, document=raw)
     if memo_key is not None:
         _PINS_MEMO[memo_key] = dict(out)
     return out
@@ -625,7 +664,7 @@ def _tri(src: Path, name: str, field_name: str, raw: Any) -> bool | None:
     return raw
 
 
-def _check_references(src: Path, pins: "Mapping[str, Pin]") -> None:
+def _check_references(src: Path, pins: Mapping[str, Pin]) -> None:
     """A pin that names another pin must name one that exists, and containment needs a path.
 
     Fail closed at LOAD time. A dangling ``nested_in`` would otherwise make the gitlink comparison
@@ -661,30 +700,63 @@ def _check_references(src: Path, pins: "Mapping[str, Pin]") -> None:
                 raise PinsError(f"{src}: pin {name!r} covers itself")
 
 
-def _local_edits(src: Path, name: str, raw: Any) -> tuple[tuple[str, str], ...]:
-    """Parse a pin's ``local_edits`` mapping of repo-relative path -> sha256 of the expected content."""
+def _digest_map(src: Path, name: str, field_name: str, raw: Any) -> tuple[tuple[str, str], ...]:
+    """Parse a pin's mapping of repo-relative path -> sha256 of the expected content."""
     if raw in (None, {}, ()):
         return ()
     if not isinstance(raw, dict):
-        raise PinsError(f"{src}: pin {name!r} local_edits must be a mapping of path -> sha256")
+        raise PinsError(f"{src}: pin {name!r} {field_name} must be a mapping of path -> sha256")
     out = []
     for rel, digest in raw.items():
+        if field_name == "build_products" and (
+            not isinstance(rel, str)
+            or not rel
+            or "\\" in rel
+            or Path(rel).is_absolute()
+            or any(part in {"", ".", ".."} for part in rel.split("/"))
+        ):
+            raise PinsError(f"{src}: pin {name!r} build_products path {rel!r} must be an ordinary repo-relative path")
         if not isinstance(digest, str):
             # Same trap as the commit: an all-digit digest is valid hex and YAML reads it as a number.
             raise PinsError(
-                f"{src}: pin {name!r} local_edits[{rel!r}] must be a quoted sha256 string; "
+                f"{src}: pin {name!r} {field_name}[{rel!r}] must be a quoted sha256 string; "
                 f"YAML read {type(digest).__name__}"
             )
         if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest.lower()):
             raise PinsError(
-                f"{src}: pin {name!r} local_edits[{rel!r}] is not a 64-character sha256 "
+                f"{src}: pin {name!r} {field_name}[{rel!r}] is not a 64-character sha256 "
                 f"({digest!r}); a partial digest does not identify content"
             )
         out.append((str(rel), digest.lower()))
     return tuple(sorted(out))
 
 
-def pin(name: str, path: "str | Path | None" = None) -> Pin:
+def _local_edits(src: Path, name: str, raw: Any) -> tuple[tuple[str, str], ...]:
+    """Parse a pin's ``local_edits`` mapping of repo-relative path -> sha256 of the expected content."""
+    return _digest_map(src, name, "local_edits", raw)
+
+
+def _check_not_lost(src: Path, pins: Mapping[str, Pin], *, document: Any) -> None:
+    """No pin may declare bytes the registry already records as UNRECOVERABLE.
+
+    Those bytes do not exist. A pin declaring them as the content it expects is either the dead digest
+    copied into a live check -- which can then never pass, and reads as ordinary drift rather than as
+    the loss it is -- or an attempt to make the lost attribution look satisfied. Refused at load.
+    """
+    by_digest = claimed_digests(src, document=document)
+    for name, p in pins.items():
+        for field_name, pairs in (("local_edits", p.local_edits), ("build_products", p.build_products)):
+            for rel, digest in pairs:
+                rec = by_digest.get(digest)
+                if rec is not None:
+                    raise PinsError(
+                        f"{src}: pin {name!r} {field_name}[{rel!r}] declares {digest[:12]}, which "
+                        f"lost_artifacts[{rec.name!r}] records as {UNRECOVERABLE}; declare the bytes that "
+                        "ARE there and leave the loss record to account for the ones that are not"
+                    )
+
+
+def pin(name: str, path: str | Path | None = None) -> Pin:
     pins = load_pins(path)
     if name not in pins:
         raise PinsError(f"no pin named {name!r}; declared: {sorted(pins)}")
@@ -700,7 +772,7 @@ def _git(repo: Path, *args: str) -> str | None:
 
 
 #: Open observation scope, or ``None``. See :func:`observation_scope`.
-_OBSERVATION_SCOPE: "dict | None" = None
+_OBSERVATION_SCOPE: dict | None = None
 
 
 @contextlib.contextmanager
@@ -745,12 +817,12 @@ def scoped_observation(key: str, compute):
     return scope[key]
 
 
-def observe(checkout: "str | Path") -> Observation:
+def observe(checkout: str | Path) -> Observation:
     """Read a checkout's actual revision. Absent or non-git paths come back with UNKNOWN, not guesses."""
     return scoped_observation(f"observe:{Path(checkout)}", lambda: _observe_now(checkout))
 
 
-def _observe_now(checkout: "str | Path") -> Observation:
+def _observe_now(checkout: str | Path) -> Observation:
     p = Path(checkout)
     if not p.is_dir():
         return Observation(path=str(p), present=False)
@@ -758,7 +830,7 @@ def _observe_now(checkout: "str | Path") -> Observation:
     branch = _git(p, "rev-parse", "--abbrev-ref", "HEAD")
     remote = _git(p, "remote", "get-url", "origin")
     status = _git(p, "status", "--porcelain")
-    lines = [l for l in (status or "").splitlines() if l.strip()] if status is not None else []
+    lines = [line for line in (status or "").splitlines() if line.strip()] if status is not None else []
     return Observation(
         path=str(p),
         present=True,
@@ -770,7 +842,7 @@ def _observe_now(checkout: "str | Path") -> Observation:
     )
 
 
-def _porcelain_paths(lines: "Sequence[str]") -> set[str]:
+def _porcelain_paths(lines: Sequence[str]) -> set[str]:
     """The paths out of ``git status --porcelain`` lines.
 
     Split on the first whitespace run rather than at a fixed column. Porcelain v1 is ``XY <path>`` and the
@@ -791,7 +863,7 @@ def _porcelain_paths(lines: "Sequence[str]") -> set[str]:
     return out
 
 
-def _touches(dirty_paths: "Sequence[str]", reads: "Sequence[str]") -> tuple[str, ...]:
+def _touches(dirty_paths: Sequence[str], reads: Sequence[str]) -> tuple[str, ...]:
     """Which of ``reads`` a dirty checkout actually affects.
 
     A read path matches a dirty entry when they are equal or when the dirty entry is a DIRECTORY prefix of
@@ -837,7 +909,7 @@ def _git_blob(repo: Path, commit: str, rel: str) -> bytes | None:
 
 
 def source_status(
-    pin_name: str, rel: str, *, checkout: "str | Path | None" = None, path: "str | Path | None" = None
+    pin_name: str, rel: str, *, checkout: str | Path | None = None, path: str | Path | None = None
 ) -> SourceStatus:
     """Does the file at ``rel`` belong to the revision pin ``pin_name`` declares?
 
@@ -916,10 +988,10 @@ def source_status(
 def verify(
     name: str,
     *,
-    checkout: "str | Path | None" = None,
-    path: "str | Path | None" = None,
-    reads: "Sequence[str] | None" = None,
-    _seen: "frozenset[str] | None" = None,
+    checkout: str | Path | None = None,
+    path: str | Path | None = None,
+    reads: Sequence[str] | None = None,
+    _seen: frozenset[str] | None = None,
 ) -> Verification:
     """Compare a checkout against its pin and report every disagreement.
 
@@ -936,6 +1008,9 @@ def verify(
     * the BYTES of every read path against the same path at the pin's commit (``content_check``), which is
       the only comparison that is right when HEAD itself is off the pin,
     * the pins this one ``covers``, folded in, so verifying the coarse pin cannot miss a nested surface.
+
+    And ``build_products``, unconditionally: git has nothing to say about a gitignored build product, so
+    a compiled binary listed only under ``requires_paths`` was checked for existence, never identity.
     """
     p = pin(name, path)
     target = Path(checkout) if checkout is not None else p.checkout()
@@ -1043,6 +1118,9 @@ def verify(
                 )
             elif not touched:
                 notes.append(f"{got.dirty_files} uncommitted change(s), none of them a source this reads")
+        product_drift, product_notes = _build_product_findings(p, Path(got.path))
+        drift.extend(product_drift)
+        notes.extend(product_notes)
         if (
             p.repo_canonical
             and got.remote not in (UNKNOWN, "")
@@ -1091,7 +1169,50 @@ def verify(
     )
 
 
-def _nested_gitlink(p: Pin, got: Observation, path: "str | Path | None") -> tuple[str, list[str], list[str]]:
+def _build_product_findings(p: Pin, root: Path) -> tuple[list[str], list[str]]:
+    """``(drift, notes)`` for every declared build product, compared by its bytes.
+
+    Every other check in :func:`verify` asks git first, and git has NO answer about an ignored file: it
+    is never "modified" (untracked) and never "untracked" (ignored). So these are compared always, and
+    three-state: the bytes match, they DIFFER (both digests named), or they could not be read (drift).
+    """
+    drift: list[str] = []
+    notes: list[str] = []
+    for rel, want in p.build_products:
+        full = root / rel
+        current = root
+        indirect = False
+        for part in Path(rel).parts:
+            current /= part
+            if current.is_symlink():
+                indirect = True
+                break
+        if indirect:
+            drift.append(
+                f"build product {rel} has a symlink component; its bytes are not read through an indirect path"
+            )
+            continue
+        if not full.is_file():
+            drift.append(
+                f"build product {rel} is declared at {want[:16]} but there is no file at {full}; a product "
+                "that is not there cannot be the one a result was attributed to"
+            )
+            continue
+        have = file_digest(full)
+        if have == UNKNOWN:
+            drift.append(f"build product {rel} could not be read, so whether it is the declared {want[:16]} is UNKNOWN")
+        elif have != want:
+            drift.append(
+                f"build product {rel} is {have[:16]} but the pin declares {want[:16]}; it was rebuilt or "
+                "replaced in place, and results attributed to the declared bytes cite bytes this host no "
+                "longer has"
+            )
+        else:
+            notes.append(f"build product {rel} matches the declared {want[:16]}")
+    return drift, notes
+
+
+def _nested_gitlink(p: Pin, got: Observation, path: str | Path | None) -> tuple[str, list[str], list[str]]:
     """The revision the CONTAINER records for this nested checkout, and how it disagrees.
 
     Measured failure this exists for: the systolic generator (pinned, verified clean) records gitlink
@@ -1157,9 +1278,9 @@ def _nested_gitlink(p: Pin, got: Observation, path: "str | Path | None") -> tupl
 def require(
     name: str,
     *,
-    checkout: "str | Path | None" = None,
-    path: "str | Path | None" = None,
-    reads: "Sequence[str] | None" = None,
+    checkout: str | Path | None = None,
+    path: str | Path | None = None,
+    reads: Sequence[str] | None = None,
 ) -> Verification:
     """:func:`verify`, raising on any disagreement. Use before producing anything that claims a result.
 
@@ -1196,11 +1317,11 @@ PINNED_CITATION = "pinned"
 
 
 def citation(
-    name: "str | Verification",
+    name: str | Verification,
     *,
-    checkout: "str | Path | None" = None,
-    path: "str | Path | None" = None,
-    reads: "Sequence[str] | None" = None,
+    checkout: str | Path | None = None,
+    path: str | Path | None = None,
+    reads: Sequence[str] | None = None,
 ) -> str:
     """How a result must SPELL the revision it was measured on. Never a bare sha.
 
@@ -1229,7 +1350,7 @@ def citation(
     return "; ".join(parts)
 
 
-def _cite_one(got: Verification, path: "str | Path | None") -> str:
+def _cite_one(got: Verification, path: str | Path | None) -> str:
     """One pin's citation clause. Reads the registry again because the DECLARED commit is the subject."""
     try:
         declared = pin(got.pin, path).commit
@@ -1258,12 +1379,12 @@ def _cite_one(got: Verification, path: "str | Path | None") -> str:
     return f"{head} ({PINNED_CITATION})"
 
 
-def citations(pins: "Mapping[str, Verification]") -> dict[str, str]:
+def citations(pins: Mapping[str, Verification]) -> dict[str, str]:
     """``{pin name: citation}`` for an already-verified mapping — the form :func:`record` embeds."""
     return {name: citation(got) for name, got in pins.items()}
 
 
-def source_digest(paths: Sequence["str | Path"]) -> str:
+def source_digest(paths: Sequence[str | Path]) -> str:
     """One digest over the exact bytes of the sources a derivation read.
 
     The commit says which revision was checked out; this says what was actually *read*, which differs
@@ -1280,7 +1401,7 @@ def source_digest(paths: Sequence["str | Path"]) -> str:
     return h.hexdigest()
 
 
-def file_digest(path: "str | Path") -> str:
+def file_digest(path: str | Path) -> str:
     """sha256 of one file, or UNKNOWN. Used to identify a prebuilt simulator binary."""
     try:
         return hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -1291,8 +1412,8 @@ def file_digest(path: "str | Path") -> str:
 def record(
     *,
     pins: Mapping[str, Verification] | None = None,
-    sources: Sequence["str | Path"] = (),
-    artifacts: Mapping[str, "str | Path"] | None = None,
+    sources: Sequence[str | Path] = (),
+    artifacts: Mapping[str, str | Path] | None = None,
     extra: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The provenance block to embed in a manifest, run record or report.
@@ -1308,7 +1429,7 @@ def record(
         "merlin": {
             "commit": merlin_commit,
             "dirty_files": (
-                len([l for l in merlin_dirty.splitlines() if l.strip()]) if merlin_dirty is not None else -1
+                len([line for line in merlin_dirty.splitlines() if line.strip()]) if merlin_dirty is not None else -1
             ),
         },
         "hardware_pins": {k: v.to_dict() for k, v in (pins or {}).items()},
