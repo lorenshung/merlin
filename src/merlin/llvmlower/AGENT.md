@@ -568,3 +568,13 @@ these identities authenticate a supplied theorem rather than establishing it.
 Only encoded-word endpoint expansion is removed after existing preparation and
 runtime plan/domain/environment checks. Other plans, modes and non-word bounds
 retain their original path. Target evaluator equivalence remains provider-owned.
+
+`prepared_polynomial_constants` emits an explicitly selected private consumer of
+an existing complete rounded-polynomial theorem. Context entry binds the actual
+prepared plan words, zero implementation budget and stable RNE; unsupported
+contexts retain the original batch helper. Immutable finite ordered input spans,
+private disjoint output storage and plan/environment lifetime remain caller
+obligations. The source score interval is preserved: zero implementation budget
+removes only extra polynomial rounding expansion, not input uncertainty. Exact
+F32 endpoint values remain available to the unchanged denominator. Constant
+specialization is not a numerical approximation or a default emitter policy.
