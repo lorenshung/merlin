@@ -405,13 +405,18 @@ def _tier_phrase(tier: Any) -> str:
     return f"a functional simulator ({oracles}) \u2014 numerically correct; **not** an RTL or timing result"
 
 
-def _readme(sel: ChampionSelection, manifest: dict[str, Any]) -> str:
+def _readme(sel: ChampionSelection, manifest: dict[str, Any], champion: dict[str, Any] | None = None) -> str:
     """The published repo's landing page.
 
     A package published with ``--no-gate`` says so HERE, at the top, in the reader's first
     paragraph. Suppressing the refusal to stderr and shipping the ordinary "certified champion"
     wording is how an uncertified package gets cited as a certified one: the warning is seen by
     the operator who already knows, and never by the person who clones the repo.
+
+    ``champion`` is what :func:`merlin.targetgen.champions.export_champion` passes once a champion's
+    records have passed its phase's evidence profile: ``{phase, profile, evidence}``. The page then
+    leads with that evidence instead of the payload gate's verdict. That gate (``oot_runner.certify``
+    rungs bound to the payload) is a different, optional certification, and the page still names it.
     """
     merlin_sha = git_sha7()
     pub = sel.manifest.get("publication") or {}
@@ -422,7 +427,18 @@ def _readme(sel: ChampionSelection, manifest: dict[str, Any]) -> str:
         f"Out-of-tree Merlin codegen export for **{sel.target}** (family `{sel.family or 'unknown'}`).",
         "",
     ]
-    if not gate_ok:
+    if champion is not None:
+        lines += [
+            f"> **Phase-{champion['phase']} champion.** Merlin's champion export checked this package against "
+            f"its phase-{champion['phase']} evidence profile, and it passed:",
+            ">",
+            *(f"> - {item}" for item in champion["evidence"]),
+            ">",
+            "> The evidence is in `.merlin/provenance.json`, `certification.json`, `measurements.json` and "
+            "`isa_prohibition.json`.",
+            "",
+        ]
+    elif not gate_ok:
         lines += [
             "> ## \u26a0 NOT CERTIFIED \u2014 published with `--no-gate`",
             ">",
@@ -441,7 +457,12 @@ def _readme(sel: ChampionSelection, manifest: dict[str, Any]) -> str:
         ]
     lines += [
         (
-            "This repository is **generated** by Merlin's `merlin-target-publish` bridge. The "
+            "This repository is **generated** by Merlin's champion export through the `merlin-target-publish` "
+            "bridge. The package payload at the root is byte-identical to the bytes the evidence above was "
+            "taken on; Merlin adds only this page and `.merlin/`. External dependency closure is "
+            "**not-attested**: the evidence is about these bytes in the environment its records name."
+            if champion is not None
+            else "This repository is **generated** by Merlin's `merlin-target-publish` bridge. The "
             "original payload stays at the repo root; additive provenance rides under `.merlin/`."
             if not gate_ok
             else "This repository is **generated** by Merlin's `merlin-target-publish` bridge: it is the "
@@ -453,7 +474,7 @@ def _readme(sel: ChampionSelection, manifest: dict[str, Any]) -> str:
         "",
         "## What",
         "",
-        f"- {'Package' if not gate_ok else 'Champion package'}: `{sel.package_id}`",
+        f"- {'Champion package' if gate_ok or champion is not None else 'Package'}: `{sel.package_id}`",
         f"- Family: `{sel.family or 'unknown'}`",
         f"- Recorded status: `{sel.status or 'unknown'}`",
         f"- Merlin git sha (this export): `{merlin_sha}`",
@@ -507,6 +528,21 @@ def _readme(sel: ChampionSelection, manifest: dict[str, Any]) -> str:
             "```",
             "",
         ]
+    if champion is not None:
+        lines += [
+            "## Provenance",
+            "",
+            f"- Champion evidence profile: `{champion['profile']}`, passed (the evidence is listed above)",
+            "- Package-payload certification by `oot_runner.certify` rungs (a separate gate): "
+            f"`{pub.get('certification', sel.cert_status or 'not recorded')}`",
+            "- External dependency closure: `not-attested`",
+            f"- Fingerprint: `{pub.get('fingerprint', 'n/a')}`",
+            "",
+            "See `.merlin/provenance.json` for the full lineage and `.merlin/provenance.yaml` and "
+            "`.merlin/certification.yaml` for the publish layer's own records.",
+            "",
+        ]
+        return "\n".join(lines)
     lines += [
         "## Provenance",
         "",
@@ -713,8 +749,13 @@ def _export_role(sel: ChampionSelection):
     return provider.role
 
 
-def assemble_repo_tree(sel: ChampionSelection, dest: str | Path, *, layout_version: str) -> dict[str, Any]:
-    """Preserve original payload paths/bytes; append explicitly scoped publication metadata."""
+def assemble_repo_tree(
+    sel: ChampionSelection, dest: str | Path, *, layout_version: str, champion: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Preserve original payload paths/bytes; append explicitly scoped publication metadata.
+
+    ``champion`` is the evidence summary of a champion that passed its phase profile (see
+    :func:`_readme`); only :func:`merlin.targetgen.champions.export_champion` passes one."""
     dest = _fresh_destination(dest, sources=(sel.package_dir,))
     _export_role(sel)
     for reserved in (".merlin", "MERLIN_PUBLICATION.md", ".git"):
@@ -728,7 +769,7 @@ def assemble_repo_tree(sel: ChampionSelection, dest: str | Path, *, layout_versi
     ):
         raise PublishError("payload changed during export copy")
     manifest = load_yaml(dest / "manifest.yaml")
-    _write(dest / "MERLIN_PUBLICATION.md", _readme(sel, manifest))
+    _write(dest / "MERLIN_PUBLICATION.md", _readme(sel, manifest, champion))
     return manifest
 
 

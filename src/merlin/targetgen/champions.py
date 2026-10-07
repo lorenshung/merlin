@@ -1,24 +1,38 @@
-"""Export a phase-2 champion from its ``best`` tag into ``out/artifacts/targets/<target>/champions/``.
+"""Export a phase champion from its OOT history into ``out/artifacts/targets/<target>/champions/``.
 
 The champion is the tree the harness committed and measured, not whatever a workspace holds now:
-the ``best`` commit is exported with ``git archive`` semantics (:func:`merlin.common.oot_repo.export`)
-and its tree digest must equal the digest the measurements were recorded against. The standalone
-layout is the one the publish bridge already produces -- :func:`publish.assemble_repo_tree` preserves
-the payload bytes and :func:`publish.embed_provenance` adds ``.merlin/{manifest.yaml,provenance.yaml,
-certification.yaml,CHAMPION}`` -- so a champion directory is exactly what ``merlin-target-publish``
-would push. This module adds the four JSON records the payload-scoped publish layer cannot know:
+the exported commit (a phase-2 run's ``best``, a phase-1 run's ``frozen``) is exported with ``git
+archive`` semantics (:func:`merlin.common.oot_repo.export`) and its tree digest must equal the digest
+the evidence was recorded against. The standalone layout is the one the publish bridge already
+produces -- :func:`publish.assemble_repo_tree` preserves the payload bytes and
+:func:`publish.embed_provenance` adds ``.merlin/{manifest.yaml,provenance.yaml,certification.yaml,
+CHAMPION}`` -- so a champion directory is exactly what ``merlin-target-publish`` would push. This
+module adds the four JSON records the payload-scoped publish layer cannot know:
 
-* ``provenance.json`` -- lineage to the phase-1 run and its ``frozen`` commit, the phase-2 run and
-  ``best`` commit, the corpus seal digest and the phase-0 evidence digest;
-* ``measurements.json`` -- FireSim cycles with the machine, the parameter header and the vendor
-  control measured in the same batch;
-* ``certification.json`` -- the GSIM certification;
+* ``provenance.json`` -- lineage to the phase-1 run and its ``frozen`` commit (and, for a phase-2
+  champion, the phase-2 run and ``best`` commit), the corpus seal digest and the phase-0 evidence digest;
+* ``measurements.json`` -- what the champion was measured on;
+* ``certification.json`` -- what certified it;
 * ``isa_prohibition.json`` -- the whole-ELF prohibited-instruction scan, naming the instructions it
   prohibited (a clean verdict over an empty prohibited set is refused).
 
-Every field listed in :data:`REQUIRED` is required and checked, never defaulted: a champion whose
-cycles came without their machine, or whose scan was not clean, is refused rather than exported with
-a gap a later reader would fill in by assumption. The export is retention-pinned.
+WHAT IS REQUIRED DEPENDS ON THE PHASE, AND THE PHASE IS DECLARED. Each phase selects its champion by
+different evidence, so each has its own profile in :data:`PROFILES`:
+
+* phase 2 (:data:`REQUIRED`) -- a whole-model program: FireSim cycles with the machine, the parameter
+  header and a vendor control measured in the same batch, the exactness contract they were graded
+  under, a passing whole-model GSIM certification and a clean whole-ELF scan;
+* phase 1 (:data:`PHASE1_REQUIRED`) -- a compiler graded on capsules: the capsule certification at its
+  tier (public and hidden results, the grader commit and the tier's engine, and how many of the passes
+  were executed now against carried from an earlier grade, which must add up) and a clean whole-ELF
+  scan that covered every capsule ELF the certification built. No whole-model number is asked of it.
+
+The phase is the export call's ``phase`` or the provenance record's ``phase``; when both are given they
+must agree, and an export that declares none is held to phase 2, the profile this exporter began with.
+Nothing reads the phase off the target. Every field a profile lists is required and checked, never
+defaulted: a champion whose cycles came without their machine, or whose scan was not clean, is refused
+rather than exported with a gap a later reader would fill in by assumption. The export is
+retention-pinned.
 
 Three optional provenance blocks describe a lineage honestly where it does not fit that mould:
 
@@ -55,7 +69,11 @@ RECORDS = ("provenance", "certification", "measurements", "isa_prohibition")
 PUBLISH_LAYER = (".merlin/manifest.yaml", ".merlin/provenance.yaml", ".merlin/certification.yaml", ".merlin/CHAMPION")
 PUBLICATION_NOTE = "MERLIN_PUBLICATION.md"
 
-#: ``record -> dotted field -> predicate name``; see :func:`_check`.
+PHASE1, PHASE2 = 1, 2
+#: An export that declares no phase is held to this profile (the one the exporter was written for).
+UNDECLARED_PHASE = PHASE2
+
+#: The phase-2 profile. ``record -> dotted field -> predicate name``; see :func:`_check`.
 REQUIRED: dict[str, dict[str, str]] = {
     "provenance": {
         "phase1.run": "text",
@@ -80,6 +98,34 @@ REQUIRED: dict[str, dict[str, str]] = {
         "prohibited_instructions": "nonempty_mapping",
     },
 }
+
+#: The phase-1 profile: a compiler certified on capsules, at the tier its certification required. No
+#: whole-model FireSim measurement, GSIM certification or exactness contract is asked of it -- a
+#: phase-1 compiler is not selected by one. ``certification.capsules`` is checked further by
+#: :func:`capsule_problems` and ``isa_prohibition.coverage`` by :func:`coverage_problems`.
+PHASE1_REQUIRED: dict[str, dict[str, str]] = {
+    "provenance": dict(REQUIRED["provenance"]),
+    # The digest the records were taken against; the export compares it with the commit's tree.
+    "measurements": {"package_digest": "sha256"},
+    "certification": {
+        "capsules.tier": "text",
+        "capsules.grader.commit": "commit",
+        "capsules.engine.name": "text",
+        "capsules.engine.binary_sha256": "sha256",
+    },
+    "isa_prohibition": {**REQUIRED["isa_prohibition"], "coverage.elfs": "positive"},
+}
+
+#: ``phase -> profile``. A profile is the evidence a champion of that phase must carry.
+PROFILES: dict[int, dict[str, dict[str, str]]] = {PHASE1: PHASE1_REQUIRED, PHASE2: REQUIRED}
+
+#: The capsule sets a phase-1 certification reports, each at the certification's tier.
+CAPSULE_SETS = ("public", "hidden")
+#: The counts each set reports: ``graded`` (> 0), ``at_tier`` (passed at the tier, at most ``graded``),
+#: and its split into passes ``measured_now`` and ``carried`` from an earlier grade (they add up).
+CAPSULE_COUNTS = ("graded", "at_tier", "measured_now", "carried")
+#: The counts a phase-1 scan reports over the certification's capsule ELFs.
+COVERAGE_COUNTS = ("elfs", "measured", "clean", "unmeasured")
 
 #: A ``provenance.lineage.legacy`` block names a lineage older than the sealed phase 0.
 LEGACY_PREDATES = "sealed phase 0"
@@ -131,6 +177,8 @@ def _check(rule: str, value) -> bool:
         return _hex(value, 64)
     if rule == "positive":
         return type(value) is int and value > 0
+    if rule == "count":
+        return type(value) is int and value >= 0
     if rule == "true":
         return value is True
     if rule == "list":
@@ -146,11 +194,37 @@ def _check(rule: str, value) -> bool:
     return value == rule  # a literal the field must equal (a verdict, a scope)
 
 
-def missing_evidence(records: dict[str, dict]) -> list[str]:
-    """Every required field that is absent or does not hold what it must, as ``record.field``."""
+def declared_phase(provenance, phase: int | None = None) -> tuple[int | None, list[str]]:
+    """The phase whose profile a champion is held to, and what keeps it from being one.
+
+    ``phase`` is the export call's declaration and ``provenance.phase`` the record's; they must agree
+    when both are given. With neither, the champion is held to :data:`UNDECLARED_PHASE`. The phase is
+    never read off the target. Returns ``(phase, problems)``; the phase is None when it is unusable.
+    """
+    recorded = provenance.get("phase") if isinstance(provenance, dict) else None
     problems = []
+    for where, value in (("phase", phase), ("provenance.phase", recorded)):
+        if value is not None and (type(value) is not int or value not in PROFILES):
+            problems.append(f"{where}: {value!r} is not a champion phase ({', '.join(map(str, PROFILES))})")
+    if problems:
+        return None, problems
+    if phase is not None and recorded is not None and phase != recorded:
+        return None, [f"phase: the export declares phase {phase}, the provenance record phase {recorded}"]
+    if phase is not None:
+        return phase, []
+    if recorded is not None:
+        return recorded, []
+    return UNDECLARED_PHASE, []
+
+
+def missing_evidence(records: dict[str, dict], *, phase: int | None = None) -> list[str]:
+    """Every field the champion's phase profile requires that is absent or does not hold what it
+    must, as ``record.field`` (see :func:`declared_phase` for which profile applies)."""
+    resolved, problems = declared_phase(records.get("provenance"), phase)
+    if resolved is None:
+        return problems
     stood_in = {f"provenance.{name}" for name in legacy_stands_in_for(records.get("provenance"))}
-    for record, rules in REQUIRED.items():
+    for record, rules in PROFILES[resolved].items():
         document = records.get(record)
         if not isinstance(document, dict):
             problems.append(f"{record}: not supplied")
@@ -161,6 +235,78 @@ def missing_evidence(records: dict[str, dict]) -> list[str]:
             if not _check(rule, _field(document, name)) and f"{record}.{name}" not in stood_in
         ]
     return problems + legacy_problems(records.get("provenance")) + composition_problems(records.get("provenance"))
+
+
+def evidence_problems(records: dict[str, dict], *, phase: int | None = None) -> list[str]:
+    """Everything that keeps ``records`` from passing its phase's profile: the required fields
+    (:func:`missing_evidence`) and the profile's own consistency checks -- the exactness contract for
+    phase 2, the capsule accounting and the scan's coverage for phase 1."""
+    resolved, problems = declared_phase(records.get("provenance"), phase)
+    if resolved is None:
+        return problems
+    problems = missing_evidence(records, phase=resolved)
+    if resolved == PHASE2:
+        return problems + exactness_problems(records.get("measurements") or {})
+    return problems + capsule_problems(records.get("certification")) + coverage_problems(records.get("isa_prohibition"))
+
+
+def capsule_problems(certification) -> list[str]:
+    """What keeps ``certification.capsules`` from stating a phase-1 certification's results.
+
+    Each of :data:`CAPSULE_SETS` reports, at the certification's tier, how many capsules were graded
+    (at least one), how many passed at the tier (no more than were graded), and how those passes
+    split into ones executed in this certification and ones carried from an earlier grade -- a split
+    that must add up, because a carried pass is a different claim from one measured now.
+    """
+    prefix = "certification.capsules"
+    block = certification.get("capsules") if isinstance(certification, dict) else None
+    if not isinstance(block, dict):
+        return [f"{prefix}: not supplied"]
+    problems = []
+    for name in CAPSULE_SETS:
+        counts = block.get(name)
+        where = f"{prefix}.{name}"
+        if not isinstance(counts, dict):
+            problems.append(f"{where}: not supplied")
+            continue
+        bad = [field for field in CAPSULE_COUNTS if not _check("count", counts.get(field))]
+        if not bad and counts["graded"] == 0:
+            bad = ["graded"]
+        problems += [f"{where}.{field}" for field in bad]
+        if bad:
+            continue
+        if counts["at_tier"] > counts["graded"]:
+            problems.append(f"{where}.at_tier: {counts['at_tier']} passes of {counts['graded']} graded")
+        if counts["measured_now"] + counts["carried"] != counts["at_tier"]:
+            problems.append(
+                f"{where}: measured_now {counts['measured_now']} + carried {counts['carried']} "
+                f"is not at_tier {counts['at_tier']}"
+            )
+    return problems
+
+
+def coverage_problems(isa_prohibition) -> list[str]:
+    """What keeps a phase-1 scan from covering every capsule ELF its certification built.
+
+    ``isa_prohibition.coverage`` counts the ELFs (at least one), how many the scanner could read, how
+    many were clean and how many it could not measure. A clean verdict needs every ELF measured and
+    clean: an unread ELF is never counted clean.
+    """
+    prefix = "isa_prohibition.coverage"
+    block = isa_prohibition.get("coverage") if isinstance(isa_prohibition, dict) else None
+    if not isinstance(block, dict):
+        return [f"{prefix}: not supplied"]
+    bad = [f"{prefix}.{field}" for field in COVERAGE_COUNTS if not _check("count", block.get(field))]
+    if bad:
+        return bad
+    problems = []
+    if block["unmeasured"] != 0 or block["measured"] != block["elfs"]:
+        problems.append(
+            f"{prefix}: {block['measured']} of {block['elfs']} ELFs measured, {block['unmeasured']} unmeasured"
+        )
+    if block["clean"] != block["elfs"]:
+        problems.append(f"{prefix}: {block['clean']} of {block['elfs']} ELFs clean")
+    return problems
 
 
 def _legacy_block(provenance) -> Any:
@@ -295,39 +441,48 @@ def export_champion(
     certification: dict[str, Any],
     measurements: dict[str, Any],
     isa_prohibition: dict[str, Any],
-    rev: str = oot_repo.BEST_TAG,
+    rev: str | None = None,
+    phase: int | None = None,
     phase2_run: str | Path | None = None,
     stage_root: str | Path | None = None,
     artifacts_root: str | Path | None = None,
     pin: bool = True,
     update_index: bool = True,
 ) -> Path:
-    """Export ``rev`` (default ``best``) of a phase-2 OOT repo as a retention-pinned champion.
+    """Export ``rev`` of a run's OOT repo as a retention-pinned champion of ``phase``.
 
-    ``repo`` is the phase-2 run's ``oot/``; ``phase2_run`` defaults to its parent. The payload is
-    staged under ``<phase2 run>/exports/<commit12>/`` (``stage_root`` overrides), which is also the
-    ``source_package`` the publish layer records.
+    ``phase`` (or the provenance record's ``phase``; see :func:`declared_phase`) selects the evidence
+    profile in :data:`PROFILES`. ``rev`` defaults to the commit that phase selects: ``best`` for
+    phase 2, ``frozen`` for phase 1. ``repo`` is the run's ``oot/`` and ``phase2_run`` -- the run the
+    repo belongs to, whatever its phase -- defaults to its parent. The payload is staged under
+    ``<run>/exports/<commit12>/`` (``stage_root`` overrides), which is also the ``source_package`` the
+    publish layer records.
     """
     for name, value in (("target", target), ("package_id", package_id)):
         try:
             package_records.component(value)
         except ValueError as exc:
             raise ChampionError(f"{name} must be a single path component: {value!r}") from exc
-    repo = Path(repo).absolute()
-    try:
-        commit = oot_repo.resolve(repo, rev)
-        digest = oot_repo.tree_digest(repo, commit)
-    except oot_repo.OotRepoError as exc:
-        raise ChampionError(str(exc)) from exc
     records = {
         "provenance": dict(provenance),
         "certification": dict(certification),
         "measurements": dict(measurements),
         "isa_prohibition": dict(isa_prohibition),
     }
-    problems = missing_evidence(records) + exactness_problems(records["measurements"])
+    resolved, problems = declared_phase(records["provenance"], phase)
+    if resolved is None:
+        raise ChampionError(f"champion phase is not usable: {', '.join(problems)}")
+    if rev is None:
+        rev = oot_repo.FROZEN_TAG if resolved == PHASE1 else oot_repo.BEST_TAG
+    repo = Path(repo).absolute()
+    try:
+        commit = oot_repo.resolve(repo, rev)
+        digest = oot_repo.tree_digest(repo, commit)
+    except oot_repo.OotRepoError as exc:
+        raise ChampionError(str(exc)) from exc
+    problems = evidence_problems(records, phase=resolved)
     if problems:
-        raise ChampionError(f"champion evidence is incomplete or not passing: {', '.join(problems)}")
+        raise ChampionError(f"phase-{resolved} champion evidence is incomplete or not passing: {', '.join(problems)}")
     if measurements["package_digest"] != digest:
         raise ChampionError(
             f"{rev} holds package {digest}, but the measurements are of {measurements['package_digest']}"
@@ -339,6 +494,8 @@ def export_champion(
         origin = oot_repo.origin(repo)
     except oot_repo.OotRepoError as exc:
         raise ChampionError(f"lineage to the phase-1 frozen commit cannot be established: {exc}") from exc
+    if resolved == PHASE1 and commit != oot_repo.resolve(repo, frozen):
+        raise ChampionError(f"a phase-1 champion is its frozen commit {frozen}, not {rev} ({commit})")
     if origin is not None and origin.get("commit") != frozen:
         raise ChampionError(f"the repo was started from {origin.get('commit')}, not the declared frozen {frozen}")
     rebuilt = oot_repo.reconstruction(repo)
@@ -364,32 +521,41 @@ def export_champion(
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging = destination.parent / f".{package_id}.staging-{os.urandom(4).hex()}"
+    history = {
+        "run": _out_relative(run_dir),
+        "rev": rev,
+        "tree": oot_repo.history(repo, commit)[-1].tree,
+        "origin": origin,
+        "reconstructed": rebuilt is not None,
+        **({"reconstruction": _relative_sources(rebuilt)} if rebuilt is not None else {}),
+    }
     try:
         try:
             selection = pub._build_selection(target, payload, manifest)
-            pub.assemble_repo_tree(selection, staging, layout_version=pub.LAYOUT_VERSION)
+            pub.assemble_repo_tree(
+                selection,
+                staging,
+                layout_version=pub.LAYOUT_VERSION,
+                champion=champion_summary(resolved, records),
+            )
             pub.embed_provenance(staging, selection)
         except pub.PublishError as exc:
             raise ChampionError(f"publish layer refused the champion: {exc}") from exc
         lineage = {
             **records["provenance"],
             "schema": SCHEMA,
+            "phase": resolved,
+            "evidence_profile": f"phase{resolved}",
             "target": target,
             "package_id": package_id,
             "package_digest": digest,
-            "phase2": {
-                **(records["provenance"].get("phase2") or {}),
-                "run": _out_relative(run_dir),
-                "rev": rev,
-                "best_commit": commit,
-                "tree": oot_repo.history(repo, commit)[-1].tree,
-                "origin": origin,
-                "reconstructed": rebuilt is not None,
-                **({"reconstruction": _relative_sources(rebuilt)} if rebuilt is not None else {}),
-            },
             "merlin_git_sha": pub._git_sha_full(),
             "exported_payload_sha256": package_records.payload_inventory(payload)["sha256"],
         }
+        if resolved == PHASE2:
+            lineage["phase2"] = {**(records["provenance"].get("phase2") or {}), **history, "best_commit": commit}
+        else:
+            lineage["phase1"] = {**records["provenance"]["phase1"], "history": {**history, "commit": commit}}
         legacy = _legacy_block(records["provenance"])
         if legacy is not None:
             stands_in = legacy_stands_in_for(records["provenance"])
@@ -411,12 +577,61 @@ def export_champion(
     if pin:
         from ..common.storage_lifecycle import pin as retention_pin
 
-        retention_pin(destination, reason=f"phase-2 champion {target}/{package_id} from {commit[:12]}")
+        retention_pin(destination, reason=f"phase-{resolved} champion {target}/{package_id} from {commit[:12]}")
     if update_index:
         from .target_index import write_index
 
         write_index(target, artifacts_root=artifacts_root)
     return destination
+
+
+def champion_summary(phase: int, records: dict[str, dict]) -> dict[str, Any]:
+    """What the landing page says certified the champion: the profile it passed and the evidence that
+    profile checked, read from the records (never restated by hand)."""
+    certification, isa = records["certification"], records["isa_prohibition"]
+    evidence: list[str] = []
+    if phase == PHASE2:
+        firesim = records["measurements"].get("firesim") or {}
+        control = firesim.get("control") or {}
+        exactness = records["measurements"].get("exactness") or {}
+        evidence += [
+            f"whole-model GSIM certification: `{(certification.get('gsim') or {}).get('verdict')}`",
+            f"FireSim: {firesim.get('cycles')} cycles on `{firesim.get('machine')}`, header `{firesim.get('header')}`, "
+            f"vendor control in the same batch (ratio {control.get('ratio')})",
+            f"exactness contract `{exactness.get('contract_sha256')}`: {exactness.get('label')}",
+        ]
+    else:
+        capsules = certification.get("capsules") or {}
+        for name in CAPSULE_SETS:
+            counts = capsules.get(name) or {}
+            evidence.append(
+                f"{name} capsules at {capsules.get('tier')}: {counts.get('at_tier')}/{counts.get('graded')} "
+                f"({counts.get('measured_now')} executed now, {counts.get('carried')} carried)"
+            )
+        engine, grader = capsules.get("engine") or {}, capsules.get("grader") or {}
+        evidence += [
+            f"{capsules.get('tier')} engine `{engine.get('name')}` (binary `{engine.get('binary_sha256')}`)",
+            f"grader commit `{grader.get('commit')}`",
+        ]
+    coverage = isa.get("coverage") or {}
+    scanned = f" over {coverage.get('elfs')} ELFs" if coverage else ""
+    evidence.append(
+        f"whole-ELF scan{scanned}: `{isa.get('verdict')}` against {len(isa.get('prohibited_instructions') or {})} "
+        f"prohibited instructions (roles {', '.join(isa.get('prohibited_roles') or ())})"
+    )
+    return {"phase": phase, "profile": f"phase{phase}", "evidence": evidence}
+
+
+def exported_history(provenance) -> dict[str, Any]:
+    """The exported commit's history block of a champion's provenance, whatever its phase: a phase-2
+    champion's ``phase2`` block, a phase-1 champion's ``phase1.history`` (empty when there is none)."""
+    if not isinstance(provenance, dict):
+        return {}
+    if provenance.get("phase") == PHASE1:
+        block = (provenance.get("phase1") or {}).get("history")
+    else:
+        block = provenance.get("phase2")
+    return block if isinstance(block, dict) else {}
 
 
 def _annotate(root: Path, lineage: dict[str, Any]) -> None:
@@ -428,7 +643,7 @@ def _annotate(root: Path, lineage: dict[str, Any]) -> None:
     """
     legacy = (lineage.get("lineage") or {}).get("legacy")
     composed = lineage.get("composition")
-    rebuilt = (lineage.get("phase2") or {}).get("reconstruction")
+    rebuilt = exported_history(lineage).get("reconstruction")
     sections: list[str] = []
     banner = ""
     if legacy is not None:
