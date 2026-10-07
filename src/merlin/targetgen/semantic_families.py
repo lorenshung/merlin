@@ -567,3 +567,58 @@ def check() -> list[str]:
         if from_prov(tag) is not None:
             problems.append(f"prov.family {tag!r} is declared unmapped yet resolves to {from_prov(tag)!r}")
     return problems
+
+
+PRIMITIVE_FORM_AXES: dict[str, tuple[str, ...]] = {
+    "contraction": ("occupancy", "aspect", "reduction_depth", "operand_capacity", "accumulator_capacity", "transfer"),
+    "reduction": ("occupancy", "reduction_depth", "operand_capacity", "transfer"),
+    "elementwise_map": ("occupancy", "operand_capacity", "transfer"),
+    "movement": ("occupancy", "operand_capacity", "transfer"),
+    "synchronization": (),
+}
+
+OP_STRUCTURAL: dict[str, str] = {
+    "model": (
+        "a whole captured program, not one computation. Its families are whatever its regions contain, "
+        "which is the model's property and not the op's; classifying it as any single family would "
+        "credit or demand a capability on the strength of a container"
+    ),
+    "host_island_seam": (
+        "a PLACEMENT structure — the accelerator -> host -> accelerator handoff. What it exercises is "
+        "the seam itself (who owns which region, and whether the operands survive the crossing), so it "
+        "belongs to no computation family and no datapath declares it"
+    ),
+}
+
+_OP_STRUCTURAL_FOLDED: dict[str, str] = {fold_spelling(op): why for op, why in OP_STRUCTURAL.items()}
+
+
+def form_axes(family: str) -> tuple[str, ...]:
+    """The form axes ``family``'s shape space has — the union over its primitives for a composite.
+
+    Union, not intersection: a fused attention contains a contraction, so its form space contains the
+    contraction's aspect and accumulator axes whether or not its reduction half has them. Scoring it on
+    the intersection would drop exactly the axes the fused kernel is hardest on.
+    """
+    prims = primitives_of(family)
+    if not prims:
+        return ()
+    seen: list[str] = []
+    for prim in prims:
+        for axis in PRIMITIVE_FORM_AXES.get(prim, ()):
+            if axis not in seen:
+                seen.append(axis)
+    return tuple(seen)
+
+
+def structural_reason(op: str | None) -> str | None:
+    """Why ``op`` names a capsule STRUCTURE rather than a computation; ``None`` if it does not.
+
+    Spelling-folded like :func:`from_op`, so a declaration is not defeated by punctuation.
+    """
+    if not op:
+        return None
+    hit = OP_STRUCTURAL.get(op.strip().lower())
+    if hit is not None:
+        return hit
+    return _OP_STRUCTURAL_FOLDED.get(fold_spelling(op))

@@ -19,6 +19,17 @@
 # A gate that is not here must be listed in `mutation_proof_ratchet.txt`, which may only shrink.
 
 proofs:
+  check_opset_coverage.py:
+    proof: merlin/tests/infra/test_opset_coverage_gate_can_fail.py::test_an_unclassified_operation_changes_the_real_gate_verdict
+    mutation: >-
+      Replace an explicitly structural source operation with an unclassified
+      operation in the declared vocabulary and invoke the real gate entry point.
+    removes: >-
+      The operation has neither a semantic family nor a structural home. The
+      explicit request has no capabilities, exclusions or ratchet that could
+      supply or forgive a home, and no unrelated cell or member failures. A
+      restored structural operation must return the verdict to clean.
+
   check_mutation_proofs.py:
     proof: merlin/tests/infra/test_mutation_proofs_gate_can_fail.py::test_a_gate_with_no_recorded_mutation_is_reported
     mutation: >-
