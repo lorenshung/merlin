@@ -52,6 +52,7 @@ def run_on_gsim(
     plus the full text's sha256), for programs whose own report is longer than the tail."""
     from merlin.runtime.backends import base as backends
     from merlin.targetgen import gsim_emulator
+    from merlin.targetgen.rtl_engine_policy import gsim_runtime_slot
 
     backend = backends.get_backend(target)
     prepare = getattr(backend, "prepare_gsim_command", None)
@@ -63,7 +64,6 @@ def run_on_gsim(
     elf = Path(elf).absolute()
     elf_sha = hashlib.sha256(elf.read_bytes()).hexdigest()
     command = prepare(elf, expected_elf_sha256=elf_sha, expected_engine_provenance=engine, max_cycles=int(max_cycles))
-    before = command.revalidate()
     env = dict(os.environ)
     env.update(dict(command.env_overrides))
     declared = getattr(backend, "gsim_backdoor_env", None)
@@ -72,19 +72,25 @@ def run_on_gsim(
         env.update(declared())
         load_path = "backdoor"
     start = time.monotonic()
-    try:
-        proc = subprocess.run(
-            list(command.argv), capture_output=True, text=True, env=env, timeout=timeout_s, cwd=str(elf.parent)
-        )
-        returncode, out, err = proc.returncode, proc.stdout, proc.stderr
-    except subprocess.TimeoutExpired as expired:
-        returncode = -1
-        out = expired.stdout.decode(errors="replace") if isinstance(expired.stdout, bytes) else (expired.stdout or "")
-        err = expired.stderr.decode(errors="replace") if isinstance(expired.stderr, bytes) else (expired.stderr or "")
+    with gsim_runtime_slot(wait_timeout_s=timeout_s):
+        before = command.revalidate()
+        try:
+            proc = subprocess.run(
+                list(command.argv), capture_output=True, text=True, env=env, timeout=timeout_s, cwd=str(elf.parent)
+            )
+            returncode, out, err = proc.returncode, proc.stdout, proc.stderr
+        except subprocess.TimeoutExpired as expired:
+            returncode = -1
+            out = (
+                expired.stdout.decode(errors="replace") if isinstance(expired.stdout, bytes) else (expired.stdout or "")
+            )
+            err = (
+                expired.stderr.decode(errors="replace") if isinstance(expired.stderr, bytes) else (expired.stderr or "")
+            )
+        command.revalidate()
     wall = time.monotonic() - start
     if stdout_path is not None:
         Path(stdout_path).write_text(out, encoding="utf-8")
-    command.revalidate()
     return EngineRun(
         records=tuple(parse_layer_records(out)),
         finish=parse_engine_finish(err),

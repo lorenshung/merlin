@@ -465,6 +465,7 @@ def _prepare_model_mlir(
     work: Path,
     *,
     int8_compute: bool = False,
+    quant_passes: list[str] | None = None,
     tag_vec_ranks: bool = False,
     named_contraction: bool = False,
     prequant_gather: bool = False,
@@ -494,6 +495,18 @@ def _prepare_model_mlir(
     from ...llvmlower.torchao_affine import lower_torchao_affine_quant
     from ...xdsl_dialects._common import text as to_text
     from ..dispatch_runtime import _propagate_quant_inner
+
+    policy_path = work / "quantization-policy.json"
+    policy_path.unlink(missing_ok=True)
+    if not int8_compute and quant_passes is not None:
+        raise ValueError("quant_passes requires int8_compute=True")
+    from ...llvmlower.quant_passes import compute_passes
+
+    selected_passes = compute_passes(quant_passes) if int8_compute else ()
+    if respect_captured_quantization_scope and quant_passes is not None and selected_passes != ("contraction_int8",):
+        raise ValueError("captured quantization scope requires contraction_int8 only")
+    if int8_compute and respect_captured_quantization_scope:
+        selected_passes = ("contraction_int8",)
 
     module = parse_mlir_file(mlir_path)
     # Same first step as the interpreter path (dispatch_runtime.run_model): torchao's
@@ -525,7 +538,7 @@ def _prepare_model_mlir(
         )
     if int8_compute:
         # Real W8A8 integer datapath (matmul/conv/attention -> i8xi8->i32 + requant; the
-        # transcendentals -> integer/RVV), via the quant-pass registry (byte-identical default set).
+        # transcendentals require explicit selection; the default is contractions/conv only.
         # lower_quant_ext stays AFTER as the f32 fallback for any dequant the int8 passes did not
         # convert (nonzero-zp, embeddings).
         from ...llvmlower.quant_passes import apply_quant
@@ -539,7 +552,7 @@ def _prepare_model_mlir(
 
             apply_quant(
                 module,
-                ["contraction_int8"],
+                list(selected_passes),
                 named_contraction=named_contraction,
                 prequant_gather=prequant_gather,
                 report_out=_qrep,
@@ -550,7 +563,13 @@ def _prepare_model_mlir(
                 "contraction_int8 only; conv/nonlinear integer approximation passes disabled"
             )
         else:
-            apply_quant(module, named_contraction=named_contraction, prequant_gather=prequant_gather, report_out=_qrep)
+            apply_quant(
+                module,
+                list(selected_passes),
+                named_contraction=named_contraction,
+                prequant_gather=prequant_gather,
+                report_out=_qrep,
+            )
         _pg = _qrep.get("contraction_int8", {})
         if prequant_gather:
             print(
@@ -740,6 +759,25 @@ def _prepare_model_mlir(
     _qinner.require_initialized(module, where=str(mlir_path))
     out = work / "model.prepared.mlir"
     out.write_text(to_text(module))
+    if int8_compute:
+        from ...common.digest import sha256_file
+        from ...common.jsonio import write_pretty_json
+
+        if respect_captured_quantization_scope:
+            selection = "captured_scope"
+        elif quant_passes is None:
+            selection = "default"
+        else:
+            selection = "explicit"
+        write_pretty_json(
+            policy_path,
+            {
+                "schema": "merlin.quantization_policy.v1",
+                "passes": list(selected_passes),
+                "selection": selection,
+                "prepared_mlir_sha256": sha256_file(out),
+            },
+        )
     return out
 
 
@@ -886,6 +924,7 @@ def prepare_for_lowering(
     work: Path,
     *,
     int8_compute: bool = False,
+    quant_passes: list[str] | None = None,
     features: frozenset[str] | None = None,
     blocking: bool = True,
     harts: int = 1,
@@ -941,6 +980,7 @@ def prepare_for_lowering(
         mlir_path,
         work,
         int8_compute=int8_compute,
+        quant_passes=quant_passes,
         tag_vec_ranks=_lanes is not None,
         named_contraction=NAMED_INT8_CONTRACTION_NAME in features,
         prequant_gather=QUANTIZE_BEFORE_GATHER_NAME in features,
@@ -2333,6 +2373,7 @@ def build_app(
     inputs_npz: str | Path | None = None,
     ram_bytes_override: int | None = None,
     int8_compute: bool = False,
+    quant_passes: list[str] | None = None,
     rvv_schedule: str | None = None,
     cflags_override: list[str] | None = None,
     features: frozenset[str] | None = None,
@@ -2455,6 +2496,7 @@ def build_app(
             model_dir / "model.mlir",
             work,
             int8_compute=int8_compute,
+            quant_passes=quant_passes,
             features=features,
             blocking=True,
             harts=n_harts,
@@ -2543,6 +2585,10 @@ def build_app(
     _h = _hashlib.sha256()
     _h.update((work / "model.o").read_bytes())
     _h.update((cgen / "weights.bin").read_bytes())
+    quantization_policy = None
+    if int8_compute:
+        quantization_policy = json.loads((work / "quantization-policy.json").read_text())
+        _h.update((work / "quantization-policy.json").read_bytes())
 
     # External-weights mode for blobs that would overflow the selected port's link
     # window: keep the low code/arena region compact and place the blob at the
@@ -2856,6 +2902,7 @@ def build_app(
         "ram_region_bytes": ram_region_bytes,
         "weights_base": weights_base,
         "build_hash": build_hash,
+        "quantization_policy": quantization_policy,
         **info,
     }
     # What the matrix-unit shim in this image actually is, for a caller that has to state it: the tile
@@ -3383,6 +3430,7 @@ def build_and_run(
     references: dict | None = None,
     timeout: int = 3600,
     int8_compute: bool = False,
+    quant_passes: list[str] | None = None,
     n_harts: int = 1,
     iters: int = 1,
     warmup: int = 0,
@@ -3412,6 +3460,7 @@ def build_and_run(
         arena_mb=arena_mb,
         cpus=max(harts, rvv_hart + 1),
         int8_compute=int8_compute,
+        quant_passes=quant_passes,
         n_harts=n_harts,
         iters=iters,
         warmup=warmup,
@@ -3432,6 +3481,7 @@ def build_and_run(
         # service) needs to be able to say so, rather than leave the recipient
         # to discover that the console beside their ELF names another binary.
         "build_hash": b.get("build_hash", ""),
+        "quantization_policy": b.get("quantization_policy"),
         # the vector length the build AND the run agreed on (None = spike's
         # default 128); recorded so a result cannot be read as another VLEN's
         "vlen": vlen,

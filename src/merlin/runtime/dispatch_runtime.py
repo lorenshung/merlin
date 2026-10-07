@@ -1270,10 +1270,10 @@ def _normalize_model_module(
     collapse_overrank_matmul(module)
     _propagate_quant_inner(module)
     if int8_compute:
-        from ..llvmlower.quant_passes import apply_quant
+        from ..llvmlower.quant_passes import apply_quant, compute_passes
 
         extra = {"prequant_gather": True} if prequant_gather else {}
-        apply_quant(module, quant_passes, select=quant_select, **extra)
+        apply_quant(module, list(compute_passes(quant_passes)), select=quant_select, **extra)
     lower_quant_ext(module)
     lower_bf16_matmul_f32acc(module)
     fix_bool_sitofp(module)
@@ -1309,17 +1309,22 @@ def run_model(
 
     ``quant_passes`` / ``quant_select`` narrow that datapath and are meaningful only when
     ``int8_compute=True``. ``quant_passes`` is a subset of ``quant_passes.known()`` (default None =
-    all six, byte-identical to the shipped path); ``quant_select`` is an ``(op) -> bool`` predicate
-    restricting which ops those passes may rewrite. Together they make the datapath's REACH a
-    variable, which is what separates "our arithmetic is wrong" from "we quantize more operations
-    than the reference does" when grading against a reference (e.g. torchao, which quantizes
-    ``nn.Linear`` only) whose quantization policy is narrower than ours.
+    contraction/conv only); nonlinear approximations require explicit selection. ``quant_select``
+    is an ``(op) -> bool`` predicate restricting which ops those passes may rewrite. Together they
+    make the datapath's REACH a variable. It separates "our arithmetic is wrong" from "we quantize
+    more operations than the reference does" when grading against a reference whose quantization
+    policy is narrower (e.g. torchao quantizes ``nn.Linear`` only).
     """
     import hashlib
     import os as _os
 
     from ..frontends.linalg_mlir import parse_mlir_file
+    from ..llvmlower.quant_passes import compute_passes
     from ..xdsl_dialects.lowering.outline import outline_dispatches
+
+    if not int8_compute and quant_passes is not None:
+        raise ValueError("quant_passes requires int8_compute=True")
+    effective_quant_passes = list(compute_passes(quant_passes)) if int8_compute else None
 
     model_dir = Path(model_dir)
     model_source = model_dir / "model.mlir"
@@ -1338,7 +1343,7 @@ def run_model(
     _normalize_model_module(
         module,
         int8_compute=int8_compute,
-        quant_passes=quant_passes,
+        quant_passes=effective_quant_passes,
         prequant_gather=prequant_gather,
         quant_select=quant_select,
     )
@@ -1357,7 +1362,7 @@ def run_model(
         expected_source_sha256=source_sha256,
         normalization_recipe={
             "int8_compute": int8_compute,
-            "quant_passes": quant_passes,
+            "quant_passes": effective_quant_passes,
             "prequant_gather": prequant_gather,
             "selection_policy": "all" if quant_select is None else "custom_unreplayable",
         },
@@ -1436,6 +1441,7 @@ def run_model(
         "n_kernels": outlined.n_kernels,
         "n_unique_kernels": getattr(execute, "last_unique_kernels", None),
         "kernel_backend": kernel_backend,
+        "quantization_passes": effective_quant_passes,
         "n_xnn_routed": (getattr(execute, "last_xnn_routed", 0) if kernel_backend == "xnnpack" else 0),
         **_mesh_counts,
     }

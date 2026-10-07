@@ -108,7 +108,24 @@ def _fake_build(bundle, work, **kwargs):
     work.mkdir(parents=True)
     elf = work / "model.elf"
     elf.write_bytes(b"one linked ELF")
-    return {"elf": elf, "mem_bytes": 256 << 20, "build_hash": "abc123", "vlen": None}
+    return {
+        "elf": elf,
+        "mem_bytes": 256 << 20,
+        "build_hash": "abc123",
+        "vlen": None,
+        # Synthetic build seam only: these bytes test receipt propagation, not a compiler observation.
+        "index_lowering": {
+            "schema": "merlin.selected-index-lowering.v1",
+            "compiler_requested": "mock-clang",
+            "compiler_resolved": "/mock/clang",
+            "compiler_sha256": "0" * 64,
+            "cross_flags": ["--target=riscv64-unknown-elf", *kwargs["cflags_override"]],
+            "data_layout": "e-p:64:64",
+            "index_bits": 64,
+            "effective_pipeline": "synthetic-index-width-pipeline",
+            "scope": "synthetic test fixture; no compiler executed",
+        },
+    }
 
 
 def _console() -> str:
@@ -136,6 +153,7 @@ def test_compile_only_and_native_engine_reuse_one_saved_elf(tmp_path, monkeypatc
     assert built_with == [selected_device]
     assert "device_sidecar" in compiled["output"]
     assert "console" not in compiled["output"]
+    assert compiled["output"]["index_lowering"]["scope"] == "synthetic test fixture; no compiler executed"
 
     backend = SimpleNamespace(available=lambda engine: engine == "gsim", run_elf=lambda elf, **kw: _console())
     selection = {"available": True, "engine": "gsim", "fidelity": "elaborated_rtl", "reason": "receipted"}
@@ -164,6 +182,22 @@ def test_compile_only_and_native_engine_reuse_one_saved_elf(tmp_path, monkeypatc
     assert verified["engine_selection"]["selection"] == selection
     assert Path(verified["output"]["console"]).read_text() == _console()
     assert built_with == [selected_device, None]
+
+
+def test_missing_index_lowering_record_cannot_become_a_compiled_receipt(tmp_path, monkeypatch):
+    inputs, out = _fixture(tmp_path, monkeypatch)
+
+    def old_build(bundle, work, **kwargs):
+        result = _fake_build(bundle, work, **kwargs)
+        del result["index_lowering"]
+        return result
+
+    monkeypatch.setattr(BM.spike_model, "build", old_build)
+    with pytest.raises(BM.BaremetalModelError, match="index-lowering record"):
+        BM.compile_saved_model(**inputs, output=out / "unbound", run="none")
+    receipt = json.loads((out / "unbound" / "baremetal_model.json").read_text())
+    assert receipt["status"] == "failed"
+    assert "index_lowering" not in receipt.get("output", {})
 
 
 def test_oversize_output_refused_before_build_with_failed_receipt(tmp_path, monkeypatch):

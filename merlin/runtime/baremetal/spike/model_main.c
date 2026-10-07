@@ -2,8 +2,10 @@
  *
  * Weights are linked in as a binary blob (objcopy/ld -b binary -> _binary_weights_bin_*);
  * the Merlin C runtime (merlin_model.c) builds memref descriptors from the generated arg
- * table and invokes the compiled forward(). The f32 output is emitted over HTIF as raw
- * 32-bit bit patterns (exact, deterministic) for the host to reinterpret and compare.
+ * table and invokes the compiled forward(). The output is emitted over HTIF as raw
+ * words (exact, deterministic) for the host to reinterpret and compare. FP32 keeps
+ * its existing protocol; signed i64 uses two 32-bit words per element, low first.
+ * Boolean results transmit their actual storage byte, without truth-value normalization.
  *
  * Bit-exact reproducibility is the point: the host x86 build and this rv64gcv build share
  * the same LLVM IR, so the harness gates `spike == host`.
@@ -35,7 +37,12 @@ void merlin_prof_dump(void);
 #define MERLIN_WEIGHTS_BASE_ADDR 0x200000000ULL
 #endif
 
+#if !MERLIN_OUT_IS_F32 && !MERLIN_OUT_IS_I64 && !MERLIN_OUT_IS_I1
+#error "bare-metal model output supports only f32, i64 or i1"
+#endif
+#if MERLIN_OUT_IS_F32
 #define OUT ((float *)MERLIN_OUTPUT_PTR[0])
+#endif
 static merlin_descriptor_t DESCS[MERLIN_N_ARGS];
 
 int main(int hart) {
@@ -64,8 +71,10 @@ int main(int hart) {
   uint64_t c1;
   __asm__ volatile("csrr %0, mcycle" : "=r"(c1));
 
-  /* Output protocol (all f32 emitted as exact 32-bit patterns):
+  /* Output protocol:
    *   OUT <k> <bits...>     : the first k = min(N, 4096) raw values (exact prefix).
+   *   OUT_I64 <k> <lo hi...>: i64 values as unsigned 32-bit halves, low first.
+   *   OUT_I1 <k> <bytes...>: actual one-byte Boolean storage; host requires 0/1.
    * For large outputs (e.g. LM logits) additionally a digest the host can gate on:
    *   ARGMAX <rows> <idx...>: argmax over the last dim per row (token predictions).
    *   SUM <bits>            : f32 sum of all outputs (loose-tol checksum). */
@@ -73,16 +82,35 @@ int main(int hart) {
 #define MERLIN_DUMP_CAP 4096
 #endif
   int k = MERLIN_OUT_ELEMS < MERLIN_DUMP_CAP ? MERLIN_OUT_ELEMS : MERLIN_DUMP_CAP;
+#if MERLIN_OUT_IS_I64
+  htif_puts("OUT_I64 ");
+#elif MERLIN_OUT_IS_I1
+  htif_puts("OUT_I1 ");
+#else
   htif_puts("OUT ");
+#endif
   htif_putd((long)k);
   for (int i = 0; i < k; i++) {
+#if MERLIN_OUT_IS_I64
+    uint64_t bits;
+    memcpy(&bits, (const unsigned char *)MERLIN_OUTPUT_PTR[0] + (long)i * 8, 8);
+    htif_putc(' ');
+    htif_putd((long)(bits & UINT32_MAX));
+    htif_putc(' ');
+    htif_putd((long)(bits >> 32));
+#elif MERLIN_OUT_IS_I1
+    htif_putc(' ');
+    htif_putd((long)((const uint8_t *)MERLIN_OUTPUT_PTR[0])[i]);
+#else
     uint32_t bits;
     memcpy(&bits, &OUT[i], 4);
     htif_putc(' ');
     htif_putd((long)(uint64_t)bits);
+#endif
   }
   htif_putc('\n');
 
+#if MERLIN_OUT_IS_F32
   if (MERLIN_OUT_ELEMS > MERLIN_DUMP_CAP) {
     int rows = MERLIN_OUT_ELEMS / MERLIN_OUT_LASTDIM;
     htif_puts("ARGMAX ");
@@ -121,6 +149,7 @@ int main(int hart) {
     htif_putc(hex[digest[i] & 15]);
   }
   htif_putc('\n');
+#endif
 #endif
   htif_puts("METRIC cycles ");
   htif_putd((long)(c1 - c0));

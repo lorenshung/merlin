@@ -8,24 +8,471 @@ and a tier that cannot run fails closed instead of quietly becoming a model tier
 
 from __future__ import annotations
 
+import errno
+import multiprocessing
+import os
+import select
+import signal
+import threading
+import time
+from contextlib import contextmanager
+from pathlib import Path
+
 import pytest
 
 from merlin.targetgen import rtl_engine_policy as P
 
 
-def test_gsim_has_five_cross_process_runtime_slots(tmp_path):
-    from contextlib import ExitStack
+_HOLD_SLOT_CODE = """\
+import os
+from pathlib import Path
+from merlin.targetgen import rtl_engine_policy as P
 
+# Keep this process-lock fixture independent of unrelated live host jobs.
+P._native_gsim_count = lambda: 0
+with P.gsim_runtime_slot(wait_timeout_s=10, slot_root=Path(root)):
+    ready.put(os.getpid())
+    if not release.poll(30):
+        raise RuntimeError("test holder release was never signaled")
+    release.recv()
+"""
+
+
+@contextmanager
+def _held_by_processes(root, count):
+    ctx = multiprocessing.get_context("spawn")
+    ready = ctx.Queue()
+    pipes = [ctx.Pipe(duplex=False) for _ in range(count)]
+    # ``exec`` is importable from builtins under pytest's installed importlib mode;
+    # a target defined in this copied test file is not importable by spawned children.
+    processes = [
+        ctx.Process(target=exec, args=(_HOLD_SLOT_CODE, {"root": str(root), "ready": ready, "release": reader}))
+        for reader, _ in pipes
+    ]
+    try:
+        for process in processes:
+            process.start()
+        for reader, _ in pipes:
+            reader.close()
+        deadline = time.monotonic() + 15
+        pids = [ready.get(timeout=max(0.1, deadline - time.monotonic())) for _ in processes]
+        assert len(set(pids)) == count
+        assert all(process.is_alive() for process in processes)
+        yield processes
+    finally:
+        for process, (_, writer) in zip(processes, pipes, strict=True):
+            if process.is_alive():
+                writer.send(True)
+            writer.close()
+        for process in processes:
+            if process.pid is not None:
+                process.join(timeout=5)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=5)
+        ready.close()
+
+
+def test_gsim_has_five_cross_process_runtime_slots(tmp_path, monkeypatch):
+    monkeypatch.setattr(P, "_native_gsim_count", lambda: 0, raising=False)
     root = tmp_path / "slots"
     assert P.capsule_worker_cap("gsim") == 5
-    with ExitStack() as held:
-        for _ in range(5):
-            held.enter_context(P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root))
+    with _held_by_processes(root, 5) as processes:
         with pytest.raises(TimeoutError, match="five GSim slots"):
             with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root):
                 pass
+        # An abrupt worker exit releases the kernel lock without a stale PID lease.
+        processes[0].terminate()
+        processes[0].join(timeout=5)
+        assert processes[0].exitcode is not None
+        with P.gsim_runtime_slot(wait_timeout_s=1, slot_root=root):
+            pass
     with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root):
         pass
+
+
+def test_nested_thread_reuses_one_slot_but_unrelated_thread_does_not(tmp_path, monkeypatch):
+    monkeypatch.setattr(P, "_native_gsim_count", lambda: 0, raising=False)
+    root = tmp_path / "slots"
+    with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root):
+        with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root):
+            with _held_by_processes(root, 4):
+                observed = []
+
+                def probe():
+                    try:
+                        with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root):
+                            observed.append("entered")
+                    except TimeoutError:
+                        observed.append("busy")
+
+                thread = threading.Thread(target=probe)
+                thread.start()
+                thread.join(timeout=5)
+                assert not thread.is_alive() and observed == ["busy"]
+            observed.clear()
+            thread = threading.Thread(target=probe)
+            thread.start()
+            thread.join(timeout=5)
+            assert not thread.is_alive() and observed == ["entered"]
+
+
+def test_fork_child_cannot_borrow_parents_slot(tmp_path, monkeypatch):
+    monkeypatch.setattr(P, "_native_gsim_count", lambda: 0, raising=False)
+    root = tmp_path / "slots"
+    parent_slot = P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root)
+    parent_slot.__enter__()
+    try:
+        with _held_by_processes(root, 4):
+            reader, writer = os.pipe()
+            pid = os.fork()
+            if pid == 0:
+                os.close(reader)
+                try:
+                    # An inherited context's cleanup must not unlock the
+                    # parent's open file description in the forked child.
+                    parent_slot.__exit__(None, None, None)
+                    try:
+                        with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root):
+                            answer = b"entered"
+                    except TimeoutError:
+                        answer = b"busy"
+                    os.write(writer, answer)
+                finally:
+                    os._exit(0)
+            os.close(writer)
+            reaped = False
+            try:
+                readable, _, _ = select.select([reader], [], [], 5)
+                assert readable, "fork child did not report within five seconds"
+                assert os.read(reader, 16) == b"busy"
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    waited, status = os.waitpid(pid, os.WNOHANG)
+                    if waited == pid:
+                        reaped = True
+                        break
+                    time.sleep(0.01)
+                else:
+                    pytest.fail("fork child did not exit within five seconds")
+                assert status == 0
+            finally:
+                os.close(reader)
+                if not reaped:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        os.waitpid(pid, 0)
+                    except ChildProcessError:
+                        pass
+    finally:
+        parent_slot.__exit__(None, None, None)
+
+
+def test_gsim_slot_releases_on_exception(tmp_path, monkeypatch):
+    monkeypatch.setattr(P, "_native_gsim_count", lambda: 0, raising=False)
+    root = tmp_path / "slots"
+    with pytest.raises(RuntimeError, match="fixture refusal"):
+        with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root):
+            raise RuntimeError("fixture refusal")
+    with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root):
+        pass
+
+
+def test_external_native_census_and_pending_reservation_share_five_slots(tmp_path, monkeypatch):
+    root = tmp_path / "slots"
+    monkeypatch.setattr(P, "_native_gsim_count", lambda: 4, raising=False)
+    with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root):
+        outcome = []
+
+        def reserve_other_thread():
+            try:
+                with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root):
+                    outcome.append("entered")
+            except TimeoutError:
+                outcome.append("busy")
+
+        thread = threading.Thread(target=reserve_other_thread)
+        thread.start()
+        thread.join(timeout=5)
+        assert not thread.is_alive() and outcome == ["busy"]
+    with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root):
+        pass
+
+
+def test_five_external_native_processes_refuse_any_new_slot(tmp_path, monkeypatch):
+    monkeypatch.setattr(P, "_native_gsim_count", lambda: 5, raising=False)
+    with pytest.raises(TimeoutError, match="five GSim slots"):
+        with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=tmp_path / "slots"):
+            pass
+
+
+def test_external_census_and_legacy_file_lock_fail_closed(tmp_path, monkeypatch):
+    root = tmp_path / "slots"
+    monkeypatch.setattr(P, "_native_gsim_count", lambda: 4, raising=False)
+    with _held_by_processes(root, 1):
+        with pytest.raises(TimeoutError, match="five GSim slots"):
+            with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root):
+                pass
+
+
+def test_parallel_reservations_cannot_outpace_native_start(tmp_path, monkeypatch):
+    root = tmp_path / "slots"
+    monkeypatch.setattr(P, "_native_gsim_count", lambda: 4, raising=False)
+    start = threading.Barrier(4)
+    release = threading.Event()
+    outcomes = []
+
+    def reserve():
+        start.wait(timeout=5)
+        try:
+            with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=root):
+                outcomes.append("entered")
+                release.wait(timeout=5)
+        except TimeoutError:
+            outcomes.append("busy")
+
+    threads = [threading.Thread(target=reserve) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    start.wait(timeout=5)
+    deadline = time.monotonic() + 5
+    while len(outcomes) < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    release.set()
+    for thread in threads:
+        thread.join(timeout=5)
+    assert all(not thread.is_alive() for thread in threads)
+    assert sorted(outcomes) == ["busy", "busy", "entered"]
+
+
+def test_unreadable_native_census_refuses_admission(tmp_path, monkeypatch):
+    def unavailable():
+        raise RuntimeError("native process evidence unreadable")
+
+    monkeypatch.setattr(P, "_native_gsim_count", unavailable, raising=False)
+    with pytest.raises(RuntimeError, match="evidence unreadable"):
+        with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=tmp_path / "slots"):
+            pass
+
+
+def test_proc_census_checks_real_uid_before_native_argv(tmp_path):
+    proc = tmp_path / "proc"
+    proc.mkdir()
+
+    def record(pid, uid, argv=None):
+        member = proc / str(pid)
+        member.mkdir()
+        (member / "status").write_text(f"Name:\tfixture\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n")
+        if argv is not None:
+            (member / "cmdline").write_bytes(b"\0".join(argv) + b"\0")
+
+    record(101, os.getuid(), [b"/any/native", b"/some/elf", b"+loadmem=/some/elf", b"+max-cycles=10"])
+    record(102, os.getuid(), [b"/other", b"--ordinary=10"])
+    record(103, os.getuid() + 1)  # A foreign argv must never be read.
+    assert P._native_gsim_count(proc_root=proc) == 1
+
+
+def test_proc_census_refuses_unreadable_same_user_evidence(tmp_path, monkeypatch):
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    member = proc / "101"
+    member.mkdir()
+    (member / "status").write_text(f"Uid:\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\n")
+    original_read_bytes = Path.read_bytes
+
+    def unreadable(path):
+        if path == member / "cmdline":
+            raise PermissionError("fixture cmdline denied")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", unreadable)
+    with pytest.raises(RuntimeError, match="cannot verify native process"):
+        P._native_gsim_count(proc_root=proc)
+
+
+@pytest.mark.parametrize(
+    ("terminal_status", "expected_count", "expected_error", "expected_reads"),
+    [
+        (b"State:\tZ (zombie)\n", 0, None, 2),
+        ("gone", 0, None, 2),
+        ("live", 1, None, 6),
+        (b"State:\tZ (zombie)\nState:\tS (sleeping)\n", 0, "malformed State evidence", 2),
+        (PermissionError("status denied"), 0, "status denied", 2),
+    ],
+)
+def test_proc_census_rechecks_empty_argv_after_status_transition(
+    tmp_path, monkeypatch, terminal_status, expected_count, expected_error, expected_reads
+):
+    proc = tmp_path / "proc"
+    member = proc / "101"
+    member.mkdir(parents=True)
+    uid = os.getuid()
+    live_status = f"State:\tS (sleeping)\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n".encode()
+    reads = 0
+
+    def transition(path):
+        nonlocal reads
+        if path == member / "status":
+            reads += 1
+            if reads == 1:
+                return live_status
+            if terminal_status == "gone":
+                member.rmdir()
+                raise FileNotFoundError(path)
+            if terminal_status == "live":
+                return live_status
+            if isinstance(terminal_status, OSError):
+                raise terminal_status
+            return terminal_status
+        if path == member / "cmdline":
+            return b""
+        raise AssertionError(f"unexpected process evidence: {path}")
+
+    pauses = []
+    monkeypatch.setattr(Path, "read_bytes", transition)
+    monkeypatch.setattr(P.time, "sleep", pauses.append)
+    if expected_error is None:
+        assert P._native_gsim_count(proc_root=proc) == expected_count
+    else:
+        with pytest.raises(RuntimeError, match=expected_error):
+            P._native_gsim_count(proc_root=proc)
+    assert reads == expected_reads
+    if terminal_status == "live":
+        assert pauses == [0.01] * 4
+
+
+@pytest.mark.parametrize(
+    ("later_status", "later_argv", "expected_count", "expected_error"),
+    [
+        (b"State:\tZ (zombie)\n", b"", 0, None),
+        (b"State:\tS (sleeping)\n", b"/native\0+loadmem=/model.elf\0+max-cycles=10\0", 1, None),
+        (b"State:\tS (sleeping)\n", b"/native\0+loadmem=/model.elf", 0, "incomplete argv"),
+    ],
+)
+def test_proc_census_settles_a_second_live_empty_argv(
+    tmp_path, monkeypatch, later_status, later_argv, expected_count, expected_error
+):
+    proc = tmp_path / "proc"
+    member = proc / "101"
+    member.mkdir(parents=True)
+    uid = os.getuid()
+    live_status = f"State:\tS (sleeping)\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n".encode()
+    settled_status = live_status if later_status == b"State:\tS (sleeping)\n" else later_status
+    statuses = iter((live_status, live_status, settled_status))
+    argvs = iter((b"", b"", later_argv))
+
+    def transition(path):
+        if path == member / "status":
+            return next(statuses)
+        if path == member / "cmdline":
+            return next(argvs)
+        raise AssertionError(f"unexpected process evidence: {path}")
+
+    monkeypatch.setattr(Path, "read_bytes", transition)
+    monkeypatch.setattr(P.time, "sleep", lambda _: None)
+    if expected_error is None:
+        assert P._native_gsim_count(proc_root=proc) == expected_count
+    else:
+        with pytest.raises(RuntimeError, match=expected_error):
+            P._native_gsim_count(proc_root=proc)
+
+
+@pytest.mark.parametrize("read_edge", ("status", "cmdline"))
+@pytest.mark.parametrize("member_state", ("gone", "present", "unreadable"))
+def test_proc_census_esrch_requires_confirmed_exit(tmp_path, monkeypatch, read_edge, member_state):
+    proc = tmp_path / "proc"
+    member = proc / "101"
+    member.mkdir(parents=True)
+    uid = os.getuid()
+    live_status = f"State:\tS (sleeping)\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n".encode()
+    original_stat = Path.stat
+
+    def stat(path, *args, **kwargs):
+        if path == member and member_state == "unreadable":
+            raise PermissionError("fixture pid stat denied")
+        return original_stat(path, *args, **kwargs)
+
+    def evidence(path):
+        if path == member / "status" and read_edge == "cmdline":
+            return live_status
+        if path == member / read_edge:
+            if member_state == "gone":
+                member.rmdir()
+            raise ProcessLookupError(errno.ESRCH, "fixture process exited")
+        raise AssertionError(f"unexpected process evidence: {path}")
+
+    monkeypatch.setattr(Path, "stat", stat)
+    monkeypatch.setattr(Path, "read_bytes", evidence)
+    if member_state == "gone":
+        assert P._native_gsim_count(proc_root=proc) == 0
+    else:
+        match = "stat denied" if member_state == "unreadable" else "cannot verify native process"
+        with pytest.raises(RuntimeError, match=match):
+            P._native_gsim_count(proc_root=proc)
+
+
+@pytest.mark.parametrize(
+    ("known", "potential", "admitted"),
+    [(3, 1, True), (4, 1, False), (0, 5, False)],
+)
+def test_verified_live_empty_argv_consumes_native_capacity(tmp_path, monkeypatch, known, potential, admitted):
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    uid = os.getuid()
+    for number in range(known + potential):
+        member = proc / str(number + 101)
+        member.mkdir()
+        (member / "status").write_text(
+            f"State:\tS (sleeping)\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n"
+        )
+        argv = b"/native\0+loadmem=/model.elf\0+max-cycles=10\0" if number < known else b""
+        (member / "cmdline").write_bytes(argv)
+    monkeypatch.setattr(P.time, "sleep", lambda _delay: None)
+    count = P._native_gsim_count(proc_root=proc)
+    assert count == known + potential
+    census = P._native_gsim_count
+    monkeypatch.setattr(P, "_native_gsim_count", lambda: census(proc_root=proc))
+    if admitted:
+        with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=tmp_path / "slots"):
+            pass
+    else:
+        with pytest.raises(TimeoutError, match="five GSim slots"):
+            with P.gsim_runtime_slot(wait_timeout_s=0, slot_root=tmp_path / "slots"):
+                pass
+
+
+@pytest.mark.parametrize("final_uid", ("missing", "malformed", "foreign"))
+def test_proc_census_refuses_bad_final_uid_for_live_empty_argv(tmp_path, monkeypatch, final_uid):
+    proc = tmp_path / "proc"
+    member = proc / "101"
+    member.mkdir(parents=True)
+    uid = os.getuid()
+    initial = f"State:\tS (sleeping)\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n".encode()
+    final = b"State:\tS (sleeping)\n"
+    if final_uid == "malformed":
+        final += b"Uid:\twrong\n"
+    elif final_uid == "foreign":
+        foreign_uid = uid + 1
+        final += f"Uid:\t{foreign_uid}\t{foreign_uid}\t{foreign_uid}\t{foreign_uid}\n".encode()
+    reads = 0
+
+    def evidence(path):
+        nonlocal reads
+        if path == member / "status":
+            reads += 1
+            return initial if reads == 1 else final
+        if path == member / "cmdline":
+            return b""
+        raise AssertionError(f"unexpected process evidence: {path}")
+
+    monkeypatch.setattr(Path, "read_bytes", evidence)
+    monkeypatch.setattr(P.time, "sleep", lambda _delay: None)
+    failure = "changed Uid evidence" if final_uid == "foreign" else "malformed Uid evidence"
+    with pytest.raises(RuntimeError, match=failure):
+        P._native_gsim_count(proc_root=proc)
 
 
 _UP = lambda why="ok": lambda: (True, why)  # noqa: E731 - table-style probes read better inline

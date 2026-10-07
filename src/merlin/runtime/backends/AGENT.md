@@ -62,7 +62,11 @@ Merlin runtime **execution backends**: run the same Merlin command buffers the P
   objects. Completion follows final audits; a new refused/failed invocation cannot
   retain the previous success receipt. This observes the build, preserving flags,
   emitted bytes and existing marker identity. Header/library/provider compilation
-  closure remains unknown rather than being inferred from a compiler name.
+  closure remains unknown rather than being inferred from a compiler name. The
+  default math archive is an explicit exception: resolve `libm.a` with the selected
+  GCC ISA/ABI flags, link its absolute regular-archive path, bind its bytes and
+  driver to the marker and recipe, and refuse changed bytes before completion.
+  This is no proof of other library/header closure or numerical host support.
 - Device host ABI preparation is optional and source-bound. The provider's
   post-offload callback receives exact routed IR and an immutable sidecar; its
   selected host file enters the normal lowering/object identity path. ABI bridge

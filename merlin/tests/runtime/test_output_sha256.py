@@ -2,18 +2,72 @@
 
 import ctypes
 import hashlib
+import json
 import shutil
 import subprocess
-from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
+from merlin.common.paths import repo_root
+
+
+def test_installed_resource_inventory_includes_the_digest_header():
+    files = json.loads((repo_root() / "build_tools/package_resources.json").read_text())["files"]
+    assert "merlin/runtime/baremetal/spike/output_sha256.h" in files
+
+
+def test_build_refuses_a_floating_digest_for_integer_output(tmp_path, monkeypatch):
+    from merlin.common.digest import sha256_file
+    from merlin.llvmlower import compilation_recipe, qinner, weight_prepack
+    from merlin.runtime.backends import spike_model
+
+    compiler = tmp_path / "compiler"
+    compiler.write_bytes(b"test compiler identity")
+    source = tmp_path / "model.ll"
+    source.write_text("define void @forward() { ret void }\n")
+    observation = {
+        "compiler_resolved": str(compiler),
+        "compiler_sha256": sha256_file(compiler),
+        "data_layout": "e-p:64:64",
+        "index_bits": 64,
+    }
+    flags = ["-march=rv64gc", "-mabi=lp64d"]
+    monkeypatch.setattr(weight_prepack, "prepare_build_bundle", lambda model, *_: model)
+    monkeypatch.setattr(qinner, "plan_for_bundle", lambda *_: False)
+    monkeypatch.setattr(spike_model._spike, "gcc_path", lambda: compiler)
+    monkeypatch.setattr(spike_model, "_mlir_runtime_compiler", lambda *_: [str(compiler)])
+    monkeypatch.setattr(
+        spike_model,
+        "selected_model_compiler_plan",
+        lambda **_: {
+            "observation": observation,
+            "gcc_cflags": flags,
+            "clang_cflags": flags,
+            "model_cflags": flags,
+        },
+    )
+    monkeypatch.setattr(
+        spike_model,
+        "lower_model_file",
+        lambda *_a, **_k: SimpleNamespace(
+            ll_path=source,
+            stats={"index_lowering": {"data_layout": "e-p:64:64", "index_bits": 64, "effective_pipeline": "test"}},
+        ),
+    )
+    monkeypatch.setattr(compilation_recipe.CompilationRecipe, "run", lambda *_a, **_k: None)
+    monkeypatch.setattr(spike_model.c_runtime, "generate", lambda *_a, **_k: {"out_dt": "i64"})
+
+    with pytest.raises(spike_model.SpikeModelError, match="SHA256.*f32"):
+        spike_model.build(tmp_path / "capture", tmp_path / "build", backend="scalar", output_sha256=True)
+    assert not (tmp_path / "build/model.elf").exists()
 
 
 @pytest.fixture(scope="module")
 def hasher(tmp_path_factory):
     if not shutil.which("cc"):
         pytest.skip("host C compiler unavailable")
-    root = Path(__file__).resolve().parents[3]
+    root = repo_root()
     work = tmp_path_factory.mktemp("sha256")
     source = work / "probe.c"
     source.write_text("""#include "output_sha256.h"

@@ -660,15 +660,27 @@ def parse_console(
     backend's own exception type (so messages/raises are unchanged from the hand-written versions)."""
     if strip_warnings:
         text = _strip_warning_fragments(text)
+    from merlin.runtime.out_b64 import OutB64Decoder, OutB64Error
+
     outputs: dict[str, list] = {}
     raw: dict[str, int] = {}
     done = False
+    packed = OutB64Decoder()
     for line in text.splitlines():
         parts = line.split()
         if not parts:
             continue
+        if done and packed.names and (parts[0] == "OUT" or parts[0].startswith("OUT_B64_")):
+            raise error_cls("output appeared after DONE")
+        try:
+            if packed.consume(parts, outputs):
+                continue
+        except OutB64Error as exc:
+            raise error_cls(str(exc)) from exc
         if parts[0] == "OUT":
             name, rows, cols = parts[1], int(parts[2]), int(parts[3])
+            if name in packed.names:
+                raise error_cls(f"duplicate OUT {name} after OUT_B64")
             vals = [value_parser(v) for v in parts[4:]]
             if len(vals) != rows * cols:
                 raise error_cls(f"OUT {name}: expected {rows * cols} values, got {len(vals)}")
@@ -683,6 +695,10 @@ def parse_console(
                 raw[parts[1]] = int(parts[2])
         elif parts[0] == "DONE":
             done = True
+    try:
+        packed.require_closed()
+    except OutB64Error as exc:
+        raise error_cls(str(exc)) from exc
     if not done:
         raise error_cls(f"run did not reach DONE; output was:\n{text[:2000]}")
     return outputs, raw

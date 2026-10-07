@@ -189,3 +189,16 @@ def test_absent_storage_contract_selects_legacy_path():
     cb, _ = fixture()
     del cb["params"]["storage_encodings"]
     assert resolve_storage_bindings(cb, max_storage_bytes=1) is None
+
+
+def test_layout_description_never_materializes_captured_or_synthetic_values(monkeypatch):
+    cb, _ = fixture()
+
+    def no_values(*args, **kwargs):
+        raise AssertionError("layout inspection must not create tensor values")
+
+    monkeypatch.setattr(Tensor, "deterministic", no_values)
+    bindings = resolve_storage_bindings(cb, max_storage_bytes=100, describe_only=True)
+    assert set(bindings) == set(cb["tensors"])
+    assert all(binding.logical_values is None for binding in bindings.values())
+    assert bindings["A"].encoding.logical_strides_elements == (5, 1)

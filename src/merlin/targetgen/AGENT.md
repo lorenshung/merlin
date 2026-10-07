@@ -70,6 +70,14 @@ launching, capsule grading, golden generation, sandboxing and certification. The
   refuses; the advisory CIRCT wrapper records unavailable evidence and still runs
   the scientific oracle. The runner selects one owner for all three operations;
   compiled assertions are not cached by mutable capsule names or object identities.
+- `rtl_engine_policy.gsim_runtime_slot` admits synchronous native runs under one per-user
+  mutex by counting both kernel slot reservations and an upper bound on same-user native
+  plusarg processes. A verified same-user live PID whose argv remains empty after bounded
+  stabilization counts as one potential native; missing, unreadable or malformed `/proc`
+  evidence refuses admission. This is conservative: unrelated empty-argv processes or a
+  different simulator using the same plusargs can consume capacity, and uncoordinated
+  launches after a census cannot be prevented. Do not describe the advisory protocol as
+  global enforcement for processes that do not participate.
 - `program_oracle.emit_bundle(target=...)` resolves `runner.program_emitter` from an
   explicitly selected OOT support provider when named-program assembly or tensor layout
   is requested. Its `path` is provider-contained; optional string `args` are target-owned

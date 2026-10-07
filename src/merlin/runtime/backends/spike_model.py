@@ -21,15 +21,17 @@ import json
 import os
 import struct
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
 from merlin.common import proc as _proc
+from merlin.common.digest import sha256_file
 from merlin.common.paths import runtime_dir
 
-from ...llvmlower import c_runtime, toolchain
+from ...llvmlower import c_runtime, target_data_layout, toolchain
 from ...llvmlower.lower import lower_model_file
 from ..boards import CONSOLE_HTIF, CONSOLE_UART
 from . import spike as _spike  # toolchain paths (gcc/spike/objdump)
@@ -40,6 +42,11 @@ RVV_CFLAGS = ["-march=rv64gcv", "-mabi=lp64d", "-mcmodel=medany", "-O2", "-ffree
 #: it now, and clang defaults to the HOST triple -- so an invocation that forgets this rejects every RISC-V
 #: flag in ``RVV_CFLAGS`` rather than mis-compiling, which is at least loud, but it is a needless failure.
 CLANG_TARGET = "--target=riscv64-unknown-elf"
+
+# merlin/runtime/c/merlin_model.h uses int64_t for every memref offset, size and stride;
+# merlin_model.c additionally asserts that a pointer is one int64_t word. This is a
+# selected runtime ABI constraint, not a target-hardware index-width assumption.
+_C_DESCRIPTOR_INDEX_BITS = 64
 
 
 def _harness_cflags(model_flags: list[str]) -> list[str]:
@@ -118,6 +125,60 @@ def _transform_host_ir(
     }
 
 
+def selected_model_compiler_plan(
+    *,
+    backend: str,
+    cflags_override: list[str] | None,
+    vlen: int | None,
+    features: frozenset[str] | None,
+) -> dict[str, Any]:
+    """Observe exactly the compiler/index selection used by a whole-model build.
+
+    The private source preflight and the actual post-preparation build call the
+    same producer owner. If preparation changes features or flags, their full
+    observations differ and the downstream source proof must refuse.
+    """
+    from ...llvmlower.impr_features import apply_cflags
+    from .zephyr_model import march_with_vlen
+
+    if backend not in {"rvv", "scalar"}:
+        raise SpikeModelError(f"unknown whole-model backend {backend!r}")
+    clang_cflags = list(cflags_override or (RVV_CFLAGS if backend == "rvv" else ["-march=rv64gc", *RVV_CFLAGS[1:]]))
+    marches = [flag for flag in clang_cflags if flag.startswith("-march=")]
+    if len(marches) != 1:
+        raise SpikeModelError("whole-model build requires exactly one -march flag")
+    gcc_cflags = _harness_cflags(clang_cflags)
+    if vlen is not None and backend == "rvv":
+        clang_cflags = march_with_vlen(clang_cflags, vlen)
+        gcc_cflags = march_with_vlen(gcc_cflags, vlen)
+    model_cflags = apply_cflags(clang_cflags, frozenset(features or frozenset()))
+    clang = toolchain.clang()
+    observation = target_data_layout.observe_index_width(clang, [CLANG_TARGET, *model_cflags])
+    from merlin.common.digest import is_sha256
+
+    if (
+        not isinstance(observation, dict)
+        or observation.get("schema") != "merlin.selected-index-lowering.v1"
+        or observation.get("compiler_requested") != str(clang)
+        or not isinstance(observation.get("compiler_resolved"), str)
+        or not is_sha256(observation.get("compiler_sha256"))
+        or observation.get("cross_flags") != [CLANG_TARGET, *model_cflags]
+        or type(observation.get("index_bits")) is not int
+        or observation["index_bits"] <= 0
+        or not isinstance(observation.get("data_layout"), str)
+        or target_data_layout.default_index_bits(observation["data_layout"]) != observation["index_bits"]
+    ):
+        raise SpikeModelError("selected cross compiler returned an incomplete index-width observation")
+    if observation["index_bits"] != _C_DESCRIPTOR_INDEX_BITS:
+        raise SpikeModelError("selected compiler index width is incompatible with the int64_t C memref ABI")
+    return {
+        "observation": observation,
+        "clang_cflags": clang_cflags,
+        "gcc_cflags": gcc_cflags,
+        "model_cflags": model_cflags,
+    }
+
+
 def _harness_dir() -> Path:
     return runtime_dir() / "baremetal/spike"
 
@@ -159,6 +220,40 @@ def _mlir_runtime_compiler(clang: Path, gcc: Path, flags: list[str]) -> list[str
         str((sysroot / "include").resolve()),
         *flags,
     ]
+
+
+def _selected_libm_archive(gcc: Path, flags: list[str], link_flags: tuple[str, ...]) -> tuple[Path, str, str]:
+    """Resolve the selected driver's archive before naming it as a link input.
+
+    A path found by a later diagnostic query is not evidence for an earlier
+    ``-lm`` link. The returned absolute archive is used directly by this build.
+    """
+    # The current host-math policy adds only symbol wrapping. A future search
+    # override must get its own exact resolution contract, not silently select
+    # the driver's default archive in place of the originally requested one.
+    if any(
+        flag in {"-L", "-B", "--sysroot", "-isysroot", "-Xlinker"}
+        or flag.startswith(("-L", "-B", "--sysroot=", "-isysroot", "-specs="))
+        for flag in flags
+    ) or any(not flag.startswith("-Wl,--wrap=") for flag in link_flags):
+        raise SpikeModelError("unsupported math-library search or link override")
+    driver = gcc.resolve(strict=True)
+    if not driver.is_file():
+        raise SpikeModelError("selected math-library driver is not a regular file")
+    driver_sha = sha256_file(driver)
+    selected = _run([gcc, *flags, *link_flags, "-nostdlib", "-nostartfiles", "-print-file-name=libm.a"]).stdout.strip()
+    candidate = Path(selected)
+    if "\n" in selected or not candidate.is_absolute() or candidate.name != "libm.a" or not candidate.is_file():
+        raise SpikeModelError("selected driver did not resolve a regular libm.a archive")
+    archive = candidate.resolve(strict=True)
+    if not archive.is_file() or sha256_file(driver) != driver_sha:
+        raise SpikeModelError("selected math-library driver or archive changed during resolution")
+    # A thin archive points at external member files: its own digest would not
+    # close the library bytes selected by the linker.
+    with archive.open("rb") as stream:
+        if stream.read(8) != b"!<arch>\n":
+            raise SpikeModelError("selected libm.a is not a self-contained regular archive")
+    return archive, sha256_file(archive), driver_sha
 
 
 #: The arena lives here (literal-addressed, inside the -m memory map this backend passes to spike).
@@ -223,18 +318,22 @@ def arch_extensions(path: str | Path) -> list[str]:
 
 def declared_isa(elf: str | Path) -> str | None:
     """The ``--isa`` a functional simulator needs to run the image, read from the ISA its linked objects
-    record (``Tag_RISCV_arch``) -- only when that goes past the simulator's default by a vector
-    extension (a two-hart program's host code); ``None`` otherwise, so every other image keeps the
-    command it always had. The counters the programs read their cycles from are kept."""
+    record (``Tag_RISCV_arch``). Even a scalar image may use declared bitmanip or half-float
+    instructions beyond Spike's default; vector presence is not a prerequisite. Keep the counter
+    extensions used by the bare-metal harness, and choose the widest declared vector length."""
     tokens = arch_extensions(elf)
     if not tokens:
         return None
     base, letters = tokens[0][:4], tokens[0][4:] + "".join(t for t in tokens[1:] if len(t) == 1)
-    if "v" not in letters:
-        return None
     widths = [t for t in tokens[1:] if t.startswith("zvl") and t.endswith("b") and t[3:-1].isdigit()]
     widest = max(widths, key=lambda t: int(t[3:-1])) if widths else None
-    return "_".join([base + letters, "zicntr", "zihpm", *([widest] if widest else [])])
+    named = ["zicntr", "zihpm"]
+    for token in tokens[1:]:
+        if len(token) > 1 and not token.startswith("zvl") and token not in named:
+            named.append(token)
+    if widest:
+        named.append(widest)
+    return "_".join([base + letters, *named])
 
 
 def declared_memory(elf: str | Path) -> tuple[int, int] | None:
@@ -322,6 +421,7 @@ def build(
     dram_base: int = DRAM_BASE,
     dram_bytes: int | None = None,
     int8_compute: bool = False,
+    quant_passes: list[str] | None = None,
     backend: str = "rvv",
     features: frozenset[str] | None = None,
     rvv_schedule: str | None = None,
@@ -359,9 +459,10 @@ def build(
     ``output_sha256`` additionally hashes every first-output f32 value, encoded
     little-endian, after timing. Pair with ``output_dump_cap=1`` for compact logs.
 
-    The lowering arguments mirror ``zephyr_model.build_app`` and defaults retain the historical
-    RVV target: ``int8_compute`` selects the real W8A8 integer
-    datapath, ``features``/``rvv_schedule``/``cflags_override`` let a tuned RVV package drive this path
+    The lowering arguments mirror ``zephyr_model.build_app`` and retain their historical defaults;
+    the selected compiler's index width is now explicitly bound for every build. ``int8_compute``
+    selects the real W8A8 integer datapath; ``features``/``rvv_schedule``/``cflags_override`` let a tuned
+    RVV package drive this path
     the way it drives the Zephyr one, and ``vlen`` pins ``-march=...zvl<N>b`` to the vector length the
     image will actually run on. Passing none of them lowers ``model.mlir`` raw — correct only when the
     caller wants the unprepared module, which is NOT what a delivery wants (measured: raw scored
@@ -417,6 +518,12 @@ def build(
 
     # Refusal during validation must not leave a previous build's success receipt.
     (Path(work) / COMPILATION_RECIPE).unlink(missing_ok=True)
+    from ...llvmlower.quant_passes import compute_passes
+
+    if not int8_compute and quant_passes is not None:
+        raise ValueError("quant_passes requires int8_compute=True")
+    if int8_compute:
+        compute_passes(quant_passes)
     if matrix is not None:
         matrix.provider()  # Refuse unselected/incomplete support before build output or native tools.
     else:
@@ -460,6 +567,7 @@ def build(
         raise ValueError("host_provider_builder must be explicitly callable")
     model_dir, work = Path(model_dir).resolve(), Path(work).resolve()
     work.mkdir(parents=True, exist_ok=True)
+    (work / "quantization-policy.json").unlink(missing_ok=True)
     compilation = CompilationRecipe(work, producer=Path(__file__))
     from ...llvmlower.weight_prepack import prepare_build_bundle
 
@@ -467,7 +575,6 @@ def build(
     inputs_npz = inputs_npz or (model_dir / "inputs.npz")
     gcc = _spike.gcc_path()
     ld = gcc.with_name("riscv64-unknown-elf-ld")
-    clang = toolchain.clang()
     h, rt = _harness_dir(), _c_runtime_dir()
     arena_bytes = arena_mb * 1024 * 1024
     prepared_path = model_dir / "model.mlir"
@@ -490,8 +597,6 @@ def build(
         gcc_cflags = march_with_vlen(gcc_cflags, vlen)
     selected_vectorize = _select_host_vectorize(clang_cflags, rvv_schedule, host_vectorize)
     vectorize = host_vectorize is True
-
-    runtime_compiler = _mlir_runtime_compiler(clang, gcc, gcc_cflags)
 
     # 1. lower MLIR -> LLVM IR -> the declared host ISA object. Parse + lower under IR_LOCK: xDSL's parser is not
     #    thread-safe and a delivery builds several images in one process (see common.ir_lock).
@@ -529,12 +634,15 @@ def build(
                 prepared_path,
                 work,
                 int8_compute=int8_compute,
+                quant_passes=quant_passes,
                 features=features,
                 vlen=vlen,
                 matrix=matrix,
                 device=device,
             )
             vectorize = selected_vectorize
+        if int8_compute:
+            compilation.bind_preparation("quantization_policy", work / "quantization-policy.json")
         if op_profile:
             # Instrumented AFTER preparation, so the ids name the ops that actually run -- instrumenting
             # the raw module would number ops the rewrites go on to split, fuse or route away, and the
@@ -545,6 +653,16 @@ def build(
             prepared_path = work / "model_prof.mlir"
             Path(prepared_path).write_text(text)
             _op_profile.write_table(prof_table, work / "op_profile_table.json")
+        compiler_plan = selected_model_compiler_plan(
+            backend=backend, cflags_override=cflags_override, vlen=vlen, features=features
+        )
+        index_observation = compiler_plan["observation"]
+        gcc_cflags = compiler_plan["gcc_cflags"]
+        clang_cflags = compiler_plan["clang_cflags"]
+        model_cflags = compiler_plan["model_cflags"]
+        selected_clang = index_observation["compiler_resolved"]
+        clang = Path(selected_clang)
+        runtime_compiler = _mlir_runtime_compiler(clang, gcc, gcc_cflags)
         res = lower_model_file(
             prepared_path,
             work / "lower",
@@ -557,13 +675,23 @@ def build(
             vectorize=vectorize,
             transform_schedule=rvv_schedule,
             features=features,
+            data_layout=index_observation["data_layout"],
+            index_bits=index_observation["index_bits"],
         )  # produce only the .ll
     # BACKEND-level feature flags, on the MODEL OBJECT ONLY (the GCC-built harness units keep
     # `gcc_cflags`): a feature like the register-group width is an LLVM backend query no tile size
     # reaches. Empty features -> the flag list is unchanged, so model.o stays byte-identical.
-    from ...llvmlower.impr_features import apply_cflags as _apply_cflags
+    lowered_index = res.stats.get("index_lowering")
+    if (
+        not isinstance(lowered_index, dict)
+        or lowered_index.get("index_bits") != index_observation["index_bits"]
+        or lowered_index.get("data_layout") != index_observation["data_layout"]
+        or not isinstance(lowered_index.get("effective_pipeline"), str)
+    ):
+        raise SpikeModelError("selected index width was not bound by the effective lowering pipeline")
+    index_lowering = {**index_observation, "effective_pipeline": lowered_index["effective_pipeline"]}
+    from merlin.common.digest import sha256_file
 
-    model_cflags = _apply_cflags(clang_cflags, frozenset(features or frozenset()))
     model_ir, host_ir_receipt = _transform_host_ir(res.ll_path, work / "host_llvm", host_llvm_transform)
     compilation.run(
         [clang, CLANG_TARGET, *model_cflags, "-c", model_ir, "-o", work / "model.o"],
@@ -571,10 +699,14 @@ def build(
         inputs=[model_ir],
         output=work / "model.o",
     )
+    if sha256_file(index_observation["compiler_resolved"]) != index_observation["compiler_sha256"]:
+        raise SpikeModelError("selected cross compiler changed during model-object build")
 
     # 2. generate the data-driven runtime artifacts (arg table, call, weights.bin, io)
     cgen = work / "cgen"
     info = c_runtime.generate(model_dir, cgen, inputs_npz, prepared_dir=work)
+    if output_sha256 and info.get("out_dt") != "f32":
+        raise SpikeModelError("full-output SHA256 evidence requires f32 output")
     # The region ahead of the weights blob holds code, the stack, and the harness's STATIC I/O
     # storage -- and that last term is a property of the model, not a constant: `static float
     # OUT[MERLIN_OUT_ELEMS]` is 125 MiB of .bss for a 128x256000 logits output, four times what a
@@ -735,6 +867,7 @@ def build(
         host_math_policy, work / "host_math", gcc, gcc_cflags, compile_host_math
     )
     supplemental_objects.extend(math_objects)
+    libm_archive, libm_sha256, libm_driver_sha256 = _selected_libm_archive(gcc, gcc_cflags, math_link_flags)
 
     from ...llvmlower.device_build import _nm
     from ..host_provider import HostProviderContext, close_host_provider, prepare_host_provider
@@ -776,6 +909,11 @@ def build(
     _hh = _hashlib.sha256()
     for _f in (work / "model.o", cgen / "weights.bin"):
         _hh.update(_f.read_bytes())
+    quantization_policy = None
+    if int8_compute:
+        raw_policy = (work / "quantization-policy.json").read_bytes()
+        quantization_policy = json.loads(raw_policy)
+        _hh.update(raw_policy)
     _rt_srcs = sorted(
         [
             *rt.glob("*.c"),
@@ -787,8 +925,6 @@ def build(
         ]
     )
     _hh.update(_source_digest(_rt_srcs).encode("utf-8"))
-    from ...common.digest import sha256_file
-
     # This unit does not contain the build marker. Compile it before hashing so
     # the actual ABI implementation can be bound without a circular link.
     runtime_object = work / "mlir_rt.o"
@@ -812,12 +948,14 @@ def build(
         _hh.update(_supplemental_object_digest(supplemental_objects))
     if math_link_flags:
         _hh.update(json.dumps(list(math_link_flags)).encode("utf-8"))
-    # The instrumentation switches change the emitted code, so they belong in the identity too.
     _hh.update(
-        f"op_profile={bool(op_profile)} heartbeat={int(prof_heartbeat_cycles)} output_dump_cap={output_dump_cap}".encode(
-            "utf-8"
-        )
+        json.dumps({"libm_sha256": libm_sha256, "libm_driver_sha256": libm_driver_sha256}, sort_keys=True).encode()
     )
+    # The instrumentation switches change the emitted code, so they belong in the identity too.
+    profile_flags = (
+        f"op_profile={bool(op_profile)} heartbeat={int(prof_heartbeat_cycles)} output_dump_cap={output_dump_cap}"
+    )
+    _hh.update(profile_flags.encode())
     if output_sha256:
         _hh.update(b"output_sha256=True")
     build_hash = _hh.hexdigest()[:12]
@@ -899,22 +1037,27 @@ def build(
             h / "model_link.ld",
             *objs,
             *math_link_flags,
-            "-lm",
+            libm_archive,
             "-o",
             elf,
         ],
         runner=_run,
-        inputs=[h / "model_link.ld", *objs],
+        inputs=[h / "model_link.ld", *objs, libm_archive],
         output=elf,
     )
     if device is not None and getattr(device, "final_elf_audit", None) is not None:
         device.final_elf_audit(elf)
     close_host_provider(host_provider_receipt, objs, elf, inspector=provider_inspector, link_flags=math_link_flags)
+    if sha256_file(index_observation["compiler_resolved"]) != index_observation["compiler_sha256"]:
+        raise SpikeModelError("selected cross compiler changed before build completion")
+    if sha256_file(gcc) != libm_driver_sha256 or sha256_file(libm_archive) != libm_sha256:
+        raise SpikeModelError("selected math-library driver or archive changed during link")
     compilation.completed(elf)
     return {
         "elf": elf,
         "mem_bytes": lay["mem_bytes"],
         "build_hash": build_hash,
+        "quantization_policy": quantization_policy,
         "arena_base": lay["arena_base"],
         "weights_base": lay["weights_base"],
         # Reported so `run` can be given it. A run at a different vector length than the build
@@ -936,6 +1079,7 @@ def build(
         # result produced by this ELF can name what it is a result about.
         "matrix": matrix_build.to_dict() if matrix_build is not None else None,
         "matrix_routing": matrix.identity() if matrix is not None else None,
+        "index_lowering": index_lowering,
         **info,
     }
 
@@ -987,28 +1131,34 @@ def run(
 def parse_console(console: str) -> dict[str, Any]:
     """Parse the shared bare-metal model protocol, independent of its simulator.
 
-    OUT is a bounded prefix (at most 4096 values), not evidence of a complete
+    OUT/OUT_I64/OUT_I1 is a bounded prefix (at most 4096 values), not evidence of a complete
     larger tensor. Process success and hardware provenance belong to the caller.
     Duplicate, truncated, or malformed output must never qualify a run.
     """
     lines = console.splitlines()
-    out_lines = [line for line in lines if line.startswith("OUT ")]
+    out_lines = [line for line in lines if line.startswith(("OUT ", "OUT_I64 ", "OUT_I1 "))]
     done_lines = [line for line in lines if line.strip() == "DONE"]
     if len(out_lines) != 1 or len(done_lines) != 1:
         raise SpikeModelError(f"run requires exactly one OUT and DONE:\n{console[-2000:]}")
     if lines.index(out_lines[0]) >= lines.index(done_lines[0]):
         raise SpikeModelError("DONE preceded model output")
     parts = out_lines[0].split()
+    integer = parts[0] == "OUT_I64"
+    boolean = parts[0] == "OUT_I1"
     try:
         n = int(parts[1])
         bits = [int(x) for x in parts[2:]]
     except (IndexError, ValueError) as exc:
-        raise SpikeModelError("malformed OUT count or raw f32 bits") from exc
-    if not 0 <= n <= 4096 or len(bits) != n or any(not 0 <= b <= 0xFFFFFFFF for b in bits):
-        raise SpikeModelError("OUT count or raw f32 bits do not match the bare-metal protocol")
-    flat = np.array(
-        [struct.unpack("<f", struct.pack("<I", b & 0xFFFFFFFF))[0] for b in bits], dtype=np.float32
-    )  # exact prefix (≤4096)
+        raise SpikeModelError("malformed OUT count or raw output words") from exc
+    maximum_word = 1 if boolean else 0xFFFFFFFF
+    if not 0 <= n <= 4096 or len(bits) != n * (2 if integer else 1) or any(not 0 <= b <= maximum_word for b in bits):
+        raise SpikeModelError("OUT count or raw output words do not match the bare-metal protocol")
+    raw = (
+        np.asarray([lo | (hi << 32) for lo, hi in zip(bits[::2], bits[1::2], strict=True)], dtype=np.uint64)
+        if integer
+        else np.asarray(bits, dtype=np.uint8 if boolean else np.uint32)
+    )
+    flat = raw.view(np.int64 if integer else np.bool_ if boolean else np.float32)  # exact prefix (≤4096)
     metrics = {}
     argmax = None
     sumval = None
@@ -1025,6 +1175,8 @@ def parse_console(console: str) -> dict[str, Any]:
             except ValueError:
                 metrics[k] = v
         elif line.startswith("ARGMAX "):
+            if integer or boolean:
+                raise SpikeModelError("integer/Boolean model output cannot carry a floating ARGMAX digest")
             p = line.split()
             try:
                 count = int(p[1])
@@ -1035,6 +1187,8 @@ def parse_console(console: str) -> dict[str, Any]:
             except (IndexError, ValueError, OverflowError) as exc:
                 raise SpikeModelError("malformed or duplicate model ARGMAX") from exc
         elif line.startswith("SUM "):
+            if integer or boolean:
+                raise SpikeModelError("integer/Boolean model output cannot carry a floating SUM digest")
             p = line.split()
             try:
                 bits = int(p[1])
@@ -1043,7 +1197,16 @@ def parse_console(console: str) -> dict[str, Any]:
                 sumval = struct.unpack("<f", struct.pack("<I", bits))[0]
             except (IndexError, ValueError) as exc:
                 raise SpikeModelError("malformed or duplicate model SUM") from exc
-    return {"outputs": flat, "prefix": flat, "argmax": argmax, "sum": sumval, "metrics": metrics, "console": console}
+    return {
+        "outputs": flat,
+        "prefix": flat,
+        "output_dtype": "i64" if integer else "i1" if boolean else "f32",
+        "raw_output_bits": raw,
+        "argmax": argmax,
+        "sum": sumval,
+        "metrics": metrics,
+        "console": console,
+    }
 
 
 def build_and_run(
@@ -1063,9 +1226,36 @@ def build_and_run(
     # The vlen the build used, threaded through so the two cannot disagree. A run at a different vector
     # length mis-places every scalable-vector spill slot; see run()'s docstring.
     result = run(elf, harts=harts, mem_bytes=mem_bytes or b["mem_bytes"], timeout=timeout, vlen=b.get("vlen"))
+    result["quantization_policy"] = b.get("quantization_policy")
     if reference is not None:
+        if result["output_dtype"] == "i1":
+            ref = np.asarray(reference).ravel()
+            pref = np.asarray(result["prefix"])
+            if ref.dtype != np.bool_:
+                raise SpikeModelError("Boolean output requires an exact bool reference; coercion is forbidden")
+            if pref.dtype != np.bool_ or np.any(pref.view(np.uint8) > 1) or np.any(ref.view(np.uint8) > 1):
+                raise SpikeModelError("Boolean output/reference must retain canonical bool wire bytes")
+            complete = pref.size == ref.size
+            mismatch = int(np.count_nonzero(pref.view(np.uint8) != ref.view(np.uint8))) if complete else None
+            result.update(ok=complete and mismatch == 0, mismatched_elements=mismatch, comparison="exact_i1")
+            result["elf"] = str(elf)
+            return result
+        if result["output_dtype"] == "i64":
+            ref = np.asarray(reference).ravel()
+            if ref.dtype != np.int64:
+                raise SpikeModelError("integer output requires an exact int64 reference; float coercion is forbidden")
+            pref = np.asarray(result["prefix"])
+            if pref.dtype != np.int64:
+                raise SpikeModelError("integer output prefix must retain its exact int64 wire dtype")
+            complete = ref.size == pref.size
+            mismatch = int(np.count_nonzero(pref != ref[: pref.size])) if ref.size >= pref.size else None
+            result.update(ok=complete and mismatch == 0, mismatched_elements=mismatch, comparison="exact_i64")
+            result["elf"] = str(elf)
+            return result
         ref = np.asarray(reference, dtype=np.float32).ravel()
-        pref = result["prefix"]
+        pref = np.asarray(result["prefix"])
+        if result["output_dtype"] != "f32" or pref.dtype != np.float32:
+            raise SpikeModelError("floating output prefix must retain its float32 wire dtype")
         k = len(pref)
         rel = float(np.abs(pref - ref[:k]).max()) / max(1e-9, float(np.abs(ref[:k]).max()))
         cos = float((pref @ ref[:k]) / (np.linalg.norm(pref) * np.linalg.norm(ref[:k]) + 1e-12))

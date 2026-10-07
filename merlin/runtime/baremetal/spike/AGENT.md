@@ -17,6 +17,11 @@ Merlin-owned bare-metal harness for running command buffers on **spike** as a mu
 
 - Compiled together with the generated `main.c` by `backends/spike.py` using the chipyard `riscv64-unknown-elf-gcc` (`-march=rv64gcv`), run with `spike --isa=rv64gcv_zfh_zvfh -pN`.
 - Output protocol on the HTIF console: `OUT <name> <rows> <cols> v...`, `METRIC <name> <value>`, `HART <id>`, `DONE` — parsed by `backends/spike.py`.
+- Whole-model `model_main.c` has a separate bounded-prefix protocol: `OUT` carries f32
+  storage words, `OUT_I64` carries low/high 32-bit halves, and `OUT_I1` carries actual
+  one-byte Boolean storage. `spike_model.parse_console` rejects noncanonical Boolean
+  bytes rather than normalizing every nonzero value to true. A prefix is not a full
+  larger output, and none of these formats grants host-operation support.
 
 ## Invariants
 
