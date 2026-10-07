@@ -152,6 +152,13 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
   compose with the disjoint FMA/division selector; both preserve original scalar
   operations and upstream tensor ownership. A local win alone does not establish
   whole-model profitability or an automatic schedule policy.
+  Its separate `packet_borrowed_pointwise_fma_division_2` feature accepts only
+  explicitly contracted immutable-input, private-disjoint-output memref writers.
+  Static maps, injective positive output layouts, pure source scalar arithmetic,
+  stable rounding and unobserved nontrapping effects are required. It retains
+  per-lane source operation order, full output maps, odd tails and source traces.
+  Input spans may alias each other; output alias permission is not inferred.
+  Default routing is unchanged and complete compound cost governs promotion.
   `packet_scalar_pointwise_two_multiplications_4` is an independent default-off
   family for f32 tensor results with exactly two source multiplications,
   constants, optional integer casts and additions. It preserves every rounded
