@@ -16,10 +16,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from merlin.common import digest as _mdigest
 from merlin.xdsl_dialects.lowering.global_plan import CycleInterval
 
 from .global_planner import OccupancySummary
-from merlin.common import digest as _mdigest
 
 PORTFOLIO_MEMBER_COUNT = 4
 

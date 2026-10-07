@@ -29,8 +29,11 @@ def _no_ambient_selection(monkeypatch):
 
 
 def test_every_entry_is_complete_and_names_one_real_switch():
-    from merlin.llvmlower import impr_features, quant_passes
-    from merlin.llvmlower import pipeline  # noqa: F401 -- registers the runner-gated features
+    from merlin.llvmlower import (
+        impr_features,
+        pipeline,  # noqa: F401 -- registers the runner-gated features
+        quant_passes,
+    )
 
     names = [e.name for e in OP.entries()]
     assert len(names) == len(set(names))
