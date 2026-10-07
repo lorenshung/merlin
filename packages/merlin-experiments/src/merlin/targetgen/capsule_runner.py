@@ -2362,10 +2362,67 @@ def _batched_tiers_of(target: str | None) -> frozenset[str]:
         return frozenset()
 
 
+def _model_screen_tier(tier: str, sim: str, tile_exec: dict | None) -> TierResult:
+    """The verdict for a whole model's functional SCREEN tier, read from its per-tile tally.
+
+    The screen is the cheapest-first rung each synthesized tile clears before the cert oracle sees it
+    (``mesh_tile_verification``: ``n_screened`` / ``n_screen_passed`` / ``n_screen_failed`` /
+    ``n_screen_unavailable``). Four distinct facts, never collapsed:
+
+      * no tile record at all             -> skipped (not applicable: this grade synthesized nothing)
+      * tiles verified, no screen tally   -> unavailable (a real hole: the cheap rung was not run)
+      * a tally that does not add up      -> unavailable (unaccounted tiles are UNKNOWN, never a pass)
+      * otherwise                         -> fail if any failed, unavailable if any could not run,
+                                             skipped if none were screened, pass if all passed
+    """
+    evidence = "mesh_tile_verification.per_tile[].screen"
+
+    def _result(status: str, reason: str, *, not_applicable: bool = False) -> TierResult:
+        return TierResult(
+            tier,
+            status,
+            True,
+            reason=reason,
+            evidence=evidence,
+            derived_from_rtl=False,
+            cycle_accurate=False,
+            not_applicable=not_applicable,
+        )
+
+    if not isinstance(tile_exec, dict) or not tile_exec:
+        return _result(
+            "skipped", "no tiles were synthesized for this grade, so there was nothing to screen", not_applicable=True
+        )
+    if tile_exec.get("n_screened") is None:
+        return _result(
+            "unavailable",
+            f"tiles were verified but no {sim} screen tally was recorded, so whether they cleared the "
+            f"{tier} screen is UNKNOWN",
+        )
+    n = int(tile_exec["n_screened"])
+    passed = int(tile_exec.get("n_screen_passed") or 0)
+    failed = int(tile_exec.get("n_screen_failed") or 0)
+    unavailable = int(tile_exec.get("n_screen_unavailable") or 0)
+    if passed + failed + unavailable != n:
+        return _result(
+            "unavailable",
+            f"{n} tile(s) screened but only {passed + failed + unavailable} accounted for; the "
+            f"unaccounted tiles' {tier} verdict is UNKNOWN",
+        )
+    if failed:
+        return _result("fail", f"{failed} of {n} tile(s) failed the {sim} screen")
+    if unavailable:
+        return _result("unavailable", f"the {sim} screen could not run on {unavailable} of {n} tile(s)")
+    if n == 0:
+        return _result("skipped", "no tile was screened")
+    return _result("pass", f"all {n} tile(s) passed the {sim} screen")
+
+
 def _model_tier_map(
     declared: list[str],
     target: str | None,
     model_exec: dict | None,
+    tile_exec: dict | None = None,
     *,
     measurement: dict | None = None,
 ) -> "dict[str, TierResult]":
@@ -2427,6 +2484,12 @@ def _model_tier_map(
             evidence=(lambda v: str(v) if v else None)(seen.get("evidence")),
             fidelity=(lambda v: str(v) if v else None)(seen.get("fidelity")),
         )
+    # A declared SCREEN tier (a cheap functional simulator below the RTL tiers, from the target's own
+    # `tier_sim`) is read from the per-tile tally. Dropping it left a declared rung with no record,
+    # which a downstream `tiers[<screen>] == "pass"` check reads as nothing at all.
+    for t, sim in _screen_tiers_of(target):
+        if t in declared and t not in tiers:
+            tiers[t] = _model_screen_tier(t, sim, tile_exec)
     # The counter-derived verdict below belongs to the tier a SIMULATOR answered at, so a batched
     # tier is excluded from the citable-tier selection; without this, declaring the batched tier
     # would silently REPLACE the simulator tier's record with an unavailable one.
@@ -3736,16 +3799,18 @@ def _grade_model_capsule_inline(
     declared = [str(x) for x in (capsule.get("required_oracle_tiers") or [])]
     mesh_exec = out.get("mesh_tile_verification") or {}
     model_exec = out.get("mesh_execution") or {}
+    n_tiles = int(mesh_exec.get("n_tiles") or 0) if isinstance(mesh_exec, dict) else 0
+    # Set BEFORE the fail-closed branches below, every one of which returns early: a refusal must still
+    # say which tier refused it, and this block used to be attached only on the success path. That
+    # includes the transform-replay refusal: it returned ahead of this block, so every grade it
+    # refused carried no tier record at all.
+    _model_tiers = _model_tier_map(declared, target, model_exec, mesh_exec)
+    result["tiers"] = {k: v.to_dict() for k, v in _model_tiers.items()}
     _transform_verdict = _model_transform_audit_verdict(model_exec)
     if _transform_verdict is not None:
         _status, _category, _detail = _transform_verdict
         result.update(status=_status, failure={"plane": "model", "category": _category, "detail": _detail})
         return result
-    n_tiles = int(mesh_exec.get("n_tiles") or 0) if isinstance(mesh_exec, dict) else 0
-    # Set BEFORE the fail-closed branches below, every one of which returns early: a refusal must still
-    # say which tier refused it, and this block used to be attached only on the success path.
-    _model_tiers = _model_tier_map(declared, target, model_exec)
-    result["tiers"] = {k: v.to_dict() for k, v in _model_tiers.items()}
     exercised: dict[str, str] = {}
     # THE LANE CONTRACT IS EVALUATED UNCONDITIONALLY. It used to sit inside `if n_tiles:` below, so a
     # capsule whose tile verification produced nothing -- no mesh_verify, no default OOT package, an

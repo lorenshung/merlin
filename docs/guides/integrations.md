@@ -15,7 +15,12 @@ Adapters live in their owning distribution: shared compiler contracts and runtim
 under `src/merlin`, and research/evaluation integrations under the relevant `packages/` tree.
 Shared upstream import/process adapters live in `src/merlin/integrations`; workflow-specific
 adapters remain in their owning distributions, not a separate monolithic integration checkout.
-Stable `merlin.*` imports can resolve to an optional distribution; they do not imply core ownership. See the
+Stable `merlin.*` imports can resolve to an optional distribution; they do not imply core ownership.
+Core can also resolve an installed owner through a declared entry-point group rather than importing
+an optional distribution: exact whole-model offload (`merlin.llvmlower.exact_offload`) requires
+exactly one `merlin.exact_offload_release` provider named `reviewed_phase0`, which the experiments
+package registers (`merlin_experiments.corpus.release:verify_exact_offload_binding`). An absent or
+ambiguous provider refuses exact offload; the lookup is a trusted-host gate, not a sandbox. See the
 [architecture reference](../reference/architecture.md) and
 [integration rationale](../design/integrations.md).
 
@@ -390,8 +395,9 @@ and round evidence, but does not thereby acquire a finalized tool ledger or cost
 New preflight/source-policy v5 binds 31 implementation roles, the original explicit price-file
 SHA256 and a normalized AET price snapshot. Beyond v4's 29 roles it pins the experiments-owned
 historical target-access policy module and its packaged deny data
-(`historical_target_access_policy`, `historical_target_access_data`), so an edited deny registry
-invalidates execution like any other treatment source. Its package-source role records the complete Phase 2
+(`historical_target_access_policy`, `historical_target_access_data`, hashed from the installed
+resource), so an edited deny registry invalidates execution like any other treatment source. The
+package-source role records the complete Phase 2
 Python membership and hashes; a separate role pins the shared inventory helper. Added, removed or
 changed package members invalidate execution without another role for each extraction. The
 original native authoring renderer remains independently pinned. The narrow legacy-input adapter retains omitted
@@ -409,9 +415,8 @@ Subscription-notional amounts remain separate from billed spend. Existing run id
 the target and suite; no target identity is guessed by the telemetry module.
 
 Historical v1 (20-source) and extraction-v2 (23-source) declarations retain their exact source
-sets and nine-artifact format; explicit-price v3 retains 27 roles and its ten-artifact format;
-v4 retains its 29 roles.
-Historical v4 closure decoding checks the recorded names and aggregate digest without reading
+sets and nine-artifact format; explicit-price v3 retains 27 roles and its ten-artifact format; v4 retains its 29 roles.
+Package-closure decoding for v4 and v5 checks the recorded names and aggregate digest without reading
 live source files. Execution separately verifies current membership and bytes.
 Readers do not add missing pins, reprice declarations, or rewrite their
 reports; changed implementations still refuse live resume across treatment drift. The native

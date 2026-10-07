@@ -1025,15 +1025,17 @@ def retention_plan(keep: int, match: str | None = None) -> dict:
             drops.append({"name": name, "path": str(path), "bytes": size})
             plan["drop_bytes"] += size
             plan["drop_units"] += 1
-        plan["groups"][group] = {
-            "units": len(rows),
-            "undated": unplaceable.get(group, 0),
-            "drops": drops,
-            "protected": protected,
-        }
+        plan["groups"][group] = _group_row(len(rows), unplaceable.get(group, 0), drops, protected)
     for group, count in unplaceable.items():
-        plan["groups"].setdefault(group, {"units": 0, "undated": count, "drops": [], "protected": []})
+        if group not in plan["groups"]:
+            plan["groups"][group] = _group_row(0, count, [], [])
     return plan
+
+
+def _group_row(units: int, undated: int, drops: list[dict], protected: list[dict]) -> dict:
+    """One group's row of a prune plan. Built in one place so a group with only undated units has
+    exactly the shape of one that was measured."""
+    return {"units": units, "undated": undated, "drops": drops, "protected": protected}
 
 
 CLASSES = ("store-orphans", "pending-snapshots", "caches")

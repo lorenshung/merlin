@@ -321,7 +321,7 @@ Every phase writes to one address per unit, and every later phase cites that add
 | its compiler history | `<phase run>/oot/` (a git repo) | the harness only, via `merlin.common.oot_repo` |
 | a sealed phase-0 release | `out/artifacts/protocols/<target>/phase0-<TS>-<sha7>/` | `merlin experiment corpus prepare` (default `--output`) then `seal` |
 | a phase-2 champion | `out/artifacts/targets/<target>/champions/<package_id>/` | `merlin.targetgen.champions.export_champion` |
-| the target index | `out/artifacts/targets/<target>/INDEX.yaml` | `merlin experiment index <target>` (generated, never edited); also regenerated when a phase-1 run freezes, a phase-2 `best` moves and a champion is exported |
+| the target index | `out/artifacts/targets/<target>/INDEX.yaml` | `merlin experiment index <target>` (generated, never edited; `--check` exits 1 when stale); also regenerated when a phase-1 run freezes, a phase-2 `best` moves and a champion is exported |
 | a tracking page | `out/artifacts/experiments/<target>/dashboard/` | `merlin experiment dashboard <run> \| --target <target>` (regenerable, read from records; see [experiment_dashboard](experiment_dashboard.md)) |
 
 The suite of a phase run IS the phase, so `aet runs --suite <target>/phase1` and `merlin-storage
@@ -346,7 +346,10 @@ adopts the orchestration's own phase-run directory), loop grading commits the op
 it is about to grade (`merlin_experiments.phase1.oot_history`), the round records in
 `qa_loop_summary.yaml` and `oot_commits.jsonl` carry the commit sha, and the official freeze tags
 `frozen` and records it in `freeze.json` under `oot`. A run that began under the legacy
-`capsule-bench/<arm>/` root resumes there without a history.
+`capsule-bench/<arm>/` root resumes there without a history. Only a sandboxed (`--sandbox bwrap`)
+run keeps one; copy mode is a diagnostic that is never admitted. A commit or tag that fails is
+recorded rather than skipped — as an `error` row in `oot_commits.jsonl`, or under `oot.error` in
+`freeze.json` — so a missing history cannot pass for a run that had nothing to commit.
 
 ```python
 from merlin.common import oot_repo as O
