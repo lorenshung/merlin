@@ -159,6 +159,20 @@ def test_equal_work_is_not_flagged(monkeypatch):
     assert r["n_collapsed"] == 0
 
 
+def test_optional_observer_sees_exact_lowered_artifact_without_changing_emit_result(monkeypatch):
+    artifact = 'module { llvm.func @fixture_entry() { llvm.return } }\n'
+    seen = []
+    monkeypatch.setattr(
+        LC, "run_entrypoints", lambda *_args, **_kwargs: (None, {"commands": [{"kind": "fixture"}]}, artifact)
+    )
+    result = LC.probe_shape(
+        "candidate", target="fixture", m=4, k=4, n=4, operand_mlir="i8", accum_mlir="i32",
+        on_lowered=lambda text, work: seen.append((text, work.is_dir())),
+    )
+    assert result == ("lowered", None, 1)
+    assert seen == [(artifact, True)]
+
+
 def test_a_failing_baseline_refuses_to_attribute_anything_to_shape(monkeypatch):
     """With the one-tile baseline down, every multi-tile corner fails for reasons unrelated to shape.
 

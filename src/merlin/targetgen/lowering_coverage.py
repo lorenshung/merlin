@@ -26,6 +26,7 @@ binding. Nothing here knows which accelerator it is looking at.
 from __future__ import annotations
 
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -119,6 +120,7 @@ def probe_shape(
     contract: str | Path | None = None,
     timeout: int = 300,
     additional_forbidden: tuple[str, ...] = (),
+    on_lowered: Callable[[str, Path], None] | None = None,
 ) -> tuple[str, str | None, int]:
     """Run ONLY the emit half of the contract for one shape; classify what came back.
 
@@ -175,6 +177,8 @@ def probe_shape(
                 ),
                 0,
             )
+        if on_lowered is not None:
+            on_lowered(_art or "", Path(td))
         # THE COMMAND BUFFER IS NOT THE PROGRAM on every endpoint. A self-hosted-ISA backend emits its
         # kernel as the FOURTH artifact and can build a perfectly well-formed command buffer beside a
         # kernel that is a bare terminator -- measured: identical 4-command buffers for a shape it

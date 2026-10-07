@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from merlin.targetgen.contract import compile as compiler
-from merlin.targetgen.contract.build_recipe import HarnessBuildRecipe
+from merlin.targetgen.contract.build_recipe import HarnessBuildRecipe, KernelStackFramePolicy
 from merlin.targetgen.contract.build_service import BuildOnlyService, load_build_package
 
 
@@ -124,6 +124,70 @@ def test_build_translation_preserves_upstream_llvm_metadata(tmp_path, monkeypatc
         compiler.llvm_mlir_to_object(text, tmp_path, target="fixture", _build_service=cap)
     assert len(calls) == 1
     assert calls[0][1] == "--mlir-to-llvmir"
+
+
+def test_explicit_public_object_budget_bounds_translation_and_compile(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from merlin.llvmlower import codegen, toolchain
+
+    cap = service(tmp_path)
+    cap = replace(cap, recipe=replace(cap.recipe, kernel_stack_frame=KernelStackFramePolicy("fixture_entry", 4096)))
+    seen = []
+    monkeypatch.setattr(toolchain, "mlir_translate", lambda: Path("/fixture/mlir-translate"))
+
+    def translate(command, **kwargs):
+        seen.append(("translate", kwargs["timeout"]))
+        Path(command[-1]).write_text("define void @fixture_entry() { ret void }\n")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    def compile_ll(source, output, target, *, extra_flags, timeout_s):
+        seen.append(("compile", timeout_s))
+        Path(output).write_bytes(b"object")
+        Path(output).with_suffix(".su").write_text(f"{source}:fixture_entry\t32\tstatic\n")
+        return output
+
+    monkeypatch.setattr(compiler.subprocess, "run", translate)
+    monkeypatch.setattr(codegen, "compile_ll", compile_ll)
+    result = compiler.llvm_mlir_to_object(
+        "builtin.module { llvm.func @fixture_entry() { llvm.return } }",
+        tmp_path / "build", target="fixture", _build_service=cap, build_timeout_s=2,
+    )
+    assert result.is_file()
+    assert [part for part, _seconds in seen] == ["translate", "compile"]
+    assert all(0 < seconds <= 2 for _part, seconds in seen)
+
+
+def test_explicit_public_object_budget_refuses_translator_timeout(tmp_path, monkeypatch):
+    import subprocess
+
+    from merlin.llvmlower import codegen, toolchain
+
+    cap = service(tmp_path)
+    monkeypatch.setattr(toolchain, "mlir_translate", lambda: Path("/fixture/mlir-translate"))
+    monkeypatch.setattr(
+        compiler.subprocess, "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(subprocess.TimeoutExpired(args[0], kwargs["timeout"])),
+    )
+    monkeypatch.setattr(codegen, "compile_ll", lambda *args, **kwargs: pytest.fail("compiled after timeout"))
+    with pytest.raises(TimeoutError, match="translation budget expired"):
+        compiler.llvm_mlir_to_object(
+            "builtin.module { llvm.func @fixture_entry() { llvm.return } }",
+            tmp_path / "build", target="fixture", _build_service=cap, build_timeout_s=1,
+        )
+
+
+def test_explicit_object_compiler_limit_is_tighter_than_global_default(monkeypatch):
+    from merlin.llvmlower import codegen
+
+    seen = []
+    monkeypatch.setattr(codegen, "clang", lambda: Path("/fixture/clang"))
+    monkeypatch.setattr(codegen._proc, "run_checked", lambda _command, **kwargs: seen.append(kwargs["timeout"]))
+    codegen.compile_ll("fixture.ll", "fixture.o", timeout_s=0.5)
+    assert seen == [0.5]
+    for invalid in (0, -1, True, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="explicit compile timeout"):
+            codegen.compile_ll("fixture.ll", "fixture.o", timeout_s=invalid)
 
 
 def test_legacy_object_path_retains_original_lowering(tmp_path, monkeypatch):

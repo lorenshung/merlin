@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
+import math
 import os
-import subprocess
 from pathlib import Path
 
 from merlin.common import compile_trace
 from merlin.common import proc as _proc
 from merlin.common.paths import runtime_dir
 
-from ..common.paths import repo_root
 from .toolchain import clang
 
 # A bounded per-compile wall clock. A pathological schedule (e.g. an outer-product contraction at a
@@ -56,18 +55,26 @@ STAGES = compile_trace.declare(
 )
 
 
-def _run(cmd: list[str]) -> None:
-    _proc.run_checked(
-        cmd, error=CodegenError, timeout=(_COMPILE_TIMEOUT_S or None), timeout_hint=" (pathological compile)"
-    )
+def _run(cmd: list[str], *, timeout_s: float | None = None) -> None:
+    if timeout_s is not None and (
+        isinstance(timeout_s, bool)
+        or not isinstance(timeout_s, (int, float))
+        or not math.isfinite(timeout_s)
+        or timeout_s <= 0
+    ):
+        raise ValueError("explicit compile timeout must be positive")
+    limit = (_COMPILE_TIMEOUT_S or None)
+    if timeout_s is not None:
+        limit = min(limit, timeout_s) if limit is not None else timeout_s
+    _proc.run_checked(cmd, error=CodegenError, timeout=limit,
+                      timeout_hint=" (pathological compile)")
 
 
-def compile_ll(
-    ll_path: str | Path, out_obj: str | Path, target: str = "riscv", *, extra_flags: tuple[str, ...] = ()
-) -> Path:
-    """Compile LLVM IR to an object file for ``riscv`` (rv64gcv) or ``x86``."""
+def compile_ll(ll_path: str | Path, out_obj: str | Path, target: str = "riscv", *,
+               extra_flags: tuple[str, ...] = (), timeout_s: float | None = None) -> Path:
+    """Compile LLVM IR, optionally under a tighter per-call diagnostic limit."""
     flags = RISCV_FLAGS if target == "riscv" else X86_FLAGS
-    _run([clang(), *flags, *extra_flags, "-c", ll_path, "-o", out_obj])
+    _run([clang(), *flags, *extra_flags, "-c", ll_path, "-o", out_obj], timeout_s=timeout_s)
     compile_trace.artifact("object", [out_obj], pipeline="codegen")
     return Path(out_obj)
 

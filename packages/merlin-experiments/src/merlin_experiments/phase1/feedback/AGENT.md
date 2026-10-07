@@ -97,7 +97,11 @@ Keep archive-before-shape and publish-after-promotion ordering unchanged.
 the selected fact-derived tile. It reads no validation capture or answer; the
 ordinary round feedback records emitted text size, not executed work or a
 correctness verdict. Size ratios never prescribe unrolling or reject smaller
-looped code. Compilation, full-model and native numerical gates remain separate.
+looped code. Its separately selected pure build-only capability may compile the
+exact emitted LLVM artifact within a bounded diagnostic budget and record direct
+tool/source pins, object bytes and status. Default round feedback stays emit-only;
+neither compiled objects nor their size/time grant execution, numerical or
+certification evidence. Full-model and native numerical gates remain separate.
 
 `brief.py` constructs and publishes the round brief from already-redacted round
 verdicts, the candidate's notes and explicit operator errata. Preserve prompt bytes,

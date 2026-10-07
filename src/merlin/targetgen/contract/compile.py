@@ -19,8 +19,10 @@ import hashlib
 import json
 import subprocess
 import tempfile
+import time
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from .build_recipe import named_object_paths
 from .harness_blobs import stage_harness_blobs
@@ -69,7 +71,12 @@ def _abi_receipt(workdir: Path, obj: Path, abi: str) -> None:
 
 
 def llvm_mlir_to_object(
-    lowered_mlir_text: str, workdir: Path, *, target: str | None = None, _build_service=None
+    lowered_mlir_text: str,
+    workdir: Path,
+    *,
+    target: str | None = None,
+    _build_service=None,
+    build_timeout_s: int | None = None,
 ) -> Path:
     """Lower package-emitted llvm-dialect MLIR to an rv64 object (.o) for ``target``'s own ISA.
 
@@ -83,8 +90,25 @@ def llvm_mlir_to_object(
     was reported as the submission's kernel faulting at runtime.
 
     ``target=None`` keeps the previous default, for callers with no target in hand.
+    A pure build-only caller may additionally bound translation and every object
+    compiler subprocess with one declining diagnostic wall budget. This does
+    not turn parsing or static stack inspection into a numerical verdict.
     """
     from merlin.llvmlower import codegen
+
+    if build_timeout_s is not None and (
+        _build_service is None or type(build_timeout_s) is not int or build_timeout_s <= 0
+    ):
+        raise ValueError("explicit object-build timeout requires a pure build service and positive seconds")
+    deadline = time.monotonic() + build_timeout_s if build_timeout_s is not None else None
+
+    def remaining() -> float | None:
+        if deadline is None:
+            return None
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("public object-build budget expired")
+        return left
 
     workdir.mkdir(parents=True, exist_ok=True)
     extra: tuple[str, ...] = ()
@@ -127,11 +151,15 @@ def llvm_mlir_to_object(
             raise ValueError("build-only translation requires a complete LLVM/Builtin module")
         source = workdir / "kernel.llvm.mlir"
         source.write_text(lowered_mlir_text, encoding="utf-8")
-        translated = subprocess.run(
-            [str(toolchain.mlir_translate()), "--mlir-to-llvmir", str(source), "-o", str(workdir / "kernel.ll")],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            translated = subprocess.run(
+                [str(toolchain.mlir_translate()), "--mlir-to-llvmir", str(source), "-o", str(workdir / "kernel.ll")],
+                capture_output=True,
+                text=True,
+                timeout=remaining(),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError("public LLVM translation budget expired") from exc
         if translated.returncode:
             raise _build_service.recipe.error_cls("LLVM translation failed:\n" + translated.stderr[-2000:])
         _build_service.verify(target)
@@ -165,7 +193,10 @@ def llvm_mlir_to_object(
     # report first so a compiler invocation that unexpectedly stops producing the sidecar cannot be
     # admitted using stale evidence from an earlier object in a reused work directory.
     policy = recipe.require_kernel_stack_frame()
-    compiled = Path(codegen.compile_ll(llvm_path, object_path, "riscv", extra_flags=(*extra, "-fstack-usage")))
+    compile_kwargs = {"extra_flags": (*extra, "-fstack-usage")}
+    if deadline is not None:
+        compile_kwargs["timeout_s"] = remaining()
+    compiled = Path(codegen.compile_ll(llvm_path, object_path, "riscv", **compile_kwargs))
     from .stack_usage import StackFramePreflightError, measure_entrypoint, write_receipt
     from .stack_usage import _sha256 as _stack_sha
 
@@ -184,7 +215,10 @@ def llvm_mlir_to_object(
         # It runs ONLY after the emitted frame has been measured over budget, so a build that
         # already fits is byte-identical to before -- which is what keeps the one bundle known to
         # have run correctly on hardware a valid acceptance test for this path.
-        repaired = _repair_oversized_frame(llvm_path, object_path, recipe=recipe, policy=policy, extra=extra)
+        repaired = _repair_oversized_frame(
+            llvm_path, object_path, recipe=recipe, policy=policy, extra=extra,
+            remaining=remaining if deadline is not None else None,
+        )
         if repaired is None:
             write_receipt(
                 receipt_path,
@@ -232,7 +266,9 @@ def llvm_mlir_to_object(
     return compiled
 
 
-def _repair_oversized_frame(llvm_path, object_path, *, recipe, policy, extra):
+def _repair_oversized_frame(
+    llvm_path, object_path, *, recipe, policy, extra, remaining: Callable[[], float | None] | None = None
+):
     """Seat the entry frame's static temporaries in one arena and RE-MEASURE.
 
     Returns ``(object, measurement, llvm_path, report_path, report)``, or ``None`` when the repair
@@ -261,7 +297,10 @@ def _repair_oversized_frame(llvm_path, object_path, *, recipe, policy, extra):
     arena_llvm.write_text(rewritten, encoding="utf-8")
     for stale in (arena_object, arena_su):
         stale.unlink(missing_ok=True)
-    rebuilt = Path(_codegen.compile_ll(arena_llvm, arena_object, "riscv", extra_flags=(*extra, "-fstack-usage")))
+    compile_kwargs = {"extra_flags": (*extra, "-fstack-usage")}
+    if remaining is not None:
+        compile_kwargs["timeout_s"] = remaining()
+    rebuilt = Path(_codegen.compile_ll(arena_llvm, arena_object, "riscv", **compile_kwargs))
     try:
         measurement = measure_entrypoint(
             arena_su, llvm_path=arena_llvm, entry_symbol=policy.entry_symbol, max_static_bytes=policy.max_static_bytes
@@ -776,7 +815,7 @@ def simulator_provenance(backend, simulator: str) -> dict[str, Any] | None:
 
 def _counter_observations(
     console: str, *, target: str, simulator: str, cycles: int | None, oracle: Any
-) -> "tuple[list[dict] | None, dict | None]":
+) -> tuple[list[dict] | None, dict | None]:
     """``(timing_observations, timing_capability)`` a bracketed run earned, or ``(None, None)``.
 
     THE HOP THAT WAS MISSING. The bracket emitter, the console parser, the wire contract and every
