@@ -36,6 +36,7 @@ from ...llvmlower.lower import lower_model_file
 from ...llvmlower.masked_contraction import MaskEffectContract
 from ...llvmlower.source_expression_interval import IntervalEffectContract
 from ..boards import CONSOLE_HTIF, CONSOLE_UART
+from ..execution_memory import ExecutionMemoryError, MemoryMapBinding, MemoryReservation, admit_execution_memory
 from . import spike as _spike  # toolchain paths (gcc/spike/objdump)
 
 RVV_CFLAGS = ["-march=rv64gcv", "-mabi=lp64d", "-mcmodel=medany", "-O2", "-ffreestanding", "-fno-builtin"]
@@ -414,6 +415,26 @@ def _supplemental_object_digest(objects):
     return digest.digest()
 
 
+def _model_memory_reservations(
+    elf: Path, *, arena_base: int, arena_bytes: int, stack_bytes: int
+) -> tuple[MemoryReservation, ...]:
+    """Recover the linked stack and the allocator extent compiled by this builder."""
+    symbols = {}
+    listing = _run([toolchain.nm(), "--defined-only", "--radix=d", elf]).stdout
+    for line in listing.splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[2] in {"_stack_top", "MERLIN_STACK_BYTES"}:
+            if parts[2] in symbols or not parts[0].isdigit():
+                raise ExecutionMemoryError("ambiguous linked runtime stack symbols")
+            symbols[parts[2]] = int(parts[0])
+    if set(symbols) != {"_stack_top", "MERLIN_STACK_BYTES"} or symbols["MERLIN_STACK_BYTES"] != stack_bytes:
+        raise ExecutionMemoryError("linked stack extent is missing or disagrees with the build")
+    reservations = [MemoryReservation("runtime-stack", symbols["_stack_top"] - stack_bytes, stack_bytes)]
+    if arena_bytes:
+        reservations.append(MemoryReservation("runtime-allocator", arena_base, arena_bytes))
+    return tuple(reservations)
+
+
 def build(
     model_dir: str | Path,
     work: str | Path,
@@ -450,6 +471,8 @@ def build(
     code_reserve: int | None = None,
     output_dump_cap: int = 4096,
     output_sha256: bool = False,
+    execution_memory_map: MemoryMapBinding | None = None,
+    execution_memory_reservations: tuple[MemoryReservation, ...] = (),
 ) -> dict:
     """Build the whole-model bare-metal ELF (spike, or any board with no RTOS).
 
@@ -478,6 +501,13 @@ def build(
     image will actually run on. Passing none of them lowers ``model.mlir`` raw — correct only when the
     caller wants the unprepared module, which is NOT what a delivery wants (measured: raw scored
     ``cos 0.925`` where the prepared path is bit-exact).
+
+    ``execution_memory_map`` explicitly binds a provider-owned decoded map to
+    the selected execution identity. A selected build closes its actual ELF,
+    linked stack, compiled allocator and caller-declared absolute external
+    buffers before publishing completion. Default selection changes no emitted
+    bytes. This gate does not infer a decoded map from simulator backing size,
+    prove peak stack/heap demand, or grant aliasing/lifetime reuse.
 
     Prepared host code uses the default RVV schedule only when its declared
     ``-march`` provides floating vector execution. ``host_vectorize`` explicitly
@@ -542,6 +572,19 @@ def build(
     # Refusal during validation must not leave a previous build's success receipt.
     (Path(work) / COMPILATION_RECIPE).unlink(missing_ok=True)
     supplier_flags = () if math_archive_symbols is None else trace_symbol_flags(math_archive_symbols)
+    (Path(work) / "execution_memory_admission.json").unlink(missing_ok=True)
+    if execution_memory_map is not None:
+        if not isinstance(execution_memory_map, MemoryMapBinding):
+            raise ExecutionMemoryError("execution_memory_map requires a selected MemoryMapBinding")
+        execution_memory_map.validate()
+        if type(stack_bytes) is not int or stack_bytes <= 0 or type(arena_mb) is not int or arena_mb < 0:
+            raise ExecutionMemoryError("unknown or invalid runtime stack/allocator sizing")
+    if not isinstance(execution_memory_reservations, tuple) or any(
+        not isinstance(use, MemoryReservation) for use in execution_memory_reservations
+    ):
+        raise ExecutionMemoryError("external runtime reservations must be an immutable typed tuple")
+    if execution_memory_reservations and execution_memory_map is None:
+        raise ExecutionMemoryError("external runtime reservations require a selected memory map")
     from ...llvmlower.quant_passes import compute_passes
 
     if not int8_compute and quant_passes is not None:
@@ -1097,6 +1140,15 @@ def build(
         raise SpikeModelError("selected cross compiler changed before build completion")
     if sha256_file(gcc) != libm_driver_sha256 or sha256_file(libm_archive) != libm_sha256:
         raise SpikeModelError("selected math-library driver or archive changed during link")
+    memory_admission = None
+    if execution_memory_map is not None:
+        runtime_reservations = _model_memory_reservations(
+            elf, arena_base=lay["arena_base"], arena_bytes=arena_bytes, stack_bytes=stack_bytes
+        )
+        memory_admission = admit_execution_memory(
+            elf, execution_memory_map, runtime_reservations + execution_memory_reservations
+        )
+        (work / "execution_memory_admission.json").write_text(json.dumps(memory_admission, indent=2) + "\n")
     compilation.completed(elf)
     return {
         "elf": elf,
@@ -1125,6 +1177,7 @@ def build(
         "matrix": matrix_build.to_dict() if matrix_build is not None else None,
         "matrix_routing": matrix.identity() if matrix is not None else None,
         "index_lowering": index_lowering,
+        **({"execution_memory_admission": memory_admission} if memory_admission is not None else {}),
         **info,
     }
 
