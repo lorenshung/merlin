@@ -20,6 +20,7 @@ import yaml
 
 from merlin.compile.model_execution_inputs import file_sha256, strict_tree_sha256
 from merlin_experiments.phase1.feedback import private_bucketize_support as bucketize_support
+from merlin_experiments.phase1.feedback import private_compilation_inputs as compilation_support
 from merlin_experiments.phase1.feedback import private_control_support as control_support
 from merlin_experiments.phase1.feedback import private_data_movement as data_movement
 from merlin_experiments.phase1.feedback import private_integer_reduction_support as integer_support
@@ -50,7 +51,7 @@ from merlin_experiments.phase1.feedback.private_source_support_join import (
 )
 
 SCHEMA = "merlin.phase1.private_full_models.v1"
-RESULT_SCHEMA = "merlin.phase1.private_full_model_build_gate.v7"
+RESULT_SCHEMA = "merlin.phase1.private_full_model_build_gate.v8"
 BUILD_BOARD_SCOPE = "static_memory_layout_and_host_ISA_only; no board execution"
 TRANSPOSE_DATA_SUPPORT_SCOPE = data_movement.SCOPE
 _transpose_data_support = data_movement.prove_transpose_source
@@ -846,6 +847,7 @@ def _verify_compiled_program(
     catalog: Path,
     dts: Path,
     device_selected: bool,
+    require_compilation_recipe: bool = True,
 ) -> dict[str, Any]:
     """Canonical post-build checks shared by freshly built and diagnostic images."""
     from merlin.llvmlower.device_offload import BY_GROUP
@@ -864,6 +866,7 @@ def _verify_compiled_program(
     elf = Path(str(output.get("elf") or ""))
     if not elf.is_file() or file_sha256(elf) != output.get("elf_sha256"):
         raise ValueError(f"{program} linked ELF is absent or changed")
+    compilation_binding = compilation_support.verify(output, elf, required=require_compilation_recipe)
     sidecar_sha = None
     linked = 0
     host_compute_audit = []
@@ -923,6 +926,7 @@ def _verify_compiled_program(
         "static_host_compute_audit": host_compute_audit,
         "candidate_tree_sha256": package_digest["sha256"],
         "index_lowering": index_lowering,
+        "compilation_recipe": compilation_binding,
     }
 
 
@@ -1235,6 +1239,7 @@ def run(
                         catalog=catalog,
                         dts=dts,
                         device_selected=device is not None,
+                        require_compilation_recipe=not diagnostic,
                     )
                 )
             if (
@@ -1433,7 +1438,9 @@ def complete(
             )
             # Every program states its own linked count: one that omits it is not summed as zero.
             and all(
-                isinstance(entry, Mapping) and type(entry.get("linked_device_groups")) is int
+                isinstance(entry, Mapping)
+                and type(entry.get("linked_device_groups")) is int
+                and compilation_support.complete(entry)
                 for entry in (row.get("checks") or {}).get("build", {}).get("programs", [])
             )
             and [entry.get("program") for entry in (row.get("checks") or {}).get("build", {}).get("programs", [])]

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 from merlin_experiments.phase1.feedback import private_bucketize_support as bucketize
+from merlin_experiments.phase1.feedback import private_compilation_inputs as compilation
 from merlin_experiments.phase1.feedback import private_full_models as gate
 from merlin_experiments.phase1.feedback import private_integer_reduction_support as integer_reductions
 from merlin_experiments.phase1.feedback import private_linalg_support as linalg
@@ -123,7 +124,21 @@ def test_private_capture_records_synthetic_input_without_accuracy_claim(tmp_path
     }
 
 
-def test_complete_requires_current_candidate_all_programs_and_device_work():
+def test_complete_requires_current_candidate_all_programs_and_device_work(monkeypatch):
+    # This existing roster fixture is synthetic; native recipe integrity is
+    # exercised independently by test_private_postbuild_recipe_checks_actual_link_inputs.
+    verified_compilation = {
+        "status": "completed_compilation_inputs_verified",
+        "recipe_path": "/operator/build/compilation_recipe.json",
+        "recipe_sha256": "5" * 64,
+        "elf_path": "/operator/build/model.elf",
+        "elf_sha256": "2" * 64,
+        "n_commands": 1,
+        "link_executable": {"path": "/operator/cc", "sha256": "6" * 64, "bytes": 1},
+        "link_inputs": [{"path": "/operator/input.o", "sha256": "7" * 64, "bytes": 1}],
+        "scope": compilation.SCOPE,
+    }
+    monkeypatch.setattr(compilation, "verify", lambda *args, **kwargs: deepcopy(verified_compilation))
     programs = {"a": ("prefix", "decode"), "b": ("model",)}
     selected_index = {
         "schema": "merlin.selected-index-lowering.v1",
@@ -320,6 +335,7 @@ def test_complete_requires_current_candidate_all_programs_and_device_work():
                             "capture_tree_sha256": "c" * 64,
                             "source_sha256": "d" * 64,
                             "elf_sha256": "2" * 64,
+                            "compilation_recipe": deepcopy(verified_compilation),
                             "index_lowering": {**deepcopy(selected_index), "effective_pipeline": indexed_passes},
                             "linked_device_groups": 1,
                             "static_host_compute_audit": [
@@ -368,6 +384,13 @@ def test_complete_requires_current_candidate_all_programs_and_device_work():
     record["schema"] = "merlin.phase1.private_full_model_build_gate.v3"
     assert not gate.complete(record, **kwargs)
     record["schema"] = gate.RESULT_SCHEMA
+    record["schema"] = "merlin.phase1.private_full_model_build_gate.v7"
+    assert not gate.complete(record, **kwargs)
+    record["schema"] = gate.RESULT_SCHEMA
+    for malformed in (None, {}, {"status": "unavailable_in_prebuilt_receipt"}):
+        record["models"][0]["checks"]["build"]["programs"][0]["compilation_recipe"] = malformed
+        assert not gate.complete(record, **kwargs)
+        record["models"][0] = model("a", programs["a"])
     record["schema"] = "merlin.phase1.private_full_model_build_gate.v4"
     assert not gate.complete(record, **kwargs)
     record["schema"] = "merlin.phase1.private_full_model_build_gate.v5"
@@ -1530,7 +1553,12 @@ def test_shared_postbuild_verifier_rehashes_prebuilt_elf(tmp_path):
         "dts": dts,
         "device_selected": False,
     }
-    assert gate._verify_compiled_program(receipt, **kwargs)["elf_sha256"] == _sha(elf)
+    with pytest.raises(ValueError, match="producer-bound compilation recipe"):
+        gate._verify_compiled_program(receipt, **kwargs)
+    kwargs["require_compilation_recipe"] = False
+    inspected = gate._verify_compiled_program(receipt, **kwargs)
+    assert inspected["elf_sha256"] == _sha(elf)
+    assert inspected["compilation_recipe"]["status"] == "unavailable_in_prebuilt_receipt"
     assert integer_reductions.linked_complete(
         source,
         {
@@ -1554,6 +1582,36 @@ def test_shared_postbuild_verifier_rehashes_prebuilt_elf(tmp_path):
     elf.write_bytes(b"mutated")
     with pytest.raises(ValueError, match="ELF is absent or changed"):
         gate._verify_compiled_program(receipt, **kwargs)
+
+
+def test_private_postbuild_recipe_checks_actual_link_inputs(tmp_path):
+    """Native tiny build, not model or simulator qualification."""
+    from merlin.llvmlower.compilation_recipe import CompilationRecipe
+
+    cc, ar = shutil.which("cc"), shutil.which("ar")
+    if cc is None or ar is None:
+        pytest.skip("native compiler/archive tools unavailable")
+    source, archive, elf = tmp_path / "main.c", tmp_path / "selected.a", tmp_path / "model.elf"
+    source.write_text("int main(void) { return 0; }\n")
+    subprocess.run([ar, "rc", str(archive)], capture_output=True, check=True)
+    recipe = CompilationRecipe(tmp_path, producer=source)
+    recipe.run(
+        [cc, str(source), str(archive), "-o", str(elf)],
+        runner=lambda argv: subprocess.run(argv, capture_output=True),
+        inputs=[source, archive],
+        output=elf,
+    )
+    recipe.completed(elf)
+    output = {"compilation_recipe": {"path": str(recipe.path), "sha256": _sha(recipe.path)}}
+    bound = compilation.verify(output, elf, required=True)
+    assert bound["elf_sha256"] == _sha(elf)
+    assert compilation.complete({"compilation_recipe": bound, "elf_sha256": _sha(elf)})
+    original_elf = _sha(elf)
+    archive.write_bytes(archive.read_bytes() + b"postbuild mutation")
+    assert _sha(elf) == original_elf
+    with pytest.raises(ValueError, match="identity|changed"):
+        compilation.verify(output, elf, required=True)
+    assert not compilation.complete({"compilation_recipe": bound, "elf_sha256": original_elf})
 
 
 def test_recipe_derivation_binds_current_sources_and_selected_capture_recipe(tmp_path, monkeypatch):

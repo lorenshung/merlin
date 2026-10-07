@@ -20,6 +20,13 @@ whole-model build. The shared post-build verifier still checks linked bytes and
 source obligations, but an old receipt without exact producer/toolchain closure
 cannot become a full-roster gate result or a build-cache hit.
 
+The v8 private complete-model build gate consumes the producer-bound completed
+compilation recipe and independently rehashes its explicit compiler/link inputs
+and final ELF. Missing historical recipes remain diagnostic-only, never newly
+certified. This evidence does not prove transitive toolchain closure, archive
+symbol suppliers, or frontend/executable numerical equivalence; library-specific
+numerical declarations retain their separate obligations.
+
 `private_source_freeze.py` owns host-only run copies of authored software and
 host-capability inputs selected by a verified Phase 0 derivation export. Bind
 original path, semantic role, digest and archive owner; distinct archives may

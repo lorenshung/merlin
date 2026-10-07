@@ -267,6 +267,15 @@ def compile_saved_model(
             "index_lowering": built["index_lowering"],
             "matrix_routing": built.get("matrix_routing"),
         }
+        # Bind the producer's record, rather than minting a new command history.
+        # Its consumer independently verifies completed commands and input bytes.
+        from merlin.llvmlower.compilation_recipe import FILENAME as RECIPE_FILENAME
+
+        recipe = elf.parent / RECIPE_FILENAME
+        if recipe.exists():
+            if recipe.is_symlink() or not recipe.is_file():
+                raise BaremetalModelError("bare-metal compilation recipe is absent or indirect")
+            receipt["output"]["compilation_recipe"] = {"path": str(recipe), "sha256": _sha(recipe)}
         from merlin.llvmlower.device_offload import SIDECAR_NAME
 
         sidecar = output_path / "build" / SIDECAR_NAME

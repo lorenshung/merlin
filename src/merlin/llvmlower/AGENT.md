@@ -72,6 +72,11 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
   project environment. Its success hash binds the returned LLVM text, before later
   host transforms/codegen/link. This observation is not a hermetic toolchain lock or
   cache identity; secret and oversized environment values remain redacted.
+- `compilation_recipe.py` records owned object/link invocations and verifies a
+  completed recipe against a caller-selected full digest, current explicit
+  tool/input/output bytes and the final executable. It checks direct argv file
+  inputs and command order without claiming implicit headers, library symbol
+  suppliers, transitive toolchain closure or numerical correctness.
 - `late_quant_rne.py` owns reusable bounded binary32 round/clamp recognition on
   emitted LLVM, an explicit typed SSA tokenizer, portable native emission and
   explicitly selected CPU ISA legalization. The empty host policy leaves source

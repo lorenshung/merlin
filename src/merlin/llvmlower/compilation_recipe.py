@@ -7,17 +7,21 @@ their own closure. Callers name inputs; this module never infers a target ABI.
 
 from __future__ import annotations
 
+import json
 import shutil
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
-from merlin.common.digest import sha256_file
+from merlin.common.digest import is_sha256, sha256_file
 from merlin.common.jsonio import write_pretty_json
 
 from . import codegen_env
 
 FILENAME = "compilation_recipe.json"
+SCHEMA = "merlin.compilation_recipe.v1"
+SCOPE = "caller-owned compilation and link; provider compilation and toolchain dependency closure unknown"
+_NON_FILE_VALUE_FLAGS = frozenset({"-I", "-isystem", "-iquote", "-idirafter", "--sysroot", "-b"})
 
 
 def _identity(path: Path) -> dict:
@@ -30,8 +34,8 @@ class CompilationRecipe:
     def __init__(self, work: Path, *, producer: Path):
         self.path = work / FILENAME
         self.record = {
-            "schema": "merlin.compilation_recipe.v1",
-            "scope": "caller-owned compilation and link; provider compilation and toolchain dependency closure unknown",
+            "schema": SCHEMA,
+            "scope": SCOPE,
             "producer": _identity(producer),
             "status": "prepared",
             "commands": [],
@@ -104,3 +108,168 @@ class CompilationRecipe:
             raise ValueError("compilation preparation changed before completion")
         self.record.update(status="completed", **{kind: _identity(product)})
         write_pretty_json(self.path, self.record)
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"compilation recipe has duplicate JSON field {key!r}")
+        result[key] = value
+    return result
+
+
+def _ordinary_path(value: object, *, directory: bool = False) -> Path:
+    if not isinstance(value, str) or not value:
+        raise ValueError("compilation recipe has an empty path")
+    path = Path(value)
+    if not path.is_absolute() or path.is_symlink():
+        raise ValueError("compilation recipe path is indirect or not absolute")
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("compilation recipe path is absent") from exc
+    if resolved != path or not (path.is_dir() if directory else path.is_file()):
+        raise ValueError("compilation recipe path is indirect or not ordinary")
+    return path
+
+
+def _checked_identity(value: object, label: str) -> dict[str, Any]:
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"path", "sha256", "bytes"}
+        or not is_sha256(value.get("sha256"))
+        or type(value.get("bytes")) is not int
+        or value["bytes"] < 0
+    ):
+        raise ValueError(f"compilation recipe {label} has no exact file identity")
+    path = _ordinary_path(value["path"])
+    if path.stat().st_size != value["bytes"] or sha256_file(path) != value["sha256"]:
+        raise ValueError(f"compilation recipe {label} bytes changed")
+    return value
+
+
+def _argument_path(value: str, cwd: Path) -> Path:
+    path = Path(value)
+    try:
+        return (path if path.is_absolute() else cwd / path).resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("compilation recipe argv names an absent direct file") from exc
+
+
+def _checked_command(value: object, prior_outputs: set[str], *, final: bool) -> dict[str, Any]:
+    if (
+        not isinstance(value, dict)
+        or set(value)
+        != {
+            "argv",
+            "cwd",
+            "executable",
+            "environment",
+            "environment_digest",
+            "inputs",
+            "requested_output",
+            "status",
+            "output",
+        }
+        or value.get("status") != "returned"
+    ):
+        raise ValueError("compilation recipe has an incomplete command")
+    argv = value["argv"]
+    if not isinstance(argv, list) or not argv or any(not isinstance(arg, str) or not arg for arg in argv):
+        raise ValueError("compilation recipe command has no complete argv")
+    cwd = _ordinary_path(value["cwd"], directory=True)
+    executable = _checked_identity(value["executable"], "command executable")
+    if not Path(argv[0]).is_absolute() or _argument_path(argv[0], cwd) != Path(executable["path"]):
+        raise ValueError("compilation recipe command selected another executable")
+    environment = value["environment"]
+    if (
+        not isinstance(environment, dict)
+        or any(not isinstance(key, str) or not isinstance(item, str) for key, item in environment.items())
+        or codegen_env.snapshot(environment) != environment
+        or value["environment_digest"] != codegen_env.digest(environment)
+    ):
+        raise ValueError("compilation recipe command environment digest differs")
+    inputs = value["inputs"]
+    if not isinstance(inputs, list) or not inputs:
+        raise ValueError("compilation recipe command has no explicit inputs")
+    input_paths = []
+    for item in inputs:
+        input_paths.append(_checked_identity(item, "input")["path"])
+    if len(set(input_paths)) != len(input_paths):
+        raise ValueError("compilation recipe command repeats an input identity")
+    output = _checked_identity(value["output"], "output")
+    output_path = output["path"]
+    if (
+        value["requested_output"] != output_path
+        or output_path in input_paths
+        or output_path in prior_outputs
+        or argv.count("-o") != 1
+        or argv.index("-o") + 1 >= len(argv)
+        or _argument_path(argv[argv.index("-o") + 1], cwd) != Path(output_path)
+    ):
+        raise ValueError("compilation recipe command output differs from its invocation")
+    direct_inputs = set()
+    for index, arg in enumerate(argv[1:], start=1):
+        if arg.startswith("-") or argv[index - 1] in _NON_FILE_VALUE_FLAGS | {"-o"}:
+            continue
+        path = _argument_path(arg, cwd)
+        if str(path) != output_path and str(path) not in input_paths:
+            raise ValueError("compilation recipe argv has an unrecorded direct file input")
+        if str(path) in input_paths:
+            direct_inputs.add(str(path))
+    if final and direct_inputs != set(input_paths):
+        raise ValueError("compilation recipe link input has no direct argv reference")
+    prior_outputs.add(output_path)
+    return value
+
+
+def verify_completed_recipe(recipe_path: Path, *, executable: Path, expected_recipe_sha256: str) -> dict[str, Any]:
+    """Recheck a completed v1 observation against current explicit file bytes.
+
+    This does not infer imported headers, library symbol suppliers, ambient tool
+    dependencies, or numerical behavior from the observed commands.
+    """
+    if not is_sha256(expected_recipe_sha256):
+        raise ValueError("compilation recipe has no selected full digest")
+    recipe = _ordinary_path(str(recipe_path))
+    if recipe.name != FILENAME or sha256_file(recipe) != expected_recipe_sha256:
+        raise ValueError("compilation recipe bytes differ from selected digest")
+    selected_elf = _ordinary_path(str(executable))
+    try:
+        record = json.loads(recipe.read_text(encoding="utf-8"), object_pairs_hook=_unique_object)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("compilation recipe is not valid JSON") from exc
+    if (
+        not isinstance(record, dict)
+        or set(record)
+        not in (
+            {"schema", "scope", "producer", "status", "commands", "executable"},
+            {"schema", "scope", "producer", "status", "commands", "executable", "preparation"},
+        )
+        or record.get("schema") != SCHEMA
+        or record.get("scope") != SCOPE
+        or record.get("status") != "completed"
+    ):
+        raise ValueError("compilation recipe is not a completed v1 observation")
+    _checked_identity(record["producer"], "producer")
+    preparation = record.get("preparation", {})
+    if not isinstance(preparation, dict) or any(not isinstance(key, str) or not key for key in preparation):
+        raise ValueError("compilation recipe preparation is malformed")
+    preparation_paths = []
+    for identity in preparation.values():
+        preparation_paths.append(_checked_identity(identity, "preparation")["path"])
+    if len(set(preparation_paths)) != len(preparation_paths):
+        raise ValueError("compilation recipe repeats a preparation identity")
+    commands = record["commands"]
+    if not isinstance(commands, list) or not commands:
+        raise ValueError("compilation recipe has no returned commands")
+    outputs: set[str] = set()
+    for index, command in enumerate(commands):
+        _checked_command(command, outputs, final=index == len(commands) - 1)
+    final = _checked_identity(record["executable"], "final executable")
+    if final != commands[-1]["output"] or final["path"] != str(selected_elf):
+        raise ValueError("compilation recipe final executable differs from link output")
+    if sha256_file(recipe) != expected_recipe_sha256:
+        raise ValueError("compilation recipe changed during verification")
+    return record
