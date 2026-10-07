@@ -582,6 +582,46 @@ operations:
       status: unreviewed
       semantics: {scope: selected_prepared_source_build_link_host_placement_only, original_to_prepared_equivalence: not_proved, compiled_numerical_equivalence: not_proved, existing_numerical_tolerance: unchanged}
       evidence: {source_schema: merlin.static_integer_reduction_source_body.v1, selected_index_observation: required, exact_source_ordinal_reproof: required, candidate_capture_and_elf_join: required}
+  - id: host_review_prepared_index_boolean_extension
+    status: reviewed
+    ops: [aten.index.Tensor]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [i1, i64], ordered_result_dtypes: [i64]}
+    source_body: {schema: merlin.prepared_index_source_body.v1, operation: boolean_extension}
+    numerical_contract:
+      status: unreviewed
+      semantics: {scope: selected_prepared_source_build_link_host_placement_only, original_to_prepared_equivalence: not_proved, compiled_numerical_equivalence: not_proved, existing_numerical_tolerance: unchanged}
+      evidence: {independent_capture_trace_source_reproof: required, selected_index_observation: required, complete_compute_root_admission: required, candidate_capture_and_elf_join: required}
+  - id: host_review_prepared_index_mask_sum
+    status: reviewed
+    ops: [aten.index.Tensor]
+    placement: host
+    signature: {family: reduction, ordered_operand_dtypes: [i64, i64], ordered_result_dtypes: [i64]}
+    source_body: {schema: merlin.prepared_index_source_body.v1, operation: mask_sum}
+    numerical_contract:
+      status: unreviewed
+      semantics: {scope: selected_prepared_source_build_link_host_placement_only, original_to_prepared_equivalence: not_proved, compiled_numerical_equivalence: not_proved, existing_numerical_tolerance: unchanged}
+      evidence: {independent_capture_trace_source_reproof: required, selected_index_observation: required, complete_compute_root_admission: required, candidate_capture_and_elf_join: required}
+  - id: host_review_prepared_literal_boolean_index
+    status: reviewed
+    ops: [aten.index.Tensor]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [i64, i64, i1], ordered_result_dtypes: [i1]}
+    source_body: {schema: merlin.prepared_index_source_body.v1, operation: literal_indexed_extract}
+    numerical_contract:
+      status: unreviewed
+      semantics: {scope: selected_prepared_source_build_link_host_placement_only, original_to_prepared_equivalence: not_proved, compiled_numerical_equivalence: not_proved, existing_numerical_tolerance: unchanged}
+      evidence: {independent_capture_trace_source_reproof: required, literal_index_bounds: required, selected_index_observation: required, complete_compute_root_admission: required, candidate_capture_and_elf_join: required}
+  - id: host_review_literal_bucketize_count
+    status: reviewed
+    ops: [aten.bucketize.Tensor]
+    placement: host
+    signature: {family: reduction, ordered_operand_dtypes: [f32, f32, i64], ordered_result_dtypes: [i64]}
+    source_body: {schema: merlin.static_bucketize_source_body.v1, operation: f32_literal_boundary_count_i64}
+    numerical_contract:
+      status: unreviewed
+      semantics: {scope: selected_prepared_source_build_link_host_placement_only, original_to_prepared_equivalence: not_proved, compiled_numerical_equivalence: not_proved, existing_numerical_tolerance: unchanged}
+      evidence: {exact_source_body: required, source_dense_nondecreasing_non_nan_boundaries: required, independent_capture_trace_right_flag_reproof: required, selected_index_observation: required, complete_compute_root_admission: required, candidate_capture_and_elf_join: required}
 evidence:
   source: Content identity of the host package selected by descriptor.yaml.
   inspected_package:
