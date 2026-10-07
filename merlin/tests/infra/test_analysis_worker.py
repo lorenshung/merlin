@@ -19,7 +19,7 @@ from merlin_experiments.phase2 import emission_diagnostics as ED
 from merlin_experiments.phase2 import stage_inputs as INPUTS
 
 from merlin.common.digest import sha256_bytes
-from merlin.common.paths import merlin_dir
+from merlin.common.paths import merlin_dir, python_import_roots
 from merlin.perf.analysis_worker import IsolatedAnalysisWorker, _read_output
 
 
@@ -45,7 +45,13 @@ def synthetic_analysis_owner(tmp_path, monkeypatch):
     overlay = tmp_path / "test_import_policy"
     overlay.mkdir()
     (overlay / "sitecustomize.py").write_text(finder_source)
-    monkeypatch.setenv("PYTHONPATH", str(overlay) + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    # The suite's conftest pins optional distributions in the parent sys.path.
+    # Child interpreters need the same explicit source roots before any older
+    # editable extension in their selected interpreter's site-packages.
+    monkeypatch.setenv(
+        "PYTHONPATH",
+        os.pathsep.join((str(overlay), *map(str, python_import_roots()), os.environ.get("PYTHONPATH", ""))),
+    )
     yield
     sys.meta_path.remove(finder)
     if original is None:
@@ -533,6 +539,23 @@ def test_worker_reserves_result_transport_grace_inside_outer_budget(tmp_path):
     receipt = json.loads(next((tmp_path / "worker").glob("*/receipt.json")).read_text())
     assert receipt["analysis_budget_seconds"] == result["analysis_budget_seconds"]
     assert receipt["analysis_budget_seconds"] < receipt["budget_seconds"] == 10
+
+
+def test_worker_child_uses_the_same_source_owner_as_parent(tmp_path):
+    """An obsolete editable extension must not supply the child worker."""
+    from merlin.perf import analysis_worker as worker_module
+
+    stage = tmp_path / "trusted_source_stage.py"
+    stage.write_text(
+        "from merlin.perf import analysis_worker\n"
+        "def analyze_whole_model_emission(*args, **kwargs):\n"
+        " return {'worker_source': analysis_worker.__file__}\n"
+    )
+    worker = IsolatedAnalysisWorker(
+        analysis_source=stage, contract_root=tmp_path, sandbox_factory=lambda *args: {}, output=tmp_path / "worker"
+    )
+    result = worker(tmp_path, tmp_path, Sentinel(), timeout_s=10)
+    assert Path(result["worker_source"]).resolve() == Path(worker_module.__file__).resolve()
 
 
 def test_host_worker_uses_injected_transport_and_records_both_commands(tmp_path, monkeypatch):

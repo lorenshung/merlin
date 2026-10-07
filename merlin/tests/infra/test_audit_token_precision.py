@@ -33,7 +33,7 @@ GRANTED = [
     "examples/gemmini/phase0/recipe.yaml",
 ]
 
-# Real answer surfaces. Each MUST trip it.
+# Declared answer identities. Each MUST trip it, even if its optional owner is absent.
 ANSWERS = [
     "merlin/contract/capsules/isa/A2_single_tile_matmul/golden.yaml",
     "merlin/contract/capsules/isa/A2_single_tile_matmul/expected_instruction_coverage.yaml",
@@ -42,7 +42,7 @@ ANSWERS = [
     # name is immaterial to the assertion — and naming a real one would publish a holdout.
     "merlin/contract/capsules/hidden/PLACEHOLDER_hidden/capsule.yaml",
     "merlin/python/merlin/runtime/reference.py",
-    "merlin/targets/gemmini/backend/gemmini.py",
+    "merlin/perf/whole_model_oracle.py",
 ]
 
 
@@ -85,7 +85,13 @@ def test_private_resource_tokens_are_nonvacuous_without_real_answer_data(tmp_pat
     monkeypatch.setattr(surfaces, "_evicted_oracle_modules", lambda: [])
     monkeypatch.setattr(surfaces, "_support_package_dirs", lambda: [])
     hidden = "merlin/contract/capsules/hidden/"
-    te = SimpleNamespace(hidden_corpus=lambda: hidden, prior_backends=(), backend_package=None)
+    te = SimpleNamespace(
+        target="private_fixture",
+        capsule_corpus=None,
+        hidden_corpus=lambda: hidden,
+        prior_backends=(),
+        backend_package=None,
+    )
     # Declared identity remains suspicious even before the optional private files exist locally.
     before = surfaces.audit_tokens(te)["answer"]
     assert "capsules/hidden" in before
@@ -116,7 +122,11 @@ def test_renamed_explicit_support_oracle_tokens_follow_current_owner(tmp_path, m
     monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "out"))
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("token discovery launched a process"))
     descriptor = SimpleNamespace(
-        target="synthetic_device", hidden_corpus=lambda: None, prior_backends=(), backend_package=None
+        target="synthetic_device",
+        capsule_corpus=None,
+        hidden_corpus=lambda: None,
+        prior_backends=(),
+        backend_package=None,
     )
     selected = audit_tokens(descriptor)["answer"]
     assert any(token in str(oracle) for token in selected)
