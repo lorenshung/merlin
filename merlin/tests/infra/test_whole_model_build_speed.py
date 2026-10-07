@@ -262,7 +262,9 @@ def test_the_pin_registry_keeps_every_machine_a_build_names_live():
     from merlin.common import provenance as PROV
 
     doc = yaml.safe_load(PROV.pins_path().read_text(encoding="utf-8"))
-    assert set(doc) == {"version", "pins", "artifacts"}
+    # `lost_artifacts` is read by `provenance_lost.load_lost` and cross-checked by both loaders.
+    assert set(doc) == {"version", "pins", "artifacts", "lost_artifacts"}
+    assert PROV.load_lost(), "the loss records must parse out of their own section"
     for machine in (
         "gemmini_gsim_emulator",
         "gemmini_gsim_model_testharness",
