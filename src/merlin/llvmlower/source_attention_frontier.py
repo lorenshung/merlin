@@ -124,6 +124,7 @@ def emit_source_attention_frontier(
     polynomial_batch_four: bool = False,
     fuse_encoded_witness: bool = False,
     prepare_probability_points: bool = False,
+    prepare_readonly_rhs: bool = False,
 ) -> str:
     """Emit portable C; nonzero result certifies complete output publication.
 
@@ -499,6 +500,18 @@ def emit_source_attention_frontier(
         from .probability_point_spans import prepare_probability_point_spans
 
         text = prepare_probability_point_spans(text)
+    if type(prepare_readonly_rhs) is not bool:
+        raise ValueError("prepared RHS selection must be a bool")
+    if prepare_readonly_rhs:
+        owner_words = 4 * plan.heads * plan.chunk * plan.depth
+        owner_rows = plan.heads * (2 * plan.chunk + 6 * plan.depth)
+        if 19 * owner_words + 9 * owner_rows + 2048 * plan.heads > 2**31 - 1:
+            raise ValueError("prepared RHS storage/index domain exceeds supported bound")
+        if not prepare_probability_points or not prepare_encoded_rows:
+            raise ValueError("prepared RHS requires point and encoded-row proofs")
+        from .prepared_attention_rhs import prepare_attention_rhs_owner
+
+        text = prepare_attention_rhs_owner(text)
     definitions = {
         "HEADS": plan.heads,
         "ROWS": plan.query_rows,

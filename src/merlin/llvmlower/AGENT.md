@@ -124,6 +124,15 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
   consumer witnesses with sequential dominance checks. Explicit format hashes
   keep distinct preparations separate. No packing, call-purity, physical alias,
   reuse lifetime, runtime cache or cost permission follows from this census.
+- `prepared_operand_owner`, `prepared_operand_effects` and
+  `prepared_operand_schedule` bind exact immutable tensor views to explicit
+  invocation-local preparation, one private owner and ordered borrow leases.
+  Complete source effects and separately validated physical producer/consumer
+  contracts are mandatory. Unknown calls, escapes, overlapping epochs and stale
+  contexts refuse transactionally. Explicit shared-view materialization retains
+  upstream tensor ownership; no pointer cache or default reuse policy is added.
+  `prepared_attention_rhs` provides the portable representation producer through
+  the existing source attention emitter; target ABI glue and products stay OOT.
 - `llvm_loop_outline.py` owns explicit post-bufferization LLVM loop extraction.
   The default-off feature derives new function symbols with LLVM tools and keeps
   only extracted helpers out of line. It adds no floating reassociation permission;
