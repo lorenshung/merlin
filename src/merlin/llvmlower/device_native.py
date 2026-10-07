@@ -535,7 +535,7 @@ def build_device_native_seam(
     for its other two and say what it lost.
     """
     from merlin.targetgen import corpus_spec as CS
-    from merlin.targetgen.oot_runner import load_package, run_entrypoint
+    from merlin.targetgen.package_runtime import load_package, run_entrypoint
 
     from .toolchain import clang
 

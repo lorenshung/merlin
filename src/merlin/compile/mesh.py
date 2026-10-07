@@ -277,7 +277,7 @@ def _mesh_verify(plan: dict, *, target: str, package: str | None, timeout: int, 
 
     from ..common.paths import runs_root
     from ..targetgen import corpus_spec as CS
-    from ..targetgen import oot_runner
+    from ..targetgen import package_runtime as oot_runner
     from ..targetgen.oracle_policy import _SIM_ORACLES
     from ..targetgen.oracle_policy import selected_endpoint as _endpoint_of
     from ..targetgen.oracle_policy import selected_sim_via as _bespoke_sim_via
@@ -1133,7 +1133,7 @@ def _matmul_via_oot_cert(
 
     from ..common.paths import runs_root
     from ..targetgen import capsule_common as CC
-    from ..targetgen import oot_runner
+    from ..targetgen import package_runtime as oot_runner
 
     sim = _resolve_oot_mesh_simulator(target, simulator)
     pkg = package or _default_oot_package(target)

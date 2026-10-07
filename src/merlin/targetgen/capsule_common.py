@@ -326,7 +326,7 @@ def run_entrypoints(
     through too: this function is the capsule route's half of it (build the package, resolve the
     staged interface) and nothing more.
     """
-    from .oot_runner import (
+    from .package_runtime import (
         INFRASTRUCTURE_PLANE,
         CertFailure,
         InfraCategory,
@@ -423,7 +423,7 @@ def lower_interface(
     import contextlib
     from concurrent.futures import ThreadPoolExecutor
 
-    from .oot_runner import (
+    from .package_runtime import (
         BackendDeclined,
         CertFailure,
         analysis_emission_entrypoints,

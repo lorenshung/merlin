@@ -147,7 +147,7 @@ def ask_package_region(
     """
     from merlin.llvmlower import whole_program as WP
     from merlin.targetgen import capsule_common as CC
-    from merlin.targetgen import oot_runner as OR
+    from merlin.targetgen import package_runtime as OR
 
     def refuse(cause: str, why: str) -> tuple[list[dict], dict, str, str, None]:
         commands, scratch, why_, cause_ = WP._refuse(cause, why)

@@ -80,9 +80,15 @@ SUITES = {
     "runtime-admission": {
         "include_experiments": False,
         "tests_root": "merlin/tests",
-        "tests": ("targetgen/test_rtl_engine_policy.py",),
+        "tests": ("targetgen/test_rtl_engine_policy.py", "targetgen/test_offload_census.py"),
         "core_extras": ("xdsl",),
-        "probe_modules": ("merlin.targetgen.rtl_engine_policy", "merlin.runtime.backends.base"),
+        "probe_modules": (
+            "merlin.targetgen.rtl_engine_policy",
+            "merlin.runtime.backends.base",
+            "merlin.targetgen.offload_census",
+            "merlin.targetgen.lowering_coverage",
+            "merlin.targetgen.package_runtime",
+        ),
         "required_modules": ("xdsl",),
     },
     "host-output": {

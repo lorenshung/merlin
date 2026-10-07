@@ -1136,7 +1136,7 @@ def compile_oot(
     (e.g. A2_single_tile_matmul) and ``--package`` the OOT backend. Accelerators run capsules/kernels,
     not whole VLA models."""
     from .common.paths import runs_root
-    from .targetgen import oot_runner
+    from .targetgen import package_runtime as oot_runner
     from .targetgen.target_experiment import load_target_experiment
 
     out: dict = {"tool": "merlin-compile", "target": target, "workload": workload, "package": package, "run": run}

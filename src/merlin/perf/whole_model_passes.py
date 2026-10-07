@@ -88,7 +88,7 @@ def apply_passes(
     stopped, naming which pass.
     """
     from merlin.common.provenance import source_digest
-    from merlin.targetgen import oot_runner as OR
+    from merlin.targetgen import package_runtime as OR
 
     work = Path(work)
     work.mkdir(parents=True, exist_ok=True)

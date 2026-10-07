@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+
+from merlin.common.paths import python_source_dir
 from merlin.targetgen import offload_census as OC
 
 
@@ -64,3 +68,72 @@ def test_instruction_use_is_measured_against_the_derived_table_or_says_why_not(m
     use = OC.instruction_use([artifact], target="synthetic")
     assert use["status"] == "measured"
     assert [row["name"] for row in use["unused"]] == ["COMPUTE", "SEQUENCER"]
+
+
+def test_installed_public_probes_do_not_require_legacy_package_shim(tmp_path) -> None:
+    script = """
+import importlib
+import importlib.abc
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+sys.path.insert(0, sys.argv[1])
+
+class HideCompatibilityShim(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "merlin.targetgen.oot_runner":
+            raise ModuleNotFoundError("compatibility shim is outside the public projection")
+
+sys.meta_path.insert(0, HideCompatibilityShim())
+from merlin.targetgen import capsule_common, lowering_coverage, offload_census, package_runtime
+for module_name in (
+    "merlin.compile.mesh",
+    "merlin.compile.mesh_backend",
+    "merlin.compile_cli",
+    "merlin.llvmlower.device_native",
+    "merlin.llvmlower.group_offload",
+    "merlin.llvmlower.device_build",
+    "merlin.llvmlower.region_capsule",
+    "merlin.llvmlower.whole_program",
+    "merlin.llvmlower.exact_offload",
+    "merlin.perf.whole_model_passes",
+    "merlin.perf.whole_model_build",
+    "merlin.perf.whole_model_replies",
+):
+    importlib.import_module(module_name)
+assert offload_census.BackendDeclined is package_runtime.BackendDeclined
+assert offload_census.CertFailure is package_runtime.CertFailure
+assert lowering_coverage.BackendDeclined is package_runtime.BackendDeclined
+assert lowering_coverage.CertFailure is package_runtime.CertFailure
+
+missing_tool = Path(sys.argv[2]) / "absent-tool"
+package = SimpleNamespace(tool=missing_tool)
+# AET's failure-category enum is optional in the core-only installed suite.
+# Keep this check on the package-runtime import and CertFailure identity.
+capsule_common._cat = lambda name: name
+try:
+    capsule_common.run_entrypoints(
+        package, sys.argv[2], {}, None, contract=None, timeout=1, fourth_output_name="unused"
+    )
+except package_runtime.CertFailure as error:
+    assert "tool missing" in str(error)
+else:
+    raise AssertionError("missing tool did not refuse")
+try:
+    capsule_common.lower_interface(
+        package, missing_tool, Path(sys.argv[2]) / "generated", contract=None, timeout=1
+    )
+except FileNotFoundError:
+    pass
+else:
+    raise AssertionError("missing interface did not refuse")
+assert "merlin.targetgen.oot_runner" not in sys.modules
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", script, str(python_source_dir()), str(tmp_path)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr

@@ -23,7 +23,7 @@ from merlin.perf import isa_utilization
 from merlin.perf.offload import offload_report
 
 from .capsule_common import discover_capsules, make_run_paths, run_entrypoints
-from .oot_runner import BackendDeclined, CertFailure
+from .package_runtime import BackendDeclined, CertFailure
 
 SCHEMA = "offload_census_v1"
 

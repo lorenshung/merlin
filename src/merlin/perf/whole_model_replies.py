@@ -131,7 +131,7 @@ class _ReplyCache:
         return subprocess.CompletedProcess(reply["argv"], reply["returncode"], reply["stdout"], reply["stderr"])
 
     def invoke(self, package, name, source, output=None, *, timeout=600):
-        from merlin.targetgen import oot_runner as OR
+        from merlin.targetgen import package_runtime as OR
 
         if self.directory is None:
             return OR.run_entrypoint(package, name, source, output, timeout=timeout)

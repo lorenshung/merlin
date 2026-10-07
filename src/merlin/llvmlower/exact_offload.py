@@ -139,7 +139,7 @@ class ExactOffloadSelection:
         """
         if not simulator or type(timeout) is not int or timeout <= 0:
             raise ValueError("certification needs an explicit simulator and positive timeout")
-        from merlin.targetgen import oot_runner
+        from merlin.targetgen import package_runtime as oot_runner
 
         self.check_release()
         self.check_package(package_dir)

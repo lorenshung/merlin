@@ -519,7 +519,7 @@ def build_device_objects(
     """
     from merlin.common.digest import sha256_text
     from merlin.targetgen import corpus_spec as CS
-    from merlin.targetgen.oot_runner import load_package, run_entrypoint
+    from merlin.targetgen.package_runtime import load_package, run_entrypoint
 
     from .device_shim import emit_translation_unit, kernel_abi_for
     from .toolchain import clang, mlir_translate

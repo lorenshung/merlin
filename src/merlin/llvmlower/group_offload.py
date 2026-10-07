@@ -325,7 +325,7 @@ def emit_group_artifacts(
     pool's rows. Exit status alone called all 71 a success.
     """
     from merlin.targetgen import corpus_spec as CS
-    from merlin.targetgen.oot_runner import load_package, run_entrypoint
+    from merlin.targetgen.package_runtime import load_package, run_entrypoint
 
     work = Path(workdir)
     work.mkdir(parents=True, exist_ok=True)

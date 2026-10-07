@@ -394,7 +394,7 @@ def _ask_package(
     offer declared (see :func:`_spliced`), because two of its data operands share a role.
     """
     from merlin.targetgen import capsule_common as CC
-    from merlin.targetgen import oot_runner as OR
+    from merlin.targetgen import package_runtime as OR
     from merlin.xdsl_dialects.lowering import group_command as GC
 
     bound: dict[str, tuple[str, ...]] = {}
@@ -742,7 +742,7 @@ def whole_program_buffer(
 
     work = Path(workdir) if workdir is not None else None
     if package is None and package_dir is not None:
-        from merlin.targetgen import oot_runner as OR
+        from merlin.targetgen import package_runtime as OR
 
         package = OR.load_package(str(package_dir))
 

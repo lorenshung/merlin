@@ -246,7 +246,7 @@ def state(
     asker = None
     if package_dir is not None:
         from merlin.common.artifacts import cache_dir
-        from merlin.targetgen import oot_runner as OR
+        from merlin.targetgen import package_runtime as OR
 
         package = OR.load_package(str(package_dir))
         replies = _ReplyCache(_package_digest(package_dir), cache_dir("package-replies") if cache else None)
@@ -887,7 +887,7 @@ def _apply_package_passes(
 
 
 def _load_pass_package(package_dir: str | Path) -> Any:
-    from merlin.targetgen import oot_runner as OR
+    from merlin.targetgen import package_runtime as OR
 
     return OR.load_package(str(package_dir))
 

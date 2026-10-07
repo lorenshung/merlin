@@ -38,7 +38,7 @@ def _built_mesh_package(pkg_dir: str, timeout: int):
         hit = _MESH_PKG_CACHE.get(key)
     if hit is not None:
         return hit
-    from ..targetgen.oot_runner import build_package, integrity_scan, load_package
+    from ..targetgen.package_runtime import build_package, integrity_scan, load_package
 
     obj = load_package(pkg_dir, contract=None)  # the same sequence run_entrypoints does when pkg is None
     integrity_scan(obj)

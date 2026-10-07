@@ -32,7 +32,7 @@ from pathlib import Path
 
 from .capability_probes import tile_edge
 from .capsule_common import make_run_paths, run_entrypoints
-from .oot_runner import BackendDeclined, CertFailure
+from .package_runtime import BackendDeclined, CertFailure
 
 #: The corners a coverage sweep asks for, as multiples of the derived tile edge on (M, K, N).
 #: ``tile`` is the BASELINE and is load-bearing: a multi-tile verdict means nothing unless the single
