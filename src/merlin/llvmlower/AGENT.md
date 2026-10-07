@@ -133,6 +133,12 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
   remains defined. Only LLVM's exact function comparison grants merging; source
   arithmetic, observable stores and public function-address rules remain intact.
   Smaller code does not establish a cycle improvement.
+- `source_continuation_outline.py` provides explicit placement of a complete
+  typed pure scalar source continuation. It verifies the entire LLVM arithmetic
+  DAG, existing uses/signature and numeric/effect context before changing only
+  placement attributes. Empty selection preserves source bytes; unsupported
+  calls, memory, control flow and contexts refuse transactionally. No target ISA,
+  source arithmetic change or automatic profitability policy is supplied.
 - `source_expression_interval.py` and its typed LLVM companion provide explicit
   source-wide binary32 interval tables for closed integer observations. Each
   fixed-bit cell encloses every member under the original scalar operation order.
