@@ -72,6 +72,11 @@ inline frames preserve context and their counts overlap parent call-site totals.
 Instruction counts never imply hardware cycles. The ELF reader explicitly
 refuses unsupported formats rather than guessing them. Tests live in the DSE
 bucket and exercise actual compiler/symbolizer twins plus changed-byte refusals.
+
+`address_locality` counts first touches and exact distinct-intervening-region
+recurrence distances from explicitly ordered requested addresses. Granule and
+resource budget are caller inputs; capacity thresholds exclude first touches.
+These are logical locality features, not physical traffic or timing estimates.
 Its production caller is `merlin experiment inspect --trace` (the group build's `debug_companion`).
 `fast_estimate_validation` is called by `whole_model_screen.fit_calibration`, which validates every
 refit of the structure screen's calibration against held-out board-measured groups under the board's
