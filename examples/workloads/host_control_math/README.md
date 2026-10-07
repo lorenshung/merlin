@@ -22,7 +22,7 @@ The other selectors are `negate`, `select`, `sine`, `cosine`, `integer_add`,
 before execution; an unknown case is refused. Keep generated MLIR, external tensor
 sidecars, frontend trace and qualification records under the configured output root.
 
-Each capture has one finite FP32 output containing every checked element. Integer
+The original selectors have one finite FP32 output containing every checked element. Integer
 cases include signed endpoints and FP32 conversion boundaries. The addition case
 exposes all 64 result bits through four unsigned 16-bit words, each exactly
 representable in FP32; it therefore does not hide low-bit errors through rounding.
@@ -65,6 +65,28 @@ tolerances and qualified evidence.
 Passing finite probes supports review of their exact signatures only. It does not
 approve BF16, arbitrary host fallback, a full model, accelerator execution, or all
 values/shapes. Accelerator-eligible computation must still be routed to the device.
+
+## Typed, ordered and boundary probes
+
+Additional independent selectors are `sine_rank4`, `cosine_rank4`,
+`arange_f32_exact`, `arange_f32_fractional`, `boolean_not`, `boolean_and`,
+`boolean_select`, `boolean_mul_lhs_singleton`, `boolean_mul_rhs_singleton`,
+`tensor_not_equal`, `tensor_bitwise_xor`, `min_values`, `f32_cumsum_rows`,
+`f32_cumsum_columns`, `f32_cumsum_signed_zero`, `bucketize_left_nan` and
+`bucketize_right_nan`. The tensor comparison, XOR and Boolean multiplication
+cases return raw Boolean outputs; the other selectors return FP32 outputs.
+Capture and qualify the declared dtype without converting raw Boolean results
+to FP32. All two-input cases use independently populated tensors.
+
+The cumulative sums expose loss of a small addend if a lowering rounds each
+intermediate to FP32, along with mixed signed-zero inputs. Minimum reduction
+includes ties and both zero signs. Bucketization includes NaN and infinities as
+inputs and returns finite insertion positions; equal boundaries distinguish
+left from right insertion. Trigonometric cases retain nontrivial inputs at rank
+four. Floating ranges exercise both binary-exact and fractional step sizes.
+Passing the source-fixture tests does not qualify their native lowerings; keep
+the exact saved-capture gate and retain any numerical or unsupported-operation
+failure as a failure.
 
 ## Independent pointwise rank/tail matrix
 

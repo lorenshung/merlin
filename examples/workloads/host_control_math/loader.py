@@ -1,8 +1,8 @@
 """Independent host-control/math probes; not a model or a support declaration.
 
 Select a case with M2M_HOST_PROBE_CASE before capture. Each case returns one
-finite FP32 tensor so the existing saved-capture scalar-host checker can inspect
-every output. Integer addition exposes all result bits as four exact 16-bit words;
+tensor; typed pointwise cases retain raw Boolean or integer outputs. Integer
+addition exposes all result bits as four exact 16-bit words;
 this does not claim exhaustive input coverage or exact arbitrary int64-to-FP32 conversion.
 """
 
@@ -15,6 +15,10 @@ CASES = (
     "select",
     "sine",
     "cosine",
+    "sine_rank4",
+    "cosine_rank4",
+    "arange_f32_exact",
+    "arange_f32_fractional",
     "integer_to_float",
     "integer_add",
     "integer_compare",
@@ -22,8 +26,21 @@ CASES = (
     "position_mask",
     "boolean_prefix_sum",
     "boolean_sum",
+    "boolean_not",
+    "boolean_and",
+    "boolean_select",
+    "boolean_mul_lhs_singleton",
+    "boolean_mul_rhs_singleton",
+    "tensor_not_equal",
+    "tensor_bitwise_xor",
+    "min_values",
+    "f32_cumsum_rows",
+    "f32_cumsum_columns",
+    "f32_cumsum_signed_zero",
     "bucketize_left",
     "bucketize_right",
+    "bucketize_left_nan",
+    "bucketize_right_nan",
     "identity_alias",
 )
 
@@ -146,6 +163,14 @@ class HostControlMath(torch.nn.Module):
             return torch.sin(x)
         if self.case == "cosine":
             return torch.cos(x)
+        if self.case == "sine_rank4":
+            return torch.sin(x.unsqueeze(0))
+        if self.case == "cosine_rank4":
+            return torch.cos(x.unsqueeze(0))
+        if self.case == "arange_f32_exact":
+            return torch.arange(-0.75, x.shape[0] - 0.75, 0.5, dtype=torch.float32, device=x.device)
+        if self.case == "arange_f32_fractional":
+            return torch.arange(-0.3, x.shape[0] - 0.3, 0.2, dtype=torch.float32, device=x.device)
         if self.case == "integer_to_float":
             return x.reshape(1, 1, -1).to(torch.float32)
         if self.case == "integer_add":
@@ -160,8 +185,28 @@ class HostControlMath(torch.nn.Module):
             return torch.cumsum(x, dim=1).to(torch.float32)
         if self.case == "boolean_sum":
             return torch.sum(x, dim=1).to(torch.float32)
+        if self.case == "boolean_not":
+            return torch.bitwise_not(x).to(torch.float32)
+        if self.case == "boolean_and":
+            return torch.bitwise_and(x, y).to(torch.float32)
+        if self.case == "boolean_select":
+            return torch.where(x, y, torch.bitwise_not(y)).to(torch.float32)
+        if self.case in {"boolean_mul_lhs_singleton", "boolean_mul_rhs_singleton"}:
+            return torch.mul(x, y)
+        if self.case == "tensor_not_equal":
+            return torch.ne(x, y)
+        if self.case == "tensor_bitwise_xor":
+            return torch.bitwise_xor(x, y)
+        if self.case == "min_values":
+            return torch.min(x, dim=1).values
+        if self.case == "f32_cumsum_columns":
+            return torch.cumsum(x, dim=0)
+        if self.case in {"f32_cumsum_rows", "f32_cumsum_signed_zero"}:
+            return torch.cumsum(x, dim=-1)
         if self.case.startswith("bucketize_"):
-            return torch.bucketize(x, y, right=self.case == "bucketize_right").to(torch.float32)
+            return torch.bucketize(x, y, right=self.case.startswith("bucketize_right")).to(torch.float32)
+        if self.case != "position_mask":
+            raise AssertionError("validated host-control/math case is not implemented")
         positions = torch.arange(x.shape[0], dtype=torch.int64, device=x.device) + x
         rows = positions.reshape(1, 1, -1, 1)
         columns = positions.reshape(1, 1, 1, -1)
@@ -182,13 +227,58 @@ def get_model_and_inputs():
             return model, (sample, other)
     elif case == "position_mask":
         sample = torch.tensor([0, -1, 2, -3, 4, -5, 6], dtype=torch.int64)
+    elif case == "tensor_not_equal":
+        sample = torch.tensor([[-(2**63), -(2**24) - 1, -1, 0, 2**63 - 1], [3, 4, 5, -7, 2**24 + 1]], dtype=torch.int64)
+        other = torch.tensor([[-(2**63), -(2**24), 0, 0, 2**63 - 2], [3, -4, 6, -7, 2**24]], dtype=torch.int64)
+        return model, (sample, other)
+    elif case == "tensor_bitwise_xor":
+        sample = torch.tensor([False, True, False, True, True, False, True, False, True], dtype=torch.bool)
+        other = torch.tensor([True, True, False, False, True, True, False, False, False], dtype=torch.bool)
+        return model, (sample, other)
+    elif case in {"boolean_mul_lhs_singleton", "boolean_mul_rhs_singleton"}:
+        dense = torch.tensor(
+            [
+                [True, False, True, False, True, False, True],
+                [False, True, True, False, False, True, True],
+                [True, True, False, False, True, True, False],
+            ],
+            dtype=torch.bool,
+        )
+        if case == "boolean_mul_lhs_singleton":
+            row = torch.tensor([[True, False, True, True, False, True, False]], dtype=torch.bool)
+            return model, (row, dense)
+        column = torch.tensor([[True], [False], [True]], dtype=torch.bool)
+        return model, (dense, column)
     elif case.startswith("boolean_"):
         sample = torch.tensor(
             [[False, False, False, False, False], [True, True, True, True, True], [True, False, True, False, True]],
             dtype=torch.bool,
         )
+        if case in {"boolean_and", "boolean_select"}:
+            other = torch.tensor(
+                [[True, False, True, False, True], [False, True, False, True, False], [True, True, False, False, True]],
+                dtype=torch.bool,
+            )
+            return model, (sample, other)
+    elif case == "min_values":
+        sample = torch.tensor(
+            [[1.0, 0.0, -0.0, 2.0, 2.0], [4.0, -1.0, -1.0, 5.0, 3.0], [7.0, 5.0, 6.0, 5.0, 8.0]], dtype=torch.float32
+        )
+    elif case == "f32_cumsum_rows":
+        sample = torch.tensor([[1e8, 1.0, -1e8, 0.0, -0.0], [2e8, 2.0, -2e8, -0.0, 0.0]], dtype=torch.float32)
+    elif case == "f32_cumsum_columns":
+        sample = torch.tensor([[1e8, -0.0], [1.0, 0.0], [-1e8, -0.0]], dtype=torch.float32)
+    elif case == "f32_cumsum_signed_zero":
+        sample = torch.tensor([-0.0, 0.0, -0.0, 0.0, 1.0, -1.0], dtype=torch.float32)
+    elif case.startswith("arange_f32_"):
+        sample = torch.tensor([0.0, 0.25, 0.5, 0.75], dtype=torch.float32)
     elif case.startswith("bucketize_"):
         sample = torch.tensor([[-3.0, -2.0, -1.0, -0.5, 0.0], [1.0, 1.25, 2.0, 4.0, 5.0]], dtype=torch.float32)
+        if case.endswith("_nan"):
+            sample = torch.tensor(
+                [[float("nan"), -float("inf"), -1.0, -0.0, 0.0], [float("inf"), 1.0, 1.25, 2.0, 5.0]],
+                dtype=torch.float32,
+            )
         boundaries = torch.tensor([-2.0, -0.5, 1.25, 4.0], dtype=torch.float32)
         return model, (sample, boundaries)
     else:
