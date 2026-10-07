@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from merlin.perf import hw_counters
 from merlin.targetgen.contract import compile as contract_compile
 
@@ -57,3 +59,56 @@ def test_a_fabricating_engines_readings_are_refused(monkeypatch, tmp_path):
     assert got["counters"]["readings"] is None
     assert got["counters"]["engine"]["verdict"] == "fabricated"
     assert "rand()" in got["counters"]["engine"].get("evidence", "") or got["counters"]["why"]
+
+
+def test_failed_readback_retains_complete_native_console(monkeypatch, tmp_path):
+    """Exercise the real compile/run/parse seam, not a replacement decoder.
+
+    A complete native invocation may return an incomplete frame. The refusal
+    must remain a refusal, but retain every returned byte for diagnosis rather
+    than discarding the transcript when parse_output raises.
+    """
+    from merlin.runtime.backends import base
+
+    console = (
+        "%Warning: native diagnostic\n"
+        "OUT_B64_BEGIN v1 Y0 1 4 1 s\n"
+        "OUT_B64_CHUNK 00000000 0004 gP8Afw==\n"
+    )
+    elf = tmp_path / "program.elf"
+    elf.write_bytes(b"synthetic execution artifact")
+    backend = SimpleNamespace(
+        run_elf=lambda *args, **kwargs: console,
+        parse_output=lambda text: base.parse_console(text, strip_warnings=True),
+    )
+    monkeypatch.setattr(contract_compile, "compile_lowered_to_elf", lambda *args, **kwargs: elf)
+    monkeypatch.setattr(base, "get_backend", lambda target: backend)
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="OUT_B64 output ended without END"):
+            contract_compile.run_on_oracle(
+                {}, "module {}", simulator="synthetic", target="synthetic", workdir=tmp_path
+            )
+        assert (tmp_path / "oracle_console.log").read_bytes() == console.encode("utf-8")
+
+
+def test_successful_readback_retains_console_without_changing_result(monkeypatch, tmp_path):
+    result = _oracle(monkeypatch, tmp_path, simulator="verilator")
+    assert (tmp_path / "oracle_console.log").read_bytes() == result["console"].encode("utf-8")
+
+
+def test_failed_launch_does_not_retain_an_earlier_attempts_console(monkeypatch, tmp_path):
+    from merlin.runtime.backends import base
+
+    _oracle(monkeypatch, tmp_path, simulator="verilator")
+    previous = tmp_path / "oracle_console.log"
+    assert previous.is_file()
+
+    def refused(*args, **kwargs):
+        raise RuntimeError("native launch refused")
+
+    monkeypatch.setattr(base, "get_backend", lambda target: SimpleNamespace(run_elf=refused))
+    with pytest.raises(RuntimeError, match="native launch refused"):
+        contract_compile.run_on_oracle(
+            {}, "module {}", simulator="synthetic", target="synthetic", workdir=tmp_path
+        )
+    assert not previous.exists()

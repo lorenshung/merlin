@@ -904,6 +904,10 @@ def run_on_oracle(
 
     readback_policy = selected(readback_policy)
     work = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="oot_run_"))
+    console_path = work / "oracle_console.log"
+    # A refused build or failed launch must not leave an earlier attempt's
+    # transcript at this invocation's diagnostic path.
+    console_path.unlink(missing_ok=True)
     _t0 = time.perf_counter()
     policy_kwargs = {"readback_policy": readback_policy} if readback_policy is not None else {}
     elf = compile_lowered_to_elf(cb, lowered_mlir_text, work, target=target, inputs=inputs, **policy_kwargs)
@@ -921,6 +925,11 @@ def run_on_oracle(
     _t1 = time.perf_counter()
     console = backend.run_elf(elf, simulator=simulator, timeout=timeout)
     _t2 = time.perf_counter()
+    # Parsing can refuse a truncated frame before this function returns a
+    # result. Retain the complete, unfiltered transcript at the execution
+    # boundary, not only on the successful grading path. This is diagnostic
+    # evidence, never a completion or numerical verdict.
+    console_path.write_bytes(console.encode("utf-8"))
     outputs, raw = backend.parse_output(console)
     if readback_policy is not None:
         from .readback_policy import (
