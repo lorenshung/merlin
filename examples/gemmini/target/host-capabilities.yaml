@@ -138,6 +138,16 @@ operations:
       status: reviewed
       semantics: {comparison: ordered_greater_or_equal, signed_zero: compares_equal, nan: false}
       evidence: {reviewed_by: "operator approval 2026-10-06", basis: "Exact typed source/IR screen and independent finite selected-scalar-package probe; all-input and RTL execution remain unqualified."}
+  - id: host_review_f32_oeq_scalar_rank4
+    status: reviewed
+    ops: [aten.eq.Scalar]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [f32, f32, i1], ordered_result_dtypes: [i1], ranks: [4]}
+    source_body: {schema: merlin.static_pointwise_source_body.v1, operation: arith.cmpf, predicate: oeq}
+    numerical_contract:
+      status: reviewed
+      semantics: {scope: selected_prepared_source_build_link_host_placement_only, comparison: ordered_equal, nan_result: false, signed_zero_equal: true, original_to_prepared_equivalence: not_proved, full_model_numerical_equivalence: not_run, existing_numerical_tolerance: unchanged}
+      evidence: {reviewed_by: "operator approval 2026-10-07 of exact Eq-only review SHA-256 885f5fe380c57db016e4a727ed7b1230dfd5ff95a0006c573d741b8085f1dcb7", neutral_source_sha256: 85bdb646a68d5987bc9c1d9b77a11b10aacd8de2d77e709b3181c5b543778a92, neutral_native_receipt_sha256: ae6108825481d49c479f4cdb218336bfd21a08f1b0b7a662542ef39e6b9b22aa, selected_index_and_elf_join: required, all_input_numerical_equivalence: not_claimed}
   - id: host_f32_where_rank4
     status: reviewed
     ops: [aten.where.self]

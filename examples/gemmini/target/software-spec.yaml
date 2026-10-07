@@ -134,6 +134,11 @@ operations:
     families: [elementwise_map]
     placement: host
     signature: {family: elementwise_map, ordered_operand_dtypes: [f32, f32, i1], ordered_result_dtypes: [i1], ranks: [4]}
+  host_review_f32_oeq_scalar_rank4:
+    status: reviewed
+    ops: [aten.eq.Scalar]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [f32, f32, i1], ordered_result_dtypes: [i1], ranks: [4]}
   host_f32_where_rank4:
     status: reviewed
     ops: [aten.where.self]
