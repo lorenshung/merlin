@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from merlin.common.paths import repo_root
+from merlin.common.paths import module_source_path
 from merlin.targetgen import build_cache as BC
 from merlin.targetgen.contract.build_recipe import KernelStackFramePolicy
 
@@ -70,17 +70,20 @@ def store(tmp_path, monkeypatch):
     return root
 
 
-#: Stands in for the build path in the key tests. A REAL file, so editing it must move the key --
-#: which is the property :func:`test_the_code_that_performs_the_build_is_in_the_key` mutates.
-LOWERING = repo_root() / "merlin/python/merlin/llvmlower/pipeline.py"
+@pytest.fixture
+def lowering(tmp_path):
+    """Copy selected imported source; mutation must not edit a checkout or installed wheel."""
+    source = tmp_path / "pipeline.py"
+    source.write_bytes(module_source_path("merlin.llvmlower.pipeline").read_bytes())
+    return source
 
 
 @pytest.fixture
-def key_of(recipe, monkeypatch, store):
+def key_of(recipe, monkeypatch, store, lowering):
     """`build_identity` with the two host probes stubbed, so these tests need neither a cross-compiler
     nor a registered backend -- what is under test here is which inputs reach the key."""
     monkeypatch.setattr(BC, "toolchain_token", lambda compiler: "toolchain-sha")
-    monkeypatch.setattr(BC, "build_path", lambda target=None: (LOWERING,))
+    monkeypatch.setattr(BC, "build_path", lambda target=None: (lowering,))
 
     def make(**over):
         args = {
@@ -146,9 +149,36 @@ def test_support_source_and_link_script_bytes_are_in_the_key(key_of, recipe):
     assert key_of() != after_support
 
 
-def test_the_code_that_performs_the_build_is_in_the_key(key_of):
+def test_declared_harness_header_bytes_are_in_the_key_and_missing_header_disables_cache(key_of, recipe, tmp_path):
+    included = tmp_path / "include"
+    included.mkdir()
+    header = included / "transport.h"
+    header.write_text("#define TRANSPORT_VERSION 1\n")
+    recipe.include_roots = (included,)
+    recipe.header_dependencies = (header,)
+    first = key_of()
+    assert first is not None
+    header.write_text("#define TRANSPORT_VERSION 2\n")
+    assert key_of() != first
+    header.unlink()
+    assert key_of() is None
+
+
+def test_shadowed_harness_header_cannot_be_hashed_as_compiled_bytes(key_of, recipe, tmp_path):
+    first_root, second_root = tmp_path / "first", tmp_path / "second"
+    first_root.mkdir()
+    second_root.mkdir()
+    (first_root / "transport.h").write_text("#define VERSION 1\n")
+    second = second_root / "transport.h"
+    second.write_text("#define VERSION 2\n")
+    recipe.include_roots = (first_root, second_root)
+    recipe.header_dependencies = (second,)
+    assert key_of() is None
+
+
+def test_the_code_that_performs_the_build_is_in_the_key(key_of, lowering):
     """An edit to the lowering pipeline emits different code; a stored build must not answer for it."""
-    src = LOWERING
+    src = lowering
     base = key_of()
     original = src.read_bytes()
     try:
@@ -159,9 +189,9 @@ def test_the_code_that_performs_the_build_is_in_the_key(key_of):
     assert key_of() == base
 
 
-def test_no_key_without_an_establishable_toolchain(recipe, monkeypatch, store):
+def test_no_key_without_an_establishable_toolchain(recipe, monkeypatch, store, lowering):
     """The toolchain is outside the repo and outside every hardware pin: unresolved means no cache."""
-    monkeypatch.setattr(BC, "build_path", lambda target=None: (LOWERING,))
+    monkeypatch.setattr(BC, "build_path", lambda target=None: (lowering,))
     monkeypatch.setattr(BC, "toolchain_token", lambda compiler: None)
     assert BC.build_identity(target="t", lowered_mlir_text="m", cb={}, inputs=None, recipe=recipe) is None
 

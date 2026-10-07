@@ -357,6 +357,7 @@ def link_elf(
     _compact_caller=None,
     _build_service=None,
     warm_profile=None,
+    readback_policy=None,
 ) -> Path:
     """Build the runner-owned harness from ``cb`` and link it with the package object -> ELF.
 
@@ -369,6 +370,16 @@ def link_elf(
     from the command buffer, and requires explicitly supplied immutable operands.
     """
     warm_profile = _strict_warm_profile(warm_profile, cb)
+    from .readback_policy import BUILD_RECEIPT, selected
+
+    readback_policy = selected(readback_policy)
+    receipt_path = workdir / BUILD_RECEIPT
+    if readback_policy is not None:
+        # A failed rebuild may never leave a previous complete policy receipt.
+        receipt_path.write_text('{"status":"incomplete"}\n', encoding="utf-8")
+    elif receipt_path.exists():
+        # A legacy rebuild must not inherit an opt-in receipt from a reused workdir.
+        receipt_path.unlink()
     if _build_service is not None:
         from .build_service import BuildOnlyService
 
@@ -386,6 +397,17 @@ def link_elf(
 
         recipe = _backends.harness_build_recipe(target).with_effective_abi()
         _render = _backends.harness_renderer(target)
+    readback_inputs = None
+    if readback_policy is not None:
+        from .readback_policy import selected_build_inputs
+
+        if _compact_caller is not None:
+            raise ValueError("full-value readback does not support the prepared compact caller")
+        import inspect
+
+        if "readback_policy" not in inspect.signature(_render).parameters:
+            raise NotImplementedError("selected backend cannot render the explicit full-value policy")
+        readback_inputs = selected_build_inputs(target, recipe, _build_service)
     abi_receipt = workdir / "kernel.abi.json"
     if abi_receipt.exists():
         try:
@@ -403,6 +425,7 @@ def link_elf(
     # filenames, assembly and linking for every target in the same way.
     blob_payloads: dict = {}
     blob_kwargs = {"blobs": blob_payloads} if _accepts_keyword(_render, "blobs") else {}
+    policy_kwargs = {"readback_policy": readback_policy} if readback_policy is not None else {}
     # ``inputs`` INJECTS the caller's real operands into the device harness. A renderer written before
     # this parameter existed still works and still materializes from names -- but silently doing that
     # while the reference and simulator use injected data produces a guaranteed three-way mismatch that
@@ -413,15 +436,13 @@ def link_elf(
         # object. No serialized candidate ABI facts or fallback inputs enter it.
         if inputs is not None or prepack_authorizations is not None:
             raise ValueError("prepared compact caller cannot be combined with other input sources")
-        import hashlib
-
         compact_object_sha = hashlib.sha256(Path(obj).read_bytes()).hexdigest()
         kwargs = {"target": target, "compact_caller": _compact_caller}
         if warm_profile is not None:
             if not _accepts_keyword(_render, "warm_profile"):
                 raise NotImplementedError("backend compact harness cannot consume a strict warm profile")
             kwargs["warm_profile"] = warm_profile
-        harness = _render(cb, **kwargs, **blob_kwargs)
+        harness = _render(cb, **kwargs, **blob_kwargs, **policy_kwargs)
     else:
         _explicit_prepack_inputs(inputs, prepack_authorizations)
     if _compact_caller is None and prepack_authorizations is None and _build_service is None:
@@ -445,15 +466,19 @@ def link_elf(
             if not _accepts_keyword(_render, "warm_profile"):
                 raise NotImplementedError("backend harness cannot consume a strict warm profile")
             kwargs["warm_profile"] = warm_profile
-        harness = _render(cb, **kwargs, **blob_kwargs)
+        harness = _render(cb, **kwargs, **blob_kwargs, **policy_kwargs)
     else:
         kwargs = {"target": target}
         if warm_profile is not None:
             if not _accepts_keyword(_render, "warm_profile"):
                 raise NotImplementedError("backend harness cannot consume a strict warm profile")
             kwargs["warm_profile"] = warm_profile
-        harness = _render(cb, **kwargs, **blob_kwargs)
+        harness = _render(cb, **kwargs, **blob_kwargs, **policy_kwargs)
     (workdir / "harness.c").write_text(harness, encoding="utf-8")
+    if readback_policy is not None:
+        from .readback_policy import stage_codec_header
+
+        stage_codec_header(workdir)
     blob_sources = stage_harness_blobs(workdir, blob_payloads)
     # Linker load address DERIVED from the RTL memory map (platform DRAM base), reusing the curated
     # script's proven section layout but replacing its BAKED origin — so the base is a HW fact, not a
@@ -548,6 +573,23 @@ def link_elf(
         )
     if _build_service is not None:
         _build_service.verify(target)
+    if readback_policy is not None:
+        from .readback_policy import build_receipt, selected_build_inputs
+
+        if readback_inputs != selected_build_inputs(target, recipe, _build_service):
+            raise ValueError("selected full-value renderer, codec, or recipe changed during link")
+        recipe_record, source_pins = readback_inputs
+        receipt = build_receipt(
+            policy=readback_policy,
+            cb=cb,
+            target=target,
+            recipe_record=recipe_record,
+            source_pins=source_pins,
+            object_path=obj,
+            harness_path=workdir / "harness.c",
+            elf_path=elf,
+        )
+        receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return elf
 
 
@@ -564,6 +606,7 @@ def compile_lowered_to_elf(
     compact_storage_limit_bytes: int = 64 * 1024,
     _build_service=None,
     warm_profile=None,
+    readback_policy=None,
 ) -> Path:
     """Full package-lowered-MLIR -> rv64 ELF (object + runner harness + link).
 
@@ -590,6 +633,9 @@ def compile_lowered_to_elf(
     hooks and keeps result readback outside the cycle window.
     """
     warm_profile = _strict_warm_profile(warm_profile, cb)
+    from .readback_policy import selected
+
+    readback_policy = selected(readback_policy)
     if _build_service is not None:
         from .build_service import BuildOnlyService
 
@@ -607,6 +653,8 @@ def compile_lowered_to_elf(
         kwargs = {"target": target, "inputs": inputs, "_build_service": _build_service}
         if warm_profile is not None:
             kwargs["warm_profile"] = warm_profile
+        if readback_policy is not None:
+            kwargs["readback_policy"] = readback_policy
         return link_elf(cb, obj, work, **kwargs)
     from merlin.runtime.backends import base as _backends
 
@@ -615,6 +663,8 @@ def compile_lowered_to_elf(
 
     work = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="oot_compile_"))
     if compact_contract is not None or logical_payloads is not None:
+        if readback_policy is not None:
+            raise ValueError("full-value readback does not support the prepared compact caller")
         if compact_contract is None or logical_payloads is None or inputs is not None:
             raise ValueError("compact build requires explicit contract + logical bytes, with no other inputs")
         prepare = getattr(_backends.get_backend(target), "prepare_compact_caller", None)
@@ -645,7 +695,17 @@ def compile_lowered_to_elf(
         kwargs = {"target": target, "inputs": inputs, "prepack_authorizations": prepack_authorizations}
         if warm_profile is not None:
             kwargs["warm_profile"] = warm_profile
+        if readback_policy is not None:
+            kwargs["readback_policy"] = readback_policy
         return link_elf(cb, obj, work, **kwargs)
+    if readback_policy is not None:
+        # This invocation-only harness choice is absent from the historical
+        # shared cache key. Never reuse or publish a legacy/digest-only ELF.
+        obj = llvm_mlir_to_object(lowered_mlir_text, work, target=target)
+        return link_elf(
+            cb, obj, work, target=target, inputs=inputs,
+            warm_profile=warm_profile, readback_policy=readback_policy,
+        )
     if warm_profile is not None:
         # The profile changes the runner-owned harness but is deliberately not
         # serialized into the command buffer.  Never let the legacy build key
@@ -788,6 +848,7 @@ def run_on_oracle(
     workdir: str | Path | None = None,
     timeout: int = 600,
     inputs: dict | None = None,
+    readback_policy=None,
 ) -> dict[str, Any]:
     """Compile the package's lowered MLIR + run on ``simulator``; return outputs/metrics/console.
 
@@ -800,13 +861,44 @@ def run_on_oracle(
     from merlin.runtime.backends import base as _backends
 
     backend = _backends.get_backend(target)
+    from .readback_policy import selected
+
+    readback_policy = selected(readback_policy)
     work = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="oot_run_"))
     _t0 = time.perf_counter()
-    elf = compile_lowered_to_elf(cb, lowered_mlir_text, work, target=target, inputs=inputs)
+    policy_kwargs = {"readback_policy": readback_policy} if readback_policy is not None else {}
+    elf = compile_lowered_to_elf(cb, lowered_mlir_text, work, target=target, inputs=inputs, **policy_kwargs)
+    readback_build = None
+    if readback_policy is not None:
+        from .readback_policy import BUILD_RECEIPT, require_build_receipt, selected_build_inputs
+
+        recipe = _backends.harness_build_recipe(target).with_effective_abi()
+        recipe_record, source_pins = selected_build_inputs(target, recipe)
+        readback_build = require_build_receipt(
+            work / BUILD_RECEIPT, policy=readback_policy, cb=cb, target=target,
+            recipe_record=recipe_record, source_pins=source_pins,
+            object_path=work / "kernel.o", harness_path=work / "harness.c", elf_path=elf,
+        )
     _t1 = time.perf_counter()
     console = backend.run_elf(elf, simulator=simulator, timeout=timeout)
     _t2 = time.perf_counter()
     outputs, raw = backend.parse_output(console)
+    if readback_policy is not None:
+        from .readback_policy import (
+            BUILD_RECEIPT,
+            require_build_receipt,
+            require_full_value_roster,
+            selected_build_inputs,
+        )
+
+        require_full_value_roster(cb, console, outputs)
+        recipe_record, source_pins = selected_build_inputs(target, recipe)
+        if readback_build != require_build_receipt(
+            work / BUILD_RECEIPT, policy=readback_policy, cb=cb, target=target,
+            recipe_record=recipe_record, source_pins=source_pins,
+            object_path=work / "kernel.o", harness_path=work / "harness.c", elf_path=elf,
+        ):
+            raise ValueError("full-value build identity changed during oracle execution")
     # DECODE A FLOAT RESULT THAT CAME BACK AS ITS CONTAINER WORD. `parse_output` yields whatever the
     # console carried; a target whose harness has integer-only formatting prints a float destination
     # buffer's stored PATTERN, so an f32 result arrives as its 32-bit word and a bf16 result as its
@@ -837,6 +929,8 @@ def run_on_oracle(
         "console": console,
         "timing": {"build_s": round(_t1 - _t0, 3), "sim_active_s": round(_t2 - _t1, 3), "oracle_wait_s": 0.0},
     }
+    if readback_build is not None:
+        result["readback_build"] = readback_build
     # Counter markers are a target-independent wire protocol.  The event names/codes remain the
     # target's own: this boundary merely preserves readings the runner already paid to collect.  If
     # they exactly cover a structurally derived joint-occupancy block, compute eta; otherwise retain

@@ -8,6 +8,10 @@ Merlin-owned bare-metal runtime backend. `spike/` holds the harness (crt, HTIF, 
 
 - Per-execution-environment harness subdirectories (`spike/`; later real boards).
 - C/assembly that is target-independent runtime substrate (Merlin owns the runtime).
+- `out_b64.h` provides opt-in lossless container-word framing through a caller's
+  block text writer. The bounded staging buffer contains actual output words;
+  range-derived narrowing preserves their values and never consults references.
+  The caller owns layout traversal, frame declarations and terminal completion.
 
 ## What does not belong here
 

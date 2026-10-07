@@ -24,6 +24,11 @@ the per-backend adapters under `backends/`.
 - `host_math.py` — explicit portable libm evaluation policies and their compiled runtime objects.
   The default emits nothing. A selected policy changes linked-byte identity and must pass the
   caller's original numerical contract; it does not promise errno or exception-flag equivalence.
+- `out_b64.py` — lossless, opt-in chunked container-word console decoding. Complete
+  frames reconstruct every value before ordinary numerical checks; malformed,
+  missing, duplicated or interrupted frames refuse. The shared console parser
+  still requires terminal `DONE`. Transport changes grant no numerical support,
+  output sampling, digest-only qualification or simulator certification.
 
 ## What does not belong here
 

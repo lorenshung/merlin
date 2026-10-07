@@ -100,6 +100,10 @@ class HarnessBuildRecipe:
     # LLVM object build requires it and fails closed when it is absent; ``target=None`` is the legacy
     # unbound object-only path and deliberately has no authority to invent a target's stack limit.
     kernel_stack_frame: KernelStackFramePolicy | None = None
+    # Opt-in headers compiled into the harness.  Each is a direct child of an
+    # include root; the ELF cache hashes its exact bytes rather than treating
+    # the include-root path alone as a source identity.
+    header_dependencies: tuple[Path, ...] = ()
 
     def require_kernel_stack_frame(self) -> KernelStackFramePolicy:
         """Return the target-declared policy or refuse to compile a target-bound kernel."""

@@ -80,6 +80,10 @@ def test_generic_linker_passes_renderer_blobs_to_the_executable(tmp_path, monkey
             return self
 
         @staticmethod
+        def mabi():
+            return "-mabi=lp64d"
+
+        @staticmethod
         def compile_command(*, source, output):
             return ["cc", "-c", str(source), "-o", str(output)]
 
@@ -97,6 +101,9 @@ def test_generic_linker_passes_renderer_blobs_to_the_executable(tmp_path, monkey
     monkeypatch.setattr(runtime_build, "derived_link_script", lambda *args: tmp_path / "unused.ld")
     kernel = tmp_path / "kernel.o"
     subprocess.run(["cc", "-c", "-x", "c", "-", "-o", str(kernel)], input="\n", text=True, check=True)
+    # The production object builder leaves this paired ABI receipt.  Linking a
+    # real object with it exercises receipt validation before harness rendering.
+    compiler._abi_receipt(tmp_path, kernel, "lp64d")
     elf = compiler.link_elf({}, kernel, tmp_path, target="synthetic")
     assert subprocess.run([str(elf)], check=False).returncode == 0
     assert (tmp_path / "harness_blob_T_W.bin").read_bytes() == b"\x07\x08\x09\x0a"

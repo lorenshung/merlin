@@ -315,6 +315,27 @@ def recipe_token(recipe: Any) -> "dict | None":
                 return None
             sources[src.name] = sha
         record["sources"] = sources
+        headers = getattr(recipe, "header_dependencies", ())
+        if headers:
+            if not isinstance(headers, tuple) or not all(isinstance(path, Path) for path in headers):
+                return None
+            include_roots = tuple(Path(root).resolve(strict=True) for root in recipe.include_roots)
+            header_hashes = {}
+            for header in headers:
+                if not header.is_absolute() or header.is_symlink():
+                    return None
+                resolved = header.resolve(strict=True)
+                if resolved.parent not in include_roots:
+                    return None
+                # The first -I root containing this direct include name wins.
+                # Refuse a declaration that hashes a later, shadowed file.
+                if next((root / resolved.name for root in include_roots if (root / resolved.name).is_file()), None) != resolved:
+                    return None
+                sha = _file_sha(resolved)
+                if sha is None:
+                    return None
+                header_hashes[str(resolved)] = sha
+            record["headers"] = header_hashes
         return record
     except Exception:  # noqa: BLE001 -- an unreadable recipe is not a key
         return None

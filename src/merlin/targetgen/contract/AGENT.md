@@ -9,6 +9,7 @@ Experiment-ABI contract layer.
 - `compile.py` — Runner-owned compile + execute of a *package-produced* lowered LLVM/RoCC MLIR.
 - `build_recipe.py` — Pure compile/link recipe; the runtime backend re-exports this same class.
 - `build_service.py` — Typed host-only build service and isolated pure target-package loader; no backend discovery, execution or reference imports.
+- `readback_policy.py` — Explicit invocation-only full-value output transport and selected build-byte receipt; never source this choice from a candidate command buffer or ambient environment.
 - `interface_emit.py` — ``merlin_iface`` interface-grammar: emit a Merlin command buffer as contract text, and
 - `schemas.py` — Fail-closed JSON-Schema validation against the ``merlin/contract/schemas/`` bundle.
 - `toolchain.py` — MLIR toolchain resolution for the experiment ABI (env-overridable).
@@ -25,3 +26,15 @@ validation, coverage and leases. It never selects evaluator adapters. Use core
 contract and layer builds. Equal basenames from caller and provider sources must
 never overwrite one object; imported objects are reserved and link order is
 retained. Unique basenames keep their original object names and commands.
+
+`HarnessBuildRecipe.header_dependencies` declares direct harness headers for
+ELF-cache identity. Exact bytes and first-match include-root resolution are
+checked; a missing, unreadable or shadowed declaration disables caching. This
+does not establish a complete transitive compiler-header closure.
+
+The opt-in `ReadbackPolicy` changes only the trusted harness readback format.
+Default calls retain their old build/cache path. A selected full-value build is
+cache-free, requires a renderer that explicitly accepts the policy, and records
+the unchanged command buffer, selected codec/recipe/source, generated harness,
+object and ELF bytes. Recheck those pins after execution before any numerical
+result. This is not complete toolchain closure or a numerical-support grant.

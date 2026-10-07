@@ -92,7 +92,7 @@ class BuildOnlyService:
                     or file_digest(item) != expected):
                 raise ValueError("build-only source/tool pin changed: " + str(path))
 
-    def render(self, cb, *, target, inputs, warm_profile=None, blobs=None):
+    def render(self, cb, *, target, inputs, warm_profile=None, readback_policy=None, blobs=None):
         self.verify(target)
         if inputs is None or not isinstance(inputs, dict) or not inputs:
             raise ValueError("build-only service requires explicit logical inputs")
@@ -103,6 +103,13 @@ class BuildOnlyService:
             kwargs["blobs"] = blobs
         if warm_profile is not None:
             kwargs["warm_profile"] = warm_profile
+        if readback_policy is not None:
+            from .readback_policy import selected
+
+            selected(readback_policy)
+            if "readback_policy" not in inspect.signature(self.renderer).parameters:
+                raise NotImplementedError("build-only renderer has no explicit full-value readback capability")
+            kwargs["readback_policy"] = readback_policy
         result = self.renderer(cb, **kwargs)
         self.verify(target)
         if not isinstance(result, str):

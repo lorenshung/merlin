@@ -11,9 +11,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-import jsonschema
-
-
 class ContractViolation(ValueError):
     """A contract artifact failed schema validation (fail-closed)."""
 
@@ -38,6 +35,8 @@ def load_schema(name: str, *, contract: str | Path | None = None) -> dict[str, A
 
 def validate(obj: Any, name: str, *, contract: str | Path | None = None) -> None:
     """Validate ``obj`` against the named schema; raise ContractViolation on any error."""
+    import jsonschema
+
     schema = load_schema(name, contract=contract)
     # The contract schemas carry a RELATIVE "$id" (e.g. "merlin/bench_contract/foo.schema.json")
     # used only as a label. Under jsonschema's RefResolver that relative id becomes the base URI,
