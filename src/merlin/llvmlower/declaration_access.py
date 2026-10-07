@@ -57,9 +57,24 @@ def unpatched_declarations(text: str, symbols: Iterable[str]) -> tuple[str, ...]
     that cares about it can fail rather than ship the copies.
     """
     missing = []
+    generic_access = None
     for sym in symbols:
         at = text.find(f"func.func private @{sym}(")
         if at < 0:
+            if generic_access is None:
+                generic_access = {}
+                if '"func.func"' in text:
+                    from ..frontends.linalg_mlir import parse_mlir_text
+
+                    module = parse_mlir_text(text)
+                    for op in module.walk():
+                        if op.name == "func.func" and not op.body.blocks:
+                            attrs = op.arg_attrs
+                            generic_access[op.sym_name.data] = bool(attrs) and all(
+                                "bufferization.access" in attr.data for attr in attrs
+                            )
+            if generic_access.get(sym):
+                continue
             missing.append(sym)
             continue
         line_end = text.find("\n", at)

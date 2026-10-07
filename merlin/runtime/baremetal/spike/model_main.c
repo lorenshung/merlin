@@ -14,6 +14,9 @@
 #include "merlin_model.h"
 #include "model_gen.h"
 #include "model_io.h"
+#ifdef MERLIN_OUTPUT_SHA256
+#include "output_sha256.h"
+#endif
 
 void console_init(void);
 void htif_puts(const char *);
@@ -66,7 +69,9 @@ int main(int hart) {
    * For large outputs (e.g. LM logits) additionally a digest the host can gate on:
    *   ARGMAX <rows> <idx...>: argmax over the last dim per row (token predictions).
    *   SUM <bits>            : f32 sum of all outputs (loose-tol checksum). */
+#ifndef MERLIN_DUMP_CAP
 #define MERLIN_DUMP_CAP 4096
+#endif
   int k = MERLIN_OUT_ELEMS < MERLIN_DUMP_CAP ? MERLIN_OUT_ELEMS : MERLIN_DUMP_CAP;
   htif_puts("OUT ");
   htif_putd((long)k);
@@ -101,6 +106,22 @@ int main(int hart) {
     htif_putd((long)(uint64_t)sb);
     htif_putc('\n');
   }
+#ifdef MERLIN_OUTPUT_SHA256
+  /* Exact full first-output evidence; excluded from c1-c0 above. */
+  uint8_t digest[32];
+  merlin_output_sha256(OUT, (size_t)MERLIN_OUT_ELEMS, digest);
+  htif_puts("OUT_SHA256 f32le ");
+  htif_putd((long)MERLIN_OUT_ELEMS);
+  htif_putc(' ');
+  htif_putd((long)((uint64_t)MERLIN_OUT_ELEMS * 4));
+  htif_putc(' ');
+  for (unsigned i = 0; i < 32; i++) {
+    static const char hex[] = "0123456789abcdef";
+    htif_putc(hex[digest[i] >> 4]);
+    htif_putc(hex[digest[i] & 15]);
+  }
+  htif_putc('\n');
+#endif
   htif_puts("METRIC cycles ");
   htif_putd((long)(c1 - c0));
   htif_putc('\n');

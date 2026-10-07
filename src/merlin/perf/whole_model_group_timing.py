@@ -513,6 +513,7 @@ def build_group_programs(
     keep_statement: bool = False,
     exactness: ContractOf | None = None,
     allow_regions: bool = False,
+    debug_companion: bool = False,
 ) -> dict[int, dict[str, Any]]:
     """One small program per group in ``groups``, built for ``machine``: ``{group: record}``.
 
@@ -538,6 +539,9 @@ def build_group_programs(
     ``prohibited_roles`` builds the program under the same instruction rule as the run's own builds.
     ``keep_statement`` keeps the statement's work tree (``lower/``: each asked group's interface, the
     package's command buffer and target artifact), which is otherwise removed; an inspection reads it.
+    ``debug_companion`` also links each program a second time from the same model, kernels and recipe
+    with debug information added (:func:`_debug_companion`), so a PC count of the program can be read
+    against source lines; the companion is recorded beside the program and never replaces it.
 
     Each record names the ELF, its memory map, the oracle (the whole model's, for the chained digest),
     who answered the group and the object's digest. ``expect_objects`` (``{group: object_sha256}``, from
@@ -624,21 +628,26 @@ def build_group_programs(
             recipe = W._with_header(
                 backends.harness_build_recipe(target), Path(header), here / "harness", [Path(o) for o in overrides]
             )
-            receipt = ctx["driver"].program.build(
-                one,
-                None,
-                None,
-                here / "program",
-                sched_kernels=kernels,
-                extra_objects=[Path(o) for o in kernels["objects"]],
-                recipe=recipe,
-                verify=verify,
-                **(
-                    {"library_loops": False, "prohibited_selectors": sorted(W._prohibited(target, prohibited_roles))}
-                    if prohibited_roles
-                    else {}
-                ),
+            rule = (
+                {"library_loops": False, "prohibited_selectors": sorted(W._prohibited(target, prohibited_roles))}
+                if prohibited_roles
+                else {}
             )
+
+            def link(directory: Path, chosen: Any, one=one, kernels=kernels, rule=rule) -> Mapping[str, Any]:
+                return ctx["driver"].program.build(
+                    one,
+                    None,
+                    None,
+                    directory,
+                    sched_kernels=kernels,
+                    extra_objects=[Path(o) for o in kernels["objects"]],
+                    recipe=chosen,
+                    verify=verify,
+                    **rule,
+                )
+
+            receipt = link(here / "program", recipe)
             _require_headers_read(receipt, abi, overrides)
             layout = _group_map(
                 Path(receipt["elf"]),
@@ -665,9 +674,12 @@ def build_group_programs(
                     "host_routed": receipt.get("host_routed") or [],
                     "library_paths": receipt.get("library_paths"),
                     "program_source": receipt.get("program_source"),
+                    "program_object": receipt.get("program_object"),
                     "variant": _board_variant(receipt),
                 }
             )
+            if debug_companion:
+                record["debug_companion"] = _debug_companion(link, recipe, here / "program.debug")
         except (Exception, SystemExit) as error:  # noqa: BLE001 -- a group that cannot be built is a named refusal
             # The driver reports a failed compile or link as SystemExit; a group whose program does not
             # build is a refusal for that group, never the end of every other group's build.
@@ -681,6 +693,35 @@ def build_group_programs(
     if not keep_statement:
         shutil.rmtree(out / "lower", ignore_errors=True)
     return records
+
+
+#: The C compiler option that adds debug information (POSIX ``c99 -g``). It asks the compiler to describe
+#: the code it emits, not to emit different code; :func:`merlin.perf.debug_companion.verify_debug_companion`
+#: refuses a companion whose allocated bytes differ anyway, so a compiler that did change them is caught.
+DEBUG_INFO_OPTION = "-g"
+
+
+def _debug_companion(link: Callable[[Path, Any], Mapping[str, Any]], recipe: Any, directory: Path) -> dict[str, Any]:
+    """The program linked again by ``link`` from the same inputs, under ``recipe`` with debug information.
+
+    Every compile and link flag the program was built with is kept, in order, and the debug option is
+    appended to them, so the companion is the recorded recipe plus debug information and nothing else.
+    A companion that cannot be built is a refusal recorded here; the program itself stands either way."""
+    import dataclasses
+
+    try:
+        chosen = dataclasses.replace(recipe, cflags=(*recipe.cflags, DEBUG_INFO_OPTION))
+        receipt = link(directory, chosen)
+    except (Exception, SystemExit) as error:  # noqa: BLE001 -- a companion that does not build is named, not fatal
+        return {"refusal": f"{type(error).__name__}: {str(error)[-400:]}", "option": DEBUG_INFO_OPTION}
+    return {
+        "elf": receipt.get("elf"),
+        "elf_sha256": receipt.get("elf_sha256"),
+        "program_object": receipt.get("program_object"),
+        "compiler": str(chosen.compiler),
+        "option": DEBUG_INFO_OPTION,
+        "cflags": list(chosen.cflags),
+    }
 
 
 def _program_files(receipt: Mapping[str, Any]) -> tuple[Path, Path]:

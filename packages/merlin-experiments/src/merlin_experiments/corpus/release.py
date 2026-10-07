@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ..spec import SpecError
+from ..spec import SpecError, read_yaml
 from .preparation import (
     admission,
     assemble,
@@ -26,9 +26,11 @@ from .preparation import (
     private_json,
     scaffold,
     source_run,
+    stage_phase1_policy_descriptor,
 )
 
 _INSTRUCTION_MODEL = "instruction-semantics.json"
+_PHASE1_POLICY = "phase1-policy-descriptor.yaml"
 
 
 @dataclass(frozen=True)
@@ -222,6 +224,27 @@ def _content(root: Path, prepared: dict) -> dict:
             raise SpecError("private instruction model must be an owner-only ordinary file")
         if fingerprint(member) != model["sha256"]:
             raise SpecError("private instruction model changed; prepare a new release")
+    policy = prepared.get("phase1_policy")
+    retained = root / "private" / _PHASE1_POLICY
+    if policy is None:
+        if retained.exists() or retained.is_symlink():
+            raise SpecError("unrecorded Phase 1 policy descriptor in corpus release")
+    else:
+        if not isinstance(policy, dict) or not isinstance(policy.get("sha256"), str):
+            raise SpecError("invalid Phase 1 policy descriptor commitment")
+        ordinary_tree(retained)
+        if not retained.is_file() or retained.stat().st_mode & 0o077:
+            raise SpecError("retained Phase 1 policy descriptor must be owner-only")
+        if fingerprint(retained) != policy["sha256"]:
+            raise SpecError("retained Phase 1 policy descriptor changed; prepare a new release")
+        selected = read_yaml(retained)
+        promoted = read_yaml(root / "payload" / "experiment" / "target_experiment.yaml")
+        if (
+            not isinstance(selected, dict)
+            or not isinstance(promoted, dict)
+            or selected.get("phase1_gates") != promoted.get("phase1_gates")
+        ):
+            raise SpecError("promoted Phase 1 gates differ from retained policy descriptor")
     return {"preparation_sha256": _digest(prepared), "payload_sha256": observed}
 
 
@@ -376,6 +399,7 @@ def prepare(
     private_baseline: Path | None = None,
     retirements: Path | None = None,
     generated_only: bool = False,
+    phase1_policy_descriptor: Path | None = None,
 ) -> dict:
     """Assemble a fresh complete source pool; neither canonical inputs nor approval change."""
     from merlin.common.paths import out_dir
@@ -424,6 +448,12 @@ def prepare(
         (root / "payload").mkdir(mode=0o700)
         payload = root / "payload"
         try:
+            phase1_policy = None
+            phase1_gates = None
+            if phase1_policy_descriptor is not None:
+                phase1_policy, phase1_gates = stage_phase1_policy_descriptor(
+                    te.path, phase1_policy_descriptor, root / "private"
+                )
             assembly = assemble(
                 te,
                 generated,
@@ -441,6 +471,7 @@ def prepare(
                 private=root / "private",
                 selected_facts=selected_facts,
                 selected_contract=selected_contract,
+                phase1_gates=phase1_gates,
             )
             descriptor = payload / "experiment" / "target_experiment.yaml"
             checked = admission(descriptor, coverage_output=root / "private" / "workload-coverage.json")
@@ -457,6 +488,7 @@ def prepare(
                     "source_plan_sha256": fingerprint(source / "resolved-plan.json"),
                     "source_output_sha256": attempt["output_sha256"],
                     "source_descriptor_sha256": fingerprint(te.path),
+                    "phase1_policy": phase1_policy,
                     "generation_lineage": lineage,
                     "assembly": assembly,
                     "scaffolding": scaffolding,

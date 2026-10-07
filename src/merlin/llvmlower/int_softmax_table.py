@@ -38,7 +38,7 @@ from pathlib import Path
 FEATURE = "int_softmax_table"
 REPORT_PREFIX = "OK int_softmax_table "
 #: The runner argv slot that gates the rewrite (after the data layout, so no existing slot moves).
-ARGV_INDEX = 18
+ARGV_INDEX = 20
 _RT_SOURCE = Path(__file__).with_name("_int_softmax_table_rt.py")
 
 

@@ -169,8 +169,9 @@ def build_quantizer(
     """The PT2E quantizer a static recipe describes, limited to placed operations.
 
     ATen operator names alone cannot license quantization: an unsupported module may call
-    ``aten.linear`` internally. Export's ``nn_module_stack`` identifies the owning module;
-    an absent/unknown owner is refused rather than silently becoming device work.
+    ``aten.linear`` internally. Export's ``nn_module_stack`` identifies the owning module.
+    Leaf operations use their module plan; container/root arithmetic uses its own
+    functional operation plan. Missing ownership or unknown leaves are refused.
     """
     import torch
     from torchao.quantization.pt2e.quantizer import QuantizationAnnotation, Quantizer
@@ -273,9 +274,15 @@ def build_quantizer(
             return False
         if path:
             decision = decisions.get(path)
-            return bool(decision and decision.get("placement") == "device" and decision.get("family") == family)
-        # A functional operation in the root forward has no leaf module. Check the actual
-        # stored operand and its shape with the same rule as a module.
+            if decision is not None:
+                return bool(decision.get("placement") == "device" and decision.get("family") == family)
+            # The inventory contains leaves only. A container still owns functional
+            # arithmetic between its children (for example, a residual add). Prove
+            # it is a container in this plan before using the root operation rule.
+            if not any(fqn.startswith(path + ".") for fqn in decisions):
+                return False
+        # Root/container arithmetic has no leaf decision. Check the actual stored
+        # operand and its shape with the same rule as a module.
         if family == "contraction":
             kernel_node = node.args[1]
             while kernel_node.op == "call_function":
@@ -473,7 +480,7 @@ def layer_inventory(model: Any) -> list[dict[str, Any]]:
     layers: list[dict[str, Any]] = []
     for fqn, module in model.named_modules():
         if not fqn or any(True for _ in module.children()):
-            continue  # a container's arithmetic is its children's
+            continue  # container-owned functional arithmetic is planned per operation
         weight = getattr(module, "weight", None)
         layers.append(
             {
@@ -720,8 +727,7 @@ def apply_recipe(
                 "selected model2MLIR lacks pt2e_conv_bn_fold_candidates; "
                 "cannot prove PT2E Conv+BatchNorm source identity for this graph"
             )
-    quantizer = build_quantizer(recipe, layer_plan=layer_plan, eps=epsilon,
-                                fold_candidates=fold_candidates)
+    quantizer = build_quantizer(recipe, layer_plan=layer_plan, eps=epsilon, fold_candidates=fold_candidates)
     prepared = prepare_pt2e(exported, quantizer)
     samples = calibration_inputs if calibration_inputs is not None else (tuple(example_inputs),)
     calibrated = 0

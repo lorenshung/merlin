@@ -16,7 +16,9 @@ zero plots as a finding; a refusal plots as a gap.
   all **parameters**: they are declared by the launcher, which lives outside the library.
 - `spans.py` — tool-call spans, transcript first then the driver's raw event stream, plus `concurrency()`.
 - `passes.py` — capsules passing over time, from `selfcheck_log.jsonl` or (derived) from verdict mtimes.
-- `tokens.py` — token buckets and the three-state cost classification.
+- `tokens.py` — token buckets and the three-state cost classification. Explicit owned rollout
+  paths can supply cumulative counters and completed-request windows; cached input and reasoning
+  output are subsets, never extra tokens. Session metadata does not prove agent ownership.
 - `corpus_coverage.py` — how much of a target's DECLARED corpus has evidence, unioned over
   every run. One row per capsule, not per run, so it does not live in `run_facts.json`.
 

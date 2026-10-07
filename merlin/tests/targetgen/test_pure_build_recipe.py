@@ -55,3 +55,30 @@ assert float_format_of("f32") == "f32"
 """
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
+
+
+def test_object_names_preserve_unique_sources_and_imported_objects(tmp_path):
+    from merlin.targetgen.contract.build_recipe import named_object_paths
+
+    imported = tmp_path / "kernel.o"
+    sources = [tmp_path / "kernel.c", imported, Path("/provider/start.S")]
+    assert named_object_paths(sources, tmp_path) == (tmp_path / "0_kernel.o", imported, tmp_path / "start.o")
+    assert named_object_paths([Path("/a/left.c"), Path("/b/right.c")], tmp_path) == (
+        tmp_path / "left.o",
+        tmp_path / "right.o",
+    )
+
+
+def test_object_names_avoid_preserved_and_generated_collisions(tmp_path):
+    from merlin.targetgen.contract.build_recipe import named_object_paths
+
+    sources = [Path("/a/kernel.c"), Path("/b/kernel.S"), Path("/c/0_kernel.c"), tmp_path / "1_kernel.o"]
+    outputs = named_object_paths(sources, tmp_path)
+    assert outputs == (
+        tmp_path / "0_kernel_1.o",
+        tmp_path / "1_kernel_1.o",
+        tmp_path / "0_kernel.o",
+        tmp_path / "1_kernel.o",
+    )
+    assert len(set(outputs)) == len(sources)
+    assert outputs == named_object_paths(sources, tmp_path)

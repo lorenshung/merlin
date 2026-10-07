@@ -33,6 +33,9 @@ func.func @forward(%a: tensor<4xf32>, %b: tensor<4xf32>) -> tensor<4xf32> {
 
 _FAKE_FUNCTIONAL_MODEL = """
 import sys
+if "-g" in sys.argv:  # the PC histogram run: the simulator's own banner, then address/count lines on stderr
+    sys.stderr.write("PC Histogram size: 2\\n0x10 5\\n0x14 7\\n")
+    sys.exit(0)
 log = next(a.split("=", 1)[1] for a in sys.argv if a.startswith("--log="))
 count = int(next(a.split("=", 1)[1] for a in sys.argv if a.startswith("--instructions=")))
 with open(log, "w") as fh:
@@ -188,3 +191,144 @@ def test_a_package_directory_needs_its_build_options_named(tmp_path):
     assert (
         resolved["options"] == {"model_capsule": "c", "machine": "m", "header": "h.h"} and resolved["machine"] is None
     )
+
+
+# ------------------------------------------------------------------------------- source attribution
+
+_FAKE_SYMBOLIZER = """
+import json, sys
+assert "--output-style=JSON" in sys.argv and any(a.startswith("--obj=") for a in sys.argv)
+for line in sys.stdin:
+    if line.strip():
+        frame = {"FunctionName": "main", "FileName": "program.c", "Line": int(line, 16) // 4, "Column": 1}
+        print(json.dumps({"Address": line.strip(), "Symbol": [frame]}))
+"""
+
+
+def _twins(root: Path, *, literal: str = "group program") -> dict[str, Path]:
+    """The program and its debug companion, built by a real compiler from one source, the companion with
+    the debug option the group build adds; ``literal`` changes the companion's source when it differs."""
+    import shutil
+
+    from merlin.perf.whole_model_group_timing import DEBUG_INFO_OPTION
+
+    clang = shutil.which("clang")
+    if not clang:
+        pytest.skip("clang unavailable")
+    toolchain = root / "toolchain"
+    toolchain.mkdir(parents=True, exist_ok=True)
+    (toolchain / "clang").symlink_to(clang)
+    built = {}
+    for name, flags, text in (("program", [], "group program"), ("debug", [DEBUG_INFO_OPTION], literal)):
+        source = root / f"{name}.c"
+        source.write_text(f'extern int puts(const char*);\nint main(void){{return puts("{text}");}}\n')
+        obj, elf = root / f"{name}.o", root / f"{name}.elf"
+        subprocess.run([clang, "-O2", "-fno-builtin", *flags, "-c", str(source), "-o", str(obj)], check=True)
+        subprocess.run([clang, "-Wl,--build-id=none", str(obj), "-o", str(elf)], check=True)
+        built[name] = (obj, elf)
+    return {
+        "toolchain": toolchain,
+        "elf": built["program"][1],
+        "object": built["program"][0],
+        "debug_elf": built["debug"][1],
+        "debug_object": built["debug"][0],
+    }
+
+
+@pytest.fixture
+def companion_build(group_build, monkeypatch, tmp_path):
+    """The group build above, whose record names a real program, its real debug companion and the compiler
+    of a toolchain that ships the (stand-in) LLVM symbolizer -- and spies on the companion module."""
+    from merlin.perf import debug_companion as DC
+    from merlin.perf import whole_model_group_timing as GT
+
+    twins = _twins(tmp_path / "twins")
+    symbolizer = twins["toolchain"] / "llvm-symbolizer"
+    symbolizer.write_text(f"#!{sys.executable}\n" + _FAKE_SYMBOLIZER)
+    symbolizer.chmod(0o755)
+    base = GT.build_group_programs
+
+    def with_companion(package_dir, groups, **kwargs):
+        records = base(package_dir, groups, **kwargs)
+        for record in records.values():
+            record.update(elf=str(twins["elf"]), program_object=str(twins["object"]))
+            if kwargs.get("debug_companion"):
+                record["debug_companion"] = {
+                    "elf": str(twins["debug_elf"]),
+                    "program_object": str(twins["debug_object"]),
+                    "compiler": str(twins["toolchain"] / "clang"),
+                    "option": "-g",
+                }
+        return records
+
+    monkeypatch.setattr(GT, "build_group_programs", with_companion)
+    calls = {"verify": [], "attribute": []}
+    verify, attribute = DC.verify_debug_companion, DC.attribute_symbolized_pcs
+
+    def spy_verify(control, companion, *, relocatable=False):
+        calls["verify"].append(relocatable)
+        return verify(control, companion, relocatable=relocatable)
+
+    def spy_attribute(counts, records):
+        calls["attribute"].append(dict(counts))
+        return attribute(counts, records)
+
+    monkeypatch.setattr(DC, "verify_debug_companion", spy_verify)
+    monkeypatch.setattr(DC, "attribute_symbolized_pcs", spy_attribute)
+    return {"twins": twins, "calls": calls, "symbolizer": symbolizer}
+
+
+def test_trace_attributes_the_pc_histogram_through_the_verified_debug_companion(companion_build, tmp_path, capsys):
+    argv = ["inspect", str(_job(tmp_path)), "--group", "g2", "--trace", "--out", str(tmp_path / "w"), "--json"]
+    assert cli.main(argv) == 0
+    result = json.loads(capsys.readouterr().out)
+    calls = companion_build["calls"]
+    assert sorted(calls["verify"]) == [False, True]  # the image and the object were both compared
+    assert calls["attribute"] == [{0x10: 5, 0x14: 7}]  # the functional model's own histogram
+    attribution = result["source_attribution"]
+    assert attribution["status"] == "attributed" and attribution["total"] == 12
+    assert attribution["symbolizer"] == str(companion_build["symbolizer"])
+    assert attribution["functions"] == {"main": 12}
+    assert [row["executions"] for row in attribution["lines"]] == [7, 5]
+    assert json.loads(Path(attribution["file"]).read_text())["total"] == 12
+
+
+def test_the_group_build_is_asked_for_a_companion_only_when_tracing(group_build, tmp_path, capsys):
+    job = _job(tmp_path)
+    assert cli.main(["inspect", str(job), "--group", "g2", "--out", str(tmp_path / "a")]) == 0
+    assert group_build["debug_companion"] is False
+    assert cli.main(["inspect", str(job), "--group", "g2", "--trace", "--out", str(tmp_path / "b")]) == 0
+    assert group_build["debug_companion"] is True
+
+
+def test_a_toolchain_without_a_symbolizer_leaves_the_attribution_unknown(companion_build, tmp_path, capsys):
+    companion_build["symbolizer"].unlink()
+    argv = ["inspect", str(_job(tmp_path)), "--group", "g2", "--trace", "--out", str(tmp_path / "w"), "--json"]
+    assert cli.main(argv) == 0
+    attribution = json.loads(capsys.readouterr().out)["source_attribution"]
+    assert attribution["status"] == "UNKNOWN" and "llvm-symbolizer" in attribution["why"]
+    assert companion_build["calls"]["attribute"] == []  # nothing was attributed without the target's tool
+
+
+def test_a_companion_that_is_not_the_program_is_refused(group_build, monkeypatch, tmp_path, capsys):
+    from merlin.perf import whole_model_group_timing as GT
+
+    twins = _twins(tmp_path / "twins", literal="another program")
+    base = GT.build_group_programs
+
+    def with_changed_companion(package_dir, groups, **kwargs):
+        records = base(package_dir, groups, **kwargs)
+        for record in records.values():
+            record.update(elf=str(twins["elf"]), program_object=str(twins["object"]))
+            record["debug_companion"] = {
+                "elf": str(twins["debug_elf"]),
+                "program_object": str(twins["debug_object"]),
+                "compiler": str(twins["toolchain"] / "clang"),
+            }
+        return records
+
+    monkeypatch.setattr(GT, "build_group_programs", with_changed_companion)
+    argv = ["inspect", str(_job(tmp_path)), "--group", "g2", "--trace", "--out", str(tmp_path / "w"), "--json"]
+    assert cli.main(argv) == 0
+    attribution = json.loads(capsys.readouterr().out)["source_attribution"]
+    assert attribution["status"] == "UNKNOWN" and "not the program" in attribution["why"]

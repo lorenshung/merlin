@@ -71,6 +71,21 @@ def test_real_n1_pointwise_pattern_becomes_one_row_major_view():
     assert text.count("linalg.generic") == 1  # only the contraction remains
 
 
+def test_named_integer_matmul_keeps_the_identity_view_optimization():
+    text = _module()
+    start = text.index("    %mm = linalg.generic")
+    end = text.index("    func.return %mm", start)
+    named = (
+        "    %mm = linalg.matmul "
+        "ins(%w, %col : tensor<8x4xi8>, tensor<4x15xi8>) "
+        "outs(%acc : tensor<8x15xi32>) -> tensor<8x15xi32>\n"
+    )
+    module = mq.parse(text[:start] + named + text[end:])
+    assert iv.rewrite_module(module).to_dict() == {"viewed": 1, "refusals": {}}
+    assert "merlin.im2col_identity_view" in str(module)
+    assert iv.rewrite_module(module).viewed == 0
+
+
 def test_nonidentity_geometry_is_counted_and_untouched():
     for kwargs in ({"kh": 3, "kw": 3}, {"sh": 2, "sw": 2}, {"n": 2}):
         module = mq.parse(_module(**kwargs))

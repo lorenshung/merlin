@@ -289,7 +289,12 @@ def find_function_ops(mlir_text: str, symbol: str = "forward") -> tuple[int, int
     return start, ret_line, ops
 
 
-def instrument(mlir_text: str, functions: "Sequence[str]" = ("forward",)) -> tuple[str, list[dict]]:
+def instrument(
+    mlir_text: str,
+    functions: "Sequence[str]" = ("forward",),
+    *,
+    structural: bool = False,
+) -> tuple[str, list[dict]]:
     """Interleave ``@merlin_prof_mark`` calls between the top-level ops of each of ``functions``.
 
     Returns ``(instrumented_text, table)``. ``table`` has one record per mark id, numbered across the
@@ -301,10 +306,23 @@ def instrument(mlir_text: str, functions: "Sequence[str]" = ("forward",)) -> tup
     the chunks' own ops too attributes them: the shim credits the time since the previous mark, so a call
     keeps only its own overhead and every op inside the chunk its own cost. Raises
     :class:`OpProfileError` if the module has no instrumentable ``functions[0]``.
+
+    ``structural=True`` selects complete typed boundaries for one explicitly
+    named function. The legacy positional multi-function text API is retained;
+    typed multi-function instrumentation refuses until it can bind global mark
+    IDs and entry/return ownership for the complete selection.
     """
-    lines = mlir_text.splitlines()
     if not functions:
         raise OpProfileError("no function named to instrument")
+    if structural:
+        # The normal model backends select complete typed boundaries. The legacy
+        # text API remains available to callers inspecting historical fixtures.
+        from .op_profile_structural import instrument_text
+
+        if len(functions) != 1:
+            raise OpProfileError("typed operation profiling supports exactly one selected function")
+        return instrument_text(mlir_text, function=functions[0])
+    lines = mlir_text.splitlines()
 
     # Marker insertions, keyed by the line they precede.
     def mark(mid: int, indent: str) -> list[str]:

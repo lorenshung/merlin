@@ -59,6 +59,11 @@ class ImprFeature:
     feature whose payoff is cancelled by a separate default-off fix is, in practice, an inert lever:
     the beam has to discover the conjunction, and everyone who names the feature directly in
     ``compiler_features`` gets the cancelled version. See ``_tile_epilogue_hygiene``.
+
+    ``alternative_group`` names a family whose members are alternative choices: at most one
+    member may be selected. ``requires_exactly_one_of`` names explicit prerequisites from which
+    exactly one must be selected. Both constraints are checked after the ``implies`` closure;
+    neither selects a prerequisite or drops a conflicting feature automatically.
     """
 
     name: str
@@ -69,6 +74,8 @@ class ImprFeature:
     edit_cflags: Callable[[list[str]], list[str]] | None = None
     schedule_replace: bool = False
     implies: frozenset[str] = frozenset()
+    alternative_group: str | None = None
+    requires_exactly_one_of: frozenset[str] = frozenset()
 
 
 _REGISTRY: dict[str, ImprFeature] = {}
@@ -252,7 +259,7 @@ def known() -> list[str]:
 
 def normalize(features) -> frozenset[str]:
     """Accept None / list / set / frozenset -> validated frozenset (every name must be registered),
-    closed under ``ImprFeature.implies``.
+    closed under ``ImprFeature.implies`` and satisfying declared selection constraints.
 
     The closure is here, and not at each call site, because ``feats = normalize(...)`` is the single
     point every consumer reads: the runner selection, the schedule edits, and the argv gates for the
@@ -269,10 +276,25 @@ def normalize(features) -> frozenset[str]:
     while True:
         grown = fs | frozenset().union(*(get(n).implies for n in fs)) if fs else fs
         if grown == fs:
-            return fs
+            break
         for n in grown - fs:
             get(n)  # an implied name must be registered too
         fs = grown
+
+    groups: dict[str, list[str]] = {}
+    for n in sorted(fs):
+        feature = get(n)
+        if feature.alternative_group is not None:
+            groups.setdefault(feature.alternative_group, []).append(n)
+    for group, members in sorted(groups.items()):
+        if len(members) > 1:
+            raise ValueError(f"feature alternatives in group {group!r} cannot compose: {members}")
+    for n in sorted(fs):
+        required = get(n).requires_exactly_one_of
+        selected = sorted(fs & required)
+        if required and len(selected) != 1:
+            raise ValueError(f"feature {n!r} requires exactly one of {sorted(required)}; selected {selected}")
+    return fs
 
 
 def apply_pipeline(passes: list[str], features: frozenset[str]) -> list[str]:
@@ -3530,6 +3552,28 @@ module attributes {transform.with_named_sequence} {
 
 register(
     ImprFeature(
+        name="approximate_transcendental_activation",
+        action_class="PASS",
+        description="Explicit f32 activation polynomial rewrite, independent of host vectorization. "
+        "Shares the provenance-scoped exp/erf/tanh approximation with the vectorized activation "
+        "feature. Normalization and unsupported dtypes retain libm lowering. Changes numerical "
+        "arithmetic and requires the caller's original model accuracy gate; default off.",
+    )
+)
+
+register(
+    ImprFeature(
+        name="fuse_activation_polynomial_fma",
+        action_class="PASS",
+        description="Explicit fused evaluation of the selected f32 activation polynomial. "
+        "Changes approximation arithmetic; requires the original model accuracy gate. "
+        "Selects exact FMA intrinsics and leaves normalization expf unchanged; default off.",
+        implies=frozenset({"approximate_transcendental_activation", "lower_fma_to_intrinsic"}),
+    )
+)
+
+register(
+    ImprFeature(
         name="vectorized_transcendental_activation",
         action_class="PASS",
         description="GENERAL vectorized-activation lowering, PRECISELY TARGETED by provenance: the "
@@ -3547,6 +3591,7 @@ register(
         "ranges (gated on cos/rel error, not bit-exact). Default-off; baseline byte-identical.",
         edit_schedule=lambda _t: _ACT_POLY_SCHEDULE,
         schedule_replace=True,
+        implies=frozenset({"approximate_transcendental_activation"}),
     )
 )
 
@@ -3968,3 +4013,68 @@ register(
 from .reduce_vec import ensure_registered as _ensure_amax_reduction  # noqa: E402
 
 VECTORIZE_AMAX_REDUCTION_NAME = _ensure_amax_reduction()
+
+
+def _reuse_tensor_destination(passes: list[str]) -> list[str]:
+    """Run upstream destination forwarding after fusion, before bufferization.
+
+    Tensor semantics and upstream use/alias analysis decide whether an empty
+    producer destination can be replaced by the eventual insert-slice view.
+    No shape, model name, floating arithmetic, or device ABI is rewritten here.
+    """
+    out = list(passes)
+    for i, item in enumerate(out):
+        if item.startswith("one-shot-bufferize"):
+            if i and out[i - 1] == "eliminate-empty-tensors":
+                return out
+            out.insert(i, "eliminate-empty-tensors")
+            return out
+    return out
+
+
+register(
+    ImprFeature(
+        name="reuse_tensor_destination",
+        action_class="PASS",
+        description="Forward tensor destinations through proved insert-slice chains before bufferization; default off.",
+        edit_pipeline=_reuse_tensor_destination,
+        implies=frozenset({_SELF_COPY_FEATURE}),
+    )
+)
+
+register(
+    ImprFeature(
+        name="initialize_tensor_border_only",
+        action_class="PASS",
+        description="Fill only the proved exterior of a fresh tensor destination whose interior is fully overwritten; default off.",
+        implies=frozenset({"reuse_tensor_destination"}),
+    )
+)
+
+
+register(
+    ImprFeature(
+        name="fold_uniform_fill_copy",
+        action_class="PASS",
+        description="Fill proved copy destinations directly from a private uniform buffer; default off.",
+        implies=frozenset({_SELF_COPY_FEATURE}),
+    )
+)
+
+
+register(
+    ImprFeature(
+        name="specialize_contiguous_copy",
+        action_class="PASS",
+        description="Specialize disjoint static copies to contiguous suffix memcpy and outer strided loops; default off.",
+        implies=frozenset({_SELF_COPY_FEATURE}),
+    )
+)
+
+from .bufferized_result_identity import ensure_registered as _ensure_buffer_identity  # noqa: E402
+
+BUFFERIZED_RESULT_IDENTITY_NAME = _ensure_buffer_identity()
+
+from .scalar_squared_sum import ensure_registered as _ensure_squared_sum  # noqa: E402
+
+SCALAR_SQUARED_SUM_NAME = _ensure_squared_sum()

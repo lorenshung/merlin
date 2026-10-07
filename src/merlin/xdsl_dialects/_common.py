@@ -55,8 +55,47 @@ if HAS_XDSL:
 
         from xdsl.printer import Printer
 
+        class PortablePrinter(Printer):
+            def print_attribute(self, attribute):
+                from xdsl.dialects.builtin import AnyFloat, DenseIntOrFPElementsAttr
+
+                if isinstance(attribute, DenseIntOrFPElementsAttr) and isinstance(
+                    attribute.get_element_type(), AnyFloat
+                ):
+                    # xDSL parses unquoted dense float hex literals as numeric
+                    # integers (e.g. -inf becomes 4286578688.0). Raw-byte strings
+                    # round-trip through both parsers and retain NaN payloads and
+                    # signed zeros. Detect splats by bytes, not float equality.
+                    data = attribute.data.data
+                    width = attribute.get_element_type().compile_time_size
+                    if data and data == data[:width] * (len(data) // width):
+                        data = data[:width]
+                    self.print_string(f'dense<"0x{data.hex().upper()}"> : ')
+                    self.print_attribute(attribute.type)
+                    return
+                super().print_attribute(attribute)
+
+            def print_op(self, op):
+                # xDSL's custom yield format puts attributes before operands,
+                # which upstream MLIR rejects. Generic syntax retains provenance
+                # and avoids depending on that incompatible custom assembly.
+                previous = self.print_generic_format
+                attributed_declaration = (
+                    op.name == "func.func"
+                    and not op.body.blocks
+                    and (op.arg_attrs is not None or op.res_attrs is not None)
+                )
+                # ReduceOp's custom printer omits its attribute dictionary entirely.
+                # Keep source provenance and transform contracts on reductions too.
+                if (op.name in {"linalg.yield", "linalg.reduce"} and op.attributes) or attributed_declaration:
+                    self.print_generic_format = True
+                try:
+                    super().print_op(op)
+                finally:
+                    self.print_generic_format = previous
+
         s = io.StringIO()
-        Printer(stream=s, print_generic_format=generic).print_op(module)
+        PortablePrinter(stream=s, print_generic_format=generic).print_op(module)
         return s.getvalue()
 
     def roundtrip(module, *dialects):

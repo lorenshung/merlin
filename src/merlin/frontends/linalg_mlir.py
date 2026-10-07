@@ -12,6 +12,7 @@ a few seconds. Two model2MLIR/xDSL impedance notes, both handled here:
   in that file) — invalid SSACFG IR. Parse the **full** artifact, not the sections,
   until that upstream bug is fixed.
 """
+
 from __future__ import annotations
 
 import json
@@ -48,37 +49,39 @@ def strip_paren_results(text: str) -> str:
         k = brace + 1
         while k < len(text) and text[k].isspace():
             k += 1
-        if text[k:k + 2] == "->":
+        if text[k : k + 2] == "->":
             k += 2
             while k < len(text) and text[k].isspace():
                 k += 1
         else:
             k = -1
         if k < 0 or k >= len(text) or text[k] != "(":
-            out.append(text[i:brace + 1])   # not a `} -> (...)` terminator
+            out.append(text[i : brace + 1])  # not a `} -> (...)` terminator
             i = brace + 1
             continue
         close = k + 1
         while close < len(text) and text[close] not in "()":
             close += 1
         if close >= len(text) or text[close] != ")" or close == k + 1:
-            out.append(text[i:brace + 1])   # unbalanced / nested / empty — leave alone
+            out.append(text[i : brace + 1])  # unbalanced / nested / empty — leave alone
             i = brace + 1
             continue
-        out.append(text[i:k])               # `} -> ` verbatim, whitespace included
-        out.append(text[k + 1:close])       # the result-type list, parens dropped
+        out.append(text[i:k])  # `} -> ` verbatim, whitespace included
+        out.append(text[k + 1 : close])  # the result-type list, parens dropped
         i = close + 1
 
 
 def make_context():
-    """A permissive xDSL context for linalg-on-tensors modules."""
+    """A permissive context for tensor sources and prepared bufferized writers."""
     from xdsl.context import Context
     from xdsl.dialects.arith import Arith
+    from xdsl.dialects.bufferization import Bufferization
     from xdsl.dialects.builtin import Builtin
     from xdsl.dialects.cf import Cf
     from xdsl.dialects.func import Func
     from xdsl.dialects.linalg import Linalg
     from xdsl.dialects.math import Math
+    from xdsl.dialects.memref import MemRef
     from xdsl.dialects.scf import Scf
     from xdsl.dialects.tensor import Tensor
 
@@ -92,7 +95,7 @@ def make_context():
     register_fp8_float_constraints()
 
     ctx = Context(allow_unregistered=True)
-    for d in (Builtin, Func, Arith, Linalg, Tensor, Scf, Math, Cf):
+    for d in (Builtin, Func, Arith, Linalg, Tensor, Scf, Math, Cf, MemRef, Bufferization):
         ctx.load_dialect(d)
     return ctx
 
@@ -156,13 +159,15 @@ def parse_mlir_file(path: str | Path, ctx=None):
         # Imported here, not at module scope: `generic_form` reaches back into this module, and the
         # re-print runs in the m2m venv, which a caller that never hits this path need not have.
         from ..llvmlower.generic_form import GenericFormError, to_generic_form
+
         try:
             generic = to_generic_form(path)
         except GenericFormError as exc:
             raise GenericFormError(
                 f"{path} is printed in MLIR custom form that xDSL cannot read "
                 f"({str(first).splitlines()[0] if str(first) else first}) and it could not be "
-                f"re-printed in generic form: {exc}") from first
+                f"re-printed in generic form: {exc}"
+            ) from first
         return parse_mlir_text(generic.read_text(encoding="utf-8"), ctx=ctx)
 
 
@@ -176,15 +181,15 @@ def load_manifest(path: str | Path) -> dict[int, dict[str, Any]]:
 class MatmulRecord:
     """One matmul-family op found in the module."""
 
-    kind: str                       # e.g. "linalg.matmul"
+    kind: str  # e.g. "linalg.matmul"
     m: int | None
     k: int | None
     n: int | None
     lhs_shape: tuple[int, ...]
     rhs_shape: tuple[int, ...]
     dtype: str
-    weight_arg_index: int | None    # func-arg index the RHS traces back to (if any)
-    weight_name: str | None         # resolved via the safetensors manifest
+    weight_arg_index: int | None  # func-arg index the RHS traces back to (if any)
+    weight_name: str | None  # resolved via the safetensors manifest
     prov: dict[str, str] = field(default_factory=dict)
 
 
@@ -231,8 +236,7 @@ def _trace_to_func_arg(value, func_args) -> int | None:
     return None
 
 
-def matmul_inventory(module, manifest: dict[int, dict[str, Any]] | None = None
-                     ) -> list[MatmulRecord]:
+def matmul_inventory(module, manifest: dict[int, dict[str, Any]] | None = None) -> list[MatmulRecord]:
     """All linalg matmul-family ops, with weights resolved through the manifest."""
     fns = [op for op in module.walk() if op.name == "func.func"]
     if not fns:
@@ -241,8 +245,7 @@ def matmul_inventory(module, manifest: dict[int, dict[str, Any]] | None = None
 
     records: list[MatmulRecord] = []
     for op in module.walk():
-        if op.name not in ("linalg.matmul", "linalg.batch_matmul",
-                           "linalg.quantized_matmul"):
+        if op.name not in ("linalg.matmul", "linalg.batch_matmul", "linalg.quantized_matmul"):
             continue
         lhs, rhs = op.inputs[0], op.inputs[1]
         ls, rs = _shape(lhs.type), _shape(rhs.type)
@@ -254,8 +257,18 @@ def matmul_inventory(module, manifest: dict[int, dict[str, Any]] | None = None
         name = None
         if idx is not None and manifest and idx in manifest:
             name = manifest[idx].get("weight")
-        records.append(MatmulRecord(
-            kind=op.name, m=m, k=k, n=n, lhs_shape=ls, rhs_shape=rs,
-            dtype=_dtype(rhs.type), weight_arg_index=idx, weight_name=name,
-            prov=_prov(op)))
+        records.append(
+            MatmulRecord(
+                kind=op.name,
+                m=m,
+                k=k,
+                n=n,
+                lhs_shape=ls,
+                rhs_shape=rs,
+                dtype=_dtype(rhs.type),
+                weight_arg_index=idx,
+                weight_name=name,
+                prov=_prov(op),
+            )
+        )
     return records

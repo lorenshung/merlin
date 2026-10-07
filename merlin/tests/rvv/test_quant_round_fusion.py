@@ -95,6 +95,122 @@ def test_the_quantize_chain_is_fused_and_leaves_no_math_op():
     assert report["rewrites"] == 1
 
 
+@pytest.mark.parametrize("zero", ["0.000000e+00", "-0.000000e+00"])
+@pytest.mark.parametrize("commuted", [False, True])
+def test_zero_point_addition_does_not_hide_the_exact_quantize_chain(zero, commuted):
+    """Captured symmetric quantizers retain an explicit zero-point addition after round."""
+    from merlin.llvmlower.quant_round import fuse_round_clamp_convert
+
+    operands = "%zp, %rd" if commuted else "%rd, %zp"
+    text = _PROVED_NONZERO_SCALE_QUANTIZE.replace(
+        "      %m1 = arith.minimumf %rd, %hi : f32",
+        f"      %zp = arith.constant {zero} : f32\n"
+        f"      %shifted = arith.addf {operands} : f32\n"
+        "      %m1 = arith.minimumf %shifted, %hi : f32",
+    )
+    module = _parse(text)
+    report: dict = {}
+    assert fuse_round_clamp_convert(module, report_out=report) == 1
+    module.verify()
+    assert report == {"rewrites": 1}
+    assert "math.roundeven" not in _body_names(module)
+    assert "arith.addf" not in _body_names(module)
+
+
+def test_nonzero_or_shared_zero_point_additions_preserve_the_original_chain():
+    from merlin.llvmlower.quant_round import fuse_round_clamp_convert
+
+    text = _PROVED_NONZERO_SCALE_QUANTIZE.replace(
+        "      %m1 = arith.minimumf %rd, %hi : f32",
+        "      %zp = arith.constant 1.000000e+00 : f32\n"
+        "      %shifted = arith.addf %rd, %zp : f32\n"
+        "      %m1 = arith.minimumf %shifted, %hi : f32",
+    )
+    module = _parse(text)
+    report: dict = {}
+    assert fuse_round_clamp_convert(module, report_out=report) == 0
+    assert report == {"refused_chain_addend_not_zero": 1, "rewrites": 0}
+    module.verify()
+    assert "math.roundeven" in _body_names(module)
+
+    text = text.replace("1.000000e+00 : f32\n      %shifted", "0.000000e+00 : f32\n      %shifted")
+    text = text.replace(
+        "      %m1 = arith.minimumf %shifted, %hi : f32",
+        "      %extra = arith.addf %shifted, %lo : f32\n      %m1 = arith.minimumf %shifted, %hi : f32",
+    )
+    module = _parse(text)
+    report = {}
+    assert fuse_round_clamp_convert(module, report_out=report) == 0
+    assert report == {"refused_clamp_result_shared": 1, "rewrites": 0}
+    module.verify()
+    assert "math.roundeven" in _body_names(module)
+
+
+@pytest.mark.parametrize("zero_point", [0, 1])
+def test_captured_integer_zero_point_splat_is_followed_exactly(zero_point):
+    from merlin.llvmlower.quant_round import fuse_round_clamp_convert
+
+    text = (
+        _PROVED_NONZERO_SCALE_QUANTIZE.replace(
+            "    %e = tensor.empty()",
+            f"    %zero_point = arith.constant {zero_point} : i64\n"
+            "    %zp_tensor = tensor.splat %zero_point : tensor<i64>\n"
+            "    %e = tensor.empty()",
+        )
+        .replace(
+            "affine_map<(d0, d1) -> ()>,",
+            "affine_map<(d0, d1) -> ()>, affine_map<(d0, d1) -> ()>,",
+        )
+        .replace(
+            "ins(%a, %s : tensor<4x8xf32>, f32)",
+            "ins(%a, %s, %zp_tensor : tensor<4x8xf32>, f32, tensor<i64>)",
+        )
+        .replace(
+            "^bb0(%x: f32, %sv: f32, %o: i8)",
+            "^bb0(%x: f32, %sv: f32, %zpv: i64, %o: i8)",
+        )
+        .replace(
+            "      %m1 = arith.minimumf %rd, %hi : f32",
+            "      %zpf = arith.sitofp %zpv : i64 to f32\n"
+            "      %shifted = arith.addf %rd, %zpf : f32\n"
+            "      %m1 = arith.minimumf %shifted, %hi : f32",
+        )
+    )
+    module = _parse(text)
+    report: dict = {}
+    assert fuse_round_clamp_convert(module, report_out=report) == int(zero_point == 0)
+    module.verify()
+    assert ("math.roundeven" in _body_names(module)) == (zero_point != 0)
+
+
+@pytest.mark.parametrize("scale", ["1.000000e+00", "0.000000e+00"])
+def test_static_scale_proof_survives_separate_reciprocal_generic(scale):
+    from merlin.llvmlower.quant_round import fuse_round_clamp_convert
+
+    prefix = f"""
+    %constant_scale = arith.constant {scale} : f32
+    %scale_tensor = tensor.splat %constant_scale : tensor<f32>
+    %scalar_empty = tensor.empty() : tensor<f32>
+    %inverse = linalg.generic {{
+      indexing_maps = [affine_map<() -> ()>, affine_map<() -> ()>],
+      iterator_types = []}}
+      ins(%scale_tensor : tensor<f32>) outs(%scalar_empty : tensor<f32>) {{
+    ^bb1(%scale: f32, %unused: f32):
+      %one = arith.constant 1.000000e+00 : f32
+      %reciprocal = arith.divf %one, %scale : f32
+      linalg.yield %reciprocal : f32
+    }} -> tensor<f32>
+"""
+    text = _QUANTIZE.replace("    %e = tensor.empty()", prefix + "    %e = tensor.empty()")
+    text = text.replace("ins(%a, %s : tensor<4x8xf32>, f32)", "ins(%a, %inverse : tensor<4x8xf32>, tensor<f32>)")
+    text = text.replace("%d = arith.divf %x, %sv", "%d = arith.mulf %x, %sv")
+    module = _parse(text)
+    report: dict = {}
+    assert fuse_round_clamp_convert(module, report_out=report) == int(scale != "0.000000e+00")
+    module.verify()
+    assert any(op.name == "math.roundeven" for op in module.walk()) == (scale == "0.000000e+00")
+
+
 @pytest.mark.parametrize(
     "mutation,reason",
     [

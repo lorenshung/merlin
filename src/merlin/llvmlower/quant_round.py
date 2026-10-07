@@ -159,17 +159,27 @@ def _float_width(t) -> int | None:
     return None
 
 
-def _const_float(value) -> float | None:
-    """The f32/f64 constant ``value`` holds, or None if it is not a float `arith.constant`."""
+def _const_float(value, remaining: int = 5) -> float | None:
+    """Read a float constant through uniform splats and their generic input arguments."""
     from xdsl.dialects.builtin import FloatAttr
 
+    if remaining <= 0:
+        return None
     owner = getattr(value, "owner", None)
-    if owner is None or getattr(owner, "name", None) != "arith.constant":
-        return None
-    attr = owner.properties.get("value", owner.attributes.get("value"))
-    if not isinstance(attr, FloatAttr):
-        return None
-    return float(attr.value.data)
+    name = getattr(owner, "name", None)
+    if name == "arith.constant":
+        attr = owner.properties.get("value", owner.attributes.get("value"))
+        return float(attr.value.data) if isinstance(attr, FloatAttr) else None
+    if name == "tensor.splat":
+        return _const_float(owner.operands[0], remaining - 1)
+    region = getattr(owner, "parent", None)
+    consumer = getattr(region, "parent", None)
+    index = getattr(value, "index", None)
+    if index is not None and getattr(consumer, "name", None) == "linalg.generic" and index < len(consumer.inputs):
+        source = consumer.inputs[index]
+        if getattr(getattr(source, "owner", None), "name", None) == "tensor.splat":
+            return _const_float(source, remaining - 1)
+    return None
 
 
 def _single_use(value) -> bool:
@@ -177,6 +187,29 @@ def _single_use(value) -> bool:
     leave the original `math.roundeven` alive AND add the inline round, which is strictly worse than
     doing nothing -- so a shared intermediate is refused rather than duplicated."""
     return len(list(value.uses)) == 1
+
+
+def _constant_zero(value, remaining: int = 5) -> bool:
+    """Prove a zero through casts and uniform splats, including generic input arguments."""
+    from xdsl.dialects.builtin import FloatAttr, IntegerAttr
+
+    if remaining <= 0:
+        return False
+    owner = getattr(value, "owner", None)
+    name = getattr(owner, "name", None)
+    if name == "arith.constant":
+        attr = owner.properties.get("value", owner.attributes.get("value"))
+        return isinstance(attr, (FloatAttr, IntegerAttr)) and attr.value.data == 0
+    if name in ("arith.sitofp", "tensor.splat"):
+        return len(owner.operands) == 1 and _constant_zero(owner.operands[0], remaining - 1)
+    region = getattr(owner, "parent", None)
+    consumer = getattr(region, "parent", None)
+    index = getattr(value, "index", None)
+    if index is not None and getattr(consumer, "name", None) == "linalg.generic" and index < len(consumer.inputs):
+        source = consumer.inputs[index]
+        if getattr(getattr(source, "owner", None), "name", None) == "tensor.splat":
+            return _constant_zero(source, remaining - 1)
+    return False
 
 
 def _guarded_scale_value(value):
@@ -274,6 +307,8 @@ def _match_chain(fptosi_op):
 
     Walks BACKWARDS from the convert through a run of `arith.minimumf` / `arith.maximumf` whose other
     operand is an integral float constant, and requires the run to bottom out at `math.roundeven`.
+    A single-use addition of a constant signed zero is also traversed. It preserves all defined
+    integer results of this chain; the possible zero-sign change is erased by `fptosi`.
     The interval is accumulated in the order the ops apply, so a chain that never bounds one side is
     caught rather than assumed.
 
@@ -331,11 +366,18 @@ def _match_chain(fptosi_op):
             if not (imin <= lo <= imax and imin <= hi <= imax):
                 return "clamp_bound_outside_dest_int"
             return (owner, clamps, lo, hi)
-        if name not in ("arith.minimumf", "arith.maximumf"):
+        if name not in ("arith.minimumf", "arith.maximumf", "arith.addf"):
             return "chain_root_not_roundeven"
         if not _single_use(cur):
             return "clamp_result_shared"
         a, b = owner.operands
+        if name == "arith.addf":
+            nxt = b if _constant_zero(a) else a if _constant_zero(b) else None
+            if nxt is None:
+                return "chain_addend_not_zero"
+            clamps.append((name, 0.0, owner))
+            cur = nxt
+            continue
         cval, nxt = _const_float(b), a
         if cval is None:
             cval, nxt = _const_float(a), b
@@ -395,6 +437,8 @@ def fuse_round_clamp_convert(module, report_out: "dict | None" = None) -> int:
         #    rather than moved so the original ops can be detached wholesale below.
         cur = v
         for name, bound, _src in reversed(clamps):
+            if name == "arith.addf":
+                continue
             cst = emit(arith.ConstantOp(FloatAttr(bound, ftype)))
             cur = emit(arith.MinimumfOp(cur, cst) if name == "arith.minimumf" else arith.MaximumfOp(cur, cst))
         c = cur

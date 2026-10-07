@@ -209,6 +209,7 @@ SUITES = {
             "test_exact_offload_release_binding.py",
         ),
         "support_files": ("reviewed_corpus_fixtures.py", "phase1_feedback_fixtures.py"),
+        "source_inputs": ("examples/gemmini/target/descriptor.yaml",),  # target-ok: these tests' fixture descriptor
         "core_extras": ("xdsl",),
         "probe_modules": (
             "merlin_experiments.phase0",
@@ -480,7 +481,8 @@ LIMITATIONS = [
     "Packaging and selected functional regressions only; no numerical/hardware certification.",
     "External venv and import-origin checks are not a security isolation guarantee.",
     "Dependency resolution uses configured indexes; exact resulting freeze is retained, not a lockfile replay.",
-    "Unrecorded dependency overrides are removed from child environments; a local diagnostic override is not qualification.",
+    "Unrecorded dependency overrides are removed from child environments; "
+    "a local diagnostic override is not qualification.",
     "External venv is deliberately retained on success or failure; this command never deletes evidence.",
 ]
 
@@ -611,6 +613,7 @@ def qualify(root, output, commit, suite, timeout, *, requested_ref=None, invocat
     helper = own.with_name("installed_qualification_probe.py")
     tests_root = Path(SUITES[suite].get("tests_root", "packages/merlin-experiments/tests"))
     support_files = SUITES[suite].get("support_files", ())
+    source_inputs = SUITES[suite].get("source_inputs", ())
     test_files = (*SUITES[suite]["tests"], *support_files)
     report = {
         "schema": "merlin.installed_qualification.v1",
@@ -626,6 +629,7 @@ def qualify(root, output, commit, suite, timeout, *, requested_ref=None, invocat
         "tool_source_note": "Actual executing bytes; hashes may include working-tree edits not in tooling_revision.",
         "selected_tests": list(SUITES[suite]["tests"]),
         "support_files": list(support_files),
+        "source_inputs": {},
         "tests_root": tests_root.as_posix(),
         "core_extras": list(SUITES[suite]["core_extras"]),
         "probe_modules": list(SUITES[suite]["probe_modules"]),
@@ -663,6 +667,7 @@ def qualify(root, output, commit, suite, timeout, *, requested_ref=None, invocat
             "packages/merlin-experiments/setup.py",
             "packages/merlin-experiments/pyproject.toml",
             *[(tests_root / n).as_posix() for n in test_files],
+            *source_inputs,
             *resources,
         ]
         archive = output / "source.tar"
@@ -674,6 +679,20 @@ def qualify(root, output, commit, suite, timeout, *, requested_ref=None, invocat
         for name in test_files:
             if not (snapshot / tests_root / name).is_file():
                 raise QualificationFailed(f"selected committed test/support file is missing: {name}")
+        for name in source_inputs:
+            member = Path(name)
+            source_path = snapshot / member
+            symlinked = any(
+                snapshot.joinpath(*member.parts[:index]).is_symlink() for index in range(1, len(member.parts) + 1)
+            )
+            if (
+                member.is_absolute()
+                or ".." in member.parts
+                or not source_path.is_file()
+                or symlinked
+                or not source_path.resolve().is_relative_to(snapshot.resolve())
+            ):
+                raise QualificationFailed(f"selected committed source input is missing or unsafe: {name}")
         report["source_archive_sha256"] = digest(archive)
         report["source_files"] = {str(p.relative_to(snapshot)): digest(p) for p in snapshot.rglob("*") if p.is_file()}
         report["projects"] = projects(
@@ -731,6 +750,15 @@ def qualify(root, output, commit, suite, timeout, *, requested_ref=None, invocat
         tests.mkdir()
         for name in test_files:
             shutil.copyfile(snapshot / tests_root / name, tests / name)
+        for name in source_inputs:
+            retained = tests / "source-inputs" / name
+            retained.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(snapshot / name, retained)
+            source_sha256 = digest(snapshot / name)
+            if digest(retained) != source_sha256:
+                raise QualificationFailed(f"copied source input differs from committed archive: {name}")
+            report["source_inputs"][name] = {"path": str(retained), "sha256": source_sha256}
+        runner.save()
         shutil.copyfile(copied_helper, tests / "conftest.py")
         runner.run(
             "tests",

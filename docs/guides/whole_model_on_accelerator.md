@@ -28,6 +28,29 @@ The older [whole-model RTL reproduction](reproducing_whole_model_on_rtl.md) docu
 Gemmini experiment, including an unresolved spike-versus-Verilator numerical difference. Its historical
 kernel and model measurements must not be promoted into a current saved-model or candidate certification.
 
+## Phase 1 completion is more than capsule success
+
+A target's `phase1_gates.private_full_models` declaration supplies the required
+validation-model and program rosters. The operator separately selects complete
+checkpoint-backed captures and their source-execution attestations; those inputs,
+their MLIR and build results remain private to the formal grader. They are not
+derivation workloads or authoring-agent feedback.
+
+The build-only gate checks every required program against the same frozen candidate
+compiler: capture identity, independently derived accelerator eligibility, exact
+group routing, justified host placement, code generation and a linked ELF. A missing
+program, dropped eligible group or failed build prevents Phase 1 completion even
+if all public and hidden capsules pass. Passing this gate is bounded static build
+and placement evidence for those captures, not full-model numerical execution or
+a proof that every possible model will compile. Representative kernels still
+require their independent L3 numerical grade.
+
+The private selection also records input provenance. A complete pretrained network
+captured with synthetic entry inputs can supply structural build evidence, but
+must retain its synthetic-input and paper-readiness declarations. The gate does
+not turn that capture into attributed-data validation, a paper-accuracy result,
+or whole-model numerical equivalence. Those require separate executed evidence.
+
 ## Select and reuse the inputs
 
 Select an existing capture bundle with a materialized, byte-verified `capture_receipt.json`; the build

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import struct
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -241,6 +242,15 @@ def test_build_entry_points_share_prepacked_ir_and_runtime_bundle(tmp_path, monk
     from merlin.runtime.backends import zephyr_model as zm
 
     src = _bundle(tmp_path / "src")
+    # Retain real files for the compilation observer while substituting only
+    # tool execution. The runtime ABI selector must still validate its sysroot.
+    for name in ("riscv64-unknown-elf-gcc", "clang"):
+        executable = tmp_path / name
+        executable.write_text("#!/bin/sh\nexit 0\n")
+        executable.chmod(0o755)
+    sysroot = tmp_path / "sysroot"
+    (sysroot / "include").mkdir(parents=True)
+    (sysroot / "include/math.h").write_text("/* fixture C library header */\n")
     monkeypatch.setattr(wp, "_default_cache_root", lambda: tmp_path / "cache")
     monkeypatch.setattr(sm._spike, "gcc_path", lambda: tmp_path / "riscv64-unknown-elf-gcc")
     monkeypatch.setattr(sm.toolchain, "clang", lambda: tmp_path / "clang")
@@ -256,7 +266,20 @@ def test_build_entry_points_share_prepacked_ir_and_runtime_bundle(tmp_path, monk
 
     def lower(path, work, **kwargs):
         seen["lower"] = Path(path).parent
-        return SimpleNamespace(ll_path=tmp_path / "model.ll")
+        llvm = tmp_path / "model.ll"
+        llvm.write_text("; fixture lowering output\n")
+        return SimpleNamespace(ll_path=llvm)
+
+    def run_tool(argv, **kwargs):
+        command = [str(item) for item in argv]
+        if command[1:] == ["-print-sysroot"]:
+            seen["sysroot_query"] = command
+            return subprocess.CompletedProcess(command, 0, stdout=str(sysroot) + "\n", stderr="")
+        assert "-c" in command and "-o" in command, command
+        output = Path(command[command.index("-o") + 1])
+        output.write_bytes(b"fixture compiled model object")
+        seen["compile"] = command
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     class ReachedABI(Exception):
         pass
@@ -270,7 +293,7 @@ def test_build_entry_points_share_prepacked_ir_and_runtime_bundle(tmp_path, monk
     monkeypatch.setattr(zm, "prepare_for_lowering", prepare)
     monkeypatch.setattr(sm, "lower_model_file", lower)
     monkeypatch.setattr(zm, "lower_model_file", lower)
-    monkeypatch.setattr(sm, "_run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sm, "_run", run_tool)
     monkeypatch.setattr(zm, "_run", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sm.c_runtime, "generate", generate)
     feature_set = frozenset({wp.FEATURE}) if enabled else frozenset()
@@ -283,6 +306,13 @@ def test_build_entry_points_share_prepacked_ir_and_runtime_bundle(tmp_path, monk
     assert seen["lower"] == seen["abi"]
     assert seen["inputs"] == seen["abi"] / "inputs.npz"
     assert seen["prepared_dir"] == work
+    if backend == "baremetal":
+        assert seen["sysroot_query"] == [str(tmp_path / "riscv64-unknown-elf-gcc"), "-print-sysroot"]
+        recipe = json.loads((work / "compilation_recipe.json").read_text())
+        assert recipe["commands"][0]["argv"] == seen["compile"]
+        assert recipe["commands"][0]["status"] == "returned"
+        assert recipe["commands"][0]["output"]["path"] == str((work / "model.o").resolve())
+        assert (work / "model.o").read_bytes() == b"fixture compiled model object"
     if enabled:
         assert seen["vlen"] == 512
         assert seen["prepare"] == seen["abi"] != src

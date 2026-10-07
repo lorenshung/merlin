@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import shlex
 import sys
+import sysconfig
 from collections import UserDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -83,9 +84,14 @@ class ToolchainPaths:
         ):
             selected_llvm = selected_clang.parent.parent.resolve()
         checkout_venv = repo / ".venv"
+        # An installed core runs from this interpreter's site-packages even when
+        # the operator's work root happens to contain an unrelated ``.venv``.
+        # Binding that checkout venv would make the frozen, granted Merlin files
+        # import through an interpreter missing their declared dependencies.
+        active_install = python_source_dir().resolve() == Path(sysconfig.get_path("purelib")).resolve()
         selected_venv = (
             Path(sys.prefix).resolve()
-            if not checkout_venv.is_dir() and sys.prefix != sys.base_prefix
+            if active_install or (not checkout_venv.is_dir() and sys.prefix != sys.base_prefix)
             else checkout_venv
         )
         clang_default = (

@@ -143,14 +143,17 @@ def _run_formal(tmp_path, *, flags=(), fault=None):
 
 def test_real_public_freeze_rehash_hidden_lifecycle_outside_checkout(tmp_path):
     run, result = _run_formal(tmp_path)
-    assert result.returncode == 0, result.stderr + result.stdout
+    # Public/hidden L3 alone is no longer a Phase-1 completion claim.  This
+    # lifecycle fixture intentionally supplies no private complete-network gate.
+    assert result.returncode == 1, result.stderr + result.stdout
     assert [json.loads(line) for line in (run / "events.jsonl").read_text().splitlines()] == [
         "public",
         "freeze",
         "hidden",
     ]
     manifest = yaml.safe_load((run / "run_manifest.yaml").read_text())
-    assert manifest["completion"]["formal_grade_complete"] is True
+    assert manifest["completion"]["formal_grade_complete"] is False
+    assert "private_full_models:incomplete" in manifest["completion"]["failures"]
     assert manifest["public_dev"]["n_capsules"] == manifest["hidden"]["n_capsules"] == 1
     assert manifest["hidden"]["cohort_admission"]["policy"] == "frozen_target_capability_operand_dtype"
     assert (run / "iterations/iteration_000/notes.md").is_file()

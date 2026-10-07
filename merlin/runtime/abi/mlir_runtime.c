@@ -162,6 +162,28 @@ static void trace_desc(const char *tag, int64_t rank, void **desc) {
 }
 #endif
 
+/* Bound a positive-stride view without overflowing the address calculation.
+ * A failed bound leaves the original element-at-a-time copy path in place. */
+static int copy_view_end(uintptr_t base, int64_t rank, const int64_t *sizes,
+                         const int64_t *strides, int64_t elem_size,
+                         uintptr_t *end) {
+  int64_t last = 0, span, bytes;
+  if (elem_size <= 0)
+    return 0;
+  for (int64_t i = 0; i < rank; ++i) {
+    if (sizes[i] <= 0 || strides[i] < 0 ||
+        __builtin_mul_overflow(sizes[i] - 1, strides[i], &span) ||
+        __builtin_add_overflow(last, span, &last))
+      return 0;
+  }
+  if (__builtin_add_overflow(last, (int64_t)1, &last) ||
+      __builtin_mul_overflow(last, elem_size, &bytes) ||
+      (uint64_t)bytes > UINTPTR_MAX - base)
+    return 0;
+  *end = base + (uintptr_t)bytes;
+  return 1;
+}
+
 void memrefCopy(int64_t elem_size, merlin_unranked_memref_t *src_u,
                 merlin_unranked_memref_t *dst_u) {
   int64_t rank = src_u->rank;
@@ -207,16 +229,40 @@ void memrefCopy(int64_t elem_size, merlin_unranked_memref_t *src_u,
   for (int64_t i = 0; i < rank; i++)
     total *= sizes[i];
 
+  /* Copy a common contiguous suffix as one byte span. Preserve the old
+   * lexicographic element order for overlapping or unbounded views: merging
+   * their copies could otherwise change which source bytes are subsequently
+   * read. Singleton axes impose no physical-stride constraint. */
+  int64_t copy_rank = rank, chunk_elements = 1;
+  uintptr_t s_end, d_end;
+  if (total > 0 &&
+      copy_view_end((uintptr_t)s_base, rank, sizes, s_strides, elem_size, &s_end) &&
+      copy_view_end((uintptr_t)d_base, rank, sizes, d_strides, elem_size, &d_end) &&
+      (s_end <= (uintptr_t)d_base || d_end <= (uintptr_t)s_base)) {
+    for (int64_t i = rank - 1; i >= 0; --i) {
+      if (sizes[i] != 1 &&
+          (s_strides[i] != chunk_elements || d_strides[i] != chunk_elements))
+        break;
+      int64_t next;
+      if (__builtin_mul_overflow(chunk_elements, sizes[i], &next) ||
+          (uint64_t)next > SIZE_MAX / (uint64_t)elem_size)
+        break;
+      chunk_elements = next;
+      copy_rank = i;
+    }
+  }
+  total /= chunk_elements;
+
   int64_t idx[MERLIN_MEMREF_MAX_RANK] = {0};   /* bounded above, not assumed */
   for (int64_t lin = 0; lin < total; lin++) {
     int64_t s_off = 0, d_off = 0;
-    for (int64_t i = 0; i < rank; i++) {
+    for (int64_t i = 0; i < copy_rank; i++) {
       s_off += idx[i] * s_strides[i];
       d_off += idx[i] * d_strides[i];
     }
     memcpy(d_base + d_off * elem_size, s_base + s_off * elem_size,
-           (size_t)elem_size);
-    for (int64_t i = rank - 1; i >= 0; i--) {
+           (size_t)elem_size * (size_t)chunk_elements);
+    for (int64_t i = copy_rank - 1; i >= 0; i--) {
       if (++idx[i] < sizes[i])
         break;
       idx[i] = 0;

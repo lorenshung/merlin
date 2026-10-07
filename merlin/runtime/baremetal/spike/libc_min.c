@@ -6,6 +6,25 @@
  */
 #include <stddef.h>
 #include <stdint.h>
+#include "htif.h"
+
+/* Upstream MLIR assertion lowering uses these libc symbols. Keep failure
+ * paths linkable even when host optimization does not eliminate assertions.
+ * This console ABI also supports the non-HTIF bare-metal backends. */
+int puts(const char *s) {
+  htif_puts(s);
+  htif_putc('\n');
+  return 0;
+}
+
+__attribute__((noreturn)) void abort(void) {
+  htif_puts("FATAL: model assertion abort\n");
+  htif_exit(0x901);
+}
+
+/* may_alias permits moving arbitrary tensor bytes through aligned word loads.
+ * Misaligned pointers keep the byte path, avoiding alignment traps. */
+typedef uintptr_t copy_word __attribute__((__may_alias__));
 
 #ifdef MERLIN_WORD_MEMOPS
 /* Word-wide copies and fills, for a program whose own code copies large tensors (a whole model's host
@@ -71,6 +90,19 @@ void *memset(void *dst, int c, size_t n) {
 void *memcpy(void *dst, const void *src, size_t n) {
   uint8_t *d = dst;
   const uint8_t *s = src;
+  const size_t width = sizeof(copy_word);
+  if ((uintptr_t)d % width == (uintptr_t)s % width) {
+    while (n && (uintptr_t)d % width) {
+      *d++ = *s++;
+      --n;
+    }
+    while (n >= width) {
+      *(copy_word *)d = *(const copy_word *)s;
+      d += width;
+      s += width;
+      n -= width;
+    }
+  }
   while (n--)
     *d++ = *s++;
   return dst;
@@ -78,6 +110,17 @@ void *memcpy(void *dst, const void *src, size_t n) {
 
 void *memset(void *dst, int c, size_t n) {
   uint8_t *d = dst;
+  const size_t width = sizeof(copy_word);
+  const copy_word pattern = (~(copy_word)0 / 255) * (uint8_t)c;
+  while (n && (uintptr_t)d % width) {
+    *d++ = (uint8_t)c;
+    --n;
+  }
+  while (n >= width) {
+    *(copy_word *)d = pattern;
+    d += width;
+    n -= width;
+  }
   while (n--)
     *d++ = (uint8_t)c;
   return dst;

@@ -17,9 +17,9 @@ from __future__ import annotations
 import hashlib
 import struct
 import subprocess
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Sequence
 
 #: Default ceiling on loaded bytes. At the measured loader rate this keeps load under ~0.6M cycles.
 DEFAULT_MAX_LOADED_BYTES = 256 * 1024
@@ -61,6 +61,7 @@ def build_program(
     *,
     target: str,
     extra_cflags: Sequence[str] = (),
+    extra_ldflags: Sequence[str] = (),
     max_loaded_bytes: int | None = DEFAULT_MAX_LOADED_BYTES,
     elf_name: str = "layer.elf",
     support_first: bool = False,
@@ -74,11 +75,25 @@ def build_program(
     ``support_first`` links the recipe's support objects (crt, syscalls) AHEAD of ``sources``. Needed
     when a source is a large straight-line kernel object: with the default order it lands between the
     crt's ``_start`` and ``_init``, and their ``jal`` (reach +-1 MiB) no longer fits. The default keeps
-    the order existing receipts were built with."""
+    the order existing receipts were built with.
+
+    ``extra_cflags`` follows recipe defaults in both compilation and linking. Compiler-driver
+    options can select startup objects at link time as well as change generated instructions.
+    ``extra_ldflags`` follows recipe linker flags, after every input object. Use
+    it for libraries required by those objects or by the recipe's libraries;
+    putting a static archive in ``extra_cflags`` can make its dependencies
+    unresolved because the compiler driver sees it before the objects.
+    These flags never affect compilation. Omitting explicit overrides preserves
+    the original recipe and command ordering."""
     from merlin.runtime.backends import base as backends
+    from merlin.targetgen.contract.build_recipe import named_object_paths
     from merlin.targetgen.runtime_build import derived_link_script
 
     recipe = backends.harness_build_recipe(target)
+    if extra_cflags:
+        recipe = replace(recipe, cflags=(*recipe.cflags, *extra_cflags))
+    if extra_ldflags:
+        recipe = replace(recipe, ldflags=(*recipe.ldflags, *extra_ldflags))
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     link_ld = derived_link_script(recipe.load_address, recipe.link_script, workdir)
@@ -88,15 +103,12 @@ def build_program(
         if support_first
         else [*map(Path, sources), *recipe.support_sources]
     )
-    for source in ordered:
+    for source, unit in zip(ordered, named_object_paths(ordered, workdir), strict=True):
         source = Path(source)
         if source.suffix not in (".c", ".S", ".s"):
             objects.append(source)
             continue
-        unit = workdir / f"{source.stem}.o"
         cmd = recipe.compile_command(source=source, output=unit)
-        if extra_cflags:
-            cmd = cmd[:1] + list(extra_cflags) + cmd[1:]
         # Compiled INSIDE the work directory so a program's `.incbin "<name>"` resolves to the blob
         # beside it by a relative name (an absolute path would make the source differ per directory).
         step = subprocess.run(cmd, capture_output=True, text=True, cwd=str(workdir))

@@ -3,7 +3,7 @@ title: Lowering pipeline
 kind: reference
 status: current
 owner: ir
-last_verified: 2026-07-14
+last_verified: 2026-10-05
 related: [core_dialects, llvm_integration]
 code_refs: [src/merlin/xdsl_dialects/lowering, src/merlin/llvmlower]
 ---
@@ -120,6 +120,68 @@ Files: `xdsl_dialects/lowering/{runtime_lowering,emit_command_buffer,dispatch_pr
 **In:** one kernel func (linalg/tensor/arith/scf) → **`llvm` dialect only**
 Sub-phases (the actual `pipeline.py` pass list):
 
+- **Optional exact tensor destination reuse** (before bufferization):
+  `reuse_tensor_destination` is an independent, default-off preparation rewrite:
+  a sole-use pure pointwise producer of a static unit-stride insert slice writes
+  into the matching view of a fresh filled destination. The scalar arithmetic
+  is cloned unchanged; reading the prior output, index-sensitive bodies, dynamic
+  slices and encoded tensor layouts refuse. Upstream `eliminate-empty-tensors`
+  runs before one-shot bufferization, and existing self-copy cleanup is implied.
+  Upstream alias analysis may still require an additional destination copy across
+  external calls; this feature supplies no new alias or ownership assertion.
+  `initialize_tensor_border_only` is a separate default-off refinement and
+  implies destination reuse. It fills only disjoint exterior slabs of the fresh
+  destination, then clones the unchanged producer into the completely overwritten
+  interior. Each exterior element belongs to the slab for its first dimension
+  outside the interior, proving full coverage without overlap. The interior's old
+  values must remain unread. A live original splat is preserved independently;
+  upstream bufferization still decides storage reuse. Shape-derived initialization
+  savings are not a cycle prediction, and the complete model gate remains required.
+- **6a Optional activation arithmetic** (before bufferization):
+  `approximate_transcendental_activation` selects the provenance-scoped f32
+  exp/erf/tanh polynomial independently of the host vector schedule. Normalization
+  and unsupported float dtypes retain their existing lowering. The option is
+  default off, changes numerical arithmetic, and requires the caller's original
+  model accuracy gate. `vectorized_transcendental_activation` implies this option
+  and additionally selects activation vectorization.
+  `fuse_activation_polynomial_fma` additionally selects fused polynomial
+  evaluation and the narrow FMA intrinsic lowering. This changes approximation
+  arithmetic and requires the same original accuracy gate; normalization keeps
+  its existing libm lowering.
+  Explicit `cpu_bf16_conv`, `cpu_layer_norm`, and `cpu_flash_sdpa` builders reproduce
+  selected, pinned PyTorch CPU arithmetic schedules without installing them in
+  the default pipeline. Callers bind the source/backend evidence and finite/RNE
+  obligations; unsupported shapes, masks or arithmetic policies refuse. These
+  numerical compatibility builders still require the original whole-model gate.
+- **6a Optional exact scalar contractions** (before bufferization):
+  `scalar_contraction_accumulator` replaces recognized static f32 tensor generics
+  with scalar loop arguments for their final reduction dimension before elementwise
+  fusion can expand the scalar body. Named operations are generalized first. Pure dimension
+  maps, parallel output dimensions, and an exact separate multiply/add body are
+  required. It preserves the initial destination and increasing reduction order,
+  including transpose and batch maps; fastmath permissions and unsupported bodies
+  remain unchanged. Each output is inserted once into a carried tensor, so upstream
+  bufferization retains responsibility for input/destination aliases. The option
+  is default off and makes no physical noalias claim.
+  The alternatives `scalar_contraction_accumulator_2_outputs` and
+  `scalar_contraction_accumulator_4_outputs`, plus
+  `scalar_contraction_accumulator_8_outputs`, carry independent scalar
+  results through the same increasing reduction loop and
+  share input extracts that do not depend on the last parallel dimension. Each
+  output retains its own separate multiply/add order. They require that parallel
+  extent to be divisible by the output count; partial tiles remain in linalg. The
+  accumulator schedules cannot be selected together.
+  `unroll_scalar_contraction_reduction_by_2` and
+  `unroll_scalar_contraction_reduction_by_4` compose with one accumulator
+  schedule and attach upstream LLVM partial-unroll metadata only to its
+  reduction loops. They retain separate arithmetic and increasing reduction
+  order. The LLVM branch property `loop_annotation` carries the metadata through
+  SCF, CF and LLVM lowering; tests require the final LLVM unroll-count metadata.
+  Both are default off, are alternatives, and add no numeric permission.
+  The registry declares separate alternative groups for output count and
+  reduction unroll count. Each unroll choice requires exactly one output
+  schedule after implication closure; pipeline marker guards also remain.
+  See [compiler feature selection](compiler_feature_selection.md).
 - **6a Bufferize** (tensor → memref): **+`memref bufferization`**
   - `[upstream]` `one-shot-bufferize{bufferize-function-boundaries}`
   - `[upstream]` `buffer-results-to-out-params{modify-public-functions hoist-static-allocs}`
@@ -139,6 +201,11 @@ Sub-phases (the actual `pipeline.py` pass list):
     instruction (`.insn`, `0x00b5050b`) the toolchain can't name is compiled into an rv64gcv
     object and confirmed in the disassembly.
 - **6e Convert to LLVM dialect** : **→ `llvm` only**
+  - `[merlin, opt-in]` `lower_fma_to_intrinsic` converts scalar/vector f32/f64
+    `math.fma` to `llvm.intr.fma` after loop formation. Fused arithmetic remains
+    fused; other math operations retain the established lowering. The separate
+    `lower_roundeven_to_intrinsic` feature selects the exact LLVM rounding
+    intrinsic at this same stage and can compose with the FMA feature.
   - `[upstream]` `convert-math-to-libm` (erf/exp/tanh → libm; newlib on riscv),
     `convert-vector-to-llvm`, `convert-math-to-llvm`, `convert-index-to-llvm`,
     `convert-arith-to-llvm`, `finalize-memref-to-llvm`, `convert-func-to-llvm`,
@@ -154,6 +221,17 @@ Files: `llvmlower/pipeline.py` (+ `kernel_backend.py` for the per-kernel version
 - `[merlin]` `_fix_float_literals` (the printer emits `f0x..`/bare inf the IR parser rejects).
 **Out:** `.ll`. **Debug:** `clang -fsyntax-only` the `.ll`.
 Files: `llvmlower/pipeline.py` (`translate_module_to_llvmir`).
+
+Ordinary upstream lowering writes `lowering_recipe.json` alongside its artifacts.
+It records the actual command, resolved pass pipeline and positional gates, selected
+features, prepared input/runner/generated schedule hashes, executable identity and
+redacted `MERLIN_*` environment. A successfully returned LLVM text is hashed after
+literal normalization and any selected loop outlining. Every new invocation drops
+the prior receipt. A failure before pipeline resolution leaves no receipt; a later
+failure has no successful-return hash.
+This scope ends before later host transforms, native codegen and linking. It does
+not close imported compiler modules, the entire environment or toolchain libraries,
+and it does not change emitted IR or existing build identities.
 
 ## Phase 8 — Native codegen & link  ✅
 **In:** `.ll` → object → linked image
@@ -224,3 +302,60 @@ fast.
   convert-*-to-llvm, translate, clang.
 - **Merlin (authored):** Phase 0 normalization, Phases 1–5 (all our dialects + outlining),
   the custom-ISA 1:1 insertion (6d), and the float-literal/printer fixes.
+
+### Private uniform-buffer copies
+
+`fold_uniform_fill_copy` is an independent, default-off post-bufferization feature.
+It requires one fresh allocation, one identity-map uniform writer with an unread
+output argument, and only direct same-block source copies and an optional final
+free. It refuses escaping aliases, unknown users, intervening writes, nested
+copies and unproved lifetime order. Each accepted copy becomes the original
+store-only writer on that copy's destination, including strided subviews. The
+private allocation and fill can then be removed. Scalar values, floating-point
+bit patterns, destination placement and untouched regions remain unchanged.
+
+This can compose with `initialize_tensor_border_only`, whose tensor-level slab
+fills otherwise may become temporary buffers and strided runtime copies. The
+border option alone did not reduce instructions in the controlled whole-model
+experiment; isolated capsule gains used a different memset implementation and
+are not a whole-model performance prediction. Both options remain explicit.
+
+### Copies with a contiguous inner region
+
+`specialize_contiguous_copy` is an independent, default-off feature after
+bufferization. It follows only known memref views to distinct fresh allocation
+roots, proving that the source and destination do not overlap. Ranked positive
+static shapes and strides determine their longest common contiguous suffix.
+The transform retains source-lexicographic outer loops and copies each complete
+suffix through rank-reduced subviews. Upstream can then lower the inner copy to
+`memcpy`; the selected runtime still owns alignment and byte-tail handling.
+No element conversion, word cast, or target-specific layout is introduced.
+
+Unknown or shared allocation roots, dynamic or nonpositive domains, missing
+contiguous suffixes, and already fully contiguous copies are left unchanged.
+`contiguous_suffix_copy.json` records the selected rewrite count, and missing or
+ambiguous runner reports fail the selected feature rather than silently skipping
+it. Native tests cover multiple outer dimensions, odd byte tails, misalignment,
+floating-point payload bits, overlap refusal, and untouched destination guards.
+Performance requires measurement: expanding every copy to scalar element loops
+was slower in the controlled whole-model experiment.
+
+### Bound integer producers and exact readout
+
+`IntegerSumProductsRange` proves a conservative signed-i32 accumulator interval
+from integer operand intervals, term count and initial accumulator bounds. It
+checks product and every-prefix accumulation overflow, including signed `-128`
+inputs and nonzero integer seeds. `emit_readout(producer_range=...)` requires
+this typed certificate and containment in the independently re-derived original
+source readout domain. It then omits only the per-element domain trap. Saturation,
+rounding thresholds, correction, lane memory order and tails remain unchanged.
+
+This option is an explicit input precondition, not a runtime validator. Its owner
+must bind the actual typed producer, immutable bias facts, generated kernel and
+exclusive output storage to the consumer call. Samples or a matching shape alone
+cannot establish that binding. Public readouts accepting arbitrary i32 inputs
+retain the checked default; its generated C remains byte-identical.
+The producer's input-to-readout storage must remain unchanged until its last
+read; an overlapping output buffer cannot silently invalidate this precondition.
+The bound convolution adapter supplies distinct, exclusively owned scratch and
+output allocations. The ordinary checked API retains its existing overlap order.

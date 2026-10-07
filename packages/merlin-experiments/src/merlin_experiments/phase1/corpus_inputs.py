@@ -39,6 +39,7 @@ class PreparedBundle:
     corpus_record: dict
     authored_sha256: str
     effective_sha256: str
+    private_full_model_record: dict | None = None
 
 
 def require_reviewed_bundle(te, authored_path: Path, bundle: dict) -> None:
@@ -90,15 +91,67 @@ def prepare_bundle(
     contract: Path,
     capsules_root: Path | None = None,
     environment: dict | None = None,
+    private_full_model_spec: Path | None = None,
 ) -> PreparedBundle:
     """Archive fresh declarations or verify existing ones; resume never derives from live data."""
     authored = run_dir / "authored_input_bundle_manifest.yaml"
     effective = run_dir / "input_bundle_manifest.yaml"
+    private_source = None
+    private_paths = None
+    if environment is None and private_full_model_spec is not None:
+        from merlin_experiments.phase1.feedback.private_full_models import (
+            loader_env_requirements_for,
+            private_input_paths,
+            requirements_for,
+        )
+
+        private_source = Path(private_full_model_spec).absolute()
+        if (
+            private_source.is_symlink()
+            or not private_source.is_file()
+            or private_source.is_relative_to(run_dir.absolute())
+        ):
+            raise ValueError("operator-private full-model specification is absent, indirect or inside the run")
+        private_paths = private_input_paths(
+            private_source,
+            target=te.target,
+            required_models=requirements_for(te.path),
+            scope_requirements=loader_env_requirements_for(te.path),
+        )
+        # The host writes these only after authoring.  A resumed agent must not
+        # see private model evidence or its paths through a broad run grant.
+        private_paths.extend(
+            {"path": str(run_dir.absolute() / name), "kind": kind}
+            for name, kind in (
+                ("grading_private_full_models", "dir"),
+                ("run_manifest.yaml", "file"),
+                ("environment.yaml", "file"),
+            )
+        )
     if environment is None:
         with os.fdopen(os.open(authored, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as stream:
             stream.write(authored_path.read_bytes())
         authored_sha = bundle_manifest_identity(authored, bundle)
         document, record = stage(run_dir, te, bundle, contract=contract, capsules_root=capsules_root)
+        private_record = None
+        if private_source is not None:
+            from merlin.compile.model_execution_inputs import file_sha256
+
+            staged = run_dir.absolute() / "private_full_model_input" / "spec.yaml"
+            copy_input(private_source, staged, private=True)
+            staged.chmod(0o400)
+            staged.parent.chmod(0o500)
+            document.setdefault("host_inputs", []).append(
+                {"path": str(staged), "note": "operator-only frozen complete-network validation specification"}
+            )
+            document["private_validation_paths"] = private_paths
+            private_record = {
+                "source": str(private_source),
+                "source_sha256": file_sha256(private_source),
+                "path": str(staged),
+                "sha256": file_sha256(staged),
+                "masked_paths": private_paths,
+            }
         with os.fdopen(os.open(effective, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
             yaml.safe_dump(document, stream, sort_keys=False)
     else:
@@ -118,12 +171,23 @@ def prepare_bundle(
         expected_bundle.setdefault("host_inputs", []).append(
             {"path": expected_source, "note": "host-only run corpus view"}
         )
+        private_record = environment.get("private_full_model_spec")
+        if private_record is not None:
+            if not isinstance(private_record, dict):
+                raise RuntimeError("resume refused: operator-private validation record is malformed")
+            expected_bundle.setdefault("host_inputs", []).append(
+                {
+                    "path": private_record.get("path"),
+                    "note": "operator-only frozen complete-network validation specification",
+                }
+            )
+            expected_bundle["private_validation_paths"] = private_record.get("masked_paths")
         if document != expected_bundle:
             raise RuntimeError("resume refused: effective bundle changed candidate grants or declared inputs")
     effective_sha = bundle_manifest_identity(effective, document)
     if environment is not None and environment.get("bundle_manifest_sha256") != effective_sha:
         raise RuntimeError("resume refused: effective input bundle bytes changed")
-    return PreparedBundle(document, record, authored_sha, effective_sha)
+    return PreparedBundle(document, record, authored_sha, effective_sha, private_record)
 
 
 def _resources(capsules: list[dict]) -> None:

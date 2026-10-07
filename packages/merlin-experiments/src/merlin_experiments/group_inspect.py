@@ -18,6 +18,13 @@ directory under the purgeable cache, and prints where everything is:
 4. **An instruction trace** (``--trace``): the group's program on the candidate's own functional
    model -- the ``spike`` machine its job declares -- with the simulator's execution log, stopped
    after ``--run-to`` instructions.
+5. **Source-line attribution** (``--trace``): the program is linked a second time from the same
+   inputs with debug information added, and that companion is admitted only if its allocated bytes and
+   relocations are the program's (:func:`merlin.perf.debug_companion.verify_debug_companion`). The
+   functional model's PC histogram of the program is then symbolized against the companion by the LLVM
+   symbolizer of the target's own toolchain (beside the compiler its build recipe names) and attributed
+   per function and source line (:func:`merlin.perf.debug_companion.attribute_symbolized_pcs`). Any step
+   that cannot be taken leaves the attribution ``UNKNOWN``, with the reason.
 
 Each step uses a hook the TARGET provides (its whole-model driver, a functional-model machine). A
 target or candidate without one is told "not available for this target" and why; nothing is guessed,
@@ -164,8 +171,11 @@ def _owned(path: Path, root: Path, group: int) -> bool:
     return any(part == tag or part.startswith(tag + ".") for part in path.relative_to(root).parts)
 
 
-def rebuild(candidate: Mapping[str, Any], group: int, work: Path, *, timeout: int = 900) -> dict[str, Any]:
-    """Build ``group`` of ``candidate`` alone under ``work``, inside a compile trace that dumps every stage."""
+def rebuild(
+    candidate: Mapping[str, Any], group: int, work: Path, *, timeout: int = 900, debug_companion: bool = False
+) -> dict[str, Any]:
+    """Build ``group`` of ``candidate`` alone under ``work``, inside a compile trace that dumps every stage.
+    ``debug_companion`` also links the program's debug-information companion (for source attribution)."""
     from merlin.common import compile_trace as T
     from merlin.compile import debug
     from merlin.perf import whole_model_group_timing as GT
@@ -201,6 +211,7 @@ def rebuild(candidate: Mapping[str, Any], group: int, work: Path, *, timeout: in
             timeout=timeout,
             jobs=1,
             keep_statement=True,
+            debug_companion=debug_companion,
         )
         written = [p for p in T.written_since(build_dir, before) if _owned(p, build_dir, group)]
     record = dict(records.get(group) or {})
@@ -271,6 +282,108 @@ def instruction_trace(candidate: Mapping[str, Any], elf: str | None, work: Path,
     }
 
 
+# ---------------------------------------------------------------------------- source attribution
+
+#: The symbolizer whose JSON records :func:`merlin.perf.debug_companion.attribute_symbolized_pcs` reads.
+SYMBOLIZER = "llvm-symbolizer"
+UNKNOWN = "UNKNOWN"
+
+
+def symbolizer_beside(compiler: str | Path | None) -> Path | None:
+    """The LLVM symbolizer of the toolchain that built the program: the one in the directory of the
+    compiler its build recipe names. None when that toolchain has none -- never one from elsewhere,
+    which would read another toolchain's view of the program's debug information."""
+    if not compiler:
+        return None
+    candidate = Path(str(compiler)).with_name(SYMBOLIZER)
+    return candidate if candidate.is_file() and os.access(candidate, os.X_OK) else None
+
+
+def _unknown(why: str, **known: Any) -> dict[str, Any]:
+    return {"status": UNKNOWN, "why": why, **known}
+
+
+def symbolize(symbolizer: Path, elf: str | Path, addresses: Sequence[int]) -> list[dict[str, Any]]:
+    """The symbolizer's JSON record for every address, one per address, against ``elf``."""
+    done = subprocess.run(
+        [str(symbolizer), f"--obj={elf}", "--output-style=JSON", "--inlining"],
+        input="".join(f"{hex(address)}\n" for address in addresses),
+        capture_output=True,
+        text=True,
+        timeout=1800,
+        check=False,
+    )
+    if done.returncode != 0:
+        raise ValueError(f"{symbolizer} exited {done.returncode}: {(done.stderr or '').strip()[-400:]}")
+    return [json.loads(line) for line in done.stdout.splitlines() if line.strip()]
+
+
+def source_attribution(candidate: Mapping[str, Any], record: Mapping[str, Any], work: Path) -> dict[str, Any]:
+    """The group's program, its PC histogram on the functional model, attributed to functions and source
+    lines through its verified debug companion -- or ``UNKNOWN`` and why.
+
+    The counts are the functional model's instruction executions of the whole one-group program (its
+    setup and checks included), never cycles and never a measured region."""
+    from merlin.perf import debug_companion as DC
+    from merlin.perf import group_efficiency as E
+
+    machine = candidate.get("machine")
+    if machine is None:
+        return _unknown("the candidate declares no functional-model (spike) machine, so there is no PC census")
+    elf, program_object = record.get("elf"), record.get("program_object")
+    if not elf or not Path(elf).is_file():
+        return _unknown("the group's program did not build, so there is nothing to attribute")
+    companion = record.get("debug_companion")
+    if not isinstance(companion, Mapping):
+        return _unknown("no debug companion was built for the program")
+    if companion.get("refusal"):
+        return _unknown(f"the debug companion did not build: {companion['refusal']}")
+    debug_elf, debug_object = companion.get("elf"), companion.get("program_object")
+    if not all(p and Path(p).is_file() for p in (debug_elf, program_object, debug_object)):
+        return _unknown("the program or its debug companion names no object and image to compare")
+    try:
+        image = DC.verify_debug_companion(Path(elf).read_bytes(), Path(debug_elf).read_bytes())
+        objects = DC.verify_debug_companion(
+            Path(program_object).read_bytes(), Path(debug_object).read_bytes(), relocatable=True
+        )
+    except (OSError, ValueError) as exc:
+        return _unknown(f"the debug companion is not the program: {exc}")
+    admitted = {"image": image, "object": objects, "option": companion.get("option")}
+    symbolizer = symbolizer_beside(companion.get("compiler"))
+    if symbolizer is None:
+        return _unknown(
+            f"the target's toolchain has no {SYMBOLIZER} beside its compiler {companion.get('compiler')}",
+            companion=admitted,
+        )
+    run = E.run_functional_model(machine, Path(elf), work / "pc_census")
+    if run["returncode"] != 0:
+        return _unknown(f"the functional model exited {run['returncode']}", companion=admitted)
+    histogram = E.pc_histogram(Path(run["histogram"]).read_text(encoding="utf-8", errors="replace"))
+    if not histogram:
+        return _unknown("the functional model wrote no PC histogram", companion=admitted)
+    try:
+        attribution = DC.attribute_symbolized_pcs(histogram, symbolize(symbolizer, debug_elf, sorted(histogram)))
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+        return _unknown(f"the PC histogram could not be attributed: {exc}", companion=admitted)
+    lines = [
+        {"file": file, "line": line, "executions": count}
+        for (file, line), count in sorted(attribution["lines"].items(), key=lambda item: (-item[1], item[0]))
+    ]
+    document = {
+        "status": "attributed",
+        "symbolizer": str(symbolizer),
+        "histogram": str(run["histogram"]),
+        "companion": admitted,
+        "total": attribution["total"],
+        "functions": dict(sorted(attribution["functions"].items(), key=lambda item: (-item[1], item[0]))),
+        "lines": lines,
+        "scope": "functional-model instruction executions of the whole one-group program; not cycles",
+    }
+    (work / "source_attribution.json").write_text(json.dumps(document, indent=1) + "\n", encoding="utf-8")
+    document["file"] = str(work / "source_attribution.json")
+    return document
+
+
 # ------------------------------------------------------------------------------------------- cli
 
 
@@ -289,7 +402,7 @@ def inspect_group(source: str | Path, group: str, args: argparse.Namespace) -> d
         import tempfile
 
         work = Path(tempfile.mkdtemp(prefix=f"{candidate['target']}-g{index}-", dir=cache_dir("group-inspect")))
-    result = rebuild(candidate, index, work)
+    result = rebuild(candidate, index, work, debug_companion=bool(args.trace))
     record = result["record"]
     out: dict[str, Any] = {
         "candidate": candidate["source"],
@@ -311,6 +424,7 @@ def inspect_group(source: str | Path, group: str, args: argparse.Namespace) -> d
             out["stage"]["why"] = "no stage or product of this rebuild has that name; see trace and products"
     if args.trace:
         out["instruction_trace"] = instruction_trace(candidate, record.get("elf"), work, run_to=args.run_to)
+        out["source_attribution"] = source_attribution(candidate, record, work)
     return out
 
 
@@ -349,6 +463,15 @@ def _print(result: Mapping[str, Any], *, lines: int) -> None:
             )
             if trace.get("error"):
                 print(f"    {trace['error']}")
+    attribution = result.get("source_attribution")
+    if attribution:
+        if attribution.get("status") != "attributed":
+            print(f"  source attribution: {attribution['status']}: {attribution['why']}")
+        else:
+            total = f"{attribution['total']:,} executions"
+            print(f"  source attribution: {attribution['file']} ({total}; {attribution['scope']})")
+            for row in attribution["lines"][:lines]:
+                print(f"    {row['executions']:>12,}  {row['file'] or '?'}:{row['line']}")
 
 
 def run_from_args(args: argparse.Namespace) -> int:
@@ -373,5 +496,8 @@ __all__: Sequence[str] = (
     "rebuild",
     "resolve_candidate",
     "run_from_args",
+    "source_attribution",
     "stage_files",
+    "symbolize",
+    "symbolizer_beside",
 )

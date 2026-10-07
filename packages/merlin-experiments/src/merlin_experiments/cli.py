@@ -257,6 +257,11 @@ def main(argv: list[str] | None = None) -> int:
         help="use only the selected Phase-0 output for public capsules; never read the historical corpus",
     )
     prepare.add_argument(
+        "--phase1-policy-descriptor",
+        type=Path,
+        help="explicit Phase-1 gate policy; all other descriptor fields must match the frozen Phase-0 source",
+    )
+    prepare.add_argument(
         "--private-baseline",
         type=Path,
         help="operator-owned hidden capsule category when it is absent from the public source checkout",
@@ -350,6 +355,7 @@ def main(argv: list[str] | None = None) -> int:
                     private_baseline=args.private_baseline,
                     retirements=args.retirements,
                     generated_only=args.generated_only,
+                    phase1_policy_descriptor=args.phase1_policy_descriptor,
                 )
             elif args.operation == "inspect":
                 result = corpus_release.inspect_release(args.release)

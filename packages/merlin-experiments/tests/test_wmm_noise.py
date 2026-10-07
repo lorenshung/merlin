@@ -181,3 +181,37 @@ def test_a_machine_without_two_same_day_repeats_is_flagged_in_the_summary(tmp_pa
     assert noise["established"] is False and noise["flag"] == N.NOT_ESTABLISHED
     # Flagged, and still not the floor: the 10% the machine moved between the two days is the margin.
     assert noise["margin"] == 0.1 and noise["basis"] == "cross_day_solo_spread" and noise["cross_day"]["max"] == 0.1
+
+
+def test_the_screen_calibration_is_validated_against_the_pairs_boards_own_margin(tmp_path):
+    """The fast path's refit holds its validation to the noise margin of the board its pairs came from."""
+    from merlin_experiments.phase2.whole_model_measured import fast as F
+
+    base = tmp_path / "base"
+    _reading(base / "store0" / "a", device=STOCK, cycles=1000, day="20261001")
+    _reading(base / "store0" / "b", device=STOCK, cycles=1030, day="20261006")
+    _reading(base / "store1" / "c", device=LEAN, cycles=2000, day="20261001")
+    (base / "_structure_screens").mkdir(parents=True)
+    pairs = [{"domain": {"binary_sha256": STOCK}}]
+    margin = F.screen_margin(base, pairs)
+    assert margin["margin"] == 0.03 and margin["basis"] == "cross_day_solo_spread"  # the stock board's own
+    assert margin["machine"]["device"] == STOCK
+    # Pairs from two boards, or from none, have no one margin: the ranking stays unvalidated.
+    assert F.screen_margin(base, [*pairs, {"domain": {"binary_sha256": LEAN}}]) is None
+    assert F.screen_margin(base, []) is None
+
+
+def test_the_rendered_screen_says_when_its_ranking_is_unvalidated():
+    from merlin_experiments.phase2.whole_model_measured import fast as F
+
+    screen = {
+        "status": "screened",
+        "label": "STRUCTURE SCREEN",
+        "calibration": {"pairs": 0, "blind_ratio": 20.0},
+        "ranking": {"status": "unvalidated", "reasons": ["too few pairs"]},
+        "groups": [],
+    }
+    text = F.render_structure(screen)
+    assert "screen ranking: UNVALIDATED" in text and "too few pairs" in text
+    screen["ranking"] = {"status": "validated", "reasons": []}
+    assert "screen ranking: VALIDATED" in F.render_structure(screen)

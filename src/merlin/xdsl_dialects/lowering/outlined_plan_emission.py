@@ -29,7 +29,7 @@ from .global_plan_emission import (
     dispatch_digest,
     verify_global_plan_emission,
 )
-from .outline import OutlineResult
+from .outline import OutlineResult, _external_declarations
 
 
 def plan_dispatch_fusion(
@@ -88,8 +88,8 @@ def plan_dispatch_fusion(
     )
 
 
-def _inline_operations(operations, mapping, destination, functions, stack=()):
-    """Clone an SSA region, replacing only defined single-block function calls by their bodies."""
+def _inline_operations(operations, mapping, destination, functions, stack=(), external_symbols=()):
+    """Inline defined bodies and preserve explicitly permitted typed external calls."""
     for op in operations:
         if op.name == "func.return":
             return [mapping[value] for value in op.operands]
@@ -98,11 +98,21 @@ def _inline_operations(operations, mapping, destination, functions, stack=()):
             if symbol in stack or symbol not in functions:
                 raise ValueError(f"cannot prove expansion of recursive or undefined call {symbol!r}")
             function = functions[symbol]
+            if not function.body.blocks and symbol in external_symbols:
+                if (
+                    tuple(value.type for value in op.operands) != function.function_type.inputs.data
+                    or tuple(value.type for value in op.results) != function.function_type.outputs.data
+                ):
+                    raise ValueError(f"external call {symbol!r} disagrees with its declared ABI")
+                cloned = op.clone(value_mapper=mapping)
+                destination.add_op(cloned)
+                mapping.update(zip(op.results, cloned.results, strict=True))
+                continue
             if len(function.body.blocks) != 1:
                 raise ValueError("structural fusion requires a single-block outlined function")
             block = function.body.blocks[0]
             inner = dict(zip(block.args, (mapping[value] for value in op.operands), strict=True))
-            results = _inline_operations(block.ops, inner, destination, functions, (*stack, symbol))
+            results = _inline_operations(block.ops, inner, destination, functions, (*stack, symbol), external_symbols)
             if results is None:
                 raise ValueError("outlined function has no return")
             mapping.update(zip(op.results, results, strict=True))
@@ -115,7 +125,8 @@ def _inline_operations(operations, mapping, destination, functions, stack=()):
     return None
 
 
-def _expanded_driver(module, entry):
+def _expanded_driver(module, entry, external_symbols=()):
+    from xdsl.dialects.builtin import ModuleOp
     from xdsl.dialects.func import FuncOp, ReturnOp
     from xdsl.ir import Block, Region
 
@@ -126,11 +137,16 @@ def _expanded_driver(module, entry):
     source = driver.body.blocks[0]
     block = Block(arg_types=[arg.type for arg in source.args])
     mapping = dict(zip(source.args, block.args, strict=True))
-    results = _inline_operations(source.ops, mapping, block, functions, (entry,))
+    declarations = _external_declarations(module, external_symbols)
+    results = _inline_operations(source.ops, mapping, block, functions, (entry,), tuple(declarations))
     if results is None:
         raise ValueError("model driver has no return")
     block.add_op(ReturnOp(*results))
-    return FuncOp(entry, driver.function_type, Region([block]))
+    # Compare declarations as well as expanded call sites: ABI and attributes are part of the
+    # preservation proof, while actual executable implementation remains a catalog obligation.
+    return ModuleOp(
+        [FuncOp(entry, driver.function_type, Region([block])), *(op.clone() for op in declarations.values())]
+    )
 
 
 class OutlinedGlobalPlanEmitter:
@@ -201,7 +217,13 @@ class OutlinedGlobalPlanEmitter:
                     raise ValueError("fused symbol collides with an existing function")
                 body = Block(arg_types=[values[name].type for name in inputs])
                 mapping = dict(zip((values[name] for name in inputs), body.args, strict=True))
-                _inline_operations([source_ops[index] for index in indices], mapping, body, functions)
+                _inline_operations(
+                    [source_ops[index] for index in indices],
+                    mapping,
+                    body,
+                    functions,
+                    external_symbols=self.outlined.external_symbols,
+                )
                 body.add_op(ReturnOp(*(mapping[values[name]] for name in outputs)))
                 fused = FuncOp(
                     item.implementation,
@@ -238,9 +260,9 @@ class OutlinedGlobalPlanEmitter:
             ]
         )
         module.verify()
-        if not _expanded_driver(self.outlined.module, program.entry).is_structurally_equivalent(
-            _expanded_driver(module, program.entry)
-        ):
+        if not _expanded_driver(
+            self.outlined.module, program.entry, self.outlined.external_symbols
+        ).is_structurally_equivalent(_expanded_driver(module, program.entry, self.outlined.external_symbols)):
             raise ValueError("global fusion changed the expanded model computation")
         live = set(program.results)
         live.update(name for node in nodes for name in (*node.inputs, *node.outputs))
@@ -280,6 +302,8 @@ class OutlinedGlobalPlanEmitter:
             "emitted_dispatches": dispatch.n_dispatches,
             "timing": "UNKNOWN",
             "physical_movement": "UNKNOWN",
+            "external_declarations": list(self.outlined.external_symbols),
+            "external_implementation_closure": "UNKNOWN" if self.outlined.external_symbols else "not_required",
             "full_model_simulated": False,
         }
         return emission

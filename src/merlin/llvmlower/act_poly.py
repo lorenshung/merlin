@@ -26,18 +26,22 @@ the erf uses the standard A&S 7.1.26 rational form. We emit the MLIR; XNNPACK's 
 coefficient/structure reference, never linked.
 
 This file runs inside the model2MLIR venv (it needs the upstream MLIR Python bindings). It is
-imported by the lowering runner ONLY when the ``vectorized_transcendental_activation`` feature is
-enabled; with the feature off it is never imported and the pipeline is byte-identical.
+imported by the lowering runner ONLY when ``approximate_transcendental_activation`` or the
+vectorized activation feature is enabled. The approximation is independent of scheduling;
+with both features off it is never imported and the pipeline is byte-identical.
 """
 
 from __future__ import annotations
 
 
-def rewrite_source() -> str:
+def rewrite_source(*, fused: bool = False) -> str:
     """Return the self-contained Python source of the rewriter, to be prepended to the lowering
     runner (which executes in the m2m venv). Kept as a source string so the runner stays a single
     self-contained script and no extra import path wiring into the m2m venv is needed."""
-    return _REWRITER_SRC
+    body = (
+        "return _math.FmaOp(a, b, c).result" if fused else "return _arith.AddFOp(_arith.MulFOp(a, b).result, c).result"
+    )
+    return _REWRITER_SRC.replace("__AP_FMA_BODY__", body)
 
 
 # The rewriter body. Self-contained (only torch_mlir.{ir,dialects.arith,dialects.math}); defines
@@ -46,6 +50,7 @@ def rewrite_source() -> str:
 _REWRITER_SRC = r'''
 # --- vectorizable transcendental-activation polynomial rewriter (default-off feature) ---
 from torch_mlir.dialects import arith as _arith
+from torch_mlir.dialects import math as _math
 
 def _ap_is_vec(t):
     try:
@@ -55,6 +60,11 @@ def _ap_is_vec(t):
 
 def _ap_i32():
     return _ir.IntegerType.get_signless(32)
+
+def _ap_supported_float(t):
+    if _ap_is_vec(t):
+        t = _ir.VectorType(t).element_type
+    return t == _ir.F32Type.get()
 
 def _ap_int_ty(t):
     if _ap_is_vec(t):
@@ -78,7 +88,7 @@ def _ap_iconst(ity, v):
     return _arith.ConstantOp(ity, attr).result
 
 def _ap_fma(a, b, c):
-    # a*b + c as arith mul+add (NOT math.fma). The whole activation body is then PURE ARITH — it
+    # By default a*b + c is arith mul+add. The whole activation body is then PURE ARITH — it
     # contains NO `math.*` op at all. That is deliberate: the un-rewritten softmax `math.exp` must
     # reach the baseline `convert-math-to-libm` -> scalar `expf` call (the exact, crash-free path).
     # The old design emitted `math.fma`, which forced a `convert-math-to-llvm` BEFORE
@@ -89,7 +99,9 @@ def _ap_fma(a, b, c):
     # to vfmul.vv + vfadd.vv (the RISC-V backend contracts adjacent mul+add into vfmacc under the
     # pipeline's fast-math where it can), and crucially the softmax exp lowers to `expf` exactly as in
     # the baseline — so no extra pipeline pass, no `llvm.intr.exp`, no crash.
-    return _arith.AddFOp(_arith.MulFOp(a, b).result, c).result
+    # Explicit fused evaluation instead emits math.fma and selects the narrow FMA-only
+    # intrinsic lowering. It does not convert normalization exp to llvm.intr.exp.
+    __AP_FMA_BODY__
 
 def _ap_absf(x, t):
     # |x| in pure arith (no math.absf): max(x, -x). See _ap_fma for why the activation body avoids any
@@ -252,7 +264,8 @@ def apply_activation_polynomial(module, ctx):
                     if o.operation.name == "linalg.generic":
                         here = _ap_is_activation_generic(o)
                     if (here and o.operation.name in _AP_BUILDERS
-                            and len(o.operands) == 1):
+                            and len(o.operands) == 1
+                            and _ap_supported_float(o.operands[0].type)):
                         targets.append(o)
                     _walk(o.operation, here)
 

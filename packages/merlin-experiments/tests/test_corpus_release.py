@@ -264,7 +264,10 @@ def release_fixture(tmp_path, monkeypatch):
     import shutil
 
     shutil.copytree(contract / "schemas", tmp_path / "merlin/contract/schemas")
-    (tmp_path / "third_party/llvm-install").mkdir(parents=True)
+    clang = tmp_path / "third_party/llvm-install/bin/clang-23"
+    clang.parent.mkdir(parents=True)
+    clang.write_text("#!/bin/sh\nexit 0\n")  # Fixture-only executable for the toolchain presence preflight.
+    clang.chmod(0o755)
     baseline = tmp_path / "baseline"
     _member(baseline, "isa", "generated_member", "public")
     _member(baseline, "layers", "retained_member", "public")
@@ -343,7 +346,7 @@ def release_fixture(tmp_path, monkeypatch):
         "definition": definition,
         "baseline": baseline,
         "run": tmp_path / "out/runs/derivation",
-        "release": tmp_path / "out/artifacts/protocols/review-fixture",
+        "release": tmp_path / "out/artifacts/protocols/fixture-device/review-fixture",
     }
 
 
@@ -370,7 +373,8 @@ def test_release_derives_admission_from_staged_members(release_fixture, capsys, 
 
 
 def test_release_rejects_absent_selected_llvm(release_fixture, capsys):
-    (release_fixture["root"] / "third_party/llvm-install").rmdir()
+    llvm = release_fixture["root"] / "third_party/llvm-install"
+    llvm.rename(llvm.with_name("llvm-unselected"))
     assert (
         main(["run", str(release_fixture["definition"]), "--phase", "0", "--run-dir", str(release_fixture["run"])]) == 0
     )
@@ -436,6 +440,110 @@ def _prepare(fixture, capsys):
     return json.loads(output.out)
 
 
+def _phase1_policy(fixture):
+    source = fixture["root"] / "source-experiment/target_experiment.yaml"
+    document = yaml.safe_load(source.read_text())
+    document["phase1_gates"] = {"private_full_models": {"required": True, "models": ["fixture-model"]}}
+    selected = fixture["root"] / "phase1-policy-descriptor.yaml"
+    selected.write_text(yaml.safe_dump(document, sort_keys=False))
+    return selected
+
+
+def test_explicit_phase1_policy_is_additive_retained_and_review_bound(release_fixture, capsys):
+    fixture = release_fixture
+    selected = _phase1_policy(fixture)
+    assert main(["run", str(fixture["definition"]), "--phase", "0", "--run-dir", str(fixture["run"])]) == 0
+    capsys.readouterr()
+    source_output = fixture["run"] / "phase0/capsules"
+    original_output_sha = fingerprint(source_output)
+    assert (
+        main(
+            [
+                "corpus",
+                "prepare",
+                str(fixture["run"]),
+                "--output",
+                str(fixture["release"]),
+                "--phase1-policy-descriptor",
+                str(selected),
+            ]
+        )
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["state"] == "awaiting_operator_review"
+    assert fingerprint(source_output) == original_output_sha
+    promoted = yaml.safe_load((fixture["release"] / "payload/experiment/target_experiment.yaml").read_text())
+    assert promoted["phase1_gates"] == yaml.safe_load(selected.read_text())["phase1_gates"]
+    retained = fixture["release"] / "private/phase1-policy-descriptor.yaml"
+    preparation = json.loads((fixture["release"] / "private/preparation.json").read_text())
+    assert preparation["phase1_policy"] == {"source_path": str(selected), "sha256": fingerprint(retained)}
+    assert retained.stat().st_mode & 0o077 == 0
+    sealed = _seal(fixture, report, capsys)
+    selected.write_text("changed after preparation\n")
+    assert corpus_release.verify(Path(sealed["seal"]), Path(sealed["descriptor"]))
+
+
+def test_phase1_policy_refuses_any_non_gate_descriptor_change(release_fixture, capsys):
+    fixture = release_fixture
+    selected = _phase1_policy(fixture)
+    policy = yaml.safe_load(selected.read_text())
+    policy["target"] = "wrong-target"
+    selected.write_text(yaml.safe_dump(policy))
+    assert main(["run", str(fixture["definition"]), "--phase", "0", "--run-dir", str(fixture["run"])]) == 0
+    capsys.readouterr()
+    assert (
+        main(
+            [
+                "corpus",
+                "prepare",
+                str(fixture["run"]),
+                "--output",
+                str(fixture["release"]),
+                "--phase1-policy-descriptor",
+                str(selected),
+            ]
+        )
+        == 2
+    )
+    assert "only in phase1_gates" in (fixture["release"] / "private/failure.json").read_text()
+    assert not (fixture["release"] / "private/seal.json").exists()
+
+
+def test_phase1_policy_retained_projection_is_checked_before_review(release_fixture, capsys):
+    fixture = release_fixture
+    selected = _phase1_policy(fixture)
+    assert main(["run", str(fixture["definition"]), "--phase", "0", "--run-dir", str(fixture["run"])]) == 0
+    capsys.readouterr()
+    assert (
+        main(
+            [
+                "corpus",
+                "prepare",
+                str(fixture["run"]),
+                "--output",
+                str(fixture["release"]),
+                "--phase1-policy-descriptor",
+                str(selected),
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    retained = fixture["release"] / "private/phase1-policy-descriptor.yaml"
+    retained.chmod(0o600)
+    policy = yaml.safe_load(retained.read_text())
+    policy["phase1_gates"]["private_full_models"]["models"] = ["different"]
+    retained.write_text(yaml.safe_dump(policy))
+    retained.chmod(0o400)
+    preparation_path = fixture["release"] / "private/preparation.json"
+    preparation = json.loads(preparation_path.read_text())
+    preparation["phase1_policy"]["sha256"] = fingerprint(retained)
+    preparation_path.write_text(json.dumps(preparation))
+    with pytest.raises(SpecError, match="promoted Phase 1 gates differ"):
+        corpus_release.inspect_release(fixture["release"])
+
+
 def test_external_private_baseline_is_explicit_and_receipted(release_fixture, capsys):
     fixture = release_fixture
     private_source = fixture["root"] / "operator-private-corpus"
@@ -443,7 +551,7 @@ def test_external_private_baseline_is_explicit_and_receipted(release_fixture, ca
     assert main(["run", str(fixture["definition"]), "--phase", "0", "--run-dir", str(fixture["run"])]) == 0
     capsys.readouterr()
 
-    absent = fixture["root"] / "out/artifacts/protocols/missing-private"
+    absent = fixture["root"] / "out/artifacts/protocols/fixture-device/missing-private"
     assert main(["corpus", "prepare", str(fixture["run"]), "--output", str(absent)]) == 2
     assert "private corpus" in (absent / "private/failure.json").read_text()
     capsys.readouterr()
@@ -1610,7 +1718,9 @@ def test_release_review_metadata_never_enters_candidate_grants(release_fixture, 
     monkeypatch.setattr(BW, "answer_surfaces", lambda te: [])
     exposed = alias / source.name / "preparation.json"
     assert BW.is_exposed(extra, exposed)  # Negative control: mode700 alone is not isolation.
-    argv = BW.full_argv(SimpleNamespace(target="fixture-device"), ws, bundle)
+    argv = BW.full_argv(
+        SimpleNamespace(target="fixture-device", capsule_corpus=None, corpus_siblings=lambda: []), ws, bundle
+    )
     assert not BW.is_exposed(argv, exposed)
     public = json.dumps(BW.snapshot_record(ws))
     assert "private_member_identity" not in public
@@ -1726,7 +1836,11 @@ def test_a_derived_policy_refuses_hand_maintained_names_and_an_unqualified_integ
 def test_the_gemmini_descriptor_derives_its_model_policy():
     from merlin.common.paths import repo_root
 
-    descriptor = yaml.safe_load((repo_root() / "examples/gemmini/target/descriptor.yaml").read_text())
+    # Installed qualification copies this committed input beside the tests. A
+    # source checkout uses the same authored file directly.
+    archived = Path(__file__).with_name("source-inputs") / "examples/gemmini/target/descriptor.yaml"
+    selected = archived if archived.is_file() else repo_root() / "examples/gemmini/target/descriptor.yaml"
+    descriptor = yaml.safe_load(selected.read_text())
     bound = descriptor["grading"]["resource_bound"]
     assert bound["derive"] == "phase0_qualified_models_v1"
     assert "required_admitted_models" not in bound and "exclude_capsules" not in bound

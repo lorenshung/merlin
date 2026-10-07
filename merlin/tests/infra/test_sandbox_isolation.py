@@ -304,6 +304,7 @@ def test_installed_bytecode_alias_uses_effective_frozen_mount(tmp_path):
     cache = rtl / "__pycache__"
     cache.mkdir()
     (cache / "private.cpython-312.pyc").write_bytes(b"private bytecode")
+    physical_bytecode = cache / "private.cpython-312.pyc"
     alias = site / "lib64/python3.12/site-packages/merlin/targetgen/rtl/__pycache__/private.cpython-312.pyc"
 
     def mounts(frozen: Path | None) -> list[str]:
@@ -361,7 +362,7 @@ def test_installed_bytecode_alias_uses_effective_frozen_mount(tmp_path):
     (present / "__pycache__").chmod(0o555)
     present.chmod(0o555)
     for raw, expected_public in ((mounts(present), "frozen public\n"), (mounts(None), "live public\n")):
-        assert {surface.path for surface in BW.coverage_gap(raw, surfaces)} == {source, alias}
+        assert {surface.path for surface in BW.coverage_gap(raw, surfaces)} == {source, alias, physical_bytecode}
         masked_present = BW.apply_answer_masks(raw, surfaces)
         assert BW.coverage_gap(masked_present, surfaces) == []
         assert ["--ro-bind", "/dev/null", str(alias)] in [
@@ -520,7 +521,6 @@ def test_tampered_snapshot_marker_cannot_follow_payload_symlink(tmp_path):
 
     manifest = BW.materialize_bundle_inputs(ws, bundle, repo=repo)
     root = BW.bundle_snapshot_root(ws)
-    marker = root / "snapshot.json"
     frozen = root / manifest["grants"][0]["snapshot"]
     try:
         frozen.parent.chmod(0o700)

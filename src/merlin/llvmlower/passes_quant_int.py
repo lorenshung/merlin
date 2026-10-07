@@ -92,6 +92,58 @@ def _constant_int(value) -> int | None:
     return int(raw) if isinstance(raw, int) else None
 
 
+def _per_tensor_dequant_through_reshape(value):
+    """Reuse symmetric calibrated bytes through statically proven reshapes.
+
+    A scalar dequantization scale commutes with element-preserving reshape.
+    Replaying only those layouts in i8 avoids requantizing a calibrated input
+    merely because a framework flattened it before a matrix multiplication.
+    """
+    import math
+
+    from xdsl.dialects.builtin import TensorType, i8
+
+    layouts = []
+    current = value
+    seen = set()
+    while getattr(current.owner, "name", None) in {"tensor.collapse_shape", "tensor.expand_shape", "tensor.cast"}:
+        op = current.owner
+        if id(op) in seen or len(op.results) != 1 or not op.operands:
+            return None
+        seen.add(id(op))
+        src, dst = op.operands[0].type, current.type
+        if not isinstance(src, TensorType) or not isinstance(dst, TensorType):
+            return None
+        ss, ds = src.get_shape(), dst.get_shape()
+        if any(d < 0 for d in (*ss, *ds)) or math.prod(ss) != math.prod(ds):
+            return None
+        layouts.append(op)
+        current = op.operands[0]
+    deq = current.owner
+    if not (
+        _is_dequant_per_tensor(deq)
+        and len(deq.operands) >= 3
+        and _constant_int(deq.operands[2]) == 0
+        and isinstance(deq.operands[0].type, TensorType)
+        and deq.operands[0].type.element_type == i8
+        and isinstance(deq.operands[1].type, TensorType)
+        and deq.operands[1].type.get_shape() == ()
+    ):
+        return None
+    quantized = deq.operands[0]
+    ops = []
+    for layout in reversed(layouts):
+        replay = type(layout).create(
+            operands=[quantized, *layout.operands[1:]],
+            result_types=[TensorType(i8, layout.results[0].type.get_shape())],
+            attributes=dict(layout.attributes),
+            properties=dict(layout.properties),
+        )
+        ops.append(replay)
+        quantized = replay.results[0]
+    return quantized, deq.operands[1], ops
+
+
 def _is_canonical_matmul(ndim: int, in_maps, out_dims, red_flags) -> bool:
     """Is this exactly ``C[m,n] += A[m,k] * B[k,n]`` -- the convention ``linalg.matmul`` asserts?
 
@@ -711,8 +763,13 @@ def lower_contraction_int8(
                 if transpose is not None and list(transpose.permutation.get_values()) == [1, 0]
                 else None
             )
+            transposed_scalar_scale = (
+                _is_dequant_per_tensor(transposed_deq)
+                and len(transposed_deq.operands) >= 3
+                and _constant_int(transposed_deq.operands[2]) == 0
+            )
             if (
-                _is_dequant(transposed_deq)
+                (_is_dequant(transposed_deq) or transposed_scalar_scale)
                 and isinstance(transposed_deq.operands[0].type, TensorType)
                 and transposed_deq.operands[0].type.element_type == i8
                 and len(shp) == 2
@@ -722,7 +779,9 @@ def lower_contraction_int8(
                 tr_i8 = L.TransposeOp(transposed_deq.operands[0], tr_empty.results[0], transpose.permutation, i8_t)
                 pre += [tr_empty, tr_i8]
                 i8_inputs.append(tr_i8.results[0])
-                scale_vals.append((transposed_deq.operands[1], par_outpos))
+                # Per-tensor PT2E weights carry one scalar scale; preserving it
+                # avoids a second, numerically different dynamic quantization.
+                scale_vals.append((transposed_deq.operands[1], [] if transposed_scalar_scale else par_outpos))
                 _bump(report_out, "transposed_quantized_weight_reused")
                 continue
 
@@ -732,19 +791,15 @@ def lower_contraction_int8(
                 i8_inputs.append(deq.operands[0])
                 scale_vals.append((deq.operands[1], par_outpos))
                 continue
-            if (
-                _is_dequant_per_tensor(operand.owner)
-                and len(operand.owner.operands) >= 3
-                and _constant_int(operand.owner.operands[2]) == 0
-                and isinstance(operand.owner.operands[0].type, TensorType)
-                and operand.owner.operands[0].type.element_type == i8
-            ):
-                # Static PT2E activation: consume the calibrated i8 tensor and
-                # its scalar scale directly. No amax scan and no second quantize.
-                deq = operand.owner
-                i8_inputs.append(deq.operands[0])
-                scale_vals.append((deq.operands[1], []))
+            static_input = _per_tensor_dequant_through_reshape(operand)
+            if static_input is not None:
+                quantized, scale, layout_ops = static_input
+                pre += layout_ops
+                i8_inputs.append(quantized)
+                scale_vals.append((scale, []))
                 _bump(report_out, "static_activation_reused")
+                if layout_ops:
+                    _bump(report_out, "static_activation_reshape_reused")
                 continue
             if operand.type.element_type != f32:
                 i8_inputs.append(operand)  # already integer

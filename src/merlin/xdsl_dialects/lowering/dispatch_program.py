@@ -25,7 +25,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .._common import HAS_XDSL
-from .outline import OutlineError, OutlineResult, outline_dispatches
+from .outline import OutlineError, OutlineResult, _external_declarations, outline_dispatches
 
 # NOTE: a `VIEW_OPS` tuple used to sit here, claiming to name "driver-side glue ops the runtime can
 # evaluate directly". Nothing imported it, and it was WRONG in both directions against the only
@@ -162,7 +162,10 @@ def build_dispatch_program(outlined: OutlineResult, entry: str = "forward") -> D
     if not HAS_XDSL:
         raise OutlineError("xDSL is required to build a dispatch program")
     module = outlined.module
-    drivers = [op for op in module.walk() if op.name == "func.func" and "$kernel_" not in op.sym_name.data]
+    declarations = _external_declarations(module, outlined.external_symbols)
+    drivers = [
+        op for op in module.walk() if op.name == "func.func" and op.body.blocks and "$kernel_" not in op.sym_name.data
+    ]
     if not drivers:
         raise OutlineError("no driver func in outlined module")
     driver = next((d for d in drivers if d.sym_name.data == entry), drivers[0])
@@ -217,6 +220,19 @@ def build_dispatch_program(outlined: OutlineResult, entry: str = "forward") -> D
         if op.name == "func.return":
             continue
         if op.name == "func.call":
+            callee = op.callee.string_value()
+            if callee in declarations:
+                # Explicit catalog calls are nodes in their original position, without consuming
+                # an outlined-kernel table entry or claiming the declaration is an implementation.
+                nodes.append(
+                    Node(
+                        kind="dispatch",
+                        op=callee,
+                        inputs=resolve(op.operands, op),
+                        outputs=[bind(r, "intermediate") for r in op.results],
+                    )
+                )
+                continue
             d = next(disp_iter, None)
             if d is None:
                 raise OutlineError(
@@ -225,6 +241,8 @@ def build_dispatch_program(outlined: OutlineResult, entry: str = "forward") -> D
                     f"({len(outlined.dispatches)}). Pairing them positionally past this point would "
                     "attribute a call to the wrong kernel symbol and the wrong provenance."
                 )
+            if callee != d.symbol:
+                raise OutlineError(f"dispatch table symbol {d.symbol!r} disagrees with driver call {callee!r}")
             n_calls += 1
             in_ids = resolve(op.operands, op)
             out_ids = [bind(r, "intermediate") for r in op.results]
@@ -408,10 +426,10 @@ def slice_program(prog: DispatchProgram, region_ids, *, entry_suffix: str = "") 
 
 
 def lower_model_to_dispatch_program(
-    module, forward: str | None = None, prune: bool = True
+    module, forward: str | None = None, prune: bool = True, *, external_symbols=()
 ) -> tuple[OutlineResult, DispatchProgram]:
     """Convenience: outline then flatten, verifying the resulting program."""
-    outlined = outline_dispatches(module, forward=forward)
+    outlined = outline_dispatches(module, forward=forward, external_symbols=external_symbols)
     prog = build_dispatch_program(outlined, entry=forward or "forward")
     if prune:
         prog = prune_dead_nodes(prog)

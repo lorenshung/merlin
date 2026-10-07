@@ -6,6 +6,8 @@ owner: compiler
 last_verified: 2026-10-06
 related: [optional_passes, model_lowering, whole_model_on_accelerator]
 code_refs: [src/merlin/common/compile_trace.py,
+            src/merlin/perf/debug_companion.py,
+            src/merlin/perf/whole_model_group_timing.py,
             src/merlin/compile/debug.py,
             src/merlin/compile/command.py,
             src/merlin/llvmlower/pipeline.py,
@@ -119,7 +121,18 @@ whole-model driver. The rebuild runs inside a trace that dumps every stage, and 
 - `--stage S`: the IR of a stage the trace reached (for example `mlir:cse#2` from the package's own
   lowering), or of a product (`command_buffer`, `artifact`, `iface`);
 - `--trace`: the group's program on the candidate's functional model (the `spike` machine its job
-  declares), with the simulator's execution log stopped after `--run-to` instructions.
+  declares), with the simulator's execution log stopped after `--run-to` instructions;
+- with `--trace`, the program's **source-line attribution**. The group build links the program a
+  second time from the same model, kernels and recipe with the compiler's debug option (`-g`) appended
+  to its recorded flags. That companion is admitted only if its allocated bytes and relocations, of the
+  image and of the program object, match the program's (`merlin.perf.debug_companion`). The functional
+  model's PC histogram of the program is then symbolized against the companion by the
+  `llvm-symbolizer` in the directory of the compiler the target's build recipe names, and attributed
+  per function and source line (`source_attribution.json` in the work directory). The counts are
+  instruction executions of the whole one-group program on the functional model, setup included: not
+  cycles, and not a measured region. If any step cannot be taken (no functional model, no companion,
+  a companion that differs, no symbolizer in the target's toolchain) the attribution is `UNKNOWN` and
+  the command says why.
 
 Each step uses a hook the target provides: its whole-model driver, and a functional-model machine.
 If the target or candidate lacks the hook, you get "not available for this target" and the reason.

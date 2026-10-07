@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -73,6 +73,9 @@ class Routed:
     operation_id: str = ""
     #: The compute group this call is, when the route was ``BY_GROUP``; ``None`` per contraction.
     group: int | None = None
+    source_operation_ordinal: int = -1
+    source_region: str = ""
+    tensor_types: tuple[str, str, str] = ()
 
 
 @dataclass(frozen=True)
@@ -110,6 +113,7 @@ class DeviceRewrite:
     #: (read, read, write); a group's call takes whatever free values its members read, so the
     #: accesses are DERIVED per symbol and the printer repair has to be told them.
     arg_access: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    model_sha256: str | None = None
 
     @property
     def moved(self) -> int:
@@ -119,6 +123,7 @@ class DeviceRewrite:
         """The sidecar's content, as plain JSON-able data."""
         return {
             "device": self.device,
+            "model_sha256": self.model_sha256,
             "granularity": self.granularity,
             "signatures": {s: list(k) for s, k in self.signatures.items()},
             "routed": [
@@ -130,6 +135,9 @@ class DeviceRewrite:
                     "fqn": r.fqn,
                     "operation_id": r.operation_id,
                     "group": r.group,
+                    "source_operation_ordinal": r.source_operation_ordinal,
+                    "source_region": r.source_region,
+                    "tensor_types": list(r.tensor_types),
                 }
                 for r in self.routed
             ],
@@ -335,6 +343,8 @@ def rewrite_contractions_to_device(
     sidecar_dir: str | Path | None = None,
     exact_selection=None,
     model_sha256: str | None = None,
+    catalog_selection: Mapping[str, Sequence[str]] | None = None,
+    catalog_bindings: Mapping[str, Mapping[str, object]] | None = None,
 ) -> DeviceRewrite:
     """Replace each SELECTED contraction with a call to ``device``'s kernel. Mutates ``module``.
 
@@ -350,14 +360,30 @@ def rewrite_contractions_to_device(
 
     if exact_selection is not None and select is not None:
         raise ValueError("exact operation selection and a shape selector cannot both decide placement")
+    if catalog_selection is not None and (select is not None or exact_selection is not None):
+        raise ValueError("catalog source selection cannot be combined with another placement selector")
+    if catalog_bindings is not None:
+        if catalog_selection is None or set(catalog_bindings) != set(catalog_selection):
+            raise ValueError("catalog bindings must cover exactly the selected source regions")
+        for region, binding in catalog_bindings.items():
+            if (
+                binding.get("region") != region
+                or not isinstance(binding.get("symbol"), str)
+                or not binding["symbol"]
+                or type(binding.get("source_operation_ordinal")) is not int
+                or binding["source_operation_ordinal"] < 0
+                or tuple(binding.get("tensor_types") or ()) != tuple(catalog_selection[region])
+            ):
+                raise ValueError("catalog binding has no exact source ordinal, types or implementation")
     if exact_selection is not None and not exact_selection.certified:
         raise ValueError("exact operation selection has no independent accelerator certification")
     if exact_selection is not None:
         exact_selection.check_release()
         exact_selection.check_backend_contract()
-    if exact_selection is None and select is None:
+    if exact_selection is None and select is None and catalog_selection is None:
         return DeviceRewrite(device=device, skipped=(("all", "no selector supplied, so nothing is routed"),))
 
+    ordinal_by_op = {op: ordinal for ordinal, op in enumerate(module.walk())}
     selected_ops = None
     ids_by_op = {}
     if exact_selection is not None:
@@ -376,8 +402,8 @@ def rewrite_contractions_to_device(
 
     triples = device_dtype_triples(device)
     if not triples:
-        if exact_selection is not None:
-            raise ValueError(f"{device!r} declares no derivable datapath for exact selection")
+        if exact_selection is not None or catalog_selection is not None:
+            raise ValueError(f"{device!r} declares no derivable datapath for exact source selection")
         return DeviceRewrite(device=device, skipped=(("all", f"{device!r} declares no derivable datapath"),))
 
     # THROUGH THE RUNTIME DIALECT. The offload is recorded as runtime ops first and realized second,
@@ -397,6 +423,24 @@ def rewrite_contractions_to_device(
     candidates = offloadable_contractions(module, device)
     if selected_ops is not None and not selected_ops.issubset({op for op, _shape in candidates}):
         raise ValueError("selected operation is not eligible on this device; host fallback must be explicit")
+    if catalog_selection is not None:
+        matched: dict[str, list] = {region: [] for region in catalog_selection}
+        for op, _shape in candidates:
+            region = getattr(op.attributes.get("prov.region_id"), "data", "")
+            if region not in matched or not op.results:
+                continue
+            types = tuple(str(x.type) for x in op.operands[:2]) + (str(op.results[0].type),)
+            if types == tuple(catalog_selection[region]):
+                matched[region].append(op)
+        if any(len(ops) != 1 for ops in matched.values()):
+            failures = {region: len(ops) for region, ops in matched.items() if len(ops) != 1}
+            raise ValueError(f"catalog operations are absent or ambiguous on this device: {failures}")
+        if catalog_bindings is not None and any(
+            ordinal_by_op[ops[0]] != catalog_bindings[region]["source_operation_ordinal"]
+            for region, ops in matched.items()
+        ):
+            raise ValueError("catalog source operation ordinal differs from the current source")
+        selected_ops = {ops[0] for ops in matched.values()}
     chosen = emit_device_program(module, device, select=select, selected_ops=selected_ops)
     lower_device_submits(module, device, transport=_transport)
     skipped: list[tuple[str, str]] = []
@@ -406,9 +450,9 @@ def rewrite_contractions_to_device(
         )
 
     stem = symbol_stem(device)
-    # Extents alone are not a callee identity when a device has multiple
-    # datapaths: one symbol cannot stand for both i8 and floating arithmetic.
-    symbols: dict[tuple[tuple[int, ...], tuple[str, str, str]], str] = {}
+    # A source-bound implementation is part of the callee identity, alongside
+    # shape and precision. Equal shapes may select different legal schedules.
+    symbols: dict[tuple[tuple[int, ...], tuple[str, str, str], str], str] = {}
     sig_dtypes: dict[str, tuple[str, str, str]] = {}
     expected_interfaces: dict[str, dict[str, str]] = {}
     routed: list[Routed] = []
@@ -416,7 +460,9 @@ def rewrite_contractions_to_device(
     for op, shape in chosen:
         key = _signature_key(shape)
         dtypes = tuple(shape.dtypes)
-        signature = (key, dtypes)
+        source_region = getattr(op.attributes.get("prov.region_id"), "data", "")
+        implementation = catalog_bindings[source_region]["symbol"] if catalog_bindings is not None else ""
+        signature = (key, dtypes, implementation)
         sym = symbols.get(signature)
         if sym is None:
             sym = f"{stem}_{len(symbols)}"
@@ -437,6 +483,7 @@ def rewrite_contractions_to_device(
             skipped.append((sym, f"expected 3 operands and 1 result, got {len(operands)} and {len(op.results)}"))
             continue
 
+        tensor_types = tuple(str(x.type) for x in operands[:2]) + (str(op.results[0].type),)
         call = func.CallOp(sym, operands, [op.results[0].type])
         op.results[0].replace_all_uses_with(call.results[0])
         op.parent.insert_op_before(call, op)
@@ -452,12 +499,15 @@ def rewrite_contractions_to_device(
                 dtypes=tuple(shape.dtypes),  # type: ignore[arg-type]
                 fqn=prov.data if isinstance(prov, StringAttr) else "",
                 operation_id=operation_id,
+                source_operation_ordinal=ordinal_by_op[op],
+                source_region=source_region,
+                tensor_types=tensor_types,
             )
         )
 
     body: Block = module.body.block
     minted: dict[str, tuple[int, ...]] = {}
-    for (key, _dtypes), sym in symbols.items():
+    for (key, _dtypes, _implementation), sym in symbols.items():
         types = _signature_types(key, sig_dtypes[sym])
         if types is None:
             skipped.append((sym, f"no MLIR type for datapath {sig_dtypes[sym]}; signature declined"))
@@ -494,6 +544,7 @@ def rewrite_contractions_to_device(
         software_spec_sha256=exact_selection.software_spec_sha256 if exact_selection is not None else None,
         capability_contract_sha256=exact_selection.capability_contract_sha256 if exact_selection is not None else None,
         expected_interfaces=expected_interfaces,
+        model_sha256=model_sha256,
     )
     if sidecar_dir is not None:
         out.write_sidecar(sidecar_dir)
@@ -900,6 +951,8 @@ def rewrite_prepared_file(
     weight_args=None,
     model: str = "",
     capture: str | Path | None = None,
+    catalog_manifest: str | Path | None = None,
+    catalog_object: str | Path | None = None,
 ) -> DeviceRewrite:
     """Rewrite a prepared module ON DISK in place and record what it minted.
 
@@ -932,12 +985,39 @@ def rewrite_prepared_file(
     model_sha256 = hashlib.sha256(prepared.read_bytes()).hexdigest()
     if exact_selection is not None and exact_selection.model_sha256 != model_sha256:
         raise ValueError("prepared model bytes changed after exact operation selection")
+    catalog_selection = None
+    catalog_bindings = None
+    if (catalog_manifest is None) != (catalog_object is None):
+        raise ValueError("catalog rewrite needs both manifest and object")
+    if catalog_manifest is not None:
+        if select is not None or exact_selection is not None:
+            raise ValueError("catalog source selection cannot be combined with another placement selector")
+        data = json.loads(Path(catalog_manifest).read_text(encoding="utf-8"))
+        if data.get("source_sha256") != model_sha256 or not data.get("coverage_complete"):
+            raise ValueError("external catalog does not cover these exact prepared model bytes")
+        rows = data.get("bindings") or ()
+        catalog_selection = {row["region"]: tuple(row["tensor_types"]) for row in rows}
+        catalog_bindings = {row["region"]: row for row in rows}
+        if (
+            len(catalog_selection) != len(rows)
+            or not catalog_selection
+            or any(not region for region in catalog_selection)
+        ):
+            raise ValueError("external catalog needs unique nonempty source regions")
     module = parse_mlir_file(prepared)
+    if catalog_selection is not None and granularity != BY_CONTRACTION:
+        raise ValueError("source catalogs bind contractions; group routing requires its own program contract")
     if exact_selection is not None and granularity != BY_CONTRACTION:
         raise ValueError("exact operation selection binds contractions; a group route cannot honour it")
     rewrite = (
         rewrite_contractions_to_device(
-            module, device, select=select, exact_selection=exact_selection, model_sha256=model_sha256
+            module,
+            device,
+            select=select,
+            exact_selection=exact_selection,
+            model_sha256=model_sha256,
+            catalog_selection=catalog_selection,
+            catalog_bindings=catalog_bindings,
         )
         if granularity == BY_CONTRACTION
         else rewrite_groups_to_device(
@@ -963,4 +1043,10 @@ def rewrite_prepared_file(
         prepared.write_text(text, encoding="utf-8")
     work.mkdir(parents=True, exist_ok=True)
     rewrite.write_sidecar(work)
+    if catalog_manifest is not None:
+        sidecar = work / SIDECAR_NAME
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+        data["catalog_manifest"] = str(Path(catalog_manifest).resolve())
+        data["catalog_object"] = str(Path(catalog_object).resolve())
+        sidecar.write_text(json.dumps(data, indent=1), encoding="utf-8")
     return rewrite

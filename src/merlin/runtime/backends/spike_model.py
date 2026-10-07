@@ -17,11 +17,12 @@ llvmlower `toolchain`.
 
 from __future__ import annotations
 
+import json
 import os
 import struct
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -41,8 +42,80 @@ RVV_CFLAGS = ["-march=rv64gcv", "-mabi=lp64d", "-mcmodel=medany", "-O2", "-ffree
 CLANG_TARGET = "--target=riscv64-unknown-elf"
 
 
+def _harness_cflags(model_flags: list[str]) -> list[str]:
+    """Give GCC the model's ISA/ABI while retaining GCC-compatible harness options."""
+    flags = list(RVV_CFLAGS)
+    for prefix in ("-march=", "-mabi=", "-mcmodel="):
+        selected = [flag for flag in model_flags if flag.startswith(prefix)]
+        if selected:
+            flags = [flag for flag in flags if not flag.startswith(prefix)]
+            flags.append(selected[-1])
+    return flags
+
+
+def _select_host_vectorize(
+    model_flags: list[str],
+    schedule: str | None,
+    requested: bool | None,
+) -> bool:
+    """Select host scheduling from the declared ISA or the caller's explicit policy.
+
+    Fixed-width vectors can be scalarized by LLVM, so an explicit schedule or
+    override may intentionally use them on a scalar ISA. The default RVV
+    schedule should only be selected for an ISA declaring floating vectors.
+    A ``zvl`` minimum-length extension alone does not provide vector execution.
+    """
+    if requested is not None and not isinstance(requested, bool):
+        raise ValueError("host_vectorize must be a bool or None")
+    if requested is False and schedule is not None:
+        raise ValueError("host_vectorize=False conflicts with an explicit rvv_schedule")
+    if requested is not None:
+        return requested
+    if schedule is not None:
+        return True
+    marches = [flag[len("-march=") :].lower() for flag in model_flags if flag.startswith("-march=")]
+    if not marches:
+        return False
+    base, *extensions = marches[-1].split("_")
+    if base.startswith(("rv32", "rv64")) and "v" in base[4:]:
+        return True
+    return any(extension.startswith(("zve32f", "zve64f", "zve64d")) for extension in extensions)
+
+
 class SpikeModelError(RuntimeError):
     pass
+
+
+def _transform_host_ir(
+    source: Path,
+    workdir: Path,
+    transform: Callable[[Path, Path], Path] | None,
+) -> tuple[Path, dict | None]:
+    """Keep target-selected late legalization inside the normal object build.
+
+    The source lowering artifact remains immutable. Clang verifies the selected
+    LLVM IR, and its compiled object participates in the existing build hash.
+    The optional callback owns its semantic proof and supporting artifacts.
+    """
+    if transform is None:
+        return source, None
+    import hashlib
+
+    before = source.read_bytes()
+    workdir.mkdir(parents=True, exist_ok=True)
+    selected = Path(transform(source, workdir)).resolve()
+    if source.read_bytes() != before:
+        raise SpikeModelError("host LLVM transform modified its source lowering artifact")
+    if selected != source.resolve() and not selected.is_relative_to(workdir.resolve()):
+        raise SpikeModelError("host LLVM transform output must be retained in its workdir")
+    if not selected.is_file():
+        raise SpikeModelError("host LLVM transform returned no LLVM IR file")
+    return selected, {
+        "source_path": str(source.resolve()),
+        "source_sha256": hashlib.sha256(before).hexdigest(),
+        "selected_path": str(selected),
+        "selected_sha256": hashlib.sha256(selected.read_bytes()).hexdigest(),
+    }
 
 
 def _harness_dir() -> Path:
@@ -65,6 +138,27 @@ _SPIKE_CMD_TIMEOUT_S = int(os.environ.get("MERLIN_COMPILE_TIMEOUT_S", "900") or 
 def _run(cmd: list, **kw) -> subprocess.CompletedProcess:
     timeout = kw.pop("timeout", _SPIKE_CMD_TIMEOUT_S or None)
     return _proc.run_checked(cmd, error=SpikeModelError, timeout=timeout, timeout_hint=" (pathological compile)", **kw)
+
+
+def _mlir_runtime_compiler(clang: Path, gcc: Path, flags: list[str]) -> list[str]:
+    """Use the model compiler's scalar ABI and the environment's C headers.
+
+    BF16 compiler helpers use floating registers under Clang's RISC-V ABI.
+    GCC's unsigned-short fallback uses integer registers and cannot service
+    these calls, even when both compilers select the same ISA and LP64D ABI.
+    """
+    sysroot_text = _run([gcc, "-print-sysroot"]).stdout.strip()
+    sysroot = Path(sysroot_text)
+    if not sysroot_text or not sysroot.is_absolute() or not (sysroot / "include/math.h").is_file():
+        raise SpikeModelError("GCC must report an absolute sysroot containing include/math.h")
+    return [
+        str(clang),
+        CLANG_TARGET,
+        f"--sysroot={sysroot.resolve()}",
+        "-isystem",
+        str((sysroot / "include").resolve()),
+        *flags,
+    ]
 
 
 ARENA_BASE = 0xC0000000  # derived-ok: address chosen by this backend's own -m map, not a target
@@ -206,6 +300,18 @@ def _layout(
     }
 
 
+def _supplemental_object_digest(objects):
+    """Identity of actual linked device/matrix bytes, independent of work paths."""
+    import hashlib
+
+    digest = hashlib.sha256(b"merlin-supplemental-objects-v1")
+    for path in objects:
+        content = Path(path).read_bytes()
+        digest.update(len(content).to_bytes(8, "little"))
+        digest.update(content)
+    return digest.digest()
+
+
 def build(
     model_dir: str | Path,
     work: str | Path,
@@ -218,6 +324,10 @@ def build(
     backend: str = "rvv",
     features: frozenset[str] | None = None,
     rvv_schedule: str | None = None,
+    host_vectorize: bool | None = None,
+    host_math_policy: str = "native",
+    host_llvm_transform: Callable[[Path, Path], Path] | None = None,
+    host_provider_builder: Callable | None = None,
     cflags_override: list[str] | None = None,
     vlen: int | None = None,
     console: str = "htif",
@@ -231,18 +341,46 @@ def build(
     op_profile: bool = False,
     prof_heartbeat_cycles: int = 2_000_000_000,
     code_reserve: int | None = None,
+    output_dump_cap: int = 4096,
+    output_sha256: bool = False,
 ) -> dict:
     """Build the whole-model bare-metal ELF (spike, or any board with no RTOS).
 
     Returns ``{elf, mem_bytes, weights_base, build_hash, ...}``.
 
-    The lowering arguments mirror ``zephyr_model.build_app`` and all default to the historical
-    behavior, so existing callers are byte-identical: ``int8_compute`` selects the real W8A8 integer
+    ``host_math_policy`` defaults to emission-neutral ``native``. Explicit
+    ``expf_via_double`` changes libm returned-value precision; callers must
+    qualify their original numerical contract. It does not preserve errno or
+    floating-point exception equivalence to native expf.
+
+    ``output_dump_cap`` limits raw output values printed after model timing. Set
+    it to the full output size for whole-output target correctness validation.
+    ``output_sha256`` additionally hashes every first-output f32 value, encoded
+    little-endian, after timing. Pair with ``output_dump_cap=1`` for compact logs.
+
+    The lowering arguments mirror ``zephyr_model.build_app`` and defaults retain the historical
+    RVV target: ``int8_compute`` selects the real W8A8 integer
     datapath, ``features``/``rvv_schedule``/``cflags_override`` let a tuned RVV package drive this path
     the way it drives the Zephyr one, and ``vlen`` pins ``-march=...zvl<N>b`` to the vector length the
     image will actually run on. Passing none of them lowers ``model.mlir`` raw — correct only when the
     caller wants the unprepared module, which is NOT what a delivery wants (measured: raw scored
     ``cos 0.925`` where the prepared path is bit-exact).
+
+    Prepared host code uses the default RVV schedule only when its declared
+    ``-march`` provides floating vector execution. ``host_vectorize`` explicitly
+    overrides that choice; an explicit ``rvv_schedule`` also selects vector
+    scheduling. Scalar targets can intentionally opt into LLVM vector
+    scalarization, but preparation for a separate device does not imply RVV.
+
+    ``host_llvm_transform`` explicitly selects a late LLVM legalization supplied
+    by the caller. It receives the immutable lowered file and its own workdir,
+    and returns the LLVM file to compile. The compiled replacement participates
+    in the normal build hash, harness generation, linking and final ELF audit.
+
+    ``host_provider_builder`` supplies separately pinned mixed host/provider
+    objects through the normal link. Their complete source/model identities,
+    imported compilation pins and typed required/defined function symbols are
+    validated independently of a device catalog's closed-kernel contract.
 
     ``stack_bytes`` is the linker-reserved stack, and it is a SIZING decision rather than a layout
     constant: the lowering promotes static intermediates to stack ``alloca``s for this target, so the
@@ -273,6 +411,11 @@ def build(
     changes the emitted code, so a profiled image is for measuring per-op cost, never for a cycle count
     compared against an unprofiled one.
     """
+    from ...llvmlower.compilation_recipe import FILENAME as COMPILATION_RECIPE
+    from ...llvmlower.compilation_recipe import CompilationRecipe
+
+    # Refusal during validation must not leave a previous build's success receipt.
+    (Path(work) / COMPILATION_RECIPE).unlink(missing_ok=True)
     if matrix is not None:
         matrix.provider()  # Refuse unselected/incomplete support before build output or native tools.
     else:
@@ -287,8 +430,36 @@ def build(
         device.exact_selection.check_release()
         device.exact_selection.check_package(device.package_dir)
         device.exact_selection.check_backend_contract()
+    if device is not None and (
+        getattr(device, "catalog_manifest", None) is not None
+        or getattr(device, "catalog_object", None) is not None
+        or getattr(device, "catalog_builder", None) is not None
+    ):
+        static_catalog = bool(device.catalog_manifest or device.catalog_object)
+        if static_catalog and (not device.catalog_manifest or not device.catalog_object):
+            raise ValueError("external device catalog needs both manifest and object")
+        if static_catalog and device.catalog_builder is not None:
+            raise ValueError("choose a precompiled catalog or a final-preparation catalog builder")
+        if getattr(device, "exact_selection", None) is not None:
+            raise ValueError("external catalog cannot replace an exactly certified package artifact")
+        if getattr(device, "select", None) is not None:
+            raise ValueError("external catalog selection is already explicit in its source bindings")
+    if (
+        not isinstance(output_dump_cap, int)
+        or isinstance(output_dump_cap, bool)
+        or not 1 <= output_dump_cap <= 2**31 - 1
+    ):
+        raise ValueError("output_dump_cap must be a positive signed 32-bit integer")
+    if not isinstance(output_sha256, bool):
+        raise ValueError("output_sha256 must be a bool")
+    from ..host_math import build_host_math, host_math_recipe
+
+    host_math_recipe(host_math_policy)  # Refuse unsupported policy before build mutation.
+    if host_provider_builder is not None and not callable(host_provider_builder):
+        raise ValueError("host_provider_builder must be explicitly callable")
     model_dir, work = Path(model_dir).resolve(), Path(work).resolve()
     work.mkdir(parents=True, exist_ok=True)
+    compilation = CompilationRecipe(work, producer=Path(__file__))
     from ...llvmlower.weight_prepack import prepare_build_bundle
 
     model_dir = prepare_build_bundle(model_dir, work, features)
@@ -307,19 +478,21 @@ def build(
     # TWO flag sets, because two compilers: the model object is built by CLANG (an RVV package's
     # cflags are clang flags -- `-fno-vectorize` is not a GCC option and the harness units would fail
     # to compile with them), while crt.S/htif.c/the generated call are built by the GCC that owns this
-    # bare-metal environment. Only the -march has to agree between them, which is what `vlen` pins.
+    # bare-metal environment. The MLIR scalar helper runtime uses Clang as well, because its
+    # BF16 register ABI must match the model. ISA/ABI flags are shared across all units.
     from .zephyr_model import march_with_vlen
 
     clang_cflags = list(cflags_override or (RVV_CFLAGS if backend == "rvv" else ["-march=rv64gc", *RVV_CFLAGS[1:]]))
-    marches = [flag for flag in clang_cflags if flag.startswith("-march=")]
-    if len(marches) != 1:
-        raise SpikeModelError("whole-model build requires exactly one -march flag")
-    gcc_cflags = [marches[0], *RVV_CFLAGS[1:]]
+    gcc_cflags = _harness_cflags(clang_cflags)
     if vlen is not None and backend == "rvv":
         clang_cflags = march_with_vlen(clang_cflags, vlen)
         gcc_cflags = march_with_vlen(gcc_cflags, vlen)
+    selected_vectorize = _select_host_vectorize(clang_cflags, rvv_schedule, host_vectorize)
+    vectorize = host_vectorize is True
 
-    # 1. lower MLIR -> LLVM IR -> rv64gcv object. Parse + lower under IR_LOCK: xDSL's parser is not
+    runtime_compiler = _mlir_runtime_compiler(clang, gcc, gcc_cflags)
+
+    # 1. lower MLIR -> LLVM IR -> the declared host ISA object. Parse + lower under IR_LOCK: xDSL's parser is not
     #    thread-safe and a delivery builds several images in one process (see common.ir_lock).
     from ...common.ir_lock import IR_LOCK
 
@@ -340,7 +513,14 @@ def build(
             int8_compute
             or features
             or rvv_schedule
-            or (device is not None and getattr(device, "exact_selection", None) is not None)
+            or (
+                device is not None
+                and (
+                    getattr(device, "exact_selection", None) is not None
+                    or getattr(device, "catalog_manifest", None) is not None
+                    or getattr(device, "catalog_builder", None) is not None
+                )
+            )
         ):
             from . import zephyr_model as _zm
 
@@ -353,14 +533,14 @@ def build(
                 matrix=matrix,
                 device=device,
             )
-            vectorize = backend == "rvv"
+            vectorize = selected_vectorize
         if op_profile:
             # Instrumented AFTER preparation, so the ids name the ops that actually run -- instrumenting
             # the raw module would number ops the rewrites go on to split, fuse or route away, and the
             # table would then resolve PROF lines to the wrong names.
             from ...llvmlower import op_profile as _op_profile
 
-            text, prof_table = _op_profile.instrument(Path(prepared_path).read_text())
+            text, prof_table = _op_profile.instrument(Path(prepared_path).read_text(), structural=True)
             prepared_path = work / "model_prof.mlir"
             Path(prepared_path).write_text(text)
             _op_profile.write_table(prof_table, work / "op_profile_table.json")
@@ -383,7 +563,13 @@ def build(
     from ...llvmlower.impr_features import apply_cflags as _apply_cflags
 
     model_cflags = _apply_cflags(clang_cflags, frozenset(features or frozenset()))
-    _run([clang, CLANG_TARGET, *model_cflags, "-c", res.ll_path, "-o", work / "model.o"])
+    model_ir, host_ir_receipt = _transform_host_ir(res.ll_path, work / "host_llvm", host_llvm_transform)
+    compilation.run(
+        [clang, CLANG_TARGET, *model_cflags, "-c", model_ir, "-o", work / "model.o"],
+        runner=_run,
+        inputs=[model_ir],
+        output=work / "model.o",
+    )
 
     # 2. generate the data-driven runtime artifacts (arg table, call, weights.bin, io)
     cgen = work / "cgen"
@@ -399,7 +585,13 @@ def build(
     lay = _layout(arena_bytes, info["weights_bytes"], dram_base=dram_base, dram_bytes=dram_bytes, code_reserve=reserve)
 
     # 3. weights.bin -> binary blob object (placed at the absolute weights address)
-    _run([ld, "-r", "-b", "binary", "-o", work / "weights_blob.o", "weights.bin"], cwd=cgen)
+    compilation.run(
+        [ld, "-r", "-b", "binary", "-o", work / "weights_blob.o", "weights.bin"],
+        runner=_run,
+        inputs=[cgen / "weights.bin"],
+        output=work / "weights_blob.o",
+        cwd=cgen,
+    )
 
     # 4. compile the C runtime + generated call + harness for riscv. The arena/weights
     #    absolute addresses are baked in as literals (>2GB from code → no PC-rel symbol).
@@ -409,8 +601,165 @@ def build(
         f"-DMERLIN_ARENA_SIZE_BYTES={hex(arena_bytes)}ULL",
         f"-DMERLIN_WEIGHTS_BASE_ADDR={hex(lay['weights_base'])}ULL",
     ]
+    supplemental_objects = []
+    # 4b. the matrix-unit shim, if any contraction was routed to one. Built from the SIDECAR the rewrite
+    #     wrote rather than from anything passed in: the symbols the module actually calls are the ones
+    #     that must be defined, and a set reconstructed here could drift from them into a link error.
+    #     Compiled with CLANG, like the model object: the `.insn` directives and the vector intrinsics
+    #     want the same toolchain that lowered the model, and only the -march has to agree with GCC's.
+    # 4a-bis. the device objects, if any contraction was offloaded. Driven by the SIDECAR the rewrite
+    #         wrote rather than by anything passed in, for the same reason the matrix shim is: the
+    #         symbols the module actually calls are the ones that must be defined, and a set
+    #         reconstructed here could drift from them into a link error.
+    from ...llvmlower.device_offload import build_arguments as _device_build_arguments
+    from ...llvmlower.device_offload import load_sidecar as _load_device_sidecar
+
+    _dev_side = _load_device_sidecar(work)
+    _dev_args = _device_build_arguments(_dev_side)
+    _dev_sigs = _dev_args["signatures"]
+    _catalog_requested = device is not None and (
+        getattr(device, "catalog_manifest", None) is not None or getattr(device, "catalog_builder", None) is not None
+    )
+    if _catalog_requested and not _dev_sigs:
+        raise RuntimeError("requested external device catalog routed no model contractions")
+    if _catalog_requested and (not _dev_side.get("catalog_manifest") or not _dev_side.get("catalog_object")):
+        raise RuntimeError("device offload sidecar lost the external catalog artifacts")
+    if not _catalog_requested and _dev_side.get("catalog_manifest"):
+        raise RuntimeError("device offload sidecar names a catalog that this build did not request")
+    if _dev_sigs:
+        if device is None:
+            raise RuntimeError(
+                f"{len(_dev_sigs)} device signature(s) were offloaded but no `device=` routing is "
+                "available to build them against; the image would not link"
+            )
+        if _dev_side.get("device") != device.device:
+            raise RuntimeError("device offload sidecar does not match selected device")
+        exact = getattr(device, "exact_selection", None)
+        if exact is not None:
+            routed_ids = {row.get("operation_id") for row in _dev_side.get("routed") or ()}
+            if (
+                routed_ids != set(exact.by_operation_id)
+                or _dev_side.get("package_sha256") != exact.package_sha256
+                or _dev_side.get("transport") != exact.transport
+                or _dev_side.get("abi_sha256") != exact.abi_sha256
+                or _dev_side.get("certification_sha256") != list(exact.certification_sha256)
+            ):
+                raise RuntimeError("device offload sidecar lost exact operation or package identity")
+        _dev_dts = _dev_args["dtypes"]
+        if _dev_side.get("catalog_manifest") is not None:
+            from ...llvmlower.device_catalog import build_catalog_objects
+
+            _dev_build = build_catalog_objects(
+                device.device,
+                _dev_sigs,
+                _dev_dts,
+                manifest_path=_dev_side["catalog_manifest"],
+                object_path=_dev_side["catalog_object"],
+                source_sha256=_dev_side.get("model_sha256") or "",
+                routed=_dev_side.get("routed") or (),
+                workdir=work / "device",
+                codegen_target="riscv",
+                cflags=[CLANG_TARGET, *clang_cflags],
+            )
+        else:
+            from ...llvmlower.device_build import build_device_objects
+
+            _dev_build = build_device_objects(
+                device.device,
+                _dev_sigs,
+                _dev_dts,
+                package_dir=device.package_dir,
+                workdir=work / "device",
+                operand_dtype=device.operand_dtype,
+                accum_dtype=device.accum_dtype,
+                codegen_target="riscv",
+                numeric_policy=device.numeric_policy,
+                entries=_dev_args["entries"],
+                # the SAME ISA the rest of the image is built for -- see device_build._flags
+                cflags=[CLANG_TARGET, *clang_cflags],
+                expected_interfaces=_dev_side.get("expected_interfaces") or None,
+                package_sha256=_dev_side.get("package_sha256"),
+            )
+        if exact is not None:
+            exact.check_package(device.package_dir)
+            exact.check_backend_contract()
+        if not _dev_build.ok or set(_dev_build.kernels) != set(_dev_sigs):
+            raise RuntimeError(
+                f"device offload did not build every routed kernel for {device.device!r}: {_dev_build.skipped}"
+            )
+        supplemental_objects.extend(_dev_build.objects)
+        print(
+            f"[device] linked {len(_dev_build.kernels)} kernel(s) + shim for {device.device}"
+            f" ({_dev_side.get('granularity') or 'contraction'} granularity;"
+            f" built_from={sorted(set(_dev_build.built_from.values()))})"
+            + (f"; declined: {[w for _s, w in _dev_build.skipped]}" if _dev_build.skipped else "")
+        )
+
+    matrix_build = None
+    from .zephyr_model import load_matrix_signatures
+
+    matrix_sigs = load_matrix_signatures(work, matrix)
+    if matrix_sigs:
+        if matrix is None:
+            raise RuntimeError(
+                f"{len(matrix_sigs)} matrix-unit signature(s) were routed but no `matrix=` routing is "
+                "available to build them against; the image would not link"
+            )
+        matrix_build = matrix.provider().build_object(
+            matrix_sigs,
+            work / "matrix",
+            unit=matrix.unit,
+            config=matrix.config,
+            cc=clang,
+            cflags=[CLANG_TARGET, *clang_cflags],
+            scalar_tile=matrix_scalar_tile,
+        )
+        supplemental_objects.append(matrix_build.object_path)
+        print(
+            f"[matrix] linked {len(matrix_sigs)} entry point(s) for {matrix.unit} "
+            f"({matrix.config}, tile edge {matrix_build.tile_edge}, "
+            f"{'SCALAR STAND-IN' if matrix_build.scalar_tile else 'device instructions'}, "
+            f"{matrix_build.scratch_bytes} B pack scratch)"
+        )
+
+    def compile_host_math(cmd):
+        return compilation.run(
+            cmd,
+            runner=_run,
+            inputs=[work / "host_math/host_math.c"],
+            output=work / "host_math/host_math.o",
+        )
+
+    math_objects, math_link_flags = build_host_math(
+        host_math_policy, work / "host_math", gcc, gcc_cflags, compile_host_math
+    )
+    supplemental_objects.extend(math_objects)
+
+    from ...llvmlower.device_build import _nm
+    from ..host_provider import HostProviderContext, close_host_provider, prepare_host_provider
+
+    def compile_host_provider(cmd, *, inputs, output):
+        return compilation.run(cmd, runner=_run, inputs=inputs, output=Path(output))
+
+    provider_inspector = _nm() if host_provider_builder is not None else None
+    host_provider_objects, host_provider_receipt = prepare_host_provider(
+        host_provider_builder,
+        HostProviderContext(
+            Path(prepared_path),
+            Path(model_ir),
+            work / "model.o",
+            work / "host_provider",
+            Path(clang),
+            tuple([CLANG_TARGET, *clang_cflags]),
+            compile_host_provider,
+        ),
+        inspector=provider_inspector,
+    )
+    supplemental_objects.extend(host_provider_objects)
+
     # Build identity: the lowered model object plus the weights blob -- what computes the answer --
-    # AND the runtime sources this compiles, printed by the harness as `METRIC build_hash`.
+    # AND the runtime sources plus actual linked device/matrix object bytes,
+    # printed by the harness as `METRIC build_hash`.
     #
     # The runtime half is not bookkeeping. Adding the bare-metal heartbeat to merlin_op_prof.c changed
     # what the image PRINTS while model.o and weights.bin stayed byte-identical, so the instrumented
@@ -437,8 +786,39 @@ def build(
         ]
     )
     _hh.update(_source_digest(_rt_srcs).encode("utf-8"))
+    from ...common.digest import sha256_file
+
+    # This unit does not contain the build marker. Compile it before hashing so
+    # the actual ABI implementation can be bound without a circular link.
+    runtime_object = work / "mlir_rt.o"
+    compilation.run(
+        [*runtime_compiler, "-c", runtime_dir() / "abi/mlir_runtime.c", "-o", runtime_object],
+        runner=_run,
+        inputs=[runtime_dir() / "abi/mlir_runtime.c"],
+        output=runtime_object,
+    )
+    runtime_compiler_record = {
+        "command_prefix": runtime_compiler,
+        "version": _run([clang, "--version"]).stdout,
+        "compiler_sha256": sha256_file(clang),
+        "runtime_object_sha256": sha256_file(runtime_object),
+        "reason": "MLIR scalar helpers must use the lowered model compiler ABI",
+    }
+    runtime_compiler_json = json.dumps(runtime_compiler_record, sort_keys=True)
+    (work / "runtime_compiler.json").write_text(runtime_compiler_json + "\n")
+    _hh.update(runtime_compiler_json.encode("utf-8"))
+    if supplemental_objects:
+        _hh.update(_supplemental_object_digest(supplemental_objects))
+    if math_link_flags:
+        _hh.update(json.dumps(list(math_link_flags)).encode("utf-8"))
     # The instrumentation switches change the emitted code, so they belong in the identity too.
-    _hh.update(f"op_profile={bool(op_profile)} heartbeat={int(prof_heartbeat_cycles)}".encode())
+    _hh.update(
+        f"op_profile={bool(op_profile)} heartbeat={int(prof_heartbeat_cycles)} output_dump_cap={output_dump_cap}".encode(
+            "utf-8"
+        )
+    )
+    if output_sha256:
+        _hh.update(b"output_sha256=True")
     build_hash = _hh.hexdigest()[:12]
     # Console backend: one of two implementations of the same four-symbol ABI. `uart` needs the
     # target's own MMIO facts, derived from its SDK headers -- never defaulted, because a wrong
@@ -477,7 +857,12 @@ def build(
         "merlin_model.o": (rt / "merlin_model.c", inc),
         "model_main.o": (
             h / "model_main.c",
-            inc + addr_defs + console_defs + prof_defs + [f'-DMERLIN_BUILD_HASH="{build_hash}"'],
+            inc
+            + addr_defs
+            + console_defs
+            + prof_defs
+            + [f'-DMERLIN_BUILD_HASH="{build_hash}"', f"-DMERLIN_DUMP_CAP={output_dump_cap}"]
+            + (["-DMERLIN_OUTPUT_SHA256"] if output_sha256 else []),
         ),
         "mlir_rt.o": (runtime_dir() / "abi/mlir_runtime.c", []),
         "crt.o": (h / "crt.S", []),
@@ -489,112 +874,19 @@ def build(
         units["op_prof.o"] = (rt / "merlin_op_prof.c", prof_defs)
     objs = []
     for obj, (src, extra) in units.items():
-        _run([gcc, *gcc_cflags, *extra, "-c", src, "-o", work / obj])
+        if work / obj != runtime_object:
+            compilation.run(
+                [gcc, *gcc_cflags, *extra, "-c", src, "-o", work / obj],
+                runner=_run,
+                inputs=[src],
+                output=work / obj,
+            )
         objs.append(work / obj)
-    objs += [work / "model.o", work / "weights_blob.o"]
-
-    # 4b. the matrix-unit shim, if any contraction was routed to one. Built from the SIDECAR the rewrite
-    #     wrote rather than from anything passed in: the symbols the module actually calls are the ones
-    #     that must be defined, and a set reconstructed here could drift from them into a link error.
-    #     Compiled with CLANG, like the model object: the `.insn` directives and the vector intrinsics
-    #     want the same toolchain that lowered the model, and only the -march has to agree with GCC's.
-    # 4a-bis. the device objects, if any contraction was offloaded. Driven by the SIDECAR the rewrite
-    #         wrote rather than by anything passed in, for the same reason the matrix shim is: the
-    #         symbols the module actually calls are the ones that must be defined, and a set
-    #         reconstructed here could drift from them into a link error.
-    from ...llvmlower.device_offload import build_arguments as _device_build_arguments
-    from ...llvmlower.device_offload import load_sidecar as _load_device_sidecar
-
-    _dev_side = _load_device_sidecar(work)
-    # THE STATEMENT THE REWRITE WROTE, NOT A RECONSTRUCTION. A group route records each routed
-    # symbol's own program in the sidecar -- epilogue, requantize multiplier, convolution geometry,
-    # committed type -- and a build that read only the signatures would synthesize a bare contraction
-    # of the same extents: the same kernel count, the same link, and every layer's readout gone. One
-    # reader for all three arguments, so the one that is easy to forget cannot be.
-    _dev_args = _device_build_arguments(_dev_side)
-    _dev_sigs = _dev_args["signatures"]
-    if _dev_sigs:
-        if device is None:
-            raise RuntimeError(
-                f"{len(_dev_sigs)} device signature(s) were offloaded but no `device=` routing is "
-                "available to build them against; the image would not link"
-            )
-        if _dev_side.get("device") != device.device:
-            raise RuntimeError("device offload sidecar does not match selected device")
-        exact = getattr(device, "exact_selection", None)
-        if exact is not None:
-            routed_ids = {row.get("operation_id") for row in _dev_side.get("routed") or ()}
-            if (
-                routed_ids != set(exact.by_operation_id)
-                or _dev_side.get("package_sha256") != exact.package_sha256
-                or _dev_side.get("transport") != exact.transport
-                or _dev_side.get("abi_sha256") != exact.abi_sha256
-                or _dev_side.get("certification_sha256") != list(exact.certification_sha256)
-            ):
-                raise RuntimeError("device offload sidecar lost exact operation or package identity")
-        from ...llvmlower.device_build import build_device_objects
-
-        _dev_build = build_device_objects(
-            device.device,
-            _dev_sigs,
-            _dev_args["dtypes"],
-            package_dir=device.package_dir,
-            workdir=work / "device",
-            operand_dtype=device.operand_dtype,
-            accum_dtype=device.accum_dtype,
-            codegen_target="riscv",
-            numeric_policy=device.numeric_policy,
-            entries=_dev_args["entries"],
-            # the SAME ISA the rest of the image is built for -- see device_build._flags
-            cflags=[CLANG_TARGET, *clang_cflags],
-            expected_interfaces=_dev_side.get("expected_interfaces") or None,
-            package_sha256=_dev_side.get("package_sha256"),
-        )
-        if exact is not None:
-            exact.check_package(device.package_dir)
-            exact.check_backend_contract()
-        if not _dev_build.ok or set(_dev_build.kernels) != set(_dev_sigs):
-            raise RuntimeError(
-                f"device offload did not build every routed kernel for {device.device!r}: {_dev_build.skipped}"
-            )
-        objs.extend(_dev_build.objects)
-        print(
-            f"[device] linked {len(_dev_build.kernels)} kernel(s) + shim for {device.device}"
-            f" ({_dev_side.get('granularity') or 'contraction'} granularity;"
-            f" built_from={sorted(set(_dev_build.built_from.values()))})"
-            + (f"; declined: {[w for _s, w in _dev_build.skipped]}" if _dev_build.skipped else "")
-        )
-
-    matrix_build = None
-    from .zephyr_model import load_matrix_signatures
-
-    matrix_sigs = load_matrix_signatures(work, matrix)
-    if matrix_sigs:
-        if matrix is None:
-            raise RuntimeError(
-                f"{len(matrix_sigs)} matrix-unit signature(s) were routed but no `matrix=` routing is "
-                "available to build them against; the image would not link"
-            )
-        matrix_build = matrix.provider().build_object(
-            matrix_sigs,
-            work / "matrix",
-            unit=matrix.unit,
-            config=matrix.config,
-            cc=clang,
-            cflags=[CLANG_TARGET, *clang_cflags],
-            scalar_tile=matrix_scalar_tile,
-        )
-        objs.append(matrix_build.object_path)
-        print(
-            f"[matrix] linked {len(matrix_sigs)} entry point(s) for {matrix.unit} "
-            f"({matrix.config}, tile edge {matrix_build.tile_edge}, "
-            f"{'SCALAR STAND-IN' if matrix_build.scalar_tile else 'device instructions'}, "
-            f"{matrix_build.scratch_bytes} B pack scratch)"
-        )
+    objs += [work / "model.o", work / "weights_blob.o", *supplemental_objects]
 
     # 5. link: weights blob at its absolute high address.
     elf = work / "model.elf"
-    _run(
+    compilation.run(
         [
             gcc,
             *gcc_cflags,
@@ -605,11 +897,19 @@ def build(
             "-T",
             h / "model_link.ld",
             *objs,
+            *math_link_flags,
             "-lm",
             "-o",
             elf,
-        ]
+        ],
+        runner=_run,
+        inputs=[h / "model_link.ld", *objs],
+        output=elf,
     )
+    if device is not None and getattr(device, "final_elf_audit", None) is not None:
+        device.final_elf_audit(elf)
+    close_host_provider(host_provider_receipt, objs, elf, inspector=provider_inspector, link_flags=math_link_flags)
+    compilation.completed(elf)
     return {
         "elf": elf,
         "mem_bytes": lay["mem_bytes"],
@@ -619,7 +919,16 @@ def build(
         # Reported so `run` can be given it. A run at a different vector length than the build
         # mis-places every scalable-vector spill slot; see run()'s docstring.
         "vlen": vlen,
+        "host_vectorize": vectorize,
+        "host_math_policy": host_math_policy,
+        "host_llvm_transform": host_ir_receipt,
+        **({"host_provider": host_provider_receipt} if host_provider_receipt is not None else {}),
+        "supplemental_objects_sha256": _supplemental_object_digest(supplemental_objects).hex()
+        if supplemental_objects
+        else None,
         "console": console,
+        "output_dump_cap": output_dump_cap,
+        "output_sha256": output_sha256,
         "chip_freq_hz": chip_freq_hz,
         "console_provenance": dict(console_facts.provenance) if console_facts else {},
         # The matrix build carries the hardware revision its instructions were derived from, so a

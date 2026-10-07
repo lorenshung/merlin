@@ -21,6 +21,7 @@ from merlin.targetgen import capsule_grade as CG
 from merlin.targetgen import capsule_runner as CR
 from merlin_experiments.phase1.context import InvocationContext, add_context_arguments, resolve_context
 from merlin_experiments.phase1.feedback import freeze as freeze_run
+from merlin_experiments.phase1.feedback import private_full_models as PFM
 
 # This is the certification tier for the Arm-4 functional experiment.  A cheaper-tier pass is
 # useful iteration feedback, but is not a completed formal run.  Keep the requirement next to the
@@ -301,6 +302,11 @@ def main(argv: list[str] | None = None, *, context: InvocationContext | None = N
     )
     ap.add_argument("--no-oracle", action="store_true")
     ap.add_argument("--skip-hidden", action="store_true")
+    ap.add_argument(
+        "--private-full-model-spec",
+        type=Path,
+        help="operator-only frozen validation input; never passed to an authoring workspace",
+    )
     a = ap.parse_args(argv)
     if a.rtl_facts is not None:
         if a.workspace is None:
@@ -401,10 +407,39 @@ def main(argv: list[str] | None = None, *, context: InvocationContext | None = N
         hidden_phase["passed"] = "not_run"
         hidden_phase["completion_failures"] = ["hidden_grade_skipped"]
         hidden_phase["formal_complete"] = False
-    formal_grade_complete = bool(public_phase["formal_complete"] and hidden_phase["formal_complete"])
+    required_full_models = PFM.requirements_for(context.descriptor)
+    required_full_programs = PFM.program_requirements_for(context.descriptor)
+    required_loader_env = PFM.loader_env_requirements_for(context.descriptor)
+    private_models: dict = {
+        "schema": PFM.RESULT_SCHEMA,
+        "passed": False,
+        "required_models": list(required_full_models),
+        "models": [],
+        "reason": "operator-private full-model validation input was not supplied",
+    }
+    if required_full_models and a.private_full_model_spec is not None:
+        try:
+            private_models = PFM.run(
+                pkg,
+                a.private_full_model_spec,
+                target=context.target,
+                required_models=required_full_models,
+                required_programs=required_full_programs,
+                loader_env_requirements=required_loader_env,
+                out=run_dir / "grading_private_full_models",
+            )
+        except Exception as exc:  # noqa: BLE001 -- missing private evidence is an incomplete run
+            private_models["reason"] = f"{type(exc).__name__}: {exc}"
+    # A descriptor with no private full-model declaration cannot silently make a new
+    # Phase 1 success claim.  Older diagnostic experiments remain runnable, incomplete.
+    private_models_complete = bool(required_full_models) and private_models.get("passed") is True
+    formal_grade_complete = bool(
+        public_phase["formal_complete"] and hidden_phase["formal_complete"] and private_models_complete
+    )
     completion_failures = [
         *(f"public:{reason}" for reason in public_phase["completion_failures"]),
         *(f"hidden:{reason}" for reason in hidden_phase["completion_failures"]),
+        *([] if private_models_complete else ["private_full_models:incomplete"]),
     ]
 
     # --- process metrics (from launcher), env, run_manifest ---
@@ -424,9 +459,12 @@ def main(argv: list[str] | None = None, *, context: InvocationContext | None = N
         "integrity_exempt": pub.get("integrity_exempt"),
         "public_dev": public_phase,
         "hidden": hidden_phase,
+        "private_full_models": private_models,
         "completion": {
             "formal_grade_complete": formal_grade_complete,
             "required_tier": FORMAL_REQUIRED_TIER,
+            "required_full_models": list(required_full_models),
+            "required_full_programs": {name: list(required_full_programs[name]) for name in required_full_models},
             "failures": completion_failures,
         },
         "cycles_diagnostic": pub.get("cycles_diagnostic", {}),

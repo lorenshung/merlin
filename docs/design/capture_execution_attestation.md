@@ -59,9 +59,9 @@ execute only those snapshots with the source and runtime read-only, no network, 
 no ambient checkout, home or cache; then verify the source and output bytes again.
 The issuer must bind the exact command, environment, isolation controls, fresh run
 identity, capture artifact inventory, and materialized receipt into its result.
-The currently admitted issuer is only Merlin's sealed Model2MLIR CPU v2 runner,
-under the preselection and replay policy described below; these requirements do
-not grant admission to another Python/model issuer.
+The admitted issuers are Merlin's sealed Model2MLIR CPU v2 and v3 runners,
+under their respective preselection and replay policies described below; these
+requirements do not grant admission to another Python/model issuer.
 
 Bubblewrap being installed is insufficient: an ordinary Python virtual environment
 may read dependencies and caches outside the declared source selection. Without
@@ -169,11 +169,28 @@ copied selected virtual environment remain explicit provenance limits.
 For newly selected Phase 0 inputs, `phase0.capture_selection` fixes the plan,
 issuer source, sandbox policy and tool bytes **before** the sealed run exists.
 Independent replay of those exact selected bytes yields a
-`verified_preselected_replay` record. The reviewed admission policy permits only
-that sealed CPU v2 issuer: `attest_sealed_m2m` issues
+`verified_preselected_replay` record. The reviewed admission policy permits the
+sealed CPU v2 and v3 issuers under their respective preselection policies:
+`attest_sealed_m2m` issues
 `verified_sealed_execution` with `source_closure_verified: true`, while
 `require_verified_execution` re-reads the selection, pending sealed receipt,
 materialized receipt and model bytes on each admission. The policy explicitly
 accepts that the receipt is unsigned and the copied virtual environment is not
 an independently pinned dependency set. Neither a raw Model2MLIR receipt nor
 the diagnostic assessment can acquire this status retroactively.
+
+The v3 policy extends this selection to complete pretrained networks and
+multi-program sessions. Its input plan inventories explicitly selected checkpoint
+files or trees, their indirect file members, fixed loader-environment values
+(including absence), and a bounded execution timeout. The sandbox mounts only
+those selected bytes and reconstructs the same command, environment and timeout
+for replay. Source-tree bytes, rather than a clean Git label, identify the selected
+Model2MLIR implementation. An older capture cannot be adopted into this policy.
+
+Every program in a session must have a materialized receipt and match the root
+session's complete stage roster and ABI. Recipe-bearing int8 stages additionally
+require preserved recipe identity, independently checked integer-reference
+agreement and actual integer contractions. Stages with no recipe-eligible work
+retain FP32 semantics; they do not acquire an int8 claim merely by belonging to
+the session. The v3 attestation binds all stages, selected inputs and replay,
+retaining the same unsigned-receipt and selected-runtime provenance limits.

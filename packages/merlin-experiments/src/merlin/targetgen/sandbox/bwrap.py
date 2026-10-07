@@ -23,9 +23,11 @@ import os
 import shutil
 import stat
 from collections.abc import Callable, Sequence
+from itertools import chain
 from pathlib import Path
 
 from merlin.common import content_store
+from merlin.common.access import contract_resource_roots
 from merlin.common.paths import repo_root
 from merlin.targetgen.sandbox.answer_surfaces import AnswerSurface, answer_surfaces
 from merlin.targetgen.target_experiment import TargetExperiment
@@ -202,6 +204,27 @@ def _host_input_paths(bundle: dict) -> list[str]:
     if len(set(paths)) != len(paths) or any(".." in Path(path).parts for path in paths):
         raise RuntimeError("host_inputs must have unique, non-escaping paths")
     return paths
+
+
+def _private_validation_paths(bundle: dict) -> list[tuple[Path, str]]:
+    """Operator-selected model inputs are denials, not candidate grants or CAS inputs."""
+    entries = bundle.get("private_validation_paths", [])
+    if not isinstance(entries, list):
+        raise RuntimeError("private_validation_paths must be a list")
+    out: list[tuple[Path, str]] = []
+    for row in entries:
+        if not isinstance(row, dict) or row.get("kind") not in {"file", "dir"}:
+            raise RuntimeError("private validation path has no file/dir kind")
+        value = row.get("path")
+        if not isinstance(value, str) or not value:
+            raise RuntimeError("private validation path is absent")
+        path = Path(value)
+        if not path.is_absolute() or ".." in path.parts or path == Path("/"):
+            raise RuntimeError("private validation path must be absolute and non-broad")
+        out.append((path, row["kind"]))
+    if len({path for path, _ in out}) != len(out):
+        raise RuntimeError("private validation paths repeat a spelling")
+    return out
 
 
 def _validate_host_sources(grants: list[tuple[str, Path]], hosts: list[tuple[str, Path]]) -> None:
@@ -763,6 +786,21 @@ def _bundle_mount_args(ws: Path, bundle: dict, repo: Path, *, _policy_test_live_
             manifest, _ = _snapshot_grants(ws, bundle, repo)
             host_records = _snapshot_host_inputs(ws, bundle, repo, manifest)
         deny_dests.extend((destination, path_kind(frozen)) for _, destination, frozen in host_records)
+    for private, kind in _private_validation_paths(bundle):
+        if private == ws or private in ws.parents or private.is_relative_to(ws):
+            raise RuntimeError("private validation input overlaps the writable authoring workspace")
+        observed = path_kind(private)
+        if private.is_symlink() or (observed != "missing" and observed != kind):
+            raise RuntimeError("private validation path changed kind")
+        if any(allowed == private or allowed.is_relative_to(private) for allowed in allow_dests):
+            raise RuntimeError("candidate grant overlaps an operator-private validation input")
+        if observed == "missing" and any(private.is_relative_to(allowed) for allowed in allow_dests):
+            raise RuntimeError("candidate grant could expose a future operator-private validation output")
+        # Scratch is already hidden. A redundant deeper --tmpfs under an
+        # absent parent can make bwrap fail before the agent starts; add the
+        # denial only when an actual declared parent grant would expose it.
+        if observed != "missing" and any(private.is_relative_to(allowed) for allowed in allow_dests):
+            deny_dests.append((private, kind))
 
     ops: list[tuple[int, int, list[str]]] = []
     for destination, frozen in live:
@@ -1105,7 +1143,7 @@ def _bind_alias(private: Path, kind: str, source: Path, destination: Path) -> tu
 
 
 def _support_bind_surfaces(argv: list[str], surfaces: list[AnswerSurface]) -> list[AnswerSurface]:
-    """Project support denials through every bind, including deeper re-exposures.
+    """Project answer denials through every bind, including deeper re-exposures.
 
     Only explicit binds sourced within a surface-declared public subtree are
     exempt. A broad support bind does not grant its contracts implicitly. Both
@@ -1116,12 +1154,10 @@ def _support_bind_surfaces(argv: list[str], surfaces: list[AnswerSurface]) -> li
     result = {surface.path: surface for surface in surfaces}
     mounts = _mounts(argv)
     for surface in surfaces:
-        if surface.origin != "backend":
-            continue
         for private in {surface.path.absolute(), surface.path.resolve()}:
             exemptions = tuple(private / sub for sub in surface.grantable)
             result.setdefault(
-                private, AnswerSurface(surface.label, private, surface.kind, "backend", surface.grantable)
+                private, AnswerSurface(surface.label, private, surface.kind, surface.origin, surface.grantable)
             )
             for state, raw_source, raw_destination in mounts:
                 if state != "expose":
@@ -1151,6 +1187,67 @@ def _frozen_support_surfaces(ws: Path, bundle: dict, surfaces: list[AnswerSurfac
     """Use copy-time ownership even when live providers/aliases disappear or change."""
     manifest, _ = _snapshot_grants(ws, bundle, repo)
     return snapshot_support_surfaces(ws, manifest)
+
+
+def _frozen_answer_surfaces(
+    ws: Path, bundle: dict, te: TargetExperiment, live: list[AnswerSurface], repo: Path
+) -> list[AnswerSurface]:
+    """Classify answer bytes in pinned public grants, independent of mutable live sources.
+
+    The snapshot marker fixes grant destinations and sources. Walking only its
+    corpus/example subtrees inspects names, not payload bytes or a fresh digest;
+    the host-owned snapshot verification remains the authority for those bytes.
+    A live golden removed after freezing must still be denied at both its public
+    grant destination and any late runtime alias of the snapshot source.
+    """
+    _, grants = _snapshot_grants(ws, bundle, repo)
+    corpus_roots = list(contract_resource_roots(repo, "capsules"))
+    if te.capsule_corpus is not None:
+        corpus_roots.extend((te.capsule_corpus.parent, te.capsule_corpus))
+    corpus_roots.extend(repo / rel.rstrip("/") for rel in te.corpus_siblings())
+    example_roots = [*contract_resource_roots(repo, "examples"), repo / "merlin/tests"]
+    result: dict[Path, AnswerSurface] = {}
+
+    def add(path: Path, kind: str, origin: str, grantable: tuple[str, ...] = ()) -> None:
+        if path_kind(path) == kind:
+            result[path] = AnswerSurface(f"frozen {origin}:{path.name}", path, kind, origin, grantable)
+
+    for _, destination, source in grants:
+        # Preserve every discovered private identity, including registry-owned
+        # modules and support providers copied by a broad public grant.
+        for surface in live:
+            if surface.path.is_relative_to(destination):
+                add(
+                    source / surface.path.relative_to(destination),
+                    surface.kind,
+                    surface.origin,
+                    surface.grantable,
+                )
+
+        classified_roots = [(path, "corpus") for path in corpus_roots]
+        classified_roots.extend((path, "example") for path in example_roots)
+        for base, category in classified_roots:
+            if base.is_relative_to(destination):
+                frozen_base = source / base.relative_to(destination)
+            elif destination.is_relative_to(base):
+                frozen_base = source
+            else:
+                continue
+            members = chain((frozen_base,), frozen_base.rglob("*")) if frozen_base.is_dir() else (frozen_base,)
+            for member in members:
+                if category == "corpus":
+                    if member.is_dir() and member.name == "hidden":
+                        add(member, "dir", "hidden")
+                    elif member.is_file():
+                        if member.name.startswith("golden.") or member.name == "expected_instruction_coverage.yaml":
+                            add(member, "file", "golden")
+                        elif member.name.endswith((".safetensors", ".safetensors.manifest.json")):
+                            add(member, "file", "weight")
+                        elif member.parent.name == "profiles" and member.name.endswith(".hidden.yaml"):
+                            add(member, "file", "hidden")
+                elif member.is_file() and member.name.startswith("expected_"):
+                    add(member, "file", "example")
+    return list(result.values())
 
 
 # --------------------------------------------------------------------------- full assembly
@@ -1293,7 +1390,9 @@ def host_input_surfaces(
     ``grant_repo`` relocates only verified repo-relative public destinations;
     external grants keep their original destination and privacy is unchanged.
     """
-    if not bundle or (not bundle.get("host_inputs") and _policy_test_live_inputs):
+    if not bundle or (
+        not bundle.get("host_inputs") and not bundle.get("private_validation_paths") and _policy_test_live_inputs
+    ):
         return []
     repo = (repo or repo_root()).absolute()
     approved: set[tuple[Path, Path]] = set()
@@ -1316,6 +1415,21 @@ def host_input_surfaces(
                 for _, destination, source in grants
                 if destination.is_relative_to(repo)
             )
+    for path, kind in _private_validation_paths(bundle):
+        if path_kind(path) == "missing":
+            # A future file cannot be masked reliably while absent. Refuse a
+            # composed live bind of its ancestor, including runtime aliases
+            # added after the frozen bundle's own public grants.
+            for state, source, _destination in _mounts(argv):
+                if state != "expose":
+                    continue
+                host_source = Path(source).absolute()
+                if path.is_relative_to(host_source) or path.is_relative_to(host_source.resolve()):
+                    raise RuntimeError("runtime bind could expose a future operator-private validation output")
+            continue
+        if path_kind(path) != kind or path.is_symlink():
+            raise RuntimeError("private validation path changed kind or became indirect")
+        records.append((str(path), path, path))
     return _private_path_surfaces(argv, records, approved)
 
 
@@ -1389,8 +1503,13 @@ def apply_final_answer_masks(
         if _policy_test_live_inputs or not bundle
         else _frozen_support_surfaces(ws, bundle, answers, (repo or repo_root()).absolute())
     )
+    frozen_answers = (
+        []
+        if _policy_test_live_inputs or not bundle
+        else _frozen_answer_surfaces(ws, bundle, te, answers, (repo or repo_root()).absolute())
+    )
     support = [surface for surface in [*answers, *frozen_support] if surface.origin == "backend"]
-    result = apply_answer_masks(argv, [*answers, *frozen_support, *private])
+    result = apply_answer_masks(argv, [*answers, *frozen_support, *frozen_answers, *private])
     if coverage_gap(result, support):
         raise RuntimeError("selected support package remains exposed after final masking")
     # The host-child context names private source authority. Provider/runtime

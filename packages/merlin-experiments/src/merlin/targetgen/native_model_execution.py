@@ -1236,3 +1236,17 @@ def execute_candidate_model(
     finally:
         record["build_artifacts"] = _build_artifacts(output)
         receipt.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def __getattr__(name: str) -> Any:
+    """Keep historical private helper imports without eagerly cycling the grader modules."""
+    if name in {
+        "_mandatory_command_blocks",
+        "_kernel_command_inventory",
+        "_verified_work_functs_by_family",
+        "_completed_eligible_tasks",
+    }:
+        from . import native_dispatch_accounting
+
+        return getattr(native_dispatch_accounting, name)
+    raise AttributeError(name)

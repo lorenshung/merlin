@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from merlin.capture.integerization import contraction_partition
 from merlin.targetgen import capsule_source as source
 
 _ONE_INTEGER_MM = """builtin.module {
@@ -101,28 +102,68 @@ def test_static_pt2e_receipt_accepts_complete_proof():
     )
 
 
+def test_preserved_qdq_partition_requires_complete_typed_accounting():
+    receipt = _receipt(seen=2, rewritten=1, remaining=1)
+    receipt["precision_decisions"] = [
+        {"kind": "linear", "node": "int_linear", "decision": "integerized_i32"},
+        {
+            "kind": "linear",
+            "node": "bf16_linear",
+            "decision": "preserve_float_qdq",
+            "source_dtype": "torch.bfloat16",
+            "required_numeric_semantics": "dequantize-before-floating-contraction",
+        },
+    ]
+    receipt["precision_decision_counts"] = {"integerized_i32": 1, "preserve_float_qdq": 1, "unresolved": 0}
+    receipt["refusals"] = [{"kind": "linear", "node": "bf16_linear", "reason": "non-f32 Q/DQ precision"}]
+    assert contraction_partition(receipt) == {"seen": 2, "integerized": 1, "preserved": 1}
+    receipt["precision_decisions"][1]["source_dtype"] = "torch.float32"
+    with pytest.raises(ValueError, match="non-FP32"):
+        contraction_partition(receipt)
+    receipt["precision_decisions"][1]["source_dtype"] = "torch.bfloat16"
+    receipt["refusals"].append({"kind": "linear", "node": "hidden", "reason": "unsupported layout"})
+    with pytest.raises(ValueError, match="exact preserved"):
+        contraction_partition(receipt)
+    receipt["refusals"].pop()
+    receipt["precision_decisions"][1]["decision"] = "unresolved"
+    with pytest.raises(ValueError, match="unresolved"):
+        contraction_partition(receipt)
+
+
 def test_selected_integer_reference_requires_exact_byte_bound_proof(tmp_path: Path):
     reference = tmp_path / "integer-reference.json"
     reference.write_text('{"outputs": [1]}\n')
     receipt = _receipt()
     proof = receipt["golden_agreement"]
     proof.update(
-        reference="pt2e_integer", atol=0.0, rtol=0.0, max_abs=0.0, max_rel=0.0,
+        reference="pt2e_integer",
+        atol=0.0,
+        rtol=0.0,
+        max_abs=0.0,
+        max_rel=0.0,
         source={"path": "pt2e_integer_reference.py", "sha256": "a" * 64},
         output={"path": reference.name, "sha256": hashlib.sha256(reference.read_bytes()).hexdigest()},
-        executed_contractions={"conv2d": 0, "linear": 1, "matmul": 0,
-                               "total": 1, "selected": 1, "observed": 1},
+        executed_contractions={"conv2d": 0, "linear": 1, "matmul": 0, "total": 1, "selected": 1, "observed": 1},
     )
     proof["outputs"][0].update(atol=0.0, rtol=0.0, max_abs=0.0, max_rel=0.0)
-    meta = {"recipe": {"software_numerical_engine": "integer_reference"},
-            "integerization_receipt": receipt, "quantization_stats": {"annotated_contractions": 1}}
+    meta = {
+        "recipe": {"software_numerical_engine": "integer_reference"},
+        "integerization_receipt": receipt,
+        "quantization_stats": {"annotated_contractions": 1},
+    }
     source._require_pt2e_integerization_receipt(
-        _ONE_INTEGER_MM, meta, agreement_tolerance=(0.03125, 0.02), capture_root=tmp_path,
+        _ONE_INTEGER_MM,
+        meta,
+        agreement_tolerance=(0.03125, 0.02),
+        capture_root=tmp_path,
     )
     reference.write_text('{"outputs": [2]}\n')
     with pytest.raises(source.M2MUnavailable, match="artifact does not match"):
         source._require_pt2e_integerization_receipt(
-            _ONE_INTEGER_MM, meta, agreement_tolerance=(0.03125, 0.02), capture_root=tmp_path,
+            _ONE_INTEGER_MM,
+            meta,
+            agreement_tolerance=(0.03125, 0.02),
+            capture_root=tmp_path,
         )
 
 

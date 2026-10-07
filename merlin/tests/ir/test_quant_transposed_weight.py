@@ -1,5 +1,7 @@
 """A constant quantized weight transpose must not become per-inference dequant/requant work."""
 
+import pytest
+
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.passes_quant_int import lower_contraction_int8
 
@@ -45,3 +47,64 @@ def test_quantized_weight_is_transposed_as_i8_without_runtime_requantization():
     assert weight_path_names.count("math.absf") == 1
     assert weight_path_names.count("math.roundeven") == 1
     assert weight_path_names.count("arith.fptosi") == 1
+
+
+def _per_tensor_ir(zero_point):
+    ir = IR.replace("%ws: tensor<4xf32>, %wz: tensor<4xi64>", "%ws: tensor<f32>, %wz: tensor<i64>")
+    ir = ir.replace(
+        '    %w = "quant_ext.dequantize_per_channel"(%wq, %ws, %wz)',
+        f"    %zpv = arith.constant {zero_point} : i64\n"
+        "    %zpt = tensor.splat %zpv : tensor<i64>\n"
+        '    %w = "quant_ext.dequantize_per_tensor"(%wq, %ws, %zpt)',
+    )
+    ir = ir.replace(
+        "<{axis = 0 : i64, quant_min = -127 : i64, quant_max = 127 : i64}>",
+        "<{quant_min = -127 : i64, quant_max = 127 : i64}>",
+    )
+    return ir.replace("(tensor<4x8xi8>, tensor<4xf32>, tensor<4xi64>)", "(tensor<4x8xi8>, tensor<f32>, tensor<i64>)")
+
+
+def test_per_tensor_quantized_transpose_keeps_calibrated_bytes_and_scalar_scale():
+    module = parse_mlir_text(_per_tensor_ir(0))
+    report = {}
+    assert lower_contraction_int8(module, report_out=report) == 1
+    assert report["transposed_quantized_weight_reused"] == 1
+    assert sum(op.name == "math.roundeven" for op in module.walk()) == 1
+    transposed = next(
+        op for op in module.walk() if op.name == "linalg.transpose" and str(op.results[0].type) == "tensor<8x4xi8>"
+    )
+    assert transposed.inputs[0] is next(op for op in module.walk() if op.name == "func.func").body.block.args[3]
+    # The generated requant generic must index its scalar weight scale with ().
+    requant = [op for op in module.walk() if op.name == "linalg.generic"][-1]
+    assert any(len(am.data.results) == 0 for am in requant.indexing_maps)
+
+
+def test_nonzero_per_tensor_zero_point_is_not_reused():
+    module = parse_mlir_text(_per_tensor_ir(3))
+    report = {}
+    assert lower_contraction_int8(module, report_out=report) == 1
+    assert not report.get("transposed_quantized_weight_reused", 0)
+    assert sum(op.name == "math.roundeven" for op in module.walk()) == 2
+
+
+@pytest.mark.parametrize("zero_point", [0, 3])
+def test_static_activation_keeps_scale_through_flatten_and_expand(zero_point):
+    source = _per_tensor_ir(0).replace("%aq: tensor<1x8xi8>", "%aq: tensor<1x1x8xi8>")
+    source = source.replace(
+        '    %a = "quant_ext.dequantize_per_tensor"(%aq, %as, %az)',
+        f"    %azv = arith.constant {zero_point} : i64\n"
+        "    %azt = tensor.splat %azv : tensor<i64>\n"
+        '    %a3 = "quant_ext.dequantize_per_tensor"(%aq, %as, %azt)',
+    )
+    source = source.replace(
+        "(tensor<1x8xi8>, tensor<f32>, tensor<i64>) -> tensor<1x8xf32>",
+        "(tensor<1x1x8xi8>, tensor<f32>, tensor<i64>) -> tensor<1x1x8xf32>\n"
+        "    %af = tensor.collapse_shape %a3 [[0, 1, 2]] : tensor<1x1x8xf32> into tensor<8xf32>\n"
+        "    %a = tensor.expand_shape %af [[0, 1]] output_shape [1, 8] : tensor<8xf32> into tensor<1x8xf32>",
+    )
+    module = parse_mlir_text(source)
+    report = {}
+    assert lower_contraction_int8(module, report_out=report) == 1
+    assert report.get("static_activation_reshape_reused", 0) == int(zero_point == 0)
+    assert sum(op.name == "math.roundeven" for op in module.walk()) == int(zero_point != 0)
+    module.verify()
