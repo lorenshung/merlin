@@ -492,29 +492,78 @@ def _log_telemetry(out: dict, capsules_arg: str) -> None:
         pass
 
 
-def _gated_without_result_rows(score: dict) -> list[dict]:
-    """Explain a model-only grade deferred by its op-evidence gate.
+def _gated_without_result_rows(
+    score: dict, *, requested: set[str], models: set[str], represented: set[str]
+) -> list[dict]:
+    """Project only requested, unexecuted model gates from the grader's score.
 
-    Gated models have score rows but no ``capsule_result.json`` because no model
-    was executed. That is an intentional non-verdict, not a lost harness output.
-    A mixed/unknown empty result set remains a harness fault.
+    The grader records a gated model in its score but writes no
+    ``capsule_result.json``. Its gate is a known non-verdict even when operation
+    results exist beside it. Every score identity must belong to this request;
+    malformed or contradictory score rows cannot be turned into feedback.
     """
     rows = score.get("per_capsule") if isinstance(score, dict) else None
+    if not isinstance(rows, list) or not represented <= requested or not models <= requested:
+        raise ValueError("self-check score identities are invalid")
+    seen: set[str] = set()
+    gated: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("self-check score row is invalid")
+        name, status = row.get("capsule"), row.get("status")
+        if (
+            not isinstance(name, str)
+            or not name
+            or name not in requested
+            or name in seen
+            or not isinstance(status, str)
+            or not status
+        ):
+            raise ValueError("self-check score row identity is invalid")
+        seen.add(name)
+        if status != "gated":
+            continue
+        reason = row.get("gate_reason")
+        if (
+            row.get("kind") != "model"
+            or name not in models
+            or name in represented
+            or not isinstance(reason, str)
+            or not reason
+        ):
+            raise ValueError("self-check gated row is inconsistent with capsule results")
+        gated.append({"capsule": name, "pass": False, "status": "gated", "reason": reason})
+    if not represented <= seen:
+        raise ValueError("self-check capsule result is absent from the grader score")
+    return gated
+
+
+def _selfcheck_counts(
+    *, result_rows: int, gated_rows: int, passed: int, certified: int, requested_size: int, suite_size: int, scope: str
+) -> dict:
+    """Keep performed results distinct from requested models deferred without execution."""
+    reported = result_rows + gated_rows
     if (
-        not isinstance(rows, list)
-        or not rows
-        or not all(
-            isinstance(row, dict)
-            and row.get("kind") == "model"
-            and row.get("status") == "gated"
-            and isinstance(row.get("capsule"), str)
-            for row in rows
-        )
+        min(result_rows, gated_rows, passed, certified, requested_size, suite_size) < 0
+        or reported > requested_size
+        or passed > result_rows
+        or certified > result_rows
+        or (suite_size and requested_size > suite_size)
     ):
-        return []
-    return [
-        {"capsule": row["capsule"], "pass": False, "status": "gated", "reason": row.get("gate_reason")} for row in rows
-    ]
+        raise ValueError("self-check counts disagree with the selected public capsules")
+    complete_request = suite_size > 0 and requested_size > 0 and reported == requested_size
+    all_pass = complete_request and gated_rows == 0 and certified == requested_size
+    return {
+        "n_capsules": reported,
+        "n_result_rows": result_rows,
+        "n_gated": gated_rows,
+        "n_unchecked": max(0, suite_size - result_rows) if suite_size else None,
+        "n_unknown": max(0, suite_size - reported) if suite_size else None,
+        "certified_complete": bool(scope == "all" and suite_size == requested_size and all_pass),
+        "all_pass": all_pass,
+        "n_passed": passed,
+        "n_certified": certified,
+    }
 
 
 def _shape_coverage(sub: Path, out_path: str, *, context: InvocationContext, contract: Path | None = None) -> int:
@@ -1260,13 +1309,57 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
                 }
             )
         rows.append(row)
-    n = len(rows)
+    n_result = len(rows)
+    try:
+        selected = CR.discover_capsules(
+            caps_root,
+            labels={"public", "dev"},
+            contract=contract if contract is not None else context.repo / "merlin/contract",
+        )
+        requested_names = [cap["name"] for cap in selected]
+        if len(set(requested_names)) != len(requested_names):
+            raise ValueError("selected public capsule names are ambiguous")
+        requested = set(requested_names)
+        models = {cap["name"] for cap in selected if cap.get("kind") == "model"}
+        if want is not None and requested != want:
+            raise ValueError("selected public capsule names differ from the request")
+        gated = _gated_without_result_rows(
+            _score, requested=requested, models=models, represented={row["capsule"] for row in rows}
+        )
+        suite_size = _suite_size(capsules_root)
+        scope = "all" if want is None else "subset"
+        counts = (
+            _selfcheck_counts(
+                result_rows=n_result,
+                gated_rows=len(gated),
+                passed=npass,
+                certified=ncert,
+                requested_size=len(requested),
+                suite_size=suite_size,
+                scope=scope,
+            )
+            if n_result
+            else None
+        )
+    except (OSError, ValueError, KeyError, TypeError):
+        out = {
+            "sim": sim,
+            "barrier_tier": barrier_tier,
+            "all_pass": False,
+            "score_integrity_fault": True,
+            "error": "self-check score does not match the selected public capsules and result rows",
+        }
+        txt = json.dumps(out, indent=2)
+        print(txt)
+        if a.out:
+            Path(a.out).write_text(txt)
+        _log_telemetry(out, a.capsules)
+        return 1
     # A model-only request has no operation evidence to clear the capstone gate.
     # The grade records that deferral in memory, not as a capsule_result.json.
     # Name it before the genuinely unexpected no-results path below.
-    if n == 0:
-        gated = _gated_without_result_rows(_score)
-        if gated:
+    if n_result == 0:
+        if gated and len(gated) == len(_score["per_capsule"]):
             out = {
                 "sim": sim,
                 "barrier_tier": barrier_tier,
@@ -1288,7 +1381,7 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
             return 1
     # Otherwise no top-level build failure and no capsule_result is a harness/path
     # problem. Never read it as an empty-but-clean verdict.
-    if n == 0:
+    if n_result == 0:
         out = {
             "sim": sim,
             "barrier_tier": barrier_tier,
@@ -1310,6 +1403,7 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
             Path(a.out).write_text(txt)
         _log_telemetry(out, a.capsules)
         return 1
+    rows.extend(gated)
     n_declined = sum(1 for r in rows if r.get("declined"))
     # A capsule can fail here for a reason the agent does not control: it declares a mandatory cert tier
     # that the SIM CHOSEN FOR THIS RUN supplies no adapter for. That is a screen being asked to certify,
@@ -1324,40 +1418,39 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
         }
         - {None}
     )
-    # WHAT A PARTIAL CHECK MAY MEAN. `all_pass` reads on the capsules that were CHECKED, and for a
-    # subset that is not the question the agent is asking. Checking two capsules of ninety-six and
-    # passing both reported `all_pass: true` with `n_capsules: 2`, beside a note whose first sentence
-    # defines "done" -- the same shape as every other defect in this harness: a partial result wearing
-    # a complete one's clothes. `scope`, `suite_size` and `certified_complete` say it outright, and
-    # `all_pass` is left alone so nothing that already reads it changes meaning.
-    suite_size = _suite_size(capsules_root)
-    scope = "all" if want is None else "subset"
+    # `all_pass` covers the complete requested cohort, not the entire suite for
+    # subsets. A gated model has no result and cannot pass that cohort; the
+    # separate `certified_complete` still requires the whole public suite.
     has_candidate_rows = any("candidate_native_verification" in row for row in rows)
+    if counts is None:  # the no-results branches returned above
+        raise RuntimeError("self-check result accounting is incomplete")
     out = {
         "sim": sim,
         "barrier_tier": barrier_tier,
-        "n_passed": npass,
-        "n_capsules": n,
+        **counts,
         "scope": scope,
         "suite_size": suite_size,
-        "n_unchecked": (max(0, suite_size - n) if suite_size else None),
-        "certified_complete": bool(scope == "all" and ncert == n and n > 0),
         # `n_passed` is what this oracle selection could measure; `n_certified` is what cleared every
         # mandatory tier. They differ exactly when the selection cannot reach a required tier, and
         # `all_pass` keys on the second: a screen may eliminate, it may never certify.
-        "n_certified": ncert,
         "n_screened_only": nscreened,
-        "all_pass": ncert == n and n > 0,
         "per_capsule": rows,
         "n_declined": n_declined,
         "note": (
             (
-                f"⚠ PARTIAL: you checked {n} of {suite_size} public capsule(s); "
-                f"{max(0, suite_size - n)} were NOT checked and their status here is UNKNOWN, not "
-                f"passing. `all_pass` below covers only what you asked for — `certified_complete` "
+                f"⚠ PARTIAL: {n_result} of {suite_size} public capsule(s) returned results; "
+                f"{len(gated)} requested model(s) were gated without execution, and "
+                f"{counts['n_unknown']} have no status in this request. "
+                f"`all_pass` below covers only what you asked for — `certified_complete` "
                 f"is the one that means done. A fix can also BREAK a capsule you did not check, so "
                 f"re-run with --capsules all before believing you are finished. "
                 if scope == "subset" and suite_size
+                else ""
+            )
+            + (
+                f" {len(gated)} requested whole-model capsule(s) were GATED and NOT EXECUTED; "
+                "their rows are non-verdicts, not passes. "
+                if gated
                 else ""
             )
             + f"Self-check on {sim} ({barrier_tier}). "

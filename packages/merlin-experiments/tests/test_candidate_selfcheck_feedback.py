@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from merlin.common.paths import data_path
 
 from merlin_experiments.phase1.context import InvocationContext
 from merlin_experiments.phase1.feedback import qa, selfcheck
@@ -74,6 +75,25 @@ def _context(root: Path):
     )
 
 
+def _write_public_capsule(corpus: Path, *, kind: str):
+    capsule = corpus / "model_case"
+    capsule.mkdir(parents=True)
+    (capsule / "capsule.yaml").write_text(
+        json.dumps(
+            {
+                "name": "model_case",
+                "kind": kind,
+                "source_role": "handauthored_compiler_test",
+                "label": "public",
+                "operation": {"op": "movement"},
+                "numeric_policy": {"compare": "exact_int", "dtype": "i8"},
+                "expected": {"instruction_classes": []},
+                "required_oracle_tiers": ["L2"],
+            }
+        )
+    )
+
+
 def test_candidate_row_uses_closed_qa_projection_and_never_screen_passes(tmp_path):
     result = _candidate_result()
     _write_result(tmp_path, result)
@@ -116,9 +136,7 @@ def test_main_selfcheck_does_not_count_legacy_screen_or_publish_legacy_artifacts
     submission.mkdir()
     (submission / "manifest.yaml").write_text("{}")
     corpus = tmp_path / "public"
-    capsule = corpus / "model_case"
-    capsule.mkdir(parents=True)
-    (capsule / "capsule.yaml").write_text("{}")
+    _write_public_capsule(corpus, kind="model")
     monkeypatch.setattr(selfcheck, "_adapters", lambda *a: ({"L3": object()}, "gsim"))
     monkeypatch.setattr(selfcheck, "_target_sim_via", lambda *a: ("fixture", "chipyard"))
     monkeypatch.setattr(selfcheck.CR, "suite_for", lambda *a: "fixture-suite")
@@ -126,11 +144,14 @@ def test_main_selfcheck_does_not_count_legacy_screen_or_publish_legacy_artifacts
 
     def grade(_submission, *, runs_root, **_kwargs):
         _write_result(Path(runs_root), _candidate_result())
-        return {"n_capsules": 1, "n_passed": 0, "per_capsule": []}
+        return {"n_capsules": 1, "n_passed": 0, "per_capsule": [{"capsule": "model_case", "status": "incomplete"}]}
 
     monkeypatch.setattr(selfcheck.CG, "grade", grade)
     code = selfcheck.main(
-        ["--sim", "gsim", "--submission", str(submission)], context=_context(tmp_path), capsules_root=corpus
+        ["--sim", "gsim", "--submission", str(submission)],
+        context=_context(tmp_path),
+        capsules_root=corpus,
+        contract=data_path("contract"),
     )
     report = json.loads(capsys.readouterr().out)
     assert code == 1
@@ -158,9 +179,7 @@ def test_main_selfcheck_uses_only_selected_tier_console(
     submission.mkdir()
     (submission / "manifest.yaml").write_text("{}")
     corpus = tmp_path / "public"
-    capsule = corpus / "model_case"
-    capsule.mkdir(parents=True)
-    (capsule / "capsule.yaml").write_text("{}")
+    _write_public_capsule(corpus, kind="isa")
     monkeypatch.setattr(selfcheck, "_adapters", lambda *a: ({"L3": object()}, "gsim"))
     monkeypatch.setattr(selfcheck, "_target_sim_via", lambda *a: ("fixture", "chipyard"))
     monkeypatch.setattr(selfcheck.CR, "suite_for", lambda *a: "fixture-suite")
@@ -191,11 +210,18 @@ def test_main_selfcheck_uses_only_selected_tier_console(
             (artifacts / l3_log).write_text("L3_PROGRESS\n")
         elif l3_log is not None:
             (artifacts.parent / "private_console.log").write_text("UNRELATED_PRIVATE_CONSOLE\n")
-        return {"n_capsules": 1, "n_passed": 0, "per_capsule": []}
+        return {
+            "n_capsules": 1,
+            "n_passed": int(passing_case),
+            "per_capsule": [{"capsule": "model_case", "status": "pass" if passing_case else "fail"}],
+        }
 
     monkeypatch.setattr(selfcheck.CG, "grade", grade)
     code = selfcheck.main(
-        ["--sim", "gsim", "--submission", str(submission)], context=_context(tmp_path), capsules_root=corpus
+        ["--sim", "gsim", "--submission", str(submission)],
+        context=_context(tmp_path),
+        capsules_root=corpus,
+        contract=data_path("contract"),
     )
     report = json.loads(capsys.readouterr().out)
     assert code == (0 if passing_case else 1)

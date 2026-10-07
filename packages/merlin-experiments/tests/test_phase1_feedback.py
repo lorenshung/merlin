@@ -292,14 +292,147 @@ def test_model_only_selfcheck_reports_gate_instead_of_harness_failure():
             }
         ]
     }
-    rows = selfcheck_feedback._gated_without_result_rows(score)
+    rows = selfcheck_feedback._gated_without_result_rows(
+        score, requested={"model_case"}, models={"model_case"}, represented=set()
+    )
     assert rows == [
         {"capsule": "model_case", "pass": False, "status": "gated", "reason": "op pass fraction 0.00 < gate 0.8"}
     ]
-    assert (
-        selfcheck_feedback._gated_without_result_rows({"per_capsule": score["per_capsule"] + [{"status": "fail"}]})
-        == []
+
+
+def test_mixed_selfcheck_retains_unexecuted_model_gate_beside_operation_result():
+    score = {
+        "per_capsule": [
+            {"capsule": "operation_case", "status": "pass"},
+            {
+                "capsule": "model_case",
+                "kind": "model",
+                "status": "gated",
+                "gate_reason": "operation evidence below gate",
+            },
+        ]
+    }
+    gated = selfcheck_feedback._gated_without_result_rows(
+        score, requested={"operation_case", "model_case"}, models={"model_case"}, represented={"operation_case"}
     )
+    assert gated == [
+        {"capsule": "model_case", "pass": False, "status": "gated", "reason": "operation evidence below gate"}
+    ]
+    counts = selfcheck_feedback._selfcheck_counts(
+        result_rows=1, gated_rows=len(gated), passed=1, certified=1, requested_size=2, suite_size=2, scope="all"
+    )
+    assert counts == {
+        "n_capsules": 2,
+        "n_result_rows": 1,
+        "n_gated": 1,
+        "n_unchecked": 1,
+        "n_unknown": 0,
+        "certified_complete": False,
+        "all_pass": False,
+        "n_passed": 1,
+        "n_certified": 1,
+    }
+    subset = selfcheck_feedback._selfcheck_counts(
+        result_rows=1, gated_rows=len(gated), passed=1, certified=1, requested_size=2, suite_size=3, scope="subset"
+    )
+    assert subset["n_unknown"] == 1
+    assert subset["n_unchecked"] == 2
+
+
+def test_selfcheck_ungated_count_projection_retains_existing_pass_semantics():
+    counts = selfcheck_feedback._selfcheck_counts(
+        result_rows=1, gated_rows=0, passed=1, certified=1, requested_size=1, suite_size=1, scope="all"
+    )
+    assert counts["n_capsules"] == counts["n_result_rows"] == 1
+    assert counts["n_gated"] == counts["n_unchecked"] == counts["n_unknown"] == 0
+    assert counts["all_pass"] and counts["certified_complete"]
+
+
+@pytest.mark.parametrize(
+    "rows,requested,represented",
+    [
+        ([{"kind": "model", "status": "gated", "gate_reason": "deferred"}], {"model_case"}, set()),
+        (
+            [{"capsule": "model_case", "kind": "model", "status": "gated", "gate_reason": "deferred"}],
+            {"operation_case"},
+            set(),
+        ),
+        (
+            [
+                {"capsule": "model_case", "kind": "model", "status": "gated", "gate_reason": "deferred"},
+                {"capsule": "model_case", "kind": "model", "status": "gated", "gate_reason": "deferred"},
+            ],
+            {"model_case"},
+            set(),
+        ),
+        (
+            [{"capsule": "model_case", "kind": "model", "status": "gated", "gate_reason": "deferred"}],
+            {"model_case"},
+            {"model_case"},
+        ),
+        (
+            [{"capsule": "model_case", "kind": "operation", "status": "gated", "gate_reason": "deferred"}],
+            {"model_case"},
+            set(),
+        ),
+    ],
+)
+def test_selfcheck_rejects_unbound_or_inconsistent_score_gates(rows, requested, represented):
+    with pytest.raises(ValueError):
+        selfcheck_feedback._gated_without_result_rows(
+            {"per_capsule": rows}, requested=requested, models=requested & {"model_case"}, represented=represented
+        )
+
+
+def test_selfcheck_rejects_score_claiming_operation_capsule_is_gated_model():
+    with pytest.raises(ValueError):
+        selfcheck_feedback._gated_without_result_rows(
+            {
+                "per_capsule": [
+                    {"capsule": "unit_case", "kind": "model", "status": "gated", "gate_reason": "deferred"}
+                ]
+            },
+            requested={"unit_case"},
+            models=set(),
+            represented=set(),
+        )
+
+
+def test_selfcheck_rejects_result_missing_from_grader_score():
+    with pytest.raises(ValueError):
+        selfcheck_feedback._gated_without_result_rows(
+            {"per_capsule": []},
+            requested={"operation_case"},
+            models=set(),
+            represented={"operation_case"},
+        )
+
+
+@pytest.mark.parametrize(
+    "result_rows,gated_rows,requested_size,suite_size",
+    [(1, 0, 2, 2), (1, 0, 1, 0)],
+)
+def test_selfcheck_missing_or_unknown_requested_cohort_cannot_pass(
+    result_rows, gated_rows, requested_size, suite_size
+):
+    counts = selfcheck_feedback._selfcheck_counts(
+        result_rows=result_rows,
+        gated_rows=gated_rows,
+        passed=1,
+        certified=1,
+        requested_size=requested_size,
+        suite_size=suite_size,
+        scope="all",
+    )
+    assert counts["all_pass"] is False
+    assert counts["certified_complete"] is False
+
+
+def test_selfcheck_rejects_more_reported_rows_than_requested_capsules():
+    with pytest.raises(ValueError):
+        selfcheck_feedback._selfcheck_counts(
+            result_rows=2, gated_rows=0, passed=2, certified=2, requested_size=1, suite_size=2, scope="all"
+        )
 
 
 _HOST = r"""
