@@ -86,7 +86,9 @@ def _host_representation_types(selected: Mapping) -> set[str]:
         _need(isinstance(operations, list), "host capability has no operation roster")
         for operation in operations:
             operation = _mapping(operation)
-            if operation.get("status", "reviewed") != "reviewed":
+            # An operation without its own status inherits the document's,
+            # which was required to be reviewed above.
+            if "status" in operation and operation["status"] != "reviewed":
                 continue
             signature = _mapping(operation.get("signature"))
             for key in ("dtypes", "ordered_operand_dtypes", "ordered_result_dtypes"):
