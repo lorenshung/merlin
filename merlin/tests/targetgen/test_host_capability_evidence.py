@@ -173,6 +173,53 @@ def test_pointwise_source_body_schema_is_closed_and_never_nested_silently():
         validate_host_capabilities(selected["host"]["capability_spec"])
 
 
+@pytest.mark.parametrize(
+    "frontend,kind,operands,results",
+    [
+        ("aten.sum.dim_IntList", "sum", ["i64", "i64"], ["i64"]),
+        ("aten.cumsum.default", "cumsum", ["i1", "i64"], ["i64"]),
+        ("aten.cumsum.default", "cumsum", ["i64", "i64"], ["i64"]),
+        ("aten.min.dim", "i64_min_first_index", ["i64", "i64", "i64"], ["i64", "i64"]),
+    ],
+)
+def test_integer_reduction_draft_schema_is_closed_without_admission(frontend, kind, operands, results):
+    selected = _selection()
+    document = selected["host"]["capability_spec"]
+    document["status"] = "unreviewed"
+    declaration = {
+        "id": "draft_integer_reduction",
+        "status": "unreviewed",
+        "ops": [frontend],
+        "families": ["reduction"],
+        "placement": "host",
+        "signature": {
+            "family": "reduction",
+            "ordered_operand_dtypes": operands,
+            "ordered_result_dtypes": results,
+        },
+        "source_body": {"schema": "merlin.static_integer_reduction_source_body.v1", "operation": kind},
+    }
+    document["operations"] = [declaration]
+    validate_host_capabilities(document)
+    assert (
+        admit_host_operation(
+            selected,
+            {"mlir_operation": "linalg.reduce" if kind == "sum" else "linalg.generic", "frontend_op": frontend},
+            {"family": "reduction", "ordered_operand_dtypes": operands, "ordered_result_dtypes": results},
+        )["status"]
+        != "admitted"
+    )
+    for changed in (
+        {**declaration, "ops": ["aten.other.default"]},
+        {**declaration, "families": ["elementwise_map"]},
+        {**declaration, "signature": {**declaration["signature"], "ordered_result_dtypes": ["f32"]}},
+        {**declaration, "source_body": {**declaration["source_body"], "other": True}},
+    ):
+        document["operations"] = [changed]
+        with pytest.raises(ValueError, match="source_body|integer-reduction"):
+            validate_host_capabilities(document)
+
+
 def test_projected_pointwise_needs_explicit_separate_schema_and_every_source_occurrence():
     selected = _pointwise_selection()
     declaration = selected["host"]["capability_spec"]["operations"][0]

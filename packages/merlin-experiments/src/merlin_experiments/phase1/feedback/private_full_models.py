@@ -603,6 +603,26 @@ def _noncompute_support(row: Mapping[str, Any]) -> bool:
     raise ValueError(f"support-required source operation has no audited lowering class: {operation}")
 
 
+def _record_linalg_or_integer_source(
+    linalg: dict,
+    integer: dict,
+    row: Mapping[str, Any],
+    host_decision: Mapping[str, Any],
+    parsed: tuple[Any, ...],
+    source_rows: Mapping[int, Mapping[str, Any]],
+    bounded_control: Mapping[str, Any] | None,
+) -> None:
+    """Route only the closed integer schema to its own mandatory source witness."""
+    from merlin.frontends.linalg_reduction_source_body import STATIC_INTEGER_REDUCTION_SOURCE_BODY_SCHEMA
+
+    body = host_decision.get("source_body_proof")
+    if isinstance(body, Mapping) and body.get("schema") == STATIC_INTEGER_REDUCTION_SOURCE_BODY_SCHEMA:
+        integer_support.record(integer, row, host_decision, parsed, source_rows)
+        return
+    linalg_support.record(linalg, row, host_decision, parsed, source_rows, control_proof=bounded_control)
+    integer_support.record(integer, row, host_decision, parsed, source_rows)
+
+
 def _source_obligations(
     capture: Path,
     target: str,
@@ -704,6 +724,7 @@ def _source_obligations(
                 capability_map=cap_map,
                 host_capabilities=dict(host),
                 source_operations=tuple(parsed[ordinal] for ordinal in row["ordinals"]),
+                source_context={"selected_index_observation": selected_index_observation},
             )
             observed = admission["observed_admission_signature"]
             hardware = admission["hardware_admission"]
@@ -776,6 +797,7 @@ def _source_obligations(
             capability_map=cap_map,
             host_capabilities=dict(host),
             source_operations=tuple(parsed[ordinal] for ordinal in row["ordinals"]),
+            source_context={"selected_index_observation": selected_index_observation},
         )
         accelerator = admission["accelerator_admission"]
         host_decision = admission["host_admission"]
@@ -789,10 +811,11 @@ def _source_obligations(
                 {"row": row, "admission": admission, "reason": "host operation lacks exact reviewed admission"}
             )
         else:
-            linalg_support.record(linalg, row, host_decision, parsed, source_rows, control_proof=bounded_control)
+            _record_linalg_or_integer_source(
+                linalg, integer_reductions, row, host_decision, parsed, source_rows, bounded_control
+            )
             linkage_support.record(linkage, row, host_decision, source_rows, linalg)
             arange_support.record(arange, capture, row, host_decision, parsed, source_rows)
-            integer_support.record(integer_reductions, row, host_decision, parsed, source_rows)
             bucketize_support.record(bucketize, row, host_decision, source_rows)
     if unresolved:
         raise SourceAdmissionError(unresolved)

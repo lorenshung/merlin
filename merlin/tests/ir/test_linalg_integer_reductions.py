@@ -95,6 +95,176 @@ def _selected(text: str, name: str):
     return next(op for op in mq.walk(module) if op.name == name)
 
 
+def _host_case(op, frontend: str, kind: str):
+    from xdsl.dialects.builtin import StringAttr
+
+    from merlin.targetgen.application_inventory import operation_structure
+
+    op.attributes["prov.aten"] = StringAttr(frontend)
+    structure = operation_structure(op)
+    inputs, outputs = structure["ordered_operand_types"], structure["ordered_result_types"]
+    row = {"mlir_operation": op.name, "frontend_op": frontend, "count": 1, **structure}
+    observed = {
+        "family": "reduction",
+        "ordered_operand_dtypes": [item["dtype"] for item in inputs],
+        "ordered_result_dtypes": [item["dtype"] for item in outputs],
+        "rank": len(outputs[0]["shape"]),
+    }
+    body = {"schema": "merlin.static_integer_reduction_source_body.v1", "operation": kind}
+    declaration = {
+        "id": "neutral_integer_reduction",
+        "ops": [frontend],
+        "families": ["reduction"],
+        "placement": "host",
+        "signature": {
+            "family": "reduction",
+            "ordered_operand_dtypes": observed["ordered_operand_dtypes"],
+            "ordered_result_dtypes": observed["ordered_result_dtypes"],
+        },
+        "source_body": body,
+    }
+    selected = {
+        "neutral": {
+            "package_sha256": "a" * 64,
+            "capability_spec_sha256": "b" * 64,
+            "dtype_strategy": "int8_w8a8",
+            "capability_spec": {
+                "schema": "merlin.host_capabilities.v1",
+                "status": "reviewed",
+                "compiler": {"package_sha256": "a" * 64, "dtype_strategy": "int8_w8a8"},
+                "operations": [declaration],
+                "evidence": {"scope": "neutral structural test, not numerical qualification"},
+            },
+        }
+    }
+    context = {
+        "selected_index_observation": {
+            "schema": "merlin.selected-index-lowering.v1",
+            "compiler_requested": "neutral-clang",
+            "compiler_resolved": "/neutral/clang",
+            "compiler_sha256": "c" * 64,
+            "cross_flags": ["--target=neutral"],
+            "data_layout": "e-p:64:64",
+            "index_bits": 64,
+            "scope": "neutral selected-width premise only",
+        }
+    }
+    return selected, row, observed, context
+
+
+@pytest.mark.parametrize("kind,boolean", [("sum", False), ("sum", True), ("cumsum", False), ("cumsum", True)])
+def test_integer_reduction_host_screen_needs_exact_body_and_selected_index(kind: str, boolean: bool):
+    from merlin.targetgen.host_capabilities import admit_host_operation, validate_host_capabilities
+    from merlin.targetgen.operation_accounting import admit_operation_row
+
+    source = _sum_source(boolean=boolean) if kind == "sum" else _scan_source(boolean=boolean)
+    op = _selected(source, "linalg.reduce" if kind == "sum" else "linalg.generic")
+    frontend = "aten.sum.dim_IntList" if kind == "sum" else "aten.cumsum.default"
+    selected, row, observed, context = _host_case(op, frontend, kind)
+    validate_host_capabilities(selected["neutral"]["capability_spec"])
+    assert admit_host_operation(selected, row, observed, source_operations=(op,))["status"] == "unknown"
+    admitted = admit_operation_row(
+        {**row, "operation": op.name, "disposition": "unclassified"},
+        software_spec=None,
+        capability_contract=None,
+        host_capabilities=selected,
+        observed=observed,
+        source_operations=(op,),
+        source_context=context,
+    )["host_admission"]
+    assert admitted["status"] == "admitted"
+    assert admitted["source_body_proof"]["patterns"][0]["operation"] == kind
+    assert admitted["source_body_proof"]["patterns"][0]["input_type"] == ("i1" if boolean else "i64")
+    assert admitted["source_body_proof"]["selected_index_observation"] == context["selected_index_observation"]
+    wrong = {"selected_index_observation": {**context["selected_index_observation"], "index_bits": 32}}
+    assert (
+        admit_host_operation(selected, row, observed, source_operations=(op,), source_context=wrong)["status"]
+        == "unknown"
+    )
+    assert (
+        admit_host_operation(selected, {**row, "count": 2}, observed, source_operations=(op,), source_context=context)[
+            "status"
+        ]
+        == "unsupported"
+    )
+    assert (
+        admit_host_operation(
+            selected, row, {**observed, "rank": observed["rank"] + 1}, source_operations=(op,), source_context=context
+        )["status"]
+        == "unsupported"
+    )
+    assert (
+        admit_host_operation(
+            selected, {**row, "ordered_operand_types": []}, observed, source_operations=(op,), source_context=context
+        )["status"]
+        == "unsupported"
+    )
+
+
+def test_integer_reduction_host_screen_rejects_mutated_ssa_and_draft_schema():
+    from merlin.targetgen.host_capabilities import admit_host_operation, validate_host_capabilities
+
+    source = _sum_source(boolean=True).replace("(%elem, %acc)", "(%acc, %acc)")
+    op = _selected(source, "linalg.reduce")
+    selected, row, observed, context = _host_case(op, "aten.sum.dim_IntList", "sum")
+    assert (
+        admit_host_operation(selected, row, observed, source_operations=(op,), source_context=context)["status"]
+        == "unsupported"
+    )
+    declaration = selected["neutral"]["capability_spec"]["operations"][0]
+    declaration["status"] = "unreviewed"
+    validate_host_capabilities(selected["neutral"]["capability_spec"])
+    assert (
+        admit_host_operation(selected, row, observed, source_operations=(op,), source_context=context)["status"]
+        != "admitted"
+    )
+    for body in (
+        {**declaration["source_body"], "extra": "unsafe"},
+        {"schema": declaration["source_body"]["schema"], "operation": "bucketize"},
+    ):
+        declaration["source_body"] = body
+        with pytest.raises(ValueError, match="source_body"):
+            validate_host_capabilities(selected["neutral"]["capability_spec"])
+
+
+@pytest.mark.parametrize(
+    "kind,old,new",
+    [
+        ("sum", "array<i64: 1>", "array<i64: 0>"),
+        ("sum", "#arith.overflow<none>", "#arith.overflow<nsw>"),
+        ("cumsum", "predicate = 7 : i64", "predicate = 6 : i64"),
+        ("cumsum", "#arith.overflow<none>", "#arith.overflow<nuw>"),
+    ],
+)
+def test_integer_reduction_host_screen_refuses_changed_axes_or_arithmetic(kind, old, new):
+    from merlin.targetgen.host_capabilities import admit_host_operation
+
+    source = _sum_source(boolean=True) if kind == "sum" else _scan_source(boolean=True)
+    name = "linalg.reduce" if kind == "sum" else "linalg.generic"
+    op = next(mq.walk(mq.parse(source.replace(old, new)), name))
+    frontend = "aten.sum.dim_IntList" if kind == "sum" else "aten.cumsum.default"
+    selected, row, observed, context = _host_case(op, frontend, kind)
+    assert (
+        admit_host_operation(selected, row, observed, source_operations=(op,), source_context=context)["status"]
+        == "unsupported"
+    )
+
+
+def test_integer_sum_host_screen_accepts_independent_scalar_reduction_shape():
+    from merlin.targetgen.host_capabilities import admit_host_operation
+
+    source = (
+        _sum_source(boolean=True).replace("tensor<2xi64>", "tensor<i64>").replace("array<i64: 1>", "array<i64: 0, 1>")
+    )
+    op = _selected(source, "linalg.reduce")
+    selected, row, observed, context = _host_case(op, "aten.sum.dim_IntList", "sum")
+    assert observed["rank"] == 0
+    assert (
+        admit_host_operation(selected, row, observed, source_operations=(op,), source_context=context)["status"]
+        == "admitted"
+    )
+
+
 @pytest.mark.parametrize("boolean", [False, True])
 def test_static_sum_checks_zero_seed_cast_axes_and_add(boolean: bool):
     pattern = recognize_static_integer_reduction(

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from hashlib import sha256
 
@@ -177,6 +178,7 @@ def test_reviewed_source_and_exact_linked_build(kind, tmp_path):
     support.verify_source(source[support.FIELD], path)
     entry = _linked(source, source["selected_index_observation"])
     assert support.linked_complete(source, entry, "c" * 64)
+    assert support.linked_complete(json.loads(json.dumps(source)), json.loads(json.dumps(entry)), "c" * 64)
     assert source[support.FIELD]["count"] == 1
     assert source[support.FIELD]["occurrences"][0]["kind"] == ("i64_min_first_index" if kind == "min" else kind)
     for field in ("capture_tree_sha256", "elf_sha256", "index_lowering"):
@@ -184,6 +186,107 @@ def test_reviewed_source_and_exact_linked_build(kind, tmp_path):
         damaged.pop(field)
         assert not support.linked_complete(source, damaged, "c" * 64)
     assert not support.linked_complete(source, entry, "f" * 64)
+
+
+@pytest.mark.parametrize("kind", ["sum", "cumsum", "min"])
+def test_host_screen_routes_exact_reduction_proof_to_mandatory_integer_witness(kind, tmp_path):
+    from merlin_experiments.phase1.feedback import private_full_models as full
+    from merlin_experiments.phase1.feedback import private_linalg_support as linalg
+
+    from merlin.targetgen.application_inventory import operation_structure
+    from merlin.targetgen.host_capabilities import admit_host_operation
+
+    _path, parsed, row, source, _decision = _prepared(tmp_path, kind)
+    ordinal = row["ordinals"][0]
+    structure = operation_structure(parsed[ordinal])
+    inputs, outputs = structure["ordered_operand_types"], structure["ordered_result_types"]
+    row = {**row, **structure, "semantic_family": "reduction"}
+    observed = {
+        "family": "reduction",
+        "ordered_operand_dtypes": [item["dtype"] for item in inputs],
+        "ordered_result_dtypes": [item["dtype"] for item in outputs],
+        "rank": len(outputs[0]["shape"]),
+    }
+    declaration = {
+        "id": "neutral_integer_reduction",
+        "ops": [row["frontend_op"]],
+        "families": ["reduction"],
+        "placement": "host",
+        "signature": {
+            "family": "reduction",
+            "ordered_operand_dtypes": observed["ordered_operand_dtypes"],
+            "ordered_result_dtypes": observed["ordered_result_dtypes"],
+        },
+        "source_body": {
+            "schema": "merlin.static_integer_reduction_source_body.v1",
+            "operation": "i64_min_first_index" if kind == "min" else kind,
+        },
+    }
+    selected = {
+        "neutral": {
+            "package_sha256": "a" * 64,
+            "capability_spec_sha256": "b" * 64,
+            "dtype_strategy": "int8_w8a8",
+            "capability_spec": {
+                "schema": "merlin.host_capabilities.v1",
+                "status": "reviewed",
+                "compiler": {"package_sha256": "a" * 64, "dtype_strategy": "int8_w8a8"},
+                "operations": [declaration],
+                "evidence": {"scope": "neutral structural test, not numerical qualification"},
+            },
+        }
+    }
+    decision = admit_host_operation(
+        selected,
+        row,
+        observed,
+        source_operations=(parsed[ordinal],),
+        source_context={"selected_index_observation": source["selected_index_observation"]},
+    )
+    assert decision["status"] == "admitted"
+
+    def record(proof):
+        integer = support.begin(
+            source["source_sha256"],
+            source["normalized_source_sha256"],
+            len(parsed),
+            source["selected_index_observation"],
+        )
+        pointwise = linalg.begin(
+            source["source_sha256"],
+            source["normalized_source_sha256"],
+            len(parsed),
+            source["selected_index_observation"],
+        )
+        full._record_linalg_or_integer_source(pointwise, integer, row, proof, parsed, {ordinal: row}, None)
+        return pointwise, integer
+
+    pointwise, integer = record(decision)
+    assert pointwise["count"] == 0 and integer["count"] == 1
+    assert integer["occurrences"][0]["ordinal"] == ordinal
+    assert record(json.loads(json.dumps(decision)))[1]["count"] == 1
+    for edit in (
+        lambda bad: bad["source_body_proof"]["patterns"][0].update(axis=(99,)),
+        lambda bad: bad["source_body_proof"]["selected_index_observation"].update(index_bits=32),
+        lambda bad: bad["source_body_proof"]["selected_index_observation"].update(index_bits=64.0),
+        lambda bad: bad["source_body_proof"]["patterns"][0].update(axis=[True] if kind != "min" else True),
+        lambda bad: bad["source_body_proof"]["patterns"][0].update(input_shape=[2.0, 3 if kind != "min" else 5]),
+        lambda bad: bad["source_body_proof"]["patterns"][0].update(index_bits_premise=64.0)
+        if kind != "min"
+        else bad["source_body_proof"]["patterns"][0].update(index_bits=64.0),
+        lambda bad: bad["profiles"][0]["decisions"][0]["source_body_proof"]["patterns"][0].update(
+            input_shape=[2.0, 3 if kind != "min" else 5]
+        ),
+        lambda bad: bad["profiles"][0]["decisions"][0]["source_body_proof"][
+            "selected_index_observation"
+        ].update(index_bits=64.0),
+        lambda bad: bad["source_body_proof"].update(declaration="forged"),
+        lambda bad: bad.pop("source_body_proof"),
+    ):
+        bad = deepcopy(decision)
+        edit(bad)
+        with pytest.raises(ValueError, match="source-body admission|parsed ordinal|reviewed declaration"):
+            record(bad)
 
 
 def test_reviewed_admission_and_exact_source_are_mandatory(tmp_path):

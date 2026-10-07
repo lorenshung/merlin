@@ -99,6 +99,9 @@ SUITES = {
             "runtime/test_link_supplier_proof.py",
             "runtime/test_spike_libm_binding.py",
             "ir/test_linalg_composite_math.py",
+            "ir/test_linalg_integer_reductions.py",
+            "ir/test_linalg_extremum_patterns.py",
+            "targetgen/test_host_capability_evidence.py",
         ),
         "core_extras": ("xdsl",),
         "probe_modules": (
@@ -108,6 +111,7 @@ SUITES = {
             "merlin.llvmlower.link_supplier_trace",
             "merlin.targetgen.host_linkage_contract",
             "merlin.frontends.linalg_composite_math",
+            "merlin.frontends.linalg_reduction_source_body",
         ),
         "required_modules": ("xdsl",),
     },
@@ -378,7 +382,11 @@ SUITES = {
         "support_files": ("phase1_feedback_fixtures.py",),
         "source_inputs": ("examples/*/target/descriptor.yaml",),
         "core_extras": ("xdsl",),
-        "probe_modules": ("merlin.targetgen.contract.readback_policy", "merlin.runtime.out_b64")
+        "probe_modules": (
+            "merlin.targetgen.contract.readback_policy",
+            "merlin.runtime.out_b64",
+            "merlin.frontends.linalg_reduction_source_body",
+        )
         + tuple(
             "merlin_experiments.phase1." + tail
             for tail in (

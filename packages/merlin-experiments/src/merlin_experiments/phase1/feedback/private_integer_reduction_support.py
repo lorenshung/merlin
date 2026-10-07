@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import asdict
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -24,17 +23,18 @@ from merlin.frontends.linalg_patterns import (
     _screen_static_linalg_source,
     recognize_static_pointwise,
 )
+from merlin.frontends.linalg_reduction_source_body import INTEGER_REDUCTION_TARGETS as _TARGETS
+from merlin.frontends.linalg_reduction_source_body import (
+    STATIC_INTEGER_REDUCTION_SOURCE_BODY_SCHEMA,
+    serialized_reduction_pattern,
+)
 from merlin_experiments.phase1.feedback import private_control_support as control
+from merlin_experiments.phase1.feedback.private_index_source import _same_json_value
 
 FIELD = "integer_reduction_host_support"
 PENDING = "source_integer_reduction_host_pending_build"
 LINKED = "source_integer_reduction_host_linked"
 SCOPE = "reviewed host integer-reduction source ordinals and exact linked build; no numerical equivalence"
-_TARGETS = {
-    "aten.sum.dim_IntList": ("linalg.reduce", "sum"),
-    "aten.cumsum.default": ("linalg.generic", "cumsum"),
-    "aten.min.dim": ("linalg.generic", "i64_min_first_index"),
-}
 _KINDS = frozenset(kind for _, kind in _TARGETS.values())
 _PREFIXES = ("aten.sum.", "aten.cumsum.", "aten.min.")
 _BUILD_KEYS = {"candidate_tree_sha256", "capture_tree_sha256", "elf_sha256"}
@@ -137,7 +137,7 @@ def _pattern(op, kind: str, width: int) -> dict:
     except InvalidLinalgPattern as exc:
         raise ValueError("integer reduction host support: parsed source body is not a closed reduction") from exc
     _need(result.operation == kind, "source body differs from selected reduction kind")
-    return asdict(result)
+    return serialized_reduction_pattern(result)
 
 
 def record(
@@ -163,6 +163,7 @@ def record(
         "host source row has no exact parsed ordinal ownership",
     )
     kinds = {_kind_for_op(parsed[ordinal]) for ordinal in ordinals}
+    body = host_decision.get("source_body_proof")
     tag = row.get("frontend_op")
     if isinstance(tag, str) and tag.startswith(_PREFIXES) and tag not in _TARGETS:
         raise ValueError("integer reduction host support: row selects an unproved frontend form")
@@ -170,6 +171,8 @@ def record(
         raise ValueError("integer reduction host support: row frontend differs from parsed source")
     _need(len(kinds) == 1, "source row mixes reductions with unrelated operations")
     kind = kinds.pop()
+    if isinstance(body, Mapping) and body.get("schema") == STATIC_INTEGER_REDUCTION_SOURCE_BODY_SCHEMA:
+        _need(kind is not None, "integer source-body proof has no reduction root")
     if kind is None:
         return
     _need(tag in _TARGETS, "selected reduction row has no matching frontend identity")
@@ -197,17 +200,73 @@ def record(
     )
     selected = witness["selected_index_observation"]
     width = _selected_width(selected)
+    profile_decisions = profiles[0].get("decisions")
+    if body is None:
+        _need(
+            not isinstance(profile_decisions, list)
+            or not any(
+                isinstance(decision, Mapping)
+                and decision.get("status") == "admitted"
+                and isinstance(decision.get("source_body_proof"), Mapping)
+                and decision["source_body_proof"].get("schema") == STATIC_INTEGER_REDUCTION_SOURCE_BODY_SCHEMA
+                for decision in profile_decisions
+            ),
+            "integer source-body admission lost its selected source proof",
+        )
+    if body is not None:
+        _need(
+            isinstance(body, Mapping)
+            and set(body)
+            == {
+                "schema",
+                "declaration",
+                "operation",
+                "selected_index_observation",
+                "patterns",
+                "profile",
+                "capability_spec_sha256",
+            }
+            and body["schema"] == STATIC_INTEGER_REDUCTION_SOURCE_BODY_SCHEMA
+            and body["operation"] == kind
+            and isinstance(body["declaration"], str)
+            and bool(body["declaration"])
+            and _same_json_value(body["selected_index_observation"], selected)
+            and body["profile"] == profiles[0]["profile"]
+            and body["capability_spec_sha256"] == profiles[0]["capability_spec_sha256"]
+            and isinstance(body["patterns"], list)
+            and len(body["patterns"]) == len(ordinals),
+            "integer source-body admission differs from selected source/profile context",
+        )
+        expected_inner = {key: value for key, value in body.items() if key not in {"profile", "capability_spec_sha256"}}
+        _need(
+            isinstance(profile_decisions, list)
+            and sum(
+                isinstance(decision, Mapping)
+                and decision.get("status") == "admitted"
+                and decision.get("declaration") == body["declaration"]
+                and _same_json_value(decision.get("source_body_proof"), expected_inner)
+                for decision in profile_decisions
+            )
+            == 1,
+            "integer source-body admission has no unique reviewed declaration",
+        )
     seen = {item["ordinal"] for item in witness["occurrences"]}
     _need(not seen.intersection(ordinals), "selected reduction ordinal is repeated")
     new = []
-    for ordinal in ordinals:
+    for position, ordinal in enumerate(ordinals):
+        pattern = _pattern(parsed[ordinal], kind, width)
+        if body is not None:
+            _need(
+                _same_json_value(body["patterns"][position], pattern),
+                "integer source-body admission differs from parsed ordinal",
+            )
         new.append(
             {
                 "ordinal": ordinal,
                 "kind": kind,
                 "profile": profiles[0]["profile"],
                 "capability_spec_sha256": profiles[0]["capability_spec_sha256"],
-                "pattern": _pattern(parsed[ordinal], kind, width),
+                "pattern": pattern,
             }
         )
     witness["occurrences"].extend(new)
@@ -242,7 +301,7 @@ def verify_source(witness: dict, source: Path) -> None:
         and normalized == witness.get("normalized_source_sha256")
         and all(
             expected[ordinal]["kind"] == expected[ordinal]["pattern"].get("operation")
-            and expected[ordinal]["pattern"] == pattern
+            and _same_json_value(expected[ordinal]["pattern"], pattern)
             for ordinal, pattern in evidence
         ),
         "source bytes or recomputed ordinal bodies changed",
@@ -257,7 +316,7 @@ def link(source: Mapping[str, Any], actual_index: Mapping[str, Any], linked_buil
     selected = witness.get("selected_index_observation")
     _need(
         witness.get("source_verified") is True
-        and selected == source.get("selected_index_observation")
+        and _same_json_value(selected, source.get("selected_index_observation"))
         and control._record_matches_selected(actual_index, selected),  # noqa: PLC2701 -- shared trusted join
         "actual linked compiler index observation differs from source premise",
     )
@@ -272,7 +331,7 @@ def link(source: Mapping[str, Any], actual_index: Mapping[str, Any], linked_buil
 
 
 def _shape(value: object, *, scalar: bool = False) -> tuple[int, ...] | None:
-    if not isinstance(value, (tuple, list)) or (not value and not scalar):
+    if type(value) is not list or (not value and not scalar):
         return None
     if any(type(dim) is not int or dim <= 0 for dim in value):
         return None
@@ -294,7 +353,7 @@ def _valid_pattern(kind: str, pattern: object, width: int) -> bool:
             return False
         axis = pattern.get("axis")
         if (
-            not isinstance(axis, (list, tuple))
+            type(axis) is not list
             or not axis
             or any(type(dim) is not int or not 0 <= dim < len(inp) for dim in axis)
             or tuple(sorted(set(axis))) != tuple(axis)
@@ -313,7 +372,7 @@ def _valid_pattern(kind: str, pattern: object, width: int) -> bool:
             and type(axis) is int
             and 0 <= axis < len(inp)
             and out == tuple(extent for dim, extent in enumerate(inp) if dim != axis)
-            and isinstance(pattern.get("ordered_types"), (list, tuple))
+            and type(pattern.get("ordered_types")) is list
             and tuple(pattern["ordered_types"]) == ("i64",) * 5
             and type(pattern.get("index_bits")) is int
             and pattern["index_bits"] == width
@@ -352,7 +411,7 @@ def linked_complete(source: Mapping[str, Any], entry: Mapping[str, Any], candida
         width = _selected_width(selected)
     except ValueError:
         return False
-    if selected != source.get("selected_index_observation") or not control._record_matches_selected(  # noqa: PLC2701
+    if not _same_json_value(selected, source.get("selected_index_observation")) or not control._record_matches_selected(  # noqa: PLC2701
         entry.get("index_lowering"), selected
     ):
         return False

@@ -7,6 +7,7 @@ are separately selected and digest-bound; no compiler payload is rewritten.
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping
 
 from merlin.common.digest import is_sha256
 from merlin.targetgen.host_linkage_contract import (
@@ -83,6 +84,11 @@ def validate_host_capabilities(
                 validate_static_pointwise_source_body,
                 validate_static_projected_pointwise_source_body,
             )
+            from merlin.frontends.linalg_reduction_source_body import (
+                INTEGER_REDUCTION_TARGETS,
+                STATIC_INTEGER_REDUCTION_SOURCE_BODY_SCHEMA,
+                validate_static_integer_reduction_source_body,
+            )
 
             allowed = {
                 "id",
@@ -113,6 +119,34 @@ def validate_host_capabilities(
                     raise ValueError("composite math source requires an exact selected linkage contract")
             elif isinstance(body, dict) and body.get("schema") == STATIC_PROJECTED_POINTWISE_BODY_SCHEMA:
                 validate_static_projected_pointwise_source_body(body)
+            elif isinstance(body, dict) and body.get("schema") == STATIC_INTEGER_REDUCTION_SOURCE_BODY_SCHEMA:
+                validate_static_integer_reduction_source_body(body)
+                matches = [
+                    (frontend, mlir)
+                    for frontend, (mlir, kind) in INTEGER_REDUCTION_TARGETS.items()
+                    if kind == body["operation"]
+                ]
+                signature = row["signature"]
+                operands = signature.get("ordered_operand_dtypes")
+                results = signature.get("ordered_result_dtypes")
+                expected_operands = (
+                    ["i64", "i64", "i64"]
+                    if body["operation"] == "i64_min_first_index"
+                    else ["i64", "i64"]
+                    if body["operation"] == "sum"
+                    else None
+                )
+                if (
+                    len(matches) != 1
+                    or row.get("ops") != [matches[0][0]]
+                    or row.get("families", ["reduction"]) != ["reduction"]
+                    or row.get("family", "reduction") != "reduction"
+                    or signature.get("family") != "reduction"
+                    or (expected_operands is not None and operands != expected_operands)
+                    or (expected_operands is None and operands not in (["i1", "i64"], ["i64", "i64"]))
+                    or results != (["i64", "i64"] if body["operation"] == "i64_min_first_index" else ["i64"])
+                ):
+                    raise ValueError("integer-reduction source_body needs one exact frontend selector and typed ABI")
             else:
                 validate_static_pointwise_source_body(body)
         if "quantization_parameters" in row["signature"]:
@@ -130,7 +164,117 @@ def validate_host_capabilities(
     return document
 
 
-def _screen_source_body(declaration: dict, row: dict, signature: dict, source_operations: tuple | None) -> dict:
+def _selected_index_bits(source_context: Mapping | None) -> int | None:
+    """Read one caller-owned compiler observation, never inventing an index width."""
+    from merlin.llvmlower.target_data_layout import default_index_bits
+
+    if not isinstance(source_context, Mapping) or set(source_context) != {"selected_index_observation"}:
+        return None
+    observed = source_context["selected_index_observation"]
+    if not isinstance(observed, Mapping) or set(observed) != {
+        "schema",
+        "compiler_requested",
+        "compiler_resolved",
+        "compiler_sha256",
+        "cross_flags",
+        "data_layout",
+        "index_bits",
+        "scope",
+    }:
+        return None
+    if (
+        observed.get("schema") != "merlin.selected-index-lowering.v1"
+        or type(observed.get("index_bits")) is not int
+        or not isinstance(observed.get("compiler_requested"), str)
+        or not observed["compiler_requested"]
+        or not isinstance(observed.get("compiler_resolved"), str)
+        or not observed["compiler_resolved"]
+        or not is_sha256(observed.get("compiler_sha256"))
+        or not isinstance(observed.get("cross_flags"), list)
+        or not observed["cross_flags"]
+        or any(not isinstance(flag, str) or not flag for flag in observed["cross_flags"])
+        or not isinstance(observed.get("data_layout"), str)
+        or not isinstance(observed.get("scope"), str)
+    ):
+        return None
+    try:
+        return observed["index_bits"] if default_index_bits(observed["data_layout"]) == observed["index_bits"] else None
+    except ValueError:
+        return None
+
+
+def _screen_integer_reduction_source_body(
+    declaration: dict, row: dict, signature: dict, source_operations: tuple | None, source_context: Mapping | None
+) -> dict:
+    """Bind every parsed source root to a closed reduction and selected-width premise."""
+    from merlin.common import mlir_query as mq
+    from merlin.frontends.linalg_extremum_patterns import recognize_static_i64_argmin
+    from merlin.frontends.linalg_integer_reductions import recognize_static_integer_reduction
+    from merlin.frontends.linalg_patterns import InvalidLinalgPattern
+    from merlin.frontends.linalg_reduction_source_body import INTEGER_REDUCTION_TARGETS, serialized_reduction_pattern
+    from merlin.targetgen.application_inventory import operation_structure
+
+    width = _selected_index_bits(source_context)
+    if width is None:
+        return {"status": "unknown", "reason": "integer source_body needs a selected compiler index observation"}
+    if source_operations is None or not source_operations:
+        return {"status": "unknown", "reason": "source_body requires parsed source operations"}
+    if (
+        not isinstance(source_operations, tuple)
+        or type(row.get("count")) is not int
+        or row["count"] != len(source_operations)
+        or len({id(op) for op in source_operations}) != len(source_operations)
+    ):
+        return {"status": "unsupported", "reason": "source_body occurrence roster differs from source row"}
+    frontend = row.get("frontend_op")
+    target = INTEGER_REDUCTION_TARGETS.get(frontend)
+    if target is None or target != (row.get("mlir_operation"), declaration["source_body"]["operation"]):
+        return {"status": "unsupported", "reason": "source_body frontend/root operation selector differs"}
+    patterns = []
+    for op in source_operations:
+        if mq.op_name(op) != target[0] or mq.attr_str(op, "prov.aten") != frontend:
+            return {"status": "unsupported", "reason": "source_body parsed operation identity differs"}
+        try:
+            pattern = (
+                recognize_static_i64_argmin(op, index_bits=width)
+                if target[1] == "i64_min_first_index"
+                else recognize_static_integer_reduction(op, index_bits=width)
+            )
+        except InvalidLinalgPattern as exc:
+            return {"status": "unsupported", "reason": f"source_body structural proof refused: {exc}"}
+        if pattern.operation != target[1]:
+            return {"status": "unsupported", "reason": "source_body reduction kind differs"}
+        structure = operation_structure(op)
+        inputs, outputs = structure["ordered_operand_types"], structure["ordered_result_types"]
+        if (
+            row.get("ordered_operand_types") != inputs
+            or row.get("ordered_result_types") != outputs
+            or signature.get("ordered_operand_dtypes") != [item["dtype"] for item in inputs]
+            or signature.get("ordered_result_dtypes") != [item["dtype"] for item in outputs]
+            or type(signature.get("rank")) is not int
+            or signature["rank"] != len(pattern.output_shape)
+            or not outputs
+            or any(item["shape"] != list(pattern.output_shape) for item in outputs)
+            or inputs[0]["shape"] != list(pattern.input_shape)
+        ):
+            return {"status": "unsupported", "reason": "source_body differs from observed typed tensor ABI"}
+        patterns.append(serialized_reduction_pattern(pattern))
+    return {
+        "status": "admitted",
+        "reason": "every parsed occurrence matches the selected-width closed integer source body",
+        "proof": {
+            "schema": declaration["source_body"]["schema"],
+            "declaration": declaration["id"],
+            "operation": target[1],
+            "selected_index_observation": copy.deepcopy(dict(source_context["selected_index_observation"])),
+            "patterns": patterns,
+        },
+    }
+
+
+def _screen_source_body(
+    declaration: dict, row: dict, signature: dict, source_operations: tuple | None, source_context: Mapping | None
+) -> dict:
     """Match every supplied parsed occurrence; never treat an omitted source as evidence."""
     from dataclasses import asdict
 
@@ -154,6 +298,10 @@ def _screen_source_body(declaration: dict, row: dict, signature: dict, source_op
         recognize_static_pointwise,
         recognize_static_projected_pointwise,
     )
+    from merlin.frontends.linalg_reduction_source_body import STATIC_INTEGER_REDUCTION_SOURCE_BODY_SCHEMA
+
+    if declaration["source_body"]["schema"] == STATIC_INTEGER_REDUCTION_SOURCE_BODY_SCHEMA:
+        return _screen_integer_reduction_source_body(declaration, row, signature, source_operations, source_context)
 
     if source_operations is None or not source_operations:
         return {"status": "unknown", "reason": "source_body requires parsed source operations"}
@@ -209,7 +357,12 @@ def _screen_source_body(declaration: dict, row: dict, signature: dict, source_op
 
 
 def admit_host_operation(
-    selected: dict | None, row: dict, signature: dict, *, source_operations: tuple | None = None
+    selected: dict | None,
+    row: dict,
+    signature: dict,
+    *,
+    source_operations: tuple | None = None,
+    source_context: Mapping | None = None,
 ) -> dict:
     """Screen every selected host profile independently from accelerator admission."""
     if selected is None:
@@ -263,7 +416,7 @@ def admit_host_operation(
             decision = admit_operation({**document, "operations": [declaration]}, operation, signature, "host")
             if "declaration" in decision:
                 if "source_body" in declaration:
-                    screened = _screen_source_body(declaration, row, signature, source_operations)
+                    screened = _screen_source_body(declaration, row, signature, source_operations, source_context)
                     if decision["status"] == "admitted" or source_operations is None:
                         decision = {**decision, "status": screened["status"], "reason": screened["reason"]}
                         if screened.get("proof") is not None:

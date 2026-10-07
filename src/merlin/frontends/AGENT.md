@@ -21,6 +21,9 @@ Frontends that ingest external IR into the Merlin pipeline. Today: linalg-on-ten
   and grants no host placement, index-width bound, or numerical equivalence by itself.
 - `linalg_integer_reductions.py` — closed static i64 sum and masked prefix-sum source checks,
   with an explicit index-width premise; no host admission or linked-build verdict.
+- `linalg_reduction_source_body.py` names the closed integer sum/prefix-sum/paired-minimum
+  frontend/root-operation kinds shared by host admission and the independent linked
+  witness. Its declaration validator grants no placement or numerical equivalence.
 - `bucketize_source.py` — a source-only, trace-bound proof of the closed f32
   bucketize counting reduction. It does not grant host placement, prove sorted
   boundaries, or certify generated code and numerical equivalence.

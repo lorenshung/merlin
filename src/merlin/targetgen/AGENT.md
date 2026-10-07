@@ -28,6 +28,12 @@ launching, capsule grading, golden generation, sandboxing and certification. The
   requirement; only an independently selected actual-link trace can prove the defining supplier.
   Neither source-call routing nor numerical
   equivalence follows from that trace or from `numerical_contract` metadata.
+- Opt-in integer-reduction `host_capabilities` source-body admission reuses the
+  closed frontend sum/cumsum/paired-min recognizers. It requires an explicit
+  caller-owned selected-index compiler observation and every exact parsed source
+  occurrence; absent context is unknown. Structural validation accepts drafts,
+  while only reviewed, pinned declarations can admit host placement. The private
+  source/build witness remains mandatory and numerical equivalence unproved.
 - `group_capsule_entries.py` — deterministic capture-group restatement used by compiler diagnostics.
   Corpus writes, promotion, grading and measured capacity probes belong to experiments-owned
   `group_capsules` and `store_probe`, which keep their stable import names.

@@ -12,6 +12,7 @@ import copy
 import hashlib
 import json
 from collections import Counter
+from collections.abc import Mapping
 
 from merlin.common.digest import is_sha256
 from merlin.targetgen.software_spec import admit_operation
@@ -333,6 +334,7 @@ def admit_operation_row(
     host_capabilities: dict | None = None,
     observed: dict | None = None,
     source_operations: tuple | None = None,
+    source_context: Mapping | None = None,
 ) -> dict:
     """Every lane's admission of ONE observed operation, exactly as a captured application's are judged.
 
@@ -351,7 +353,9 @@ def admit_operation_row(
     software = _software_admissions(software_spec, row, observed)
     hardware = _hardware_admission(row, observed, capability_contract, capability_map)
     accelerator = _accelerator_admission(row, software, hardware, software_spec is not None)
-    host = admit_host_operation(host_capabilities, row, observed, source_operations=source_operations)
+    host = admit_host_operation(
+        host_capabilities, row, observed, source_operations=source_operations, source_context=source_context
+    )
     return {
         "observed_admission_signature": observed,
         "software_admissions": software,

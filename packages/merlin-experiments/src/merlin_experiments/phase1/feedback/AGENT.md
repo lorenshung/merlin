@@ -97,6 +97,9 @@ It never creates a host declaration or proves numerical equivalence.
 `private_integer_reduction_support.py` rechecks the exact source bodies of
 reviewed integer sum, prefix-sum and paired minimum admissions. Its selected
 index-width premise must match the producer-owned linked build observation.
+An opt-in closed integer-reduction `source_body` admission is routed here, not
+to the pointwise Linalg witness; its declaration/profile/context and every
+parsed ordinal pattern are rechecked before the mandatory linked-build join.
 `private_index_source.py` is a grant-none diagnostic for two independent
 prepared tensor-index forms: an i1 mask's closed i64 count, and an indexed
 extract whose literal range/offset extrema are in bounds under a caller-supplied
