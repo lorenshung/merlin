@@ -126,6 +126,9 @@ def _imports(path: Path) -> set[str]:
             if base:
                 found.add(base)
                 found.update(f"{base}.{alias.name}" for alias in node.names)
+                # The same bare-sibling seam, spelled ``from _sibling import name``.
+                if not node.level and package and "." not in base and (path.parent / f"{base}.py").is_file():
+                    found.add(f"{package}.{base}")
     return found
 
 

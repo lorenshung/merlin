@@ -1,9 +1,12 @@
 # Modules under the instrumented packages that no production code imports.
 # May only shrink: wire the module into a production path, or delete it.
 # growth-accepted: the gate is new; this is debt it discovered, not debt added.
+# growth-accepted: present on origin/main 1547c19f7 (merged without a caller), not added here; wire or delete
+merlin/python/merlin/perf/address_locality.py
 merlin/python/merlin/perf/convolution_window_work_order.py
 merlin/python/merlin/perf/deps/measured.py
 merlin/python/merlin/perf/emitter_reach.py
+merlin/python/merlin/perf/execution_boundaries.py
 merlin/python/merlin/perf/explicit_plan_adapter.py
 merlin/python/merlin/perf/host_epilogue_site_inventory.py
 merlin/python/merlin/perf/integer_address_equivalence.py

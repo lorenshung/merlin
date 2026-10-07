@@ -3,6 +3,7 @@
 # rewrite the ledger. May only shrink: read the datum without a fallback and record the
 # absence, or move the code off an evidence path.
 # growth-accepted: the gate is new; this is debt it discovered, not debt added.
+# growth-accepted: present on origin/main 1547c19f7 (merged with the gate red), not added here; fix and remove
 build_tools/scripts/check_artifact_layout.py::_stale_path_literals::swallowed-error::OSError
 build_tools/scripts/check_bundled_data.py::_setup_rules::swallowed-error::ValueError/TypeError
 build_tools/scripts/check_bundled_data.py::audit::get-default::compared
@@ -148,3 +149,11 @@ src/merlin/verify/lattice.py::render::get-default::distinct_shapes
 src/merlin/verify/proofs.py::summarize::get-default::status
 src/merlin/verify/refine.py::_record::swallowed-error::Exception
 src/merlin/verify/tools.py::find_filecheck::swallowed-error::Exception
+packages/merlin-experiments/src/merlin_experiments/phase1/feedback/brief.py::_public_build_section::swallowed-error::OSError/ValueError/TypeError/KeyError/JSONDecodeError
+packages/merlin-experiments/src/merlin_experiments/phase1/feedback/private_control_support.py::prove_bounded_assertions::swallowed-error::ValueError
+packages/merlin-experiments/src/merlin_experiments/phase1/feedback/private_literal_arange.py::_range::get-default::dtype
+packages/merlin-experiments/src/merlin_experiments/phase1/feedback/private_literal_arange.py::_range::get-default::device
+packages/merlin-experiments/src/merlin_experiments/phase1/feedback/private_literal_arange.py::_range::get-default::layout
+packages/merlin-experiments/src/merlin_experiments/phase1/feedback/private_literal_arange.py::_range::get-default::pin_memory
+packages/merlin-experiments/src/merlin_experiments/phase1/feedback/private_pool_support.py::prove_pool_source::get-default::args
+packages/merlin-experiments/src/merlin_experiments/phase1/feedback/private_pure_stage_support.py::_host_representation_types::get-default::status
