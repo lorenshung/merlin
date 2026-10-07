@@ -318,8 +318,10 @@ def _need(condition: bool, reason: str) -> None:
 
 
 def _named(value: Any, name: str) -> Any:
+    from xdsl.ir import Operation
+
     owner = value.owner
-    _need(owner is not None and mq.op_name(owner) == name and value in owner.results, f"expected {name}")
+    _need(isinstance(owner, Operation) and mq.op_name(owner) == name and value in owner.results, f"expected {name}")
     return owner
 
 

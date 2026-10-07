@@ -140,6 +140,19 @@ def _prove(source: str, *, bits: int = 32, wrong_inventory_digest: bool = False)
     )
 
 
+def test_non_operation_owner_refuses_as_unsupported_source_chain() -> None:
+    from xdsl.dialects.builtin import i64
+    from xdsl.ir import Block
+
+    argument = Block(arg_types=[i64]).args[0]
+    with pytest.raises(ValueError, match="source bounded-control proof: expected tensor.extract"):
+        control._named(argument, "tensor.extract")
+
+    module = mq.parse(_source())
+    extract = next(op for op in mq.walk(module) if mq.op_name(op) == "tensor.extract")
+    assert control._named(extract.results[0], "tensor.extract") is extract
+
+
 @pytest.mark.parametrize("extent", [4, 7])
 def test_exact_unsigned_mask_count_guards_are_source_tautologies(extent: int) -> None:
     result = _prove(_source(extent))
