@@ -22,7 +22,7 @@ predates the newest change to the code it documents (see `check_docs_freshness.p
 - [Architecture](reference/architecture.md) — `current`, verified 2026-10-05 · owner: core — see also: [repo_structure](reference/repo_structure.md), [core_dialects](reference/core_dialects.md), [lowering_pipeline](reference/lowering_pipeline.md)
 - [CLI reference](reference/cli.md) — `generated` · owner: tooling
 - [Compact whole-output evidence](reference/output_sha256.md) — `current`, verified 2026-10-06 · owner: core — see also: [ordered_fma_certificates](reference/ordered_fma_certificates.md), [quantized_host_optimizations](reference/quantized_host_optimizations.md)
-- [Compiler feature selection](reference/compiler_feature_selection.md) — `current`, verified 2026-10-05 · owner: ir — see also: [lowering_pipeline](reference/lowering_pipeline.md)
+- [Compiler feature selection](reference/compiler_feature_selection.md) — `current`, verified 2026-10-06 · owner: ir — see also: [lowering_pipeline](reference/lowering_pipeline.md)
 - [Consumer-derived reconstruction norm requirements](reference/dot_norm_requirements.md) — `current`, verified 2026-10-06 · owner: core — see also: [ordered_fma_certificates](reference/ordered_fma_certificates.md), [quantized_host_optimizations](reference/quantized_host_optimizations.md)
 - [Contracts](reference/contracts.md) — `current`, verified 2026-07-14 · owner: ir — see also: [core_dialects](reference/core_dialects.md)
 - [Core dialects](reference/core_dialects.md) — `current`, verified 2026-07-14 · owner: ir — see also: [dialects](reference/dialects.md), [contracts](reference/contracts.md), [lowering_pipeline](reference/lowering_pipeline.md)
@@ -30,14 +30,14 @@ predates the newest change to the code it documents (see `check_docs_freshness.p
 - [Dialects](reference/dialects.md) — `current`, verified 2026-07-14 · owner: ir — see also: [core_dialects](reference/core_dialects.md), [xdsl](reference/xdsl.md)
 - [DSE boundary-placement vocabulary](reference/dse_boundary_vocabulary.md) — `current`, verified 2026-09-23 · owner: dse — see also: [dse_guidance](guides/dse_guidance.md), [contracts](reference/contracts.md), [design_pressure](guides/design_pressure.md)
 - [Encoder row equality](reference/encoded_row_equality.md) — `current`, verified 2026-10-06 · owner: core — see also: [ordered_fma_certificates](reference/ordered_fma_certificates.md), [quantized_host_optimizations](reference/quantized_host_optimizations.md)
-- [Exact bounded host rounding](reference/late_quant_rne.md) — `current`, verified 2026-10-05 · owner: core — see also: [architecture](reference/architecture.md), [lowering_pipeline](reference/lowering_pipeline.md)
+- [Exact bounded host rounding](reference/late_quant_rne.md) — `current`, verified 2026-10-06 · owner: core — see also: [architecture](reference/architecture.md), [lowering_pipeline](reference/lowering_pipeline.md)
 - [Exact finite bound conversion](reference/exact_bound_conversion.md) — `current`, verified 2026-10-06 · owner: core — see also: [ordered_fma_certificates](reference/ordered_fma_certificates.md), [quantized_host_optimizations](reference/quantized_host_optimizations.md)
 - [Exact integer reconstruction in the source attention frontier](reference/source_frontier_integer_reconstruction.md) — `current`, verified 2026-10-06 · owner: core — see also: [ordered_fma_certificates](reference/ordered_fma_certificates.md), [quantized_host_optimizations](reference/quantized_host_optimizations.md)
 - [Experiment ABI](reference/experiment_abi.md) — `current`, verified 2026-07-14 · owner: targetgen — see also: [targetgen](guides/targetgen.md), [adding_a_target](guides/adding_a_target.md)
 - [Four-cell prepared polynomial scheduling](reference/prepared_polynomial_batch.md) — `current`, verified 2026-10-06 · owner: core — see also: [ordered_fma_certificates](reference/ordered_fma_certificates.md), [quantized_host_optimizations](reference/quantized_host_optimizations.md)
 - [Fused canonical encoder witness](reference/fused_encoded_witness.md) — `current`, verified 2026-10-06 · owner: core — see also: [ordered_fma_certificates](reference/ordered_fma_certificates.md), [quantized_host_optimizations](reference/quantized_host_optimizations.md)
 - [Generated target repositories](reference/generated_target_repos.md) — `current`, verified 2026-07-07 · owner: targetgen — see also: [targetgen](guides/targetgen.md), [adding_a_target](guides/adding_a_target.md)
-- [Host and device compilation](reference/host_device_compilation.md) — `current`, verified 2026-10-05 · owner: runtime — see also: [runtime](reference/runtime.md), [zephyr](guides/zephyr.md), [adding_a_target](guides/adding_a_target.md), [experiment_abi](reference/experiment_abi.md)
+- [Host and device compilation](reference/host_device_compilation.md) — `current`, verified 2026-10-06 · owner: runtime — see also: [runtime](reference/runtime.md), [zephyr](guides/zephyr.md), [adding_a_target](guides/adding_a_target.md), [experiment_abi](reference/experiment_abi.md)
 - [Independent source FMA batch permission](reference/source_fma_batch.md) — `draft`, verified 2026-10-06 · owner: compiler
 - [Lowering pipeline](reference/lowering_pipeline.md) — `current`, verified 2026-10-05 · owner: ir — see also: [core_dialects](reference/core_dialects.md), [llvm_integration](guides/llvm_integration.md)
 - [merlin/ layout — what goes where](reference/merlin_layout.md) — `current`, verified 2026-07-14 · owner: core — see also: [repo_structure](reference/repo_structure.md), [architecture](reference/architecture.md)
@@ -49,19 +49,19 @@ predates the newest change to the code it documents (see `check_docs_freshness.p
 - [Prepared probability bins](reference/prepared_probability_bins.md) — `current`, verified 2026-10-06 · owner: core — see also: [ordered_fma_certificates](reference/ordered_fma_certificates.md), [quantized_host_optimizations](reference/quantized_host_optimizations.md)
 - [Prepared word-space softmax interval domain](reference/word_softmax_domain.md) — `current`, verified 2026-10-06 · owner: core — see also: [ordered_fma_certificates](reference/ordered_fma_certificates.md), [quantized_host_optimizations](reference/quantized_host_optimizations.md)
 - [Private softmax producer spans](reference/prepared_softmax_spans.md) — `current`, verified 2026-10-06 · owner: core — see also: [ordered_fma_certificates](reference/ordered_fma_certificates.md), [quantized_host_optimizations](reference/quantized_host_optimizations.md)
-- [Quantized host optimizations](reference/quantized_host_optimizations.md) — `current`, verified 2026-10-05 · owner: core — see also: [architecture](reference/architecture.md), [lowering_pipeline](reference/lowering_pipeline.md)
+- [Quantized host optimizations](reference/quantized_host_optimizations.md) — `current`, verified 2026-10-06 · owner: core — see also: [architecture](reference/architecture.md), [lowering_pipeline](reference/lowering_pipeline.md)
 - [Repository map](reference/repo_map.md) — `generated` · owner: tooling
 - [Repository structure](reference/repo_structure.md) — `current`, verified 2026-09-21 · owner: core — see also: [architecture](reference/architecture.md), [getting_started](guides/getting_started.md), [storage](guides/storage.md)
 - [Retaining completed observation certificates](reference/certified_row_retention.md) — `current`, verified 2026-10-06 · owner: core — see also: [ordered_fma_certificates](reference/ordered_fma_certificates.md), [quantized_host_optimizations](reference/quantized_host_optimizations.md)
 - [Runtime](reference/runtime.md) — `current`, verified 2026-10-05 · owner: runtime — see also: [zephyr](guides/zephyr.md)
 - [RVV kernel-mining methodology](reference/rvv_kernel_mining_methodology.md) — `current`, verified 2026-07-19 · owner: kernels — see also: [kernel_mining](guides/kernel_mining.md), [dse](guides/dse.md)
-- [Scalar pointwise FMA and division loop scheduling](reference/scalar_pointwise_unroll.md) — `current`, verified 2026-10-05 · owner: llvmlower
+- [Scalar pointwise FMA and division loop scheduling](reference/scalar_pointwise_unroll.md) — `current`, verified 2026-10-06 · owner: llvmlower
 - [Scalar pointwise lane packets](reference/scalar_pointwise_packets.md) — `current`, verified 2026-10-06 · owner: llvmlower
 - [Schema reference](reference/schemas.md) — `generated` · owner: tooling
-- [Shared explicit tensor permutation proof](reference/shared_permutation.md) — `current`, verified 2026-10-05 · owner: core
-- [Source closure for guarded ordered floating contractions](reference/ordered_fma_groups.md) — `current`, verified 2026-10-05 · owner: llvmlower
+- [Shared explicit tensor permutation proof](reference/shared_permutation.md) — `current`, verified 2026-10-06 · owner: core
+- [Source closure for guarded ordered floating contractions](reference/ordered_fma_groups.md) — `current`, verified 2026-10-06 · owner: llvmlower
 - [Source-rounded interval endpoints](reference/f32_interval_endpoints.md) — `draft`, verified 2026-10-05 · owner: core
-- [Typed broadcast reciprocal square root hoisting](reference/broadcast_math_hoist.md) — `current`, verified 2026-10-05 · owner: llvmlower
+- [Typed broadcast reciprocal square root hoisting](reference/broadcast_math_hoist.md) — `current`, verified 2026-10-06 · owner: llvmlower
 - [Typed preprocessing correspondence](reference/preprocessing_correspondence.md) — `current`, verified 2026-10-06 · owner: ir — see also: [lowering_pipeline](reference/lowering_pipeline.md), [architecture](reference/architecture.md)
 - [xDSL prototyping plane](reference/xdsl.md) — `current`, verified 2026-07-14 · owner: ir — see also: [dialects](reference/dialects.md), [core_dialects](reference/core_dialects.md)
 
@@ -145,8 +145,8 @@ predates the newest change to the code it documents (see `check_docs_freshness.p
 - [Design: Triton as a target-independent kernel frontend](design/triton_frontend.md) — `draft`, verified 2026-08-10 · owner: ir — see also: [lowering_pipeline](reference/lowering_pipeline.md), [core_dialects](reference/core_dialects.md), [target_resolution](guides/target_resolution.md)
 - [Design: which phase a capsule can serve, derived for every target](design/capsule_phase_split.md) — `current`, verified 2026-09-05 · owner: core — see also: [perf_corpus_scope_gap](design/perf_corpus_scope_gap.md), [derived_capsule_axes](design/derived_capsule_axes.md), [perf_phase2_wiring](design/perf_phase2_wiring.md), [dialect_test_bar](design/dialect_test_bar.md)
 - [Design: wiring phase 2 — what the performance search can measure, ask, and refuse](design/perf_phase2_wiring.md) — `current`, verified 2026-09-08 · owner: gemmini-perf-bench — see also: [compiler_plane](design/compiler_plane.md), [expert_gap_attribution](design/expert_gap_attribution.md), [command_stream_reorder_emitter](design/command_stream_reorder_emitter.md)
-- [Exact integer radix reconstruction before binary64 conversion](design/exact-integer-radix-reconstruction.md) — `current`, verified 2026-10-05 · owner: compiler
-- [Exact zero metadata for encoded integer panels](design/encoded-integer-zero-metadata.md) — `current`, verified 2026-10-05 · owner: compiler
+- [Exact integer radix reconstruction before binary64 conversion](design/exact-integer-radix-reconstruction.md) — `current`, verified 2026-10-06 · owner: compiler
+- [Exact zero metadata for encoded integer panels](design/encoded-integer-zero-metadata.md) — `current`, verified 2026-10-06 · owner: compiler
 - [Macro scheduling: a stream-level plan over compute groups](design/macro_scheduling.md) — `draft`, verified 2026-09-17 · owner: core — see also: [static_arena_wiring](design/static_arena_wiring.md), [command_stream_reorder_emitter](design/command_stream_reorder_emitter.md), [compiler_plane](design/compiler_plane.md)
 - [Radiance search, GSIM certification, and kernel-library comparison](design/radiance_staged_evaluation.md) — `current`, verified 2026-09-08 · owner: targetgen
 - [Target publishing — preserved payloads and scoped evidence](design/target_publishing.md) — `current`, verified 2026-09-29 · owner: core — see also: [repo_structure](reference/repo_structure.md), [integrations](guides/integrations.md), [architecture](reference/architecture.md)

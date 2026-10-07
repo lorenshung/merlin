@@ -3,7 +3,7 @@ title: Host and device compilation
 kind: reference
 status: current
 owner: runtime
-last_verified: 2026-10-05
+last_verified: 2026-10-06
 related: [runtime, zephyr, adding_a_target, experiment_abi]
 code_refs: [src/merlin/targetgen/contract/build_recipe.py, src/merlin/targetgen/contract/build_service.py, src/merlin/targetgen/contract/compile.py, src/merlin/runtime/backends/base.py, merlin/runtime/c]
 ---
@@ -58,10 +58,19 @@ code must not select compiler flags or target instructions by target name.
 The recipe resolves the effective RISC-V ABI from an explicit `-mabi` flag or by
 asking the selected compiler, never from a runner default, and the paired build
 records an ABI receipt so the kernel object and its harness link under one ABI.
+Each compiled source gets its own object (`named_object_paths`): a unique basename
+keeps its historical `<stem>.o`, colliding basenames are named by their link
+position, and caller-supplied objects are never overwritten. Only output names
+change; the link order and the recipe do not.
 
 The existing model C substrate in [`merlin/runtime/c/`](../../merlin/runtime/c)
 builds MLIR memref descriptors and invokes a compiled whole-model function.
-Its `merlin_host_main.c` is a host verification driver. The tracked
+Its `merlin_host_main.c` is a host verification driver. The same directory also
+holds optional, target-neutral header-only numerics (ordered-FMA and product-norm
+certificates, interval endpoints, radix packing, prepared softmax spans) and the
+`templates/` the attention lowering instantiates; lowering-generated host code
+includes them, and none of them is a device runtime or enables an optimization by
+itself (see its `AGENT.md`). The tracked
 `merlin_hal.h` describes a broader replay seam, but its documented
 `merlin_program.c` consumer does not exist, so that header is not yet a
 working universal accelerator dispatcher.
