@@ -1,0 +1,1378 @@
+{
+ "schema": "merlin_schedule_proxy_validation_v1",
+ "target": "gemmini",
+ "what": "71 compute groups of a captured ResNet-50, each with the contraction the proxy is given and the cycles FireSim measured for the explicit-nest arm and for the hardware-FSM arm.",
+ "measurement_source": {
+  "artifact": "out/artifacts/perf-bench/gemmini/fsmfree_wholemodel_20260923T223846Z/per_group_fsm_vs_explicit.json",
+  "sha256": "e288cbdf7c49d0e327ee8b049f58710b74b1e6d0dec5141714118e6b8d2438f1",
+  "explicit_total_cycles": 43900637,
+  "fsm_total_cycles": 24359749,
+  "by_kind": {
+   "conv2d": {
+    "n": 20,
+    "fsm": 12167031,
+    "explicit": 25639926,
+    "ratio": 2.1073
+   },
+   "matmul": {
+    "n": 34,
+    "fsm": 8399110,
+    "explicit": 13953532,
+    "ratio": 1.6613
+   },
+   "sum": {
+    "n": 16,
+    "fsm": 3782243,
+    "explicit": 4288294,
+    "ratio": 1.1338
+   },
+   "mean": {
+    "n": 1,
+    "fsm": 11365,
+    "explicit": 18885,
+    "ratio": 1.6617
+   }
+  },
+  "bitstreams": [
+   "0af6f26e",
+   "a9a190b9"
+  ],
+  "queue_jobs": [
+   759,
+   760,
+   761
+  ],
+  "cycle_scope": "summed_per_call_cycle_brackets"
+ },
+ "lever_sensitivity": {
+  "what": "nine scheduling policies measured on pinned elaborated RTL (GSIM, no functional simulator, every arm bit-exact against the vendor kernel in the same binary). Cycle scope: one call of one contraction, CPU counter across the call including the closing fence -- comparable ONLY within one binary and NOT addable to a whole-model total.",
+  "caveat": "at the 7-row-tile geometry an arm moves up to 7% with the composition of the binary it sits in (measured by rebuilding with the arms reordered); only the reuse/reload pair survived that reordering, so treat differences under ~7% there as noise",
+  "refuted_lever": "hoisting the load-configuration state: -0.4% to +0.5% on every shape. A load config completes on issue, so paying one per operand switch costs nothing. Not rewarded here.",
+  "shapes": [
+   {
+    "shape": "3136x64x64",
+    "contraction": {
+     "m": 3136,
+     "n": 64,
+     "k": 64,
+     "stream_run": 3136
+    },
+    "hoist_load_states": 0.037,
+    "burst_to_just_in_time": -0.032,
+    "remove_stationary_reload": -0.246,
+    "regime": "mesh_critical"
+   },
+   {
+    "shape": "64x512x1024",
+    "contraction": {
+     "m": 64,
+     "n": 512,
+     "k": 1024,
+     "stream_run": 64
+    },
+    "hoist_load_states": 0.001,
+    "burst_to_just_in_time": -0.223,
+    "remove_stationary_reload": -0.015,
+    "regime": "load_critical"
+   },
+   {
+    "shape": "64x256x1024",
+    "contraction": {
+     "m": 64,
+     "n": 256,
+     "k": 1024,
+     "stream_run": 64
+    },
+    "hoist_load_states": -0.004,
+    "burst_to_just_in_time": -0.127,
+    "remove_stationary_reload": 0.007,
+    "regime": "load_critical"
+   },
+   {
+    "shape": "49x512x1024 at 7-row tiles",
+    "contraction": {
+     "m": 49,
+     "n": 512,
+     "k": 1024,
+     "stream_run": 7
+    },
+    "hoist_load_states": 0.035,
+    "burst_to_just_in_time": -0.006,
+    "remove_stationary_reload": -0.178,
+    "regime": "mesh_critical"
+   }
+  ],
+  "boundary": {
+   "quantity": "reload_multiplicity",
+   "mesh_critical_at_or_above": 5.5,
+   "bounded_to": [
+    4,
+    7
+   ],
+   "note": "four points bound the boundary to the open interval (4, 7] and no further; 5.5 is its midpoint and is the value the tests classify with. It is a MEASURED device property supplied as data, never a default inside the model."
+  }
+ },
+ "shape_source": {
+  "capture": "out/artifacts/recaptures/resnet50_sum_and_mean_20260917",
+  "capture_linalg_sha256": "91a134c3cfbebd8b8dd1218f618ce8f24120b1f6ff4d1b9871733307a32fb5e9",
+  "extracted_by": "merlin/experiments/gemmini_perf_bench/scripts/group_model_program.py::extract"
+ },
+ "machine": {
+  "array_rows": 16,
+  "array_cols": 16,
+  "muls_per_element": 1,
+  "peak_macs_per_cycle": 256,
+  "operand_bytes": 1,
+  "accumulate_bytes": 4,
+  "readout_bytes": "UNKNOWN",
+  "ping_pong_ways": 2,
+  "operand_store_bytes_per_loop": 131072,
+  "accumulate_store_bytes_per_loop": 32768,
+  "fill_drain_cycles": 17,
+  "dram_bytes_per_cycle": "UNKNOWN",
+  "provenance": {
+   "array_rows": "facts.arrays[mesh]: 16x16",
+   "array_cols": "facts.arrays[mesh]: 16x16",
+   "muls_per_element": "facts.arrays[mesh].mac_idiom.muls = 1",
+   "operand_bytes": "facts.datapaths: narrowest datapath is 8 bits",
+   "accumulate_bytes": "facts.datapaths: widest datapath is 32 bits",
+   "ping_pong_ways": "the loop FSM keeps one context per bank of the most bank-constrained store, so it runs 2 concurrent context(s) that ping-pong and each store is split 2 ways (accumulator: facts.memories[accumulator]: 65536 bytes / (depth 512 x 64 byte row) = 2 bank(s); scratchpad: facts.memories[scratchpad]: 262144 bytes / (depth 4096 x 16 byte row) = 4 bank(s))",
+   "accumulate_store_bytes": "accumulator: 65536 bytes / 2 concurrent loop context(s)",
+   "operand_store_bytes": "scratchpad: 262144 bytes / 2 concurrent loop context(s)",
+   "fill_drain_cycles": "fill/drain 17 cycles, measured; the law 'systolic_2d' predicts 30 and is REFUTED for this design -- do not sweep with it"
+  },
+  "refusals": {
+   "readout_bytes": "no interface states the dtypes a result may leave the device in, so the size of the output traffic is not derivable. This is a readout fact, not a schedule choice",
+   "dram_bytes_per_cycle": "no fact states this design's transfer width or its issue rate, so the traffic term is dropped and the bound is compute-only (looser, never tighter). The structural timing walk cannot supply it: it derives feed-forward depth and a sequenced movement engine has none. EXTRACT ONE OF: facts.datapaths[<name>].role = 'movement' with .bits -- the width in bits of one beat on the engine that moves tensor bytes between DRAM and the on-chip stores, on a datapath block that DECLARES itself the movement path; facts.interfaces[<name>].transfer_bits -- the width in bits of one beat of the target's own DRAM/host transfer interface; facts.interfaces[<name>].beat_bits with .beats_per_cycle -- a beat width plus how many beats the interface retires per cycle, when the two differ. Failing that, a measurement at >=2 transfer sizes separates the per-beat rate from the per-transfer cost"
+  }
+ },
+ "groups": [
+  {
+   "group": 1,
+   "kind": "conv2d",
+   "contraction": {
+    "m": 12544,
+    "n": 64,
+    "k": 147,
+    "lhs_bytes": 150528,
+    "rhs_bytes": 9408,
+    "result_bytes": 200704,
+    "stream_run": 112,
+    "label": "g1"
+   },
+   "fsm_cycles": 1956917,
+   "explicit_cycles": 1986790
+  },
+  {
+   "group": 2,
+   "kind": "matmul",
+   "contraction": {
+    "m": 3136,
+    "n": 64,
+    "k": 64,
+    "lhs_bytes": 200704,
+    "rhs_bytes": 4096,
+    "result_bytes": 200704,
+    "stream_run": 3136,
+    "label": "g2"
+   },
+   "fsm_cycles": 55780,
+   "explicit_cycles": 118011
+  },
+  {
+   "group": 3,
+   "kind": "conv2d",
+   "contraction": {
+    "m": 3136,
+    "n": 64,
+    "k": 576,
+    "lhs_bytes": 200704,
+    "rhs_bytes": 36864,
+    "result_bytes": 200704,
+    "stream_run": 56,
+    "label": "g3"
+   },
+   "fsm_cycles": 473284,
+   "explicit_cycles": 640353
+  },
+  {
+   "group": 4,
+   "kind": "matmul",
+   "contraction": {
+    "m": 3136,
+    "n": 256,
+    "k": 64,
+    "lhs_bytes": 200704,
+    "rhs_bytes": 16384,
+    "result_bytes": 802816,
+    "stream_run": 3136,
+    "label": "g4"
+   },
+   "fsm_cycles": 223288,
+   "explicit_cycles": 470471
+  },
+  {
+   "group": 5,
+   "kind": "matmul",
+   "contraction": {
+    "m": 3136,
+    "n": 256,
+    "k": 64,
+    "lhs_bytes": 200704,
+    "rhs_bytes": 16384,
+    "result_bytes": 802816,
+    "stream_run": 3136,
+    "label": "g5"
+   },
+   "fsm_cycles": 228494,
+   "explicit_cycles": 474778
+  },
+  {
+   "group": 6,
+   "kind": "sum",
+   "contraction": {
+    "m": 14336,
+    "n": 56,
+    "k": 1,
+    "lhs_bytes": 802816,
+    "rhs_bytes": 802816,
+    "result_bytes": 802816,
+    "stream_run": 14336,
+    "label": "g6"
+   },
+   "fsm_cycles": 482203,
+   "explicit_cycles": 492302
+  },
+  {
+   "group": 7,
+   "kind": "matmul",
+   "contraction": {
+    "m": 3136,
+    "n": 64,
+    "k": 256,
+    "lhs_bytes": 802816,
+    "rhs_bytes": 16384,
+    "result_bytes": 200704,
+    "stream_run": 3136,
+    "label": "g7"
+   },
+   "fsm_cycles": 206694,
+   "explicit_cycles": 379955
+  },
+  {
+   "group": 8,
+   "kind": "conv2d",
+   "contraction": {
+    "m": 3136,
+    "n": 64,
+    "k": 576,
+    "lhs_bytes": 200704,
+    "rhs_bytes": 36864,
+    "result_bytes": 200704,
+    "stream_run": 56,
+    "label": "g8"
+   },
+   "fsm_cycles": 473282,
+   "explicit_cycles": 638668
+  },
+  {
+   "group": 9,
+   "kind": "matmul",
+   "contraction": {
+    "m": 3136,
+    "n": 256,
+    "k": 64,
+    "lhs_bytes": 200704,
+    "rhs_bytes": 16384,
+    "result_bytes": 802816,
+    "stream_run": 3136,
+    "label": "g9"
+   },
+   "fsm_cycles": 219244,
+   "explicit_cycles": 468301
+  },
+  {
+   "group": 10,
+   "kind": "sum",
+   "contraction": {
+    "m": 14336,
+    "n": 56,
+    "k": 1,
+    "lhs_bytes": 802816,
+    "rhs_bytes": 802816,
+    "result_bytes": 802816,
+    "stream_run": 14336,
+    "label": "g10"
+   },
+   "fsm_cycles": 436869,
+   "explicit_cycles": 469294
+  },
+  {
+   "group": 11,
+   "kind": "matmul",
+   "contraction": {
+    "m": 3136,
+    "n": 64,
+    "k": 256,
+    "lhs_bytes": 802816,
+    "rhs_bytes": 16384,
+    "result_bytes": 200704,
+    "stream_run": 3136,
+    "label": "g11"
+   },
+   "fsm_cycles": 206495,
+   "explicit_cycles": 379051
+  },
+  {
+   "group": 12,
+   "kind": "conv2d",
+   "contraction": {
+    "m": 3136,
+    "n": 64,
+    "k": 576,
+    "lhs_bytes": 200704,
+    "rhs_bytes": 36864,
+    "result_bytes": 200704,
+    "stream_run": 56,
+    "label": "g12"
+   },
+   "fsm_cycles": 473413,
+   "explicit_cycles": 638277
+  },
+  {
+   "group": 13,
+   "kind": "matmul",
+   "contraction": {
+    "m": 3136,
+    "n": 256,
+    "k": 64,
+    "lhs_bytes": 200704,
+    "rhs_bytes": 16384,
+    "result_bytes": 802816,
+    "stream_run": 3136,
+    "label": "g13"
+   },
+   "fsm_cycles": 219564,
+   "explicit_cycles": 468865
+  },
+  {
+   "group": 14,
+   "kind": "sum",
+   "contraction": {
+    "m": 14336,
+    "n": 56,
+    "k": 1,
+    "lhs_bytes": 802816,
+    "rhs_bytes": 802816,
+    "result_bytes": 802816,
+    "stream_run": 14336,
+    "label": "g14"
+   },
+   "fsm_cycles": 493537,
+   "explicit_cycles": 502371
+  },
+  {
+   "group": 15,
+   "kind": "matmul",
+   "contraction": {
+    "m": 3136,
+    "n": 128,
+    "k": 256,
+    "lhs_bytes": 802816,
+    "rhs_bytes": 32768,
+    "result_bytes": 401408,
+    "stream_run": 3136,
+    "label": "g15"
+   },
+   "fsm_cycles": 407391,
+   "explicit_cycles": 692298
+  },
+  {
+   "group": 16,
+   "kind": "conv2d",
+   "contraction": {
+    "m": 784,
+    "n": 128,
+    "k": 1152,
+    "lhs_bytes": 401408,
+    "rhs_bytes": 147456,
+    "result_bytes": 100352,
+    "stream_run": 28,
+    "label": "g16"
+   },
+   "fsm_cycles": 577334,
+   "explicit_cycles": 678419
+  },
+  {
+   "group": 17,
+   "kind": "matmul",
+   "contraction": {
+    "m": 784,
+    "n": 512,
+    "k": 128,
+    "lhs_bytes": 100352,
+    "rhs_bytes": 65536,
+    "result_bytes": 401408,
+    "stream_run": 784,
+    "label": "g17"
+   },
+   "fsm_cycles": 208374,
+   "explicit_cycles": 364899
+  },
+  {
+   "group": 18,
+   "kind": "conv2d",
+   "contraction": {
+    "m": 784,
+    "n": 512,
+    "k": 256,
+    "lhs_bytes": 802816,
+    "rhs_bytes": 131072,
+    "result_bytes": 401408,
+    "stream_run": 28,
+    "label": "g18"
+   },
+   "fsm_cycles": 533554,
+   "explicit_cycles": 732900
+  },
+  {
+   "group": 19,
+   "kind": "sum",
+   "contraction": {
+    "m": 14336,
+    "n": 28,
+    "k": 1,
+    "lhs_bytes": 401408,
+    "rhs_bytes": 401408,
+    "result_bytes": 401408,
+    "stream_run": 14336,
+    "label": "g19"
+   },
+   "fsm_cycles": 269687,
+   "explicit_cycles": 320565
+  },
+  {
+   "group": 20,
+   "kind": "matmul",
+   "contraction": {
+    "m": 784,
+    "n": 128,
+    "k": 512,
+    "lhs_bytes": 401408,
+    "rhs_bytes": 65536,
+    "result_bytes": 100352,
+    "stream_run": 784,
+    "label": "g20"
+   },
+   "fsm_cycles": 207823,
+   "explicit_cycles": 303692
+  },
+  {
+   "group": 21,
+   "kind": "conv2d",
+   "contraction": {
+    "m": 784,
+    "n": 128,
+    "k": 1152,
+    "lhs_bytes": 100352,
+    "rhs_bytes": 147456,
+    "result_bytes": 100352,
+    "stream_run": 28,
+    "label": "g21"
+   },
+   "fsm_cycles": 535044,
+   "explicit_cycles": 612665
+  },
+  {
+   "group": 22,
+   "kind": "matmul",
+   "contraction": {
+    "m": 784,
+    "n": 512,
+    "k": 128,
+    "lhs_bytes": 100352,
+    "rhs_bytes": 65536,
+    "result_bytes": 401408,
+    "stream_run": 784,
+    "label": "g22"
+   },
+   "fsm_cycles": 208137,
+   "explicit_cycles": 366996
+  },
+  {
+   "group": 23,
+   "kind": "sum",
+   "contraction": {
+    "m": 14336,
+    "n": 28,
+    "k": 1,
+    "lhs_bytes": 401408,
+    "rhs_bytes": 401408,
+    "result_bytes": 401408,
+    "stream_run": 14336,
+    "label": "g23"
+   },
+   "fsm_cycles": 269095,
+   "explicit_cycles": 278927
+  },
+  {
+   "group": 24,
+   "kind": "matmul",
+   "contraction": {
+    "m": 784,
+    "n": 128,
+    "k": 512,
+    "lhs_bytes": 401408,
+    "rhs_bytes": 65536,
+    "result_bytes": 100352,
+    "stream_run": 784,
+    "label": "g24"
+   },
+   "fsm_cycles": 208330,
+   "explicit_cycles": 304571
+  },
+  {
+   "group": 25,
+   "kind": "conv2d",
+   "contraction": {
+    "m": 784,
+    "n": 128,
+    "k": 1152,
+    "lhs_bytes": 100352,
+    "rhs_bytes": 147456,
+    "result_bytes": 100352,
+    "stream_run": 28,
+    "label": "g25"
+   },
+   "fsm_cycles": 534522,
+   "explicit_cycles": 612409
+  },
+  {
+   "group": 26,
+   "kind": "matmul",
+   "contraction": {
+    "m": 784,
+    "n": 512,
+    "k": 128,
+    "lhs_bytes": 100352,
+    "rhs_bytes": 65536,
+    "result_bytes": 401408,
+    "stream_run": 784,
+    "label": "g26"
+   },
+   "fsm_cycles": 208365,
+   "explicit_cycles": 365939
+  },
+  {
+   "group": 27,
+   "kind": "sum",
+   "contraction": {
+    "m": 14336,
+    "n": 28,
+    "k": 1,
+    "lhs_bytes": 401408,
+    "rhs_bytes": 401408,
+    "result_bytes": 401408,
+    "stream_run": 14336,
+    "label": "g27"
+   },
+   "fsm_cycles": 275844,
+   "explicit_cycles": 319701
+  },
+  {
+   "group": 28,
+   "kind": "matmul",
+   "contraction": {
+    "m": 784,
+    "n": 128,
+    "k": 512,
+    "lhs_bytes": 401408,
+    "rhs_bytes": 65536,
+    "result_bytes": 100352,
+    "stream_run": 784,
+    "label": "g28"
+   },
+   "fsm_cycles": 208246,
+   "explicit_cycles": 303876
+  },
+  {
+   "group": 29,
+   "kind": "conv2d",
+   "contraction": {
+    "m": 784,
+    "n": 128,
+    "k": 1152,
+    "lhs_bytes": 100352,
+    "rhs_bytes": 147456,
+    "result_bytes": 100352,
+    "stream_run": 28,
+    "label": "g29"
+   },
+   "fsm_cycles": 534629,
+   "explicit_cycles": 612499
+  },
+  {
+   "group": 30,
+   "kind": "matmul",
+   "contraction": {
+    "m": 784,
+    "n": 512,
+    "k": 128,
+    "lhs_bytes": 100352,
+    "rhs_bytes": 65536,
+    "result_bytes": 401408,
+    "stream_run": 784,
+    "label": "g30"
+   },
+   "fsm_cycles": 208568,
+   "explicit_cycles": 366331
+  },
+  {
+   "group": 31,
+   "kind": "sum",
+   "contraction": {
+    "m": 14336,
+    "n": 28,
+    "k": 1,
+    "lhs_bytes": 401408,
+    "rhs_bytes": 401408,
+    "result_bytes": 401408,
+    "stream_run": 14336,
+    "label": "g31"
+   },
+   "fsm_cycles": 269254,
+   "explicit_cycles": 278843
+  },
+  {
+   "group": 32,
+   "kind": "matmul",
+   "contraction": {
+    "m": 784,
+    "n": 256,
+    "k": 512,
+    "lhs_bytes": 401408,
+    "rhs_bytes": 131072,
+    "result_bytes": 200704,
+    "stream_run": 784,
+    "label": "g32"
+   },
+   "fsm_cycles": 411615,
+   "explicit_cycles": 611963
+  },
+  {
+   "group": 33,
+   "kind": "conv2d",
+   "contraction": {
+    "m": 196,
+    "n": 256,
+    "k": 2304,
+    "lhs_bytes": 200704,
+    "rhs_bytes": 589824,
+    "result_bytes": 50176,
+    "stream_run": 14,
+    "label": "g33"
+   },
+   "fsm_cycles": 468651,
+   "explicit_cycles": 1490392
+  },
+  {
+   "group": 34,
+   "kind": "matmul",
+   "contraction": {
+    "m": 196,
+    "n": 1024,
+    "k": 256,
+    "lhs_bytes": 50176,
+    "rhs_bytes": 262144,
+    "result_bytes": 200704,
+    "stream_run": 196,
+    "label": "g34"
+   },
+   "fsm_cycles": 217603,
+   "explicit_cycles": 366700
+  },
+  {
+   "group": 35,
+   "kind": "conv2d",
+   "contraction": {
+    "m": 196,
+    "n": 1024,
+    "k": 512,
+    "lhs_bytes": 401408,
+    "rhs_bytes": 524288,
+    "result_bytes": 200704,
+    "stream_run": 14,
+    "label": "g35"
+   },
+   "fsm_cycles": 421247,
+   "explicit_cycles": 996113
+  },
+  {
+   "group": 36,
+   "kind": "sum",
+   "contraction": {
+    "m": 14336,
+    "n": 14,
+    "k": 1,
+    "lhs_bytes": 200704,
+    "rhs_bytes": 200704,
+    "result_bytes": 200704,
+    "stream_run": 14336,
+    "label": "g36"
+   },
+   "fsm_cycles": 146504,
+   "explicit_cycles": 190305
+  },
+  {
+   "group": 37,
+   "kind": "matmul",
+   "contraction": {
+    "m": 196,
+    "n": 256,
+    "k": 1024,
+    "lhs_bytes": 200704,
+    "rhs_bytes": 262144,
+    "result_bytes": 50176,
+    "stream_run": 196,
+    "label": "g37"
+   },
+   "fsm_cycles": 235543,
+   "explicit_cycles": 343853
+  },
+  {
+   "group": 38,
+   "kind": "conv2d",
+   "contraction": {
+    "m": 196,
+    "n": 256,
+    "k": 2304,
+    "lhs_bytes": 50176,
+    "rhs_bytes": 589824,
+    "result_bytes": 50176,
+    "stream_run": 14,
+    "label": "g38"
+   },
+   "fsm_cycles": 496729,
+   "explicit_cycles": 823612
+  },
+  {
+   "group": 39,
+   "kind": "matmul",
+   "contraction": {
+    "m": 196,
+    "n": 1024,
+    "k": 256,
+    "lhs_bytes": 50176,
+    "rhs_bytes": 262144,
+    "result_bytes": 200704,
+    "stream_run": 196,
+    "label": "g39"
+   },
+   "fsm_cycles": 217559,
+   "explicit_cycles": 368242
+  },
+  {
+   "group": 40,
+   "kind": "sum",
+   "contraction": {
+    "m": 14336,
+    "n": 14,
+    "k": 1,
+    "lhs_bytes": 200704,
+    "rhs_bytes": 200704,
+    "result_bytes": 200704,
+    "stream_run": 14336,
+    "label": "g40"
+   },
+   "fsm_cycles": 152367,
+   "explicit_cycles": 190847
+  },
+  {
+   "group": 41,
+   "kind": "matmul",
+   "contraction": {
+    "m": 196,
+    "n": 256,
+    "k": 1024,
+    "lhs_bytes": 200704,
+    "rhs_bytes": 262144,
+    "result_bytes": 50176,
+    "stream_run": 196,
+    "label": "g41"
+   },
+   "fsm_cycles": 235528,
+   "explicit_cycles": 343801
+  },
+  {
+   "group": 42,
+   "kind": "conv2d",
+   "contraction": {
+    "m": 196,
+    "n": 256,
+    "k": 2304,
+    "lhs_bytes": 50176,
+    "rhs_bytes": 589824,
+    "result_bytes": 50176,
+    "stream_run": 14,
+    "label": "g42"
+   },
+   "fsm_cycles": 497030,
+   "explicit_cycles": 823131
+  },
+  {
+   "group": 43,
+   "kind": "matmul",
+   "contraction": {
+    "m": 196,
+    "n": 1024,
+    "k": 256,
+    "lhs_bytes": 50176,
+    "rhs_bytes": 262144,
+    "result_bytes": 200704,
+    "stream_run": 196,
+    "label": "g43"
+   },
+   "fsm_cycles": 217568,
+   "explicit_cycles": 368366
+  },
+  {
+   "group": 44,
+   "kind": "sum",
+   "contraction": {
+    "m": 14336,
+    "n": 14,
+    "k": 1,
+    "lhs_bytes": 200704,
+    "rhs_bytes": 200704,
+    "result_bytes": 200704,
+    "stream_run": 14336,
+    "label": "g44"
+   },
+   "fsm_cycles": 152494,
+   "explicit_cycles": 191310
+  },
+  {
+   "group": 45,
+   "kind": "matmul",
+   "contraction": {
+    "m": 196,
+    "n": 256,
+    "k": 1024,
+    "lhs_bytes": 200704,
+    "rhs_bytes": 262144,
+    "result_bytes": 50176,
+    "stream_run": 196,
+    "label": "g45"
+   },
+   "fsm_cycles": 235240,
+   "explicit_cycles": 343581
+  },
+  {
+   "group": 46,
+   "kind": "conv2d",
+   "contraction": {
+    "m": 196,
+    "n": 256,
+    "k": 2304,
+    "lhs_bytes": 50176,
+    "rhs_bytes": 589824,
+    "result_bytes": 50176,
+    "stream_run": 14,
+    "label": "g46"
+   },
+   "fsm_cycles": 496565,
+   "explicit_cycles": 824014
+  },
+  {
+   "group": 47,
+   "kind": "matmul",
+   "contraction": {
+    "m": 196,
+    "n": 1024,
+    "k": 256,
+    "lhs_bytes": 50176,
+    "rhs_bytes": 262144,
+    "result_bytes": 200704,
+    "stream_run": 196,
+    "label": "g47"
+   },
+   "fsm_cycles": 217654,
+   "explicit_cycles": 368040
+  },
+  {
+   "group": 48,
+   "kind": "sum",
+   "contraction": {
+    "m": 14336,
+    "n": 14,
+    "k": 1,
+    "lhs_bytes": 200704,
+    "rhs_bytes": 200704,
+    "result_bytes": 200704,
+    "stream_run": 14336,
+    "label": "g48"
+   },
+   "fsm_cycles": 152881,
+   "explicit_cycles": 190592
+  },
+  {
+   "group": 49,
+   "kind": "matmul",
+   "contraction": {
+    "m": 196,
+    "n": 256,
+    "k": 1024,
+    "lhs_bytes": 200704,
+    "rhs_bytes": 262144,
+    "result_bytes": 50176,
+    "stream_run": 196,
+    "label": "g49"
+   },
+   "fsm_cycles": 235014,
+   "explicit_cycles": 344285
+  },
+  {
+   "group": 50,
+   "kind": "conv2d",
+   "contraction": {
+    "m": 196,
+    "n": 256,
+    "k": 2304,
+    "lhs_bytes": 50176,
+    "rhs_bytes": 589824,
+    "result_bytes": 50176,
+    "stream_run": 14,
+    "label": "g50"
+   },
+   "fsm_cycles": 496956,
+   "explicit_cycles": 823352
+  },
+  {
+   "group": 51,
+   "kind": "matmul",
+   "contraction": {
+    "m": 196,
+    "n": 1024,
+    "k": 256,
+    "lhs_bytes": 50176,
+    "rhs_bytes": 262144,
+    "result_bytes": 200704,
+    "stream_run": 196,
+    "label": "g51"
+   },
+   "fsm_cycles": 217615,
+   "explicit_cycles": 367637
+  },
+  {
+   "group": 52,
+   "kind": "sum",
+   "contraction": {
+    "m": 14336,
+    "n": 14,
+    "k": 1,
+    "lhs_bytes": 200704,
+    "rhs_bytes": 200704,
+    "result_bytes": 200704,
+    "stream_run": 14336,
+    "label": "g52"
+   },
+   "fsm_cycles": 151923,
+   "explicit_cycles": 185738
+  },
+  {
+   "group": 53,
+   "kind": "matmul",
+   "contraction": {
+    "m": 196,
+    "n": 256,
+    "k": 1024,
+    "lhs_bytes": 200704,
+    "rhs_bytes": 262144,
+    "result_bytes": 50176,
+    "stream_run": 196,
+    "label": "g53"
+   },
+   "fsm_cycles": 235123,
+   "explicit_cycles": 343861
+  },
+  {
+   "group": 54,
+   "kind": "conv2d",
+   "contraction": {
+    "m": 196,
+    "n": 256,
+    "k": 2304,
+    "lhs_bytes": 50176,
+    "rhs_bytes": 589824,
+    "result_bytes": 50176,
+    "stream_run": 14,
+    "label": "g54"
+   },
+   "fsm_cycles": 496526,
+   "explicit_cycles": 824198
+  },
+  {
+   "group": 55,
+   "kind": "matmul",
+   "contraction": {
+    "m": 196,
+    "n": 1024,
+    "k": 256,
+    "lhs_bytes": 50176,
+    "rhs_bytes": 262144,
+    "result_bytes": 200704,
+    "stream_run": 196,
+    "label": "g55"
+   },
+   "fsm_cycles": 217513,
+   "explicit_cycles": 367684
+  },
+  {
+   "group": 56,
+   "kind": "sum",
+   "contraction": {
+    "m": 14336,
+    "n": 14,
+    "k": 1,
+    "lhs_bytes": 200704,
+    "rhs_bytes": 200704,
+    "result_bytes": 200704,
+    "stream_run": 14336,
+    "label": "g56"
+   },
+   "fsm_cycles": 151587,
+   "explicit_cycles": 185350
+  },
+  {
+   "group": 57,
+   "kind": "matmul",
+   "contraction": {
+    "m": 196,
+    "n": 512,
+    "k": 1024,
+    "lhs_bytes": 200704,
+    "rhs_bytes": 524288,
+    "result_bytes": 100352,
+    "stream_run": 196,
+    "label": "g57"
+   },
+   "fsm_cycles": 468635,
+   "explicit_cycles": 692081
+  },
+  {
+   "group": 58,
+   "kind": "conv2d",
+   "contraction": {
+    "m": 49,
+    "n": 512,
+    "k": 4608,
+    "lhs_bytes": 100352,
+    "rhs_bytes": 2359296,
+    "result_bytes": 25088,
+    "stream_run": 7,
+    "label": "g58"
+   },
+   "fsm_cycles": 694062,
+   "explicit_cycles": 3182940
+  },
+  {
+   "group": 59,
+   "kind": "matmul",
+   "contraction": {
+    "m": 49,
+    "n": 2048,
+    "k": 512,
+    "lhs_bytes": 25088,
+    "rhs_bytes": 1048576,
+    "result_bytes": 100352,
+    "stream_run": 49,
+    "label": "g59"
+   },
+   "fsm_cycles": 269989,
+   "explicit_cycles": 480107
+  },
+  {
+   "group": 60,
+   "kind": "conv2d",
+   "contraction": {
+    "m": 49,
+    "n": 2048,
+    "k": 1024,
+    "lhs_bytes": 200704,
+    "rhs_bytes": 2097152,
+    "result_bytes": 100352,
+    "stream_run": 7,
+    "label": "g60"
+   },
+   "fsm_cycles": 613619,
+   "explicit_cycles": 3250325
+  },
+  {
+   "group": 61,
+   "kind": "sum",
+   "contraction": {
+    "m": 14336,
+    "n": 7,
+    "k": 1,
+    "lhs_bytes": 100352,
+    "rhs_bytes": 100352,
+    "result_bytes": 100352,
+    "stream_run": 14336,
+    "label": "g61"
+   },
+   "fsm_cycles": 127502,
+   "explicit_cycles": 168024
+  },
+  {
+   "group": 62,
+   "kind": "matmul",
+   "contraction": {
+    "m": 49,
+    "n": 512,
+    "k": 2048,
+    "lhs_bytes": 100352,
+    "rhs_bytes": 1048576,
+    "result_bytes": 25088,
+    "stream_run": 49,
+    "label": "g62"
+   },
+   "fsm_cycles": 302318,
+   "explicit_cycles": 467065
+  },
+  {
+   "group": 63,
+   "kind": "conv2d",
+   "contraction": {
+    "m": 49,
+    "n": 512,
+    "k": 4608,
+    "lhs_bytes": 25088,
+    "rhs_bytes": 2359296,
+    "result_bytes": 25088,
+    "stream_run": 7,
+    "label": "g63"
+   },
+   "fsm_cycles": 696947,
+   "explicit_cycles": 2724035
+  },
+  {
+   "group": 64,
+   "kind": "matmul",
+   "contraction": {
+    "m": 49,
+    "n": 2048,
+    "k": 512,
+    "lhs_bytes": 25088,
+    "rhs_bytes": 1048576,
+    "result_bytes": 100352,
+    "stream_run": 49,
+    "label": "g64"
+   },
+   "fsm_cycles": 269731,
+   "explicit_cycles": 481104
+  },
+  {
+   "group": 65,
+   "kind": "sum",
+   "contraction": {
+    "m": 14336,
+    "n": 7,
+    "k": 1,
+    "lhs_bytes": 100352,
+    "rhs_bytes": 100352,
+    "result_bytes": 100352,
+    "stream_run": 14336,
+    "label": "g65"
+   },
+   "fsm_cycles": 128076,
+   "explicit_cycles": 167474
+  },
+  {
+   "group": 66,
+   "kind": "matmul",
+   "contraction": {
+    "m": 49,
+    "n": 512,
+    "k": 2048,
+    "lhs_bytes": 100352,
+    "rhs_bytes": 1048576,
+    "result_bytes": 25088,
+    "stream_run": 49,
+    "label": "g66"
+   },
+   "fsm_cycles": 302507,
+   "explicit_cycles": 467592
+  },
+  {
+   "group": 67,
+   "kind": "conv2d",
+   "contraction": {
+    "m": 49,
+    "n": 512,
+    "k": 4608,
+    "lhs_bytes": 25088,
+    "rhs_bytes": 2359296,
+    "result_bytes": 25088,
+    "stream_run": 7,
+    "label": "g67"
+   },
+   "fsm_cycles": 696720,
+   "explicit_cycles": 2724834
+  },
+  {
+   "group": 68,
+   "kind": "matmul",
+   "contraction": {
+    "m": 49,
+    "n": 2048,
+    "k": 512,
+    "lhs_bytes": 25088,
+    "rhs_bytes": 1048576,
+    "result_bytes": 100352,
+    "stream_run": 49,
+    "label": "g68"
+   },
+   "fsm_cycles": 269843,
+   "explicit_cycles": 479871
+  },
+  {
+   "group": 69,
+   "kind": "sum",
+   "contraction": {
+    "m": 14336,
+    "n": 7,
+    "k": 1,
+    "lhs_bytes": 100352,
+    "rhs_bytes": 100352,
+    "result_bytes": 100352,
+    "stream_run": 14336,
+    "label": "g69"
+   },
+   "fsm_cycles": 122420,
+   "explicit_cycles": 156651
+  },
+  {
+   "group": 70,
+   "kind": "mean",
+   "contraction": {
+    "m": 2048,
+    "n": 1,
+    "k": 49,
+    "lhs_bytes": 100352,
+    "rhs_bytes": 0,
+    "result_bytes": 2048,
+    "stream_run": 2048,
+    "label": "g70"
+   },
+   "fsm_cycles": 11365,
+   "explicit_cycles": 18885
+  },
+  {
+   "group": 71,
+   "kind": "matmul",
+   "contraction": {
+    "m": 1,
+    "n": 1000,
+    "k": 2048,
+    "lhs_bytes": 2048,
+    "rhs_bytes": 2048000,
+    "result_bytes": 1000,
+    "stream_run": 1,
+    "label": "g71"
+   },
+   "fsm_cycles": 397719,
+   "explicit_cycles": 519665
+  }
+ ],
+ "measured_correlation": {
+  "issue transactions alone": {
+   "spearman_vs_explicit": 0.8778,
+   "pearson_vs_explicit": 0.8003,
+   "spearman_vs_fsm": 0.8165,
+   "pairwise_correct": 2062,
+   "pairwise_total": 2485,
+   "pairwise_accuracy": 0.8298
+  },
+  "movement bytes alone": {
+   "spearman_vs_explicit": 0.4017,
+   "pearson_vs_explicit": 0.5829,
+   "spearman_vs_fsm": 0.3911,
+   "pairwise_correct": 1563,
+   "pairwise_total": 2485,
+   "pairwise_accuracy": 0.629
+  },
+  "both, uncalibrated (1.0)": {
+   "spearman_vs_explicit": 0.9203,
+   "pearson_vs_explicit": 0.834,
+   "spearman_vs_fsm": 0.8111,
+   "pairwise_correct": 2221,
+   "pairwise_total": 2485,
+   "pairwise_accuracy": 0.8938
+  },
+  "both, calibrated (3.5)": {
+   "spearman_vs_explicit": 0.9779,
+   "pearson_vs_explicit": 0.8836,
+   "spearman_vs_fsm": 0.8882,
+   "pairwise_correct": 2317,
+   "pairwise_total": 2485,
+   "pairwise_accuracy": 0.9324
+  },
+  "named_worst_ranks": {
+   "uncalibrated": {
+    "g60": 4,
+    "g58": 1,
+    "g67": 3,
+    "g63": 2
+   },
+   "calibrated": {
+    "g60": 4,
+    "g58": 1,
+    "g67": 3,
+    "g63": 2
+   }
+  },
+  "proxy_top4": {
+   "uncalibrated": [
+    58,
+    63,
+    67,
+    60
+   ],
+   "calibrated": [
+    58,
+    63,
+    67,
+    60
+   ]
+  },
+  "exchange_rate_split_half": {
+   "trials": 200,
+   "median": 3.5,
+   "p10": 3.0,
+   "p90": 6.0,
+   "held_out_spearman_median": 0.9701,
+   "held_out_spearman_p10": 0.9412
+  },
+  "vacuity_check": {
+   "what": "the same work in two orientations, moving bit-identical bytes",
+   "moved_bytes": [
+    2398208,
+    2398208
+   ],
+   "transactions": [
+    67224.0,
+    74904.0
+   ],
+   "array_issue_cycles": [
+    401408,
+    524288
+   ],
+   "idle_slot_share": [
+    0.0,
+    0.234375
+   ]
+  },
+  "fitted_cycles_per_transaction": 15.948,
+  "regime_agreement": "4/4"
+ }
+}

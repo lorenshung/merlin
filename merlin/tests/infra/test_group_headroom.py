@@ -141,3 +141,82 @@ def test_group_headroom_is_none_without_shape_facts_or_an_int_cycle_count():
         GH.group_headroom(op="matmul", shape_facts=facts, ours_cycles=None, reference_cycles=90, machine=machine)
         is None
     )
+
+
+# --------------------------------------------------------------------------------------- the rank signal
+
+
+def _priced_machine() -> DB.Machine:
+    """The facts the schedule proxy needs to size a transaction: array geometry and operand width."""
+    return DB.Machine(
+        array_rows=16,
+        array_cols=16,
+        muls_per_element=1,
+        operand_bytes=1,
+        accumulate_bytes=4,
+        readout_bytes=DB.UNKNOWN,
+        ping_pong_ways=2,
+        operand_store_bytes=131072,
+        accumulate_store_bytes=32768,
+        fill_drain_cycles=DB.UNKNOWN,
+        dram_bytes_per_cycle=DB.UNKNOWN,
+    )
+
+
+_CONV = {
+    "N": 8,
+    "ci": 4,
+    "Himg": 10,
+    "Wimg": 10,
+    "kh": 3,
+    "kw": 3,
+    "stride": [1, 1],
+    "padding": [0, 0, 0, 0],
+    "operand_dtype": "i8",
+    "output_dtype": "i8",
+}
+
+
+def test_the_bound_and_the_rank_price_the_same_contraction():
+    """``macs_and_bytes`` is the contraction's own count, so the two signals cannot drift apart."""
+    for op, facts in (
+        ("matmul", {"M": 4, "K": 8, "N": 16, "operand_dtype": "i8", "output_dtype": "i8"}),
+        ("conv2d", _CONV),
+    ):
+        work = GH.contraction_for(op, facts)
+        assert GH.macs_and_bytes(op, facts) == (work.macs, work.moved_bytes)
+
+
+def test_a_convolution_streams_one_output_row_and_reads_its_image_not_its_im2col():
+    work = GH.contraction_for("conv2d", _CONV)
+    assert (work.m, work.n, work.k) == (8 * 8, 8, 4 * 3 * 3)
+    assert work.stream_run == 8  # one output row of an 8x8 output
+    assert work.lhs_bytes == 10 * 10 * 4
+
+
+def test_group_rank_is_the_proxys_order_and_never_a_cycle_count():
+    machine = _priced_machine()
+    narrow = GH.group_rank(GH.contraction_for("conv2d", _CONV), machine, target="any")
+    wide = GH.group_rank(GH.contraction_for("conv2d", {**_CONV, "Himg": 34, "Wimg": 34}), machine, target="any")
+    assert narrow["transactions"] is not None and wide["transactions"] > narrow["transactions"]
+    assert set(narrow["terms"]) == {"compute", "movement"}
+    assert "cycles" in narrow["unresolved"]  # uncalibrated: an order, not a magnitude
+    assert narrow["regime"] == "UNDECIDED"
+
+
+def test_group_rank_refuses_when_the_facts_do_not_size_a_transaction():
+    rank = GH.group_rank(GH.contraction_for("conv2d", _CONV), _machine(), target="any")
+    assert rank["transactions"] is None
+    assert "operand_bytes" in rank["unresolved"]
+
+
+def test_group_headroom_carries_the_rank_when_the_target_is_named():
+    machine = _priced_machine()
+    facts = {"M": 64, "K": 64, "N": 64, "operand_dtype": "i8", "output_dtype": "i8"}
+    without = GH.group_headroom(op="matmul", shape_facts=facts, ours_cycles=900, reference_cycles=800, machine=machine)
+    assert "rank" not in without
+    with_rank = GH.group_headroom(
+        op="matmul", shape_facts=facts, ours_cycles=900, reference_cycles=800, machine=machine, target="any"
+    )
+    assert with_rank["rank"]["transactions"] > 0
+    assert with_rank["headroom_cycles"] == 100

@@ -90,6 +90,7 @@ __all__ = [
     "falsification_receipt",
     "fill_term",
     "machine_from_facts",
+    "select_tiling",
 ]
 
 #: The evidence kind a derived-and-survived bound carries. Deliberately NOT ``structural_bound``:
@@ -820,32 +821,50 @@ def _round_up(value: int, quantum: int) -> int:
     return -(-int(value) // int(quantum)) * int(quantum)
 
 
-def _best_tiling(gemm: Gemm, machine: Machine) -> "Tiling | str":
+def select_tiling(
+    gemm: Gemm,
+    machine: Machine,
+    *,
+    lhs_bytes: "int | None" = None,
+    rhs_bytes: "int | None" = None,
+    result_bytes: "int | None" = None,
+) -> "Tiling | str":
     """The legal tiling that moves the least DRAM traffic, or why none is derivable.
 
     Traffic is ``|A| * J0 + |B| * I0 + |C|`` with ``I0``/``J0`` the tile-loop trip counts -- the
     reduction innermost with the output tile resident in the result store. A tile is legal when the
     operand store holds its A and B slabs and the result store holds its output slab, both at the
     capacity ONE loop context sees.
+
+    The three footprints default to what the machine's own element widths say a dense contraction of
+    this shape moves. A caller whose operands are NOT dense in the contraction's own extents -- a
+    convolution, whose ``|A|`` is the image rather than the im2col matrix, or a schedule that stores
+    its result narrower than the readout facts state -- passes the bytes it actually moves instead.
+
+    ``|C|`` is the SAME for every tiling of a shape, so the readout width cannot move the argmin. Only
+    the default path needs it, and only to report a complete ``traffic_bytes`` total; a caller that
+    supplies its own footprints gets a tiling on a target whose facts evidence no readout dtype.
     """
     rows, cols = machine.array_rows, machine.array_cols
-    for name in ("operand_store_bytes", "accumulate_store_bytes", "operand_bytes", "accumulate_bytes", "readout_bytes"):
+    for name in ("operand_store_bytes", "accumulate_store_bytes", "operand_bytes", "accumulate_bytes"):
         if is_unknown(getattr(machine, name)):
             return machine.refusals.get(name, f"{name} is UNKNOWN")
     if is_unknown(rows) or is_unknown(cols):
         return machine.refusals.get("array_rows", "the array geometry is UNKNOWN")
 
     rows, cols = int(rows), int(cols)
-    op_bytes, acc_bytes, out_bytes = (
-        int(machine.operand_bytes),
-        int(machine.accumulate_bytes),
-        int(machine.readout_bytes),
-    )
+    op_bytes, acc_bytes = int(machine.operand_bytes), int(machine.accumulate_bytes)
     op_cap, acc_cap = int(machine.operand_store_bytes), int(machine.accumulate_store_bytes)
 
     padded_m, padded_n, padded_k = _round_up(gemm.m, rows), _round_up(gemm.n, cols), _round_up(gemm.k, rows)
-    a_bytes, b_bytes = gemm.m * gemm.k * op_bytes, gemm.k * gemm.n * op_bytes
-    c_bytes = gemm.m * gemm.n * out_bytes
+    a_bytes = gemm.m * gemm.k * op_bytes if lhs_bytes is None else int(lhs_bytes)
+    b_bytes = gemm.k * gemm.n * op_bytes if rhs_bytes is None else int(rhs_bytes)
+    if result_bytes is None:
+        if is_unknown(machine.readout_bytes):
+            return machine.refusals.get("readout_bytes", "readout_bytes is UNKNOWN")
+        c_bytes = gemm.m * gemm.n * int(machine.readout_bytes)
+    else:
+        c_bytes = int(result_bytes)
     tile_k = min(rows, padded_k)
 
     best: "Tiling | None" = None
@@ -872,6 +891,11 @@ def _best_tiling(gemm: Gemm, machine: Machine) -> "Tiling | str":
             "so no legal schedule of this shape exists to bound"
         )
     return best
+
+
+def _best_tiling(gemm: Gemm, machine: Machine) -> "Tiling | str":
+    """:func:`select_tiling` over the dense footprints the machine's own widths imply."""
+    return select_tiling(gemm, machine)
 
 
 def achievable_bound(gemm: Gemm, machine: Machine, *, workload: str = "") -> AchievableBound:

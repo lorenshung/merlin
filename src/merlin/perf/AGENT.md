@@ -92,3 +92,9 @@ boundary envelope checks an unpriced subdomain and never approves a ranking.
 The provider owns decoding/ABI and exact artifact verification; the existing
 fitter and held-out ordering gate remain separate. Independent expanded event
 traces and multiple provider geometries test the summary and refusal behavior.
+
+`schedule_proxy` prices what a schedule asks the device for in array-tile transactions (compute tiles
+plus moved bytes, never one without the other). It is validated as an ORDER against 71 FireSim-measured
+groups (`merlin/tests/dse/test_schedule_proxy.py`, points in `examples/<target>/phase2/`) and is the
+`cost_proxy` rung of `merlin/contract/measurement_ladder.yaml`: ranking only, never a cycle count.
+Its production caller is `group_headroom.group_rank`, reported beside each stated group's bound.

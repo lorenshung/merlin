@@ -14,7 +14,8 @@ capture's whole-program statement (the same statement the builder asks the packa
 are a function of a capture and nothing here names a model, a group or a shape. A PREDICTED cost per
 group is the same derived bound the phase-0 perf-cells product ranks by
 (:mod:`merlin.perf.group_headroom`, the target's own RTL facts); a group it has no formula for predicts
-UNKNOWN, never zero.
+UNKNOWN, never zero. Beside it, each group carries the validated schedule cost proxy's rank signal
+(``rank_transactions``): an order over groups, reported and never used as a share basis.
 
 WHICH FORMS MUST BE COVERED. A form is required when its SHARE of the model's cycles reaches
 ``share_threshold`` on ANY basis available: its predicted share, its share of the reference arm's
@@ -98,8 +99,9 @@ def statement_forms(model_capsule: str | Path, *, target: str) -> list[dict[str,
         facts = W._shape_facts(op, entry)
         if facts is not None and "operand_dtype" not in facts:
             facts = {**facts, "operand_dtype": entry.get("operand_dtype"), "output_dtype": entry.get("output_dtype")}
-        estimate = GH.macs_and_bytes(op, facts) if facts is not None else None
-        bound = GH.group_bound(*estimate, machine) if estimate is not None else None
+        work = GH.contraction_for(op, facts, label=f"g{row['group']}") if facts is not None else None
+        bound = GH.group_bound(work.macs, work.moved_bytes, machine) if work is not None else None
+        rank = GH.group_rank(work, machine, target=target) if work is not None else None
         rows.append(
             {
                 "group": str(row["group"]),
@@ -109,6 +111,10 @@ def statement_forms(model_capsule: str | Path, *, target: str) -> list[dict[str,
                 "shape": {k: v for k, v in (facts or {}).items() if k not in ("operand_dtype", "output_dtype")} or None,
                 "predicted_cycles": (bound or {}).get("bound_cycles"),
                 "predicted_limiter": (bound or {}).get("limiter"),
+                # The validated schedule cost proxy: an ORDER over groups, never a share basis and
+                # never a cycle count (merlin/contract/measurement_ladder.yaml, rung cost_proxy).
+                "rank_transactions": (rank or {}).get("transactions"),
+                "rank_regime": (rank or {}).get("regime"),
             }
         )
     return rows

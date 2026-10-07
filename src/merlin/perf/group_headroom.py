@@ -17,6 +17,12 @@ Every rate is read off :class:`merlin.perf.derived_bound.Machine`; a term whose 
 out rather than being defaulted, and the group's bound is then reported over whatever terms resolved
 -- never silently zero, never a guess. An op this module has no MAC-bearing formula for (a residual
 add, a window mean) gets no bound at all: fabricating one would be worse than omitting it.
+
+A group's shape facts are first stated as a :class:`merlin.perf.schedule_proxy.Contraction`
+(:func:`contraction_for`), so the bound above and the RANK signal beside it price the same work.
+:func:`group_rank` is the validated schedule cost proxy's answer for that contraction -- array-tile
+transactions of compute and movement, ordered against measured hardware -- reported beside the bound
+and never folded into it: the proxy establishes an order between groups, not a cycle count.
 """
 
 from __future__ import annotations
@@ -26,11 +32,14 @@ from typing import Any
 
 from .decompose import is_unknown
 from .derived_bound import Machine, _width_bits, machine_from_facts
+from .schedule_proxy import Contraction, schedule_cost
 
 __all__ = [
     "SCHEMA",
+    "contraction_for",
     "group_bound",
     "group_headroom",
+    "group_rank",
     "macs_and_bytes",
     "machine_for",
 ]
@@ -51,6 +60,18 @@ def _dtype_bytes(dtype: Any) -> int | None:
 def macs_and_bytes(op: Any, facts: Mapping[str, Any]) -> tuple[int, int] | None:
     """``(macs, moved_bytes)`` for one group's shape facts, or ``None`` when ``op`` states no
     MAC-bearing contraction this estimate covers, or a needed extent/dtype is missing."""
+    work = contraction_for(op, facts)
+    return None if work is None else (work.macs, work.moved_bytes)
+
+
+def contraction_for(op: Any, facts: Mapping[str, Any], *, label: str = "") -> Contraction | None:
+    """One group's shape facts as the contraction it presents, or ``None`` when ``op`` states no
+    MAC-bearing contraction this estimate covers, or a needed extent/dtype is missing.
+
+    The footprints are the group's OWN tensors. A convolution's ``m`` is its output positions and its
+    ``k`` the window times the input channels, but its ``lhs`` is the image -- never the im2col matrix
+    -- and its contiguous output run is one output row, which is what separates a narrow-row stage
+    from an equal-MAC one on a fixed-height array."""
     operand_bytes = _dtype_bytes(facts.get("operand_dtype"))
     output_bytes = _dtype_bytes(facts.get("output_dtype")) or operand_bytes
     if operand_bytes is None:
@@ -62,8 +83,16 @@ def macs_and_bytes(op: Any, facts: Mapping[str, Any]) -> tuple[int, int] | None:
             return None
         if min(m, k, n) <= 0:
             return None
-        moved = m * k * operand_bytes + k * n * operand_bytes + m * n * (output_bytes or operand_bytes)
-        return m * k * n, moved
+        return Contraction(
+            m=m,
+            n=n,
+            k=k,
+            lhs_bytes=m * k * operand_bytes,
+            rhs_bytes=k * n * operand_bytes,
+            result_bytes=m * n * (output_bytes or operand_bytes),
+            stream_run=m,
+            label=label,
+        )
     if op == "conv2d":
         try:
             co, ci = int(facts["N"]), int(facts["ci"])
@@ -81,12 +110,18 @@ def macs_and_bytes(op: Any, facts: Mapping[str, Any]) -> tuple[int, int] | None:
         wout = (wimg - kw + pad_w) // sw + 1
         if hout <= 0 or wout <= 0:
             return None
-        macs = hout * wout * co * ci * kh * kw
         # The unit's OWN tensors: the image and the weight, never the im2col matrix a native
         # convolution unit forms in its own address stream and no buffer ever holds whole.
-        moved = himg * wimg * ci * operand_bytes + co * ci * kh * kw * operand_bytes
-        moved += hout * wout * co * (output_bytes or operand_bytes)
-        return macs, moved
+        return Contraction(
+            m=hout * wout,
+            n=co,
+            k=ci * kh * kw,
+            lhs_bytes=himg * wimg * ci * operand_bytes,
+            rhs_bytes=co * ci * kh * kw * operand_bytes,
+            result_bytes=hout * wout * co * (output_bytes or operand_bytes),
+            stream_run=wout,
+            label=label,
+        )
     return None
 
 
@@ -126,22 +161,46 @@ def group_bound(macs: int, moved_bytes: int, machine: Machine) -> dict[str, Any]
     }
 
 
+def group_rank(work: Contraction, machine: Machine, *, target: str) -> dict[str, Any]:
+    """The schedule cost proxy's RANK signal for one group, priced on ``machine``.
+
+    ``transactions`` orders groups by what they ask the device for and is ``None`` when the machine's
+    own facts do not ground a transaction (the reasons travel in ``unresolved``). It is never a cycle
+    count: the proxy is validated as an order, and its magnitude error is large."""
+    cost = schedule_cost(work, target=target, machine=machine, workload=work.name)
+    return {
+        "transactions": round(cost.transactions, 4) if cost.resolved else None,
+        "terms": {name: round(value, 4) for name, value in cost.terms.items()},
+        "regime": cost.regime,
+        "unresolved": {name: cost.reasons[name] for name in cost.unresolved},
+        "pricing": cost.pricing.provenance,
+    }
+
+
 def group_headroom(
-    *, op: Any, shape_facts: Mapping[str, Any] | None, ours_cycles: Any, reference_cycles: Any, machine: Machine
+    *,
+    op: Any,
+    shape_facts: Mapping[str, Any] | None,
+    ours_cycles: Any,
+    reference_cycles: Any,
+    machine: Machine,
+    target: str | None = None,
 ) -> dict[str, Any] | None:
     """One group's full headroom document, or ``None`` when its op/shape facts admit no MAC-bearing
     estimate. ``headroom_cycles`` is ``ours - reference`` (never derived, the measurement already
-    states both); ``over_bound`` is ``ours / bound_cycles`` when the bound resolved."""
+    states both); ``over_bound`` is ``ours / bound_cycles`` when the bound resolved. With ``target``,
+    the document also carries the group's :func:`group_rank`."""
     if not isinstance(shape_facts, Mapping) or not isinstance(ours_cycles, int):
         return None
-    counted = macs_and_bytes(op, shape_facts)
-    if counted is None:
+    work = contraction_for(op, shape_facts)
+    if work is None:
         return None
-    macs, moved_bytes = counted
-    bound = group_bound(macs, moved_bytes, machine)
+    bound = group_bound(work.macs, work.moved_bytes, machine)
     document: dict[str, Any] = {"schema": SCHEMA, **bound}
     if isinstance(reference_cycles, int):
         document["headroom_cycles"] = ours_cycles - reference_cycles
     if bound["bound_cycles"]:
         document["over_bound"] = round(ours_cycles / bound["bound_cycles"], 4)
+    if target is not None:
+        document["rank"] = group_rank(work, machine, target=target)
     return document
