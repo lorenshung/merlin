@@ -205,7 +205,10 @@ def test_unrelated_typed_host_rules_do_not_rescue_an_unbuildable_comparison_part
     assert entries == []
     assert len(skipped) == 1 and skipped[0]["family"] == "PF"
     assert "bias_add" in skipped[0]["reason"]
-    assert skipped[0]["refused_part"]["basis"] == "builder_emitted_typed_interface"
+    refusal = skipped[0]["refused_part"]
+    assert refusal["member"] == "bias_add"
+    assert refusal["decisions"] and all(row["status"] == "unsupported" for row in refusal["decisions"])
+    assert "composition" in refusal["reason"]
 
     # Lack of reviewed declarations is UNKNOWN, not proof that a whole family is inapplicable.
     original_host = evidence.host_capabilities
