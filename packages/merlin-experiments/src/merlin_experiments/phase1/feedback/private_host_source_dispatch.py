@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from merlin.frontends.bucketize_source import STATIC_BUCKETIZE_SOURCE_BODY_SCHEMA
 from merlin.frontends.linalg_reduction_source_body import STATIC_INTEGER_REDUCTION_SOURCE_BODY_SCHEMA
 from merlin.frontends.prepared_index_source_body import SCHEMA as PREPARED_INDEX_SOURCE_BODY_SCHEMA
 from merlin_experiments.phase1.feedback import private_index_host_support as index_support
@@ -41,6 +42,10 @@ def record(
         return
     if schema == PREPARED_INDEX_SOURCE_BODY_SCHEMA:
         index_support.record(index, row, host_decision, parsed, source_rows)
+        return
+    if schema == STATIC_BUCKETIZE_SOURCE_BODY_SCHEMA:
+        # The caller's mandatory bucketize witness independently records the
+        # verified trace, boundary literal and selected linked source below.
         return
     linalg_support.record(linalg, row, host_decision, parsed, source_rows, control_proof=bounded_control)
     integer_support.record(integer, row, host_decision, parsed, source_rows)

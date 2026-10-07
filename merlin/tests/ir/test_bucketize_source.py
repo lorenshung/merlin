@@ -8,7 +8,14 @@ from hashlib import sha256
 import pytest
 
 from merlin.common import mlir_query as mq
-from merlin.frontends.bucketize_source import recognize_bucketize_source, screen_bucketize_source
+from merlin.frontends.bucketize_source import (
+    STATIC_BUCKETIZE_SOURCE_BODY_SCHEMA,
+    bucketize_pattern_fits_index,
+    recognize_bucketize_source,
+    recognize_static_bucketize_body,
+    screen_bucketize_source,
+    validate_static_bucketize_source_body,
+)
 from merlin.frontends.linalg_patterns import InvalidLinalgPattern
 
 
@@ -49,6 +56,31 @@ def _program(*, right: bool = False, input_shape: str = "2x3", boundary_count: i
 
 def _generic(text: str):
     return next(mq.walk(mq.parse(text), "linalg.generic"))
+
+
+def test_host_bucketize_body_is_explicit_literal_and_conditionally_typed():
+    declaration = {"schema": STATIC_BUCKETIZE_SOURCE_BODY_SCHEMA, "operation": "f32_literal_boundary_count_i64"}
+    assert validate_static_bucketize_source_body(declaration) == declaration
+    for wrong in ({**declaration, "extra": True}, {**declaration, "operation": "count"}, {"schema": "other"}):
+        with pytest.raises(InvalidLinalgPattern):
+            validate_static_bucketize_source_body(wrong)
+    for right in (False, True):
+        text = _program(right=right).replace(
+            "    %zero =",
+            '    %boundaries = "arith.constant"() <{value = dense<[0.0, 0.25, 0.25, 1.0]> : tensor<4xf32>}> : () -> tensor<4xf32>\n    %zero =',
+        )
+        # Replace only the boundary argument; the same SSA value is now literal.
+        text = text.replace("%boundaries: tensor<4xf32>", "%unused: tensor<4xf32>")
+        pattern = recognize_static_bucketize_body(_generic(text))
+        assert pattern.operation == declaration["operation"]
+        assert pattern.ordered_types == ("f32", "f32", "i64", "i64")
+        assert pattern.right is right
+        assert pattern.count_range == (0, 4)
+        assert len(pattern.literal_sha256) == 64
+        assert bucketize_pattern_fits_index(recognize_bucketize_source(_generic(text), right=right), 64)
+        assert not bucketize_pattern_fits_index(recognize_bucketize_source(_generic(text), right=right), 3)
+    with pytest.raises(InvalidLinalgPattern, match="boundary ordering"):
+        recognize_static_bucketize_body(_generic(_program()))
 
 
 def _trace(text: str, *, right: bool) -> dict:

@@ -8,9 +8,13 @@ from hashlib import sha256
 
 import pytest
 from merlin_experiments.phase1.feedback import private_bucketize_support as support
+from merlin_experiments.phase1.feedback import private_host_source_dispatch as dispatch
 
 from merlin.common import mlir_query as mq
+from merlin.compile.model_execution_inputs import strict_tree_sha256
+from merlin.frontends.bucketize_source import STATIC_BUCKETIZE_SOURCE_BODY_SCHEMA
 from merlin.frontends.capture_normalization import normalize_capture_mlir
+from merlin.targetgen.host_capabilities import admit_host_operation
 
 
 def _sha(value: bytes) -> str:
@@ -142,19 +146,76 @@ def _capture(
         json.dumps({"schema": "m2m.capture-receipt.v1", "artifacts": artifacts, "materialized_abi": {"complete": True}})
     )
     normalized = normalize_capture_mlir(text)[0]
-    selected = {"schema": "merlin.selected-index-lowering.v1", "index_bits": index_bits} if index_bits else None
+    selected = (
+        {
+            "schema": "merlin.selected-index-lowering.v1",
+            "compiler_requested": "neutral-clang",
+            "compiler_resolved": "/neutral/clang",
+            "compiler_sha256": "c" * 64,
+            "cross_flags": ["--target=neutral"],
+            "data_layout": f"e-p:{index_bits}:{index_bits}",
+            "index_bits": index_bits,
+            "scope": "neutral selected compiler observation",
+        }
+        if index_bits
+        else None
+    )
     witness = support.begin(capture, parsed, _sha(text.encode()), _sha(normalized.encode()), selected)
     return witness, ordinal
 
 
-def _reviewed():
-    return {
+def _reviewed(witness, ordinal):
+    assert witness["source_proof"]["ordinals"][0][0] == ordinal
+    pattern = dict(witness["source_proof"]["ordinals"][0][1])
+    fact = witness["boundary_facts"][0]
+    decision = {
         "status": "admitted",
         "reviewed": True,
+        "source_body_proof": {
+            "schema": STATIC_BUCKETIZE_SOURCE_BODY_SCHEMA,
+            "declaration": "neutral_closed_bucketize",
+            "operation": "f32_literal_boundary_count_i64",
+            "predicate": None,
+            "patterns": [
+                {
+                    "operation": "f32_literal_boundary_count_i64",
+                    "shape": pattern["input_shape"],
+                    "ordered_types": ["f32", "f32", "i64", "i64"],
+                    "boundary_count": pattern["boundary_count"],
+                    "right": pattern["right"],
+                    "comparison": pattern["comparison"],
+                    "count_range": pattern["count_range"],
+                    "literal_sha256": fact["literal_sha256"],
+                }
+            ],
+            "profile": "neutral",
+            "capability_spec_sha256": "a" * 64,
+            "selected_index_observation": deepcopy(witness["selected_index_observation"]),
+        },
         "profiles": [
-            {"status": "admitted", "reviewed": True, "profile": "neutral", "capability_spec_sha256": "a" * 64}
+            {
+                "status": "admitted",
+                "reviewed": True,
+                "profile": "neutral",
+                "capability_spec_sha256": "a" * 64,
+            }
         ],
     }
+    inner = {
+        key: value
+        for key, value in decision["source_body_proof"].items()
+        if key not in {"profile", "capability_spec_sha256"}
+    }
+    decision["profiles"][0]["source_body_proof"] = deepcopy(inner)
+    decision["profiles"][0]["decisions"] = [
+        {
+            "status": "admitted",
+            "review_status": "reviewed",
+            "declaration": inner["declaration"],
+            "source_body_proof": deepcopy(inner),
+        }
+    ]
+    return decision
 
 
 def _row(ordinal):
@@ -181,7 +242,7 @@ def test_unsorted_or_nan_literal_cannot_discharge_boundary_premise(tmp_path, bou
     assert witness["boundary_facts"][0]["status"] == "not_proved"
     row = _row(ordinal)
     with pytest.raises(ValueError, match="ordering/non-NaN premise"):
-        support.record(witness, row, _reviewed(), {ordinal: row})
+        support.record(witness, row, _reviewed(witness, ordinal), {ordinal: row})
 
 
 def test_dynamic_boundary_is_not_inferred_from_trace_or_example_inputs(tmp_path):
@@ -233,9 +294,27 @@ def test_reviewed_host_and_exact_linked_identity_required(tmp_path, monkeypatch)
     source_rows = {ordinal: row}
     with pytest.raises(ValueError, match="reviewed host admission"):
         support.record(witness, row, {"status": "unsupported"}, source_rows)
-    support.record(witness, row, _reviewed(), source_rows)
+    without_body = _reviewed(witness, ordinal)
+    without_body.pop("source_body_proof")
+    with pytest.raises(ValueError, match="closed source-body"):
+        support.record(witness, row, without_body, source_rows)
+    wrong_right = _reviewed(witness, ordinal)
+    wrong_right["source_body_proof"]["patterns"][0]["right"] = True
+    wrong_right["profiles"][0]["source_body_proof"]["patterns"][0]["right"] = True
+    wrong_right["profiles"][0]["decisions"][0]["source_body_proof"]["patterns"][0]["right"] = True
+    with pytest.raises(ValueError, match="differs from the traced source"):
+        support.record(witness, row, wrong_right, source_rows)
+    wrong_declaration = _reviewed(witness, ordinal)
+    wrong_declaration["profiles"][0]["decisions"][0]["declaration"] = "unrelated"
+    with pytest.raises(ValueError, match="exact selected reviewed declaration decision"):
+        support.record(witness, row, wrong_declaration, source_rows)
+    wrong_inner_proof = _reviewed(witness, ordinal)
+    wrong_inner_proof["profiles"][0]["decisions"][0]["source_body_proof"]["patterns"][0]["right"] = True
+    with pytest.raises(ValueError, match="exact selected reviewed declaration decision"):
+        support.record(witness, row, wrong_inner_proof, source_rows)
+    support.record(witness, row, _reviewed(witness, ordinal), source_rows)
     with pytest.raises(ValueError, match="admitted twice"):
-        support.record(witness, row, _reviewed(), source_rows)
+        support.record(witness, row, _reviewed(witness, ordinal), source_rows)
     source = {
         support.FIELD: witness,
         "source_sha256": witness["raw_source_sha256"],
@@ -245,10 +324,14 @@ def test_reviewed_host_and_exact_linked_identity_required(tmp_path, monkeypatch)
         "selected_index_observation": witness["selected_index_observation"],
     }
     monkeypatch.setattr(support, "_record_matches_selected", lambda actual, selected: actual == selected)
-    build = {"candidate_tree_sha256": "b" * 64, "capture_tree_sha256": "c" * 64, "elf_sha256": "d" * 64}
+    build = {
+        "candidate_tree_sha256": "b" * 64,
+        "capture_tree_sha256": strict_tree_sha256(tmp_path / "capture")["sha256"],
+        "elf_sha256": "d" * 64,
+    }
     with pytest.raises(ValueError, match="index lowering"):
         support.link(source, {"index_bits": 32}, build)
-    support.link(source, witness["selected_index_observation"], build)
+    support.link(source, witness["selected_index_observation"], build, capture_path=tmp_path / "capture")
     entry = {
         "source_sha256": source["source_sha256"],
         "capture_tree_sha256": build["capture_tree_sha256"],
@@ -263,7 +346,103 @@ def test_reviewed_host_and_exact_linked_identity_required(tmp_path, monkeypatch)
         lambda value: value[support.FIELD].update(original_to_prepared_equivalence="proved"),
         lambda value: value[support.FIELD]["linked_build"].update(elf_sha256="0" * 64),
         lambda value: value[support.FIELD].update(actual_index_observation={"index_bits": 32}),
+        lambda value: value[support.FIELD].update(source_capture_path="/missing/capture"),
+        lambda value: value[support.FIELD].update(source_capture_path=1),
     ):
         altered = deepcopy(source)
         mutate(altered)
         assert not support.linked_source_complete(altered, entry, build["candidate_tree_sha256"])
+    trace = tmp_path / "capture" / "frontend-trace.json"
+    original = trace.read_bytes()
+    trace.write_bytes(original + b"\n")
+    assert not support.linked_source_complete(source, entry, build["candidate_tree_sha256"])
+    trace.write_bytes(original)
+    assert support.linked_source_complete(source, entry, build["candidate_tree_sha256"])
+
+
+def test_link_reproves_actual_capture_bytes_not_just_the_source_record(tmp_path, monkeypatch):
+    witness, ordinal = _capture(tmp_path)
+    row = _row(ordinal)
+    support.record(witness, row, _reviewed(witness, ordinal), {ordinal: row})
+    source = {
+        support.FIELD: witness,
+        "source_sha256": witness["raw_source_sha256"],
+        "normalized_source_sha256": witness["normalized_source_sha256"],
+        "capture_receipt_sha256": witness["capture_receipt_sha256"],
+        "n_source_operations": witness["n_source_operations"],
+        "selected_index_observation": witness["selected_index_observation"],
+    }
+    monkeypatch.setattr(support, "_record_matches_selected", lambda actual, selected: actual == selected)
+    capture = tmp_path / "capture"
+    build = {
+        "candidate_tree_sha256": "b" * 64,
+        "capture_tree_sha256": strict_tree_sha256(capture)["sha256"],
+        "elf_sha256": "d" * 64,
+    }
+    trace = capture / "frontend-trace.json"
+    trace.write_bytes(trace.read_bytes() + b"\n")
+    with pytest.raises(ValueError, match="linked capture source or trace changed"):
+        support.link(source, witness["selected_index_observation"], build, capture_path=capture)
+
+
+def test_actual_host_source_decision_joins_independent_trace_and_literal(tmp_path):
+    witness, ordinal = _capture(tmp_path)
+    row = _row(ordinal)
+    parsed = tuple(mq.walk(mq.parse((tmp_path / "capture" / "model.mlir").read_text())))
+    selected = {
+        "neutral": {
+            "package_sha256": "b" * 64,
+            "capability_spec_sha256": "a" * 64,
+            "dtype_strategy": "int8_w8a8",
+            "capability_spec": {
+                "schema": "merlin.host_capabilities.v1",
+                "status": "reviewed",
+                "compiler": {"package_sha256": "b" * 64, "dtype_strategy": "int8_w8a8"},
+                "operations": [
+                    {
+                        "id": "neutral_closed_bucketize",
+                        "ops": ["aten.bucketize.Tensor"],
+                        "placement": "host",
+                        "signature": {
+                            "family": "reduction",
+                            "ordered_operand_dtypes": ["f32", "f32", "i64"],
+                            "ordered_result_dtypes": ["i64"],
+                        },
+                        "source_body": {
+                            "schema": STATIC_BUCKETIZE_SOURCE_BODY_SCHEMA,
+                            "operation": "f32_literal_boundary_count_i64",
+                        },
+                        "numerical_contract": {"status": "unreviewed"},
+                    }
+                ],
+                "evidence": {"scope": "neutral source/build-only placement"},
+            },
+        }
+    }
+    decision = admit_host_operation(
+        selected,
+        row,
+        {
+            "family": "reduction",
+            "ordered_operand_dtypes": ["f32", "f32", "i64"],
+            "ordered_result_dtypes": ["i64"],
+            "rank": 1,
+        },
+        source_operations=(parsed[ordinal],),
+        source_context={"selected_index_observation": witness["selected_index_observation"]},
+    )
+    assert decision["status"] == "admitted"
+    support.record(witness, row, decision, {ordinal: row})
+    assert witness["admissions"][0]["source_body_schema"] == STATIC_BUCKETIZE_SOURCE_BODY_SCHEMA
+
+
+def test_bucketize_schema_routes_away_from_unrelated_linalg_witness(monkeypatch):
+    def wrong_witness(*_args, **_kwargs):
+        raise AssertionError("bucketize source was sent through pointwise witness")
+
+    monkeypatch.setattr(dispatch.linalg_support, "record", wrong_witness)
+    dispatch.record(
+        {}, {}, {}, {},
+        {"source_body_proof": {"schema": STATIC_BUCKETIZE_SOURCE_BODY_SCHEMA}},
+        (), {}, None,
+    )

@@ -9,7 +9,6 @@ whole-model numerical behavior.
 from __future__ import annotations
 
 import json
-import math
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import asdict
@@ -19,7 +18,17 @@ from typing import Any
 
 from merlin.common import mlir_query as mq
 from merlin.common.digest import is_sha256
-from merlin.frontends.bucketize_source import screen_bucketize_source
+from merlin.common.jsonio import strict_json_equal
+from merlin.compile.model_execution_inputs import file_sha256, strict_tree_sha256
+from merlin.frontends.bucketize_source import (
+    BUCKETIZE_COUNT_OPERATION,
+    BucketizeSourcePattern,
+    STATIC_BUCKETIZE_SOURCE_BODY_SCHEMA,
+    bucketize_pattern_fits_index,
+    literal_bucketize_boundary_fact,
+    screen_bucketize_source,
+)
+from merlin.frontends.linalg_patterns import InvalidLinalgPattern
 from merlin.targetgen.application_inventory import verify_capture_receipt
 from merlin_experiments.phase1.feedback.private_control_support import _record_matches_selected
 
@@ -38,50 +47,6 @@ def _need(condition: bool, reason: str) -> None:
 
 def _digest(document: object) -> str:
     return sha256(json.dumps(document, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
-
-def _dense_boundary(op: Any, count: int) -> dict[str, Any]:
-    """Prove the exact second SSA operand is a sorted non-NaN f32 literal.
-
-    A dynamic boundary is explicitly unproved; its provenance tag or captured
-    example values cannot establish the host precondition.
-    """
-    from xdsl.dialects import arith
-    from xdsl.dialects.builtin import DenseIntOrFPElementsAttr, TensorType, f32
-    from xdsl.traits import Pure
-
-    boundary = op.inputs[1]
-    owner = boundary.owner
-    pending = {"status": "not_proved", "required_precondition": _BOUNDARY_PREMISE, "literal_sha256": None}
-    if type(owner) is not arith.ConstantOp:
-        return pending
-    _need(type(owner).has_trait(Pure) and not owner.regions and not owner.successors, "boundary constant is impure")
-    _need(
-        not owner.operands
-        and len(owner.results) == 1
-        and owner.results[0] is boundary
-        and set(owner.properties) == {"value"}
-        and all(key.startswith("prov.") for key in owner.attributes),
-        "boundary constant has unknown semantics",
-    )
-    value = owner.properties["value"]
-    _need(
-        isinstance(value, DenseIntOrFPElementsAttr)
-        and isinstance(value.type, TensorType)
-        and value.type == boundary.type
-        and value.type.get_element_type() == f32
-        and tuple(value.type.get_shape()) == (count,),
-        "boundary literal has a different type or extent",
-    )
-    values = tuple(value.get_values())
-    _need(len(values) == count and all(type(item) is float for item in values), "boundary literal is incomplete")
-    if any(math.isnan(item) for item in values) or any(left > right for left, right in zip(values, values[1:])):
-        return pending
-    return {
-        "status": "source_dense_non_decreasing_non_nan_proved",
-        "required_precondition": _BOUNDARY_PREMISE,
-        "literal_sha256": sha256(value.data.data).hexdigest(),
-    }
 
 
 def _bucketize_ordinals(parsed: tuple[Any, ...], trace: Mapping[str, Any]) -> tuple[int, ...]:
@@ -159,15 +124,10 @@ def begin(
         proof = json.loads(json.dumps(asdict(observed)))
         for ordinal, pattern in observed.ordinals:
             _need(
-                bool(pattern.input_shape)
-                and all(
-                    type(extent) is int and 0 < extent < 1 << (selected_index_observation["index_bits"] - 1)
-                    for extent in pattern.input_shape
-                )
-                and pattern.boundary_count < 1 << (selected_index_observation["index_bits"] - 1),
-                "source loop extent exceeds selected index width",
+                bucketize_pattern_fits_index(pattern, selected_index_observation["index_bits"]),
+                "source loop extent or byte span exceeds selected index width",
             )
-            facts.append({"ordinal": ordinal, **_dense_boundary(parsed[ordinal], pattern.boundary_count)})
+            facts.append({"ordinal": ordinal, **literal_bucketize_boundary_fact(parsed[ordinal], pattern.boundary_count)})
     return {
         "status": PENDING,
         "scope": SCOPE,
@@ -219,6 +179,27 @@ def record(
         host_decision.get("status") == "admitted" and host_decision.get("reviewed") is True,
         "bucketize has no exact reviewed host admission",
     )
+    body = host_decision.get("source_body_proof")
+    _need(
+        isinstance(body, Mapping)
+        and set(body)
+        == {
+            "schema", "declaration", "operation", "predicate", "patterns", "profile",
+            "capability_spec_sha256", "selected_index_observation",
+        }
+        and body.get("schema") == STATIC_BUCKETIZE_SOURCE_BODY_SCHEMA
+        and body.get("operation") == BUCKETIZE_COUNT_OPERATION
+        and body.get("predicate") is None
+        and isinstance(body.get("declaration"), str)
+        and bool(body["declaration"])
+        and isinstance(body.get("patterns"), list)
+        and len(body["patterns"]) == len(ordinals),
+        "bucketize host admission lacks the closed source-body proof",
+    )
+    _need(
+        strict_json_equal(body["selected_index_observation"], witness["selected_index_observation"]),
+        "bucketize source-body proof differs from the selected compiler index observation",
+    )
     facts = {item["ordinal"]: item for item in witness["boundary_facts"]}
     _need(
         all(facts[item]["status"] == "source_dense_non_decreasing_non_nan_proved" for item in ordinals),
@@ -239,6 +220,54 @@ def record(
         and is_sha256(profile.get("capability_spec_sha256")),
         "reviewed host profile has no selected capability identity",
     )
+    _need(
+        (body["profile"], body["capability_spec_sha256"])
+        == (profile["profile"], profile["capability_spec_sha256"]),
+        "bucketize source-body proof differs from the selected reviewed profile",
+    )
+    inner_proof = {key: value for key, value in body.items() if key not in {"profile", "capability_spec_sha256"}}
+    decisions = profile.get("decisions")
+    _need(isinstance(decisions, list), "reviewed host decision roster is malformed")
+    admitted_decisions = [
+        item
+        for item in decisions
+        if isinstance(item, Mapping) and item.get("status") == "admitted" and item.get("review_status") == "reviewed"
+    ]
+    _need(
+        len(admitted_decisions) == 1
+        and admitted_decisions[0].get("declaration") == body["declaration"]
+        and strict_json_equal(admitted_decisions[0].get("source_body_proof"), inner_proof)
+        and strict_json_equal(profile.get("source_body_proof"), inner_proof),
+        "bucketize proof is not the exact selected reviewed declaration decision",
+    )
+    proved = {ordinal: pattern for ordinal, pattern in witness["source_proof"]["ordinals"]}
+    for ordinal, claimed in zip(ordinals, body["patterns"], strict=True):
+        pattern = proved.get(ordinal)
+        fact = facts.get(ordinal)
+        _need(
+            isinstance(claimed, Mapping)
+            and set(claimed)
+            == {
+                "operation", "shape", "ordered_types", "boundary_count", "right",
+                "comparison", "count_range", "literal_sha256",
+            }
+            and isinstance(pattern, Mapping)
+            and isinstance(fact, Mapping)
+            and strict_json_equal(
+                claimed,
+                {
+                    "operation": BUCKETIZE_COUNT_OPERATION,
+                    "shape": pattern["input_shape"],
+                    "ordered_types": ["f32", "f32", "i64", "i64"],
+                    "boundary_count": pattern["boundary_count"],
+                    "right": pattern["right"],
+                    "comparison": pattern["comparison"],
+                    "count_range": pattern["count_range"],
+                    "literal_sha256": fact["literal_sha256"],
+                },
+            ),
+            "bucketize host source-body proof differs from the traced source",
+        )
     seen = {item for admission in witness["admissions"] for item in admission["ordinals"]}
     _need(not seen.intersection(ordinals), "bucketize source ordinal was admitted twice")
     witness["admissions"].append(
@@ -246,12 +275,58 @@ def record(
             "ordinals": sorted(ordinals),
             "profile": profile["profile"],
             "capability_spec_sha256": profile["capability_spec_sha256"],
+            "declaration": body["declaration"],
+            "source_body_schema": body["schema"],
+            "source_body_proof_sha256": _digest(body),
         }
     )
     witness["admissions"].sort(key=lambda item: item["ordinals"][0])
 
 
-def link(source: Mapping[str, Any], actual_index: Mapping[str, Any], linked_build: Mapping[str, str]) -> None:
+def _capture_matches(
+    witness: Mapping[str, Any], source: Mapping[str, Any], linked_build: Mapping[str, str], capture_path: Path | None
+) -> bool:
+    """Reprove the selected source and trace from the exact linked capture tree."""
+    if not witness["expected_ordinals"]:
+        return capture_path is None or isinstance(capture_path, Path)
+    if capture_path is None or not capture_path.is_absolute() or capture_path.is_symlink():
+        return False
+    model = capture_path / "model.mlir"
+    trace = capture_path / "frontend-trace.json"
+    receipt = capture_path / "capture_receipt.json"
+    if any(not item.is_file() or item.is_symlink() for item in (model, trace, receipt)):
+        return False
+    try:
+        def pinned() -> bool:
+            checked = verify_capture_receipt(model)
+            return bool(
+                checked.get("status") == "verified_materialized"
+                and checked.get("receipt_sha256") == source.get("capture_receipt_sha256")
+                and checked.get("receipt_sha256") == witness.get("capture_receipt_sha256")
+                and strict_tree_sha256(capture_path)["sha256"] == linked_build.get("capture_tree_sha256")
+                and file_sha256(model) == witness.get("raw_source_sha256") == source.get("source_sha256")
+                and file_sha256(trace) == witness["source_proof"]["trace_sha256"]
+            )
+
+        if not pinned():
+            return False
+        observed = screen_bucketize_source(model, trace, tuple(witness["expected_ordinals"]))
+        return bool(
+            _digest(asdict(observed)) == _digest(witness["source_proof"])
+            and observed.normalized_sha256 == source.get("normalized_source_sha256")
+            and pinned()
+        )
+    except (OSError, UnicodeError, KeyError, TypeError, ValueError, InvalidLinalgPattern):
+        return False
+
+
+def link(
+    source: Mapping[str, Any],
+    actual_index: Mapping[str, Any],
+    linked_build: Mapping[str, str],
+    *,
+    capture_path: Path | None = None,
+) -> None:
     """Bind exact completed host source to the actual selected linked program."""
     witness = source.get(FIELD)
     _need(isinstance(witness, dict) and witness.get("status") == PENDING, "source roster is not pending")
@@ -271,9 +346,11 @@ def link(source: Mapping[str, Any], actual_index: Mapping[str, Any], linked_buil
         set(linked_build) == _BUILD_KEYS and all(is_sha256(linked_build[key]) for key in _BUILD_KEYS),
         "linked candidate/capture/ELF identity is incomplete",
     )
+    _need(_capture_matches(witness, source, linked_build, capture_path), "linked capture source or trace changed")
     witness["status"] = LINKED
     witness["actual_index_observation"] = deepcopy(dict(actual_index))
     witness["linked_build"] = dict(linked_build)
+    witness["source_capture_path"] = str(capture_path) if witness["expected_ordinals"] else None
 
 
 def linked_source_complete(source: Mapping[str, Any], entry: Mapping[str, Any], candidate_sha256: str) -> bool:
@@ -307,6 +384,7 @@ def linked_source_complete(source: Mapping[str, Any], entry: Mapping[str, Any], 
                 "admissions",
                 "actual_index_observation",
                 "linked_build",
+                "source_capture_path",
             }
             or not is_sha256(witness["raw_source_sha256"])
             or not is_sha256(witness["normalized_source_sha256"])
@@ -358,6 +436,7 @@ def linked_source_complete(source: Mapping[str, Any], entry: Mapping[str, Any], 
                 and selected == source.get("selected_index_observation")
                 and _record_matches_selected(actual, selected)
                 and actual == entry.get("index_lowering")
+                and witness["source_capture_path"] is None
             )
         if (
             not isinstance(proof, Mapping)
@@ -411,7 +490,16 @@ def linked_source_complete(source: Mapping[str, Any], entry: Mapping[str, Any], 
                     type(extent) is not int or extent < 1 or extent >= 1 << (selected["index_bits"] - 1)
                     for extent in item[1]["input_shape"]
                 )
-                or item[1]["boundary_count"] >= 1 << (selected["index_bits"] - 1)
+                or not bucketize_pattern_fits_index(
+                    BucketizeSourcePattern(
+                        tuple(item[1]["input_shape"]),
+                        item[1]["boundary_count"],
+                        item[1]["right"],
+                        item[1]["comparison"],
+                        tuple(item[1]["count_range"]),
+                    ),
+                    selected["index_bits"],
+                )
                 for item in proof["ordinals"]
             )
             or any(
@@ -428,13 +516,20 @@ def linked_source_complete(source: Mapping[str, Any], entry: Mapping[str, Any], 
             )
         ):
             return False
-        return all(
+        return type(witness["source_capture_path"]) is str and _capture_matches(
+            witness, source, linked, Path(witness["source_capture_path"])
+        ) and all(
             isinstance(row, Mapping)
-            and set(row) == {"ordinals", "profile", "capability_spec_sha256"}
+            and set(row)
+            == {"ordinals", "profile", "capability_spec_sha256", "declaration", "source_body_schema", "source_body_proof_sha256"}
             and bool(row["ordinals"])
             and isinstance(row["profile"], str)
             and bool(row["profile"])
             and is_sha256(row["capability_spec_sha256"])
+            and isinstance(row["declaration"], str)
+            and bool(row["declaration"])
+            and row["source_body_schema"] == STATIC_BUCKETIZE_SOURCE_BODY_SCHEMA
+            and is_sha256(row["source_body_proof_sha256"])
             for row in admissions
         )
     except (KeyError, TypeError, ValueError, OverflowError):

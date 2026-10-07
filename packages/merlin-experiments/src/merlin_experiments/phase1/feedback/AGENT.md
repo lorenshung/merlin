@@ -121,8 +121,11 @@ cannot be upgraded. This does not prove original-to-prepared equivalence or
 numerical correctness of the compiled loop.
 `private_bucketize_support.py` joins the source/trace roster, proves literal
 boundary ordering and requires an existing reviewed host placement for every
-occurrence. Dynamic boundary ordering remains unproved. Both carry mandatory
-empty-or-populated records into the v4 full-model build gate and bind the exact
+occurrence. An opted-in bucketize host source-body proof must exactly agree
+with that independent right/literal/index witness; link and completion re-read
+the selected capture tree, model, trace and receipt. Dynamic boundary ordering
+remains unproved. The v13 private gate requires the empty-or-populated bucketize
+record and binds the exact
 candidate, capture and ELF. Neither proves frontend or executable numerical
 equivalence, creates a host rule, or upgrades historical v3 gate records.
 

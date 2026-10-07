@@ -107,7 +107,9 @@ SUITES = {
             "ir/test_linalg_composite_math.py",
             "ir/test_linalg_integer_reductions.py",
             "ir/test_linalg_extremum_patterns.py",
+            "ir/test_bucketize_source.py",
             "targetgen/test_host_capability_evidence.py",
+            "targetgen/test_bucketize_host_source_body.py",
         ),
         "core_extras": ("xdsl",),
         "probe_modules": (
@@ -117,6 +119,7 @@ SUITES = {
             "merlin.llvmlower.link_supplier_trace",
             "merlin.targetgen.host_linkage_contract",
             "merlin.frontends.linalg_composite_math",
+            "merlin.frontends.bucketize_source",
             "merlin.frontends.linalg_reduction_source_body",
             "merlin.frontends.prepared_index_source_body",
         ),

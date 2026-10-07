@@ -120,6 +120,11 @@ launching, capsule grading, golden generation, sandboxing and certification. The
 
 ## Invariants
 
+The opt-in literal bucketize host source-body contract admits only an exact
+typed prepared count form with a selected index-width premise. The private
+capture trace and linked-build witness must independently agree with it;
+this selected placement contract does not establish PyTorch numerical equivalence.
+
 - `plugins.resolve_support()` is the shared explicit-selection check for runtime
   plugins and `load_declared()` target tools. Reference or generated-home metadata
   alone cannot authorize executable support. `load_module(root, ...)` remains the

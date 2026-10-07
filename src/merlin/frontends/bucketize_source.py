@@ -8,6 +8,7 @@ correctness of a linked executable.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -52,6 +53,121 @@ class BucketizeSource:
     trace_sha256: str
     ordinals: tuple[tuple[int, BucketizeSourcePattern], ...]
     trace_bindings: tuple[tuple[int, BucketizeTraceBinding], ...]
+
+
+STATIC_BUCKETIZE_SOURCE_BODY_SCHEMA = "merlin.static_bucketize_source_body.v1"
+BUCKETIZE_COUNT_OPERATION = "f32_literal_boundary_count_i64"
+
+
+@dataclass(frozen=True)
+class StaticBucketizeHostPattern:
+    """A literal-boundary prepared source form, not a frontend/numeric proof."""
+
+    operation: str
+    shape: tuple[int, ...]
+    ordered_types: tuple[str, ...]
+    boundary_count: int
+    right: bool
+    comparison: str
+    count_range: tuple[int, int]
+    literal_sha256: str
+
+
+def validate_static_bucketize_source_body(declaration: object) -> dict[str, str]:
+    """Accept only the explicit source-body contract for the closed count form."""
+    if (
+        not isinstance(declaration, dict)
+        or set(declaration) != {"schema", "operation"}
+        or declaration.get("schema") != STATIC_BUCKETIZE_SOURCE_BODY_SCHEMA
+        or declaration.get("operation") != BUCKETIZE_COUNT_OPERATION
+    ):
+        raise InvalidLinalgPattern("source_body requires the closed literal bucketize v1 declaration")
+    return declaration
+
+
+def literal_bucketize_boundary_fact(op, count: int) -> dict[str, str | None]:
+    """Prove the exact boundary SSA operand is sorted, non-NaN f32 literal data."""
+    from xdsl.dialects import arith
+    from xdsl.dialects.builtin import DenseIntOrFPElementsAttr, TensorType, f32
+
+    pending = {"status": "not_proved", "required_precondition": "nondecreasing_non_nan_f32_boundaries", "literal_sha256": None}
+    boundary = op.inputs[1]
+    owner = boundary.owner
+    if type(owner) is not arith.ConstantOp:
+        return pending
+    _owned_operation(owner, arith.ConstantOp, {"value"})
+    if owner.operands or len(owner.results) != 1 or owner.results[0] is not boundary:
+        raise InvalidLinalgPattern("bucketize boundary literal has an invalid SSA owner")
+    value = owner.properties["value"]
+    if (
+        not isinstance(value, DenseIntOrFPElementsAttr)
+        or not isinstance(value.type, TensorType)
+        or value.type != boundary.type
+        or value.type.get_element_type() != f32
+        or tuple(value.type.get_shape()) != (count,)
+    ):
+        raise InvalidLinalgPattern("bucketize boundary literal type or extent differs")
+    values = tuple(value.get_values())
+    if len(values) != count or any(type(item) is not float for item in values):
+        raise InvalidLinalgPattern("bucketize boundary literal is incomplete")
+    if any(math.isnan(item) for item in values) or any(left > right for left, right in zip(values, values[1:])):
+        return pending
+    return {
+        "status": "source_dense_non_decreasing_non_nan_proved",
+        "required_precondition": "nondecreasing_non_nan_f32_boundaries",
+        "literal_sha256": sha256(value.data.data).hexdigest(),
+    }
+
+
+def bucketize_pattern_fits_index(
+    pattern: BucketizeSourcePattern | StaticBucketizeHostPattern, index_bits: int
+) -> bool:
+    """Bound static extents and tensor byte spans by a caller-selected index width."""
+    if type(index_bits) is not int or not 2 <= index_bits <= 128:
+        return False
+    maximum = (1 << (index_bits - 1)) - 1
+    count = pattern.boundary_count
+    if type(count) is not int or not 0 < count <= maximum or count > maximum // 4:
+        return False
+    shape = pattern.input_shape if isinstance(pattern, BucketizeSourcePattern) else pattern.shape
+    elements = 1
+    for extent in shape:
+        if type(extent) is not int or not 0 < extent <= maximum or elements > maximum // extent:
+            return False
+        elements *= extent
+    return bool(shape) and elements <= maximum // 8
+
+
+def recognize_static_bucketize_body(op) -> StaticBucketizeHostPattern:
+    """Recognize a closed literal count; the trace still owns the right flag."""
+    from xdsl.dialects import arith
+    from xdsl.dialects.builtin import IntegerAttr
+
+    shell = _checked_static_indexed_linalg_shell(op)
+    if len(shell.body) != 4 or type(shell.body[0]) is not arith.CmpfOp:
+        raise InvalidLinalgPattern("bucketize source has no closed comparison body")
+    predicate = shell.body[0].properties.get("predicate")
+    if (
+        not isinstance(predicate, IntegerAttr)
+        or str(predicate.type) != "i64"
+        or type(predicate.value.data) is not int
+        or predicate.value.data not in (11, 12)
+    ):
+        raise InvalidLinalgPattern("bucketize source needs unordered lower/upper comparison")
+    pattern = recognize_bucketize_source(op, right=predicate.value.data == 12)
+    fact = literal_bucketize_boundary_fact(op, pattern.boundary_count)
+    if fact["status"] != "source_dense_non_decreasing_non_nan_proved":
+        raise InvalidLinalgPattern("bucketize boundary ordering/non-NaN premise is not proved")
+    return StaticBucketizeHostPattern(
+        BUCKETIZE_COUNT_OPERATION,
+        pattern.input_shape,
+        ("f32", "f32", "i64", "i64"),
+        pattern.boundary_count,
+        pattern.right,
+        pattern.comparison,
+        pattern.count_range,
+        fact["literal_sha256"],
+    )
 
 
 def _owned_operation(op, expected_class, properties: set[str]) -> None:

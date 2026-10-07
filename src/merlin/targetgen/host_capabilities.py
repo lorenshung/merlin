@@ -7,6 +7,7 @@ are separately selected and digest-bound; no compiler payload is rewritten.
 from __future__ import annotations
 
 import copy
+import json
 from collections.abc import Mapping
 
 from merlin.common.digest import is_sha256
@@ -65,6 +66,10 @@ def validate_host_capabilities(
                 row["linkage_contract"],
             )
         if "source_body" in row:
+            from merlin.frontends.bucketize_source import (
+                STATIC_BUCKETIZE_SOURCE_BODY_SCHEMA,
+                validate_static_bucketize_source_body,
+            )
             from merlin.frontends.linalg_boolean_patterns import (
                 DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA,
                 STATIC_BOOLEAN_SOURCE_BODY_SCHEMA,
@@ -179,6 +184,22 @@ def validate_host_capabilities(
                     or results != list(expected[2])
                 ):
                     raise ValueError("prepared-index source_body needs one exact frontend role and typed ABI")
+            elif isinstance(body, dict) and body.get("schema") == STATIC_BUCKETIZE_SOURCE_BODY_SCHEMA:
+                validate_static_bucketize_source_body(body)
+                if (
+                    row.get("ops") != ["aten.bucketize.Tensor"]
+                    or "families" in row
+                    or "family" in row
+                    or row["signature"]
+                    != {
+                        "family": "reduction",
+                        "ordered_operand_dtypes": ["f32", "f32", "i64"],
+                        "ordered_result_dtypes": ["i64"],
+                    }
+                    or not isinstance(row.get("numerical_contract"), dict)
+                    or row["numerical_contract"].get("status") != "unreviewed"
+                ):
+                    raise ValueError("bucketize source_body needs one exact typed placement-only selector")
             else:
                 validate_static_pointwise_source_body(body)
         if "quantization_parameters" in row["signature"]:
@@ -280,6 +301,12 @@ def _screen_source_body(
     """Match every supplied parsed occurrence; never treat an omitted source as evidence."""
     from dataclasses import asdict
 
+    from merlin.common import mlir_query as mq
+    from merlin.frontends.bucketize_source import (
+        STATIC_BUCKETIZE_SOURCE_BODY_SCHEMA,
+        bucketize_pattern_fits_index,
+        recognize_static_bucketize_body,
+    )
     from merlin.frontends.linalg_boolean_patterns import (
         DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA,
         STATIC_BOOLEAN_SOURCE_BODY_SCHEMA,
@@ -308,6 +335,47 @@ def _screen_source_body(
         return _screen_integer_reduction_source_body(declaration, row, signature, source_operations, source_context)
     if declaration["source_body"]["schema"] == PREPARED_INDEX_SOURCE_BODY_SCHEMA:
         return screen_prepared_index_source_body(declaration, row, signature, source_operations, source_context)
+    if declaration["source_body"]["schema"] == STATIC_BUCKETIZE_SOURCE_BODY_SCHEMA:
+        width = _selected_index_bits(source_context)
+        if width is None:
+            return {"status": "unknown", "reason": "bucketize source_body needs a selected compiler index observation"}
+        if source_operations is None or not source_operations:
+            return {"status": "unknown", "reason": "source_body requires parsed source operations"}
+        if (
+            not isinstance(source_operations, tuple)
+            or type(row.get("count")) is not int
+            or row["count"] != len(source_operations)
+            or row.get("mlir_operation") != "linalg.generic"
+            or row.get("frontend_op") != "aten.bucketize.Tensor"
+            or len({id(op) for op in source_operations}) != len(source_operations)
+            or any(mq.attr_str(op, "prov.aten") != "aten.bucketize.Tensor" for op in source_operations)
+        ):
+            return {"status": "unsupported", "reason": "bucketize source-body occurrence roster differs"}
+        try:
+            patterns = tuple(recognize_static_bucketize_body(op) for op in source_operations)
+        except InvalidLinalgPattern as exc:
+            return {"status": "unsupported", "reason": f"bucketize source-body structural proof refused: {exc}"}
+        if any(not bucketize_pattern_fits_index(pattern, width) for pattern in patterns):
+            return {"status": "unsupported", "reason": "bucketize source tensor exceeds selected signed index span"}
+        if (
+            signature.get("ordered_operand_dtypes") != ["f32", "f32", "i64"]
+            or signature.get("ordered_result_dtypes") != ["i64"]
+            or type(signature.get("rank")) is not int
+            or any(signature["rank"] != len(pattern.shape) for pattern in patterns)
+        ):
+            return {"status": "unsupported", "reason": "bucketize source body differs from observed typed tensor ABI"}
+        return {
+            "status": "admitted",
+            "reason": "every parsed occurrence matches the closed literal bucketize count",
+            "proof": {
+                "schema": STATIC_BUCKETIZE_SOURCE_BODY_SCHEMA,
+                "declaration": declaration["id"],
+                "operation": declaration["source_body"]["operation"],
+                "predicate": None,
+                "patterns": [json.loads(json.dumps(asdict(pattern))) for pattern in patterns],
+                "selected_index_observation": copy.deepcopy(dict(source_context["selected_index_observation"])),
+            },
+        }
 
     if source_operations is None or not source_operations:
         return {"status": "unknown", "reason": "source_body requires parsed source operations"}
