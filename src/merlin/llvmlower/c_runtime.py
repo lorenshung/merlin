@@ -77,6 +77,17 @@ def _bf16_bits(f32: "np.ndarray") -> "np.ndarray":
     return rounded.astype(np.uint16)
 
 
+def _storage_nbytes(arr: "np.ndarray", dt: str) -> int:
+    """Bytes the generated C array for ``arr`` occupies: its element count times the ABI dtype's width.
+
+    Not ``arr.nbytes``. A capture corpus holds bf16/f16 values in float32 NumPy arrays, while
+    :func:`_embed_array` emits them as 2-byte raw bit patterns, so the corpus array's own size is twice
+    the C array's: a state reset sized by it copies past the end of both arrays, and a stream stride
+    sized by it skips every other step. (An f64 input held as float32 is the reverse: half its size.)
+    """
+    return int(arr.size) * DT_BYTES[dt]
+
+
 def _embed_array(arr: "np.ndarray", dt: str) -> str:
     # 16-bit floats have NO decimal C literal for an ``unsigned short`` storage array: writing
     # `unsigned short x = 0.125` truncates to 0. Emit the RAW 16-bit patterns instead — f16 via
@@ -266,7 +277,7 @@ def generate(
             n_in += 1
         io_decls.append(f"static {C_OF[dt]} merlin_in_{i}[] = {{{_embed_array(arr, dt)}}};")
         embedded_arrays[i] = (arr, dt)
-        static_io_bytes += int(arr.nbytes)
+        static_io_bytes += _storage_nbytes(arr, dt)
         embedded.add(i)
         rows.append(("MERLIN_INPUT", i, len(shape), shape, elem, dt))
     # QUANT-INNER ARGUMENTS. A torchao subclass's int8 `int_data`/`scale` are not `@forward`
@@ -482,10 +493,10 @@ def generate(
     for input_arg in sorted(state_input_args):
         arr, dt = embedded_arrays[input_arg]
         io.append(f"static const {C_OF[dt]} merlin_initial_{input_arg}[] = {{{_embed_array(arr, dt)}}};")
-        static_io_bytes += int(arr.nbytes)
+        static_io_bytes += _storage_nbytes(arr, dt)
     for input_arg, arr, dt in stream_specs:
         io.append(f"static const {C_OF[dt]} merlin_stream_{input_arg}[] = {{{_embed_array(arr, dt)}}};")
-        static_io_bytes += int(arr.nbytes)
+        static_io_bytes += _storage_nbytes(arr, dt)
     if correctness_values is not None:
         io.append("static const float merlin_correctness_golden[] = {" + _embed_array(correctness_values, "f32") + "};")
         static_io_bytes += int(correctness_values.nbytes)
@@ -525,13 +536,13 @@ def generate(
     )
     io.append("static void merlin_reset_session(void) {")
     for input_arg in sorted(state_input_args):
-        arr, _ = embedded_arrays[input_arg]
-        io.append(f"  memcpy(merlin_in_{input_arg}, merlin_initial_{input_arg}, {int(arr.nbytes)}UL);")
+        arr, dt = embedded_arrays[input_arg]
+        io.append(f"  memcpy(merlin_in_{input_arg}, merlin_initial_{input_arg}, {_storage_nbytes(arr, dt)}UL);")
     io.append("}")
     io.append("static void merlin_prepare_step(long step) {")
     io.append("  long s = step % MERLIN_SESSION_STEPS;")
-    for input_arg, arr, _ in stream_specs:
-        step_bytes = int(arr[0].nbytes)
+    for input_arg, arr, dt in stream_specs:
+        step_bytes = _storage_nbytes(arr[0], dt)
         io.append(
             f"  MERLIN_INPUT_PTR[{input_arg}] = "
             f"(void *)((const unsigned char *)merlin_stream_{input_arg} + s * {step_bytes}L);"

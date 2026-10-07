@@ -83,6 +83,53 @@ def test_generation_keeps_all_outputs_and_emits_stateful_session(monkeypatch, tm
     assert proc.returncode == 0, proc.stderr
 
 
+def _after(text: str, prefix: str, end: str) -> int:
+    """The integer the generated line starting with ``prefix`` carries before ``end``."""
+    line = next(line.strip() for line in text.splitlines() if line.strip().startswith(prefix))
+    return int(line[len(prefix) :].partition(end)[0])
+
+
+@pytest.mark.parametrize("abi_dtype", ["bf16", "f16", "f64"])
+def test_session_copies_are_sized_by_the_abi_dtype_not_the_corpus_array(monkeypatch, tmp_path, abi_dtype):
+    """Capture corpora hold bf16/f16 (and f64) inputs as float32 NumPy arrays, while the generated C array
+    is in the ABI's own element width. Sizing the reset copy and the stream stride by the corpus array's
+    ``nbytes`` copies twice the C array for a 2-byte dtype (and half of it for f64)."""
+    model, _ = _bundle(tmp_path)
+    sig = [([2], abi_dtype), ([2], abi_dtype)]
+    monkeypatch.setattr(c_runtime, "parse_forward_signature", lambda _: sig)
+    monkeypatch.setattr(c_runtime, "load_safetensors_header", lambda _: ({}, 0))
+    import merlin.common.mlir_query as query
+
+    monkeypatch.setattr(query, "forward_signature", lambda _: (sig, [([2], "f32"), ([2], abi_dtype)]))
+    out = tmp_path / f"generated_{abi_dtype}"
+    info = c_runtime.generate(model, out, model / "inputs.npz")
+    io = (out / "model_io.h").read_text(encoding="utf-8")
+
+    width = c_runtime.DT_BYTES[abi_dtype]
+    reset = _after(io, "memcpy(merlin_in_1, merlin_initial_1, ", "UL")
+    stride = _after(io, "MERLIN_INPUT_PTR[0] = (void *)((const unsigned char *)merlin_stream_0 + s * ", "L")
+    assert reset == 2 * width and stride == 2 * width
+    # inputs 2x2 elems, initial state 2, stream 3x2 (ABI width), two f32 goldens 3x2, outputs f32[2] + abi[2].
+    assert info["static_io_bytes"] == (2 + 2 + 2 + 6) * width + 2 * 6 * 4 + 2 * 4 + 2 * width
+
+    # The C compiler's own sizeof of the arrays the header declares is the authority on the copy sizes.
+    fixture = out / "sizes.c"
+    fixture.write_text(
+        '#include "model_gen.h"\n#include "model_io.h"\n'
+        f'_Static_assert(sizeof(merlin_initial_1) == {reset}, "reset copies exactly the state array");\n'
+        f'_Static_assert(sizeof(merlin_in_1) == {reset}, "reset fills exactly the input array");\n'
+        f'_Static_assert(sizeof(merlin_stream_0) == 3 * {stride}, "the stream stride is one step");\n'
+        "int main(void) { return 0; }\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        ["cc", "-std=c11", f"-I{runtime_dir() / 'c'}", f"-I{out}", "-fsyntax-only", str(fixture)],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
 def test_generation_accepts_a_weightless_identity_program(monkeypatch, tmp_path):
     """An ABI-only session stage has inputs and outputs but legitimately no weight blob."""
     model, _ = _bundle(tmp_path)
