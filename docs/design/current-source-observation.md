@@ -42,3 +42,18 @@ transformation need their own numerical, effect and ownership contracts.
 Independent shapes and tails, unchanged complete output gates, final object
 identity and complete hardware costs remain necessary for promotion. With no
 feature selected, the normal pipeline and generated worker remain unchanged.
+
+## Reifying the proved scalar helpers
+
+`reify_closed_scalar_observer_helpers` accepts a revalidated current typed
+`ClosedScalarObserver` and explicit effects and creates two fresh functions:
+the original `f32 -> f32` expression and the complete `f32 -> i8` quantizer.
+It clones original operation order, precision, attributes and literal bits.
+The two finishing rounded multiplies remain at the consumer; the quantizer
+accepts their original scaled result. The source operations and their uses
+remain unchanged. Enclosing provenance is retained for traceability.
+
+Stale source/use/context proofs, missing dependencies, invalid ABI names and
+conflicting trace records refuse. Helper lowering and linkage use ordinary
+compiler interfaces. Reification supplies neither a placement policy nor
+consumer coordinates, ownership, floating-mode guards or performance routing.

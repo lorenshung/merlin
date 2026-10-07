@@ -23,6 +23,14 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
   ordinary generated code and grants no rewrite, ownership or cost policy.
   Model names and binding ordinals never select a production transformation.
 
+- `source_observation_helpers.py` revalidates current typed scalar-observer
+  proofs and clones the original expression and complete integer quantizer
+  into fresh scalar helper functions under explicit effects. Original
+  arithmetic order/types/attributes/constants and trace data remain intact;
+  source operations and use lists are unchanged. Finishing multiplies, helper
+  placement/binding, runtime numeric guards, ownership and complete cost
+  remain separate obligations. Retained helper bodies select no implementation.
+
 - The ordinary text/file model lowering APIs forward the existing explicit
   `MaskEffectContract` through `masked_contraction_effects`. Backend model
   builders use the same parameter. Separate closed-mask feature and scalar
