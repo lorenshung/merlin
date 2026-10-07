@@ -531,7 +531,16 @@ __attribute__((always_inline)) float {lookup_name}(float x,float up,float scale)
 
 
 def emit_source_interval_i8_lookup(
-    *, table_name, activation_name, quantizer_name, lookup_name, leading_bits, finite_inputs=(), finite_table=None
+    *,
+    table_name,
+    activation_name,
+    quantizer_name,
+    lookup_name,
+    leading_bits,
+    finite_inputs=(),
+    finite_table=None,
+    observer_word_cells=(),
+    zero_observer_cells=(),
 ):
     """Return only the already-certified integer observation, explicitly opt-in.
 
@@ -543,6 +552,14 @@ def emit_source_interval_i8_lookup(
     Explicit finite_inputs additionally requires the matching finite_table,
     validated source/LLVM producer bindings and dominating successful immutable scale scans. It removes only
     their redundant finite checks; ordinary emission is byte-identical.
+    Explicit observer_word_cells replaces only the second saturated RNE
+    quantization with membership in its exact ordered-binary32 preimage. The
+    table and complete typed observer/effect witnesses must agree. Every source
+    finishing multiply and original refusal continuation remains unchanged.
+    Explicit zero_observer_cells instead adds only an exact sufficient zero-bin
+    test before the unchanged observers. It consumes no cell storage and keeps
+    the original path for every other result. The same typed effect witnesses
+    and immutable expression/observer matching are required.
     """
     # Reuse the existing identifier/partition admission, never a second grammar.
     emit_source_interval_lookup(
@@ -553,6 +570,11 @@ def emit_source_interval_i8_lookup(
         leading_bits=leading_bits,
     )
     finite_inputs = tuple(finite_inputs)
+    observer_word_cells = tuple(observer_word_cells)
+    zero_observer_cells = tuple(zero_observer_cells)
+    if observer_word_cells and zero_observer_cells:
+        raise ValueError("choose one explicit source observer representation")
+    observer_cells = observer_word_cells or zero_observer_cells
     if finite_inputs:
         from .scaled_integer_finite_llvm import validate_finite_scale_helper
 
@@ -579,8 +601,56 @@ def emit_source_interval_i8_lookup(
                     raise ValueError("finite producer observer differs from the actual lookup source expression")
                 if not math.isfinite(_float(observer.quant_factor_bits)):
                     raise ValueError("finite original quantization factor required")
-    elif finite_table is not None:
+    elif finite_table is not None and not observer_cells:
         raise ValueError("finite table supplied without prepared input bindings")
+    membership_table = ""
+    certify = f" signed char low_word={quantizer_name}(low_scaled),high_word={quantizer_name}(high_scaled);\n if(low_word!=high_word)goto source_fallback;"
+    if observer_cells:
+        from .bounded_rne_word_cells import validate_bounded_rne_word_cells
+
+        if (
+            not isinstance(finite_table, SourceIntervalTable)
+            or finite_table.leading_bits != leading_bits
+            or len(finite_table.data) != (1 << leading_bits) * 8
+        ):
+            raise ValueError("explicit matching source interval table required for observer cells")
+        for cells in observer_cells:
+            validate_bounded_rne_word_cells(cells)
+            if cells.expression_sha256 != finite_table.expression_sha256:
+                raise ValueError("observer cell source expression differs from the actual lookup table")
+        if finite_inputs:
+            expected = {
+                (route["source_expression_sha256"], route["quant_factor_bits"])
+                for binding in finite_inputs
+                for route in binding._routes
+            }
+            supplied = {(cells.expression_sha256, cells.quant_factor_word) for cells in observer_cells}
+            if expected != supplied:
+                raise ValueError("observer cells do not cover the selected finite source observers")
+        ranges = observer_cells[0].ranges
+        if any(cells.ranges != ranges for cells in observer_cells):
+            raise ValueError("shared observer cells have different numerical semantics")
+        if zero_observer_cells:
+            # An OR of the two nonnegative magnitude words dominates each.
+            # Admission inside the exact q=0 preimage is therefore sufficient;
+            # a rare false negative retains the original two observers. This
+            # also refuses NaNs/infinities without inspecting FP comparisons.
+            zero_upper = ranges[128][1] ^ 0x80000000
+            certify = (
+                f""" uint32_t endpoint_magnitude=(bits(low_scaled)|bits(high_scaled))&0x7fffffffu;
+ if(endpoint_magnitude<={zero_upper}u)return 0;
+"""
+                + certify
+            )
+        else:
+            rows = ",".join("{" + str(lo) + "u," + str(hi) + "u}" for lo, hi in ranges)
+            name = lookup_name + "_rne_cells"
+            membership_table = f"static const uint32_t {name}[256][2]={{{rows}}};\n"
+            certify = f""" signed char low_word={quantizer_name}(low_scaled);
+ uint32_t other_word=bits(high_scaled);
+ uint32_t other_key=(other_word>>31)?~other_word:(other_word^0x80000000u);
+ const uint32_t*bin={name}[(int)low_word+128];
+ if(other_key<bin[0]||other_key>bin[1])goto source_fallback;"""
     nonfinite = "||".join(f"({word}&0x7f800000u)==0x7f800000u" for word in ("w", "bits(up)", "bits(scale)"))
     finite_guard = "" if finite_inputs else f" if({nonfinite})goto source_fallback;\n"
     return f"""#include <stdint.h>
@@ -588,14 +658,14 @@ extern const float {table_name}[{1 << leading_bits}][2];
 extern float {activation_name}(float);
 extern signed char {quantizer_name}(float);
 static inline uint32_t bits(float x){{uint32_t w;__builtin_memcpy(&w,&x,4);return w;}}
+{membership_table}\
 __attribute__((always_inline)) signed char {lookup_name}(float x,float up,float scale){{
  uint32_t w=bits(x);
 {finite_guard} const float*cell={table_name}[w>>{32 - leading_bits}];float lo=cell[0],hi=cell[1];
  if(!(lo<=hi))goto source_fallback;
  float low_product=lo*up,high_product=hi*up;
  float low_scaled=low_product*scale,high_scaled=high_product*scale;
- signed char low_word={quantizer_name}(low_scaled),high_word={quantizer_name}(high_scaled);
- if(low_word!=high_word)goto source_fallback;
+{certify}
  return low_word;
 source_fallback:;
  float original={activation_name}(x);

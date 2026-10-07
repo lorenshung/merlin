@@ -14,6 +14,17 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
 
 ## What belongs here
 
+- `bounded_rne_word_cells.py` derives exact ordered-binary32 preimages of a
+  source-proven saturated ties-even signed-byte observation, retaining typed
+  source/use/context witnesses and explicit floating effect permissions. The
+  source interval emitter accepts separate default-off full membership or
+  sufficient zero-bin alternatives. All rounded finishing multiplies and
+  original source continuations remain; unsupported rounding stays behind the
+  caller's original source guard. No measured input or golden chooses legality.
+  Full membership adds immutable bin storage and dependencies; the zero test
+  adds branches on nonzero paths. Complete-cost evidence, including varied
+  operand contexts, is needed before any profitability or whole-model claim.
+
 - `cli.py` exposes the existing file-lowering API through `merlin lower`, without
   capture, optional research workflows or deployment. It requires fresh output,
   defaults to LLVM IR only, and forwards audit/sidecar options. `LowerResult.audit_index`
