@@ -98,6 +98,7 @@ SUITES = {
             "runtime/test_compilation_recipe.py",
             "runtime/test_link_supplier_proof.py",
             "runtime/test_spike_libm_binding.py",
+            "ir/test_linalg_composite_math.py",
         ),
         "core_extras": ("xdsl",),
         "probe_modules": (
@@ -106,6 +107,7 @@ SUITES = {
             "merlin.runtime.backends.spike_model",
             "merlin.llvmlower.link_supplier_trace",
             "merlin.targetgen.host_linkage_contract",
+            "merlin.frontends.linalg_composite_math",
         ),
         "required_modules": ("xdsl",),
     },
