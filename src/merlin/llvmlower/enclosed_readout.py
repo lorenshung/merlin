@@ -57,18 +57,26 @@ def prove(source_scales, store_scales, lo, hi, *, relu=False):
     )
 
 
-def emit_pair_scan(certificate, symbol, *, copy_policy="runtime"):
+def emit_pair_scan(certificate, symbol, *, copy_policy="runtime", checked_alignment=False):
     """Update the first byte array in place; second must be stable and disjoint.
 
     Complete producer-domain and both readout semantics are caller prerequisites.
     memcpy loads permit unaligned addresses. Equal eight-byte packets need no
     stores; differing packets are decoded lane by lane. The explicit compiler_builtin
     policy permits the C compiler to inline constant byte copies even under
-    fno-builtin; runtime retains ordinary memcpy calls. No exception flags or
+    fno-builtin; runtime retains ordinary memcpy calls. Explicit checked_alignment
+    tests both actual pointers before telling the compiler that packet loads are
+    aligned. Other pointers keep byte-safe copies; complete packets and tails
+    stay within count. This option requires compiler_builtin and never casts byte
+    storage to an integer lvalue. Default C bytes are unchanged. No exception flags or
     floating arithmetic occur here. Unknown pairs trap instead of guessing.
     """
     if copy_policy not in ("runtime", "compiler_builtin"):
         raise ValueError("unknown portable copy policy")
+    if type(checked_alignment) is not bool:
+        raise ValueError("checked alignment must be boolean")
+    if checked_alignment and copy_policy != "compiler_builtin":
+        raise ValueError("checked alignment requires compiler builtin copies")
     copy_name = "memcpy" if copy_policy == "runtime" else "__builtin_memcpy"
     if not isinstance(symbol, str) or not symbol.isascii() or not symbol.isidentifier():
         raise ValueError("C identifier required")
@@ -85,6 +93,20 @@ def emit_pair_scan(certificate, symbol, *, copy_policy="runtime"):
         f"case {(r['pair'][0] & 255) | ((r['pair'][1] & 255) << 8)}: return (unsigned char){r['source']};"
         for r in expected["corrections"]
     )
+
+    def packet_loop(first, second):
+        return f""" for(;count-i>=8;i+=8){{uint64_t a,b;{copy_name}(&a,{first}+i,8);{copy_name}(&b,{second}+i,8);
+  if(a!=b)for(size_t j=0;j<8;j++)first[i+j]={symbol}_lane(first[i+j],second[i+j]);}}"""
+
+    packets = packet_loop("first", "second")
+    if checked_alignment:
+        packets = f""" if(count>=8&&(((uintptr_t)first|(uintptr_t)second)&7)==0){{
+ unsigned char *aligned_first=__builtin_assume_aligned(first,8);
+ const unsigned char *aligned_second=__builtin_assume_aligned(second,8);
+{packet_loop("aligned_first", "aligned_second")}
+ }}else{{
+{packets}
+ }}"""
     return f"""#include <stdint.h>
 #include <stddef.h>
 extern void *memcpy(void *, const void *, size_t);
@@ -94,8 +116,7 @@ static unsigned char {symbol}_lane(unsigned char a,unsigned char b){{
 }}
 void {symbol}(unsigned char *first,const unsigned char *second,size_t count){{
  size_t i=0;
- for(;count-i>=8;i+=8){{uint64_t a,b;{copy_name}(&a,first+i,8);{copy_name}(&b,second+i,8);
-  if(a!=b)for(size_t j=0;j<8;j++)first[i+j]={symbol}_lane(first[i+j],second[i+j]);}}
+{packets}
  for(;i<count;i++)first[i]={symbol}_lane(first[i],second[i]);
 }}
 """
