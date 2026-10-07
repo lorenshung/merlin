@@ -451,3 +451,19 @@ normal provider routing automatically.
   parameter inputs. Every additional live source-derived use remains an
   observation; source/context/use mutations refuse validation. This analysis
   grants no numeric equivalence, approximation, scheduling or buffer permission.
+
+`prepare_probability_points` is default off and requires prepared probability
+bins, producer spans and encoded-row proofs. Both owned checked/private softmax
+producers refresh their BF16 bins after source replay. Successful finite equal
+bins prove the exact original BF16 probability; ambiguous or nonfinite results
+refuse before output publication. The synchronous PV gather copies that point
+once and passes one private epoch-bound source span to the product evaluator.
+QK inputs similarly originate from immutable exact BF16 source values. Null
+lower/upper inputs remove duplicated source uncertainty work, while every radix
+reconstruction-error and original ordered-FMA bound remains required. Private
+workspace capacity is unchanged; unused lower/upper arrays remain allocated.
+`probability_point_spans.py` transforms the owned executor grammar only, with
+complete replay/store and adjacent consumer-region checks. It does not admit
+arbitrary C, external point flags, or a new normal source binding. Tests in
+`test_probability_point_spans.py` cover BF16 words/F32 ties, signed zero,
+nonfinite refusal, source mutation and private base/coverage/epoch mismatches.

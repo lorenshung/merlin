@@ -166,6 +166,18 @@ int retention_stability(void){
             (True, True, False, True, True, True, True, True, True, True, True, True, True, True, True),
             id="fused_integer_reconstruction_composed",
         ),
+        pytest.param(
+            (True, True, False, True, True, True, True, True, True, True, True, True, True, True, False, True),
+            id="probability_points_composed",
+        ),
+        pytest.param(
+            (False, False, False, True, True, False, True, True, False, True, True, True, False, False, False, True),
+            id="probability_points_basic",
+        ),
+        pytest.param(
+            (True, True, False, True, True, True, True, True, True, True, True, True, True, True, True, True),
+            id="fused_integer_probability_points_composed",
+        ),
     ],
 )
 def native(tmp_path_factory, request):
@@ -199,6 +211,7 @@ def native(tmp_path_factory, request):
             prepare_softmax_spans=request.param[11] if len(request.param) > 11 else False,
             exact_bound_conversion=ExactBoundConversionContract(True, True, True, True, True) if exact else None,
             polynomial_batch_four=request.param[13] if len(request.param) > 13 else False,
+            prepare_probability_points=request.param[15] if len(request.param) > 15 else False,
         )
         + EXTRA
         + (RETENTION_TEST if request.param[5] else "")
