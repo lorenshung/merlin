@@ -635,3 +635,7 @@ specialization is not a numerical approximation or a default emitter policy.
 ## Complete integer product families
 
 Exact product families require complete prefix bounds, all live output planes, immutable inputs, private disjoint outputs, synchronous completion and preserved host effects. Target storage, scheduling and callback implementation proofs remain provider obligations.
+
+## Finite point observations at the BF16 quantization frontier
+
+Finite-point row observations require pure returned-value quantization, stable RNE, nontrapping arithmetic, unobserved flags, immutable endpoints and private disjoint outputs. Approximate product permission and arbitrary interposed rounding calls do not establish these facts.

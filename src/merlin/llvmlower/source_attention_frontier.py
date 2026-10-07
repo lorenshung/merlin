@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from merlin.common.paths import data_path
 
 from .exact_bound_conversion import ExactBoundConversionContract
+from .frontier_point_cells import FrontierPointCellsContract
 from .independent_lane_schedule import LaneEffects
 from .source_product_family import SourceProductFamilyContract
 from .source_roundoff_policy import ApproximateSourceRoundoffPolicy
@@ -130,6 +131,7 @@ def emit_source_attention_frontier(
     prepare_readonly_rhs: bool = False,
     radius_stage_effects: LaneEffects | None = None,
     source_roundoff_estimate: ApproximateSourceRoundoffPolicy | None = None,
+    frontier_point_cells: FrontierPointCellsContract | None = None,
     source_product_family: SourceProductFamilyContract | None = None,
 ) -> str:
     """Emit portable C; nonzero result records complete output publication.
@@ -199,6 +201,10 @@ def emit_source_attention_frontier(
     Optional exact product families carry all original integer output planes
     through a distinct checked callback and physical plane stride. Source
     reconstruction, numerical policy, ownership and fallback remain required.
+
+    Optional finite-point observations remove duplicate endpoint quantization
+    only under a separate pure integer-observation/effects contract. Stable
+    source-scale checks, original fallback and approximate-policy gates remain.
     """
     if type(fuse_encoded_witness) is not bool:
         raise ValueError("fused encoded witness policy must be bool")
@@ -549,6 +555,10 @@ def emit_source_attention_frontier(
         from .source_product_family import prepare_source_product_family
 
         text = prepare_source_product_family(text, plan=plan, contract=source_product_family)
+    if frontier_point_cells is not None:
+        from .frontier_point_cells import prepare_frontier_point_cells
+
+        text = prepare_frontier_point_cells(text, contract=frontier_point_cells)
     definitions = {
         "HEADS": plan.heads,
         "ROWS": plan.query_rows,
