@@ -21,6 +21,10 @@ Frontends that ingest external IR into the Merlin pipeline. Today: linalg-on-ten
   and grants no host placement, index-width bound, or numerical equivalence by itself.
 - `linalg_integer_reductions.py` — closed static i64 sum and masked prefix-sum source checks,
   with an explicit index-width premise; no host admission or linked-build verdict.
+- `linalg_f32_maximum_patterns.py` — closed static one-axis f32 `linalg.reduce`
+  with an exact negative-infinity seed and unflagged `arith.maximumf`. The
+  selected index width is a caller premise; PyTorch reduction equivalence,
+  host placement, and linked-build behavior remain separate obligations.
 - `linalg_reduction_source_body.py` names the closed integer sum/prefix-sum/paired-minimum
   frontend/root-operation kinds shared by host admission and the independent linked
   witness. Its declaration validator grants no placement or numerical equivalence.
