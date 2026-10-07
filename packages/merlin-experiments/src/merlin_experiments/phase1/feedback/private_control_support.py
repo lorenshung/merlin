@@ -96,7 +96,8 @@ def assertion_row_proven(row: Mapping[str, Any], proof: Mapping[str, Any] | None
         proven = {guard.get("compare_ordinal") for guard in guards if isinstance(guard, Mapping)}
     elif operation in {"arith.index_cast", "arith.addi"}:
         chains = proof.get("index_data_support")
-        if not isinstance(chains, list):
+        internal = proof.get("internal_compaction_support")
+        if not isinstance(chains, list) or not isinstance(internal, list):
             return False
         key = "cast_ordinal" if operation == "arith.index_cast" else "add_ordinals"
         proven = set()
@@ -110,6 +111,10 @@ def assertion_row_proven(row: Mapping[str, Any], proof: Mapping[str, Any] | None
                 proven.update(value)
             else:
                 return False
+        for chain in internal:
+            if not isinstance(chain, Mapping):
+                return False
+            proven.add(chain.get("cast_ordinal") if operation == "arith.index_cast" else chain.get("add_ordinal"))
     else:
         return False
     return set(ordinals) <= proven
@@ -121,10 +126,11 @@ def attach_source_record(result: dict[str, Any], proof: Mapping[str, Any] | None
         return
     result["selected_index_observation"] = dict(proof["selected_index_observation"])
     result["n_bounded_control_assertions"] = proof["count"]
-    result["n_bounded_index_support_operations"] = sum(
+    result["n_bounded_index_support_operations"] = len(proof["internal_compaction_support"]) * 2 + sum(
         1 + len(chain["add_ordinals"]) for chain in proof["index_data_support"]
     )
-    if proof["count"]:
+    result["n_internal_mask_compactions"] = len(proof["internal_compaction_support"])
+    if proof["count"] or proof["internal_compaction_support"]:
         result["bounded_control_support"] = dict(proof)
 
 
@@ -176,7 +182,7 @@ def _complete_guard_roster(proof: Mapping[str, Any], source: Mapping[str, Any]) 
     guards = proof.get("guards")
     if (
         type(count) is not int
-        or count < 1
+        or count < 0
         or source.get("n_bounded_control_assertions") != count
         or not isinstance(guards, list)
         or len(guards) != count
@@ -186,14 +192,15 @@ def _complete_guard_roster(proof: Mapping[str, Any], source: Mapping[str, Any]) 
         or proof.get("normalized_source_sha256") != source.get("normalized_source_sha256")
         or proof.get("selected_index_observation") != source.get("selected_index_observation")
         or type(proof.get("index_bits")) is not int
-        or proof["index_bits"] < 2
+        or not 2 <= proof["index_bits"] <= 128
         or proof.get("index_bits") != (source.get("selected_index_observation") or {}).get("index_bits")
     ):
         return False
     ordinals = [guard.get("assert_ordinal") for guard in guards if isinstance(guard, Mapping)]
     compares = [guard.get("compare_ordinal") for guard in guards if isinstance(guard, Mapping)]
     chains = proof.get("index_data_support", [])
-    if not isinstance(chains, list):
+    internal = proof.get("internal_compaction_support")
+    if not isinstance(chains, list) or not isinstance(internal, list):
         return False
     data_ordinals = []
     for chain in chains:
@@ -209,6 +216,41 @@ def _complete_guard_roster(proof: Mapping[str, Any], source: Mapping[str, Any]) 
         if not isinstance(adds, list) or len(adds) != 2:
             return False
         data_ordinals.extend([chain["cast_ordinal"], *adds])
+    if source.get("n_internal_mask_compactions") != len(internal):
+        return False
+    if count == 0 and not chains and not internal:
+        return False
+    for chain in internal:
+        if not isinstance(chain, Mapping) or set(chain) != {
+            "cast_ordinal",
+            "add_ordinal",
+            "allocation_ordinal",
+            "loop_ordinal",
+            "cast_dim_ordinal",
+            "cast_linalg_ordinal",
+            "extent",
+            "input_dtype",
+            "output_dtype",
+        }:
+            return False
+        ordinal_keys = (
+            "cast_ordinal",
+            "add_ordinal",
+            "allocation_ordinal",
+            "loop_ordinal",
+            "cast_dim_ordinal",
+            "cast_linalg_ordinal",
+        )
+        if (
+            any(type(chain[key]) is not int or chain[key] < 0 for key in ordinal_keys)
+            or len({chain[key] for key in ordinal_keys}) != len(ordinal_keys)
+            or type(chain["extent"]) is not int
+            or not 0 < chain["extent"] <= ((1 << (proof["index_bits"] - 1)) - 1) // 8
+            or chain["input_dtype"] != "i1"
+            or chain["output_dtype"] != "i64"
+        ):
+            return False
+        data_ordinals.extend([chain["cast_ordinal"], chain["add_ordinal"]])
     if source.get("n_bounded_index_support_operations") != len(data_ordinals):
         return False
     return (
@@ -231,6 +273,8 @@ def link_selected_build(source: dict[str, Any], receipt: Mapping[str, Any], link
             return {}
         if source.get("n_bounded_control_assertions") != 0:
             raise ValueError("source bounded-control assertion roster is incomplete")
+        if source.get("n_internal_mask_compactions") != 0:
+            raise ValueError("source internal-compaction roster is incomplete")
     elif not isinstance(proof, dict) or proof.get("status") != PENDING or not _complete_guard_roster(proof, source):
         raise ValueError("source bounded-control proof was not pending a linked build")
     selected = source.get("selected_index_observation")
@@ -252,7 +296,7 @@ def linked_selected_build_complete(source: Mapping[str, Any], entry: Mapping[str
         return False
     proof = source.get("bounded_control_support")
     if proof is None:
-        return source.get("n_bounded_control_assertions") == 0
+        return source.get("n_bounded_control_assertions") == 0 and source.get("n_internal_mask_compactions") == 0
     if not isinstance(proof, Mapping) or proof.get("status") != LINKED or not _complete_guard_roster(proof, source):
         return False
     linked = proof.get("linked_build")
@@ -490,7 +534,7 @@ def _same_flat_mask(left: Any, right: Any, extent: int) -> bool:
     return root(left) is root(right)
 
 
-def _compaction_loop(loop: Any, mask: Any, extent: int, *, compact: Any | None = None) -> Any:
+def _compaction_loop(loop: Any, mask: Any, extent: int, *, compact: Any | None = None, data_type: str = "i64") -> Any:
     """Prove the one-bit-at-a-time cursor and conditional tensor data movement."""
     _only_provenance(loop, set())
     _need(
@@ -558,7 +602,8 @@ def _compaction_loop(loop: Any, mask: Any, extent: int, *, compact: Any | None =
         _need(
             len(read.operands) == 2
             and read.operands[1] is induction
-            and _shape(read.operands[0], "i64") == (extent,)
+            and _shape(read.operands[0], data_type) == (extent,)
+            and str(read.results[0].type) == data_type
             and tuple(write.operands) == (read.results[0], current, cursor)
             and _uses_are(induction, (condition, 1), (read, 1))
             and _uses_are(current, (write, 1), (else_yield, 0)),
@@ -580,6 +625,189 @@ def _compaction_loop(loop: Any, mask: Any, extent: int, *, compact: Any | None =
         "mask data path has an unexpected consumer",
     )
     return increment
+
+
+def _dynamic_vector(value: Any, element: str) -> bool:
+    from xdsl.dialects.builtin import DYNAMIC_INDEX, TensorType
+
+    typ = value.type
+    return (
+        isinstance(typ, TensorType) and str(typ.element_type) == element and tuple(typ.get_shape()) == (DYNAMIC_INDEX,)
+    )
+
+
+def _internal_compaction_chain(
+    cast: Any, count_mask: Any, extent: int, ordinals: Mapping[int, int], guards: list[dict], index_bits: int
+) -> dict[str, Any]:
+    """Prove a Boolean compaction and exact dynamic same-shape i64 cast."""
+    from xdsl.dialects.arith import AddiOp, ConstantOp, ExtUIOp, IndexCastOp
+    from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, DenseArrayBase
+    from xdsl.dialects.linalg.attrs import IteratorType, IteratorTypeAttr
+    from xdsl.dialects.linalg.ops import GenericOp, ReduceOp
+    from xdsl.dialects.linalg.ops import YieldOp as LinalgYieldOp
+    from xdsl.dialects.scf import ForOp, IfOp
+    from xdsl.dialects.scf import YieldOp as ScfYieldOp
+    from xdsl.dialects.tensor import DimOp, EmptyOp, ExtractOp, InsertOp
+    from xdsl.ir.affine import AffineDimExpr
+
+    maximum = (1 << (index_bits - 1)) - 1
+    _need(extent <= maximum // 8, "dynamic cast byte span exceeds selected signed index")
+    _need(isinstance(cast, IndexCastOp), "unregistered mask-count cast")
+    _only_provenance(cast, set())
+    _need(
+        len(cast.operands) == 1
+        and len(cast.results) == 1
+        and str(cast.operands[0].type) == "i64"
+        and str(cast.results[0].type) == "index",
+        "mask count cast is not i64 to selected index",
+    )
+    count_extract = cast.operands[0].owner
+    count_reduce = count_extract.operands[0].owner if isinstance(count_extract, ExtractOp) else None
+    mask_generic = count_reduce.operands[0].owner if isinstance(count_reduce, ReduceOp) else None
+    _need(isinstance(mask_generic, GenericOp), "unregistered mask-count source")
+    mask_body = list(mask_generic.regions[0].blocks[0].ops)
+    reduce_body = list(count_reduce.regions[0].blocks[0].ops)
+    _need(
+        len(mask_body) == 2
+        and isinstance(mask_body[0], ExtUIOp)
+        and isinstance(mask_body[1], LinalgYieldOp)
+        and len(reduce_body) == 2
+        and isinstance(reduce_body[0], AddiOp)
+        and isinstance(reduce_body[1], LinalgYieldOp),
+        "mask count has an unregistered scalar body",
+    )
+    _need(len(cast.results) == 1 and _uses_are(cast.operands[0], (cast, 0)), "mask count escapes the cast")
+    uses = list(cast.results[0].uses)
+    _need(len(uses) == 1 and uses[0].index == 0, "count index has another consumer")
+    empty = uses[0].operation
+    _need(isinstance(empty, EmptyOp) and _dynamic_vector(empty.results[0], "i1"), "not an i1 dynamic allocation")
+    _only_provenance(empty, set())
+    _need(tuple(empty.operands) == tuple(cast.results), "allocation is not sized by the mask count")
+    uses = list(empty.results[0].uses)
+    _need(len(uses) == 1 and uses[0].index == 3, "compaction allocation has another consumer")
+    loop = uses[0].operation
+    _need(isinstance(loop, ForOp) and _dynamic_vector(loop.results[0], "i1"), "not an i1 compaction loop")
+    _need(
+        all(isinstance(value.owner, ConstantOp) for value in loop.operands[:3])
+        and isinstance(loop.operands[4].owner, ConstantOp),
+        "compaction bounds/cursor have unregistered constants",
+    )
+    body = list(loop.regions[0].blocks[0].ops)
+    _need(
+        len(body) == 3
+        and isinstance(body[0], ExtractOp)
+        and isinstance(body[1], IfOp)
+        and isinstance(body[2], ScfYieldOp),
+        "compaction has no registered closed body",
+    )
+    taken = list(body[1].regions[0].blocks[0].ops)
+    missed = list(body[1].regions[1].blocks[0].ops)
+    _need(
+        len(taken) == 4
+        and isinstance(taken[0], ExtractOp)
+        and isinstance(taken[1], InsertOp)
+        and isinstance(taken[2], AddiOp)
+        and isinstance(taken[3], ScfYieldOp)
+        and len(missed) == 1
+        and isinstance(missed[0], ScfYieldOp),
+        "compaction has an unregistered data or cursor op",
+    )
+    loop_mask = body[0].operands[0]
+    _need(_same_flat_mask(count_mask, loop_mask, extent), "count and data loop use different masks")
+    increment = _compaction_loop(loop, loop_mask, extent, data_type="i1")
+    _need(tuple(loop.operands[3:4]) == tuple(empty.results), "loop has another allocation")
+
+    uses = list(loop.results[0].uses)
+    dims = [use.operation for use in uses if isinstance(use.operation, DimOp) and use.index == 0]
+    generics = [use.operation for use in uses if isinstance(use.operation, GenericOp) and use.index == 0]
+    _need(len(generics) == 1 and len(dims) + 1 == len(uses), "compacted value escapes closed cast/guards")
+    generic = generics[0]
+    _only_provenance(generic, {"indexing_maps", "iterator_types", "operandSegmentSizes"})
+    _need(len(generic.operands) == 2 and len(generic.results) == 1, "dynamic cast has another operand or result")
+    output_empty = _named(generic.operands[1], "tensor.empty")
+    _only_provenance(output_empty, set())
+    _need(isinstance(output_empty, EmptyOp), "unregistered cast allocation")
+    _need(
+        _dynamic_vector(generic.results[0], "i64")
+        and _dynamic_vector(output_empty.results[0], "i64")
+        and len(output_empty.operands) == 1
+        and _uses_are(output_empty.results[0], (generic, 1)),
+        "dynamic cast result/storage differs",
+    )
+    cast_dim = _named(output_empty.operands[0], "tensor.dim")
+    _need(isinstance(cast_dim, DimOp), "unregistered cast dimension")
+    _need(cast_dim in dims, "cast allocation uses another dimension")
+    guard_dims = {guard["dim_ordinal"] for guard in guards}
+    for dim in dims:
+        _only_provenance(dim, set())
+        _need(
+            len(dim.operands) == 2
+            and dim.operands[0] is loop.results[0]
+            and _integer(dim.operands[1], "index") == 0
+            and (dim is cast_dim or ordinals[id(dim)] in guard_dims),
+            "compaction dimension has an unproved consumer",
+        )
+        if dim is not cast_dim:
+            compares = {guard["compare_ordinal"] for guard in guards if guard["dim_ordinal"] == ordinals[id(dim)]}
+            _need(
+                bool(dim.results[0].uses)
+                and all(use.index == 0 and ordinals.get(id(use.operation)) in compares for use in dim.results[0].uses),
+                "guard dimension has an unexpected consumer",
+            )
+    _need(_uses_are(cast_dim.results[0], (output_empty, 0)), "cast dimension has another consumer")
+    segments = generic.properties["operandSegmentSizes"]
+    maps = generic.properties["indexing_maps"]
+    iterators = generic.properties["iterator_types"]
+    _need(
+        isinstance(segments, DenseArrayBase)
+        and tuple(segments.iter_values()) == (1, 1)
+        and isinstance(maps, ArrayAttr)
+        and len(maps.data) == 2
+        and all(
+            isinstance(item, AffineMapAttr)
+            and item.data.num_dims == 1
+            and item.data.num_symbols == 0
+            and tuple(item.data.results) == (AffineDimExpr(0),)
+            for item in maps.data
+        )
+        and isinstance(iterators, ArrayAttr)
+        and len(iterators.data) == 1
+        and isinstance(iterators.data[0], IteratorTypeAttr)
+        and iterators.data[0].data == IteratorType.PARALLEL,
+        "dynamic cast is not one identity-map parallel loop",
+    )
+    _need(len(generic.regions) == 1 and len(generic.regions[0].blocks) == 1, "dynamic cast has another body")
+    block = generic.regions[0].blocks[0]
+    ops = list(block.ops)
+    _need(
+        len(block.args) == 2
+        and [str(value.type) for value in block.args] == ["i1", "i64"]
+        and len(ops) == 2
+        and isinstance(ops[0], ExtUIOp)
+        and isinstance(ops[1], LinalgYieldOp),
+        "dynamic cast body changes Boolean extension",
+    )
+    extension, yield_op = ops
+    _only_provenance(extension, set())
+    _only_provenance(yield_op, set())
+    _need(
+        tuple(extension.operands) == (block.args[0],)
+        and str(extension.results[0].type) == "i64"
+        and tuple(yield_op.operands) == tuple(extension.results)
+        and _uses_are(extension.results[0], (yield_op, 0)),
+        "dynamic cast uses another value path",
+    )
+    return {
+        "cast_ordinal": ordinals[id(cast)],
+        "add_ordinal": ordinals[id(increment)],
+        "allocation_ordinal": ordinals[id(empty)],
+        "loop_ordinal": ordinals[id(loop)],
+        "cast_dim_ordinal": ordinals[id(cast_dim)],
+        "cast_linalg_ordinal": ordinals[id(generic)],
+        "extent": extent,
+        "input_dtype": "i1",
+        "output_dtype": "i64",
+    }
 
 
 def _index_data_chain(dim: Any, cast: Any, count_mask: Any, extent: int, ordinals: Mapping[int, int]) -> dict[str, Any]:
@@ -643,10 +871,11 @@ def prove_bounded_assertions(
         raise ValueError("source bounded-control proof: invalid typed source") from exc
     parsed = tuple(mq.walk(module))
     joined = source_inventory_by_ordinal(parsed, inventory, raw_sha256, normalized_sha256)
-    _need(type(index_bits) is int and index_bits >= 2, "no caller-supplied index width premise")
+    _need(type(index_bits) is int and 2 <= index_bits <= 128, "no caller-supplied index width premise")
     ordinals = {id(op): position for position, op in enumerate(parsed)}
     guards = []
     index_data_support = []
+    internal_compaction_support = []
     seen_casts: set[int] = set()
     for ordinal, op in enumerate(parsed):
         if mq.op_name(op) != "cf.assert":
@@ -710,6 +939,17 @@ def prove_bounded_assertions(
                 # Assertion tautology does not imply a complete cursor/data proof.
                 # Exact unsupported index operations remain in the source ledger.
                 pass
+    for cast in parsed:
+        if mq.op_name(cast) != "arith.index_cast" or len(cast.operands) != 1 or len(cast.results) != 1:
+            continue
+        try:
+            extent, count_mask = _mask_count(cast.operands[0])
+            internal_compaction_support.append(
+                _internal_compaction_chain(cast, count_mask, extent, ordinals, guards, index_bits)
+            )
+        except ValueError:
+            # A typed cast alone is not an internal compaction proof.
+            continue
     return {
         "status": PENDING,
         "scope": SCOPE,
@@ -720,4 +960,5 @@ def prove_bounded_assertions(
         "count": len(guards),
         "guards": guards,
         "index_data_support": index_data_support,
+        "internal_compaction_support": internal_compaction_support,
     }

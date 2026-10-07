@@ -66,6 +66,7 @@ def _source_scatter(extent: int = 4) -> str:
         f"function_type = (tensor<{extent}xi1>, tensor<{extent}xi64>) -> tensor<?xi64>",
         f"function_type = (tensor<{extent}xi1>, tensor<{extent}xi64>) -> tensor<{extent}xi64>",
     )
+
     return source.replace(
         '    "func.return"(%result) : (tensor<?xi64>) -> ()',
         f"""    %scatter_init = "tensor.empty"() : () -> tensor<{extent}xi64>
@@ -84,6 +85,41 @@ def _source_scatter(extent: int = 4) -> str:
         "scf.yield"(%next_dest, %next_cursor) : (tensor<{extent}xi64>, index) -> ()
     }}) : (index, index, index, tensor<{extent}xi64>, index) -> (tensor<{extent}xi64>, index)
     "func.return"(%scatter) : (tensor<{extent}xi64>) -> ()""",
+    )
+
+
+def _source_internal_cast(extent: int = 4) -> str:
+    """A dynamic Boolean compaction consumed by a shape-preserving cast."""
+    source = _source(extent)
+    source = source.replace(
+        f"function_type = (tensor<{extent}xi1>, tensor<{extent}xi64>) -> tensor<?xi64>",
+        f"function_type = (tensor<{extent}xi1>, tensor<{extent}xi1>) -> tensor<?xi64>",
+    ).replace(f"%data: tensor<{extent}xi64>", f"%data: tensor<{extent}xi1>")
+    source = source.replace(
+        f'%item = "tensor.extract"(%data, %i) : (tensor<{extent}xi64>, index) -> i64',
+        f'%item = "tensor.extract"(%data, %i) : (tensor<{extent}xi1>, index) -> i1',
+    ).replace(
+        '%inserted = "tensor.insert"(%item, %current, %index) : (i64, tensor<?xi64>, index) -> tensor<?xi64>',
+        '%inserted = "tensor.insert"(%item, %current, %index) : (i1, tensor<?xi1>, index) -> tensor<?xi1>',
+    )
+    source = source.replace("tensor<?xi64>", "tensor<?xi1>")
+    source = source.replace(
+        f"function_type = (tensor<{extent}xi1>, tensor<{extent}xi1>) -> tensor<?xi1>",
+        f"function_type = (tensor<{extent}xi1>, tensor<{extent}xi1>) -> tensor<?xi64>",
+    )
+    return source.replace(
+        '    "func.return"(%result) : (tensor<?xi1>) -> ()',
+        """    %cast_dim = "tensor.dim"(%result, %lo) : (tensor<?xi1>, index) -> index
+    %cast_init = "tensor.empty"(%cast_dim) : (index) -> tensor<?xi64>
+    %cast = "linalg.generic"(%result, %cast_init) <{
+      indexing_maps = [affine_map<(d0) -> (d0)>, affine_map<(d0) -> (d0)>],
+      iterator_types = [#linalg.iterator_type<parallel>],
+      operandSegmentSizes = array<i32: 1, 1>}> ({
+      ^bb4(%bit: i1, %old_cast: i64):
+        %wide_cast = "arith.extui"(%bit) : (i1) -> i64
+        "linalg.yield"(%wide_cast) : (i64) -> ()
+    }) : (tensor<?xi1>, tensor<?xi64>) -> tensor<?xi64>
+    "func.return"(%cast) : (tensor<?xi64>) -> ()""",
     )
 
 
@@ -131,6 +167,78 @@ def test_complete_mask_compaction_and_scatter_proves_only_exact_index_ordinals(e
         assert not control.assertion_row_proven(
             {"mlir_operation": operation, "count": len(ordinals) + 1, "ordinals": [*ordinals, 999]}, proof
         )
+
+
+@pytest.mark.parametrize("extent", [4, 7])
+def test_internal_boolean_compaction_cast_proves_exact_cursor_and_allocation(extent: int) -> None:
+    proof = _prove(_source_internal_cast(extent))
+    assert proof["count"] == 2
+    assert len(proof["internal_compaction_support"]) == 1
+    chain = proof["internal_compaction_support"][0]
+    assert chain["extent"] == extent
+    for operation, ordinals in (
+        ("arith.index_cast", [chain["cast_ordinal"]]),
+        ("arith.addi", [chain["add_ordinal"]]),
+    ):
+        assert control.assertion_row_proven(
+            {"mlir_operation": operation, "count": len(ordinals), "ordinals": ordinals}, proof
+        )
+    assert all(guard["count_interval"] == [0, extent] for guard in proof["guards"])
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        lambda s: s.replace('"tensor.extract"(%mask, %i)', '"tensor.extract"(%data, %i)'),
+        lambda s: s.replace("value = 1 : index", "value = 2 : index"),
+        lambda s: s.replace('"tensor.extract"(%data, %i)', '"tensor.extract"(%data, %index)'),
+        lambda s: s.replace('"tensor.empty"(%cast_dim)', '"tensor.empty"(%dim)'),
+        lambda s: s.replace(
+            '"arith.extui"(%bit) : (i1) -> i64\n        "linalg.yield"(%wide_cast)',
+            '"arith.extsi"(%bit) : (i1) -> i64\n        "linalg.yield"(%wide_cast)',
+        ),
+    ],
+)
+def test_internal_compaction_near_misses_never_discharge_cursor(changed) -> None:
+    try:
+        proof = _prove(changed(_source_internal_cast()))
+    except ValueError:
+        return
+    assert proof["internal_compaction_support"] == []
+
+
+def test_internal_compaction_requires_selected_byte_span_and_linked_identity() -> None:
+    from copy import deepcopy
+
+    assert _prove(_source_internal_cast(), bits=5)["internal_compaction_support"] == []
+    proof = _prove(_source_internal_cast(), bits=64)
+    selected = _selected_index()
+    proof["selected_index_observation"] = deepcopy(selected)
+    proof["index_bits"] = selected["index_bits"]
+    source = {
+        "source_sha256": proof["raw_source_sha256"],
+        "normalized_source_sha256": proof["normalized_source_sha256"],
+        "selected_index_observation": deepcopy(selected),
+    }
+    control.attach_source_record(source, proof)
+    linked = {"capture_tree_sha256": "c" * 64, "elf_sha256": "e" * 64, "candidate_tree_sha256": "f" * 64}
+    actual = {**selected, "effective_pipeline": _effective_pipeline()}
+    entry = {**linked, "index_lowering": actual}
+    control.link_selected_build(source, {"output": {"index_lowering": actual}}, linked)
+    assert control.linked_selected_build_complete(source, entry, "f" * 64)
+    assert not control.linked_selected_build_complete(source, {**entry, "elf_sha256": "0" * 64}, "f" * 64)
+    assert not control.linked_selected_build_complete(source, entry, "0" * 64)
+    for mutation in (
+        lambda item: item.pop("internal_compaction_support"),
+        lambda item: item["internal_compaction_support"][0].update(add_ordinal=True),
+        lambda item: item["internal_compaction_support"][0].update(extent=4.0),
+        lambda item: item["internal_compaction_support"][0].update(
+            cast_dim_ordinal=item["internal_compaction_support"][0]["loop_ordinal"]
+        ),
+    ):
+        changed = deepcopy(source)
+        mutation(changed["bounded_control_support"])
+        assert not control.linked_selected_build_complete(changed, entry, "f" * 64)
 
 
 def _different_scatter_mask(source: str) -> str:
@@ -199,6 +307,7 @@ def test_compaction_ordinals_and_hashes_remain_bound_to_the_linked_build() -> No
         "selected_index_observation": deepcopy(selected),
         "n_bounded_control_assertions": proof["count"],
         "n_bounded_index_support_operations": 3,
+        "n_internal_mask_compactions": 0,
         "bounded_control_support": proof,
     }
     linked = {"capture_tree_sha256": "c" * 64, "elf_sha256": "e" * 64, "candidate_tree_sha256": "f" * 64}
@@ -237,7 +346,7 @@ def _different_loop_shape(source: str) -> str:
         ),
         (lambda s: s.replace('"arith.extui"(%bit)', '"arith.extsi"(%bit)'), "unsigned Boolean extension"),
         (lambda s: s.replace("#arith.overflow<none>}> : (i64", "#arith.overflow<nsw>}> : (i64"), "overflow semantics"),
-        (lambda s: s.replace("tensor<4xi1>", "tensor<4xi8>"), "invalid typed source"),
+        (lambda s: s.replace("tensor<4xi1>", "tensor<4xi8>"), "invalid typed source|expected i1 tensor"),
         (_different_loop_shape, "loop can change"),
     ],
 )
@@ -306,6 +415,7 @@ def test_linked_control_proof_requires_exact_prepared_compiler_and_elf() -> None
         "selected_index_observation": deepcopy(selected),
         "n_bounded_control_assertions": 2,
         "n_bounded_index_support_operations": 0,
+        "n_internal_mask_compactions": 0,
         "bounded_control_support": {
             "status": control.PENDING,
             "count": 2,
@@ -314,6 +424,8 @@ def test_linked_control_proof_requires_exact_prepared_compiler_and_elf() -> None
             "raw_source_sha256": "d" * 64,
             "normalized_source_sha256": "b" * 64,
             "selected_index_observation": deepcopy(selected),
+            "index_data_support": [],
+            "internal_compaction_support": [],
         },
     }
     linked = {"capture_tree_sha256": "c" * 64, "elf_sha256": "e" * 64, "candidate_tree_sha256": "f" * 64}
@@ -364,7 +476,11 @@ def test_linked_control_proof_requires_exact_prepared_compiler_and_elf() -> None
 
 def test_prebuild_and_postbuild_observations_must_match_all_flags() -> None:
     selected = _selected_index()
-    source = {"selected_index_observation": selected, "n_bounded_control_assertions": 0}
+    source = {
+        "selected_index_observation": selected,
+        "n_bounded_control_assertions": 0,
+        "n_internal_mask_compactions": 0,
+    }
     receipt = {"output": {"index_lowering": {**selected, "effective_pipeline": _effective_pipeline()}}}
     assert control.link_selected_build(source, receipt, {}) == receipt["output"]["index_lowering"]
     changed = {**selected, "cross_flags": ["--target=synthetic", "-march=synthetic", "-prepared-feature"]}

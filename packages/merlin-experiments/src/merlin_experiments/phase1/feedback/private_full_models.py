@@ -51,7 +51,7 @@ from merlin_experiments.phase1.feedback.private_source_support_join import (
 )
 
 SCHEMA = "merlin.phase1.private_full_models.v1"
-RESULT_SCHEMA = "merlin.phase1.private_full_model_build_gate.v8"
+RESULT_SCHEMA = "merlin.phase1.private_full_model_build_gate.v9"
 BUILD_BOARD_SCOPE = "static_memory_layout_and_host_ISA_only; no board execution"
 TRANSPOSE_DATA_SUPPORT_SCOPE = data_movement.SCOPE
 _transpose_data_support = data_movement.prove_transpose_source

@@ -36,8 +36,14 @@ Historical direct-path reads remain diagnostic only. The copy proves selected
 source identity, not host-operation correctness or whole-model execution.
 
 `private_control_support.py` proves typed source intervals for a narrow
-mask-count assertion chain, its single-consumer comparison predicates, and exact
-bounded mask-compaction/scatter cursors. Its index width is a caller-supplied
+mask-count assertion chain, its single-consumer comparison predicates, exact
+bounded mask-compaction/scatter cursors, and a separately closed internal
+Boolean compact-then-cast chain. The latter binds count, allocation, ordered
+cursor writes, shape-preserving cast and worst-case byte span without admitting
+the separate reduction/cast arithmetic or dynamic external output ABI. The v9
+gate requires its empty-or-complete internal roster; historical v8 results do
+not acquire this proof. Linked-image identity does not prove compiled semantic
+equivalence or numerical correctness. Its index width is a caller-supplied
 premise, not selected compiler evidence. The full-model consumer may discharge
 only exact proven source ordinals after binding the same producer-owned compiler
 observation to the linked build. All other index arithmetic and host math retain

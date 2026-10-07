@@ -196,6 +196,7 @@ def test_complete_requires_current_candidate_all_programs_and_device_work(monkey
                         "eligible_groups": [0],
                         "selected_index_observation": deepcopy(selected_index),
                         "n_bounded_control_assertions": 0,
+                        "n_internal_mask_compactions": 0,
                         "linalg_host_support": {
                             **linalg.begin("d" * 64, "e" * 64, 5, deepcopy(selected_index)),
                             "status": linalg.LINKED,
@@ -386,7 +387,12 @@ def test_complete_requires_current_candidate_all_programs_and_device_work(monkey
     record["schema"] = gate.RESULT_SCHEMA
     record["schema"] = "merlin.phase1.private_full_model_build_gate.v7"
     assert not gate.complete(record, **kwargs)
+    record["schema"] = "merlin.phase1.private_full_model_build_gate.v8"
+    assert not gate.complete(record, **kwargs)
     record["schema"] = gate.RESULT_SCHEMA
+    record["models"][0]["checks"]["source"]["prefix"].pop("n_internal_mask_compactions")
+    assert not gate.complete(record, **kwargs)
+    record["models"][0] = model("a", programs["a"])
     for malformed in (None, {}, {"status": "unavailable_in_prebuilt_receipt"}):
         record["models"][0]["checks"]["build"]["programs"][0]["compilation_recipe"] = malformed
         assert not gate.complete(record, **kwargs)
@@ -1488,6 +1494,7 @@ def test_shared_postbuild_verifier_rehashes_prebuilt_elf(tmp_path):
         "n_linalg_regions": 1,
         "selected_index_observation": deepcopy(selected),
         "n_bounded_control_assertions": 0,
+        "n_internal_mask_compactions": 0,
         "direct_return_support": None,
         "transpose_data_support": {"status": "source_structural_data_support_pending_build"},
         "generic_copy_data_support": {"status": "source_structural_data_support_pending_build"},
