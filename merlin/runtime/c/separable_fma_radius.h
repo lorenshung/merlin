@@ -74,4 +74,55 @@ static inline int merlin_fma_separable_radius_apply(
 #endif
  return 1;
 }
+/* Explicit independent-coordinate schedule. The compiler caller must bind the
+ * same immutable admitted row epoch, stable RNE/nontrapping arithmetic and no
+ * intermediate exception observations. Outputs are fresh disjoint spans and
+ * cannot alias the plan, column metadata or centers. This helper grants no
+ * pointer-identity cache or relaxed numerical admission. Scalar caller tails
+ * use the original consumer. Unused helper leaves default generated code inert.
+ */
+static inline int merlin_fma_radius_disjoint(
+ const void *a,size_t an,const void *b,size_t bn) {
+ uintptr_t x=(uintptr_t)a,y=(uintptr_t)b;
+ return a&&b&&an<=UINTPTR_MAX-x&&bn<=UINTPTR_MAX-y&&
+        (x+an<=y||y+bn<=x);
+}
+static inline int merlin_fma_separable_radius_apply_eight(
+ const merlin_fma_separable_radius *p,size_t first,float *lower,float *upper) {
+ if(!p||!p->valid||!p->columns||!lower||!upper||
+    first>p->columns->columns||p->columns->columns-first<8)return 0;
+ size_t columns=p->columns->columns;
+ if(columns>SIZE_MAX/sizeof(*p->columns->source)||
+    columns>SIZE_MAX/sizeof(*p->centers)||
+    !merlin_fma_radius_disjoint(lower,8*sizeof(*lower),upper,8*sizeof(*upper)))return 0;
+ const void *reads[4]={p,p->columns,p->columns->source,p->centers};
+ size_t sizes[4]={sizeof(*p),sizeof(*p->columns),
+                 columns*sizeof(*p->columns->source),columns*sizeof(*p->centers)};
+ for(size_t i=0;i<4;i++)if(
+    !merlin_fma_radius_disjoint(lower,8*sizeof(*lower),reads[i],sizes[i])||
+    !merlin_fma_radius_disjoint(upper,8*sizeof(*upper),reads[i],sizes[i]))return 0;
+ double maximum[8],center[8],product[8],radius[8],lo[8],hi[8];
+ for(size_t i=0;i<8;i++){
+  maximum[i]=p->columns->source[first+i].maximum;
+  center[i]=p->centers[first+i];
+ }
+ for(size_t i=0;i<8;i++)product[i]=merlin_fma_up_mul(p->gamma_l1,maximum[i]);
+ for(size_t i=0;i<8;i++)radius[i]=merlin_fma_up_add(product[i],p->subnormal);
+ for(size_t i=0;i<8;i++)lo[i]=merlin_fma_down_add(center[i],-radius[i]);
+ for(size_t i=0;i<8;i++)hi[i]=merlin_fma_up_add(center[i],radius[i]);
+#if defined(MERLIN_ENABLE_EXACT_BOUND_CONVERSION)
+ for(size_t i=0;i<8;i++)lower[i]=MERLIN_F32_EXACT_FLOOR_FROM_F64(lo[i]);
+ for(size_t i=0;i<8;i++)upper[i]=MERLIN_F32_EXACT_CEIL_FROM_F64(hi[i]);
+#else
+ for(size_t i=0;i<8;i++){
+  lower[i]=(float)lo[i];
+  if((double)lower[i]>lo[i])lower[i]=merlin_fma_next_down_f32(lower[i]);
+ }
+ for(size_t i=0;i<8;i++){
+  upper[i]=(float)hi[i];
+  if((double)upper[i]<hi[i])upper[i]=merlin_fma_next_up_f32(upper[i]);
+ }
+#endif
+ return 1;
+}
 #endif

@@ -504,3 +504,13 @@ complete replay/store and adjacent consumer-region checks. It does not admit
 arbitrary C, external point flags, or a new normal source binding. Tests in
 `test_probability_point_spans.py` cover BF16 words/F32 ties, signed zero,
 nonfinite refusal, source mutation and private base/coverage/epoch mismatches.
+
+### Explicit independent radius staging
+
+`independent_lane_schedule` retains typed per-lane SSA and rounding under a
+complete scalar effect contract. The regular source attention emitter selects
+`radius_stage_effects` only with the admitted separable producer and exact bound
+conversion. Private eight-column staging retains scalar tails, disjoint outputs
+and checked refusal. Default C bytes are unchanged; target conversion hooks and
+ISA/register legality belong to the provider. No automatic width/cost policy is
+introduced.

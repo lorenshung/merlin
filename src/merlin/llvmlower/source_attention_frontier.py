@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from merlin.common.paths import data_path
 
 from .exact_bound_conversion import ExactBoundConversionContract
+from .independent_lane_schedule import LaneEffects
 
 
 def _f32(value: float) -> str:
@@ -125,6 +126,7 @@ def emit_source_attention_frontier(
     fuse_encoded_witness: bool = False,
     prepare_probability_points: bool = False,
     prepare_readonly_rhs: bool = False,
+    radius_stage_effects: LaneEffects | None = None,
 ) -> str:
     """Emit portable C; nonzero result certifies complete output publication.
 
@@ -512,6 +514,12 @@ def emit_source_attention_frontier(
         from .prepared_attention_rhs import prepare_attention_rhs_owner
 
         text = prepare_attention_rhs_owner(text)
+    if radius_stage_effects is not None:
+        if not separable_source_radius or exact_bound_conversion is None:
+            raise ValueError("radius staging requires admitted separable radii and exact conversion")
+        from .radius_stage_schedule import stage_separable_radius_columns
+
+        text = stage_separable_radius_columns(text, effects=radius_stage_effects)
     definitions = {
         "HEADS": plan.heads,
         "ROWS": plan.query_rows,
