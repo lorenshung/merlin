@@ -101,6 +101,8 @@ def test_failed_launch_does_not_retain_an_earlier_attempts_console(monkeypatch, 
 
     _oracle(monkeypatch, tmp_path, simulator="verilator")
     previous = tmp_path / "oracle_console.log"
+    previous_stderr = tmp_path / "oracle_stderr.log"
+    previous_stderr.write_bytes(b"stale diagnostic")
     assert previous.is_file()
 
     def refused(*args, **kwargs):
@@ -112,3 +114,39 @@ def test_failed_launch_does_not_retain_an_earlier_attempts_console(monkeypatch, 
             {}, "module {}", simulator="synthetic", target="synthetic", workdir=tmp_path
         )
     assert not previous.exists()
+    assert not previous_stderr.exists()
+
+
+@pytest.mark.parametrize("failure", ["timeout", "nonzero"])
+@pytest.mark.parametrize("binary", [True, False])
+def test_process_failure_retains_partial_console_without_granting_a_result(
+    monkeypatch, tmp_path, failure, binary
+):
+    import subprocess
+
+    from merlin.runtime.backends import base
+
+    stdout = b"OUT_B64_BEGIN v1 Y0 1 4 1 s\npartial\xff"
+    stderr = b"native execution diagnostic\xfe"
+    if not binary:
+        stdout, stderr = stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
+    error = (
+        subprocess.TimeoutExpired(["synthetic"], 1, output=stdout, stderr=stderr)
+        if failure == "timeout"
+        else subprocess.CalledProcessError(124, ["synthetic"], output=stdout, stderr=stderr)
+    )
+
+    def refused(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(contract_compile, "compile_lowered_to_elf", lambda *args, **kwargs: tmp_path / "program.elf")
+    monkeypatch.setattr(base, "get_backend", lambda target: SimpleNamespace(run_elf=refused))
+    (tmp_path / "oracle_console.log").write_bytes(b"stale stdout")
+    (tmp_path / "oracle_stderr.log").write_bytes(b"stale stderr")
+    with pytest.raises(type(error)) as caught:
+        contract_compile.run_on_oracle(
+            {}, "module {}", simulator="synthetic", target="synthetic", workdir=tmp_path
+        )
+    assert caught.value is error
+    for name, expected in (("oracle_console.log", stdout), ("oracle_stderr.log", stderr)):
+        assert (tmp_path / name).read_bytes() == (expected if binary else expected.encode("utf-8"))

@@ -896,6 +896,7 @@ def run_on_oracle(
     spike/verilator — only VCS/FireSim adapters that route through a queue set it).
     """
     import time
+    from subprocess import CalledProcessError, TimeoutExpired
 
     from merlin.runtime.backends import base as _backends
 
@@ -905,9 +906,11 @@ def run_on_oracle(
     readback_policy = selected(readback_policy)
     work = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="oot_run_"))
     console_path = work / "oracle_console.log"
+    stderr_path = work / "oracle_stderr.log"
     # A refused build or failed launch must not leave an earlier attempt's
     # transcript at this invocation's diagnostic path.
     console_path.unlink(missing_ok=True)
+    stderr_path.unlink(missing_ok=True)
     _t0 = time.perf_counter()
     policy_kwargs = {"readback_policy": readback_policy} if readback_policy is not None else {}
     elf = compile_lowered_to_elf(cb, lowered_mlir_text, work, target=target, inputs=inputs, **policy_kwargs)
@@ -923,7 +926,16 @@ def run_on_oracle(
             object_path=work / "kernel.o", harness_path=work / "harness.c", elf_path=elf,
         )
     _t1 = time.perf_counter()
-    console = backend.run_elf(elf, simulator=simulator, timeout=timeout)
+    try:
+        console = backend.run_elf(elf, simulator=simulator, timeout=timeout)
+    except (TimeoutExpired, CalledProcessError) as exc:
+        # Standard process failures can carry partial output even with
+        # text=True. Preserve bytes verbatim; they are diagnostic evidence,
+        # never a completed frame or a numerical verdict. Re-raise unchanged.
+        for path, data in ((console_path, exc.stdout), (stderr_path, exc.stderr)):
+            if isinstance(data, (bytes, str)):
+                path.write_bytes(data if isinstance(data, bytes) else data.encode("utf-8"))
+        raise
     _t2 = time.perf_counter()
     # Parsing can refuse a truncated frame before this function returns a
     # result. Retain the complete, unfiltered transcript at the execution
