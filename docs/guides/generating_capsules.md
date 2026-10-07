@@ -3,7 +3,7 @@ title: Generating capsules for a target
 kind: guide
 status: current
 owner: targetgen
-last_verified: 2026-10-05
+last_verified: 2026-10-06
 related: [adding_a_target, gemmini_experiment, capsule_bench, integrations, phase0_specification]
 code_refs:
   - experiments/catalog.yaml
@@ -188,6 +188,10 @@ and tool sources while retaining the Phase 0 producer's historical identity. The
 receipt establishes recorded byte consistency, not cryptographic proof of execution; operator
 review and sealing remain separate. Combined plans with non-run-owned input pins remain
 outside this artifact-only admission path.
+`--phase1-policy-descriptor FILE` retains an explicit Phase-1-only gate policy beside the release
+(`phase1-policy-descriptor.yaml`, owner-only and read-only, recorded by digest). It may differ from
+the frozen Phase 0 descriptor only in `phase1_gates`; any other difference refuses, so the overlay
+never changes the Phase 0 source identity.
 For a sealed Phase 1 run, select the released descriptor and use its complete descriptor
 cohort. A raw capsule-root override is diagnostic only and cannot inherit the review,
 even when its files are under the reviewed release.
