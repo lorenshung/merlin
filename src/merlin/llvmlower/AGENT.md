@@ -514,3 +514,14 @@ conversion. Private eight-column staging retains scalar tails, disjoint outputs
 and checked refusal. Default C bytes are unchanged; target conversion hooks and
 ISA/register legality belong to the provider. No automatic width/cost policy is
 introduced.
+
+### Explicit approximate source-roundoff permission
+
+`source_roundoff_policy` is a separate default-off numerical alternative in the
+normal source attention emitter. Fixed RMS4 source-error estimates require
+complete explicit approximate-output permission, original independent output
+validation, point/reconstruction and prefix-safety evidence. Representation
+uncertainty is never scaled; unknown batches retain rigorous bounds and provider
+refusal uses original source fallback. This policy supplies no exact enclosure
+or source-consumer theorem and must never use the exact-observation binder.
+Target products, ABI and ISA capabilities remain OOT.

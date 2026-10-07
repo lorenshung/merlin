@@ -15,6 +15,7 @@ from merlin.common.paths import data_path
 
 from .exact_bound_conversion import ExactBoundConversionContract
 from .independent_lane_schedule import LaneEffects
+from .source_roundoff_policy import ApproximateSourceRoundoffPolicy
 
 
 def _f32(value: float) -> str:
@@ -127,8 +128,15 @@ def emit_source_attention_frontier(
     prepare_probability_points: bool = False,
     prepare_readonly_rhs: bool = False,
     radius_stage_effects: LaneEffects | None = None,
+    source_roundoff_estimate: ApproximateSourceRoundoffPolicy | None = None,
 ) -> str:
-    """Emit portable C; nonzero result certifies complete output publication.
+    """Emit portable C; nonzero result records complete output publication.
+
+    With the default rigorous numeric route, the original source consumer
+    certificate remains required. Explicit source_roundoff_estimate permission
+    instead selects an approximate replay policy: it proves no source enclosure
+    or exact observer equivalence, and independent original output validation
+    is mandatory. It never enables the exact-observer binder implicitly.
 
     On zero result the caller must run the retained original source body. Input,
     output and workspace owners must be disjoint and live for the synchronous
@@ -520,6 +528,15 @@ def emit_source_attention_frontier(
         from .radius_stage_schedule import stage_separable_radius_columns
 
         text = stage_separable_radius_columns(text, effects=radius_stage_effects)
+    if source_roundoff_estimate is not None:
+        if not isinstance(source_roundoff_estimate, ApproximateSourceRoundoffPolicy):
+            raise ValueError("typed approximate source-roundoff policy required")
+        source_roundoff_estimate.validate()
+        if not prepare_encoded_rows or not prepare_probability_points:
+            raise ValueError("source-roundoff estimates require complete point and encoded-row proofs")
+        from .source_roundoff_policy import prepare_source_roundoff_estimates
+
+        text = prepare_source_roundoff_estimates(text, policy=source_roundoff_estimate)
     definitions = {
         "HEADS": plan.heads,
         "ROWS": plan.query_rows,

@@ -239,3 +239,13 @@ math belongs in Merlin. Target outward arithmetic remains in the OOT provider.
 Wider intervals can increase exact source replay; complete consumer and source
 costs determine usefulness. Composition with norm requirements and certified-row
 retention must preserve their separate admissions and state lifetimes.
+
+### Approximate source error estimates
+
+`source_rms_roundoff_estimate.h` and `source_rms_point_products.h` expose distinct
+estimate types under an explicit approximate numerical policy. A modeled RMS4
+radius is not a deterministic source enclosure. Original prefix overflow checks,
+exact point/reconstruction witnesses and deterministic subnormal allowance remain;
+representation and interval errors use the unchanged rigorous producer. No
+normal default caller is changed. Independent original output validation and
+retained source fallback are mandatory provider obligations.
