@@ -65,3 +65,27 @@ tolerances and qualified evidence.
 Passing finite probes supports review of their exact signatures only. It does not
 approve BF16, arbitrary host fallback, a full model, accelerator execution, or all
 values/shapes. Accelerator-eligible computation must still be routed to the device.
+
+## Independent pointwise rank/tail matrix
+
+For an exact one-primitive result, select
+`M2M_HOST_PROBE_CASE=matrix_<operation>_r<rank>` where rank is 1, 2, 3 or 4.
+The neutral output shapes are the suffixes of `(2, 2, 3, 7)`; the final
+extent of seven provides a nontrivial tail without a validation-derived size.
+Allowed operations are `f32_add/sub/mul/neg/le/select/nonzero`,
+`i64_add/sub/mul/le/to_f32`, `i1_and/xor/not/to_f32/to_i64`, and
+`i1_mul_lhs_projected`/`i1_mul_rhs_projected`. A selector names one original
+PyTorch operation and one raw f32, i64 or i1 result tensor. Two-input cases
+use independently populated operands. The i64 inputs include both signed
+endpoints and wrapping arithmetic; f32 comparison includes equal values and
+both zero signs. Boolean projection cases use a singleton first axis on only
+one operand. An invalid operation or rank refuses before capture.
+
+Use the same capture and scalar-host qualification commands as above, with the
+case name as a separate immutable output directory. Record the complete
+selected case string alongside the loader, input/golden, MLIR, ELF and tool
+hashes: ordinary capture receipts do not independently attest the environment
+variable selecting a case. Do not reinterpret older captures after changing
+the loader. Native qualification must compare every raw output bit; i64 must
+not pass through FP32. The matrix excludes compound arithmetic, reductions,
+transcendentals, GELU, FP32 scan, nonfinite behavior and any host admission.

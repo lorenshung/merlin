@@ -27,15 +27,114 @@ CASES = (
     "identity_alias",
 )
 
+_MATRIX_OPERATIONS = (
+    "f32_add",
+    "f32_sub",
+    "f32_mul",
+    "f32_neg",
+    "f32_le",
+    "f32_select",
+    "f32_nonzero",
+    "i64_add",
+    "i64_sub",
+    "i64_mul",
+    "i64_le",
+    "i64_to_f32",
+    "i1_and",
+    "i1_xor",
+    "i1_not",
+    "i1_to_f32",
+    "i1_to_i64",
+    "i1_mul_lhs_projected",
+    "i1_mul_rhs_projected",
+)
+_MATRIX_SHAPE = (2, 2, 3, 7)
+MATRIX_CASES = tuple(f"matrix_{operation}_r{rank}" for operation in _MATRIX_OPERATIONS for rank in range(1, 5))
+
+
+def _matrix_operation(case):
+    prefix, separator, rank = case.rpartition("_r")
+    if (
+        not separator
+        or not prefix.startswith("matrix_")
+        or prefix.removeprefix("matrix_") not in _MATRIX_OPERATIONS
+        or rank not in {"1", "2", "3", "4"}
+    ):
+        raise ValueError(f"unknown pointwise matrix case: {case!r}")
+    return prefix.removeprefix("matrix_"), int(rank)
+
+
+def _periodic_tensor(values, shape, dtype):
+    count = torch.Size(shape).numel()
+    return torch.tensor([values[index % len(values)] for index in range(count)], dtype=dtype).reshape(shape)
+
+
+def _matrix_inputs(operation, rank):
+    shape = _MATRIX_SHAPE[-rank:]
+    floats = (-0.0, 0.0, -3.25, 1.5, -0.125, 0.5, 2.0, -1.5, 1e8)
+    other_floats = (0.0, -0.0, -3.25, -2.0, 0.25, 0.5, -1.0, 1.5, -1e8)
+    integers = (-(2**63), 2**63 - 1, -7, -1, 0, 1, 7, 2**24 + 1)
+    other_integers = (1, 2, -3, 2**63 - 1, -(2**63), -1, 3, 2**24)
+    booleans = (False, True, False, True, True, False, True)
+    other_booleans = (True, False, False, True, False, True, True)
+    if operation == "f32_select":
+        return (
+            _periodic_tensor(booleans, shape, torch.bool),
+            _periodic_tensor(floats, shape, torch.float32),
+            _periodic_tensor(other_floats, shape, torch.float32),
+        )
+    if operation.startswith("f32_"):
+        x = _periodic_tensor(floats, shape, torch.float32)
+        y = _periodic_tensor(other_floats, shape, torch.float32)
+    elif operation.startswith("i64_"):
+        x = _periodic_tensor(integers, shape, torch.int64)
+        y = _periodic_tensor(other_integers, shape, torch.int64)
+    else:
+        x_shape = (1, *shape[1:]) if operation.endswith("lhs_projected") else shape
+        y_shape = (1, *shape[1:]) if operation.endswith("rhs_projected") else shape
+        x = _periodic_tensor(booleans, x_shape, torch.bool)
+        y = _periodic_tensor(other_booleans, y_shape, torch.bool)
+    if operation in {"f32_neg", "f32_nonzero", "i64_to_f32", "i1_not", "i1_to_f32", "i1_to_i64"}:
+        return (x,)
+    return x, y
+
 
 class HostControlMath(torch.nn.Module):
     def __init__(self, case):
         super().__init__()
-        if case not in CASES:
+        if case not in CASES and case not in MATRIX_CASES:
             raise ValueError(f"unknown host-control/math case: {case!r}")
         self.case = case
+        self.matrix_operation = _matrix_operation(case)[0] if case in MATRIX_CASES else None
 
-    def forward(self, x, y=None):
+    def forward(self, x, y=None, z=None):
+        if self.matrix_operation is not None:
+            operation = self.matrix_operation
+            if operation in {"f32_add", "i64_add"}:
+                return x + y
+            if operation in {"f32_sub", "i64_sub"}:
+                return x - y
+            if operation in {"f32_mul", "i64_mul", "i1_mul_lhs_projected", "i1_mul_rhs_projected"}:
+                return x * y
+            if operation in {"f32_le", "i64_le"}:
+                return x <= y
+            if operation == "f32_select":
+                return torch.where(x, y, z)
+            if operation == "f32_nonzero":
+                return x.to(torch.bool)
+            if operation in {"i64_to_f32", "i1_to_f32"}:
+                return x.to(torch.float32)
+            if operation == "i1_to_i64":
+                return x.to(torch.int64)
+            if operation == "f32_neg":
+                return -x
+            if operation == "i1_and":
+                return x & y
+            if operation == "i1_xor":
+                return x ^ y
+            if operation == "i1_not":
+                return ~x
+            raise AssertionError("validated matrix operation is not implemented")
         if self.case == "identity_alias":
             return torch.ops.aten.alias.default(x)
         if self.case == "negate":
@@ -72,6 +171,9 @@ class HostControlMath(torch.nn.Module):
 def get_model_and_inputs():
     case = os.environ.get("M2M_HOST_PROBE_CASE", "negate")
     model = HostControlMath(case).eval()
+    if case in MATRIX_CASES:
+        operation, rank = _matrix_operation(case)
+        return model, _matrix_inputs(operation, rank)
     if case.startswith("integer_"):
         values = [-(2**63), -(2**24) - 1, -3, -1, 0, 1, 3, 2**24 + 1, 2**63 - 1]
         sample = torch.tensor(values, dtype=torch.int64)
