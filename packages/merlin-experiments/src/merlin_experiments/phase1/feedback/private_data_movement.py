@@ -20,9 +20,16 @@ LINKED = "source_structural_data_support_linked"
 def verify_transpose(op: Any, *, ordinal: int) -> None:
     """Verify one exact named transpose is static data movement, not computation."""
     from xdsl.dialects.builtin import DenseArrayBase, TensorType
+    from xdsl.dialects.linalg.ops import TransposeOp, YieldOp
 
-    if mq.op_name(op) != "linalg.transpose" or len(op.operands) != 2 or len(op.results) != 1:
+    if not isinstance(op, TransposeOp) or len(op.operands) != 2 or len(op.results) != 1:
         raise ValueError(f"source operation {ordinal} is not a single-result linalg.transpose")
+    if (
+        set(op.properties) != {"permutation"}
+        or any(not key.startswith("prov.") for key in op.attributes)
+        or op.successors
+    ):
+        raise ValueError(f"source transpose {ordinal} carries an unrecognized semantic property or attribute")
     types = [value.type for value in (*op.operands, *op.results)]
     if any(not isinstance(value, TensorType) or not value.has_static_shape() for value in types):
         raise ValueError(f"source transpose {ordinal} has a dynamic or non-tensor type")
@@ -41,11 +48,7 @@ def verify_transpose(op: Any, *, ordinal: int) -> None:
         or init_shape != output_shape
     ):
         raise ValueError(f"source transpose {ordinal} changes element type or output storage")
-    properties = op.properties.get("permutation")
-    attribute = op.attributes.get("permutation")
-    if properties is not None and attribute is not None and properties != attribute:
-        raise ValueError(f"source transpose {ordinal} has conflicting permutations")
-    permutation_attr = properties if properties is not None else attribute
+    permutation_attr = op.properties["permutation"]
     if not isinstance(permutation_attr, DenseArrayBase) or str(permutation_attr.elt_type) != "i64":
         raise ValueError(f"source transpose {ordinal} has no typed static permutation")
     permutation = tuple(permutation_attr.iter_values())
@@ -60,13 +63,18 @@ def verify_transpose(op: Any, *, ordinal: int) -> None:
         raise ValueError(f"source transpose {ordinal} has no single data-movement body")
     block = op.regions[0].blocks[0]
     body = list(block.ops)
+    yielded = body[0] if len(body) == 1 else None
     if (
         len(block.args) != 2
         or any(argument.type != input_type.element_type for argument in block.args)
-        or len(body) != 1
-        or mq.op_name(body[0]) != "linalg.yield"
-        or len(body[0].operands) != 1
-        or body[0].operands[0] is not block.args[0]
+        or not isinstance(yielded, YieldOp)
+        or yielded.results
+        or yielded.regions
+        or yielded.successors
+        or yielded.properties
+        or any(not key.startswith("prov.") for key in yielded.attributes)
+        or len(yielded.operands) != 1
+        or yielded.operands[0] is not block.args[0]
     ):
         raise ValueError(f"source transpose {ordinal} computes or yields something other than its input")
 
@@ -302,6 +310,7 @@ def linked_movement_complete(source: Mapping[str, Any], entry: Mapping[str, Any]
             or not is_sha256(source.get("source_sha256"))
             or proof.get("raw_source_sha256") != source["source_sha256"]
             or not is_sha256(proof.get("normalized_source_sha256"))
+            or proof.get("normalized_source_sha256") != source.get("normalized_source_sha256")
             or entry.get("source_sha256") != source["source_sha256"]
         ):
             return False

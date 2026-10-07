@@ -491,6 +491,7 @@ def linked_direct_return_complete(source: Mapping, entry: Mapping, candidate_sha
                 "meta_sha256",
             )
         )
+        and proof.get("normalized_source_sha256") == source.get("normalized_source_sha256")
         and isinstance(proof.get("input_abi"), list)
         and bool(proof["input_abi"])
         and isinstance(proof.get("output_abi"), list)

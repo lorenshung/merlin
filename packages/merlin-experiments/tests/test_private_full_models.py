@@ -448,6 +448,11 @@ def test_complete_requires_current_candidate_all_programs_and_device_work():
     record["models"][0]["checks"]["source"]["prefix"]["generic_copy_data_support"]["ordinals"] = [True]
     assert not gate.complete(record, **kwargs)
     record["models"][0] = model("a", programs["a"])
+    record["models"][0]["checks"]["source"]["prefix"]["generic_copy_data_support"]["normalized_source_sha256"] = (
+        "f" * 64
+    )
+    assert not gate.complete(record, **kwargs)
+    record["models"][0] = model("a", programs["a"])
     assert not gate.complete(record, **{**kwargs, "candidate_sha256": "3" * 64})
     record["models"][0]["checks"]["build"]["programs"].pop()
     assert not gate.complete(record, **kwargs)
@@ -816,6 +821,7 @@ def test_transpose_data_support_joins_every_source_ordinal_and_refuses_computati
         {"output": "?x2xi8"},
         {"output": "3x2xf32"},
         {"body": '"linalg.yield"(%b) : (i8) -> ()'},
+        {"body": '"linalg.yield"(%a) {unknown.semantic = 1 : i32} : (i8) -> ()'},
         {"body": '%sum = "arith.addi"(%a, %b) : (i8, i8) -> i8\n        "linalg.yield"(%sum) : (i8) -> ()'},
         {"operation": "linalg.generic"},
     ):
@@ -823,6 +829,21 @@ def test_transpose_data_support_joins_every_source_ordinal_and_refuses_computati
             bad_module = _transpose_module(**invalid)
             bad_op = tuple(mq.walk(bad_module))[2]
             gate._verify_transpose_data_support(bad_op, ordinal=2)
+    from xdsl.dialects.builtin import StringAttr
+
+    attr_module = _transpose_module()
+    attr_op = tuple(mq.walk(attr_module))[2]
+    attr_op.attributes["unknown.semantic"] = StringAttr("changed")
+    attr_module.verify()
+    with pytest.raises(ValueError, match="semantic"):
+        gate._verify_transpose_data_support(attr_op, ordinal=2)
+    for nested in (False, True):
+        property_module = _transpose_module()
+        property_op = tuple(mq.walk(property_module))[2]
+        target = list(property_op.regions[0].blocks[0].ops)[0] if nested else property_op
+        target.properties["unknown.semantic"] = StringAttr("changed")
+        with pytest.raises(ValueError):
+            gate._verify_transpose_data_support(property_op, ordinal=2)
     for invalid_row in (
         {**row, "disposition": "host_required"},
         {**row, "ordinals": [3]},

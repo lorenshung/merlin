@@ -165,6 +165,7 @@ def test_value_only_ordered_reducer_is_source_bound_and_link_requires_exact_byte
     }
     source = {
         "source_sha256": proof["raw_source_sha256"],
+        "normalized_source_sha256": proof["normalized_source_sha256"],
         "capture_receipt_sha256": proof["capture_receipt_sha256"],
         "pool_value_support": proof,
     }
@@ -173,6 +174,9 @@ def test_value_only_ordered_reducer_is_source_bound_and_link_requires_exact_byte
     proof["status"] = LINKED
     proof["linked_build"] = {"candidate_tree_sha256": "c" * 64, "capture_tree_sha256": "a" * 64, "elf_sha256": "b" * 64}
     assert linked_pool_complete(source, entry, "c" * 64)
+    proof["normalized_source_sha256"] = "f" * 64
+    assert not linked_pool_complete(source, entry, "c" * 64)
+    proof["normalized_source_sha256"] = source["normalized_source_sha256"]
     assert not linked_pool_complete(source, entry, "d" * 64)
     receipt_sha = proof.pop("capture_receipt_sha256")
     source.pop("capture_receipt_sha256")

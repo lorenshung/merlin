@@ -211,6 +211,7 @@ def test_direct_return_needs_exact_linked_host_image(tmp_path):
     proof = _prove(capture, host)
     source = {
         "source_sha256": proof["raw_source_sha256"],
+        "normalized_source_sha256": proof["normalized_source_sha256"],
         "capture_receipt_sha256": proof["capture_receipt_sha256"],
         "n_source_operations": 3,
         "n_linalg_regions": 0,
@@ -233,6 +234,9 @@ def test_direct_return_needs_exact_linked_host_image(tmp_path):
         {"capture_tree_sha256": "a" * 64, "elf_sha256": "b" * 64, "candidate_tree_sha256": "c" * 64},
     )
     assert pure.linked_direct_return_complete(source, entry, "c" * 64)
+    proof["normalized_source_sha256"] = "f" * 64
+    assert not pure.linked_direct_return_complete(source, entry, "c" * 64)
+    proof["normalized_source_sha256"] = source["normalized_source_sha256"]
     for field, wrong in (
         ("candidate_tree_sha256", "d" * 64),
         ("elf_sha256", "e" * 64),

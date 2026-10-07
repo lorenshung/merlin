@@ -405,6 +405,7 @@ def linked_pool_complete(source: Mapping[str, Any], entry: Mapping[str, Any], ca
         or proof.get("raw_source_sha256") != source["source_sha256"]
         or entry.get("source_sha256") != source["source_sha256"]
         or not is_sha256(proof.get("normalized_source_sha256"))
+        or proof.get("normalized_source_sha256") != source.get("normalized_source_sha256")
     ):
         return False
     if occurrences and (
