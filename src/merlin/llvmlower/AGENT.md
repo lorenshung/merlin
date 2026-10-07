@@ -163,6 +163,14 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
   values and ambiguous consumer bins retain the original source continuation;
   immutable tables share only exact canonical source semantics. This utility
   selects no workload, target, storage policy or profitable implementation.
+- `scaled_integer_finite` and `scaled_integer_finite_llvm` explicitly bind full
+  signed integer conversion/ordered constant products to a smaller immutable
+  broadcast scale domain. Bounded physical scale loads and complete effects
+  are checked before portable scans may replace repeated finite-input tests.
+  Fresh output disjointness, immutable source spans and stable RNE are explicit
+  normal ownership/provider obligations. Unknown indices, escapes, mutations,
+  strict FP and relaxed arithmetic refuse. Original complete source helpers
+  remain the fallback; scanner traffic and full helper cost must be measured.
 - `immutable_llvm_base.py` offers explicit immutable global-address binding
   through an unchanged public wrapper to a hidden out-of-line implementation.
   Typed pointer-use closure permits only GEPs and nonpointer loads from an

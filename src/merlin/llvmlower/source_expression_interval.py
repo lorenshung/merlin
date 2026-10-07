@@ -530,7 +530,9 @@ __attribute__((always_inline)) float {lookup_name}(float x,float up,float scale)
 """
 
 
-def emit_source_interval_i8_lookup(*, table_name, activation_name, quantizer_name, lookup_name, leading_bits):
+def emit_source_interval_i8_lookup(
+    *, table_name, activation_name, quantizer_name, lookup_name, leading_bits, finite_inputs=(), finite_table=None
+):
     """Return only the already-certified integer observation, explicitly opt-in.
 
     The typed all-use closure and unobserved/nontrapping floating effect contract
@@ -538,6 +540,9 @@ def emit_source_interval_i8_lookup(*, table_name, activation_name, quantizer_nam
     activation and each rounded finishing multiply execute on every refusal.
     Table partition/cells and the original quantizer remain unchanged. A caller
     guard retains original source arithmetic for unsupported floating modes.
+    Explicit finite_inputs additionally requires the matching finite_table,
+    validated source/LLVM producer bindings and dominating successful immutable scale scans. It removes only
+    their redundant finite checks; ordinary emission is byte-identical.
     """
     # Reuse the existing identifier/partition admission, never a second grammar.
     emit_source_interval_lookup(
@@ -547,7 +552,37 @@ def emit_source_interval_i8_lookup(*, table_name, activation_name, quantizer_nam
         lookup_name=lookup_name,
         leading_bits=leading_bits,
     )
+    finite_inputs = tuple(finite_inputs)
+    if finite_inputs:
+        from .scaled_integer_finite_llvm import validate_finite_scale_helper
+
+        if (
+            not isinstance(finite_table, SourceIntervalTable)
+            or finite_table.leading_bits != leading_bits
+            or len(finite_table.data) != (1 << leading_bits) * 8
+        ):
+            raise ValueError("explicit matching immutable source table required for prepared finite inputs")
+        for binding in finite_inputs:
+            validate_finite_scale_helper(binding)
+            for route in binding._routes:
+                matches = [
+                    observer
+                    for observer in binding._observers
+                    if observer.quant_factor_bits == route["quant_factor_bits"]
+                    and observer.expression.canonical_sha256 == route["source_expression_sha256"]
+                ]
+                if len(matches) != 1:
+                    raise ValueError("selected finite producer has no unique typed observer")
+                observer = matches[0]
+                validate_closed_scalar_observer(observer)
+                if observer.expression.canonical_sha256 != finite_table.expression_sha256:
+                    raise ValueError("finite producer observer differs from the actual lookup source expression")
+                if not math.isfinite(_float(observer.quant_factor_bits)):
+                    raise ValueError("finite original quantization factor required")
+    elif finite_table is not None:
+        raise ValueError("finite table supplied without prepared input bindings")
     nonfinite = "||".join(f"({word}&0x7f800000u)==0x7f800000u" for word in ("w", "bits(up)", "bits(scale)"))
+    finite_guard = "" if finite_inputs else f" if({nonfinite})goto source_fallback;\n"
     return f"""#include <stdint.h>
 extern const float {table_name}[{1 << leading_bits}][2];
 extern float {activation_name}(float);
@@ -555,8 +590,7 @@ extern signed char {quantizer_name}(float);
 static inline uint32_t bits(float x){{uint32_t w;__builtin_memcpy(&w,&x,4);return w;}}
 __attribute__((always_inline)) signed char {lookup_name}(float x,float up,float scale){{
  uint32_t w=bits(x);
- if({nonfinite})goto source_fallback;
- const float*cell={table_name}[w>>{32 - leading_bits}];float lo=cell[0],hi=cell[1];
+{finite_guard} const float*cell={table_name}[w>>{32 - leading_bits}];float lo=cell[0],hi=cell[1];
  if(!(lo<=hi))goto source_fallback;
  float low_product=lo*up,high_product=hi*up;
  float low_scaled=low_product*scale,high_scaled=high_product*scale;
