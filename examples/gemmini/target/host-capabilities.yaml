@@ -45,6 +45,16 @@ operations:
       semantics: {arithmetic: ieee754_binary32, rounding: round_to_nearest_even, subnormals: preserved,
                   accumulator: f32, reduction_order: selected_lowering, epsilon: graph_parameter}
       evidence: {reviewed_by: "operator decision 2026-10-01 via coordinating session, approving W1_DECLARATIONS_DRAFT.md", basis: "observed f32 linalg.reduce/linalg.generic signatures (addf, divf, maximumf, subf, exp, rsqrt bodies); emitted scalar-package execution remains an obligation"}
+  - id: host_review_prepared_f32_maximum
+    status: reviewed
+    ops: [aten.amax.default]
+    placement: host
+    signature: {family: reduction, ordered_operand_dtypes: [f32, f32], ordered_result_dtypes: [f32]}
+    source_body: {schema: merlin.static_f32_maximum_source_body.v1, operation: arith.maximumf}
+    numerical_contract:
+      status: unreviewed
+      semantics: {scope: selected_prepared_source_build_link_host_placement_only, original_to_prepared_equivalence: not_proved, PyTorch_numerical_equivalence: not_proved, all_input_native_equivalence: not_proved, existing_numerical_tolerance: unchanged}
+      evidence: {exact_prepared_source_body: required, selected_index_observation: required, all_source_roots_reproved: required, candidate_capture_elf_join: required, reviewed_by: "operator approval 2026-10-07 of review SHA256 2d185844f009a1552a1313d035cba628bfee0cec7878cc6d943ad406a66ec3ca"}
   - id: host_i32_to_f32_cast
     ops: [aten._to_copy.default]
     families: [elementwise_map]

@@ -87,6 +87,12 @@ operations:
     ops: [aten.native_layer_norm.default, aten._softmax.default, aten.mean.dim]
     placement: host
     dtypes: [f32]
+  host_review_prepared_f32_maximum:
+    status: reviewed
+    ops: [aten.amax.default]
+    families: [reduction]
+    placement: host
+    signature: {family: reduction, ordered_operand_dtypes: [f32, f32], ordered_result_dtypes: [f32]}
   host_cast:
     ops: [aten._to_copy.default]
     placement: host
