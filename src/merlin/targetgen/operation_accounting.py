@@ -171,7 +171,7 @@ def _software_admissions(spec: dict | None, row: dict, signature: dict) -> list[
     direct = [
         entry
         for entry in declarations
-        if row["operation"] in entry.get("ops", []) or entry.get("id") == row["operation"]
+        if row["operation"] in entry.get("ops", []) or (not entry.get("ops") and entry.get("id") == row["operation"])
     ]
     decisions = []
     for declaration in direct or declarations:

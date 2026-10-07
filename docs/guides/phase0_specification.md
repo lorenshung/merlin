@@ -190,6 +190,11 @@ Add reviewed declarations only when independent evidence supports exactly what y
 Use the operation's name once. A shared family name such as `contraction` or `movement`
 selects that family; a custom name must explicitly name its `ops` or `families`. Named
 groups are normalized to the same internal operation rows as the legacy list syntax.
+When a row names nonempty `ops`, only those exact frontend operations can match it;
+`families` do not add other operations. Put an observed-family constraint in
+`signature.family` when needed. Rows without an explicit `ops` roster can match
+by semantic family. A direct operation match that fails its signature constraints
+does not fall back to a broader family row.
 A standalone declaration admits only that standalone use: it does not admit the same
 family composed into another operation (`composed_with`) or, for an elementwise map,
 applied as a fused epilogue. Declare and review such a composition explicitly.

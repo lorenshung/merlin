@@ -378,11 +378,14 @@ def admit_operation(spec: dict, op: str, signature: dict, placement: str) -> dic
         raise ValueError("operation admission requires an observed signature and explicit placement")
     family = signature.get("family") or from_op(op)
     rows = spec.get("operations") or []
-    direct = [row for row in rows if op in row.get("ops", []) or row.get("id") == op]
+    # An explicit frontend roster narrows this declaration, even when it also
+    # names a semantic family or its identifier happens to equal the observed op.
+    direct = [row for row in rows if op in row.get("ops", []) or (not row.get("ops") and row.get("id") == op)]
     candidates = direct or [
         row
         for row in rows
-        if family is not None
+        if not row.get("ops")
+        and family is not None
         and (
             family in row.get("families", [])
             or family == row.get("family")

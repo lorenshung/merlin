@@ -291,6 +291,40 @@ def test_operation_admission_checks_signature_and_never_ignores_unknowns():
     assert SS.admit_operation(spec, "matmul", signature, "accelerator")["status"] == "unknown"
 
 
+def test_explicit_operation_selector_cannot_widen_through_family_or_id():
+    spec = _spec()
+    spec["status"] = "reviewed"
+    spec["operations"] = [
+        {
+            "id": "reviewed_explicit",
+            "ops": ["aten.explicit"],
+            "families": ["elementwise_map"],
+            "placement": "host",
+            "signature": {"family": "elementwise_map", "ranks": [2]},
+        }
+    ]
+    observed = {"family": "elementwise_map", "rank": 2}
+    assert SS.admit_operation(spec, "aten.explicit", observed, "host")["status"] == "admitted"
+    assert SS.admit_operation(spec, "aten.synthetic_elementwise", observed, "host")["status"] == "unsupported"
+
+    # A matching row identifier is not an escape from that row's explicit ops list.
+    spec["operations"][0]["id"] = "aten.synthetic_elementwise"
+    assert SS.admit_operation(spec, "aten.synthetic_elementwise", observed, "host")["status"] == "unsupported"
+
+    # An actual family-only declaration is still available as fallback.
+    spec["operations"][0]["id"] = "reviewed_explicit"
+    spec["operations"].append(
+        {
+            "id": "reviewed_family",
+            "families": ["elementwise_map"],
+            "placement": "host",
+            "signature": {"family": "elementwise_map", "ranks": [2]},
+        }
+    )
+    assert SS.admit_operation(spec, "aten.synthetic_elementwise", observed, "host")["status"] == "admitted"
+    assert SS.admit_operation(spec, "aten.explicit", {**observed, "rank": 3}, "host")["status"] == "unsupported"
+
+
 def test_synthesis_producer_binds_explicit_software_and_hardware_selection(tmp_path, monkeypatch):
     import importlib.util
 

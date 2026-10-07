@@ -44,6 +44,39 @@ def test_movement_form_comes_from_the_ir_carrier_not_a_provenance_label(carrier,
     assert unresolved["hardware_admission"]["status"] == "unknown"
 
 
+def test_exact_frontend_roster_does_not_hide_a_family_only_declaration():
+    row = {
+        "operation": "aten.synthetic_elementwise",
+        "frontend_op": "aten.synthetic_elementwise",
+        "mlir_operation": "linalg.generic",
+        "semantic_family": "elementwise_map",
+        "disposition": "host_required",
+        "ordered_operand_types": [{"shape": [2, 3], "dtype": "f32"}],
+        "ordered_result_types": [{"shape": [2, 3], "dtype": "f32"}],
+    }
+    spec = {
+        "status": "reviewed",
+        "operations": [
+            {
+                "id": "aten.synthetic_elementwise",
+                "ops": ["aten.explicit"],
+                "families": ["elementwise_map"],
+                "placement": "host",
+                "signature": {"ranks": [2]},
+            },
+            {
+                "id": "family_only",
+                "families": ["elementwise_map"],
+                "placement": "host",
+                "signature": {"ranks": [2]},
+            },
+        ],
+    }
+    result = admit_operation_row(row, software_spec=spec, capability_contract=None)
+    assert result["matching_declarations"] == ["family_only"]
+    assert result["software_admissions"][0]["status"] == "admitted"
+
+
 def _inputs():
     rows = []
     for name, disposition, family, fmt, frontend, positions in (
