@@ -126,6 +126,10 @@ def _imports(path: Path) -> set[str]:
             if base:
                 found.add(base)
                 found.update(f"{base}.{alias.name}" for alias in node.names)
+                # Match the bare-import worker seam above for ``from sibling import name``.
+                # Only a real adjacent source file establishes that package ownership.
+                if not node.level and package and "." not in base and (path.parent / f"{base}.py").is_file():
+                    found.add(f"{package}.{base}")
     return found
 
 

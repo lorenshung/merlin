@@ -6,6 +6,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 from merlin.common.paths import repo_root
 
 
@@ -178,3 +180,25 @@ def test_only_executable_commands_in_the_rendered_shared_prompt_are_wired(tmp_pa
     files["src/merlin/driver.py"] = "# A dormant generator is not a task command.\n"
     gate = _gate(_tree(tmp_path, files))
     assert gate.unwired() == [f"{base}/docs_only.py", f"{base}/dormant.py", prompt, f"{base}/not_executable.py", plan]
+
+
+@pytest.mark.parametrize("source", ["src/merlin", "packages/extra/src/merlin"])
+def test_from_bare_sibling_resolves_only_existing_local_modules(tmp_path, source):
+    base = f"{source}/targetgen"
+    gate = _gate(
+        _tree(
+            tmp_path,
+            {
+                f"{base}/_helper.py": "X = 1\n",
+                f"{base}/_worker.py": (
+                    "from _helper import X as value\nfrom absent import X\nfrom external.helper import X\n"
+                ),
+                "src/merlin/driver.py": "import merlin.targetgen._worker\n",
+            },
+        )
+    )
+    imports = gate._imports(tmp_path / base / "_worker.py")
+    assert "merlin.targetgen._helper" in imports
+    assert "merlin.targetgen.absent" not in imports
+    assert "merlin.targetgen.external.helper" not in imports
+    assert gate.unwired() == []
