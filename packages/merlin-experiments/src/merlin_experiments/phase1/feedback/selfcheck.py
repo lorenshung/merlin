@@ -1183,10 +1183,6 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
             tr = t.get("summary") or {}
         except Exception:
             pass
-        # sim console (the agent's own run output)
-        console_tail = None
-        for lg in (cr.parent / "artifacts").glob("*_console.log") if (cr.parent / "artifacts").is_dir() else []:
-            console_tail = lg.read_text()[-800:]
         row = {
             "capsule": name,
             "pass": passed,
@@ -1226,6 +1222,29 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
                 "numeric bug; do not debug the arithmetic."
             )
         if not passed:
+            # Only the selected barrier tier can supply this diagnostic. A lower-tier DONE log
+            # is not evidence that an unmeasured higher tier reached DONE. The grader records
+            # the console basename on the tier itself; malformed or absent names stay null.
+            _tier_log = _barrier_record.get("console_log") if isinstance(_barrier_record, dict) else None
+            _artifacts = cr.parent / "artifacts"
+            console_tail = None
+            if (
+                isinstance(_tier_log, str)
+                and _tier_log.endswith("_console.log")
+                and Path(_tier_log).name == _tier_log
+                and not _artifacts.is_symlink()
+            ):
+                _console = _artifacts / _tier_log
+                if _console.is_file() and not _console.is_symlink():
+                    try:
+                        # Large public readouts can be many megabytes. Decode only the bounded
+                        # suffix needed for the agent-facing tail, never the whole console.
+                        with _console.open("rb") as _stream:
+                            _stream.seek(0, os.SEEK_END)
+                            _stream.seek(max(0, _stream.tell() - 4096))
+                            console_tail = _stream.read(4096).decode("utf-8", errors="replace")[-800:]
+                    except (OSError, UnicodeError):
+                        pass
             # FULL debug detail ONLY for a FAILING capsule (the one you are working). A passing capsule's
             # diff stats / trace dump / console tail are noise that re-inflates the agent's context every
             # round (the self_check output is re-fed each turn) — the pass flag is all that's needed for it.

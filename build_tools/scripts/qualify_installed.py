@@ -355,6 +355,7 @@ SUITES = {
     },
     "phase1": {
         "tests": (
+            "test_candidate_selfcheck_feedback.py",
             "test_phase1_controller.py",
             "test_phase1_session.py",
             "test_phase1_readback_selection.py",
@@ -384,6 +385,7 @@ SUITES = {
         "core_extras": ("xdsl",),
         "probe_modules": (
             "merlin.targetgen.contract.readback_policy",
+            "merlin.targetgen.capsule_runner",
             "merlin.runtime.out_b64",
             "merlin.frontends.linalg_reduction_source_body",
         )
@@ -399,6 +401,7 @@ SUITES = {
                 "workspace_transport",
                 "feedback.certification",
                 "feedback.qa",
+                "feedback.selfcheck",
                 "feedback.codegen_scalability",
                 "feedback.rtlchecks",
                 "feedback.private_full_models",

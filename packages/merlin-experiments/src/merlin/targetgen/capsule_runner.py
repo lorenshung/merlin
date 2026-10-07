@@ -481,26 +481,15 @@ def _out_of_range_reason(sim: str, idx, size) -> str:
 
 
 def _oracle_timeout_reason(sim: str, msg: str) -> str:
-    """The tier ``reason`` for an oracle that exceeded its WALL-CLOCK budget.
+    """The tier ``reason`` for a wall-clock timeout without a correctness verdict.
 
-    FOURTH CASE OF THE LESSON THIS FILE ALREADY RECORDS THREE TIMES (did-not-halt, runtime trap,
-    out-of-range): a condition that is not the agent's defect must not be reported as ``tool_crash``,
-    because an infra-looking failure is one the agent cannot act on and it burns rounds trying.
-
-    A wall-clock timeout is the sharpest version of that, because it is not a failure at all: the
-    program was NOT MEASURED. It may be entirely correct. Distinct from ``did not halt``, which IS the
-    agent's defect (the kernel never reached the ISA's halt instruction and would run forever) and which
-    keeps the ``TIMEOUT`` category. This one is ``TESTBENCH_TIMEOUT`` -- the testbench ran out of time,
-    not the program out of correctness.
-
-    MEASURED: six capsules ran the cert tier to a 1200s per-capsule budget and were recorded as
-    ``elaborated_rtl crash``, which told the agent its tool had crashed on a tier those capsules had
-    declared (``max_oracle_tier: L2``) they were not even asking for.
+    A timeout does not establish whether the delay came from the emitted program, the
+    simulator, startup, or output transport. It remains distinct from an observed
+    cycle-cap ``did not halt`` failure and keeps the ``TESTBENCH_TIMEOUT`` category.
     """
     return (
-        f"{sim} did not finish within its wall-clock budget, so this program is UNMEASURED at this "
-        f"tier -- NOT wrong. Nothing was compared. This is a budget/size fact about the capsule and the "
-        f"engine, not a defect in what your compiler emitted: {msg[-200:]}"
+        f"{sim} exceeded its wall-clock budget; this tier is UNMEASURED and the cause is undetermined. "
+        f"No correctness verdict was obtained for this tier: {msg[-200:]}"
     )
 
 

@@ -6,10 +6,21 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from merlin_experiments.phase1.context import InvocationContext
 from merlin_experiments.phase1.feedback import qa, selfcheck
 
 SENTINEL = "PRIVATE_OR_LEGACY_PROGRAM_SENTINEL"
+
+
+def test_oracle_timeout_reason_does_not_exculpate_or_blame_emitted_program():
+    reason = selfcheck.CR._oracle_timeout_reason("selected simulator", "timed out after 1800 seconds")
+    assert "UNMEASURED" in reason
+    assert "cause is undetermined" in reason
+    assert "not a defect" not in reason
+    assert "budget/size fact" not in reason
+    assert "timed out after 1800 seconds" in reason
 
 
 def _candidate_result(*, passed=False):
@@ -126,6 +137,77 @@ def test_main_selfcheck_does_not_count_legacy_screen_or_publish_legacy_artifacts
     assert report["n_passed"] == report["n_screened_only"] == report["n_certified"] == 0
     assert report["per_capsule"][0]["candidate_native_verification"]["status"] == "incomplete"
     assert SENTINEL not in json.dumps(report)
+
+
+@pytest.mark.parametrize(
+    ("l2_status", "l3_status", "l3_log", "expected_tier", "expected_tail"),
+    [
+        ("pass", "fail", None, "L3", None),
+        ("pass", "fail", "l3_console.log", "L3", "L3_PROGRESS\n"),
+        ("pass", "fail", "../private_console.log", "L3", None),
+        ("fail", None, None, "L2", "L2_DONE\n"),
+        ("pass", None, None, "L2", None),
+        ("pass", "pass", "l3_console.log", "L3", None),
+    ],
+)
+def test_main_selfcheck_uses_only_selected_tier_console(
+    tmp_path, monkeypatch, capsys, l2_status, l3_status, l3_log, expected_tier, expected_tail
+):
+    monkeypatch.chdir(tmp_path)
+    submission = tmp_path / "submission"
+    submission.mkdir()
+    (submission / "manifest.yaml").write_text("{}")
+    corpus = tmp_path / "public"
+    capsule = corpus / "model_case"
+    capsule.mkdir(parents=True)
+    (capsule / "capsule.yaml").write_text("{}")
+    monkeypatch.setattr(selfcheck, "_adapters", lambda *a: ({"L3": object()}, "gsim"))
+    monkeypatch.setattr(selfcheck, "_target_sim_via", lambda *a: ("fixture", "chipyard"))
+    monkeypatch.setattr(selfcheck.CR, "suite_for", lambda *a: "fixture-suite")
+    monkeypatch.setattr(selfcheck, "_log_telemetry", lambda *a: None)
+    passing_case = l2_status == "pass" and l3_status in (None, "pass")
+
+    def grade(_submission, *, runs_root, **_kwargs):
+        l3 = {"status": l3_status}
+        if l3_log is not None:
+            l3["console_log"] = l3_log
+        result = {
+            "capsule": "model_case",
+            "kind": "op",
+            "status": "pass" if passing_case else "fail",
+            "numeric": {"status": "pass"},
+            "tiers": {"L2": {"status": l2_status, "console_log": "l2_console.log"}},
+            "failure": {"category": "TESTBENCH_TIMEOUT", "tier": "L3"},
+        }
+        if l3_status is not None:
+            result["tiers"]["L3"] = l3
+        parent = Path(runs_root) / "runs" / "fixture-suite" / "model_case"
+        parent.mkdir(parents=True)
+        (parent / "capsule_result.json").write_text(json.dumps(result))
+        artifacts = parent / "artifacts"
+        artifacts.mkdir()
+        (artifacts / "l2_console.log").write_text("L2_DONE\n")
+        if l3_log is not None and Path(l3_log).name == l3_log:
+            (artifacts / l3_log).write_text("L3_PROGRESS\n")
+        elif l3_log is not None:
+            (artifacts.parent / "private_console.log").write_text("UNRELATED_PRIVATE_CONSOLE\n")
+        return {"n_capsules": 1, "n_passed": 0, "per_capsule": []}
+
+    monkeypatch.setattr(selfcheck.CG, "grade", grade)
+    code = selfcheck.main(
+        ["--sim", "gsim", "--submission", str(submission)], context=_context(tmp_path), capsules_root=corpus
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert code == (0 if passing_case else 1)
+    row = report["per_capsule"][0]
+    assert row["barrier_tier"] == expected_tier
+    if expected_tail is None and passing_case:
+        assert "sim_console_tail" not in row
+    else:
+        assert row["sim_console_tail"] == expected_tail
+    if expected_tier == "L3":
+        assert "L2_DONE" not in json.dumps(report)
+        assert "UNRELATED_PRIVATE_CONSOLE" not in json.dumps(report)
 
 
 def test_model_layers_uses_candidate_projection_not_legacy_functional_pass(tmp_path, monkeypatch, capsys):
