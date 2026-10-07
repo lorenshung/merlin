@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import yaml
 
 from merlin.common.digest import sha256_bytes
-from merlin.common.paths import merlin_dir
+from merlin.common.paths import contract_dir
 from merlin.targetgen.contract.interface_emit import emit_interface_mlir, parse_interface_mlir
 
 
@@ -41,7 +41,7 @@ def bind_single_resident_matmul(
     assumption that their pointer ABI happens to look like this one.
     """
     raw = abi_contract if abi_contract is not None else (
-        merlin_dir() / "contract/mlir_oot_backend_contract.yaml"
+        contract_dir() / "mlir_oot_backend_contract.yaml"
     ).read_bytes()
     if not isinstance(raw, bytes):
         raise ValueError("selected kernel ABI contract must be exact bytes")

@@ -87,8 +87,24 @@ def test_a_routing_with_a_decision_moves_the_contraction(tmp_path, declared_i8_d
     assert len(side.get("signatures") or {}) == 1
 
 
-def test_group_route_retains_exact_source_identity_in_sidecar(tmp_path, declared_i8_datapath):
-    from merlin.llvmlower.device_offload import BY_GROUP, rewrite_prepared_file
+def test_group_route_retains_exact_source_identity_in_sidecar(tmp_path):
+    from merlin.common import mlir_query as mq
+    from merlin.llvmlower.device_offload import rewrite_groups_to_device
+    from merlin.xdsl_dialects.lowering import compute_groups as CG
+
+    class NeutralOracle:
+        """Only the observed integer contraction is available; no target package is inferred."""
+
+        def ask(self, *, family, in_dtype, **_kwargs):
+            if family == "contraction" and in_dtype == "int8":
+                return CG.Admission(True, units=("neutral_unit",))
+            return CG.Admission(False, "undeclared_family", "not declared by this fixture")
+
+        def unit_for(self, *_args):
+            return "neutral_unit"
+
+        def absorbs(self, _kind):
+            return CG.Admission(False, "readout_undeclared", "no readout declared")
 
     prepared = tmp_path / "prepared.mlir"
     prepared.write_text(
@@ -97,14 +113,14 @@ def test_group_route_retains_exact_source_identity_in_sidecar(tmp_path, declared
             'linalg.matmul {prov.region_id = "region-a", prov.source_node_ids = ["node-b", "node-a"]} ins',
         )
     )
-    rewrite = rewrite_prepared_file(
-        prepared,
-        tmp_path,
-        "gemmini",
+    rewrite = rewrite_groups_to_device(
+        mq.parse(prepared.read_text(encoding="utf-8")),
+        "neutral",
         select=lambda _shape: True,
-        granularity=BY_GROUP,
+        oracle=NeutralOracle(),
         weight_args={1},
         model="neutral",
+        sidecar_dir=tmp_path,
     )
     assert rewrite.moved == 1
     (routed,) = load_sidecar(tmp_path)["routed"]
@@ -215,6 +231,25 @@ def test_build_device_objects_accepts_cflags():
     from merlin.llvmlower.device_build import build_device_objects
 
     assert "cflags" in inspect.signature(build_device_objects).parameters
+
+
+def test_whole_model_requires_fail_fast_device_objects():
+    """The strict all-routed-symbol caller must opt in; diagnostics keep their full roster."""
+    import ast
+    import inspect
+    import textwrap
+
+    from merlin.runtime.backends import spike_model
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(spike_model.build)))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "build_device_objects"
+    ]
+    assert len(calls) == 1
+    selected = [kw.value for kw in calls[0].keywords if kw.arg == "stop_on_first_failure"]
+    assert len(selected) == 1 and isinstance(selected[0], ast.Constant) and selected[0].value is True
 
 
 def test_baremetal_harness_uses_the_selected_rocket_isa():

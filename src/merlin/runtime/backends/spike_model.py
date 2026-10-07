@@ -816,6 +816,9 @@ def build(
                 codegen_target="riscv",
                 numeric_policy=device.numeric_policy,
                 entries=_dev_args["entries"],
+                # Every routed signature is mandatory below. Once one fails, later objects
+                # cannot make this whole-model image link or satisfy its selected route.
+                stop_on_first_failure=True,
                 # the SAME ISA the rest of the image is built for -- see device_build._flags
                 cflags=[CLANG_TARGET, *clang_cflags],
                 expected_interfaces=_dev_side.get("expected_interfaces") or None,

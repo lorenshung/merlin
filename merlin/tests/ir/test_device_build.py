@@ -116,6 +116,73 @@ def test_an_unusable_package_is_reported_not_raised(tmp_path):
     assert not b.ok and b.skipped and any("package" in why for _, why in b.skipped)
 
 
+@pytest.mark.parametrize("stop_on_first_failure, expected", [(False, ["a", "b"]), (True, ["a"])])
+def test_required_whole_model_kernel_stops_after_first_tool_timeout(
+    tmp_path, monkeypatch, stop_on_first_failure, expected
+):
+    """A required kernel's compile timeout must not start the next expensive kernel."""
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from merlin.compile import mesh
+    from merlin.llvmlower import device_build as DB
+    from merlin.llvmlower import device_shim, toolchain
+    from merlin.targetgen import corpus_spec, package_runtime
+
+    monkeypatch.setattr(DB, "objects_buildable", lambda _device: None)
+    monkeypatch.setattr(device_shim, "kernel_abi_for", lambda _device: SimpleNamespace(symbol="kernel"))
+    monkeypatch.setattr(DB, "kernel_entry", lambda *_args: ({"op": "matmul"}, "stated_group", ""))
+    monkeypatch.setattr(DB, "_objcopy", lambda: "objcopy")
+    monkeypatch.setattr(mesh, "_mesh_tile_binding", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(corpus_spec, "build", lambda *_args: (None, "module {}"))
+    monkeypatch.setattr(package_runtime, "load_package", lambda _path: object())
+    monkeypatch.setattr(toolchain, "mlir_translate", lambda: "mlir-translate")
+    monkeypatch.setattr(toolchain, "clang", lambda: "clang")
+    seen = []
+
+    def emit(_pkg, _entrypoint, path, **_kwargs):
+        seen.append(Path(path).name.removesuffix(".iface.mlir"))
+        return SimpleNamespace(returncode=0, stdout="module {}", stderr="")
+
+    def tool(argv, *, timeout):
+        if argv[0] == "clang":
+            return subprocess.CompletedProcess(argv, 124, "", f"timed out after {timeout} seconds")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(package_runtime, "run_entrypoint", emit)
+    monkeypatch.setattr(DB, "_run_build_tool", tool)
+    kwargs = {"stop_on_first_failure": True} if stop_on_first_failure else {}
+    result = build_device_objects(
+        "neutral",
+        {"a": (2, 2, 2), "b": (3, 3, 3)},
+        {"a": ("i8", "i8", "i32"), "b": ("i8", "i8", "i32")},
+        package_dir=tmp_path / "package",
+        workdir=tmp_path / "work",
+        operand_dtype="int8",
+        accum_dtype="i32",
+        timeout=7,
+        **kwargs,
+    )
+    assert seen == expected
+    assert [symbol for symbol, _reason in result.skipped] == expected
+    assert all("clang: timed out after 7 seconds" in reason for _symbol, reason in result.skipped)
+    assert not result.ok and not result.objects and result.shim_object is None
+
+
+def test_fail_fast_selection_requires_a_bool(tmp_path):
+    with pytest.raises(ValueError, match="stop_on_first_failure must be a bool"):
+        build_device_objects(
+            "neutral",
+            {},
+            {},
+            package_dir=tmp_path,
+            workdir=tmp_path / "work",
+            operand_dtype="int8",
+            accum_dtype="i32",
+            stop_on_first_failure=1,
+        )
+
+
 def test_exact_model_build_hands_the_selected_interface_to_the_oot_package(tmp_path, monkeypatch):
     """The build must not regenerate a same-shaped but different capsule."""
     from types import SimpleNamespace

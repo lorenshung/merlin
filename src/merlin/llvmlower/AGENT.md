@@ -286,6 +286,10 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
   this owner does not import a target rewrite or assume its dtype/signature record.
   It preserves the existing simple declaration syntax, not a general MLIR parser.
   Device and matrix-unit file rewrites share it and refuse unpatched declarations.
+- `device_build.py` normally retains every attempted per-symbol decline for diagnostics.
+  The whole-model caller requires every routed kernel and explicitly selects fail-fast
+  object building: the first failed tool or package emission is retained by symbol,
+  later kernels and the shim are not built, and no partial object roster is admitted.
 - `int8_contractions.py` owns structural signed-int8/int32 contraction outlining,
   declaration emission and signature sidecars. Callers supply selection, symbol
   prefix and sidecar filename explicitly; no target ABI names are defaults.

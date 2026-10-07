@@ -490,6 +490,7 @@ def build_device_objects(
     cflags: Sequence[str] | None = None,
     entries: Mapping[str, Mapping[str, Any]] | None = None,
     timeout: int = 900,
+    stop_on_first_failure: bool = False,
     expected_interfaces: Mapping[str, Mapping[str, str]] | None = None,
     package_sha256: str | None = None,
     tile_edge: int | None = None,
@@ -513,9 +514,9 @@ def build_device_objects(
     routing stated programs, so an unstated symbol is a gap in the statement, and substituting a bare
     contraction for it is exactly the silent loss this parameter exists to prevent.
 
-    Every failure is recorded and skipped rather than raised: a model whose third extent the package
-    declines should still build its other two and say what it lost, because the alternative is an
-    all-or-nothing build whose failure names none of the shapes involved.
+    By default every failure is recorded and skipped, so a diagnostic build reports all declined
+    symbols. A caller that requires every object may request ``stop_on_first_failure``; its first
+    actual failure is retained, no subsequent symbol is attempted, and no shim is emitted.
     """
     from merlin.common.digest import sha256_text
     from merlin.targetgen import corpus_spec as CS
@@ -525,6 +526,8 @@ def build_device_objects(
     from .toolchain import clang, mlir_translate
 
     work = Path(workdir)
+    if type(stop_on_first_failure) is not bool:
+        raise ValueError("stop_on_first_failure must be a bool")
     work.mkdir(parents=True, exist_ok=True)
     skipped: list[tuple[str, str]] = []
 
@@ -595,6 +598,8 @@ def build_device_objects(
     oc = _objcopy()
 
     for index, sym in enumerate(sorted(signatures)):
+        if stop_on_first_failure and skipped:
+            break
         key = tuple(int(v) for v in signatures[sym])
         entry, provenance, refusal = kernel_entry(sym, key, None if entries is None else entries.get(sym), device)
         if entry is None:
@@ -664,6 +669,15 @@ def build_device_objects(
         objs.append(obj)
         kernels[sym] = want
         built_from[sym] = provenance
+
+    if stop_on_first_failure and skipped:
+        return DeviceBuild(
+            device=device,
+            objects=tuple(objs),
+            kernels=kernels,
+            built_from=built_from,
+            skipped=tuple(skipped),
+        )
 
     if not kernels:
         return DeviceBuild(device=device, skipped=tuple(skipped))
