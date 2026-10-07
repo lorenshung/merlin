@@ -8,9 +8,13 @@ import pytest
 
 from merlin.common import mlir_query as mq
 from merlin.frontends.linalg_boolean_patterns import (
+    DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA,
+    recognize_dynamic_boolean_cast_body,
     recognize_static_boolean_body,
     screen_static_boolean_source,
     static_boolean_ordered_types,
+    validate_dynamic_boolean_cast_source_body,
+    validate_serialized_dynamic_boolean_cast_pattern,
     validate_static_boolean_source_body,
 )
 from merlin.frontends.linalg_patterns import InvalidLinalgPattern, recognize_static_pointwise
@@ -68,6 +72,130 @@ def _program(
 
 def _generic(text: str):
     return next(mq.walk(mq.parse(text), "linalg.generic"))
+
+
+def _dynamic_cast() -> str:
+    return """builtin.module {
+  func.func @forward(%x: tensor<?xi1>) -> tensor<?xi64> {
+    %axis = "arith.constant"() <{value = 0 : index}> : () -> index
+    %extent = "tensor.dim"(%x, %axis) : (tensor<?xi1>, index) -> index
+    %init = "tensor.empty"(%extent) : (index) -> tensor<?xi64>
+    %out = "linalg.generic"(%x, %init) <{indexing_maps = [
+      affine_map<(d0) -> (d0)>, affine_map<(d0) -> (d0)>],
+      iterator_types = [#linalg.iterator_type<parallel>],
+      operandSegmentSizes = array<i32: 1, 1>}> ({
+      ^bb0(%bit: i1, %old: i64):
+        %wide = "arith.extui"(%bit) : (i1) -> i64
+        "linalg.yield"(%wide) : (i64) -> ()
+    }) : (tensor<?xi1>, tensor<?xi64>) -> tensor<?xi64>
+    func.return %out : tensor<?xi64>
+  }
+}"""
+
+
+def test_dynamic_boolean_extension_has_separate_closed_source_contract():
+    import json
+    from dataclasses import asdict
+
+    from xdsl.dialects.builtin import DYNAMIC_INDEX
+
+    declaration = {"schema": DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA, "operation": "i1_to_i64_extui"}
+    assert validate_dynamic_boolean_cast_source_body(declaration) == declaration
+    pattern = recognize_dynamic_boolean_cast_body(_generic(_dynamic_cast()))
+    assert pattern.shape == (DYNAMIC_INDEX,)
+    assert pattern.ordered_types == ("i1", "i64", "i64")
+    validate_serialized_dynamic_boolean_cast_pattern(asdict(pattern))
+    validate_serialized_dynamic_boolean_cast_pattern(json.loads(json.dumps(asdict(pattern))))
+    for changed in (
+        {**declaration, "predicate": "eq"},
+        {**declaration, "schema": "merlin.static_boolean_body.v1"},
+        {**declaration, "operation": "arith.extui"},
+    ):
+        with pytest.raises(InvalidLinalgPattern, match="source_body"):
+            validate_dynamic_boolean_cast_source_body(changed)
+    for key, value in (
+        ("shape", [True]),
+        ("ordered_types", ["i1", "i1", "i64"]),
+        ("input_maps", ["(d0) -> (0)"]),
+        ("shape_source", "ambient_length"),
+    ):
+        with pytest.raises(InvalidLinalgPattern, match="serialized"):
+            validate_serialized_dynamic_boolean_cast_pattern({**asdict(pattern), key: value})
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        lambda s: s.replace("%x: tensor<?xi1>)", "%x: tensor<?xi1>, %y: tensor<?xi1>)").replace(
+            '"tensor.dim"(%x, %axis)', '"tensor.dim"(%y, %axis)'
+        ),
+        lambda s: s.replace('"tensor.empty"(%extent)', '"tensor.empty"(%axis)'),
+        lambda s: s.replace('"arith.extui"(%bit)', '"arith.extsi"(%bit)'),
+        lambda s: s.replace('"arith.extui"(%bit) : (i1) -> i64', '"arith.addi"(%old, %old) : (i64, i64) -> i64'),
+        lambda s: s.replace('"linalg.yield"(%wide)', '"linalg.yield"(%old)'),
+        lambda s: s.replace("affine_map<(d0) -> (d0)>],", "affine_map<(d0) -> (0)>],"),
+        lambda s: s.replace("#linalg.iterator_type<parallel>", "#linalg.iterator_type<reduction>"),
+        lambda s: s.replace("tensor<?xi64>", "tensor<4xi64>"),
+    ],
+)
+def test_dynamic_boolean_cast_near_misses_refuse(changed):
+    with pytest.raises(InvalidLinalgPattern):
+        recognize_dynamic_boolean_cast_body(_generic(changed(_dynamic_cast())))
+
+
+def test_dynamic_boolean_host_declaration_is_source_bound_and_not_a_review_grant():
+    from copy import deepcopy
+
+    from merlin.targetgen.host_capabilities import admit_host_operation, validate_host_capabilities
+
+    declaration = {
+        "id": "neutral_dynamic_cast",
+        "ops": ["linalg.generic"],
+        "placement": "host",
+        "signature": {
+            "ordered_operand_dtypes": ["i1", "i64"],
+            "ordered_result_dtypes": ["i64"],
+            "ranks": [1],
+        },
+        "source_body": {"schema": DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA, "operation": "i1_to_i64_extui"},
+    }
+    document = {
+        "schema": "merlin.host_capabilities.v1",
+        "status": "reviewed",
+        "compiler": {"package_sha256": "a" * 64, "dtype_strategy": "neutral"},
+        "operations": [declaration],
+        "evidence": {"scope": "synthetic declaration only"},
+    }
+    selected = {
+        "host": {
+            "package_sha256": "a" * 64,
+            "capability_spec_sha256": "b" * 64,
+            "dtype_strategy": "neutral",
+            "capability_spec": document,
+        }
+    }
+    row = {"mlir_operation": "linalg.generic", "count": 1}
+    signature = {
+        "family": "cast",
+        "ordered_operand_dtypes": ["i1", "i64"],
+        "ordered_result_dtypes": ["i64"],
+        "rank": 1,
+    }
+    validate_host_capabilities(document)
+    assert admit_host_operation(selected, row, signature)["status"] == "unknown"
+    assert (
+        admit_host_operation(selected, row, signature, source_operations=(_generic(_dynamic_cast()),))["status"]
+        == "admitted"
+    )
+    unreviewed = deepcopy(selected)
+    unreviewed["host"]["capability_spec"]["operations"][0]["status"] = "unreviewed"
+    assert (
+        admit_host_operation(unreviewed, row, signature, source_operations=(_generic(_dynamic_cast()),))["status"]
+        == "unknown"
+    )
+    declaration["source_body"] = {**declaration["source_body"], "allow_other_shapes": True}
+    with pytest.raises(InvalidLinalgPattern, match="source_body"):
+        validate_host_capabilities(document)
 
 
 @pytest.mark.parametrize(

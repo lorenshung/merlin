@@ -17,6 +17,10 @@ Frontends that ingest external IR into the Merlin pipeline. Today: linalg-on-ten
 - `bucketize_source.py` — a source-only, trace-bound proof of the closed f32
   bucketize counting reduction. It does not grant host placement, prove sorted
   boundaries, or certify generated code and numerical equivalence.
+- `linalg_boolean_patterns.py` also owns a separate, closed dynamic rank-one
+  i1-to-i64 unsigned cast source body. It proves input-derived output extent,
+  identity maps and scalar extension, but not a runtime bound, host placement,
+  external dynamic-output ABI or numerical behavior of a compiled program.
 
 ## What does not belong here
 

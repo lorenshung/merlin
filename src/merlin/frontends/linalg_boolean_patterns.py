@@ -19,6 +19,7 @@ from merlin.frontends.linalg_patterns import (
 )
 
 STATIC_BOOLEAN_SOURCE_BODY_SCHEMA = "merlin.static_boolean_body.v1"
+DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA = "merlin.dynamic_boolean_cast_body.v1"
 _BOOLEAN_ORDERED_TYPES = {
     "i1_not": ("i1", "i1", "i1"),
     "f32_nonzero_to_i1": ("f32", "i1", "i1"),
@@ -256,3 +257,188 @@ def screen_static_boolean_source(path: Path, ordinals: tuple[int, ...]) -> Stati
     """Bind every requested proved body to exact raw/normalized source bytes."""
     raw, normalized, evidence = _screen_static_linalg_source(path, ordinals, recognize_static_boolean_body)
     return StaticBooleanSource(raw, normalized, evidence)
+
+
+@dataclass(frozen=True)
+class DynamicBooleanCastPattern:
+    """One exact dynamic rank-one unsigned extension, without a size bound."""
+
+    operation: str
+    shape: tuple[int, ...]
+    ordered_types: tuple[str, ...]
+    input_shapes: tuple[tuple[int, ...], ...]
+    input_maps: tuple[str, ...]
+    shape_source: str
+
+
+def validate_dynamic_boolean_cast_source_body(declaration: object) -> dict[str, str]:
+    """Accept only the separate, closed dynamic Boolean extension contract."""
+    if (
+        not isinstance(declaration, dict)
+        or set(declaration) != {"schema", "operation"}
+        or declaration.get("schema") != DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA
+        or declaration.get("operation") != "i1_to_i64_extui"
+    ):
+        raise InvalidLinalgPattern("source_body requires the closed dynamic Boolean cast v1 declaration")
+    return dict(declaration)
+
+
+def dynamic_boolean_cast_ordered_types(declaration: object) -> tuple[str, ...]:
+    validate_dynamic_boolean_cast_source_body(declaration)
+    return ("i1", "i64", "i64")
+
+
+def recognize_dynamic_boolean_cast_body(op) -> DynamicBooleanCastPattern:
+    """Check value extension and runtime extent provenance, never grant placement.
+
+    The bound on the runtime extent belongs to the source-linked caller, not to
+    this shape-preserving scalar-body recognizer.
+    """
+    from xdsl.dialects import arith, tensor
+    from xdsl.dialects.builtin import (
+        DYNAMIC_INDEX,
+        AffineMapAttr,
+        ArrayAttr,
+        DenseArrayBase,
+        IntegerAttr,
+        NoneAttr,
+        TensorType,
+    )
+    from xdsl.dialects.linalg.attrs import IteratorType, IteratorTypeAttr
+    from xdsl.dialects.linalg.ops import GenericOp
+    from xdsl.ir.affine import AffineMap
+
+    if type(op) is not GenericOp or len(op.inputs) != 1 or len(op.outputs) != 1 or len(op.results) != 1:
+        raise InvalidLinalgPattern("dynamic Boolean cast requires registered unary linalg.generic")
+    if (
+        op.successors
+        or set(op.properties) != {"indexing_maps", "iterator_types", "operandSegmentSizes"}
+        or any(not key.startswith("prov.") for key in op.attributes)
+    ):
+        raise InvalidLinalgPattern("dynamic Boolean cast has unknown effects or metadata")
+    segments = op.properties["operandSegmentSizes"]
+    if (
+        not isinstance(segments, DenseArrayBase)
+        or str(segments.elt_type) != "i32"
+        or tuple(segments.iter_values()) != (1, 1)
+    ):
+        raise InvalidLinalgPattern("dynamic Boolean cast has incorrect operand segments")
+    source, init, result = op.inputs[0], op.outputs[0], op.results[0]
+    expected = ((source, "i1"), (init, "i64"), (result, "i64"))
+    if (
+        any(
+            not isinstance(value.type, TensorType)
+            or not isinstance(value.type.encoding, NoneAttr)
+            or tuple(value.type.get_shape()) != (DYNAMIC_INDEX,)
+            or str(value.type.element_type) != element
+            for value, element in expected
+        )
+        or result.type != init.type
+    ):
+        raise InvalidLinalgPattern("dynamic Boolean cast requires same-rank dynamic i1/i64 tensors")
+    maps = op.properties["indexing_maps"]
+    iterators = op.properties["iterator_types"]
+    identity = AffineMap.identity(1)
+    if (
+        not isinstance(maps, ArrayAttr)
+        or len(maps.data) != 2
+        or any(not isinstance(item, AffineMapAttr) or item.data != identity for item in maps.data)
+        or not isinstance(iterators, ArrayAttr)
+        or len(iterators.data) != 1
+        or not isinstance(iterators.data[0], IteratorTypeAttr)
+        or iterators.data[0].data != IteratorType.PARALLEL
+    ):
+        raise InvalidLinalgPattern("dynamic Boolean cast requires one identity-map parallel iterator")
+    empty = init.owner
+    if (
+        type(empty) is not tensor.EmptyOp
+        or empty.properties
+        or empty.successors
+        or empty.regions
+        or any(not key.startswith("prov.") for key in empty.attributes)
+        or tuple(empty.results) != (init,)
+        or len(empty.operands) != 1
+    ):
+        raise InvalidLinalgPattern("dynamic Boolean cast requires a one-dimension output allocation")
+    dim = empty.operands[0].owner
+    if (
+        type(dim) is not tensor.DimOp
+        or dim.properties
+        or dim.successors
+        or dim.regions
+        or any(not key.startswith("prov.") for key in dim.attributes)
+        or len(dim.operands) != 2
+        or dim.operands[0] is not source
+        or len(dim.results) != 1
+        or str(dim.results[0].type) != "index"
+    ):
+        raise InvalidLinalgPattern("dynamic Boolean cast output extent must come from its input")
+    zero = dim.operands[1].owner
+    if (
+        type(zero) is not arith.ConstantOp
+        or set(zero.properties) != {"value"}
+        or zero.regions
+        or zero.successors
+        or any(not key.startswith("prov.") for key in zero.attributes)
+        or not isinstance(value := zero.properties["value"], IntegerAttr)
+        or str(value.type) != "index"
+        or value.value.data != 0
+        or tuple(zero.results) != (dim.operands[1],)
+    ):
+        raise InvalidLinalgPattern("dynamic Boolean cast dimension is not exactly input axis zero")
+    if len(op.regions) != 1 or len(op.regions[0].blocks) != 1:
+        raise InvalidLinalgPattern("dynamic Boolean cast requires one scalar block")
+    block = op.regions[0].block
+    body = tuple(block.ops)
+    if (
+        tuple(str(arg.type) for arg in block.args) != ("i1", "i64")
+        or len(body) != 2
+        or type(body[0]) is not arith.ExtUIOp
+        or tuple(body[0].operands) != (block.args[0],)
+        or len(body[0].results) != 1
+        or str(body[0].results[0].type) != "i64"
+    ):
+        raise InvalidLinalgPattern("dynamic Boolean cast body is not input-only i1 to i64 extui")
+    _checked_arith(body[0], arith.ExtUIOp, set())
+    _checked_yield(body[1], body[0].results[0])
+    try:
+        op.verify()
+    except Exception as exc:  # noqa: BLE001 - malformed xDSL source fails closed
+        raise InvalidLinalgPattern(f"dynamic Boolean cast failed xDSL verification: {exc}") from exc
+    return DynamicBooleanCastPattern(
+        "i1_to_i64_extui",
+        (DYNAMIC_INDEX,),
+        ("i1", "i64", "i64"),
+        ((DYNAMIC_INDEX,),),
+        (str(identity),),
+        "input_dim_0",
+    )
+
+
+def validate_serialized_dynamic_boolean_cast_pattern(pattern: object) -> None:
+    """Recheck the only legal serialized dynamic shape/map/value contract."""
+    from xdsl.dialects.builtin import DYNAMIC_INDEX
+    from xdsl.ir.affine import AffineMap
+
+    fields = {"operation", "shape", "ordered_types", "input_shapes", "input_maps", "shape_source"}
+    if (
+        not isinstance(pattern, Mapping)
+        or set(pattern) != fields
+        or pattern["operation"] != "i1_to_i64_extui"
+        or pattern["shape_source"] != "input_dim_0"
+        or not isinstance(pattern["shape"], (tuple, list))
+        or len(pattern["shape"]) != 1
+        or type(pattern["shape"][0]) is not int
+        or pattern["shape"][0] != DYNAMIC_INDEX
+        or not isinstance(pattern["ordered_types"], (tuple, list))
+        or tuple(pattern["ordered_types"]) != ("i1", "i64", "i64")
+        or not isinstance(pattern["input_shapes"], (tuple, list))
+        or len(pattern["input_shapes"]) != 1
+        or not isinstance(pattern["input_shapes"][0], (tuple, list))
+        or len(pattern["input_shapes"][0]) != 1
+        or type(pattern["input_shapes"][0][0]) is not int
+        or pattern["input_shapes"][0][0] != DYNAMIC_INDEX
+        or not isinstance(pattern["input_maps"], (tuple, list))
+        or tuple(pattern["input_maps"]) != (str(AffineMap.identity(1)),)
+    ):
+        raise InvalidLinalgPattern("serialized dynamic Boolean cast body is not closed")

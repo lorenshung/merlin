@@ -241,6 +241,93 @@ def test_internal_compaction_requires_selected_byte_span_and_linked_identity() -
         assert not control.linked_selected_build_complete(changed, entry, "f" * 64)
 
 
+def test_reviewed_dynamic_cast_body_requires_the_exact_linked_compaction_bound() -> None:
+    from copy import deepcopy
+
+    from merlin_experiments.phase1.feedback import private_linalg_support as linalg
+
+    from merlin.targetgen.host_capabilities import admit_host_operation
+
+    text = _source_internal_cast(7)
+    module = mq.parse(text)
+    parsed = tuple(mq.walk(module))
+    digest = sha256(text.encode()).hexdigest()
+    selected = _selected_index()
+    proof = _prove(text, bits=64)
+    proof["selected_index_observation"] = deepcopy(selected)
+    ordinal = proof["internal_compaction_support"][0]["cast_linalg_ordinal"]
+    row = {"mlir_operation": "linalg.generic", "count": 1, "ordinals": [ordinal]}
+    policy = {
+        "host": {
+            "package_sha256": "a" * 64,
+            "capability_spec_sha256": "b" * 64,
+            "dtype_strategy": "int8_w8a8",
+            "capability_spec": {
+                "schema": "merlin.host_capabilities.v1",
+                "status": "reviewed",
+                "compiler": {"package_sha256": "a" * 64, "dtype_strategy": "int8_w8a8"},
+                "operations": [
+                    {
+                        "id": "neutral_dynamic_extension",
+                        "ops": ["linalg.generic"],
+                        "placement": "host",
+                        "signature": {
+                            "ordered_operand_dtypes": ["i1", "i64"],
+                            "ordered_result_dtypes": ["i64"],
+                            "ranks": [1],
+                        },
+                        "source_body": {
+                            "schema": "merlin.dynamic_boolean_cast_body.v1",
+                            "operation": "i1_to_i64_extui",
+                        },
+                    }
+                ],
+                "evidence": {"scope": "synthetic placement only; no numerical review"},
+            },
+        }
+    }
+    observed = {
+        "family": "cast",
+        "ordered_operand_dtypes": ["i1", "i64"],
+        "ordered_result_dtypes": ["i64"],
+        "rank": 1,
+    }
+    assert admit_host_operation(policy, row, observed)["status"] == "unknown"
+    admission = admit_host_operation(policy, row, observed, source_operations=(parsed[ordinal],))
+    assert admission["status"] == "admitted"
+    witness = linalg.begin(digest, digest, len(parsed), selected)
+    with pytest.raises(ValueError, match="internal compaction"):
+        linalg.record(witness, row, admission, parsed, {ordinal: row})
+    linalg.record(witness, row, admission, parsed, {ordinal: row}, control_proof=proof)
+    source = {
+        "source_sha256": digest,
+        "normalized_source_sha256": digest,
+        "n_source_operations": len(parsed),
+        "selected_index_observation": deepcopy(selected),
+        "linalg_host_support": witness,
+    }
+    control.attach_source_record(source, proof)
+    linked = {"capture_tree_sha256": "c" * 64, "elf_sha256": "e" * 64, "candidate_tree_sha256": "f" * 64}
+    actual = {**selected, "effective_pipeline": _effective_pipeline()}
+    entry = {"source_sha256": digest, **linked, "index_lowering": actual}
+    with pytest.raises(ValueError, match="identical linked control witness"):
+        linalg.link(source, actual, linked)
+    control.link_selected_build(source, {"output": {"index_lowering": actual}}, linked)
+    linalg.link(source, actual, linked)
+    assert linalg.linked_complete(source, entry, "f" * 64)
+    for mutation in (
+        lambda value: value.pop("bounded_control_support"),
+        lambda value: value["linalg_host_support"]["occurrences"][0]["dynamic_bound"].update(extent=8),
+        lambda value: value["linalg_host_support"]["occurrences"][0].update(shape_source="ambient"),
+        lambda value: value["bounded_control_support"]["internal_compaction_support"][0].update(extent=8),
+        lambda value: value["bounded_control_support"]["selected_index_observation"].update(index_bits=32),
+    ):
+        changed = deepcopy(source)
+        mutation(changed)
+        assert not linalg.linked_complete(changed, entry, "f" * 64)
+    assert not linalg.linked_complete(source, {**entry, "elf_sha256": "0" * 64}, "f" * 64)
+
+
 def _different_scatter_mask(source: str) -> str:
     source = source.replace(
         '    %scatter_init = "tensor.empty"()',

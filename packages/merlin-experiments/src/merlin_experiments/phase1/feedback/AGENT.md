@@ -57,11 +57,12 @@ It rechecks each parsed operation and joins the same linked whole-program build;
 this source witness does not establish numerical equivalence.
 `private_linalg_support.py` is the current versioned, mandatory empty-or-
 populated witness for exact pointwise, Boolean and unary f32 sine/cosine source-body declarations.
-It keeps their schemas separate, rechecks every parsed ordinal, bounds each
-static tensor's extent and byte span by the producer-selected signed index
-width, and binds that exact lowering record to the linked program. This is
-per-tensor source/build evidence, not a global arena proof; it grants no host
-rule or selected-libm/PyTorch numerical equivalence.
+Its separate dynamic Boolean cast schema requires the same ordinal in the
+closed internal-compaction proof and bounds its allocation by the selected
+signed index width. Every body is rechecked against parsed source and joined
+to the same linked candidate, capture and ELF. This is per-tensor source/build
+evidence, not a global arena proof; it grants no host rule, external dynamic
+output ABI, compiled semantics or PyTorch numerical equivalence.
 `private_device_audit.py` also owns exact static board/DTS input checks for the
 linked image; that check remains build-only and does not imply board execution.
 

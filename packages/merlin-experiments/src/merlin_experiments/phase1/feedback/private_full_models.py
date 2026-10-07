@@ -764,7 +764,7 @@ def _source_obligations(
         elif host_decision["status"] != "admitted" or host_decision.get("reviewed") is not True:
             unresolved.append({"ordinals": row["ordinals"], "reason": "host operation lacks exact reviewed admission"})
         else:
-            linalg_support.record(linalg, row, host_decision, parsed, source_rows)
+            linalg_support.record(linalg, row, host_decision, parsed, source_rows, control_proof=bounded_control)
             arange_support.record(arange, capture, row, host_decision, parsed, source_rows)
             integer_support.record(integer_reductions, row, host_decision, parsed, source_rows)
             bucketize_support.record(bucketize, row, host_decision, source_rows)

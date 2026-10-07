@@ -14,9 +14,14 @@ from typing import Any
 
 from merlin.common.digest import is_sha256
 from merlin.frontends.linalg_boolean_patterns import (
+    DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA,
     STATIC_BOOLEAN_SOURCE_BODY_SCHEMA,
+    dynamic_boolean_cast_ordered_types,
+    recognize_dynamic_boolean_cast_body,
     recognize_static_boolean_body,
     static_boolean_ordered_types,
+    validate_dynamic_boolean_cast_source_body,
+    validate_serialized_dynamic_boolean_cast_pattern,
     validate_serialized_static_boolean_pattern,
     validate_static_boolean_source_body,
 )
@@ -63,6 +68,7 @@ _OCCURRENCE = {
     "input_shapes",
     "input_maps",
 }
+_DYNAMIC_OCCURRENCE = _OCCURRENCE | {"shape_source", "dynamic_bound"}
 
 
 def _contract(schema: object, operation: object, predicate: object) -> tuple[dict[str, str], Any, tuple[str, ...]]:
@@ -72,6 +78,11 @@ def _contract(schema: object, operation: object, predicate: object) -> tuple[dic
             raise InvalidLinalgPattern("Boolean source body does not declare a predicate")
         declaration = validate_static_boolean_source_body({"schema": schema, "operation": operation})
         return declaration, recognize_static_boolean_body, static_boolean_ordered_types(declaration)
+    if schema == DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA:
+        if predicate is not None:
+            raise InvalidLinalgPattern("dynamic Boolean cast does not declare a predicate")
+        declaration = validate_dynamic_boolean_cast_source_body({"schema": schema, "operation": operation})
+        return declaration, recognize_dynamic_boolean_cast_body, dynamic_boolean_cast_ordered_types(declaration)
     if schema == STATIC_POINTWISE_SOURCE_BODY_SCHEMA:
         raw = {"schema": schema, "operation": operation}
         if predicate is not None:
@@ -120,6 +131,8 @@ def record(
     admission: Mapping[str, Any],
     parsed: tuple[Any, ...],
     source_rows: Mapping[int, Mapping[str, Any]],
+    *,
+    control_proof: Mapping[str, Any] | None = None,
 ) -> None:
     """Recompute and retain every exact source ordinal of an admitted row."""
     body = admission.get("source_body_proof")
@@ -151,6 +164,9 @@ def record(
     except InvalidLinalgPattern as exc:
         raise ValueError("static Linalg host admission has an invalid source-body contract") from exc
     seen = {item["ordinal"] for item in witness["occurrences"]}
+    dynamic = body["schema"] == DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA
+    if dynamic and not _control_proof_matches_source(control_proof, witness):
+        raise ValueError("dynamic Boolean cast has no closed internal compaction proof")
     for ordinal, pattern in zip(ordinals, patterns, strict=True):
         try:
             actual = (
@@ -174,24 +190,55 @@ def record(
                 validate_serialized_static_boolean_pattern(pattern)
             except InvalidLinalgPattern as exc:
                 raise ValueError("static Boolean proof has an invalid serialized source pattern") from exc
-        witness["occurrences"].append(
-            {
-                "ordinal": ordinal,
-                "profile": body["profile"],
-                "capability_spec_sha256": body["capability_spec_sha256"],
-                "declaration": body["declaration"],
-                "schema": body["schema"],
-                "operation": pattern["operation"],
-                "predicate": pattern.get("predicate"),
-                "shape": pattern["shape"],
-                "ordered_types": pattern["ordered_types"],
-                "input_shapes": pattern.get("input_shapes", ()),
-                "input_maps": pattern.get("input_maps", ()),
-            }
-        )
+        if dynamic:
+            try:
+                validate_serialized_dynamic_boolean_cast_pattern(pattern)
+            except InvalidLinalgPattern as exc:
+                raise ValueError("dynamic Boolean cast has an invalid serialized source pattern") from exc
+            bounds = [
+                chain
+                for chain in control_proof["internal_compaction_support"]
+                if chain["cast_linalg_ordinal"] == ordinal
+            ]
+            if len(bounds) != 1:
+                raise ValueError("dynamic Boolean cast is not the proved internal compaction consumer")
+        occurrence = {
+            "ordinal": ordinal,
+            "profile": body["profile"],
+            "capability_spec_sha256": body["capability_spec_sha256"],
+            "declaration": body["declaration"],
+            "schema": body["schema"],
+            "operation": pattern["operation"],
+            "predicate": pattern.get("predicate"),
+            "shape": pattern["shape"],
+            "ordered_types": pattern["ordered_types"],
+            "input_shapes": pattern.get("input_shapes", ()),
+            "input_maps": pattern.get("input_maps", ()),
+        }
+        if dynamic:
+            occurrence["shape_source"] = pattern["shape_source"]
+            occurrence["dynamic_bound"] = deepcopy(bounds[0])
+        witness["occurrences"].append(occurrence)
         seen.add(ordinal)
     witness["occurrences"].sort(key=lambda item: item["ordinal"])
     witness["count"] = len(witness["occurrences"])
+
+
+def _control_proof_matches_source(proof: object, witness: Mapping[str, Any]) -> bool:
+    if not isinstance(proof, Mapping) or proof.get("selected_index_observation") != witness.get(
+        "selected_index_observation"
+    ):
+        return False
+    source = {
+        "source_sha256": witness.get("raw_source_sha256"),
+        "normalized_source_sha256": witness.get("normalized_source_sha256"),
+        "selected_index_observation": witness.get("selected_index_observation"),
+    }
+    try:
+        control_support.attach_source_record(source, proof)
+        return control_support._complete_guard_roster(proof, source)  # noqa: PLC2701 -- shared roster verifier
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def link(source: Mapping[str, Any], actual_index: Mapping[str, Any], linked_build: Mapping[str, str]) -> None:
@@ -206,6 +253,12 @@ def link(source: Mapping[str, Any], actual_index: Mapping[str, Any], linked_buil
         raise ValueError("static Linalg proof has no exact selected index-lowering build")
     if not _all_shapes_fit(witness.get("occurrences"), selected["index_bits"]):
         raise ValueError("static Linalg shape exceeds selected signed index address span")
+    if not _dynamic_roster_matches_control(witness, source):
+        raise ValueError("dynamic Boolean cast differs from linked internal compaction source")
+    if any(item.get("schema") == DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA for item in witness["occurrences"]):
+        control = source.get("bounded_control_support")
+        if control.get("status") != control_support.LINKED or control.get("linked_build") != dict(linked_build):
+            raise ValueError("dynamic Boolean cast has no identical linked control witness")
     witness["status"] = LINKED
     witness["actual_index_observation"] = deepcopy(dict(actual_index))
     witness["linked_build"] = dict(linked_build)
@@ -238,6 +291,19 @@ def _all_shapes_fit(occurrences: object, index_bits: int) -> bool:
     for item in occurrences:
         if not isinstance(item, Mapping):
             return False
+        if item.get("schema") == DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA:
+            try:
+                validate_serialized_dynamic_boolean_cast_pattern(
+                    {
+                        key: item[key]
+                        for key in ("operation", "shape", "ordered_types", "input_shapes", "input_maps", "shape_source")
+                    }
+                )
+            except (InvalidLinalgPattern, KeyError):
+                return False
+            if not _dynamic_bound_fits(item.get("dynamic_bound"), item.get("ordinal"), maximum):
+                return False
+            continue
         shape, types, inputs = item.get("shape"), item.get("ordered_types"), item.get("input_shapes")
         if not isinstance(types, (list, tuple)) or len(types) < 2 or not fits(shape, types[-1]):
             return False
@@ -251,6 +317,56 @@ def _all_shapes_fit(occurrences: object, index_bits: int) -> bool:
         elif any(not fits(shape, dtype) for dtype in types[:-1]):
             return False
     return True
+
+
+def _dynamic_bound_fits(bound: object, ordinal: object, maximum: int) -> bool:
+    fields = {
+        "cast_ordinal",
+        "add_ordinal",
+        "allocation_ordinal",
+        "loop_ordinal",
+        "cast_dim_ordinal",
+        "cast_linalg_ordinal",
+        "extent",
+        "input_dtype",
+        "output_dtype",
+    }
+    ordinal_fields = fields - {"extent", "input_dtype", "output_dtype"}
+    return bool(
+        isinstance(bound, Mapping)
+        and set(bound) == fields
+        and type(ordinal) is int
+        and type(bound["cast_linalg_ordinal"]) is int
+        and bound["cast_linalg_ordinal"] == ordinal
+        and all(type(bound[key]) is int and bound[key] >= 0 for key in ordinal_fields)
+        and len({bound[key] for key in ordinal_fields}) == len(ordinal_fields)
+        and type(bound["extent"]) is int
+        and 0 < bound["extent"] <= maximum // 8
+        and bound["input_dtype"] == "i1"
+        and bound["output_dtype"] == "i64"
+    )
+
+
+def _dynamic_roster_matches_control(witness: Mapping[str, Any], source: Mapping[str, Any]) -> bool:
+    occurrences = witness.get("occurrences")
+    if not isinstance(occurrences, list):
+        return False
+    dynamic = [
+        item
+        for item in occurrences
+        if isinstance(item, Mapping) and item.get("schema") == DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA
+    ]
+    if not dynamic:
+        return True
+    control = source.get("bounded_control_support")
+    if not _control_proof_matches_source(control, witness):
+        return False
+    chains = control["internal_compaction_support"]
+    return all(
+        sum(chain["cast_linalg_ordinal"] == item["ordinal"] and chain == item.get("dynamic_bound") for chain in chains)
+        == 1
+        for item in dynamic
+    )
 
 
 def linked_complete(source: Mapping[str, Any], entry: Mapping[str, Any], candidate_sha256: str) -> bool:
@@ -289,7 +405,9 @@ def linked_complete(source: Mapping[str, Any], entry: Mapping[str, Any], candida
         return False
     ordinals = []
     for item in occurrences:
-        if not isinstance(item, Mapping) or set(item) != _OCCURRENCE:
+        if not isinstance(item, Mapping) or set(item) != (
+            _DYNAMIC_OCCURRENCE if item.get("schema") == DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA else _OCCURRENCE
+        ):
             return False
         ordinal, shape, types, maps = item["ordinal"], item["shape"], item["ordered_types"], item["input_maps"]
         if (
@@ -297,7 +415,7 @@ def linked_complete(source: Mapping[str, Any], entry: Mapping[str, Any], candida
             or not 0 <= ordinal < proof["n_source_operations"]
             or not isinstance(shape, (list, tuple))
             or not shape
-            or any(type(dim) is not int or dim < 0 for dim in shape)
+            or any(type(dim) is not int for dim in shape)
             or not isinstance(types, (list, tuple))
             or any(not isinstance(dtype, str) or not dtype for dtype in types)
             or not isinstance(maps, (list, tuple))
@@ -316,6 +434,20 @@ def linked_complete(source: Mapping[str, Any], entry: Mapping[str, Any], candida
             return False
         if tuple(types) != expected_types:
             return False
+        if item["schema"] == DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA:
+            try:
+                validate_serialized_dynamic_boolean_cast_pattern(
+                    {
+                        key: item[key]
+                        for key in ("operation", "shape", "ordered_types", "input_shapes", "input_maps", "shape_source")
+                    }
+                )
+            except InvalidLinalgPattern:
+                return False
+            if not control_support.linked_selected_build_complete(source, entry, candidate_sha256):
+                return False
+        elif any(dim < 0 for dim in shape):
+            return False
         if item["schema"] in {STATIC_POINTWISE_SOURCE_BODY_SCHEMA, STATIC_F32_MATH_SOURCE_BODY_SCHEMA} and (
             maps or item["input_shapes"]
         ):
@@ -329,6 +461,8 @@ def linked_complete(source: Mapping[str, Any], entry: Mapping[str, Any], candida
                 return False
         ordinals.append(ordinal)
     if ordinals != sorted(set(ordinals)):
+        return False
+    if not _dynamic_roster_matches_control(proof, source):
         return False
     linked = proof.get("linked_build")
     return bool(

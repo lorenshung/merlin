@@ -53,7 +53,9 @@ def validate_host_capabilities(
             raise ValueError("source_body must be an explicit host declaration field, not a signature constraint")
         if "source_body" in row:
             from merlin.frontends.linalg_boolean_patterns import (
+                DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA,
                 STATIC_BOOLEAN_SOURCE_BODY_SCHEMA,
+                validate_dynamic_boolean_cast_source_body,
                 validate_static_boolean_source_body,
             )
             from merlin.frontends.linalg_math_patterns import (
@@ -80,6 +82,8 @@ def validate_host_capabilities(
             body = row["source_body"]
             if isinstance(body, dict) and body.get("schema") == STATIC_BOOLEAN_SOURCE_BODY_SCHEMA:
                 validate_static_boolean_source_body(body)
+            elif isinstance(body, dict) and body.get("schema") == DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA:
+                validate_dynamic_boolean_cast_source_body(body)
             elif isinstance(body, dict) and body.get("schema") == STATIC_F32_MATH_SOURCE_BODY_SCHEMA:
                 validate_static_f32_math_source_body(body)
             else:
@@ -104,7 +108,9 @@ def _screen_source_body(declaration: dict, row: dict, signature: dict, source_op
     from dataclasses import asdict
 
     from merlin.frontends.linalg_boolean_patterns import (
+        DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA,
         STATIC_BOOLEAN_SOURCE_BODY_SCHEMA,
+        recognize_dynamic_boolean_cast_body,
         recognize_static_boolean_body,
     )
     from merlin.frontends.linalg_math_patterns import (
@@ -126,6 +132,7 @@ def _screen_source_body(declaration: dict, row: dict, signature: dict, source_op
         body = declaration["source_body"]
         recognizer = {
             STATIC_BOOLEAN_SOURCE_BODY_SCHEMA: recognize_static_boolean_body,
+            DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA: recognize_dynamic_boolean_cast_body,
             STATIC_F32_MATH_SOURCE_BODY_SCHEMA: recognize_static_f32_math_body,
         }.get(body["schema"], recognize_static_pointwise)
         patterns = tuple(recognizer(op) for op in source_operations)
