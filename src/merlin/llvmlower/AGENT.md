@@ -14,6 +14,15 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
 
 ## What belongs here
 
+- `exact_row_radix_pack.py` offers an explicit source-exact producer row proof
+  for the existing canonical BF16 signed radix128 representation. The mandatory
+  finite source scan proves a nonzero normal row's exponent span fits the grid;
+  one row branch then packs exact unsaturated coefficients and widens source
+  values directly. Zero/subnormal/wide-span/uncertain rows retain the original
+  encoder. No measured operand, target selector, reassociation or new floating
+  effect permission grants admission. Complete preparation/packing/readout cost
+  and original whole accuracy gates determine experimental profitability.
+
 - `bounded_rne_word_cells.py` derives exact ordered-binary32 preimages of a
   source-proven saturated ties-even signed-byte observation, retaining typed
   source/use/context witnesses and explicit floating effect permissions. The

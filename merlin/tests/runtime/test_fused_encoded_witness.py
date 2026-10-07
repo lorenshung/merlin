@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from test_source_attention_frontier import PLAN
 
-from merlin.common.paths import merlin_dir
+from merlin.common.paths import data_path
 from merlin.llvmlower.fused_encoded_witness import fused_encoded_row_header, prepare_fused_encoded_witness
 from merlin.llvmlower.source_attention_frontier import emit_source_attention_frontier
 
@@ -51,7 +51,7 @@ def native(tmp_path_factory):
             "-shared",
             "-fPIC",
             "-I",
-            str(merlin_dir() / "runtime/c"),
+            str(data_path("runtime", "c")),
             str(w / "p.c"),
             "-lm",
             "-o",
@@ -126,7 +126,7 @@ def group_native(tmp_path_factory):
             "-shared",
             "-fPIC",
             "-I",
-            str(merlin_dir() / "runtime/c"),
+            str(data_path("runtime", "c")),
             str(w / "p.c"),
             "-lm",
             "-o",
