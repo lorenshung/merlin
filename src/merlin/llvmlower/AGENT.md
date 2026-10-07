@@ -373,6 +373,11 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
   byte pair, including intermediate prefixes and final source observations.
   Source inputs, buffer lifetimes, target arithmetic and full transfer costs
   remain provider obligations; no target implementation or routing is inferred.
+  Its explicit predictor-key family reuses an already computed exact integer
+  observation only when every member of each complete key fibre needs the same
+  correction. Collisions with different corrections refuse. Signed-i32 seed and
+  difference bounds are proved; target conversion, activation order, storage and
+  complete producer/readback costs remain separate provider obligations.
 
 `merlin/python/tests/test_llvmlower.py` — synthetic slice e2e (host execution vs Python reference); toolchain-gated tests auto-skip when clang/m2m venv are absent.
 

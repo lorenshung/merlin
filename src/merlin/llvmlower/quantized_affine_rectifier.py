@@ -41,6 +41,59 @@ def _axis_rectifier(a, b, lhs, rhs):
     return offsets, parts, indicator, stages
 
 
+def _predictor_key_relation(expected, predicted, a, b, p, q):
+    """Group corrections by an already computed integer observation.
+
+    A key may represent several source pairs. All pairs in that fibre must need
+    the same correction, including pairs where the prediction is already exact.
+    The complete finite domain, rather than coprimality or sampled uniqueness,
+    establishes whether that observation is sufficient.
+    """
+    wide = a * p + b * q
+    delta = expected.astype(np.int64) - predicted.astype(np.int64)
+    corrected = predicted.astype(np.int64)
+    relation = []
+    for value in np.unique(wide[delta != 0]):
+        members = wide == value
+        corrections = np.unique(delta[members])
+        if len(corrections) != 1:
+            raise ValueError("predictor key collision has different source corrections")
+        correction = int(corrections[0])
+        key = wide - value
+        if min(int(key.min()), -int(value)) < -(1 << 31) or max(int(key.max()), -int(value)) >= 1 << 31:
+            raise ValueError("predictor key or seed exceeds signed-i32 representation")
+        positive, negative = np.clip(key, 0, 127), np.clip(-key, 0, 127)
+        first = np.clip(1 - positive, 0, 127)
+        indicator = np.clip(first - negative, 0, 127)
+        if not np.array_equal(indicator, members):
+            raise ValueError("predictor key rectifier differs from its complete key fibre")
+        corrected += correction * indicator
+        left, right = np.argwhere(members)[0]
+        relation.append(
+            dict(
+                lhs=int(left) - 128,
+                rhs=int(right) - 128,
+                correction=correction,
+                key=dict(lhs_coefficient=p, rhs_coefficient=q, seed=-int(value)),
+                key_range=_range(key),
+                predictor_integer_range=_range(wide),
+                positive=dict(scale=1, clip=[0, 127], range=_range(positive)),
+                negative=dict(scale=-1, clip=[0, 127], range=_range(negative)),
+                indicator=dict(
+                    seed=1,
+                    positive_coefficient=-1,
+                    negative_coefficient=-1,
+                    clip=[0, 127],
+                    range=_range(indicator),
+                    stages=[dict(output_range=_range(first)), dict(output_range=_range(indicator))],
+                ),
+                indicator_pairs=int(indicator.sum()),
+                corrected_prefix_range=_range(corrected),
+            )
+        )
+    return relation, corrected
+
+
 def derive(proof, *, max_pairs, indicator_family="positional_key"):
     """Synthesize a bounded exact sparse correction from a complete certificate.
 
@@ -53,7 +106,7 @@ def derive(proof, *, max_pairs, indicator_family="positional_key"):
         raise ValueError("explicit nonnegative correction cardinality limit required")
     if not isinstance(proof, dict) or proof != pair.derive(**proof["source"], **proof["predictor"]):
         raise ValueError("unchanged complete source/predictor pair certificate required")
-    if indicator_family not in ("positional_key", "axis_offsets"):
+    if indicator_family not in ("positional_key", "axis_offsets", "predictor_key"):
         raise ValueError("unknown exact singleton indicator family")
     expected = pair.source_table(**proof["source"])
 
@@ -65,7 +118,11 @@ def derive(proof, *, max_pairs, indicator_family="positional_key"):
     b = np.arange(-128, 128, dtype=np.int64)[None, :]
     corrected = predicted.astype(np.int64)
     relation = []
-    for left, right in locations:
+    if indicator_family == "predictor_key":
+        relation, corrected = _predictor_key_relation(
+            expected, predicted, a, b, **{k: proof["predictor"][k] for k in ("p", "q")}
+        )
+    for left, right in () if indicator_family == "predictor_key" else locations:
         lhs, rhs = int(left) - 128, int(right) - 128
         if indicator_family == "positional_key":
             key, positive, negative, indicator = _rectifier(a, b, lhs, rhs)
@@ -139,9 +196,18 @@ def derive(proof, *, max_pairs, indicator_family="positional_key"):
         indicator_semantics=(
             "Exact integer affine key; clip(key,0,127), clip(-key,0,127), clip(1-u-v,0,127)"
             if indicator_family == "positional_key"
-            else "Four clipped source-coordinate offsets; successive clip(e-offset,0,127) from e=1"
+            else (
+                "Reuse exact predictor integer key with i32 seed; two clipped signed key reads; "
+                "successive clip(e-offset,0,127) from e=1"
+                if indicator_family == "predictor_key"
+                else "Four clipped source-coordinate offsets; successive clip(e-offset,0,127) from e=1"
+            )
         ),
-        correction_semantics="Exact integer prediction plus each disjoint singleton correction; final source clamp",
+        correction_semantics=(
+            "Exact integer prediction plus each complete disjoint predictor-key fibre correction; final source clamp"
+            if indicator_family == "predictor_key"
+            else "Exact integer prediction plus each disjoint singleton correction; final source clamp"
+        ),
         exact_for_all_source_pairs=True,
         obligations=[
             "Provider independently qualifies the original predictor conversion/product/RNE/clamp",

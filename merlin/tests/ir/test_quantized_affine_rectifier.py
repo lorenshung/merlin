@@ -102,3 +102,49 @@ def test_axis_fallback_binds_the_same_original_observation():
     fallback["relation"][0]["offsets"][0]["coefficient"] = -1
     with pytest.raises(ValueError, match="changed"):
         rectifier.validate(fallback)
+
+
+def test_existing_predictor_integer_key_closes_full_source_domain():
+    proof = _sparse_proof()
+    plan = rectifier.derive(proof, max_pairs=1, indicator_family="predictor_key")
+    row = plan["relation"][0]
+    assert row["key"] == dict(lhs_coefficient=298, rhs_coefficient=249, seed=-33131)
+    assert row["key_range"] == [-103147, 36338]
+    assert row["indicator_pairs"] == 1
+    assert plan["corrected_table_sha256"] == proof["source_table_sha256"]
+    assert rectifier.validate(plan) is plan
+
+
+def test_equal_corrections_on_colliding_key_fibres_are_supported():
+    proof = pair.derive(1, 1, 2, p=1, q=1, scale=0.25, relu=True)
+    plan = rectifier.derive(proof, max_pairs=65536, indicator_family="predictor_key")
+    assert any(row["indicator_pairs"] > 1 for row in plan["relation"])
+    assert sum(row["indicator_pairs"] for row in plan["relation"]) == proof["mismatched_pairs"]
+    assert plan["corrected_table_sha256"] == proof["source_table_sha256"]
+
+
+@pytest.mark.parametrize("source,predictor", [((0.2, 0.3, 1), (2, 3, 0.1)), ((1, 2, 3), (1, 1, 0.5))])
+def test_ambiguous_key_refuses_instead_of_correcting_exact_source_pairs(source, predictor):
+    proof = pair.derive(*source, p=predictor[0], q=predictor[1], scale=predictor[2], relu=True)
+    with pytest.raises(ValueError, match="collision"):
+        rectifier.derive(proof, max_pairs=65536, indicator_family="predictor_key")
+
+
+def test_reused_key_witness_mutation_and_empty_domain():
+    plan = rectifier.derive(_sparse_proof(), max_pairs=1, indicator_family="predictor_key")
+    plan["relation"][0]["key"]["seed"] += 1
+    with pytest.raises(ValueError, match="changed"):
+        rectifier.validate(plan)
+    exact = pair.derive(1, 0.5, 1, p=2, q=1, scale=0.5)
+    empty = rectifier.derive(exact, max_pairs=0, indicator_family="predictor_key")
+    assert empty["relation"] == []
+    assert rectifier.validate(empty) is empty
+
+
+def test_predictor_key_difference_requires_i32_not_just_predictor_i32():
+    a = np.array([[-128], [127]], dtype=np.int64)
+    b = np.array([[-128, 127]], dtype=np.int64)
+    expected = np.array([[1, 0], [0, 0]], dtype=np.int8)
+    predicted = np.zeros_like(expected)
+    with pytest.raises(ValueError, match="signed-i32"):
+        rectifier._predictor_key_relation(expected, predicted, a, b, 8388607, 8388607)
