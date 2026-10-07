@@ -286,6 +286,15 @@ pins:
       # and false of the machine. A read set that omits what the RTL build consumes cannot answer the
       # only question a performance claim asks of this pin.
       - src/main/scala/gemmini/LoadController.scala
+      # THE NORMALIZATION EXCLUSION rests on these two. The contract (examples/gemmini/target/contracts/
+      # target_contract.yaml) leaves `normalization` and `softmax` undeclared because AccumulatorScale's
+      # LAYERNORM / IGELU / SOFTMAX arms are gated on `has_normalizations`, which GemminiConfigs defaults
+      # to false and `defaultConfig` never sets. A family declared nowhere has no contract line for
+      # check_capability_backing.py to attach a citation to, so until these were read here an edit to
+      # either file could move that verdict while the pin stayed clean. Both are byte-identical to the
+      # pinned revision (checked 2026-10-06).
+      - src/main/scala/gemmini/AccumulatorScale.scala
+      - src/main/scala/gemmini/GemminiConfigs.scala
     # CONTENT, not `git status`. Turned on for the same reason the sibling pin below turns it on: the
     # dirty heuristic answers "differs from HEAD", and it cannot distinguish a reviewed edit whose
     # bytes are declared here from an unreviewed one. With this on, each read path gets a per-file
