@@ -24,14 +24,23 @@ cannot become a full-roster gate result or a build-cache hit.
 The private complete-model build gate consumes the producer-bound completed
 compilation recipe and independently rehashes its explicit compiler/link inputs
 and final ELF. Missing historical recipes remain diagnostic-only, never newly
-certified. The v10 gate additionally requires an empty-or-complete
+certified. The v11 gate additionally requires an empty-or-complete
 `private_linkage_support.py` source roster. A reviewed f32 sine/cosine declaration
 with a closed linkage contract records only a pending source requirement; the
 consumer reselects host package, GCC, ISA flags and archive bytes independently
 before rechecking the actual link's defining-supplier trace against the same
 source/candidate/capture/ELF identity. It never infers source-call routing,
 transitive toolchain closure, frontend/executable numerical equivalence, or a
-host numerical grant from the trace or ignored metadata.
+host numerical grant from the trace or ignored metadata. Opt-in closed static
+composite math forms additionally retain exact per-ordinal literal-bit and
+intrinsic-obligation fields (including explicit null fields for older forms).
+Pow/tanh source forms require an independently selected `powf`/`tanhf` archive
+supplier in the same linked image; this is not source-call or numerical proof.
+Historical v10 gate records lack the mandatory fields and cannot be upgraded.
+Composite forms additionally reparse their exact raw and normalized captured
+stage at link and final claim, verify the selected capture tree and receipt
+bytes, and compare each source ordinal with the stored literals and intrinsic
+roster. A missing or changed source is a refusal, not a numerical waiver.
 
 `private_source_freeze.py` owns host-only run copies of authored software and
 host-capability inputs selected by a verified Phase 0 derivation export. Bind

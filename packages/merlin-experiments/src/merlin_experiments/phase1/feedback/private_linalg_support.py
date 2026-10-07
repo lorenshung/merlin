@@ -10,9 +10,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import asdict
+from hashlib import sha256
+from pathlib import Path
 from typing import Any
 
+from merlin.common import mlir_query as mq
 from merlin.common.digest import is_sha256
+from merlin.compile.model_execution_inputs import file_sha256, strict_tree_sha256
+from merlin.frontends.capture_normalization import normalize_capture_mlir
 from merlin.frontends.linalg_boolean_patterns import (
     DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA,
     STATIC_BOOLEAN_SOURCE_BODY_SCHEMA,
@@ -24,6 +29,16 @@ from merlin.frontends.linalg_boolean_patterns import (
     validate_serialized_dynamic_boolean_cast_pattern,
     validate_serialized_static_boolean_pattern,
     validate_static_boolean_source_body,
+)
+from merlin.frontends.linalg_composite_math import (
+    SCHEMA as COMPOSITE_SOURCE_SCHEMA,
+)
+from merlin.frontends.linalg_composite_math import (
+    STATIC_COMPOSITE_MATH_SOURCE_BODY_SCHEMA,
+    recognize_static_composite_math_body,
+    static_composite_math_ordered_types,
+    validate_serialized_static_composite_math_pattern,
+    validate_static_composite_math_source_body,
 )
 from merlin.frontends.linalg_math_patterns import (
     STATIC_F32_MATH_SOURCE_BODY_SCHEMA,
@@ -43,7 +58,10 @@ from merlin.frontends.linalg_patterns import (
     validate_static_pointwise_source_body,
     validate_static_projected_pointwise_source_body,
 )
-from merlin.targetgen.host_linkage_contract import validate_linkage_contract
+from merlin.targetgen.host_linkage_contract import (
+    required_composite_math_symbol,
+    validate_source_linkage_contract,
+)
 from merlin_experiments.phase1.feedback import private_control_support as control_support
 
 PENDING = "source_linalg_host_support_pending_build"
@@ -60,6 +78,7 @@ _TOP = {
     "count",
     "occurrences",
     "linked_build",
+    "source_capture_path",
 }
 _OCCURRENCE = {
     "ordinal",
@@ -73,6 +92,8 @@ _OCCURRENCE = {
     "ordered_types",
     "input_shapes",
     "input_maps",
+    "literal_bits",
+    "lowering_intrinsic_obligations",
     "linkage_requirement",
 }
 _DYNAMIC_OCCURRENCE = _OCCURRENCE | {"shape_source", "dynamic_bound"}
@@ -107,6 +128,11 @@ def _contract(schema: object, operation: object, predicate: object) -> tuple[dic
             raise InvalidLinalgPattern("unary f32 math source body does not declare a predicate")
         declaration = validate_static_f32_math_source_body({"schema": schema, "operation": operation})
         return declaration, recognize_static_f32_math_body, static_f32_math_ordered_types(declaration)
+    if schema == STATIC_COMPOSITE_MATH_SOURCE_BODY_SCHEMA:
+        if predicate is not None:
+            raise InvalidLinalgPattern("composite math source body does not declare a predicate")
+        declaration = validate_static_composite_math_source_body({"schema": schema, "operation": operation})
+        return declaration, recognize_static_composite_math_body, static_composite_math_ordered_types(declaration)
     raise InvalidLinalgPattern("unknown static source-body schema")
 
 
@@ -135,6 +161,7 @@ def begin(
         ),
         "count": 0,
         "occurrences": [],
+        "source_capture_path": None,
     }
 
 
@@ -179,17 +206,18 @@ def record(
     seen = {item["ordinal"] for item in witness["occurrences"]}
     dynamic = body["schema"] == DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA
     linkage = admission.get("linkage_requirement")
+    required_symbol = required_composite_math_symbol(body["schema"], body["operation"])
+    if required_symbol and linkage is None:
+        raise ValueError("composite math source lacks its exact selected linkage requirement")
     if linkage is not None:
         if (
-            body["schema"] != STATIC_F32_MATH_SOURCE_BODY_SCHEMA
-            or body["operation"] not in {"math.sin", "math.cos"}
-            or not isinstance(linkage, Mapping)
+            not isinstance(linkage, Mapping)
             or set(linkage) != {"profile", "capability_spec_sha256", "declaration", "contract"}
             or (linkage["profile"], linkage["capability_spec_sha256"], linkage["declaration"])
             != (body["profile"], body["capability_spec_sha256"], body["declaration"])
         ):
             raise ValueError("static Linalg linkage requirement differs from reviewed source body")
-        linkage = validate_linkage_contract(linkage["contract"])
+        linkage = validate_source_linkage_contract(body["schema"], body["operation"], linkage["contract"])
     if dynamic and not _control_proof_matches_source(control_proof, witness):
         raise ValueError("dynamic Boolean cast has no closed internal compaction proof")
     for ordinal, pattern in zip(ordinals, patterns, strict=True):
@@ -220,6 +248,11 @@ def record(
                 validate_serialized_static_projected_pointwise_pattern(pattern)
             except InvalidLinalgPattern as exc:
                 raise ValueError("projected pointwise proof has an invalid serialized source pattern") from exc
+        if body["schema"] == STATIC_COMPOSITE_MATH_SOURCE_BODY_SCHEMA:
+            try:
+                validate_serialized_static_composite_math_pattern(pattern)
+            except InvalidLinalgPattern as exc:
+                raise ValueError("composite math proof has an invalid serialized source pattern") from exc
         if dynamic:
             try:
                 validate_serialized_dynamic_boolean_cast_pattern(pattern)
@@ -244,6 +277,8 @@ def record(
             "ordered_types": pattern["ordered_types"],
             "input_shapes": pattern.get("input_shapes", ()),
             "input_maps": pattern.get("input_maps", ()),
+            "literal_bits": pattern.get("literal_bits"),
+            "lowering_intrinsic_obligations": pattern.get("lowering_intrinsic_obligations"),
             "linkage_requirement": deepcopy(linkage),
         }
         if dynamic:
@@ -272,7 +307,13 @@ def _control_proof_matches_source(proof: object, witness: Mapping[str, Any]) -> 
         return False
 
 
-def link(source: Mapping[str, Any], actual_index: Mapping[str, Any], linked_build: Mapping[str, str]) -> None:
+def link(
+    source: Mapping[str, Any],
+    actual_index: Mapping[str, Any],
+    linked_build: Mapping[str, str],
+    *,
+    capture_path: Path | None = None,
+) -> None:
     witness = source.get("linalg_host_support")
     if not isinstance(witness, dict) or witness.get("status") != PENDING:
         raise ValueError("static Linalg proof is not pending the selected build")
@@ -284,6 +325,10 @@ def link(source: Mapping[str, Any], actual_index: Mapping[str, Any], linked_buil
         raise ValueError("static Linalg proof has no exact selected index-lowering build")
     if not _all_shapes_fit(witness.get("occurrences"), selected["index_bits"]):
         raise ValueError("static Linalg shape exceeds selected signed index address span")
+    if not all(_math_record_valid(item) for item in witness["occurrences"]):
+        raise ValueError("static Linalg math source or linkage record is incomplete")
+    if not _composite_source_matches(witness, source, linked_build, capture_path):
+        raise ValueError("composite math source differs from the selected captured-stage tree")
     if not _dynamic_roster_matches_control(witness, source):
         raise ValueError("dynamic Boolean cast differs from linked internal compaction source")
     if any(item.get("schema") == DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA for item in witness["occurrences"]):
@@ -293,6 +338,62 @@ def link(source: Mapping[str, Any], actual_index: Mapping[str, Any], linked_buil
     witness["status"] = LINKED
     witness["actual_index_observation"] = deepcopy(dict(actual_index))
     witness["linked_build"] = dict(linked_build)
+    witness["source_capture_path"] = str(capture_path) if _has_composite(witness) else None
+
+
+def _has_composite(witness: Mapping[str, Any]) -> bool:
+    return any(item.get("schema") == STATIC_COMPOSITE_MATH_SOURCE_BODY_SCHEMA for item in witness["occurrences"])
+
+
+def _composite_source_matches(
+    witness: Mapping[str, Any],
+    source: Mapping[str, Any],
+    linked_build: Mapping[str, Any],
+    capture_path: Path | None,
+) -> bool:
+    """Reparse each composite ordinal from the exact selected capture tree."""
+    if not _has_composite(witness):
+        return capture_path is None or isinstance(capture_path, Path)
+    if capture_path is None or not capture_path.is_absolute() or capture_path.is_symlink():
+        return False
+    model = capture_path / "model.mlir"
+    receipt = capture_path / "capture_receipt.json"
+    if not model.is_file() or model.is_symlink() or not receipt.is_file() or receipt.is_symlink():
+        return False
+    try:
+
+        def pinned() -> bool:
+            return bool(
+                strict_tree_sha256(capture_path)["sha256"] == linked_build.get("capture_tree_sha256")
+                and file_sha256(model) == witness.get("raw_source_sha256") == source.get("source_sha256")
+                and file_sha256(receipt) == source.get("capture_receipt_sha256")
+            )
+
+        if not pinned():
+            return False
+        normalized, _ = normalize_capture_mlir(model.read_text(encoding="utf-8"))
+        if sha256(normalized.encode("utf-8")).hexdigest() != witness.get("normalized_source_sha256") or witness.get(
+            "normalized_source_sha256"
+        ) != source.get("normalized_source_sha256"):
+            return False
+        parsed = tuple(mq.walk(mq.parse(normalized)))
+        if len(parsed) != witness.get("n_source_operations"):
+            return False
+        for item in witness["occurrences"]:
+            if item.get("schema") != STATIC_COMPOSITE_MATH_SOURCE_BODY_SCHEMA:
+                continue
+            ordinal = item.get("ordinal")
+            if type(ordinal) is not int or not 0 <= ordinal < len(parsed):
+                return False
+            pattern = asdict(recognize_static_composite_math_body(parsed[ordinal]))
+            if item.get("operation") != pattern["operation"] or any(
+                tuple(item.get(key, ())) != tuple(pattern[key])
+                for key in ("shape", "ordered_types", "literal_bits", "lowering_intrinsic_obligations")
+            ):
+                return False
+        return pinned()
+    except (OSError, UnicodeError, KeyError, TypeError, ValueError, InvalidLinalgPattern):
+        return False
 
 
 def _all_shapes_fit(occurrences: object, index_bits: int) -> bool:
@@ -400,6 +501,32 @@ def _dynamic_roster_matches_control(witness: Mapping[str, Any], source: Mapping[
     )
 
 
+def _math_record_valid(item: object) -> bool:
+    """Revalidate exact literal/intrinsic metadata and selected symbol duty."""
+    if not isinstance(item, Mapping):
+        return False
+    if item.get("schema") != STATIC_COMPOSITE_MATH_SOURCE_BODY_SCHEMA:
+        return item.get("literal_bits") is None and item.get("lowering_intrinsic_obligations") is None
+    try:
+        validate_serialized_static_composite_math_pattern(
+            {
+                "schema": COMPOSITE_SOURCE_SCHEMA,
+                "operation": item["operation"],
+                "shape": item["shape"],
+                "ordered_types": item["ordered_types"],
+                "literal_bits": item["literal_bits"],
+                "lowering_intrinsic_obligations": item["lowering_intrinsic_obligations"],
+            }
+        )
+        symbol = required_composite_math_symbol(item["schema"], item["operation"])
+        linkage = item.get("linkage_requirement")
+        if symbol is None:
+            return linkage is None
+        return validate_source_linkage_contract(item["schema"], item["operation"], linkage)["symbols"] == [symbol]
+    except (InvalidLinalgPattern, KeyError, TypeError, ValueError):
+        return False
+
+
 def linked_complete(source: Mapping[str, Any], entry: Mapping[str, Any], candidate_sha256: str) -> bool:
     """Require the mandatory witness to cite the same linked program bytes."""
     proof = source.get("linalg_host_support")
@@ -465,14 +592,11 @@ def linked_complete(source: Mapping[str, Any], entry: Mapping[str, Any], candida
             return False
         if tuple(types) != expected_types:
             return False
+        if not _math_record_valid(item):
+            return False
         if item["linkage_requirement"] is not None:
-            if item["schema"] != STATIC_F32_MATH_SOURCE_BODY_SCHEMA or item["operation"] not in {
-                "math.sin",
-                "math.cos",
-            }:
-                return False
             try:
-                validate_linkage_contract(item["linkage_requirement"])
+                validate_source_linkage_contract(item["schema"], item["operation"], item["linkage_requirement"])
             except ValueError:
                 return False
         if item["schema"] == DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA:
@@ -489,9 +613,13 @@ def linked_complete(source: Mapping[str, Any], entry: Mapping[str, Any], candida
                 return False
         elif any(dim < 0 for dim in shape):
             return False
-        if item["schema"] in {STATIC_POINTWISE_SOURCE_BODY_SCHEMA, STATIC_F32_MATH_SOURCE_BODY_SCHEMA} and (
-            maps or item["input_shapes"]
-        ):
+        if item["schema"] in {
+            STATIC_POINTWISE_SOURCE_BODY_SCHEMA,
+            STATIC_F32_MATH_SOURCE_BODY_SCHEMA,
+            STATIC_COMPOSITE_MATH_SOURCE_BODY_SCHEMA,
+        } and (maps or item["input_shapes"]):
+            return False
+        if item["schema"] == STATIC_COMPOSITE_MATH_SOURCE_BODY_SCHEMA and item["predicate"] is not None:
             return False
         if item["schema"] == STATIC_BOOLEAN_SOURCE_BODY_SCHEMA:
             try:
@@ -516,6 +644,17 @@ def linked_complete(source: Mapping[str, Any], entry: Mapping[str, Any], candida
     if not _dynamic_roster_matches_control(proof, source):
         return False
     linked = proof.get("linked_build")
+    if _has_composite(proof):
+        captured = proof.get("source_capture_path")
+        if (
+            not isinstance(captured, str)
+            or not captured
+            or not isinstance(linked, Mapping)
+            or not _composite_source_matches(proof, source, linked, Path(captured))
+        ):
+            return False
+    elif proof.get("source_capture_path") is not None:
+        return False
     return bool(
         isinstance(linked, Mapping)
         and set(linked) == {"candidate_tree_sha256", "capture_tree_sha256", "elf_sha256"}

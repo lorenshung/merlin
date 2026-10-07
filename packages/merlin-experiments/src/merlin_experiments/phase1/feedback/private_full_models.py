@@ -56,7 +56,7 @@ from merlin_experiments.phase1.feedback.private_source_support_join import (
 )
 
 SCHEMA = "merlin.phase1.private_full_models.v1"
-RESULT_SCHEMA = "merlin.phase1.private_full_model_build_gate.v10"
+RESULT_SCHEMA = "merlin.phase1.private_full_model_build_gate.v11"
 BUILD_BOARD_SCOPE = "static_memory_layout_and_host_ISA_only; no board execution"
 TRANSPOSE_DATA_SUPPORT_SCOPE = data_movement.SCOPE
 _transpose_data_support = data_movement.prove_transpose_source
@@ -866,6 +866,7 @@ def _verify_compiled_program(
     receipt: Mapping[str, Any],
     *,
     program: str,
+    capture_path: Path | None = None,
     source: dict[str, Any],
     stage_tree: Mapping[str, Any],
     package_digest: Mapping[str, Any],
@@ -939,7 +940,7 @@ def _verify_compiled_program(
     pool_support["linked_build"] = dict(linked_build)
     pure_stage.link_direct_return(source, linked_build)
     index_lowering = control_support.link_selected_build(source, receipt, linked_build)
-    linalg_support.link(source, index_lowering, linked_build)
+    linalg_support.link(source, index_lowering, linked_build, capture_path=capture_path)
     arange_support.link(source, index_lowering, linked_build)
     integer_support.link(source, index_lowering, linked_build)
     ordered_scan_support.link(source, index_lowering, linked_build)
@@ -1227,6 +1228,7 @@ def run(
                     _verify_compiled_program(
                         receipt,
                         program=program,
+                        capture_path=stage,
                         source=source,
                         stage_tree=stage_tree,
                         package_digest=package_digest,

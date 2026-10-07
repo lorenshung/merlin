@@ -28,3 +28,30 @@ def validate_linkage_contract(value: object) -> dict[str, Any]:
     if symbols != sorted(symbols):
         raise ValueError("host linkage symbols must be in canonical order")
     return {"schema": SCHEMA, "supplier": SUPPLIER, "archive_sha256": value["archive_sha256"], "symbols": symbols}
+
+
+def required_composite_math_symbol(schema: object, operation: object) -> str | None:
+    """Name an unresolved selected-library obligation, not an observed call."""
+    from merlin.frontends.linalg_composite_math import STATIC_COMPOSITE_MATH_SOURCE_BODY_SCHEMA
+
+    if schema != STATIC_COMPOSITE_MATH_SOURCE_BODY_SCHEMA or type(operation) is not str:
+        return None
+    return {"literal_base_pow_f32": "powf", "tanh_gelu_f32": "tanhf"}.get(operation)
+
+
+def validate_source_linkage_contract(schema: object, operation: object, value: object) -> dict[str, Any]:
+    """Restrict new composite forms to their exact selected symbol requirement."""
+    from merlin.frontends.linalg_composite_math import STATIC_COMPOSITE_MATH_SOURCE_BODY_SCHEMA
+    from merlin.frontends.linalg_math_patterns import STATIC_F32_MATH_SOURCE_BODY_SCHEMA
+
+    contract = validate_linkage_contract(value)
+    if (
+        schema == STATIC_F32_MATH_SOURCE_BODY_SCHEMA
+        and type(operation) is str
+        and operation in {"math.sin", "math.cos"}
+    ):
+        return contract  # Preserve the previously reviewed unary-math contract.
+    symbol = required_composite_math_symbol(schema, operation)
+    if schema != STATIC_COMPOSITE_MATH_SOURCE_BODY_SCHEMA or symbol is None or contract["symbols"] != [symbol]:
+        raise ValueError("linkage contract does not match the exact composite math source form")
+    return contract

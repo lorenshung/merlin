@@ -4,16 +4,28 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from dataclasses import asdict
 from hashlib import sha256
 
 import pytest
 from merlin_experiments.phase1.feedback import private_linalg_support as support
 
 from merlin.common import mlir_query as mq
+from merlin.compile.model_execution_inputs import strict_tree_sha256
+from merlin.frontends.capture_normalization import normalize_capture_mlir
+from merlin.frontends.linalg_composite_math import recognize_static_composite_math_body
 from merlin.targetgen.host_capabilities import admit_host_operation
+from merlin.targetgen.host_linkage_contract import SCHEMA as LINKAGE_SCHEMA
+from merlin.targetgen.host_linkage_contract import SUPPLIER
 
 
-def _op(operation: str, *, false_constant: bool = False, scalar_first: bool = False):
+def _source(
+    operation: str,
+    *,
+    false_constant: bool = False,
+    scalar_first: bool = False,
+    literal_value: str | None = None,
+):
     """Parse a harmless typed source fixture, independent of checkout-only tests."""
     forms = {
         "arith.addf": (
@@ -51,6 +63,24 @@ def _op(operation: str, *, false_constant: bool = False, scalar_first: bool = Fa
             "f32",
             '%v = "math.cos"(%a) <{fastmath = #arith.fastmath<none>}> : (f32) -> f32',
         ),
+        "clamp_upper_literal": (
+            "tensor<2x3xf32>",
+            None,
+            "f32",
+            "f32",
+            '%bound = "arith.constant"() <{value = 2.250000e+00 : f32}> : () -> f32\n'
+            '        %v = "arith.minimumf"(%a, %bound) '
+            "<{fastmath = #arith.fastmath<none>}> : (f32, f32) -> f32",
+        ),
+        "literal_base_pow_f32": (
+            "tensor<2x3xf32>",
+            None,
+            "f32",
+            "f32",
+            '%base = "arith.constant"() <{value = 3.250000e+00 : f32}> : () -> f32\n'
+            '        %v = "math.powf"(%base, %a) '
+            "<{fastmath = #arith.fastmath<none>}> : (f32, f32) -> f32",
+        ),
         "i1_not": (
             "tensor<2x3xi1>",
             None,
@@ -82,6 +112,8 @@ def _op(operation: str, *, false_constant: bool = False, scalar_first: bool = Fa
         first = f"tensor<{input_type}>"
     if false_constant:
         body = body.replace("value = true", "value = false")
+    if literal_value is not None:
+        body = body.replace("3.250000e+00" if operation == "literal_base_pow_f32" else "2.250000e+00", literal_value)
     output = f"tensor<2x3x{output_type}>"
     inputs = f"%x: {first}, %y: {second}" if second else f"%x: {first}"
     operands = "%x, %y, %init" if second else "%x, %init"
@@ -113,7 +145,11 @@ def _op(operation: str, *, false_constant: bool = False, scalar_first: bool = Fa
         func.return %out : {output}
       }}
     }}"""
-    return next(mq.walk(mq.parse(text), "linalg.generic"))
+    return text
+
+
+def _op(operation: str, **kwargs):
+    return next(mq.walk(mq.parse(_source(operation, **kwargs)), "linalg.generic"))
 
 
 def _case(schema: str, operation: str, *, scalar_first: bool = False):
@@ -123,12 +159,18 @@ def _case(schema: str, operation: str, *, scalar_first: bool = False):
         "arith.cmpf": ["f32", "f32", "i1"],
         "math.sin": ["f32", "f32"],
         "math.cos": ["f32", "f32"],
+        "clamp_upper_literal": ["f32", "f32"],
+        "literal_base_pow_f32": ["f32", "f32"],
         "i1_not": ["i1", "i1"],
         "f32_nonzero_to_i1": ["f32", "i1"],
         "i1_mul_singleton_projected": ["i1", "i1", "i1"],
     }[operation]
     result = (
-        "i64" if operation == "arith.addi" else "f32" if operation in {"arith.addf", "math.sin", "math.cos"} else "i1"
+        "i64"
+        if operation == "arith.addi"
+        else "f32"
+        if operation in {"arith.addf", "math.sin", "math.cos", "clamp_upper_literal", "literal_base_pow_f32"}
+        else "i1"
     )
     parsed = (_op(operation, scalar_first=scalar_first), _op(operation, scalar_first=scalar_first))
     selected = {
@@ -155,6 +197,18 @@ def _case(schema: str, operation: str, *, scalar_first: bool = False):
                             "operation": operation,
                             **({"predicate": "ole"} if operation == "arith.cmpf" else {}),
                         },
+                        **(
+                            {
+                                "linkage_contract": {
+                                    "schema": LINKAGE_SCHEMA,
+                                    "supplier": SUPPLIER,
+                                    "archive_sha256": "c" * 64,
+                                    "symbols": ["powf"],
+                                }
+                            }
+                            if operation == "literal_base_pow_f32"
+                            else {}
+                        ),
                     }
                 ],
                 "evidence": {"scope": "synthetic declaration only"},
@@ -388,6 +442,98 @@ def test_math_witness_refuses_changed_body_roster_schema_and_linked_identity():
     assert not support.linked_complete(source, {**entry, "capture_tree_sha256": "f" * 64}, "d" * 64)
     assert not support.linked_complete(source, {**entry, "elf_sha256": "f" * 64}, "d" * 64)
     assert not support.linked_complete(source, entry, "f" * 64)
+
+
+@pytest.mark.parametrize("operation", ("clamp_upper_literal", "literal_base_pow_f32"))
+def test_composite_math_witness_requires_selected_capture_and_reparses_after_link(tmp_path, monkeypatch, operation):
+    schema = "merlin.static_composite_math_body.v1"
+    parsed, row, joined, digest, admission = _case(schema, operation)
+    assert admission["status"] == "admitted"  # Synthetic reviewed source placement only.
+    with pytest.raises(ValueError, match="selected captured-stage tree"):
+        _linked(parsed, row, joined, digest, admission)
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    model = capture / "model.mlir"
+    model.write_text(_source(operation))
+    receipt = capture / "capture_receipt.json"
+    receipt.write_text('{"scope":"neutral fixture"}')
+    raw = sha256(model.read_bytes()).hexdigest()
+    normalized, _ = normalize_capture_mlir(model.read_text())
+    normalized_digest = sha256(normalized.encode()).hexdigest()
+    all_ops = tuple(mq.walk(mq.parse(normalized)))
+    ordinal = next(i for i, op in enumerate(all_ops) if op.name == "linalg.generic")
+    source_row = {"mlir_operation": "linalg.generic", "count": 1, "ordinals": [ordinal]}
+    actual_pattern = recognize_static_composite_math_body(all_ops[ordinal])
+    admission["source_body_proof"]["patterns"] = [asdict(actual_pattern)]
+    selected, actual = _index_lowering(32)
+    proof = support.begin(raw, normalized_digest, len(all_ops), selected)
+    support.record(proof, source_row, admission, all_ops, {ordinal: source_row})
+    tree = strict_tree_sha256(capture)["sha256"]
+    source = {
+        "source_sha256": raw,
+        "normalized_source_sha256": normalized_digest,
+        "capture_receipt_sha256": sha256(receipt.read_bytes()).hexdigest(),
+        "n_source_operations": len(all_ops),
+        "selected_index_observation": selected,
+        "linalg_host_support": proof,
+    }
+    entry = {"source_sha256": raw, "capture_tree_sha256": tree, "elf_sha256": "e" * 64, "index_lowering": actual}
+    linked_build = {"candidate_tree_sha256": "d" * 64, "capture_tree_sha256": tree, "elf_sha256": "e" * 64}
+    with pytest.raises(ValueError, match="selected captured-stage tree"):
+        support.link(source, actual, linked_build)
+    support.link(source, actual, linked_build, capture_path=capture)
+    occurrences = source["linalg_host_support"]["occurrences"]
+    assert all(item["schema"] == schema and item["literal_bits"] for item in occurrences)
+    assert all(item["lowering_intrinsic_obligations"] is not None for item in occurrences)
+    assert support.linked_complete(json.loads(json.dumps(source)), entry, "d" * 64)
+    original = deepcopy(occurrences)
+    for mutation in (
+        {"literal_bits": []},
+        {"literal_bits": ["not-bits"]},
+        {"lowering_intrinsic_obligations": ["math.sin"]},
+        {"lowering_intrinsic_obligations": None},
+        {"schema": "merlin.static_f32_math_source_body.v1"},
+        {"linkage_requirement": None if operation == "literal_base_pow_f32" else {"symbols": ["powf"]}},
+    ):
+        source["linalg_host_support"]["occurrences"] = [{**original[0], **mutation}]
+        assert not support.linked_complete(source, entry, "d" * 64), mutation
+    source["linalg_host_support"]["occurrences"] = original
+    source["linalg_host_support"]["occurrences"] = []
+    source["linalg_host_support"]["count"] = 0
+    assert not support.linked_complete(source, entry, "d" * 64)
+    source["linalg_host_support"]["occurrences"] = original
+    source["linalg_host_support"]["count"] = 1
+    source["linalg_host_support"]["occurrences"][0]["literal_bits"] = ["0x3f800000"]
+    assert not support.linked_complete(source, entry, "d" * 64)
+    source["linalg_host_support"]["occurrences"] = original
+    model.write_text(_source(operation, literal_value="2.750000e+00"))
+    assert not support.linked_complete(source, entry, "d" * 64)
+    model.write_text(_source(operation))
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "model.mlir").write_text(_source(operation, literal_value="2.750000e+00"))
+    (other / "capture_receipt.json").write_bytes(receipt.read_bytes())
+    source["linalg_host_support"]["source_capture_path"] = str(other)
+    assert not support.linked_complete(source, entry, "d" * 64)
+    source["linalg_host_support"]["source_capture_path"] = str(capture)
+    recognize = support.recognize_static_composite_math_body
+
+    def changed_during_reparse(op):
+        pattern = recognize(op)
+        model.write_text(_source(operation, literal_value="2.750000e+00"))
+        return pattern
+
+    monkeypatch.setattr(support, "recognize_static_composite_math_body", changed_during_reparse)
+    assert not support.linked_complete(source, entry, "d" * 64)
+
+
+def test_composite_math_record_refuses_second_changed_source_occurrence():
+    parsed, row, joined, digest, admission = _case("merlin.static_composite_math_body.v1", "clamp_upper_literal")
+    changed = _op("clamp_upper_literal", literal_value="2.750000e+00")
+    # The changed constant is still a valid form, but no longer matches the pinned per-ordinal proof.
+    # A separate parsed instance with changed literal must not inherit the earlier occurrence proof.
+    with pytest.raises(ValueError, match="parsed source"):
+        support.record(support.begin(digest, digest, len(parsed)), row, admission, (parsed[0], changed), joined)
 
 
 def test_missing_and_empty_witness_are_distinct_and_mandatory():

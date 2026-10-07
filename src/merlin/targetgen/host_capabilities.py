@@ -9,7 +9,11 @@ from __future__ import annotations
 import copy
 
 from merlin.common.digest import is_sha256
-from merlin.targetgen.host_linkage_contract import validate_linkage_contract
+from merlin.targetgen.host_linkage_contract import (
+    required_composite_math_symbol,
+    validate_linkage_contract,
+    validate_source_linkage_contract,
+)
 from merlin.targetgen.software_spec import admit_operation, validate_quantization_parameters
 
 SCHEMA = "merlin.host_capabilities.v1"
@@ -53,21 +57,22 @@ def validate_host_capabilities(
         if "source_body" in row["signature"]:
             raise ValueError("source_body must be an explicit host declaration field, not a signature constraint")
         if "linkage_contract" in row:
-            from merlin.frontends.linalg_math_patterns import STATIC_F32_MATH_SOURCE_BODY_SCHEMA
-
-            if (
-                not isinstance(row.get("source_body"), dict)
-                or row["source_body"].get("schema") != STATIC_F32_MATH_SOURCE_BODY_SCHEMA
-                or row["source_body"].get("operation") not in {"math.sin", "math.cos"}
-            ):
-                raise ValueError("linkage contract needs a static unary f32 math declaration")
-            validate_linkage_contract(row["linkage_contract"])
+            body = row.get("source_body")
+            validate_source_linkage_contract(
+                body.get("schema") if isinstance(body, dict) else None,
+                body.get("operation") if isinstance(body, dict) else None,
+                row["linkage_contract"],
+            )
         if "source_body" in row:
             from merlin.frontends.linalg_boolean_patterns import (
                 DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA,
                 STATIC_BOOLEAN_SOURCE_BODY_SCHEMA,
                 validate_dynamic_boolean_cast_source_body,
                 validate_static_boolean_source_body,
+            )
+            from merlin.frontends.linalg_composite_math import (
+                STATIC_COMPOSITE_MATH_SOURCE_BODY_SCHEMA,
+                validate_static_composite_math_source_body,
             )
             from merlin.frontends.linalg_math_patterns import (
                 STATIC_F32_MATH_SOURCE_BODY_SCHEMA,
@@ -102,6 +107,10 @@ def validate_host_capabilities(
                 validate_dynamic_boolean_cast_source_body(body)
             elif isinstance(body, dict) and body.get("schema") == STATIC_F32_MATH_SOURCE_BODY_SCHEMA:
                 validate_static_f32_math_source_body(body)
+            elif isinstance(body, dict) and body.get("schema") == STATIC_COMPOSITE_MATH_SOURCE_BODY_SCHEMA:
+                validate_static_composite_math_source_body(body)
+                if required_composite_math_symbol(body["schema"], body["operation"]) and "linkage_contract" not in row:
+                    raise ValueError("composite math source requires an exact selected linkage contract")
             elif isinstance(body, dict) and body.get("schema") == STATIC_PROJECTED_POINTWISE_BODY_SCHEMA:
                 validate_static_projected_pointwise_source_body(body)
             else:
@@ -131,6 +140,10 @@ def _screen_source_body(declaration: dict, row: dict, signature: dict, source_op
         recognize_dynamic_boolean_cast_body,
         recognize_static_boolean_body,
     )
+    from merlin.frontends.linalg_composite_math import (
+        STATIC_COMPOSITE_MATH_SOURCE_BODY_SCHEMA,
+        recognize_static_composite_math_body,
+    )
     from merlin.frontends.linalg_math_patterns import (
         STATIC_F32_MATH_SOURCE_BODY_SCHEMA,
         recognize_static_f32_math_body,
@@ -157,6 +170,7 @@ def _screen_source_body(declaration: dict, row: dict, signature: dict, source_op
             STATIC_BOOLEAN_SOURCE_BODY_SCHEMA: recognize_static_boolean_body,
             DYNAMIC_BOOLEAN_CAST_SOURCE_BODY_SCHEMA: recognize_dynamic_boolean_cast_body,
             STATIC_F32_MATH_SOURCE_BODY_SCHEMA: recognize_static_f32_math_body,
+            STATIC_COMPOSITE_MATH_SOURCE_BODY_SCHEMA: recognize_static_composite_math_body,
             STATIC_PROJECTED_POINTWISE_BODY_SCHEMA: recognize_static_projected_pointwise,
         }.get(body["schema"], recognize_static_pointwise)
         patterns = tuple(recognizer(op) for op in source_operations)

@@ -18,14 +18,14 @@ from merlin.llvmlower.compilation_recipe import verify_completed_recipe
 from merlin.llvmlower.link_supplier_trace import trace_symbol_flags
 from merlin.mining.registry import load_rvv_package
 from merlin.runtime.backends import spike, spike_model
-from merlin.targetgen.host_linkage_contract import validate_linkage_contract
+from merlin.targetgen.host_linkage_contract import validate_source_linkage_contract
 
 FIELD = "host_linkage_support"
 PENDING = "reviewed_source_linkage_requirement_pending_build"
 LINKED = "reviewed_source_linkage_supplier_verified"
 SCOPE = "exact reviewed source ordinals and actual defining archive; source-call and numerical proof excluded"
 _BUILD = {"capture_tree_sha256", "candidate_tree_sha256", "elf_sha256"}
-_OCCURRENCE = {"ordinal", "profile", "capability_spec_sha256", "declaration", "operation", "contract"}
+_OCCURRENCE = {"ordinal", "profile", "capability_spec_sha256", "declaration", "schema", "operation", "contract"}
 _TOP = {
     "status",
     "scope",
@@ -92,13 +92,14 @@ def record(
         != (body.get("profile"), body.get("capability_spec_sha256"), body.get("declaration"))
     ):
         raise ValueError("linkage requirement has no exact reviewed source occurrence roster")
-    contract = validate_linkage_contract(requirement["contract"])
+    contract = validate_source_linkage_contract(body.get("schema"), body.get("operation"), requirement["contract"])
     seen = {item["ordinal"] for item in witness["occurrences"]}
     for ordinal in ordinals:
         matches = [
             item
             for item in proved
             if item.get("ordinal") == ordinal
+            and item.get("schema") == body.get("schema")
             and item.get("profile") == requirement["profile"]
             and item.get("capability_spec_sha256") == requirement["capability_spec_sha256"]
             and item.get("declaration") == requirement["declaration"]
@@ -120,6 +121,7 @@ def record(
                 "profile": requirement["profile"],
                 "capability_spec_sha256": requirement["capability_spec_sha256"],
                 "declaration": requirement["declaration"],
+                "schema": body["schema"],
                 "operation": body["operation"],
                 "contract": deepcopy(contract),
             }
@@ -138,7 +140,13 @@ def symbols(source: Mapping[str, Any]) -> list[str] | None:
     if not isinstance(occurrences, list) or witness.get("count") != len(occurrences):
         raise ValueError("source linkage roster is incomplete")
     selected = sorted(
-        {symbol for item in occurrences for symbol in validate_linkage_contract(item["contract"])["symbols"]}
+        {
+            symbol
+            for item in occurrences
+            for symbol in validate_source_linkage_contract(item["schema"], item["operation"], item["contract"])[
+                "symbols"
+            ]
+        }
     )
     if selected:
         trace_symbol_flags(selected)
@@ -247,7 +255,10 @@ def link(
     if selected_symbols is None:
         witness.update(status=LINKED, linked_build=dict(linked_build))
         return
-    contracts = [validate_linkage_contract(item["contract"]) for item in witness["occurrences"]]
+    contracts = [
+        validate_source_linkage_contract(item["schema"], item["operation"], item["contract"])
+        for item in witness["occurrences"]
+    ]
     selected = _selected_archive(host_package, host_package_tree_sha256, vlen, dts, dts_sha256)
     if (selected["host_isa"], selected["simulator_isa"]) != (host_isa, simulator_isa):
         raise ValueError("linkage build differs from independently selected host ISA")
@@ -336,6 +347,7 @@ def linked_complete(source: Mapping[str, Any], entry: Mapping[str, Any], candida
             "profile": item.get("profile"),
             "capability_spec_sha256": item.get("capability_spec_sha256"),
             "declaration": item.get("declaration"),
+            "schema": item.get("schema"),
             "operation": item.get("operation"),
             "contract": item.get("linkage_requirement"),
         }
@@ -363,13 +375,14 @@ def linked_complete(source: Mapping[str, Any], entry: Mapping[str, Any], candida
                         and row.get("profile") == item["profile"]
                         and row.get("capability_spec_sha256") == item["capability_spec_sha256"]
                         and row.get("declaration") == item["declaration"]
+                        and row.get("schema") == item["schema"]
                         and row.get("operation") == item["operation"]
                     ]
                 )
                 != 1
             ):
                 return False
-            validate_linkage_contract(item["contract"])
+            validate_source_linkage_contract(item["schema"], item["operation"], item["contract"])
             seen.add(ordinal)
         selected_symbols = sorted({symbol for item in occurrences for symbol in item["contract"]["symbols"]})
         if not selected_symbols:

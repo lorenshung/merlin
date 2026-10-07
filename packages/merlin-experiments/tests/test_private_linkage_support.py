@@ -37,30 +37,74 @@ _SOURCE = """module {
     return %out : tensor<3xf32>
   }
 }"""
+_SOURCE_POW = _SOURCE.replace(
+    '        %sin = "math.sin"(%value) <{fastmath = #arith.fastmath<none>}> : (f32) -> f32',
+    '        %base = "arith.constant"() <{value = 3.250000e+00 : f32}> : () -> f32\n'
+    '        %sin = "math.powf"(%base, %value) '
+    "<{fastmath = #arith.fastmath<none>}> : (f32, f32) -> f32",
+)
+_SOURCE_GELU = _SOURCE.replace(
+    '        %sin = "math.sin"(%value) <{fastmath = #arith.fastmath<none>}> : (f32) -> f32',
+    "\n".join(
+        (
+            '        %half = "arith.constant"() <{value = 5.000000e-01 : f32}> : () -> f32',
+            '        %one = "arith.constant"() <{value = 1.000000e+00 : f32}> : () -> f32',
+            '        %cubic = "arith.constant"() <{value = 4.471500e-02 : f32}> : () -> f32',
+            '        %scale = "arith.constant"() <{value = 7.9788456e-01 : f32}> : () -> f32',
+            '        %square = "arith.mulf"(%value, %value) : (f32, f32) -> f32',
+            '        %cube = "arith.mulf"(%square, %value) : (f32, f32) -> f32',
+            '        %scaled = "arith.mulf"(%cubic, %cube) : (f32, f32) -> f32',
+            '        %plus = "arith.addf"(%value, %scaled) : (f32, f32) -> f32',
+            '        %inner = "arith.mulf"(%scale, %plus) : (f32, f32) -> f32',
+            '        %tanh = "math.tanh"(%inner) : (f32) -> f32',
+            '        %shifted = "arith.addf"(%one, %tanh) : (f32, f32) -> f32',
+            '        %half_input = "arith.mulf"(%half, %value) : (f32, f32) -> f32',
+            '        %sin = "arith.mulf"(%half_input, %shifted) : (f32, f32) -> f32',
+        )
+    ),
+)
 
 
-def _declaration(archive_sha: str) -> dict:
+def _source(operation: str) -> str:
+    return {
+        "math.sin": _SOURCE,
+        "literal_base_pow_f32": _SOURCE_POW,
+        "tanh_gelu_f32": _SOURCE_GELU,
+    }[operation]
+
+
+def _declaration(archive_sha: str, *, operation: str = "math.sin") -> dict:
+    composite = operation in {"literal_base_pow_f32", "tanh_gelu_f32"}
     return {
         "id": "reviewed_neutral_sine",
         "ops": ["linalg.generic"],
         "placement": "host",
         "signature": {"ordered_operand_dtypes": ["f32", "f32"], "ordered_result_dtypes": ["f32"], "ranks": [1]},
-        "source_body": {"schema": "merlin.static_f32_math_source_body.v1", "operation": "math.sin"},
+        "source_body": {
+            "schema": "merlin.static_composite_math_body.v1" if composite else "merlin.static_f32_math_source_body.v1",
+            "operation": operation,
+        },
         "linkage_contract": {
             "schema": SCHEMA,
             "supplier": SUPPLIER,
             "archive_sha256": archive_sha,
-            "symbols": ["sinf"],
+            "symbols": ["powf" if operation == "literal_base_pow_f32" else "tanhf" if composite else "sinf"],
         },
     }
 
 
 def _admission(
-    archive_sha: str, *, source: bool = True, reviewed: bool = True, misplaced: bool = False
+    archive_sha: str,
+    *,
+    source: bool = True,
+    reviewed: bool = True,
+    misplaced: bool = False,
+    operation: str = "math.sin",
 ) -> tuple[dict, dict, tuple]:
-    parsed = (next(mq.walk(mq.parse(_SOURCE), "linalg.generic")),)
+    program = _source(operation)
+    parsed = (next(mq.walk(mq.parse(program), "linalg.generic")),)
     row = {"mlir_operation": "linalg.generic", "count": 1, "ordinals": [0]}
-    declaration = _declaration(archive_sha)
+    declaration = _declaration(archive_sha, operation=operation)
     if misplaced:
         declaration["numerical_contract"] = {"linkage_contract": declaration.pop("linkage_contract")}
     selected = {
@@ -139,15 +183,16 @@ def test_contract_is_closed_and_source_only_decision_stays_pending():
     assert "linkage_requirement" not in _admission("c" * 64, reviewed=False)[0]
 
 
-def _bundle(path: Path) -> Path:
+def _bundle(path: Path, *, operation: str = "math.sin") -> Path:
     path.mkdir()
-    (path / "model.mlir").write_text(_SOURCE, encoding="utf-8")
+    (path / "model.mlir").write_text(_source(operation), encoding="utf-8")
     (path / "weights.safetensors.manifest.json").write_text('{"0":{"kind":"input","name":"values"}}')
     np.savez(path / "inputs.npz", in0=np.array([-1.0, 0.0, 1.0], dtype=np.float32))
     return path
 
 
-def test_real_sine_link_supplier_joins_reviewed_source_and_rejects_override(tmp_path):
+@pytest.mark.parametrize("operation", ("math.sin", "literal_base_pow_f32", "tanh_gelu_f32"))
+def test_real_math_link_supplier_joins_reviewed_source_and_rejects_override(tmp_path, operation):
     package_name = os.environ.get("MERLIN_TEST_HOST_PACKAGE")
     if not package_name or not spike.gcc_path().is_file() or not toolchain.m2m_python().is_file():
         pytest.skip("explicit neutral host package and cross toolchain not selected")
@@ -161,7 +206,7 @@ def test_real_sine_link_supplier_joins_reviewed_source_and_rejects_override(tmp_
     dts = tmp_path / "neutral.dts"
     dts.write_text('/ { cpus { cpu@0 { riscv,isa = "' + march[0] + '"; }; }; };')
     selected = linkage._selected_archive(package, package_sha, None, dts, sha256_file(dts))
-    admission, row, parsed = _admission(selected["archive_sha256"])
+    admission, row, parsed = _admission(selected["archive_sha256"], operation=operation)
     raw = "d" * 64
     linalg_witness = linalg.begin(raw, raw, 1)
     linalg.record(linalg_witness, row, admission, parsed, {0: row})
@@ -174,9 +219,10 @@ def test_real_sine_link_supplier_joins_reviewed_source_and_rejects_override(tmp_
         "linalg_host_support": linalg_witness,
         linkage.FIELD: witness,
     }
-    assert linkage.symbols(source) == ["sinf"]
+    symbol = "powf" if operation == "literal_base_pow_f32" else "tanhf" if operation == "tanh_gelu_f32" else "sinf"
+    assert linkage.symbols(source) == [symbol]
     built = spike_model.build(
-        _bundle(tmp_path / "bundle"),
+        _bundle(tmp_path / "bundle", operation=operation),
         tmp_path / "build",
         arena_mb=1,
         backend="scalar",
@@ -240,7 +286,7 @@ def test_real_sine_link_supplier_joins_reviewed_source_and_rejects_override(tmp_
     dts.write_bytes(original_dts)
     # Rehashing a forged observed supplier does not make it independently selected.
     document = json.loads(recipe.read_text(encoding="utf-8"))
-    document["link_suppliers"]["symbols"]["sinf"]["definition"] = str(elf.parent / "model.o")
+    document["link_suppliers"]["symbols"][symbol]["definition"] = str(elf.parent / "model.o")
     recipe.write_text(json.dumps(document), encoding="utf-8")
     entry["compilation_recipe"]["recipe_sha256"] = sha256_file(recipe)
     assert not linkage.linked_complete(source, entry, "e" * 64)

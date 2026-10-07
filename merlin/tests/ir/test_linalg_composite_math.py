@@ -19,6 +19,9 @@ from merlin.frontends.linalg_composite_math import (
     validate_static_composite_math_source_body,
 )
 from merlin.frontends.linalg_patterns import InvalidLinalgPattern
+from merlin.targetgen.host_capabilities import admit_host_operation, validate_host_capabilities
+from merlin.targetgen.host_linkage_contract import SCHEMA as LINKAGE_SCHEMA
+from merlin.targetgen.host_linkage_contract import SUPPLIER
 
 
 def _body(kind: str) -> str:
@@ -226,3 +229,103 @@ def test_source_screen_pins_raw_and_normalized_bytes_and_ordinals(tmp_path):
     for bad in ((True,), (-1,), (ordinal, ordinal), (10000,)):
         with pytest.raises(InvalidLinalgPattern):
             screen_static_composite_math_source(path, bad)
+
+
+def _synthetic_host(kind: str, *, symbol: str | None = None):
+    proof = recognize_static_composite_math_body(_generic(_program(kind)))
+    declaration = {
+        "id": "neutral_math",
+        "ops": ["linalg.generic"],
+        "placement": "host",
+        "signature": {
+            "ordered_operand_dtypes": list(proof.ordered_types[:-1]),
+            "ordered_result_dtypes": [proof.ordered_types[-1]],
+            "ranks": [2],
+        },
+        "source_body": {"schema": STATIC_COMPOSITE_MATH_SOURCE_BODY_SCHEMA, "operation": kind},
+        "numerical_contract": {"status": "unreviewed"},
+    }
+    if symbol is not None:
+        declaration["linkage_contract"] = {
+            "schema": LINKAGE_SCHEMA,
+            "supplier": SUPPLIER,
+            "archive_sha256": "c" * 64,
+            "symbols": [symbol],
+        }
+    selected = {
+        "host": {
+            "package_sha256": "a" * 64,
+            "capability_spec_sha256": "b" * 64,
+            "dtype_strategy": "int8_w8a8",
+            "capability_spec": {
+                "schema": "merlin.host_capabilities.v1",
+                "status": "reviewed",
+                "compiler": {"package_sha256": "a" * 64, "dtype_strategy": "int8_w8a8"},
+                "operations": [declaration],
+                "evidence": {"scope": "neutral placement declaration only"},
+            },
+        }
+    }
+    return selected, proof
+
+
+@pytest.mark.parametrize(
+    ("kind", "symbol"),
+    (
+        ("clamp_upper_literal", None),
+        ("reciprocal_signed_i64_to_f32", None),
+        ("literal_base_pow_f32", "powf"),
+        ("tanh_gelu_f32", "tanhf"),
+    ),
+)
+def test_host_declaration_requires_every_exact_parsed_body_and_only_pending_linkage(kind, symbol):
+    selected, proof = _synthetic_host(kind, symbol=symbol)
+    validate_host_capabilities(selected["host"]["capability_spec"])
+    row = {"mlir_operation": "linalg.generic", "count": 2}
+    signature = {
+        "family": "elementwise_map",
+        "ordered_operand_dtypes": list(proof.ordered_types[:-1]),
+        "ordered_result_dtypes": [proof.ordered_types[-1]],
+        "rank": 2,
+    }
+    good = (_generic(_program(kind)), _generic(_program(kind)))
+    assert admit_host_operation(selected, row, signature)["status"] == "unknown"
+    admitted = admit_host_operation(selected, row, signature, source_operations=good)
+    assert admitted["status"] == "admitted"  # Synthetic reviewed placement only.
+    assert admitted["source_body_proof"]["patterns"][0]["literal_bits"] == proof.literal_bits
+    assert admitted["source_body_proof"]["patterns"][0]["lowering_intrinsic_obligations"] == (
+        proof.lowering_intrinsic_obligations
+    )
+    assert (admitted.get("linkage_requirement") is not None) == (symbol is not None)
+    assert "numerical" not in admitted["qualification"]
+    changed = (
+        _program(kind).replace("2.250000e+00", "2.750000e+00")
+        if symbol is None
+        else _program(kind).replace("3.250000e+00", "4.250000e+00")
+    )
+    if changed != _program(kind):
+        differing_literals = admit_host_operation(
+            selected, row, signature, source_operations=(good[0], _generic(changed))
+        )
+        assert differing_literals["status"] == "admitted"
+        assert (
+            differing_literals["source_body_proof"]["patterns"][0]["literal_bits"]
+            != differing_literals["source_body_proof"]["patterns"][1]["literal_bits"]
+        )
+    assert admit_host_operation(selected, row, signature, source_operations=good[:1])["status"] == "unsupported"
+
+
+@pytest.mark.parametrize(("kind", "symbol"), (("literal_base_pow_f32", "powf"), ("tanh_gelu_f32", "tanhf")))
+def test_selected_math_symbol_contract_is_mandatory_and_exact(kind, symbol):
+    selected, _ = _synthetic_host(kind, symbol=symbol)
+    row = selected["host"]["capability_spec"]["operations"][0]
+    for contract in (None, {**row["linkage_contract"], "symbols": ["other"]}):
+        if contract is None:
+            row.pop("linkage_contract")
+        else:
+            row["linkage_contract"] = contract
+        with pytest.raises(ValueError, match="linkage"):
+            validate_host_capabilities(selected["host"]["capability_spec"])
+    clamp, _ = _synthetic_host("clamp_upper_literal", symbol="powf")
+    with pytest.raises(ValueError, match="linkage"):
+        validate_host_capabilities(clamp["host"]["capability_spec"])

@@ -401,6 +401,8 @@ def test_complete_requires_current_candidate_all_programs_and_device_work(monkey
     assert not gate.complete(record, **kwargs)
     record["schema"] = "merlin.phase1.private_full_model_build_gate.v9"
     assert not gate.complete(record, **kwargs)
+    record["schema"] = "merlin.phase1.private_full_model_build_gate.v10"
+    assert not gate.complete(record, **kwargs)
     record["schema"] = gate.RESULT_SCHEMA
     record["models"][0]["checks"]["source"]["prefix"].pop("n_internal_mask_compactions")
     assert not gate.complete(record, **kwargs)
