@@ -125,6 +125,17 @@ and the reduction extent. For unrestricted signed int8 inputs, K=31 passes its
 conservative i20 bound and K=32 does not. Wider accumulator storage or a small
 final result does not prove that intermediate partial sums avoided wrapping.
 
+Host placement and numerical equivalence are separate reviews. The new static
+source-body declarations admit only their exact parsed scalar operations and
+affine maps for build/link/host-placement checks; their numerical contracts remain
+unreviewed. Sine/cosine additionally require the actual linked `sinf`/`cosf`
+supplier to match the selected archive; source-call-to-symbol routing is not
+proved. This is not a PyTorch equivalence proof:
+the finite strict sine/cosine probes each differed by one ULP in two cases.
+No tolerance is relaxed, and no accelerator eligibility is replaced by host
+placement. Literal ranges and ordered scans also require their dedicated
+source, selected-index and linked-build witnesses.
+
 The selected Rocket CPUs have no V extension. Mint the descriptor's scalar
 host package from the checked-in recipe before deriving a new Phase 0 corpus:
 

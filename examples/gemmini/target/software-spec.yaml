@@ -170,6 +170,46 @@ operations:
     families: [elementwise_map]
     placement: host
     signature: {family: elementwise_map, ordered_operand_dtypes: [i64, f32], ordered_result_dtypes: [f32], ranks: [1, 3]}
+  # Selected-source build/link placement only. Numerical equivalence remains
+  # an independent obligation; these are not accelerator capability declarations.
+  host_review_f32_add_r1: {status: reviewed, ops: [aten.add.Tensor], families: [elementwise_map], placement: host, signature: {family: elementwise_map, ordered_operand_dtypes: [f32, f32, f32], ordered_result_dtypes: [f32], ranks: [1]}}
+  host_review_f32_mul_r1: {status: reviewed, ops: [aten.mul.Tensor], families: [elementwise_map], placement: host, signature: {family: elementwise_map, ordered_operand_dtypes: [f32, f32, f32], ordered_result_dtypes: [f32], ranks: [1]}}
+  host_review_f32_sub_r1_4: {status: reviewed, ops: [aten.sub.Tensor], families: [elementwise_map], placement: host, signature: {family: elementwise_map, ordered_operand_dtypes: [f32, f32, f32], ordered_result_dtypes: [f32], ranks: [1, 2, 3, 4]}}
+  host_review_f32_neg_r1_3: {status: reviewed, ops: [aten.neg.default], families: [elementwise_map], placement: host, signature: {family: elementwise_map, ordered_operand_dtypes: [f32, f32], ordered_result_dtypes: [f32], ranks: [1, 2, 3]}}
+  host_review_f32_le_r1_4: {status: reviewed, ops: [aten.le.Tensor], families: [elementwise_map], placement: host, signature: {family: elementwise_map, ordered_operand_dtypes: [f32, f32, i1], ordered_result_dtypes: [i1], ranks: [1, 2, 3, 4]}}
+  host_review_f32_select_r1_3: {status: reviewed, ops: [aten.where.self], families: [elementwise_map], placement: host, signature: {family: elementwise_map, ordered_operand_dtypes: [i1, f32, f32, f32], ordered_result_dtypes: [f32], ranks: [1, 2, 3]}}
+  host_review_f32_nonzero_r1_4: {status: reviewed, ops: [aten._to_copy.default], families: [elementwise_map], placement: host, signature: {family: elementwise_map, ordered_operand_dtypes: [f32, i1], ordered_result_dtypes: [i1], ranks: [1, 2, 3, 4]}}
+  host_review_i64_add_r2_4: {status: reviewed, ops: [aten.add.Tensor], families: [elementwise_map], placement: host, signature: {family: elementwise_map, ordered_operand_dtypes: [i64, i64, i64], ordered_result_dtypes: [i64], ranks: [2, 3, 4]}}
+  host_review_i64_sub_r1_4: {status: reviewed, ops: [aten.sub.Tensor], families: [elementwise_map], placement: host, signature: {family: elementwise_map, ordered_operand_dtypes: [i64, i64, i64], ordered_result_dtypes: [i64], ranks: [1, 2, 3, 4]}}
+  host_review_i64_mul_r1_4: {status: reviewed, ops: [aten.mul.Tensor], families: [elementwise_map], placement: host, signature: {family: elementwise_map, ordered_operand_dtypes: [i64, i64, i64], ordered_result_dtypes: [i64], ranks: [1, 2, 3, 4]}}
+  host_review_i64_le_r2_3: {status: reviewed, ops: [aten.le.Tensor], families: [elementwise_map], placement: host, signature: {family: elementwise_map, ordered_operand_dtypes: [i64, i64, i1], ordered_result_dtypes: [i1], ranks: [2, 3]}}
+  host_review_i64_to_f32_r2_4: {status: reviewed, ops: [aten._to_copy.default], families: [elementwise_map], placement: host, signature: {family: elementwise_map, ordered_operand_dtypes: [i64, f32], ordered_result_dtypes: [f32], ranks: [2, 4]}}
+  host_review_i1_to_f32_r2_3: {status: reviewed, ops: [aten._to_copy.default], families: [elementwise_map], placement: host, signature: {family: elementwise_map, ordered_operand_dtypes: [i1, f32], ordered_result_dtypes: [f32], ranks: [2, 3]}}
+  host_review_i1_to_i64_r1_4: {status: reviewed, ops: [aten._to_copy.default], families: [elementwise_map], placement: host, signature: {family: elementwise_map, ordered_operand_dtypes: [i1, i64], ordered_result_dtypes: [i64], ranks: [1, 2, 3, 4]}}
+  host_review_i1_and_r1_4: {status: reviewed, ops: [aten.bitwise_and.Tensor], families: [elementwise_map], placement: host, signature: {family: elementwise_map, ordered_operand_dtypes: [i1, i1, i1], ordered_result_dtypes: [i1], ranks: [1, 2, 3, 4]}}
+  host_review_i1_xor_r1_4: {status: reviewed, ops: [aten.bitwise_xor.Tensor], families: [elementwise_map], placement: host, signature: {family: elementwise_map, ordered_operand_dtypes: [i1, i1, i1], ordered_result_dtypes: [i1], ranks: [1, 2, 3, 4]}}
+  host_review_i1_not_r1_4: {status: reviewed, ops: [aten.bitwise_not.default], families: [elementwise_map], placement: host, signature: {family: elementwise_map, ordered_operand_dtypes: [i1, i1], ordered_result_dtypes: [i1], ranks: [1, 2, 3, 4]}}
+  host_review_i1_mul_projected_r1_4: {status: reviewed, ops: [aten.mul.Tensor], families: [elementwise_map], placement: host, signature: {family: elementwise_map, ordered_operand_dtypes: [i1, i1, i1], ordered_result_dtypes: [i1], ranks: [1, 2, 3, 4]}}
+  # Separate prepared literal constructor, not one pointwise scalar body.
+  host_review_literal_i64_arange_start_step_r1: {status: reviewed, ops: [aten.arange.start_step], families: [elementwise_map], placement: host, signature: {family: elementwise_map, ordered_operand_dtypes: [i64], ordered_result_dtypes: [i64], ranks: [1]}}
+  host_review_selected_libm_sinf_f32:
+    status: reviewed
+    ops: [aten.sin.default]
+    families: [elementwise_map]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [f32, f32], ordered_result_dtypes: [f32]}
+  host_review_selected_libm_cosf_f32:
+    status: reviewed
+    ops: [aten.cos.default]
+    families: [elementwise_map]
+    placement: host
+    signature: {family: elementwise_map, ordered_operand_dtypes: [f32, f32], ordered_result_dtypes: [f32]}
+  host_review_prepared_ordered_f32_cumsum_f64:
+    status: reviewed
+    ops: [aten.cumsum.default]
+    families: [reduction]
+    placement: host
+    signature: {family: reduction, ordered_operand_dtypes: [f32], ordered_result_dtypes: [f32], compute_dtypes: [f64]}
 restrictions:
   # Keep this guard if a later readout declaration claims bias: a two-load operand sum has no
   # reviewed bias seed, and this restriction prevents that claim from entering its derived form.
