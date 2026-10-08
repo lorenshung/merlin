@@ -219,7 +219,7 @@ def test_guardless_corpus_with_any_lane_expectation(tmp_path, monkeypatch):
     assert result["counts"] == {"public": 1, "hidden": 1, "host_guard": 0}
     install_writer(monkeypatch)
     generated = tmp_path / "run/phase0/capsules"
-    stage.generate(Path(result["recipe"]), generated, target="synthetic", descriptor=tmp_path / "descriptor.yaml")
+    stage.generate(Path(result["recipe"]), generated, target="synthetic")
     declared = yaml.safe_load((generated / "public/public/capsule.yaml").read_bytes())
     assert declared["lane_expectation"] == "any" and declared["scored"] is True
     assert "lanes" not in declared and declared["semantic"] == {"must_accelerate": False}
