@@ -3,10 +3,12 @@ title: Optional lowering passes — list, select, copy
 kind: guide
 status: current
 owner: compiler
-last_verified: 2026-10-06
+last_verified: 2026-10-08
 related: [model_lowering, whole_model_on_accelerator, extending_the_stack]
 code_refs: [src/merlin/llvmlower/optional_passes.py,
             src/merlin/llvmlower/int_softmax_table.py,
+            src/merlin/llvmlower/normalization_reassociation.py,
+            src/merlin/llvmlower/passes_xdsl.py,
             src/merlin/compile/command.py,
             src/merlin/perf/whole_model_builder.py]
 ---
@@ -52,7 +54,8 @@ Each entry names the switch that already existed, and selecting it flips that sw
 
 * a **lowering feature** (`merlin.llvmlower.impr_features`), added to or removed from the feature set
   `lower_to_llvm_ir` builds;
-* a **`MERLIN_*` variable** (`MERLIN_FUSION_GUARD`, `MERLIN_SINK_DEALLOCS`, `MERLIN_STATIC_ARENA`). An
+* a **`MERLIN_*` variable** (`MERLIN_FUSION_GUARD`, `MERLIN_SINK_DEALLOCS`, `MERLIN_STATIC_ARENA`,
+  `MERLIN_LAYER_NORM_CHUNKED_SUMS`). An
   explicit selection wins over the variable, which still works on its own for A/B builds;
 * a pass of the **integer datapath** (`merlin.llvmlower.quant_passes`), added to or removed from the
   set `apply_quant` runs.
@@ -78,6 +81,27 @@ reason (`int_softmax_table_report.json` beside the lowered IR). `merlin/tests/ir
 runs the captured and the rewritten modules on the same inputs and requires identical bits. It covers
 the table at every grid index, the softmax alone, and two whole int8 attentions, including flat rows
 whose quantization scale clamps to its eps. The fixtures live in `merlin/tests/data/int_softmax_table/`.
+
+## layer-norm-chunked-sums
+
+A LayerNorm's row sum is one long chain of f32 additions. `layer-norm-chunked-sums`
+(`merlin.llvmlower.normalization_reassociation`) splits the row into contiguous 32-element chunks, sums
+each chunk into a fresh `+0.0` partial, and sums the partials. It runs in the lowering's xDSL
+preprocessing, after the quantization rewrite and before the module is handed to upstream MLIR.
+
+It is **numerics-changing**. Selecting it is the explicit permission for two things the source does not
+grant: reassociating those additions, and assuming the intermediates stay finite. A partial sum that
+overflows in one order may stay finite in another, and NaN payloads and exception order are not
+preserved. Grade a build that selects it against its own reference.
+
+It matches structure only. A `linalg.reduce` is rewritten only when its provenance names the operation
+kind `layer_norm`, it adds f32 values over the innermost axis, that axis has a static extent of at
+least two chunks and divisible by the chunk, and its initial value is a `+0.0` splat. Every other
+reduction is left byte-identical. The rewritten reduction and its new partial-sum generic carry
+`merlin.normalization_reassociation`, so a second application finds nothing. When the lowering
+records a source transform map, the reduction owns the operations the rewrite adds.
+`merlin/tests/ir/test_normalization_reassociation.py` checks the scope, both permissions, the default-off
+seam, and that the rewritten sum equals the source sum on inputs whose partial sums are exact.
 
 ## Adding one
 

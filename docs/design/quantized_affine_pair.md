@@ -3,11 +3,12 @@ title: "Design: exact quantized affine pair certificates"
 kind: design
 status: draft
 owner: core
-last_verified: 2026-10-05
+last_verified: 2026-10-08
 related: [agent_compiler_performance]
 code_refs:
   - src/merlin/llvmlower/quantized_affine_pair.py
   - merlin/tests/ir/test_quantized_affine_pair.py
+  - merlin/tests/ir/test_quantized_affine_source_word.py
 ---
 
 # Exact quantized affine pair certificates
@@ -59,3 +60,13 @@ The first provider experiment rejected standalone CPU correction despite a much
 faster predictor because the complete path was slower. Optimizers must retain
 that distinction when considering correction fused with an already required
 host operation or a different target implementation.
+
+An explicit source-word guard narrows the scan without changing the certificate.
+From the sparse pair predicate it derives the raw bytes that every correction
+pair must contain on one operand axis, choosing the axis with fewer distinct
+bytes as a code-size ranking. An aligned eight-lane source word that holds none
+of them cannot contain a correction, so it skips the pair checks and reads neither
+the other source nor the predicted output; a word with a possible hit checks its
+lanes with the exact pair predicate. The guard is exact over the complete domain,
+including adjacent-borrow cases of the any-byte test, but its hit rate on real
+inputs is unknown, so it carries the same performance admission as the scan.

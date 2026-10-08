@@ -358,6 +358,10 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
   `MERLIN_*` variable, an integer-datapath pass, a capture key). A selection (`--pass`/`--no-pass`,
   the builder's `lowering_passes`, `MERLIN_PASSES`) flips exactly those switches; an empty one changes
   nothing. A new optional pass gets an entry there.
+- `normalization_reassociation.py` — the numerics-changing `layer-norm-chunked-sums` rewrite (default
+  off): a `prov.op = "layer_norm"` f32 innermost-axis row sum becomes a sum of contiguous chunk sums.
+  `passes_xdsl._preprocess_module` runs it only when selected; selecting it grants both reassociation
+  and finite intermediates, and anything outside its strict scope is left unchanged.
 - `int_softmax_table.py` + `_int_softmax_table_rt.py` — the `int-softmax-table` rewrite. The `_rt` file
   is runner SOURCE (spliced into every runner variant, executed by the compiler's Python), not a module
   Merlin calls: keep it self-contained and its names `_ist_`-prefixed. It runs on the module as parsed,
@@ -417,6 +421,10 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
   cardinality. Complete-domain enumeration proves predicate identity, including
   empty and multiple-pair relations. Ordered floating replay is unchanged;
   actual load scheduling and full producer/correction cost require qualification.
+  Its explicit `source_word_guard` (with a sparse limit and the packed prefix) derives
+  the raw bytes every correction pair must contain on one operand axis; an aligned
+  eight-lane source word holding none of them skips the pair checks without
+  reading the other source or the output. Its runtime hit rate is UNKNOWN.
 - `quantized_affine_rectifier.py` synthesizes optional exact sparse finite-domain
   corrections from the complete ordered binary32 pair certificate. Positional
   keys or clipped per-axis offsets prove singleton indicators over every signed

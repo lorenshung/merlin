@@ -296,7 +296,48 @@ def derive_sparse_pair_predicate(proof, *, limit):
     )
 
 
-def emit_correction(proof, symbol, *, packed_prefix=True, output_value_guard=False, sparse_pair_limit=0):
+def derive_source_word_guard(proof, *, limit):
+    """Derive source bytes which every complete correction pair must contain.
+
+    A rejected word cannot contain a mismatch, so it requires no access to the
+    other source or predicted output. Choose the axis with fewer distinct bytes
+    as an explicit code-size ranking; runtime hit rate and cost remain unknown.
+    The boolean zero-byte test accepts every hit, including adjacent borrow
+    cases. Individual suspect lanes still require the exact pair predicate.
+    """
+    sparse = derive_sparse_pair_predicate(proof, limit=limit)
+    lhs = sorted(row["lhs_raw"] for row in sparse["groups"])
+    rhs = sorted({byte for row in sparse["groups"] for byte in row["rhs_raw"]})
+    axis, values = ("lhs", lhs) if len(lhs) <= len(rhs) else ("rhs", rhs)
+    return dict(
+        schema="quantized_affine_source_word_guard_v1",
+        source_table_sha256=proof["source_table_sha256"],
+        predictor_table_sha256=proof["predictor_table_sha256"],
+        correction_bitmap_sha256=proof["correction_bitmap_sha256"],
+        pairs=65536,
+        sparse_cardinality=sparse["cardinality"],
+        axis=axis,
+        raw_byte_values=values,
+        scope=(
+            "No-hit source words prove every predicted lane source-exact; "
+            "suspect words require exact pair tests; immutable sources and disjoint fresh output required"
+        ),
+        runtime_hit_rate="UNKNOWN",
+    )
+
+
+def _source_word_hit_expression(values):
+    """Boolean any-byte equality; high-bit positions may include borrow flags."""
+    terms = []
+    for byte in values:
+        difference = f"(raw^UINT64_C(0x{byte * 0x0101010101010101:016x}))"
+        terms.append(f"(({difference}-UINT64_C(0x0101010101010101))&~{difference}&UINT64_C(0x8080808080808080))")
+    return "|".join(terms) or "UINT64_C(0)"
+
+
+def emit_correction(
+    proof, symbol, *, packed_prefix=True, output_value_guard=False, sparse_pair_limit=0, source_word_guard=False
+):
     """Correct only certified mismatches; an optional safe word guard skips scans.
 
     Inputs must retain the original source bytes after predictor execution. The
@@ -311,16 +352,21 @@ def emit_correction(proof, symbol, *, packed_prefix=True, output_value_guard=Fal
         or type(output_value_guard) is not bool
         or type(sparse_pair_limit) is not int
         or not 0 <= sparse_pair_limit <= 16
+        or type(source_word_guard) is not bool
+        or (source_word_guard and (not packed_prefix or not sparse_pair_limit))
         or proof != derive(**proof["source"], **proof["predictor"])
     ):
         raise ValueError("valid identifier and unchanged complete pair certificate required")
     values = ",".join(map(str, bytes.fromhex(proof["correction_bitmap_hex"])))
     sparse = derive_sparse_pair_predicate(proof, limit=sparse_pair_limit) if sparse_pair_limit else None
+    source_guard = derive_source_word_guard(proof, limit=sparse_pair_limit) if source_word_guard else None
     source = proof["source"]
     relu = "if (sum < 0.0f) sum = 0.0f;" if source["relu"] else ""
     low = 0 if source["relu"] else -128
     output_guard = derive_output_value_guard(proof) if output_value_guard else None
-    if output_guard is not None and output_guard["predictor_exact"]:
+    if (output_guard is not None and output_guard["predictor_exact"]) or (
+        source_guard is not None and not source_guard["raw_byte_values"]
+    ):
         return f"""#include <stdint.h>
 #include <stddef.h>
 void {symbol}(const int8_t *a,const int8_t *b,int8_t *c,size_t n) {{
@@ -366,6 +412,27 @@ static inline __attribute__((always_inline)) void {symbol}_pair(const int8_t *a,
 {pair_check}\
 }}
 """
+    if source_guard is not None:
+        selected = "a" if source_guard["axis"] == "lhs" else "b"
+        any_hit = _source_word_hit_expression(source_guard["raw_byte_values"])
+        return (
+            code
+            + f"""static __attribute__((noinline)) void {symbol}_check_word(
+ const int8_t *a,const int8_t *b,int8_t *c) {{
+ for(size_t lane=0;lane<8;lane++){symbol}_pair(a,b,c,lane);
+}}
+typedef uint64_t {symbol}_word __attribute__((may_alias));
+void {symbol}(const int8_t *a,const int8_t *b,int8_t *c,size_t n) {{
+ size_t i=0,packed_end=n&~(size_t)7;
+ if(!((uintptr_t){selected}&7))for(;i<packed_end;i+=8) {{
+  uint64_t raw=*(const {symbol}_word*)({selected}+i);
+  if(!({any_hit}))continue;
+  {symbol}_check_word(a+i,b+i,c+i);
+ }}
+ for(;i<n;i++){symbol}_pair(a,b,c,i);
+}}
+"""
+        )
     if output_guard is not None:
         loop = ""
         if packed_prefix and bit_predicate is not None:

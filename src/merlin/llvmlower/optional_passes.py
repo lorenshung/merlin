@@ -139,6 +139,19 @@ REGISTRY: tuple[OptionalPass, ...] = (
         switch="MERLIN_STATIC_ARENA",
     ),
     OptionalPass(
+        name="layer-norm-chunked-sums",
+        summary="sum each LayerNorm row in contiguous 32-element chunks, then sum the chunks",
+        changes=(
+            "an f32 innermost-axis row sum whose provenance is a LayerNorm, with a static extent divisible "
+            "by the chunk and a +0 initial value, becomes a two-stage sum; selecting it permits "
+            "reassociating those additions and assumes finite intermediates"
+        ),
+        exactness=NUMERICS_CHANGING,
+        default="off",
+        stage="lowering",
+        switch="MERLIN_LAYER_NORM_CHUNKED_SUMS",
+    ),
+    OptionalPass(
         name="int-softmax",
         summary="softmax exp as the integer I-BERT exp",
         changes="math.exp in a softmax becomes a fixed-point polynomial and power-of-two shift",
