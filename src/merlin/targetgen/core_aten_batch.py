@@ -192,6 +192,9 @@ def build_core_aten_batch(
     and results one positional ABI. The map identifies each case's contiguous input and
     output interval. An unavailable case has no interval and cannot earn a pass.
     """
+    identifiers = [str(case.get("case_id") or case["overload"]) for case in corpus["cases"]]
+    if len(identifiers) != len(set(identifiers)):
+        raise ValueError("duplicate case identifiers in batch corpus")
     capture_root = Path(capture_root)
     bundle_root = Path(bundle_root)
     bundle_root.mkdir(parents=True, exist_ok=True)
@@ -206,15 +209,20 @@ def build_core_aten_batch(
 
     for case in corpus["cases"]:
         overload = case["overload"]
-        directory = capture_root / overload.replace(".", "__")
+        from merlin.targetgen.core_aten_capture import case_capture_name
+
+        identifier = str(case.get("case_id") or overload)
+        directory = capture_root / case_capture_name(case)
         capture_file = directory / "capture.json"
         mlir_file = directory / "capsule.linalg.mlir"
         record: dict[str, Any] = {
             "overload": overload,
+            "case_id": identifier,
+            "routing": {"lane": "host", "routed": False, "reason": "scalar mode"},
             "case": case,
             "capture_directory": str(directory),
         }
-        if selected_overloads is not None and overload not in selected_overloads:
+        if selected_overloads is not None and identifier not in selected_overloads:
             record.update(status="not_in_shard", reason="scheduled in a different batch shard")
             records.append(record)
             continue

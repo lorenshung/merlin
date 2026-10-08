@@ -168,7 +168,7 @@ def grade_core_aten_batch(
     """
     verdicts: dict[str, dict[str, Any]] = {}
     for record in batch_map["cases"]:
-        overload = str(record["overload"])
+        overload = str(record.get("case_id") or record["overload"])
         if record["status"] != "bundled":
             verdicts[overload] = {"status": record["status"], "reason": record.get("reason", "")}
             continue
@@ -198,6 +198,36 @@ def grade_core_aten_batch(
         else:
             status = "ungradable"
         verdicts[overload] = {"status": status, "results": details, "output_indices": indices}
+    for record in batch_map["cases"]:
+        identifier = str(record.get("case_id") or record["overload"])
+        verdict = verdicts[identifier]
+        routing = dict(record.get("routing") or {"lane": "host", "routed": False, "reason": "scalar mode"})
+        verdict.update(
+            overload=record["overload"],
+            routing=routing,
+            routing_reason=routing.get("reason", ""),
+            **{key: value for key, value in routing.items() if key != "reason"},
+        )
+        if record.get("source_preparation"):
+            verdict["source_preparation"] = record["source_preparation"]
+        if routing.get("lane") == "device" and record["status"] == "bundled":
+            evidence = routing.get("execution_evidence") or {}
+            count = evidence.get("executed_instructions")
+            from merlin.targetgen.core_aten_device import verify_execution_evidence
+
+            if (
+                routing.get("routed") is not True
+                or not routing.get("routed_operations")
+                or sum(case["status"] == "bundled" for case in batch_map["cases"]) != 1
+                or evidence.get("case_id") != identifier
+                or evidence.get("status") != "measured"
+                or evidence.get("attribution") != "single_case_shard"
+                or type(count) is not int
+                or count < 1
+                or evidence.get("target") != routing.get("target")
+                or not verify_execution_evidence(evidence)
+            ):
+                verdict.update(status="execution_failed", reason="device execution evidence missing or empty")
     counts: dict[str, int] = {}
     for item in verdicts.values():
         counts[item["status"]] = counts.get(item["status"], 0) + 1
@@ -207,5 +237,9 @@ def grade_core_aten_batch(
         "passed_count": counts.get("pass", 0),
         "status_counts": dict(sorted(counts.items())),
         "cases": verdicts,
+        "passed_by_lane": {
+            lane: sum(v["status"] == "pass" and v["lane"] == lane for v in verdicts.values())
+            for lane in ("host", "device")
+        },
         "scope": "final result values only; mutation, aliases, and strides are not observed",
     }

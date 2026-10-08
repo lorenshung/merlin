@@ -115,6 +115,16 @@ def _git_revision(path: Path) -> str | None:
     return process.stdout.strip() if process.returncode == 0 and process.stdout.strip() else None
 
 
+def case_capture_name(case: dict[str, Any]) -> str:
+    """Stable filesystem key; additive variants must never overwrite another capture."""
+    import hashlib
+
+    identifier = case.get("case_id")
+    if identifier:
+        return "case-" + hashlib.sha256(str(identifier).encode()).hexdigest()
+    return str(case["overload"]).replace(".", "__")
+
+
 def capture_case_corpus(
     corpus: dict[str, Any],
     output_root: str | Path,
@@ -125,6 +135,9 @@ def capture_case_corpus(
 ) -> dict[str, Any]:
     """Capture canonical cases independently, retaining failures as auditable result records."""
 
+    identifiers = [str(case.get("case_id") or case["overload"]) for case in corpus["cases"]]
+    if len(identifiers) != len(set(identifiers)):
+        raise ValueError("duplicate case identifiers in capture corpus")
     root = Path(output_root)
     root.mkdir(parents=True, exist_ok=True)
     source = PytorchRefSource(
@@ -136,7 +149,8 @@ def capture_case_corpus(
         overload = case["overload"]
         if overloads is not None and overload not in overloads:
             continue
-        destination = root / overload.replace(".", "__")
+        identifier = str(case.get("case_id") or overload)
+        destination = root / case_capture_name(case)
         destination.mkdir(parents=True, exist_ok=True)
         loader = destination / "capsule.pytorch.py"
         loader.write_text(loader_source(case), encoding="utf-8")
@@ -150,6 +164,7 @@ def capture_case_corpus(
                 "schema_version": 1,
                 "status": "captured_exact" if exact else "captured_lost_exact_provenance",
                 "overload": overload,
+                "case_id": identifier,
                 "captured_overloads": actual,
                 "pytorch_version": artifact.meta.get("torch_version"),
                 "model2mlir_revision": _git_revision(source.m2m_dir),
@@ -163,13 +178,14 @@ def capture_case_corpus(
                 "schema_version": 1,
                 "status": "capture_failed",
                 "overload": overload,
+                "case_id": identifier,
                 "captured_overloads": [],
                 "pytorch_version": corpus["pytorch_version"],
                 "model2mlir_revision": _git_revision(source.m2m_dir),
                 "reason": f"{type(exc).__name__}: {exc}",
             }
         (destination / "capture.json").write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        results[overload] = record
+        results[identifier] = record
     counts: dict[str, int] = {}
     for record in results.values():
         status = record["status"]

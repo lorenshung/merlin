@@ -31,6 +31,19 @@ def main(argv: list[str] | None = None) -> int:
     output.mkdir(parents=True, exist_ok=True)
     document = provider.build_gemmini_overlay(pytorch_version=core_opset()["torch"])
     (output / "gemmini_core_aten_overlay.json").write_bytes(json_bytes(document))
+    # The generic capture/batch APIs consume a cases corpus, keyed by unique case_id.
+    provider.validate_gemmini_overlay(document)
+    (output / "core_aten_overlay_cases.json").write_bytes(
+        json_bytes(
+            {
+                "schema_version": 1,
+                "pytorch_version": document["pytorch_version"],
+                "overlay_sha256": document["overlay_sha256"],
+                "portable_replacement_forbidden": True,
+                "cases": document["selected_cases"],
+            }
+        )
+    )
     (output / "gemmini_core_aten_overlay.md").write_text(provider.gemmini_overlay_summary(document), encoding="utf-8")
     print(
         f"{document['selected_count']}/{document['candidate_count']} cases cover "
