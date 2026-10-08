@@ -32,3 +32,10 @@ held-out models (claim and evaluation-only, `claim_boundary.held_out_models`) ar
 derives the role taxonomy and resolves the experiment's `prohibited_instruction_roles`; it declares,
 it does not enforce. Form-perf members, their coverage and the claim-model statistic never read a
 claim model's capture before the Phase-1 freeze, and never write a capsule from one.
+
+`component_only=True` is an explicit independent-input mode of the same generator.
+It accepts fresh shared dev sweeps and reviewed source-bound HW/SW objective
+declarations, never model/capture/hidden/history selectors. The existing writer,
+goldens and concrete program screen remain authoritative. Its global coverage,
+functional guard obligation and candidate numerical acceptance stay unestablished;
+recording a zero-MAC performance objective does not invent cost or certification.

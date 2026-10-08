@@ -13,6 +13,10 @@ code_refs:
   - packages/merlin-experiments/src/merlin_experiments/phase2/authoring.py
   - packages/merlin-experiments/src/merlin_experiments/phase2/authoring_cli.py
   - packages/merlin-experiments/tests/test_component_workflow.py
+  - packages/merlin-experiments/src/merlin_experiments/phase0/component_generation.py
+  - packages/merlin-experiments/src/merlin_experiments/phase0/generation.py
+  - packages/merlin-experiments/src/merlin_experiments/phase2/corpus.py
+  - packages/merlin-experiments/tests/test_component_generation.py
 ---
 
 # Component-only Phase 2
@@ -30,6 +34,65 @@ probes, complete-model graph/analysis actions and all legacy global context,
 source-pair and mechanism-probe providers. Passing those services to the policy
 is an admission error. Registry inspection without providers advertises the
 feedback tiers as unavailable.
+
+## Independent Phase 0 inputs
+
+The ordinary `phase0.generate_target(..., component_only=True)` API and
+`python -m merlin_experiments.phase0 --component-only` reuse the existing sweep
+expansion, builders, independent golden engines and written-program admission.
+The normal `capsule_derivation` adapter forwards the explicit option. This mode
+requires a fresh output directory, explicit descriptor/recipe/shared template,
+and `evidence_mode: diagnostic`. The descriptor must contain no workload,
+claim-boundary or grading selectors. Captures, conformance/application sidecars,
+synthesis/solver/hidden sidecars, old evidence bundles and legacy profile-directory
+discovery are refused. The public recipe supplies numerical/target choices;
+all component members come from the shared independent sweeps.
+
+The selected reviewed software spec may declare non-MAC performance objectives:
+
+```yaml
+component_performance:
+  schema: merlin.component_performance.v1
+  status: reviewed
+  hardware:
+    contract_sha256: <selected EvidenceSelection.derivation_identity contract digest>
+    raw_facts_sha256: <selected raw hardware facts byte digest>
+  objectives:
+    - family: <declared shared sweep family>
+      operations: [<reviewed software operation declaration id>]
+      objective:
+        metric: complete_component_cycles
+        unit: cycles
+        direction: min
+        basis: all preparation, device work, readout and output publication
+```
+
+The declaration explicitly commits to the selected HW contract/facts; its source
+bytes and reviewed operation owners supply objective provenance. The generator
+records the actual recipe, template and generator-owner source bytes, and binds
+the resulting declaration identity to every generated member. Sweeps cannot
+author their own generated identity or objective provenance. A named objective
+owner must declare the generated operation/family. Every emitted program still
+needs the existing concrete reviewed placement screen. Unknown work remains
+refused; a real zero-MAC member needs its explicit typed objective.
+
+`corpus.performance_objectives(live_or_frozen_corpus)` returns the checked
+name-to-`PerformanceObjective` map for the existing `phase_policy.split_report`
+and `anchors` APIs. Corpus selection, discovery and freezing preserve these
+bindings. Objective admission does not supply measured cost, cycle certification,
+utilization, an anchor or a target rate. Absent objectives retain the legacy
+zero-MAC refusal. The recorded source digests are host-issued selection metadata,
+not cryptographic proof of review authority or a fresh source-closure check when
+a frozen corpus is later used. Fresh runtime/library isolation is separate.
+
+Global application coverage remains diagnostic/unknown. Since this input mode
+does not supply application conformance or a Phase 1 certification, its guard
+obligation is explicitly `not_established`, with no functional guard or candidate
+numerical acceptance inferred. Legacy generation keeps its original coverage and
+guard-link gates. Existing generated goldens, graders, component certification
+and final hidden/whole-model gates retain their independent roles. No fresh
+experimental agent launch, hardware measurement or final convergence follows
+from generating and freezing this corpus.
 
 ## Host-owned selection
 

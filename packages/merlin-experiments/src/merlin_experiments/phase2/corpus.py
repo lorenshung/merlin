@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from merlin.common.digest import is_sha256
 from merlin.targetgen.target_experiment import TargetExperiment
 from merlin_experiments.corpus.phase_selection import validate_phase_selections
 from merlin_experiments.phase2 import contracts as CONTRACTS
@@ -69,6 +70,89 @@ def _selected_names(value: str | Sequence[str] | None, *, label: str) -> tuple[s
     if not names or len(names) != len(set(names)):
         raise StageGateError(f"{label} selection must contain unique names or 'all'")
     return names
+
+
+def _component_objectives(record, members):
+    """Check pinned host-issued generation metadata before existing phase admission.
+
+    These hashes bind the recorded selection; they are neither signatures of
+    review authority nor a fresh re-read of the recorded generator/source paths.
+    Capsule bytes and objective bindings themselves are rechecked here.
+    """
+    if record is None:
+        if any(
+            "component_generation_sha256" in member.descriptor.get("performance", {})
+            or "objective" in member.descriptor.get("performance", {})
+            for member in members
+        ):
+            raise StageGateError("component objective lacks its generator declaration identity")
+        return {}
+    from merlin.targetgen import phase_policy as policy
+    from merlin_experiments.phase0.component_generation import SCHEMA, digest, require_written
+
+    if (
+        not isinstance(record, Mapping)
+        or record.get("schema") != SCHEMA
+        or record.get("status") != "generated_from_reviewed_component_declarations"
+        or record.get("scope") != "independent_components_no_application_inputs"
+        or record.get("whole_coverage_verified") is not False
+        or record.get("timing_verified") is not False
+        or not isinstance(record.get("families"), Mapping)
+    ):
+        raise StageGateError("component generation identity is malformed")
+    pins = [record.get("recipe"), record.get("shared_template"), *(record.get("generator_sources") or [])]
+    if len(pins) < 3 or any(
+        not isinstance(pin, Mapping) or not is_sha256(pin.get("sha256")) or not pin.get("path") for pin in pins
+    ):
+        raise StageGateError("component generation lacks exact source/template identities")
+    if (
+        not is_sha256(record.get("software_spec_sha256"))
+        or not is_sha256(record.get("declaration_sha256"))
+        or not isinstance(record.get("hardware"), Mapping)
+        or set(record["hardware"]) != {"contract_sha256", "raw_facts_sha256"}
+        or any(not is_sha256(value) for value in record["hardware"].values())
+    ):
+        raise StageGateError("component generation lacks selected reviewed HW/SW identities")
+    result = {}
+    for member in members:
+        if (
+            CONTRACTS.mapping_file(member.source_dir / "capsule.yaml", yaml_file=True) != member.descriptor
+            or CONTRACTS.exact_tree_record(member.source_dir)["sha256"] != member.source_sha256
+        ):
+            raise StageGateError("component generated source/descriptor changed")
+        performance = member.descriptor.get("performance") or {}
+        family = performance.get("family")
+        declaration = record["families"].get(family)
+        if performance.get("component_generation_sha256") != digest(record):
+            raise StageGateError("component member differs from its generated source/contract identity")
+        objective = performance.get("objective")
+        if objective != (declaration.get("objective") if isinstance(declaration, Mapping) else None):
+            raise StageGateError("component objective differs from its reviewed generated family binding")
+        try:
+            require_written(member.descriptor)
+            if objective is not None:
+                if not isinstance(declaration.get("operations"), list) or not declaration["operations"]:
+                    raise ValueError("component objective has no reviewed operation owners")
+                value = dict(objective)
+                value["provenance"] = tuple(value["provenance"])
+                result[member.capsule] = policy.PerformanceObjective(**value)
+        except (TypeError, ValueError, KeyError) as exc:
+            raise StageGateError("component phase admission refused: " + str(exc)) from exc
+    return result
+
+
+def performance_objectives(corpus: PerformanceCorpus | FrozenPerformanceCorpus):
+    """Typed name bindings for phase_policy.split_report/anchors; no cycle claims."""
+    if isinstance(corpus, FrozenPerformanceCorpus):
+        verify_frozen_performance_corpus(corpus)
+        record = CONTRACTS.mapping_file(corpus.manifest_path).get("component_generation")
+    elif isinstance(corpus, PerformanceCorpus):
+        if CONTRACTS.sha256_file(corpus.provenance_manifest) != corpus.provenance_sha256:
+            raise StageGateError("component generation provenance changed")
+        record = corpus.performance_generation.get("component_generation")
+    else:
+        raise TypeError("typed performance corpus required")
+    return _component_objectives(record, corpus.capsules)
 
 
 def discover_performance_corpus(
@@ -164,6 +248,7 @@ def discover_performance_corpus(
         )
     if not found or {row.source_relative_path for row in found} != phase_generated:
         raise StageGateError("generated performance phase is empty or stale versus provenance")
+    _component_objectives(generation.get("component_generation"), found)
     wanted_families = set(_selected_names(families, label="performance family"))
     wanted_capsules = set(_selected_names(None if representative else capsules, label="performance capsule"))
     known_families = {row.family for row in found}
@@ -287,6 +372,10 @@ def freeze_performance_corpus(corpus: PerformanceCorpus, snapshot_root: Path) ->
         "capsules_sha256": aggregate["sha256"],
         "capsules": rows,
     }
+    component = corpus.performance_generation.get("component_generation")
+    if component is not None:
+        _component_objectives(component, corpus.capsules)
+        document["component_generation"] = copy.deepcopy(component)
     if corpus.test_justification is not None:
         receipt_path = snapshot_root / "test_justification.json"
         CONTRACTS.write_json(receipt_path, corpus.test_justification)
@@ -403,6 +492,7 @@ def verify_frozen_performance_corpus(corpus: FrozenPerformanceCorpus) -> None:
             "snapshot_sha256"
         ):
             raise StageGateError(f"frozen performance member changed: {identity}")
+    _component_objectives(document.get("component_generation"), corpus.capsules)
     justification = document.get("test_justification")
     if justification is not None:
         if not isinstance(justification, Mapping) or justification.get("path") != "test_justification.json":

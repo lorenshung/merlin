@@ -347,11 +347,33 @@ def generate_target(
     smt_profile: str | Path | None = None,
     hidden_profile: str | Path | None = None,
     prohibited_instruction_roles: list[str] | None = None,
+    component_only: bool = False,
 ) -> list[Path]:
     from merlin.common.paths import checkout_root
 
     if output_root is None:
         raise ValueError("Phase 0 requires an explicit output_root; generated capsules must not default to source data")
+    if type(component_only) is not bool:
+        raise TypeError("component_only must be an explicit Boolean")
+    if component_only:
+        from .component_generation import require_inputs
+
+        if Path(output_root).exists() or Path(output_root).is_symlink():
+            raise ValueError(
+                "component generation requires a fresh output_root; previous corpus/history is not an input"
+            )
+        require_inputs(
+            descriptor=descriptor,
+            recipe=recipe,
+            performance_template=performance_template,
+            profiles_root=profiles_root,
+            evidence_mode=evidence_mode,
+            evidence_input=evidence_input,
+            conformance_spec=conformance_spec,
+            synth_profile=synth_profile,
+            smt_profile=smt_profile,
+            hidden_profile=hidden_profile,
+        )
     profile_inputs = dict(
         profiles_root=profiles_root,
         recipe=recipe,
@@ -381,6 +403,7 @@ def generate_target(
         target,
         descriptor=descriptor,
         diagnostic=evidence_mode == "diagnostic",
+        **({"include_holdouts": False} if component_only else {}),
         **{key: value for key, value in profile_inputs.items() if value is not None},
     )
     if profile.get("capsule_policy") == "derived_only":
@@ -512,6 +535,13 @@ def generate_target(
     entries = [_resolve_flat_extents(e, binding) for e in entries]
     entries = [_with_candidate_policy(e, instruction_policy) for e in entries]
     entries = [_with_reference_gate(e, te, descriptor) for e in entries]
+    component_identity = None
+    if component_only:
+        from .component_generation import bind_entries
+
+        entries, component_identity = bind_entries(
+            entries, evidence=evidence, profile=profile, recipe=recipe, performance_template=performance_template
+        )
     semantics = (profile.get("datapath") or {}).get("numerical_semantics")
     if semantics is not None:
         semantics = copy.deepcopy(semantics)
@@ -729,6 +759,22 @@ def generate_target(
                     Path(w).rename(diagnostic)
                     w = diagnostic
                 actual["software_screen"] = observed
+                if component_only:
+                    from .component_generation import require_written
+
+                    try:
+                        require_written(actual)
+                    except ValueError as exc:
+                        failures.append((e.get("name", "?"), str(exc)))
+                        refused_generated.append(Path(w))
+                        _performance_errors.append(
+                            {
+                                "family": family,
+                                "member": e.get("name"),
+                                "kind": "component_admission",
+                                "detail": str(exc),
+                            }
+                        )
                 if observed["status"] == "unsupported":
                     actual["source_reference"] = diagnostic_entry(actual, observed)["source_reference"]
                 (Path(w) / "capsule.yaml").write_text(yaml.safe_dump(actual, sort_keys=False))
@@ -854,6 +900,8 @@ def generate_target(
         "blocked_unimplemented": declared_blocked + _runtime_blocked,
         "errors": _performance_errors,
     }
+    if component_identity is not None:
+        performance_record["component_generation"] = component_identity
     if unbuilt_roster:
         print(
             f"  [roster] {len(unbuilt_roster)} declared roster model(s) could not be captured at this "
@@ -933,9 +981,22 @@ def generate_target(
                 "status": report["status"],
                 "n_capsules": report["cohort"]["n_capsules"],
             }
-        from .phase2_guards import build_guard_link
+        if component_only:
+            guard_link = {
+                "schema": "merlin.phase0.component_guard_obligation.v1",
+                "status": "not_established",
+                "guards": [],
+                "reason": (
+                    "independent component generation supplies no application conformance or Phase 1 certification"
+                ),
+                "qualification": "generated goldens and program admission do not accept a candidate numerically",
+            }
+        else:
+            from .phase2_guards import build_guard_link
 
-        guard_link = build_guard_link(out_root, coverage_inputs, selected_reports["phase1"], selected_reports["phase2"])
+            guard_link = build_guard_link(
+                out_root, coverage_inputs, selected_reports["phase1"], selected_reports["phase2"]
+            )
         guard_path = coverage_root / "phase2-functional-guards.json"
         guard_raw = (json.dumps(guard_link, sort_keys=True, indent=2) + "\n").encode()
         guard_path.write_bytes(guard_raw)
