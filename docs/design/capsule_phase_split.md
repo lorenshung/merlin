@@ -31,9 +31,11 @@ the target and the capsule, the same way its tier already is.
 tier; its largest operand is inside the measured range (`cert_cost.MEASURED_MAX_OPERAND_ELEMENTS`,
 65,536); and its size is inside what a budget affords on **this target's own** certified runs.
 
-**`priceable`** — can a performance claim about it be falsified? Its declared work must be countable
-and non-zero. An unpriced member costs more than itself: a `None` price nulls every derived rate and
-**disables the corpus-wide attainment stop condition for every other member**.
+**`priceable`** — can a performance claim about it be falsified? The default retains countable
+nonzero MAC work. A declaration genuinely deriving zero MACs may instead receive an explicit typed
+`PerformanceObjective`: observable metric, unit, direction, complete cost boundary/basis and
+provenance. This admits a falsifiable question without supplying a measured cost, ceiling or cycle
+certificate. Unknown work derivation remains refused; the objective cannot repair it.
 
 Work is derived from what the capsule declares, never from an operation-name allowlist — an allowlist
 must be edited each time a family becomes priceable, and the edit is the thing that gets forgotten.
@@ -104,13 +106,15 @@ floor and yields two verdicts, while two disjoint corpora pay two floors for ver
 
 ### Why the single-phase members are single-phase
 
-Gemmini is the only target whose reasons are all decidable, and they fall into two clean groups.
+The historical default split above was measured without explicit component objectives. Its reasons
+fall into two groups; these measurements do not qualify the new explicit objective route.
 
 **Phase-1 only is dominated by families that do not contract** — movement, elementwise_map, reduction,
 softmax and normalization together account for most of it. These carry zero multiply-accumulate work, so they
-have no utilization to improve and cannot move a MAC-denominated objective. That is structural, not a
-defect: those families belong to phase 1 by their nature, and admitting them to a performance corpus
-would add members that cannot move the objective while still paying a full certification floor.
+have no MAC utilization to improve and cannot move a MAC-denominated objective. The default therefore
+keeps them phase-1 only. An explicit component latency, movement or another falsifiable cost contract
+can admit the same family to performance search through `priceable`, `phase_of`, `split_report` and
+`anchors`, while the independent certification predicate and sibling obligations remain intact.
 
 **Phase-2 only is entirely size** — either the member exceeds what the budget affords (852 elements
 at 300 s on this target's fit) or its largest operand leaves the measured range (65,536). These are
@@ -123,6 +127,12 @@ declared input is the network's entry tensor rather than a contraction's operand
 convolution whose weight rank the geometry rule does not cover.
 
 ## What this does not yet do
+
+Phase 0 corpus generation does not yet derive and supply these typed zero-MAC objectives from its
+component contracts. The generic API enables the route; it does not automatically select it or
+authorize manually authored corpus members. Generator/schema/consumer wiring must preserve exact
+objective boundaries and unknown costs; MAC-rate and attainment consumers must use the selected
+component objective rather than reinterpret zero MACs as counted compute work.
 
 The predicates cover certifiability and priceability. Two further phase-2 admission conditions from
 the design are **not** implemented here and must not be read as passing: that a member's headroom

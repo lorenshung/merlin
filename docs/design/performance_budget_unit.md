@@ -5,10 +5,26 @@ status: current
 owner: core
 last_verified: 2026-08-29
 related: [expert_gap_attribution]
-code_refs: [src/merlin/targetgen/tier_policy.py, src/merlin/targetgen/program_oracle.py, packages/merlin-experiments/src/merlin/targetgen/capsule_runner.py, src/merlin/kernels/measurement.py, merlin/contract/hardware_pins.yaml]
+code_refs: [src/merlin/targetgen/tier_policy.py, src/merlin/targetgen/phase_policy.py, src/merlin/targetgen/program_oracle.py, packages/merlin-experiments/src/merlin/targetgen/capsule_runner.py, src/merlin/kernels/measurement.py, merlin/contract/hardware_pins.yaml]
 ---
 
 # What a performance query costs, and what is actually scarce
+
+## Component performance admission
+
+`phase_policy.priceable` preserves its legacy requirement for derivable nonzero MAC
+work when no objective is supplied. A component whose declaration genuinely derives
+zero MACs can instead receive an explicit `PerformanceObjective`: observable metric,
+unit, minimization/maximization direction, complete cost boundary/basis and provenance.
+Copies, packing, quantization, dispatch and synchronization can therefore pose a
+falsifiable performance question without acquiring invented MAC utilization.
+
+This is eligibility to ask a question, not a measured cost, throughput ceiling or
+cycle certificate. Unknown work derivation remains refused. `phase_of` forwards the
+typed objective while retaining its independent certification predicate;
+`split_report` and `anchors` accept optional uniquely bound capsule-name objectives. Existing callers
+and MAC-rate reports remain unchanged unless they explicitly select the new contract;
+rate consumers must not reinterpret a zero-MAC component as counted compute work.
 
 A performance layer that rations expensive evaluations has to know which evaluation is expensive.
 The obvious assumption — that cycle-accurate simulation is the scarce resource and everything else

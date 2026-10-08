@@ -19,10 +19,10 @@ THE TWO PREDICATES
   runs (:mod:`merlin.targetgen.cert_cost`) rather than assumed.
 
 ``priceable`` -- can a performance claim about this member be falsified?
-  Its declared work can be counted, so utilization and both ceilings exist. A member whose work
-  cannot be priced is worse than absent: a ``None`` price nulls every derived rate AND disables the
-  corpus-wide attainment stop condition for every OTHER member, so one unpriced capsule costs more
-  than itself.
+  The legacy path requires counted nonzero MAC work. A genuinely noncontracting member can instead
+  carry an explicit observable performance objective and complete cost basis. That declaration
+  permits asking a performance question; it supplies no cost, ceiling or certification. Unknown
+  work derivation remains refused rather than nulling a derived rate or an attainment stop condition.
 
 WHY ``both`` IS THE DEFAULT AND EXCLUSION NEEDS A REASON. Certification cost on the targets measured
 here is dominated by a per-member FLOOR, not by member size: the fitted law is a large constant plus a
@@ -49,6 +49,7 @@ __all__ = [
     "NO",
     "UNKNOWN",
     "Verdict",
+    "PerformanceObjective",
     "PhaseVerdict",
     "PHASE1",
     "PHASE2",
@@ -102,6 +103,44 @@ class Verdict:
             "a Verdict is tri-state; compare .value to YES/NO/UNKNOWN rather than using truthiness, "
             "because UNKNOWN would otherwise read as NO and a question nobody could answer would "
             "become an answer"
+        )
+
+
+@dataclass(frozen=True)
+class PerformanceObjective:
+    """An explicitly supplied, observable cost objective for noncontracting work.
+
+    The basis names the complete measured component and its observable cost;
+    provenance identifies the declaration/evidence owner. This permits asking a
+    performance question, not answering it: no cycles, bandwidth, ceiling or
+    certification verdict is inferred from this record.
+    """
+
+    metric: str
+    unit: str
+    direction: str
+    basis: str
+    provenance: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if any(type(value) is not str or not value.strip() for value in (self.metric, self.unit, self.basis)):
+            raise ValueError("performance objective requires an observable metric, unit and cost basis")
+        if type(self.direction) is not str or self.direction not in ("min", "max"):
+            raise ValueError("performance objective direction must be min or max")
+        if (
+            type(self.provenance) is not tuple
+            or not self.provenance
+            or any(type(item) is not str or not item.strip() for item in self.provenance)
+        ):
+            raise ValueError("performance objective requires explicit provenance")
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(
+            metric=self.metric,
+            unit=self.unit,
+            direction=self.direction,
+            basis=self.basis,
+            provenance=list(self.provenance),
         )
 
 
@@ -374,13 +413,21 @@ def certifiable(
     return Verdict(YES, f"{size} elements is inside the {affordable} affordable at {budget_s:g}s")
 
 
-def priceable(capsule: Mapping[str, Any], *, achievable_macs_per_cycle: float | None = None) -> Verdict:
+def priceable(
+    capsule: Mapping[str, Any],
+    *,
+    achievable_macs_per_cycle: float | None = None,
+    performance_objective: PerformanceObjective | None = None,
+) -> Verdict:
     """Can a performance claim about this member be falsified?
 
-    Work must be countable, and the work must be non-zero: a member that performs no
-    multiply-accumulate has no utilization to improve, so admitting it to a performance corpus adds a
-    member that cannot move the objective while still costing a full certification floor.
+    The legacy path requires nonzero counted MAC work. Genuinely noncontracting
+    components may instead carry an explicit observable cost objective; this
+    does not invent MAC utilization or weaken cycle-accurate certification.
+    Unknown work derivation is not repaired by supplying an objective.
     """
+    if performance_objective is not None and not isinstance(performance_objective, PerformanceObjective):
+        raise TypeError("performance objective must be a typed PerformanceObjective")
     macs, why = declared_macs(capsule)
     if macs is None:
         return Verdict(
@@ -389,6 +436,14 @@ def priceable(capsule: Mapping[str, Any], *, achievable_macs_per_cycle: float | 
             "corpus-wide attainment stop condition for every other member",
         )
     if macs == 0:
+        if performance_objective is not None:
+            objective = performance_objective
+            return Verdict(
+                YES,
+                f"declares zero MACs ({why}); explicit {objective.direction} "
+                f"{objective.metric} [{objective.unit}] objective: {objective.basis}; "
+                f"provenance={objective.provenance}; cost and ceilings remain unmeasured",
+            )
         return Verdict(NO, f"declares zero multiply-accumulates ({why}), so it carries no utilization to improve")
     if achievable_macs_per_cycle is None:
         return Verdict(
@@ -407,12 +462,15 @@ def phase_of(
     budget_s: float | None = None,
     achievable_macs_per_cycle: float | None = None,
     cycle_accurate_available: "bool | None" = None,
+    performance_objective: PerformanceObjective | None = None,
 ) -> PhaseVerdict:
     """Which phase this capsule can serve. ``both`` is the healthy state; ``neither`` is a finding."""
     cert = certifiable(
         capsule, target=target, fit=fit, budget_s=budget_s, cycle_accurate_available=cycle_accurate_available
     )
-    price = priceable(capsule, achievable_macs_per_cycle=achievable_macs_per_cycle)
+    price = priceable(
+        capsule, achievable_macs_per_cycle=achievable_macs_per_cycle, performance_objective=performance_objective
+    )
     if cert.value == UNKNOWN or price.value == UNKNOWN:
         # Fail closed on the EVIDENCE, not on the capsule. An UNKNOWN folded into NO would report a
         # missing measurement as a property of the corpus.
@@ -428,6 +486,21 @@ def phase_of(
     return PhaseVerdict(phase=phase, cert=cert, price=price, name=str(capsule.get("name") or ""))
 
 
+def _bound_objectives(
+    capsules: Sequence[Mapping[str, Any]],
+    performance_objectives: Mapping[str, PerformanceObjective] | None,
+) -> Mapping[str, PerformanceObjective]:
+    objectives = {} if performance_objectives is None else performance_objectives
+    if not isinstance(objectives, Mapping):
+        raise TypeError("performance objectives must be a capsule-name mapping")
+    names = [str(c.get("name") or "") for c in capsules]
+    if set(objectives) - set(names) or any(names.count(name) != 1 for name in objectives):
+        raise ValueError("each performance objective must bind one declared capsule name")
+    if any(not isinstance(objective, PerformanceObjective) for objective in objectives.values()):
+        raise TypeError("performance objectives must be typed PerformanceObjective records")
+    return objectives
+
+
 def split_report(
     capsules: Sequence[Mapping[str, Any]],
     *,
@@ -436,6 +509,7 @@ def split_report(
     budget_s: float | None = None,
     achievable_macs_per_cycle: float | None = None,
     cycle_accurate_available: "bool | None" = None,
+    performance_objectives: Mapping[str, PerformanceObjective] | None = None,
 ) -> dict[str, Any]:
     """The phase split for one target's corpus, with every single-phase member's reason kept.
 
@@ -443,6 +517,7 @@ def split_report(
     that names the thing to fix -- a missing golden engine, an unpriced family, or a size nobody can
     afford to certify.
     """
+    objectives = _bound_objectives(capsules, performance_objectives)
     verdicts = [
         phase_of(
             c,
@@ -451,6 +526,7 @@ def split_report(
             budget_s=budget_s,
             achievable_macs_per_cycle=achievable_macs_per_cycle,
             cycle_accurate_available=cycle_accurate_available,
+            performance_objective=objectives.get(str(c.get("name") or "")),
         )
         for c in capsules
     ]
@@ -511,6 +587,7 @@ def anchors(
     cycle_accurate_available: "bool | None" = None,
     verify: bool = False,
     roots: Any = None,
+    performance_objectives: Mapping[str, PerformanceObjective] | None = None,
 ) -> dict[str, Any]:
     """Pair every phase-2 member with the certified sibling it can rest on.
 
@@ -538,6 +615,7 @@ def anchors(
     anchor is a stronger guarantee for the same certification floor, and the floor is what dominates
     the cost.
     """
+    objectives = _bound_objectives(capsules, performance_objectives)
     attested: dict[str, tuple[str, str]] = {}
     if str(target):
         try:
@@ -552,7 +630,14 @@ def anchors(
 
     by_ob: dict[tuple, list[tuple[Mapping[str, Any], PhaseVerdict]]] = {}
     for c in capsules:
-        v = phase_of(c, target=target, fit=fit, budget_s=budget_s, cycle_accurate_available=cycle_accurate_available)
+        v = phase_of(
+            c,
+            target=target,
+            fit=fit,
+            budget_s=budget_s,
+            cycle_accurate_available=cycle_accurate_available,
+            performance_objective=objectives.get(_name(c)),
+        )
         by_ob.setdefault(_obligation_key(c), []).append((c, v))
 
     paired: list[dict[str, Any]] = []
