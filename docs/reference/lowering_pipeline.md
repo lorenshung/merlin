@@ -3,7 +3,7 @@ title: Lowering pipeline
 kind: reference
 status: current
 owner: ir
-last_verified: 2026-10-05
+last_verified: 2026-10-08
 related: [core_dialects, llvm_integration]
 code_refs: [src/merlin/xdsl_dialects/lowering, src/merlin/llvmlower]
 ---
@@ -25,6 +25,31 @@ per boundary: each phase's output should `verify()`, and the per-kernel phases g
 torch reference.
 
 Status legend: ✅ built & verified · ◐ partially built · ⏳ planned (approved).
+
+## Explicit generated entry projection
+
+The normal model builder accepts `entry_weight_projection`, an optional typed
+`GeneratedDispatchABI` contract. After shared preparation, the compiler derives
+a complete argument table from the original capture, quant-inner lift and
+quantization hoist. It can remove unused whole immutable stored or generated-zero
+parameters after conservative pure tensor DCE. Model inputs, captured buffers,
+outputs and prepared trailing arguments retain their ownership and semantics.
+
+Selection requires explicit generated-caller, unobserved-address, readonly-weight
+and arithmetic-effect permissions. Every argument/result type and direct caller
+is checked. Unknown symbolic callers and ABI attributes refuse; unknown effects
+and physical memory allocations remain live. Session state or stream declarations
+cannot grant immutable ownership to a captured weight. Source files and the
+presence or absence of optional storage/session/hoist files are checked before
+planning, application and C runtime generation.
+
+One original-to-projected mapping rewrites the entry, direct callers, generated
+C interface, descriptors, state/stream indices and retained packed weight spans.
+The original bundle and module remain unchanged. Default `None` retains the
+existing route. The mechanism is target independent; it grants no device layout
+or DMA alignment fact and predicts no runtime speedup.
+
+Public API: `merlin.llvmlower.entry_weight_projection`.
 
 ---
 
@@ -155,8 +180,10 @@ Sub-phases (the actual `pipeline.py` pass list):
   numerical compatibility builders still require the original whole-model gate.
 - **6a Optional exact scalar contractions** (before bufferization):
   `scalar_contraction_accumulator` replaces recognized static f32 tensor generics
-  with scalar loop arguments for their final reduction dimension before elementwise
-  fusion can expand the scalar body. Named operations are generalized first. Pure dimension
+  with scalar loop arguments for their final reduction dimension after ordinary
+  tensor fusion and generalization, immediately before bufferization. Named
+  materializations retain the ordinary fusion boundary; only remaining pure
+  contractions are eligible. Pure dimension
   maps, parallel output dimensions, and an exact separate multiply/add body are
   required. It preserves the initial destination and increasing reduction order,
   including transpose and batch maps; fastmath permissions and unsupported bodies
@@ -359,3 +386,65 @@ The producer's input-to-readout storage must remain unchanged until its last
 read; an overlapping output buffer cannot silently invalidate this precondition.
 The bound convolution adapter supplies distinct, exclusively owned scratch and
 output allocations. The ordinary checked API retains its existing overlap order.
+
+### Explicit scalar carrier representations
+
+`ApproximateScalarCarrierPolicy` grants a distinct absolute and relative error
+budget for a scalar expression before its original finishing operations. It
+requires independent validation of the original public outputs; carrier error
+permission alone does not establish integer-code or whole-model equivalence.
+The policy also bounds runtime coefficient payload and compile-time proof-table
+payload. Code, temporary proof work, stack and aggregate runtime storage require
+separate admission.
+
+`prepare_source_scalar_carrier` validates current typed closed scalar observers,
+immutable three-coefficient choices and explicit floating effects. Every fine
+raw-binary32 interval must meet the budget for both rounded carrier FMAs. Fine
+proof partitions can refine admission without increasing the coarse runtime
+table. Rejected cells evaluate the original source expression. The caller
+supplies a runtime rounding predicate; a false predicate retains the source
+expression under the incoming rounding mode.
+
+`reify_source_scalar_carrier_helper_family` constructs one readonly typed table
+and independently binds each helper to its current source proof. It validates
+the complete storage/helper namespace and retains each original finishing
+multiplier and integer observer. Shared storage is explicit before upstream
+lowering; compiler or linker deduplication is not a premise. Binding, input and
+output ownership, final linked placement, runtime predicates, complete costs
+and original output gates remain caller obligations. These APIs perform no
+automatic discovery, pipeline selection or profitability decision.
+
+### Current source scalar insertion
+
+`SourceScalarCarrierSelection` is an explicit invocation-local option for
+`lower_model`, `lower_model_file`, `lower_to_llvm_ir` and the ordinary model
+builders. The selected native pipeline pauses after its ordinary tensor fusion
+and generalization, immediately before bufferization. The parent discovers
+closed integer observations in those current bytes, validates every source
+witness and prepares one immutable table per expression family. Retained
+helpers or historical call-site proofs are not inputs to this selection.
+
+The response contains new private helper fragments and typed SSA edit locators
+bound to the current source digest. The native child verifies the full module
+and authenticates all edits before inserting them. It keeps original producer
+operations, globals, resource handles and module ownership in the original
+context. Only proved private scalar operations are erased. Replacement calls
+retain their exact source provenance dictionaries and fused native locations.
+Unsupported namespaces, resources in selected scalar expressions, live escapes,
+stale packets and incomplete effects refuse the selected invocation.
+
+`IncomingRNECapability` names a provider-owned `() -> i1` runtime predicate.
+Each scalar point reads the actual incoming rounding mode. The contract requires
+preserved rounding mode and flags, no writes and nontrapping behavior; it does
+not authorize hoisting the predicate across a region. A false result evaluates
+the original expression. Separately, `CompilerHostNumericAdmission` admits the
+actual compiler host to RNE before source construction and serialization and
+must restore its complete incoming environment on success or error.
+
+The private request and response have explicit byte quotas and one invocation
+owner. Callback code runs synchronously on the calling thread and must return
+promptly. A deadline bounds native waiting and is checked after the callback;
+it cannot interrupt arbitrary callback code. Failure terminates only the owned
+child. The unselected route retains the original runner and pipeline. Numerical
+policy, aggregate storage, linked predicate qualification, complete producer and
+consumer cost, and original whole output validation remain explicit obligations.

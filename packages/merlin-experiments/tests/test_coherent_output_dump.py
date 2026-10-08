@@ -26,9 +26,14 @@ from merlin_experiments.phase1.feedback.native_output_readback import (
     decode_coherent_output_dump,
     decode_htif_signature,
 )
+from merlin_experiments.phase1.feedback.native_packet_readback import (
+    admit_coherent_packet_storage,
+    decode_coherent_packet_dump,
+)
 
 from merlin.runtime.backends import base as backends
 from merlin.targetgen import plugins
+from merlin.targetgen.contract.readback_policy import ReadbackPolicy
 
 
 @pytest.fixture
@@ -201,6 +206,163 @@ def _admit(selected_layout, elf: Path) -> dict:
 
 def _dump(path: Path, *, address: int, payload: bytes, source: int = 0) -> Path:
     return _dump_regions(path, [(address, payload)], source=source)
+
+
+def _packet_elf(tmp_path, selected_layout, *, capacity_delta=0, readonly_length=False):
+    from merlin.runtime.out_packet import ExpectedOutput, out_bin_packet_capacity
+
+    cc = shutil.which("cc")
+    if cc is None:
+        pytest.skip("a neutral host C compiler is unavailable")
+    _, _, cb = selected_layout
+    capacity = out_bin_packet_capacity(
+        [
+            ExpectedOutput(
+                "Y",
+                2,
+                3,
+                cb["tensors"]["Y"]["dtype"],
+                cb["tensors"]["Y"]["dtype"] != "f32",
+                4 if cb["tensors"]["Y"]["dtype"] == "f32" else 1,
+                (2, 3),
+            )
+        ]
+    )
+    source = tmp_path / "packet.c"
+    width = 4 if cb["tensors"]["Y"]["dtype"] == "f32" else 1
+    source.write_text(
+        "#include <stdint.h>\n"
+        f"unsigned char T_Y[{16 * width}] __attribute__((used));\n"
+        f"unsigned char merlin_readback_packet[{capacity + capacity_delta}] __attribute__((used));\n"
+        f"{'const ' if readonly_length else 'volatile '}uint64_t merlin_readback_packet_used "
+        "__attribute__((used)) = 0;\nint main(void) { return 0; }\n"
+    )
+    elf = tmp_path / "packet.elf"
+    subprocess.run([cc, "-O0", "-no-pie", str(source), "-o", str(elf)], check=True, capture_output=True)
+    return elf
+
+
+def _packet_wire(payload: bytes, *, width=1, signed=True) -> bytes:
+    checksum = 0xCBF29CE484222325
+    for byte in payload:
+        checksum = ((checksum ^ byte) * 0x100000001B3) & ((1 << 64) - 1)
+    return (
+        f"OUT_BIN_BEGIN v1 Y 2 3 {width} {'s' if signed else 'u'} {len(payload)}\n".encode()
+        + payload
+        + f"OUT_BIN_END v1 {checksum:016x}\nDONE\n".encode()
+    )
+
+
+def _packet_dump(path, storage, wire):
+    path.write_bytes(
+        b"GSIMPKT1"
+        + struct.pack(
+            "<QQQQ", storage["regions"][0]["base"], storage["regions"][1]["base"], storage["capacity"], len(wire)
+        )
+        + wire
+        + b"PKTEND1\n"
+    )
+    return path
+
+
+@pytest.mark.parametrize("dtype", ["i8", "f32"])
+def test_packet_reader_binds_real_elf_and_full_logical_words(selected_layout, tmp_path, monkeypatch, dtype):
+    submission, facts, cb = selected_layout
+    cb["tensors"]["Y"]["dtype"] = dtype
+    (submission / "command_buffer.json").write_text(json.dumps(cb))
+    elf = _packet_elf(tmp_path, selected_layout)
+    admission = _admit(selected_layout, elf)
+    kwargs = dict(
+        admission=admission,
+        submission=submission,
+        command_buffer_member="command_buffer.json",
+        target="neutral",
+        facts_path=facts,
+        elf_path=elf,
+    )
+    storage = admit_coherent_packet_storage(**kwargs)
+    words = [-4, -3, -2, -1, 0, 1] if dtype == "i8" else [0, 0x80000000, 0x7FC01234, 0x3F800000, 0x7F800000, 0xFF800000]
+    width = 1 if dtype == "i8" else 4
+    wire = _packet_wire(
+        b"".join(word.to_bytes(width, "little", signed=dtype == "i8") for word in words),
+        width=width,
+        signed=dtype == "i8",
+    )
+    dump = _packet_dump(tmp_path / "packet.dump", storage, wire)
+    values = decode_coherent_packet_dump(**kwargs, packet_admission=storage, dump_path=dump)
+    assert values["outputs"] == {"Y": [words[:3], words[3:]]}
+    assert values["source"] == "coherent_packet"
+    assert values["payload_bytes"] == len(wire)
+    assert "physical-padding" in values["scope"]
+    backend = backends.get_backend("neutral")
+    monkeypatch.setattr(
+        backend,
+        "memory_readback_transport",
+        lambda simulator, *, policy_transport=None: "gsim_coherent_packet_v1",
+        raising=False,
+    )
+    workdir = tmp_path / "generated"
+    workdir.mkdir()
+    hook = NativeMemoryReadback(facts_path=facts, policy=ReadbackPolicy("coherent_packet_v1"))
+    request = hook.prepare(cb=cb, target="neutral", elf_path=elf, workdir=workdir, simulator="gsim", backend=backend)
+    assert request["memory_readback"]["regions"] == storage["regions"]
+    _packet_dump(Path(request["memory_readback"]["output_path"]), storage, wire)
+    output, evidence = hook.decode("METRIC cycles 7\nDONE\n")
+    assert output == values["outputs"] and evidence["schema"] == "oracle_memory_readback_evidence_v3"
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "wrong_capacity",
+        "readonly_length",
+        "missing_footer",
+        "bad_metadata",
+        "truncated",
+        "no_wire_done",
+        "extra_bytes",
+        "changed_pin",
+    ],
+)
+def test_packet_readback_refuses_bad_storage_or_incomplete_payload(selected_layout, tmp_path, fault):
+    submission, facts, _ = selected_layout
+    elf = _packet_elf(
+        tmp_path,
+        selected_layout,
+        capacity_delta=int(fault == "wrong_capacity"),
+        readonly_length=fault == "readonly_length",
+    )
+    admission = _admit(selected_layout, elf)
+    kwargs = dict(
+        admission=admission,
+        submission=submission,
+        command_buffer_member="command_buffer.json",
+        target="neutral",
+        facts_path=facts,
+        elf_path=elf,
+    )
+    if fault in {"wrong_capacity", "readonly_length"}:
+        with pytest.raises(ValueError):
+            admit_coherent_packet_storage(**kwargs)
+        return
+    storage = admit_coherent_packet_storage(**kwargs)
+    wire = _packet_wire(bytes(6))
+    if fault == "no_wire_done":
+        wire = wire[:-5]
+    dump = _packet_dump(tmp_path / "packet.dump", storage, wire)
+    raw = dump.read_bytes()
+    if fault == "missing_footer":
+        dump.write_bytes(raw[:-8])
+    elif fault == "bad_metadata":
+        dump.write_bytes(raw[:8] + struct.pack("<Q", storage["regions"][0]["base"] + 8) + raw[16:])
+    elif fault == "truncated":
+        dump.write_bytes(raw[:-9] + raw[-8:])
+    elif fault == "extra_bytes":
+        dump.write_bytes(raw + b"\n")
+    elif fault == "changed_pin":
+        storage = {**storage, "capacity": storage["capacity"] + 1}
+    with pytest.raises(ValueError):
+        decode_coherent_packet_dump(**kwargs, packet_admission=storage, dump_path=dump)
 
 
 def _dump_regions(path: Path, regions: list[tuple[int, bytes]], *, source: int = 0) -> Path:

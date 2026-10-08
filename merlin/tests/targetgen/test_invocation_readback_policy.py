@@ -18,6 +18,7 @@ from merlin.targetgen.contract.readback_policy import (
     FULL_VALUES_B64,
     FULL_VALUES_BIN,
     ReadbackPolicy,
+    read_console,
     require_build_receipt,
     require_full_value_roster,
     selected_build_inputs,
@@ -59,16 +60,18 @@ def test_policy_is_strictly_versioned_and_does_not_modify_capsule():
     assert ReadbackPolicy.from_record(ReadbackPolicy(FULL_VALUES_BIN).record()) == ReadbackPolicy(FULL_VALUES_BIN)
 
 
-def test_memory_readback_is_explicit_and_never_admits_serial_values():
-    policy = ReadbackPolicy("coherent_dump_v1")
+@pytest.mark.parametrize("transport", ["coherent_dump_v1", "coherent_packet_v1"])
+def test_memory_readback_is_explicit_and_never_admits_serial_values(transport):
+    policy = ReadbackPolicy(transport)
     assert ReadbackPolicy.from_record(policy.record()) == policy
     with pytest.raises(ValueError, match="memory admission"):
         require_full_value_roster(_cb(), "DONE\n", {"out": [[1, 2]]}, policy=policy)
 
 
-def test_memory_build_receipt_has_no_serial_codec_and_rechecks_bytes(monkeypatch, tmp_path):
+@pytest.mark.parametrize("transport", ["coherent_dump_v1", "coherent_packet_v1"])
+def test_memory_build_receipt_rechecks_selected_transport_and_header_bytes(monkeypatch, tmp_path, transport):
     def render(_cb, *, inputs, readback_policy):
-        assert readback_policy == ReadbackPolicy("coherent_dump_v1")
+        assert readback_policy == ReadbackPolicy(transport)
         return "int main(void) { return 0; }\n"
 
     service, _source = _service(tmp_path, render)
@@ -85,7 +88,7 @@ def test_memory_build_receipt_has_no_serial_codec_and_rechecks_bytes(monkeypatch
         return SimpleNamespace(returncode=0, stderr="", stdout="")
 
     monkeypatch.setattr(compiler.subprocess, "run", fake_compile)
-    policy = ReadbackPolicy("coherent_dump_v1")
+    policy = ReadbackPolicy(transport)
     cb = _cb()
     saved = copy.deepcopy(cb)
     elf = compiler.link_elf(
@@ -107,17 +110,43 @@ def test_memory_build_receipt_has_no_serial_codec_and_rechecks_bytes(monkeypatch
         )
 
     receipt = verified()
-    assert receipt["schema"] == "merlin_readback_build_v2"
-    assert receipt["staged_codec_sha256"] is None
+    packet = transport == "coherent_packet_v1"
+    assert receipt["schema"] == ("merlin_readback_build_v3" if packet else "merlin_readback_build_v2")
+    assert bool(receipt["staged_codec_sha256"]) == packet
     assert recipe["readback_transport"] == policy.record()
-    assert not (build / "out_b64.h").exists() and not (build / "out_bin.h").exists()
+    codecs = ("out_b64.h", "out_bin.h", "out_bin_memory.h")
+    assert all((build / name).exists() == packet for name in codecs)
     assert cb == saved
-    for path in (obj, elf, build / "harness.c"):
+    for path in (obj, elf, build / "harness.c", *((build / name for name in codecs) if packet else ())):
         original = path.read_bytes()
         path.write_bytes(original + b"changed")
         with pytest.raises(ValueError, match="receipt"):
             verified()
         path.write_bytes(original)
+@pytest.mark.parametrize("transport", [None, FULL_VALUES_B64, FULL_VALUES_BIN])
+def test_console_reader_uses_explicit_policy_not_filename(tmp_path, transport):
+    path = tmp_path / "console.bin"
+    path.write_bytes(b"DONE\n")
+    policy = ReadbackPolicy(transport) if transport else None
+    expected = b"DONE\n" if transport == FULL_VALUES_BIN else "DONE\n"
+    assert read_console(path, policy=policy) == expected
+    path.write_bytes(b"\xff\x00")
+    if transport == FULL_VALUES_BIN:
+        assert read_console(path, policy=policy) == b"\xff\x00"
+    else:
+        with pytest.raises(UnicodeDecodeError):
+            read_console(path, policy=policy)
+
+
+def test_console_reader_refuses_untyped_choice_before_filesystem_access(tmp_path):
+    with pytest.raises(ValueError, match="explicit trusted"):
+        read_console(tmp_path / "absent.bin", policy={"transport": FULL_VALUES_BIN})
+
+
+@pytest.mark.parametrize("transport", ["coherent_dump_v1", "coherent_packet_v1"])
+def test_console_reader_refuses_coherent_memory_before_filesystem_access(tmp_path, transport):
+    with pytest.raises(ValueError, match="independent memory audit"):
+        read_console(tmp_path / "absent.txt", policy=ReadbackPolicy(transport))
 
 
 def test_binary_receipt_binds_both_staged_headers_and_declared_values(monkeypatch, tmp_path):

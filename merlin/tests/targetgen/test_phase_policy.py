@@ -126,6 +126,97 @@ def test_an_unpriceable_member_says_why_it_costs_more_than_itself():
     assert "attainment stop condition" in v.reason
 
 
+def _movement_objective(**changes):
+    values = dict(
+        metric="complete_component_latency",
+        unit="cycles",
+        direction="min",
+        basis="entry through synchronous completion, including packing and readout",
+        provenance=("frozen component cost contract",),
+    )
+    values.update(changes)
+    return PP.PerformanceObjective(**values)
+
+
+@pytest.mark.parametrize(
+    "family", ["movement", "elementwise_map", "synchronization", "reduction", "normalization", "softmax"]
+)
+def test_explicit_non_mac_cost_objective_admits_a_performance_question(family):
+    component = _capsule(
+        semantic={"semantic_family": family},
+        operation={"op": "component", "attributes": {}},
+        inputs=[{"name": "X", "shape": [5, 7]}],
+    )
+    assert PP.declared_macs(component)[0] == 0
+    assert PP.priceable(component).value == PP.NO
+    result = PP.priceable(component, performance_objective=_movement_objective())
+    assert result.value == PP.YES
+    assert "complete_component_latency" in result.reason and "unmeasured" in result.reason
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"metric": ""},
+        {"unit": " "},
+        {"basis": ""},
+        {"direction": "unknown"},
+        {"provenance": ()},
+        {"provenance": ("",)},
+        {"provenance": ["mutable"]},
+    ],
+)
+def test_non_mac_objective_requires_falsifiable_cost_basis(change):
+    with pytest.raises(ValueError):
+        _movement_objective(**change)
+
+
+def test_non_mac_objective_cannot_authorize_unknown_work_or_forge_a_record():
+    unknown = _capsule(inputs=[{"name": "X", "shape": [5, 7]}])
+    assert PP.priceable(unknown, performance_objective=_movement_objective()).value == PP.NO
+    with pytest.raises(TypeError, match="typed PerformanceObjective"):
+        PP.priceable(unknown, performance_objective={"metric": "cycles", "basis": "claimed"})
+    assert (
+        PP.priceable(_capsule(), achievable_macs_per_cycle=0, performance_objective=_movement_objective()).value
+        == PP.UNKNOWN
+    )
+
+
+def test_cost_objective_does_not_grant_cycle_certification():
+    component = _capsule(
+        semantic={"semantic_family": "movement"},
+        operation={"op": "copy", "attributes": {}},
+        inputs=[{"name": "X", "shape": [5, 7]}],
+    )
+    result = PP.phase_of(
+        component, target="generic_target", cycle_accurate_available=False, performance_objective=_movement_objective()
+    )
+    assert result.phase == PP.PHASE2 and result.cert.value == PP.NO
+    unknown = PP.phase_of(component, target="generic_target", performance_objective=_movement_objective())
+    assert unknown.phase == PP.UNDETERMINED and unknown.cert.value == PP.UNKNOWN
+
+
+def test_cost_objective_report_requires_unique_declared_bindings():
+    component = _capsule(
+        semantic={"semantic_family": "movement"},
+        operation={"op": "copy", "attributes": {}},
+        inputs=[{"name": "X", "shape": [5, 7]}],
+    )
+    report = PP.split_report(
+        [component],
+        target="generic_target",
+        cycle_accurate_available=False,
+        performance_objectives={"T0": _movement_objective()},
+    )
+    assert report["counts"][PP.PHASE2] == 1
+    for capsules, objectives in (
+        ([component], {"missing": _movement_objective()}),
+        ([component, component], {"T0": _movement_objective()}),
+    ):
+        with pytest.raises(ValueError, match="bind one declared capsule"):
+            PP.split_report(capsules, target="generic_target", performance_objectives=objectives)
+
+
 # --------------------------------------------------------------------------- the work derivation
 
 
@@ -332,6 +423,26 @@ def test_the_largest_certifiable_witness_is_chosen_as_the_anchor():
     assert a["paired"][0]["anchor"] == "mid"
 
 
+def test_explicit_zero_mac_extension_keeps_the_existing_anchor_obligation():
+    small = _sized("small", 8, 8, 8)
+    large = _sized("large", 512, 512, 512, capped="L2")
+    for capsule in (small, large):
+        capsule["semantic"] = {"semantic_family": "movement"}
+        capsule["operation"] = {"op": "movement", "attributes": {"out": "Y"}}
+        capsule["inputs"] = capsule["inputs"][:1]
+    assert PP.anchors([small, large], target="t", cycle_accurate_available=True)["paired"] == []
+    selected = PP.anchors(
+        [small, large],
+        target="t",
+        cycle_accurate_available=True,
+        performance_objectives={"large": _movement_objective()},
+    )
+    assert selected["paired"][0]["member"] == "large"
+    assert selected["paired"][0]["anchor"] == "small"
+    with pytest.raises(ValueError, match="one declared capsule"):
+        PP.anchors([small, large], target="t", performance_objectives={"missing": _movement_objective()})
+
+
 # ------------------------------------------------- the anchor relation, VERIFIED against the evidence
 
 
@@ -345,6 +456,7 @@ def _result(root, capsule, tier="L3", status="pass", cycle_accurate=True):
         json.dumps(
             {
                 "capsule": capsule,
+                "status": status,
                 "tiers": {
                     tier: {
                         "status": status,
@@ -359,6 +471,26 @@ def _result(root, capsule, tier="L3", status="pass", cycle_accurate=True):
         encoding="utf-8",
     )
     return root
+
+
+@pytest.mark.parametrize("overall_status", [None, "fail"])
+def test_passing_tier_without_an_overall_passing_grade_stays_unverified(tmp_path, overall_status):
+    import json
+
+    sibling = _sized("sibling", 32, 32, 32)
+    member = _sized("member", 512, 512, 512, capped="L2")
+    member["extends"] = "sibling"
+    _result(tmp_path, "sibling")
+    path = tmp_path / "sibling" / "L3" / "capsule_result.json"
+    result = json.loads(path.read_text())
+    if overall_status is None:
+        del result["status"]
+    else:
+        result["status"] = overall_status
+    path.write_text(json.dumps(result))
+
+    report = PP.anchors([sibling, member], target="t", cycle_accurate_available=True, verify=True, roots=[tmp_path])
+    assert report["paired"][0]["verified"] is False
 
 
 def test_the_verified_anchor_is_the_one_the_capsule_DECLARES(tmp_path):

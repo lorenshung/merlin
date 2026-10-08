@@ -21,6 +21,7 @@ from merlin.xdsl_dialects.lowering.global_plan import CycleInterval
 
 from .global_planner import OccupancySummary
 
+# Retained for the historical four-member paper-policy wrapper only.
 PORTFOLIO_MEMBER_COUNT = 4
 
 _DIRECTIONS = {
@@ -180,6 +181,7 @@ class QualityBudget:
     limits: tuple[QualityLimit, ...]
     reference: str
     profile: str = "custom"
+    parameters: tuple[tuple[str, float], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.reference.strip() or not self.limits or not self.profile.strip():
@@ -196,6 +198,21 @@ class QualityBudget:
             QualityLimit("normalized_root_mean_square_error", "at_most", 0.02),
         ):
             raise ValueError("numerical similarity profile must enforce cosine and normalized RMSE limits")
+        if type(self.parameters) is not tuple:
+            raise TypeError("quality parameters must be an immutable tuple")
+        if tuple(sorted(self.parameters)) != self.parameters or len(dict(self.parameters)) != len(self.parameters):
+            raise ValueError("quality parameters must be unique and sorted")
+        for name, value in self.parameters:
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("quality parameter names must be nonempty")
+            _finite_nonnegative(value, "quality parameter")
+        if self.profile in ("exact", "elementwise"):
+            metric = "bitwise_mismatch_count" if self.profile == "exact" else "elementwise_violation_count"
+            if self.limits != (QualityLimit(metric, "at_most", 0.0),):
+                raise ValueError("exact and elementwise profiles require zero complete-output violations")
+            required = () if self.profile == "exact" else ("atol", "rtol")
+            if tuple(name for name, _ in self.parameters) != required:
+                raise ValueError("elementwise quality requires explicit atol and rtol; exact has no parameters")
 
     @classmethod
     def classification_top1(cls, reference: str) -> QualityBudget:
@@ -218,17 +235,45 @@ class QualityBudget:
             "numerical_similarity",
         )
 
+    @classmethod
+    def exact(cls, reference: str) -> QualityBudget:
+        """Zero bitwise mismatches over every output, including signed zeros."""
+        return cls((QualityLimit("bitwise_mismatch_count", "at_most", 0.0),), reference, "exact")
+
+    @classmethod
+    def elementwise(cls, reference: str, *, atol: float, rtol: float) -> QualityBudget:
+        """Count violations of abs(candidate-reference) <= atol+rtol*abs(reference).
+
+        The independent observer owns full output coverage and nonfinite-value
+        semantics. A maximum-error or cosine proxy cannot supply this metric.
+        Its observation must bind these exact tolerance parameters.
+        """
+        return cls(
+            (QualityLimit("elementwise_violation_count", "at_most", 0.0),),
+            reference,
+            "elementwise",
+            (("atol", atol), ("rtol", rtol)),
+        )
+
+    @classmethod
+    def task(cls, reference: str, *, limits: tuple[QualityLimit, ...]) -> QualityBudget:
+        """Caller-defined task metrics and thresholds, with no default proxy."""
+        return cls(limits, reference, "task")
+
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "profile": self.profile,
             "reference": self.reference,
             "limits": [limit.to_dict() for limit in self.limits],
         }
+        if self.parameters:
+            result["parameters"] = dict(self.parameters)
+        return result
 
 
 @dataclass(frozen=True)
-class FourModelQualitySchema:
-    """Frozen quality policy for four content-addressed portfolio members."""
+class PortfolioQualitySchema:
+    """Frozen explicit policy for any nonempty content-addressed portfolio."""
 
     mode: str
     ordered_member_sha256s: tuple[str, ...]
@@ -236,9 +281,9 @@ class FourModelQualitySchema:
     reason: str
 
     def __post_init__(self) -> None:
-        if len(self.ordered_member_sha256s) != PORTFOLIO_MEMBER_COUNT:
-            raise ValueError("the quality schema requires exactly four portfolio members")
-        if len(set(self.ordered_member_sha256s)) != PORTFOLIO_MEMBER_COUNT or any(
+        if not self.ordered_member_sha256s:
+            raise ValueError("the quality schema requires a nonempty portfolio")
+        if len(set(self.ordered_member_sha256s)) != len(self.ordered_member_sha256s) or any(
             not _is_sha256(member) for member in self.ordered_member_sha256s
         ):
             raise ValueError("portfolio members require distinct SHA-256 identities")
@@ -246,7 +291,9 @@ class FourModelQualitySchema:
             raise ValueError("quality schema mode must be accuracy_bounded or exact_only")
         budget_members = tuple(member for member, _ in self.budgets)
         if self.mode == "accuracy_bounded" and budget_members != self.ordered_member_sha256s:
-            raise ValueError("accuracy-bounded budgets must cover all four members in portfolio order")
+            raise ValueError("accuracy-bounded budgets must cover all members in portfolio order")
+        if any(not isinstance(budget, QualityBudget) for _, budget in self.budgets):
+            raise TypeError("quality schema requires typed QualityBudget records")
         if self.mode == "exact_only" and self.budgets:
             raise ValueError("exact-only fallback cannot carry approximate quality budgets")
         if not self.reason.strip():
@@ -258,13 +305,29 @@ class FourModelQualitySchema:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema": "phase2_four_model_quality_schema_v1",
+            "schema": "phase2_portfolio_quality_schema_v1",
             "mode": self.mode,
             "ordered_member_sha256s": list(self.ordered_member_sha256s),
             "budgets": {member: budget.to_dict() for member, budget in self.budgets},
             "reason": self.reason,
-            "approximation_allowed": self.mode == "accuracy_bounded",
+            "approximation_allowed": self.mode == "accuracy_bounded"
+            and any(budget.profile != "exact" for _, budget in self.budgets),
         }
+
+
+@dataclass(frozen=True)
+class FourModelQualitySchema(PortfolioQualitySchema):
+    """Compatibility wrapper retaining the historical four-member policy."""
+
+    def __post_init__(self) -> None:
+        if len(self.ordered_member_sha256s) != PORTFOLIO_MEMBER_COUNT:
+            raise ValueError("the quality schema requires exactly four portfolio members")
+        super().__post_init__()
+
+    def to_dict(self) -> dict[str, Any]:
+        result = super().to_dict()
+        result["schema"] = "phase2_four_model_quality_schema_v1"
+        return result
 
 
 def standard_four_model_quality_schema(
@@ -314,23 +377,40 @@ class QualityObservation:
     values: tuple[tuple[str, float], ...]
     provenance: tuple[str, ...]
     complete: bool = True
+    parameters: tuple[tuple[str, float], ...] = ()
 
     def __post_init__(self) -> None:
         if tuple(sorted(self.values)) != self.values or len(dict(self.values)) != len(self.values):
             raise ValueError("quality values must be unique and sorted")
         if any(not name.strip() for name, _ in self.values):
             raise ValueError("quality metric names cannot be empty")
-        if any(isinstance(value, bool) or not math.isfinite(float(value)) for _, value in self.values):
+        if any(
+            isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value))
+            for _, value in self.values
+        ):
             raise ValueError("quality observations must be finite numeric values")
+        if type(self.complete) is not bool:
+            raise TypeError("quality observation completeness must be a boolean")
         if not self.provenance:
             raise ValueError("quality observations require independent provenance")
+        if type(self.parameters) is not tuple:
+            raise TypeError("quality observation parameters must be an immutable tuple")
+        if tuple(sorted(self.parameters)) != self.parameters or len(dict(self.parameters)) != len(self.parameters):
+            raise ValueError("quality observation parameters must be unique and sorted")
+        for name, value in self.parameters:
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("quality observation parameter names must be nonempty")
+            _finite_nonnegative(value, "quality observation parameter")
 
     @property
     def value_map(self) -> dict[str, float]:
         return {name: float(value) for name, value in self.values}
 
     def to_dict(self) -> dict[str, Any]:
-        return {"values": self.value_map, "provenance": list(self.provenance), "complete": self.complete}
+        result = {"values": self.value_map, "provenance": list(self.provenance), "complete": self.complete}
+        if self.parameters:
+            result["parameters"] = dict(self.parameters)
+        return result
 
 
 @dataclass(frozen=True)
@@ -733,10 +813,14 @@ def _quality(value: QualityObservation | Mapping[str, Any] | None) -> QualityObs
         if isinstance(number, bool) or not isinstance(number, (int, float)):
             raise TypeError(f"quality observation {name} must be numeric")
         parsed.append((str(name), float(number)))
+    parameters = value.get("parameters", {})
+    if not isinstance(parameters, Mapping):
+        raise TypeError("quality observation parameters must be a mapping")
     return QualityObservation(
         values=tuple(sorted(parsed)),
         provenance=tuple(str(item) for item in value.get("provenance") or ()),
         complete=value.get("complete") is True,
+        parameters=tuple(sorted((name, number) for name, number in parameters.items())),
     )
 
 
@@ -750,6 +834,8 @@ def _quality_gate(
     baseline_values = {} if baseline is None else baseline.value_map
     if candidate is None or not candidate.complete:
         blockers.append("complete candidate quality observation is unavailable")
+    if budget.parameters and candidate is not None and candidate.parameters != budget.parameters:
+        blockers.append("candidate quality observation does not bind the selected metric parameters")
     for limit in budget.limits:
         value, base = candidate_values.get(limit.metric), baseline_values.get(limit.metric)
         threshold_passes = None
@@ -757,12 +843,16 @@ def _quality_gate(
         if value is None:
             blockers.append(f"candidate quality metric {limit.metric} is unavailable")
         else:
+            if budget.profile in ("exact", "elementwise") and (value < 0 or not value.is_integer()):
+                blockers.append(f"candidate quality metric {limit.metric} is not a nonnegative integer count")
             threshold_passes = value <= limit.threshold if limit.direction == "at_most" else value >= limit.threshold
             if not threshold_passes:
                 failures.append(f"candidate quality metric {limit.metric} exceeds its budget")
         if limit.maximum_degradation is not None:
             if baseline is None or not baseline.complete:
                 blockers.append("complete baseline quality observation is unavailable")
+            if budget.parameters and baseline is not None and baseline.parameters != budget.parameters:
+                blockers.append("baseline quality observation does not bind the selected metric parameters")
             if base is None:
                 blockers.append(f"baseline quality metric {limit.metric} is unavailable")
             elif value is not None:
@@ -945,18 +1035,16 @@ def evaluate_fast_portfolio(
     expected_models: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Apply quality, analytical Pareto, uncertainty, roofline, and risk gates."""
-    expected = tuple(expected_models or (str(row.get("model_id")) for row in rows))
-    if (
-        len(expected) != PORTFOLIO_MEMBER_COUNT
-        or len(set(expected)) != PORTFOLIO_MEMBER_COUNT
-        or any(not _is_sha256(model) for model in expected)
-    ):
-        raise ValueError("fast evaluation requires four distinct content-addressed models")
+    expected = tuple(str(row.get("model_id")) for row in rows) if expected_models is None else tuple(expected_models)
+    if not expected or len(set(expected)) != len(expected) or any(not _is_sha256(model) for model in expected):
+        raise ValueError("fast evaluation requires a nonempty portfolio of distinct content-addressed models")
     by_model = {str(row.get("model_id")): row for row in rows}
     if len(by_model) != len(rows) or set(by_model) != set(expected):
         raise ValueError("fast-evaluation rows must exactly cover the ordered portfolio")
     if set(quality_budgets) != set(expected):
         raise ValueError("quality budgets must exactly cover the ordered portfolio")
+    if any(not isinstance(budget, QualityBudget) for budget in quality_budgets.values()):
+        raise TypeError("quality budgets must contain typed QualityBudget records")
 
     regressions = policy.regression_map
     model_results, all_failures, all_blockers, speedups = [], [], [], []

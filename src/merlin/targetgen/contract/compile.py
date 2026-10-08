@@ -912,10 +912,10 @@ def run_on_oracle(
     from merlin.runtime.backends import base as _backends
 
     backend = _backends.get_backend(target)
-    from .readback_policy import COHERENT_DUMP_V1, FULL_VALUES_BIN, selected
+    from .readback_policy import FULL_VALUES_BIN, MEMORY_TRANSPORTS, selected
 
     readback_policy = selected(readback_policy)
-    memory = readback_policy is not None and readback_policy.transport == COHERENT_DUMP_V1
+    memory = readback_policy is not None and readback_policy.transport in MEMORY_TRANSPORTS
     # A trusted evaluator supplies the admitted memory reader. Core never
     # discovers an optional grader, reads a candidate-selected transport, or
     # substitutes missing serial frames with an empty output roster.

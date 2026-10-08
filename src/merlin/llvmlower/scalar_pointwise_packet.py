@@ -6,6 +6,11 @@ upstream bufferization establish alias legality; no physical no-alias is inferre
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+BORROWED_FEATURE = "packet_borrowed_pointwise_fma_division_2"
+BORROWED_MARKER = "__merlin_borrowed_pointwise_packet_2__"
+BORROWED_CONTRACT = "merlin.borrowed_pointwise_effects"
 FEATURE = "packet_scalar_pointwise_fma_division_2"
 FOUR_FEATURE = "packet_scalar_pointwise_fma_division_4"
 BROADCAST_FEATURE = "packet_scalar_pointwise_broadcast_2"
@@ -16,6 +21,60 @@ FOUR_MARKER = "__merlin_pointwise_packet_4__"
 BROADCAST_MARKER = "__merlin_pointwise_broadcast_packet_2__"
 MULTIPLY_FOUR_MARKER = "__merlin_pointwise_multiplication_packet_4__"
 TWO_MULTIPLY_FOUR_MARKER = "__merlin_pointwise_two_multiplications_packet_4__"
+
+
+@dataclass(frozen=True)
+class BorrowedPointwiseEffects:
+    """Caller proof obligations for reordering independent borrowed writes.
+
+    Input spans may alias each other. Output coordinates must be private,
+    disjoint from every input and already owned for the full writer lifetime.
+    These explicit permissions do not follow from a memref type or symbol.
+    """
+
+    immutable_inputs: bool
+    fresh_disjoint_output: bool
+    stable_rounding: bool
+    nontrapping_arithmetic: bool
+    exception_flags_unobserved: bool
+
+    def validate(self):
+        if any(value is not True for value in vars(self).values()):
+            raise ValueError("complete borrowed pointwise effect proof required")
+
+
+def bind_borrowed_pointwise_packet(operation, *, effects):
+    """Attach an explicit normal-pass contract to one live memref writer.
+
+    The selected upstream feature independently checks the complete typed
+    scalar body, maps, static spans and source contexts. This binding grants
+    only the caller-supplied physical and floating effects, not profitability.
+    Unsupported source remains unchanged under the normal feature.
+    """
+    from xdsl.dialects.builtin import DictionaryAttr, MemRefType, UnitAttr
+    from xdsl.dialects.linalg.ops import GenericOp
+
+    if not isinstance(effects, BorrowedPointwiseEffects):
+        raise ValueError("explicit borrowed pointwise effects required")
+    effects.validate()
+    if (
+        not isinstance(operation, GenericOp)
+        or operation.results
+        or len(operation.outputs) != 1
+        or any(not isinstance(value.type, MemRefType) for value in operation.operands)
+    ):
+        raise ValueError("one ordinary borrowed memref writer required")
+    if BORROWED_CONTRACT in operation.attributes:
+        raise ValueError("borrowed pointwise contract already present")
+    operation.attributes[BORROWED_CONTRACT] = DictionaryAttr({name: UnitAttr() for name in vars(effects)})
+
+
+def _edit_borrowed_pipeline(passes):
+    hits = [i for i, p in enumerate(passes) if "one-shot-bufferize" in p]
+    if len(hits) != 1 or BORROWED_MARKER in passes:
+        raise ValueError("borrowed pointwise packet requires one bufferization stage")
+    i = hits[0]
+    return [*passes[:i], BORROWED_MARKER, *passes[i:]]
 
 
 def _edit_pipeline(passes, *, lanes=2, broadcast=False, multiplication=False, two_products=False):
@@ -34,6 +93,20 @@ def _edit_pipeline(passes, *, lanes=2, broadcast=False, multiplication=False, tw
 def ensure_registered():
     from .impr_features import ImprFeature, known, register
 
+    if BORROWED_FEATURE not in known():
+        register(
+            ImprFeature(
+                name=BORROWED_FEATURE,
+                action_class="PASS",
+                description=(
+                    "Interleave two independent scalar lanes of an explicitly contracted "
+                    "immutable-input, private-disjoint-output memref FMA/division writer; "
+                    "preserve source arithmetic and bounded tails."
+                ),
+                edit_pipeline=_edit_borrowed_pipeline,
+                alternative_group="borrowed_pointwise_packet",
+            )
+        )
     for name, lanes in ((FEATURE, 2), (FOUR_FEATURE, 4)):
         if name not in known():
             register(
@@ -116,6 +189,14 @@ def _pointwise_packet_spec(op, multiplication=False, two_products=False):
     if (None in positions[-1] or sorted(positions[-1]) != list(range(dims))
             or any(d is None or d <= 0 for d in extents)):
         return None
+    body = _pointwise_packet_body_spec(op, types, multiplication, two_products)
+    return (positions, extents, body) if body is not None else None
+
+
+def _pointwise_packet_body_spec(op, types, multiplication=False, two_products=False):
+    from torch_mlir import ir as _pp_ir
+    if any("strictfp" in name or "strictfp" in str(op.attributes[name]) for name in op.attributes):
+        return None
     block = op.regions[0].blocks[0]
     body = list(block.operations)
     if len(block.arguments) != len(types) or not body or body[-1].operation.name != "linalg.yield" or len(body[-1].operands) != 1:
@@ -138,6 +219,8 @@ def _pointwise_packet_spec(op, multiplication=False, two_products=False):
                "arith.extui", "arith.trunci", "arith.extf", "arith.truncf", "math.fma"}
     fmas = division = multiplies = 0
     for inner in body[:-1]:
+        if any("strictfp" in name or "strictfp" in str(inner.attributes[name]) for name in inner.attributes):
+            return None
         if inner.operation.name not in allowed or inner.regions or len(inner.results) != 1:
             return None
         if "fastmath" in inner.attributes and str(inner.attributes["fastmath"]) != "#arith.fastmath<none>":
@@ -160,7 +243,7 @@ def _pointwise_packet_spec(op, multiplication=False, two_products=False):
         if inner.operation.name == "arith.divf" and isinstance(inner.results[0].type, _pp_ir.F32Type):
             division += 1
     eligible = (multiplies == 2 if two_products else multiplies >= 3) if multiplication else fmas >= 4 and division
-    return (positions, extents, body) if eligible else None
+    return body if eligible else None
 
 
 def _pointwise_broadcast_axis(op, positions, extents, lanes):
@@ -308,7 +391,168 @@ def _packetize_pointwise(ctx, module, lanes=2, broadcast=False, multiplication=F
     module.operation.verify()
     return len(todo)
 
-_PP_MARKERS = {"__merlin_pointwise_packet_2__": 2, "__merlin_pointwise_packet_4__": 4,
+
+def _borrowed_pointwise_packet_spec(op):
+    from torch_mlir import ir as _pp_ir
+    contract_name = "merlin.borrowed_pointwise_effects"
+    permissions = {"immutable_inputs", "fresh_disjoint_output", "stable_rounding",
+                   "nontrapping_arithmetic", "exception_flags_unobserved"}
+    if (op.operation.name != "linalg.generic" or op.results
+            or len(op.regions) != 1 or len(op.regions[0].blocks) != 1
+            or contract_name not in op.attributes or len(op.operands) < 2):
+        return None
+    contract = op.attributes[contract_name]
+    if not isinstance(contract, _pp_ir.DictAttr):
+        return None
+    if ({entry.name for entry in contract} != permissions
+            or any(not isinstance(contract[key], _pp_ir.UnitAttr) for key in permissions)):
+        return None
+    types = [value.type for value in op.operands]
+    if any(not isinstance(t, _pp_ir.MemRefType) or any(d <= 0 for d in t.shape) for t in types):
+        return None
+    maps = [_pp_ir.AffineMapAttr(a).value for a in op.attributes["indexing_maps"]]
+    dims = maps[-1].n_dims
+    if (dims < 1 or len(maps) != len(types)
+            or any(m.n_dims != dims or m.n_symbols for m in maps)
+            or [str(x) for x in op.attributes["iterator_types"]] != ["#linalg.iterator_type<parallel>"] * dims):
+        return None
+    positions, extents = [], [None] * dims
+    for mapping, typ in zip(maps, types):
+        if len(mapping.results) != len(typ.shape):
+            return None
+        try:
+            strides, offset = typ.get_strides_and_offset()
+        except (ValueError, TypeError, RuntimeError):
+            return None
+        if any(stride <= 0 for stride in strides) or offset < 0:
+            return None
+        pos = []
+        for expr, extent in zip(mapping.results, typ.shape):
+            if not isinstance(expr, _pp_ir.AffineDimExpr):
+                return None
+            dim = _pp_ir.AffineDimExpr(expr).position
+            if dim in pos or (extents[dim] is not None and extents[dim] != extent):
+                return None
+            pos.append(dim)
+            extents[dim] = extent
+        positions.append(pos)
+    # A private span does not prove that distinct logical output coordinates
+    # have distinct addresses. Require a separable positive-stride layout;
+    # arbitrary affine layouts and overlapping rows conservatively refuse.
+    output_strides, _ = types[-1].get_strides_and_offset()
+    covered = 1
+    for stride, extent in sorted(zip(output_strides, types[-1].shape)):
+        if extent > 1:
+            if stride < covered:
+                return None
+            covered += (extent - 1) * stride
+    # Exactly one output argument and a one-to-one full output map. Linalg
+    # operand segment sizes are authoritative; scalar init reads still refuse.
+    if (len(op.attributes["operandSegmentSizes"]) != 2
+            or list(op.attributes["operandSegmentSizes"])[-1] != 1
+            or sorted(positions[-1]) != list(range(dims))
+            or any(extent is None for extent in extents)):
+        return None
+    body = _pointwise_packet_body_spec(op, types)
+    return (positions, extents, body) if body is not None else None
+
+
+def _packetize_borrowed_pointwise(ctx, module):
+    from torch_mlir import ir as _pp_ir
+    todo = []
+    def walk(op):
+        if any("strictfp" in name or "strictfp" in str(op.attributes[name]) for name in op.attributes):
+            return
+        for region in op.regions:
+            for block in region.blocks:
+                for inner in list(block.operations):
+                    spec = _borrowed_pointwise_packet_spec(inner)
+                    if spec is None:
+                        walk(inner.operation)
+                    else:
+                        todo.append((inner, spec))
+    walk(module.operation)
+    with ctx:
+        for old, (positions, extents, scalar_body) in todo:
+            with old.location, _pp_ir.InsertionPoint(old):
+                index = _pp_ir.IndexType.get()
+                def create(name, operands=(), results=(), attributes=None, regions=0):
+                    return _pp_ir.Operation.create(name, operands=list(operands), results=list(results),
+                                                   attributes=attributes or {}, regions=regions)
+                constants = {}
+                def c(value):
+                    if value not in constants:
+                        constants[value] = create("arith.constant", results=[index],
+                            attributes={"value": _pp_ir.IntegerAttr.get(index, value)}).results[0]
+                    return constants[value]
+                for value in [0, 1, 2, *extents, extents[-1] // 2 * 2]:
+                    c(value)
+                def packet(indices, width):
+                    mappings, lane_indices = [], []
+                    args = list(old.regions[0].blocks[0].arguments)
+                    for lane in range(width):
+                        ids = list(indices)
+                        if lane:
+                            ids[-1] = create("arith.addi", [ids[-1], c(lane)], [index]).results[0]
+                        lane_indices.append(ids)
+                        mapped = {}
+                        for arg, operand, pos in zip(args[:-1], old.operands[:-1], positions[:-1]):
+                            mapped[arg] = create(
+                                "memref.load", [operand, *[ids[d] for d in pos]], [arg.type]
+                            ).results[0]
+                        mappings.append(mapped)
+                    for scalar_op in scalar_body[:-1]:
+                        for mapped in mappings:
+                            cloned = create(scalar_op.operation.name,
+                                [mapped.get(v, v) for v in scalar_op.operands],
+                                [r.type for r in scalar_op.results],
+                                {name: scalar_op.attributes[name] for name in scalar_op.attributes})
+                            mapped[scalar_op.results[0]] = cloned.results[0]
+                    stores = []
+                    for ids, mapped in zip(lane_indices, mappings):
+                        value = mapped.get(scalar_body[-1].operands[0], scalar_body[-1].operands[0])
+                        stores.append(create(
+                            "memref.store", [value, old.operands[-1], *[ids[d] for d in positions[-1]]]
+                        ))
+                    return stores
+                def nest(depth, indices):
+                    if depth == len(extents) - 1:
+                        end = extents[-1] // 2 * 2
+                        replacements = []
+                        if end:
+                            loop = create("scf.for", [c(0), c(end), c(2)], regions=1)
+                            block = _pp_ir.Block.create_at_start(loop.regions[0], [index])
+                            with _pp_ir.InsertionPoint(block):
+                                packet([*indices, block.arguments[0]], 2)
+                                create("scf.yield")
+                            replacements.append(loop)
+                        if extents[-1] != end:
+                            replacements.extend(packet([*indices, c(end)], 1))
+                        return replacements
+                    loop = create("scf.for", [c(0), c(extents[depth]), c(1)], regions=1)
+                    block = _pp_ir.Block.create_at_start(loop.regions[0], [index])
+                    with _pp_ir.InsertionPoint(block):
+                        nest(depth + 1, [*indices, block.arguments[0]])
+                        create("scf.yield")
+                    return [loop]
+                replacements = nest(0, [])
+                # A buffer writer may have both a packet loop and a scalar tail
+                # at the top level. Each retains the enclosing source trace;
+                # nested stores are represented by their outer loop.
+                previous = old.attributes["prov.transforms"] if "prov.transforms" in old.attributes else None
+                transforms = _pp_ir.StringAttr(previous).value + "," if previous is not None else ""
+                for replacement in replacements:
+                    for name in old.attributes:
+                        if name.startswith("prov."):
+                            replacement.attributes[name] = old.attributes[name]
+                    replacement.attributes["prov.transforms"] = _pp_ir.StringAttr.get(
+                        transforms + "borrowed_scalar_pointwise_packet_2")
+                old.operation.erase()
+    module.operation.verify()
+    return len(todo)
+
+_PP_MARKERS = {"__merlin_borrowed_pointwise_packet_2__": 2,
+               "__merlin_pointwise_packet_2__": 2, "__merlin_pointwise_packet_4__": 4,
                "__merlin_pointwise_broadcast_packet_2__": 2,
                "__merlin_pointwise_multiplication_packet_4__": 4,
                "__merlin_pointwise_two_multiplications_packet_4__": 4}
@@ -322,14 +566,19 @@ def _run_stages(ctx, module, pipeline, erase, mid=(), late=(), post_openmp=(), p
     multiplication_marker = "__merlin_pointwise_multiplication_packet_4__"
     two_products_marker = "__merlin_pointwise_two_multiplications_packet_4__"
     multiplication_markers = {multiplication_marker, two_products_marker}
-    if (len([m for m in selected if m not in multiplication_markers]) > 1
-            or any(selected.count(m) > 1 for m in multiplication_markers)):
+    borrowed_marker = "__merlin_borrowed_pointwise_packet_2__"
+    if (len([m for m in selected if m not in multiplication_markers and m != borrowed_marker]) > 1
+            or any(selected.count(m) > 1 for m in _PP_MARKERS)):
         raise ValueError("pointwise packet schedules are alternatives")
     begin = 0
     for marker in selected:
         i = passes.index(marker, begin)
         _PP_ORIG_RUN_STAGES(ctx, module, ','.join(passes[begin:i]), 0, (), (), (),
                            pre_generalize if begin == 0 else ())
+        if marker == borrowed_marker:
+            print('OK borrowed_pointwise_packet', 2, _packetize_borrowed_pointwise(ctx, module))
+            begin = i + 1
+            continue
         print('OK scalar_pointwise_packet', _PP_MARKERS[marker], _packetize_pointwise(
             ctx, module, _PP_MARKERS[marker],
             broadcast=marker == "__merlin_pointwise_broadcast_packet_2__",
@@ -341,7 +590,13 @@ def _run_stages(ctx, module, pipeline, erase, mid=(), late=(), post_openmp=(), p
 
 
 def apply_for_test(
-    mlir_text: str, *, lanes: int = 2, broadcast: bool = False, multiplication: bool = False, two_products: bool = False
+    mlir_text: str,
+    *,
+    lanes: int = 2,
+    broadcast: bool = False,
+    multiplication: bool = False,
+    two_products: bool = False,
+    borrowed: bool = False,
 ) -> tuple[str, int]:
     """Run the shipped structural rewrite in the upstream toolchain's Python."""
     import subprocess
@@ -358,6 +613,16 @@ def apply_for_test(
         raise ValueError("multiplication packet requires an explicit boolean and four ordinary lanes")
     if type(two_products) is not bool or (two_products and not multiplication):
         raise ValueError("two-product packet requires explicit multiplication selection")
+    if type(borrowed) is not bool or (borrowed and (lanes != 2 or broadcast or multiplication or two_products)):
+        raise ValueError("borrowed pointwise packet requires explicit two ordinary lanes")
+    invocation = (
+        "_packetize_borrowed_pointwise(ctx,module)"
+        if borrowed
+        else (
+            f"_packetize_pointwise(ctx,module,{lanes},broadcast={broadcast},"
+            f"multiplication={multiplication},two_products={two_products})"
+        )
+    )
     with tempfile.TemporaryDirectory(prefix="merlin_pointwise_packet_") as directory:
         root = Path(directory)
         src, script = root / "input.mlir", root / "run.py"
@@ -366,7 +631,7 @@ def apply_for_test(
             "import sys\nfrom torch_mlir import ir\n"
             + RUNNER_PRELUDE.split("_PP_MARKERS =", 1)[0]
             + "ctx=ir.Context()\nmodule=ir.Module.parse(open(sys.argv[1]).read(),ctx)\n"
-            + f"print('COUNT',_packetize_pointwise(ctx,module,{lanes},broadcast={broadcast},multiplication={multiplication},two_products={two_products}))\nprint('MODULE_BEGIN')\nprint(module)\n"
+            + f"print('COUNT',{invocation})\nprint('MODULE_BEGIN')\nprint(module)\n"
         )
         proc = subprocess.run([str(m2m_python()), str(script), str(src)], capture_output=True, text=True, timeout=120)
         if proc.returncode:

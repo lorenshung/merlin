@@ -49,3 +49,8 @@ before launch; normal exit, exactly one DONE, no serial substitutes, complete
 logical values and unchanged build bytes are required afterward. Optional
 evaluators own the memory decoder; core never imports a grader to select one.
 An output-readback admission does not prove numerical or compiler correctness.
+
+The separately selected packet-memory policy stages all three generic codec
+headers and uses a distinct v3 build receipt. Its trusted reader checks the
+ELF-bound bounded arena and complete logical output frames, not output padding.
+Existing raw-memory, binary, B64 and absent-policy build identities stay unchanged.

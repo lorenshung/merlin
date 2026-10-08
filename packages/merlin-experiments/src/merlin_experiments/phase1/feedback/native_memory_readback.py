@@ -27,6 +27,7 @@ from .native_output_readback import (
 _TRANSPORTS = {
     ("spike", "htif_signature_v1"),
     ("gsim", "gsim_coherent_dump_v1"),
+    ("gsim", "gsim_coherent_packet_v1"),
 }
 
 
@@ -115,9 +116,31 @@ def select_memory_engine(
 class NativeMemoryReadback:
     """One-use trusted hook; no candidate command-buffer field can select it."""
 
-    def __init__(self, *, facts_path: Path) -> None:
+    def __init__(self, *, facts_path: Path, policy=None) -> None:
+        from merlin.targetgen.contract.readback_policy import MEMORY_TRANSPORTS, selected
+
         self.facts_path = Path(facts_path)
+        self.policy = selected(policy)
+        if self.policy is not None and self.policy.transport not in MEMORY_TRANSPORTS:
+            raise ValueError("memory reader requires an explicit memory transport")
         self._prepared: dict[str, Any] | None = None
+
+    def _transport(self, backend: Any, simulator: str) -> str:
+        from merlin.targetgen.contract.readback_policy import COHERENT_PACKET_V1
+
+        declared = getattr(backend, "memory_readback_transport", None)
+        if not callable(declared):
+            raise ValueError("selected backend does not declare a memory readback transport")
+        packet = self.policy is not None and self.policy.transport == COHERENT_PACKET_V1
+        transport = declared(simulator, policy_transport=self.policy.transport) if packet else declared(simulator)
+        expected = (
+            "htif_signature_v1"
+            if simulator == "spike"
+            else ("gsim_coherent_packet_v1" if packet else "gsim_coherent_dump_v1")
+        )
+        if type(transport) is not str or (simulator, transport) not in _TRANSPORTS or transport != expected:
+            raise ValueError("selected backend cannot run the requested memory transport")
+        return transport
 
     def prepare(
         self,
@@ -139,12 +162,7 @@ class NativeMemoryReadback:
         cb_raw = canonical_json(cb)
         if backend is not backends.get_backend(target):
             raise ValueError("memory readback backend differs from selected target provider")
-        declared = getattr(backend, "memory_readback_transport", None)
-        if not callable(declared):
-            raise ValueError("selected backend does not declare a memory readback transport")
-        transport = declared(simulator)
-        if type(transport) is not str or (simulator, transport) not in _TRANSPORTS:
-            raise ValueError("selected backend cannot run the requested memory transport")
+        transport = self._transport(backend, simulator)
         workdir = Path(workdir)
         if not workdir.is_absolute() or workdir.is_symlink() or not workdir.is_dir():
             raise ValueError("memory readback requires an ordinary absolute run-owned workdir")
@@ -177,8 +195,20 @@ class NativeMemoryReadback:
             elf_path=elf_path,
         )
         bounds = None
+        packet_storage = None
         if transport == "htif_signature_v1":
             bounds = admit_htif_signature_bounds(
+                admission=admission,
+                submission=source,
+                command_buffer_member=cb_path.name,
+                target=target,
+                facts_path=self.facts_path,
+                elf_path=elf_path,
+            )
+        elif transport == "gsim_coherent_packet_v1":
+            from .native_packet_readback import admit_coherent_packet_storage
+
+            packet_storage = admit_coherent_packet_storage(
                 admission=admission,
                 submission=source,
                 command_buffer_member=cb_path.name,
@@ -194,12 +224,14 @@ class NativeMemoryReadback:
                 for row in sorted(admission["outputs"], key=lambda row: row["address"])
             ]
         )
+        if packet_storage is not None:
+            regions = packet_storage["regions"]
         output_path = source / ("output.signature" if bounds is not None else "output.dump")
         if output_path.exists() or output_path.is_symlink():
             raise ValueError("memory readback output path is not fresh")
         regions_path = None
         regions_raw = None
-        if transport == "gsim_coherent_dump_v1":
+        if transport in {"gsim_coherent_dump_v1", "gsim_coherent_packet_v1"}:
             regions_path = source / "regions.txt"
             # This is the existing GSim +dump-regions wire format, not a JSON
             # descriptor. The in-memory request below is still closed JSON.
@@ -229,6 +261,8 @@ class NativeMemoryReadback:
             "admission": admission,
             "fixed": fixed,
             "bounds": bounds,
+            "packet_storage": packet_storage,
+            "policy_record": self.policy.record() if self.policy is not None else None,
             "request": request,
             "request_raw": canonical_json(request),
             "output_path": output_path,
@@ -253,7 +287,8 @@ class NativeMemoryReadback:
             or state["source"].is_symlink()
             or not state["source"].is_dir()
             or state["backend"] is not backends.get_backend(state["target"])
-            or state["backend"].memory_readback_transport(state["simulator"]) != state["transport"]
+            or self._transport(state["backend"], state["simulator"]) != state["transport"]
+            or (self.policy.record() if self.policy is not None else None) != state["policy_record"]
             or canonical_json(state["request"]) != state["request_raw"]
         ):
             raise ValueError("memory readback selected request or source changed during execution")
@@ -283,6 +318,15 @@ class NativeMemoryReadback:
                 signature_path=state["output_path"],
             )
             artifact_sha256 = values["signature_sha256"]
+        elif state["packet_storage"] is not None:
+            from .native_packet_readback import decode_coherent_packet_dump
+
+            values = decode_coherent_packet_dump(
+                **source_kwargs,
+                packet_admission=state["packet_storage"],
+                dump_path=state["output_path"],
+            )
+            artifact_sha256 = values["dump_sha256"]
         else:
             values = decode_coherent_output_dump(
                 **source_kwargs,
@@ -292,12 +336,15 @@ class NativeMemoryReadback:
             artifact_sha256 = values["dump_sha256"]
         evidence = {
             "schema": (
-                "oracle_memory_readback_evidence_v2"
+                "oracle_memory_readback_evidence_v3"
+                if state["packet_storage"] is not None
+                else "oracle_memory_readback_evidence_v2"
                 if state["bounds"] is not None and state["bounds"]["schema"] == "htif_signature_bounds_v2"
                 else "oracle_memory_readback_evidence_v1"
             ),
             "status": "complete",
-            "scope": (
+            "scope": values.get("scope")
+            or (
                 "complete physical-region and logical-output decoding only; normal exit, DONE, "
                 "numerical correctness, placement and certification are caller obligations"
             ),
@@ -312,6 +359,9 @@ class NativeMemoryReadback:
             "console_sha256": _sha(console if type(console) is bytes else console.encode("utf-8")),
             "source": values["source"],
         }
+        if state["packet_storage"] is not None:
+            evidence["packet_admission_sha256"] = values["packet_admission_sha256"]
+            evidence["payload_bytes"] = values["payload_bytes"]
         return values["outputs"], evidence
 
 
@@ -327,6 +377,7 @@ def execute_memory_elf(
     expected_elf_sha256: str,
     facts_path: Path,
     post_run_revalidate: Callable[[], None],
+    readback_policy=None,
 ) -> tuple[str, dict[str, list], dict, dict]:
     """Execute one already-linked ELF through the normal selected backend.
 
@@ -351,7 +402,7 @@ def execute_memory_elf(
     if parent.is_symlink() or not parent.is_dir():
         raise ValueError("memory execution parent is absent or indirect")
     workdir.mkdir(mode=0o700, exist_ok=False)
-    hook = NativeMemoryReadback(facts_path=facts_path)
+    hook = NativeMemoryReadback(facts_path=facts_path, policy=readback_policy)
     selected = hook.prepare(
         cb=cb,
         target=target,

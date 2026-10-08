@@ -71,6 +71,9 @@ SUITES = {
         "tests": (
             "runtime/test_out_b64.py",
             "runtime/test_out_bin.py",
+            "runtime/test_out_bin_bulk.py",
+            "runtime/test_out_bin_memory.py",
+            "runtime/test_out_packet.py",
             "runtime/test_out_b64_profile.py",
             "targetgen/test_invocation_readback_policy.py",
             "infra/test_elf_build_cache.py",
@@ -79,6 +82,7 @@ SUITES = {
         "probe_modules": (
             "merlin.runtime.out_b64",
             "merlin.runtime.out_bin",
+            "merlin.runtime.out_packet",
             "merlin.targetgen.contract.readback_policy",
         ),
         "required_modules": ("xdsl",),
@@ -416,6 +420,7 @@ SUITES = {
             "merlin.targetgen.capsule_runner",
             "merlin.runtime.out_b64",
             "merlin.runtime.out_bin",
+            "merlin.runtime.out_packet",
             "merlin.frontends.linalg_reduction_source_body",
             "merlin.frontends.prepared_index_source_body",
         )
@@ -456,6 +461,7 @@ SUITES = {
                 "feedback.caller_layout",
                 "feedback.native_output_readback",
                 "feedback.native_memory_readback",
+                "feedback.native_packet_readback",
             )
         ),
         "required_modules": ("xdsl",),

@@ -41,6 +41,9 @@ never swallowed as a per-group failure.
 - CAS-backed snapshots share file modes. Before deleting a read-only bundle, use
   its snapshot cleanup owner; bare TemporaryDirectory cleanup can chmod shared
   files after an unlink failure and invalidate other sealed consumers.
+- Content-store copy fallbacks keep files read-only (0444 or executable 0555),
+  including cross-filesystem and disabled-store copies. Destination symlinks
+  refuse; callers own destination paths, existing regular files and directory modes.
 - Frozen imports never fall through to a live owner or unchecked bytecode. This
   provenance boundary is not a Python sandbox and does not propagate to subprocesses
   without an explicit bootstrap. Keep experiment-specific launch policy out of core.

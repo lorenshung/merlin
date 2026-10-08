@@ -26,10 +26,13 @@ from .concat_dps import ensure_registered as _register_concat_dps
 # entry exists. Idempotent, so a second import is a no-op.
 from .epilogue_fusion import ensure_registered as _register_epilogue_fusion
 from .im2col_pack import ensure_registered as _register_im2col_panel_pack
+from .masked_contraction import MaskEffectContract
 from .named_broadcast_fold import ensure_registered as _register_named_broadcast_fold
 from .passes_xdsl import PREPROCESS_STAGES, preprocess_text
 from .pipeline import lower_to_llvm_ir
 from .prov_cse import ensure_registered as _register_cse_through_provenance
+from .source_expression_interval import IntervalEffectContract
+from .source_scalar_carrier_binding import host_admitted
 from .transpose_maps import ensure_registered as _register_fold_weight_transpose
 
 _register_epilogue_fusion()
@@ -71,6 +74,7 @@ class LowerResult:
     audit_index: Path | None = None
 
 
+@host_admitted
 def lower_model(
     mlir_text: str,
     workdir: str | Path,
@@ -88,6 +92,9 @@ def lower_model(
     audit_sidecars: tuple[str | Path, ...] = (),
     data_layout: str | None = None,
     index_bits: int | None = None,
+    masked_contraction_effects: MaskEffectContract | None = None,
+    source_observation_effects: IntervalEffectContract | None = None,
+    source_scalar_carrier=None,
 ) -> LowerResult:
     """Lower MLIR text end to end; emit per-target artifacts in ``workdir``.
 
@@ -95,6 +102,10 @@ def lower_model(
     :func:`merlin.llvmlower.pipeline.lower_to_llvm_ir`). ``index_bits`` explicitly binds every LLVM
     index conversion pass and is returned with the effective pipeline in ``stats``. A selected build
     supplies it from its compiler observation; this generic API does not infer a host/runtime ABI.
+
+    ``masked_contraction_effects`` forwards the caller's explicit nontrapping,
+    unobserved-floating-flags contract for closed-mask scheduling. Selection
+    still requires its scalar schedule and feature; no effects are inferred.
 
     ``ir_audit=True`` retains exact named-stage IR and a completion/failure index
     in a fresh workdir child. ``audit_sidecars`` binds existing weights/manifests
@@ -154,6 +165,9 @@ def lower_model(
                 data_layout=data_layout,
                 index_bits=index_bits,
                 lowering_selection=lowering_selection,
+                masked_contraction_effects=masked_contraction_effects,
+                source_observation_effects=source_observation_effects,
+                source_scalar_carrier=source_scalar_carrier,
             )
         except Exception as exc:
             # A module MLIR refuses to PARSE fails before any pass, and the reader's dump names a line
@@ -171,6 +185,10 @@ def lower_model(
             except Exception:  # noqa: BLE001 -- an exotic constructor: keep the original
                 raise exc
             raise enriched from exc
+        if "source_observation" in lowering_selection:
+            stats["source_observation"] = lowering_selection["source_observation"]
+        if "source_scalar_carrier" in lowering_selection:
+            stats["source_scalar_carrier"] = lowering_selection["source_scalar_carrier"]
         if index_bits is not None:
             if lowering_selection.get("index_bits") != index_bits or not lowering_selection.get("effective_pipeline"):
                 raise ValueError("selected index lowering lost its effective compiler pipeline")
@@ -215,6 +233,7 @@ def lower_model(
         return result
 
 
+@host_admitted
 def lower_model_file(
     mlir_path: str | Path,
     workdir: str | Path,
@@ -232,6 +251,9 @@ def lower_model_file(
     audit_sidecars: tuple[str | Path, ...] = (),
     data_layout: str | None = None,
     index_bits: int | None = None,
+    masked_contraction_effects: MaskEffectContract | None = None,
+    source_observation_effects: IntervalEffectContract | None = None,
+    source_scalar_carrier=None,
 ) -> LowerResult:
     audit_mode(ir_audit)
     return lower_model(
@@ -251,4 +273,7 @@ def lower_model_file(
         audit_sidecars=audit_sidecars,
         data_layout=data_layout,
         index_bits=index_bits,
+        masked_contraction_effects=masked_contraction_effects,
+        source_observation_effects=source_observation_effects,
+        source_scalar_carrier=source_scalar_carrier,
     )

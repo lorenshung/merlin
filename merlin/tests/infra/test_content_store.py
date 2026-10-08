@@ -7,9 +7,11 @@ not follow a later in-place edit of the source) and no reason to copy *per consu
 
 from __future__ import annotations
 
+import errno
 import importlib
 import os
 import sys
+import tempfile
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -48,6 +50,157 @@ def test_disabling_the_store_still_freezes_the_same_bytes(tmp_path, monkeypatch)
     landed = tmp_path / "copied" / "top.txt"
     assert landed.read_text() == "top\n"
     assert landed.stat().st_nlink == 1
+
+
+@pytest.mark.parametrize("executable", [False, True])
+@pytest.mark.parametrize("fallback", ["disabled", "unavailable", "failed_link"])
+def test_copy_fallback_retains_typed_readonly_mode_and_original_inputs(tmp_path, monkeypatch, executable, fallback):
+    source = tmp_path / "source"
+    source.write_bytes(b"unchanged frozen input bytes\n")
+    original_mode = 0o750 if executable else 0o664
+    source.chmod(original_mode)
+    original = source.read_bytes(), source.stat().st_mode & 0o7777, source.stat().st_ino
+    store = None if fallback == "disabled" else tmp_path / "store"
+    destination = tmp_path / "consumer"
+    if fallback == "unavailable":
+        store.write_bytes(b"not a directory")
+        store.chmod(0o640)
+    elif fallback == "failed_link":
+        native_link = os.link
+
+        def fail_only_consumer(src, dst, *args, **kwargs):
+            if Path(dst) == destination:
+                raise OSError(errno.EOPNOTSUPP, "independent fixture: destination links unsupported")
+            return native_link(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr(os, "link", fail_only_consumer)
+    assert not CS.place_file(source, destination, store)
+    expected_mode = 0o555 if executable else 0o444
+    assert destination.read_bytes() == original[0]
+    assert destination.stat().st_mode & 0o7777 == expected_mode
+    assert destination.stat().st_nlink == 1
+    assert destination.stat().st_ino != source.stat().st_ino
+    assert (source.read_bytes(), source.stat().st_mode & 0o7777, source.stat().st_ino) == original
+    if fallback == "failed_link":
+        obj = CS.object_for(store, source)
+        assert obj.read_bytes() == original[0] and obj.stat().st_mode & 0o7777 == expected_mode
+        assert not destination.samefile(obj)
+    elif fallback == "unavailable":
+        assert store.read_bytes() == b"not a directory" and store.stat().st_mode & 0o7777 == 0o640
+
+
+@pytest.mark.parametrize("executable", [False, True])
+def test_native_cross_filesystem_copy_freezes_mode_without_changing_source_or_cas(tmp_path, executable):
+    """Opt-in native EXDEV control; release qualifiers supply an owned other volume.
+
+    Ordinary CI may have only one writable filesystem. The qualifier must set
+    MERLIN_TEST_CONTENT_STORE_EXDEV_ROOT to its owned source/CAS directory and
+    keep pytest's tmp_path on a different volume; a configured same-volume
+    root fails rather than converting this proof into a synthetic link error.
+    """
+    selected = os.environ.get("MERLIN_TEST_CONTENT_STORE_EXDEV_ROOT")
+    if not selected:
+        pytest.skip("native EXDEV gate requires an explicit owned source/CAS test root")
+    selected_root = Path(selected)
+    selected_root.mkdir(parents=True, exist_ok=True)
+    assert selected_root.stat().st_dev != tmp_path.stat().st_dev
+    with tempfile.TemporaryDirectory(dir=selected_root, prefix="native-exdev-") as source_dir:
+        source = Path(source_dir) / "source"
+        source.write_bytes(b"native cross-filesystem frozen input\n")
+        original_mode = 0o750 if executable else 0o664
+        source.chmod(original_mode)
+        store = Path(source_dir) / "cas"
+        obj = CS.object_for(store, source)
+        expected_mode = 0o555 if executable else 0o444
+        assert obj is not None and obj.stat().st_mode & 0o7777 == expected_mode
+        before_source = source.read_bytes(), source.stat().st_mode & 0o7777, source.stat().st_ino
+        before_cas = obj.read_bytes(), obj.stat().st_mode & 0o7777, obj.stat().st_ino
+        with pytest.raises(OSError) as native:
+            os.link(obj, tmp_path / "native-link-probe")
+        assert native.value.errno == errno.EXDEV
+        destination = tmp_path / "consumer"
+        assert not CS.place_file(source, destination, store)
+        assert destination.stat().st_dev != obj.stat().st_dev
+        assert destination.read_bytes() == before_source[0]
+        assert destination.stat().st_mode & 0o7777 == expected_mode
+        assert destination.stat().st_nlink == 1
+        assert (source.read_bytes(), source.stat().st_mode & 0o7777, source.stat().st_ino) == before_source
+        assert (obj.read_bytes(), obj.stat().st_mode & 0o7777, obj.stat().st_ino) == before_cas
+
+
+@pytest.mark.parametrize("executable", [False, True])
+def test_disabled_store_tree_freezes_dereferenced_file_modes(tmp_path, executable):
+    source = tmp_path / "source"
+    source.mkdir()
+    actual = source / "data"
+    actual.write_bytes(b"selected input\n")
+    original_mode = 0o750 if executable else 0o664
+    actual.chmod(original_mode)
+    (source / "alias").symlink_to("data")
+    CS.place_tree(source, tmp_path / "consumer", None)
+    for name in ("data", "alias"):
+        landed = tmp_path / "consumer" / name
+        assert not landed.is_symlink() and landed.read_bytes() == actual.read_bytes()
+        assert landed.stat().st_mode & 0o7777 == (0o555 if executable else 0o444)
+    assert actual.stat().st_mode & 0o7777 == original_mode
+    assert (source / "alias").is_symlink()
+
+
+def test_copy_fallback_keeps_caller_owned_regular_overwrite_behavior(tmp_path):
+    source, destination = tmp_path / "source", tmp_path / "consumer"
+    source.write_bytes(b"new source")
+    source.chmod(0o664)
+    destination.write_bytes(b"old consumer")
+    inode = destination.stat().st_ino
+    assert not CS.place_file(source, destination, None)
+    assert destination.read_bytes() == b"new source" and destination.stat().st_mode & 0o7777 == 0o444
+    assert destination.stat().st_ino == inode
+    assert source.stat().st_mode & 0o7777 == 0o664
+
+
+@pytest.mark.parametrize("executable", [False, True])
+def test_failed_copy_never_changes_destination_mode(tmp_path, monkeypatch, executable):
+    source, destination = tmp_path / "source", tmp_path / "consumer"
+    source.write_bytes(b"complete source")
+    source.chmod(0o750 if executable else 0o664)
+    before_source = source.read_bytes(), source.stat().st_mode & 0o7777
+    destination.write_bytes(b"caller-owned destination")
+    destination.chmod(0o600)
+
+    def interrupted_copy(src, dst, **kwargs):
+        Path(dst).write_bytes(b"partial copied bytes")
+        raise OSError("independent fixture: interrupted copy")
+
+    monkeypatch.setattr(CS.shutil, "copy2", interrupted_copy)
+    with pytest.raises(OSError, match="interrupted copy"):
+        CS.place_file(source, destination, None)
+    assert destination.read_bytes() == b"partial copied bytes"
+    assert destination.stat().st_mode & 0o7777 == 0o600
+    assert (source.read_bytes(), source.stat().st_mode & 0o7777) == before_source
+
+
+@pytest.mark.parametrize("store_enabled", [False, True])
+@pytest.mark.parametrize("dangling", [False, True])
+def test_destination_symlink_refuses_before_mutating_foreign_target_or_creating_cas(tmp_path, store_enabled, dangling):
+    source, foreign = tmp_path / "source", tmp_path / "foreign"
+    source.write_bytes(b"source bytes")
+    source.chmod(0o664)
+    if not dangling:
+        foreign.write_bytes(b"foreign bytes")
+        foreign.chmod(0o600)
+    destination = tmp_path / "consumer"
+    destination.symlink_to(foreign)
+    store = tmp_path / "store" if store_enabled else None
+    with pytest.raises(ValueError, match="destination.*symlink"):
+        CS.place_file(source, destination, store)
+    assert destination.is_symlink() and source.read_bytes() == b"source bytes"
+    assert source.stat().st_mode & 0o7777 == 0o664
+    if dangling:
+        assert not foreign.exists()
+    else:
+        assert foreign.read_bytes() == b"foreign bytes" and foreign.stat().st_mode & 0o7777 == 0o600
+    if store is not None:
+        assert not store.exists()
 
 
 @pytest.mark.parametrize("executable", [False, True])

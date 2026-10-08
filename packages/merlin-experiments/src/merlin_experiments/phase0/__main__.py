@@ -45,6 +45,11 @@ def main(argv=None) -> int:
     ap.add_argument("--smt-profile", type=Path, help="explicit optional solver-generated sidecar")
     ap.add_argument("--hidden-profile", type=Path, help="explicit optional private holdout sidecar (host only)")
     ap.add_argument(
+        "--component-only",
+        action="store_true",
+        help="independent generated components from reviewed HW/SW declarations",
+    )
+    ap.add_argument(
         "--descriptor",
         type=Path,
         default=None,
@@ -131,6 +136,8 @@ def main(argv=None) -> int:
         )
         if a.prohibited_instruction_roles:
             options["prohibited_instruction_roles"] = list(a.prohibited_instruction_roles)
+        if a.component_only:
+            options["component_only"] = True
         written = generate_target(t, **options)
         print(f"{t}: wrote {len(written)} capsules -> {written[0].parent.parent if written else '(none)'}")
     if a.comparison_manifest or not a.target:

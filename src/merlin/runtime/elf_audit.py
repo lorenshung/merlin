@@ -26,7 +26,6 @@ vector coverage. Fails CLOSED: an unreadable ELF is an error, never a pass.
 from __future__ import annotations
 
 import json
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -71,6 +70,7 @@ class Segment:
     filesz: int
     memsz: int
     flags: str
+    paddr: int | None = None
 
     @property
     def end(self) -> int:
@@ -139,7 +139,7 @@ def _run(cmd: list[str]) -> str:
     return _proc.run_checked(cmd, error=ElfAuditError, timeout=300, wrap_timeout=False, tail=500).stdout
 
 
-def read_elf(elf: str | Path) -> tuple[int, list[Segment], dict[str, tuple[int, int, str]]]:
+def read_elf(elf: str | Path, *, strict: bool = False) -> tuple[int, list[Segment], dict[str, tuple[int, int, str]]]:
     """``(entry, segments, sections)`` from the ELF headers.
 
     Parsed from ``readelf -lSh`` text with ``str.split`` — no regex (repo rule) and no extra dependency.
@@ -149,20 +149,39 @@ def read_elf(elf: str | Path) -> tuple[int, list[Segment], dict[str, tuple[int, 
         raise ElfAuditError("no readelf available (need the chipyard riscv toolchain on PATH)")
     out = _run([readelf, "-h", "-l", "-S", "-W", str(elf)])
     entry = 0
+    has_entry = False
     segments: list[Segment] = []
     sections: dict[str, tuple[int, int, str]] = {}
     for line in out.splitlines():
         s = line.strip()
         if s.startswith("Entry point address:"):
             entry = int(s.split(":", 1)[1].strip(), 16)
+            has_entry = True
         elif s.startswith("LOAD"):
             # LOAD  offset vaddr paddr filesz memsz flags align
             parts = s.split()
             try:
-                segments.append(
-                    Segment("LOAD", int(parts[2], 16), int(parts[4], 16), int(parts[5], 16), "".join(parts[6:-1]))
+                segment = Segment(
+                    "LOAD",
+                    int(parts[2], 16),
+                    int(parts[4], 16),
+                    int(parts[5], 16),
+                    "".join(parts[6:-1]),
+                    paddr=int(parts[3], 16),
                 )
-            except (IndexError, ValueError):
+                if strict:
+                    segment.flags = segment.flags.replace("E", "X")
+                if strict and (
+                    not segment.flags
+                    or set(segment.flags) - set("RWX")
+                    or not 0 <= segment.filesz <= segment.memsz
+                    or segment.memsz <= 0
+                ):
+                    raise ElfAuditError(f"invalid LOAD segment in {elf}: {s}")
+                segments.append(segment)
+            except (IndexError, ValueError) as exc:
+                if strict:
+                    raise ElfAuditError(f"malformed LOAD segment in {elf}: {s}") from exc
                 continue
         elif s.startswith("[") and "]" in s:
             # section table row: [ N] name type addr off size ...
@@ -177,6 +196,8 @@ def read_elf(elf: str | Path) -> tuple[int, list[Segment], dict[str, tuple[int, 
                     continue
     if not segments:
         raise ElfAuditError(f"no LOAD segments in {elf} — not a linked executable?")
+    if strict and not has_entry:
+        raise ElfAuditError(f"missing entry point in {elf}")
     return entry, segments, sections
 
 

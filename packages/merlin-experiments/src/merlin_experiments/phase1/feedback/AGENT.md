@@ -32,6 +32,11 @@ the eventual consumer must bind its run/receipt and keep full-value checks manda
 selected backend transport. It stages a fresh command-buffer copy and run-owned
 artifact paths, performs all ELF/alias preflight before launch, then rechecks
 source, request and output bytes; core retains exit/DONE, receipt and grade authority.
+Each invocation uses a fresh retained attempt directory even when two tiers share
+the same capsule build directory. `native_packet_readback.py` independently binds
+the optional packed arena/publication symbols and complete typed logical frames
+to those same source/ELF pins. It never treats packet DONE as native completion
+or claims physical-padding, numerical equivalence or a certificate.
 
 `private_prebuilt_receipt.py` admits only diagnostic inspection of an existing
 whole-model build. The shared post-build verifier still checks linked bytes and

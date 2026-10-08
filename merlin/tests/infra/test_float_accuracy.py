@@ -63,6 +63,37 @@ def test_the_threshold_is_the_capsules_own_declaration(tmp_path):
     assert FA.check(_console(off), loose)["passed"] is True
 
 
+@pytest.mark.parametrize("nonfinite", [float("inf"), -float("inf"), float("nan")])
+@pytest.mark.parametrize("arm", ["reference", "candidate", "both"])
+def test_compare_counts_nonfinite_operands_as_violations(nonfinite, arm):
+    reference, candidate = [1.0, 0.0, -1.0], [1.0, 0.0, -1.0]
+    if arm in ("reference", "both"):
+        reference[1] = nonfinite
+    if arm in ("candidate", "both"):
+        candidate[1] = nonfinite
+    with np.errstate(invalid="ignore"):
+        result = FA.compare(candidate, reference, atol=0.03125, rtol=0.02)
+    assert result["within"] == 2 and result["of"] == 3
+    assert result["policy"] == {"atol": 0.03125, "rtol": 0.02}
+
+
+@pytest.mark.parametrize("nonfinite", [float("inf"), -float("inf")])
+def test_check_refuses_finite_candidate_against_infinite_reference(tmp_path, nonfinite):
+    reference = list(REFERENCE)
+    reference[1] = nonfinite
+    capsule = _capsule(tmp_path, float_outputs={"Y0": reference})
+    result = FA.check(_console(REFERENCE), capsule)
+    assert not result["passed"] and result["within"] == 3 and result["of"] == 4
+    assert result["policy"] == {"atol": 0.03125, "rtol": 0.02}
+
+
+def test_finite_tolerance_boundary_is_unchanged():
+    reference = [2.0, -2.0, 0.0, 0.0]
+    candidate = [3.25, -3.25, 0.25, float(np.nextafter(0.25, float("inf")))]
+    result = FA.compare(candidate, reference, atol=0.25, rtol=0.5)
+    assert result["within"] == 3 and result["of"] == 4
+
+
 @pytest.mark.parametrize(
     "build, console, why",
     [

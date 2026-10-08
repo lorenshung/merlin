@@ -12,14 +12,18 @@ import subprocess
 import sys
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from merlin.common.access import PUBLIC_INPUT_MODULE, is_harness_module, is_public_input_module
 
+from .compiler_library import CompilerLibraryContract, CompilerLibraryError
 from .contract import compile as oot_compile  # noqa: F401 -- legacy evaluator monkeypatch seam
 from .contract import schemas
+
+if TYPE_CHECKING:
+    from .artifact_bundle import SelectedArtifactProfile
 
 DEFAULT_TARGET = "unknown"  # fallback only when a package manifest declares no ``target`` field
 CONTRACT_VERSION = "0.1"
@@ -77,7 +81,7 @@ def _is_input_dialect(mod: str) -> bool:
     return is_public_input_module(mod)
 
 
-def _py_imports_merlin(text: str) -> str | None:
+def _py_imports_merlin(text: str, *, compiler_library: CompilerLibraryContract | None = None) -> str | None:
     """Return the offending module name iff source imports a non-exempt core/extension harness module.
     The historical function name remains compatible. AST-based: docstrings, comments and ``merlin_iface``
     never match. The public input dialect (:data:`_INPUT_DIALECT_EXEMPT`) is allowed (using the interface,
@@ -88,10 +92,14 @@ def _py_imports_merlin(text: str) -> str | None:
         tree = ast.parse(text)
     except SyntaxError:
         return None
+
+    def permitted(module: str) -> bool:
+        return _is_input_dialect(module) or (compiler_library is not None and compiler_library.permits(module))
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for a in node.names:
-                if is_harness_module(a.name) and not _is_input_dialect(a.name):
+                if is_harness_module(a.name) and not permitted(a.name):
                     return a.name
         elif isinstance(node, ast.ImportFrom):
             if node.level != 0:
@@ -99,12 +107,12 @@ def _py_imports_merlin(text: str) -> str | None:
             mod = node.module or ""
             if not is_harness_module(mod):
                 continue
-            if _is_input_dialect(mod):
+            if permitted(mod):
                 continue
             # `from merlin.xdsl_dialects import interface` resolves each imported name to its FQN; allow only
             # when EVERY name is the exempt input dialect, else flag the module (e.g. a `lowering` sibling).
             fqns = [f"{mod}.{a.name}" for a in node.names]
-            if fqns and all(_is_input_dialect(f) for f in fqns):
+            if fqns and all(permitted(f) for f in fqns):
                 continue
             return mod
     return None
@@ -274,8 +282,17 @@ class Package:
 CAPABILITY_GATE = "package_capability"
 
 
-def load_package(package_dir: str | Path, *, contract: str | Path | None = None) -> Package:
+def load_package(
+    package_dir: str | Path,
+    *,
+    contract: str | Path | None = None,
+    artifact_profile: SelectedArtifactProfile | None = None,
+) -> Package:
     """Load + validate a package manifest (fail-closed). Resolves the entrypoint tool path.
+
+    Explicit ``artifact_profile`` admits ABI 0.2 structural inspection only,
+    independently of the legacy executable-compiler capability. It never
+    changes that capability verdict. Default ABI 0.2 loading refuses.
 
     Also ASKS the package classifier whether this directory provides the ``compiler`` capability at
     all, so "this is not a compiler package" is answered once, by name, instead of surfacing as
@@ -290,7 +307,7 @@ def load_package(package_dir: str | Path, *, contract: str | Path | None = None)
 
     d = Path(package_dir)
     capability = _package.capability(d, "compiler")
-    if _blocks(
+    if artifact_profile is None and _blocks(
         _configured_phase(CAPABILITY_GATE), "absent" if not capability.provided else "provided", failing=("absent",)
     ):
         raise CertFailure("contract", "structural_invariant_violation", capability.explain(d))
@@ -321,7 +338,14 @@ def load_package(package_dir: str | Path, *, contract: str | Path | None = None)
     build = manifest.get("build")
     tool_rel = build["tool_output"] if build else manifest["entrypoints"]["tool"]
     tool = (d / tool_rel).resolve()
-    return Package(directory=d, manifest=manifest, tool=tool, compiler_capability=capability)
+    package = Package(directory=d, manifest=manifest, tool=tool, compiler_capability=capability)
+    if manifest.get("abi_version", "0.1") == "0.2" or artifact_profile is not None:
+        if manifest.get("abi_version") != "0.2":
+            raise CertFailure(
+                "contract", "structural_invariant_violation", "structural profile permission requires artifact ABI 0.2"
+            )
+        _admit_artifact_protocol(package, artifact_profile)
+    return package
 
 
 def usable_cmake() -> str:
@@ -425,13 +449,32 @@ def build_package(pkg: Package, *, timeout: int = 1800) -> None:
             )
 
 
-def integrity_scan(pkg: Package, *, additional_forbidden: tuple[str, ...] = ()) -> None:
+def integrity_scan(
+    pkg: Package,
+    *,
+    additional_forbidden: tuple[str, ...] = (),
+    compiler_library: CompilerLibraryContract | None = None,
+    compiler_library_root: Path | None = None,
+) -> None:
     """Reject harness/reference access, with optional host-owned stricter markers.
 
     Supplemental markers belong to one invocation and cannot remove the default
     oracle markers or structural import restrictions. Never read them from a
     candidate manifest or mutate the process-wide defaults for an experiment.
     """
+    if (compiler_library is None) != (compiler_library_root is None):
+        raise CertFailure(
+            "integrity", "structural_invariant_violation", "library contract and root must be supplied together"
+        )
+    if compiler_library is not None:
+        if type(compiler_library) is not CompilerLibraryContract or pkg.integrity_exempt:
+            raise CertFailure(
+                "integrity", "forbidden_pattern", "reviewed-library candidates cannot claim an integrity exemption"
+            )
+        try:
+            compiler_library.verify(compiler_library_root)
+        except (CompilerLibraryError, OSError) as exc:
+            raise CertFailure("integrity", "forbidden_pattern", str(exc)) from exc
     if pkg.integrity_exempt:
         return
     for src in pkg.directory.rglob("*"):
@@ -449,7 +492,7 @@ def integrity_scan(pkg: Package, *, additional_forbidden: tuple[str, ...] = ()) 
                     f"(a non-exempt package must not read the reference/oracle)",
                 )
         if src.suffix == ".py":  # real merlin-harness import (AST, not substring)
-            mod = _py_imports_merlin(text)
+            mod = _py_imports_merlin(text, compiler_library=compiler_library)
             if mod is not None:
                 raise CertFailure(
                     "integrity",
@@ -465,24 +508,64 @@ def integrity_scan(pkg: Package, *, additional_forbidden: tuple[str, ...] = ()) 
 _ENTRYPOINT_ALIASES = {"emit_target_artifact": "lower_target_to_llvm", "lower_target_to_llvm": "emit_target_artifact"}
 
 
-def analysis_emission_entrypoints(pkg: Package) -> tuple[str, ...]:
+def _admit_artifact_protocol(pkg: Package, profile: SelectedArtifactProfile | None) -> str:
+    version = pkg.manifest.get("abi_version", "0.1")
+    if version == "0.1":
+        return version
+    if version != "0.2":
+        raise CertFailure(
+            "contract", "structural_invariant_violation", f"unsupported experiment ABI version {version!r}"
+        )
+    from .artifact_bundle import require_profile
+
+    try:
+        require_profile(profile)
+    except (OSError, ValueError, TypeError) as exc:
+        raise CertFailure(
+            "contract",
+            "structural_invariant_violation",
+            "artifact ABI 0.2 has no execution adapter; explicit profile-bound structural emission only: " + str(exc),
+        ) from exc
+    return version
+
+
+def analysis_emission_entrypoints(
+    pkg: Package, *, artifact_profile: SelectedArtifactProfile | None = None
+) -> tuple[str, ...]:
     """Commands needed to obtain both artifacts for host-owned analysis.
 
     The four experiment ABI commands remain mandatory.  A package may additionally expose
     ``emit_analysis_bundle`` to produce the command buffer at ``{output_json}`` and the target
     artifact on stdout in one compiler process.  Analysis feature-detects that optimization and
     otherwise preserves the two-command protocol for existing packages.
+    ABI 0.2 needs explicit profile-bound structural permission; the returned
+    artifact commands are not an executable or a certification route.
     """
+    version = _admit_artifact_protocol(pkg, artifact_profile)
     manifest = getattr(pkg, "manifest", {}) or {}
     commands = manifest.get("commands") or {}
     if "emit_analysis_bundle" in commands:
         return ("emit_analysis_bundle",)
-    return ("emit_command_buffer", "lower_target_to_llvm")
+    return ("emit_command_buffer", "emit_target_artifact" if version == "0.2" else "lower_target_to_llvm")
 
 
-def _resolve_argv(pkg: Package, name: str, input_mlir: Path, output_json: Path | None) -> list[str]:
+def _resolve_argv(
+    pkg: Package,
+    name: str,
+    input_mlir: Path,
+    output_json: Path | None,
+    *,
+    artifact_profile: SelectedArtifactProfile | None = None,
+) -> list[str]:
+    version = _admit_artifact_protocol(pkg, artifact_profile)
+    if version == "0.2" and name == "lower_target_to_llvm":
+        raise CertFailure(
+            "contract",
+            "structural_invariant_violation",
+            "artifact ABI 0.2 cannot enter the legacy LLVM execution route",
+        )
     commands = pkg.manifest["commands"]
-    if name not in commands and _ENTRYPOINT_ALIASES.get(name) in commands:
+    if version == "0.1" and name not in commands and _ENTRYPOINT_ALIASES.get(name) in commands:
         name = _ENTRYPOINT_ALIASES[name]  # back-compat: package declares the other spelling
     template = commands[name]["argv"]
     # Substituted I/O paths must be ABSOLUTE. Entrypoints run with cwd=pkg.directory, so a caller that
@@ -572,6 +655,7 @@ def run_entrypoint(
     *,
     timeout: int = 600,
     write_bytecode: bool = False,
+    artifact_profile: SelectedArtifactProfile | None = None,
 ) -> subprocess.CompletedProcess:
     """Invoke one entrypoint as a subprocess (never imports the package).
 
@@ -585,6 +669,9 @@ def run_entrypoint(
 
     Paths are absolutised first, so pinning the cwd cannot break a caller that passed them relative.
 
+    ABI 0.2 requires explicit profile-bound structural emission permission.
+    It has no normal executor; its stdout must not enter the legacy LLVM path.
+
     No bytecode is written INTO the package by default: running from the package root, a Python
     package importing its own modules writes ``__pycache__`` beside them, and a frozen submission whose
     digest excludes ``__pycache__`` (and whose presence the functional gate refuses) once acquired it
@@ -593,7 +680,7 @@ def run_entrypoint(
     """
     input_mlir = Path(input_mlir).resolve()
     output_json = Path(output_json).resolve() if output_json is not None else None
-    argv = _resolve_argv(pkg, name, input_mlir, output_json)
+    argv = _resolve_argv(pkg, name, input_mlir, output_json, artifact_profile=artifact_profile)
     if _needs_interpreter(pkg, argv):
         argv = [sys.executable, *argv]
     # cwd=pkg.directory is the CONTRACT, not a convenience: _resolve_argv documents "steps run with
@@ -624,7 +711,9 @@ def run_entrypoint(
         env["PYTHONPATH"] = os.pathsep.join(
             str(Path(value or ".").resolve()) for value in env["PYTHONPATH"].split(os.pathsep)
         )
-    return subprocess.run(argv, cwd=str(pkg.directory), env=env, capture_output=True, text=True, timeout=timeout)
+    result = subprocess.run(argv, cwd=str(pkg.directory), env=env, capture_output=True, text=True, timeout=timeout)
+    _admit_artifact_protocol(pkg, artifact_profile)
+    return result
 
 
 # --------------------------------------------------------------------------- certification

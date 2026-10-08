@@ -37,8 +37,11 @@ def _edit_pipeline(passes: list[str], *, outputs: int = 1, rows: int = 1) -> lis
     hits = [i for i, p in enumerate(passes) if "one-shot-bufferize" in p]
     if len(hits) != 1:
         raise ValueError(f"{FEATURE} requires exactly one one-shot-bufferize stage")
-    fusion = [i for i, p in enumerate(passes[: hits[0]]) if "linalg-fuse-elementwise-ops" in p]
-    i = fusion[0] if fusion else hits[0]
+    # Preserve the ordinary tensor fusion/generalization boundary. Generalizing
+    # named copies before fusion can change materialization of prepared read-only
+    # operands even when no contraction is selected. Scalarize only the exact
+    # pure contractions remaining immediately before bufferization.
+    i = hits[0]
     marker = (
         RECTANGULAR_MARKER
         if rows == 2
@@ -70,7 +73,10 @@ def ensure_registered() -> str:
             ImprFeature(
                 name=FEATURE,
                 action_class="PASS",
-                description="Keep exact ordered f32 tensor contraction accumulators in scalar loop arguments before bufferization.",
+                description=(
+                    "Keep exact ordered f32 tensor contraction accumulators in scalar loop arguments before "
+                    "bufferization."
+                ),
                 edit_pipeline=_edit_pipeline,
                 alternative_group=_OUTPUTS_GROUP,
             )
@@ -80,7 +86,10 @@ def ensure_registered() -> str:
             ImprFeature(
                 name=FOUR_OUTPUTS_FEATURE,
                 action_class="PASS",
-                description="Carry four independent exact output accumulators across increasing-K tensor contractions whose last parallel extent is divisible by four.",
+                description=(
+                    "Carry four independent exact output accumulators across increasing-K tensor contractions "
+                    "whose last parallel extent is divisible by four."
+                ),
                 edit_pipeline=lambda passes: _edit_pipeline(passes, outputs=4),
                 alternative_group=_OUTPUTS_GROUP,
             )
@@ -90,7 +99,10 @@ def ensure_registered() -> str:
             ImprFeature(
                 name=EIGHT_OUTPUTS_FEATURE,
                 action_class="PASS",
-                description="Carry eight independent exact output accumulators across increasing-K tensor contractions whose last parallel extent is divisible by eight.",
+                description=(
+                    "Carry eight independent exact output accumulators across increasing-K tensor "
+                    "contractions whose last parallel extent is divisible by eight."
+                ),
                 edit_pipeline=lambda passes: _edit_pipeline(passes, outputs=8),
                 alternative_group=_OUTPUTS_GROUP,
             )
@@ -100,7 +112,10 @@ def ensure_registered() -> str:
             ImprFeature(
                 name=TWO_OUTPUTS_FEATURE,
                 action_class="PASS",
-                description="Carry two independent exact output accumulators across increasing-K tensor contractions whose last parallel extent is divisible by two.",
+                description=(
+                    "Carry two independent exact output accumulators across increasing-K tensor contractions "
+                    "whose last parallel extent is divisible by two."
+                ),
                 edit_pipeline=lambda passes: _edit_pipeline(passes, outputs=2),
                 alternative_group=_OUTPUTS_GROUP,
             )
@@ -110,7 +125,11 @@ def ensure_registered() -> str:
             ImprFeature(
                 name=RECTANGULAR_FEATURE,
                 action_class="PASS",
-                description="Carry eight exact ordered accumulators across a two-row/four-column tensor contraction tile, sharing only typed coordinate-identical immutable input reads. Partial tiles refuse.",
+                description=(
+                    "Carry eight exact ordered accumulators across a two-row/four-column tensor contraction "
+                    "tile, sharing only typed coordinate-identical immutable input reads. Partial tiles "
+                    "refuse."
+                ),
                 edit_pipeline=lambda passes: _edit_pipeline(passes, outputs=4, rows=2),
                 alternative_group=_OUTPUTS_GROUP,
             )
@@ -120,7 +139,10 @@ def ensure_registered() -> str:
             ImprFeature(
                 name=REDUCTION_UNROLL_FEATURE,
                 action_class="PASS",
-                description="Request partial unrolling by two for exact scalar contraction reduction loops using upstream LLVM loop annotations.",
+                description=(
+                    "Request partial unrolling by two for exact scalar contraction reduction loops using "
+                    "upstream LLVM loop annotations."
+                ),
                 edit_pipeline=_edit_reduction_unroll,
                 alternative_group=_UNROLL_GROUP,
                 requires_exactly_one_of=_OUTPUTS_FEATURES,
@@ -131,7 +153,10 @@ def ensure_registered() -> str:
             ImprFeature(
                 name=FOUR_REDUCTION_UNROLL_FEATURE,
                 action_class="PASS",
-                description="Request partial unrolling by four for exact scalar contraction reduction loops using upstream LLVM loop annotations.",
+                description=(
+                    "Request partial unrolling by four for exact scalar contraction reduction loops using "
+                    "upstream LLVM loop annotations."
+                ),
                 edit_pipeline=lambda passes: _edit_reduction_unroll(passes, count=4),
                 alternative_group=_UNROLL_GROUP,
                 requires_exactly_one_of=_OUTPUTS_FEATURES,
@@ -159,7 +184,8 @@ def _scalar_contraction_spec(op):
     body = list(block.operations)
     if (len(block.arguments) != 3 or len(body) != 3
             or [x.operation.name for x in body] != ["arith.mulf", "arith.addf", "linalg.yield"]
-            or any("fastmath" in x.attributes and str(x.attributes["fastmath"]) != "#arith.fastmath<none>" for x in body)
+            or any("fastmath" in x.attributes
+                   and str(x.attributes["fastmath"]) != "#arith.fastmath<none>" for x in body)
             or any(name != "fastmath" and not name.startswith("prov.")
                    for x in body[:2] for name in x.attributes)):
         return None
@@ -212,7 +238,8 @@ def _scalar_contraction_spec(op):
     return positions, extents, mul_order, add_order
 
 
-def _scalarize_tensor_contractions(ctx, module, outputs=1, reduction_unroll=0, rows=1, selection=None, output_guard=None):
+def _scalarize_tensor_contractions(
+        ctx, module, outputs=1, reduction_unroll=0, rows=1, selection=None, output_guard=None):
     from torch_mlir import ir as _sc_ir
     todo = []
 
@@ -315,14 +342,17 @@ def _scalarize_tensor_contractions(ctx, module, outputs=1, reduction_unroll=0, r
                                     if key is not None and key in shared:
                                         value = shared[key]
                                     else:
-                                        value = create("tensor.extract", [old.operands[i], *[all_indices[d] for d in positions[i]]],
-                                                       [scalar]).results[0]
+                                        value = create(
+                                            "tensor.extract",
+                                            [old.operands[i], *[all_indices[d] for d in positions[i]]],
+                                            [scalar]).results[0]
                                         if key is not None:
                                             shared[key] = value
                                     values.append(value)
                                 product = create("arith.mulf", [values[d] for d in mul_order], [scalar]).results[0]
                                 operands = [product, block.arguments[lane_number + 1]]
-                                accumulated.append(create("arith.addf", [operands[d] for d in add_order], [scalar]).results[0])
+                                accumulated.append(create(
+                                    "arith.addf", [operands[d] for d in add_order], [scalar]).results[0])
                             create("scf.yield", accumulated)
                         destination = current
                         for value, idx in zip(loop.results, out_indices):
@@ -385,11 +415,13 @@ def _run_stages(ctx, module, pipeline, erase, mid=(), late=(), post_openmp=(), p
     head_generalizes = any('linalg-generalize-named-ops' in p for p in passes[:i])
     _SC_ORIG_RUN_STAGES(ctx, module, ','.join(passes[:i]), 0, (), (), (),
                         pre_generalize if head_generalizes else ())
-    _SC_ORIG_RUN_STAGES(ctx, module, 'func.func(linalg-generalize-named-ops)', 0, (), (), (),
-                        () if head_generalizes else pre_generalize)
+    if not head_generalizes:
+        _SC_ORIG_RUN_STAGES(ctx, module, 'func.func(linalg-generalize-named-ops)', 0, (), (), (),
+                            pre_generalize)
     rows = 2 if selected[0] == _SC2X4_MARKER else 1
     outputs = {_SC_MARKER: 1, _SC2_MARKER: 2, _SC4_MARKER: 4, _SC8_MARKER: 8, _SC2X4_MARKER: 4}[selected[0]]
-    name = 'scalar_contraction_accumulator' + ('_2x4_outputs' if rows != 1 else '' if outputs == 1 else '_' + str(outputs) + '_outputs')
+    name = 'scalar_contraction_accumulator' + (
+        '_2x4_outputs' if rows != 1 else '' if outputs == 1 else '_' + str(outputs) + '_outputs')
     count = _scalarize_tensor_contractions(ctx, module, outputs, unroll, rows)
     print('OK', name, count)
     if unroll:
@@ -419,7 +451,8 @@ def apply_for_test(mlir_text: str, *, outputs: int = 1, reduction_unroll: int = 
         "import sys\nfrom torch_mlir import ir\n"
         + RUNNER_PRELUDE.split("_SC_MARKER =", 1)[0]
         + "ctx = ir.Context()\nmodule = ir.Module.parse(open(sys.argv[1]).read(), ctx)\n"
-        + f"print('COUNT', _scalarize_tensor_contractions(ctx, module, {outputs}, {reduction_unroll}, {rows}))\nprint('MODULE_BEGIN')\nprint(module)\n"
+        + f"print('COUNT', _scalarize_tensor_contractions(ctx, module, {outputs}, {reduction_unroll}, {rows}))\n"
+        "print('MODULE_BEGIN')\nprint(module)\n"
     )
     proc = subprocess.run([str(m2m_python()), str(script), str(src)], capture_output=True, text=True, timeout=120)
     if proc.returncode:

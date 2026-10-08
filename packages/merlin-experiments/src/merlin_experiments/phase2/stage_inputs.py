@@ -18,6 +18,7 @@ from merlin.perf.external_objective import OBJECTIVE_DIRECTORY, ExternalObjectiv
 from merlin.targetgen.target_experiment import TargetExperiment
 
 from . import agent_workspace as AW
+from . import broker_policy as BP
 from . import candidate_record as RECORD
 from . import contracts as CONTRACTS
 from . import corpus as CORPUS
@@ -47,6 +48,51 @@ class StageE2ESentinel:
     capsule_sha256: str
     required_lanes: tuple[str, ...]
     required_tiers: tuple[str, ...]
+
+
+def prepare_component_prompt_inputs(
+    policy,
+    *,
+    corpus_manifest_path: str,
+    candidate_path: str,
+    allowed_paths: tuple[str, ...],
+    wall_budget_seconds: int,
+    max_tool_calls: int,
+    tool_timeout_seconds: int,
+    broker_path: str,
+    broker_receipt_path: str,
+) -> SP.ComponentPromptInputs:
+    """Bind a host-selected component policy without selecting a model or legacy grant.
+
+    Paths describe an independently materialized view. This preparation API does
+    not admit that view or start a session. The normal launcher currently refuses
+    the profile until a qualified fresh isolated transport is available.
+    """
+    from merlin.benchharness import hash_tree
+
+    from .component_workflow import ComponentOnlyPolicy
+
+    if type(policy) is not ComponentOnlyPolicy or policy.workflow_id != BP.COMPONENT_ONLY_V1:
+        raise StageGateError("component prompt requires the explicit component-only policy")
+    members = tuple(sorted(policy._validate()))
+    corpus = policy.component_corpus
+    inputs = SP.ComponentPromptInputs(
+        corpus_manifest_path,
+        corpus.manifest_sha256,
+        corpus.capsules_sha256,
+        members,
+        candidate_path,
+        str(hash_tree(policy.candidate)["sha256"]),
+        policy.build_registry(),
+        allowed_paths,
+        wall_budget_seconds,
+        max_tool_calls,
+        tool_timeout_seconds,
+        broker_path,
+        broker_receipt_path,
+    )
+    SP.render_component_prompt(inputs)
+    return inputs
 
 
 def sentinel_identity(sentinel: StageE2ESentinel, *, role: str) -> dict[str, Any]:

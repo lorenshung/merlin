@@ -23,7 +23,7 @@ import struct
 import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -33,8 +33,16 @@ from merlin.common.paths import runtime_dir
 
 from ...llvmlower import c_runtime, target_data_layout, toolchain
 from ...llvmlower.lower import lower_model_file
+from ...llvmlower.masked_contraction import MaskEffectContract
+from ...llvmlower.source_expression_interval import IntervalEffectContract
+from ...llvmlower.source_scalar_carrier_binding import host_admitted
 from ..boards import CONSOLE_HTIF, CONSOLE_UART
+from ..execution_memory import ExecutionMemoryError, MemoryMapBinding, MemoryReservation, admit_execution_memory
 from . import spike as _spike  # toolchain paths (gcc/spike/objdump)
+
+if TYPE_CHECKING:
+    from ...llvmlower.entry_weight_projection import GeneratedDispatchABI
+    from ...llvmlower.host_transform_chain import HostLLVMTransformChain
 
 RVV_CFLAGS = ["-march=rv64gcv", "-mabi=lp64d", "-mcmodel=medany", "-O2", "-ffreestanding", "-fno-builtin"]
 
@@ -97,6 +105,8 @@ def _transform_host_ir(
     source: Path,
     workdir: Path,
     transform: Callable[[Path, Path], Path] | None,
+    *,
+    chain: HostLLVMTransformChain | None = None,
 ) -> tuple[Path, dict | None]:
     """Keep target-selected late legalization inside the normal object build.
 
@@ -104,6 +114,17 @@ def _transform_host_ir(
     LLVM IR, and its compiled object participates in the existing build hash.
     The optional callback owns its semantic proof and supporting artifacts.
     """
+    if chain is not None:
+        from ...llvmlower.host_transform_chain import apply_host_transform_chain
+
+        return apply_host_transform_chain(
+            source,
+            workdir,
+            chain,
+            terminal=(lambda current, work: _transform_host_ir(current, work, transform))
+            if transform is not None
+            else None,
+        )
     if transform is None:
         return source, None
     import hashlib
@@ -412,6 +433,27 @@ def _supplemental_object_digest(objects):
     return digest.digest()
 
 
+def _model_memory_reservations(
+    elf: Path, *, arena_base: int, arena_bytes: int, stack_bytes: int
+) -> tuple[MemoryReservation, ...]:
+    """Recover the linked stack and the allocator extent compiled by this builder."""
+    symbols = {}
+    listing = _run([toolchain.nm(), "--defined-only", "--radix=d", elf]).stdout
+    for line in listing.splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[2] in {"_stack_top", "MERLIN_STACK_BYTES"}:
+            if parts[2] in symbols or not parts[0].isdigit():
+                raise ExecutionMemoryError("ambiguous linked runtime stack symbols")
+            symbols[parts[2]] = int(parts[0])
+    if set(symbols) != {"_stack_top", "MERLIN_STACK_BYTES"} or symbols["MERLIN_STACK_BYTES"] != stack_bytes:
+        raise ExecutionMemoryError("linked stack extent is missing or disagrees with the build")
+    reservations = [MemoryReservation("runtime-stack", symbols["_stack_top"] - stack_bytes, stack_bytes)]
+    if arena_bytes:
+        reservations.append(MemoryReservation("runtime-allocator", arena_base, arena_bytes))
+    return tuple(reservations)
+
+
+@host_admitted
 def build(
     model_dir: str | Path,
     work: str | Path,
@@ -428,7 +470,13 @@ def build(
     host_vectorize: bool | None = None,
     host_math_policy: str = "native",
     math_archive_symbols: Sequence[str] | None = None,
+    prepared_model_transform: Callable[[Path, Path], Path] | None = None,
+    entry_weight_projection: GeneratedDispatchABI | None = None,
+    masked_contraction_effects: MaskEffectContract | None = None,
+    source_observation_effects: IntervalEffectContract | None = None,
+    source_scalar_carrier=None,
     host_llvm_transform: Callable[[Path, Path], Path] | None = None,
+    host_llvm_transform_chain: HostLLVMTransformChain | None = None,
     host_provider_builder: Callable | None = None,
     cflags_override: list[str] | None = None,
     vlen: int | None = None,
@@ -445,6 +493,8 @@ def build(
     code_reserve: int | None = None,
     output_dump_cap: int = 4096,
     output_sha256: bool = False,
+    execution_memory_map: MemoryMapBinding | None = None,
+    execution_memory_reservations: tuple[MemoryReservation, ...] = (),
 ) -> dict:
     """Build the whole-model bare-metal ELF (spike, or any board with no RTOS).
 
@@ -474,6 +524,13 @@ def build(
     caller wants the unprepared module, which is NOT what a delivery wants (measured: raw scored
     ``cos 0.925`` where the prepared path is bit-exact).
 
+    ``execution_memory_map`` explicitly binds a provider-owned decoded map to
+    the selected execution identity. A selected build closes its actual ELF,
+    linked stack, compiled allocator and caller-declared absolute external
+    buffers before publishing completion. Default selection changes no emitted
+    bytes. This gate does not infer a decoded map from simulator backing size,
+    prove peak stack/heap demand, or grant aliasing/lifetime reuse.
+
     Prepared host code uses the default RVV schedule only when its declared
     ``-march`` provides floating vector execution. ``host_vectorize`` explicitly
     overrides that choice; an explicit ``rvv_schedule`` also selects vector
@@ -484,6 +541,12 @@ def build(
     by the caller. It receives the immutable lowered file and its own workdir,
     and returns the LLVM file to compile. The compiled replacement participates
     in the normal build hash, harness generation, linking and final ELF audit.
+
+    ``host_llvm_transform_chain`` adds an explicitly ordered typed stage chain
+    with actual emission verifiers and retained source/semantic witnesses.
+    The existing ``host_llvm_transform`` remains its terminal hook, so adding
+    helper stages cannot replace that selected late legalization. Missing
+    promised stages refuse; the absent chain preserves the single-hook path.
 
     ``host_provider_builder`` supplies separately pinned mixed host/provider
     objects through the normal link. Their complete source/model identities,
@@ -518,6 +581,17 @@ def build(
     its cycles went rather than only how many there were, which is what pricing a compute unit needs. It
     changes the emitted code, so a profiled image is for measuring per-op cost, never for a cycle count
     compared against an unprofiled one.
+    ``prepared_model_transform`` selects an invocation-local typed MLIR callback
+    after all ordinary preparation and before profiling/upstream lowering. It
+    receives an immutable private input snapshot and a private output directory;
+    verified public entry types and exact selected bytes enter the recipe.
+    Source semantics, effects and provider proofs remain caller obligations.
+    Empty selection preserves the ordinary build route.
+
+    ``masked_contraction_effects`` explicitly forwards nontrapping and
+    unobserved-floating-flags permission to the selected closed-mask scalar
+    schedule. The caller must separately select its feature and schedule.
+    The default grants no permission and changes no policy.
     """
     from ...llvmlower.compilation_recipe import FILENAME as COMPILATION_RECIPE
     from ...llvmlower.compilation_recipe import CompilationRecipe
@@ -526,6 +600,25 @@ def build(
     # Refusal during validation must not leave a previous build's success receipt.
     (Path(work) / COMPILATION_RECIPE).unlink(missing_ok=True)
     supplier_flags = () if math_archive_symbols is None else trace_symbol_flags(math_archive_symbols)
+    (Path(work) / "execution_memory_admission.json").unlink(missing_ok=True)
+    if host_llvm_transform_chain is not None:
+        from ...llvmlower.host_transform_chain import HostLLVMTransformChain
+
+        if type(host_llvm_transform_chain) is not HostLLVMTransformChain:
+            raise TypeError("typed host transform chain required")
+        host_llvm_transform_chain.validate()
+    if execution_memory_map is not None:
+        if not isinstance(execution_memory_map, MemoryMapBinding):
+            raise ExecutionMemoryError("execution_memory_map requires a selected MemoryMapBinding")
+        execution_memory_map.validate()
+        if type(stack_bytes) is not int or stack_bytes <= 0 or type(arena_mb) is not int or arena_mb < 0:
+            raise ExecutionMemoryError("unknown or invalid runtime stack/allocator sizing")
+    if not isinstance(execution_memory_reservations, tuple) or any(
+        not isinstance(use, MemoryReservation) for use in execution_memory_reservations
+    ):
+        raise ExecutionMemoryError("external runtime reservations must be an immutable typed tuple")
+    if execution_memory_reservations and execution_memory_map is None:
+        raise ExecutionMemoryError("external runtime reservations require a selected memory map")
     from ...llvmlower.quant_passes import compute_passes
 
     if not int8_compute and quant_passes is not None:
@@ -617,7 +710,13 @@ def build(
         # report, so a bundle that needs the lift may not take the unprepared branch.
         from ...llvmlower import qinner as _qinner
 
-        if not (int8_compute or features or rvv_schedule) and _qinner.plan_for_bundle(prepared_path):
+        if not (
+            int8_compute
+            or features
+            or rvv_schedule
+            or prepared_model_transform is not None
+            or entry_weight_projection is not None
+        ) and _qinner.plan_for_bundle(prepared_path):
             raise SpikeModelError(
                 f"{model_dir} carries quant-inner tensors, which are bound by lifting them in "
                 "prepare_for_lowering; build it with int8_compute/features/rvv_schedule so the "
@@ -627,6 +726,8 @@ def build(
             int8_compute
             or features
             or rvv_schedule
+            or prepared_model_transform is not None
+            or entry_weight_projection is not None
             or (
                 device is not None
                 and (
@@ -647,10 +748,25 @@ def build(
                 vlen=vlen,
                 matrix=matrix,
                 device=device,
+                prepared_model_transform=prepared_model_transform,
             )
             vectorize = selected_vectorize
         if int8_compute:
             compilation.bind_preparation("quantization_policy", work / "quantization-policy.json")
+        if prepared_model_transform is not None:
+            from ...llvmlower.prepared_model_transform import RECEIPT
+
+            compilation.bind_preparation("prepared_model_transform", work / "prepared_model_transform" / RECEIPT)
+        entry_projection_source = None
+        entry_projection_plan = None
+        if entry_weight_projection is not None:
+            from ...llvmlower.entry_weight_projection import RECEIPT, prepare_entry_weight_projection
+
+            entry_projection_source = Path(prepared_path)
+            prepared_path, entry_projection_plan = prepare_entry_weight_projection(
+                entry_projection_source, work, model_dir, entry_weight_projection
+            )
+            compilation.bind_preparation("entry_weight_projection", work / "entry_weight_projection" / RECEIPT)
         if op_profile:
             # Instrumented AFTER preparation, so the ids name the ops that actually run -- instrumenting
             # the raw module would number ops the rewrites go on to split, fuse or route away, and the
@@ -685,6 +801,9 @@ def build(
             features=features,
             data_layout=index_observation["data_layout"],
             index_bits=index_observation["index_bits"],
+            masked_contraction_effects=masked_contraction_effects,
+            source_observation_effects=source_observation_effects,
+            source_scalar_carrier=source_scalar_carrier,
         )  # produce only the .ll
     # BACKEND-level feature flags, on the MODEL OBJECT ONLY (the GCC-built harness units keep
     # `gcc_cflags`): a feature like the register-group width is an LLVM backend query no tile size
@@ -698,9 +817,26 @@ def build(
     ):
         raise SpikeModelError("selected index width was not bound by the effective lowering pipeline")
     index_lowering = {**index_observation, "effective_pipeline": lowered_index["effective_pipeline"]}
+    if source_observation_effects is not None:
+        from ...llvmlower.source_observation_stage import REPORT
+
+        compilation.bind_preparation("source_observation", work / "lower" / REPORT)
     from merlin.common.digest import sha256_file
 
-    model_ir, host_ir_receipt = _transform_host_ir(res.ll_path, work / "host_llvm", host_llvm_transform)
+    if host_llvm_transform_chain is None:
+        model_ir, host_ir_receipt = _transform_host_ir(res.ll_path, work / "host_llvm", host_llvm_transform)
+    else:
+        from ...llvmlower.lowering_recipe import FILENAME as LOWERING_RECIPE
+        from ...llvmlower.lowering_recipe import bind_host_transform_chain
+
+        model_ir, host_ir_receipt = _transform_host_ir(
+            res.ll_path, work / "host_llvm", host_llvm_transform, chain=host_llvm_transform_chain
+        )
+        host_chain_receipt = Path(host_ir_receipt["chain"]["path"])
+        bind_host_transform_chain(
+            res.workdir / LOWERING_RECIPE, host_chain_receipt, source=res.ll_path, selected=model_ir
+        )
+        compilation.bind_preparation("host_transform_chain", host_chain_receipt)
     compilation.run(
         [clang, CLANG_TARGET, *model_cflags, "-c", model_ir, "-o", work / "model.o"],
         runner=_run,
@@ -712,7 +848,13 @@ def build(
 
     # 2. generate the data-driven runtime artifacts (arg table, call, weights.bin, io)
     cgen = work / "cgen"
-    info = c_runtime.generate(model_dir, cgen, inputs_npz, prepared_dir=work)
+    projection_options = {}
+    if entry_projection_plan is not None:
+        projection_options = {
+            "entry_projection": entry_projection_plan,
+            "entry_projection_source": entry_projection_source,
+        }
+    info = c_runtime.generate(model_dir, cgen, inputs_npz, prepared_dir=work, **projection_options)
     if output_sha256 and info.get("out_dt") != "f32":
         raise SpikeModelError("full-output SHA256 evidence requires f32 output")
     # The region ahead of the weights blob holds code, the stack, and the harness's STATIC I/O
@@ -1067,6 +1209,20 @@ def build(
         raise SpikeModelError("selected cross compiler changed before build completion")
     if sha256_file(gcc) != libm_driver_sha256 or sha256_file(libm_archive) != libm_sha256:
         raise SpikeModelError("selected math-library driver or archive changed during link")
+    memory_admission = None
+    if execution_memory_map is not None:
+        runtime_reservations = _model_memory_reservations(
+            elf, arena_base=lay["arena_base"], arena_bytes=arena_bytes, stack_bytes=stack_bytes
+        )
+        memory_admission = admit_execution_memory(
+            elf, execution_memory_map, runtime_reservations + execution_memory_reservations
+        )
+        (work / "execution_memory_admission.json").write_text(json.dumps(memory_admission, indent=2) + "\n")
+    if host_llvm_transform_chain is not None:
+        from ...llvmlower.host_transform_chain import recheck_host_transform_chain
+
+        host_llvm_transform_chain.validate()
+        recheck_host_transform_chain(host_chain_receipt, expected_chain=host_llvm_transform_chain)
     compilation.completed(elf)
     return {
         "elf": elf,
@@ -1095,6 +1251,7 @@ def build(
         "matrix": matrix_build.to_dict() if matrix_build is not None else None,
         "matrix_routing": matrix.identity() if matrix is not None else None,
         "index_lowering": index_lowering,
+        **({"execution_memory_admission": memory_admission} if memory_admission is not None else {}),
         **info,
     }
 

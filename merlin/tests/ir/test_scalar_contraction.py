@@ -36,7 +36,10 @@ def source(a_shape, b_shape, c_shape, *, transpose=False, alias=False, fastmath=
     maps = [batch + [i, k], batch + ([j, k] if transpose else [k, j]), batch + [i, j]]
     amap = ",".join(f"affine_map<({','.join(dims)})->({','.join(m)})>" for m in maps)
     iters = ",".join([*(['"parallel"'] * rank), '"reduction"'])
-    typ = lambda shape: "tensor<" + "x".join(map(str, shape)) + "xf32>"
+
+    def typ(shape):
+        return "tensor<" + "x".join(map(str, shape)) + "xf32>"
+
     ta, tb, tc = map(typ, [a_shape, b_shape, c_shape])
     arguments = f"%a: {ta}, %b: {tb}" + ("" if alias else f", %c: {tc}")
     initial = "%a" if alias else "%c"
@@ -195,6 +198,49 @@ def test_marker_is_before_bufferization_and_default_pipeline_is_unchanged():
     selected = _upstream_pipeline(frozenset({FEATURE}))
     assert selected.replace(MARKER + ",", "") == baseline
     assert selected.index(MARKER) < selected.index("one-shot-bufferize")
+    assert selected.index("linalg-fuse-elementwise-ops") < selected.index(MARKER)
+    assert selected.index("linalg-generalize-named-ops") < selected.index(MARKER)
+
+
+@pytest.mark.parametrize("feature", [*OUTPUTS, RECTANGULAR_FEATURE])
+def test_no_matching_contraction_preserves_prepared_view_lowering(tmp_path, feature):
+    # A scalar schedule must not generalize these named materializations before
+    # ordinary elementwise fusion. The read-only callbacks may observe their
+    # buffers, so a numerical-output check alone misses changed borrow admission.
+    src = """module {
+      func.func private @remember(memref<3x2xf32> {bufferization.access = "read"})
+      func.func private @observe(memref<3x2xf32> {bufferization.access = "read"})
+      func.func private @prepare(%x: tensor<3x2xf32> {bufferization.access = "read"}) {
+        %b = bufferization.to_buffer %x read_only : tensor<3x2xf32> to memref<3x2xf32>
+        func.call @remember(%b) : (memref<3x2xf32>) -> ()
+        return
+      }
+      func.func private @use(%x: tensor<3x2xf32> {bufferization.access = "read"}) {
+        %b = bufferization.to_buffer %x read_only : tensor<3x2xf32> to memref<3x2xf32>
+        func.call @observe(%b) : (memref<3x2xf32>) -> ()
+        return
+      }
+      func.func @forward(%x: tensor<2x3xf32>) -> tensor<3x2xf32>
+          attributes {llvm.emit_c_interface} {
+        %e = tensor.empty() : tensor<3x2xf32>
+        %t = linalg.transpose ins(%x : tensor<2x3xf32>)
+          outs(%e : tensor<3x2xf32>) permutation=[1,0]
+        %e2 = tensor.empty() : tensor<3x2xf32>
+        %shared = linalg.copy ins(%t : tensor<3x2xf32>)
+          outs(%e2 : tensor<3x2xf32>) -> tensor<3x2xf32>
+        func.call @prepare(%shared) : (tensor<3x2xf32>) -> ()
+        func.call @use(%shared) : (tensor<3x2xf32>) -> ()
+        func.call @use(%shared) : (tensor<3x2xf32>) -> ()
+        return %shared : tensor<3x2xf32>
+      }
+    }"""
+    control = lower_to_llvm_ir(src, workdir=tmp_path / "control", features=set())
+    selected = lower_to_llvm_ir(src, workdir=tmp_path / "selected", features={feature})
+
+    def without_module_id(text):
+        return "\n".join(line for line in text.splitlines() if not line.startswith("; ModuleID = "))
+
+    assert without_module_id(control) == without_module_id(selected)
 
 
 @pytest.mark.parametrize("tiled", [TWO_OUTPUTS_FEATURE, FOUR_OUTPUTS_FEATURE, EIGHT_OUTPUTS_FEATURE])
@@ -328,7 +374,9 @@ def test_rectangular_live_original_initializer_is_preserved_by_upstream(tmp_path
         "return %r:tensor<4x8xf32>",
         """
       %empty = tensor.empty():tensor<4x8xf32>
-      %observed = linalg.generic {indexing_maps=[affine_map<(d0,d1)->(d0,d1)>, affine_map<(d0,d1)->(d0,d1)>, affine_map<(d0,d1)->(d0,d1)>], iterator_types=["parallel","parallel"]}
+      %observed = linalg.generic {
+        indexing_maps=[affine_map<(d0,d1)->(d0,d1)>, affine_map<(d0,d1)->(d0,d1)>,
+          affine_map<(d0,d1)->(d0,d1)>], iterator_types=["parallel","parallel"]}
       ins(%r,%c:tensor<4x8xf32>,tensor<4x8xf32>) outs(%empty:tensor<4x8xf32>) {
       ^bb0(%x:f32,%y:f32,%unused:f32):
         %v = arith.addf %x,%y:f32

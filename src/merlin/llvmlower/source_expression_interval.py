@@ -238,11 +238,53 @@ def close_scalar_i8_observer(cut, endpoint, *, effects: IntervalEffectContract):
     if block is None or product.parent is not block or scaled.parent is not block:
         raise ValueError("all scalar source operations must share their original block")
     terminator = block.last_op
-    if terminator is None or terminator.name not in ("linalg.yield", "func.return") or len(terminator.operands) != 1:
+    publication_witnesses = ()
+    if terminator is None:
         raise ValueError("one retained integer source observation required")
-    if any(operation is not terminator and not operation.has_trait(Pure) for operation in block.ops):
+    if (
+        terminator.name in ("linalg.yield", "func.return")
+        and len(terminator.operands) == 1
+        and terminator.operands[0].type == i8
+    ):
+        observation = terminator
+    else:
+        from .closed_tensor_insert import prove_closed_tensor_insert
+
+        def depends(value, target, seen):
+            if value is target:
+                return True
+            if value in seen:
+                return False
+            seen.add(value)
+            owner = value.owner
+            return (
+                getattr(owner, "parent", None) is block
+                and owner.name != "tensor.insert"
+                and any(depends(operand, target, seen) for operand in owner.operands)
+            )
+
+        candidates = [
+            operation
+            for operation in block.ops
+            if operation.name == "tensor.insert" and depends(operation.operands[0], scaled.results[0], set())
+        ]
+        if len(candidates) != 1:
+            raise ValueError("one retained integer source observation required")
+        observation = candidates[0]
+        publication_witnesses = prove_closed_tensor_insert(observation)
+
+    def source_pure(operation):
+        if operation.has_trait(Pure):
+            return True
+        if publication_witnesses:
+            from .closed_tensor_insert import pure_tensor_control
+
+            return pure_tensor_control(operation)
+        return False
+
+    if any(operation is not terminator and not source_pure(operation) for operation in block.ops):
         raise ValueError("unknown source effects may observe or alter the floating environment")
-    result = terminator.operands[0]
+    result = observation.operands[0]
     if result.type != i8:
         raise ValueError("signed i8 observation required")
     quant_ops, seen = [], {scaled.results[0]}
@@ -274,15 +316,15 @@ def close_scalar_i8_observer(cut, endpoint, *, effects: IntervalEffectContract):
     proof = prove_scalar_bounded_rne(holder.body.block)
     if proof is None or proof.raw_input is not probe.args[0] or proof.integer_bits != 8 or proof.bounds != (-128, 127):
         raise ValueError("complete saturated ties-even i8 observer proof failed")
-    allowed = set((*operations, product, scaled, *quant_ops, terminator))
+    allowed = set((*operations, product, scaled, *quant_ops, observation))
     for operation in allowed:
         _numeric_context(operation)
-        if operation.name == "arith.constant":
+        if operation.name == "arith.constant" or operation is observation:
             continue
         for value in operation.results:
             if any(use.operation not in allowed for use in value.uses):
                 raise ValueError("source expression or observation has an additional live escape")
-    observed_ops = tuple(dict.fromkeys((*block.ops, *operations, *quant_ops, factor.owner)))
+    observed_ops = tuple(dict.fromkeys((*block.ops, *operations, *quant_ops, factor.owner, *publication_witnesses)))
     contexts, contexts_seen = [], set()
     for operation in observed_ops:
         owner = operation.parent_op()

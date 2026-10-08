@@ -3,7 +3,7 @@ title: Repository structure
 kind: reference
 status: current
 owner: core
-last_verified: 2026-09-21
+last_verified: 2026-10-07
 related: [architecture, getting_started, storage]
 code_refs: [pyproject.toml, src/merlin, packages, experiments/catalog.yaml]
 ---
@@ -14,6 +14,16 @@ Start at `experiments/catalog.yaml` to select a phase workflow. Shared compiler 
 lives in `src/merlin`; optional research implementation lives in independently installed
 distributions under `packages/`. The old `merlin/python/merlin` directory is a compatibility
 symlink to core, not the place to add new research modules.
+
+Read-only resource identity is independent of writable output roots.
+`merlin.common.paths.data_path` selects this implementation's actual source
+checkout, an explicit `MERLIN_REPO_ROOT`, or the installed core's bundled
+`merlin/_data` files. An incidental caller CWD or `MERLIN_WORK_DIR` containing
+another `merlin/runtime`, contract or schema tree cannot shadow installed data.
+Resource-specific overrides such as `MERLIN_RUNTIME_DIR` remain explicit
+selections. Compilation recipes should pin the actual C/header files they use
+as well as the Python package; Python import isolation alone does not identify
+the compiled runtime.
 
 ```
 src/merlin/    compiler IR, schedules, capture contracts, target/toolchain resolution, runtime, verification

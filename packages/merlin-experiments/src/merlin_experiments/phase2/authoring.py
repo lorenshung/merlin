@@ -385,6 +385,18 @@ def _codex_round(
     return rc, transcript, policy
 
 
+def admit_authoring_workflow(workflow_id: str) -> None:
+    """Keep the broker action profile distinct from fresh-session launch authority."""
+    if workflow_id == BP.COMPONENT_ONLY_V1:
+        raise StageGateError(
+            "component-only authoring is unavailable: approved minimal view, verified runtime "
+            "isolation and zero-history session transport are required; the broker profile "
+            "does not grant launch authority"
+        )
+    if workflow_id != BP.CORPUS_FEEDBACK_V1:
+        raise StageGateError(f"unsupported authoring workflow: {workflow_id!r}")
+
+
 def run_stage(
     *,
     suite: str,
@@ -414,8 +426,10 @@ def run_stage(
     rtl_facts: Path | None = None,
     telemetry_price_table: Path | None = None,
     waive_functional_gate: tuple[str, ...] = (),
+    workflow_id: str = BP.CORPUS_FEEDBACK_V1,
 ) -> Path:
     """Run bounded authoring rounds and return the sealed candidate-record path."""
+    admit_authoring_workflow(workflow_id)
     if not isinstance(sandbox_inputs, (PC.PackageSandboxInputs, PC.FrozenPackageSandboxInputs)):
         raise StageGateError("performance authoring requires an explicit sandbox input selection")
     sandbox_inputs = copy.deepcopy(sandbox_inputs)

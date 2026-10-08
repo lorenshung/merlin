@@ -1,5 +1,9 @@
 # `merlin/contract/` — the experiment ABI (v0.1)
 
+The [draft target artifact ABI](target_artifact_abi.md) adds explicit profile-bound
+structural inspection for `0.2`. Execution and certification of that version
+are unsupported; existing `0.1` packages keep their protocol.
+
 This is a **repo-independent contract**: the fixed interface against which an *out-of-tree target
 backend package* is built, invoked, certified, and scored. It exists so two agents — a raw
 baseline (docs + this contract only) and a Merlin-assisted one (docs + contract + Merlin tooling)

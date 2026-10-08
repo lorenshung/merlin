@@ -115,7 +115,7 @@ def _lane_scope(lane_report: dict, observed_lanes: set) -> set:
     return observed_lanes & {str(ln) for ln in scope}
 
 
-def candidate_native_model_check(result: dict, *, target: str) -> dict:
+def candidate_native_model_check(result: dict, *, target: str, readback_policy=None) -> dict:
     """Grade only the submitted whole-program artifact, never the legacy host graph.
 
     This is a distinct diagnostic/qualification surface. It requires the
@@ -177,6 +177,7 @@ def candidate_native_model_check(result: dict, *, target: str) -> dict:
         native,
         target=target,
         entry_symbol=entry,
+        **({"readback_policy": readback_policy} if readback_policy is not None else {}),
     )
     numeric_status = (native.get("numeric") or {}).get("status") if isinstance(native, dict) else None
     if (
@@ -220,6 +221,7 @@ def candidate_native_model_check(result: dict, *, target: str) -> dict:
         target=target,
         entry_symbol=entry,
         completed_dispatch=dispatch,
+        **({"readback_policy": readback_policy} if readback_policy is not None else {}),
     )
     static_tiers = tier_check.get("tiers") or {}
     l2_mismatch = (
@@ -274,7 +276,9 @@ def candidate_native_model_check(result: dict, *, target: str) -> dict:
     }
 
 
-def model_execution_check(result: dict, capsule: dict | None = None, *, target: str | None = None) -> dict:
+def model_execution_check(
+    result: dict, capsule: dict | None = None, *, target: str | None = None, readback_policy=None,
+) -> dict:
     """Return the model capsule's honest structural/effect evidence.
 
     Operator capsules have one emitted kernel, so their decoded instruction trace is the appropriate
@@ -294,7 +298,8 @@ def model_execution_check(result: dict, capsule: dict | None = None, *, target: 
         # model check. The old ledger cannot certify a different program.
         effective_target = target or (result.get("operation") or {}).get("target")
         candidate_check = candidate_native_model_check(
-            result, target=effective_target if isinstance(effective_target, str) else ""
+            result, target=effective_target if isinstance(effective_target, str) else "",
+            **({"readback_policy": readback_policy} if readback_policy is not None else {}),
         )
         violations.extend(candidate_check["violations"])
         emitted_host_compute = candidate_check["emitted_host_compute"]
@@ -748,7 +753,7 @@ def model_execution_check(result: dict, capsule: dict | None = None, *, target: 
     }
 
 
-def enforce_model_execution_check(result: dict, capsule: dict | None, *, target: str) -> dict:
+def enforce_model_execution_check(result: dict, capsule: dict | None, *, target: str, readback_policy=None) -> dict:
     """Attach and enforce a whole-model execution proof on the capsule verdict itself.
 
     The score-level structural flag is not enough: QA and checkpoint readers intentionally re-open each
@@ -757,7 +762,10 @@ def enforce_model_execution_check(result: dict, capsule: dict | None, *, target:
     so those durable readers false-accepted it.  A wrong/missing required engine is ``incomplete`` (the
     requested evidence did not run), while malformed evidence from the requested engine is a real fail.
     """
-    check = model_execution_check(result, capsule, target=target)
+    check = model_execution_check(
+        result, capsule, target=target,
+        **({"readback_policy": readback_policy} if readback_policy is not None else {}),
+    )
     result["model_execution_check"] = check
     if check.get("candidate_native_model_check") is not None:
         result["candidate_native_model_check"] = check["candidate_native_model_check"]
@@ -1316,7 +1324,13 @@ def grade(
         for result in results:
             if result.get("kind") != "model":
                 continue
-            enforce_model_execution_check(result, _caps_by_name.get(str(result.get("capsule"))), target=target)
+            # Reopen under the same trusted adapter selection as the model
+            # child. Candidate result records cannot choose their own codec.
+            readback_policy = CR._adapter_readback_policy(oracle_adapters or {})
+            enforce_model_execution_check(
+                result, _caps_by_name.get(str(result.get("capsule"))), target=target,
+                **({"readback_policy": readback_policy} if readback_policy is not None else {}),
+            )
             # The runner persisted the model result before this suite-level cross-record proof existed.
             # Keep the durable row in sync because QA/selfcheck/checkpoint consumers deliberately re-glob
             # it rather than trusting this function's in-memory score.

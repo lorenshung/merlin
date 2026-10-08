@@ -215,6 +215,10 @@ class AxisDerivationUnavailable(ValueError):
     rather than "this family does not apply here".
     """
 
+    def __init__(self, detail: str, *, record: dict | None = None):
+        super().__init__(detail)
+        self.record = record
+
 
 def _memory_regime_axis(
     spec: dict,
@@ -320,6 +324,23 @@ def _resolve_derived_axis(
         return _memory_regime_axis(
             spec, owner=owner, target=target, tile=tile, dtype=dtype, fixed=fixed, evidence=evidence
         )
+    if kind == "resident_allocation_boundary":
+        from .resource_boundaries import BoundaryUnavailable, derive
+
+        try:
+            return derive(
+                spec,
+                owner=owner,
+                axis=axis,
+                target=target,
+                tile=tile,
+                dtype=dtype,
+                fixed=fixed,
+                evidence=evidence,
+                resolve_extent=resolve_extent,
+            )
+        except BoundaryUnavailable as exc:
+            raise AxisDerivationUnavailable(str(exc), record=exc.record) from exc
     raise ValueError(f"{owner}: axis derivation {kind!r} has no resolver")  # unreachable; fail closed
 
 
@@ -1165,6 +1186,8 @@ def expand_sweeps(
                 )
             except AxisDerivationUnavailable as exc:
                 unhostable = {"axis": axis, "derive": str(spec.get("derive")), "detail": str(exc)}
+                if exc.record is not None:
+                    unhostable["record"] = exc.record
                 break
             resolved[axis] = values
             axis_labels[axis] = labels

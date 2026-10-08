@@ -197,6 +197,24 @@ class Adapter:
             if Path(profile).name != profile or profile in (".", ".."):
                 raise SpecError("profile must be one profile name, without a path")
         if self.name == "capsule_derivation":
+            if config.get("component_only"):
+                if (
+                    not {"descriptor", "recipe", "performance_template"} <= config.keys()
+                    or "profiles_root" in config
+                    or config.get("evidence_mode") != "diagnostic"
+                ):
+                    raise SpecError(
+                        "component Phase 0 requires explicit independent inputs and diagnostic evidence mode"
+                    )
+                if {
+                    "conformance_spec",
+                    "synth_profile",
+                    "smt_profile",
+                    "hidden_profile",
+                    "m2m_root",
+                    "m2m_python",
+                } & config.keys():
+                    raise SpecError("component Phase 0 refuses application, capture and hidden inputs")
             explicit = {
                 "recipe",
                 "performance_template",
@@ -400,6 +418,7 @@ ADAPTERS = {
             "smt_profile": Option("input"),
             "hidden_profile": Option("input"),
             "comparison_manifest": Option("bool"),
+            "component_only": Option("bool"),
             "m2m_root": Option("path", flag=""),
             "m2m_python": Option("path", flag=""),
         },

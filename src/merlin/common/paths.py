@@ -135,15 +135,16 @@ def resolve_grant(rel: str, *, root: Path | None = None) -> Path:
 def data_path(*parts: str) -> Path:
     """Resolve bundled read-only package data (``schemas/``, ``prompts/``, …).
 
-    Prefers the in-repo canonical tree (``<repo>/merlin/<parts>``) when a checkout is present, so
-    dev workflows and the repo linters always read the live files. Falls back to the copy bundled
-    into an installed wheel (``merlin/_data/<parts>`` via ``importlib.resources``) so ``pip install
-    merlin`` works outside a checkout. Per-class env overrides (e.g. ``MERLIN_SCHEMAS_DIR``) are
-    applied by the class-specific wrappers below, not here.
+    Prefers the canonical tree belonging to this implementation's checkout or an explicit
+    ``MERLIN_REPO_ROOT``. Installed code otherwise reads its bundled ``merlin/_data`` tree,
+    even when the caller's CWD or writable work directory contains another ``merlin`` tree.
+    Output/work roots do not select read-only compiler resources. Per-class env overrides
+    (e.g. ``MERLIN_SCHEMAS_DIR``) are applied by the wrappers below, not here.
     """
     rel = Path(*parts)
-    cand = merlin_dir() / rel
-    if cand.exists():
+    source_owner = bool(os.environ.get("MERLIN_REPO_ROOT")) or checkout_root() is not None
+    cand = merlin_dir() / rel if source_owner else python_source_dir() / "merlin" / "_data" / rel
+    if source_owner and cand.exists():
         return cand
     try:
         import importlib.resources as _ir
@@ -152,7 +153,7 @@ def data_path(*parts: str) -> Path:
         # normally-installed (unzipped) wheel -> a real filesystem path
         return Path(str(base))
     except (ModuleNotFoundError, FileNotFoundError, TypeError, NotADirectoryError):
-        return cand  # nonexistent repo path -> callers raise a clear FileNotFoundError
+        return cand  # Selected owner path; callers report unavailable resources.
 
 
 def schemas_dir() -> Path:

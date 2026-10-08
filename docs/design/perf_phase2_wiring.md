@@ -63,6 +63,23 @@ ratios. Increasing accelerator coverage alone cannot retain a candidate: at leas
 physical-movement, occupancy/overlap, encoding, or boundary objective must improve. This penalises
 offloads that merely increase op count while adding transfers or reducing accelerator occupancy.
 
+The core evaluator accepts any nonempty ordered portfolio of distinct content-addressed members;
+every row and quality budget must cover that exact membership. `PortfolioQualitySchema` freezes
+this generic policy. `FourModelQualitySchema` and `standard_four_model_quality_schema` retain the
+historical four-member preset and its serialized schema. The existing analytical-provider installer
+still selects that preset; a caller must explicitly supply the generic policy to use different
+membership or quality requirements.
+
+Quality is a selected contract, not an inferred proxy. `QualityBudget.exact` requires zero bitwise
+mismatches across every output. `QualityBudget.elementwise` requires zero violations of
+`abs(candidate-reference) <= atol + rtol * abs(reference)` and independently observed parameters
+identical to the selected tolerances. The observer owns output coverage and nonfinite semantics;
+maximum error, cosine similarity, and other metrics cannot substitute for that violation count.
+`QualityBudget.task` accepts explicit task metrics, limits, and optional degradation bounds against
+a complete baseline. Missing or incomplete observations remain `needs_evidence`, and a known
+quality failure rejects a candidate even when its analytical performance improves. These contracts
+do not grant cycle certification or change the historical quality presets.
+
 The provider binding pins its implementation and calibration receipts, declares host-analytical
 execution, forbids complete-model/layer simulation, and caps each model evaluation at 60 seconds.
 Phase 2 writes the resulting gate into each iteration, sealed review artifact, and

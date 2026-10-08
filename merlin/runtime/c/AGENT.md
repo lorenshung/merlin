@@ -2,6 +2,11 @@
 
 ## Purpose
 
+`source_rms_produced_maximum.h` consumes complete immutable finite BF16 producer
+facts only after original reconstructed equality checks. It preserves the
+separately selected RMS4 numerical policy, original radius/prefix safety and
+rigorous fallback. Unknown source/storage/effects/lifetime facts grant no reuse.
+
 The **Merlin C runtime**: a generic, data-driven driver that executes a compiled whole model (`_mlir_ciface_forward`) by building MLIR memref descriptors from a generated argument table. Target-agnostic core; the same code runs on host (verification) and bare-metal spike/Zephyr.
 
 ## What belongs here
@@ -249,3 +254,15 @@ exact point/reconstruction witnesses and deterministic subnormal allowance remai
 representation and interval errors use the unchanged rigorous producer. No
 normal default caller is changed. Independent original output validation and
 retained source fallback are mandatory provider obligations.
+
+## Complete integer product families
+
+Exact product families require complete prefix bounds, all live output planes, immutable inputs, private disjoint outputs, synchronous completion and preserved host effects. Target storage, scheduling and callback implementation proofs remain provider obligations.
+
+## Finite point observations at the BF16 quantization frontier
+
+Finite-point row observations require pure returned-value quantization, stable RNE, nontrapping arithmetic, unobserved flags, immutable endpoints and private disjoint outputs. Approximate product permission and arbitrary interposed rounding calls do not establish these facts.
+
+## Exact BF16 integer observations
+
+Exact BF16 integer observations preserve the original scale/product DAG and require pure roundeven values, integer-only observations, stable RNE, nontrapping arithmetic, unobserved flags and standard unobserved representation copies. Compose after finite-point specialization; each contract remains independently required.

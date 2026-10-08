@@ -1,5 +1,22 @@
 # AGENT.md — packages/merlin-experiments/src/merlin_experiments/phase2
 
+`component_experiment.py` owns explicit minimal agent-view materialization and
+verification, strict networkless tool-policy construction, bounded probe refusal
+and final per-member comparison arithmetic. It does not admit Phase 0 generation,
+an authoring transport, hardware receipts or historical telemetry by itself.
+Reviewed upstream publication is not an agent grant; preserve fresh-session and
+actual-runtime isolation requirements before launching a component campaign.
+`numerical_readback.py` reconstructs a complete exact/elementwise observation
+from two evaluator-owned full readbacks, the original fixed `QualityBudget`,
+existing V4 private-input ownership and selected typed build services. Reopen
+the selected recipe/renderer/codec and produced bytes; preserve dtype, full
+roster, signed-zero/raw-bit and nonfinite semantics. Its result grants only
+numerical agreement of protected readbacks. A host-created freeze does not
+authenticate execution, reference generation, source-to-ELF invocation,
+hardware/timer/input identity or complete final campaign membership. Keep
+those joins with the trusted evaluation lifecycle; never turn this observation
+or a caller-supplied hash/boolean into hardware or final-executable authority.
+
 `campaign.py` owns frozen functional admission, exact fork checks, package sandbox
 policy and completion accounting. `prompt.py` owns deterministic task contracts.
 `functional_inputs.py` joins that admission to the immutable Phase 1 input/host-lane
@@ -24,6 +41,27 @@ GSIM feedback, redaction, stopping and mandatory final-byte receipt qualificatio
 qualification (a micro sweep cannot establish global evidence). Native controllers supply
 real scientific dependencies and explicitly select the workflow, never by target-name inference.
 These workflow policies remain scientific contracts, not interchangeable grading defaults.
+`component_workflow.py` owns the explicit `component-only-v1` generated-component
+profile. It excludes descriptor probes, model graphs/analysis and legacy global
+providers. Host-selected calibrated estimates and unchanged certified component
+RTL feedback are separate optional actions; UNKNOWN estimates never become zero
+or measured cycles. Provider source, target configuration and corpus identities
+are rechecked. New receipts bind this profile; historical identities stay unchanged.
+`prepare_component_prompt_inputs` and `render_component_prompt` use a separate
+component declaration without selecting a model or exposing functional snapshots.
+The action profile and prompt are not fresh-session launch authority. Normal
+authoring and its CLI refuse this profile until an approved minimal view, verified
+runtime isolation and qualified zero-history transport are independently supplied.
+Never fall back to the legacy networked authoring policy for this scientific claim.
+`component_cca.py` owns the optional trusted generated-component CCA provider,
+exact baseline/candidate/member/corpus/descriptor bindings and complete structural
+report replay. Delegate gaps to the core all-facet comparator; reflect every field,
+keep missing communication/coverage explicitly UNKNOWN and refuse scope mismatch.
+Private artifact paths, baseline programs and raw source metadata cannot enter
+participant feedback. Source-file identity does not replace executing callable/code
+selection or full runtime admission. This route grants neither measured cycles nor
+application coverage, fresh transport or final acceptance; test with synthetic
+host providers through the selected broker and receipt validator.
 `broker_evidence.py` owns shared identity checks: new receipt rows bind the selected
 workflow; historical absent IDs remain explicitly unbound and are never inferred or rewritten.
 The same bound workflow executes and qualifies a round. No policy imports a native

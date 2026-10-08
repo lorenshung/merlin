@@ -15,6 +15,13 @@ by the structure of the contract (subprocess + file boundary).
    interface*, not regex-scrape it; the input GRAMMAR is the fixed public contract, not the answer).
    Every other `merlin.xdsl_dialects.*` module (e.g. `lowering`) stays forbidden, as does the whole
    `merlin.xdsl_dialects` package import.
+   A new reviewed-library invocation MAY additionally use exact leaf APIs from a
+   host-supplied `merlin.compiler_library.v1` contract. The host binds its source
+   root, dependency members, resources and byte identities; the scanner rechecks
+   them. A candidate manifest cannot select that contract. Namespace initializers
+   and direct shared-library imports are reviewed, and withheld evaluator/oracle
+   identities remain forbidden. This is not a blanket `merlin.*` exception or a
+   substitute for runtime isolation. Legacy invocations keep their existing rule.
    → `FailureCategory.FORBIDDEN_PATTERN`
 2. **No reading the golden outputs.** The package must not read `expected_command_buffer_*.json`
    beyond `g0` (the one published example) or any `runs/**` directory. It computes the command

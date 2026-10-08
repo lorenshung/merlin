@@ -534,7 +534,7 @@ def simulator_adapter(sim: str, target: str, selection: dict | None = None, *, r
     keeps, and then discarded; a cert that ran on the slow engine because the fast one was missing looked
     exactly like one that ran on the slow engine because it was the only one."""
 
-    from merlin.targetgen.contract.readback_policy import COHERENT_DUMP_V1, selected
+    from merlin.targetgen.contract.readback_policy import MEMORY_TRANSPORTS, selected
 
     readback_policy = selected(readback_policy)
 
@@ -551,7 +551,7 @@ def simulator_adapter(sim: str, target: str, selection: dict | None = None, *, r
             if not exact:
                 raise OracleUnavailable(reason)
         policy_kwargs = {"readback_policy": readback_policy} if readback_policy is not None else {}
-        if readback_policy is not None and readback_policy.transport == COHERENT_DUMP_V1:
+        if readback_policy is not None and readback_policy.transport in MEMORY_TRANSPORTS:
             from merlin_experiments.phase1.feedback.native_memory_readback import (
                 NativeMemoryReadback,
                 select_memory_engine,
@@ -568,7 +568,7 @@ def simulator_adapter(sim: str, target: str, selection: dict | None = None, *, r
                 revalidate()
                 return citation
 
-            policy_kwargs["memory_readback"] = NativeMemoryReadback(facts_path=facts_path)
+            policy_kwargs["memory_readback"] = NativeMemoryReadback(facts_path=facts_path, policy=readback_policy)
             policy_kwargs["oracle_revalidate"] = revalidate_memory_engine
         res = oot_compile.run_on_oracle(
             cb, llvm_text, simulator=sim, target=target, workdir=workdir, timeout=timeout, **policy_kwargs
@@ -2971,6 +2971,7 @@ def _grade_candidate_model_capsule_inline(
         result["candidate_source_eligibility_failure"] = {"type": type(exc).__name__, "detail": str(exc)[:2000]}
         return enforce_model_execution_check(result, capsule, target=target)
 
+    readback_policy = None
     try:
         # The child receives a JSON context, not a Python capability. Reconstruct
         # only the exact operator-selected policy record; absent means legacy.
@@ -3036,7 +3037,10 @@ def _grade_candidate_model_capsule_inline(
         # a numerically green native receipt. Keep its durable run artifacts
         # for diagnosis, but never feed that receipt to the pass gate.
         result.pop("candidate_native_execution", None)
-    return enforce_model_execution_check(result, capsule, target=target)
+    return enforce_model_execution_check(
+        result, capsule, target=target,
+        **({"readback_policy": readback_policy} if readback_policy is not None else {}),
+    )
 
 
 def _resolve_model_host_lane(target: str, dtype: str):

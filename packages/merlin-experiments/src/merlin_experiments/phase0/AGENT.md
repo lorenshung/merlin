@@ -32,3 +32,20 @@ held-out models (claim and evaluation-only, `claim_boundary.held_out_models`) ar
 derives the role taxonomy and resolves the experiment's `prohibited_instruction_roles`; it declares,
 it does not enforce. Form-perf members, their coverage and the claim-model statistic never read a
 claim model's capture before the Phase-1 freeze, and never write a capsule from one.
+
+`component_only=True` is an explicit independent-input mode of the same generator.
+It accepts fresh shared dev sweeps and reviewed source-bound HW/SW objective
+declarations, never model/capture/hidden/history selectors. The existing writer,
+goldens and concrete program screen remain authoritative. Its global coverage,
+functional guard obligation and candidate numerical acceptance stay unestablished;
+recording a zero-MAC performance objective does not invent cost or certification.
+The trusted Boolean mode reaches the writer explicitly. Independent generation
+must not look up, stat, read or stamp capture-derived shape census data; legacy
+default generation retains its existing census annotation. Performance metadata
+does not choose the input mode.
+
+`resource_boundaries` derives aligned/tail extent points from explicit simultaneous
+allocations in one selected physical store. Reuse generic address-space row sizing;
+capacity/reservation paths refer only to refreshed selected facts. Keep missing
+facts and missing below points explicit. Size inequalities do not prove placement,
+lifetime, cache behavior, profitable scheduling or target execution.

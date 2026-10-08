@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "merlin/bench_contract/manifest_v2.schema.json",
+  "title": "Out-of-tree artifact manifest (draft structural ABI v0.2; execution unsupported)",
+  "allOf": [
+    {
+      "$ref": "manifest.schema.json#/$defs/common"
+    },
+    {
+      "required": [
+        "abi_version"
+      ],
+      "properties": {
+        "abi_version": {
+          "const": "0.2"
+        },
+        "commands": {
+          "required": [
+            "parse",
+            "lower_interface_to_target",
+            "emit_command_buffer",
+            "emit_target_artifact"
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -2,6 +2,22 @@
 
 ## Purpose
 
+`endpoint_narrowing` is a separate default-off capability for finite interval
+subsets in a private original-source epoch. It preserves the legacy prepared
+owner's mandatory invalidation and derives its own retained magnitude fact.
+Source membership, numerical policy, effects, exclusive mutation, complete
+storage and dependency closure remain caller proofs. Partial updates invalidate
+one output column; denominator updates invalidate the row. Unknown writes,
+widening, changed context, signed-zero output ambiguities and unsupported
+effects retain the original checked computation. No automatic selection,
+floating observation permission, target scheduling or profitability is implied.
+
+`produced_bf16_row_facts` is an explicit default-off source/effects composition
+seam. Complete finite BF16 writes and private immutable source/metadata closure
+permit producer max/min facts to replace repeated packing and already selected
+RMS4 maximum scans. Original equality, scalar DAG, epochs/quotas and fallback
+remain mandatory. It supplies neither automatic routing nor numerical permission.
+
 `radix_integer_reconstruct.c_fused_header` and the explicit
 `source_attention_frontier` fused reconstruction option keep complete immutable
 integer group planes until one exact local sum and binary64 conversion. Callback
@@ -14,6 +30,70 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
 
 ## What belongs here
 
+- `closed_tensor_insert.py` extends current scalar-observation analysis to a
+  unique i8 insertion in an immutable static tensor carrier. Typed constant or
+  bounded SCF-IV coordinates must be in bounds and distinct across lanes.
+  Complete uses, carrier ownership, surrounding effects and source context are
+  rebound before any rewrite. Native insertion retains extraction, publication,
+  control and destination/resource handles; only proved private arithmetic may
+  change. Original approximation permission, finishing operations, fallback and
+  per-point incoming-RNE capability remain. This composes lane scheduling with
+  the existing normal scalar-family seam and infers no whole accuracy or profit.
+
+- `entry_weight_projection.py` offers explicit removal of unused whole immutable
+  parameter arguments after conservative pure tensor DCE. Its complete captured
+  and prepared argument table binds source files, optional file presence/absence,
+  result types and ownership. Generated caller, readonly weight/address and
+  arithmetic effect permissions must be explicit. Session-owned weights,
+  unknown symbolic escapes, physical allocator effects and unknown effects
+  refuse or remain live. Normal model compilation and C runtime generation
+  rederive one projection for entry types, all callers, descriptors, session
+  indices and retained packed spans. Inputs, captured buffers, outputs and
+  prepared trailing weights remain. Default None performs no projection I/O.
+  This supplies no target alignment fact, automatic selector or cycle forecast.
+
+- `source_scalar_carrier.py` and `source_scalar_carrier_policy.py` provide a
+  distinct, explicitly selected approximation budget for a scalar expression
+  before its unchanged finishing operations and integer observer. Current
+  source intervals certify immutable three-coefficient cells; finer proof
+  partitions require no finer runtime table. Invalid cells or a false caller
+  rounding predicate evaluate the original expression. Family reification
+  owns one typed readonly table and checks every member and ABI symbol before
+  ordinary upstream lowering. No default selection, target instruction,
+  final-output equivalence, whole allocation plan or profitability is inferred.
+  Keep this permission separate from the source attention RMS4 policy.
+
+- `source_observation_stage.py` is an explicit default-off native tensor
+  checkpoint after ordinary fusion/generalization and before scheduling or
+  bufferization. Normal APIs forward `source_observation_effects`, the existing
+  explicit `IntervalEffectContract`; an installed parent rederives closed
+  scalar i8 proofs from exact current source. Checkpoint/report identity and
+  all effects are rechecked on loading. This read-only analysis preserves
+  ordinary generated code and grants no rewrite, ownership or cost policy.
+  Model names and binding ordinals never select a production transformation.
+
+- `source_observation_helpers.py` revalidates current typed scalar-observer
+  proofs and clones the original expression and complete integer quantizer
+  into fresh scalar helper functions under explicit effects. Original
+  arithmetic order/types/attributes/constants and trace data remain intact;
+  source operations and use lists are unchanged. Finishing multiplies, helper
+  placement/binding, runtime numeric guards, ownership and complete cost
+  remain separate obligations. Retained helper bodies select no implementation.
+
+- The ordinary text/file model lowering APIs forward the existing explicit
+  `MaskEffectContract` through `masked_contraction_effects`. Backend model
+  builders use the same parameter. Separate closed-mask feature and scalar
+  schedule selection remain required; defaults infer no floating effects.
+  Complete use/shape legality and original output gates stay authoritative.
+
+- `prepared_model_transform.py` provides an explicit invocation-local callback
+  after all shared model preparation, before profiling/upstream lowering. It
+  supplies an immutable private source snapshot, verifies returned typed MLIR
+  and public entry types, and publishes exact selected identities only on
+  success. Empty selection performs no I/O. Source semantics, effects, provider
+  proofs and profitability remain caller obligations; production policy must
+  derive from source semantics rather than workload identity.
+
 - `host_llvm_helpers.py` offers explicit immutable helper IR linkage through the
   existing normal host-transform callback. The selected upstream linker and
   always-inline pass must remove every required call/address reference while
@@ -24,6 +104,18 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
   Empty selection preserves source bytes and performs no compilation. Helper
   numeric/effect equivalence and final object/link qualification remain caller
   obligations; the completed recipe identifies LLVM IR, not an executable.
+
+- `host_transform_chain.py` requires an explicit ordered typed stage contract,
+  pinned implementation and semantic-proof artifacts, and actual input/output
+  emission verification for every selected stage. Normal host compilation
+  keeps the existing single hook as a terminal after added stages; missing
+  promises, mutable source/proof bytes and skipped emissions refuse. Each
+  stage receives an owned immutable input snapshot. Ordinary lowering and
+  compilation receipts bind the complete chain through final completion.
+  Provider verifiers own semantic theorems and effects; core does not infer
+  equivalence from names or metadata. The absent chain preserves the legacy
+  single-hook/default path. Tool/dependency closure and profitability remain
+  separate obligations.
 
 - `exact_row_radix_pack.py` offers an explicit source-exact producer row proof
   for the existing canonical BF16 signed radix128 representation. The mandatory
@@ -104,6 +196,10 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
   fastmath and unproved bodies refuse. Tensor semantics and upstream bufferization
   govern aliasing and lifetimes. No target or workload policy is implied, and
   complete emitted allocation/copy/store costs determine profitability.
+- Scalar contraction schedules run after ordinary tensor fusion/generalization
+  and immediately before bufferization. They do not move global named-op
+  generalization in front of fusion. Fused non-pure bodies refuse; prepared
+  physical buffer contracts and complete costs still require qualification.
 - `scalar_contraction.py` also offers an explicit two-row/four-column schedule.
   Exact projected input maps prove immutable coordinate reuse across rows and
   columns; source multiply/add order, seeds, output-coordinate permutations and
@@ -144,6 +240,13 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
   compose with the disjoint FMA/division selector; both preserve original scalar
   operations and upstream tensor ownership. A local win alone does not establish
   whole-model profitability or an automatic schedule policy.
+  Its separate `packet_borrowed_pointwise_fma_division_2` feature accepts only
+  explicitly contracted immutable-input, private-disjoint-output memref writers.
+  Static maps, injective positive output layouts, pure source scalar arithmetic,
+  stable rounding and unobserved nontrapping effects are required. It retains
+  per-lane source operation order, full output maps, odd tails and source traces.
+  Input spans may alias each other; output alias permission is not inferred.
+  Default routing is unchanged and complete compound cost governs promotion.
   `packet_scalar_pointwise_two_multiplications_4` is an independent default-off
   family for f32 tensor results with exactly two source multiplications,
   constants, optional integer casts and additions. It preserves every rounded
@@ -374,6 +477,15 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
 
 ## Invariants
 
+- `source_scalar_carrier_binding.py` and `source_stage_transport.py` insert
+  explicitly selected current scalar families at the normal tensor boundary.
+  Keep all member proofs, namespace and SSA identities checked before edits;
+  preserve original native producer/resource handles and source joins. Runtime
+  rounding predicates are provider owned and read per point. Compiler host RNE
+  admission is a separate scoped capability with full environment restoration.
+  Trusted callbacks are synchronous; owned-child deadlines do not preempt them.
+  The absent option must keep the original runner and emitted bytes unchanged.
+
 - **Accelerator-independent.** Shared passes, weights packing, ABI and runners do
   not branch on accelerator identity. CPU instruction selection belongs in host
   codegen, under an explicit host ISA policy (`codegen.py` flags or the late
@@ -387,7 +499,8 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
 - Weight tensors are never embedded in C arrays — pointers into the safetensors payload blob, offsets straight from the header (`weights_pack.pack`).
 - Vectorization is clang `-O2 -march=rv64gcv` auto-vectorization (verified: emits vsetvli). A scalable-vector tile/vectorize MLIR path may be layered later.
 - Host (x86 ctypes) parity vs torch reference is the gate before any spike run.
-- `HostModel.load` defaults to `RTLD_LOCAL`, including the >1024-arg trampoline path: the trampoline receives the loaded library's exact entry address. Several model/kernel `.so`s must coexist without their shared `forward`/`memrefCopy` symbols clashing. `emit_c_interface` wraps only memref args as descriptor pointers; scalar args are passed by value — use `abi.ScalarArg` (the dispatch runtime relies on this for `cumsum`-style kernels).
+- `HostModel.load` defaults to `RTLD_LOCAL`, including the >1024-arg trampoline path: the trampoline receives the loaded library's exact entry address. Several model/kernel `.so`s must coexist without their shared `forward`/`memrefCopy` symbols clashing. Default artifact loading retains native `CDLL` semantics and read-only compatibility, with `image_sha256=None`: a reused path may still return an earlier image. `emit_c_interface` wraps only memref args as descriptor pointers; scalar args are passed by value — use `abi.ScalarArg` (the dispatch runtime relies on this for `cumsum`-style kernels).
+- Fresh `kernel_backend.compile_host` loads select `PrivateHostImagePolicy` for their exact invocation-owned build directory, canonicalized before lowering. The private sibling snapshot gives each compilation a byte-identified load path; fd/path stability checks and cleanup retain source bytes. This opt-in requires temporary creation and cleanup in the selected directory and refuses aliased source parents. Sibling placement preserves relative dependency lookup, but neither dependencies nor build/execution provenance are frozen. Do not silently select it for cached, sealed or read-only artifact readers or substitute an external temporary directory that changes `$ORIGIN`.
 
 ## Testing expectations
 
@@ -479,6 +592,13 @@ Tools: torch-mlir wheel python = full upstream pass registry + translate; clang-
   and optionally stripmines static parallel tensor maps through proved input
   permutations. It retains live destination tensors through ordinary upstream
   bufferization, with separate exact tails and no inferred pointer no-alias.
+  Its explicit `output_minor_batch` groups independent output-minor coordinates
+  within contiguous-input packet loops. The default one preserves original
+  emission/reporting; coincident axes and unit minor extents retain that route.
+  Source arithmetic, loads/stores, numeric permission and tensor ownership are
+  unchanged. Static source/minor tails are separate and bounded; emission limits
+  infer no target register, alignment or profitable width. Price complete work
+  with the actual runtime; retired instructions do not establish device cycles.
 - `bounded_rne_packet_llvm.py` recognizes pure straight-line multi-result scalar
   helpers by their complete arithmetic and SSA dependencies, then groups explicit
   CPU RNE operations under the selected host ISA policy. Absent that policy the
@@ -616,3 +736,15 @@ obligations. The source score interval is preserved: zero implementation budget
 removes only extra polynomial rounding expansion, not input uncertainty. Exact
 F32 endpoint values remain available to the unchanged denominator. Constant
 specialization is not a numerical approximation or a default emitter policy.
+
+## Complete integer product families
+
+Exact product families require complete prefix bounds, all live output planes, immutable inputs, private disjoint outputs, synchronous completion and preserved host effects. Target storage, scheduling and callback implementation proofs remain provider obligations.
+
+## Finite point observations at the BF16 quantization frontier
+
+Finite-point row observations require pure returned-value quantization, stable RNE, nontrapping arithmetic, unobserved flags, immutable endpoints and private disjoint outputs. Approximate product permission and arbitrary interposed rounding calls do not establish these facts.
+
+## Exact BF16 integer observations
+
+Exact BF16 integer observations preserve the original scale/product DAG and require pure roundeven values, integer-only observations, stable RNE, nontrapping arithmetic, unobserved flags and standard unobserved representation copies. Compose after finite-point specialization; each contract remains independently required.
