@@ -71,6 +71,7 @@ SUITES = {
         "tests": (
             "runtime/test_out_b64.py",
             "runtime/test_out_bin.py",
+            "runtime/test_out_bin_bulk.py",
             "runtime/test_out_bin_memory.py",
             "runtime/test_out_packet.py",
             "runtime/test_out_b64_profile.py",
