@@ -2,7 +2,7 @@
 title: "Justifying Phase 2 tests from Phase 0 evidence"
 kind: guide
 status: current
-last_verified: 2026-10-05
+last_verified: 2026-10-07
 owner: experiments
 related: [phase0_specification, generating_capsules, perf_phase2_wiring]
 code_refs:
@@ -64,8 +64,13 @@ Read `test_justification.json` next to a frozen `performance_corpus_manifest.jso
 inapplicable, unimplemented or failed; it is not evidence that the compiler handles that lever.
 Families admitted only by the selected frozen requirement (a captured multi-region scope chain or
 a derived model form class) are listed as `skipped_inapplicable` when that requirement selects
-nothing, and as `blocked_unimplemented` when the requirement lacks the scope they need. Families
-the template declares but this cohort cannot measure, such as claims decided from the decoded
-instruction stream rather than from cycles, are also listed as `blocked_unimplemented`.
+nothing, and as `blocked_unimplemented` when the requirement lacks the scope they need. The
+emitted-stream families (PD load-configuration residency, PA stationary residency, PJ move-in
+placement) are generated: each is decided from the candidate's own decoded instruction stream by the
+analyzer its acceptance block names (`merlin.perf.{load_state,stationary,movein}_claim`, dispatched by
+`merlin_experiments.phase2.claims.dispatch`). They read no cycles, cap at the correctness tier and
+say only that redundant or exposed work is absent, never that anything got faster. A family the
+template declares but no materializer can derive yet (PT, whose starting depth is a measured property
+of the machine) stays `blocked_unimplemented`.
 For a performance conclusion, inspect the later measured result and its analyzer verdict as a
 separate artifact. Do not promote a generated test or a diagnostic receipt to a measured claim.

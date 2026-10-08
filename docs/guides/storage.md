@@ -320,7 +320,7 @@ Every phase writes to one address per unit, and every later phase cites that add
 | a phase run | `out/runs/<target>/phase<N>/<TS>_<method>_<sha7>/` | `start_phase_run(target=, phase=, method=)`; a single-phase `merlin experiment run --phase N` |
 | its compiler history | `<phase run>/oot/` (a git repo) | the harness only, via `merlin.common.oot_repo` |
 | a sealed phase-0 release | `out/artifacts/protocols/<target>/phase0-<TS>-<sha7>/` | `merlin experiment corpus prepare` (default `--output`) then `seal` |
-| a phase-2 champion | `out/artifacts/targets/<target>/champions/<package_id>/` | `merlin.targetgen.champions.export_champion` |
+| a champion (phase 1 or 2) | `out/artifacts/targets/<target>/champions/<package_id>/` | `merlin.targetgen.champions.export_champion` |
 | the target index | `out/artifacts/targets/<target>/INDEX.yaml` | `merlin experiment index <target>` (generated, never edited; `--check` exits 1 when stale); also regenerated when a phase-1 run freezes, a phase-2 `best` moves and a champion is exported |
 | a tracking page | `out/artifacts/experiments/<target>/dashboard/` | `merlin experiment dashboard <run> \| --target <target>` (regenerable, read from records; see [experiment_dashboard](experiment_dashboard.md)) |
 
@@ -373,6 +373,19 @@ header and the vendor control run in the same batch, and the `exactness` record 
 `prohibited_instructions` it held the program to). Each required field is checked and none is
 defaulted; a scan that is not clean, a clean scan that prohibited nothing, a measurement with no
 identifiable exactness contract, or a GSIM verdict that is not `pass` refuses the export.
+
+**The evidence asked of a champion depends on its phase** (`champions.PROFILES`). The phase is declared
+by the export (`phase=`) or by `provenance.phase`, which must agree when both are given; an export
+that declares neither is held to the phase-2 profile above. A phase-1 champion is a compiler certified
+on capsules, so it carries no FireSim measurement, GSIM verdict or exactness contract. Its
+`certification.capsules` names the tier, the grader commit and the tier's engine (name and binary
+digest), with public and hidden counts graded and passed at the tier, split into passes executed now
+and carried from an earlier grade (which must add up). Its whole-ELF scan must be clean over a
+non-empty prohibited set, with coverage counting every capsule ELF as measured and clean. A phase-1
+export defaults to the `frozen` commit and refuses any other. The publish layer's "published with
+--no-gate" banner judges the `oot_runner.certify` payload gate, not this profile, so a champion that
+passes its profile leads its landing page with that profile instead. The target index records each
+champion's phase.
 
 **A lineage older than these records says so instead of borrowing their shape.** Three optional
 provenance blocks cover it, each printed in `MERLIN_PUBLICATION.md` as well as recorded:
