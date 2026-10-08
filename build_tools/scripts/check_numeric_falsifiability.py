@@ -149,10 +149,7 @@ def main(argv: list[str] | None = None) -> int:
             f"numeric falsifiability: {len(accepted)} accepted constant answer(s), "
             f"{len(unloadable)} unloadable declaration(s), {len(unmeasured)} UNMEASURED oracle(s)"
         )
-        print(
-            f"  assessed {coverage.get('assessed_policies', 0)}/"
-            f"{coverage.get('applicable_policies', 0)} applicable policies"
-        )
+        print(f"  assessed {coverage['assessed_policies']}/{coverage['applicable_policies']} applicable policies")
         if unloadable or unmeasured:
             print("  PARTIAL audit: unavailable inputs have not received a clean numerical verdict")
         for row in accepted:
