@@ -17,6 +17,7 @@ merlin-rtl-introspect: extract structure-only facts from elaborated RTL (CIRCT/F
 - `introspect.py` — merlin-rtl-introspect — structure-only FIRRTL census and selected target-declared role probes.
 - `muon_introspect.py` — Deterministic, no-LLM extraction of Muon (RadianceMuonConfig) hardware facts from the real RTL.
 - `replay_json_to_h.py` — Convert a RoCC replay spec JSON (gen_rocc_replay) into a C header the arc replay harness #includes.
+- `rocc_header.py` — Derive RoCC register usage by preprocessing selected C header call forms.
 
 <!-- Purpose/Modules derived from docstrings via build_tools/scripts/gen_package_docs.py.
      Add hand-written notes (invariants, gotchas) below. -->
