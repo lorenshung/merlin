@@ -386,6 +386,27 @@ def generation_lineage(plan: dict, generated: Path) -> dict | None:
     """
     from ..runner import fingerprint
 
+    provenance = read_yaml(generated / "MANIFEST.yaml")
+    core_stage = provenance.get("core_aten_stage")
+    if core_stage is not None:
+        ledger_path = generated / "_private" / "stage.json"
+        ordinary_tree(ledger_path)
+        if fingerprint(ledger_path) != core_stage.get("private_ledger_sha256"):
+            raise SpecError("Core ATen private generation ledger differs from its manifest commitment")
+        ledger = json.loads(ledger_path.read_bytes())
+        receipt = ledger.get("receipt") or {}
+        if receipt.get("target") != plan.get("target") or receipt.get("schema") != core_stage.get("schema"):
+            raise SpecError("Core ATen generation lineage names a different selection")
+        return {
+            "schema": core_stage["schema"],
+            "scope": core_stage["scope"],
+            "status": "byte_bound_diagnostic",
+            "selection_sha256": receipt["selection_sha256"],
+            "generated_manifest_sha256": fingerprint(generated / "MANIFEST.yaml"),
+            "private_ledger_sha256": fingerprint(ledger_path),
+            "input_provenance": receipt["inputs"],
+            "packaging": ledger["packaging"],
+        }
     bundle_name = plan.get("phase0_evidence_bundle")
     if bundle_name is None:
         return None  # Historical runs have no selected evidence or generation receipt.
@@ -508,6 +529,27 @@ def _reviewed_retirements(path: Path | None) -> tuple[dict[str, str], str | None
     return retired, fingerprint(path)
 
 
+def _full_call_answers(members: dict) -> dict[str, Path]:
+    """Resolve only digest-bound writer answers, never an ambient grader override."""
+    from merlin.targetgen.golden_store import FILES
+
+    answers = {}
+    for key, (member, document) in members.items():
+        binding = document.get("full_call_golden")
+        if binding is None:
+            continue
+        if not isinstance(binding, dict) or "golden.yaml" not in binding or set(binding) - set(FILES):
+            raise SpecError("full-call capsule lacks a valid private answer commitment")
+        source = member.parent.parent / "_private" / member.parent.name / member.name
+        ordinary_tree(source)
+        for filename, digest in binding.items():
+            path = source / filename
+            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                raise SpecError("full-call private answer bytes differ from capsule commitment")
+        answers[key] = source
+    return answers
+
+
 def assemble(
     te,
     generated: Path,
@@ -541,13 +583,30 @@ def assemble(
     # Copying private files into independent inodes must not launder an existing
     # public alias. Reuse the native snapshot's authoritative privacy admission.
     generated_private = generated / "hidden"
+    generated_answers = generated / "_private"
+    emitted = _members(generated)
+    answer_sources = _full_call_answers(emitted)
+    for root in roots:
+        if list(root.glob("*/capsule.yaml")):
+            # Reuse category member identity checking without reading unrelated siblings.
+            baseline_members = {
+                ("hidden" if root == private_baseline else root.name) + "/" + path.parent.name: (
+                    path.parent,
+                    read_yaml(path),
+                )
+                for path in root.glob("*/capsule.yaml")
+            }
+            for key, value in _full_call_answers(baseline_members).items():
+                answer_sources.setdefault(key, value)
     # Check all source surfaces together. A private external baseline aliased to
     # a generated public file is just as unsafe as an alias inside either tree.
     _validate_host_sources(
         [(str(root), root) for root in roots if root not in private_roots]
-        + [(str(root), root) for root in generated.iterdir() if root != generated_private],
+        + [(str(root), root) for root in generated.iterdir() if root not in (generated_private, generated_answers)],
         [(str(root), root) for root in private_roots]
-        + ([(str(generated_private), generated_private)] if generated_private.exists() else []),
+        + ([(str(generated_private), generated_private)] if generated_private.exists() else [])
+        + [(str(path), path) for path in answer_sources.values()]
+        + ([(str(generated_answers), generated_answers)] if generated_answers.exists() else []),
     )
     baseline = {}
     for root in roots:
@@ -633,6 +692,11 @@ def assemble(
             shutil.rmtree(target)
         digest = copy_input(source, target, private=key.startswith("hidden/"))
         replacements.append({"member": key, "previous_sha256": previous_sha, "sha256": digest})
+    answer_copies = {}
+    for key, source in sorted(answer_sources.items()):
+        answer_copies[key] = copy_input(source, destination / "_private" / key, private=True)
+    if (generated_answers / "stage.json").is_file():
+        copy_input(generated_answers / "stage.json", destination / "_private" / "stage.json", private=True)
     final_members = _members(destination)
     # Only this derivation may supply new completeness inputs. A historical
     # baseline sidecar cannot fill an absent source trace in the selected run.
@@ -673,6 +737,7 @@ def assemble(
         },
         "generated_manifest_sha256": fingerprint(generated / "MANIFEST.yaml"),
         "replacements": replacements,
+        "full_call_answers": answer_copies,
     }
 
 
@@ -923,7 +988,11 @@ def scaffold(
             promoted,
             experiment / "input_bundles",
             variants=("public_v0", "realistic_v0", "hwbringup_v0"),
-            host_inputs=(str(private), *([str(corpus / "_phase0")] if (corpus / "_phase0").is_dir() else [])),
+            host_inputs=(
+                str(private),
+                *([str(corpus / "_phase0")] if (corpus / "_phase0").is_dir() else []),
+                *([str(corpus / "_private")] if (corpus / "_private").is_dir() else []),
+            ),
             python_source_root=python_source_dir(),
             llvm_toolchain_root=llvm_root if llvm_root != checkout_llvm else None,
             rtl_facts_root=facts_root,

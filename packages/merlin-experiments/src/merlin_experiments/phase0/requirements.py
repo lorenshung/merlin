@@ -277,6 +277,15 @@ def derive(
     the same selection produces identical bytes; changed inputs need a new root.
     """
     declaration = from_definition(definition)
+    from .core_aten_stage import declaration as core_declaration
+    from .core_aten_stage import derive as derive_core
+
+    if core_declaration(declaration.recipe) is not None:
+        if captures or native_qualifications or capture_preselections or quantization_policies:
+            raise ValueError("Core ATen uses only recipe-declared case selections and retained captures")
+        return derive_core(declaration.recipe, Path(output_root), target=declaration.target)
+    if rtl_facts is None:
+        raise ValueError("model derivation requires explicit --rtl-facts")
     te = load_target_experiment(declaration.descriptor)
     declared = (te.workload_spec or {}).get("applications")
     if not isinstance(declared, (list, tuple)) or not declared or len(declared) != len(set(declared)):
