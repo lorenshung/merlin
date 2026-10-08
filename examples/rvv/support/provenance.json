@@ -1,0 +1,27 @@
+{
+  "schema": "merlin.support_migration.v1",
+  "target": "rvv",
+  "upstream": {
+    "url": "https://github.com/ucb-bar/rvv-mlir.git",
+    "base_ref": "stable/sol_k1_int8",
+    "base_commit": "3e48d41813ae17f6e6112ba63c741e923b0e496d",
+    "catalog_commit": "a568f412625539cfdb29484869093721b027be5c",
+    "root_role": "host_schedule"
+  },
+  "merlin_source_baseline": "6b83c05a7ea7e7eb50fc688670cfa547f16f315c",
+  "qualification": {
+    "level": "metadata_schema_checked_snapshot",
+    "schema_valid": true,
+    "schema_diagnostics": [],
+    "hardware_executed": false,
+    "candidate_certification": false
+  },
+  "files": [
+    {
+      "path": "contracts/target_contract.yaml",
+      "source": "/scratch/agustin/projects/oscar-merlin/out/artifacts/targets/rvv/contracts/target_contract.yaml",
+      "source_revision": null,
+      "sha256": "b08117fecc0eef967ce639ab55314d2b8a163dd1733603f11133f452dd8ec4a4"
+    }
+  ]
+}

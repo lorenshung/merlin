@@ -1,0 +1,132 @@
+{
+  "schema": "merlin.support_migration.v1",
+  "target": "muon",
+  "upstream": {
+    "url": null,
+    "root_role": "support",
+    "status": "local_only_no_remote_configured"
+  },
+  "merlin_source_baseline": "380443c6bcf856462ecc0b71761849033b52e91c",
+  "qualification": {
+    "level": "source_identity_snapshot",
+    "schema_valid": null,
+    "hardware_executed": false,
+    "candidate_certification": false
+  },
+  "files": [
+    {
+      "path": "backend/NATIVE_MX_ABI.md",
+      "source": "merlin/targets/muon/backend/NATIVE_MX_ABI.md",
+      "source_revision": "380443c6bcf856462ecc0b71761849033b52e91c",
+      "sha256": "237188c8cb5b8967a0d9c188132e5455c9d195136f34b02018da2a03c99a9941"
+    },
+    {
+      "path": "backend/__init__.py",
+      "source": "merlin/targets/muon/backend/__init__.py",
+      "source_revision": "380443c6bcf856462ecc0b71761849033b52e91c",
+      "sha256": "793c48068ab37086e29fa386a73f8a8a95786e7fe2c4047822fa2603f15adb98"
+    },
+    {
+      "path": "backend/gen_muon_digest.py",
+      "source": "merlin/targets/muon/backend/gen_muon_digest.py",
+      "source_revision": "380443c6bcf856462ecc0b71761849033b52e91c",
+      "sha256": "17332c593885510057598bcdbd5405d5a328e7a3d5ed08af2ebc5b96b0512d67"
+    },
+    {
+      "path": "backend/muon.py",
+      "source": "merlin/targets/muon/backend/muon.py",
+      "source_revision": "380443c6bcf856462ecc0b71761849033b52e91c",
+      "sha256": "3fa03a4a0cad6b33c7422420c0db6565fb0993f94321cabdc2af64f368c1786a"
+    },
+    {
+      "path": "backend/muon_bsp.py",
+      "source": "merlin/targets/muon/backend/muon_bsp.py",
+      "source_revision": "380443c6bcf856462ecc0b71761849033b52e91c",
+      "sha256": "5f64e4b7be2603d35f139ce56513e50fdce394b6ae143e567e337162f14ba295"
+    },
+    {
+      "path": "backend/muon_capsule_runner.py",
+      "source": "merlin/targets/muon/backend/muon_capsule_runner.py",
+      "source_revision": "380443c6bcf856462ecc0b71761849033b52e91c",
+      "sha256": "f9a3625fa69ce372f932652d20e8a954f31e336f0b8900a94f6f3d69331431eb"
+    },
+    {
+      "path": "backend/muon_codegen.py",
+      "source": "merlin/targets/muon/backend/muon_codegen.py",
+      "source_revision": "380443c6bcf856462ecc0b71761849033b52e91c",
+      "sha256": "d0625b46f5cbc7aa0efa5a440f83182a70c6c4b97a6f3b41f437471816d9d313"
+    },
+    {
+      "path": "backend/muon_codegen_mlir.py",
+      "source": "merlin/targets/muon/backend/muon_codegen_mlir.py",
+      "source_revision": "380443c6bcf856462ecc0b71761849033b52e91c",
+      "sha256": "ff172344a9f4e05d5a5907e540b4791a781a40b2f4a854930c3276dc49121e56"
+    },
+    {
+      "path": "backend/muon_harness.py",
+      "source": "merlin/targets/muon/backend/muon_harness.py",
+      "source_revision": "380443c6bcf856462ecc0b71761849033b52e91c",
+      "sha256": "6a2eb4c6f56fbdcda05565a68aa4b9177e528b01013438e184f874eb31234312"
+    },
+    {
+      "path": "backend/muon_introspect.py",
+      "source": "merlin/targets/muon/backend/muon_introspect.py",
+      "source_revision": "380443c6bcf856462ecc0b71761849033b52e91c",
+      "sha256": "36ce7b2966d97720d0ffb0318161cff5b5932ef1ea09ade3e2667e1764a3fb9c"
+    },
+    {
+      "path": "backend/muon_kernel_selection.py",
+      "source": "merlin/targets/muon/backend/muon_kernel_selection.py",
+      "source_revision": "380443c6bcf856462ecc0b71761849033b52e91c",
+      "sha256": "d4222a970a6d17f65aa2de25a8ed11101ca9e2380b5e65a86511c1b0cecc0e24"
+    },
+    {
+      "path": "backend/muon_link.py",
+      "source": "merlin/targets/muon/backend/muon_link.py",
+      "source_revision": "380443c6bcf856462ecc0b71761849033b52e91c",
+      "sha256": "208dc7d3433a8a7ef95e41fe32bde8619d73ec33396819cae4d6478a44928877"
+    },
+    {
+      "path": "backend/muon_mx_abi.py",
+      "source": "merlin/targets/muon/backend/muon_mx_abi.py",
+      "source_revision": "380443c6bcf856462ecc0b71761849033b52e91c",
+      "sha256": "c559337f8d068c97c22673c9e00c4b03144d0007f4fc8d9dc0eca643906afbf9"
+    },
+    {
+      "path": "backend/muon_mx_codegen.py",
+      "source": "merlin/targets/muon/backend/muon_mx_codegen.py",
+      "source_revision": "380443c6bcf856462ecc0b71761849033b52e91c",
+      "sha256": "a4367d74ec68e263683e1f31675738c74e3a195c60f5f5968f9cea91126091a0"
+    },
+    {
+      "path": "backend/muon_oracles.py",
+      "source": "merlin/targets/muon/backend/muon_oracles.py",
+      "source_revision": "380443c6bcf856462ecc0b71761849033b52e91c",
+      "sha256": "5a537e0aeb6ad7fae5af3b542e1e4146804675bbe8fbc05506f344e1a0a54f15"
+    },
+    {
+      "path": "backend/muon_result_page.py",
+      "source": "merlin/targets/muon/backend/muon_result_page.py",
+      "source_revision": "380443c6bcf856462ecc0b71761849033b52e91c",
+      "sha256": "ab0c2f001c524c3159278b4b340bbcb914b2ffb6094b76f19817430588f528b0"
+    },
+    {
+      "path": "backend/soc_carrier/main.c",
+      "source": "merlin/targets/muon/backend/soc_carrier/main.c",
+      "source_revision": "380443c6bcf856462ecc0b71761849033b52e91c",
+      "sha256": "ec10b21da95963cb47e034448671e0fc9efa43243ecbb92b711fdf58a2d59ec3"
+    },
+    {
+      "path": "contracts/target_contract.yaml",
+      "source": "merlin/targets/muon/contracts/target_contract.yaml",
+      "source_revision": "380443c6bcf856462ecc0b71761849033b52e91c",
+      "sha256": "c39878928d8d674ded768a293b8bd8f662bf1b7f6f09d2e36f8208c310cb14d1"
+    },
+    {
+      "path": "sim_oracle.py",
+      "source": "merlin/targets/muon/sim_oracle.py",
+      "source_revision": "380443c6bcf856462ecc0b71761849033b52e91c",
+      "sha256": "ec307a2b62cd4b89984ac2431cff3bb4c1ae3f5d2c176b8d77e8dd613b0b75bf"
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+schema: merlin.provider.v1
+id: rvv-support
+target: rvv
+role: support
+contract: contracts/target_contract.yaml

@@ -1,0 +1,49 @@
+# Provenance of support/: a byte-identical copy of one companion provider root.
+# The vendored directory's git tree id equals source.tree; merlin/tests/infra/test_example_support.py
+# recomputes it and the file count from the committed bytes. Do not edit support/ in place: a change
+# is a new vendoring with its own source commit, recorded here.
+schema: merlin.vendored_support.v1
+target: gemmini
+provider_id: gemmini-support
+path: support
+file_count: 151
+vendored: 2026-10-07
+source:
+  repository: "https://github.com/ucb-bar/gemmini-mlir.git"
+  published: false  # the commit is on no remote branch; this copy is its only tracked home
+  commit: 9e99fc264cd5b9f21f51948dcdce94377ca86727
+  commit_date: "2026-10-06T23:21:18-07:00"
+  provider_root: "merlin-support"
+  tree: 7f724638afb20ba6dd904286be37177884b672da
+  merge_parents:
+    - 0d0e62fb335c85ffb0d379774d539120e3141107
+    - 87ef5587c1a1eb1eb13c7da3f32a5b5e9b2a52fd
+pinned:
+  manifest: build_tools/upstreams/target_support.json
+  companion_commit: 29818c8ce1ba2f48d5e62cc0d585f1d250c59fb4
+  provider_tree: 7f724638afb20ba6dd904286be37177884b672da
+  identical_to_source: true
+records:
+  file_provenance: support/provenance.json
+  migrations:
+    - support/build_source_identity_migration.json
+    - support/build_support_migration.json
+    - support/completion_capability_migration.json
+    - support/conformance_migration.json
+    - support/contract_alignment_migration.json
+    - support/model_slices_migration.json
+    - support/pinned_runtime_migration.json
+    - support/portfolio_capabilities_migration.json
+    - support/primitive_helper_migration.json
+    - support/readout_encoding_migration.json
+    - support/required_extraction_migration.json
+    - support/resource_migration.json
+    - support/rocc_semantics_migration.json
+    - support/rtl_checks_migration.json
+    - support/runtime_environment_migration.json
+    - support/schedule_vocabulary_migration.json
+    - support/simulator_identity_migration.json
+    - support/standalone_elementwise_review.json
+    - support/transport_alignment_migration.json
+    - support/whole_model_backend_migration.json
+    - support/whole_model_driver_migration.json
