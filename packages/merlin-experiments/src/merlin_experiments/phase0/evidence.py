@@ -349,6 +349,53 @@ class EvidenceSelection:
         return views[name]
 
 
+def _record_scaling_contradictions(
+    diagnostics: list, contract: Mapping, provider_raw: bytes, *, target: str, selected_source
+) -> None:
+    """Compare an explicit capability contract's unit scaling with the selected provider's.
+
+    The two declarations have different owners. A readout check against only the selected one can
+    miss a stronger, incompatible scaling claim made by the executable provider, so each unit whose
+    scaling differs (or which the provider lacks) is recorded; neither declaration is replaced.
+    """
+    provider_contract = yaml.safe_load(provider_raw)
+    if not isinstance(provider_contract, dict) or provider_contract.get("name") != target:
+        raise ValueError("selected support provider contract differs from selected target")
+
+    def units(document: Mapping) -> dict:
+        return {
+            unit["name"]: unit
+            for unit in document.get("compute_units") or ()
+            if isinstance(unit, Mapping) and isinstance(unit.get("name"), str)
+        }
+
+    provider_units = units(provider_contract)
+    for name, unit in sorted(units(contract).items()):
+        provider_unit = provider_units.get(name)
+        if provider_unit is not None and unit.get("scaling") == provider_unit.get("scaling"):
+            continue
+        diagnostics.append(
+            {
+                "component": "support-contract",
+                "status": "contradiction",
+                "unit": name,
+                "selected_scaling": unit.get("scaling"),
+                "provider_scaling": provider_unit.get("scaling") if provider_unit is not None else None,
+                "reason": (
+                    f"selected compute unit {name!r} has no matching support-provider unit"
+                    if provider_unit is None
+                    else f"selected compute unit {name!r} declares scaling {unit.get('scaling')!r}, but the "
+                    f"support provider declares {provider_unit.get('scaling')!r}; review the provider against "
+                    "the selected RTL readout and freeze a fresh corpus"
+                ),
+                "selected_contract_sha256": (
+                    selected_source.sha256 if selected_source is not None else _canonical_digest(contract)
+                ),
+                "provider_contract_sha256": _digest(provider_raw),
+            }
+        )
+
+
 def select_evidence(
     target: str,
     *,
@@ -554,6 +601,23 @@ def select_evidence(
         provider = target_registry.resolve(target)
     except (KeyError, FileNotFoundError, ValueError) as exc:
         diagnostics.append({"component": "support", "status": "unknown", "reason": str(exc)})
+    if (
+        provider is not None
+        and getattr(provider, "kind", None) == "generated"
+        and not provider.contract_path.is_file()
+        and not provider.contract_path.is_symlink()
+    ):
+        # Registry discovery also names the *future* generated-package home. Until it has been
+        # materialized it is not a selected support implementation, and reading it as one makes
+        # Phase 0 inventory a phantom provider.
+        diagnostics.append(
+            {
+                "component": "support",
+                "status": "unknown",
+                "reason": f"generated support contract is not materialized: {provider.contract_path}",
+            }
+        )
+        provider = None
     if provider is not None:
         # Capability input selection is independent of executable support ownership.
         # The existing explicit contract selector must not be ignored merely because
@@ -596,6 +660,16 @@ def select_evidence(
                     observe(path, f"software-reference:{role}", required=True)
         contract = capability_contract(software_doc, base_contract=contract)
         datapath = numerical_datapath(software_doc)
+    if provider is not None and capability_contract_path is not None:
+        _record_scaling_contradictions(
+            diagnostics,
+            contract,
+            observe(provider.contract_path, "support-contract", required=True),
+            target=target,
+            selected_source=None
+            if isinstance(capability_contract_path, Mapping)
+            else sources.get(Path(capability_contract_path).absolute()),
+        )
     # The hardware selection is a source declaration, not an inferred dtype.
     for field, value in hardware_doc.items():
         if field.endswith("_path") and isinstance(value, str):
@@ -1306,6 +1380,11 @@ def export_evidence(selection: EvidenceSelection, artifact_root: str | Path) -> 
 def _materialize_evidence(root: Path, outputs: dict[str, bytes]) -> None:
     """Validate all destinations before adding immutable saved evidence members."""
     for name in outputs:
+        member = Path(name)
+        if member.is_absolute() or not member.parts or ".." in member.parts:
+            raise ValueError(f"invalid evidence output member: {name}")
+        if member.parts[0] == "private":
+            raise ValueError(f"evidence output may not occupy the private source snapshot: {name}")
         path = root / name
         if path.is_symlink():
             raise ValueError(f"evidence output may not be symlinked: {path}")
