@@ -118,6 +118,28 @@ def _managed_tempdir(tmp_path_factory):
                 os.environ[key] = value
 
 
+@pytest.fixture
+def tmp_path(tmp_path):
+    """pytest's own ``tmp_path``, handed back in a state its retention policy can remove.
+
+    ``tmp_path_retention_policy = "failed"`` deletes a passed test's tree with
+    ``shutil.rmtree(ignore_errors=True)``, which silently skips every directory left without owner
+    write -- and the sealed snapshots these tests build (bundle inputs, frozen corpora, reviewed
+    releases) clear write bits by design. Such a tree outlives the policy, so a multi-GB copy left
+    read-only is retained after a passing run. Restore owner write on directories only: unlinking
+    needs the parent writable, and files (some hard-linked into a shared content store) keep their
+    modes.
+    """
+    yield tmp_path
+    for directory, _subdirs, _files in os.walk(tmp_path):
+        try:
+            mode = os.lstat(directory).st_mode
+            if not mode & 0o200:
+                os.chmod(directory, mode | 0o200)
+        except OSError:
+            pass  # best effort, exactly as pytest's own removal is
+
+
 # ------------------------------------------------------------------------------------------------
 # The suite must test THIS checkout's merlin, not whichever one the venv resolves.
 # ------------------------------------------------------------------------------------------------
