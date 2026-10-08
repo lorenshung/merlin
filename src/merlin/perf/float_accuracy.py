@@ -62,12 +62,14 @@ def declared_reference(capsule: Path):
 
 
 def compare(program, reference, atol: float, rtol: float) -> dict[str, Any]:
-    """Element-wise agreement of two equal-length float vectors under ``atol``/``rtol``."""
+    """Element-wise agreement under ``atol``/``rtol``; both operands must be finite."""
     import numpy as np
 
     a, b = np.asarray(program, np.float64), np.asarray(reference, np.float64)
     gap = np.abs(a - b)
-    within = int((gap <= atol + rtol * np.abs(b)).sum())
+    # An infinite reference otherwise makes both sides infinite: inf <= inf
+    # would accept a finite candidate. Nonfinite operands are always violations.
+    within = int((np.isfinite(a) & np.isfinite(b) & (gap <= atol + rtol * np.abs(b))).sum())
     scale = np.maximum(np.abs(b), np.finfo(np.float64).tiny)
     norms = float(np.linalg.norm(a) * np.linalg.norm(b))
     return {

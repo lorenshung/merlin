@@ -266,6 +266,25 @@ def test_nonfinite_raw_exactness_and_elementwise_refusal_count(native_case, word
     assert result.quality.value_map[budget.limits[0].metric] == (0 if profile == "exact" else 1)
 
 
+@pytest.mark.parametrize("word", [0x7F800000, 0xFF800000])
+@pytest.mark.parametrize("arm", ["reference", "candidate"])
+def test_asymmetric_infinity_counts_as_elementwise_violation(native_case, word, arm):
+    case = native_case
+    selected = case.arms[0 if arm == "reference" else 1]
+    console = selected.console.read_text()
+    # Keep both arm shapes equal and all other words identical and finite.
+    values = np.asarray(2 * (np.arange(10) - 3), np.float32).view(np.uint32).copy()
+    values[0] = word
+    selected.console.write_text(_frame("F", (2, 5), values) + console[console.index("OUT_B64_BEGIN v1 I") :])
+    raw, _ = N.parse_console(selected.console.read_text())
+    decoded = N.decode_float_readback(raw, {"F": "f32"})["F"]
+    assert np.isinf(decoded[0][0]) and (decoded[0][0] > 0) == (word == 0x7F800000)
+    result = N.admit_protected_numerical_readback(**case.freeze())
+    assert result.quality.value_map == {"elementwise_violation_count": 1}
+    assert result.quality.parameters == (("atol", 0.03125), ("rtol", 0.02))
+    assert result.quality.complete and result.element_count == 23 and result.missing
+
+
 @pytest.mark.parametrize("kind", ["missing", "extra", "partial", "done", "geometry", "digest"])
 def test_incomplete_or_extra_console_cannot_become_complete(native_case, kind):
     case = native_case
