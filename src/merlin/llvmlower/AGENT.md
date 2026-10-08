@@ -20,6 +20,17 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
 
 ## What belongs here
 
+- `source_scalar_carrier.py` and `source_scalar_carrier_policy.py` provide a
+  distinct, explicitly selected approximation budget for a scalar expression
+  before its unchanged finishing operations and integer observer. Current
+  source intervals certify immutable three-coefficient cells; finer proof
+  partitions require no finer runtime table. Invalid cells or a false caller
+  rounding predicate evaluate the original expression. Family reification
+  owns one typed readonly table and checks every member and ABI symbol before
+  ordinary upstream lowering. No default selection, target instruction,
+  final-output equivalence, whole allocation plan or profitability is inferred.
+  Keep this permission separate from the source attention RMS4 policy.
+
 - `source_observation_stage.py` is an explicit default-off native tensor
   checkpoint after ordinary fusion/generalization and before scheduling or
   bufferization. Normal APIs forward `source_observation_effects`, the existing

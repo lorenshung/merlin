@@ -361,3 +361,30 @@ The producer's input-to-readout storage must remain unchanged until its last
 read; an overlapping output buffer cannot silently invalidate this precondition.
 The bound convolution adapter supplies distinct, exclusively owned scratch and
 output allocations. The ordinary checked API retains its existing overlap order.
+
+### Explicit scalar carrier representations
+
+`ApproximateScalarCarrierPolicy` grants a distinct absolute and relative error
+budget for a scalar expression before its original finishing operations. It
+requires independent validation of the original public outputs; carrier error
+permission alone does not establish integer-code or whole-model equivalence.
+The policy also bounds runtime coefficient payload and compile-time proof-table
+payload. Code, temporary proof work, stack and aggregate runtime storage require
+separate admission.
+
+`prepare_source_scalar_carrier` validates current typed closed scalar observers,
+immutable three-coefficient choices and explicit floating effects. Every fine
+raw-binary32 interval must meet the budget for both rounded carrier FMAs. Fine
+proof partitions can refine admission without increasing the coarse runtime
+table. Rejected cells evaluate the original source expression. The caller
+supplies a runtime rounding predicate; a false predicate retains the source
+expression under the incoming rounding mode.
+
+`reify_source_scalar_carrier_helper_family` constructs one readonly typed table
+and independently binds each helper to its current source proof. It validates
+the complete storage/helper namespace and retains each original finishing
+multiplier and integer observer. Shared storage is explicit before upstream
+lowering; compiler or linker deduplication is not a premise. Binding, input and
+output ownership, final linked placement, runtime predicates, complete costs
+and original output gates remain caller obligations. These APIs perform no
+automatic discovery, pipeline selection or profitability decision.
