@@ -74,6 +74,17 @@ int main(int hart) {
 #ifdef MERLIN_DUMP_ALL_OUTPUTS
   /* Lossless storage readback in MLIR result order, outside model timing. */
   for (int output = 0; output < MERLIN_N_OUTPUTS; output++) {
+#ifdef MERLIN_RETURNED_DESCRIPTORS
+    htif_puts("OUT_SHAPE ");
+    htif_putd((long)output);
+    htif_putc(' ');
+    htif_putd(MERLIN_OUTPUT_RANKS[output]);
+    for (int axis = 0; axis < MERLIN_OUTPUT_RANKS[output]; axis++) {
+      htif_putc(' ');
+      htif_putd(merlin_result_extent(output, axis));
+    }
+    htif_putc('\n');
+#endif
     const unsigned char *bytes = (const unsigned char *)MERLIN_OUTPUT_PTR[output];
     htif_puts("OUT_BYTES ");
     htif_putd((long)output);
