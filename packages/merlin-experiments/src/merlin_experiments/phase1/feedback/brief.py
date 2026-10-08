@@ -90,18 +90,42 @@ def _public_build_section(run_dir: Path) -> list[str]:
     numeric progress reader intentionally ignores those keys, but an advisory
     must still follow the latest actual archived candidate, never an older
     projection with a coincidentally matching numeric round.
+
+    A record without a timezone-aware ``graded_at`` was not stamped by a
+    grader that orders continuous rounds (the historical numeric rounds), so
+    it takes no part in the ordering. An archived verdict that cannot be READ
+    is different: it may be the newest round, and skipping it would pair the
+    advisory with an older candidate. The advisory is then withheld, and the
+    section names the records that stopped it.
     """
     history = run_dir / "qa_history"
     rounds = []
-    for path in history.glob("verdict_round_*.json"):
+    unreadable: list[str] = []
+    for path in sorted(history.glob("verdict_round_*.json")):
         try:
             verdict = json.loads(path.read_text())
-            stamp = datetime.fromisoformat(verdict["graded_at"])
-            if stamp.tzinfo is None:
-                continue
-        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        except (OSError, ValueError) as exc:
+            unreadable.append(f"`{path.name}` ({type(exc).__name__})")
+            continue
+        graded_at = verdict.get("graded_at") if isinstance(verdict, dict) else None
+        if not isinstance(graded_at, str):
+            continue
+        try:
+            stamp = datetime.fromisoformat(graded_at)
+        except ValueError:
+            unreadable.append(f"`{path.name}` (graded_at {graded_at!r} is not ISO-8601)")
+            continue
+        if stamp.tzinfo is None:
             continue
         rounds.append((stamp, path.name, verdict))
+    if unreadable:
+        return [
+            "## Public object-build scalability (advisory only)",
+            "",
+            "Withheld: the latest graded round cannot be determined because these archived verdicts "
+            "could not be read: " + ", ".join(unreadable) + ".",
+            "",
+        ]
     if not rounds:
         return []
     _stamp, name, verdict = max(rounds)
