@@ -329,3 +329,35 @@ def test_absent_model_sources_refuse_the_build(tmp_path, monkeypatch):
     monkeypatch.setattr(MP, "model_sources_dir", lambda: tmp_path / "absent")
     with pytest.raises(MP.PerturbBuildError, match="absent"):
         MP.build_verilator_variant(tmp_path / "obj", tmp_path / "out", makefile="V.mk")
+
+
+def test_the_operator_command_matches_the_control_against_the_pinned_digest(tmp_path, monkeypatch, capsys):
+    """`merlin-target-tools mem-perturb-variant` reads the stock simulator's digest from the pin
+    registry, builds into a fresh directory only, and exits non-zero when the control relink is not
+    the pinned simulator -- the receipt's one claim is that the memory model is the only difference."""
+    import json
+
+    from merlin.common import provenance as P
+    from merlin.targetgen import tool_cli
+
+    registry = tmp_path / "pins.yaml"
+    registry.write_text(json.dumps({"artifacts": {"stock_sim": {"path": "sim", "digest": "d" * 64}}}))
+    monkeypatch.setattr(P, "pins_path", lambda: registry)
+    seen = {}
+
+    def build(obj_dir, out_dir, **kw):
+        seen.update(kw)
+        return {"control_relink": {"performed": True, "matches_declared_base": kw["base_digest"] == "d" * 64}}
+
+    monkeypatch.setattr(MP, "build_verilator_variant", build)
+    argv = ["mem-perturb-variant", "--obj-dir", str(tmp_path / "obj"), "--makefile", "V.mk"]
+    assert tool_cli.main([*argv, "--out", str(tmp_path / "v1"), "--base-artifact", "stock_sim"]) == 0
+    assert seen == {"makefile": "V.mk", "control": True, "base_digest": "d" * 64}
+    registry.write_text(json.dumps({"artifacts": {"stock_sim": {"path": "sim", "digest": "e" * 64}}}))
+    assert tool_cli.main([*argv, "--out", str(tmp_path / "v2"), "--base-artifact", "stock_sim"]) == 1
+    full = tmp_path / "v3"
+    full.mkdir()
+    (full / "emulator").write_bytes(b"pinned engine")
+    with pytest.raises(SystemExit, match="not empty"):
+        tool_cli.main([*argv, "--out", str(full)])
+    capsys.readouterr()

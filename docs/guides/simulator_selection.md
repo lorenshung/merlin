@@ -176,7 +176,8 @@ completes responses with DIFFERENT AXI ids out of order (same-id order, burst co
 data sampling are kept), each after a seeded latency:
 
 1. Build the variant from the reference build's own objects, never writing to them:
-   `merlin.targetgen.mem_perturb.build_verilator_variant(obj_dir, out_dir, makefile=..., base_digest=...)`.
+   `merlin-target-tools mem-perturb-variant --obj-dir DIR --makefile MK --out FRESH_DIR --base-artifact PIN`
+   (`mem_perturb.build_verilator_variant`).
    The memory harness is found by content, patched to construct the model in
    `merlin/contract/external/sim_memory/`, and relinked into `out_dir`. A control relink of the
    unmodified objects is compared with the declared reference simulator, and the receipt beside the
