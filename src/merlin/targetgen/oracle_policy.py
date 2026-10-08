@@ -250,6 +250,23 @@ def _chipyard_available(target: str) -> tuple[bool, str]:
     return False, f"{target!r}: neither the chipyard spike sim nor the mlc arc oracle is available"
 
 
+def _spike_adapters(target: str) -> dict:
+    factory = _SIM_ADAPTER_FACTORIES.get("spike")
+    if factory is None:
+        raise OracleMetadataUnavailable(
+            "concrete simulator adapters require merlin-experiments; use oracle_tier_plan for core-only metadata"
+        )
+    return factory(target)
+
+
+def _spike_available(target: str) -> tuple[bool, str]:
+    from ..runtime.backends.spike import spike_path
+
+    if not spike_path().is_file():
+        return False, f"{target!r}: spike binary is absent: {spike_path()}"
+    return True, f"{target!r}: plain-ISA spike functional oracle"
+
+
 #: DECLARED bespoke-sim oracle registry, keyed by sim ENGINE (``sim_via``) — the seam that keeps oracle
 #: routing target-name-free (a new sim engine registers here; the dispatch below is untouched). The
 #: self-hosted SIMT oracle is discovered from an explicitly selected OOT support
@@ -264,6 +281,14 @@ _SIM_ORACLES: dict[str, _SimOracle] = {
         is_compile_based=True,
         requires_mlir_python=True,
         tier_plan=chipyard_tier_plan,
+    ),
+    # Plain-ISA Spike (no extension, no RTL): the functional tier only, and it REPLACES the arc default.
+    "spike": _SimOracle(
+        lambda t: _spike_adapters(t),
+        lambda t: _spike_available(t),
+        exclusive=True,
+        is_compile_based=True,
+        tier_plan=lambda t: OracleTierPlan(("L2",), requirements_inference_safe=True),
     ),
 }
 
