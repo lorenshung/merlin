@@ -61,9 +61,9 @@ For a RoCC target, the backend exposes a `rocc_semantics` object with three meth
   and raises `ValueError` for invalid operand selectors or unsupported classes.
 
 Merlin owns transport/SSA parsing and assembler round-trip checks, not accelerator
-operand layouts. Missing semantics refuse execution. The local Gemmini companion
-implements this interface; select its `merlin-support` root explicitly and supply
-the provider's required RTL facts. Legacy in-tree support is not a fallback.
+operand layouts. Missing semantics refuse execution. The Gemmini support provider
+vendored at `examples/gemmini/support` implements this interface; it is the selected
+support when `MERLIN_TARGET_PATH` is unset. Supply the provider's required RTL facts. Legacy in-tree support is not a fallback.
 
 Capability manifest loading returns the declared `encoding` mapping unchanged: an
 `addr_len` does not imply readout flags or an accumulator layout. A RoCC provider may

@@ -15,8 +15,8 @@ imports `merlin.targetgen`).
   `harvest_model_kernels.py`) require the selected OOT Gemmini support package's
   `gemmini_conformance.model_slices`. The shared distribution no longer owns the
   target-specific instruction requirements or fixed model-slice recipes. Set the
-  host-only `PYTHONPATH` to that checkout's `merlin-support/` and select the same
-  directory with `MERLIN_TARGET_PATH`; never grant this private authoring package
+  host-only `PYTHONPATH` to the vendored `examples/gemmini/support/` (selected by default
+  when `MERLIN_TARGET_PATH` is unset); never grant this private authoring package
   to compiler candidates. The pure MLIR emitter remains in core
   `merlin.targetgen.contract.matmul_interface` and requires an explicit target.
 - `conv_downsample_ab.py` is a target-specific study, not a generic compiler interface.

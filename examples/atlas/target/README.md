@@ -60,17 +60,16 @@ independently from that provider's compatibility declarations.
 [`descriptor.yaml`](descriptor.yaml) declares policy, workloads and external
 resources; [`tooling.env.example`](tooling.env.example) lists local tool locations
 without loading them automatically. Runtime implementation and named-program
-oracles belong to the OOT support package. Select that provider and ModelIR
-explicitly before extraction:
+oracles belong to the support provider vendored at [`../support`](../support), which
+is selected when `MERLIN_TARGET_PATH` is unset. Select ModelIR before extraction:
 
 ```sh
-export MERLIN_TARGET_PATH=/path/to/atlas-mlir/merlin-support
 export MERLIN_MLC_DIR=/path/to/ModelIR
 ```
 
 The provider's `runner.program_emitter` owns model-specific encoding policy;
-Merlin has no bundled assembler patch or same-name fallback. See the selected
-companion revision in
+Merlin has no bundled assembler patch or same-name fallback. The vendored bytes are
+the companion revision recorded in [`../SOURCE.yaml`](../SOURCE.yaml) and
 [`target_support.json`](../../../build_tools/upstreams/target_support.json).
 
 The selected matrix cell contains E4M3 operands, an exact 13-bit custom product

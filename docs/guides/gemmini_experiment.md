@@ -138,8 +138,8 @@ wedged one.
 ## 3. Certify (RTL conformance)
 
 ```bash
-# Select an OOT support checkout containing the conformance example.
-GEMMINI_SUPPORT=/absolute/path/to/gemmini-mlir/merlin-support
+# The vendored support provider carries the conformance example.
+GEMMINI_SUPPORT=$PWD/examples/gemmini/support
 MERLIN_TARGET_PATH="$GEMMINI_SUPPORT" PYTHONPATH="$GEMMINI_SUPPORT" \
   .venv/bin/python "$GEMMINI_SUPPORT/examples/conformance/run.py" --simulators spike,verilator
 ```

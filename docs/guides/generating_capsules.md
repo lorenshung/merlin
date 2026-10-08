@@ -27,9 +27,11 @@ code_refs:
 
 Phase 0 derives tests; it does not certify a compiler. Start with an experiment in
 [the catalog](../../experiments/catalog.yaml), not a script in a legacy corpus directory.
-Install Merlin and the optional `merlin-experiments` distribution. Provision selected
-OOT support, RTL facts and capture/toolchain dependencies explicitly; an example recipe
-alone does not make them available. See [integrations](integrations.md).
+Install Merlin and the optional `merlin-experiments` distribution. Target support is the
+provider vendored at `examples/<example>/support` unless `MERLIN_TARGET_PATH` selects another;
+a Phase 1 launch records that effective selection in the child's environment, so a resume cannot
+pick up different support code. Provision RTL facts and capture/toolchain dependencies
+explicitly; an example recipe alone does not make them available. See [integrations](integrations.md).
 
 ## Find the inputs
 

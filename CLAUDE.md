@@ -28,6 +28,13 @@ an explicit contract: generic mechanism in Merlin, target facts and implementati
 Promote generic OOT prototypes into Merlin and make the provider delegate; do not maintain
 duplicate implementations. Preserve explicit numeric policy selection and correctness gates.
 
+Merlin's own **support provider** for a target (backend, oracles, build support and their tests)
+is target-specific code, so it is vendored at `examples/<target>/support/`, byte-identical to the
+companion commit recorded in `examples/<target>/SOURCE.yaml`. It is the selected support when
+`MERLIN_TARGET_PATH` is unset, it is never agent-visible, and it is never a compiler candidate.
+Change it by re-vendoring from a recorded commit, not by editing it in place. Compiler candidates
+stay in their OOT repositories. See `docs/guides/target_resolution.md`.
+
 The OOT dialect is a **general compiler backend**, not a workload-specific kernel generator.
 Production passes derive choices from input operation semantics, shapes, layouts, numeric
 contracts and hardware capabilities. Never select production behavior by model name, captured

@@ -1,11 +1,13 @@
 # Muon reference metadata
 
 Muon runtime, code generation, introspection and Cyclotron oracle support now
-have one owner: the separate local `muon-support` repository recorded in
-[`target_support.json`](../../../build_tools/upstreams/target_support.json).
-No remote has been selected and no companion changes have been pushed.
+have one owner: the provider vendored at [`../support`](../support), a byte-identical
+copy of the local `muon-support` companion commit recorded in [`../SOURCE.yaml`](../SOURCE.yaml)
+and [`target_support.json`](../../../build_tools/upstreams/target_support.json). That
+companion had no remote, so this tracked copy is its only published home.
 
-Select its root explicitly through `MERLIN_TARGET_PATH`. The provider identity
+With `MERLIN_TARGET_PATH` unset it is the selected support; an explicit value replaces
+it. The provider identity
 is `muon`, not the experiment identity `radiance`; preserve that distinction.
 This reference contract has no executable plugin declarations.
 

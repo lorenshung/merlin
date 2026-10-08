@@ -6,10 +6,12 @@ Tests for the **gemmini** subsystem: Gemmini target: conformance/cert, RTL check
 
 ## Invariants
 
-- Backend-dependent tests require an OOT support provider explicitly selected with
-  `MERLIN_TARGET_PATH`; no in-tree backend/build-support copy remains. Select the
-  pinned companion recorded in `build_tools/upstreams/target_support.json` and
-  provide reviewed RTL facts separately for facts-dependent tests. Absence is not
+- Backend-dependent tests require a selected support provider. Outside pytest an unset
+  `MERLIN_TARGET_PATH` selects the vendored `examples/gemmini/support` (source revision in
+  `examples/gemmini/SOURCE.yaml`); inside a test session `merlin/tests/conftest.py` makes it
+  select nothing, so run these with
+  `MERLIN_TARGET_PATH=$PWD/examples/gemmini/support`. Provide reviewed RTL facts separately
+  for facts-dependent tests. Absence is not
   a passing target qualification. Do not run compiler/simulator tests merely to
   validate a source-layout change.
 - Every test file is `merlin/tests/gemmini/test_<area>.py`; pytest collects recursively (`testpaths = merlin/tests`).

@@ -61,12 +61,14 @@ OOT support package, not these example inputs. Select it and the extraction tool
 explicitly before the commands below:
 
 ```sh
-export MERLIN_TARGET_PATH=/path/to/gemmini-mlir/merlin-support
 export MERLIN_MLC_DIR=/path/to/ModelIR
 ```
 
-Use the companion revision recorded in
-[`target_support.json`](../../../build_tools/upstreams/target_support.json).
+The Gemmini support provider is vendored at [`../support`](../support), byte-identical to the
+companion revision recorded in [`../SOURCE.yaml`](../SOURCE.yaml) and
+[`target_support.json`](../../../build_tools/upstreams/target_support.json). With
+`MERLIN_TARGET_PATH` unset it is the selected support; set the variable only to try another
+revision, and keep the whole tree host-private.
 Calibration coefficients are screening estimates, not new measurements.
 
 The selected integer RTL has 8-bit signed operands, a 20-bit MAC result and
@@ -212,7 +214,7 @@ readout scale. The Phase 0 review status is not changed by this probe.
 
 ```sh
 export PYTHONPATH=src:packages/merlin-experiments/src
-export MERLIN_TARGET_PATH=/selected/gemmini-mlir/merlin-support
+export MERLIN_TARGET_PATH=$PWD/examples/gemmini/support
 export MERLIN_CHIPYARD=/selected/chipyard
 python examples/gemmini/verification/probe_residual_readout.py \
   --phase0 /generated/gemmini/run/phase0 \
@@ -254,7 +256,7 @@ Gemmini support and Chipyard toolchain explicitly:
 
 ```sh
 export PYTHONPATH=src:packages/merlin-experiments/src
-export MERLIN_TARGET_PATH=/selected/gemmini-mlir/merlin-support
+export MERLIN_TARGET_PATH=$PWD/examples/gemmini/support
 export MERLIN_CHIPYARD=/selected/chipyard
 python examples/gemmini/verification/probe_native_kernel.py \
   --corpus /generated/gemmini/corpus-1 \
@@ -308,7 +310,7 @@ support package and toolchain selections used for the Phase 0 diagnostic:
 
 ```sh
 export PYTHONPATH=src:packages/merlin-experiments/src
-export MERLIN_TARGET_PATH=/selected/gemmini-mlir/merlin-support
+export MERLIN_TARGET_PATH=$PWD/examples/gemmini/support
 export MERLIN_CHIPYARD=/selected/chipyard
 export MERLIN_RTL_FACTS=/selected/facts/facts.json
 export MERLIN_M2M_VENV=/selected/model2MLIR/.venv

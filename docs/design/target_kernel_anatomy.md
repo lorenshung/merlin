@@ -15,8 +15,9 @@ code_refs:
 # A target's kernel anatomy, and the slot that was missing
 
 Ownership update: Muon backend, emitter and introspection code now live in the
-explicitly selected, local-only OOT support repository recorded in
-[`target_support.json`](../../build_tools/upstreams/target_support.json).
+support provider vendored at `examples/muon/support` (a copy of the local-only companion
+commit recorded in [`target_support.json`](../../build_tools/upstreams/target_support.json)),
+selected when `MERLIN_TARGET_PATH` is unset.
 The design narrative and historical measurements below are preserved, not newly
 qualified by relocation. Merlin's retained metadata is not an executable provider.
 
