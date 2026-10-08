@@ -45,7 +45,7 @@ _SCHEME = {
     "fp8_e4m3": ("float8_weight_only_e4m3", None),
 }
 
-_CAPTURE_ABI_VERSION = 6
+_CAPTURE_ABI_VERSION = 7
 
 
 def _capture_api_report(m2m) -> dict[str, list[str]]:
@@ -320,25 +320,10 @@ def _freeze_calibration(samples, *, limit, normalize, torch):
 
 
 def _float_reference(mdl, inputs, torch) -> dict:
-    """The untransformed model's outputs on ``inputs``, in the golden's JSON shape.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _capture_result_contract import float_reference
 
-    Every RNG this worker seeds is saved and restored around the forward, so a loader whose forward
-    draws random numbers produces the same golden afterwards as it would have without this run.
-    """
-    import numpy as np
-
-    states = (random.getstate(), np.random.get_state(), torch.get_rng_state())
-    try:
-        with torch.no_grad():
-            y = mdl(*inputs)
-        leaves, abi = _output_abi(y)
-        leaves = [leaf.detach().clone() for leaf in leaves]
-        values = [_to_native(x) for x in leaves]
-    finally:
-        random.setstate(states[0])
-        np.random.set_state(states[1])
-        torch.set_rng_state(states[2])
-    return {"outputs": values[0] if len(values) == 1 else values, "output_abi": abi, "leaves": leaves}
+    return float_reference(mdl, inputs, torch, _input_abi, _output_abi, _to_native)
 
 
 def _output_abi(outputs):
@@ -1281,6 +1266,8 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
 
         nl_census = NL.install(mdl)
     trace_options = {"capture_trace": True, "original_frontend_snapshot": original_snapshot} if trace_supported else {}
+    pre_call_leaves, pre_call_abi = _input_abi(inputs)
+    pre_call_values = [_to_native(x) for x in pre_call_leaves]
     res = m2m.convert(
         mdl,
         inputs,
@@ -1360,8 +1347,12 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
     # Preserve the version-1 single-result JSON shape so existing operator capsules and caches remain
     # byte-compatible.  ``output_abi`` is what disambiguates one list-shaped tensor from many results.
     outputs = output_values[0] if len(output_values) == 1 else output_values
-    input_leaves, input_abi = _input_abi(inputs)
-    input_prov = [_to_native(x) for x in input_leaves]
+    input_leaves, input_abi = pre_call_leaves, pre_call_abi
+    input_prov = pre_call_values
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _capture_result_contract import exported_contract
+
+    result_contract = exported_contract(res, input_leaves)
 
     (out / "inputs.json").write_text(json.dumps(input_prov), encoding="utf-8")
     (out / "golden.json").write_text(json.dumps(outputs), encoding="utf-8")
@@ -1460,6 +1451,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
         # independently against the captured @forward signature before declaring capsule inputs.
         "input_abi": input_abi,
         "output_abi": output_abi,
+        "result_contract": result_contract,
         # WHAT THE INPUTS WERE, as the loader itself declares them. The parent turns this into the
         # capsule's input-provenance record; without it a synthetic-input capture and a real-data one
         # are indistinguishable afterwards, and only one of them can back an accuracy statement.

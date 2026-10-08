@@ -42,7 +42,7 @@ from merlin.common.paths import repo_root
 from merlin.targetgen import capture_cache, component_sources
 from merlin.targetgen.golden_store import write_golden
 
-_MODEL_CAPTURE_ABI_VERSION = 6
+_MODEL_CAPTURE_ABI_VERSION = 7
 
 
 # ------------------------------------------------------------------------------------------------
