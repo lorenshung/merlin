@@ -1121,8 +1121,17 @@ def run(
     isa: str = "rv64gcv_zfh_zvfh",
     timeout: int = 3600,
     vlen: int | None = None,
+    extension: str | None = None,
+    extlib: str | Path | None = None,
+    path_prepend: Sequence[str | Path] = (),
+    spike_binary: str | Path | None = None,
+    trace_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Run the ELF on spike; parse the HTIF output. Returns {outputs, metrics, console}.
+    """Run the ELF on spike; parse the HTIF output.
+
+    Providers may select ``extension``, ``extlib``, ``spike_binary`` and tool
+    ``path_prepend`` (for dtc). ``trace_path`` streams Spike's instruction log to
+    disk. The byte-readback protocol returns ``output_bytes`` in result order.
 
     ``mem_bytes`` must cover 0x80000000 .. weights_base + weights size (use the value
     returned by :func:`build`).
@@ -1142,15 +1151,42 @@ def run(
         want = f"zvl{int(vlen)}b"
         if want not in isa:
             isa = f"{isa}_{want}"
-    cmd = [_spike.spike_path(), f"--isa={isa}", f"-p{harts}", f"-m{hex(DRAM_BASE)}:{hex(mem_bytes)}", str(elf)]
+    cmd = [
+        spike_binary or _spike.spike_path(),
+        f"--isa={isa}",
+        f"-p{harts}",
+        f"-m{hex(DRAM_BASE)}:{hex(mem_bytes)}",
+        str(elf),
+    ]
+    options = []
+    if extlib is not None:
+        options.append(f"--extlib={extlib}")
+    if extension is not None:
+        options.append(f"--extension={extension}")
+    if trace_path is not None:
+        options.append("-l")
+    cmd[1:1] = options
+    env = None
+    if path_prepend:
+        env = dict(os.environ)
+        env["PATH"] = os.pathsep.join([*(str(path) for path in path_prepend), env.get("PATH", "")])
     # Capture BYTES and decode leniently. `text=True` raises UnicodeDecodeError on the first invalid byte
     # and takes the WHOLE console with it -- and an image that is failing is exactly the one that emits
     # stray bytes, so the log was being destroyed precisely when it was needed. A replacement character in
     # a garbled region is strictly better than losing every OUT/METRIC/DONE line that preceded it.
-    proc = subprocess.run([str(c) for c in cmd], capture_output=True, timeout=timeout)
-    console = (proc.stdout or b"").decode("utf-8", errors="replace") + (proc.stderr or b"").decode(
-        "utf-8", errors="replace"
-    )
+    if trace_path is None:
+        proc = subprocess.run([str(c) for c in cmd], capture_output=True, timeout=timeout, env=env)
+        stderr = proc.stderr or b""
+    else:
+        # Stream instruction logs to disk: a scalar fallback can execute millions of instructions.
+        with Path(trace_path).open("wb") as trace:
+            proc = subprocess.run([str(c) for c in cmd], stdout=subprocess.PIPE, stderr=trace, timeout=timeout, env=env)
+        stderr = b""
+        if proc.returncode:
+            with Path(trace_path).open("rb") as trace:
+                trace.seek(max(0, trace.seek(0, os.SEEK_END) - 2000))
+                stderr = trace.read()
+    console = (proc.stdout or b"").decode("utf-8", errors="replace") + stderr.decode("utf-8", errors="replace")
     if proc.returncode != 0:
         raise SpikeModelError(
             f"spike exited {proc.returncode} even though it may have printed OUT/DONE:\n{console[-2000:]}"
@@ -1195,7 +1231,7 @@ def _parse_bytes_console(console: str) -> dict[str, Any]:
             if len(parts) != 3 or parts[1] in metrics:
                 raise SpikeModelError("malformed or duplicate model METRIC")
             try:
-                metrics[parts[1]] = int(parts[2])
+                metrics[parts[1]] = parts[2] if parts[1] == "build_hash" else int(parts[2])
             except ValueError:
                 metrics[parts[1]] = parts[2]
     return {"output_bytes": parse_all_output_bytes(console), "metrics": metrics, "console": console}
@@ -1246,7 +1282,7 @@ def parse_console(console: str) -> dict[str, Any]:
             # Not every metric is a number: `build_hash` is a hex digest. Keeping the string beats
             # crashing the parse of an otherwise complete run.
             try:
-                metrics[k] = int(v)
+                metrics[k] = v if k == "build_hash" else int(v)
             except ValueError:
                 metrics[k] = v
         elif line.startswith("ARGMAX "):
