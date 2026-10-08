@@ -25,6 +25,7 @@
       "catalog_commit": null,
       "root_role": "support",
       "companion_commit": "5d52f2bb5660a909ba947420ed6f44ba92a43986",
+      "companion_commit_relation": "same_commit",
       "provider_root": ".",
       "provider_role": "support",
       "vendored": {
@@ -60,6 +61,7 @@
       "catalog_commit": "a568f412625539cfdb29484869093721b027be5c",
       "root_role": "host_schedule",
       "companion_commit": "d6863380d43f61dcc22ebe498c0f6b9341018e29",
+      "companion_commit_relation": "same_commit",
       "provider_root": "saturn-support",
       "provider_role": "support",
       "vendored": {
@@ -98,6 +100,7 @@
       "catalog_commit": "3b8dbc57fd405058597481bcf28198702b6befde",
       "root_role": "candidate_compiler",
       "companion_commit": "29818c8ce1ba2f48d5e62cc0d585f1d250c59fb4",
+      "companion_commit_relation": "base_pin_of_merged_tip",
       "provider_root": "merlin-support",
       "provider_role": "support",
       "vendored": {
@@ -165,6 +168,7 @@
       "catalog_commit": "a568f412625539cfdb29484869093721b027be5c",
       "root_role": "host_schedule",
       "companion_commit": "d6863380d43f61dcc22ebe498c0f6b9341018e29",
+      "companion_commit_relation": "same_commit",
       "provider_root": "merlin-support",
       "provider_role": "support",
       "vendored": {
@@ -194,6 +198,7 @@
       "catalog_commit": null,
       "root_role": null,
       "companion_commit": "392eb077c8a48bd3a21b253d9e488ba3d7ad74cf",
+      "companion_commit_relation": "same_commit",
       "provider_root": "merlin-support",
       "provider_role": "support",
       "vendored": {

@@ -31,7 +31,12 @@ normalized:
       same bytes.
 pinned:
   manifest: build_tools/upstreams/target_support.json
+  # Two commits, one provider tree. source.commit is the MERGED TIP the bytes were copied from:
+  # this pin merged with 87ef5587 (the declined-artifact guard). companion_commit is the BASE PIN:
+  # the support-branch commit target_support.json pins. Both carry provider_tree.
   companion_commit: 29818c8ce1ba2f48d5e62cc0d585f1d250c59fb4
+  companion_commit_date: "2026-10-01T15:53:33-07:00"
+  relation: base_pin_of_merged_tip
   provider_tree: 7f724638afb20ba6dd904286be37177884b672da
   identical_to_source: true
 records:

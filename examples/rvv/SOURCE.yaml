@@ -29,6 +29,7 @@ normalized:
 pinned:
   manifest: build_tools/upstreams/target_support.json
   companion_commit: d6863380d43f61dcc22ebe498c0f6b9341018e29
+  relation: same_commit
   provider_tree: cdfed452de48491da2f09a772b251b8b827e8bda
   identical_to_source: true
 records:

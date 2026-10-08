@@ -23,6 +23,7 @@ import hashlib
 import os
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -149,6 +150,42 @@ def test_the_migration_manifest_agrees_with_every_source_record():
         )
         assert vendored.get("merge_parents") == doc["source"].get("merge_parents")
         assert entry["companion_commit"] == doc["pinned"]["companion_commit"]
+        assert entry["companion_commit_relation"] == doc["pinned"]["relation"]
+
+
+#: How the pinned companion commit relates to the commit the bytes were copied from.
+PIN_RELATIONS = {"same_commit", "base_pin_of_merged_tip"}
+
+
+@pytest.mark.parametrize(("record", "doc"), RECORDS, ids=IDS)
+def test_the_pinned_commit_and_the_copied_commit_are_told_apart(record, doc):
+    """Two different commits in one record must say which is which, and must carry one provider tree.
+
+    A merged tip (``source.commit``, with its ``merge_parents``) may be what the bytes were copied from
+    while the manifest pins the support-branch commit it merged (the base pin). That is consistent only
+    if the record names the relation and both commits carry the same provider tree; an unexplained
+    second commit is the inconsistency this refuses.
+    """
+    source, pinned = doc["source"], doc["pinned"]
+    relation = pinned["relation"]
+    assert relation in PIN_RELATIONS
+    if relation == "same_commit":
+        assert pinned["companion_commit"] == source["commit"]
+        assert "merge_parents" not in source
+    else:
+        assert pinned["companion_commit"] != source["commit"]
+        assert len(source.get("merge_parents") or []) >= 2, "a merged tip names its parents"
+        assert pinned["provider_tree"] == source["tree"], "the base pin and the merged tip carry one tree"
+        when = datetime.fromisoformat
+        assert when(pinned["companion_commit_date"]) <= when(source["commit_date"]), "a pin newer than its merge"
+
+
+def test_a_second_commit_without_a_relation_is_refused():
+    """The relation check above can fail: a record that pins a different commit as ``same_commit`` is caught."""
+    path, doc = next((path, doc) for path, doc in RECORDS if doc["pinned"]["relation"] == "same_commit")
+    forged = {**doc, "pinned": {**doc["pinned"], "companion_commit": "0" * 40}}
+    with pytest.raises(AssertionError):
+        test_the_pinned_commit_and_the_copied_commit_are_told_apart(path, forged)
 
 
 @pytest.mark.parametrize(("record", "doc"), RECORDS, ids=IDS)

@@ -21,6 +21,7 @@ normalized: []
 pinned:
   manifest: build_tools/upstreams/target_support.json
   companion_commit: 5d52f2bb5660a909ba947420ed6f44ba92a43986
+  relation: same_commit
   provider_tree: 6293adbf1e53084daec008a08119680f557032d1
   identical_to_source: true
 records:
