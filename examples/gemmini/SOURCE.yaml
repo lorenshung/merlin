@@ -63,3 +63,11 @@ records:
     - support/transport_alignment_migration.json
     - support/whole_model_backend_migration.json
     - support/whole_model_driver_migration.json
+tests:
+  requires_external:
+    - test: tests/test_conformance_recording.py
+      external: chipyard
+      reason: >-
+        Records conformance runs whose manifest stamps the toolchain revisions of a Chipyard checkout
+        (MERLIN_EXT_CHIPYARD); without one the recorder refuses with ExternalPathUnset before any
+        assertion. The rest of the suite needs no external checkout.

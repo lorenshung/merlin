@@ -358,30 +358,24 @@ def test_vendored_support_cannot_be_published_as_a_candidate(record, doc):
 
 # --------------------------------------------------------------------------------- vendored suites
 SUITES = [(path, doc) for path, doc in RECORDS if (_support_root(path, doc) / "tests").is_dir()]
+#: A suite's tests that need an operator's external checkout, recorded in SOURCE.yaml with the
+#: checkout's ``MERLIN_EXT_<NAME>`` key and why: they run where it is set and skip, by name, where not.
+NEEDS_EXTERNAL = [
+    (path, doc, entry) for path, doc in SUITES for entry in ((doc.get("tests") or {}).get("requires_external") or [])
+]
 
 
-@pytest.mark.integration
-@pytest.mark.parametrize(("record", "doc"), SUITES, ids=[path.parent.name for path, _ in SUITES])
-def test_vendored_support_suite_passes_from_its_new_home(record, doc, tmp_path):
-    """Each provider's own tests, run from its in-repo home the way its README documents.
+def _run_suite(root: Path, tmp_path: Path, selection: list[str]) -> subprocess.CompletedProcess:
+    """A provider's own tests, run from its in-repo home the way its README documents.
 
     The README selects the provider alone on ``MERLIN_TARGET_PATH``; so does this, with the vendored
-    root, so the suite sees exactly the plugins it saw at its companion. Integration: a suite may read
-    operator tool paths from ``.env`` (Gemmini's conformance recording needs ``MERLIN_EXT_CHIPYARD``).
-    Each suite runs in its own interpreter because the suites import their provider's modules by bare
-    name and share test-module basenames.
+    root, so the suite sees exactly the plugins it saw at its companion. Each suite runs in its own
+    interpreter because the suites import their provider's modules by bare name and share test-module
+    basenames.
     """
-    root = _support_root(record, doc)
     env = dict(os.environ, MERLIN_TARGET_PATH=str(root), PYTHONDONTWRITEBYTECODE="1")
     env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(root), os.environ.get("PYTHONPATH"))))
-    # A test bound to the companion repository's own layout (a sibling directory the vendored tree
-    # does not reproduce) is recorded, with its reason, in SOURCE.yaml rather than edited in place.
-    repo = repo_root().resolve()
-    deselected = [
-        f"--deselect={(root / entry['test']).relative_to(repo).as_posix()}"
-        for entry in (doc.get("tests") or {}).get("deselect", [])
-    ]
-    result = subprocess.run(
+    return subprocess.run(
         [
             sys.executable,
             "-m",
@@ -389,14 +383,48 @@ def test_vendored_support_suite_passes_from_its_new_home(record, doc, tmp_path):
             "-q",
             "-p",
             "no:cacheprovider",
-            f"--rootdir={repo}",
+            f"--rootdir={repo_root().resolve()}",
             f"--basetemp={tmp_path / 'basetemp'}",
-            *deselected,
-            str(root / "tests"),
+            *selection,
         ],
         cwd=tmp_path,
         env=env,
         capture_output=True,
         text=True,
     )
+
+
+@pytest.mark.parametrize(("record", "doc"), SUITES, ids=[path.parent.name for path, _ in SUITES])
+def test_vendored_support_suite_passes_from_its_new_home(record, doc, tmp_path):
+    """Every vendored provider's suite, in the fast CI job: a core change that breaks a provider which is
+    never edited in place has to fail somewhere.
+
+    Two recorded exclusions, each with its reason in SOURCE.yaml rather than an edit to the vendored
+    tree: a test bound to the companion repository's own layout (``tests.deselect``), and a test that
+    needs an operator's external checkout (``tests.requires_external``), which runs in the test below.
+    """
+    root = _support_root(record, doc)
+    repo = repo_root().resolve()
+    tests = doc.get("tests") or {}
+    excluded = [entry["test"] for entry in (*tests.get("deselect", []), *(tests.get("requires_external") or []))]
+    assert all((root / relative.partition("::")[0]).is_file() for relative in excluded), "an exclusion names nothing"
+    selection = [f"--deselect={(root / relative).relative_to(repo).as_posix()}" for relative in excluded]
+    result = _run_suite(root, tmp_path, [*selection, str(root / "tests")])
+    assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-2000:]
+
+
+@pytest.mark.parametrize(
+    ("record", "doc", "entry"),
+    NEEDS_EXTERNAL,
+    ids=[f"{path.parent.name}-{entry['external']}" for path, _, entry in NEEDS_EXTERNAL],
+)
+def test_vendored_support_tests_that_need_an_external_checkout(record, doc, entry, tmp_path):
+    from merlin.common.paths import ExternalPathUnset, ext_path
+
+    try:
+        ext_path(entry["external"])
+    except ExternalPathUnset:
+        pytest.skip(f"MERLIN_EXT_{entry['external'].upper()} is unset: {' '.join(entry['reason'].split())}")
+    root = _support_root(record, doc)
+    result = _run_suite(root, tmp_path, [str(root / entry["test"])])
     assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-2000:]
