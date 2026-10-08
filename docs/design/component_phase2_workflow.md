@@ -48,6 +48,17 @@ synthesis/solver/hidden sidecars, old evidence bundles and legacy profile-direct
 discovery are refused. The public recipe supplies numerical/target choices;
 all component members come from the shared independent sweeps.
 
+Every selected shared template must itself be independent. A template containing
+`requires_form_scope` is refused in this mode; its capture-derived families are
+not silently removed. Reusing the legacy shared template therefore requires a
+separately reviewed independent template selection. Existing direct builders
+and their numerical engines are not a generated domain-coverage certificate.
+In particular, the interface, generated operand bytes and golden output extents
+must agree at each concrete sweep point, including rectangular contractions,
+tails and the separate row extents of resident-weight consumers. Bare extents
+resolved by a sweep take precedence over tile-count aliases; an omitted attention
+key length preserves the query-length square default.
+
 The selected reviewed software spec may declare non-MAC performance objectives:
 
 ```yaml

@@ -415,23 +415,24 @@ def _float_golden(entry, binding, *, semantics=None):
         x = reg(entry.get("src", "X"), (M, N))
         outputs[entry.get("out", "Y0")] = floats([[rnd(dec(x[i * N + j])) for j in range(N)] for i in range(M)])
     elif op == "resident_reuse":
-        K = entry.get("K_tiles", 1) * dim
-        N = entry.get("N_tiles", 1) * dim
+        K = entry.get("K", entry.get("K_tiles", 1) * dim)
+        N = entry.get("N", entry.get("N_tiles", 1) * dim)
         w = reg(entry["weight"], (K, N))
         for m in entry["matmuls"]:
-            M = m.get("M_tiles", 1) * dim
+            M = m.get("M", m.get("M_tiles", 1) * dim)
             a = reg(m["lhs"], (M, K))
             outputs[m["out"]] = floats(mm(a, (M, K), w, (K, N)))
     elif op == "attention_qk":
-        M = entry.get("M_tiles", 1) * dim
-        Kd = entry.get("K_tiles", 1) * dim
+        M = entry.get("M", entry.get("M_tiles", 1) * dim)
+        Kd = entry.get("K", entry.get("K_tiles", 1) * dim)
+        N = entry.get("N", entry["N_tiles"] * dim if "N_tiles" in entry else M)
         q = reg(entry.get("q", "Q"), (M, Kd))
-        k = reg(entry.get("k", "K"), (M, Kd))
-        kt = [0] * (M * Kd)
-        for i in range(M):
+        k = reg(entry.get("k", "K"), (N, Kd))
+        kt = [0] * (N * Kd)
+        for i in range(N):
             for j in range(Kd):
-                kt[j * M + i] = k[i * Kd + j]
-        outputs[entry.get("out", "Y0")] = floats(mm(q, (M, Kd), kt, (Kd, M)))
+                kt[j * N + i] = k[i * Kd + j]
+        outputs[entry.get("out", "Y0")] = floats(mm(q, (M, Kd), kt, (Kd, N)))
     elif op == "conv2d":
         # AN IM2COL CONV IS A CONTRACTION OVER GATHERED WINDOWS, and that is the whole of it: the device
         # gathers [Ho*Wo, Kh*Kw*Ci] out of the NHWC activation and runs the same reduction the matmul
@@ -1130,13 +1131,14 @@ def _simt_golden(entry, binding):
         prov[entry.get("src", "X")] = {"shape": [M, N], "decoded": X.reshape(-1).tolist()}
         outputs[entry.get("out", "Y0")] = rnd_out(X)
     elif op == "attention_qk":
-        M = entry.get("M_tiles", 1) * dim
-        Kd = entry.get("K_tiles", 1) * dim
+        M = entry.get("M", entry.get("M_tiles", 1) * dim)
+        Kd = entry.get("K", entry.get("K_tiles", 1) * dim)
+        N = entry.get("N", entry["N_tiles"] * dim if "N_tiles" in entry else M)
         Q = synth(entry.get("q", "Q"), (M, Kd))
-        Kk = synth(entry.get("k", "K"), (M, Kd))
+        Kk = synth(entry.get("k", "K"), (N, Kd))
         y = (Q.astype(np.float32) @ Kk.astype(np.float32).T).astype(np.float64)
         prov[entry.get("q", "Q")] = {"shape": [M, Kd], "decoded": Q.reshape(-1).tolist()}
-        prov[entry.get("k", "K")] = {"shape": [M, Kd], "decoded": Kk.reshape(-1).tolist()}
+        prov[entry.get("k", "K")] = {"shape": [N, Kd], "decoded": Kk.reshape(-1).tolist()}
         outputs[entry.get("out", "Y0")] = rnd_out(y)
     elif op == "rmsnorm":
         M = entry.get("M", entry.get("M_tiles", 1) * dim)

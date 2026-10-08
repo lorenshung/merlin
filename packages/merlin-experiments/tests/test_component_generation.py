@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import yaml
 from merlin_experiments.phase0 import component_generation as G
@@ -20,6 +22,7 @@ from merlin_experiments.phase2 import corpus as C
 from merlin_experiments.phase2.contracts import StageGateError
 
 from merlin.runtime.backends import base
+from merlin.targetgen import golden_store as GS
 from merlin.targetgen import phase_policy as PP
 from merlin.targetgen import readout_facet, target_registry
 from merlin.targetgen.rtl import facts
@@ -203,6 +206,161 @@ def live(options):
     return C.discover_performance_corpus(
         SimpleNamespace(target="fixture", capsule_corpus=options["output_root"] / "isa", graded_roots=lambda: [])
     )
+
+
+def floating_sweep(options, dtype, operation, *, tiled=False):
+    """Select a synthetic diagnostic datapath and normal shared sweep input.
+
+    This is generator regression input, not a reviewed target corpus. The
+    generator still owns all concrete stimuli, interfaces and golden values.
+    """
+    accumulator = "f32" if dtype == "f32" else "bf16"
+    contract = yaml.safe_load(options["capability_contract"].read_bytes())
+    unit = contract["compute_units"][0]
+    unit["dtypes"] = [dtype]
+    unit["accumulate"] = [{"in": dtype, "weight": dtype, "acc": accumulator}]
+    for capability in unit["semantic_capabilities"]:
+        capability["dtypes"] = [dtype]
+        if "result_dtypes" in capability:
+            capability["result_dtypes"] = [accumulator]
+    write(options["capability_contract"], contract)
+    software = yaml.safe_load(options["software_spec"].read_bytes())
+    software["numerical_semantics"] = {
+        "model": {"engine": "specir_fp_reduce"},
+        "operand_dtype": dtype,
+        "accumulator_dtype": accumulator,
+        "readout_dtype": accumulator,
+        "product_rounding": "accumulator_format",
+        "rounding": "rne",
+        "reduction_order": "index_sequential",
+        "reduction_cadence": "per_step",
+        "subnormal_operand_flush": False,
+    }
+    if dtype != "f32":
+        # An external independent engine is required; never replace it with a
+        # hand-written answer or a target's reference kernel.
+        if not os.environ.get("SPECIR_ROOT"):
+            pytest.skip("explicit independent SpecIR source selection is unavailable")
+        software["numerical_semantics"]["model"]["source_root_env"] = "SPECIR_ROOT"
+    for declaration in software["operations"].values():
+        declaration["dtypes"] = [dtype]
+    software["component_performance"]["hardware"]["contract_sha256"] = hashlib.sha256(
+        (json.dumps(contract, sort_keys=True, indent=2) + "\n").encode()
+    ).hexdigest()
+    software["component_performance"]["objectives"] = []  # Contraction work has MACs.
+    write(options["software_spec"], software)
+    template = yaml.safe_load(options["performance_template"].read_bytes())
+    sweep = template["sweeps"][0]
+    sweep["id"] = "rectangular" if operation == "attention_qk" else "resident"
+    sweep["base"]["op"] = operation
+    sweep["base"]["performance"]["family"] = sweep["id"]
+    if tiled:
+        sweep["axes"] = {"M_tiles": [2, 3], "K_tiles": [3, 4], "N_tiles": [4, 5]}
+        sweep["fit_axes"] = ["M_tiles", "K_tiles", "N_tiles"]
+        sweep["name"] = "{id}_{M_tiles}_{K_tiles}_{N_tiles}"
+    else:
+        sweep["axes"] = {
+            "M": ["2*tile", "3*tile+1"],
+            "K": ["3*tile", "4*tile+1"],
+            "N": ["4*tile", "5*tile+1"],
+        }
+        sweep["fit_axes"] = ["M", "K", "N"]
+        sweep["name"] = "{id}_{M}_{K}_{N}"
+    if operation == "resident_reuse":
+        sweep["axes"].pop("M")
+        sweep["fit_axes"] = ["K", "N"]
+        sweep["name"] = "{id}_{K}_{N}"
+        sweep["base"]["weight"] = "W"
+        sweep["variants"] = [
+            {
+                "matmuls": [
+                    {"lhs": "A", "out": "YA", "M": "2*tile"},
+                    {"lhs": "B", "out": "YB", "M": "3*tile+1"},
+                ]
+            }
+        ]
+    write(options["performance_template"], template)
+
+
+@pytest.mark.parametrize("dtype", ["f32", "fp8_e4m3"])
+@pytest.mark.parametrize("tiled", [False, True])
+def test_normal_rectangular_attention_stimuli_and_golden_match_interface(independent, dtype, tiled):
+    floating_sweep(independent, dtype, "attention_qk", tiled=tiled)
+    written = generation.generate_target("fixture", **independent)
+    assert len(written) == 8
+    extents = set()
+    for path in written:
+        cap = yaml.safe_load((path / "capsule.yaml").read_bytes())
+        golden = GS.load_golden(path)
+        assert cap["software_screen"]["status"] == "admitted"
+        assert golden["outputs"] and cap["operation"]["op"] == "attention_qk"
+        q, k = cap["inputs"]
+        m, depth = q["shape"]
+        n, key_depth = k["shape"]
+        assert depth == key_depth and m != n
+        extents.add((m, depth, n))
+        interface = (path / "capsule.interface.mlir").read_text()
+        assert f"tensor<{m}x{depth}x" in interface and f"tensor<{n}x{depth}x" in interface
+        assert f"-> tensor<{m}x{n}x" in interface
+        provenance = golden["oracle_provenance"]["inputs"]
+        assert provenance[q["name"]]["shape"] == q["shape"]
+        assert provenance[k["name"]]["shape"] == k["shape"]
+        assert len(provenance[q["name"]]["decoded"]) == m * depth
+        assert len(provenance[k["name"]]["decoded"]) == n * depth
+        output = golden["outputs"]["Y0"]
+        assert len(output) == m and all(len(row) == n for row in output)
+        if dtype == "f32":
+            lhs = np.asarray(provenance[q["name"]]["decoded"], dtype=np.float32).reshape(m, depth)
+            rhs = np.asarray(provenance[k["name"]]["decoded"], dtype=np.float32).reshape(n, depth)
+            np.testing.assert_array_equal(output, lhs @ rhs.T)
+    assert len(extents) == 8
+    corpus = live(independent)
+    assert len(corpus.capsules) == 8 and not C.performance_objectives(corpus)
+
+
+def test_normal_fp8_resident_reuse_preserves_each_generated_extent(independent):
+    floating_sweep(independent, "fp8_e4m3", "resident_reuse")
+    written = generation.generate_target("fixture", **independent)
+    assert len(written) == 4
+    for path in written:
+        cap = yaml.safe_load((path / "capsule.yaml").read_bytes())
+        golden = GS.load_golden(path)
+        assert cap["software_screen"]["status"] == "admitted"
+        provenance = golden["oracle_provenance"]["inputs"]
+        inputs = {row["name"]: row for row in cap["inputs"]}
+        depth, n = inputs["W"]["shape"]
+        for name, row in inputs.items():
+            assert provenance[name]["shape"] == row["shape"]
+            assert len(provenance[name]["decoded"]) == np.prod(row["shape"])
+        for member in cap["operation"]["attributes"]["matmuls"]:
+            m, lhs_depth = inputs[member["lhs"]]["shape"]
+            assert lhs_depth == depth
+            output = golden["outputs"][member["out"]]
+            assert len(output) == m and all(len(row) == n for row in output)
+        assert inputs["A"]["shape"] != inputs["B"]["shape"]
+        assert golden["outputs"]["YA"] != golden["outputs"]["YB"]
+
+
+@pytest.mark.parametrize("dtype", ["f32", "fp8_e4m3"])
+def test_normal_attention_without_key_length_preserves_square_default(independent, dtype):
+    floating_sweep(independent, dtype, "attention_qk", tiled=True)
+    template = yaml.safe_load(independent["performance_template"].read_bytes())
+    sweep = template["sweeps"][0]
+    sweep["axes"].pop("N_tiles")
+    sweep["fit_axes"].remove("N_tiles")
+    sweep["name"] = "{id}_{M_tiles}_{K_tiles}"
+    write(independent["performance_template"], template)
+    written = generation.generate_target("fixture", **independent)
+    assert len(written) == 4
+    for path in written:
+        cap = yaml.safe_load((path / "capsule.yaml").read_bytes())
+        golden = GS.load_golden(path)
+        assert cap["software_screen"]["status"] == "admitted"
+        q, k = cap["inputs"]
+        assert q["shape"] == k["shape"]
+        m, _ = q["shape"]
+        output = golden["outputs"]["Y0"]
+        assert len(output) == m and all(len(row) == m for row in output)
 
 
 def test_normal_generator_freeze_and_zero_mac_phase_admission(independent, tmp_path):
