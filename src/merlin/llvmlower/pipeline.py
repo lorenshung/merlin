@@ -1435,6 +1435,7 @@ def _select_runner(
     multicore path carry the feature rewrites — see the EMIT_* comment.
     """
     from .ir_inspection import bind_inspection
+    from .result_buffers import inject as guard_results
 
     if {"approximate_transcendental_activation", "vectorized_transcendental_activation"} & feats:
         source = _activation_poly_runner(emit, fused="fuse_activation_polynomial_fma" in feats)
@@ -1447,7 +1448,7 @@ def _select_runner(
         source = _RUNNER_SRC.replace("__MERLIN_EMIT__", emit)
     # Every variant runs elementwise fusion under the broadcast control function (fusion_guard).
     return bind_inspection(
-        fusion_guard.inject(source),
+        guard_results(fusion_guard.inject(source)),
         inspection_dir,
         keep_exact=keep_exact,
         print_before=printing[0],
@@ -1722,6 +1723,9 @@ def lower_to_llvm_ir(
             pipeline = _parallel_pipeline(feats)  # multicore (OpenMP) scalar path — K1 big models
         else:
             pipeline = _upstream_pipeline(feats)
+    from .result_buffers import descriptor_results
+
+    pipeline = descriptor_results(pipeline, mlir_text)
     if index_bits is not None:
         if not data_layout:
             raise ValueError("explicit index width requires selected compiler data layout")

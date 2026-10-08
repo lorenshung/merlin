@@ -210,6 +210,9 @@ def generate(
     stub_zero_offsets: dict[int, int] = {}  # byte length -> offset of a shared zero region
 
     out_specs = _out_specs(model_dir / "model.mlir")
+    returned_descriptors = any(dim < 0 for shape, _ in out_specs for dim in shape)
+    if returned_descriptors and not dump_all_outputs:
+        raise ValueError("dynamic results require descriptor byte readback")
     out_shape, out_dt = out_specs[0]
 
     # manifest input name -> inputs.npz tuple order. Prefer the per-model
@@ -333,7 +336,7 @@ def generate(
     # lets a captured decoder/LSTM expose its updated state instead of the runtime silently dropping
     # all but result zero.
     for output_index, (shape, dt) in enumerate(out_specs):
-        rows.append(("MERLIN_OUTPUT", output_index, len(shape), shape, DT_BYTES[dt], dt))
+        rows.append(("MERLIN_OUTPUT", output_index, len(shape), [max(0, d) for d in shape], DT_BYTES[dt], dt))
 
     # Optional capture-owned state map. Numeric ABI indices are intentional: symbolic state names
     # are provenance for humans, while the captured signature is the executable contract. Each pair
@@ -477,8 +480,20 @@ def generate(
     h += ["};"]
     if dump_all_outputs:
         h.append("#define MERLIN_DUMP_ALL_OUTPUTS 1")
-        sizes = ",".join(str(int(np.prod(shape)) * DT_BYTES[dt]) for shape, dt in out_specs)
-        h.append(f"static const size_t MERLIN_OUTPUT_NBYTES[MERLIN_N_OUTPUTS] = {{{sizes}}};")
+        if returned_descriptors:
+            h.extend(
+                [
+                    "#define MERLIN_RETURNED_DESCRIPTORS 1",
+                    "extern size_t MERLIN_OUTPUT_NBYTES[MERLIN_N_OUTPUTS];",
+                    "extern long merlin_result_extent(int output, int axis);",
+                    "static const int MERLIN_OUTPUT_RANKS[MERLIN_N_OUTPUTS] = {"
+                    + ",".join(str(len(shape)) for shape, _ in out_specs)
+                    + "};",
+                ]
+            )
+        else:
+            sizes = ",".join(str(int(np.prod(shape)) * DT_BYTES[dt]) for shape, dt in out_specs)
+            h.append(f"static const size_t MERLIN_OUTPUT_NBYTES[MERLIN_N_OUTPUTS] = {{{sizes}}};")
     h.append("#endif")
 
     io = [
@@ -503,7 +518,7 @@ def generate(
         io.append("static const float merlin_quality_golden[] = {" + _embed_array(quality_values, "f32") + "};")
         static_io_bytes += int(quality_values.nbytes)
     for i, (shape, dt) in enumerate(out_specs):
-        nbytes = int(np.prod(shape)) * DT_BYTES[dt]
+        nbytes = 0 if returned_descriptors else int(np.prod(shape)) * DT_BYTES[dt]
         io.append(f"static _Alignas(64) unsigned char merlin_out_{i}[{max(1, nbytes)}];")
     # Pointer table, indexed by arg position: the address of the embedded array, or NULL for an arg
     # the runtime reads from the weights blob. Keyed off ``embedded`` -- what the loop ABOVE
@@ -522,6 +537,13 @@ def generate(
         + ",".join(f"(void*)merlin_out_{i}" for i in range(len(out_specs)))
         + "};"
     )
+    if returned_descriptors:
+        io.extend(
+            [
+                "extern void **merlin_result_ptrs(void);",
+                "#define MERLIN_OUTPUT_PTR merlin_result_ptrs()",
+            ]
+        )
     pair_len = max(1, len(state_pairs))
     io.append(
         f"static const int MERLIN_STATE_INPUT_ARGS[{pair_len}] = {{"
@@ -622,6 +644,53 @@ def generate(
         f"extern void _mlir_ciface_{ciface_name}({decl});",
         f"void {invoke_name}(void **d) {{ _mlir_ciface_{ciface_name}({call}); }}",
     ]
+    if returned_descriptors:
+        # A ranked memref C result is returned through the first pointer. Multiple
+        # results use a struct of rank-exact descriptors, never max-rank storage.
+        call_c = ["#include <stddef.h>", "#include <stdint.h>", "#include <stdlib.h>"]
+        for i, (shape, _) in enumerate(out_specs):
+            rank = len(shape)
+            arrays = f"int64_t sizes[{rank}], strides[{rank}];" if rank else ""
+            call_c.append(f"typedef struct {{ void *allocated, *aligned; int64_t offset; {arrays} }} result_{i};")
+        call_c.extend(
+            [
+                "typedef struct {" + "".join(f"result_{i} r{i};" for i in range(len(out_specs))) + "} results_t;",
+                "static results_t results;",
+                f"static void *result_ptrs[{len(out_specs)}];",
+                f"size_t MERLIN_OUTPUT_NBYTES[{len(out_specs)}];",
+                "void **merlin_result_ptrs(void) { return result_ptrs; }",
+                "long merlin_result_extent(int output, int axis) { switch(output) {",
+            ]
+        )
+        for i, (shape, _) in enumerate(out_specs):
+            if shape:
+                call_c.append(f"case {i}: return results.r{i}.sizes[axis];")
+        call_c.extend(
+            [
+                "default: return 0; } }",
+                f"extern void _mlir_ciface_{ciface_name}({','.join(['void*'] * (n_sig_args + 1))});",
+                f"void {invoke_name}(void **d) {{",
+                f"_mlir_ciface_{ciface_name}(&results{''.join(f',d[{i}]' for i in range(n_sig_args))});",
+            ]
+        )
+        for i, (shape, dt) in enumerate(out_specs):
+            call_c.append(f"size_t count_{i} = 1, stride_{i} = 1;")
+            for axis in reversed(range(len(shape))):
+                call_c.extend(
+                    [
+                        f"if (results.r{i}.sizes[{axis}] < 0 || results.r{i}.strides[{axis}] != (int64_t)stride_{i}) abort();",
+                        f"if (results.r{i}.sizes[{axis}] && count_{i} > SIZE_MAX / (size_t)results.r{i}.sizes[{axis}]) abort();",
+                        f"count_{i} *= results.r{i}.sizes[{axis}]; stride_{i} = count_{i};",
+                    ]
+                )
+            call_c.extend(
+                [
+                    f"if (count_{i} > SIZE_MAX / {DT_BYTES[dt]}) abort();",
+                    f"MERLIN_OUTPUT_NBYTES[{i}] = count_{i} * {DT_BYTES[dt]};",
+                    f"result_ptrs[{i}] = (char *)results.r{i}.aligned + results.r{i}.offset * {DT_BYTES[dt]};",
+                ]
+            )
+        call_c.append("}")
 
     (out_dir / "weights.bin").write_bytes(bytes(blob) + bytes(appended))
     (out_dir / "model_gen.h").write_text("\n".join(h) + "\n")
@@ -633,7 +702,7 @@ def generate(
     # a 256000-wide logits vector at sequence length 128 is 125 MiB of .bss on its own, and a
     # code-region reserve chosen without it puts the weights blob inside .bss, which surfaces only as
     # a linker "section .weights VMA overlaps section .bss" and reads as anything but a sizing error.
-    output_bytes = sum(int(np.prod(shape)) * DT_BYTES[dt] for shape, dt in out_specs)
+    output_bytes = 0 if returned_descriptors else sum(int(np.prod(shape)) * DT_BYTES[dt] for shape, dt in out_specs)
     return {
         "n_args": len(rows),
         "n_outputs": len(out_specs),

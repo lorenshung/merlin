@@ -1234,7 +1234,22 @@ def _parse_bytes_console(console: str) -> dict[str, Any]:
                 metrics[parts[1]] = parts[2] if parts[1] == "build_hash" else int(parts[2])
             except ValueError:
                 metrics[parts[1]] = parts[2]
-    return {"output_bytes": parse_all_output_bytes(console), "metrics": metrics, "console": console}
+    output_bytes = parse_all_output_bytes(console)
+    shapes = []
+    for at, line in enumerate(lines):
+        parts = line.split()
+        if not parts or parts[0] != "OUT_SHAPE":
+            continue
+        try:
+            index, rank, *dims = [int(p) for p in parts[1:]]
+            if index != len(shapes) or rank < 0 or len(dims) != rank or any(d < 0 for d in dims) or at >= done[0]:
+                raise ValueError("invalid shape frame")
+            shapes.append(dims)
+        except ValueError as exc:
+            raise SpikeModelError("malformed OUT_SHAPE result index, rank or extents") from exc
+    if shapes and len(shapes) != len(output_bytes):
+        raise SpikeModelError("result shape/byte frame count differs")
+    return {"output_bytes": output_bytes, "output_shapes": shapes, "metrics": metrics, "console": console}
 
 
 def parse_console(console: str) -> dict[str, Any]:
