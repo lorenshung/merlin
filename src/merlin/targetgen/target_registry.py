@@ -25,11 +25,10 @@ from typing import Any
 
 import yaml
 
-from merlin.common.paths import artifacts_dir, build_dir, checkout_root, targets_dir
+from merlin.common.paths import artifacts_dir, build_dir, checkout_root, rtl_facts_path, targets_dir
 from merlin.common.yaml import safe_load_text
 
 from .providers import Provider, ProviderRole, read_provider
-from .rtl.facts import rtl_facts_path
 
 # ─────────────────────────────────────────────────────────────────────────────────────────────────
 # Target-package RESOLUTION — how Merlin picks WHICH definition package to use for a target name.
