@@ -24,6 +24,13 @@ SCOPE = (
     "no frontend equivalence, host admission or compiler equivalence"
 )
 _SIGNED_I64 = (-(1 << 63), (1 << 63) - 1)
+#: The only spelling each admitted ``aten.arange`` source option may carry.
+_RANGE_SOURCE_OPTIONS: dict[str, Any] = {
+    "dtype": {"kind": "dtype", "value": "torch.int64"},
+    "device": {"kind": "device", "value": "cpu"},
+    "layout": {"kind": "layout", "value": "torch.strided"},
+    "pin_memory": False,
+}
 _BODY = (
     "linalg.index",
     "arith.index_cast",
@@ -62,14 +69,17 @@ def _range(node: dict[str, Any]) -> tuple[int, int, int, int]:
         and all(type(value) is int and _SIGNED_I64[0] <= value <= _SIGNED_I64[1] for value in args),
         "range arguments are not fixed signed-i64 literals",
     )
+    # An omitted option is not given a value here. Only a spelled option is
+    # compared; the single result below must show the i64, CPU, strided and
+    # contiguous storage that an omitted one leaves to the frontend.
     _need(
         isinstance(kwargs, dict)
-        and set(kwargs) <= {"dtype", "device", "layout", "pin_memory"}
-        and kwargs.get("dtype", {"kind": "dtype", "value": "torch.int64"}) == {"kind": "dtype", "value": "torch.int64"}
-        and kwargs.get("device", {"kind": "device", "value": "cpu"}) == {"kind": "device", "value": "cpu"}
-        and kwargs.get("layout", {"kind": "layout", "value": "torch.strided"})
-        == {"kind": "layout", "value": "torch.strided"}
-        and kwargs.get("pin_memory", False) is False,
+        and set(kwargs) <= set(_RANGE_SOURCE_OPTIONS)
+        and all(
+            type(kwargs[name]) is type(expected) and kwargs[name] == expected
+            for name, expected in _RANGE_SOURCE_OPTIONS.items()
+            if name in kwargs
+        ),
         "range has dynamic or non-CPU source options",
     )
     _need(
