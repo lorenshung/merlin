@@ -1151,8 +1151,8 @@ def execute_candidate_model(
     """
     from merlin.targetgen.bundle_harness import emitted_entry_arity, is_executable_emission
     from merlin.targetgen.contract.readback_policy import (
-        COHERENT_DUMP_V1,
         FULL_VALUES_BIN,
+        MEMORY_TRANSPORTS,
         require_current_build_receipt,
         selected,
     )
@@ -1160,7 +1160,7 @@ def execute_candidate_model(
 
     readback_policy = selected(readback_policy)
     binary_console = readback_policy is not None and readback_policy.transport == FULL_VALUES_BIN
-    memory_console = readback_policy is not None and readback_policy.transport == COHERENT_DUMP_V1
+    memory_console = readback_policy is not None and readback_policy.transport in MEMORY_TRANSPORTS
 
     source = Path(capsule_dir)
     capture = Path(capture_bundle)
@@ -1333,6 +1333,7 @@ def execute_candidate_model(
                     timeout=timeout,
                     expected_elf_sha256=record["elf"]["sha256"],
                     post_run_revalidate=after_run,
+                    readback_policy=readback_policy,
                 )
 
         # The functional tier consumes the SAME already-linked candidate ELF.

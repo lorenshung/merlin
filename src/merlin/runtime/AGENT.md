@@ -33,6 +33,9 @@ the per-backend adapters under `backends/`.
   exact length-delimited raw payloads without text-decoding their NUL/non-UTF-8
   contents, checks the transport checksum, and requires END/DONE and a closed
   output roster before the unchanged numerical checker sees actual values.
+- `out_packet.py` reuses the binary codec for closed in-memory full-value packets,
+  bounded by a caller-owned typed output roster. Packet DONE is wire closure only;
+  native completion and numerical comparison remain independent obligations.
 
 ## What does not belong here
 

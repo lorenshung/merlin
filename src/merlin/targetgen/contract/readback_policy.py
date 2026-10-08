@@ -19,7 +19,9 @@ POLICY_SCHEMA = "merlin_readback_policy_v1"
 FULL_VALUES_B64 = "out_b64_v1"
 FULL_VALUES_BIN = "out_bin_v1"
 COHERENT_DUMP_V1 = "coherent_dump_v1"
-READBACK_TRANSPORTS = (FULL_VALUES_B64, FULL_VALUES_BIN, COHERENT_DUMP_V1)
+COHERENT_PACKET_V1 = "coherent_packet_v1"
+MEMORY_TRANSPORTS = (COHERENT_DUMP_V1, COHERENT_PACKET_V1)
+READBACK_TRANSPORTS = (FULL_VALUES_B64, FULL_VALUES_BIN, *MEMORY_TRANSPORTS)
 BUILD_RECEIPT = "readback_build.json"
 
 
@@ -67,7 +69,15 @@ def _codec_names(policy: ReadbackPolicy | None) -> tuple[str, ...]:
     policy = selected(policy)
     if policy is not None and policy.transport == COHERENT_DUMP_V1:
         return ()
+    if policy is not None and policy.transport == COHERENT_PACKET_V1:
+        return ("out_b64.h", "out_bin.h", "out_bin_memory.h")
     return ("out_b64.h", "out_bin.h") if policy is not None and policy.transport == FULL_VALUES_BIN else ("out_b64.h",)
+
+
+def _receipt_schema(policy: ReadbackPolicy) -> str:
+    if policy.transport == COHERENT_PACKET_V1:
+        return "merlin_readback_build_v3"
+    return "merlin_readback_build_v2" if policy.transport == COHERENT_DUMP_V1 else "merlin_readback_build_v1"
 
 
 def _staged_codec_sha256(harness_path: Path, policy: ReadbackPolicy) -> str | None:
@@ -107,6 +117,8 @@ def selected_build_inputs(
             **token,
             "readback_codecs": [{"path": str(path), "sha256": file_sha256(path)} for path in codecs],
         }
+    if policy is not None and policy.transport == COHERENT_PACKET_V1:
+        token = {**token, "readback_transport": policy.record()}
     if build_service is None:
         sources = build_cache.build_path(target)
         if not sources:
@@ -155,7 +167,7 @@ def build_receipt(
     """Bind selected bytes after linking; this is not full toolchain closure."""
 
     body: dict[str, Any] = {
-        "schema": "merlin_readback_build_v2" if policy.transport == COHERENT_DUMP_V1 else "merlin_readback_build_v1",
+        "schema": _receipt_schema(policy),
         "status": "completed",
         "target": target,
         "readback_policy": policy.record(),
@@ -170,6 +182,10 @@ def build_receipt(
     }
     if policy.transport == FULL_VALUES_BIN:
         body["staged_range_sha256"] = file_sha256(harness_path.parent / "out_b64.h")
+    elif policy.transport == COHERENT_PACKET_V1:
+        body["staged_codecs"] = [
+            {"name": name, "sha256": file_sha256(harness_path.parent / name)} for name in _codec_names(policy)
+        ]
     body["build_identity_sha256"] = canonical_sha256(body)
     return body
 
@@ -194,8 +210,7 @@ def require_build_receipt(
     identity = data.get("build_identity_sha256")
     body = {key: value for key, value in data.items() if key != "build_identity_sha256"}
     if (
-        body.get("schema")
-        != ("merlin_readback_build_v2" if policy.transport == COHERENT_DUMP_V1 else "merlin_readback_build_v1")
+        body.get("schema") != _receipt_schema(policy)
         or body.get("status") != "completed"
         or body.get("target") != target
         or body.get("readback_policy") != policy.record()
@@ -222,6 +237,20 @@ def require_build_receipt(
             != [item.get("sha256") for item in codecs if type(item) is dict]
         ):
             raise ValueError("readback build receipt does not bind selected codec bytes")
+    elif policy.transport == COHERENT_PACKET_V1:
+        codecs = recipe_record.get("readback_codecs")
+        staged = [{"name": name, "sha256": file_sha256(harness_path.parent / name)} for name in _codec_names(policy)]
+        if (
+            recipe_record.get("readback_transport") != policy.record()
+            or type(codecs) is not list
+            or len(codecs) != len(staged)
+            or any(type(item) is not dict for item in codecs)
+            or [item["sha256"] for item in staged] != [item.get("sha256") for item in codecs]
+            or body.get("staged_codecs") != staged
+            or "staged_range_sha256" in body
+            or "readback_codec" in recipe_record
+        ):
+            raise ValueError("readback build receipt does not bind complete packet codec bytes")
     elif (
         recipe_record.get("readback_transport") != policy.record()
         or body.get("staged_codec_sha256") is not None
@@ -315,7 +344,7 @@ def require_full_value_roster(
     """Require one complete packed value frame for every declared output."""
 
     policy = selected(policy)
-    if policy is not None and policy.transport == COHERENT_DUMP_V1:
+    if policy is not None and policy.transport in MEMORY_TRANSPORTS:
         raise ValueError("coherent output requires independent memory admission, not serial output values")
 
     abi = cb.get("kernel_abi") or {}
