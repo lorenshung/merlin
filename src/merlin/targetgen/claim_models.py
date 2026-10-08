@@ -108,6 +108,26 @@ def is_claim_bundle(bundle: str) -> bool:
     return model_of(bundle) is not None
 
 
+def mentioned_claim_model(name: str) -> str | None:
+    """The claim model whose tokens appear CONTIGUOUSLY anywhere in ``name``, or ``None``.
+
+    :func:`model_of` reads a capture BUNDLE, whose name begins with its model. A capsule name does
+    not: it carries a corpus prefix and a target suffix around the model it was cut from
+    (``<prefix>_<model>_<suffix>``), so a prefix match never sees the model. This is the same
+    whole-token rule applied at every offset, longest declaration first, still with no regex.
+    """
+    nt = _tokens(name)
+    best: str | None = None
+    best_len = 0
+    for m in claim_models():
+        mt = _tokens(m)
+        if not mt or len(mt) <= best_len:
+            continue
+        if any(nt[i : i + len(mt)] == mt for i in range(len(nt) - len(mt) + 1)):
+            best, best_len = m, len(mt)
+    return best
+
+
 def partition(captures: dict[str, Path | str]) -> tuple[dict, dict]:
     """``(derivation, claim)`` -- split a capture map by the declared holdout.
 

@@ -688,43 +688,15 @@ def materialize_public_cohort(
     return link
 
 
-def cert_capsule_cover(
+def capsule_cell_rows(
     corpus_roots, *, labels: set[str] | None = None, tile_dim: int | None = None, exclude: set[str] | None = None
-) -> dict:
-    """The REPRESENTATIVE subset a cycle-accurate cert tier should run, when the functional tier runs
-    everything. Returns ``{"capsules": [...], "cells": [...], "uncovered": [...], "basis": {...}}``.
+) -> list[dict]:
+    """Every graded capsule with the ``(family, dtype, alignment)`` cells it exercises.
 
-    Why a subset at all. The functional tier answers "does it compute the right value" and is cheap; the
-    cert tier answers "does the hardware actually do it" -- encoding, protocol, resource limits -- and is
-    minutes per capsule. Running cert on everything spends most of a run re-proving the same hardware
-    facts, and on this repo's SIMT target that was 80% of an agent round for a verdict the score never
-    read. Running it on nothing leaves the RTL claim unevidenced. A cover is the middle: full coverage at
-    the functional tier, representative coverage at the cert tier.
-
-    Why THESE axes. Representativeness must track where the HARDWARE differs, not where the numerics do:
-
-      * ``semantic_family`` -- a contraction drives different RTL than a normalization or a movement.
-      * operand ``dtype``   -- the proxy for WHICH compute unit runs it (block-scaled microscaling formats
-                              go to the MX PE; ordinary floats to the SIMT lanes) and for datapath width.
-
-      * tile ALIGNMENT (only when ``tile_dim`` is given) -- whether the capsule's extents divide evenly
-        by the target's tile edge, or leave a partial tile. This is the axis a functional model is least
-        able to stand in for: a partial tile changes addressing and the working-set boundary, and this
-        repo has already been bitten by exactly that -- a taped-out unit computed partial N tiles
-        (``n % 64 != 0``) wrongly while every functional check passed. A cover built on family and dtype
-        alone can pick, for each cell, the one capsule whose extents happen to divide evenly, and then
-        certify no partial tile anywhere. Passing ``tile_dim`` closes that blind spot; omitting it leaves
-        it open, which is why ``basis`` reports which axes were actually used.
-
-    All are declared per capsule and read as data, so a new target's cover falls out of its own corpus
-    with no edit here. ``expected_instruction_coverage.instruction_classes`` would be the most faithful
-    axis of all and is deliberately NOT used: every capsule in this repo declares it empty, so selecting on
-    it would silently return a cover of one. That is recorded in ``basis`` so the caller can see which
-    axes actually carried the choice rather than assuming all of them did.
-
-    Greedy set cover, which is within a log factor of optimal and, more usefully, is explainable: each
-    chosen capsule is the one adding the most uncovered cells. ``uncovered`` is returned rather than
-    swallowed -- a cell no capsule can cover is a corpus gap the caller should surface, not hide.
+    The ONE definition of what a capsule covers. :func:`cert_capsule_cover` selects a representative
+    subset from these rows, and the coverage inventory attributes witnesses from them, so the cover and
+    the inventory cannot disagree about which capsule exercises which cell. Each row carries ``name``,
+    ``family``, ``families`` (own plus fused), ``dtypes``, ``align`` and ``cells``.
     """
     labels = labels or {"public"}
     # A capsule the descriptor EXCLUDES FROM GRADING cannot represent its cell. The cover names, per
@@ -777,18 +749,62 @@ def cert_capsule_cover(
             # Crediting only `semantic_family` therefore left such a cell permanently uncoverable while
             # the requirement kept demanding it: a gap no capsule could close, reported forever as debt.
             fams = [sem.get("semantic_family")] + list(sem.get("composed_families") or ())
+            families = tuple(f for f in fams if f)
             rows.append(
                 {
                     "name": cap.get("name") or cy.parent.name,
                     "family": sem.get("semantic_family"),
-                    "families": tuple(f for f in fams if f),
+                    "families": families,
                     "dtypes": dts,
                     "align": align,
+                    "cells": tuple(sorted({(f, dt, align) for f in families for dt in dts}, key=str)),
                 }
             )
+    return rows
+
+
+def cert_capsule_cover(
+    corpus_roots, *, labels: set[str] | None = None, tile_dim: int | None = None, exclude: set[str] | None = None
+) -> dict:
+    """The REPRESENTATIVE subset a cycle-accurate cert tier should run, when the functional tier runs
+    everything. Returns ``{"capsules": [...], "cells": [...], "uncovered": [...], "basis": {...}}``.
+
+    Why a subset at all. The functional tier answers "does it compute the right value" and is cheap; the
+    cert tier answers "does the hardware actually do it" -- encoding, protocol, resource limits -- and is
+    minutes per capsule. Running cert on everything spends most of a run re-proving the same hardware
+    facts, and on this repo's SIMT target that was 80% of an agent round for a verdict the score never
+    read. Running it on nothing leaves the RTL claim unevidenced. A cover is the middle: full coverage at
+    the functional tier, representative coverage at the cert tier.
+
+    Why THESE axes. Representativeness must track where the HARDWARE differs, not where the numerics do:
+
+      * ``semantic_family`` -- a contraction drives different RTL than a normalization or a movement.
+      * operand ``dtype``   -- the proxy for WHICH compute unit runs it (block-scaled microscaling formats
+                              go to the MX PE; ordinary floats to the SIMT lanes) and for datapath width.
+
+      * tile ALIGNMENT (only when ``tile_dim`` is given) -- whether the capsule's extents divide evenly
+        by the target's tile edge, or leave a partial tile. This is the axis a functional model is least
+        able to stand in for: a partial tile changes addressing and the working-set boundary, and this
+        repo has already been bitten by exactly that -- a taped-out unit computed partial N tiles
+        (``n % 64 != 0``) wrongly while every functional check passed. A cover built on family and dtype
+        alone can pick, for each cell, the one capsule whose extents happen to divide evenly, and then
+        certify no partial tile anywhere. Passing ``tile_dim`` closes that blind spot; omitting it leaves
+        it open, which is why ``basis`` reports which axes were actually used.
+
+    All are declared per capsule and read as data, so a new target's cover falls out of its own corpus
+    with no edit here. ``expected_instruction_coverage.instruction_classes`` would be the most faithful
+    axis of all and is deliberately NOT used: every capsule in this repo declares it empty, so selecting on
+    it would silently return a cover of one. That is recorded in ``basis`` so the caller can see which
+    axes actually carried the choice rather than assuming all of them did.
+
+    Greedy set cover, which is within a log factor of optimal and, more usefully, is explainable: each
+    chosen capsule is the one adding the most uncovered cells. ``uncovered`` is returned rather than
+    swallowed -- a cell no capsule can cover is a corpus gap the caller should surface, not hide.
+    """
+    rows = capsule_cell_rows(corpus_roots, labels=labels, tile_dim=tile_dim, exclude=exclude)
 
     def _cells(r):
-        return {(f, dt, r["align"]) for f in r["families"] for dt in r["dtypes"]}
+        return set(r["cells"])
 
     cells = {c for r in rows for c in _cells(r)}
     uncovered, chosen = set(cells), []
