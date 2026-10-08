@@ -13,6 +13,11 @@ import os
 
 import pytest
 
+# Unset, MERLIN_TARGET_PATH selects every vendored examples/*/support provider of the checkout. These
+# tests build their own providers and selections, so the session starts with none selected unless the
+# operator chose one (the same rule as merlin/tests/conftest.py).
+os.environ.setdefault("MERLIN_TARGET_PATH", "")
+
 
 @pytest.fixture(autouse=True)
 def _resolvable_clang(monkeypatch, tmp_path_factory):

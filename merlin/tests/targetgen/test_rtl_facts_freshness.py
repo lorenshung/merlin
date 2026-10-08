@@ -45,7 +45,7 @@ def _record(fir: Path) -> dict:
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("MERLIN_REPO_ROOT", str(tmp_path / "repo"))
     monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "out"))
-    monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     monkeypatch.delenv("MERLIN_RTL_FACTS", raising=False)
     monkeypatch.setattr(facts, "facts_alias", lambda target: target)
     monkeypatch.setattr(facts, "_committed_facts_path", lambda target: None)

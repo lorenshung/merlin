@@ -56,7 +56,7 @@ def test_selected_metadata_and_endpoint_roles(provider, monkeypatch):
 
 
 def test_unselected_metadata_refuses(provider, monkeypatch):
-    monkeypatch.delenv("MERLIN_TARGET_PATH")
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     with pytest.raises(PluginError, match="explicit MERLIN_TARGET_PATH"):
         target_registry.load_matrix_contract("fixture_matrix")
 

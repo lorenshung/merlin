@@ -582,6 +582,11 @@ def resolve_plan(
             for key in ("MERLIN_TARGET_PATH", "MERLIN_TARGET_CONTRACT"):
                 if key in os.environ:
                     command["env"][key] = os.environ[key]
+            from merlin.targetgen.target_registry import effective_target_path
+
+            # An unset selection is the checkout's in-repo support default. Spell it out, so a
+            # resume after the vendored support changed cannot pick up different support code.
+            command["env"]["MERLIN_TARGET_PATH"] = effective_target_path()
             from merlin.targetgen.target_experiment import load_target_experiment, selected_experiment_contract
 
             descriptor_path = Path(command["inputs"]["descriptor"])

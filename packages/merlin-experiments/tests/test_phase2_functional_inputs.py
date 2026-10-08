@@ -102,7 +102,7 @@ def test_real_v4_admission_projection_relocation_and_private_masks(frozen_source
     f = frozen_source
     before = FI.CONTRACTS.exact_tree_record(f.root)
     # The admitted snapshot, not current provider discovery or live payload, owns execution.
-    monkeypatch.delenv("MERLIN_TARGET_PATH")
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     (f.public / "public.h").write_text("changed live input")
     admitted, frozen = transport(f)
     assert admitted.bundle_input_snapshot["version"] == 4

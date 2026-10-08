@@ -187,7 +187,7 @@ def test_matrix_provider_refuses_implicit_selection(synthetic_matrix, monkeypatc
     from merlin.targetgen.plugins import PluginError
 
     matrix, _ = synthetic_matrix
-    monkeypatch.delenv("MERLIN_TARGET_PATH")
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     with pytest.raises(PluginError, match="explicit MERLIN_TARGET_PATH"):
         matrix.provider()
 
@@ -234,7 +234,7 @@ def test_build_refuses_unselected_matrix_before_output_or_native_work(tmp_path, 
 
     from merlin.targetgen.plugins import PluginError
 
-    monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("build launched native tooling"))
     backend = importlib.import_module("merlin.runtime.backends." + backend_name)
     work = tmp_path / "uncreated-work"

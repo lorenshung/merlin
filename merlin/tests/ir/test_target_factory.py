@@ -92,6 +92,6 @@ def test_factory_lowering_matches_per_target(selected_saturn):
 def test_unselected_reference_does_not_authorize_execution(monkeypatch):
     from merlin.targetgen.plugins import PluginError, resolve_support
 
-    monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     with pytest.raises(PluginError, match="explicit MERLIN_TARGET_PATH"):
         resolve_support("saturn")

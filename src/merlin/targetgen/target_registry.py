@@ -45,6 +45,9 @@ from .rtl.facts import rtl_facts_path
 #   1. ``MERLIN_TARGET_PATH`` entries  — EXPLICIT selection: a specific versioned/named package, or a
 #      user's separately-cloned ``<target>-mlir`` repo. ``os.pathsep``-separated, left-to-right; each
 #      entry is either a package root (has ``contracts/target_contract.yaml``) or a dir OF such roots.
+#      UNSET, it defaults to the checkout's vendored support providers (``examples/*/support``, keyed
+#      by each provider's declared target; see :func:`in_repo_support`). Set to the EMPTY string, it
+#      selects nothing, which is how a caller asks for no executable support at all.
 #   2. physical-checkout ``examples/<name>/target/`` first, then legacy
 #      ``merlin/targets/<name>/`` compatibility links. MERLIN_TARGETS_DIR replaces this search.
 #   3. ``out/build/generated/<name>/``  — the FRESHLY-GENERATED OOT home (``write_oot_target`` /
@@ -203,14 +206,67 @@ def _roots_under(entry: Path) -> list[Path]:
     return []
 
 
-def _env_target_roots() -> list[Path]:
-    """The ``MERLIN_TARGET_PATH`` search entries, in declared (left-to-right) order."""
-    raw = os.environ.get(_ENV_TARGET_PATH, "")
-    return [Path(e) for e in raw.split(os.pathsep) if e]
+#: Where a checkout keeps a target's vendored support provider: ``examples/<example>/<this>``. The
+#: example directory is not the target's identity; the provider's own declaration is.
+IN_REPO_SUPPORT_DIR = "support"
 
 
 class TargetCollisionError(ValueError):
     """One unordered shelf contains different providers for the same target."""
+
+
+def in_repo_support() -> dict[str, Path]:
+    """The checkout's vendored support providers -> ``{declared target: provider root}``.
+
+    Target support is target-specific code, so it lives beside the target's example, at
+    ``examples/<example>/support``. Each root is keyed by the target its ``provider.yaml`` declares,
+    never by its directory name, so a lookup takes the target as a parameter and this module names
+    none. Only support providers count; an invalid declaration raises rather than vanishing from
+    the selection, and two examples declaring one target are refused instead of picked by sort order.
+
+    An installed distribution has no checkout and therefore no default: it selects support only
+    through ``MERLIN_TARGET_PATH``.
+    """
+    checkout = checkout_root()
+    if checkout is None:
+        return {}
+    found: dict[str, Path] = {}
+    for candidate in sorted((checkout / "examples").glob(f"*/{IN_REPO_SUPPORT_DIR}")):
+        if not candidate.is_dir() or not _is_target_root(candidate):
+            continue
+        root = candidate.resolve()
+        name = _target_name(root)
+        if name in found and found[name] != root:
+            raise TargetCollisionError(f"two in-repo support providers declare {name!r}: {found[name]} and {root}")
+        found[name] = root
+    return found
+
+
+def default_support_root(target: str) -> Path | None:
+    """The in-repo support provider ``MERLIN_TARGET_PATH`` defaults to for ``target``, if one exists."""
+    return in_repo_support().get(target)
+
+
+def _env_target_roots() -> list[Path]:
+    """The ``MERLIN_TARGET_PATH`` search entries, in declared (left-to-right) order.
+
+    Unset, the entries are the in-repo support providers (one per declared target). An explicit
+    value, including the empty string, replaces that default entirely.
+    """
+    raw = os.environ.get(_ENV_TARGET_PATH)
+    if raw is None:
+        return list(in_repo_support().values())
+    return [Path(e) for e in raw.split(os.pathsep) if e]
+
+
+def effective_target_path() -> str:
+    """The selection in ``MERLIN_TARGET_PATH`` syntax, with the in-repo default spelled out.
+
+    For a caller that hands the selection to a child process or prepends an entry to it: an unset
+    variable must not become an explicit selection that silently drops the default.
+    """
+    raw = os.environ.get(_ENV_TARGET_PATH)
+    return raw if raw is not None else os.pathsep.join(str(root) for root in _env_target_roots())
 
 
 @dataclass(frozen=True)
@@ -258,7 +314,9 @@ def explicit_targets() -> dict[str, Path]:
     """Support providers selected on MERLIN_TARGET_PATH, without implicit artifact discovery.
 
     Use this inventory to authorize executable plugins. Reference definitions and freshly
-    generated directories remain inspectable metadata, not permission to execute code.
+    generated directories remain inspectable metadata, not permission to execute code. With the
+    variable unset, the selection is the checkout's reviewed in-repo support (:func:`in_repo_support`),
+    which is tracked source, not a discovered artifact.
     """
     return _discover(_env_target_roots())
 

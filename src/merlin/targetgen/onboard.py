@@ -149,7 +149,8 @@ def _target_path(root: Path | None):
         return
     key = "MERLIN_TARGET_PATH"
     prev = os.environ.get(key)
-    entries = [str(root)] + ([prev] if prev else [])
+    current = _tr.effective_target_path()  # an unset variable is the in-repo default, not an empty one
+    entries = [str(root)] + ([current] if current else [])
     os.environ[key] = os.pathsep.join(entries)
     try:
         yield

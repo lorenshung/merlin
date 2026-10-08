@@ -97,7 +97,7 @@ def test_onboard_regenerates_manifest_and_routes(tmp_path, monkeypatch, target, 
     """The same target-agnostic flow onboards a SIMT and two systolic targets — kind/endpoint are DERIVED
     from the regenerated manifest via the family registry, never a per-target branch."""
     external_sources.require_rtl(target)
-    monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     res = onboard(_real_desc(target), oot_root=tmp_path / target)
     assert res.target == target
     assert res.regenerated is True
@@ -115,7 +115,7 @@ def test_onboard_regenerates_manifest_and_routes(tmp_path, monkeypatch, target, 
 
 
 def test_onboard_fails_honestly_on_unresolvable_rtl_repo(tmp_path, monkeypatch):
-    monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     desc = _write_desc(tmp_path, "target: radiance\nrtl:\n  via: mlc\n  repo: ./no/such/rtl/here\n")
     with pytest.raises(OnboardError) as e:
         onboard(desc, oot_root=tmp_path / "out")
@@ -124,7 +124,7 @@ def test_onboard_fails_honestly_on_unresolvable_rtl_repo(tmp_path, monkeypatch):
 
 def test_onboard_fails_honestly_when_no_manifest_can_be_grounded(tmp_path, monkeypatch):
     """A target with neither a generator entry nor a committed contract fails closed — no fabrication."""
-    monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     desc = _write_desc(tmp_path, "target: totally_new_accel\nrtl:\n  via: mlc\n")
     with pytest.raises(OnboardError) as e:
         onboard(desc, oot_root=tmp_path / "out")
@@ -132,7 +132,7 @@ def test_onboard_fails_honestly_when_no_manifest_can_be_grounded(tmp_path, monke
 
 
 def test_onboard_accepts_remote_url_pointer_and_emits_registration_step(tmp_path, monkeypatch):
-    monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     desc = _write_desc(tmp_path, "target: radiance\nrtl:\n  via: mlc\n  repo: https://example.com/acme/radiance.git\n")
     res = onboard(desc, oot_root=tmp_path / "out")
     assert res.manifest.kind == "simt"
@@ -141,7 +141,7 @@ def test_onboard_accepts_remote_url_pointer_and_emits_registration_step(tmp_path
 
 
 def test_onboard_rejects_malformed_rtl_pointer(tmp_path, monkeypatch):
-    monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     desc = _write_desc(tmp_path, "target: radiance\nrtl:\n  via: mlc\n  repo: 'weird://\\x00'\n")
     with pytest.raises(OnboardError):
         onboard(desc, oot_root=tmp_path / "out")

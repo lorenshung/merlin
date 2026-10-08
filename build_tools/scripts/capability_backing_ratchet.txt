@@ -36,3 +36,15 @@ toy_npu unbacked:no_semantic_capabilities:pe_array
 voyager_accel unbacked:no_semantic_capabilities:vector_unit
 voyager_accel unbacked:ranks:contraction
 voyager_accel unbacked:unmaterializable:elementwise_map
+# growth-accepted: vendored support contracts (2026-10-07). With MERLIN_TARGET_PATH unset, atlas and
+# rvv now resolve to their providers vendored at examples/<target>/support, whose contracts are
+# byte-identical copies of companion commits (examples/<target>/SOURCE.yaml) and carry these uncited
+# claims. The providers already shipped them; vendoring brought them into the tree, it did not add
+# them. Cite or drop each in the companion contract and re-vendor.
+atlas unbacked:undetermined:reduction
+atlas unbacked:undetermined:synchronization
+atlas unbacked:unmaterializable:elementwise_map
+rvv unbacked:no_semantic_capabilities:vector
+rvv unbacked:undetermined:movement
+rvv unbacked:undetermined:reduction
+rvv unbacked:undetermined:synchronization

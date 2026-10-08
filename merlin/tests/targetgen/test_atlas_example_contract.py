@@ -10,7 +10,7 @@ from merlin.targetgen.software_spec import admit_operation, capability_contract,
 
 
 def test_atlas_reference_contract_is_selected_and_matches_derivation_intent(monkeypatch):
-    monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     monkeypatch.delenv("MERLIN_TARGETS_DIR", raising=False)
     monkeypatch.delenv("MERLIN_TARGET_CONTRACT", raising=False)
     selected = repo_root() / "examples/atlas/target"

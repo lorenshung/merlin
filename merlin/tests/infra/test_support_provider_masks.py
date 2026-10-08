@@ -30,6 +30,9 @@ def support(tmp_path, monkeypatch):
     monkeypatch.setenv("MERLIN_TARGETS_DIR", str(repo / "merlin/targets"))
     monkeypatch.setattr(target_registry, "targets_dir", lambda: repo / "merlin/targets")
     monkeypatch.setattr(target_registry, "generated_target_home", lambda: repo / "out/build/generated")
+    # The checkout's vendored support is masked whatever is selected; this fixture models a checkout
+    # without any, so its owner sets are exact. test_example_support.py covers the vendored trees.
+    monkeypatch.setattr(target_registry, "in_repo_support", lambda: {})
     monkeypatch.setattr(surfaces, "repo_root", lambda: repo)
     monkeypatch.setattr(surfaces, "artifacts_dir", lambda: repo / "out/artifacts")
     monkeypatch.setattr(surfaces, "MODULE_ACCESS", ())
@@ -81,7 +84,7 @@ def test_installed_reference_alias_masks_both_spelling_and_owner(tmp_path, monke
     (alias / "contracts/target_contract.yaml").symlink_to(contract)
     monkeypatch.setenv("MERLIN_REPO_ROOT", str(repo))
     monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "out"))
-    monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     monkeypatch.delenv("MERLIN_TARGETS_DIR", raising=False)
     monkeypatch.setattr(target_registry, "checkout_root", lambda: None)
     monkeypatch.setattr(target_registry, "targets_dir", lambda: repo / "merlin/targets")
@@ -228,7 +231,7 @@ def test_frozen_ownership_survives_selection_and_interior_alias_changes(support,
         alias.symlink_to(public)
     else:
         shutil.rmtree(root)
-    monkeypatch.delenv("MERLIN_TARGET_PATH")
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     assert bwrap.verify_snapshot_binding(ws, bundle, expected, repo=repo) == manifest
     bwrap.verify_bundle_snapshot(ws, bundle, repo=repo)
     destination = tmp_path / "translated"
@@ -335,7 +338,7 @@ def test_captured_overlapping_owner_survives_original_removal(support, tmp_path,
     manifest = bwrap.materialize_bundle_inputs(ws, bundle, repo=repo)
     frozen = bwrap.snapshot_input_paths(ws, bundle, [root / "contracts"], repo=repo)[0]
     shutil.rmtree(root)
-    monkeypatch.delenv("MERLIN_TARGET_PATH")
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     destination = tmp_path / "contract-view"
     argv = ["--ro-bind", str(frozen), str(destination)]
     result = bwrap.apply_final_answer_masks(argv, te, ws, bundle, repo=repo)

@@ -39,7 +39,7 @@ def fake_module(monkeypatch, name, **attributes):
 @pytest.fixture(autouse=True)
 def isolated_paths(tmp_path, monkeypatch):
     monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "out"))
-    monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     monkeypatch.delenv("MERLIN_TARGET_CONTRACT", raising=False)
     monkeypatch.setattr(registry, "targets_dir", lambda: tmp_path / "curated")
 

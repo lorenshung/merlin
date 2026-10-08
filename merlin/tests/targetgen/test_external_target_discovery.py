@@ -53,7 +53,7 @@ def _make_oot_target(root, name):
 def test_no_env_and_empty_generated_home_means_no_external_targets(tmp_path, monkeypatch):
     # external_targets() discovers env roots UNION the generated home (out/build/generated). With no env
     # AND an empty generated home (isolated via MERLIN_OUT_ROOT), there is nothing to discover.
-    monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path))  # empty generated home
     assert tr.external_targets() == {}
     # reference targets still resolve normally.
@@ -63,7 +63,7 @@ def test_no_env_and_empty_generated_home_means_no_external_targets(tmp_path, mon
 def test_generated_home_is_auto_discovered_without_env(tmp_path, monkeypatch):
     # A package dropped into the generated home (out/build/generated/<pkg>) is picked up with ZERO env —
     # the seamless default for a just-generated target. (resolve() reports kind='external'.)
-    monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path))
     home = tr.generated_target_home()
     _make_oot_target(home / "radiance", "radiance")
@@ -113,7 +113,7 @@ def references(tmp_path, monkeypatch):
     legacy = checkout / "merlin/targets"
     example = _make_oot_target(checkout / "examples/synthetic/target", "synthetic")
     monkeypatch.delenv("MERLIN_TARGETS_DIR", raising=False)
-    monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     monkeypatch.delenv("MERLIN_TARGET_CONTRACT", raising=False)
     monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "out"))
     monkeypatch.setattr(tr, "checkout_root", lambda: checkout)

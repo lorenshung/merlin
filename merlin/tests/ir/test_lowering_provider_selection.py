@@ -58,14 +58,14 @@ def test_invalid_selected_contract_never_falls_back(selected, invalid):
 def test_authored_example_is_read_without_selected_support(tmp_path, monkeypatch):
     monkeypatch.setenv("MERLIN_REPO_ROOT", str(tmp_path / "repo"))
     monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "out"))
-    monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     monkeypatch.delenv("MERLIN_TARGET_CONTRACT", raising=False)
     authored = checkout_root() / "examples/toy_npu/target/contracts/target_contract.yaml"
     assert pipeline.load_curated_contract("toy_npu") == yaml.safe_load(authored.read_text())
 
 
 def test_authored_example_contract_remains_selected(monkeypatch):
-    monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     monkeypatch.delenv("MERLIN_TARGET_CONTRACT", raising=False)
     path = repo_root() / "examples/toy_npu/target/contracts/target_contract.yaml"
     assert pipeline.load_curated_contract("toy_npu") == yaml.safe_load(path.read_text())
@@ -104,7 +104,7 @@ assert pipeline.execute(result)['correct'] is True
 def test_missing_explicit_contract_cannot_use_neutral_default(tmp_path, monkeypatch):
     monkeypatch.setenv("MERLIN_REPO_ROOT", str(tmp_path / "repo"))
     monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "out"))
-    monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     monkeypatch.setenv("MERLIN_TARGET_CONTRACT", str(tmp_path / "missing.yaml"))
     with pytest.raises(pipeline.LoweringError, match="missing.yaml"):
         pipeline.load_curated_contract("toy_npu")

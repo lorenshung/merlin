@@ -58,7 +58,7 @@ def test_resume_refuses_provider_drift(selected, monkeypatch, damage):
         shutil.copytree(root, replacement)
         monkeypatch.setenv("MERLIN_TARGET_PATH", str(replacement))
     elif damage == "unselected":
-        monkeypatch.delenv("MERLIN_TARGET_PATH")
+        monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     elif damage == "removed":
         (root / "backend/rtl_checks.py").unlink()
     elif damage == "added":
@@ -77,7 +77,7 @@ def test_resume_refuses_provider_drift(selected, monkeypatch, damage):
 
 def test_adding_selection_to_unselected_receipt_refuses(selected, monkeypatch):
     root, arguments = selected
-    monkeypatch.delenv("MERLIN_TARGET_PATH")
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     record = SI.record(**arguments)
     monkeypatch.setenv("MERLIN_TARGET_PATH", str(root))
     with pytest.raises(SpecError, match="source identity changed"):

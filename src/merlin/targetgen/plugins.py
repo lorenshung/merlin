@@ -322,7 +322,11 @@ def resolve_support(target: str):
 
     root = target_registry.explicit_targets().get(target)
     if root is None:
-        raise PluginError(f"{target}: executable support requires explicit MERLIN_TARGET_PATH selection")
+        raise PluginError(
+            f"{target}: executable support requires explicit MERLIN_TARGET_PATH selection "
+            f"(or, with it unset, an in-repo examples/*/{target_registry.IN_REPO_SUPPORT_DIR} provider "
+            "declaring this target)"
+        )
     selected = target_registry.resolve(target)
     if selected.base.resolve() != root.resolve():
         raise PluginError(f"{target}: resolved provider differs from explicit support selection")

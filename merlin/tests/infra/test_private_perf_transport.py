@@ -133,7 +133,7 @@ def test_v4_admission_and_public_projection_preserve_private_host_provenance(pri
 def test_projection_uses_captured_support_ownership_after_provider_unlink(private_functional, monkeypatch):
     f = private_functional
     shutil.rmtree(f.support)
-    monkeypatch.delenv("MERLIN_TARGET_PATH")
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     frozen = _transport(f)
     projection = json.loads(frozen.public_marker.read_text())
     contracts = next(row for row in projection["grants"] if row["path"] == "inputs/selected-support/contracts")

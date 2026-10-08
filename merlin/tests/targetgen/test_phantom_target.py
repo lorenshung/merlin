@@ -177,7 +177,7 @@ print(json.dumps({
 
 def _run_probe(target_path: str | None) -> dict:
     env = dict(os.environ)
-    env.pop("MERLIN_TARGET_PATH", None)
+    env["MERLIN_TARGET_PATH"] = ""
     if target_path is not None:
         env["MERLIN_TARGET_PATH"] = target_path
     proc = subprocess.run([sys.executable, "-c", _ORACLE_PROBE], capture_output=True, text=True, env=env)
