@@ -16,7 +16,7 @@ from math import prod
 from typing import Any
 
 from xdsl.dialects.builtin import IntegerType, VectorType
-from xdsl.dialects.llvm import ICmpPredicateFlag
+from xdsl.dialects.llvm import ICmpPredicateFlag, LLVMPointerType
 from xdsl.ir import Block, BlockArgument, Operation
 
 from merlin.xdsl_dialects.lowering.integer_constant_eval import constant_integer
@@ -265,6 +265,97 @@ def _block_signatures(
     return out
 
 
+def _pointer_setup_operations(function: Any) -> frozenset[Operation]:
+    """Prove pointer-plus-constant arithmetic, without exempting loaded values.
+
+    This deliberately small SSA proof has no target facts or compiler annotations.
+    Pointer entry arguments, globals and stack allocations seed address provenance.
+    Loads, calls, opaque results and CFG block arguments never do. Other integer
+    work remains in the arithmetic budget, even when its role is unknown.
+    """
+    blocks = tuple(function.body.blocks)
+    if not blocks:
+        return frozenset()
+    pointers = {arg for arg in blocks[0].args if isinstance(arg.type, LLVMPointerType)}
+    addresses = set()
+    proved = set()
+    operations = tuple(function.walk())
+    for op in operations:
+        name = _real_name(op)
+        if len(op.results) != 1:
+            continue
+        result = op.results[0]
+        if name in {"llvm.mlir.addressof", "llvm.alloca"} and isinstance(result.type, LLVMPointerType):
+            pointers.add(result)
+        elif name in {"llvm.getelementptr", "llvm.bitcast"} and isinstance(result.type, LLVMPointerType):
+            if (
+                op.operands
+                and op.operands[0] in pointers
+                and all(constant_integer(index) is not None for index in op.operands[1:])
+            ):
+                pointers.add(result)
+        elif name == "llvm.ptrtoint" and len(op.operands) == 1 and op.operands[0] in pointers:
+            addresses.add(result)
+        elif name == "llvm.inttoptr" and len(op.operands) == 1 and op.operands[0] in addresses:
+            pointers.add(result)
+        elif name in {"llvm.add", "llvm.sub"} and len(op.operands) == 2:
+            left, right = op.operands
+            address_offset = left in addresses and constant_integer(right) is not None
+            if name == "llvm.add":
+                address_offset |= right in addresses and constant_integer(left) is not None
+            if address_offset:
+                addresses.add(result)
+                proved.add(op)
+
+    use_cache = {}
+
+    def address_only_uses(value) -> bool:
+        """Require a closed use chain ending at memory addressing or command issue.
+
+        An integer derived from a pointer can also be stored or returned as a
+        computed value. Ancestry alone does not license that computation.
+        Opaque command effects still belong to the independent target decoder.
+        """
+        pending = [value]
+        visited = set()
+        while pending:
+            current = pending.pop()
+            if current in use_cache:
+                if not use_cache[current]:
+                    use_cache[value] = False
+                    return False
+                continue
+            if current in visited:
+                continue
+            visited.add(current)
+            uses = tuple(current.uses)
+            if not uses:
+                use_cache[value] = False
+                return False
+            for use in uses:
+                user = use.operation
+                name = _real_name(user)
+                if user in proved or (
+                    name in {"llvm.inttoptr", "llvm.ptrtoint", "llvm.getelementptr", "llvm.bitcast"}
+                    and len(user.results) == 1
+                    and (user.results[0] in pointers or user.results[0] in addresses)
+                ):
+                    pending.extend(user.results)
+                elif name == "llvm.load" and use.index == 0:
+                    continue
+                elif name == "llvm.store" and use.index == 1:
+                    continue
+                elif name == "llvm.inline_asm" and not user.results:
+                    continue
+                else:
+                    use_cache[value] = False
+                    return False
+        use_cache.update((visited_value, True) for visited_value in visited)
+        return True
+
+    return frozenset(op for op in reversed(operations) if op in proved and address_only_uses(op.results[0]))
+
+
 def analyze_host_cfg_activity(function: Any, *, prepared_cfg: PreparedHostCFG | None = None) -> dict[str, Any]:
     """Account one submitted LLVM function at the emitted IR level."""
     cfg = require_prepared_host_cfg(function, prepared_cfg) if prepared_cfg is not None else prepare_host_cfg(function)
@@ -331,6 +422,8 @@ def analyze_host_cfg_activity(function: Any, *, prepared_cfg: PreparedHostCFG | 
 
     static = Counter()
     dynamic = Counter()
+    pointer_setup = _pointer_setup_operations(function)
+    dynamic_pointer_setup = 0
     tasks = defaultdict(
         lambda: {"static": Counter(), "dynamic": Counter(), "load_payload_bytes": 0, "store_payload_bytes": 0}
     )
@@ -368,6 +461,8 @@ def analyze_host_cfg_activity(function: Any, *, prepared_cfg: PreparedHostCFG | 
             if count is not None:
                 dynamic[category] += count
                 task["dynamic"][category] += count
+                if operation in pointer_setup:
+                    dynamic_pointer_setup += count
             if category in {"load", "store"}:
                 ty = operation.results[0].type if category == "load" else operation.operands[0].type
                 payload = _payload_bytes(ty)
@@ -473,6 +568,7 @@ def analyze_host_cfg_activity(function: Any, *, prepared_cfg: PreparedHostCFG | 
         "block_signatures": _block_signatures(blocks, index, multiplicity),
         "static_operations": dict(static),
         "dynamic_operations": dict(dynamic) if not problems else None,
+        "dynamic_pointer_setup_arithmetic": dynamic_pointer_setup if not problems else None,
         "load_payload_bytes": sum(row["load_payload_bytes"] for row in tasks.values()) if payload_known else None,
         "store_payload_bytes": sum(row["store_payload_bytes"] for row in tasks.values()) if payload_known else None,
         "unknown_memory_operation_indices": unknown_payload,
