@@ -16,7 +16,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from merlin.targetgen.compiler_library import CompilerLibraryContract
+from merlin.targetgen.compiler_library import CompilerLibraryContract, freeze_compiler_library
 
 from .contracts import StageGateError, canonical_json
 
@@ -76,6 +76,21 @@ class ComponentView:
     library_sha256: str
 
 
+def _reviewed_library(library: CompilerLibraryContract, library_root: Path) -> None:
+    # Preserve the existing member/dependency refusal before deriving a fresh
+    # contract from exactly the host-approved selection. The new identity check
+    # does not let live directory discovery expand that selection.
+    library.verify(library_root)
+    frozen = freeze_compiler_library(
+        library_root,
+        review_id=library.review_id,
+        public_modules=library.public_modules,
+        sources=tuple((member.path, member.module) for member in library.members),
+    )
+    if frozen.sha256 != library.sha256:
+        raise StageGateError("approved compiler library identity changed")
+
+
 def materialize_component_view(
     destination: Path,
     *,
@@ -97,7 +112,7 @@ def materialize_component_view(
     if not any(member.role == "generated_input" for member in inputs):
         raise StageGateError("component view has no generated development inputs")
     _digest(generation_sha256)
-    library.verify(library_root)
+    _reviewed_library(library, library_root)
     selections = [
         ("compiler/" + member.path, Path(library_root) / member.path, member.sha256, "compiler")
         for member in library.members
@@ -126,7 +141,7 @@ def materialize_component_view(
         )
         (staging / "manifest.json").write_bytes(manifest)
         (staging / "manifest.json").chmod(0o444)
-        library.verify(library_root)
+        _reviewed_library(library, library_root)
         if destination.exists() or destination.is_symlink():
             raise StageGateError("component view destination appeared during materialization")
         staging.rename(destination)

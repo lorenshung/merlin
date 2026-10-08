@@ -44,6 +44,60 @@ def test_view_copies_only_explicit_reviewed_members_without_source_paths(tmp_pat
     assert not (view.root / "private-answer.txt").exists()
 
 
+def test_view_refreezes_exact_approved_library_selection(tmp_path, monkeypatch):
+    root = tmp_path / "installed"
+    (root / "merlin").mkdir(parents=True)
+    (root / "merlin/__init__.py").write_text("")
+    (root / "merlin/portable.py").write_text("def lower(value):\n    return value\n")
+    sources = (("merlin/__init__.py", "merlin"), ("merlin/portable.py", "merlin.portable"))
+    library = freeze_compiler_library(root, review_id="review", public_modules=("merlin.portable",), sources=sources)
+    generated = tmp_path / "generated.mlir"
+    generated.write_text("module {}\n")
+    member = C.ApprovedInput(
+        generated, "generated_input/case.mlir", hashlib.sha256(generated.read_bytes()).hexdigest(), "generated_input"
+    )
+    selected = []
+
+    def checked_freeze(selected_root, *, review_id, public_modules, sources):
+        selected.append((selected_root, review_id, public_modules, sources))
+        return freeze_compiler_library(
+            selected_root, review_id=review_id, public_modules=public_modules, sources=sources
+        )
+
+    monkeypatch.setattr(C, "freeze_compiler_library", checked_freeze, raising=False)
+    view = C.materialize_component_view(
+        tmp_path / "agent-view", library=library, library_root=root, inputs=(member,), generation_sha256="1" * 64
+    )
+    assert C.verify_component_view(view)["library_sha256"] == library.sha256
+    assert selected == [(root, "review", ("merlin.portable",), sources)] * 2
+
+
+def test_view_refuses_refrozen_library_identity_drift(tmp_path, monkeypatch):
+    root = tmp_path / "installed"
+    (root / "merlin").mkdir(parents=True)
+    (root / "merlin/__init__.py").write_text("")
+    (root / "merlin/portable.py").write_text("def lower(value):\n    return value\n")
+    sources = (("merlin/__init__.py", "merlin"), ("merlin/portable.py", "merlin.portable"))
+    library = freeze_compiler_library(root, review_id="review", public_modules=("merlin.portable",), sources=sources)
+    generated = tmp_path / "generated.mlir"
+    generated.write_text("module {}\n")
+    member = C.ApprovedInput(
+        generated, "generated_input/case.mlir", hashlib.sha256(generated.read_bytes()).hexdigest(), "generated_input"
+    )
+
+    def changed_identity(selected_root, *, review_id, public_modules, sources):
+        return freeze_compiler_library(
+            selected_root, review_id="different-review", public_modules=public_modules, sources=sources
+        )
+
+    monkeypatch.setattr(C, "freeze_compiler_library", changed_identity, raising=False)
+    with pytest.raises(StageGateError, match="library identity"):
+        C.materialize_component_view(
+            tmp_path / "agent-view", library=library, library_root=root, inputs=(member,), generation_sha256="1" * 64
+        )
+    assert not (tmp_path / "agent-view").exists()
+
+
 @pytest.mark.parametrize("mutation", ["history", "bytes", "link", "empty-directory"])
 def test_added_history_or_changed_member_invalidates_view(tmp_path, mutation):
     view = _view(tmp_path)
