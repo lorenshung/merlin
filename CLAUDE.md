@@ -30,7 +30,9 @@ duplicate implementations. Preserve explicit numeric policy selection and correc
 
 Merlin's own **support provider** for a target (backend, oracles, build support and their tests)
 is target-specific code, so it is vendored at `examples/<target>/support/`, byte-identical to the
-companion commit recorded in `examples/<target>/SOURCE.yaml`. It is the selected support when
+companion commit recorded in `examples/<target>/SOURCE.yaml` except the provenance files that
+`SOURCE.yaml` lists as path-normalized (host paths rewritten repo-relative, original blob ids
+recorded). It is the selected support when
 `MERLIN_TARGET_PATH` is unset, it is never agent-visible, and it is never a compiler candidate.
 Change it by re-vendoring from a recorded commit, not by editing it in place. Compiler candidates
 stay in their OOT repositories. See `docs/guides/target_resolution.md`.
