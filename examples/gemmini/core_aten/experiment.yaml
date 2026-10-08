@@ -17,7 +17,7 @@ phases:
       # Preparation must generate this bundle inside the selected release.
       # Select that release's private/seal.json and matching manifest together on the CLI.
       bundle_manifest: ../../../out/artifacts/probes/phase1-prep/gemmini-def/release/payload/experiment/input_bundles/merlin_assisted_rtlchecks_public_v0/input_bundle_manifest.yaml
-      oracle_timing: ../../../out/artifacts/probes/phase1-prep/gemmini-def/oracle/.oracle_timing.gemmini.json
+      oracle_timing: ../../../out/artifacts/probes/phase1-prep/oracle_timing.gemmini.json
       driver: codex
       model: gpt-6.1-sol
       effort: high
@@ -25,4 +25,4 @@ phases:
       max_wall_s: 43200
       round_timeout: 43200
       grade_interval: 900
-      sim_max_jobs: 5
+      sim_max_jobs: 2

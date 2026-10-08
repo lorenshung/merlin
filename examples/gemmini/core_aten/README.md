@@ -40,23 +40,21 @@ Driver selections are flags on `inspect`, `preflight`, and `run`:
   --phase1-effort high --phase1-provider subscription
 ```
 
-L2 is the fast functional feedback tier, and L3 is mandatory certification.
-The descriptor selects `certification_floor: L3`; it checks declarations,
-not engine availability, and does not add L3 to L2-only source capsules.
-The target producer must declare direct L3 obligations before preparation.
-The existing ladder promotes passing candidate bytes per capsule and keeps
-missing mandatory tiers incomplete. Do not remove L3 to obtain a success.
+L2 is the selected functional tier for this definition; L3 is disabled by the
+Core ATen target contract. Each scored full-call capsule is compiled through
+Merlin DeviceRouting using the submitted source-bound device catalog. A pass
+requires full-call readback correctness and retired accelerator-instruction
+evidence. Host guard capsules are reported separately and never earn device
+credit. The baseline support provider remains host-private; submissions start
+empty.
 
-A reviewed L2-only start is currently blocked by the Chipyard admission
-contract: even initial authoring requires a genuine L3 timing receipt bound
-to the selected Verilator simulator bytes. Also, the complete full-call
-producer and private-sidecar release integration must be installed before
-these capsules can enter reviewed admission. Ordinary capsule directories
-alone do not satisfy the immutable Phase 0 receipt required by preparation.
-The original matrix/model Phase 0 recipe generates a different corpus and
-must not be used to claim production of these 193 cases. Consequently this
-definition declares Phase 1 only; it does not mislabel the old recipe as the
-Core ATen producer.
+A genuine oracle timing receipt must bind the selected Verilator binary even
+for L2-only authoring. Use the Core ATen Phase 0 derivation stage with explicitly
+selected public, hidden and host guard captures, then prepare a generated-only
+release. Ordinary capsule directories alone do not satisfy the immutable
+Phase 0 receipt required by preparation. The original matrix/model recipe
+produces a different corpus. This definition selects Phase 1; its operator
+Phase 0 derivation definition is supplied separately.
 
 Select an executable OOT support provider with `MERLIN_TARGET_PATH` and the
 matching contract with `MERLIN_TARGET_CONTRACT`. Select the actual RTL
