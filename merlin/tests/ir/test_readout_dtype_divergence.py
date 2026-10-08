@@ -99,10 +99,11 @@ def test_an_absent_output_dtype_is_refused_rather_than_defaulted():
 
     from merlin.runtime import simulate
     from merlin.runtime.simulator import SimulationError
+    from merlin.targetgen.families import DEFAULT_EXAMPLE_TARGET
     from merlin.verify.evaluate import _finish_lowering, _lower_to_interface
 
     # K large enough that the accumulator leaves the i8 range, or the test proves nothing.
-    iface, tc = _lower_to_interface(4, 64, 4, 1)
+    iface, tc = _lower_to_interface(4, 64, 4, 1, target=DEFAULT_EXAMPLE_TARGET)
     cb = _finish_lowering(iface, tc)
     assert simulate(cb)["outputs"], "the declared buffer must still run"
 

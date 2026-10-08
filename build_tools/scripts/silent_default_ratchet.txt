@@ -141,7 +141,6 @@ src/merlin/verify/host_compute_audit.py::audit::get-default::row['verdict']
 src/merlin/verify/host_compute_audit.py::sites_from_outline::get-default::dtype
 src/merlin/verify/host_compute_audit.py::audit_group::get-default::name
 src/merlin/verify/host_compute_audit.py::audit_group::get-default::name~2
-src/merlin/verify/lattice.py::witnesses_graded::swallowed-error::Exception
 src/merlin/verify/lattice.py::emit_counterexamples::get-default::dtype
 src/merlin/verify/lattice.py::render::get-default::capsules
 src/merlin/verify/lattice.py::render::get-default::distinct_shapes

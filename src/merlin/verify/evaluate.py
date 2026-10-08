@@ -29,6 +29,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from merlin.targetgen.families import DEFAULT_EXAMPLE_TARGET
+
 from .faults import CB_CORPUS, CORPUS, Fault
 
 LAYERS = ("static", "formal", "dynamic")
@@ -62,14 +64,15 @@ class Detection:
             raise ValueError("outcome 'detected' must carry detected=True")
 
 
-def _lower_to_interface(m: int, k: int, n: int, reuse: int):
-    from merlin.xdsl_dialects.lowering import pipeline
+def _lower_to_interface(m: int, k: int, n: int, reuse: int, *, target: str):
     from merlin.xdsl_dialects.lowering.contract_facts import lower_to_contract
     from merlin.xdsl_dialects.lowering.interface_lowering import lower_to_interface
     from merlin.xdsl_dialects.lowering.pipeline import build_input_module, load_curated_contract
     from merlin.xdsl_dialects.lowering.schedule_decisions import lower_to_schedule
 
-    tc = load_curated_contract("toy_npu")
+    tc = load_curated_contract(target)
+    if tc.get("name") != target:
+        raise ValueError(f"selected contract names {tc.get('name')!r}, expected {target!r}")
     mod = build_input_module(reuse=reuse, m=m, k=k, n=n)
     return lower_to_interface(lower_to_schedule(lower_to_contract(mod, tc))), tc
 
@@ -205,7 +208,7 @@ def run_cb_matrix(
 
     from merlin.runtime import simulate
 
-    clean_iface, tc = _lower_to_interface(m, k, n, reuse)
+    clean_iface, tc = _lower_to_interface(m, k, n, reuse, target=DEFAULT_EXAMPLE_TARGET)
     clean_cb = _finish_lowering(clean_iface, tc)
     golden = simulate(clean_cb)["outputs"]
 
@@ -265,7 +268,7 @@ def run_matrix(
     *, m: int = 4, k: int = 4, n: int = 4, reuse: int = 2, timeout_ms: int = 60_000, faults: tuple[Fault, ...] = CORPUS
 ) -> dict[str, Any]:
     """Run the corpus past every layer. Returns a JSON-serializable record."""
-    clean_iface, tc = _lower_to_interface(m, k, n, reuse)
+    clean_iface, tc = _lower_to_interface(m, k, n, reuse, target=DEFAULT_EXAMPLE_TARGET)
     from merlin.runtime import simulate
 
     golden = simulate(_finish_lowering(clean_iface, tc))["outputs"]
@@ -277,7 +280,7 @@ def run_matrix(
         ("formal", lambda mod: _formal(mod, timeout_ms)),
         ("dynamic", lambda mod: _dynamic(mod, tc, golden)),
     ):
-        mod, _ = _lower_to_interface(m, k, n, reuse)
+        mod, _ = _lower_to_interface(m, k, n, reuse, target=DEFAULT_EXAMPLE_TARGET)
         t0 = time.time()
         hit, outcome, diag = fn(mod)
         baseline.append(Detection("<none: unmutated>", layer, hit, time.time() - t0, diag, outcome))
@@ -289,7 +292,7 @@ def run_matrix(
             ("formal", lambda mod: _formal(mod, timeout_ms)),
             ("dynamic", lambda mod: _dynamic(mod, tc, golden)),
         ):
-            mod, _ = _lower_to_interface(m, k, n, reuse)
+            mod, _ = _lower_to_interface(m, k, n, reuse, target=DEFAULT_EXAMPLE_TARGET)
             fault.mutate(mod)
             t0 = time.time()
             try:
