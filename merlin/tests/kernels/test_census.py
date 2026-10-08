@@ -351,3 +351,19 @@ class TestProfileUsability:
         doc["op_table"] = [*self._TABLE, {"id": 1, "fqn": "x", "mlir_op": "linalg.generic", "ticks": None}]
         _, ticks, _ = cs.load_profile(self._write(tmp_path, doc))
         assert set(ticks) == {0}, "a missing measurement is unmeasured, not zero"
+
+
+def test_a_census_states_which_families_it_looked_for(tmp_path):
+    """The rows say what was found; only the scope says what was searched.
+
+    A consumer reading absence off the rows alone concludes a transformer never normalizes, because
+    `observe_contractions` never enumerates normalization in the first place.
+    """
+    assert cs.CENSUS_SCOPE == ("contraction",)
+    assert cs.census(_MATMUL_I8, model="m").scope == cs.CENSUS_SCOPE
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "model.mlir").write_text(_MATMUL_I8)
+    assert cs.census_bundle(bundle).scope == cs.CENSUS_SCOPE
+    # A census that walked nothing states no scope, so it cannot license a claim about absence.
+    assert cs.census_bundle(tmp_path / "absent").scope == ()
