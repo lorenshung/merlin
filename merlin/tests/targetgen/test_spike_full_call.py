@@ -38,3 +38,19 @@ def test_adapter_exposes_full_call_boundary_only():
     assert callable(adapter.run_full_call)
     with pytest.raises(capsule_runner.OracleUnavailable):
         adapter(None, "", None, 1)
+
+
+def test_build_refusal_returns_durable_execution_error(tmp_path, monkeypatch):
+    from merlin.runtime.backends import spike_model
+    from merlin.targetgen import core_aten_provenance
+
+    def refuse(*args, **kwargs):
+        raise ValueError("candidate build refused")
+
+    monkeypatch.setattr(spike_model, "build", refuse)
+    monkeypatch.setattr(core_aten_provenance, "batch_provenance", lambda *a, **k: {"scope": "test"})
+    adapter = spike_full_call.full_call_adapter("t", isa="declared-isa")
+    result = adapter.run_full_call(bundle=tmp_path, llvm_mlir="submitted LLVM")
+    assert result["output_bytes"] is None
+    assert result["execution_error"] == "ValueError: candidate build refused"
+    assert result["lane"] == "host" and result["executed_instructions"] == 0

@@ -162,3 +162,43 @@ def test_runner_grades_candidate_emission_and_requires_rtl(packaged, tmp_path, m
     )
     capsule["required_oracle_tiers"] = ["L2"]
     assert C.run_capsule(capsule, tmp_path, adapters={"L2": object()}, **options)["status"] == "incomplete"
+
+
+def test_source_bundle_scoring_requires_device_evidence_and_reports_guards(packaged, tmp_path, monkeypatch):
+    capsule, raw, readback, _, _ = packaged
+    capsule.update(cohort="public", scored=True, lane_expectation="device")
+    config = SimpleNamespace(target="test_target", fourth_output_name="lowered.mlir", rtl_tiers={"L3"})
+    options = dict(
+        paths=SimpleNamespace(run_path=tmp_path / "runs"),
+        config=config,
+        pkg=None,
+        contract=None,
+        timeout=1,
+        no_oracle=False,
+    )
+    observation = dict(
+        output_bytes=raw,
+        semantic_readback=readback,
+        provenance={"scope": "test"},
+        engine="test",
+        derived_from_rtl=False,
+        lane="device",
+        executed_instructions=0,
+    )
+
+    def execute(**kwargs):
+        assert kwargs["package_dir"] == tmp_path
+        assert kwargs["capsule"] is capsule
+        return observation
+
+    adapter = SimpleNamespace(run_full_call=execute, compiles_source_bundle=True)
+    assert C.run_capsule(capsule, tmp_path, adapters={"L2": adapter}, **options)["status"] == "fail"
+    observation["executed_instructions"] = 3
+    result = C.run_capsule(capsule, tmp_path, adapters={"L2": adapter}, **options)
+    assert result["status"] == "pass"
+    assert (result["lane"], result["executed_instructions"], result["cohort"]) == ("device", 3, "public")
+    capsule.update(cohort="host_guard", scored=False, lane_expectation="host-guard")
+    assert C.run_capsule(capsule, tmp_path, adapters={"L2": adapter}, **options)["status"] == "fail"
+    observation.update(lane="host", executed_instructions=0)
+    result = C.run_capsule(capsule, tmp_path, adapters={"L2": adapter}, **options)
+    assert result["status"] == "pass" and result["cohort"] == "guard" and result["scored"] is False

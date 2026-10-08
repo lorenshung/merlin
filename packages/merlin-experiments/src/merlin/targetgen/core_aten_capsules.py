@@ -267,6 +267,10 @@ def run_capsule(capsule, package_dir, *, paths, config, adapters, pkg, contract,
         "kind": capsule["kind"],
         "label": capsule["label"],
         "contract_version": CONTRACT_VERSION,
+        "cohort": "guard" if capsule.get("cohort") == "host_guard" else capsule.get("cohort", capsule["label"]),
+        "scored": capsule.get("scored", True),
+        "lane": "host",
+        "executed_instructions": 0,
         "status": "incomplete",
         "tiers": {},
         "numeric": {"status": "skipped"},
@@ -278,16 +282,23 @@ def run_capsule(capsule, package_dir, *, paths, config, adapters, pkg, contract,
         ),
     }
     try:
-        pkg, cb, emission = run_entrypoints(
-            pkg,
-            package_dir,
-            capsule,
-            paths,
-            contract=contract,
-            timeout=timeout,
-            fourth_output_name=config.fourth_output_name,
-        )
-        result["candidate_emission"] = {"sha256": hashlib.sha256(emission.encode()).hexdigest()}
+        source_adapters = [a for a in (adapters or {}).values() if getattr(a, "compiles_source_bundle", False)]
+        if source_adapters:
+            cb, emission = None, ""
+        else:
+            pkg, cb, emission = run_entrypoints(
+                pkg,
+                package_dir,
+                capsule,
+                paths,
+                contract=contract,
+                timeout=timeout,
+                fourth_output_name=config.fourth_output_name,
+            )
+        if not source_adapters:
+            result["candidate_emission"] = {"sha256": hashlib.sha256(emission.encode()).hexdigest()}
+        else:
+            result["compilation_mode"] = "source_bound_submitted_device_catalog"
         bundle = paths.run_path / ".private_full_call_runtime"
         bundle.mkdir(mode=0o700, exist_ok=True)
         runtime_bundle(capsule, bundle)
@@ -303,7 +314,17 @@ def run_capsule(capsule, package_dir, *, paths, config, adapters, pkg, contract,
                 }
                 result["failure"] = {"plane": "oracle_unavailable", "category": "NOT_RUN_IS_NOT_PASS", "tier": tier}
                 break
-            run = execute(bundle=bundle, llvm_mlir=emission, command_buffer=cb, target=config.target, timeout=timeout)
+            kwargs = (
+                {"package_dir": package_dir, "capsule": capsule}
+                if getattr(adapter, "compiles_source_bundle", False)
+                else {}
+            )
+            run = execute(
+                bundle=bundle, llvm_mlir=emission, command_buffer=cb, target=config.target, timeout=timeout, **kwargs
+            )
+            result.update(lane=run.get("lane", "host"), executed_instructions=run.get("executed_instructions", 0))
+            if run.get("execution_evidence") is not None:
+                result["execution_evidence"] = run["execution_evidence"]
             if not isinstance(run.get("provenance"), dict):
                 raise ValueError("full-call execution lacks provenance")
             result["provenance"]["executions"][tier] = run["provenance"]
@@ -317,6 +338,10 @@ def run_capsule(capsule, package_dir, *, paths, config, adapters, pkg, contract,
             )
             row = next(iter(verdict["cases"].values()))
             passed = row["status"] == "pass"
+            if capsule.get("lane_expectation") == "device":
+                passed = passed and result["lane"] == "device" and result["executed_instructions"] > 0
+            elif capsule.get("lane_expectation") == "host-guard":
+                passed = passed and result["lane"] == "host" and result["executed_instructions"] == 0
             result["tiers"][tier] = {
                 "status": "pass" if passed else "fail",
                 "mandatory": True,

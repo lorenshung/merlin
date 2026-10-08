@@ -226,7 +226,7 @@ def generate(
                 member = category / row["id"]
                 declaration_path = member / "capsule.yaml"
                 capsule = yaml.safe_load(declaration_path.read_bytes())
-                capsule["cohort"] = cohort
+                capsule["cohort"] = "guard" if cohort == "host_guard" else cohort
                 capsule["scored"] = cohort != "host_guard"
                 capsule["lane_expectation"] = "host-guard" if cohort == "host_guard" else "device"
                 capsule["semantic"] = {"must_accelerate": cohort != "host_guard"}

@@ -49,6 +49,8 @@ def full_call_adapter(
     backend: str = "scalar",
     runner_options: Mapping[str, Any] | None = None,
     engine: str = "spike",
+    execution_provider: Path | None = None,
+    rtl_facts: Path | None = None,
 ):
     """Build an oracle callable exposing ``run_full_call`` for one plain Spike target.
 
@@ -57,13 +59,43 @@ def full_call_adapter(
     """
     options = dict(runner_options or {})
 
-    def run_full_call(*, bundle, llvm_mlir, command_buffer=None, target=target, timeout=600, **_ignored):
+    def run_full_call(
+        *,
+        bundle,
+        llvm_mlir,
+        command_buffer=None,
+        target=target,
+        timeout=600,
+        package_dir=None,
+        capsule=None,
+        **_ignored,
+    ):
         from merlin.runtime.backends import spike_model
         from merlin.targetgen.core_aten_provenance import batch_provenance
 
         bundle = Path(bundle)
         result: dict[str, Any] = {"engine": engine, "derived_from_rtl": False}
+        routing = None
+        result.update(lane="host", executed_instructions=0)
         try:
+            if execution_provider is not None:
+                from merlin.targetgen.core_aten_device import (
+                    load_execution_provider,
+                    routing_for_bundle,
+                    selected_facts,
+                )
+
+                provider = load_execution_provider(target, execution_provider)
+                with selected_facts(target, rtl_facts) as facts:
+                    prepare = getattr(provider, "prepare_bundle", None)
+                    if prepare is not None:
+                        prepare(bundle, target=target, facts=facts)
+                    if (capsule or {}).get("scored", True):
+                        if package_dir is None:
+                            raise ValueError("source-bound execution requires the submitted package")
+                        routing, reason = routing_for_bundle(bundle, target, Path(package_dir), provider, facts)
+                        if routing is None:
+                            raise ValueError("submitted backend did not route this capsule: " + reason)
             build = spike_model.build(
                 bundle,
                 bundle / "spike-build",
@@ -71,30 +103,62 @@ def full_call_adapter(
                 arena_mb=DEFAULT_ARENA_MB,
                 dump_all_outputs=True,
                 backend=backend,
-                host_llvm_transform=_translate_candidate(llvm_mlir),
+                device=routing,
+                host_llvm_transform=_translate_candidate(llvm_mlir) if execution_provider is None else None,
             )
+            trace = bundle / "spike-trace.log" if routing is not None else None
             run = spike_model.run(
-                build["elf"], mem_bytes=build["mem_bytes"], timeout=timeout, vlen=build.get("vlen"), isa=isa, **options
+                build["elf"],
+                mem_bytes=build["mem_bytes"],
+                timeout=timeout,
+                vlen=build.get("vlen"),
+                isa=isa,
+                trace_path=trace,
+                **options,
             )
             if build.get("build_hash") is not None and run.get("metrics", {}).get("build_hash") != build["build_hash"]:
                 raise RuntimeError("console build hash does not match the linked executable")
+            if routing is not None:
+                from merlin.llvmlower.device_offload import load_sidecar
+                from merlin.targetgen.core_aten_device import executed_device_instructions, selected_facts
+
+                if not load_sidecar(bundle / "spike-build").get("routed"):
+                    raise ValueError("submitted backend emitted no source-bound device calls")
+                with selected_facts(target, rtl_facts):
+                    evidence = executed_device_instructions(trace, Path(build["elf"]), target)
+                result.update(
+                    lane="device", executed_instructions=evidence["executed_instructions"], execution_evidence=evidence
+                )
+                if evidence["executed_instructions"] < 1:
+                    raise ValueError("no target instruction executed for submitted device calls")
+            (bundle / "spike-console.txt").write_text(run["console"])
             result.update(
                 output_bytes=run["output_bytes"],
                 output_shapes=run.get("output_shapes") or None,
                 semantic_readback=run.get("semantic_readback"),
                 execution_error=None,
             )
-        except Exception as exc:  # noqa: BLE001 -- a failed execution is a verdict input, not a crash
+        except Exception as exc:  # noqa: BLE001 -- execution refusal is a verdict input
             result.update(
                 output_bytes=None,
                 output_shapes=None,
                 semantic_readback=None,
                 execution_error=f"{type(exc).__name__}: {exc}"[:2000],
             )
-        provenance = batch_provenance(bundle, runner_options=options)
+        provenance = batch_provenance(
+            bundle,
+            target=target if execution_provider else None,
+            package=Path(package_dir) if package_dir else None,
+            runner_options=options,
+            rtl_facts=rtl_facts,
+        )
         provenance["isa"] = isa
         provenance["target"] = target
-        provenance["candidate_llvm_sha256"] = hashlib.sha256(llvm_mlir.encode()).hexdigest()
+        if execution_provider is None:
+            provenance["candidate_llvm_sha256"] = hashlib.sha256(llvm_mlir.encode()).hexdigest()
+        else:
+            provenance["compilation_mode"] = "source_bound_submitted_device_catalog"
+            provenance["execution_provider_sha256"] = hashlib.sha256(execution_provider.read_bytes()).hexdigest()
         result["provenance"] = provenance
         return result
 
@@ -104,6 +168,7 @@ def full_call_adapter(
         raise OracleUnavailable("this oracle executes the full-call boundary only (run_full_call)")
 
     run.run_full_call = run_full_call
+    run.compiles_source_bundle = execution_provider is not None
     run._merlin_simulator_engine = engine
     return run
 
