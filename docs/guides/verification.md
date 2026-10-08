@@ -3,7 +3,7 @@ title: Verify a compiler transformation
 kind: guide
 status: current
 owner: verification
-last_verified: 2026-10-06
+last_verified: 2026-10-07
 related: [phase0_specification, model_lowering, simulator_selection]
 code_refs:
   - src/merlin/verify/receipts.py
@@ -13,6 +13,10 @@ code_refs:
   - src/merlin/verify/smt_semantics.py
   - src/merlin/verify/cb_semantics.py
   - src/merlin/verify/model_coverage.py
+  - src/merlin/verify/scalar_ir.py
+  - src/merlin/verify/outline_ir.py
+  - src/merlin/verify/split_reduction.py
+  - src/merlin/verify/cli.py
 ---
 
 # Verify a compiler transformation
@@ -122,6 +126,46 @@ cannot be serialized as a recipe and is reported as `unsupported_custom_selectio
 grading refuses that status. Older archives without a recipe report `not_recorded`. The reported
 semantic-equivalence status remains `not_proven`: replay checks determinism and provenance, not
 whether a transformation preserves values or whether target execution matches the source.
+
+For a pure scalar-integer pass such as the supported subset of `chunk_forward`, use the
+**exact before/after MLIR files** the pass consumed and produced:
+
+```sh
+merlin-verify scalar-receipt --before /generated/before.mlir \
+  --after /generated/after.mlir --entry forward \
+  --output /generated/scalar-transform-receipt.json
+merlin-verify qualify-scalar-receipt \
+  --receipt /generated/scalar-transform-receipt.json \
+  --before /generated/before.mlir --after /generated/after.mlir
+```
+
+This command uses a separate, narrow QF_BV model of integer constants, addition, subtraction,
+multiplication, defined calls, and returns. It binds the saved file bytes and proof query;
+`ScalarTransformReceipt.from_dict` and `qualify_scalar_receipt` re-run the check before trusting a
+stored verdict. Exit 0 is a proof within that model, 1 a counterexample, and 2 an abstention. The
+qualification command returns 0 only when the stored proof replays with the supplied exact bytes
+and current verifier/toolchain; otherwise it returns 2. Tensor/memref operations, effects, floats,
+and generated machine code abstain; the command is not a general `chunk_forward` certificate.
+
+For the supported pure integer-tensor subset of `outline_dispatches` (for example the audit's
+`normalized-model` and `outlined-model` files, when they fall inside it), a separate structural
+checker expands the emitted private kernel calls and compares typed SSA result graphs:
+
+```sh
+merlin-verify outline-receipt --before /generated/before.mlir \
+  --after /generated/after.mlir --output /generated/outline-receipt.json
+merlin-verify qualify-outline-receipt --receipt /generated/outline-receipt.json \
+  --before /generated/before.mlir --after /generated/after.mlir
+```
+
+This is conditional syntactic beta-equivalence under the unchanged semantics of pure MLIR
+operations, not an independent matmul or device-code proof. A different expanded graph exits 1
+with a structural mismatch witness; an unmodeled operation, `tensor.empty`/`linalg.fill`
+initialization, or an unqualified stored receipt exits 2. Only exit 0 qualifies the exact pair.
+
+`merlin-verify split-reduction` proves or refutes one signed split-K accumulation for every input
+pair at declared operand, partial and output widths (see `docs/design/compiler_verification.md`).
+It is an algebraic obligation over those widths, not a check of any emitted kernel.
 
 Each receipt records SHA-256 identities of the generic xDSL IR text (or, for an emitted
 `merlin_iface` target, its exact UTF-8 text) and canonical command-buffer JSON, both sides' typed
