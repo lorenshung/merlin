@@ -350,8 +350,16 @@ def generate_target(
         from .core_aten_stage import declaration, generate
 
         if declaration(Path(recipe)) is not None:
-            if any(value is not None for value in (software_spec, evidence_input, synth_profile, hidden_profile)):
+            if any(value is not None for value in (software_spec, evidence_input, hidden_profile)):
                 raise ValueError("retained Core ATen stage cannot mix other generation or evidence inputs")
+            if conformance_spec is not None or synth_profile is not None:
+                from .profiles import verify_selected_synthesis
+
+                status = verify_selected_synthesis(
+                    synth_profile, conformance_spec=conformance_spec, recipe=recipe, descriptor=descriptor
+                )
+                if status.get("status") != "verified":
+                    raise ValueError("Core ATen generation requires verified selected synthesis")
             if evidence_mode == "verified" or prohibited_instruction_roles:
                 raise ValueError(
                     "retained Core ATen packaging is diagnostic; instruction policy needs execution evidence"

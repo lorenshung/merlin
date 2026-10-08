@@ -56,14 +56,17 @@ def selection(recipe: Path) -> tuple[list[dict], dict[str, str]]:
     block = declaration(recipe)
     if block is None or set(block.get("cohorts", {})) != set(COHORTS):
         raise ValueError("Core ATen stage requires public, hidden and host_guard declarations")
+    lane = block.get("lane_expectation", "device")
+    if lane not in ("device", "full_call"):
+        raise ValueError("Core ATen lane_expectation must be device or full_call")
     paths: dict[str, str] = {}
     overlay = _path(recipe, block.get("overlay"))
     paths[str(overlay)] = _sha(overlay)
     batches, identities = [], set()
     for cohort in COHORTS:
         rows = block["cohorts"][cohort]
-        if not isinstance(rows, list) or not rows:
-            raise ValueError("every Core ATen cohort must declare at least one case selection")
+        if not isinstance(rows, list) or (not rows and cohort != "host_guard"):
+            raise ValueError("scored Core ATen cohorts must declare at least one case selection")
         for row in rows:
             cases_path = _path(recipe, row.get("cases"))
             captures = _path(recipe, row.get("captures"))
@@ -113,7 +116,7 @@ def selection(recipe: Path) -> tuple[list[dict], dict[str, str]]:
                     "captures": str(captures),
                 }
             )
-        del by_id, corpus  # Do not retain an unselected bounded suite while loading the next batch.
+            del by_id, corpus  # Do not retain an unselected bounded suite while loading the next batch.
     return batches, dict(sorted(paths.items()))
 
 
@@ -136,7 +139,58 @@ def input_paths(recipe: Path) -> list[Path]:
     return [Path(path) for path in sorted(paths)]
 
 
-def derive(recipe: Path, output: Path, *, target: str) -> dict:
+def _requirement(batches: list[dict], receipt: dict) -> dict:
+    """Declare finite retained-call obligations without claiming execution coverage."""
+    return {
+        "schema": "merlin.phase0.core_aten_conformance.v1",
+        "target": receipt["target"],
+        "scope": receipt["scope"],
+        "selection_sha256": receipt["selection_sha256"],
+        "cohorts": {
+            cohort: {
+                "count": sum(len(b["corpus"]["cases"]) for b in batches if b["cohort"] == cohort),
+                "scored": cohort != "host_guard",
+            }
+            for cohort in COHORTS
+        },
+        "obligations": [
+            "exact nonopaque overload-bound full-call capture",
+            "complete selected input bytes and disjoint public/hidden calls",
+            "independent owner-only full-call answers excluded from candidate grants",
+            "Phase 1 numerical agreement and declared lane execution evidence",
+        ],
+        "execution_coverage_status": "unverified",
+    }
+
+
+def verify_synthesis(recipe: Path, requirement: dict, synthesis: dict) -> dict:
+    """Recompute membership and receipts; input digests alone do not prove selection."""
+    batches, paths = selection(recipe)
+    receipt_path = _path(recipe, declaration(recipe).get("derivation"))
+    receipt = json.loads(receipt_path.read_bytes())
+    expected = {
+        "schema": SCHEMA,
+        "target": requirement.get("target"),
+        "inputs": paths,
+        "selection_sha256": hashlib.sha256(_json(batches)).hexdigest(),
+        "scope": "retained full-call packaging; no numerical or hardware verdict",
+    }
+    if receipt != expected or requirement != _requirement(batches, expected):
+        raise ValueError("Core ATen conformance selection changed; rerun corpus derive")
+    if (
+        synthesis.get("core_aten_selection")
+        != {
+            "schema": SCHEMA,
+            "selection_sha256": receipt["selection_sha256"],
+            "receipt_sha256": _sha(receipt_path),
+        }
+        or synthesis.get("capsules") != []
+    ):
+        raise ValueError("Core ATen selected synthesis differs from the retained-call derivation")
+    return {"selection_sha256": receipt["selection_sha256"], "execution_coverage_status": "unverified"}
+
+
+def derive(recipe: Path, output: Path, *, target: str, descriptor: Path) -> dict:
     batches, paths = selection(recipe)
     output = output.absolute()
     if output.exists():
@@ -162,9 +216,36 @@ def derive(recipe: Path, output: Path, *, target: str) -> dict:
     block["derivation"] = str(output / "selection.json")
     (output / "recipe.yaml").write_text(yaml.safe_dump(document, sort_keys=False))
     (output / "recipe.yaml").chmod(0o600)
+    from .profiles import synthesis_input_identity
+
+    requirement = output / "requirements.yaml"
+    requirement.write_text(yaml.safe_dump(_requirement(batches, receipt), sort_keys=False))
+    synthesis = output / "synth.yaml"
+    synthesis.write_text(
+        yaml.safe_dump(
+            {
+                "provenance": {
+                    "selected_inputs": synthesis_input_identity(
+                        conformance_spec=requirement, recipe=output / "recipe.yaml", descriptor=descriptor
+                    )
+                },
+                "core_aten_selection": {
+                    "schema": SCHEMA,
+                    "selection_sha256": receipt["selection_sha256"],
+                    "receipt_sha256": _sha(output / "selection.json"),
+                },
+                "capsules": [],
+            },
+            sort_keys=False,
+        )
+    )
+    for member in (requirement, synthesis):
+        member.chmod(0o600)
     return {
         "schema": SCHEMA,
         "recipe": str(output / "recipe.yaml"),
+        "conformance_spec": str(requirement),
+        "synth_profile": str(synthesis),
         "selection_sha256": receipt["selection_sha256"],
         "counts": {
             cohort: sum(len(b["corpus"]["cases"]) for b in batches if b["cohort"] == cohort) for cohort in COHORTS
@@ -228,9 +309,12 @@ def generate(
                 capsule = yaml.safe_load(declaration_path.read_bytes())
                 capsule["cohort"] = "guard" if cohort == "host_guard" else cohort
                 capsule["scored"] = cohort != "host_guard"
-                capsule["lane_expectation"] = "host-guard" if cohort == "host_guard" else "device"
-                capsule["semantic"] = {"must_accelerate": cohort != "host_guard"}
-                capsule["lanes"] = {"forbid" if cohort == "host_guard" else "require": ["on_mesh"]}
+                capsule["lane_expectation"] = (
+                    "host-guard" if cohort == "host_guard" else block.get("lane_expectation", "device")
+                )
+                if block.get("lane_expectation", "device") == "device":
+                    capsule["semantic"] = {"must_accelerate": cohort != "host_guard"}
+                    capsule["lanes"] = {"forbid" if cohort == "host_guard" else "require": ["on_mesh"]}
                 declaration_path.write_text(yaml.safe_dump(capsule, sort_keys=False))
                 row.setdefault("digests", {})["capsule.yaml"] = _sha(declaration_path)
                 call_digest = hashlib.sha256()

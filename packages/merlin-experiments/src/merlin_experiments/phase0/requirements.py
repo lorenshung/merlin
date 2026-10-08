@@ -283,7 +283,9 @@ def derive(
     if core_declaration(declaration.recipe) is not None:
         if captures or native_qualifications or capture_preselections or quantization_policies:
             raise ValueError("Core ATen uses only recipe-declared case selections and retained captures")
-        return derive_core(declaration.recipe, Path(output_root), target=declaration.target)
+        return derive_core(
+            declaration.recipe, Path(output_root), target=declaration.target, descriptor=declaration.descriptor
+        )
     if rtl_facts is None:
         raise ValueError("model derivation requires explicit --rtl-facts")
     te = load_target_experiment(declaration.descriptor)
