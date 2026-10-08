@@ -1299,10 +1299,7 @@ def execute_candidate_model(
             )
 
             recipe_record, source_pins = selected_build_inputs(
-                target,
-                service.recipe.with_effective_abi(),
-                service,
-                **readback_input_kwargs,
+                target, service.recipe.with_effective_abi(), service, **readback_input_kwargs
             )
             record["readback_build"] = require_build_receipt(
                 output / "build" / BUILD_RECEIPT,
@@ -1343,22 +1340,14 @@ def execute_candidate_model(
             functional_backend, functional_citation, revalidate_functional = _functional_engine(target)
             revalidate_functional()
             capture_kwargs = {"capture_bytes": True} if binary_console else {}
-            functional_console = functional_backend.run_elf(
-                elf,
-                simulator="spike",
-                timeout=timeout,
-                **capture_kwargs,
-            )
+            functional_console = functional_backend.run_elf(elf, simulator="spike", timeout=timeout, **capture_kwargs)
             revalidate_functional()
             revalidate_source()
             if _digest(Path(elf)) != record["elf"]:
                 raise NativeModelExecutionError("candidate ELF changed during L2 functional execution")
             if readback_policy is not None:
                 recipe_now, sources_now = selected_build_inputs(
-                    target,
-                    service.recipe.with_effective_abi(),
-                    service,
-                    **readback_input_kwargs,
+                    target, service.recipe.with_effective_abi(), service, **readback_input_kwargs
                 )
                 if (recipe_now, sources_now) != (recipe_record, source_pins):
                     raise NativeModelExecutionError("full-value build inputs changed during L2 execution")
@@ -1432,10 +1421,7 @@ def execute_candidate_model(
             raise NativeModelExecutionError("candidate ELF bytes changed during execution")
         if readback_policy is not None:
             recipe_now, sources_now = selected_build_inputs(
-                target,
-                service.recipe.with_effective_abi(),
-                service,
-                **readback_input_kwargs,
+                target, service.recipe.with_effective_abi(), service, **readback_input_kwargs
             )
             if (recipe_now, sources_now) != (recipe_record, source_pins):
                 raise NativeModelExecutionError("full-value build inputs changed during L3 execution")
