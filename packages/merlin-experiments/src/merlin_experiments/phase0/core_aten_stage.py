@@ -26,17 +26,26 @@ LANE_EXPECTATIONS = ("device", "any", "host")
 
 def contraction_lane(source: Path, facts: dict) -> str:
     """Place a captured call by typed contraction semantics and selected datapaths."""
-    from merlin.frontends.linalg_mlir import parse_mlir_file
+    import tempfile
+
+    from xdsl.utils.exceptions import ParseError
+
+    from merlin.frontends.linalg_mlir import parse_mlir_text
     from merlin.kernels.shapes import observe_contraction_demands
+    from merlin.llvmlower.generic_form import to_generic_form
     from merlin.system.offload import facts_dtype_triples, why_not
 
     triples = facts_dtype_triples(facts)
+    # A custom-form capture is re-printed in scratch space: writing beside the retained source would
+    # change the bound capture-directory membership between derivation and verification.
+    try:
+        module = parse_mlir_text(source.read_text(encoding="utf-8"))
+    except ParseError:
+        with tempfile.TemporaryDirectory(prefix="placement-generic-") as scratch:
+            module = parse_mlir_text(to_generic_form(source, scratch).read_text(encoding="utf-8"))
     return (
         "device"
-        if any(
-            why_not(shape, triples=triples, ranks=None) is None
-            for _, shape in observe_contraction_demands(parse_mlir_file(source))
-        )
+        if any(why_not(shape, triples=triples, ranks=None) is None for _, shape in observe_contraction_demands(module))
         else "host"
     )
 

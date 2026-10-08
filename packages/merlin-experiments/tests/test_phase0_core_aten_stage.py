@@ -374,3 +374,25 @@ def test_derived_placement_refuses_authored_lanes_and_mismatched_exports(tmp_pat
     recipe.write_text(yaml.safe_dump(doc))
     with pytest.raises(ValueError, match="cannot mix"):
         stage.selection(recipe)
+
+
+def test_placement_never_writes_beside_the_retained_capture(tmp_path):
+    """A custom-form capture is re-printed in scratch space, so capture membership stays stable."""
+    import shutil
+
+    from merlin.common.paths import artifacts_dir
+
+    source = artifacts_dir() / "verification/core-aten/round2/final-captures-stable/aten__randn__default"
+    if not (source / "capsule.linalg.mlir").is_file():
+        pytest.skip("retained custom-form capture is not present")
+    copy = tmp_path / "capture"
+    shutil.copytree(source, copy, ignore=shutil.ignore_patterns("*.generic.mlir", "_print_generic.py"))
+    before = sorted(path.name for path in copy.iterdir())
+    facts = {
+        "facts": {
+            "target": "t",
+            "datapaths": [{"name": "input", "dtype": "f32"}, {"name": "accumulator", "dtype": "f32"}],
+        }
+    }
+    assert stage.contraction_lane(copy / "capsule.linalg.mlir", facts) == "host"
+    assert sorted(path.name for path in copy.iterdir()) == before
