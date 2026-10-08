@@ -18,6 +18,12 @@ are not in the AST at all**, so a ``# e.g. gemmini`` note is fine. What is caugh
 code: a default value, a comparison operand, a dict key/value, help/error text — the places that make
 core logic operate on one specific target.
 
+A second, TOKENIZED check (:func:`_scan_tokens`) catches what that literal rule cannot: a target
+named inside an IDENTIFIER (``SATURN_BENCHES``, ``class SaturnBench``) or anywhere in a program string,
+case-insensitively and by whole word (``FOO_SATURN_X`` is the words ``foo saturn x``). It reads NAME
+tokens and every non-docstring string, and leaves comments and docstrings to review. A file whose own
+path names the target is that target's module; pre-existing debt sits in ``target_token_ratchet.txt``.
+
 Allowed exceptions (checked in order):
 
   1. an inline ``# target-ok: <rationale>`` comment on the offending line (preferred — co-located);
@@ -37,9 +43,11 @@ delete its entry. Run::
 from __future__ import annotations
 
 import ast
+import io
 import json
 import subprocess
 import sys
+import tokenize
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -243,6 +251,176 @@ def substrate_report(targets: list[Path]) -> tuple[list[str], list[str], int]:
     return violations, healed, carried
 
 
+
+# --- the token check: identifiers and every program string, case-insensitively ----------------------
+# The literal check above matches a target name as a WHOLE, lower-case identifier inside a string
+# Constant. Three spellings walked straight past it -- measured 2026-10-08, 28 code-level mentions of
+# a target in the core and extension sources, none of them caught:
+#
+#   * an IDENTIFIER is not a string at all: `SATURN_BENCHES`, `class SaturnBench`, `_SATURN_CFLAGS`;
+#   * a CAPITALISED name in text the program emits: "a bare-metal Saturn ELF";
+#   * a COMPOUND whose parts are joined by a word character: "radiance-kernels" was caught, but
+#     "MERLIN_MUON_CONFIG" and `FOO_SATURN_X` were not.
+#
+# So this check TOKENIZES each file (stdlib ``tokenize``, no regex) and splits every NAME token and every
+# non-docstring string into lower-case words -- on non-alphanumerics and on lower->Upper camelCase
+# boundaries -- then looks for each target's own words as a contiguous run. `FOO_SATURN_X` is
+# [foo, saturn, x] and contains [saturn]; `mx_gemmini` is its own entry [mx, gemmini]. The name set is
+# the same DERIVED roster the literal check uses. COMMENTS and DOCSTRINGS are prose and are not read
+# here: a docstring is a string that forms a whole statement on its own.
+#
+# A file whose own path contains the target's words is that target's module and is exempt (the rule
+# the substrate and coupling scans already apply). Debt that predates this check is recorded per file
+# in TOKEN_RATCHET, which may only shrink; everything else is a violation.
+TOKEN_RATCHET = ROOT / "build_tools" / "scripts" / "target_token_ratchet.txt"
+_STATEMENT_START = frozenset({tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT, tokenize.ENCODING})
+_STATEMENT_END = frozenset({tokenize.NEWLINE, tokenize.ENDMARKER})
+#: Literal text inside an f-string (Python >= 3.12 splits f-strings into FSTRING_* tokens; before that an
+#: f-string is one STRING token, which the STRING branch reads whole).
+_FSTRING_TEXT = getattr(tokenize, "FSTRING_MIDDLE", None)
+
+
+def _words(text: str) -> list[str]:
+    """Lower-case words of ``text``: alphanumeric runs, also split where a lower-case letter or digit is
+    followed by an upper-case one. ``SaturnBench`` -> [saturn, bench]; ``FOO_SATURN_X`` ->
+    [foo, saturn, x]; ``saturn_opu_mxv256d128`` -> [saturn, opu, mxv256d128]."""
+    out: list[str] = []
+    word = ""
+    prev = ""
+    for ch in text:
+        if ch.isalnum():
+            if word and ch.isupper() and (prev.islower() or prev.isdigit()):
+                out.append(word.lower())
+                word = ""
+            word += ch
+        elif word:
+            out.append(word.lower())
+            word = ""
+        prev = ch
+    if word:
+        out.append(word.lower())
+    return out
+
+
+def _contains_run(words: list[str], run: list[str]) -> bool:
+    n = len(run)
+    return n > 0 and any(words[i : i + n] == run for i in range(len(words) - n + 1))
+
+
+def _name_in(text: str, names: frozenset[str]) -> str | None:
+    """The target ``text`` names, preferring the most specific (longest) entry, else None."""
+    words = _words(text)
+    for name in sorted(names, key=lambda n: (-len(_words(n)), n)):
+        if _contains_run(words, _words(name)):
+            return name
+    return None
+
+
+def _docstring_tokens(tokens: list[tokenize.TokenInfo]) -> set[int]:
+    """Indices of STRING tokens that form a whole statement (docstrings and other bare prose strings)."""
+    out: set[int] = set()
+    i = 0
+    while i < len(tokens):
+        if tokens[i].type != tokenize.STRING:
+            i += 1
+            continue
+        j = i - 1
+        while j >= 0 and tokens[j].type in (tokenize.NL, tokenize.COMMENT):
+            j -= 1
+        k = i
+        run = []
+        while k < len(tokens) and tokens[k].type in (tokenize.STRING, tokenize.NL):
+            if tokens[k].type == tokenize.STRING:
+                run.append(k)
+            k += 1
+        while k < len(tokens) and tokens[k].type == tokenize.COMMENT:
+            k += 1
+        starts = j < 0 or tokens[j].type in _STATEMENT_START
+        ends = k >= len(tokens) or tokens[k].type in _STATEMENT_END
+        if starts and ends:
+            out.update(run)
+        i = (run[-1] + 1) if run else i + 1
+    return out
+
+
+def _scan_tokens(path: Path, names: frozenset[str] | None = None) -> list[tuple[int, str, str, str]]:
+    """``(lineno, target, kind, snippet)`` for every identifier or program string naming a target.
+
+    ``kind`` is ``identifier`` or ``string``. Comments and docstrings are skipped; a ``# target-ok:``
+    marker on any line the token spans silences it.
+    """
+    names = TARGET_NAMES if names is None else names
+    src = path.read_text(encoding="utf-8", errors="replace")
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(src).readline))
+    except (tokenize.TokenError, SyntaxError) as exc:
+        # Fail closed: a file this check cannot read has not been shown to name no target.
+        return [(getattr(exc, "lineno", None) or 0, "<untokenizable>", "file", str(exc)[:60])]
+    prose = _docstring_tokens(tokens)
+    lines = src.splitlines()
+    hits: list[tuple[int, str, str, str]] = []
+    for i, tok in enumerate(tokens):
+        if tok.type == tokenize.NAME:
+            kind = "identifier"
+        elif (tok.type == tokenize.STRING and i not in prose) or (_FSTRING_TEXT and tok.type == _FSTRING_TEXT):
+            kind = "string"
+        else:
+            continue
+        name = _name_in(tok.string, names)
+        if name is None:
+            continue
+        span = lines[max(tok.start[0] - 1, 0) : tok.end[0]]
+        if any(INLINE_MARKER in line for line in span):
+            continue
+        hits.append((tok.start[0], name, kind, " ".join(tok.string.split())[:60]))
+    return hits
+
+
+def _token_owned(relstr: str, name: str) -> bool:
+    """True when the path's own words contain the target's: the file is that target's module."""
+    return _contains_run(_words(relstr), _words(name))
+
+
+def _load_token_ratchet() -> set[str]:
+    if not TOKEN_RATCHET.is_file():
+        return set()
+    out = set()
+    for line in TOKEN_RATCHET.read_text(encoding="utf-8").splitlines():
+        entry = line.split("#", 1)[0].strip()
+        if entry:
+            out.add(entry)
+    return out
+
+
+def token_hits(relstr: str) -> list[tuple[int, str, str, str]]:
+    """Identifier/string target names in ``relstr`` that the file's own path does not own."""
+    return [h for h in _scan_tokens(ROOT / relstr) if not _token_owned(relstr, h[1])]
+
+
+def token_report(targets: list[Path], exact: set[str], prefixes: list[str]) -> tuple[list[str], list[str], int]:
+    """(violations, healed ratchet entries, ratcheted files still carrying debt) over ``targets``."""
+    ratchet = _load_token_ratchet()
+    violations: list[str] = []
+    healed: list[str] = []
+    carried = 0
+    for rel in targets:
+        relstr = rel.as_posix()
+        if _allowed(relstr, exact, prefixes):
+            continue
+        hits = token_hits(relstr)
+        if relstr in ratchet or _source_layout.policy_path(relstr) in ratchet:
+            if hits:
+                carried += 1
+            else:
+                healed.append(relstr)
+            continue
+        for lineno, name, kind, snippet in hits:
+            violations.append(f"{relstr}:{lineno}: target name {name!r} in {kind} {snippet!r} (resolve the "
+                              f"target at runtime, move the target's facts to its example, or add "
+                              f"`# target-ok: <why>`)")
+    return violations, healed, carried
+
+
 # --- the coupling scan: what the literal check above cannot see ------------------------------------
 # The check above inspects string-literal Constants only, and matches a target name as a WHOLE
 # identifier. Both choices are deliberate and both hide real coupling:
@@ -411,6 +589,8 @@ def main(argv: list[str] | None = None) -> int:
 
     sub_violations, healed, carried = substrate_report(targets)
     violations.extend(sub_violations)
+    tok_violations, tok_healed, tok_carried = token_report(targets, exact, prefixes)
+    violations.extend(tok_violations)
 
     if stop_hook:
         if violations:
@@ -431,17 +611,23 @@ def main(argv: list[str] | None = None) -> int:
     # Report the exemptions as DEBT, not as part of a pass. An allowlist announced on an "ok" line reads
     # as "nothing to see"; it is 36 places where the core is welded to a specific target.
     n_coupling = len(coupling_inventory(staged))
-    print(f"[  ok] no-target-name: no stray target-name literal in scope "
+    print(f"[  ok] no-target-name: no stray target-name literal, identifier or string in scope "
           f"({len(TARGET_NAMES)} derived target names, {len(SUBSTRATE_NAMES)} substrates).")
     if healed:
         print(f"[note] {len(healed)} file(s) in {SUBSTRATE_RATCHET.name} no longer name a substrate; delete "
               f"their lines: {', '.join(healed)}")
+    if tok_healed:
+        print(f"[note] {len(tok_healed)} file(s) in {TOKEN_RATCHET.name} no longer name a target in an identifier "
+              f"or string; delete their lines: {', '.join(tok_healed)}")
     print(f"[DEBT] {n_allow} allowlisted file(s) still name a target, and {n_coupling} dependency(ies) on "
           f"a specific target sit in modules whose own name claims to be generic (--coupling to list). "
           f"Both counts may only fall.")
     if carried:
         print(f"[DEBT] {carried} generic file(s) still name a board/simulator/unit ({SUBSTRATE_RATCHET.name}); "
               f"the list may only shrink.")
+    if tok_carried:
+        print(f"[DEBT] {tok_carried} file(s) still name a target in an identifier or string "
+              f"({TOKEN_RATCHET.name}); the list may only shrink.")
     return 0
 
 

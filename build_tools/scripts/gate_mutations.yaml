@@ -19,6 +19,17 @@
 # A gate that is not here must be listed in `mutation_proof_ratchet.txt`, which may only shrink.
 
 proofs:
+  check_no_target_name.py:
+    proof: merlin/tests/infra/test_overfit_gates.py::test_a_target_identifier_planted_in_a_clean_module_fails_the_gate
+    mutation: >-
+      Point the real gate's main at one core module, first byte-identical to the tracked clean file and
+      then with a module-level identifier FOO_SATURN_X appended, and assert the exit status flips from
+      0 to 1 with the identifier named in the report.
+    removes: >-
+      Every way the planted line could pass: it is an identifier, not a string literal, so only the
+      tokenized check can see it; the module's path names no target, so path ownership cannot excuse
+      it; the file is in neither the allowlist nor the token ratchet; the line carries no target-ok
+      marker; and the clean run returning 0 proves nothing else in the file was already failing.
   check_opset_coverage.py:
     proof: merlin/tests/infra/test_opset_coverage_gate_can_fail.py::test_an_unclassified_operation_changes_the_real_gate_verdict
     mutation: >-

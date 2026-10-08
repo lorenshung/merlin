@@ -30,7 +30,6 @@ build_tools/scripts/check_no_holdout_names.py
 build_tools/scripts/check_no_local_paths.py
 build_tools/scripts/check_no_public_port_bindings.py
 build_tools/scripts/check_no_regex.py
-build_tools/scripts/check_no_target_name.py
 build_tools/scripts/check_opcode_documentation.py
 build_tools/scripts/check_oracle_blind_spots.py
 build_tools/scripts/check_overfit_register.py

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -108,3 +109,110 @@ def test_the_lift_detector_reports_the_live_tree_without_enforcing(gate):
     assert gate.main(["--coupling"]) == 0
     for line in gate.lift_candidates():
         assert line.endswith("audit for a lift")
+
+
+# ------------------------------------------------------------------ the token check
+# Identifiers and the text a program emits, case-insensitively. The literal check above reads only
+# lower-case whole-identifier string constants, which is how `SATURN_BENCHES`, `class SaturnBench` and
+# "a bare-metal Saturn ELF" sat in the core with the gate green.
+def _token_hits(gate, path, names=None):
+    return [(kind, name) for _ln, name, kind, _snip in gate._scan_tokens(path, names)]
+
+
+def test_the_token_check_catches_a_target_inside_an_identifier(gate, tmp_path):
+    src = tmp_path / "generic.py"
+    src.write_text("FOO_SATURN_X = 1\nclass SaturnBench:\n    pass\n", encoding="utf-8")
+    assert _token_hits(gate, src) == [("identifier", "saturn"), ("identifier", "saturn")]
+
+
+def test_the_token_check_reads_program_text_case_insensitively(gate, tmp_path):
+    src = tmp_path / "generic.py"
+    src.write_text(
+        'MSG = "a bare-metal Saturn ELF"\nENV = "MERLIN_MUON_CONFIG"\nREF = f"from radiance-kernels {MSG}"\n',
+        encoding="utf-8",
+    )
+    assert _token_hits(gate, src) == [("string", "saturn"), ("string", "muon"), ("string", "radiance")]
+
+
+def test_the_token_check_leaves_comments_and_docstrings_to_review(gate, tmp_path):
+    src = tmp_path / "generic.py"
+    src.write_text(
+        '"""Measured on saturn: 26055 cycles."""\n'
+        "# the gemmini mesh drains here\n"
+        "def f():\n"
+        '    """Atlas example."""\n'
+        '    "a bare prose statement about Radiance"\n'
+        "    return 1\n",
+        encoding="utf-8",
+    )
+    assert gate._scan_tokens(src) == []
+
+
+def test_the_token_check_reports_the_most_specific_target(gate, tmp_path):
+    src = tmp_path / "generic.py"
+    src.write_text("MX_GEMMINI_ROUTE = 1\n", encoding="utf-8")
+    assert _token_hits(gate, src) == [("identifier", "mx_gemmini")]
+
+
+def test_the_token_check_honours_the_marker_on_the_tokens_own_line(gate, tmp_path):
+    src = tmp_path / "generic.py"
+    src.write_text(f'ENV = "MERLIN_MUON_CONFIG"  {gate.INLINE_MARKER} the variable a gate hunts\n', encoding="utf-8")
+    assert gate._scan_tokens(src) == []
+
+
+def test_a_word_that_merely_contains_a_target_is_not_one(gate, tmp_path):
+    """Whole WORDS, not substrings: `irradiance` and `saturnine` name no target."""
+    src = tmp_path / "generic.py"
+    src.write_text('irradiance = "saturnine"\n', encoding="utf-8")
+    assert gate._scan_tokens(src) == []
+
+
+def test_a_path_owns_the_targets_its_words_name(gate):
+    assert gate._token_owned("merlin/contract/external/gsim/model_build/gsim_gemmini_cmd_encode.py", "gemmini")
+    assert gate._token_owned("src/merlin/targetgen/mx_gemmini_route.py", "mx_gemmini")
+    assert not gate._token_owned("src/merlin/targetgen/mx_oracle.py", "mx_gemmini")
+    assert not gate._token_owned("src/merlin/kernels/bench_ceiling.py", "saturn")
+
+
+def test_the_token_check_uses_the_derived_roster(gate, tmp_path):
+    """No new hand-kept list: a target declared only in a registry is caught in an identifier."""
+    roster = importlib.util.spec_from_file_location("_target_roster_t", GATE.parent / "_target_roster.py")
+    module = importlib.util.module_from_spec(roster)
+    roster.loader.exec_module(module)
+    (tmp_path / "examples" / "dev").mkdir(parents=True)
+    (tmp_path / "examples" / "dev" / "experiment.yaml").write_text("target: blk_hw\n", encoding="utf-8")
+    names = frozenset(module.target_names(tmp_path))
+    src = tmp_path / "generic.py"
+    src.write_text("FOO_BLK_HW_X = 1\n", encoding="utf-8")
+    assert _token_hits(gate, src, names) == [("identifier", "blk_hw")]
+    assert gate.TARGET_NAMES == frozenset(
+        (module.target_names(repo_root()) | gate.RESIDUAL_NAMES) - gate.REFERENCE_DEFAULTS
+    )
+
+
+def test_mutating_a_clean_core_module_with_a_target_identifier_is_caught(gate, tmp_path):
+    """MUTATION: the live module this gate was tightened for is clean; one planted identifier is not."""
+    rel = "src/merlin/kernels/bench_ceiling.py"
+    live = repo_root() / rel
+    assert gate.token_hits(rel) == []
+    mutant = tmp_path / "bench_ceiling.py"
+    mutant.write_text(live.read_text(encoding="utf-8") + "\nFOO_SATURN_X = 1\n", encoding="utf-8")
+    hits = gate._scan_tokens(mutant)
+    assert [(kind, name, snip) for _ln, name, kind, snip in hits] == [("identifier", "saturn", "FOO_SATURN_X")]
+
+
+def test_a_target_identifier_planted_in_a_clean_module_fails_the_gate(gate, tmp_path, monkeypatch, capsys):
+    """MUTATION, at the VERDICT: the gate's own ``main`` passes the clean module and fails it once an
+    identifier naming a target is planted -- the spelling the literal check let through."""
+    rel = "src/merlin/kernels/bench_ceiling.py"
+    clean = (repo_root() / rel).read_text(encoding="utf-8")
+    module = tmp_path / rel
+    module.parent.mkdir(parents=True)
+    monkeypatch.setattr(gate, "ROOT", tmp_path)
+    monkeypatch.setattr(gate, "_iter_targets", lambda staged: [Path(rel)])
+    module.write_text(clean, encoding="utf-8")
+    assert gate.main([]) == 0
+    module.write_text(clean + "\nFOO_SATURN_X = 1\n", encoding="utf-8")
+    capsys.readouterr()
+    assert gate.main([]) == 1
+    assert "FOO_SATURN_X" in capsys.readouterr().out
