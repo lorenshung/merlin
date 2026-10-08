@@ -862,7 +862,7 @@ def audit_candidate_static_tiers(
         cb = json.loads(_read_pinned_payload(emission, "command_buffer").decode("utf-8"))
         lowered = _read_pinned_payload(emission, "lowered_mlir").decode("utf-8")
         source = _read_pinned_payload(emission, "source_interface").decode("utf-8")
-        ok, reason = is_executable_emission(cb, artifact_text=lowered)
+        ok, reason = is_executable_emission(cb, artifact_text=lowered, entry_symbol=entry_symbol)
         if not ok:
             raise NativeModelExecutionError(reason)
         placement = audit_candidate_source_placement(emission, certificate, target=target)
@@ -1199,7 +1199,10 @@ def execute_candidate_model(
         cb = json.loads(json.dumps(command_buffer))
         if (cb.get("kernel_abi") or {}).get("kind") != "whole_program":
             raise NativeModelExecutionError("candidate did not declare a whole_program pointer ABI")
-        ok, reason = is_executable_emission(cb, artifact_text=lowered_mlir_text)
+        from merlin.runtime.backends import base as backends
+
+        entry_symbol = backends.harness_build_recipe(target).require_kernel_stack_frame().entry_symbol
+        ok, reason = is_executable_emission(cb, artifact_text=lowered_mlir_text, entry_symbol=entry_symbol)
         if not ok:
             raise NativeModelExecutionError(reason)
         abi = cb["kernel_abi"]
@@ -1249,7 +1252,7 @@ def execute_candidate_model(
         record["candidate"] = {
             "command_buffer_sha256": hashlib.sha256(json.dumps(cb, sort_keys=True).encode()).hexdigest(),
             "lowered_mlir_sha256": hashlib.sha256(lowered_mlir_text.encode()).hexdigest(),
-            "entry_arity": emitted_entry_arity(lowered_mlir_text),
+            "entry_arity": emitted_entry_arity(lowered_mlir_text, entry_symbol=entry_symbol),
             "abi_args": len(abi["args"]),
         }
         from merlin.runtime.route_quality import (
@@ -1260,7 +1263,8 @@ def execute_candidate_model(
 
         scratch = tuple(binding["source_entry_binding"]["source_owned_mutables"])
         service = _build_service_for(target, source_owned_mutables=scratch or None)
-        entry_symbol = service.recipe.require_kernel_stack_frame().entry_symbol
+        if service.recipe.require_kernel_stack_frame().entry_symbol != entry_symbol:
+            raise NativeModelExecutionError("selected entry symbol changed during candidate source binding")
         host_report = _host_compute_report(cb, lowered_mlir_text, entry_symbol=entry_symbol)
         record["host_compute"] = host_report.to_dict()
         try:
@@ -1277,8 +1281,13 @@ def execute_candidate_model(
         record["host_build_sources"] = [{"path": p, "sha256": digest} for p, digest in service.source_pins]
         policy_kwargs = {"readback_policy": readback_policy} if readback_policy is not None else {}
         elf = compile_lowered_to_elf(
-            cb, lowered_mlir_text, output / "build", target=target, inputs=inputs,
-            _build_service=service, **policy_kwargs,
+            cb,
+            lowered_mlir_text,
+            output / "build",
+            target=target,
+            inputs=inputs,
+            _build_service=service,
+            **policy_kwargs,
         )
         if readback_policy is not None:
             from merlin.targetgen.contract.readback_policy import (
@@ -1290,10 +1299,14 @@ def execute_candidate_model(
             recipe_record, source_pins = selected_build_inputs(target, service.recipe.with_effective_abi(), service)
             record["readback_build"] = require_build_receipt(
                 output / "build" / BUILD_RECEIPT,
-                policy=readback_policy, cb=cb, target=target,
-                recipe_record=recipe_record, source_pins=source_pins,
+                policy=readback_policy,
+                cb=cb,
+                target=target,
+                recipe_record=recipe_record,
+                source_pins=source_pins,
                 object_path=output / "build" / "kernel.o",
-                harness_path=output / "build" / "harness.c", elf_path=elf,
+                harness_path=output / "build" / "harness.c",
+                elf_path=elf,
             )
         record["elf"] = _digest(Path(elf))
         revalidate_source()
@@ -1332,10 +1345,15 @@ def execute_candidate_model(
                 if (recipe_now, sources_now) != (recipe_record, source_pins):
                     raise NativeModelExecutionError("full-value build inputs changed during L2 execution")
                 require_build_receipt(
-                    output / "build" / BUILD_RECEIPT, policy=readback_policy, cb=cb, target=target,
-                    recipe_record=recipe_record, source_pins=source_pins,
+                    output / "build" / BUILD_RECEIPT,
+                    policy=readback_policy,
+                    cb=cb,
+                    target=target,
+                    recipe_record=recipe_record,
+                    source_pins=source_pins,
                     object_path=output / "build" / "kernel.o",
-                    harness_path=output / "build" / "harness.c", elf_path=elf,
+                    harness_path=output / "build" / "harness.c",
+                    elf_path=elf,
                 )
             functional_path = output / "console_l2.txt"
             functional_path.write_text(functional_console, encoding="utf-8")
@@ -1396,10 +1414,15 @@ def execute_candidate_model(
             if (recipe_now, sources_now) != (recipe_record, source_pins):
                 raise NativeModelExecutionError("full-value build inputs changed during L3 execution")
             require_build_receipt(
-                output / "build" / BUILD_RECEIPT, policy=readback_policy, cb=cb, target=target,
-                recipe_record=recipe_record, source_pins=source_pins,
+                output / "build" / BUILD_RECEIPT,
+                policy=readback_policy,
+                cb=cb,
+                target=target,
+                recipe_record=recipe_record,
+                source_pins=source_pins,
                 object_path=output / "build" / "kernel.o",
-                harness_path=output / "build" / "harness.c", elf_path=elf,
+                harness_path=output / "build" / "harness.c",
+                elf_path=elf,
             )
         console_path = output / "console.txt"
         console_path.write_text(console, encoding="utf-8")

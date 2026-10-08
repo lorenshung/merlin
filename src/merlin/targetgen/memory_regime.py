@@ -454,6 +454,8 @@ def reduction_depth_regimes(
     dtype: str | None = None,
     m_tiles: int = 1,
     n_tiles: int = 1,
+    m_extent: int | None = None,
+    n_extent: int | None = None,
     points_per_regime: int = 2,
     spills_max_fraction: float = 2.0,
     store=None,
@@ -470,7 +472,9 @@ def reduction_depth_regimes(
     a one-point extrapolation dressed as a fit.
 
     ``K`` is the only varied axis: see :func:`deep_k_rows` for why. Points are spread evenly across each
-    band's reachable tile multiples rather than taken from its edge.
+    band's reachable tile multiples rather than taken only from its edge. ``m_extent`` and ``n_extent``
+    may preserve exact captured parallel extents, including tails; the older tile-multiple form remains
+    available for generic machine-law sweeps.
 
     Returns ``{"by_regime": {regime: {"points": [...], "unreachable": reason-or-None}}, ...}``. A regime
     with no reachable shape returns its REASON, never an empty list with no explanation: an unreachable
@@ -478,13 +482,20 @@ def reduction_depth_regimes(
     """
     if store is None and capacity is None:
         store, capacity = operand_store(target, dtype=dtype)
+    if (m_extent is None) != (n_extent is None):
+        raise ValueError("exact parallel extents must supply both M and N")
+    if m_extent is not None and (
+        type(m_extent) is not int or m_extent < 1 or type(n_extent) is not int or n_extent < 1
+    ):
+        raise ValueError("exact parallel extents must be positive integers")
     wanted = [str(r) for r in (regimes if regimes is not None else ORDER)]
     tile = int(tile_dim or 0)
+    exact_parallel = m_extent is not None
     out: dict = {
         "capacity_rows": int(capacity) if capacity else None,
         "tile_dim": tile or None,
-        "m_tiles": int(m_tiles),
-        "n_tiles": int(n_tiles),
+        "m_tiles": None if exact_parallel else int(m_tiles),
+        "n_tiles": None if exact_parallel else int(n_tiles),
         "by_regime": {},
     }
     if store is None or not capacity or tile < 1:
@@ -496,7 +507,8 @@ def reduction_depth_regimes(
         out["by_regime"] = {r: {"points": [], "unreachable": why} for r in wanted}
         return out
 
-    m_extent, n_extent = tile * int(m_tiles), tile * int(n_tiles)
+    if not exact_parallel:
+        m_extent, n_extent = tile * int(m_tiles), tile * int(n_tiles)
     out["m_extent"], out["n_extent"] = m_extent, n_extent
 
     def rows_at(mult: int):

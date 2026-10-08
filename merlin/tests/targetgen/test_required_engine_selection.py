@@ -14,6 +14,13 @@ from merlin.targetgen import oracle_policy as policy
 from merlin.targetgen import rtl_engine_policy as engines
 
 
+@pytest.fixture(autouse=True)
+def clear_mesh_simulator_cache():
+    mesh_backend._MESH_SIM_CACHE.clear()
+    yield
+    mesh_backend._MESH_SIM_CACHE.clear()
+
+
 @pytest.mark.parametrize("required", ["gsim", "  gsim\t", "verilator", "vcs"])
 def test_required_engine_only_probes_requested_engine(monkeypatch, required):
     calls = []

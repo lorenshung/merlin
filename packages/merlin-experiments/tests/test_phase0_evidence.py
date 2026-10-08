@@ -536,6 +536,15 @@ def test_selected_application_accounting_is_digest_bound_and_replayed_without_fr
     accounting = json.loads((output / "coverage/operation-accounting.json").read_bytes())
     assert accounting["overall"]["n_mlir_operations"] == 1
     assert accounting["overall"]["pytorch_provenance"]["original_pytorch_invocation_count"] is None
+    basis = json.loads((output / "coverage/performance-basis.json").read_bytes())
+    assert basis["schema"] == "merlin.phase0.performance_basis.v1"
+    assert basis["applications"]["app"]["capture_sha256"] == inventory["applications"]["app"]["capture_sha256"]
+    assert basis["applications"]["app"]["rows"][0]["ordinals"] == [0]
+    artifacts = manifest["artifacts"]
+    assert basis["sources"]["operation_accounting_sha256"] == artifacts["coverage/operation-accounting.json"]["sha256"]
+    facts_path = "hardware/effective-views/performance-facts.json"
+    assert basis["sources"]["performance_facts_artifact_sha256"] == artifacts[facts_path]["sha256"]
+    assert "coverage/performance-basis.json" in manifest["consumers"]["performance_basis"]
     assert "coverage/operation-accounting.json" in manifest["consumers"]["operation_accounting"]
     assert "hardware/effective-views/isa-taxonomy.json" in manifest["consumers"]["corpus_binding"]
     coverage_readme = (output / "coverage/README.md").read_text()
@@ -882,3 +891,72 @@ def test_an_rtl_audit_beside_the_facts_clears_only_its_own_diagnostic(monkeypatc
     assert not any(row["component"] == "rtl-audit" for row in audited.diagnostics)
     # Other reasons remain on record, so the selection is still not verified.
     assert audited.diagnostics and audited.status == "diagnostic"
+
+
+def test_explicit_contract_does_not_require_unmaterialized_default_support(monkeypatch, tmp_path):
+    _, facts_path, _ = _selection(monkeypatch, tmp_path)
+    public_contract = tmp_path / "selected-contract.yaml"
+    public_contract.write_text("name: fixture\ncompute_units: []\n")
+    absent = tmp_path / "generated-but-not-materialized"
+    absent.mkdir()
+    monkeypatch.setattr(
+        target_registry,
+        "resolve",
+        lambda _target: SimpleNamespace(
+            kind="generated", base=absent, contract_path=absent / "contracts/target_contract.yaml"
+        ),
+    )
+
+    selected = evidence.select_evidence("fixture", facts_path=facts_path, capability_contract_path=public_contract)
+
+    assert selected.contract["name"] == "fixture"
+    assert any(row["component"] == "support" and row["status"] == "unknown" for row in selected.diagnostics)
+    assert not any(source.role == "support-contract" for source in selected.source_snapshots)
+
+
+def test_explicit_contract_records_selected_provider_scaling_conflict(monkeypatch, tmp_path):
+    _, raw, code = _selection(monkeypatch, tmp_path)
+    provider_contract = code.parent / "contracts/target_contract.yaml"
+    provider_contract.write_text(
+        "name: fixture\ncompute_units:\n"
+        "- {name: unit, kind: systolic, dtypes: [int8], ops: [matmul], scaling: per_channel}\n"
+    )
+    selected_contract = tmp_path / "selected-contract.yaml"
+    selected_contract.write_text(
+        "name: fixture\ncompute_units:\n"
+        "- {name: unit, kind: systolic, dtypes: [int8], ops: [matmul], scaling: per_tensor}\n"
+    )
+
+    selected = evidence.select_evidence("fixture", capability_contract_path=selected_contract, facts_path=raw)
+    (finding,) = [row for row in selected.diagnostics if row["component"] == "support-contract"]
+    assert finding["status"] == "contradiction"
+    assert finding["unit"] == "unit"
+    assert finding["selected_scaling"] == "per_tensor"
+    assert finding["provider_scaling"] == "per_channel"
+    assert finding["selected_contract_sha256"] == evidence._digest(selected_contract.read_bytes())
+    assert finding["provider_contract_sha256"] == evidence._digest(provider_contract.read_bytes())
+    assert any(
+        source.path == provider_contract and source.sha256 == finding["provider_contract_sha256"]
+        for source in selected.source_snapshots
+    )
+
+    aligned = evidence.select_evidence("fixture", capability_contract_path=provider_contract, facts_path=raw)
+    assert not [row for row in aligned.diagnostics if row["component"] == "support-contract"]
+
+
+def test_evidence_export_cannot_write_into_private_source_snapshot(tmp_path):
+    root = tmp_path / "phase0"
+    member = root / "private/source/merlin/contract/capsules/isa/capsule.yaml"
+    with pytest.raises(ValueError, match="private source snapshot"):
+        evidence._materialize_evidence(root, {"private/source/merlin/contract/capsules/isa/capsule.yaml": b"changed"})
+    assert not member.exists()
+
+
+def test_evidence_export_cannot_follow_parent_alias_into_private_source_snapshot(tmp_path):
+    root = tmp_path / "phase0"
+    snapshot = root / "private" / "source"
+    snapshot.mkdir(parents=True)
+    (root / "software").symlink_to(snapshot, target_is_directory=True)
+    with pytest.raises(ValueError, match="traverses a symlink"):
+        evidence._materialize_evidence(root, {"software/capsule.yaml": b"changed"})
+    assert not (snapshot / "capsule.yaml").exists()

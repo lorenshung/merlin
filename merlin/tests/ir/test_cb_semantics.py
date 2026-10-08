@@ -27,9 +27,10 @@ pytestmark = pytest.mark.skipif(
 
 def _pair(m=2, k=2, n=2, reuse=2):
     """The interface program and the command buffer the in-tree pipeline produced from it."""
+    from merlin.targetgen.families import DEFAULT_EXAMPLE_TARGET
     from merlin.verify.evaluate import _finish_lowering, _lower_to_interface
 
-    iface, tc = _lower_to_interface(m, k, n, reuse)
+    iface, tc = _lower_to_interface(m, k, n, reuse, target=DEFAULT_EXAMPLE_TARGET)
     return iface, _finish_lowering(iface, tc), tc
 
 

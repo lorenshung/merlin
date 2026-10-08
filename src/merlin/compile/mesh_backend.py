@@ -25,6 +25,8 @@ def _refuse(reason: str):
 _MESH_RUN_SEQ = itertools.count()  # one run dir per mesh-layer invocation
 _MESH_PKG_CACHE: dict[str, object] = {}
 _MESH_PKG_LOCK = threading.Lock()
+_MESH_SIM_CACHE: dict[tuple[str, str | None, str | None], str] = {}
+_MESH_SIM_LOCK = threading.Lock()
 
 
 def _built_mesh_package(pkg_dir: str, timeout: int):
@@ -76,15 +78,24 @@ def _resolve_oot_mesh_simulator(target: str, simulator: str | None = None) -> st
     if required is None and requested is not None:
         return requested
 
-    from ..targetgen.oracle_policy import select_chipyard_engine as chipyard_l3_selection
+    # One whole-model build asks this for every mesh layer. The policy probes simulator
+    # availability; repeat that only when the target or caller's constraint changes.
+    key = (target, requested, required)
+    with _MESH_SIM_LOCK:
+        if key in _MESH_SIM_CACHE:
+            return _MESH_SIM_CACHE[key]
+        from ..targetgen.oracle_policy import select_chipyard_engine as chipyard_l3_selection
 
-    selected = chipyard_l3_selection(target)
-    engine = str(selected.get("engine") or "").strip()
-    if not engine:
-        raise RuntimeError(f"{target}: chipyard L3 policy returned no RTL engine")
-    if required is not None and engine != required:
-        raise RuntimeError(f"{target}: selected RTL engine {engine!r} differs from required RTL engine {required!r}")
-    return engine
+        selected = chipyard_l3_selection(target)
+        engine = str(selected.get("engine") or "").strip()
+        if not engine:
+            raise RuntimeError(f"{target}: chipyard L3 policy returned no RTL engine")
+        if required is not None and engine != required:
+            raise RuntimeError(
+                f"{target}: selected RTL engine {engine!r} differs from required RTL engine {required!r}"
+            )
+        _MESH_SIM_CACHE[key] = engine
+        return engine
 
 
 def _mesh_layer_id(m: int, k: int, n: int, binding, epilogue: list | None, acc_scale: float | None) -> str:

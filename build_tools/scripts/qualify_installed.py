@@ -70,6 +70,7 @@ SUITES = {
         "tests_root": "merlin/tests",
         "tests": (
             "runtime/test_out_b64.py",
+            "runtime/test_out_b64_profile.py",
             "targetgen/test_invocation_readback_policy.py",
             "infra/test_elf_build_cache.py",
         ),

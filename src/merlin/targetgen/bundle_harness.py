@@ -858,76 +858,43 @@ EMITTED_PROGRAM_KEY = "host_lane_program_emitted"
 # entry disagrees with the ABI it claims to implement also refuses, which is the case that would
 # otherwise link plausible-looking arithmetic onto the wrong bytes.
 
-#: Op name of a function definition in an emitted LLVM-dialect artifact, and the attribute holding
-#: its signature. Dialect spellings, not target facts.
-_ARTIFACT_FUNC_OP = '"llvm.func"'
-_ARTIFACT_SIGNATURE_ATTR = "function_type"
 
+def emitted_entry_arity(artifact_text: str, *, entry_symbol: str | None = None) -> int | None:
+    """Return the unique verified LLVM entry definition's arity, never a declaration or text match.
 
-def _matching(text: str, start: int, opener: str, closer: str) -> int:
-    """Index just past the ``closer`` matching the ``opener`` at ``start``, or ``-1``."""
-    depth = 0
-    for index in range(start, len(text)):
-        char = text[index]
-        if char == opener:
-            depth += 1
-        elif char == closer:
-            depth -= 1
-            if depth == 0:
-                return index
-    return -1
-
-
-def _top_level_parts(text: str) -> list[str]:
-    """``text`` split on commas that are not nested inside ``<>``, ``()`` or ``[]``."""
-    parts: list[str] = []
-    depth = 0
-    current: list[str] = []
-    for char in text:
-        if char in "<([":
-            depth += 1
-        elif char in ">)]":
-            depth -= 1
-        if char == "," and depth == 0:
-            parts.append("".join(current))
-            current = []
-            continue
-        current.append(char)
-    parts.append("".join(current))
-    return [part.strip() for part in parts if part.strip()]
-
-
-def emitted_entry_arity(artifact_text: str) -> int | None:
-    """Parameter count of the artifact's entry definition, or ``None`` if it defines none.
-
-    Parsed structurally (balanced-delimiter scan over the printed signature), so a signature that
-    spells its parameter types differently still counts correctly.
+    A mixed-lane builder emits both pretty ``llvm.func @entry`` and generic ``"llvm.func"`` syntax.
+    The old generic-only signature scan rejected real pretty emissions and could match a helper or
+    comment instead of the selected entry. With no selected symbol, ambiguity fails closed.
     """
     if not isinstance(artifact_text, str):
         return None
-    position = artifact_text.find(_ARTIFACT_FUNC_OP)
-    if position < 0:
+    if entry_symbol is not None and (type(entry_symbol) is not str or not entry_symbol):
         return None
-    signature_at = artifact_text.find(_ARTIFACT_SIGNATURE_ATTR, position)
-    if signature_at < 0:
+    try:
+        from xdsl.dialects import llvm
+        from xdsl.parser import Parser
+
+        from merlin.targetgen.oot_starterkit.llvm_context import make_llvm_context
+
+        module = Parser(make_llvm_context(), artifact_text).parse_module()
+        module.verify()
+        functions = [op for op in module.body.block.ops if isinstance(op, llvm.FuncOp)]
+        definitions = [
+            op for op in functions if op.body.blocks and (entry_symbol is None or op.sym_name.data == entry_symbol)
+        ]
+        if len(definitions) != 1:
+            return None
+        selected = definitions[0]
+        if sum(op.sym_name.data == selected.sym_name.data for op in functions) != 1:
+            return None
+        return len(selected.function_type.inputs)
+    except Exception:  # noqa: BLE001 — malformed/unavailable typed IR is never an emitted entry
         return None
-    angle_at = artifact_text.find("<", signature_at)
-    if angle_at < 0:
-        return None
-    angle_end = _matching(artifact_text, angle_at, "<", ">")
-    if angle_end < 0:
-        return None
-    signature = artifact_text[angle_at + 1 : angle_end]
-    paren_at = signature.find("(")
-    if paren_at < 0:
-        return None
-    paren_end = _matching(signature, paren_at, "(", ")")
-    if paren_end < 0:
-        return None
-    return len(_top_level_parts(signature[paren_at + 1 : paren_end]))
 
 
-def is_executable_emission(command_buffer: Mapping[str, Any], *, artifact_text: str | None = None) -> tuple[bool, str]:
+def is_executable_emission(
+    command_buffer: Mapping[str, Any], *, artifact_text: str | None = None, entry_symbol: str | None = None
+) -> tuple[bool, str]:
     """``(ok, why_not)`` -- whether this is an emitted, undeclined program.
 
     Pass ``artifact_text`` (the emitted target artifact) for a mixed mesh+host program: its buffer
@@ -957,7 +924,7 @@ def is_executable_emission(command_buffer: Mapping[str, Any], *, artifact_text: 
     abi = command_buffer.get("kernel_abi")
     declared = len(abi.get("args") or ()) if isinstance(abi, Mapping) else 0
     if artifact_text is not None:
-        arity = emitted_entry_arity(artifact_text)
+        arity = emitted_entry_arity(artifact_text, entry_symbol=entry_symbol)
         if arity is None:
             return False, (
                 "the emitted artifact defines no entry function, so nothing was "
@@ -988,9 +955,11 @@ def is_executable_emission(command_buffer: Mapping[str, Any], *, artifact_text: 
     )
 
 
-def require_executable_emission(command_buffer: Mapping[str, Any], *, artifact_text: str | None = None) -> None:
+def require_executable_emission(
+    command_buffer: Mapping[str, Any], *, artifact_text: str | None = None, entry_symbol: str | None = None
+) -> None:
     """Raise unless this is an emitted, undeclined program."""
-    ok, why_not = is_executable_emission(command_buffer, artifact_text=artifact_text)
+    ok, why_not = is_executable_emission(command_buffer, artifact_text=artifact_text, entry_symbol=entry_symbol)
     if not ok:
         raise BundleHarnessError(
             "refusing to render a harness for a command buffer that is not an emitted program: " + why_not

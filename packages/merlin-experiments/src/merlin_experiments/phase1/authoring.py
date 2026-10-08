@@ -12,7 +12,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -32,12 +31,10 @@ from merlin_experiments.phase1 import run_inputs as RI
 from merlin_experiments.phase1 import spend as SPEND
 from merlin_experiments.phase1 import treatments as T
 from merlin_experiments.phase1.audit import AnswerAudit
-from merlin_experiments.phase1.context import context_argv
 from merlin_experiments.phase1.feedback import certification as CERT
 from merlin_experiments.phase1.feedback import lifecycle as FL
 from merlin_experiments.phase1.feedback import loop_grading as LG
 from merlin_experiments.phase1.providers import execution as EX
-from merlin_experiments.phase1.session import task_scope
 
 if TYPE_CHECKING:
     from merlin_experiments.phase1.session import PreparedRun
@@ -246,8 +243,6 @@ def finalize_report(
 
 def execute(prepared: PreparedRun, runtime: AuthoringRuntime) -> int:
     """Continue the existing authoring/completion policy inside the caller's workspace lease."""
-    from merlin.targetgen.sandbox import bwrap as _BWS
-
     a, treatment = prepared.request.options, prepared.request.treatment
     arm = a.arm
     bundle_id = runtime.bundle_id
@@ -256,7 +251,7 @@ def execute(prepared: PreparedRun, runtime: AuthoringRuntime) -> int:
     _manifest = partial(load_capability_manifest, context.target)
     audit = AnswerAudit.for_descriptor(_te(), prepared.request.bundle_manifest.parent)
     resolved_tools = prepared.request.resolved_tools
-    ws, run_dir, bundle_dir = prepared.workspace, prepared.run_dir, prepared.bundle_dir
+    ws, run_dir = prepared.workspace, prepared.run_dir
     bundle, _environment_record = prepared.bundle, prepared.environment
     _public_root, _policy_root, _contract_root = prepared.public_root, prepared.policy_root, prepared.contract_root
     _resuming = prepared.resuming
@@ -1330,69 +1325,16 @@ def execute(prepared: PreparedRun, runtime: AuthoringRuntime) -> int:
         # authoring loop can last across worktree edits and quota-window resumes, so setup-time hashing is
         # not enough: recompute every treatment byte and the private snapshot content now, fail closed on
         # drift, and hand the grader only the already-frozen hidden path.
-        _current_scope = task_scope(_te(), a.sandbox, repo=context.repo, **_scope_roots)
-        _official_hidden_dir = None
-        if a.sandbox == "bwrap":
-            _BWS.verify_bundle_snapshot(ws, bundle, repo=context.repo)
-            _verified_snapshot_root = _BWS.bundle_snapshot_root(ws).resolve(strict=True)
-            _expected_hidden_dir = RI.hidden_snapshot_dir(_verified_snapshot_root, _te(), context.repo)
-        else:
-            _expected_hidden_dir = None
+        from . import formal_invocation
+
         try:
-            _official_hidden_dir = RI.verify_persisted_run_inputs(
-                _environment_record,
-                identity={
-                    "run_id": a.run_id,
-                    "arm": arm,
-                    "sandbox": a.sandbox,
-                    "bundle_id": bundle["bundle_id"],
-                    "condition": bundle.get("condition", "legacy"),
-                },
-                task_scope=_current_scope,
-                ws=ws,
-                run_dir=run_dir,
-                bundle_dir=bundle_dir,
-                resolved_tools=resolved_tools(),
-                expected_hidden_dir=_expected_hidden_dir,
+            grade_rc = formal_invocation.run(
+                prepared,
+                public_capsules=CERT._public_capsules(grading_inputs),
+                selected_rtl_facts=execution.selected_rtl_facts,
             )
         except RuntimeError as exc:
             raise RuntimeError(f"official grade refused: {exc}") from exc
-        _verify_implementation_sources()
-        grade_cmd = [
-            sys.executable,
-            "-m",
-            "merlin_experiments.phase1.feedback.formal",
-            *context_argv(context),
-            "--contract",
-            str(_contract_root if _contract_root is not None else context.repo / "merlin/contract"),
-            "--run-dir",
-            str(run_dir),
-            "--arm",
-            arm,
-            "--model",
-            a.model,
-            "--capsules",
-            str(CERT._public_capsules(grading_inputs)),
-        ]
-        # bwrap formal runs consume the immutable operator-only copy, never the live worktree/symlink.
-        # The unsandboxed mode is an explicit untrusted diagnostic and retains its historical live path.
-        if _official_hidden_dir is None:
-            _cc = Path(_te().capsule_corpus)
-            _official_hidden_dir = (_cc if _cc.is_absolute() else (context.repo / _cc)).parent / "hidden"
-        if _official_hidden_dir.is_dir():
-            grade_cmd += ["--hidden-capsules", str(_official_hidden_dir)]
-        if a.no_oracle:
-            grade_cmd.append("--no-oracle")
-        if prepared.private_full_model_spec is not None:
-            grade_cmd += ["--private-full-model-spec", str(prepared.private_full_model_spec)]
-        if a.skip_hidden:
-            grade_cmd.append("--skip-hidden")
-        if execution.selected_rtl_facts is not None:
-            grade_cmd += ["--workspace", str(ws), "--rtl-facts", str(execution.selected_rtl_facts)]
-        from merlin_experiments.frozen_python import inherited_python_command
-
-        grade_proc = subprocess.run(inherited_python_command(grade_cmd), cwd=str(context.repo))
-        _verify_implementation_sources()
         _manifest_path = run_dir / "run_manifest.yaml"
         if _manifest_path.is_file():
             _manifest_doc = yaml.safe_load(_manifest_path.read_text(encoding="utf-8")) or {}
@@ -1402,7 +1344,7 @@ def execute(prepared: PreparedRun, runtime: AuthoringRuntime) -> int:
         from merlin_experiments.phase1.feedback import private_full_models as PFM
 
         official_grade = CERT._official_grade_result(
-            grade_proc.returncode,
+            grade_rc,
             run_dir,
             required_models=PFM.requirements_for(context.descriptor),
             required_programs=PFM.program_requirements_for(context.descriptor),

@@ -9,9 +9,9 @@ plan. Both resolve the default backend package (``_default_oot_package``) and th
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 
+from ..targetgen.operation_numerics import integer_split_k_limit
 from .capacity import (
     _accumulator_capacity_elems,
     _capacity_fit_tile,
@@ -684,11 +684,12 @@ def run_matmul_on_mesh(
 
     so = _SIM_ORACLES.get(_bespoke_sim_via(target))
 
-    def _dispatch(_mlir, _A, _W) -> list | None:
+    def _dispatch(_mlir, _A, _W, *, _call_observed: dict | None = None) -> list | None:
         """One mesh call at whatever extent it is given."""
+        _obs = observed if _call_observed is None else _call_observed
         if so is not None and so.exclusive:
-            if observed is not None:
-                observed["path"] = "bespoke_sim"
+            if _obs is not None:
+                _obs["path"] = "bespoke_sim"
             return _matmul_via_bespoke_sim(
                 target,
                 _mlir,
@@ -697,11 +698,11 @@ def run_matmul_on_mesh(
                 package=package,
                 timeout=timeout,
                 layer_id=_mesh_layer_id(len(_A), len(_A[0]), len(_W[0]), binding, epilogue, acc_scale),
-                observed=observed,
+                observed=_obs,
             )
         if endpoint in (None, "inline_asm_insn", "upstream_target"):
-            if observed is not None:
-                observed["path"] = "oot_cert"
+            if _obs is not None:
+                _obs["path"] = "oot_cert"
             return _matmul_via_oot_cert(
                 target,
                 _mlir,
@@ -711,11 +712,11 @@ def run_matmul_on_mesh(
                 package=package,
                 layer_id=_mesh_layer_id(len(_A), len(_A[0]), len(_W[0]), binding, epilogue, acc_scale),
                 timeout=timeout,
-                observed=observed,
+                observed=_obs,
             )
         if endpoint == "external_backend":
-            if observed is not None:
-                observed["path"] = "program_oracle"
+            if _obs is not None:
+                _obs["path"] = "program_oracle"
             return _matmul_via_program_oracle(
                 target,
                 _mlir,
@@ -725,7 +726,7 @@ def run_matmul_on_mesh(
                 package=package,
                 timeout=timeout,
                 operand_dtype=binding.operand_dtype,
-                observed=observed,
+                observed=_obs,
             )
         return None  # no mesh-execution path derived for this endpoint kind
 
@@ -747,10 +748,41 @@ def run_matmul_on_mesh(
     _mt, _kt, _nt = M, K, N
     _n_sub = 1
     _tiled_by = None
+    try:
+        _integer_limit = integer_split_k_limit(numeric_policy, tile_dim=_D, full_k=K) if binding.integer else None
+    except ValueError as exc:
+        if observed is not None:
+            observed["decline"] = str(exc)
+        return None
+    if _integer_limit is not None:
+        import numpy as _np
+
+        _min_operand = -(1 << (_integer_limit["signed_operand_bits"] - 1))
+        _max_operand = (1 << (_integer_limit["signed_operand_bits"] - 1)) - 1
+        _lhs_values, _rhs_values = _np.asarray(A, dtype=_np.float64), _np.asarray(W, dtype=_np.float64)
+        if any(
+            not _np.isfinite(values).all()
+            or not _np.array_equal(values, _np.rint(values))
+            or _np.any(values < _min_operand)
+            or _np.any(values > _max_operand)
+            for values in (_lhs_values, _rhs_values)
+        ):
+            if observed is not None:
+                observed["decline"] = "selected integer mesh operands are not integral signed-width values"
+            return None
+    if _integer_limit is not None and K > _integer_limit["max_padded_k"]:
+        if _integer_limit["tile_k"] < _D:
+            if observed is not None:
+                observed["decline"] = "selected internal MAC width cannot safely execute one padded mesh tile"
+            return None
+        _kt = _integer_limit["tile_k"]
+        _tiled_by = "internal_mac_width"
     _acc_cap = _accumulator_capacity_elems(target, binding.accum_dtype)
     if _cap:
-        _mt, _kt, _nt, _n_sub = _capacity_fit_tile(M, K, N, max(1, _D), _cap, _acc_cap)
-        _tiled_by = "capacity"
+        _cm, _ck, _cn, _n_sub = _capacity_fit_tile(M, K, N, max(1, _D), _cap, _acc_cap)
+        _mt, _kt, _nt = _cm, min(_kt, _ck), _cn
+        if (_cm, _ck, _cn) != (M, K, N):
+            _tiled_by = "capacity_and_internal_mac_width" if _tiled_by else "capacity"
     else:
         # NO CLASSIFIABLE OPERAND STORE -> the capacity tiler cannot even be evaluated, and this branch
         # used to end there: the whole extent went to a backend that may implement one tile, which
@@ -761,9 +793,15 @@ def run_matmul_on_mesh(
         if _decl:
             _dm, _dk, _dn = (max(1, min(v, e)) for v, e in zip(_decl, (M, K, N)))
             if (_dm, _dk, _dn) != (M, K, N):
-                _mt, _kt, _nt = _dm, _dk, _dn
+                _mt, _kt, _nt = _dm, min(_kt, _dk), _dn
                 _n_sub = (-(-M // _mt)) * (-(-K // _kt)) * (-(-N // _nt))
-                _tiled_by = "declared_primitive_tile"
+                _tiled_by = "declared_primitive_tile_and_internal_mac_width" if _tiled_by else "declared_primitive_tile"
+    if _integer_limit is not None and ((_kt + _D - 1) // _D) * _D > _integer_limit["max_padded_k"]:
+        _kt = (_integer_limit["max_padded_k"] // _D) * _D
+        if _kt < 1:
+            if observed is not None:
+                observed["decline"] = "selected integer tile cannot meet both residency and padded MAC bounds"
+            return None
     if (_mt, _kt, _nt) != (M, K, N):
         if epilogue:
             if observed is not None:
@@ -779,9 +817,12 @@ def run_matmul_on_mesh(
             return None
         import numpy as _np
 
-        _An, _Wn = _np.asarray(A, dtype=_np.float64), _np.asarray(W, dtype=_np.float64)
-        _acc = _np.zeros((M, N), dtype=_np.float64)
+        _dtype = _np.int64 if _integer_limit is not None else _np.float64
+        _An, _Wn = _np.asarray(A, dtype=_dtype), _np.asarray(W, dtype=_dtype)
+        _acc = _np.zeros((M, N), dtype=_np.int64 if _integer_limit is not None else _np.float64)
         _sub_mlir: dict[tuple[int, int, int], str] = {}
+        _primitive_calls: list[dict] = []
+        _n_sub = (-(-M // _mt)) * (-(-K // _kt)) * (-(-N // _nt))
         if observed is not None:
             # ATTRIBUTION. The runtime is discharging an obligation the contract places on the TARGET
             # BACKEND. Blocking here keeps whole-model work moving, but a result produced this way is
@@ -832,6 +873,9 @@ def run_matmul_on_mesh(
                     f"host) and the layer's numerics are not what the device alone would give."
                 ),
             }
+            if _tiled_by == "internal_mac_width":
+                # A numeric split does not discharge a capacity-fit obligation.
+                observed.pop("capacity_fit", None)
         for m0 in range(0, M, _mt):
             for n0 in range(0, N, _nt):
                 for k0 in range(0, K, _kt):
@@ -840,10 +884,63 @@ def run_matmul_on_mesh(
                     shp = (a.shape[0], a.shape[1], w.shape[1])
                     if shp not in _sub_mlir:
                         _sub_mlir[shp] = _build(*shp)
-                    part = _dispatch(_sub_mlir[shp], a.tolist(), w.tolist())
+                    _call_obs: dict = {}
+                    part = _dispatch(_sub_mlir[shp], a.tolist(), w.tolist(), _call_observed=_call_obs)
                     if part is None:
+                        if observed is not None:
+                            observed["decline"] = _call_obs.get("decline", "mesh primitive did not complete")
                         return None  # fail closed: a partial sum is not a result
-                    _acc[m0 : m0 + a.shape[0], n0 : n0 + w.shape[1]] += _np.asarray(part, dtype=_np.float64)
+                    _part = _np.asarray(part, dtype=_np.float64)
+                    if _part.shape != (a.shape[0], w.shape[1]) or not _np.isfinite(_part).all():
+                        if observed is not None:
+                            observed["decline"] = "mesh primitive returned malformed partial-result shape or values"
+                        return None
+                    if _integer_limit is not None:
+                        if not _np.array_equal(_part, _np.rint(_part)):
+                            if observed is not None:
+                                observed["decline"] = "integer mesh primitive returned a non-integral partial result"
+                            return None
+                        if (
+                            _np.any(_part < -(1 << 31))
+                            or _np.any(_part > (1 << 31) - 1)
+                            or _np.any(_np.abs(_part) > shp[1] * _integer_limit["maximum_product"])
+                        ):
+                            if observed is not None:
+                                observed["decline"] = "integer mesh primitive exceeds its exact i32/K bound"
+                            return None
+                        _part = _part.astype(_np.int64)
+                    _acc[m0 : m0 + a.shape[0], n0 : n0 + w.shape[1]] += _part
+                    if _integer_limit is not None:
+                        _primitive_calls.append(
+                            {
+                                "offsets": [m0, k0, n0],
+                                "shape": list(shp),
+                                "worst_case_padded_shape": [_up(axis) for axis in shp],
+                                "oracle_evidence": _call_obs.get("oracle_evidence"),
+                                "trace_check": _call_obs.get("trace_check"),
+                                "artifact_identity": _call_obs.get("artifact_identity"),
+                                "cert_run_id": _call_obs.get("cert_run_id"),
+                            }
+                        )
+                    if observed is not None:
+                        observed.update(_call_obs)
+        if _integer_limit is not None:
+            if _np.any(_acc < -(1 << 31)) or _np.any(_acc > (1 << 31) - 1):
+                if observed is not None:
+                    observed["decline"] = "integer mesh split exceeded i32 after exact aggregation"
+                return None
+            if observed is not None:
+                observed["integer_split_k"] = {
+                    "schema": "merlin.integer_split_k.v1",
+                    "padded_shape": [M, K, N],
+                    "mesh_tile_dim": _D,
+                    "tile": [_mt, _kt, _nt],
+                    "max_padded_k_per_dispatch": _integer_limit["max_padded_k"],
+                    "mac_result_bits": _integer_limit["mac_result_bits"],
+                    "signed_operand_bits": _integer_limit["signed_operand_bits"],
+                    "aggregation": "exact_i64_sum_checked_i32_before_epilogue",
+                    "primitive_calls": _primitive_calls,
+                }
         return _unpad(_acc.tolist())
 
     # EVALUATE THE OBLIGATION ON EVERY MESH PATH, not just one of them. This check used to sit inside
@@ -867,6 +964,43 @@ def run_matmul_on_mesh(
         except Exception:  # noqa: BLE001 — unresolvable target: no obligation known
             pass
     out = _dispatch(mlir, A, W)
+    if out is not None and _integer_limit is not None and not epilogue:
+        import numpy as _np
+
+        _array = _np.asarray(out, dtype=_np.float64)
+        if (
+            _array.shape != (M, N)
+            or not _np.isfinite(_array).all()
+            or not _np.array_equal(_array, _np.rint(_array))
+            or _np.any(_array < -(1 << 31))
+            or _np.any(_array > (1 << 31) - 1)
+            or _np.any(_np.abs(_array) > K * _integer_limit["maximum_product"])
+        ):
+            if observed is not None:
+                observed["decline"] = "integer mesh direct primitive exceeds its exact i32/K bound"
+            return None
+        if observed is not None:
+            observed["integer_split_k"] = {
+                "schema": "merlin.integer_split_k.v1",
+                "padded_shape": [M, K, N],
+                "mesh_tile_dim": _D,
+                "tile": [M, K, N],
+                "max_padded_k_per_dispatch": _integer_limit["max_padded_k"],
+                "mac_result_bits": _integer_limit["mac_result_bits"],
+                "signed_operand_bits": _integer_limit["signed_operand_bits"],
+                "aggregation": "exact_i64_sum_checked_i32_before_epilogue",
+                "primitive_calls": [
+                    {
+                        "offsets": [0, 0, 0],
+                        "shape": [M, K, N],
+                        "worst_case_padded_shape": [M, K, N],
+                        "oracle_evidence": observed.get("oracle_evidence"),
+                        "trace_check": observed.get("trace_check"),
+                        "artifact_identity": observed.get("artifact_identity"),
+                        "cert_run_id": observed.get("cert_run_id"),
+                    }
+                ],
+            }
     if out is not None or _tiled:
         return _unpad(out)  # already a tile of a split layer: do not recurse further
     # Past the return above, the mesh DECLINED this extent. Name why, before either tiler is tried:

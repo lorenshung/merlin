@@ -3,6 +3,55 @@
 from __future__ import annotations
 
 
+def integer_split_k_limit(numeric_policy: dict | None, *, tile_dim: int, full_k: int) -> dict | None:
+    """Derive the worst-case signed-integer primitive K from selected arithmetic.
+
+    This is a target-neutral numerical obligation shared by capture selection and
+    actual mesh dispatch. A full contraction may need several bounded primitive
+    tiles, followed by exact i32 aggregation before its epilogue. The caller
+    must separately establish that the declaration was reviewed and that a
+    compiler performs the split; this calculation proves neither.
+    """
+    semantics = (numeric_policy or {}).get("numerical_semantics") or {}
+    internal = semantics.get("internal_arithmetic") or {}
+    if not internal:
+        return None
+    if internal.get("full_operation_overflow_policy") != "bounded_exact_requires_each_partial_sum":
+        raise ValueError("integer mesh has no supported selected partial-sum policy")
+    operand_bits = internal.get("signed_operand_bits")
+    mac_bits = internal.get("mac_result_bits")
+    if (
+        type(operand_bits) is not int
+        or type(mac_bits) is not int
+        or not 2 <= operand_bits <= 32
+        or not 2 <= mac_bits <= 64
+        or semantics.get("accumulator_dtype") not in {"i32", "int32"}
+        or internal.get("mac_result_overflow") != f"wrap_to_{mac_bits}_bits"
+        or type(tile_dim) is not int
+        or tile_dim < 1
+        or type(full_k) is not int
+        or full_k < 1
+    ):
+        raise ValueError("integer mesh has unsupported selected MAC/accumulator arithmetic")
+    maximum_operand = 1 << (operand_bits - 1)
+    maximum_product = maximum_operand * maximum_operand
+    full_bound = full_k * maximum_product
+    if full_bound > (1 << 31) - 1:
+        raise ValueError("integer mesh full contraction may exceed exact i32 aggregation")
+    limit = ((1 << (mac_bits - 1)) - 1) // maximum_product
+    aligned = (limit // tile_dim) * tile_dim
+    return {
+        "max_true_k": limit,
+        "max_padded_k": limit,
+        "tile_k": aligned,
+        "full_result_bound": full_bound,
+        "mac_result_bits": mac_bits,
+        "signed_operand_bits": operand_bits,
+        "maximum_product": maximum_product,
+        "aggregation": "exact_integer_sum_before_epilogue",
+    }
+
+
 def integer_partial_sum_bound(
     semantics: dict, *, reduction_extent: int, lhs_values, rhs_values, initial_values=()
 ) -> dict:

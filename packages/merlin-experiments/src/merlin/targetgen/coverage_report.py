@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 from .capsule_common import tier_status as _tier_status
 
@@ -189,9 +188,10 @@ def _acceleratable_coverage(results: list[dict], cap_by_name: dict, target: str 
     map (target declares no ``semantic_capabilities`` yet) yields an honest all-ineligible, recall=None
     result rather than a fake 1.0."""
     from . import eligibility as _el
-    from .runner_config import conventional_tier_sim
 
-    sim_tiers = tuple(conventional_tier_sim())  # tiers that run the emitted artifact on a simulator
+    tier_sim, _, policy_error = _selected_tiers(target)
+    policy_known = policy_error is None
+    sim_tiers = tuple(tier_sim) if policy_known else ()
     cap_map: dict = {}
     undetermined: frozenset = frozenset()
     if target:
@@ -250,13 +250,13 @@ def _acceleratable_coverage(results: list[dict], cap_by_name: dict, target: str 
         # must_accelerate contract: an ELIGIBLE region declared must_accelerate that did NOT reach the
         # accelerator is a violation — the fallback escape hatch cannot hide an emit-layer gap. An
         # ineligible region (or one with must_accelerate unset / fallback_allowed) legitimately falls back.
-        violated = must and eligible and not accelerated
+        violated = policy_known and must and eligible and not accelerated
         per_capsule.append(
             {
                 "capsule": r["capsule"],
                 "semantic_family": family,
                 "eligible": eligible,
-                "accelerated": accelerated,
+                "accelerated": accelerated if policy_known else None,
                 "must_accelerate": must,
                 "must_accelerate_violated": violated,
                 "reason": reason,
@@ -315,7 +315,7 @@ def _acceleratable_coverage(results: list[dict], cap_by_name: dict, target: str 
         # `family is not None`: an UNCLASSIFIED region is still excluded, because "our taxonomy has no
         # word for this op" is a gap in our vocabulary and is already reported as `n_unclassified` --
         # reporting it as a decline would put the blame on the hardware.
-        if must and not eligible and not accelerated and family is not None:
+        if policy_known and must and not eligible and not accelerated and family is not None:
             declined_offload.append(
                 {
                     "capsule": r["capsule"],
@@ -333,15 +333,16 @@ def _acceleratable_coverage(results: list[dict], cap_by_name: dict, target: str 
             n_eligible += 1
             if accelerated:
                 n_eligible_accelerated += 1
-            else:
+            elif policy_known:
                 false_fallback.append(r["capsule"])
 
     by_generalization_axis = {
-        axis: {**b, "recall": _ratio(b["n_eligible_accelerated"], b["n_eligible"])}
+        axis: {**b, "recall": _ratio(b["n_eligible_accelerated"], b["n_eligible"]) if policy_known else None}
         for axis, b in sorted(by_axis.items())
     }
 
     return {
+        "acceleration_policy": {"status": "selected" if policy_known else "unknown", "reason": policy_error},
         "denominator_source": "semantic_capabilities (independent eligibility oracle)",
         "n_eligible": n_eligible,
         # Regions whose family no evidence source could decide. In NEITHER the numerator nor the
@@ -363,7 +364,7 @@ def _acceleratable_coverage(results: list[dict], cap_by_name: dict, target: str 
         # have only two of them reachable standalone, in which case the headline ratio is a statement
         # about those two and nothing else.
         "by_family": {
-            f: {**b, "recall": _ratio(b["n_eligible_accelerated"], b["n_eligible"])}
+            f: {**b, "recall": _ratio(b["n_eligible_accelerated"], b["n_eligible"]) if policy_known else None}
             for f, b in sorted(by_family.items())
         },
         "fused_only_families": fused_only,
@@ -376,7 +377,7 @@ def _acceleratable_coverage(results: list[dict], cap_by_name: dict, target: str 
         "declared_unexercised_families": sorted(set(cap_map) - set(by_family)),
         "false_fallback": false_fallback,
         "must_accelerate_violations": must_accelerate_violations,
-        "must_accelerate_pass": not must_accelerate_violations,
+        "must_accelerate_pass": policy_known and not must_accelerate_violations,
         # Reported, never scored: a declined offload is correct behaviour whose COST is the thing
         # worth seeing. Distinguishing it from acceleration is the whole point -- see the comment at
         # the append site for why `must_accelerate` cannot carry this.
@@ -392,7 +393,7 @@ def _acceleratable_coverage(results: list[dict], cap_by_name: dict, target: str 
             for ax in DECLINE_AXES
             if any(d["declined_on"] == ax for d in declined_offload)
         },
-        "acceleratable_region_recall": _ratio(n_eligible_accelerated, n_eligible),
+        "acceleratable_region_recall": _ratio(n_eligible_accelerated, n_eligible) if policy_known else None,
         # The floor under the headline. `n_undetermined` regions are the ones whose family no rung of
         # the evidence ladder could decide; by design they leave BOTH sides of the ratio, because
         # scoring them either way would move ARR for a reason about our evidence rather than about the
@@ -400,8 +401,10 @@ def _acceleratable_coverage(results: list[dict], cap_by_name: dict, target: str 
         # undecidable region silently shrinks the denominator, and a shrinking denominator RAISES
         # recall. Charging them all to the denominator does not score them -- it brackets them, so a
         # target whose evidence is thin reads as a WIDE range instead of a high number.
-        "acceleratable_region_recall_lower_bound": _ratio(n_eligible_accelerated, n_eligible + n_undetermined),
-        "acceleration_precision": _ratio(n_accel_eligible, n_accelerated),
+        "acceleratable_region_recall_lower_bound": (
+            _ratio(n_eligible_accelerated, n_eligible + n_undetermined) if policy_known else None
+        ),
+        "acceleration_precision": _ratio(n_accel_eligible, n_accelerated) if policy_known else None,
         "by_generalization_axis": by_generalization_axis,
         "per_capsule": per_capsule,
     }
@@ -476,6 +479,26 @@ def _axes(baseline: list[str], observed) -> list[str]:
     return [*baseline, *extra]
 
 
+def _selected_tiers(target: str | None) -> tuple[dict[str, str], frozenset[str], str | None]:
+    """Read selected simulator/RTL tiers, or explain why their identities are unknown."""
+    if not target:
+        return {}, frozenset(), "target not supplied"
+    try:
+        from .target_experiment import load_capability_manifest
+
+        manifest = load_capability_manifest(target)
+        tier_sim = dict(manifest.tier_sim)
+        rtl_tiers = frozenset(manifest.rtl_tiers)
+    except Exception as exc:  # noqa: BLE001 — unknown policy is reported as unknown, never guessed
+        return {}, frozenset(), f"{type(exc).__name__}: {exc}"
+    return tier_sim, rtl_tiers, None
+
+
+def _observed_oracle_tiers(results: list[dict]) -> set[str]:
+    """Observed graded tiers beyond the local golden and reference checks."""
+    return {tier for row in results for tier in (row.get("tiers") or {}) if tier not in {"L0", "L1"}}
+
+
 def aggregate(
     results: list[dict],
     capsules: list[dict] | None = None,
@@ -501,7 +524,8 @@ def aggregate(
 
     by_kind: dict[str, int] = {}
     by_label: dict[str, int] = {}
-    by_tier_reached = {t: 0 for t in TIERS}
+    report_tiers = _axes(TIERS, {tier for row in results for tier in (row.get("tiers") or {})})
+    by_tier_reached = {t: 0 for t in report_tiers}
     # THIS TARGET's class axes unioned with what its traces/capsules exercised. The baseline list is one
     # machine's vocabulary, so prepending it unconditionally printed a dozen rows of another target's
     # instruction classes -- COMPUTE_PRELOADED, CONFIG_LD, LOOP_CONV -- as "not covered" on a target whose
@@ -512,20 +536,18 @@ def aggregate(
     # `conv2d` / `padded_edge` on a SIMT target are as wrong as another machine's opcodes would be.
     mode_cov = {m: 0 for m in _axes([], universe_modes)}
     class_cov = {c: 0 for c in _axes(_class_axis_baseline(target), universe_classes)}
-    # Heavy-oracle availability is tracked per heavy oracle tier; the substrate NAME for each tier is
-    # DERIVED from the canonical tier->simulator map (single source of truth in runner_config), never
-    # hardcoded as vcs/firesim here — so a target whose ladder names its heavy oracles differently is
-    # counted under its own substrate labels.
-    from .runner_config import conventional_tier_sim
-
-    _TIER_SIM = conventional_tier_sim()
-    heavy_tiers = tuple(t for t in ("L4", "L5") if t in _TIER_SIM)
-    unavail = {_TIER_SIM[t]: 0 for t in heavy_tiers}
+    # Count only this target's declared RTL tiers. When no selected manifest resolves, keep observed
+    # oracle-tier unavailability under an explicit unknown identity rather than naming another target's
+    # simulator.
+    tier_sim, rtl_tiers, policy_error = _selected_tiers(target)
+    selected = policy_error is None
+    heavy_tiers = rtl_tiers & tier_sim.keys() if selected else _observed_oracle_tiers(results)
+    unavail = {tier_sim[t]: 0 for t in heavy_tiers} if selected else {}
 
     for r in results:
         by_kind[r.get("kind", "unknown")] = by_kind.get(r.get("kind", "unknown"), 0) + 1
         by_label[r.get("label", "unknown")] = by_label.get(r.get("label", "unknown"), 0) + 1
-        for t in TIERS:
+        for t in report_tiers:
             # via the shared normalizer: a model capsule records a tier as a bare status STRING, an op
             # capsule as a dict. Reading `.get("status")` off the string raised, and only ever on a
             # submission good enough to un-gate its model capsules.
@@ -534,7 +556,8 @@ def aggregate(
             if st == "pass":
                 by_tier_reached[t] += 1
             if t in heavy_tiers and st == "unavailable":
-                unavail[_TIER_SIM[t]] += 1
+                identity = tier_sim[t] if selected else "unknown"
+                unavail[identity] = unavail.get(identity, 0) + 1
         # modes from the capsule's declared expected.modes (only count when the capsule passed)
         cap = cap_by_name.get(r["capsule"])
         if cap and r.get("status") == "pass":
@@ -571,7 +594,7 @@ def render_markdown(cov: dict, results: list[dict]) -> str:
         "| tier | capsules passing |",
         "|---|---|",
     ]
-    for t in TIERS:
+    for t in cov["by_tier_reached"]:
         L.append(f"| {t} | {cov['by_tier_reached'].get(t, 0)} |")
     L += [
         "",
@@ -602,6 +625,7 @@ def render_markdown(cov: dict, results: list[dict]) -> str:
         _lo = arr.get("acceleratable_region_recall_lower_bound")
         _p = arr.get("acceleration_precision")
         _n_e, _n_u, _n_c = arr.get("n_eligible", 0), arr.get("n_undetermined", 0), arr.get("n_unclassified", 0)
+        policy = arr.get("acceleration_policy") or {}
         L += [
             "",
             "## Acceleratable Region Recall",
@@ -621,6 +645,8 @@ def render_markdown(cov: dict, results: list[dict]) -> str:
             f"- unclassified (this taxonomy has no name for the op): **{_n_c}**",
             "",
         ]
+        if policy.get("status") == "unknown":
+            L += [f"> Accelerator coverage unknown: {policy.get('reason') or 'selected policy unavailable'}.", ""]
         _bf = arr.get("by_family") or {}
         if _bf:
             L += ["| semantic family | regions | eligible | accelerated | recall |", "|---|---|---|---|---|"]
@@ -671,12 +697,12 @@ def render_markdown(cov: dict, results: list[dict]) -> str:
                 "",
             ]
 
+    L += ["", "## Oracle availability (honest)", ""]
+    for oracle, count in sorted((cov.get("unavailable") or {}).items()):
+        L.append(f"- {oracle} recorded unavailable on **{count}** capsules")
+    if not cov.get("unavailable"):
+        L.append("- No RTL oracle identity declared or observed.")
     L += [
-        "",
-        "## Heavy-oracle availability (honest)",
-        "",
-        f"- VCS (L4) recorded unavailable on **{cov['unavailable']['vcs']}** capsules",
-        f"- FireSim (L5) recorded unavailable on **{cov['unavailable']['firesim']}** capsules",
         "",
         "_Not-run is not pass: a mandatory tier recorded unavailable yields capsule status=incomplete, never pass._",
     ]

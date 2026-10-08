@@ -37,8 +37,12 @@ def _service(tmp_path, renderer):
     script = tmp_path / "script.ld"
     script.write_text("SECTIONS {}\n", encoding="utf-8")
     recipe = HarnessBuildRecipe(
-        compiler=tmp_path / "unused-gcc", include_roots=(), support_sources=(),
-        link_script=script, load_address=0, cflags=("-march=rv64gc", "-mabi=lp64d"),
+        compiler=tmp_path / "unused-gcc",
+        include_roots=(),
+        support_sources=(),
+        link_script=script,
+        load_address=0,
+        cflags=("-march=rv64gc", "-mabi=lp64d"),
     )
     return BuildOnlyService("fixture", recipe, renderer, ((str(source), file_digest(source)),)), source
 
@@ -96,22 +100,35 @@ def test_real_link_seam_records_exact_selected_bytes_and_rejects_changed_source(
     cb = _cb()
     saved = copy.deepcopy(cb)
     policy = ReadbackPolicy(FULL_VALUES_B64)
-    elf = compiler.link_elf(cb, obj, build, target="fixture", inputs={"arg": [1]},
-                            _build_service=service, readback_policy=policy)
+    elf = compiler.link_elf(
+        cb, obj, build, target="fixture", inputs={"arg": [1]}, _build_service=service, readback_policy=policy
+    )
     recipe_record, source_pins = selected_build_inputs("fixture", service.recipe.with_effective_abi(), service)
     receipt = require_build_receipt(
-        build / BUILD_RECEIPT, policy=policy, cb=cb, target="fixture",
-        recipe_record=recipe_record, source_pins=source_pins,
-        object_path=obj, harness_path=build / "harness.c", elf_path=elf,
+        build / BUILD_RECEIPT,
+        policy=policy,
+        cb=cb,
+        target="fixture",
+        recipe_record=recipe_record,
+        source_pins=source_pins,
+        object_path=obj,
+        harness_path=build / "harness.c",
+        elf_path=elf,
     )
     assert receipt["build_identity_sha256"] and receipt["staged_codec_sha256"]
     assert cb == saved
     (build / "harness.c").write_text("tampered\n", encoding="utf-8")
     with pytest.raises(ValueError, match="receipt"):
         require_build_receipt(
-            build / BUILD_RECEIPT, policy=policy, cb=cb, target="fixture",
-            recipe_record=recipe_record, source_pins=source_pins,
-            object_path=obj, harness_path=build / "harness.c", elf_path=elf,
+            build / BUILD_RECEIPT,
+            policy=policy,
+            cb=cb,
+            target="fixture",
+            recipe_record=recipe_record,
+            source_pins=source_pins,
+            object_path=obj,
+            harness_path=build / "harness.c",
+            elf_path=elf,
         )
     source.write_text("SOURCE=2\n", encoding="utf-8")
     with pytest.raises(ValueError, match="source"):
@@ -139,8 +156,15 @@ def test_selected_source_mutation_during_link_never_finishes_receipt(monkeypatch
 
     monkeypatch.setattr(compiler.subprocess, "run", mutate)
     with pytest.raises(ValueError, match="source"):
-        compiler.link_elf(_cb(), obj, build, target="fixture", inputs={"arg": [1]},
-                          _build_service=service, readback_policy=ReadbackPolicy(FULL_VALUES_B64))
+        compiler.link_elf(
+            _cb(),
+            obj,
+            build,
+            target="fixture",
+            inputs={"arg": [1]},
+            _build_service=service,
+            readback_policy=ReadbackPolicy(FULL_VALUES_B64),
+        )
     assert json.loads((build / BUILD_RECEIPT).read_text()) == {"status": "incomplete"}
 
 
@@ -214,6 +238,7 @@ def test_qa_factories_carry_explicit_policy_without_changing_default(monkeypatch
 def test_native_postrun_build_mutation_cannot_retain_a_numerical_pass(monkeypatch, tmp_path):
     from merlin.compile import model_execution_inputs
     from merlin.runtime import route_quality
+    from merlin.runtime.backends import base as backends
     from merlin.targetgen import bundle_harness, capsule_golden, golden_store, native_model_execution, oracle_policy
     from merlin.targetgen.contract import compile as compiler
     from merlin.targetgen.contract import readback_policy as readback
@@ -223,28 +248,42 @@ def test_native_postrun_build_mutation_cannot_retain_a_numerical_pass(monkeypatc
     source.mkdir()
     capture.mkdir()
     for path in (
-        source / "capsule.yaml", source / "golden.yaml", capture / "model.mlir",
-        capture / "weights.safetensors", capture / "weights.safetensors.manifest.json", capture / "inputs.npz",
+        source / "capsule.yaml",
+        source / "golden.yaml",
+        capture / "model.mlir",
+        capture / "weights.safetensors",
+        capture / "weights.safetensors.manifest.json",
+        capture / "inputs.npz",
     ):
         path.write_bytes(b"selected-neutral-input")
     cb = _cb()
     cb["kernel_abi"]["args"] = []
     monkeypatch.setattr(bundle_harness, "is_executable_emission", lambda *_args, **_kw: (True, ""))
-    monkeypatch.setattr(bundle_harness, "emitted_entry_arity", lambda _text: 0)
+    monkeypatch.setattr(bundle_harness, "emitted_entry_arity", lambda _text, **_kw: 0)
     monkeypatch.setattr(golden_store, "load_golden", lambda _source: {"outputs": {"out": [[1, 2]]}})
-    monkeypatch.setattr(native_model_execution, "_bind_inputs", lambda *_args, **_kw: (
-        {"arg": [[1, 2]]}, {"source_entry_binding": {"source_owned_mutables": []}},
-    ))
+    monkeypatch.setattr(
+        native_model_execution,
+        "_bind_inputs",
+        lambda *_args, **_kw: (
+            {"arg": [[1, 2]]},
+            {"source_entry_binding": {"source_owned_mutables": []}},
+        ),
+    )
     monkeypatch.setattr(native_model_execution, "_frozen_model_policy", lambda *_args, **_kw: {})
-    monkeypatch.setattr(native_model_execution, "_host_compute_report", lambda *_args, **_kw: SimpleNamespace(
-        to_dict=lambda: {},
-    ))
+    monkeypatch.setattr(
+        native_model_execution,
+        "_host_compute_report",
+        lambda *_args, **_kw: SimpleNamespace(
+            to_dict=lambda: {},
+        ),
+    )
     monkeypatch.setattr(route_quality, "require_clean_host_compute", lambda _report: None)
     recipe = SimpleNamespace(
         require_kernel_stack_frame=lambda: SimpleNamespace(entry_symbol="entry"),
         with_effective_abi=lambda: "recipe",
     )
     service = SimpleNamespace(recipe=recipe, source_pins=(("pinned", "digest"),))
+    monkeypatch.setattr(backends, "harness_build_recipe", lambda _target: recipe)
     monkeypatch.setattr(native_model_execution, "_build_service_for", lambda *_args, **_kw: service)
 
     def compile_selected(_cb, _lowered, work, **_kwargs):
@@ -266,13 +305,22 @@ def test_native_postrun_build_mutation_cannot_retain_a_numerical_pass(monkeypatc
         return {"schema": "merlin_readback_build_v1"}
 
     monkeypatch.setattr(readback, "require_build_receipt", receipt_check)
-    monkeypatch.setattr(oracle_policy, "selected_l3_engine_report", lambda _target: {
-        "available": True, "engine": "verilator",
-    })
+    monkeypatch.setattr(
+        oracle_policy,
+        "selected_l3_engine_report",
+        lambda _target: {
+            "available": True,
+            "engine": "verilator",
+        },
+    )
     monkeypatch.setattr(model_execution_inputs, "selected_firrtl", lambda *_args, **_kw: {})
-    monkeypatch.setattr(native_model_execution, "_functional_engine", lambda _target: (_ for _ in ()).throw(
-        RuntimeError("no functional probe"),
-    ))
+    monkeypatch.setattr(
+        native_model_execution,
+        "_functional_engine",
+        lambda _target: (_ for _ in ()).throw(
+            RuntimeError("no functional probe"),
+        ),
+    )
     harness = tmp_path / "out" / "build" / "harness.c"
 
     def mutate_after_run(*_args, **_kwargs):
@@ -283,18 +331,32 @@ def test_native_postrun_build_mutation_cannot_retain_a_numerical_pass(monkeypatc
         run_elf=mutate_after_run,
         parse_output=lambda _console: pytest.fail("numeric parsing preceded the post-run build join"),
     )
-    monkeypatch.setattr(model_execution_inputs, "native_engine", lambda *_args, **_kw: (
-        backend, {"engine": "verilator"}, lambda: None, None,
-    ))
+    monkeypatch.setattr(
+        model_execution_inputs,
+        "native_engine",
+        lambda *_args, **_kw: (
+            backend,
+            {"engine": "verilator"},
+            lambda: None,
+            None,
+        ),
+    )
     monkeypatch.setattr(
         capsule_golden, "compare", lambda *_args, **_kw: pytest.fail("numeric comparison preceded join")
     )
 
     result = native_model_execution.execute_candidate_model(
-        command_buffer=cb, lowered_mlir_text="neutral-llvm", capsule_dir=source,
-        capture_bundle=capture, target="fixture", out_dir=tmp_path / "out",
-        simulator="verilator", rtl_facts="selected-facts", board_config="selected-board",
-        numeric_policy={"compare": "exact_int"}, readback_policy=ReadbackPolicy(FULL_VALUES_B64),
+        command_buffer=cb,
+        lowered_mlir_text="neutral-llvm",
+        capsule_dir=source,
+        capture_bundle=capture,
+        target="fixture",
+        out_dir=tmp_path / "out",
+        simulator="verilator",
+        rtl_facts="selected-facts",
+        board_config="selected-board",
+        numeric_policy={"compare": "exact_int"},
+        readback_policy=ReadbackPolicy(FULL_VALUES_B64),
     )
     assert checks == ["original\n", "mutated\n"]
     assert result["status"] == "incomplete" and result["failure"]["type"] == "ValueError"

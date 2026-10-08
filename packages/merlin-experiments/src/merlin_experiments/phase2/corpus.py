@@ -7,6 +7,8 @@ portfolio and measured-claim decisions remain distinct consumers of frozen input
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -56,6 +58,7 @@ class PerformanceCorpus:
     performance_generation: dict[str, Any]
     capsules: tuple[PerformanceCapsule, ...]
     test_justification: dict[str, Any] | None = None
+    representative_selection: dict[str, Any] | None = None
 
 
 def _selected_names(value: str | Sequence[str] | None, *, label: str) -> tuple[str, ...]:
@@ -75,6 +78,9 @@ def discover_performance_corpus(
     capsules: str | Sequence[str] | None = None,
 ) -> PerformanceCorpus:
     """Admit only generated dev capsules from the descriptor-derived phase."""
+    representative = capsules == "representative"
+    if representative and families not in (None, "all"):
+        raise StageGateError("representative selection requires the complete generated family roster")
     target = str(target_experiment.target or "").strip()
     if not target:
         raise StageGateError("target experiment has no target identity")
@@ -159,7 +165,7 @@ def discover_performance_corpus(
     if not found or {row.source_relative_path for row in found} != phase_generated:
         raise StageGateError("generated performance phase is empty or stale versus provenance")
     wanted_families = set(_selected_names(families, label="performance family"))
-    wanted_capsules = set(_selected_names(capsules, label="performance capsule"))
+    wanted_capsules = set(_selected_names(None if representative else capsules, label="performance capsule"))
     known_families = {row.family for row in found}
     known_capsules = {row.capsule for row in found}
     if wanted_families - known_families or wanted_capsules - known_capsules:
@@ -181,9 +187,29 @@ def discover_performance_corpus(
             target, corpus_root, phase_root, provenance, identity, dict(generation), tuple(found)
         )
         justification = TJ.derive_justification(complete)
-    return PerformanceCorpus(
+    result = PerformanceCorpus(
         target, corpus_root, phase_root, provenance, identity, dict(generation), selected, justification
     )
+    if representative:
+        from merlin_experiments.phase2 import representative_selection as RS
+
+        if justification is None:
+            raise StageGateError("representative selection requires current generated Phase 0 evidence")
+        scope = TJ.verify_live_justification(result, justification)
+        selection = RS.derive(justification, scope)
+        chosen = {(row["family"], row["capsule"]) for row in selection["selected_members"]}
+        result = PerformanceCorpus(
+            target,
+            corpus_root,
+            phase_root,
+            provenance,
+            identity,
+            dict(generation),
+            tuple(row for row in selected if (row.family, row.capsule) in chosen),
+            justification,
+            selection,
+        )
+    return result
 
 
 def freeze_performance_corpus(corpus: PerformanceCorpus, snapshot_root: Path) -> FrozenPerformanceCorpus:
@@ -194,10 +220,22 @@ def freeze_performance_corpus(corpus: PerformanceCorpus, snapshot_root: Path) ->
         raise StageGateError(f"performance snapshot is not fresh: {snapshot_root}")
     if CONTRACTS.sha256_file(corpus.provenance_manifest) != corpus.provenance_sha256:
         raise StageGateError("performance provenance changed before freeze")
+    selected_scope = None
     if corpus.test_justification is not None:
-        TJ.verify_live_justification(corpus, corpus.test_justification)
+        selected_scope = TJ.verify_live_justification(corpus, corpus.test_justification)
     elif TJ.requires_justification(CONTRACTS.mapping_file(corpus.provenance_manifest, yaml_file=True)):
         raise StageGateError("current generated performance corpus lacks its test justification")
+    if corpus.representative_selection is not None:
+        from merlin_experiments.phase2 import representative_selection as RS
+
+        if (
+            corpus.test_justification is None
+            or RS.derive(corpus.test_justification, selected_scope) != corpus.representative_selection
+        ):
+            raise StageGateError("representative selection changed before freeze")
+        chosen = {(row["family"], row["capsule"]) for row in corpus.representative_selection["selected_members"]}
+        if {(row.family, row.capsule) for row in corpus.capsules} != chosen:
+            raise StageGateError("representative selection differs from frozen members")
     capsules_root = snapshot_root / "capsules"
     capsules_root.mkdir(parents=True)
     frozen: list[PerformanceCapsule] = []
@@ -254,21 +292,42 @@ def freeze_performance_corpus(corpus: PerformanceCorpus, snapshot_root: Path) ->
         CONTRACTS.write_json(receipt_path, corpus.test_justification)
         copied = snapshot_root / "test_justification_inputs"
         copied.mkdir()
-        source_root = corpus.corpus_root / "_evidence"
+        source_root = TJ.selected_evidence_root(corpus)
         for name, relative in (
             ("evidence-manifest.json", "evidence-manifest.json"),
             ("performance-facts.json", "hardware/effective-views/performance-facts.json"),
             ("operation-accounting.json", "coverage/operation-accounting.json"),
+            ("performance-basis.json", "coverage/performance-basis.json"),
         ):
             shutil.copyfile(source_root / relative, copied / name)
+        if selected_scope is not None:
+            CONTRACTS.write_json(copied / "performance-scope.json", selected_scope)
         document["test_justification"] = {
             "path": receipt_path.name,
             "sha256": CONTRACTS.sha256_file(receipt_path),
+            **(
+                {"selected_requirement_sha256": corpus.test_justification["source"]["selected_requirement_sha256"]}
+                if selected_scope is not None
+                else {}
+            ),
             "inputs": {
                 "evidence-manifest.json": corpus.test_justification["source"]["manifest_sha256"],
                 "performance-facts.json": corpus.test_justification["source"]["performance_facts_sha256"],
                 "operation-accounting.json": corpus.test_justification["source"]["operation_accounting_sha256"],
+                "performance-basis.json": corpus.test_justification["source"]["performance_basis_sha256"],
+                **(
+                    {"performance-scope.json": corpus.test_justification["source"]["selected_scope_sha256"]}
+                    if selected_scope is not None
+                    else {}
+                ),
             },
+        }
+    if corpus.representative_selection is not None:
+        receipt_path = snapshot_root / "representative_selection.json"
+        CONTRACTS.write_json(receipt_path, corpus.representative_selection)
+        document["representative_selection"] = {
+            "path": receipt_path.name,
+            "sha256": CONTRACTS.sha256_file(receipt_path),
         }
     manifest = snapshot_root / "performance_corpus_manifest.json"
     CONTRACTS.write_json(manifest, document)
@@ -367,10 +426,45 @@ def verify_frozen_performance_corpus(corpus: FrozenPerformanceCorpus) -> None:
             ("evidence-manifest.json", "manifest_sha256"),
             ("performance-facts.json", "performance_facts_sha256"),
             ("operation-accounting.json", "operation_accounting_sha256"),
+            ("performance-basis.json", "performance_basis_sha256"),
         ):
             digest = CONTRACTS.sha256_file(corpus.root / "test_justification_inputs" / name)
             if digest != inputs.get(name) or digest != source.get(field):
                 raise StageGateError(f"frozen performance test justification input changed: {name}")
+        scope_sha = source.get("selected_scope_sha256")
+        requirement_sha = source.get("selected_requirement_sha256")
+        if (scope_sha is None) != (requirement_sha is None):
+            raise StageGateError("frozen performance scope source binding is incomplete")
+        if scope_sha is not None:
+            if justification.get("selected_requirement_sha256") != requirement_sha:
+                raise StageGateError("frozen performance scope selected-source identity changed")
+            scope_path = corpus.root / "test_justification_inputs" / "performance-scope.json"
+            if (
+                any(path.is_symlink() for path in (scope_path, scope_path.parent, corpus.root))
+                or not scope_path.is_file()
+            ):
+                raise StageGateError("frozen performance scope bytes changed")
+            scope_bytes = scope_path.read_bytes()
+            if (
+                hashlib.sha256(scope_bytes).hexdigest() != scope_sha
+                or inputs.get("performance-scope.json") != scope_sha
+            ):
+                raise StageGateError("frozen performance scope bytes changed")
+            from merlin_experiments.phase0.performance_scope import validate_performance_scope
+
+            try:
+                scope = json.loads(scope_bytes)
+                if not isinstance(scope, dict):
+                    raise ValueError("projection must be a mapping")
+                validate_performance_scope(scope)
+            except (ValueError, TypeError) as exc:
+                raise StageGateError(f"frozen performance scope is invalid: {exc}") from exc
+        elif (
+            "selected_requirement_sha256" in justification
+            or "performance-scope.json" in inputs
+            or (corpus.root / "test_justification_inputs/performance-scope.json").exists()
+        ):
+            raise StageGateError("frozen performance scope lacks a selected-source binding")
         planned = {str(row.get("relative_path")): row for row in receipt.get("members") or []}
         if not planned or len(planned) != len(receipt.get("members") or []):
             raise StageGateError("frozen performance test justification has duplicate or empty members")
@@ -383,6 +477,28 @@ def verify_frozen_performance_corpus(corpus: FrozenPerformanceCorpus) -> None:
                 or (plan.get("measurement") or {}).get("status") != "unmeasured"
             ):
                 raise StageGateError(f"frozen performance member lacks an unmeasured test plan: {member.capsule}")
+    selection_context = document.get("representative_selection")
+    if selection_context is not None:
+        from merlin_experiments.phase2 import representative_selection as RS
+
+        if (
+            not isinstance(selection_context, Mapping)
+            or selection_context.get("path") != "representative_selection.json"
+        ):
+            raise StageGateError("frozen representative selection declaration is malformed")
+        selection_path = corpus.root / "representative_selection.json"
+        if selection_path.is_symlink() or CONTRACTS.sha256_file(selection_path) != selection_context.get("sha256"):
+            raise StageGateError("frozen representative selection bytes changed")
+        if justification is None:
+            raise StageGateError("frozen representative selection lacks test justification")
+        scope_path = corpus.root / "test_justification_inputs/performance-scope.json"
+        scope = CONTRACTS.mapping_file(scope_path) if scope_path.is_file() else None
+        expected = RS.derive(CONTRACTS.mapping_file(corpus.root / "test_justification.json"), scope)
+        if CONTRACTS.mapping_file(selection_path) != expected:
+            raise StageGateError("frozen representative selection differs from its source")
+        chosen = {(row["family"], row["capsule"]) for row in expected["selected_members"]}
+        if chosen != {(row.family, row.capsule) for row in corpus.capsules}:
+            raise StageGateError("frozen representative members differ from the selected plan")
 
 
 def expected_perf_cells(

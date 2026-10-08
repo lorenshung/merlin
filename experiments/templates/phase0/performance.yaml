@@ -1,5 +1,10 @@
 sweeps:
 - id: PK
+  # Keep the machine-law cohort intact. One derived cohort per observed M/N
+  # covers every selected-capture K on the same unchanged four-point grid.
+  capture_shape_pattern:
+    kind: observed_mn_on_existing_k_grid
+    max_cohorts: 16
   fit_axes:
   - K
   comparison_roles:
@@ -610,6 +615,13 @@ sweeps:
   source_reference: 'shared operand-encoding pair: one identical contraction computed in two of the target''s
     own declared encodings, so the cost of the encoding choice is isolated'
 - id: PR
+  # In a selected Phase 0 run, fix M/N from one independently captured
+  # development contraction for which the selected RTL operand store proves an
+  # adjacent three-point-per-band residency crossing. Without selected captures,
+  # this remains only the generic single-tile machine-law diagnostic.
+  capture_shape_pattern:
+    kind: observed_mn_for_memory_regime
+    max_candidates: 16
   fit_axes:
   - K
   comparison_roles:

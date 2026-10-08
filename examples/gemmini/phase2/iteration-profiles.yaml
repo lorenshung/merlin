@@ -1,0 +1,14 @@
+schema: merlin.iteration_variant_template.v1
+target: gemmini
+workload_id: residual_cnn
+profile_constants:
+  blocks: 2
+boundary:
+  kind: square_nchw_concurrent_tensor_capacity
+  memory: scratchpad.mem
+  array: mesh
+  array_axis: cols
+  channels_per_array_lane: 1
+  live_tensor_roles:
+    - skip_input
+    - branch_result

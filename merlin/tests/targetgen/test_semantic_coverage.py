@@ -159,8 +159,22 @@ def test_coverage_certificate_surfaces_false_fallback_and_ineligible():
 # --- B2: suite-level ARR in the coverage aggregate ----------------------------------------------
 
 
-def test_suite_acceleratable_coverage():
-    # Three capsules with author-eligibility overrides (target=None -> oracle empty, overrides drive it).
+def _fixture_simulator_policy(monkeypatch):
+    from merlin.targetgen import eligibility, target_experiment
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        target_experiment,
+        "load_capability_manifest",
+        lambda target: SimpleNamespace(tier_sim={"L2": "fixture-sim"}, rtl_tiers=()),
+    )
+    monkeypatch.setattr(eligibility, "capability_map_for_target", lambda target: {})
+    monkeypatch.setattr(eligibility, "undetermined_families_for_target", lambda target: frozenset())
+
+
+def test_suite_acceleratable_coverage(monkeypatch):
+    _fixture_simulator_policy(monkeypatch)
+    # Three capsules with author-eligibility overrides; the selected fixture policy names L2.
     # A2 accelerated (passed L2/spike); A7 eligible but only L1 passed = false_fallback; SORT ineligible.
     caps = [
         {
@@ -194,7 +208,7 @@ def test_suite_acceleratable_coverage():
         {"capsule": "SORT", "kind": "isa", "label": "public", "status": "pass", "tiers": {"L0": {"status": "pass"}}},
     ]
     cap_by_name = {c["name"]: c for c in caps}
-    ac = cov._acceleratable_coverage(results, cap_by_name, target=None)
+    ac = cov._acceleratable_coverage(results, cap_by_name, target="fixture")
     assert ac["n_eligible"] == 2
     assert ac["n_eligible_accelerated"] == 1
     assert ac["false_fallback"] == ["A7"]
@@ -203,8 +217,49 @@ def test_suite_acceleratable_coverage():
     assert ac["must_accelerate_violations"] == ["A7"]
     assert ac["must_accelerate_pass"] is False
     # full aggregate surfaces it too
-    full = cov.aggregate(results, capsules=caps, target=None)
+    monkeypatch.setattr(cov, "_isa_class_vocabulary", lambda target: [])
+    full = cov.aggregate(results, capsules=caps, target="fixture")
     assert full["acceleratable_coverage"]["false_fallback"] == ["A7"]
+
+
+def test_coverage_uses_selected_ladder_and_reports_unknown_without_one(monkeypatch):
+    from types import SimpleNamespace
+
+    from merlin.targetgen import target_experiment
+
+    monkeypatch.setattr(
+        target_experiment,
+        "load_capability_manifest",
+        lambda target: SimpleNamespace(tier_sim={"Q2": "model", "Q7": "rtl-device"}, rtl_tiers=("Q7",)),
+    )
+    monkeypatch.setattr(cov, "_isa_class_vocabulary", lambda target: [])
+    results = [
+        {"capsule": "A", "tiers": {"Q2": {"status": "pass"}, "Q7": {"status": "unavailable"}}},
+    ]
+    caps = [{"name": "A", "operation": {"op": "matmul"}, "semantic": {"eligible": True, "must_accelerate": True}}]
+    selected = cov.aggregate(results, capsules=caps, target="fixture")
+    assert selected["unavailable"] == {"rtl-device": 1}
+    assert selected["by_tier_reached"]["Q2"] == 1
+    assert selected["acceleratable_coverage"]["n_eligible_accelerated"] == 1
+    assert "rtl-device recorded unavailable" in cov.render_markdown(selected, results)
+
+    unknown = cov.aggregate(results, capsules=caps, target=None)
+    assert unknown["unavailable"] == {"unknown": 1}
+    assert unknown["acceleratable_coverage"]["n_eligible_accelerated"] == 0
+    assert unknown["acceleratable_coverage"]["acceleratable_region_recall"] is None
+    assert unknown["acceleratable_coverage"]["acceleration_policy"]["reason"] == "target not supplied"
+    assert unknown["acceleratable_coverage"]["per_capsule"][0]["accelerated"] is None
+    assert unknown["acceleratable_coverage"]["false_fallback"] == []
+    assert unknown["acceleratable_coverage"]["must_accelerate_violations"] == []
+    assert unknown["acceleratable_coverage"]["must_accelerate_pass"] is False
+    assert "Accelerator coverage unknown: target not supplied" in cov.render_markdown(unknown, results)
+
+    monkeypatch.setattr(
+        target_experiment, "load_capability_manifest", lambda target: (_ for _ in ()).throw(ValueError("missing"))
+    )
+    unresolved = cov._acceleratable_coverage(results, {"A": caps[0]}, target="fixture")
+    assert unresolved["acceleratable_region_recall"] is None
+    assert unresolved["acceleration_policy"] == {"status": "unknown", "reason": "ValueError: missing"}
 
 
 def test_a_declined_offload_is_reported_rather_than_silently_permitted():
@@ -298,7 +353,8 @@ def test_the_declined_offload_is_visible_in_the_rendered_report():
 # --- C1: generalization-axis (G0-G5) breakdown --------------------------------------------------
 
 
-def test_generalization_axis_breakdown():
+def test_generalization_axis_breakdown(monkeypatch):
+    _fixture_simulator_policy(monkeypatch)
     caps = [
         {
             "name": "G0",
@@ -342,7 +398,7 @@ def test_generalization_axis_breakdown():
             "tiers": {"L2": {"status": "fail"}},
         },  # shape: NOT accelerated
     ]
-    ac = cov._acceleratable_coverage(results, {c["name"]: c for c in caps}, target=None)
+    ac = cov._acceleratable_coverage(results, {c["name"]: c for c in caps}, target="fixture")
     axes = ac["by_generalization_axis"]
     assert axes["seen"]["recall"] == 1.0
     assert axes["shape"]["n_eligible"] == 2 and axes["shape"]["recall"] == 0.5

@@ -1,9 +1,9 @@
 """Verify a target's DERIVED extent lattice — the same one the capsule corpus is built from.
 
 The review comment this answers is *"the capsules are very case-specific"*. They are: the dynamic
-ladder grades the shapes it can afford, tens of them, each on one stimulus. This sweeps the lattice
-the target's own RTL facts define and proves, at every point, that the compiled program computes the
-declared contraction **for every input** at that shape. The cases stop being chosen by us.
+ladder grades the shapes it can afford, tens of them, each on one stimulus. This attempts to sweep
+the lattice the target's own RTL facts define. A successfully verified point proves that the
+compiled program computes the declared contraction **for every input** at that shape.
 
 The lattice is not invented here. A reviewed conformance requirement is generated
 from the target's capability manifest and RTL facts and already carries both halves:
@@ -30,26 +30,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-#: Cell families this module can build and lower a program for.
-#:
-#: The limit is NOT the SMT encoder — it already handles VECTOR_MAP, VREDUCE and MOVEMENT. It is the
-#: in-tree reference target: ``load_curated_contract("toy_npu")`` declares exactly four ops
-#: (``res_pack, matmul, commit, evict``), and ``lower_to_target`` refuses anything outside them with
-#: "the dialect plan does not lower interface.X, so this payload cannot descend to it. Coverage is
-#: read from the plan, never assumed." Without a descent there is no command buffer, and with no
-#: command buffer there is no compilation to validate. Sweeping the other families needs a target
-#: that declares their ops — a target-side gap, not an encoder one, and the omission reason says so.
+#: The only workload this module currently builds is quantized i8 contraction. A cell with a
+#: different family or dtype cannot borrow that workload's proof.
 ENCODABLE_FAMILIES = frozenset({"contraction"})
-
-
-def reference_target_ops() -> list[str]:
-    """The op set the in-tree reference target declares. Read, never assumed."""
-    try:
-        from merlin.xdsl_dialects.lowering.pipeline import load_curated_contract
-
-        return sorted((load_curated_contract("toy_npu") or {}).get("ops") or [])
-    except Exception:
-        return []
+ENCODABLE_DTYPES = frozenset({"i8"})
 
 
 def spec_path(target: str):
@@ -83,10 +67,10 @@ def sweep(
     """Validate the compilation at every (cell, extent) the target's own facts define."""
     from .evaluate import _finish_lowering, _lower_to_interface
     from .refine import validate_compilation
-    from .smt_semantics import UnsupportedSemantics
 
     spec = load_spec(target)
-    points = lattice_points(spec)
+    available_points = lattice_points(spec)
+    points = available_points
     if max_points is not None:
         points = points[:max_points]
     cells = list(spec.get("cells") or ())
@@ -107,6 +91,9 @@ def sweep(
         if family not in ENCODABLE_FAMILIES:
             omissions.append({"cell": name, "reason": _family_omission(family)})
             continue
+        if dtype not in ENCODABLE_DTYPES:
+            omissions.append({"cell": name, "reason": _dtype_omission(dtype)})
+            continue
         grouped.setdefault((family, dtype), []).append(name)
 
     for (family, dtype), covered in sorted(grouped.items()):
@@ -114,12 +101,18 @@ def sweep(
         for p in points:
             t0 = time.time()
             try:
-                iface, tc = _lower_to_interface(p, p, p, reuse)
+                iface, tc = _lower_to_interface(p, p, p, reuse, target=target)
                 cb = _finish_lowering(iface, tc)
+                if cb.get("target") != target:
+                    raise ValueError(f"lowered command buffer names {cb.get('target')!r}, expected {target!r}")
                 v = validate_compilation(iface, cb, acc_width=acc_width, timeout_ms=timeout_ms)
                 status = v.status
-            except UnsupportedSemantics as exc:
-                status = "abstained"
+            except Exception as exc:  # noqa: BLE001 — a failed lowering/solver cannot count as proof
+                from merlin.xdsl_dialects.lowering.interface_lowering import LoweringError
+
+                from .smt_semantics import UnsupportedSemantics
+
+                status = "abstained" if isinstance(exc, (LoweringError, UnsupportedSemantics)) else "error"
                 results.append(
                     {
                         "cell": name,
@@ -129,7 +122,7 @@ def sweep(
                         "n": p,
                         "status": status,
                         "seconds": round(time.time() - t0, 2),
-                        "reason": str(exc)[:200],
+                        "reason": f"{type(exc).__name__}: {exc}"[:200],
                         "covers_cells": covered,
                     }
                 )
@@ -149,18 +142,30 @@ def sweep(
 
     verified = [r for r in results if r["status"] == "unsat"]
     refuted = [r for r in results if r["status"] == "sat"]
+    cells_verified_at_sampled_points = sorted(
+        c
+        for c in {c for r in results for c in r["covers_cells"]}
+        if points and all(q["status"] == "unsat" for q in results if c in q["covers_cells"])
+    )
+    cells_covered = cells_verified_at_sampled_points if points == available_points else []
+    errors = [r for r in results if r["status"] == "error"]
     return {
-        "schema": "verify_lattice/v1",
+        "schema": "verify_lattice/v2",
         "target": target,
         "lattice_points": points,
+        "lattice_points_available": available_points,
+        "max_points": max_points,
         "lattice_source": _lattice_source(spec),
         "cells_declared": len(cells),
         "cell_groups_swept": len({r["cell"] for r in results}),
-        "cells_covered": sorted({c for r in results for c in r.get("covers_cells", ())}),
+        "cells_swept": sorted({c for r in results for c in r.get("covers_cells", ())}),
+        "cells_verified_at_sampled_points": cells_verified_at_sampled_points,
+        "cells_covered": cells_covered,
         "points_total": len(results),
         "points_verified": len(verified),
         "points_refuted": len(refuted),
-        "points_abstained": len(results) - len(verified) - len(refuted),
+        "points_abstained": len(results) - len(verified) - len(refuted) - len(errors),
+        "points_error": len(errors),
         "reuse": reuse,
         "acc_width": acc_width,
         "timeout_ms": timeout_ms,
@@ -171,41 +176,37 @@ def sweep(
                 "shapes_proved": len(verified),
                 "quantifier": "every integer input at each shape",
             },
-            "dynamic": witnesses_graded(target),
+            "dynamic_declared": witnesses_declared(target),
             "note": (
-                "The two numbers measure different things and neither subsumes the other: the "
-                "dynamic ladder is the only layer that touches hardware, and the formal sweep "
-                "says nothing about it. What the formal side adds is the quantifier -- all "
-                "inputs rather than one stimulus -- at the shapes it can reach."
+                "Formal proofs are measured here; dynamic capsules are only counted from the "
+                "selected target's declared suite, not from grade receipts. The dynamic ladder "
+                "touches hardware when run; the formal sweep does not."
             ),
         },
     }
 
 
-def witnesses_graded(target: str) -> dict[str, Any]:
-    """How many capsules the dynamic ladder grades for this target, and at how many distinct shapes.
+def witnesses_declared(target: str) -> dict[str, Any]:
+    """Count declared capsules and distinct shapes in this target's selected graded suite.
 
-    The comparison this supports is the quantified answer to "the capsules are very case-specific":
-    the dynamic ladder grades N witnesses, each on ONE stimulus; the formal sweep proves M shapes over
-    EVERY input. Both numbers are counted here rather than asserted, and the shape count is what makes
-    the comparison fair -- several capsules can share a shape, so a raw capsule count would overstate
-    the dynamic side's shape coverage.
+    This measures available witnesses, not completed grading. Execution requires grade receipts and
+    cannot be inferred from a tracked capsule.yaml. Several capsules can share one shape.
     """
     import yaml
 
-    from merlin.common.paths import merlin_dir
-    from merlin.targetgen.target_experiment import TargetExperiment  # noqa: F401  (import guard)
+    from merlin.targetgen.corpora import graded_capsule_roots
 
-    root = merlin_dir() / "contract" / "capsules"
-    if not root.is_dir():
-        return {"capsules": 0, "distinct_shapes": 0, "note": "no corpus tree in this checkout"}
-    capsules, shapes = 0, set()
-    for path in root.rglob("capsule.yaml"):
-        if "hidden" in path.parts:
-            continue
+    roots = graded_capsule_roots(target)
+    if not roots:
+        return {"capsules": 0, "distinct_shapes": 0, "note": "no descriptor-selected graded roots for this target"}
+    capsules, shapes, unreadable = 0, set(), []
+    paths = {path for root in roots for path in root.rglob("capsule.yaml") if "hidden" not in path.parts}
+    for path in sorted(paths):
         try:
             doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        except Exception:
+        except (OSError, UnicodeError, yaml.YAMLError) as exc:
+            # Counted, never dropped: an unreadable declaration is not an absent one.
+            unreadable.append({"path": str(path), "reason": f"{type(exc).__name__}: {exc}"[:200]})
             continue
         capsules += 1
         for spec in doc.get("inputs") or []:
@@ -215,28 +216,22 @@ def witnesses_graded(target: str) -> dict[str, Any]:
     return {
         "capsules": capsules,
         "distinct_shapes": len(shapes),
-        "note": "counted from tracked capsule.yaml files, excluding hidden/; each is graded on "
-        "one deterministic stimulus",
+        "unreadable": unreadable,
+        "note": "counted from this target's descriptor-selected graded roots, excluding hidden/; "
+        "availability only, with no grade receipt checked",
     }
 
 
 def _family_omission(family: str) -> str:
-    """Why a family is not swept — the real blocker, derived from the target, not a generic message.
-
-    Being precise here matters: "we have not written a builder" and "the reference target cannot
-    represent this at all" call for different work, and the first would send someone to the wrong file.
-    """
-    ops = reference_target_ops()
-    # Deliberately does NOT name the interface op: the family name and the op name differ (the
-    # `elementwise_map` family lowers to `interface.elementwise`), and inventing `interface.<family>`
-    # would put a plausible-looking but wrong symbol in a ledger people cite.
+    """Explain the unbuilt workload without inferring backend capability."""
     return (
-        f"family {family!r} is not swept: the in-tree reference target declares only "
-        f"{ops or 'UNKNOWN'}, so lower_to_target refuses this family's interface op and no "
-        f"command buffer is produced — there is nothing to validate. The SMT encoder is not the "
-        f"limit (it already handles VECTOR_MAP, VREDUCE and MOVEMENT); a target declaring those "
-        f"ops is."
+        f"family {family!r} is not swept: this verifier has no workload builder for it; "
+        f"no target capability or SMT verdict was inferred."
     )
+
+
+def _dtype_omission(dtype: str) -> str:
+    return f"dtype {dtype!r} is not swept: this verifier builds only i8 quantized matmul workloads"
 
 
 def _lattice_source(spec: dict[str, Any]) -> str:
@@ -255,26 +250,41 @@ def render(rec: dict[str, Any]) -> str:
     out.append(f"  extents      {rec['lattice_points'] or '(none derivable)'}")
     out.append(f"  source       {rec['lattice_source']}")
     out.append(
-        f"  cells        {len(rec['cells_covered'])} covered of {rec['cells_declared']} "
+        f"  cells        {len(rec['cells_covered'])} fully verified of {rec['cells_declared']} "
         f"declared, via {rec['cell_groups_swept']} distinct query group(s)"
     )
+    if rec.get("max_points") is not None:
+        out.append(
+            f"               {len(rec['cells_verified_at_sampled_points'])} cell(s) verified at sampled points; "
+            f"{len(rec['lattice_points'])} of {len(rec['lattice_points_available'])} extent(s) selected"
+        )
     out.append("               (alignment is expressed by the extent, not by a separate query)")
     out.append(
         f"  points       {rec['points_verified']} verified / {rec['points_refuted']} REFUTED "
-        f"/ {rec['points_abstained']} abstained  (of {rec['points_total']})"
+        f"/ {rec['points_abstained']} abstained / {rec['points_error']} ERROR "
+        f"(of {rec['points_total']})"
     )
+    unavailable = [r for r in rec["results"] if r["status"] in {"abstained", "error", "unknown"}]
+    if unavailable:
+        out.append("  no proof for:")
+        for r in unavailable:
+            out.append(f"    {r['cell']:34s} {r['m']}x{r['k']}x{r['n']}: {r.get('reason', r['status'])}")
     ss = rec.get("shape_space") or {}
     if ss:
-        d = ss.get("dynamic") or {}
+        d = ss.get("dynamic_declared") or {}
         out.append("")
         out.append(
             f"  shape space  formal: {ss['formal']['shapes_proved']} shape(s) proved over {ss['formal']['quantifier']}"
         )
         out.append(
-            f"               dynamic: {d.get('capsules', 0)} capsule(s) across "
-            f"{d.get('distinct_shapes', 0)} distinct shape(s), one stimulus each"
+            f"               dynamic available: {d.get('capsules', 0)} declared capsule(s) across "
+            f"{d.get('distinct_shapes', 0)} distinct shape(s); execution not measured"
         )
-        out.append("               (different questions -- only the dynamic ladder touches hardware)")
+        out.append("               (only the dynamic ladder touches hardware when it runs)")
+        if d.get("unreadable"):
+            out.append(
+                f"               {len(d['unreadable'])} declared capsule(s) could not be read and are not counted"
+            )
     if rec["points_refuted"]:
         out.append("")
         out.append("  REFUTED — the compiled program disagrees with the declared contraction:")
@@ -320,8 +330,8 @@ def main(argv: list[str] | None = None) -> int:
         _write(rec)
     if args.emit_counterexamples:
         emit_counterexamples(rec, profile=args.smt_profile)
-    # A refutation is a failure; an abstention is not.
-    return 1 if rec["points_refuted"] else 0
+    # A refutation or unexpected tooling error is a failure; a recorded abstention is not.
+    return 1 if rec["points_refuted"] or rec["points_error"] else 0
 
 
 def emit_counterexamples(rec: dict[str, Any], *, profile: Path) -> None:
@@ -370,10 +380,10 @@ def _write(rec: dict[str, Any]):
             f"solver bound: {rec['timeout_ms']} ms per point",
         ],
         notes=(
-            "Verification of a target's derived extent lattice. Each point proves the compiled program "
-            "computes the declared contraction for EVERY input at that shape, versus the dynamic ladder "
-            "which grades one stimulus per witness. Cells and extents come from the target's own "
-            "capability manifest and RTL facts, so the verified set is generated rather than curated."
+            "Verification attempts over a target's derived extent lattice. A verified point proves the "
+            "compiled program computes the declared contraction for EVERY input at that shape, "
+            "while declared dynamic capsules are counted without grade receipts. Cells and extents "
+            "come from the target's own capability manifest and RTL facts."
         ),
     )
     out = prod.add_artifact("lattice.json")

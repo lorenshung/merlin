@@ -201,6 +201,27 @@ MERLIN_CORPUS_SEAL="${CORPUS_SEAL:?}" python -m merlin_experiments.phase1 \
 
 This starts authoring and grading: approve the provider and budget before running
 it. The budget matches the example definition; reduce it deliberately if needed.
+To qualify one preserved compiler without starting an author, use a **new** run ID
+and the same reviewed release, bundle, timing, private full-model spec, and selected
+toolchain bindings with `--qualify-submission "${SUBMISSION_DIR:?}"` instead of the
+provider, schedule, and round options above. Select the corpus seal explicitly with
+`MERLIN_CORPUS_SEAL`. The submission is copied into the new run and graded through
+the ordinary public, hidden, private, and RTL gates. Its receipt is qualification
+of that selected copy only—not agent convergence, an upgrade of an older run, or
+permission to omit the private model gate. A new tool identity needs a new run;
+neither `--resume` nor `--seed-submission` can be combined with this mode.
+Qualification executes compiler builds and native simulators, but does not
+launch a paid author.
+
+```sh
+MERLIN_CORPUS_SEAL="${CORPUS_SEAL:?}" python -m merlin_experiments.phase1 \
+  --descriptor "${DESCRIPTOR:?}" --repo "${RESOURCE_ROOT:?}" \
+  --bundle "${BUNDLE_ID:?}" --bundle-manifest "${BUNDLE_MANIFEST:?}" \
+  --oracle-timing "${ORACLE_TIMING:?}" --run-id "${NEW_RUN_ID:?}" \
+  --level EL4 --sandbox bwrap --private-full-model-spec "${PRIVATE_FULL_MODEL_SPEC:?}" \
+  --qualify-submission "${SUBMISSION_DIR:?}"
+```
+
 Provision FileCheck on the selected execution PATH, and supply required toolchain
 library paths and credentials explicitly. This installed route does not inherit
 the old launcher's LLVM/Chipyard FileCheck candidates or compatibility-library defaults.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -51,6 +52,22 @@ def _measured_status(run_dir: Path, *, stall_hours: float | None = None) -> dict
     if error:
         document["objective_error"] = error
     return document
+
+
+def _capture_sources() -> tuple[Path, Path]:
+    """Keep a sealed capture's worker and schemas in the same Merlin installation.
+
+    ``schemas_dir`` may prefer an ambient checkout even when ``merlin`` was
+    imported from a wheel. That checkout is not part of the selected package,
+    so the seal correctly refuses it. An explicit schema override is still
+    passed through for the issuer to validate against the selected worker.
+    """
+    from merlin.common.paths import module_source_path, schemas_dir
+
+    package = module_source_path("merlin").parent
+    bundled = package / "_data/schemas"
+    schemas = bundled if "MERLIN_SCHEMAS_DIR" not in os.environ and bundled.is_dir() else schemas_dir()
+    return package / "targetgen/_m2m_capture_worker.py", schemas
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -230,6 +247,13 @@ def main(argv: list[str] | None = None) -> int:
     issue_capture = capture_ops.add_parser("issue", help="capture only from an exact preselected identity")
     issue_capture.add_argument("--selection", type=Path, required=True)
     issue_capture.add_argument("--expected-sha256", required=True)
+    variants = operations.add_parser(
+        "variants", help="derive bounded independent workload roots from selected RTL facts"
+    )
+    variants.add_argument("--facts", type=Path, required=True)
+    variants.add_argument("--template", type=Path, required=True)
+    variants.add_argument("--loader", type=Path, required=True)
+    variants.add_argument("--output", type=Path, required=True, help="fresh generated capture-input directory")
     from merlin.targetgen import group_capsules
 
     groups = operations.add_parser(
@@ -285,19 +309,32 @@ def main(argv: list[str] | None = None) -> int:
         return group_inspect.run_from_args(args)
     try:
         if args.verb == "corpus":
-            if args.operation == "capture":
-                from merlin.common.paths import module_source_path, schemas_dir
+            if args.operation == "variants":
+                from .phase0.workload_variants import materialize
 
+                try:
+                    result = materialize(
+                        facts_path=args.facts,
+                        template_path=args.template,
+                        loader_path=args.loader,
+                        output_root=args.output,
+                    )
+                except ValueError as exc:
+                    raise SpecError(str(exc)) from exc
+                print(json.dumps(result, indent=2))
+                return 0
+            if args.operation == "capture":
                 from .phase0 import capture_selection
 
                 try:
                     if args.capture_operation == "select":
+                        worker, schemas = _capture_sources()
                         result = capture_selection.select(
                             m2m_root=args.m2m_root,
                             workload_root=args.workload_root,
-                            worker=module_source_path("merlin").parent / "targetgen/_m2m_capture_worker.py",
+                            worker=worker,
                             venv=args.venv,
-                            schemas_root=schemas_dir(),
+                            schemas_root=schemas,
                             run_dir=args.run_dir,
                             output_dir=args.output,
                             dtype=args.dtype,

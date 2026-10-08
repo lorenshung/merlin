@@ -835,7 +835,8 @@ def build(
         print(
             f"[device] linked {len(_dev_build.kernels)} kernel(s) + shim for {device.device}"
             f" ({_dev_side.get('granularity') or 'contraction'} granularity;"
-            f" built_from={sorted(set(_dev_build.built_from.values()))})"
+            f" built_from={sorted(set(_dev_build.built_from.values()))};"
+            f" {_dev_build.object_dedup.get('unique_artifacts')} distinct compiled artifact(s))"
             + (f"; declined: {[w for _s, w in _dev_build.skipped]}" if _dev_build.skipped else "")
         )
 

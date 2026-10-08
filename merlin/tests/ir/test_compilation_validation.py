@@ -30,10 +30,11 @@ _TIMEOUT_MS = 180_000
 
 
 def _pair():
+    from merlin.targetgen.families import DEFAULT_EXAMPLE_TARGET
     from merlin.verify.evaluate import _finish_lowering, _lower_to_interface
 
     m, k, n = _SHAPE
-    iface, tc = _lower_to_interface(m, k, n, 2)
+    iface, tc = _lower_to_interface(m, k, n, 2, target=DEFAULT_EXAMPLE_TARGET)
     return iface, _finish_lowering(iface, tc)
 
 
@@ -104,6 +105,8 @@ def test_a_buffer_for_a_different_program_abstains():
     from merlin.verify.smt_semantics import UnsupportedSemantics
 
     iface, _ = _pair()
-    other, tc = _lower_to_interface(4, 4, 4, 2)
+    from merlin.targetgen.families import DEFAULT_EXAMPLE_TARGET
+
+    other, tc = _lower_to_interface(4, 4, 4, 2, target=DEFAULT_EXAMPLE_TARGET)
     with pytest.raises(UnsupportedSemantics, match="not the same program|is \\(4, 4\\)"):
         validate_compilation(iface, _finish_lowering(other, tc), timeout_ms=_TIMEOUT_MS)

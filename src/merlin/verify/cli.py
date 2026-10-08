@@ -155,6 +155,98 @@ def cmd_compile_receipt(args) -> int:
     return EXIT_VERIFIED if receipt.verified else EXIT_REFUTED if receipt.status == "refuted" else EXIT_ABSTAINED
 
 
+def _emit_receipt(record: dict[str, Any], output: str | None) -> None:
+    rendered = json.dumps(record, indent=2, sort_keys=True) + "\n"
+    if output:
+        with Path(output).open("x", encoding="utf-8") as stream:
+            stream.write(rendered)
+    else:
+        print(rendered, end="")
+
+
+def cmd_scalar_receipt(args) -> int:
+    """Validate two exact MLIR files in the supported pure scalar-integer subset."""
+    from .scalar_ir import verify_scalar_transform
+
+    receipt = verify_scalar_transform(
+        Path(args.before).read_bytes(),
+        Path(args.after).read_bytes(),
+        entry=args.entry,
+        timeout_ms=args.timeout_ms,
+    )
+    _emit_receipt(receipt.to_dict(), args.output)
+    return EXIT_VERIFIED if receipt.verified else EXIT_REFUTED if receipt.status == "refuted" else EXIT_ABSTAINED
+
+
+def cmd_qualify_scalar_receipt(args) -> int:
+    """Replay a saved scalar proof against the exact before/after file bytes."""
+    from .scalar_ir import ScalarTransformReceipt, qualify_scalar_receipt
+
+    try:
+        record = json.loads(Path(args.receipt).read_text(encoding="utf-8"))
+        receipt = ScalarTransformReceipt.from_dict(record)
+        qualified = qualify_scalar_receipt(receipt, Path(args.before).read_bytes(), Path(args.after).read_bytes())
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(f"unqualified: invalid receipt or artifact: {exc}")
+        return EXIT_ABSTAINED
+    print("qualified" if qualified else "unqualified: proof replay or byte identity failed")
+    return EXIT_VERIFIED if qualified else EXIT_ABSTAINED
+
+
+def cmd_outline_receipt(args) -> int:
+    """Check beta-equivalence of one actual pure outlining pass output."""
+    from .outline_ir import verify_outline_transform
+
+    receipt = verify_outline_transform(Path(args.before).read_bytes(), Path(args.after).read_bytes(), entry=args.entry)
+    _emit_receipt(receipt.to_dict(), args.output)
+    return EXIT_VERIFIED if receipt.verified else EXIT_REFUTED if receipt.status == "mismatch" else EXIT_ABSTAINED
+
+
+def cmd_qualify_outline_receipt(args) -> int:
+    """Replay a saved outlining receipt against the exact before/after bytes."""
+    from .outline_ir import OutlineTransformReceipt, qualify_outline_receipt
+
+    try:
+        record = json.loads(Path(args.receipt).read_text(encoding="utf-8"))
+        receipt = OutlineTransformReceipt.from_dict(record)
+        qualified = qualify_outline_receipt(receipt, Path(args.before).read_bytes(), Path(args.after).read_bytes())
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(f"unqualified: invalid receipt or artifact: {exc}")
+        return EXIT_ABSTAINED
+    print("qualified" if qualified else "unqualified: proof replay or byte identity failed")
+    return EXIT_VERIFIED if qualified else EXIT_ABSTAINED
+
+
+def _chunk_sizes(text: str) -> tuple[int, ...]:
+    try:
+        return tuple(int(part) for part in text.split(","))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"chunks must be comma-separated integers, not {text!r}") from exc
+
+
+def cmd_split_reduction(args) -> int:
+    """Prove or refute one signed split-K accumulation at the declared widths, for every input."""
+    from dataclasses import asdict
+
+    from .split_reduction import maximum_safe_chunk, verify_split_reduction
+
+    try:
+        verdict = verify_split_reduction(
+            k=args.k,
+            operand_width=args.operand_width,
+            partial_width=args.partial_width,
+            output_width=args.output_width,
+            chunks=args.chunks,
+            timeout_ms=args.timeout_ms,
+        )
+        bound = maximum_safe_chunk(args.operand_width, args.partial_width)
+    except ValueError as exc:
+        print(json.dumps({"status": "invalid", "reason": str(exc)}, indent=2))
+        return EXIT_ABSTAINED
+    print(json.dumps({**asdict(verdict), "maximum_safe_chunk": bound}, indent=2))
+    return {"verified": EXIT_VERIFIED, "refuted": EXIT_REFUTED}.get(verdict.status, EXIT_ABSTAINED)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="merlin-verify", description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -197,6 +289,46 @@ def main(argv: list[str] | None = None) -> int:
     receipt.add_argument("--timeout-ms", type=int, default=60_000)
     receipt.add_argument("--output", help="write a new receipt file; omit for stdout")
     receipt.set_defaults(fn=cmd_compile_receipt)
+
+    scalar = sub.add_parser("scalar-receipt", help="prove an exact pure scalar-integer MLIR transformation")
+    scalar.add_argument("--before", required=True, help="exact before-pass MLIR file")
+    scalar.add_argument("--after", required=True, help="exact after-pass MLIR file")
+    scalar.add_argument("--entry", default="forward", help="entry function to compare")
+    scalar.add_argument("--timeout-ms", type=int, default=30_000)
+    scalar.add_argument("--output", help="write a new receipt file; omit for stdout")
+    scalar.set_defaults(fn=cmd_scalar_receipt)
+
+    qualify_scalar = sub.add_parser(
+        "qualify-scalar-receipt", help="replay a saved scalar proof on exact before/after MLIR files"
+    )
+    qualify_scalar.add_argument("--receipt", required=True, help="saved scalar receipt JSON")
+    qualify_scalar.add_argument("--before", required=True, help="exact before-pass MLIR file")
+    qualify_scalar.add_argument("--after", required=True, help="exact after-pass MLIR file")
+    qualify_scalar.set_defaults(fn=cmd_qualify_scalar_receipt)
+
+    outline = sub.add_parser("outline-receipt", help="check exact pure outlining by call expansion")
+    outline.add_argument("--before", required=True, help="exact before-pass MLIR file")
+    outline.add_argument("--after", required=True, help="exact after-pass MLIR file")
+    outline.add_argument("--entry", default="forward", help="entry function to compare")
+    outline.add_argument("--output", help="write a new receipt file; omit for stdout")
+    outline.set_defaults(fn=cmd_outline_receipt)
+
+    qualify_outline = sub.add_parser("qualify-outline-receipt", help="replay a saved pure outlining receipt")
+    qualify_outline.add_argument("--receipt", required=True, help="saved outline receipt JSON")
+    qualify_outline.add_argument("--before", required=True, help="exact before-pass MLIR file")
+    qualify_outline.add_argument("--after", required=True, help="exact after-pass MLIR file")
+    qualify_outline.set_defaults(fn=cmd_qualify_outline_receipt)
+
+    split = sub.add_parser(
+        "split-reduction", help="prove a signed split-K accumulation at declared widths for every input"
+    )
+    split.add_argument("--k", type=int, required=True, help="reduction length of the source contraction")
+    split.add_argument("--operand-width", type=int, required=True, help="signed operand bits")
+    split.add_argument("--partial-width", type=int, required=True, help="signed bits of each chunk's accumulator")
+    split.add_argument("--output-width", type=int, required=True, help="signed bits of the aggregated output")
+    split.add_argument("--chunks", type=_chunk_sizes, required=True, help="chunk sizes covering K, e.g. 31,31,10")
+    split.add_argument("--timeout-ms", type=int, default=30_000)
+    split.set_defaults(fn=cmd_split_reduction)
 
     args = ap.parse_args(argv)
     return args.fn(args)

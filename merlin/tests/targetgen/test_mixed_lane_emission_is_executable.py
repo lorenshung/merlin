@@ -25,15 +25,24 @@ from merlin.targetgen.bundle_harness import (
 def _artifact(parameters: int) -> str:
     """A printed LLVM-dialect module whose single entry takes ``parameters`` pointers."""
     pointers = ", ".join(["!llvm.ptr"] * parameters)
+    block_args = ", ".join(f"%arg{i}: !llvm.ptr" for i in range(parameters))
     return (
         '"builtin.module"() ({\n'
-        '  "llvm.mlir.global"() <{global_type = !llvm.array<16 x i8>, sym_name = "stage"}> : () -> ()\n'
-        '  "llvm.func"() <{sym_name = "kernel", '
-        f"function_type = !llvm.func<void ({pointers})>}}> ({{\n"
+        '  "llvm.func"() <{unnamed_addr = 0 : i64, sym_name = "kernel", '
+        f"function_type = !llvm.func<void ({pointers})>, CConv = #llvm.cconv<ccc>, "
+        'linkage = #llvm.linkage<"external">, visibility_ = 0 : i64}> ({\n'
+        f"  ^bb0({block_args}):\n"
         '    "llvm.return"() : () -> ()\n'
         "  }) : () -> ()\n"
         "}) : () -> ()\n"
     )
+
+
+def _pretty_artifact(parameters: int, *, name: str = "gemmini_kernel", definition: bool = True) -> str:
+    """Registered LLVM pretty syntax, as emitted by a mixed whole-program builder."""
+    pointers = ", ".join(f"%arg{i}: !llvm.ptr" for i in range(parameters))
+    body = " { llvm.return }" if definition else ""
+    return f"module {{ llvm.func @{name}({pointers}){body} }}"
 
 
 def _mixed_buffer(arguments: int) -> dict:
@@ -56,14 +65,7 @@ def test_entry_arity_is_parsed_from_the_printed_signature() -> None:
 
 def test_arity_ignores_nesting_inside_a_parameter_type() -> None:
     """A struct-typed parameter carries commas of its own; they are not parameter separators."""
-    text = (
-        '"builtin.module"() ({\n'
-        '  "llvm.func"() <{sym_name = "kernel", function_type = '
-        "!llvm.func<void (!llvm.struct<(i32, i32, i64)>, !llvm.ptr)>}> ({\n"
-        '    "llvm.return"() : () -> ()\n'
-        "  }) : () -> ()\n"
-        "}) : () -> ()\n"
-    )
+    text = "module { llvm.func @kernel(%a: !llvm.struct<(i32, i32, i64)>, %b: !llvm.ptr) { llvm.return } }"
     assert emitted_entry_arity(text) == 2
 
 
@@ -77,6 +79,38 @@ def test_mixed_lane_emission_is_executable_when_the_artifact_agrees() -> None:
     ok, why_not = is_executable_emission(buffer, artifact_text=_artifact(393))
     assert ok, why_not
     require_executable_emission(buffer, artifact_text=_artifact(393))
+
+
+def test_pretty_llvm_definition_is_executable_when_its_abi_agrees() -> None:
+    # Production emits this registered spelling; the older generic-only scan missed it.
+    ok, why_not = is_executable_emission(_mixed_buffer(2), artifact_text=_pretty_artifact(2))
+    assert ok, why_not
+
+
+def test_only_the_named_defined_entry_can_satisfy_a_mixed_emission() -> None:
+    artifact = (
+        "module { "
+        "llvm.func @helper(%arg0: !llvm.ptr) { llvm.return } "
+        "llvm.func @candidate_entry(%arg0: !llvm.ptr) { llvm.return } "
+        "}"
+    )
+    buffer = _mixed_buffer(1)
+    assert is_executable_emission(buffer, artifact_text=artifact, entry_symbol="candidate_entry")[0]
+    assert not is_executable_emission(buffer, artifact_text=artifact, entry_symbol="missing")[0]
+    assert not is_executable_emission(buffer, artifact_text=artifact)[0], "ambiguous helper must not be an entry"
+    declaration = _pretty_artifact(1, name="candidate_entry", definition=False)
+    assert not is_executable_emission(buffer, artifact_text=declaration, entry_symbol="candidate_entry")[0]
+    spoof = "module {} // llvm.func @candidate_entry(%arg0: !llvm.ptr) { llvm.return }"
+    assert not is_executable_emission(buffer, artifact_text=spoof, entry_symbol="candidate_entry")[0]
+    duplicate = (
+        "module { llvm.func @candidate_entry(%arg0: !llvm.ptr) "
+        "llvm.func @candidate_entry(%arg0: !llvm.ptr) { llvm.return } }"
+    )
+    assert not is_executable_emission(buffer, artifact_text=duplicate, entry_symbol="candidate_entry")[0]
+    assert not is_executable_emission(buffer, artifact_text="module { llvm.func @candidate_entry(")[0]
+    assert not is_executable_emission(buffer, artifact_text=_pretty_artifact(1), entry_symbol=1)[0]
+    with pytest.raises(BundleHarnessError):
+        require_executable_emission(buffer, artifact_text=artifact, entry_symbol="missing")
 
 
 def test_same_buffer_without_its_artifact_is_still_refused() -> None:

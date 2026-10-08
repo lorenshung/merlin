@@ -349,6 +349,53 @@ class EvidenceSelection:
         return views[name]
 
 
+def _record_scaling_contradictions(
+    diagnostics: list, contract: Mapping, provider_raw: bytes, *, target: str, selected_source
+) -> None:
+    """Compare an explicit capability contract's unit scaling with the selected provider's.
+
+    The two declarations have different owners. A readout check against only the selected one can
+    miss a stronger, incompatible scaling claim made by the executable provider, so each unit whose
+    scaling differs (or which the provider lacks) is recorded; neither declaration is replaced.
+    """
+    provider_contract = yaml.safe_load(provider_raw)
+    if not isinstance(provider_contract, dict) or provider_contract.get("name") != target:
+        raise ValueError("selected support provider contract differs from selected target")
+
+    def units(document: Mapping) -> dict:
+        return {
+            unit["name"]: unit
+            for unit in document.get("compute_units") or ()
+            if isinstance(unit, Mapping) and isinstance(unit.get("name"), str)
+        }
+
+    provider_units = units(provider_contract)
+    for name, unit in sorted(units(contract).items()):
+        provider_unit = provider_units.get(name)
+        if provider_unit is not None and unit.get("scaling") == provider_unit.get("scaling"):
+            continue
+        diagnostics.append(
+            {
+                "component": "support-contract",
+                "status": "contradiction",
+                "unit": name,
+                "selected_scaling": unit.get("scaling"),
+                "provider_scaling": provider_unit.get("scaling") if provider_unit is not None else None,
+                "reason": (
+                    f"selected compute unit {name!r} has no matching support-provider unit"
+                    if provider_unit is None
+                    else f"selected compute unit {name!r} declares scaling {unit.get('scaling')!r}, but the "
+                    f"support provider declares {provider_unit.get('scaling')!r}; review the provider against "
+                    "the selected RTL readout and freeze a fresh corpus"
+                ),
+                "selected_contract_sha256": (
+                    selected_source.sha256 if selected_source is not None else _canonical_digest(contract)
+                ),
+                "provider_contract_sha256": _digest(provider_raw),
+            }
+        )
+
+
 def select_evidence(
     target: str,
     *,
@@ -554,6 +601,23 @@ def select_evidence(
         provider = target_registry.resolve(target)
     except (KeyError, FileNotFoundError, ValueError) as exc:
         diagnostics.append({"component": "support", "status": "unknown", "reason": str(exc)})
+    if (
+        provider is not None
+        and getattr(provider, "kind", None) == "generated"
+        and not provider.contract_path.is_file()
+        and not provider.contract_path.is_symlink()
+    ):
+        # Registry discovery also names the *future* generated-package home. Until it has been
+        # materialized it is not a selected support implementation, and reading it as one makes
+        # Phase 0 inventory a phantom provider.
+        diagnostics.append(
+            {
+                "component": "support",
+                "status": "unknown",
+                "reason": f"generated support contract is not materialized: {provider.contract_path}",
+            }
+        )
+        provider = None
     if provider is not None:
         # Capability input selection is independent of executable support ownership.
         # The existing explicit contract selector must not be ignored merely because
@@ -596,6 +660,16 @@ def select_evidence(
                     observe(path, f"software-reference:{role}", required=True)
         contract = capability_contract(software_doc, base_contract=contract)
         datapath = numerical_datapath(software_doc)
+    if provider is not None and capability_contract_path is not None:
+        _record_scaling_contradictions(
+            diagnostics,
+            contract,
+            observe(provider.contract_path, "support-contract", required=True),
+            target=target,
+            selected_source=None
+            if isinstance(capability_contract_path, Mapping)
+            else sources.get(Path(capability_contract_path).absolute()),
+        )
     # The hardware selection is a source declaration, not an inferred dtype.
     for field, value in hardware_doc.items():
         if field.endswith("_path") and isinstance(value, str):
@@ -1048,156 +1122,6 @@ def select_evidence(
     )
 
 
-def _coverage_readme(accounting: dict, quantization: dict) -> bytes:
-    """Human navigation generated from the same JSON views, never a second census."""
-
-    def cell(value):
-        return str(value).replace("|", "\\|").replace("\n", " ").replace("\r", " ")
-
-    overall, universe = accounting["overall"], accounting["framework_universe"]
-    operation_count = overall["n_mlir_operations"] if overall["n_mlir_operations"] is not None else "unavailable"
-    registry_count = (
-        universe["n_registered_aten_operators"]
-        if universe["n_registered_aten_operators"] is not None
-        else "unavailable"
-    )
-    inventory_identity = accounting.get("selected_inventory") or {}
-    lines = [
-        "# Phase 0 operation and quantization accounting",
-        "",
-        "Generated diagnostic views; no compiler lowering or TorchAO realization is certified.",
-        "",
-        f"Inventory status: **{accounting['status']}**. Normalized MLIR operations: **{operation_count}**.",
-        f"Inventory binding: **{inventory_identity.get('status', 'not_available')}**; "
-        f"declared roster matches: **{inventory_identity.get('declared_roster_matches', 'unknown')}**.",
-        f"Selected framework catalog: **{universe['status']}**; registered ATen overloads: **{registry_count}**.",
-        "",
-        "Frontend counts are static captured call sites, not dynamic execution frequencies.",
-        "Missing source traces remain unknown; repeated lowering provenance is never counted as a frontend call.",
-        "",
-        "## Combined normalized-IR split",
-        "",
-        "| Partition | Operations |",
-        "| --- | ---: |",
-    ]
-    lines += [f"| {cell(name)} | {count} |" for name, count in overall["classification_counts"].items()]
-    operation_breakdown: dict[tuple[str, str], int] = {}
-    for application in accounting["applications"].values():
-        for signature in application["signatures"]:
-            key = (signature["classification"], signature["observed_signature"]["mlir_operation"])
-            operation_breakdown[key] = operation_breakdown.get(key, 0) + signature["count"]
-    lines += [
-        "",
-        "## Normalized-IR operations by partition",
-        "",
-        "These are static occurrences from the same digest-bound accounting, not new support claims.",
-        "",
-        "| Partition | MLIR operation | Occurrences |",
-        "| --- | --- | ---: |",
-    ]
-    for (partition, operation), count in sorted(
-        operation_breakdown.items(), key=lambda item: (item[0][0], -item[1], item[0][1])
-    ):
-        lines.append(f"| {cell(partition)} | {cell(operation)} | {count} |")
-    lines += [
-        "",
-        "## Selected hardware declaration screen",
-        "",
-        "This separate split exposes hardware-declared admission even when SW review is unresolved.",
-        "It is not executed compiler lowering or hardware qualification.",
-        "",
-        "| Admission | Operations |",
-        "| --- | ---: |",
-    ]
-    lines += [f"| {cell(name)} | {count} |" for name, count in overall["hardware_admission_counts"].items()]
-    lines += [
-        "",
-        "## Independent host and accelerator support",
-        "",
-        "These declaration screens are independent; unreviewed inputs remain unknown.",
-        "Neither screen implies actual dispatch or execution.",
-        "A host placement request without a matching pinned host capability remains unknown.",
-        "",
-        "| Support partition | Operations |",
-        "| --- | ---: |",
-    ]
-    lines += [f"| {cell(name)} | {count} |" for name, count in overall.get("support_partition_counts", {}).items()]
-    lines += [
-        "",
-        "## Per-application split",
-        "",
-        "| Application | Role / scope | Original calls | Quantized calls | Prepared calls | "
-        "MLIR ops | Source correspondence |",
-        "| --- | --- | ---: | ---: | ---: | ---: | --- |",
-    ]
-    for name, application in accounting["applications"].items():
-        source = (application.get("completeness") or {}).get("source_trace") or {}
-        identity = application.get("workload_identity") or {}
-        counts = [source.get(f"{stage}_invocation_count") for stage in ("original", "quantized", "prepared")]
-        rendered = " | ".join("unknown" if value is None else str(value) for value in counts)
-        scope = f"{identity.get('workload_role', 'unknown')} / {identity.get('coverage_scope', 'unknown')}"
-        lines.append(
-            f"| {cell(name)} | {cell(scope)} | {rendered} | {application['n_mlir_operations']} | "
-            f"{cell(source.get('status', 'unknown'))} |"
-        )
-    lines += [
-        "",
-        "## Precision and typed-edge obligations",
-        "",
-        "`operation-accounting.json` retains ordered storage, compute, accumulator and output types",
-        "for each exact operation ordinal, plus independent host/accelerator signature decisions.",
-        "`completeness.transfer_obligations` lists typed SSA edges with conditional lane crossings;",
-        "no crossing is claimed until placement is selected and a reviewed transfer contract matches.",
-        "Inspect [frontend/index.json](../software/frontend/index.json) for exact trace and SSA graph files.",
-        "Unknown lineage, precision, capability, transfer or exact capsule coverage blocks verified",
-        "whole-workload admission. Unit tests and representative subsets do not certify a headline model.",
-    ]
-    native = {
-        label: app["native_baseline_observation"]
-        for label, app in accounting["applications"].items()
-        if "native_baseline_observation" in app
-    }
-    if native:
-        lines += [
-            "",
-            "## Selected finite native baselines",
-            "",
-            "These complete-program CPU checks do not change RVV host or accelerator admission.",
-            "",
-            "| Application | Input precisions | Maximum absolute error | Target executed |",
-            "| --- | --- | ---: | --- |",
-        ]
-        for label, observation in native.items():
-            precision = ", ".join(sorted({item["dtype"] for item in observation["input_abi"]}))
-            lines.append(f"| {cell(label)} | {cell(precision)} | {observation['max_absolute_error']} | false |")
-        lines += [
-            "",
-            "Inspect [native-baseline-observations.json](../software/native-baseline-observations.json)",
-            "for exact ABIs, compiler identities, policies and links to byte-identical frozen receipts and outputs.",
-            "Agreement is scoped to the saved inputs; individual-operation execution is not independently traced.",
-        ]
-    lines += [
-        "",
-        "## Format and operation decisions",
-        "",
-        "| Format | Hardware status | Operation decisions |",
-        "| --- | --- | --- |",
-    ]
-    for row in quantization["formats"]:
-        decisions = ", ".join(f"{entry['operation_id']}: {entry['status']}" for entry in row["operation_eligibility"])
-        lines.append(f"| {cell(row['id'])} | {cell(row['status'])} | {cell(decisions)} |")
-    lines += [
-        "",
-        "Inspect [operation-accounting.json](operation-accounting.json) for exact signature ordinals,",
-        "per-application provenance groups, registry sets and unobserved declarations.",
-        "Inspect [quantization-contract.json](../software/quantization-contract.json) for parameters,",
-        "format-specific recipes, conflicts and reasons each operation is unknown or ineligible.",
-        "The selected detailed inventory is copied as `application-inventory.json` when available.",
-        "",
-    ]
-    return "\n".join(lines).encode()
-
-
 def export_evidence(selection: EvidenceSelection, artifact_root: str | Path) -> dict:
     """Write only already-observed bytes beneath the explicit Phase 0 run root."""
     root = Path(artifact_root)
@@ -1233,6 +1157,7 @@ def export_evidence(selection: EvidenceSelection, artifact_root: str | Path) -> 
     if selection.instruction_semantics_source is not None:
         outputs["software/instruction-semantics-authored.yaml"] = selection.instruction_semantics_source
     from merlin.targetgen.operation_accounting import build_operation_accounting
+    from merlin.targetgen.performance_basis import build_performance_basis
     from merlin.targetgen.quantization_spec import build_quantization_contract, capture_recipe_candidates
 
     accounting = build_operation_accounting(
@@ -1285,6 +1210,17 @@ def export_evidence(selection: EvidenceSelection, artifact_root: str | Path) -> 
         accounting,
     )
     outputs["coverage/operation-accounting.json"] = _json(accounting)
+    outputs["coverage/performance-basis.json"] = _json(
+        build_performance_basis(
+            accounting,
+            selection.performance_facts,
+            target=selection.target,
+            operation_accounting_sha256=_digest(outputs["coverage/operation-accounting.json"]),
+            performance_facts_artifact_sha256=_digest(outputs["hardware/effective-views/performance-facts.json"]),
+            selected_hardware_spec_sha256=_canonical_digest(selection.hardware_spec),
+            raw_rtl_facts_sha256=selection.raw_facts_sha256,
+        )
+    )
     outputs["software/quantization-contract.json"] = _json(quantization)
     recipes = []
     for candidate in capture_recipe_candidates(selection.software_spec, quantization):
@@ -1335,7 +1271,9 @@ def export_evidence(selection: EvidenceSelection, artifact_root: str | Path) -> 
             },
         }
     )
-    outputs["coverage/README.md"] = _coverage_readme(accounting, quantization)
+    from .coverage_readme import render as render_coverage_readme
+
+    outputs["coverage/README.md"] = render_coverage_readme(accounting, quantization)
     outputs["software/framework/pytorch-opset.json"] = _json(
         getattr(
             selection,
@@ -1382,6 +1320,15 @@ def export_evidence(selection: EvidenceSelection, artifact_root: str | Path) -> 
                 "hardware/effective-views/isa-taxonomy.json",
             ],
             "performance_gates": ["hardware/effective-views/performance-facts.json"],
+            "performance_basis": [
+                "coverage/operation-accounting.json",
+                "hardware/effective-views/performance-facts.json",
+                "software/hardware-spec.json",
+                "software/software-spec.json",
+                "software/contract.json",
+                *(["hardware/circt/facts.json"] if selection.raw_facts is not None else []),
+                "coverage/performance-basis.json",
+            ],
             "memory_regime_axes": ["hardware/effective-views/refreshed-facts.json"],
             "readout": [
                 "hardware/effective-views/refreshed-facts.json",
@@ -1433,6 +1380,11 @@ def export_evidence(selection: EvidenceSelection, artifact_root: str | Path) -> 
 def _materialize_evidence(root: Path, outputs: dict[str, bytes]) -> None:
     """Validate all destinations before adding immutable saved evidence members."""
     for name in outputs:
+        member = Path(name)
+        if member.is_absolute() or not member.parts or ".." in member.parts:
+            raise ValueError(f"invalid evidence output member: {name}")
+        if member.parts[0] == "private":
+            raise ValueError(f"evidence output may not occupy the private source snapshot: {name}")
         path = root / name
         if path.is_symlink():
             raise ValueError(f"evidence output may not be symlinked: {path}")

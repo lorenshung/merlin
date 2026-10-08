@@ -24,6 +24,12 @@ and working log: `docs/design/compiler_verification.md`.
   where no ignore rule matched it — in a public repo. It is gone; do not reintroduce that shape.
 - `faults.py` — the seeded fault corpus, one knob each, applied to real pass output.
 - `evaluate.py` — run every fault past every layer; produce the detection matrix.
+- `scalar_ir.py` — byte-bound QF_BV translation validation of a pure scalar-integer before/after
+  MLIR pair (first consumer: `perf.whole_model_chunks.chunk_forward`); everything else abstains.
+- `outline_ir.py` — byte-bound structural check of `outline_dispatches` output: expands the emitted
+  private kernel calls and compares typed SSA graphs; a syntactic proof, not a matmul theorem.
+- `split_reduction.py` — SMT proof or counterexample for one signed split-K accumulation at
+  declared operand/partial/output widths; an algebraic obligation, not an emitted-kernel check.
 - `merlin.verify.plots` — optional analysis-owned figures under
   `packages/merlin-analysis/src/merlin/verify/`, each generated from a JSON record, never a literal.
 - `merlin.verify.replay` / `merlin.verify.replay_layers` — optional analysis-owned historical replay,
