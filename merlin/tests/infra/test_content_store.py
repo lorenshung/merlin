@@ -52,6 +52,42 @@ def test_disabling_the_store_still_freezes_the_same_bytes(tmp_path, monkeypatch)
     assert landed.stat().st_nlink == 1
 
 
+def test_permission_preserving_copy_refuses_cas_and_shared_destination(tmp_path):
+    source = tmp_path / "source"
+    source.write_bytes(b"owner-only selected input\n")
+    source.chmod(0o400)
+    store = tmp_path / "store"
+    for placer in (CS.place_file, CS.place_tree):
+        with pytest.raises(ValueError, match="cannot use the shared content store"):
+            placer(source, tmp_path / "absent", store, preserve_permissions=True)
+    assert not store.exists() and not (tmp_path / "absent").exists()
+    shared = tmp_path / "shared"
+    other = tmp_path / "other"
+    shared.write_bytes(b"unrelated retained bytes\n")
+    shared.chmod(0o444)
+    os.link(shared, other)
+    with pytest.raises(ValueError, match="shared permission-preserving destination"):
+        CS.place_file(source, shared, None, preserve_permissions=True)
+    assert other.read_bytes() == b"unrelated retained bytes\n"
+    assert other.stat().st_mode & 0o7777 == 0o444
+
+
+@pytest.mark.parametrize("existing", ["directory", "symlink", "dangling_symlink"])
+def test_permission_preserving_tree_refuses_existing_destination_before_copy(tmp_path, existing):
+    source = _tree(tmp_path / "source")
+    destination, retained = tmp_path / "destination", tmp_path / "retained"
+    if existing == "directory":
+        destination.mkdir()
+    else:
+        if existing == "symlink":
+            retained.mkdir()
+        destination.symlink_to(retained, target_is_directory=True)
+    with pytest.raises(ValueError, match="tree destination must be new"):
+        CS.place_tree(source, destination, None, preserve_permissions=True)
+    assert not (retained / "top.txt").exists() and not (destination / "top.txt").exists()
+    assert destination.is_symlink() == (existing != "directory")
+
+
 @pytest.mark.parametrize("executable", [False, True])
 @pytest.mark.parametrize("fallback", ["disabled", "unavailable", "failed_link"])
 def test_copy_fallback_retains_typed_readonly_mode_and_original_inputs(tmp_path, monkeypatch, executable, fallback):

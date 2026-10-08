@@ -629,7 +629,8 @@ def materialize_bundle_inputs(
     treatment smaller than the bundle and its lock claim.
 
     ``private_sources`` supplies additional copy-policy hints captured by the caller:
-    overlapping roots bypass the shared content store. It does not add grants or
+    overlapping roots bypass the shared content store and preserve restrictive
+    source permissions while removing write bits. It does not add grants or
     replace answer ownership/masking, and applies only when creating a new snapshot.
     """
     private_sources = tuple(Path(path) for path in private_sources)
@@ -730,9 +731,9 @@ def materialize_bundle_inputs(
             )
             input_store = None if private_copy else store
             if source.is_dir():
-                content_store.place_tree(source, dst, input_store, observe=observe)
+                content_store.place_tree(source, dst, input_store, observe=observe, preserve_permissions=private_copy)
             else:
-                content_store.place_file(source, dst, input_store, observe=observe)
+                content_store.place_file(source, dst, input_store, observe=observe, preserve_permissions=private_copy)
         digest, n_files, n_bytes = _snapshot_content(pending)
         grant_records = []
         for rel, source in inputs:

@@ -58,6 +58,38 @@ def test_private_only_bundle_has_no_candidate_input_binds(private_bundle):
     assert BW.snapshot_input_paths(workspace, bundle, [hidden], repo=repo)[0].is_dir()
 
 
+@pytest.mark.parametrize("use_store", [False, True])
+@pytest.mark.parametrize("broad_grant", [False, True])
+def test_private_snapshot_keeps_owner_only_modes_and_independent_inodes(
+    private_bundle, monkeypatch, use_store, broad_grant
+):
+    repo, workspace, bundle, hidden = private_bundle
+    store = repo / "cas"
+    monkeypatch.setenv("MERLIN_BUNDLE_CAS", str(store) if use_store else "")
+    bundle["allowed"] = [{"path": "inputs" if broad_grant else "inputs/public.txt"}]
+    hidden.chmod(0o2700)
+    secret = hidden / "secret.bin"
+    secret.chmod(0o400)
+    executable = hidden / "private-tool"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o700)
+    before = [(path.read_bytes(), path.stat().st_mode & 0o7777, path.stat().st_ino) for path in (secret, executable)]
+    BW.materialize_bundle_inputs(workspace, bundle, repo=repo)
+    [frozen] = BW.snapshot_input_paths(workspace, bundle, [hidden], repo=repo)
+    assert frozen.stat().st_mode & 0o7777 == 0o500
+    assert hidden.stat().st_mode & 0o7777 == 0o2700
+    for source, mode, original in zip((secret, executable), (0o400, 0o500), before, strict=True):
+        copied = frozen / source.name
+        assert copied.read_bytes() == original[0]
+        assert copied.stat().st_mode & 0o7777 == mode
+        assert copied.stat().st_nlink == 1
+        assert copied.stat().st_ino != original[2]
+        assert (source.read_bytes(), source.stat().st_mode & 0o7777, source.stat().st_ino) == original
+        assert not BW.is_exposed(BW.base_argv(workspace, bundle, repo=repo), source)
+    if use_store:
+        assert all(path.read_bytes() != before[0][0] for path in store.rglob("*") if path.is_file())
+
+
 @pytest.mark.parametrize("path", ["inputs/hidden", "inputs/hidden/secret.bin"])
 def test_explicit_public_grant_cannot_reopen_private_subtree(private_bundle, path):
     repo, workspace, bundle, _ = private_bundle

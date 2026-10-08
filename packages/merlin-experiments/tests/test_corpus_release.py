@@ -954,6 +954,8 @@ def test_release_hands_selected_capability_view_to_native_phase1(release_fixture
     monkeypatch.setenv("MERLIN_TARGET_CONTRACT", str(provider_contract))
     with pytest.raises(ValueError, match="capability contract.*differs"):
         load_context(descriptor, repo=root)
+    assert copied.stat().st_nlink == 1
+    copied.chmod(0o600)  # Deliberate tampering with this fixture's independent frozen copy.
     copied.write_text(raw + "\n")
     monkeypatch.setenv("MERLIN_TARGET_CONTRACT", str(copied))
     with pytest.raises(SpecError, match="source identity changed"):
@@ -1691,6 +1693,46 @@ def test_reviewed_handoff_uses_shared_content_store_without_mutating_sources(rel
     argv = BW.base_argv(ws, bundle, repo=fixture["root"])
     assert BW.is_exposed(argv, public)
     assert not BW.is_exposed(argv, private)
+
+
+def test_reviewed_private_instruction_model_survives_freeze_without_permission_widening(release_fixture, capsys):
+    from merlin.targetgen.sandbox import bwrap as BW
+
+    fixture = release_fixture
+    _prepare(fixture, capsys)
+    private = fixture["release"] / "private"
+    model = private / "instruction-semantics.json"
+    model.write_text('{"schema":"synthetic-test-only","instructions":[]}\n')
+    model.chmod(0o400)
+    preparation = private / "preparation.json"
+    document = json.loads(preparation.read_text())
+    document["instruction_semantics"] = {"sha256": fingerprint(model)}
+    preparation.write_text(json.dumps(document))
+    sealed = _seal(fixture, corpus_release.inspect_release(fixture["release"]), capsys)
+    descriptor = Path(sealed["descriptor"])
+    bundle = yaml.safe_load(
+        (descriptor.parent / "input_bundles/raw_baseline_public_v0/input_bundle_manifest.yaml").read_text()
+    )
+    ws = fixture["root"] / "instruction-model-snapshot"
+    ws.mkdir()
+    BW.materialize_bundle_inputs(ws, bundle, repo=fixture["root"])
+    try:
+        verified = corpus_release.verify_snapshot_for_phase1(
+            Path(sealed["seal"]), descriptor, ws, bundle, repo=fixture["root"]
+        )
+        frozen = verified.private_instruction_model
+        assert frozen is not None and frozen.read_bytes() == model.read_bytes()
+        assert frozen.stat().st_mode & 0o7777 == 0o400
+        assert frozen.stat().st_nlink == 1 and not frozen.samefile(model)
+        assert model.stat().st_mode & 0o7777 == 0o400
+        # Correct bytes cannot authorize broader access to the private model.
+        frozen.chmod(0o444)
+        with pytest.raises(SpecError, match="frozen private instruction model"):
+            corpus_release.verify_snapshot_for_phase1(
+                Path(sealed["seal"]), descriptor, ws, bundle, repo=fixture["root"]
+            )
+    finally:
+        BW.remove_bundle_snapshot(ws)
 
 
 @pytest.mark.parametrize("location", ["live", "frozen"])
