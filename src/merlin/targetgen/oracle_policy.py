@@ -237,17 +237,65 @@ class _SimOracle:
     #: shared code path a second sim cannot be added to without editing it.
 
 
+def selected_full_call_provider(target: str):
+    """Resolve the contract-owned full-call provider for grading and preflight."""
+    import hashlib
+    from pathlib import Path
+
+    from merlin.common.paths import repo_root
+    from merlin.targetgen.plugins import load_module
+    from merlin.targetgen.target_experiment import load_capability_manifest
+
+    runner = load_capability_manifest(target).contract.get("runner") or {}
+    reference = runner.get("full_call_provider")
+    if not reference:
+        return None
+    path = Path(reference)
+    if not path.is_absolute():
+        path = repo_root() / path
+    return load_module(
+        path.parent,
+        path.name,
+        package_name="full_call_execution_" + hashlib.sha256(str(path.parent.resolve()).encode()).hexdigest(),
+    )
+
+
 def _chipyard_available(target: str) -> tuple[bool, str]:
-    """chipyard (gemmini/mx-gemmini): the loop-tier spike binary carries GO; the mlc arc model is the
-    fallback gold tier when spike is absent. Preserves the prior gemmini availability semantics exactly."""
+    """Probe the selected full-call model, otherwise retain backend/ARC discovery.
+
+    Provider options are the same ones used by full-call execution. A broken
+    explicit selection refuses rather than substituting a different model.
+    This checks installation availability, not numerical correctness.
+    """
+    from pathlib import Path
+
     from .rtl import mlc_bridge
+
+    try:
+        provider = selected_full_call_provider(target)
+        if provider is not None:
+            from ..runtime.backends.spike import spike_path
+
+            options = provider.runner_options()
+            binary = Path(options.get("spike_binary") or spike_path())
+            if not binary.is_file() or not os.access(binary, os.X_OK):
+                raise ValueError(f"selected Spike binary is absent or not executable: {binary}")
+            library = options.get("extlib")
+            if library is not None and not Path(library).is_file():
+                raise ValueError(f"selected Spike extension is absent: {library}")
+            return True, (
+                f"{target!r}: chipyard spike full-call provider available "
+                f"(binary={binary}, extension={options.get('extension')!r}, extlib={library})"
+            )
+    except Exception as exc:  # explicit provider selection must fail closed
+        return False, f"{target!r}: selected full-call Spike provider unavailable: {type(exc).__name__}: {exc}"
 
     arc_ok = mlc_bridge.arc_available(target)
     try:
         from ..runtime.backends import base as _bk
 
-        _gem = _bk.get_backend(target)  # resolve THIS target's backend (chipyard spike availability)
-        spike_ok = bool(_gem.available("spike"))
+        backend = _bk.get_backend(target)
+        spike_ok = bool(backend.available("spike"))
     except Exception:  # noqa: BLE001 — an unimportable backend is honestly unavailable
         spike_ok = False
     if spike_ok:

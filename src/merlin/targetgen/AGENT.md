@@ -21,6 +21,14 @@ launching, capsule grading, golden generation, sandboxing and certification. The
 - `validate/` — schema + structural checks and the validation report.
 - `oracle_policy.py` / `program_engine_policy.py` — read-only engine and tier metadata. Advertised
   availability is not successful evaluator construction or a certification result.
+  Chipyard full-call preflight and grading resolve the same contract-owned
+  `runner.full_call_provider`. Availability reads its `runner_options()` and checks
+  the selected Spike executable and explicit extension library; a broken declared
+  provider refuses instead of falling back to another model. Without a provider,
+  preflight retains the runtime backend and ARC availability path.
+  Full-call execution-provider and submitted-catalog imports scope their synthetic
+  namespaces by canonical owner path, so graded snapshots cannot share cached modules.
+  The loader retains its explicit ownership-collision refusal.
 - `elf_lanes.py` — shared execution-artifact/evidence vocabulary and static inspection. Required
   execution and negative static evidence remain distinct.
 - `host_linkage_contract.py` structurally validates closed draft or reviewed contracts for a

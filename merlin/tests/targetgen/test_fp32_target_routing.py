@@ -78,9 +78,20 @@ def test_fp32_descriptor_and_isolated_extension_selection(tmp_path, monkeypatch)
     library.write_bytes(b"isolated extension fixture")
     monkeypatch.setenv("MERLIN_FP32_SPIKE_EXTLIB", str(library))
     monkeypatch.setattr("merlin.runtime.backends.spike.spike_path", lambda: "/selected/tools/bin/spike")
+    from merlin.targetgen import oracle_policy
+
+    binary = tmp_path / "tools/bin/spike"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("fixture")
+    binary.chmod(0o755)
+    monkeypatch.setattr("merlin.runtime.backends.spike.spike_path", lambda: binary)
+    # Preflight must consult the contract's provider even without a runtime backend.
+    ok, reason = oracle_policy._chipyard_available(descriptor.target)
+    assert ok and str(library) in reason and "extension='gemmini'" in reason, reason
     options = provider.runner_options()
     assert options["extlib"] == library and options["extension"] == "gemmini"
     library.unlink()
+    assert not oracle_policy._chipyard_available(descriptor.target)[0]
     with pytest.raises(ValueError, match="isolated FP32"):
         provider.runner_options()
 

@@ -1077,17 +1077,8 @@ def _sim_engine_adapters(sim_via: str, target: str) -> dict[str, Callable]:
     DERIVED from the target's contract, never assumed."""
     if sim_via == "chipyard":
         adapters: dict[str, Callable] = {"L2": simulator_adapter("spike", target)}
-        from merlin.common.paths import repo_root
-        from merlin.targetgen.plugins import load_module
-        from merlin.targetgen.target_experiment import load_capability_manifest
-
-        runner = load_capability_manifest(target).contract.get("runner") or {}
-        provider_path = runner.get("full_call_provider")
-        if provider_path:
-            provider_path = Path(provider_path)
-            if not provider_path.is_absolute():
-                provider_path = repo_root() / provider_path
-            provider = load_module(provider_path.parent, provider_path.name, package_name="full_call_execution")
+        provider = _oracle_policy.selected_full_call_provider(target)
+        if provider is not None:
             adapters["L2"] = provider.full_call_oracle(target)
         plan = _oracle_policy.chipyard_tier_plan(target)
         if plan.selection is None:
