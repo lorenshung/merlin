@@ -167,6 +167,28 @@ def _bind_inputs(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict):
         raise NativeModelExecutionError("frozen weight manifest is not a mapping")
+    # Source entry order, not ABI spelling/order, identifies captured leaves.
+    # Validate the complete source/plan join before accepting that mapping.
+    from merlin.runtime.commandbuffer import whole_program_entry_bindings
+    from merlin.targetgen.oot_starterkit.plan import source_operation_inventory, validate_mixed_program_plan
+
+    source_path = capture_bundle / "model.mlir"
+    if source_path.is_symlink() or not source_path.is_file():
+        raise NativeModelExecutionError("frozen model interface is absent or indirect")
+    source_bytes = source_path.read_bytes()
+    validation = validate_mixed_program_plan(source_bytes, command_buffer)
+    if not validation.get("ok"):
+        raise NativeModelExecutionError(
+            f"candidate source/entry plan is incomplete: {validation.get('findings', [])[:2]}"
+        )
+    entry = whole_program_entry_bindings(command_buffer)
+    abi = command_buffer["kernel_abi"]["args"]
+    read = {str(arg["tensor"]) for arg in abi if arg["access"] == "read"}
+    if entry is None or set(entry) != read or len(entry) != len(read):
+        raise NativeModelExecutionError("frozen source entry bindings differ from exact read-only pointer ABI")
+    argument_indices = {name: index for index, name in enumerate(entry)}
+    if any((named := parse_arg_index(name)) is not None and named != index for name, index in argument_indices.items()):
+        raise NativeModelExecutionError("physical captured argument index differs from source argument index")
     # Prefer the explicitly selected RTL array's column count.  A named target
     # can otherwise resolve its own geometry through the existing capability
     # path, which refuses rather than guessing an unavailable fixed array.
@@ -189,7 +211,7 @@ def _bind_inputs(
         pitch = arrays[0]["cols"]
     else:
         pitch = tile_edge(target)
-    packed = plan(command_buffer, row_pitch_elements=pitch, weight_manifest=manifest)
+    packed = plan(command_buffer, row_pitch_elements=pitch, weight_manifest=manifest, argument_indices=argument_indices)
     capture_source, source_report = capture_tensor_source(capture_bundle, packed, weight_manifest=manifest)
     inputs: dict[str, Any] = {}
     for row in packed.const:
@@ -206,29 +228,6 @@ def _bind_inputs(
     # Conversely, a true entry-bound readwrite pointer needs a carried-state
     # seed; this one-shot model runner has no such session contract. Check the
     # complete source/plan join before treating any mutable buffer as scratch.
-    from merlin.runtime.commandbuffer import whole_program_entry_bindings
-    from merlin.targetgen.oot_starterkit.plan import source_operation_inventory, validate_mixed_program_plan
-
-    source_path = capture_bundle / "model.mlir"
-    if source_path.is_symlink() or not source_path.is_file():
-        raise NativeModelExecutionError("frozen model interface is absent or indirect")
-    source_bytes = source_path.read_bytes()
-    validation = validate_mixed_program_plan(source_bytes, command_buffer)
-    if not validation.get("ok"):
-        raise NativeModelExecutionError(
-            f"candidate source/entry plan is incomplete: {validation.get('findings', [])[:2]}"
-        )
-    entry = whole_program_entry_bindings(command_buffer)
-    abi = command_buffer["kernel_abi"]["args"]
-    read = {str(arg["tensor"]) for arg in abi if arg["access"] == "read"}
-    if entry is None or set(entry) != read or len(entry) != len(read):
-        raise NativeModelExecutionError("frozen source entry bindings differ from exact read-only pointer ABI")
-    # The packer resolves captured bytes by the physical arg<N> index, while
-    # entry_bindings maps those physical names to source argument positions.
-    # Equal shapes/types cannot prove this correspondence: a swap would run the
-    # right program on the wrong frozen input/weight bytes.
-    if any(parse_arg_index(name) != source_index for source_index, name in enumerate(entry)):
-        raise NativeModelExecutionError("physical captured argument index differs from source argument index")
     if set(inputs) != read or len(inputs) != len(read):
         raise NativeModelExecutionError("captured leaf binding does not cover the exact source entry ABI")
 

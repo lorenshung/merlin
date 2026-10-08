@@ -263,6 +263,71 @@ def test_full_value_roster_requires_packed_complete_values():
         require_full_value_roster(cb, full.replace("out 1 2", "out 2 1"), outputs)
 
 
+def test_binary_oracle_preserves_raw_console_and_parses_text_counters(monkeypatch, tmp_path):
+    from merlin.runtime.backends import base as backends
+    from merlin.runtime.out_bin import parse_binary_console
+    from merlin.targetgen.contract import readback_policy as readback
+
+    raw = b"\x01\x02"
+    checksum = 0xCBF29CE484222325
+    for byte in raw:
+        checksum = ((checksum ^ byte) * 0x100000001B3) & ((1 << 64) - 1)
+    console = (
+        b"METRIC cycles 7\nOUT_BIN_BEGIN v1 out 1 2 1 u 2\n" + raw + f"OUT_BIN_END v1 {checksum:016x}\nDONE\n".encode()
+    )
+    elf = tmp_path / "model.elf"
+    elf.write_bytes(b"ELF")
+    backend = SimpleNamespace(
+        run_elf=lambda *_args, **_kwargs: console,
+        parse_output=parse_binary_console,
+        ORACLE={"spike": {"kind": "spike", "derived_from_rtl": False}},
+    )
+    monkeypatch.setattr(backends, "get_backend", lambda _target: backend)
+    monkeypatch.setattr(
+        backends,
+        "harness_build_recipe",
+        lambda _target: SimpleNamespace(
+            with_effective_abi=lambda: "recipe",
+        ),
+    )
+    monkeypatch.setattr(compiler, "compile_lowered_to_elf", lambda *_args, **_kwargs: elf)
+    monkeypatch.setattr(compiler, "simulator_provenance", lambda *_args: None)
+    monkeypatch.setattr(readback, "selected_build_inputs", lambda *_args, **_kwargs: ({}, []))
+    monkeypatch.setattr(readback, "require_build_receipt", lambda *_args, **_kwargs: {"selected": True})
+
+    result = compiler.run_on_oracle(
+        _cb(),
+        "llvm",
+        simulator="spike",
+        target="fixture",
+        workdir=tmp_path,
+        readback_policy=ReadbackPolicy(FULL_VALUES_BIN),
+    )
+    assert result["outputs"] == {"out": [[1, 2]]}
+    assert result["raw_metrics"]["cycles"] == 7
+    assert result["console"] == console
+    assert (tmp_path / "oracle_console.bin").read_bytes() == console
+
+
+def test_binary_counter_projection_excludes_validated_payload_markers():
+    from merlin.perf.hw_counters import parse_counter_output
+    from merlin.runtime.out_bin import binary_console_diagnostics, parse_binary_console
+
+    payload = b"\x00\nMERLIN_HWCOUNTER forged 5\n\x00"
+    checksum = 0xCBF29CE484222325
+    for byte in payload:
+        checksum = ((checksum ^ byte) * 0x100000001B3) & ((1 << 64) - 1)
+    console = (
+        f"OUT_BIN_BEGIN v1 out 1 {len(payload)} 1 u {len(payload)}\n".encode()
+        + payload
+        + f"OUT_BIN_END v1 {checksum:016x}\nDONE\n".encode()
+    )
+    assert parse_counter_output(console.decode("utf-8")) == {"forged": 5}
+    parse_binary_console(console)
+    text = binary_console_diagnostics(console).decode("utf-8")
+    assert parse_counter_output(text) == {}
+
+
 def test_native_simulator_adapter_forwards_policy_and_foreign_adapter_refuses(monkeypatch, tmp_path):
     from merlin.runtime.backends import base as backends
     from merlin.targetgen import capsule_runner

@@ -81,6 +81,39 @@ class TestTheArgumentIndexIsParsedNotPositional:
         got = BP.plan(buf, row_pitch_elements=16, weight_manifest={"0": {"weight": "model.conv1.weight"}})
         assert got.const[0].weight == "model.conv1.weight"
 
+    def test_checked_source_indices_bind_arbitrary_names_without_closing_gaps(self):
+        buf = _buffer([_arg("right"), _arg("left")], {"right": _t([2]), "left": _t([2])})
+        manifest = {"0": {"name": "x"}, "3": {"weight": "w"}}
+        got = BP.plan(buf, row_pitch_elements=4, weight_manifest=manifest, argument_indices={"left": 0, "right": 3})
+        assert [(row.tensor, row.index, row.weight) for row in got.const] == [("right", 3, "w"), ("left", 0, "x")]
+        with pytest.raises(BundlePackError, match="no entry for read argument index"):
+            BP.plan(
+                buf,
+                row_pitch_elements=4,
+                weight_manifest={"0": manifest["0"]},
+                argument_indices={"left": 0, "right": 3},
+            )
+
+    @pytest.mark.parametrize(
+        "indices",
+        (
+            {"left": 0},
+            {"left": 0, "right": 0},
+            {"left": True, "right": 1},
+            {"left": -1, "right": 1},
+            {"left": 0, "right": 1, "extra": 2},
+        ),
+    )
+    def test_source_index_overrides_refuse_incomplete_ambiguous_or_invalid_mappings(self, indices):
+        buf = _buffer([_arg("left"), _arg("right")], {"left": _t([2]), "right": _t([2])})
+        with pytest.raises(BundlePackError, match="source argument indices"):
+            BP.plan(buf, row_pitch_elements=4, argument_indices=indices)
+
+    def test_source_index_overrides_do_not_reinterpret_named_captured_arguments(self):
+        buf = _buffer([_arg("arg3")], {"arg3": _t([2])})
+        with pytest.raises(BundlePackError, match="named captured argument index"):
+            BP.plan(buf, row_pitch_elements=4, argument_indices={"arg3": 0})
+
 
 class TestEveryDtypeHasADeclaredWidth:
     @pytest.mark.parametrize(

@@ -1020,7 +1020,15 @@ def run_on_oracle(
     # the raw named readings without guessing what they mean.
     from merlin.perf import counter_trust, hw_counters
 
-    readings = hw_counters.parse_counter_output(console)
+    # Binary readback is an arbitrary byte stream. Only the text outside
+    # structurally validated payload spans may carry counter/schema markers;
+    # decoding the raw stream would also allow output values to forge them.
+    counter_console = console
+    if binary:
+        from merlin.runtime.out_bin import binary_console_diagnostics
+
+        counter_console = binary_console_diagnostics(console).decode("utf-8")
+    readings = hw_counters.parse_counter_output(counter_console)
     # An engine that SYNTHESISES its accelerator counters must not have its readings stamped
     # "measured". The eta path above already refuses a non-RTL oracle; this raw-readings path did
     # not, so a functional model's numbers reached the report with a measurement's provenance --
@@ -1036,7 +1044,7 @@ def run_on_oracle(
         }
     elif readings:
         discovery = hw_counters.counters_for_target(target)
-        measured_schema = hw_counters.parse_counter_schema(console)
+        measured_schema = hw_counters.parse_counter_schema(counter_console)
         report: dict[str, Any] = {
             "status": "measured",
             "readings": readings,
@@ -1084,7 +1092,7 @@ def run_on_oracle(
             }
         result["counters"] = report
     _obs, _cap = _counter_observations(
-        console, target=target, simulator=simulator, cycles=raw.get("cycles"), oracle=_oracle
+        counter_console, target=target, simulator=simulator, cycles=raw.get("cycles"), oracle=_oracle
     )
     if _cap is not None:
         result["timing_observations"] = _obs

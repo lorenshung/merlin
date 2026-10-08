@@ -1650,6 +1650,10 @@ def _record_console(paths, name: str, console) -> tuple[str | None, int | None]:
     """
     if console is None:
         return None, None
+    if type(console) is bytes:
+        fname = f"{name}_console.bin"
+        (paths.artifacts_dir / fname).write_bytes(console)
+        return fname, len(console)
     text = str(console)
     fname = f"{name}_console.log"
     (paths.artifacts_dir / fname).write_text(text, encoding="utf-8")
@@ -5900,7 +5904,7 @@ def run_capsule(
                     reason=ex.get("reason"),
                     cycles=ex.get("cycles"),
                     derived_from_rtl=True,
-                    evidence=f"{_sim_name}_console.log",
+                    evidence=_clog or f"{_sim_name}_console.log",
                     timing=_tm,
                     not_applicable=True,
                     concurrency=_conc,
@@ -5949,7 +5953,7 @@ def run_capsule(
                     derived_from_rtl=tier in cfg.rtl_tiers,
                     toolchain=_graded_program(res, package_dir),
                     cycle_accurate=tier in cfg.rtl_tiers,
-                    evidence=f"{_sim_name}_console.log",
+                    evidence=_clog or f"{_sim_name}_console.log",
                     timing=_tm,
                     gflops=_cg,
                     pct_fp_peak=_cp,
@@ -6094,7 +6098,7 @@ def run_capsule(
                 derived_from_rtl=_derived_from_rtl,
                 toolchain=_graded_program(res, package_dir),
                 cycle_accurate=(tier in cfg.rtl_tiers and okt),
-                evidence=f"{_ev_name}_console.log",
+                evidence=_clog or f"{_ev_name}_console.log",
                 timing=_tm,
                 gflops=_gflops,
                 pct_fp_peak=_pct_peak,

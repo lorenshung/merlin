@@ -53,6 +53,21 @@ def test_generic_codec_header_is_available_from_selected_runtime_resources():
     assert b"merlin_out_b64_finish" in header.read_bytes()
 
 
+def test_capsule_console_records_binary_bytes_without_text_conversion(tmp_path):
+    from types import SimpleNamespace
+
+    from merlin.targetgen import capsule_runner
+
+    raw = b"OUT_BIN_BEGIN v1 out 1 1 1 u 1\n\x00OUT_BIN_END v1 0000000000000000\nDONE\n"
+    name, size = capsule_runner._record_console(SimpleNamespace(artifacts_dir=tmp_path), "spike", raw)
+    assert name == "spike_console.bin"
+    assert size == len(raw)
+    assert (tmp_path / name).read_bytes() == raw
+    text_name, text_size = capsule_runner._record_console(SimpleNamespace(artifacts_dir=tmp_path), "spike", "DONE\n")
+    assert (text_name, text_size) == ("spike_console.log", 5)
+    assert (tmp_path / text_name).read_text() == "DONE\n"
+
+
 @pytest.mark.parametrize("transport", ["out_b64_v1", "out_bin_v1"])
 def test_selected_policy_is_typed_and_records_exactly(tmp_path, transport):
     context = invocation(tmp_path, transport)
