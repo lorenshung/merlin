@@ -4879,6 +4879,21 @@ def run_capsule(
 
     paths = make_run_paths(runs_root, run_id, suite=cfg.suite, target=cfg.target, dtype=cfg.dtype, benchmark=name)
 
+    from . import core_aten_capsules
+
+    if core_aten_capsules.is_full_call(capsule):
+        return core_aten_capsules.run_capsule(
+            capsule,
+            package_dir,
+            paths=paths,
+            config=cfg,
+            adapters=adapters,
+            pkg=pkg,
+            contract=contract,
+            timeout=timeout,
+            no_oracle=no_oracle,
+        )
+
     # Whole-model capsule: graded end to end by compiling the captured model through the merlin
     # whole-model flow (compile_rvv) and gating vs its golden — NOT the per-op tier ladder. Write the
     # same capsule_result.json shape so downstream reporting is uniform.
