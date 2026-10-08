@@ -172,9 +172,8 @@ def _strip_build_state(root: Path) -> None:
 
 
 # the PUBLIC capsule set (with goldens — operator-side; output is redacted before the agent sees it),
-# DERIVED per-target from the descriptor's capsule_corpus (e.g. fp8/L3 or i8/L2) — no committed
-# set leaking one target's capsules into another's check. Falls back to the legacy committed set if
-# the descriptor can't be resolved.
+# DERIVED per-target from the descriptor's capsule_corpus (e.g. fp8/L3, i8/L2) — no committed set
+# leaking another target's capsules. Falls back to the legacy committed set if the descriptor can't be resolved.
 def _public_capsules(context: InvocationContext) -> Path:
     try:
         from merlin.targetgen.target_experiment import load_target_experiment
@@ -418,9 +417,8 @@ def _adapters(sim: str, target: str, sim_via: str | None, *, readback_policy=Non
     """Resolve the self-check oracle tiers from the TARGET's contract (target-agnostic, mirrors the driver
     grade). A chipyard target exposes the spike/verilator/vcs ladder selectable via --sim; any
     other target grades on its OWN contract-derived RTL tier (external_backend -> the program oracle;
-    an arc target -> the RTL-derived arc cosim), where --sim is not applicable. Routing a self-hosted-ISA
-    target here through the hardcoded spike/verilator adapters ran the RoCC/RVV lowering path and crashed
-    (AW4)."""
+    an arc target -> the RTL-derived arc cosim), where --sim is not applicable. Routing a self-hosted
+    ISA here through the hardcoded spike/verilator adapters ran the RoCC/RVV lowering and crashed (AW4)."""
     policy_error = _sim_policy_error(sim, sim_via)
     if policy_error:
         raise ValueError(policy_error)
