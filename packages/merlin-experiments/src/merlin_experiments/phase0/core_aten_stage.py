@@ -136,7 +136,58 @@ def input_paths(recipe: Path) -> list[Path]:
     return [Path(path) for path in sorted(paths)]
 
 
-def derive(recipe: Path, output: Path, *, target: str) -> dict:
+def _requirement(batches: list[dict], receipt: dict) -> dict:
+    """Declare finite retained-call obligations without claiming execution coverage."""
+    return {
+        "schema": "merlin.phase0.core_aten_conformance.v1",
+        "target": receipt["target"],
+        "scope": receipt["scope"],
+        "selection_sha256": receipt["selection_sha256"],
+        "cohorts": {
+            cohort: {
+                "count": sum(len(b["corpus"]["cases"]) for b in batches if b["cohort"] == cohort),
+                "scored": cohort != "host_guard",
+            }
+            for cohort in COHORTS
+        },
+        "obligations": [
+            "exact nonopaque overload-bound full-call capture",
+            "complete selected input bytes and disjoint public/hidden calls",
+            "independent owner-only full-call answers excluded from candidate grants",
+            "Phase 1 numerical agreement and declared lane execution evidence",
+        ],
+        "execution_coverage_status": "unverified",
+    }
+
+
+def verify_synthesis(recipe: Path, requirement: dict, synthesis: dict) -> dict:
+    """Recompute membership and receipts; input digests alone do not prove selection."""
+    batches, paths = selection(recipe)
+    receipt_path = _path(recipe, declaration(recipe).get("derivation"))
+    receipt = json.loads(receipt_path.read_bytes())
+    expected = {
+        "schema": SCHEMA,
+        "target": requirement.get("target"),
+        "inputs": paths,
+        "selection_sha256": hashlib.sha256(_json(batches)).hexdigest(),
+        "scope": "retained full-call packaging; no numerical or hardware verdict",
+    }
+    if receipt != expected or requirement != _requirement(batches, expected):
+        raise ValueError("Core ATen conformance selection changed; rerun corpus derive")
+    if (
+        synthesis.get("core_aten_selection")
+        != {
+            "schema": SCHEMA,
+            "selection_sha256": receipt["selection_sha256"],
+            "receipt_sha256": _sha(receipt_path),
+        }
+        or synthesis.get("capsules") != []
+    ):
+        raise ValueError("Core ATen selected synthesis differs from the retained-call derivation")
+    return {"selection_sha256": receipt["selection_sha256"], "execution_coverage_status": "unverified"}
+
+
+def derive(recipe: Path, output: Path, *, target: str, descriptor: Path) -> dict:
     batches, paths = selection(recipe)
     output = output.absolute()
     if output.exists():
@@ -162,9 +213,36 @@ def derive(recipe: Path, output: Path, *, target: str) -> dict:
     block["derivation"] = str(output / "selection.json")
     (output / "recipe.yaml").write_text(yaml.safe_dump(document, sort_keys=False))
     (output / "recipe.yaml").chmod(0o600)
+    from .profiles import synthesis_input_identity
+
+    requirement = output / "requirements.yaml"
+    requirement.write_text(yaml.safe_dump(_requirement(batches, receipt), sort_keys=False))
+    synthesis = output / "synth.yaml"
+    synthesis.write_text(
+        yaml.safe_dump(
+            {
+                "provenance": {
+                    "selected_inputs": synthesis_input_identity(
+                        conformance_spec=requirement, recipe=output / "recipe.yaml", descriptor=descriptor
+                    )
+                },
+                "core_aten_selection": {
+                    "schema": SCHEMA,
+                    "selection_sha256": receipt["selection_sha256"],
+                    "receipt_sha256": _sha(output / "selection.json"),
+                },
+                "capsules": [],
+            },
+            sort_keys=False,
+        )
+    )
+    for member in (requirement, synthesis):
+        member.chmod(0o600)
     return {
         "schema": SCHEMA,
         "recipe": str(output / "recipe.yaml"),
+        "conformance_spec": str(requirement),
+        "synth_profile": str(synthesis),
         "selection_sha256": receipt["selection_sha256"],
         "counts": {
             cohort: sum(len(b["corpus"]["cases"]) for b in batches if b["cohort"] == cohort) for cohort in COHORTS

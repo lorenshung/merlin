@@ -16,6 +16,7 @@ from merlin_experiments.spec import SpecError
 
 
 def fixture_recipe(tmp_path):
+    (tmp_path / "descriptor.yaml").write_text("target: synthetic\n")
     cohorts = {}
     for role in stage.COHORTS:
         cases = tmp_path / f"{role}.json"
@@ -87,8 +88,8 @@ def install_writer(monkeypatch, writer=fake_writer):
 
 def test_selection_determinism_and_stale_refusal(tmp_path, monkeypatch):
     recipe = fixture_recipe(tmp_path)
-    first = stage.derive(recipe, tmp_path / "derive1", target="synthetic")
-    second = stage.derive(recipe, tmp_path / "derive2", target="synthetic")
+    first = stage.derive(recipe, tmp_path / "derive1", target="synthetic", descriptor=tmp_path / "descriptor.yaml")
+    second = stage.derive(recipe, tmp_path / "derive2", target="synthetic", descriptor=tmp_path / "descriptor.yaml")
     assert first["selection_sha256"] == second["selection_sha256"]
     assert (tmp_path / "derive1/selection.json").read_bytes() == (tmp_path / "derive2/selection.json").read_bytes()
     install_writer(monkeypatch)
@@ -101,7 +102,7 @@ def test_selection_determinism_and_stale_refusal(tmp_path, monkeypatch):
 
 def test_complete_manifest_and_independent_private_copy(tmp_path, monkeypatch):
     recipe = fixture_recipe(tmp_path)
-    result = stage.derive(recipe, tmp_path / "derive", target="synthetic")
+    result = stage.derive(recipe, tmp_path / "derive", target="synthetic", descriptor=tmp_path / "descriptor.yaml")
     install_writer(monkeypatch)
     generated = tmp_path / "run/phase0/capsules"
     stage.generate(Path(result["recipe"]), generated, target="synthetic")
@@ -110,7 +111,9 @@ def test_complete_manifest_and_independent_private_copy(tmp_path, monkeypatch):
     assert manifest["held_out"]["n_generated"] == 1
     assert "hidden/hidden" not in (generated / "MANIFEST.yaml").read_text()
     assert not yaml.safe_load((generated / "host_guard/host_guard/capsule.yaml").read_bytes())["scored"]
-    te = SimpleNamespace(capsule_corpus=tmp_path / "baseline/public", target="synthetic")
+    te = SimpleNamespace(
+        capsule_corpus=tmp_path / "baseline/public", target="synthetic", descriptor=tmp_path / "descriptor.yaml"
+    )
     destination = tmp_path / "release/corpus"
     assemble(te, generated, destination, generated_only=True)
     for role in stage.COHORTS:
@@ -128,7 +131,7 @@ def test_complete_manifest_and_independent_private_copy(tmp_path, monkeypatch):
 
 def test_writer_failure_never_promotes_partial_corpus(tmp_path, monkeypatch):
     recipe = fixture_recipe(tmp_path)
-    result = stage.derive(recipe, tmp_path / "derive", target="synthetic")
+    result = stage.derive(recipe, tmp_path / "derive", target="synthetic", descriptor=tmp_path / "descriptor.yaml")
 
     def fail(*args, **kwargs):
         fake_writer(*args, **kwargs)
@@ -158,7 +161,7 @@ def test_overlap_and_alias_inputs_refused(tmp_path):
 
 def test_identical_executed_call_is_refused_across_cohorts(tmp_path, monkeypatch):
     recipe = fixture_recipe(tmp_path)
-    result = stage.derive(recipe, tmp_path / "derive", target="synthetic")
+    result = stage.derive(recipe, tmp_path / "derive", target="synthetic", descriptor=tmp_path / "descriptor.yaml")
 
     def duplicate_writer(*args, **kwargs):
         manifest = fake_writer(*args, **kwargs)
@@ -179,7 +182,7 @@ def test_output_bytes_and_private_lineage_are_deterministic(tmp_path, monkeypatc
     from merlin_experiments.corpus.preparation import generation_lineage
 
     recipe = fixture_recipe(tmp_path)
-    result = stage.derive(recipe, tmp_path / "derive", target="synthetic")
+    result = stage.derive(recipe, tmp_path / "derive", target="synthetic", descriptor=tmp_path / "descriptor.yaml")
     install_writer(monkeypatch)
     outputs = [tmp_path / name / "phase0/capsules" for name in ("one", "two")]
     for output in outputs:
@@ -201,5 +204,54 @@ def test_unattested_legacy_capture_contract_is_refused(tmp_path):
     capture["capture_meta"].pop("result_contract")
     receipt_path.write_text(json.dumps(capture))
     with pytest.raises(ValueError, match="result contract"):
-        stage.derive(recipe, tmp_path / "derive", target="synthetic")
+        stage.derive(recipe, tmp_path / "derive", target="synthetic", descriptor=tmp_path / "descriptor.yaml")
     assert not (tmp_path / "derive").exists()
+
+
+def test_selected_synthesis_binds_finite_conformance_without_execution_claim(tmp_path):
+    from merlin_experiments.phase0.profiles import verify_selected_synthesis
+
+    recipe = fixture_recipe(tmp_path)
+    derived = stage.derive(recipe, tmp_path / "derived", target="synthetic", descriptor=tmp_path / "descriptor.yaml")
+    status = verify_selected_synthesis(
+        derived["synth_profile"],
+        conformance_spec=derived["conformance_spec"],
+        recipe=derived["recipe"],
+        descriptor=tmp_path / "descriptor.yaml",
+    )
+    assert status["status"] == "verified"
+    assert status["execution_coverage_status"] == "unverified"
+    requirement = yaml.safe_load(Path(derived["conformance_spec"]).read_bytes())
+    assert requirement["cohorts"]["hidden"]["count"] == 1
+    assert not requirement["cohorts"]["host_guard"]["scored"]
+    assert "hidden-captures" not in Path(derived["conformance_spec"]).read_text()
+
+
+@pytest.mark.parametrize("changed", ["recipe", "conformance_spec", "descriptor", "receipt", "capture", "synthesis"])
+def test_selected_synthesis_refuses_changed_selection(tmp_path, changed):
+    from merlin_experiments.phase0.profiles import verify_selected_synthesis
+
+    recipe = fixture_recipe(tmp_path)
+    descriptor = tmp_path / "descriptor.yaml"
+    derived = stage.derive(recipe, tmp_path / "derived", target="synthetic", descriptor=descriptor)
+    if changed in ("recipe", "conformance_spec"):
+        path = Path(derived[changed])
+        path.write_text(path.read_text() + "\n# changed bytes\n")
+    elif changed == "descriptor":
+        descriptor.write_text("target: synthetic\nworkload_spec: {certification_floor: L3}\n")
+    elif changed == "receipt":
+        (tmp_path / "derived/selection.json").write_text("{}")
+    elif changed == "capture":
+        next((tmp_path / "hidden-captures").glob("*/capsule.linalg.mlir")).write_text("changed")
+    else:
+        path = Path(derived["synth_profile"])
+        document = yaml.safe_load(path.read_bytes())
+        document["core_aten_selection"]["selection_sha256"] = "0" * 64
+        path.write_text(yaml.safe_dump(document))
+    with pytest.raises(ValueError, match="stale selected synthesis|selection changed|synthesis differs"):
+        verify_selected_synthesis(
+            derived["synth_profile"],
+            conformance_spec=derived["conformance_spec"],
+            recipe=derived["recipe"],
+            descriptor=descriptor,
+        )
