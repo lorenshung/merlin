@@ -75,8 +75,25 @@ def test_semantic_near_misses_refuse(change):
     assert prove_scalar_bounded_rne(block) is None
 
 
-@pytest.mark.parametrize("n,pad,lanes", [(7, 1, 4), (9, 0, 4), (10, 0, 4), (6, 0, 8), (15, 1, 8), (17, 0, 8)])
-def test_stripmine_transpose_tails_live_destination_native(tmp_path, n, pad, lanes):
+@pytest.mark.parametrize(
+    "n,pad,lanes,m,batch",
+    [
+        (7, 1, 4, 3, 1),
+        (9, 0, 4, 3, 1),
+        (10, 0, 4, 3, 1),
+        (6, 0, 8, 3, 1),
+        (15, 1, 8, 3, 1),
+        (17, 0, 8, 3, 1),
+        (13, 1, 8, 5, 4),
+        (7, 1, 4, 7, 8),
+        (9, 0, 4, 5, 2),
+        (3, 1, 8, 2, 4),
+        (10, 1, 4, 1, 4),
+        (16, 0, 8, 6, 3),
+    ],
+)
+def test_stripmine_transpose_tails_live_destination_native(tmp_path, n, pad, lanes, m, batch):
+    import hashlib
     import subprocess
 
     import numpy as np
@@ -88,7 +105,6 @@ def test_stripmine_transpose_tails_live_destination_native(tmp_path, n, pad, lan
     from merlin.llvmlower.toolchain import clang
     from merlin.xdsl_dialects._common import text
 
-    m = 3
     pn, pm = n + 2 * pad, m + 2 * pad
     view = (
         f'%view="tensor.extract_slice"(%old) <{{static_offsets=array<i64:{pad},{pad}>,'
@@ -129,18 +145,36 @@ def test_stripmine_transpose_tails_live_destination_native(tmp_path, n, pad, lan
         return %old,{"%answer" if pad else "%r"}:tensor<{pn}x{pm}xi8>,tensor<{pn}x{pm}xi8>
       }} }}""")
     assert fuse_round_clamp_convert(module) == 1
-    reports = schedule_bounded_rne_maps(module, lanes=lanes)
+    reports = schedule_bounded_rne_maps(module, lanes=lanes, output_minor_batch=batch)
     assert len(reports) == 1 and reports[0]["packet_axis"] == 0 and reports[0]["tail"] == n % lanes
+    if batch != 1:
+        assert reports[0]["output_minor_batch"]["selected"] == min(batch, m)
+        assert reports[0]["output_minor_batch"]["status"] == ("CANDIDATE" if m > 1 else "ORIGINAL_SCHEDULE_FALLBACK")
     module.verify()
     llvm = lower_to_llvm_ir(text(module, generic=True), workdir=tmp_path / "lower", vectorize=False)
     assert "call void @free(" in llvm
     src = tmp_path / "model.ll"
     src.write_text(llvm)
     obj = tmp_path / "model.o"
-    lib = tmp_path / f"quant_{n}_{pad}.so"
-    subprocess.run([str(clang()), "-O2", "-fPIC", "-c", str(src), "-o", str(obj)], check=True, capture_output=True)
+    # Successful tmp_path trees may be removed and their paths reused while
+    # dlopen still holds an earlier image. Bind the filename to the actual body.
+    lib = tmp_path / f"quant_{hashlib.sha256(llvm.encode()).hexdigest()}.so"
     subprocess.run(
-        ["cc", "-fPIC", "-shared", str(obj), str(mlir_runtime_c()), "-lm", "-o", str(lib)],
+        [str(clang()), "-O2", "-fPIC", "-c", str(src), "-o", str(obj)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "cc",
+            "-fPIC",
+            "-shared",
+            str(obj),
+            str(mlir_runtime_c()),
+            "-lm",
+            "-o",
+            str(lib),
+        ],
         check=True,
         capture_output=True,
     )
@@ -163,7 +197,8 @@ def test_stripmine_transpose_tails_live_destination_native(tmp_path, n, pad, lan
 
 
 @pytest.mark.parametrize("effectful", [False, True])
-def test_dead_tensor_branch_does_not_gain_opaque_calls(effectful):
+@pytest.mark.parametrize("batch", [1, 3])
+def test_dead_tensor_branch_does_not_gain_opaque_calls(effectful, batch):
     from xdsl.dialects import func, tensor
     from xdsl.dialects.builtin import AffineMapAttr, ModuleOp, TensorType, f32, i8
     from xdsl.dialects.linalg.ops import GenericOp, IteratorType, IteratorTypeAttr
@@ -203,7 +238,20 @@ def test_dead_tensor_branch_does_not_gain_opaque_calls(effectful):
         ]
     )
     before = len(list(module.walk()))
-    routes = schedule_bounded_rne_maps(module)
+    routes = schedule_bounded_rne_maps(module, output_minor_batch=batch)
     assert len(routes) == int(effectful)
     if not effectful:
         assert len(list(module.walk())) == before
+    elif batch != 1:
+        assert routes[0]["output_minor_batch"]["status"] == "ORIGINAL_SCHEDULE_FALLBACK"
+        assert routes[0]["output_minor_batch"]["selected"] == 1
+
+
+@pytest.mark.parametrize("batch", [False, 0, 9, 1.0])
+def test_output_minor_batch_requires_explicit_bounded_integer(batch):
+    from xdsl.dialects.builtin import ModuleOp
+
+    from merlin.llvmlower.bounded_rne_maps import schedule_bounded_rne_maps
+
+    with pytest.raises(ValueError, match="output minor batch"):
+        schedule_bounded_rne_maps(ModuleOp([]), output_minor_batch=batch)

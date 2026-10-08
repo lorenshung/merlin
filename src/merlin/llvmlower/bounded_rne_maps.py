@@ -43,7 +43,13 @@ def prove_scalar_bounded_rne(block) -> ScalarRneProof | None:
     def dtype(t):
         return "float" if t == f32 else str(t) if isinstance(t, IntegerType) else None
 
-    binary = {"arith.addi": "add", "arith.andi": "and", "arith.ori": "or", "arith.subf": "fsub", "arith.mulf": "fmul"}
+    binary = {
+        "arith.addi": "add",
+        "arith.andi": "and",
+        "arith.ori": "or",
+        "arith.subf": "fsub",
+        "arith.mulf": "fmul",
+    }
     for serial, op in enumerate(ops[:-1]):
         if op.regions or len(op.results) != 1 or any(x not in values for x in op.operands):
             return None
@@ -89,7 +95,15 @@ def prove_scalar_bounded_rne(block) -> ScalarRneProof | None:
         values[result] = name
         reverse[_identity(name)] = result
         definitions[_identity(name)] = _Instruction(
-            name, opcode, typ, operands, serial, serial + 1, predicate, callee, output_type
+            name,
+            opcode,
+            typ,
+            operands,
+            serial,
+            serial + 1,
+            predicate,
+            callee,
+            output_type,
         )
     yielded = ops[-1].operands[0]
     token = values.get(yielded, "")
@@ -103,7 +117,7 @@ def prove_scalar_bounded_rne(block) -> ScalarRneProof | None:
     return ScalarRneProof(raw, yielded, int(proof["integer_dtype"][1:]), tuple(proof["bounds"]))
 
 
-def schedule_bounded_rne_maps(module, *, lanes=4, symbol_prefix="bounded_rne_packet"):
+def schedule_bounded_rne_maps(module, *, lanes=4, symbol_prefix="bounded_rne_packet", output_minor_batch=1):
     """Stripmine proved pure tensor maps; retain original arithmetic in helpers.
 
     This explicit transform changes no numeric contract. Inputs are immutable
@@ -111,6 +125,13 @@ def schedule_bounded_rne_maps(module, *, lanes=4, symbol_prefix="bounded_rne_pac
     remains responsible for any copy required by live aliases. Full packets and
     static tails are separate, so no load or store relies on masking. Affine
     permutation inputs can be traced through one or more tensor transposes.
+
+    ``output_minor_batch`` explicitly groups independent output-minor coordinates
+    inside a contiguous-input packet loop. Each coordinate still invokes the
+    same scalar-body packet, with exact tails on both dimensions. This is a
+    bounded emission candidate; it makes no register, alignment or cycle claim.
+    One preserves the original schedule. A coincident source/output axis or a
+    unit output-minor extent keeps the original schedule with a reported fallback.
     """
     from xdsl.dialects import arith, func, scf, tensor
     from xdsl.dialects.builtin import IndexType, NoneAttr, StringAttr, TensorType
@@ -120,6 +141,8 @@ def schedule_bounded_rne_maps(module, *, lanes=4, symbol_prefix="bounded_rne_pac
 
     if type(lanes) is not int or not 1 <= lanes <= 8:
         raise ValueError("packet width must be an integer in [1,8]")
+    if type(output_minor_batch) is not int or not 1 <= output_minor_batch <= 8:
+        raise ValueError("output minor batch must be an integer in [1,8] (bounded emission limit)")
     if (
         not isinstance(symbol_prefix, str)
         or not symbol_prefix
@@ -217,7 +240,10 @@ def schedule_bounded_rne_maps(module, *, lanes=4, symbol_prefix="bounded_rne_pac
     reserved = {
         attr.data
         for op in module.walk()
-        if isinstance(attr := op.properties.get("sym_name", op.attributes.get("sym_name")), StringAttr)
+        if isinstance(
+            attr := op.properties.get("sym_name", op.attributes.get("sym_name")),
+            StringAttr,
+        )
     }
     reports = []
     for op, proof, shape, sources, axis in plans:
@@ -225,6 +251,9 @@ def schedule_bounded_rne_maps(module, *, lanes=4, symbol_prefix="bounded_rne_pac
         typ = output.type
         body = op.body.block
         rank = len(shape)
+        minor_axis = rank - 1
+        minor_width = min(output_minor_batch, shape[minor_axis]) if axis != minor_axis else 1
+        batched = minor_width > 1
         widths = {lanes}
         if shape[axis] % lanes:
             widths.add(shape[axis] % lanes)
@@ -239,20 +268,36 @@ def schedule_bounded_rne_maps(module, *, lanes=4, symbol_prefix="bounded_rne_pac
             block = Block(arg_types=[arg.type for _ in range(width) for arg in body.args[:-1]])
             results = []
             for lane in range(width):
-                mapping = dict(zip(body.args[:-1], block.args[lane * len(sources) : (lane + 1) * len(sources)]))
+                mapping = dict(
+                    zip(
+                        body.args[:-1],
+                        block.args[lane * len(sources) : (lane + 1) * len(sources)],
+                    )
+                )
                 for old in list(body.ops)[:-1]:
                     block.add_op(old.clone(mapping))
                 results.append(mapping[body.last_op.operands[0]])
             block.add_op(func.ReturnOp(*results))
             helper = func.FuncOp(
-                name, ([x.type for x in block.args], [proof.result.type] * width), Region(block), visibility="private"
+                name,
+                ([x.type for x in block.args], [proof.result.type] * width),
+                Region(block),
+                visibility="private",
             )
             module.body.block.add_op(helper)
             helpers[width] = name
-        constants = {
-            n: arith.ConstantOp.from_int_and_width(n, IndexType())
-            for n in {0, 1, lanes, *shape, *range(lanes), (shape[axis] // lanes) * lanes}
+        constant_values = {
+            0,
+            1,
+            lanes,
+            *shape,
+            *range(lanes),
+            (shape[axis] // lanes) * lanes,
         }
+        if batched:
+            constant_values.update((minor_width, (shape[minor_axis] // minor_width) * minor_width))
+            constant_values.update(range(minor_width))
+        constants = {n: arith.ConstantOp.from_int_and_width(n, IndexType()) for n in constant_values}
 
         def c(n):
             return constants[n].result
@@ -292,7 +337,35 @@ def schedule_bounded_rne_maps(module, *, lanes=4, symbol_prefix="bounded_rne_pac
                 current = insert.result
             return current
 
-        order = [d for d in range(rank) if d != axis]
+        order = [d for d in range(rank) if d != axis and (not batched or d != minor_axis)]
+
+        def grouped_packet(parent, current, indices, width, minor_count):
+            for minor_offset in range(minor_count):
+                ix = list(indices)
+                if minor_offset:
+                    add = arith.AddiOp(ix[minor_axis], c(minor_offset))
+                    parent.add_op(add)
+                    ix[minor_axis] = add.result
+                current = packet(parent, current, ix, width)
+            return current
+
+        def axis_packets(parent, current, indices, minor_count):
+            full = (shape[axis] // lanes) * lanes
+            if full:
+                bb = Block(arg_types=[IndexType(), typ])
+                ix = list(indices)
+                ix[axis] = bb.args[0]
+                value = grouped_packet(bb, bb.args[1], ix, lanes, minor_count)
+                bb.add_op(scf.YieldOp(value))
+                loop = scf.ForOp(c(0), c(full), c(lanes), [current], Region(bb))
+                parent.add_op(loop)
+                current = loop.results[0]
+            tail = shape[axis] - full
+            if tail:
+                ix = list(indices)
+                ix[axis] = c(full)
+                current = grouped_packet(parent, current, ix, tail, minor_count)
+            return current
 
         def loops(parent, depth, current, indices):
             if depth < len(order):
@@ -305,21 +378,23 @@ def schedule_bounded_rne_maps(module, *, lanes=4, symbol_prefix="bounded_rne_pac
                 loop = scf.ForOp(c(0), c(shape[d]), c(1), [current], Region(bb))
                 parent.add_op(loop)
                 return loop.results[0]
-            full = (shape[axis] // lanes) * lanes
+            if not batched:
+                return axis_packets(parent, current, indices, 1)
+            full = (shape[minor_axis] // minor_width) * minor_width
             if full:
                 bb = Block(arg_types=[IndexType(), typ])
                 ix = list(indices)
-                ix[axis] = bb.args[0]
-                value = packet(bb, bb.args[1], ix, lanes)
+                ix[minor_axis] = bb.args[0]
+                value = axis_packets(bb, bb.args[1], ix, minor_width)
                 bb.add_op(scf.YieldOp(value))
-                loop = scf.ForOp(c(0), c(full), c(lanes), [current], Region(bb))
+                loop = scf.ForOp(c(0), c(full), c(minor_width), [current], Region(bb))
                 parent.add_op(loop)
                 current = loop.results[0]
-            tail = shape[axis] - full
+            tail = shape[minor_axis] - full
             if tail:
                 ix = list(indices)
-                ix[axis] = c(full)
-                current = packet(parent, current, ix, tail)
+                ix[minor_axis] = c(full)
+                current = axis_packets(parent, current, ix, tail)
             return current
 
         value = loops(root, 0, output, [c(0)] * rank)
@@ -343,5 +418,16 @@ def schedule_bounded_rne_maps(module, *, lanes=4, symbol_prefix="bounded_rne_pac
                 ),
             }
         )
+        if output_minor_batch != 1:
+            reports[-1]["output_minor_batch"] = {
+                "requested": output_minor_batch,
+                "selected": minor_width,
+                "axis": minor_axis,
+                "tail": shape[minor_axis] % minor_width if batched else 0,
+                "status": "CANDIDATE" if batched else "ORIGINAL_SCHEDULE_FALLBACK",
+                "fallback_reason": None if batched else "source/output axes coincide or output-minor extent is one",
+                "profitability": "UNKNOWN; packet arithmetic and traffic unchanged",
+                "pointer_alignment": "NO_NEW_ALIGNMENT_FACT",
+            }
     module.verify()
     return reports

@@ -579,6 +579,13 @@ Tools: torch-mlir wheel python = full upstream pass registry + translate; clang-
   and optionally stripmines static parallel tensor maps through proved input
   permutations. It retains live destination tensors through ordinary upstream
   bufferization, with separate exact tails and no inferred pointer no-alias.
+  Its explicit `output_minor_batch` groups independent output-minor coordinates
+  within contiguous-input packet loops. The default one preserves original
+  emission/reporting; coincident axes and unit minor extents retain that route.
+  Source arithmetic, loads/stores, numeric permission and tensor ownership are
+  unchanged. Static source/minor tails are separate and bounded; emission limits
+  infer no target register, alignment or profitable width. Price complete work
+  with the actual runtime; retired instructions do not establish device cycles.
 - `bounded_rne_packet_llvm.py` recognizes pure straight-line multi-result scalar
   helpers by their complete arithmetic and SSA dependencies, then groups explicit
   CPU RNE operations under the selected host ISA policy. Absent that policy the
