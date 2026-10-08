@@ -20,7 +20,13 @@ from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["device_contraction_ranks", "device_dtype_triples", "offloadable_contractions", "why_not"]
+__all__ = [
+    "device_contraction_ranks",
+    "device_dtype_triples",
+    "facts_dtype_triples",
+    "offloadable_contractions",
+    "why_not",
+]
 
 
 def _mlir(token: str) -> str | None:
@@ -44,6 +50,21 @@ def _units(device_name: str) -> list[dict]:
         return []
 
 
+def facts_dtype_triples(document: dict) -> tuple[tuple[str, str, str], ...]:
+    """Derive operand/weight/accumulator precision from explicitly selected RTL facts."""
+    body = document.get("facts", document)
+    by_name = {
+        str(d.get("name")): str(d.get("dtype"))
+        for d in (body.get("datapaths") or ())
+        if d.get("name") and d.get("dtype")
+    }
+    inp, acc = by_name.get("input"), by_name.get("accumulator")
+    if not inp or not acc:
+        return ()
+    lhs, rhs, a = _mlir(inp), _mlir(by_name.get("weight", inp)), _mlir(acc)
+    return ((lhs, rhs, a),) if lhs and rhs and a else ()
+
+
 def _triples_from_facts(device_name: str) -> tuple[tuple[str, str, str], ...]:
     """The datapath triple read straight off the RTL facts' ``datapaths`` block.
 
@@ -62,16 +83,7 @@ def _triples_from_facts(device_name: str) -> tuple[tuple[str, str, str], ...]:
         body = _f.body_if_present(device_name)
     except Exception:  # noqa: BLE001 -- ungrounded facts are a real answer
         return ()
-    by_name = {
-        str(d.get("name")): str(d.get("dtype"))
-        for d in (body.get("datapaths") or ())
-        if d.get("name") and d.get("dtype")
-    }
-    inp, acc = by_name.get("input"), by_name.get("accumulator")
-    if not inp or not acc:
-        return ()
-    lhs, a = _mlir(inp), _mlir(acc)
-    return ((lhs, lhs, a),) if lhs and a else ()
+    return facts_dtype_triples(body)
 
 
 def device_dtype_triples(device_name: str) -> tuple[tuple[str, str, str], ...]:
