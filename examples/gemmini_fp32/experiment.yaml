@@ -1,0 +1,28 @@
+schema_version: 1
+id: gemmini-fp32-core-aten-193-functional
+target: gemmini_fp32
+description: Placement-checked Core ATen full-call compiler authoring for Rocket with
+  FP32 Gemmini; selected facts assign mandatory device or host execution per capsule.
+inputs:
+  target: target/descriptor.yaml
+policy:
+  prohibited_instruction_roles:
+  - loop_descriptor
+phases:
+  1:
+    adapter: capsule_bench
+    config:
+      require_reviewed_corpus: true
+      descriptor: target/descriptor.yaml
+      level: EL4
+      bundle: merlin_assisted_rtlchecks_public_v0
+      bundle_manifest: ../../out/artifacts/probes/fp32-gemmini/corpus/release/payload/experiment/input_bundles/merlin_assisted_rtlchecks_public_v0/input_bundle_manifest.yaml
+      oracle_timing: ../../out/artifacts/probes/fp32-gemmini/corpus/oracle-timing.json
+      driver: codex
+      model: gpt-6.1-sol
+      effort: high
+      provider: subscription
+      max_wall_s: 43200
+      round_timeout: 43200
+      grade_interval: 900
+      sim_max_jobs: 2

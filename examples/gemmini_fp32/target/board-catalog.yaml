@@ -1,0 +1,18 @@
+# Target-owned host metadata from the separately elaborated FP32 configuration.
+schema_version: 1
+boards:
+  gemmini_fp32_rocket:
+    target: gemmini_fp32
+    rtl_sim_config: FPGemminiRocketConfig
+    host_dts_sha256: a45460168248bd08e47a237f78eb1256d589b5410c046f0031e648207a83dfc3
+    dram_bytes: 256 MiB
+    dram_base: 2147483648
+    harts: 1
+    vector_harts: 0
+    console: htif
+    flow: baremetal
+    code_reserve: 64 MiB
+    notes: 'Host fields read from the FPGemminiRocketConfig elaborated DTS: one enabled
+      non-vector Rocket CPU, enabled memory at 0x80000000 of length 0x10000000, and
+      an HTIF node. Code reserve is an operator build-layout request. This metadata
+      is not a measured host-image, timing, or upload qualification.'

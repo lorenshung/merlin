@@ -1,0 +1,122 @@
+version: 0.1
+family: tensor_resident
+endpoint_kind: inline_asm_insn
+rtl_extraction:
+  firrtl_role_probe:
+    array:
+      name: mesh
+      parent_module_contains: Mesh
+      child_module_prefix: Tile
+    memory:
+      name: scratchpad
+      declaration_contains: 'smem mem : UInt<'
+      source_contains: Scratchpad.scala
+      datapath_name: input
+    interfaces:
+    - module: ReservationStation
+      name: rocc_cmd
+      evidence: module ReservationStation (RoCC decode/dispatch)
+    - module: FrontendTLB
+      name: dma_tlb
+      evidence: module FrontendTLB
+  scala_funct_block:
+    start_comment: // funct values
+    stop_declaration: CONFIG_EX
+  accumulator_memory:
+    module: AccumulatorMem
+    memory_name: accumulator
+    address_port: io_write_bits_addr
+    data_prefix: io_write_bits_data_
+    data_suffix: _0
+    mask_prefix: io_write_bits_mask_
+    firrtl_data_field: io.write.bits.data
+  boolean_feature_gate:
+    feature: max_pool
+    module: StoreController
+    node: pooling_is_enabled
+    dynamic_operand_contains: pool
+    config_field: has_max_pool
+features:
+- systolic_array
+- resident_packed_tensor
+- accumulator_commit
+- command_buffer
+- metrics
+compiler_obligations:
+- must_prove_rhs_immutable_for_residency
+- must_tile_to_mesh_shape
+- must_commit_accumulator_before_reuse
+- must_respect_scratchpad_capacity
+runtime_promises:
+- command_buffer
+- metrics
+isa:
+  march: rv64gc_zba_zbb_zbs_zfh
+name: gemmini_fp32
+status: prototype
+hardware_pins: []
+requires_human_review: true
+runner:
+  suite: core-aten-full-call
+  dtype: f32xf32_f32
+  enabled_oracle_tiers:
+  - L2
+  tier_sim:
+    L2: spike
+  full_call_provider: examples/gemmini_fp32/phase0/core_aten/execution_provider.py
+  full_call_instructions: 'Start with an empty submission. Implement the standard
+    manifest and four xDSL/Python entrypoints with integrity_exempt: false. Merlin
+    owns host lowering, full-call ABI, allocation, linking and readback.
+
+
+    Provide submission/mlir_oot/golden_device_catalog.py; this retained API name gives
+    no access to golden values. Expose build_catalog(source: str) -> (module, inventory)
+    and merlin_builder(llvm_bin: Path) -> build(prepared: Path, workdir: Path) ->
+    (manifest_json: Path, object_file: Path). Parse the current MLIR structurally
+    and compile kernels from that exact final prepared source. Derive operand/accumulator
+    precision and encodings from selected public RTL facts. No scalar fallback for
+    eligible contractions.
+
+
+    Kernels use void symbol(lhs pointer, rhs pointer, out pointer), dense row-major
+    buffers, and whole-batch calls. Inventory and compiled manifest require abi {argument_order:
+    [lhs,rhs,out], pointee_layout: dense_row_major, batch_call: whole_batch, dtypes:
+    [operand IR type, weight IR type, accumulator IR type]}, source_sha256, coverage_complete:
+    true, equal matched_contractions and covered_contractions, unique_kernels, kernels
+    [{symbol, batched, dimensions: {batch,m,n,k}}], and bindings [{source_operation_ordinal,
+    region, symbol, tensor_types}]. Ordinal indexes parsed module.walk() including
+    the module; region is prov.region_id; tensor_types exactly identify current lhs/rhs/result.
+    The compiled manifest also records compilation.object_sha256. Symbols must be
+    valid, uniquely defined identifiers without unresolved references.
+
+
+    Placement is derived from captured IR and selected target facts. Device-expected
+    capsules must pass full-call numerical/semantic readback on the device lane with
+    nonzero retired accelerator instructions matched to linked ELF PCs and retained
+    trace evidence. Host-expected capsules must pass on the host lane. Both are scored;
+    host fallback cannot pass a device expectation. Public and hidden use the same
+    rule. Host guards remain unscored. Only L2 is enabled; functional Spike execution
+    is not RTL certification.
+
+    '
+  rtl_facts: rtl-facts/fpgemmini_rocket_8c3f9923/facts.json
+runtime:
+  default_backend: baremetal
+  rtl_sim_config: FPGemminiRocketConfig
+  backends:
+  - spike
+compute_units:
+- name: systolic_mesh
+  kind: systolic
+  dtypes:
+  - f32
+  ops:
+  - matmul
+  semantic_capabilities:
+  - family: contraction
+    dtypes:
+    - f32
+notes: FP32 configuration of the Gemmini generator. Operand and accumulator triples,
+  geometry, capacity and instruction encodings must come from the separately selected
+  elaborated FP32 facts. Functional Spike evidence is not RTL certification. Hardware
+  pin proposal awaits review; no int8 hardware pin applies.

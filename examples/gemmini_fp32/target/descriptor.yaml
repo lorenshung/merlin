@@ -1,0 +1,26 @@
+target: gemmini_fp32
+resources_root: examples/gemmini_fp32/phase1
+backend_package_dir: examples/gemmini_fp32/target
+rtl:
+  via: mlc
+hardware_spec:
+  target_contract: examples/gemmini_fp32/target/contracts/target_contract.yaml
+capsule_corpus: out/artifacts/probes/fp32-gemmini/corpus/public
+grading:
+  release_admission: derive_from_corpus_v1
+  resource_bound:
+    policy: representative_l3_capstones_v1
+answer_surfaces:
+  prior_backends:
+  - merlin_native_v0
+  - hand_smoke_oot
+  - agent_spec_v0_mlir_oot
+  - agent_spec_v1_mlir_oot
+  prior_backend_exemptions: []
+toolchain:
+  sim_via: chipyard
+workload_spec:
+  certification_floor: L2
+host:
+  board: gemmini_fp32_rocket
+  catalog: examples/gemmini_fp32/target/board-catalog.yaml
