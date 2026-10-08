@@ -81,6 +81,12 @@ def main(argv: list[str] | None = None) -> int:
         from .phase2.whole_model_measured import cell_runs
 
         return cell_runs.main(raw[1:])
+    if raw[:1] == ["census"]:
+        # Exact, unpriced censuses of one observed execution, from records `inspect --trace` (locality)
+        # or a target provider (call and stack boundaries) wrote.
+        from merlin.perf import census_cli
+
+        return census_cli.main(raw[1:])
     if raw[:1] == ["study"]:
         # A comparison study's register beside its run matrices, and the baseline its arms are scored on.
         from merlin.benchharness import study_status
@@ -157,6 +163,11 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser(
         "cell",
         help="a cell run: `cell prepare <loop run> --cell ID`, `cell launch <run> --profile P`, `cell status`",
+        add_help=False,
+    )
+    commands.add_parser(
+        "census",
+        help="exact censuses of one observed execution: `census locality|boundaries|boundary-domain`",
         add_help=False,
     )
     commands.add_parser(
