@@ -31,6 +31,18 @@ GSIM feedback, redaction, stopping and mandatory final-byte receipt qualificatio
 qualification (a micro sweep cannot establish global evidence). Native controllers supply
 real scientific dependencies and explicitly select the workflow, never by target-name inference.
 These workflow policies remain scientific contracts, not interchangeable grading defaults.
+`component_workflow.py` owns the explicit `component-only-v1` generated-component
+profile. It excludes descriptor probes, model graphs/analysis and legacy global
+providers. Host-selected calibrated estimates and unchanged certified component
+RTL feedback are separate optional actions; UNKNOWN estimates never become zero
+or measured cycles. Provider source, target configuration and corpus identities
+are rechecked. New receipts bind this profile; historical identities stay unchanged.
+`prepare_component_prompt_inputs` and `render_component_prompt` use a separate
+component declaration without selecting a model or exposing functional snapshots.
+The action profile and prompt are not fresh-session launch authority. Normal
+authoring and its CLI refuse this profile until an approved minimal view, verified
+runtime isolation and qualified zero-history transport are independently supplied.
+Never fall back to the legacy networked authoring policy for this scientific claim.
 `broker_evidence.py` owns shared identity checks: new receipt rows bind the selected
 workflow; historical absent IDs remain explicitly unbound and are never inferred or rewritten.
 The same bound workflow executes and qualifies a round. No policy imports a native

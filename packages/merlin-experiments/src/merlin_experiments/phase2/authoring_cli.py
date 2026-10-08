@@ -11,6 +11,7 @@ from pathlib import Path
 
 from merlin.targetgen.target_experiment import TargetExperiment, load_target_experiment
 from merlin_experiments.phase2 import authoring
+from merlin_experiments.phase2 import broker_policy as BP
 from merlin_experiments.phase2 import campaign as PC
 from merlin_experiments.phase2.contracts import StageGateError
 
@@ -22,6 +23,20 @@ def main(
     suite: str | None = None,
     source_root: Path | None = None,
 ) -> int:
+    # The component profile has no qualified fresh isolated agent transport.
+    # Refuse before demanding legacy GSIM/model inputs or resolving tools.
+    # --help still displays the normal parser's complete contract.
+    profile_parser = argparse.ArgumentParser(add_help=False)
+    profile_parser.add_argument(
+        "--workflow", choices=(BP.CORPUS_FEEDBACK_V1, BP.COMPONENT_ONLY_V1), default=BP.CORPUS_FEEDBACK_V1
+    )
+    profile, remaining = profile_parser.parse_known_args(argv)
+    if profile.workflow == BP.COMPONENT_ONLY_V1 and not {"-h", "--help"}.intersection(remaining):
+        try:
+            authoring.admit_authoring_workflow(profile.workflow)
+        except StageGateError as exc:
+            print(f"NO-GO: {exc}", file=sys.stderr)
+            return 2
     # The sandbox gets this through sandbox_env, but the host lane imports candidate modules too --
     # the development-feedback evaluator runs capsule lowerings in-process, and that wrote a second
     # batch of caches into submission/mlir_oot/lowering/ nine minutes after the first. Set it here so
@@ -41,6 +56,12 @@ def main(
     if suite is None:
         parser.add_argument("--suite", required=True, help="explicit AET attribution suite")
     parser.add_argument("--model", required=True, help="explicit Codex model slug")
+    parser.add_argument(
+        "--workflow",
+        choices=(BP.CORPUS_FEEDBACK_V1, BP.COMPONENT_ONLY_V1),
+        default=BP.CORPUS_FEEDBACK_V1,
+        help="explicit scientific profile; component launch refuses without qualified isolation",
+    )
     parser.add_argument("--effort", default="high")
     parser.add_argument("--wall-budget-seconds", type=int, required=True)
     parser.add_argument("--rounds", type=int, default=1)
@@ -120,6 +141,7 @@ def main(
             gsim_certificate_sha256=args.gsim_certificate_sha256,
             rtl_facts=args.rtl_facts,
             telemetry_price_table=args.telemetry_price_table,
+            workflow_id=args.workflow,
         )
     except (StageGateError, PC.CampaignGateError) as exc:
         print(f"NO-GO: {exc}", file=sys.stderr)

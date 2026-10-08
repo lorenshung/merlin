@@ -24,6 +24,7 @@ from .contracts import canonical_json as _canonical_json
 
 CORPUS_FEEDBACK_V1 = "corpus-feedback-v1"
 WHOLE_MODEL_V1 = "whole-model-v1"
+COMPONENT_ONLY_V1 = "component-only-v1"
 DEVELOPMENT_FEEDBACK_ACTION = "tuning-gsim-feedback"
 _HOST_ANALYSIS_SENTINEL = "__host_owned_command_buffer_analysis__"
 
@@ -438,6 +439,10 @@ def select_workflow(workflow_id: str, **inputs: Any) -> WorkflowPolicy:
     from .whole_model import WholeModelPolicy
 
     registry = {CORPUS_FEEDBACK_V1: CorpusFeedbackPolicy, WHOLE_MODEL_V1: WholeModelPolicy}
+    if workflow_id == COMPONENT_ONLY_V1:
+        from .component_workflow import ComponentOnlyPolicy
+
+        registry[COMPONENT_ONLY_V1] = ComponentOnlyPolicy
     try:
         owner = registry[workflow_id]
     except (KeyError, TypeError) as exc:
@@ -469,10 +474,14 @@ def action_registry(
     unavailable: Mapping[str, str] | None = None,
 ) -> tuple[BrokerAction, ...]:
     """Construct the selected host contract before the round's evaluator exists."""
-    if workflow_id not in (CORPUS_FEEDBACK_V1, WHOLE_MODEL_V1):
+    if workflow_id not in (CORPUS_FEEDBACK_V1, WHOLE_MODEL_V1, COMPONENT_ONLY_V1):
         raise StageGateError(f"unknown broker workflow policy: {workflow_id!r}")
     return _build_action_registry(
-        candidate, target_experiment, global_optimization=workflow_id == WHOLE_MODEL_V1, unavailable=unavailable
+        candidate,
+        target_experiment,
+        global_optimization=workflow_id == WHOLE_MODEL_V1,
+        component_only=workflow_id == COMPONENT_ONLY_V1,
+        unavailable=unavailable,
     )
 
 
@@ -481,6 +490,7 @@ def _build_action_registry(
     target_experiment: TargetExperiment,
     *,
     global_optimization: bool = False,
+    component_only: bool = False,
     unavailable: Mapping[str, str] | None = None,
 ) -> tuple[BrokerAction, ...]:
     """Create named candidate-manifest actions; no caller-selected executable is accepted.
@@ -522,7 +532,9 @@ def _build_action_registry(
                 not global_optimization,
             )
         )
-    for probe in TC.required_tool_probes(target_experiment):
+    if component_only and global_optimization:
+        raise StageGateError("component profile cannot inherit global optimization")
+    for probe in () if component_only else TC.required_tool_probes(target_experiment):
         slug = _probe_slug(probe.label)
         if not slug:
             raise StageGateError("required target tool probe has no safe action name")
@@ -530,6 +542,20 @@ def _build_action_registry(
             BrokerAction(
                 f"probe-{slug}", ("bash", "-c", probe.cmd), (), f"descriptor-derived probe for {probe.label}", False
             )
+        )
+    if component_only:
+        from .component_workflow import component_actions, unavailable_component_actions
+
+        actions.extend(component_actions())
+        names = [action.name for action in actions]
+        if len(names) != len(set(names)):
+            raise StageGateError("broker action registry contains duplicate names")
+        refused = dict(unavailable if unavailable is not None else unavailable_component_actions())
+        if set(refused) - set(names):
+            raise StageGateError("availability was declared for unregistered component actions")
+        return tuple(
+            action if action.name not in refused else replace(action, unavailable_reason=refused[action.name])
+            for action in actions
         )
     actions.append(
         BrokerAction(

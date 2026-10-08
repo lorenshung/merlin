@@ -14,6 +14,8 @@ from merlin.perf.execution_policy import ITERATION_MAX_SECONDS
 
 from . import broker_policy as BP
 from . import prompt as PP
+from .broker import BrokerAction
+from .broker_evidence import _is_sha256
 from .claims import dispatch as CD
 from .contracts import StageGateError
 
@@ -95,6 +97,104 @@ class StagePromptInputs:
     execution_broker_path: str
     execution_broker_command: str
     broker_receipt_path: str
+
+
+@dataclass(frozen=True)
+class ComponentPromptInputs:
+    """Agent-facing component facts, without model or launch permissions.
+
+    Paths are supplied by the trusted materialized-view owner. This renderer
+    neither approves those paths nor establishes session or runtime isolation.
+    """
+
+    corpus_manifest_path: str
+    corpus_manifest_sha256: str
+    corpus_sha256: str
+    members: tuple[tuple[str, str], ...]
+    candidate_path: str
+    candidate_sha256: str
+    actions: tuple[BrokerAction, ...]
+    allowed_paths: tuple[str, ...]
+    wall_budget_seconds: int
+    max_tool_calls: int
+    tool_timeout_seconds: int
+    broker_path: str
+    broker_receipt_path: str
+
+
+def render_component_prompt(inputs: ComponentPromptInputs) -> str:
+    """Render explicit component capabilities without the legacy model supplement."""
+    for value in (inputs.corpus_manifest_sha256, inputs.corpus_sha256, inputs.candidate_sha256):
+        if not _is_sha256(value):
+            raise StageGateError("component prompt requires exact source and candidate identities")
+    if (
+        not inputs.members
+        or len(set(inputs.members)) != len(inputs.members)
+        or any(
+            len(member) != 2 or any(not isinstance(item, str) or not item for item in member)
+            for member in inputs.members
+        )
+    ):
+        raise StageGateError("component prompt member set is invalid")
+    for value in (inputs.wall_budget_seconds, inputs.max_tool_calls, inputs.tool_timeout_seconds):
+        if type(value) is not int or value <= 0:
+            raise StageGateError("component prompt budgets require positive integers")
+    if inputs.tool_timeout_seconds > ITERATION_MAX_SECONDS:
+        raise StageGateError("component prompt tool timeout exceeds the reduced-component iteration limit")
+    names = {action.name for action in inputs.actions}
+    from .component_workflow import component_actions
+
+    permitted = {action.name for action in component_actions()}
+    if len(names) != len(inputs.actions) or any(
+        name not in permitted and not name.startswith("candidate-") for name in names
+    ):
+        raise StageGateError("component prompt carries an action outside its selected profile")
+    if any(not isinstance(path, str) or not path for path in inputs.allowed_paths):
+        raise StageGateError("component prompt path declarations are invalid")
+    if not {
+        inputs.corpus_manifest_path,
+        inputs.candidate_path,
+        inputs.broker_path,
+        inputs.broker_receipt_path,
+    }.issubset(inputs.allowed_paths):
+        raise StageGateError("component prompt paths do not belong to its declared view")
+    document = {
+        "schema": "merlin.component_prompt.v1",
+        "workflow_id": BP.COMPONENT_ONLY_V1,
+        "corpus": {
+            "manifest": inputs.corpus_manifest_path,
+            "manifest_sha256": inputs.corpus_manifest_sha256,
+            "sha256": inputs.corpus_sha256,
+            "members": [{"family": family, "capsule": capsule} for family, capsule in inputs.members],
+        },
+        "candidate": {"path": inputs.candidate_path, "initial_sha256": inputs.candidate_sha256},
+        "actions": [action.advertised() for action in inputs.actions],
+        "allowed_paths": list(inputs.allowed_paths),
+        "broker": {"path": inputs.broker_path, "receipt_path": inputs.broker_receipt_path},
+        "budgets": {
+            "wall_seconds": inputs.wall_budget_seconds,
+            "max_calls": inputs.max_tool_calls,
+            "tool_seconds": inputs.tool_timeout_seconds,
+        },
+        "launch_admission": "REQUIRED_SEPARATELY",
+        "final_acceptance": "NOT_ESTABLISHED",
+    }
+    return (
+        "# Generated component compiler optimization\n\n"
+        "Edit the compiler library through its declared entrypoints and reusable transforms. "
+        "Use generated components to test source semantics, representations, layout, packing, "
+        "host and device work, resource ownership, and producer/consumer composition. Keep complete "
+        "construction and consumption costs visible.\n\n"
+        "Invoke only advertised available broker actions, using the supplied broker path. "
+        "Calibrated intervals are estimates: UNKNOWN remains unavailable and cannot become zero. "
+        "Component RTL feedback is optional and uses the unchanged certified workload gate. "
+        "Spike establishes functional evidence and cannot supply hardware timing. Neither tier "
+        "grants final acceptance. Whole-model graphs, measurements, holdout answers and FireSim "
+        "services are absent from this training profile. Preserve the fixed grader and accuracy gates.\n\n"
+        "This prompt grants no launch authority. The host must independently admit the approved "
+        "minimal view, isolated runtime and zero-history session before any authoring starts.\n\n"
+        "```json\n" + json.dumps(document, sort_keys=True, indent=2) + "\n```\n"
+    )
 
 
 @dataclass(frozen=True)
