@@ -259,6 +259,16 @@ def _phase0_operator_inputs(command: dict) -> dict[str, dict | None]:
         observed["phase0:operator:application_demands_sidecar"] = (
             {"path": str(sidecar.resolve()), "present": sidecar.is_file()} if sidecar is not None else None
         )
+    recipe = inputs.get("recipe")
+    if recipe and Path(recipe).is_file():
+        from .phase0.core_aten_stage import declaration, input_paths
+
+        if declaration(Path(recipe)) is not None:
+            try:
+                for index, path in enumerate(input_paths(Path(recipe))):
+                    observed[f"phase0:operator:core_aten:{index:06d}"] = {"path": str(path), "present": True}
+            except (OSError, ValueError) as exc:
+                raise SpecError(f"invalid Core ATen stage inputs: {exc}") from exc
     return observed
 
 

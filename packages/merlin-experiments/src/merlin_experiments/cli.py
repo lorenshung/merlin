@@ -190,7 +190,7 @@ def main(argv: list[str] | None = None) -> int:
     operations = corpus.add_subparsers(dest="operation", required=True)
     derive = operations.add_parser("derive", help="deterministic requirements and complete census; no agent execution")
     derive.add_argument("definition", help="explicit experiment definition or catalog id")
-    derive.add_argument("--application-capture", action="append", required=True, metavar="LABEL=PATH")
+    derive.add_argument("--application-capture", action="append", default=[], metavar="LABEL=PATH")
     derive.add_argument(
         "--application-capture-selection",
         action="append",
@@ -212,9 +212,7 @@ def main(argv: list[str] | None = None) -> int:
         metavar="LABEL=PATH",
         help="optional exact generated native-host qualification receipt; never grants RVV support",
     )
-    derive.add_argument(
-        "--rtl-facts", type=Path, required=True, help="exact extraction artifact; never re-extract implicitly"
-    )
+    derive.add_argument("--rtl-facts", type=Path, help="exact extraction artifact; required for model derivation")
     derive.add_argument("--output", type=Path, required=True, help="new immutable artifact root")
     capture = operations.add_parser("capture", help="preselect and issue one fresh sealed CPU capture")
     capture_ops = capture.add_subparsers(dest="capture_operation", required=True)
