@@ -55,7 +55,6 @@ Core console-scripts are installed with `pip install -e .` from the repo root. O
 |---|---|
 | `merlin-evaluation-cohort` | `merlin.targetgen.evaluation_cohort:main` |
 | `merlin-experiment` | `merlin_experiments.cli:main` |
-| `merlin-study-status` | `merlin.benchharness.study_status:main` |
 
 ## merlin-mining
 

@@ -24,8 +24,8 @@ but are still reported as spend: a voided run consumed tokens, and hiding it und
 Nothing here runs an agent, a grader or a simulator; it is a read-only view. It knows no target:
 the baseline record names its own target, package, fidelity and certifying tiers.
 
-    merlin-study-status board --register TASKS.md --runs-root <runs> [--void void.yaml] [--json out.json]
-    merlin-study-status baseline --label ref --package <pkg> --target <t> --fidelity fast \\
+    merlin experiment study board --register TASKS.md --runs-root <runs> [--void void.yaml] [--json out.json]
+    merlin experiment study baseline --label ref --package <pkg> --target <t> --fidelity fast \\
         --certifying-tier L2 --out <runs>/baselines.json TASK=<capsule_result.json> ...
 """
 
@@ -289,7 +289,7 @@ def baseline_record(
 def read_baseline(path: Path) -> dict[str, Any]:
     """The baseline record, or an explicit absence that says how to produce one."""
     if not path.is_file():
-        return {"available": False, "reason": f"no {path.name}; record one with `merlin-study-status baseline`"}
+        return {"available": False, "reason": f"no {path.name}; record one with `merlin experiment study baseline`"}
     document = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(document, dict) or not isinstance(document.get("tasks"), dict):
         return {"available": False, "reason": f"{path} is not a baseline record"}
@@ -473,7 +473,9 @@ def _baseline(args: argparse.Namespace) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        prog="merlin experiment study", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     board = commands.add_parser("board", help="the register beside what the run matrices measured")
     board.add_argument("--register", type=Path, required=True, help="the study's task register (markdown)")

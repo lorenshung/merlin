@@ -9,6 +9,7 @@ voided run stays in the spend, and a cycle count comes from a certifying tier al
 from __future__ import annotations
 
 import json
+import tomllib
 
 import pytest
 
@@ -159,7 +160,7 @@ def test_the_board_reads_numbers_from_disk_and_states_a_missing_baseline(tmp_pat
     assert SS.main(["board", "--register", str(register), "--runs-root", str(tmp_path)]) == 0
     out = capsys.readouterr().out
     assert "REGISTER  4 tasks" in out and "!! 1 row(s) have no recognised state" in out
-    assert "PERFORMANCE  unavailable" in out and "merlin-study-status baseline" in out
+    assert "PERFORMANCE  unavailable" in out and "merlin experiment study baseline" in out
 
     graded = tmp_path / "T0.json"
     graded.write_text(json.dumps(_result("pass", {"L2": {"status": "pass", "cycles": 1000}})))
@@ -196,3 +197,18 @@ def test_the_kernel_vs_compiler_study_register_and_void_list_parse():
     spine = SS.critical_path(text, tasks)
     assert spine and all(row["state"] != SS.UNRECOGNISED for row in spine)
     assert SS.read_void(study / "voided_runs.yaml")
+
+
+def test_the_board_is_a_merlin_experiment_subcommand_and_has_no_script_of_its_own(tmp_path, capsys):
+    """One experiment front door: ``merlin experiment study`` reaches the board, and no second console
+    script for it is declared beside ``merlin-experiment``."""
+    cli = pytest.importorskip("merlin_experiments.cli")
+    register = tmp_path / "TASKS.md"
+    register.write_text(REGISTER)
+    _matrix(tmp_path, "s4", [_row("arm_a", "T0", True, 500, fidelity="fast")])
+    assert cli.main(["study", "board", "--register", str(register), "--runs-root", str(tmp_path)]) == 0
+    assert "REGISTER  4 tasks" in capsys.readouterr().out
+    scripts = tomllib.loads((repo_root() / "packages/merlin-experiments/pyproject.toml").read_text())["project"][
+        "scripts"
+    ]
+    assert not [name for name, entry in scripts.items() if entry.startswith("merlin.benchharness.study_status")]

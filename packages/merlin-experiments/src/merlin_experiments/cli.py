@@ -81,6 +81,11 @@ def main(argv: list[str] | None = None) -> int:
         from .phase2.whole_model_measured import cell_runs
 
         return cell_runs.main(raw[1:])
+    if raw[:1] == ["study"]:
+        # A comparison study's register beside its run matrices, and the baseline its arms are scored on.
+        from merlin.benchharness import study_status
+
+        return study_status.main(raw[1:])
     parser = argparse.ArgumentParser(prog="merlin experiment", description=__doc__)
     parser.add_argument("--catalog", type=Path, help="catalog YAML; paths inside it are relative to that file")
     commands = parser.add_subparsers(dest="verb", required=True)
@@ -152,6 +157,11 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser(
         "cell",
         help="a cell run: `cell prepare <loop run> --cell ID`, `cell launch <run> --profile P`, `cell status`",
+        add_help=False,
+    )
+    commands.add_parser(
+        "study",
+        help="a comparison study, read-only: `study board` (register vs run matrices), `study baseline`",
         add_help=False,
     )
     stop = commands.add_parser(
