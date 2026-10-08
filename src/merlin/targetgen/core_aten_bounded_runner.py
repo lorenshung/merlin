@@ -34,10 +34,12 @@ def bundle_admission_reason(capture: dict, mlir_source: str | None = None) -> st
         for abi in [*meta.get("input_abi", []), *meta.get("output_abi", [])]:
             _tensor_type(abi)
         if mlir_source is not None:
-            names, _, returned = _function_parts(mlir_source)
+            names, _, returned, _, _ = _function_parts(mlir_source)
             if len(names) != len(meta.get("input_abi", [])):
                 raise ValueError("captured argument ABI or input count mismatch")
-            if len(returned) != len(meta.get("output_abi", [])):
+            contract = meta.get("result_contract")
+            result_abi = contract["results"] if contract is not None else meta.get("output_abi", [])
+            if len(returned) != len(result_abi):
                 raise ValueError("captured result ABI count mismatch")
     except (KeyError, TypeError, ValueError) as exc:
         return f"{type(exc).__name__}: {exc}"
