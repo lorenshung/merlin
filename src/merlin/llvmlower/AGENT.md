@@ -30,6 +30,16 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
 
 ## What belongs here
 
+- `closed_tensor_insert.py` extends current scalar-observation analysis to a
+  unique i8 insertion in an immutable static tensor carrier. Typed constant or
+  bounded SCF-IV coordinates must be in bounds and distinct across lanes.
+  Complete uses, carrier ownership, surrounding effects and source context are
+  rebound before any rewrite. Native insertion retains extraction, publication,
+  control and destination/resource handles; only proved private arithmetic may
+  change. Original approximation permission, finishing operations, fallback and
+  per-point incoming-RNE capability remain. This composes lane scheduling with
+  the existing normal scalar-family seam and infers no whole accuracy or profit.
+
 - `entry_weight_projection.py` offers explicit removal of unused whole immutable
   parameter arguments after conservative pure tensor DCE. Its complete captured
   and prepared argument table binds source files, optional file presence/absence,

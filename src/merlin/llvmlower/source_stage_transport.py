@@ -221,12 +221,20 @@ def _cs_apply(ctx, module, packet, source_digest):
             raise ValueError("duplicate current scalar integer anchor")
         anchors.add(key)
         anchor = _cs_resolve(module, row["anchor"])
-        if (
-            anchor.name not in ("linalg.yield", "func.return")
-            or len(anchor.operands) != 1
-            or str(anchor.operands[0].type) != "i8"
-        ):
+        scalar_return = anchor.name in ("linalg.yield", "func.return") and len(anchor.operands) == 1
+        tensor_insert = (
+            anchor.name == "tensor.insert" and len(anchor.operands) >= 3 and len(anchor.results) == 1
+            and anchor.results[0].type == anchor.operands[1].type
+            and isinstance(anchor.results[0].type, ir.RankedTensorType)
+            and str(ir.RankedTensorType(anchor.results[0].type).element_type) == "i8"
+            and len(anchor.operands) == ir.RankedTensorType(anchor.results[0].type).rank + 2
+            and all(str(value.type) == "index" for value in anchor.operands[2:])
+        )
+        if not (scalar_return or tensor_insert) or str(anchor.operands[0].type) != "i8":
             raise ValueError("original closed integer leaf is unavailable")
+        uses = tuple(anchor.operands[0].uses)
+        if len(uses) != 1 or uses[0].owner.operation != anchor or uses[0].operand_number != 0:
+            raise ValueError("original integer leaf does not have one publication")
         cut, up = _cs_value(module, row["cut"]), _cs_value(module, row["up"])
         if str(cut.type) != "f32" or str(up.type) != "f32":
             raise ValueError("original scalar producer types changed")

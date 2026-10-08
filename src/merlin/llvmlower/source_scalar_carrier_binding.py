@@ -215,7 +215,11 @@ class SourceScalarCarrierSelection:
                     fragments.append(adapter)
                     anchor = proof.integer_result.uses
                     uses = tuple(anchor)
-                    if len(uses) != 1 or uses[0].operation.name not in ("linalg.yield", "func.return"):
+                    if (
+                        len(uses) != 1
+                        or uses[0].index != 0
+                        or uses[0].operation.name not in ("linalg.yield", "func.return", "tensor.insert")
+                    ):
                         raise ValueError("current integer observation escaped its original terminator")
                     terminator = uses[0].operation
                     private = set((*proof.expression_operations, *proof.observer_operations))
