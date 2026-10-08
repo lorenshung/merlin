@@ -29,8 +29,9 @@ the open interval (4, 7] and no further -- one of them carries a ~7% per-arm noi
 pick a number inside that interval, this classifies only OUTSIDE it: at or below the lower edge a
 member is load-critical under every boundary the evidence admits, at or above the upper edge it is
 mesh-critical under every one, and a member landing strictly between is UNCLASSIFIABLE and refuses
-the cohort. The two edges are read from the family's own frozen acceptance -- data, reviewed with the
-declaration -- never from a literal here, and a contract declaring neither gets a refusal.
+the cohort. The two edges are read from the family's own frozen acceptance -- device data the selected
+target's recipe supplies and the profile merges in, reviewed with the declaration -- never from a literal
+here, and a contract declaring neither gets a refusal.
 
 THE CLASSIFICATION IS NOT A BOUND. It decides only which bucket a member lands in; the pass/fail
 arithmetic comes entirely from the trace. A mis-classification can weaken the discrimination report,
@@ -96,6 +97,18 @@ def regime_bracket(acceptance: Mapping[str, Any] | None) -> tuple[int, int] | No
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             return None
     return (int(low), int(high)) if int(low) < int(high) else None
+
+
+def _undeclared_bracket(acceptance: Mapping[str, Any]) -> str:
+    """Why no bracket was read, in the contract's own words when it recorded any.
+
+    The edges are DEVICE data the selected target supplies; a contract minted for a target that
+    supplied none records that in ``regime.bracket``, and the refusal repeats it so the reason names
+    where the missing measurement belongs rather than only that it is missing.
+    """
+    regime = acceptance.get("regime") if isinstance(acceptance, Mapping) else None
+    note = regime.get("bracket") if isinstance(regime, Mapping) else None
+    return f" (the contract records the bracket as {note!r})" if isinstance(note, str) and note else ""
 
 
 def admitted_positions(acceptance: Mapping[str, Any] | None) -> int | None:
@@ -246,7 +259,7 @@ def preflight_movein_evidence(
             family,
             "the frozen acceptance declares no regime bracket, so which members this demand applies "
             "to is UNDECLARED -- and applying it to all of them is measured to ask for nothing on "
-            "mesh-critical shapes and to fight the reuse order that does pay there",
+            "mesh-critical shapes and to fight the reuse order that does pay there" + _undeclared_bracket(contract),
         )
 
     row_block = SR.array_row_block(str(target)) if target is not None else None
@@ -355,6 +368,7 @@ def analyze_movein_claim(descriptors: object, results: object, per_unit: object 
         return _fail(
             "the frozen acceptance declares no regime bracket or no admitted staging depth, so "
             "neither which members this demand applies to nor what it admits of them is stated"
+            + _undeclared_bracket(contract)
         )
 
     # Supplied by the observer when it had a target; otherwise each member falls back to the

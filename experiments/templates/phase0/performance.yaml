@@ -1824,14 +1824,17 @@ sweeps:
     block the array holds, and the members fitting one row block are the control
 
 # PJ -- MOVE-IN PLACEMENT, and REGIME-CONDITIONAL by measurement. Placing each operand transfer beside
-# the position that first reads it rather than hoisting the slab in front of the nest measured -22.3%
-# and -12.7% on two LOAD-critical shapes and -3.2% / -0.6% on two MESH-critical ones, where the order PA
-# demands stages a run of moving windows together. So the demand is made of load-critical members,
-# WAIVED on mesh-critical ones, and the cohort must contain a waived member. The bracket declares both
-# EDGES of the interval the four measured points bound (reload multiplicity in (4, 7]) rather than a
-# boundary inside it; a member landing between them refuses the cohort. Only the exposed PREFIX is
-# demanded -- movement issued before any compute cannot be overlapped with any -- while the mid-stream
-# load window is not published by the extracted facts and is recorded UNKNOWN, never failed on.
+# the position that first reads it rather than hoisting the slab in front of the nest pays on
+# LOAD-critical shapes and does nothing on MESH-critical ones, where the order PA demands stages a run
+# of moving windows together. So the demand is made of load-critical members, WAIVED on mesh-critical
+# ones, and the cohort must contain a waived member. WHERE the regimes split is a measured property of
+# one device, so this template declares only the discriminant: the bracket's two EDGES (the interval the
+# target's own measured points bound) and the measurement behind them come from the selected target's
+# recipe (`performance_regimes.PJ`). A target declaring none has the bracket recorded UNDECLARED and the
+# analyzer refuses its cohort; no edge is ever inherited from another device. A member landing between
+# the edges refuses the cohort. Only the exposed PREFIX is demanded -- movement issued before any
+# compute cannot be overlapped with any -- while the mid-stream load window is not published by the
+# extracted facts and is recorded UNKNOWN, never failed on.
 - id: PJ
   fit_axes:
   - K
@@ -1906,14 +1909,11 @@ sweeps:
           not_demanded: mid_stream_bursts_whose_absorption_depends_on_the_undisclosed_load_window
         regime:
           discriminant: reload_multiplicity_output_row_blocks_spanned
-          # The two EDGES of the interval the four measured points bound, not a boundary inside it.
-          load_critical_at_or_below: 4
-          mesh_critical_at_or_above: 7
+          # The two EDGES of the interval the selected target's measured points bound (not a boundary
+          # inside it), and the measurement itself: device data from its recipe's performance_regimes.PJ.
+          bracket: declared_by_the_selected_target
           undecided_band: refuse_the_cohort_rather_than_assign_a_lever_by_coin_toss
-          basis: >-
-            four shapes on pinned elaborated RTL, each arm bit-exact against the vendor kernel in the same
-            binary: 3136x64x64 (mult 196, burst->jit -3.2%), 49x512x1024 at a 7-row geometry (mult 7,
-            -0.6%), 64x512x1024 (mult 4, -22.3%), 64x256x1024 (mult 4, -12.7%)
+          basis: declared_by_the_selected_target
           waiver: >-
             the demand is NOT made of mesh-critical members; just-in-time placement is measured to do nothing
             on them, and the order that does pay there stages a run of moving windows together, so demanding

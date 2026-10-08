@@ -29,10 +29,15 @@ from merlin.targetgen import target_experiment
 
 STREAM = ("PD", "PA", "PJ")
 TILE = 16
+#: The synthetic target's own PJ measurement. A regime bracket is device data, so the shared template
+#: carries none and every target that wants a decidable PJ cohort declares one in its recipe.
+SYNTHETIC_PJ = {"load_critical_at_or_below": 4, "mesh_critical_at_or_above": 7, "basis": "synthetic bracket"}
 
 
-def _profile(tmp_path) -> dict:
+def _profile(tmp_path, regimes: dict | None = None) -> dict:
     profile: dict = {"capsules": []}
+    if regimes:
+        profile["performance_regimes"] = copy.deepcopy(regimes)
     profiles._merge_shared_perf(
         profile,
         source=tmp_path / "recipe.yaml",
@@ -78,9 +83,10 @@ def binding(monkeypatch):
     )
 
 
-def _members(tmp_path, binding, **trait_overrides) -> tuple[list[dict], list[dict]]:
+def _members(tmp_path, binding, regimes=None, **trait_overrides) -> tuple[list[dict], list[dict]]:
     skipped: list[dict] = []
-    entries = SWEEPS.expand_sweeps(_profile(tmp_path), binding, trait_facts=_facts(**trait_overrides), skipped=skipped)
+    profile = _profile(tmp_path, {"PJ": SYNTHETIC_PJ} if regimes is None else regimes)
+    entries = SWEEPS.expand_sweeps(profile, binding, trait_facts=_facts(**trait_overrides), skipped=skipped)
     return entries, skipped
 
 
@@ -178,3 +184,87 @@ def test_phase2_admits_the_claim_and_refuses_to_measure_it_as_cycles(tmp_path, b
     )
     with pytest.raises(StageGateError, match="decided from the candidate's emitted stream"):
         RECORD.prepare_formal_claim(capsules)
+
+
+# ------------------------------------------------------------------ the PJ bracket is the target's data
+def _pj_regime(profile: dict) -> dict:
+    (sweep,) = [s for s in profile["sweeps"] if s["id"] == "PJ"]
+    return sweep["base"]["performance"]["acceptance"]["regime"]
+
+
+def test_the_shared_template_carries_no_pj_bracket_edges():
+    """Where PJ's regimes split is measured on one device; the shared template must not hold it."""
+    (sweep,) = [s for s in _profile_sweeps() if s["id"] == "PJ"]
+    regime = sweep["base"]["performance"]["acceptance"]["regime"]
+    assert not set(profiles._REGIME_EDGES) & set(regime)
+    assert regime["bracket"] == regime["basis"] == profiles.TARGET_DECLARED
+
+
+def test_the_selected_targets_bracket_is_merged_where_the_template_marks_it(tmp_path):
+    regime = _pj_regime(_profile(tmp_path, {"PJ": SYNTHETIC_PJ}))
+    assert list(regime) == [
+        "discriminant",
+        "load_critical_at_or_below",
+        "mesh_critical_at_or_above",
+        "undecided_band",
+        "basis",
+        "waiver",
+    ]
+    assert (regime["load_critical_at_or_below"], regime["mesh_critical_at_or_above"]) == (4, 7)
+    assert regime["basis"] == "synthetic bracket"
+
+
+def test_the_template_digest_is_not_changed_by_a_targets_bracket(tmp_path):
+    with_bracket = _profile(tmp_path, {"PJ": SYNTHETIC_PJ})["_performance_template"]["sha256"]
+    without = _profile(tmp_path)["_performance_template"]["sha256"]
+    assert with_bracket == without
+
+
+def test_a_target_declaring_no_bracket_has_its_pj_cohort_refused(tmp_path, binding):
+    """No edge is defaulted: the contract records UNDECLARED and the analyzer refuses, saying so."""
+    regime = _pj_regime(_profile(tmp_path))
+    assert regime["bracket"] == regime["basis"] == profiles.TARGET_UNDECLARED
+    assert not set(profiles._REGIME_EDGES) & set(regime)
+    entries, skipped = _members(tmp_path, binding, regimes={})
+    assert not skipped
+    cohort = [_capsule(e, binding) for e in entries if e["performance"]["family"] == "PJ"]
+    assert cohort
+    preflight = CD.resolve(cohort).preflight(cohort, replicates=["r000"])
+    assert preflight["status"] == "REFUSED"
+    (reason,) = preflight["refusal_reasons"]
+    assert "no regime bracket" in reason and profiles.TARGET_UNDECLARED in reason
+
+
+@pytest.mark.parametrize(
+    "regimes, message",
+    [
+        ({"PD": SYNTHETIC_PJ}, "declares no target-supplied regime bracket"),
+        ({"PJ": {**SYNTHETIC_PJ, "mesh_critical_at_or_above": 4}}, "lower edge must be below"),
+        ({"PJ": {"load_critical_at_or_below": 4, "mesh_critical_at_or_above": 7}}, "needs exactly"),
+        ({"PJ": {**SYNTHETIC_PJ, "basis": " "}}, "must state the measurement"),
+    ],
+)
+def test_a_malformed_or_misplaced_bracket_is_refused_at_load(tmp_path, regimes, message):
+    with pytest.raises(ValueError, match=message):
+        _profile(tmp_path, regimes)
+
+
+def test_the_gemmini_recipe_reproduces_the_bracket_the_template_used_to_hold(tmp_path):
+    """Target-specific, selected explicitly: the move kept gemmini's frozen PJ contract identical."""
+    import yaml
+
+    recipe = yaml.safe_load((repo_root() / "examples/gemmini/phase0/recipe.yaml").read_text())
+    regime = _pj_regime(_profile(tmp_path, recipe["performance_regimes"]))
+    assert regime == {
+        "discriminant": "reload_multiplicity_output_row_blocks_spanned",
+        "load_critical_at_or_below": 4,
+        "mesh_critical_at_or_above": 7,
+        "undecided_band": "refuse_the_cohort_rather_than_assign_a_lever_by_coin_toss",
+        "basis": (
+            "four shapes on pinned elaborated RTL, each arm bit-exact against the vendor kernel in the same "
+            "binary: 3136x64x64 (mult 196, burst->jit -3.2%), 49x512x1024 at a 7-row geometry (mult 7, "
+            "-0.6%), 64x512x1024 (mult 4, -22.3%), 64x256x1024 (mult 4, -12.7%)"
+        ),
+        "waiver": regime["waiver"],
+    }
+    assert list(regime)[1:3] == list(profiles._REGIME_EDGES)

@@ -12,6 +12,18 @@ datapath:
   requant_shift: 3
   required_oracle_tiers: [L0, L1, L2, L3]
 capsules: []
+# Regime brackets for shared performance families whose demand is conditioned on a MEASURED property
+# of this device. The shared template names the discriminant; the edges, and the measurement that
+# bounds them, are this target's. Each bracket declares both EDGES of the interval its measured points
+# bound rather than a boundary inside it.
+performance_regimes:
+  PJ:
+    load_critical_at_or_below: 4
+    mesh_critical_at_or_above: 7
+    basis: >-
+      four shapes on pinned elaborated RTL, each arm bit-exact against the vendor kernel in the same
+      binary: 3136x64x64 (mult 196, burst->jit -3.2%), 49x512x1024 at a 7-row geometry (mult 7,
+      -0.6%), 64x512x1024 (mult 4, -22.3%), 64x256x1024 (mult 4, -12.7%)
 # Shared performance families this target declines, each with the reason and the decision. The
 # family stays defined in the shared template; generation records it as withdrawn, not as refused.
 performance_withdrawals:

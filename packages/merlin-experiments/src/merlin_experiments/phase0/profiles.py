@@ -569,6 +569,73 @@ def _select_performance_withdrawals(profile: dict, *, source: Path) -> None:
     profile["_performance_template"]["withdrawn"] = [selected[name] for name in sorted(selected)]
 
 
+#: The value a shared family's ``acceptance.regime`` carries in place of DEVICE data: the bracket edges
+#: and the measurement behind them are supplied by the selected target's recipe
+#: (``performance_regimes.<family>``), never by the shared template.
+TARGET_DECLARED = "declared_by_the_selected_target"
+#: What the frozen contract records when the selected target declares nothing for such a family. The
+#: family's analyzer reads no edges and refuses the cohort; nothing is defaulted.
+TARGET_UNDECLARED = "UNDECLARED_by_the_selected_target"
+#: The bracket fields a target supplies, besides its ``basis``.
+_REGIME_EDGES = ("load_critical_at_or_below", "mesh_critical_at_or_above")
+
+
+def _target_regime(row: object, *, family: str, source: Path) -> dict:
+    """Validate one ``performance_regimes`` entry: both edges, lower strictly below upper, and a basis."""
+    if not isinstance(row, dict) or set(row) != {*_REGIME_EDGES, "basis"}:
+        raise ValueError(f"{source}: performance_regimes.{family} needs exactly {', '.join(_REGIME_EDGES)} and basis")
+    low, high = (row[edge] for edge in _REGIME_EDGES)
+    if any(not isinstance(value, int) or isinstance(value, bool) or value < 1 for value in (low, high)):
+        raise ValueError(f"{source}: performance_regimes.{family} edges must be positive integers")
+    if low >= high:
+        raise ValueError(f"{source}: performance_regimes.{family} lower edge must be below the upper edge")
+    if not isinstance(row["basis"], str) or not row["basis"].strip():
+        raise ValueError(f"{source}: performance_regimes.{family} must state the measurement as its basis")
+    return row
+
+
+def _apply_target_regimes(profile: dict, sweeps: list[dict], *, source: Path) -> None:
+    """Fill each shared family's target-declared regime bracket from the selected target's recipe.
+
+    Where a lever stops paying is MEASURED on one device, so the shared template names only the
+    discriminant and marks the edges and their basis :data:`TARGET_DECLARED`. The recipe supplies them
+    under ``performance_regimes.<family>``; the merged contract records them in the template's own key
+    order, the edges where the marker stood. A target that declares none for such a family gets both
+    markers replaced by :data:`TARGET_UNDECLARED` and no edges, so the family's analyzer refuses the
+    cohort with that reason. A recipe entry for a family whose template takes no bracket is an error:
+    it would otherwise persist silently after the family changed.
+    """
+    rows = profile.pop("performance_regimes", None)
+    if rows is not None and (not isinstance(rows, dict) or not rows):
+        raise ValueError(f"{source}: performance_regimes must be a nonempty mapping of family to bracket")
+    rows = dict(rows or {})
+    wanting: dict[str, dict] = {}
+    for sweep in sweeps:
+        acceptance = ((sweep.get("base") or {}).get("performance") or {}).get("acceptance")
+        regime = acceptance.get("regime") if isinstance(acceptance, dict) else None
+        if isinstance(regime, dict) and regime.get("bracket") == TARGET_DECLARED:
+            wanting[str(sweep.get("id"))] = acceptance
+    unknown = sorted(set(rows) - set(wanting))
+    if unknown:
+        raise ValueError(
+            f"{source}: performance_regimes names {unknown}, whose shared template declares no "
+            "target-supplied regime bracket"
+        )
+    for family, acceptance in wanting.items():
+        declared = _target_regime(rows[family], family=family, source=source) if family in rows else None
+        merged: dict = {}
+        for key, value in acceptance["regime"].items():
+            if declared is None:
+                merged[key] = TARGET_UNDECLARED if value == TARGET_DECLARED else value
+            elif key == "bracket":
+                merged.update({edge: declared[edge] for edge in _REGIME_EDGES})
+            elif key == "basis" and value == TARGET_DECLARED:
+                merged[key] = declared["basis"]
+            else:
+                merged[key] = value
+        acceptance["regime"] = merged
+
+
 def _profiles_root(profiles_root: str | Path | None) -> Path:
     if profiles_root is None:
         raise ValueError("Phase 0 requires explicit recipe inputs or profiles_root; select an experiment definition")
@@ -607,7 +674,9 @@ def _merge_shared_perf(
     ]
     if non_perf:
         raise ValueError(f"shared performance template {shared_path} contains non-performance sweeps {non_perf}")
-    sweeps = list(shared.get("sweeps") or [])
+    # A copy: the selected target's data is merged into the sweeps below, while the recorded template
+    # digest stays the digest of the shared template itself.
+    sweeps = copy.deepcopy(list(shared.get("sweeps") or []))
     blocked = list(shared.get("blocked_unimplemented") or [])
     family_records: list[dict] = []
     seen: set[str] = set()
@@ -652,6 +721,7 @@ def _merge_shared_perf(
                 "comparison_roles": list(item.get("comparison_roles") or []),
             }
         )
+    _apply_target_regimes(profile, sweeps, source=source)
     profile["sweeps"] = list(profile.get("sweeps") or []) + sweeps
     # Recorded repo-root-relative so a consumer can resolve it against `repo_root()` alone.
     # It is derived from the same `shared_path` this function read, never re-spelled by hand: a
@@ -909,8 +979,8 @@ _DERIVED_AXES = ("memory_regime_reduction_depth",)
 
 def build_comparison_manifest(targets: list[str], *, profiles_root: str | Path | None = None) -> dict:
     """Group capsules that exercise the SAME op across targets into comparison sets, so a shared op (e.g.
-    rmsnorm/gelu/gemv_batched) can be compared across each target's own precision (MXFP8 on mx vs FP8-E4M3
-    on atlas vs fp16 on radiance). Keyed by ``comparison_group`` when the profile declares one, else by op."""
+    rmsnorm/gelu/gemv_batched) can be compared across each target's own precision (e.g. MXFP8 on one target vs
+    FP8-E4M3 or fp16 on another). Keyed by ``comparison_group`` when the profile declares one, else by op."""
     if not targets:
         raise ValueError("comparison requires explicitly selected public profiles")
     return compare_public_profiles(
