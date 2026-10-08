@@ -232,13 +232,15 @@ def _ledger() -> set[str]:
     }
 
 
-def test_the_gate_is_green_on_this_tree() -> None:
+def test_the_gate_is_green_on_this_tree(monkeypatch) -> None:
     """Every narrowing claim is either evidenced or ratcheted, and no ratchet line is stale.
 
     Both halves. A ledger held in one direction only grows entries that outlive their gaps and becomes
     a permanent allowlist -- the gap closes, nobody notices, and the line forgives the next regression
-    of the same claim.
+    of the same claim. Audited under the selection pre-commit and CI run the gate with: no explicit
+    ``MERLIN_TARGET_PATH``, so each target's vendored support (the suite's conftest selects none).
     """
+    monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)
     ledger = _ledger()
     problems, stale = [], []
     for target in CB.gated_targets():
@@ -249,8 +251,9 @@ def test_the_gate_is_green_on_this_tree() -> None:
     assert not stale, f"ledger lines that are no longer gaps: {stale}"
 
 
-def test_every_ledger_line_names_a_real_target_and_a_declared_shape() -> None:
+def test_every_ledger_line_names_a_real_target_and_a_declared_shape(monkeypatch) -> None:
     """A ledger entry that names nothing cannot be closed, and cannot be shown to be stale either."""
+    monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)  # the gate's own selection, as above
     targets = set(CB.gated_targets())
     for entry in _ledger():
         target, _, rest = entry.partition(" ")
@@ -294,26 +297,33 @@ def test_the_cli_agrees_with_the_library_and_reports_the_scope() -> None:
     halves then run green about two different trees, and the exit code cannot tell you which one the
     contracts came from. Comparing the roots turns that into a named environment failure.
     """
+    import os
     import subprocess
     import sys
 
     script = repo_root() / "build_tools" / "scripts" / "check_capability_backing.py"
-    tree = subprocess.run([sys.executable, str(script), "--tree"], capture_output=True, text=True, timeout=300)
+    # The script runs as pre-commit and CI run it: with no explicit MERLIN_TARGET_PATH.
+    env = {key: value for key, value in os.environ.items() if key != "MERLIN_TARGET_PATH"}
+    tree = subprocess.run([sys.executable, str(script), "--tree"], capture_output=True, text=True, timeout=300, env=env)
     assert tree.returncode == 0, tree.stdout + tree.stderr
     assert tree.stdout.strip() == str(repo_root()), (
         f"the gate script audits {tree.stdout.strip()!r} but this test imported merlin from "
         f"{repo_root()!r}; they would both report green about different checkouts. Set "
         f"PYTHONPATH=<this tree>/src so the library half reads the tree under test."
     )
-    got = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=300)
+    got = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=300, env=env)
     assert got.returncode == 0, got.stdout + got.stderr
-    shapes = subprocess.run([sys.executable, str(script), "--shapes"], capture_output=True, text=True, timeout=300)
+    shapes = subprocess.run(
+        [sys.executable, str(script), "--shapes"], capture_output=True, text=True, timeout=300, env=env
+    )
     assert shapes.returncode == 0
     for key in list(CB.NARROWING_SHAPES) + list(CB.DEFERRED_SHAPES):
         assert key in shapes.stdout, f"{key} missing from --shapes"
     # And with the ledger ignored it FAILS, which is what proves the ledger is load-bearing rather
     # than an empty file the gate happens to read.
-    clean = subprocess.run([sys.executable, str(script), "--no-ratchet"], capture_output=True, text=True, timeout=300)
+    clean = subprocess.run(
+        [sys.executable, str(script), "--no-ratchet"], capture_output=True, text=True, timeout=300, env=env
+    )
     assert clean.returncode == 1, "the ratchet forgives nothing, so it is not holding anything back"
 
 
