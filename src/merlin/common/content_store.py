@@ -164,19 +164,33 @@ def _observe_source(
 
 
 def place_file(
-    source: Path, dst: Path, root: Path | None, *, observe: Callable[[Path, Path, Path], None] | None = None
+    source: Path,
+    dst: Path,
+    root: Path | None,
+    *,
+    observe: Callable[[Path, Path, Path], None] | None = None,
+    preserve_permissions: bool = False,
 ) -> bool:
     """Put ``source``'s bytes at ``dst``. Returns whether the store's inode is now shared.
 
     Falls back to a copy whenever the link cannot be made -- no store, a cross-filesystem
     destination (``EXDEV``), or a filesystem without hard links. The result has identical bytes
-    and mode 0444, or 0555 when the source is executable, either way; only its disk cost differs.
+    and, by default, mode 0444 or 0555 when the source is executable; only its disk cost differs.
     The caller owns destination paths and any existing regular file it allows to be overwritten.
     A destination symlink refuses before placement; this helper grants no ownership over other
     hard links to an existing destination or aliases in its parent path.
+
+    Permission-preserving inputs bypass the store and retain the source's read
+    and execute bits, never adding group/other access to an owner-only input.
+    Write and special bits are always removed. This policy is explicit: merely
+    disabling the store does not change public input permissions.
     """
+    if preserve_permissions and root is not None:
+        raise ValueError("permission-preserving inputs cannot use the shared content store")
     if dst.is_symlink():
         raise ValueError(f"refusing to freeze destination symlink: {dst}")
+    if preserve_permissions and is_shared(dst):
+        raise ValueError(f"refusing to overwrite a shared permission-preserving destination: {dst}")
     if observe is not None:
         canonical = source.resolve(strict=True)
         _observe_source(source, canonical, dst, observe)
@@ -188,14 +202,20 @@ def place_file(
             return True
         except OSError:
             pass
-    mode = 0o555 if source.stat().st_mode & 0o111 else 0o444
+    source_mode = source.stat().st_mode
+    mode = source_mode & 0o555 if preserve_permissions else (0o555 if source_mode & 0o111 else 0o444)
     shutil.copy2(source, dst, follow_symlinks=True)
     dst.chmod(mode)
     return False
 
 
 def place_tree(
-    source: Path, dst: Path, root: Path | None, *, observe: Callable[[Path, Path, Path], None] | None = None
+    source: Path,
+    dst: Path,
+    root: Path | None,
+    *,
+    observe: Callable[[Path, Path, Path], None] | None = None,
+    preserve_permissions: bool = False,
 ) -> None:
     """Deep-freeze a directory, dereferencing symlinks.
 
@@ -208,10 +228,17 @@ def place_tree(
     to this invocation's source, never to the first writer of identical bytes.
     A node reached through links can produce multiple observations: each lexical
     link expansion retains its ownership spelling, all with the final canonical
-    source. The observer cannot change copy/cache policy.
+    source. The observer cannot change copy/cache policy. ``preserve_permissions``
+    applies the independent, read/execute-only policy to files and directories.
+    That opt-in tree requires new destination directories and never follows a
+    pre-existing destination alias. Default directory modes remain caller-owned.
     """
+    if preserve_permissions and root is not None:
+        raise ValueError("permission-preserving inputs cannot use the shared content store")
 
     def walk(current: Path, out: Path, ancestry: tuple[tuple[int, int], ...], canonical: Path) -> None:
+        if preserve_permissions and (out.exists() or out.is_symlink()):
+            raise ValueError(f"permission-preserving tree destination must be new: {out}")
         stat = canonical.stat()  # follows links; a dangling one raises
         key = (stat.st_dev, stat.st_ino)
         # A cycle is a directory that contains ITSELF, which is what makes the walk unbounded. Two
@@ -220,7 +247,7 @@ def place_tree(
         if key in ancestry:
             raise RuntimeError(f"refusing to freeze a symlink cycle at {current}")
         _observe_source(current, canonical, out, observe)
-        out.mkdir(parents=True, exist_ok=True)
+        out.mkdir(parents=True, exist_ok=True, mode=0o700 if preserve_permissions else 0o777)
         for entry in sorted(canonical.iterdir()):
             target = out / entry.name
             if entry.is_dir():  # follows links, as a dereferencing copy would
@@ -228,7 +255,7 @@ def place_tree(
             elif entry.is_file():
                 actual = entry.resolve(strict=True)
                 _observe_source(current / entry.name, actual, target, observe)
-                place_file(actual, target, root)
+                place_file(actual, target, root, preserve_permissions=preserve_permissions)
             else:
                 # A device node, a socket, a fifo -- or a link to none of the above. Freezing the
                 # tree smaller than what was declared is the failure to avoid, so say so and stop.
@@ -237,6 +264,8 @@ def place_tree(
                     f"(a dangling symlink, or a device/socket/fifo)"
                 )
         shutil.copystat(canonical, out)
+        if preserve_permissions:
+            out.chmod(stat.st_mode & 0o555)
 
     walk(source, dst, (), source.resolve(strict=True))
 
