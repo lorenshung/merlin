@@ -38,3 +38,6 @@ cache-free, requires a renderer that explicitly accepts the policy, and records
 the unchanged command buffer, selected codec/recipe/source, generated harness,
 object and ELF bytes. Recheck those pins after execution before any numerical
 result. This is not complete toolchain closure or a numerical-support grant.
+The binary alternative is separately selected and stages its own length-aware
+packer plus the existing range helper; a raw byte console is archived before
+strict parsing. B64 and absent-policy behavior remain unchanged.

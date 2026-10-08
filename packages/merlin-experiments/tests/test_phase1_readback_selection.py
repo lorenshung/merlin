@@ -18,10 +18,11 @@ def invocation(root: Path, selection: str | None = None) -> C.InvocationContext:
     )
 
 
-def test_context_and_worker_roundtrip_keep_explicit_policy(tmp_path, monkeypatch):
-    original = invocation(tmp_path, "out_b64_v1")
+@pytest.mark.parametrize("transport", ["out_b64_v1", "out_bin_v1"])
+def test_context_and_worker_roundtrip_keep_explicit_policy(tmp_path, monkeypatch, transport):
+    original = invocation(tmp_path, transport)
     command = selfcheck.worker_command(original, tmp_path / "capsules", tmp_path / "contract")
-    assert command[command.index("--readback-policy") + 1] == "out_b64_v1"
+    assert command[command.index("--readback-policy") + 1] == transport
     parser = build_parser()
     # Children use the shared context parser, not the authoring option parser.
     import argparse
@@ -52,9 +53,10 @@ def test_generic_codec_header_is_available_from_selected_runtime_resources():
     assert b"merlin_out_b64_finish" in header.read_bytes()
 
 
-def test_selected_policy_is_typed_and_records_exactly(tmp_path):
-    context = invocation(tmp_path, "out_b64_v1")
-    record = {"schema": "merlin_readback_policy_v1", "transport": "out_b64_v1"}
+@pytest.mark.parametrize("transport", ["out_b64_v1", "out_bin_v1"])
+def test_selected_policy_is_typed_and_records_exactly(tmp_path, transport):
+    context = invocation(tmp_path, transport)
+    record = {"schema": "merlin_readback_policy_v1", "transport": transport}
     assert C.readback_record(context) == record
     assert C.readback_kwargs(context)["readback_policy"].record() == record
     C.verify_readback_record(context, record)

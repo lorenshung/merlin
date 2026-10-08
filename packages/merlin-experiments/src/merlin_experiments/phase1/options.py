@@ -268,7 +268,7 @@ def build_parser(
     )
     ap.add_argument(
         "--readback-policy",
-        choices=("out_b64_v1",),
+        choices=("out_b64_v1", "out_bin_v1"),
         default="",
         help="explicit full-value output transport; recorded for the run and immutable on resume",
     )

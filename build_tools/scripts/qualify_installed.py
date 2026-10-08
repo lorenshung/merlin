@@ -70,12 +70,15 @@ SUITES = {
         "tests_root": "merlin/tests",
         "tests": (
             "runtime/test_out_b64.py",
+            "runtime/test_out_bin.py",
             "runtime/test_out_b64_profile.py",
             "targetgen/test_invocation_readback_policy.py",
             "infra/test_elf_build_cache.py",
         ),
         "core_extras": ("xdsl",),
-        "probe_modules": ("merlin.runtime.out_b64", "merlin.targetgen.contract.readback_policy"),
+        "probe_modules": (
+            "merlin.runtime.out_b64", "merlin.runtime.out_bin", "merlin.targetgen.contract.readback_policy",
+        ),
         "required_modules": ("xdsl",),
     },
     "runtime-admission": {
@@ -409,6 +412,7 @@ SUITES = {
             "merlin.targetgen.contract.readback_policy",
             "merlin.targetgen.capsule_runner",
             "merlin.runtime.out_b64",
+            "merlin.runtime.out_bin",
             "merlin.frontends.linalg_reduction_source_body",
             "merlin.frontends.prepared_index_source_body",
         )

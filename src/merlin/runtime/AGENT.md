@@ -29,6 +29,10 @@ the per-backend adapters under `backends/`.
   missing, duplicated or interrupted frames refuse. The shared console parser
   still requires terminal `DONE`. Transport changes grant no numerical support,
   output sampling, digest-only qualification or simulator certification.
+- `out_bin.py` — separate opt-in byte-oriented full-value framing. It consumes
+  exact length-delimited raw payloads without text-decoding their NUL/non-UTF-8
+  contents, checks the transport checksum, and requires END/DONE and a closed
+  output roster before the unchanged numerical checker sees actual values.
 
 ## What does not belong here
 

@@ -12,6 +12,10 @@ Merlin-owned bare-metal runtime backend. `spike/` holds the harness (crt, HTIF, 
   block text writer. The bounded staging buffer contains actual output words;
   range-derived narrowing preserves their values and never consults references.
   The caller owns layout traversal, frame declarations and terminal completion.
+- `out_bin.h` is a separate opt-in binary container-word packer. Its bounded
+  buffer passes explicit lengths to a caller-supplied coherent byte writer, so
+  arbitrary payload bytes are retained. It changes no `out_b64.h` behavior and
+  grants no numerical or target support.
 
 ## What does not belong here
 

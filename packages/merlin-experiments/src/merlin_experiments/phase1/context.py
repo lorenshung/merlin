@@ -49,7 +49,7 @@ def load_context(
     permissive target-name fallback and prior environment normalization (including unset defaults).
     Installed callers must not supply it. No fallback target or checkout discovery lives here.
     """
-    if readback_policy is not None and readback_policy != "out_b64_v1":
+    if readback_policy is not None and readback_policy not in ("out_b64_v1", "out_bin_v1"):
         raise ValueError("unsupported invocation readback policy")
     descriptor = Path(descriptor).expanduser().resolve()
     root = Path(repo).expanduser().resolve()
@@ -125,7 +125,7 @@ def add_context_arguments(parser) -> None:
     """Declare explicit installed invocation inputs without initializing an experiment."""
     parser.add_argument("--descriptor", type=Path, help="target experiment descriptor")
     parser.add_argument("--repo", type=Path, help="repository/work root for declared resources")
-    parser.add_argument("--readback-policy", choices=("out_b64_v1",), default=None)
+    parser.add_argument("--readback-policy", choices=("out_b64_v1", "out_bin_v1"), default=None)
 
 
 def resolve_context(args, parser, context=None) -> InvocationContext:

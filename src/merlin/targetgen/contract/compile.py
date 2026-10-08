@@ -446,7 +446,7 @@ def link_elf(
 
         if "readback_policy" not in inspect.signature(_render).parameters:
             raise NotImplementedError("selected backend cannot render the explicit full-value policy")
-        readback_inputs = selected_build_inputs(target, recipe, _build_service)
+        readback_inputs = selected_build_inputs(target, recipe, _build_service, policy=readback_policy)
     abi_receipt = workdir / "kernel.abi.json"
     if abi_receipt.exists():
         try:
@@ -517,7 +517,7 @@ def link_elf(
     if readback_policy is not None:
         from .readback_policy import stage_codec_header
 
-        stage_codec_header(workdir)
+        stage_codec_header(workdir, policy=readback_policy)
     blob_sources = stage_harness_blobs(workdir, blob_payloads)
     # Linker load address DERIVED from the RTL memory map (platform DRAM base), reusing the curated
     # script's proven section layout but replacing its BAKED origin — so the base is a HW fact, not a
@@ -615,7 +615,7 @@ def link_elf(
     if readback_policy is not None:
         from .readback_policy import build_receipt, selected_build_inputs
 
-        if readback_inputs != selected_build_inputs(target, recipe, _build_service):
+        if readback_inputs != selected_build_inputs(target, recipe, _build_service, policy=readback_policy):
             raise ValueError("selected full-value renderer, codec, or recipe changed during link")
         recipe_record, source_pins = readback_inputs
         receipt = build_receipt(
@@ -901,11 +901,12 @@ def run_on_oracle(
     from merlin.runtime.backends import base as _backends
 
     backend = _backends.get_backend(target)
-    from .readback_policy import selected
+    from .readback_policy import FULL_VALUES_BIN, selected
 
     readback_policy = selected(readback_policy)
     work = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="oot_run_"))
-    console_path = work / "oracle_console.log"
+    binary = readback_policy is not None and readback_policy.transport == FULL_VALUES_BIN
+    console_path = work / ("oracle_console.bin" if binary else "oracle_console.log")
     stderr_path = work / "oracle_stderr.log"
     # A refused build or failed launch must not leave an earlier attempt's
     # transcript at this invocation's diagnostic path.
@@ -919,7 +920,7 @@ def run_on_oracle(
         from .readback_policy import BUILD_RECEIPT, require_build_receipt, selected_build_inputs
 
         recipe = _backends.harness_build_recipe(target).with_effective_abi()
-        recipe_record, source_pins = selected_build_inputs(target, recipe)
+        recipe_record, source_pins = selected_build_inputs(target, recipe, policy=readback_policy)
         readback_build = require_build_receipt(
             work / BUILD_RECEIPT, policy=readback_policy, cb=cb, target=target,
             recipe_record=recipe_record, source_pins=source_pins,
@@ -927,7 +928,8 @@ def run_on_oracle(
         )
     _t1 = time.perf_counter()
     try:
-        console = backend.run_elf(elf, simulator=simulator, timeout=timeout)
+        run_kwargs = {"capture_bytes": True} if binary else {}
+        console = backend.run_elf(elf, simulator=simulator, timeout=timeout, **run_kwargs)
     except (TimeoutExpired, CalledProcessError) as exc:
         # Standard process failures can carry partial output even with
         # text=True. Preserve bytes verbatim; they are diagnostic evidence,
@@ -941,7 +943,7 @@ def run_on_oracle(
     # result. Retain the complete, unfiltered transcript at the execution
     # boundary, not only on the successful grading path. This is diagnostic
     # evidence, never a completion or numerical verdict.
-    console_path.write_bytes(console.encode("utf-8"))
+    console_path.write_bytes(console if type(console) is bytes else console.encode("utf-8"))
     outputs, raw = backend.parse_output(console)
     if readback_policy is not None:
         from .readback_policy import (
@@ -951,8 +953,8 @@ def run_on_oracle(
             selected_build_inputs,
         )
 
-        require_full_value_roster(cb, console, outputs)
-        recipe_record, source_pins = selected_build_inputs(target, recipe)
+        require_full_value_roster(cb, console, outputs, policy=readback_policy)
+        recipe_record, source_pins = selected_build_inputs(target, recipe, policy=readback_policy)
         if readback_build != require_build_receipt(
             work / BUILD_RECEIPT, policy=readback_policy, cb=cb, target=target,
             recipe_record=recipe_record, source_pins=source_pins,
