@@ -27,6 +27,7 @@ def _run_spike_bundle(directory: Path, report: dict, *, arena_mb: int, timeout: 
             inputs_npz=directory / "inputs.npz",
             arena_mb=arena_mb,
             dump_all_outputs=True,
+            backend="scalar",
         )
         run = spike_model.run(
             build["elf"],

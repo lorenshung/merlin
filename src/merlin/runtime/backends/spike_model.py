@@ -445,6 +445,7 @@ def build(
     code_reserve: int | None = None,
     output_dump_cap: int = 4096,
     output_sha256: bool = False,
+    dump_all_outputs: bool = False,
 ) -> dict:
     """Build the whole-model bare-metal ELF (spike, or any board with no RTOS).
 
@@ -459,6 +460,9 @@ def build(
     traces for caller-selected C symbols. Each must resolve to the selected
     byte-pinned math archive; the default link and receipt are unchanged. This
     does not prove source-call routing or numerical equivalence.
+
+    ``dump_all_outputs`` emits every result as lossless storage bytes in result order.
+    It replaces the bounded prefix protocol and is opt-in.
 
     ``output_dump_cap`` limits raw output values printed after model timing. Set
     it to the full output size for whole-output target correctness validation.
@@ -566,6 +570,10 @@ def build(
         or not 1 <= output_dump_cap <= 2**31 - 1
     ):
         raise ValueError("output_dump_cap must be a positive signed 32-bit integer")
+    if not isinstance(dump_all_outputs, bool):
+        raise ValueError("dump_all_outputs must be a bool")
+    if dump_all_outputs and output_sha256:
+        raise ValueError("dump_all_outputs conflicts with output_sha256")
     if not isinstance(output_sha256, bool):
         raise ValueError("output_sha256 must be a bool")
     from ..host_math import build_host_math, host_math_recipe
@@ -712,7 +720,13 @@ def build(
 
     # 2. generate the data-driven runtime artifacts (arg table, call, weights.bin, io)
     cgen = work / "cgen"
-    info = c_runtime.generate(model_dir, cgen, inputs_npz, prepared_dir=work)
+    info = c_runtime.generate(
+        model_dir,
+        cgen,
+        inputs_npz,
+        prepared_dir=work,
+        **({"dump_all_outputs": True} if dump_all_outputs else {}),
+    )
     if output_sha256 and info.get("out_dt") != "f32":
         raise SpikeModelError("full-output SHA256 evidence requires f32 output")
     # The region ahead of the weights blob holds code, the stack, and the harness's STATIC I/O
@@ -967,6 +981,8 @@ def build(
         f"op_profile={bool(op_profile)} heartbeat={int(prof_heartbeat_cycles)} output_dump_cap={output_dump_cap}"
     )
     _hh.update(profile_flags.encode())
+    if dump_all_outputs:
+        _hh.update(b"dump_all_outputs=True")
     if output_sha256:
         _hh.update(b"output_sha256=True")
     build_hash = _hh.hexdigest()[:12]
@@ -1142,6 +1158,49 @@ def run(
     return parse_console(console)
 
 
+def parse_all_output_bytes(console: str) -> list[bytes]:
+    """Decode ordered result frames without interpreting their storage dtype.
+
+    This frame decoder also accepts an unterminated fragment for diagnostics.
+    The execution parser separately requires a single terminal DONE.
+    """
+    outputs = []
+    for line in console.splitlines():
+        parts = line.split()
+        if not parts or parts[0] != "OUT_BYTES":
+            continue
+        try:
+            index, count = int(parts[1]), int(parts[2])
+            values = [int(value) for value in parts[3:]]
+            if index != len(outputs) or count < 0 or len(values) != count:
+                raise ValueError("result index or byte count disagrees with frame")
+            outputs.append(bytes(values))
+        except (IndexError, ValueError, OverflowError) as exc:
+            raise SpikeModelError("malformed OUT_BYTES result index, count or bytes") from exc
+    return outputs
+
+
+def _parse_bytes_console(console: str) -> dict[str, Any]:
+    lines = console.splitlines()
+    done = [i for i, line in enumerate(lines) if line.strip() == "DONE"]
+    frames = [i for i, line in enumerate(lines) if line.split()[:1] == ["OUT_BYTES"]]
+    if len(done) != 1 or not frames or frames[-1] >= done[0]:
+        raise SpikeModelError("run requires ordered OUT_BYTES followed by exactly one DONE")
+    if any(line.startswith(("OUT ", "OUT_I64 ", "OUT_I1 ")) for line in lines):
+        raise SpikeModelError("mixed model output protocols")
+    metrics = {}
+    for line in lines:
+        if line.startswith("METRIC "):
+            parts = line.split()
+            if len(parts) != 3 or parts[1] in metrics:
+                raise SpikeModelError("malformed or duplicate model METRIC")
+            try:
+                metrics[parts[1]] = int(parts[2])
+            except ValueError:
+                metrics[parts[1]] = parts[2]
+    return {"output_bytes": parse_all_output_bytes(console), "metrics": metrics, "console": console}
+
+
 def parse_console(console: str) -> dict[str, Any]:
     """Parse the shared bare-metal model protocol, independent of its simulator.
 
@@ -1149,6 +1208,8 @@ def parse_console(console: str) -> dict[str, Any]:
     larger tensor. Process success and hardware provenance belong to the caller.
     Duplicate, truncated, or malformed output must never qualify a run.
     """
+    if any(line.split()[:1] == ["OUT_BYTES"] for line in console.splitlines()):
+        return _parse_bytes_console(console)
     lines = console.splitlines()
     out_lines = [line for line in lines if line.startswith(("OUT ", "OUT_I64 ", "OUT_I1 "))]
     done_lines = [line for line in lines if line.strip() == "DONE"]

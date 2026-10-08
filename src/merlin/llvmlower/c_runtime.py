@@ -135,6 +135,7 @@ def generate(
     invoke_name: str = "merlin_invoke",
     max_session_steps: int | None = None,
     prepared_dir: str | Path | None = None,
+    dump_all_outputs: bool = False,
 ) -> dict:
     """Emit the runtime-driving artifacts for a captured model into ``out_dir``.
 
@@ -474,6 +475,10 @@ def generate(
         dimstr = ",".join(str(d) for d in dims) or "0"
         h.append(f"  {{{kind}, {off}L, {rank}, {{{dimstr}}}, {elem}}},")
     h += ["};"]
+    if dump_all_outputs:
+        h.append("#define MERLIN_DUMP_ALL_OUTPUTS 1")
+        sizes = ",".join(str(int(np.prod(shape)) * DT_BYTES[dt]) for shape, dt in out_specs)
+        h.append(f"static const size_t MERLIN_OUTPUT_NBYTES[MERLIN_N_OUTPUTS] = {{{sizes}}};")
     h.append("#endif")
 
     io = [
@@ -508,7 +513,7 @@ def generate(
     io.append(
         "static void *MERLIN_INPUT_PTR[MERLIN_N_ARGS] = {"
         + ",".join(f"(void*)merlin_in_{i}" if i in embedded else "0" for i in range(n_sig_args))
-        + ","
+        + ("," if n_sig_args else "")
         + ",".join("0" for _ in out_specs)
         + "};"
     )
