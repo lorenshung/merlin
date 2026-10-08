@@ -608,3 +608,11 @@ obligations. The source score interval is preserved: zero implementation budget
 removes only extra polynomial rounding expansion, not input uncertainty. Exact
 F32 endpoint values remain available to the unchanged denominator. Constant
 specialization is not a numerical approximation or a default emitter policy.
+
+- `modular_contractions.py` widens only closed unflagged integer multiply/add
+  reductions from a proven zero initializer, using caller-supplied wider datapaths.
+  A retained truncating host readout preserves every original wrapping result bit,
+  including wider-accumulator overflow. Nonzero initialization, overflow promises,
+  extra arithmetic, ambiguous precision and floating point refuse. This is an
+  explicit preparation step with original/source hashes; it changes no default
+  scalar or quantization policy and grants no backend or execution qualification.
