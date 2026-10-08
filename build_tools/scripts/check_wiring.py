@@ -15,14 +15,41 @@ build tools, excluding the test suite and the module itself. A declared console 
 executable ``python -m`` command in the shared runtime-rendered task prompt counts as wired. Tests
 do not: a test proves a module works, not that anything uses it.
 
-Known debt lives in ``unwired_ratchet.txt`` beside this file, one repo-relative path per line. It
-may only shrink (``check_ratchets_shrink.py`` holds every ``*_ratchet.txt``), and an entry for a
-module that has since been wired or deleted fails this gate until it is removed, so the ledger
-cannot rot into an allowlist.
+TWO GRANULARITIES, BECAUSE MODULE GRANULARITY HAS A BLIND SPOT THE SIZE OF A MODULE. An imported
+module is "wired" whatever is inside it, so a function nobody calls hides inside one perfectly:
+``llvmlower/device_build.py::routing_for_placement`` sat with zero callers and ten test references
+inside a module this gate reported as wired, and would have gone on doing so: its own ``__all__`` was
+the only production mention of the name in the tree. :func:`unwired_symbols` therefore repeats the
+question one level down, over the public top-level definitions of the instrumented packages, with the
+SAME rule: a production reference, or it is debt.
 
-    python build_tools/scripts/check_wiring.py            # exit 1 on a new unwired module
-    python build_tools/scripts/check_wiring.py --write    # regenerate the ledger (review the diff)
-    python build_tools/scripts/check_wiring.py --list     # print every unwired module
+That scan is deliberately CONSERVATIVE, because a ledger full of accusations nobody can defend is
+worse than no ledger -- an entry you cannot justify can never be removed. Four conditions must all
+hold, and each one THROWS AWAY real debt on purpose:
+
+  * References are matched by NAME (``ast.Name`` / ``ast.Attribute`` / ``import`` aliases / string
+    constants, so a name dispatched dynamically counts as used). Name matching over-counts
+    references, which under-counts debt. That is the direction this gate wants to be wrong in.
+  * ``__all__`` is excluded from reference counting -- an export list DECLARES a name, it does not
+    USE it, and counting it hid the very case above.
+  * A DECORATED definition is never flagged. A decorator is a call that can register the object
+    somewhere this gate cannot see; the gate declines to judge rather than guess.
+  * The symbol must have at least one reference in a test suite. A public definition nothing
+    references at all is ordinary dead code; this ledger is about the narrower, worse case -- work
+    with a test behind it and no caller in front of it, which reads exactly like a passing check.
+
+A symbol in a module the module-level ledger already holds is not repeated: that debt is recorded
+once, at the coarser granularity, and paying it off resolves both.
+
+Known debt lives in two ledgers beside this file -- ``unwired_ratchet.txt`` (one repo-relative module
+path per line) and ``unwired_symbols_ratchet.txt`` (``<path>::<name>``), both keyed by the stable
+policy path so a relocated file keeps its identity. Both may only shrink (``check_ratchets_shrink.py``
+holds every ``*_ratchet.txt``), and an entry that has since been wired or deleted fails this gate
+until it is removed, so neither ledger can rot into an allowlist.
+
+    python build_tools/scripts/check_wiring.py            # exit 1 on a new unwired module or symbol
+    python build_tools/scripts/check_wiring.py --write    # regenerate both ledgers (review the diff)
+    python build_tools/scripts/check_wiring.py --list     # print every unwired module and symbol
 """
 
 from __future__ import annotations
@@ -37,6 +64,7 @@ import _source_layout  # noqa: E402
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_ROOT = _source_layout.core_package(ROOT).parent
 LEDGER = ROOT / "build_tools" / "scripts" / "unwired_ratchet.txt"
+SYMBOL_LEDGER = ROOT / "build_tools" / "scripts" / "unwired_symbols_ratchet.txt"
 #: Packages whose modules compute quality signals, verdicts or evidence.
 INSTRUMENTED = tuple(
     f"{prefix}/{package}"
@@ -95,11 +123,19 @@ def _module_name(path: Path) -> str | None:
     return ".".join(parts)
 
 
+def _tree(path: Path) -> ast.AST | None:
+    """The parsed file, or None for one that does not parse. Deliberately NOT cached: holding a few
+    thousand trees alive made the collector's full passes cost more than parsing twice."""
+    try:
+        return ast.parse(path.read_text(encoding="utf-8"))
+    except (SyntaxError, UnicodeDecodeError, OSError):
+        return None
+
+
 def _imports(path: Path) -> set[str]:
     """Every dotted module name ``path`` imports, with relative imports resolved."""
-    try:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-    except (SyntaxError, UnicodeDecodeError):
+    tree = _tree(path)
+    if tree is None:
         return set()
     own = _module_name(path)
     package = None
@@ -264,21 +300,221 @@ def unwired() -> list[str]:
     )
 
 
-def _ledger() -> list[str]:
-    if not LEDGER.is_file():
+# --------------------------------------------------------------------------- symbol granularity
+
+
+def _console_script_symbols() -> set[str]:
+    """Function names a declared console script calls (``pkg.mod:main`` -> ``main``).
+
+    An entry point has no in-tree caller by construction; the packaging metadata IS its caller."""
+    symbols: set[str] = set()
+    for pyproject in (ROOT / "pyproject.toml", *sorted((ROOT / "packages").glob("*/pyproject.toml"))):
+        if not pyproject.is_file():
+            continue
+        in_scripts = False
+        for line in pyproject.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("["):
+                in_scripts = stripped == "[project.scripts]"
+                continue
+            if in_scripts and "=" in stripped:
+                target = stripped.split("=", 1)[1].strip().strip('"')
+                _module, _, symbol = target.partition(":")
+                if symbol:
+                    symbols.add(symbol.split(".", 1)[0])
+    return symbols
+
+
+def _export_list_nodes(tree: ast.AST) -> set[int]:
+    """Every node under an ``__all__ = [...]`` assignment.
+
+    An export list NAMES a symbol; it does not USE it. Counting it as a reference is what let
+    ``device_build.routing_for_placement`` -- zero callers, ten test references -- read as wired.
+    """
+    skip: set[int] = set()
+    for node in getattr(tree, "body", ()):  # an export list is a module-level statement
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+        else:
+            continue
+        if node.value is not None and any(isinstance(t, ast.Name) and t.id == "__all__" for t in targets):
+            skip.update(id(sub) for sub in ast.walk(node.value))
+    return skip
+
+
+def _referenced_names(path: Path) -> set[str]:
+    """Every name ``path`` could be USING, matched structurally but broadly.
+
+    Broadly on purpose: an ``ast.Name``, an attribute access, an import alias and a bare string
+    constant all count, so a symbol reached through ``getattr(module, "name")`` or a registry table
+    keyed by string is treated as referenced. Over-counting references under-counts debt, and that is
+    the direction a ledger of accusations should err in.
+    """
+    tree = _tree(path)
+    if tree is None:
+        return set()
+    skip = _export_list_nodes(tree)
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if id(node) in skip:
+            continue
+        if isinstance(node, ast.Name):
+            found.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            found.add(node.attr)
+        elif isinstance(node, ast.alias):
+            found.add(node.name.rpartition(".")[2])
+            if node.asname:
+                found.add(node.asname)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            found.add(node.value)
+    return found
+
+
+#: Every ASCII character that cannot occur in an identifier, mapped to a space: one C-level pass turns a
+#: source into the words it could possibly reference, so a file that names no candidate is never walked.
+_NON_IDENTIFIER = str.maketrans({chr(c): " " for c in range(128) if not (chr(c).isalnum() or chr(c) == "_")})
+
+
+def _words(path: Path) -> set[str]:
+    """A SUPERSET of the names :func:`_referenced_names` can return for ``path`` that are identifiers."""
+    try:
+        return set(path.read_text(encoding="utf-8").translate(_NON_IDENTIFIER).split())
+    except (OSError, UnicodeDecodeError):
+        return set()
+
+
+def _referenced_among(paths, candidates: set[str]) -> set[str]:
+    """The ``candidates`` some file in ``paths`` references. A file whose words name none of the
+    candidates still open is not walked, which is what keeps the scan inside a pre-commit budget."""
+    open_names, found = set(candidates), set()
+    for path in paths:
+        if not open_names or not (_words(path) & open_names):
+            continue
+        hits = _referenced_names(path) & open_names
+        found |= hits
+        open_names -= hits
+    return found
+
+
+def _public_definitions(path: Path) -> list[str]:
+    """Public top-level ``def`` / ``async def`` / ``class`` names in ``path``, undecorated only.
+
+    A decorated definition is skipped: the decorator is a call, and a call can register the object in
+    a table this gate cannot follow. Declining to judge is the conservative answer.
+    """
+    tree = _tree(path)
+    if tree is None:
+        return []
+    return [
+        node.name
+        for node in getattr(tree, "body", ())
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and not node.name.startswith("_")
+        and not node.decorator_list
+    ]
+
+
+def _test_files() -> list[Path]:
+    """Every test-suite source: the cross-subsystem suite and each distribution's own tests."""
+    roots = [ROOT / "merlin" / "tests", *sorted((ROOT / "packages").glob("*/tests"))]
+    return [
+        path
+        for base in roots
+        if base.is_dir()
+        for path in sorted(base.rglob("*.py"))
+        if "__pycache__" not in path.parts
+    ]
+
+
+def _instrumented_files() -> dict[str, Path]:
+    """``{repo-relative path: file}`` for every module under the instrumented packages."""
+    extension_roots = (
+        (package / part).relative_to(ROOT).as_posix()
+        for package in _source_layout.source_packages(ROOT)
+        if package.name == "merlin" and package.is_relative_to(ROOT / "packages")
+        for part in ("perf", "targetgen", "verify")
+    )
+    files: dict[str, Path] = {}
+    for relative_root in (*INSTRUMENTED, *extension_roots):
+        for path in _python_files(relative_root):
+            if path.name != "__init__.py":
+                files.setdefault(path.resolve().relative_to(ROOT.resolve()).as_posix(), path)
+    return files
+
+
+def unwired_symbols(known_unwired_modules: set[str] | None = None) -> list[str]:
+    """``<policy path>::<name>`` for every public definition with tests and no production use.
+
+    ``known_unwired_modules`` are the module-granular findings; a symbol inside one is left out so
+    the same debt is not recorded at two granularities.
+    """
+    if known_unwired_modules is None:
+        known_unwired_modules = set(unwired())
+    known = {_source_layout.policy_path(path) for path in known_unwired_modules}
+
+    definitions: dict[str, list[str]] = {}
+    for relative, path in _instrumented_files().items():
+        policy = _source_layout.policy_path(relative)
+        if policy in known:
+            continue
+        names = _public_definitions(path)
+        if names:
+            definitions[policy] = names
+
+    candidates = {name for names in definitions.values() for name in names}
+    test_references = _referenced_among(_test_files(), candidates)
+    # Every name production code could be using, ANYWHERE -- including the defining module itself. A
+    # public helper called only by its own module's wired entry point is reached; it is not debt.
+    used = _console_script_symbols()
+    production = (path for root in (*PRODUCTION, *_target_workflow_roots()) for path in _python_files(root))
+    used |= _referenced_among(production, test_references - used)
+
+    return sorted(
+        f"{policy}::{name}"
+        for policy, names in definitions.items()
+        for name in names
+        if name not in used and name in test_references
+    )
+
+
+def _ledger(path: Path | None = None) -> list[str]:
+    path = LEDGER if path is None else path
+    if not path.is_file():
         return []
     return [
         line.split("#", 1)[0].strip()
-        for line in LEDGER.read_text(encoding="utf-8").splitlines()
+        for line in path.read_text(encoding="utf-8").splitlines()
         if line.split("#", 1)[0].strip()
     ]
+
+
+SYMBOL_HEADER = (
+    "# Public top-level definitions under the instrumented packages that no production code\n"
+    "# references, and at least one test does. One `<policy path>::<name>` per line.\n"
+    "#\n"
+    "# WHY A SECOND GRANULARITY. An imported module is `wired` whatever is inside it, so the\n"
+    "# module-level ledger beside this one cannot see a function nobody calls.\n"
+    "#\n"
+    "# WHAT IS *NOT* HERE, and why this list is shorter than the debt. The scan is deliberately\n"
+    "# conservative -- see check_wiring.py's docstring: references are matched by name (so dynamic\n"
+    "# dispatch counts as use), decorated definitions are never flagged (a decorator may register\n"
+    "# the object), a definition with no test behind it is left to ordinary dead-code review, and a\n"
+    "# symbol inside a module the module-level ledger already holds is recorded once, there.\n"
+    "#\n"
+    "# May only shrink: call it from the path it was built for, or delete it.\n"
+    "# growth-accepted: the symbol granularity is new; this is debt it discovered, not debt added.\n"
+)
 
 
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     found = unwired()
+    found_symbols = unwired_symbols(set(found))
     if "--list" in arguments:
-        print("\n".join(found))
+        print("\n".join([*found, *found_symbols]))
         return 0
     if "--write" in arguments:
         header = (
@@ -288,6 +524,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         LEDGER.write_text(header + "".join(f"{path}\n" for path in found), encoding="utf-8")
         print(f"wrote {LEDGER.relative_to(ROOT)} ({len(found)} entries)")
+        SYMBOL_LEDGER.write_text(SYMBOL_HEADER + "".join(f"{key}\n" for key in found_symbols), encoding="utf-8")
+        print(f"wrote {SYMBOL_LEDGER.relative_to(ROOT)} ({len(found_symbols)} entries)")
         return 0
     known = set(_ledger())
     stable_found = {_source_layout.policy_path(path) for path in found}
@@ -303,9 +541,25 @@ def main(argv: list[str] | None = None) -> int:
             f"[FAIL] stale ledger entry: {path} is wired or gone -- remove it from "
             f"{LEDGER.relative_to(ROOT)} so the ledger keeps shrinking."
         )
-    if new or stale:
+    known_symbols = set(_ledger(SYMBOL_LEDGER))
+    new_symbols = [key for key in found_symbols if key not in known_symbols]
+    stale_symbols = sorted(known_symbols - set(found_symbols))
+    for key in new_symbols:
+        print(
+            f"[FAIL] unwired symbol: {key} is referenced by tests and by no production code. Call it "
+            f"from the path it was built for, or delete it."
+        )
+    for key in stale_symbols:
+        print(
+            f"[FAIL] stale ledger entry: {key} is wired or gone -- remove it from "
+            f"{SYMBOL_LEDGER.relative_to(ROOT)} so the ledger keeps shrinking."
+        )
+    if new or stale or new_symbols or stale_symbols:
         return 1
-    print(f"[  ok] wiring: {len(found)} known unwired module(s) in the ledger; no new one.")
+    print(
+        f"[  ok] wiring: {len(found)} known unwired module(s) and {len(found_symbols)} known unwired "
+        f"symbol(s) in the ledgers; no new one."
+    )
     return 0
 
 
