@@ -119,6 +119,8 @@ def test_unpaid_qualification_uses_formal_child_and_refuses_selected_source_drif
                 name,
                 "--sandbox",
                 "bwrap",
+                "--qa-timeout",
+                "3217",
                 "--qualify-submission",
                 source_arg,
                 "--private-full-model-spec",
@@ -157,6 +159,7 @@ def test_unpaid_qualification_uses_formal_child_and_refuses_selected_source_drif
         assert "merlin_experiments.phase1.feedback.formal" in argv
         assert "--private-full-model-spec" in argv
         assert "--hidden-capsules" in argv
+        assert argv[argv.index("--qa-timeout") + 1] == "3217"
         return subprocess.CompletedProcess(argv, 1)
 
     monkeypatch.setattr(formal_invocation.subprocess, "run", unavailable_formal)

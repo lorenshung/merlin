@@ -132,6 +132,8 @@ def freeze_and_observe(root, *, repo):
     return record
 freeze.freeze = freeze_and_observe
 def external_execution(caps, package_dir, *, runs_root, oracle_adapters, target, **kwargs):
+    if '--qa-timeout' in sys.argv:
+        assert kwargs['timeout'] == int(sys.argv[sys.argv.index('--qa-timeout') + 1])
     labels = {cap['label'] for cap in caps}
     hidden = labels == {'hidden'}
     assert bool((run / 'freeze.json').exists()) == hidden
@@ -220,6 +222,14 @@ def test_real_public_freeze_rehash_hidden_lifecycle_outside_checkout(tmp_path):
     assert manifest["hidden"]["cohort_admission"]["policy"] == "frozen_target_capability_operand_dtype"
     assert (run / "iterations/iteration_000/notes.md").is_file()
     assert (run / "final_report.md").is_file()
+
+
+def test_selected_step_timeout_reaches_public_and_hidden_grade(tmp_path):
+    run, result = _run_formal(tmp_path, flags=("--qa-timeout", "3217"))
+    assert result.returncode == 1, result.stderr + result.stdout
+    manifest = yaml.safe_load((run / "run_manifest.yaml").read_text())
+    assert manifest["grading_budget"]["step_timeout_s"] == 3217
+    assert manifest["public_dev"]["n_passed"] == manifest["hidden"]["n_passed"] == 1
 
 
 @pytest.mark.parametrize("flags", [("--no-oracle",), ("--skip-hidden",)])

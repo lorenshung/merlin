@@ -327,7 +327,9 @@ def _roots(spec: str) -> list[str]:
     return [s for s in (x.strip() for x in str(spec).split(",")) if s]
 
 
-def _score(pkg, capsules, runs_root, labels, no_oracle, *, context: InvocationContext, contract=None):
+def _score(
+    pkg, capsules, runs_root, labels, no_oracle, *, context: InvocationContext, contract=None, step_timeout_s=900
+):
     # Resolve the TARGET'S OWN oracle ladder from its contract (external_backend->program_oracle,
     # chipyard->spike/verilator, else arc) — never pass None here, which historically fell back to the
     # gemmini spike/verilator MLIR-lowering oracle and mis-graded atlas (torch-mlir run_lowering.py crash).
@@ -341,7 +343,7 @@ def _score(pkg, capsules, runs_root, labels, no_oracle, *, context: InvocationCo
         labels=labels,
         contract=str(Path(contract).resolve()) if contract else str(context.repo / "merlin/contract"),
         oracle_adapters=adapters,
-        timeout=900,
+        timeout=step_timeout_s,
         target=context.target,
         no_oracle=no_oracle,
         # The public set was materialized from the descriptor before the run.  The hidden
@@ -383,6 +385,7 @@ def main(argv: list[str] | None = None, *, context: InvocationContext | None = N
     ap.add_argument("--rtl-facts", type=Path, help="Selected facts in that workspace's frozen input snapshot")
     ap.add_argument("--arm", required=True)
     ap.add_argument("--model", default="unknown")
+    ap.add_argument("--qa-timeout", type=int, default=900, help="Selected per-step grading timeout in seconds")
     ap.add_argument(
         "--capsules",
         default=None,
@@ -409,6 +412,8 @@ def main(argv: list[str] | None = None, *, context: InvocationContext | None = N
         help="operator-only frozen validation input; never passed to an authoring workspace",
     )
     a = ap.parse_args(argv)
+    if a.qa_timeout < 1:
+        ap.error("--qa-timeout must be positive")
     if a.rtl_facts is not None:
         if a.workspace is None:
             ap.error("--rtl-facts requires --workspace")
@@ -450,6 +455,7 @@ def main(argv: list[str] | None = None, *, context: InvocationContext | None = N
         a.no_oracle,
         context=context,
         contract=a.contract,
+        step_timeout_s=a.qa_timeout,
     )
     (run_dir / "grading_public" / "score_capsule.json").write_text(json.dumps(pub, indent=2))
 
@@ -490,6 +496,7 @@ def main(argv: list[str] | None = None, *, context: InvocationContext | None = N
             a.no_oracle,
             context=context,
             contract=a.contract,
+            step_timeout_s=a.qa_timeout,
         )
         (run_dir / "grading_hidden" / "score_capsule.json").write_text(json.dumps(hid, indent=2))
 
@@ -577,6 +584,7 @@ def main(argv: list[str] | None = None, *, context: InvocationContext | None = N
         **({"qualification_only": True, "authoring_converged": False} if qualification_only else {}),
         "arm": a.arm,
         "model": a.model,
+        "grading_budget": {"step_timeout_s": a.qa_timeout},
         "repo_sha": frozen["repo_sha"],
         "submission_sha256": frozen["submission_sha256"],
         "frozen_at": frozen["frozen_at"],

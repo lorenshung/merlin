@@ -70,6 +70,8 @@ def run(
         options.arm,
         "--model",
         options.model,
+        "--qa-timeout",
+        str(options.qa_timeout),
         "--capsules",
         str(public_capsules),
     ]
