@@ -2,6 +2,16 @@
 
 ## Purpose
 
+`endpoint_narrowing` is a separate default-off capability for finite interval
+subsets in a private original-source epoch. It preserves the legacy prepared
+owner's mandatory invalidation and derives its own retained magnitude fact.
+Source membership, numerical policy, effects, exclusive mutation, complete
+storage and dependency closure remain caller proofs. Partial updates invalidate
+one output column; denominator updates invalidate the row. Unknown writes,
+widening, changed context, signed-zero output ambiguities and unsupported
+effects retain the original checked computation. No automatic selection,
+floating observation permission, target scheduling or profitability is implied.
+
 `produced_bf16_row_facts` is an explicit default-off source/effects composition
 seam. Complete finite BF16 writes and private immutable source/metadata closure
 permit producer max/min facts to replace repeated packing and already selected
