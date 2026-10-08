@@ -7,6 +7,11 @@ enqueue-time certificate attribution unchanged. Public clients remain separate.
 Dispatch owns only the closed async simulator policy shared by broker and promotion.
 Source moves invalidate new implementation identities, never rewrite old evidence.
 
+`private_facts.py` selects the private roster's exact pinned RTL extraction for
+its model builds, after checking that the public effective view names the same
+verified FIRRTL target/config. It restores the public environment afterward;
+distinct input roles do not imply equivalent host/SDK facts or compiled semantics.
+
 `private_capture_roster.py` binds every single- or multi-program capture stage to
 the ordinary root contract and receipts. It refuses missing, extra, opaque or
 indirect stage inputs, and reports only the attested loader's declared input

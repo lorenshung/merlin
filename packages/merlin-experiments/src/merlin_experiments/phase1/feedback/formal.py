@@ -28,6 +28,7 @@ from merlin_experiments.phase1.context import (
 )
 from merlin_experiments.phase1.feedback import freeze as freeze_run
 from merlin_experiments.phase1.feedback import private_full_models as PFM
+from merlin_experiments.phase1.feedback.private_facts import selected_input_facts
 
 # This is the certification tier for the Arm-4 functional experiment.  A cheaper-tier pass is
 # useful iteration feedback, but is not a completed formal run.  Keep the requirement next to the
@@ -525,17 +526,21 @@ def main(argv: list[str] | None = None, *, context: InvocationContext | None = N
             )
             if source_freeze is None:
                 raise ValueError("private full-model certification requires a fresh run-owned authored-source freeze")
-            private_models = PFM.run(
-                pkg,
-                a.private_full_model_spec,
-                target=context.target,
-                required_models=required_full_models,
-                required_programs=required_full_programs,
-                loader_env_requirements=required_loader_env,
-                out=run_dir / "grading_private_full_models",
-                source_freeze=source_freeze,
-                source_freeze_root=(run_dir / "private_full_model_input" / "sources") if source_freeze else None,
-            )
+            with selected_input_facts(
+                a.private_full_model_spec, target=context.target, required_models=required_full_models
+            ) as facts_binding:
+                private_models = PFM.run(
+                    pkg,
+                    a.private_full_model_spec,
+                    target=context.target,
+                    required_models=required_full_models,
+                    required_programs=required_full_programs,
+                    loader_env_requirements=required_loader_env,
+                    out=run_dir / "grading_private_full_models",
+                    source_freeze=source_freeze,
+                    source_freeze_root=(run_dir / "private_full_model_input" / "sources") if source_freeze else None,
+                )
+            private_models["fact_reader_binding"] = facts_binding
             if (
                 _private_source_freeze_for_formal(
                     run_dir, a.private_full_model_spec, context.target, workspace=a.workspace, repo=context.repo
