@@ -862,7 +862,7 @@ def audit_candidate_static_tiers(
         cb = json.loads(_read_pinned_payload(emission, "command_buffer").decode("utf-8"))
         lowered = _read_pinned_payload(emission, "lowered_mlir").decode("utf-8")
         source = _read_pinned_payload(emission, "source_interface").decode("utf-8")
-        ok, reason = is_executable_emission(cb, artifact_text=lowered)
+        ok, reason = is_executable_emission(cb, artifact_text=lowered, entry_symbol=entry_symbol)
         if not ok:
             raise NativeModelExecutionError(reason)
         placement = audit_candidate_source_placement(emission, certificate, target=target)
@@ -1199,7 +1199,10 @@ def execute_candidate_model(
         cb = json.loads(json.dumps(command_buffer))
         if (cb.get("kernel_abi") or {}).get("kind") != "whole_program":
             raise NativeModelExecutionError("candidate did not declare a whole_program pointer ABI")
-        ok, reason = is_executable_emission(cb, artifact_text=lowered_mlir_text)
+        from merlin.runtime.backends import base as backends
+
+        entry_symbol = backends.harness_build_recipe(target).require_kernel_stack_frame().entry_symbol
+        ok, reason = is_executable_emission(cb, artifact_text=lowered_mlir_text, entry_symbol=entry_symbol)
         if not ok:
             raise NativeModelExecutionError(reason)
         abi = cb["kernel_abi"]
@@ -1249,7 +1252,7 @@ def execute_candidate_model(
         record["candidate"] = {
             "command_buffer_sha256": hashlib.sha256(json.dumps(cb, sort_keys=True).encode()).hexdigest(),
             "lowered_mlir_sha256": hashlib.sha256(lowered_mlir_text.encode()).hexdigest(),
-            "entry_arity": emitted_entry_arity(lowered_mlir_text),
+            "entry_arity": emitted_entry_arity(lowered_mlir_text, entry_symbol=entry_symbol),
             "abi_args": len(abi["args"]),
         }
         from merlin.runtime.route_quality import (
@@ -1260,7 +1263,8 @@ def execute_candidate_model(
 
         scratch = tuple(binding["source_entry_binding"]["source_owned_mutables"])
         service = _build_service_for(target, source_owned_mutables=scratch or None)
-        entry_symbol = service.recipe.require_kernel_stack_frame().entry_symbol
+        if service.recipe.require_kernel_stack_frame().entry_symbol != entry_symbol:
+            raise NativeModelExecutionError("selected entry symbol changed during candidate source binding")
         host_report = _host_compute_report(cb, lowered_mlir_text, entry_symbol=entry_symbol)
         record["host_compute"] = host_report.to_dict()
         try:
