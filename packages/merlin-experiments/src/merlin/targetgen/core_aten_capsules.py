@@ -311,6 +311,7 @@ def run_capsule(capsule, package_dir, *, paths, config, adapters, pkg, contract,
                     "mandatory": True,
                     "not_run_is_not_pass": True,
                     "detail": "selected oracle does not implement full-call boundary execution",
+                    "reason": "selected oracle does not implement full-call boundary execution",
                 }
                 result["failure"] = {"plane": "oracle_unavailable", "category": "NOT_RUN_IS_NOT_PASS", "tier": tier}
                 break
@@ -337,6 +338,7 @@ def run_capsule(capsule, package_dir, *, paths, config, adapters, pkg, contract,
                 provenance=run["provenance"],
             )
             row = next(iter(verdict["cases"].values()))
+            execution_failed = row["status"] == "execution_failed"
             passed = row["status"] == "pass"
             if capsule.get("lane_expectation") == "device":
                 passed = passed and result["lane"] == "device" and result["executed_instructions"] > 0
@@ -350,24 +352,32 @@ def run_capsule(capsule, package_dir, *, paths, config, adapters, pkg, contract,
                 "engine": run.get("engine"),
                 "semantic_scope": row.get("semantic_scope"),
                 "provenance": run["provenance"],
+                "reason": row["reason"]
+                if execution_failed
+                else None
+                if passed
+                else "compiled full-call boundary or execution lane differs from the call contract",
             }
             result["numeric"] = {
-                "status": "pass" if passed else "fail",
+                "status": "skipped" if execution_failed else "pass" if passed else "fail",
                 "semantic_scope": row.get("semantic_scope"),
             }
             if tier in config.rtl_tiers and run.get("derived_from_rtl") is not True:
                 result["tiers"][tier]["status"] = "unavailable"
                 result["tiers"][tier]["not_run_is_not_pass"] = True
+                result["tiers"][tier]["reason"] = "selected oracle did not derive execution from RTL"
                 result["failure"] = {"plane": "oracle_unavailable", "category": "NOT_RUN_IS_NOT_PASS", "tier": tier}
                 break
             if not passed:
                 result["status"] = "fail"
                 # Full observations and expected values remain exclusively in the private runtime.
                 result["failure"] = {
-                    "plane": "numeric",
-                    "category": "NUMERIC_MISMATCH",
+                    "plane": "compile" if execution_failed else "numeric",
+                    "category": "PROTOCOL_VIOLATION" if execution_failed else "NUMERIC_MISMATCH",
                     "tier": tier,
-                    "detail": "compiled full-call boundary differs from the call contract",
+                    "detail": row["reason"]
+                    if execution_failed
+                    else "compiled full-call boundary differs from the call contract",
                 }
                 _json(bundle / "private-verdict.json", verdict)
                 break

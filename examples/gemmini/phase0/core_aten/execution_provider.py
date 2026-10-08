@@ -1,5 +1,6 @@
 """Gemmini-owned source catalog and Spike extension selection for Core ATen."""
 
+import hashlib
 from pathlib import Path
 
 from merlin.llvmlower import toolchain
@@ -25,7 +26,9 @@ def routing(directory, *, target, package, facts, eligible):
     operand, weight, accum = next(iter(triples))
     if operand != weight:
         raise ValueError("catalog requires identical operand storage types")
-    backend = load_module(package, "mlir_oot.golden_device_catalog", package_name="core_aten_backend")
+    # Immutable snapshots at different roots must not share cached Python modules.
+    identity = hashlib.sha256(str(Path(package).resolve()).encode()).hexdigest()
+    backend = load_module(package, "mlir_oot.golden_device_catalog", package_name=f"core_aten_backend_{identity}")
     # The provider owns semantic matching. Unsupported operations remain host work.
     source = (Path(directory) / "model.mlir").read_text()
     _, inventory = backend.build_catalog(source)
