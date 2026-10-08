@@ -12,6 +12,8 @@ code_refs:
   - src/merlin/verify/split_reduction.py
   - src/merlin/verify/cli.py
   - src/merlin/perf/whole_model_chunks.py
+  - src/merlin/compile/mesh.py
+  - src/merlin/targetgen/operation_numerics.py
   - src/merlin/targetgen/contraction_egraph.py
   - src/merlin/xdsl_dialects/lowering/outline.py
   - src/merlin/xdsl_dialects/lowering/dispatch_program.py
@@ -157,6 +159,13 @@ object. The separate split-K theorem above is **not** attributed to
 `chunk_forward`: that pass does not split a reduction. A future split-K pass
 must expose its exact before/after IR and bind its emitted chunk boundaries,
 widths and target primitive semantics to the algebraic obligation.
+The mesh runtime already splits one such case: when a selected integer policy
+declares a signed MAC result narrower than the full reduction needs,
+`merlin.compile.mesh.run_matmul_on_mesh` derives the per-dispatch K bound from
+`merlin.targetgen.operation_numerics.integer_split_k_limit`, aggregates the
+partial results exactly in i64 checked against i32, and records an
+`integer_split_k` witness naming every primitive call. The witness states the
+split it performed; it does not prove the primitive's arithmetic.
 
 ### Actual outlining boundary: syntactic call-expansion proof
 

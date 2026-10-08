@@ -110,6 +110,113 @@ def test_a_layer_that_fits_runs_untiled(monkeypatch):
     assert seen == [(16, 128, 128)], "nothing to split — one attempt at the tile-aligned extent"
 
 
+def test_selected_integer_internal_width_forces_certifiable_k_tiles(monkeypatch, tmp_path):
+    """A full-K i32 result may be exact while the internal 20-bit MAC is not."""
+    seen: list = []
+    _fake_backend(monkeypatch, ceiling=10**9, seen=seen)
+    monkeypatch.setattr(
+        CC,
+        "_mesh_tile_binding",
+        lambda *_args, **_kwargs: type(
+            "B",
+            (),
+            {
+                "tile_dim": 16,
+                "operand_dtype": "i8",
+                "accum_dtype": "i32",
+                "integer": True,
+                "cap_dtype": staticmethod(lambda token: token),
+            },
+        )(),
+    )
+    policy = {
+        "numerical_semantics": {
+            "accumulator_dtype": "i32",
+            "internal_arithmetic": {
+                "signed_operand_bits": 8,
+                "mac_result_bits": 20,
+                "mac_result_overflow": "wrap_to_20_bits",
+                "full_operation_overflow_policy": "bounded_exact_requires_each_partial_sum",
+            },
+        }
+    }
+    observed: dict = {}
+    got = CC.run_matmul_on_mesh(
+        "t",
+        [[127] * 64],
+        [[127] for _ in range(64)],
+        operand_dtype="i8",
+        accum_dtype="i32",
+        numeric_policy=policy,
+        observed=observed,
+    )
+    assert got == [[64 * 127 * 127]]
+    assert seen == [(16, 16, 16)] * 4
+    witness = observed["integer_split_k"]
+    assert witness["tile"] == [16, 16, 16]
+    assert witness["max_padded_k_per_dispatch"] == 31
+    assert [row["offsets"] for row in witness["primitive_calls"]] == [
+        [0, 0, 0],
+        [0, 16, 0],
+        [0, 32, 0],
+        [0, 48, 0],
+    ]
+    seen.clear()
+    observed.clear()
+    # The true K fits the 31-MAC bound, but padding to D=16 would dispatch
+    # K=32 and overflow on a worst-case signed-i8 product.  Split that too.
+    got = CC.run_matmul_on_mesh(
+        "t",
+        [[127] * 31],
+        [[127] for _ in range(31)],
+        operand_dtype="i8",
+        accum_dtype="i32",
+        numeric_policy=policy,
+        observed=observed,
+    )
+    assert got == [[31 * 127 * 127]]
+    assert seen == [(16, 16, 16)] * 2
+    assert observed["integer_split_k"]["padded_shape"] == [16, 32, 16]
+    seen.clear()
+    observed.clear()
+    direct = CC.run_matmul_on_mesh(
+        "t",
+        [[127] * 16],
+        [[127] for _ in range(16)],
+        operand_dtype="i8",
+        accum_dtype="i32",
+        numeric_policy=policy,
+        observed=observed,
+    )
+    assert direct == [[16 * 127 * 127]]
+    assert observed["integer_split_k"]["primitive_calls"][0]["shape"] == [16, 16, 16]
+    seen.clear()
+    observed.clear()
+    package = tmp_path / "declared_tile_package"
+    package.mkdir()
+    (package / "manifest.yaml").write_text("primitive_tile: {m: 8, k: 8, n: 8}\n", encoding="utf-8")
+    # A backend-declared sub-tile can be smaller than the mesh edge.  Its
+    # conservative padded K is still 16, so declining K8 would be a false
+    # refusal.  M/N tails are zero-padded over the outer partition domain.
+    tiled = CC.run_matmul_on_mesh(
+        "t",
+        [[127] * 8 for _ in range(17)],
+        [[127] * 19 for _ in range(8)],
+        operand_dtype="i8",
+        accum_dtype="i32",
+        numeric_policy=policy,
+        observed=observed,
+        package=str(package),
+    )
+    assert tiled == [[8 * 127 * 127] * 19 for _ in range(17)]
+    assert seen == [(8, 8, 8)] * 32
+    witness = observed["integer_split_k"]
+    assert witness["padded_shape"] == [32, 16, 32]
+    assert witness["tile"] == [8, 8, 8]
+    assert len(witness["primitive_calls"]) == 32
+    assert all(call["worst_case_padded_shape"] == [16, 16, 16] for call in witness["primitive_calls"])
+
+
 def test_recursive_rescale_and_column_tiling_preserve_declared_policy(monkeypatch):
     _fake_backend(monkeypatch, ceiling=16 * 32 + 16 * 16)
     original_binding = CC._mesh_tile_binding
@@ -168,3 +275,31 @@ def test_a_backend_that_refuses_everything_still_fails_closed(monkeypatch):
     A = [[1.0, 2.0], [3.0, 4.0]]
     W = [[1.0, 0.0], [0.0, 1.0]]
     assert CC.run_matmul_on_mesh("t", A, W, operand_dtype="fp32", accum_dtype="f32") is None
+
+
+def test_integer_split_k_limit_is_derived_from_the_declared_arithmetic_and_refuses_the_rest():
+    from merlin.targetgen.operation_numerics import integer_split_k_limit
+
+    def policy(**internal):
+        base = {
+            "signed_operand_bits": 8,
+            "mac_result_bits": 20,
+            "mac_result_overflow": "wrap_to_20_bits",
+            "full_operation_overflow_policy": "bounded_exact_requires_each_partial_sum",
+        }
+        return {"numerical_semantics": {"accumulator_dtype": "i32", "internal_arithmetic": {**base, **internal}}}
+
+    limit = integer_split_k_limit(policy(), tile_dim=16, full_k=64)
+    # (2**19 - 1) // 128**2 = 31 worst-case signed-i8 products fit a signed 20-bit MAC.
+    assert (limit["max_padded_k"], limit["tile_k"], limit["maximum_product"]) == (31, 16, 128 * 128)
+    wider = integer_split_k_limit(
+        policy(mac_result_bits=24, mac_result_overflow="wrap_to_24_bits"), tile_dim=16, full_k=64
+    )
+    assert wider["max_padded_k"] == ((1 << 23) - 1) // (128 * 128)
+    assert integer_split_k_limit({"numerical_semantics": {}}, tile_dim=16, full_k=64) is None
+    with pytest.raises(ValueError, match="partial-sum policy"):
+        integer_split_k_limit(policy(full_operation_overflow_policy="wrap"), tile_dim=16, full_k=64)
+    with pytest.raises(ValueError, match="unsupported selected MAC"):
+        integer_split_k_limit(policy(mac_result_overflow="saturate"), tile_dim=16, full_k=64)
+    with pytest.raises(ValueError, match="exceed exact i32"):
+        integer_split_k_limit(policy(), tile_dim=16, full_k=1 << 20)
