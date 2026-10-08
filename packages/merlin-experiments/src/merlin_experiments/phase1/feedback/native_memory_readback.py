@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -147,8 +148,10 @@ class NativeMemoryReadback:
         workdir = Path(workdir)
         if not workdir.is_absolute() or workdir.is_symlink() or not workdir.is_dir():
             raise ValueError("memory readback requires an ordinary absolute run-owned workdir")
-        source = workdir / "memory_readback"
-        source.mkdir(mode=0o700, exist_ok=False)
+        # Capsule tiers can share this generated workdir. Each invocation must
+        # retain its own source/output bytes without reusing or deleting an
+        # earlier tier's evidence.
+        source = Path(tempfile.mkdtemp(prefix="memory_readback_", dir=workdir))
         cb_path = source / "command_buffer.json"
         with cb_path.open("xb") as output:
             output.write(cb_raw)

@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import shutil
+import stat
 import struct
 import subprocess
 from pathlib import Path
@@ -579,9 +580,10 @@ def test_trusted_hook_preflights_before_native_launch_then_rechecks_complete_out
     request = selected["memory_readback"]
     assert request["schema"] == "oracle_memory_readback_v1"
     assert request["transport"] == transport
-    assert request["output_path"] == str(
-        workdir / "memory_readback" / ("output.signature" if simulator == "spike" else "output.dump")
-    )
+    attempt = Path(request["output_path"]).parent
+    assert attempt.parent == workdir and attempt.name.startswith("memory_readback_")
+    assert stat.S_IMODE(attempt.stat().st_mode) == 0o700
+    assert Path(request["output_path"]).name == ("output.signature" if simulator == "spike" else "output.dump")
     assert not Path(request["output_path"]).exists()
     assert len(request["regions"]) == 1
     region = request["regions"][0]
@@ -604,6 +606,43 @@ def test_trusted_hook_preflights_before_native_launch_then_rechecks_complete_out
         hook.prepare(cb=cb, target="neutral", elf_path=elf, workdir=workdir, simulator=simulator, backend=backend)
 
 
+def test_two_tiers_keep_independent_readback_attempts_in_one_capsule_workdir(selected_layout, tmp_path, monkeypatch):
+    _, facts, cb = selected_layout
+    backend = backends.get_backend("neutral")
+    monkeypatch.setattr(
+        backend,
+        "memory_readback_transport",
+        lambda simulator: "htif_signature_v1" if simulator == "spike" else "gsim_coherent_dump_v1",
+        raising=False,
+    )
+    elf = _elf(tmp_path, signature_aliases="exact")
+    workdir = tmp_path / "generated"
+    workdir.mkdir()
+    physical = bytes(16)
+
+    spike = NativeMemoryReadback(facts_path=facts)
+    spike_request = spike.prepare(
+        cb=cb, target="neutral", elf_path=elf, workdir=workdir, simulator="spike", backend=backend
+    )["memory_readback"]
+    signature = _write_signature(Path(spike_request["output_path"]), physical)
+    spike_outputs, spike_evidence = spike.decode("METRIC cycles 7\nDONE\n")
+    assert spike_evidence["status"] == "complete"
+    signature_bytes = signature.read_bytes()
+
+    gsim = NativeMemoryReadback(facts_path=facts)
+    gsim_request = gsim.prepare(
+        cb=cb, target="neutral", elf_path=elf, workdir=workdir, simulator="gsim", backend=backend
+    )["memory_readback"]
+    assert Path(gsim_request["output_path"]).parent != signature.parent
+    assert signature.read_bytes() == signature_bytes
+    region = gsim_request["regions"][0]
+    _dump(Path(gsim_request["output_path"]), address=region["base"], payload=physical)
+    gsim_outputs, gsim_evidence = gsim.decode("METRIC cycles 8\nDONE\n")
+    assert gsim_outputs == spike_outputs
+    assert gsim_evidence["status"] == "complete"
+    assert signature.read_bytes() == signature_bytes
+
+
 def test_trusted_hook_refuses_wrong_capability_and_mutated_staged_inputs(selected_layout, tmp_path, monkeypatch):
     _, facts, cb = selected_layout
     backend = backends.get_backend("neutral")
@@ -622,7 +661,7 @@ def test_trusted_hook_refuses_wrong_capability_and_mutated_staged_inputs(selecte
     }
     with pytest.raises(ValueError, match="cannot run"):
         hook.prepare(**kwargs)
-    assert not (workdir / "memory_readback").exists()
+    assert not list(workdir.glob("memory_readback_*"))
     monkeypatch.setattr(backend, "memory_readback_transport", lambda engine: "gsim_coherent_dump_v1")
     request = hook.prepare(**kwargs)["memory_readback"]
     region = request["regions"][0]
