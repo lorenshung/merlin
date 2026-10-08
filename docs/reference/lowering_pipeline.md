@@ -3,7 +3,7 @@ title: Lowering pipeline
 kind: reference
 status: current
 owner: ir
-last_verified: 2026-10-05
+last_verified: 2026-10-08
 related: [core_dialects, llvm_integration]
 code_refs: [src/merlin/xdsl_dialects/lowering, src/merlin/llvmlower]
 ---
@@ -388,3 +388,38 @@ lowering; compiler or linker deduplication is not a premise. Binding, input and
 output ownership, final linked placement, runtime predicates, complete costs
 and original output gates remain caller obligations. These APIs perform no
 automatic discovery, pipeline selection or profitability decision.
+
+### Current source scalar insertion
+
+`SourceScalarCarrierSelection` is an explicit invocation-local option for
+`lower_model`, `lower_model_file`, `lower_to_llvm_ir` and the ordinary model
+builders. The selected native pipeline pauses after its ordinary tensor fusion
+and generalization, immediately before bufferization. The parent discovers
+closed integer observations in those current bytes, validates every source
+witness and prepares one immutable table per expression family. Retained
+helpers or historical call-site proofs are not inputs to this selection.
+
+The response contains new private helper fragments and typed SSA edit locators
+bound to the current source digest. The native child verifies the full module
+and authenticates all edits before inserting them. It keeps original producer
+operations, globals, resource handles and module ownership in the original
+context. Only proved private scalar operations are erased. Replacement calls
+retain their exact source provenance dictionaries and fused native locations.
+Unsupported namespaces, resources in selected scalar expressions, live escapes,
+stale packets and incomplete effects refuse the selected invocation.
+
+`IncomingRNECapability` names a provider-owned `() -> i1` runtime predicate.
+Each scalar point reads the actual incoming rounding mode. The contract requires
+preserved rounding mode and flags, no writes and nontrapping behavior; it does
+not authorize hoisting the predicate across a region. A false result evaluates
+the original expression. Separately, `CompilerHostNumericAdmission` admits the
+actual compiler host to RNE before source construction and serialization and
+must restore its complete incoming environment on success or error.
+
+The private request and response have explicit byte quotas and one invocation
+owner. Callback code runs synchronously on the calling thread and must return
+promptly. A deadline bounds native waiting and is checked after the callback;
+it cannot interrupt arbitrary callback code. Failure terminates only the owned
+child. The unselected route retains the original runner and pipeline. Numerical
+policy, aggregate storage, linked predicate qualification, complete producer and
+consumer cost, and original whole output validation remain explicit obligations.

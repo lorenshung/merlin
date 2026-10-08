@@ -443,6 +443,15 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
 
 ## Invariants
 
+- `source_scalar_carrier_binding.py` and `source_stage_transport.py` insert
+  explicitly selected current scalar families at the normal tensor boundary.
+  Keep all member proofs, namespace and SSA identities checked before edits;
+  preserve original native producer/resource handles and source joins. Runtime
+  rounding predicates are provider owned and read per point. Compiler host RNE
+  admission is a separate scoped capability with full environment restoration.
+  Trusted callbacks are synchronous; owned-child deadlines do not preempt them.
+  The absent option must keep the original runner and emitted bytes unchanged.
+
 - **Accelerator-independent.** Shared passes, weights packing, ABI and runners do
   not branch on accelerator identity. CPU instruction selection belongs in host
   codegen, under an explicit host ISA policy (`codegen.py` flags or the late

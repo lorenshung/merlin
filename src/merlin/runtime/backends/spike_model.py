@@ -35,6 +35,7 @@ from ...llvmlower import c_runtime, target_data_layout, toolchain
 from ...llvmlower.lower import lower_model_file
 from ...llvmlower.masked_contraction import MaskEffectContract
 from ...llvmlower.source_expression_interval import IntervalEffectContract
+from ...llvmlower.source_scalar_carrier_binding import host_admitted
 from ..boards import CONSOLE_HTIF, CONSOLE_UART
 from ..execution_memory import ExecutionMemoryError, MemoryMapBinding, MemoryReservation, admit_execution_memory
 from . import spike as _spike  # toolchain paths (gcc/spike/objdump)
@@ -435,6 +436,7 @@ def _model_memory_reservations(
     return tuple(reservations)
 
 
+@host_admitted
 def build(
     model_dir: str | Path,
     work: str | Path,
@@ -454,6 +456,7 @@ def build(
     prepared_model_transform: Callable[[Path, Path], Path] | None = None,
     masked_contraction_effects: MaskEffectContract | None = None,
     source_observation_effects: IntervalEffectContract | None = None,
+    source_scalar_carrier=None,
     host_llvm_transform: Callable[[Path, Path], Path] | None = None,
     host_provider_builder: Callable | None = None,
     cflags_override: list[str] | None = None,
@@ -754,6 +757,7 @@ def build(
             index_bits=index_observation["index_bits"],
             masked_contraction_effects=masked_contraction_effects,
             source_observation_effects=source_observation_effects,
+            source_scalar_carrier=source_scalar_carrier,
         )  # produce only the .ll
     # BACKEND-level feature flags, on the MODEL OBJECT ONLY (the GCC-built harness units keep
     # `gcc_cflags`): a feature like the register-group width is an LLVM backend query no tile size

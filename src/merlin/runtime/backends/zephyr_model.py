@@ -33,6 +33,7 @@ from ...llvmlower import c_runtime, toolchain
 from ...llvmlower.lower import lower_model_file
 from ...llvmlower.masked_contraction import MaskEffectContract
 from ...llvmlower.source_expression_interval import IntervalEffectContract
+from ...llvmlower.source_scalar_carrier_binding import host_admitted
 from . import spike as _spike
 from .firesim_runner import FireSimRunner, select_runner
 
@@ -2374,6 +2375,7 @@ zephyr_link_libraries(-Wl,--whole-archive {model_archive} -Wl,--no-whole-archive
 # ---- build / run -------------------------------------------------------------------
 
 
+@host_admitted
 def build_app(
     model_dir: str | Path,
     work: str | Path,
@@ -2409,6 +2411,7 @@ def build_app(
     prepared_model_transform: Callable[[Path, Path], Path] | None = None,
     masked_contraction_effects: MaskEffectContract | None = None,
     source_observation_effects: IntervalEffectContract | None = None,
+    source_scalar_carrier=None,
 ) -> dict:
     """Lower the model, generate the Zephyr app, and build ``zephyr.elf``.
 
@@ -2575,6 +2578,7 @@ def build_app(
             parallel_chunks=parallel_arms(work),
             masked_contraction_effects=masked_contraction_effects,
             source_observation_effects=source_observation_effects,
+            source_scalar_carrier=source_scalar_carrier,
         )
     # What this lowering will ask the heap for, read off the IR that is about to be compiled. Measured
     # here rather than estimated later: the file exists for exactly this build, and the number decides the

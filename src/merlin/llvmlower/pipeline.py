@@ -27,6 +27,7 @@ from pathlib import Path
 
 from merlin.common import compile_trace
 
+from .source_scalar_carrier_binding import host_admitted
 from .toolchain import m2m_python
 
 
@@ -1528,6 +1529,7 @@ def _residual_vector_dialect_ops(path: Path) -> tuple[str, ...]:
     return tuple(sorted(found))
 
 
+@host_admitted
 def lower_to_llvm_ir(
     mlir_text: str,
     workdir: str | Path | None = None,
@@ -1546,6 +1548,7 @@ def lower_to_llvm_ir(
     lowering_selection: dict | None = None,
     masked_contraction_effects=None,
     source_observation_effects=None,
+    source_scalar_carrier=None,
 ) -> str:
     """Lower upstream-MLIR text to LLVM IR text via the m2m venv. Returns .ll text.
 
@@ -1748,6 +1751,19 @@ def lower_to_llvm_ir(
         from .source_observation_stage import validate_pipeline as _validate_observation_pipeline
 
         _validate_observation_pipeline(pipeline)
+    scalar_stage = None
+    if source_scalar_carrier is not None:
+        from .source_stage_transport import insert_marker
+
+        if source_observation_effects is not None and source_observation_effects != source_scalar_carrier.effects:
+            raise ValueError("source observation and scalar rewrite require the same explicit effects")
+        pipeline = insert_marker(pipeline)
+        scalar_stage = work / "source_scalar_carrier"
+        scalar_stage.mkdir(exist_ok=False)
+        recipe_sources.update(
+            scalar_carrier_binding=Path(__file__).with_name("source_scalar_carrier_binding.py"),
+            scalar_stage_transport=Path(__file__).with_name("source_stage_transport.py"),
+        )
     src = work / "model.mlir"
     out = work / "model.ll"
     runner = work / "run_lowering.py"
@@ -1781,6 +1797,16 @@ def lower_to_llvm_ir(
         keep_exact=audit is not None and audit.mode == "both",
         printing=(native[1], native[2]) if native is not None else (True, True),
     )
+    if scalar_stage is not None:
+        from .source_stage_transport import bind_runner as _bind_scalar_runner
+
+        runner_src = _bind_scalar_runner(
+            runner_src,
+            directory=scalar_stage,
+            max_source_bytes=source_scalar_carrier.max_source_bytes,
+            max_response_bytes=source_scalar_carrier.max_response_bytes,
+            timeout=timeout,
+        )
     runner.write_text(runner_src, encoding="utf-8")
     # argv[4] gates the self-copy erase, so the frozen hand_v0 control keeps its byte-identical
     # lowering unless the feature is explicitly enabled.
@@ -1945,7 +1971,19 @@ def lower_to_llvm_ir(
 
         audit.command(command, sources=(__file__, runner), provenance=toolchain_provenance())
     try:
-        proc = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+        if scalar_stage is None:
+            proc = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+        else:
+            from .source_stage_transport import run_command as _run_scalar_command
+
+            proc = _run_scalar_command(
+                command,
+                directory=scalar_stage,
+                callback=source_scalar_carrier.callback,
+                max_source_bytes=source_scalar_carrier.max_source_bytes,
+                max_response_bytes=source_scalar_carrier.max_response_bytes,
+                timeout=timeout,
+            )
     except BaseException as exc:
         if audit is not None:
             try:
@@ -1968,6 +2006,21 @@ def lower_to_llvm_ir(
     if audit is not None:
         audit.collect_views()
     _harvest_native(traced, stage_out)
+    if scalar_stage is not None:
+        import hashlib as _hashlib
+        import json as _json
+
+        source_digest = _hashlib.sha256((scalar_stage / "current.mlir").read_bytes()).hexdigest()
+        response_digest = _hashlib.sha256((scalar_stage / "response.json").read_bytes()).hexdigest()
+        expected = f"OK current_scalar_leaf_stage {source_digest} {response_digest}"
+        if [line for line in proc.stdout.splitlines() if line.startswith("OK current_scalar_leaf_stage")] != [expected]:
+            raise PipelineError("native scalar rewrite completion is absent or inconsistent")
+        for name in ("current.mlir", "request.json", "response.json", "binding.json"):
+            recipe.bind_source("scalar_carrier_" + name.replace(".", "_"), scalar_stage / name)
+        binding = _json.loads((scalar_stage / "binding.json").read_text())
+        binding.update(status="CURRENT_TYPED_EDITS_NATIVE_VERIFIED", native_response_sha256=response_digest)
+        if lowering_selection is not None:
+            lowering_selection["source_scalar_carrier"] = binding
     if _SOURCE_OBSERVATION_FEATURE in feats:
         from .source_observation_stage import require_report as _require_source_observation_report
 
