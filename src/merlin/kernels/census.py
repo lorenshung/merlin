@@ -101,6 +101,12 @@ class Census:
     stage: str  # which IR the rows were read from
     source: str  # path of that IR
     target: str | None = None
+    #: The semantic families this census LOOKED FOR, which is not the same as the ones it found.
+    #: ``census`` walks ``shapes.observe_contractions``, so a family it never enumerates is absent
+    #: from the rows whether or not the model exercises it. A consumer that reports "family not
+    #: evidenced" must tell that apart from "nothing looked", so the scope travels with the census
+    #: rather than being assumed by each caller. Empty means nothing was walked.
+    scope: tuple[str, ...] = ()
     rows: tuple[CensusRow, ...] = ()
     total_work: int = 0
     model_ticks: int | None = None  # whole-model ticks, i.e. the pct_model denominator
@@ -281,6 +287,12 @@ def _ticks_by_key(
 # ---------------------------------------------------------------------------------------------
 
 
+#: What :func:`census` enumerates. It walks ``shapes.observe_contractions``, so contraction is the
+#: only family it can see; every other family is absent from its rows by construction. Named here so
+#: consumers read the scope off the census instead of assuming one.
+CENSUS_SCOPE: tuple[str, ...] = ("contraction",)
+
+
 def census(
     src: "str | Path | Any",
     *,
@@ -364,6 +376,7 @@ def census(
         stage=stage,
         source=str(src) if isinstance(src, (str, Path)) else "",
         target=target,
+        scope=CENSUS_SCOPE,
         rows=tuple(rows),
         total_work=sum(r.work for r in rows),
         model_ticks=model_ticks,
@@ -428,6 +441,7 @@ def census_bundle(
         stage=got.stage,
         source=str(observed),
         target=got.target,
+        scope=got.scope,
         rows=got.rows,
         total_work=got.total_work,
         model_ticks=got.model_ticks,

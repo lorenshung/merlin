@@ -47,6 +47,22 @@ Use the companion revision recorded in
 [`target_support.json`](../../../build_tools/upstreams/target_support.json).
 Calibration coefficients are screening estimates, not new measurements.
 
+### Why `software-spec.yaml` is marked reviewed
+
+`software-spec.yaml` says `status: reviewed`, as do its transfer contracts. The rationale for that
+lives here rather than in the spec. A review is a decision about the authored bytes, and the session
+that made it is not part of the software capability contract. Three operator decisions stand behind
+the current file:
+
+| Date | Decision | What it covers | What it does not claim |
+| --- | --- | --- | --- |
+| 2026-10-01 | Accept the values the RTL facts derive for the five rows where the authored spec had drifted from them. Phase 0 now fills those hardware-shaped fields from the selected facts (`hardware:` forms, `eligible_operations: from_facts`). Reasoned `restrictions` were the alternative. This supersedes the same day's approval of the hand-written declaration draft. | Accelerator contraction for the 18 int8 `_int_mm` placements, and the exact-operation host declarations for the 150 host placements the facts proposed. | That a derived form executes. Phase 1 still owns lowering, execution and numerical qualification. |
+| 2026-10-01 | Approve the fact-derived transfer contracts. Every one of the 23 observed host/accelerator crossings matched exactly one contract. | `operand_load` (i8, row-major, contiguous) and `accumulator_readout` (i32, row-major, contiguous, valid window required), as bit-preserving copies. | Quantization, casts, transposes, dispatch or DMA execution. |
+| 2026-10-03 | Admit the exact typed rank-3/4 `dequantize_per_tensor` host operation (i8, f32 and i64 operands, f32 result, zero point 0). | That one host placement, with the matching `host-capabilities.yaml` rule. | Device execution, other ranks or shapes, or numerical equivalence beyond the saved check. |
+
+A change that widens any of these rows needs a new decision recorded the same way. Editing the
+spec's status alone is not enough.
+
 The selected integer RTL has 8-bit signed operands, a 20-bit MAC result and
 32-bit accumulator storage. Those are different quantities. A mathematical
 int32 golden needs proof that internal partial sums cannot overflow, or an
@@ -158,8 +174,8 @@ bit-exact Spike check with the selected Verilator Rocket DTS; rerun the generic
 qualifier with `python -m merlin.compile.scalar_host_qualification --help` to
 generate your own ignored receipt. That one check does not establish Rocket RTL
 or FireSim execution, nor execution of the other declared host operations.
-Typed load/readout candidates describe bit-preserving crossings; they remain
-unreviewed and never imply that FP32-to-int8 quantization, dispatch, or DMA
+The typed load/readout contracts are reviewed only as bit-preserving copies (see
+above) and never imply that FP32-to-int8 quantization, dispatch, or DMA
 execution was already implemented. The selected hardware readout recipe supplies
 symmetric, per-tensor W8A8 to the generated quantization contract; the authored
 spec limits that format to contractions. Per-channel software epilogues need a

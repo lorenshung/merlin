@@ -343,6 +343,31 @@ rejected. This build also proves a session-specific scheduling gap: the session 
 `prepare_for_lowering`, so it does not currently derive the per-operation block and parallel-arm
 tables used by the monolithic whole-model path.
 
+## 2026-09-07 status summary: one kernel win, no model win
+
+As of 2026-09-07 Merlin did not beat ExecuTorch on any of the four whole-model INT8 workloads. The
+ratio of ExecuTorch's latency to Merlin's (above 1 means Merlin is faster) stood at:
+
+| Model | 1 hart | 8 harts |
+|---|---:|---:|
+| TinyLlama | 0.95 | 0.93 |
+| LSTMNetVIT | 0.40 | 0.31 |
+| ResNet-50 | 0.39 | 0.19 |
+| smolVLA | below 0.353 | not measured |
+
+These are best diagnostic walls, not a paired certification set. ResNet-50 is excluded from a
+matched W8A8 claim, as explained in its section above.
+
+An older slide's bitVLA win is real but narrower than it looked. It routed the same 15 FP32 matmuls
+inside one Merlin graph and runtime to three kernel backends: Merlin's generated kernels (148.3 ms),
+XNNPACK kernels (167.3 ms) and OpenBLAS kernels (180.5 ms). Each figure is the minimum of three
+launches on the K1. It shows that Merlin can generate a winning kernel for a favourable shape. It is
+not a comparison with the standalone ExecuTorch flow, and it does not carry over to whole-model
+scheduling, memory or runtime.
+
+The figures that summarised this status were generated from these numbers. They are not tracked,
+since the tables above and in the sections before carry the data.
+
 ## Reproducing this
 
 ### ⚠️ First, the trap that will silently run someone else's code

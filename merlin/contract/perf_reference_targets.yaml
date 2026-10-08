@@ -601,6 +601,162 @@ references:
         (out/artifacts/audits/gemmini/v1/.../exit_criteria_status.json) but no checkpoint row, so
         job 728 remains the best number with a measurement receipt.
 
+  # ------------------------------------------------------------------------------------------
+  # THE SAME STANDALONE IMAGE WITH THE SEQUENCER TAKEN OUT. Recorded beside job 728 because it is
+  # the only pair in this file that differs in exactly ONE thing: the kernel bodies. Same capture,
+  # same 71 groups, same linked blobs, same harness, same program identity, same cycle scope, and
+  # (measured, not assumed) the same numbers on both registered devices -- so the ratio between them
+  # is a schedule result rather than a comparison of two artifacts.
+  #
+  # WHY THE PAIR EXISTS AT ALL. Job 728's emitted C contains 63 `gemmini_loop_ws` and 31
+  # `gemmini_loop_conv_ws` call sites and no raw mesh command; the vendor reference's `tiled_*_auto`
+  # entry points are schedulers too. Both 24M-class numbers therefore measure the HARDWARE's tiling
+  # sequencer, not a compiler's schedule, and neither can be ranked against an open-coded system
+  # without comparing two different mechanisms.
+  # ------------------------------------------------------------------------------------------
+  resnet50_int8_compute_group_image_explicit_nest_job759:
+    model: resnet50
+    precision: w8a8
+    design: FireSimGemminiRocketConfig
+    program_identity: compute_group_standalone_image
+    device: firesim_gemmini_rocket_u250_30mhz
+    status: achieved
+    how: >-
+      Job 728's program with every kernel body re-emitted as an EXPLICIT mesh command nest --
+      config_ex / config_ld, mvin, preload, compute_preloaded / compute_accumulated, config_st,
+      mvout -- instead of the endpoint's LOOP_WS and LOOP_CONV_WS descriptors. 70 of the 71 groups
+      issue no sequencer instruction at all; group 1 keeps the vendor `tiled_conv_auto` call because
+      its readout pools (3x3 stride 2) and the explicit nest does not spell the store controller's
+      pooling descriptor.
+    provenance:
+      firesim_queue_job: 759
+      elf: out/artifacts/perf-bench/gemmini/rcp_ours_explicit_20260923T003706Z/group_model_program.elf
+      elf_sha256: f16f16c8298cdd7c17fb2f7168fa371db311affcad38d6dbd60f02c16e8389e9
+      row: >-
+        out/artifacts/measurements/firesim_alveo_u250_firesim_gemmini_rocket_30mhz/resnet50/group-model-program-explicit_v1_20260923T223953Z_e1beae0/checkpoint_row.json
+      report: out/artifacts/perf-bench/gemmini/fsmfree_wholemodel_20260923T223846Z/
+      device_evidence: >-
+        Read off the FireSim manager's own infrasetup log -- `Bitstream tar: file://.../2026-09-17--05-57-16-alveo_u250_firesim_gemmini_rocket_30mhz/.../firesim.tar.gz`
+        followed by `Successfully programmed FPGA 42` -- and not inferred from the hw-config string
+        that was requested. Stated because the device axis is the one this file has already been
+        burned on, and because an ignored `--hw-config` and a genuinely device-invariant program
+        produce the same evidence everywhere except that line.
+      gate: >-
+        71 of 71 per-group FNV-1a checksums equal to the numpy emulation of the same integer program
+        (the v2 policy's 71 declared values); argmax 21=21; cosine 997,981 ppm. The out-of-program
+        checksum comparison is the oracle -- the in-program argmax printed identically on the
+        numerically wrong job 730.
+      sealed: false
+      sealed_reason: >-
+        The run IS bound to its bytes -- this queue revision records `stage_from_sha256`, which the
+        699-731 range did not -- but `merlin.perf.firesim_receipt` accepts only the v1 policy shape,
+        and this run was gated against the v2 shape (per-group checksums), which is the stronger
+        oracle. `observed`, for that reason alone.
+    measured:
+      whole_model_cycles: 43900637
+      whole_boot_target_cycles: 3119414342
+    caveats:
+      - >-
+        SLOWER THAN THE SEQUENCER, and that is the finding: 1.80x against job 728 on the same
+        device, the same program identity and the same cycle scope (24,359,749 -> 43,900,637). By
+        kind: conv2d 2.11x (12,167,031 -> 25,639,926 over 20 groups), matmul 1.66x
+        (8,399,110 -> 13,953,532 over 34), resadd 1.13x (3,782,243 -> 4,288,294 over 16); the four
+        deep-stage 3x3 convolutions are 3.9-5.3x. That is the measured cost of issuing the mesh
+        stream from the host rather than from the endpoint's loop sequencer, at this revision of the
+        explicit emitter. It is a starting point for the schedule, not a ceiling on it.
+      - >-
+        70 OF 71 GROUPS, not 71. Group 1's 1,986,790 cycles (4.5% of the total) are a vendor
+        `tiled_conv_auto` call in BOTH arms, so it cancels in the ratio above and does not cancel in
+        an absolute claim. Do not describe this program as FSM-free.
+      - >-
+        `whole_boot_target_cycles` is FireSim's own whole-simulation count (reset, blobs faulting
+        in, the warm-up invocation of all 71 groups, the out-of-window checksum passes, the UART
+        drain). It is a second scope on the same run and it is NOT a model-execution window. The
+        contiguous window over the measured pass -- which would price the host work BETWEEN groups,
+        excluded from `whole_model_cycles` by construction -- does not exist for this program: it
+        takes one `rdcycle` pair around `run(1)` in `group_model_program.render()` and a rebuild.
+      - >-
+        THE EMITTER IS NOT IN ANY COMMIT. The explicit recipes and the `--schedules ours-explicit`
+        mode lived only in a concurrent session's working tree when this ran (merlin source_digest
+        74150e47db2cf28d77fce7da8f221b6704338ea714860f123dc66dcc87fc6da0). The result is bound to the
+        ELF bytes and to that digest, not to a revision of this repository, so it is not reproducible
+        from a checkout until those sources are committed.
+
+  resnet50_int8_compute_group_image_explicit_nest_job760:
+    model: resnet50
+    precision: w8a8
+    design: FireSimGemminiRocketConfig
+    program_identity: compute_group_standalone_image
+    device: firesim_gemmini_rocket_u250
+    status: achieved
+    how: >-
+      The IDENTICAL ELF as job 759 flashed onto the other registered U250 bitstream, to find out what
+      the device axis costs for this program instead of assuming it.
+    provenance:
+      firesim_queue_job: 760
+      elf_sha256: f16f16c8298cdd7c17fb2f7168fa371db311affcad38d6dbd60f02c16e8389e9
+      row: >-
+        out/artifacts/measurements/firesim_resnet50_merlin_warm_measured_full_gemmini_u250_pinned/resnet50/group-model-program-explicit_v1_20260923T224543Z_e1beae0/checkpoint_row.json
+      device_evidence: >-
+        `Bitstream tar: file://.../resnet50_merlin_phase2_bf62_w8a8_warm_measured_firesim_ready_20260907/firesim.tar.gz`
+        (sha256 a9a190b9...) then `Successfully programmed FPGA 42`, in the manager's infrasetup log.
+      gate: 71 of 71 checksums, argmax 21=21, cosine 997,981 ppm -- as job 759.
+      sealed: false
+      sealed_reason: as job 759.
+    measured:
+      whole_model_cycles: 43900637
+      whole_boot_target_cycles: 3119414342
+    caveats:
+      - >-
+        BIT-IDENTICAL TO JOB 759 in both scopes and in all 71 checksums, and the FSM arm behaves the
+        same way (job 761 below). The two tars are different builds -- firesim-commit
+        b084672c2f8cf32e55d78f73a001074c23f8a2b8-dirty against
+        da2a1cbcebbb96e21c551ebef513fd95a9d73403-dirty, different `firesim.bit` digests and sizes --
+        so this is a MEASURED equality and the first evidence in this file about what the
+        0af6f26e / a9a190b9 split actually costs. It is not a licence to compare cycles across the
+        two devices in general: an equality on one program says nothing about another, and the rule
+        in hardware_pins.yaml stands until a pair of runs says otherwise for the program being
+        compared.
+      - >-
+        SAME DEVICE AS q535 / q545 / job650 / job654 / job656, and still not comparable to any of
+        them: program identity refuses. Theirs is a window over a callable program that quantizes its
+        own f32 input; this is the sum of 71 per-call brackets over a closed `int main(void)` with
+        the image linked in already quantized. One axis now instead of two, and the remaining one is
+        named.
+
+  resnet50_int8_compute_group_image_job761_device_control:
+    model: resnet50
+    precision: w8a8
+    design: FireSimGemminiRocketConfig
+    program_identity: compute_group_standalone_image
+    device: firesim_gemmini_rocket_u250
+    status: achieved
+    how: >-
+      Job 728's EXACT bytes on the other bitstream. The device control for the pair above: without
+      it, "the explicit arm is device-invariant" would rest on one program and could as easily have
+      been a property of the queue as of the hardware.
+    provenance:
+      firesim_queue_job: 761
+      elf: out/artifacts/perf-bench/gemmini/rcp_ours_strided_20260919T024325Z/group_model_program.elf
+      elf_sha256: c903ad73194f514696e712c6bf36978a518552f8258b9c9aa35d657de640d6f6
+      row: >-
+        out/artifacts/measurements/firesim_resnet50_merlin_warm_measured_full_gemmini_u250_pinned/resnet50/group-model-program-fsm-control_v1_20260923T225239Z_e1beae0/checkpoint_row.json
+      gate: >-
+        This build predates the FNV-1a group digest and prints only `sum=`, so the v2 policy cannot
+        be read from it. Gated instead by BYTE EQUALITY with job 728's uartlog: all 71 GM_GROUP lines
+        -- per-group cycles AND per-group sums -- identical, as are the argmax and cosine lines.
+      sealed: false
+      sealed_reason: as job 759.
+    measured:
+      whole_model_cycles: 24359749
+      whole_boot_target_cycles: 2726480402
+    caveats:
+      - >-
+        EQUAL TO JOB 728 to the last digit, on a different bitstream. Read together with job 760 this
+        says the two registered U250 builds are cycle-indistinguishable for BOTH arms of this
+        program, which is worth knowing and is not a general result. It does not retroactively make
+        any cross-device comparison in this file legitimate.
+
   resnet50_int8_vendor_reference_job656:
     model: resnet50
     precision: w8a8

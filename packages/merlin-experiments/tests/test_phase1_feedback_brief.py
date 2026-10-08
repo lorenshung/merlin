@@ -166,3 +166,51 @@ def test_source_receipt_binds_actual_brief_bytes(tmp_path, monkeypatch):
     member.write_text(member.read_text() + "# changed feedback owner\n")
     with pytest.raises(SpecError, match="source identity changed"):
         SI.verify(record, **inputs)
+
+
+def _public_round(history: Path, key: str, stamp: str, candidate: str) -> None:
+    (history / f"verdict_round_{key}.json").write_text(
+        json.dumps({"graded_at": stamp, "graded_candidate_sha256": candidate})
+    )
+    (history / f"codegen_scalability_public_round_{key}.json").write_text(
+        json.dumps(
+            {
+                "schema": "merlin.public_object_build_feedback.v1",
+                "candidate_sha256": candidate,
+                "scope": "public_emit_and_build_only_advisory",
+                "ran": True,
+                "samples": [
+                    {
+                        "extent_scale": scale,
+                        "emit_outcome": "lowered",
+                        "build_status": "compiled",
+                        "emitted_artifact_bytes": 10 * scale,
+                        "object_bytes": 2 * scale,
+                        "compile_wall_s": 0.5,
+                    }
+                    for scale in (1, 2, 4, 8)
+                ],
+            }
+        )
+    )
+
+
+def test_an_unreadable_verdict_withholds_the_public_build_advisory(tmp_path):
+    """The newest round may be the unreadable one, so pairing the advisory with the newest READABLE
+    round can show an older candidate's projection as the current one. Withhold it and say why."""
+    from merlin_experiments.phase1.feedback import brief
+
+    history = tmp_path / "qa_history"
+    history.mkdir()
+    _public_round(history, "r0000_t000001", "2026-10-01T00:00:00+00:00", "a" * 64)
+    shown = brief._public_build_section(tmp_path)
+    assert "| 8 | lowered | compiled | 80 | 16 | 0.5 |" in shown
+
+    # a legacy round with no stamp takes no part in the ordering, exactly as before
+    (history / "verdict_round_03.json").write_text(json.dumps({"n_passed": 1}))
+    assert brief._public_build_section(tmp_path) == shown
+
+    (history / "verdict_round_r0000_t000002.json").write_text("{ truncated")
+    withheld = "\n".join(brief._public_build_section(tmp_path))
+    assert "Withheld" in withheld and "verdict_round_r0000_t000002.json" in withheld
+    assert "| 8 |" not in withheld

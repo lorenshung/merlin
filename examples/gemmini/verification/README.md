@@ -498,3 +498,33 @@ The output directory must be fresh under `out/`. Inspect its `receipt.json`,
 `incomplete_support_provenance` while support-source identity or the
 compiler-package-to-support binding is unproven. A finite Spike match does not
 review the software spec, prove RTL execution, or establish whole-model offload.
+
+### Reproduce the accumulator load-order race
+
+[acc_race/](acc_race/README.md) holds bare-metal reproducers for two loads into
+the same accumulator rows (overwrite, then accumulate) that complete out of
+issue order. Each wrong element is classified by which operand survived, and a
+fenced harness copy serves as the control. Spike and in-order RTL simulators
+never show the race; the board and a reordering memory model do. The measured
+evidence and its consequences for verification are in the
+[design note](../../../docs/design/accumulator_load_order.md).
+
+### Measure open-coded nest placement levers
+
+[probe_load_placement.py](probe_load_placement.py) builds one binary carrying
+the same contraction under several scheduling policies: load states, move-in
+placement, readout placement and weight reuse. It runs the binary on a selected
+RTL engine with the unit's own counters, and the hardware sequencer serves as
+the element-for-element oracle. Geometry is read from the harness headers.
+`--harness` and `--cc` select a harness tree and compiler when no backend is
+installed.
+
+```sh
+python examples/gemmini/verification/probe_load_placement.py \
+  --target gemmini --shape 64x512x1024 --bank occupancy \
+  --emulator /selected/gsim/emulator --out out/artifacts/probes/gemmini-load-placement-1
+```
+
+Compare arms only within one binary: an arm's absolute count moves with the
+other arms in the same binary. The findings are in the
+[design note](../../../docs/design/open_coded_nest_costs.md).

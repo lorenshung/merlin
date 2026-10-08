@@ -206,6 +206,16 @@ def test_typed_multi_input_alias_stage_is_source_proven(tmp_path):
     assert proof["source_operations"] == 3
 
 
+def test_host_operation_status_is_inherited_or_excludes_the_operation(tmp_path):
+    capture, host = _fixture(tmp_path)
+    operations = host["selected"]["capability_spec"]["operations"]
+    del operations[0]["status"]  # inherits the reviewed document's status
+    assert _prove(capture, host)["status"] == pure.PENDING
+    operations[0]["status"] = "draft"  # a spelled non-reviewed row contributes no type
+    with pytest.raises(ValueError, match="declare no representation type"):
+        _prove(capture, host)
+
+
 def test_direct_return_needs_exact_linked_host_image(tmp_path):
     capture, host = _fixture(tmp_path)
     proof = _prove(capture, host)

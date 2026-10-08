@@ -161,18 +161,20 @@ def test_main_selfcheck_does_not_count_legacy_screen_or_publish_legacy_artifacts
 
 
 @pytest.mark.parametrize(
-    ("l2_status", "l3_status", "l3_log", "expected_tier", "expected_tail"),
+    ("l2_status", "l3_status", "l3_log", "expected_tier", "expected_tail", "unreadable"),
     [
-        ("pass", "fail", None, "L3", None),
-        ("pass", "fail", "l3_console.log", "L3", "L3_PROGRESS\n"),
-        ("pass", "fail", "../private_console.log", "L3", None),
-        ("fail", None, None, "L2", "L2_DONE\n"),
-        ("pass", None, None, "L2", None),
-        ("pass", "pass", "l3_console.log", "L3", None),
+        ("pass", "fail", None, "L3", None, False),
+        ("pass", "fail", "l3_console.log", "L3", "L3_PROGRESS\n", False),
+        ("pass", "fail", "../private_console.log", "L3", None, False),
+        ("fail", None, None, "L2", "L2_DONE\n", False),
+        ("pass", None, None, "L2", None, False),
+        ("pass", "pass", "l3_console.log", "L3", None, False),
+        # A console that exists but cannot be read is named as unreadable, never as an empty tail.
+        ("pass", "fail", "l3_console.log", "L3", "<console unreadable: PermissionError", True),
     ],
 )
 def test_main_selfcheck_uses_only_selected_tier_console(
-    tmp_path, monkeypatch, capsys, l2_status, l3_status, l3_log, expected_tier, expected_tail
+    tmp_path, monkeypatch, capsys, l2_status, l3_status, l3_log, expected_tier, expected_tail, unreadable
 ):
     monkeypatch.chdir(tmp_path)
     submission = tmp_path / "submission"
@@ -208,6 +210,8 @@ def test_main_selfcheck_uses_only_selected_tier_console(
         (artifacts / "l2_console.log").write_text("L2_DONE\n")
         if l3_log is not None and Path(l3_log).name == l3_log:
             (artifacts / l3_log).write_text("L3_PROGRESS\n")
+            if unreadable:
+                (artifacts / l3_log).chmod(0)
         elif l3_log is not None:
             (artifacts.parent / "private_console.log").write_text("UNRELATED_PRIVATE_CONSOLE\n")
         return {
@@ -229,6 +233,8 @@ def test_main_selfcheck_uses_only_selected_tier_console(
     assert row["barrier_tier"] == expected_tier
     if expected_tail is None and passing_case:
         assert "sim_console_tail" not in row
+    elif unreadable:
+        assert row["sim_console_tail"].startswith(expected_tail)
     else:
         assert row["sim_console_tail"] == expected_tail
     if expected_tier == "L3":

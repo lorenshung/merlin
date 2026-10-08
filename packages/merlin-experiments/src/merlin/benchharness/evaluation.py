@@ -135,7 +135,17 @@ class EvaluationResult:
         self.caveats.append(Caveat(code=code, detail=detail))
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        """The full record, INCLUDING the derived verdicts.
+
+        `counts_as_correct` and `is_scoreable` are properties, so `asdict` drops them and a stored
+        result read back with no `correct` at all -- on rounds that had in fact matched at a certifying
+        tier. A reader cannot tell that absence from "the oracle could not say", which is the confusion
+        the unavailable-is-not-zero rule exists to prevent, so both are written down.
+        """
+        out = asdict(self)
+        out["correct"] = self.counts_as_correct
+        out["is_scoreable"] = self.is_scoreable
+        return out
 
     def redact(self) -> dict:
         """The agent-facing view: only what a developer could obtain without the answer key.
