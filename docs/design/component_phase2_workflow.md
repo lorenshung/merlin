@@ -49,6 +49,12 @@ dependency graph. Compiler-library/runtime import admission must separately bind
 dependencies and resources. No implicit current-checkout or installed-target
 fallback is authorized by this profile.
 
+An active analytical policy also snapshots its selected callable and Python code
+object. Replacing that callable with another function in the same pinned file or
+changing its code object refuses execution. This guards active selection drift;
+it does not prove arbitrary closure state or dynamic dependency integrity. The
+normal fresh runtime admission remains a separate prerequisite.
+
 ## Fast and measured tiers
 
 `ComponentAnalyticalProvider` binds an explicit callable's source file and an

@@ -425,6 +425,36 @@ def test_unavailable_calibration_and_changed_target_refuse(tmp_path, monkeypatch
         policy._validate()
 
 
+def test_same_source_callback_replacement_and_code_replacement_refuse(tmp_path, monkeypatch):
+    selected, policy, _, _ = _analytic_broker(tmp_path, monkeypatch)
+    original = policy.component_analytical
+
+    def another(candidate, corpus, timeout_s):
+        return {}
+
+    # Frozen dataclass integrity must not depend on the caller respecting Python's
+    # conventional immutability: both callables have the same pinned owner file.
+    object.__setattr__(original, "evaluate", another)
+    with pytest.raises(StageGateError, match="callable binding changed"):
+        policy._validate()
+    object.__setattr__(original, "evaluate", analytical)
+    saved = analytical.__code__
+    try:
+        analytical.__code__ = another.__code__
+        with pytest.raises(StageGateError, match="callable binding changed"):
+            policy._validate()
+    finally:
+        analytical.__code__ = saved
+    policy._validate()
+
+
+def test_unknown_interval_rechecks_reason_after_constructor(tmp_path):
+    interval = CycleInterval.unknown("fixture missing cost")
+    object.__setattr__(interval, "missing", ())
+    with pytest.raises(StageGateError, match="lacks its reason"):
+        CW._interval(interval)
+
+
 def test_feedback_does_not_replace_required_commands_or_bind_later_compiler(tmp_path, monkeypatch):
     selected, policy, actions, engine = _analytic_broker(tmp_path, monkeypatch)
     assert engine.execute({"action": CW.ANALYTICAL_ACTION})["returncode"] == 0

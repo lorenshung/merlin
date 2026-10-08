@@ -115,6 +115,14 @@ def _callable_source(callback):
     return path, sha256_file(path)
 
 
+def _callable_code(callback):
+    while isinstance(callback, partial):
+        callback = callback.func
+    if inspect.ismethod(callback):
+        callback = callback.__func__
+    return getattr(callback, "__code__", None)
+
+
 class ComponentAnalyticalEvaluation(Protocol):
     def __call__(
         self,
@@ -162,7 +170,9 @@ def _interval(value):
         not math.isfinite(value.lo) or not math.isfinite(value.hi) or not value.provenance or value.missing
     ):
         raise StageGateError("resolved component estimate lacks finite qualified provenance")
-    if not value.resolved and any(not isinstance(reason, str) or not reason.strip() for reason in value.missing):
+    if not value.resolved and (
+        not value.missing or any(not isinstance(reason, str) or not reason.strip() for reason in value.missing)
+    ):
         raise StageGateError("unknown component cost lacks its reason")
     if any(not isinstance(item, str) or not item.strip() for item in value.provenance):
         raise StageGateError("component cost provenance is malformed")
@@ -277,9 +287,13 @@ class ComponentOnlyPolicy(WorkflowPolicy):
         self.component_corpus = component_corpus
         self.component_analytical = component_analytical
         self.component_rtl = component_rtl
+        if component_analytical is not None and type(component_analytical) is not ComponentAnalyticalProvider:
+            raise StageGateError("explicit typed component analytical provider required")
         self._component_bindings = (component_corpus.manifest_sha256, component_corpus.capsules_sha256)
         self._target_binding = sha256_file(self.target_experiment.path)
         self._provider_selections = (component_analytical, component_rtl, services)
+        self._analytical_callable = component_analytical.evaluate if component_analytical is not None else None
+        self._analytical_code = _callable_code(self._analytical_callable)
         self._structural_source = (
             _callable_source(services.command_buffer_analysis) if services.command_buffer_analysis is not None else None
         )
@@ -319,6 +333,11 @@ class ComponentOnlyPolicy(WorkflowPolicy):
         if self.component_analytical is not None:
             if type(self.component_analytical) is not ComponentAnalyticalProvider:
                 raise StageGateError("explicit typed component analytical provider required")
+            if (
+                self.component_analytical.evaluate is not self._analytical_callable
+                or _callable_code(self.component_analytical.evaluate) is not self._analytical_code
+            ):
+                raise StageGateError("component analytical callable binding changed")
             calibration = self.component_analytical.validate()
             if calibration.get("target_sha256") != sha256_file(self.target_experiment.path):
                 raise StageGateError("component calibration targets another descriptor")
