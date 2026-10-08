@@ -3,7 +3,7 @@ title: Typed preprocessing correspondence
 kind: reference
 status: current
 owner: ir
-last_verified: 2026-10-06
+last_verified: 2026-10-08
 related: [lowering_pipeline, architecture]
 code_refs: [src/merlin/llvmlower/typed_preprocessing_correspondence.py, src/merlin/llvmlower/passes_xdsl.py, src/merlin/common/ir_audit.py]
 ---
@@ -27,7 +27,10 @@ explicit attribute dictionaries when attaching the C interface; an attribute
 dictionary is not treated as a function body. A generically printed module is
 handled through typed IR: only a public function definition gains the interface,
 and private or external callbacks keep their original ABI. Only a defined
-single-block function can supply this correspondence map.
+single-block function can supply this correspondence map. When the optional
+`layer-norm-chunked-sums` pass is selected, the map also owns the chunk and
+partial-sum operations it adds, so the ownership check still covers them; that
+pass changes numerics, which this type-only check does not measure.
 
 The returned `claim` is `preprocessing_result_types_only`. Source operands are
 observed in the source IR, but this checker does not establish their runtime

@@ -3,7 +3,7 @@ title: Inspecting whole-model MLIR lowering
 kind: guide
 status: current
 owner: ir
-last_verified: 2026-10-06
+last_verified: 2026-10-08
 related: [llvm_toolchain, llvm_integration, triton_kernels]
 code_refs:
   - src/merlin/llvmlower/cli.py
@@ -68,7 +68,9 @@ splat tensors can exceed their short MLIR spelling. `exact` does not export thes
 The audit records completed preprocessing stages and upstream pass evidence available
 from the existing pipeline (the xDSL stages are `xdsl-parsed` and one per rewrite, read off
 the same table the preprocessing runs; a generically printed module gains its C interface
-on the public definition only). To stop at a named stage or dump its IR without an audit,
+on the public definition only). An optional pass selected through `MERLIN_PASSES` (see
+[optional passes](optional_passes.md)), such as `layer-norm-chunked-sums`, adds no stage: its rewrite
+appears in the next recorded xDSL stage. To stop at a named stage or dump its IR without an audit,
 see [compile_debugging](compile_debugging.md). It is not a promise of one complete module per upstream pass.
 For example, a fresh DeepJSCC capture completed with six named stages (input,
 upstream, upstream-scheduled, llvm-translated, llvm-normalized, llvm-final) and
@@ -77,7 +79,8 @@ route, not accelerator offload or model-level numerical correctness.
 For a single defined, single-block function, audited xDSL preprocessing also writes
 `source-transform-map.json`. The audit index binds its bytes and hash. It maps each
 top-level source operation to its surviving or generated preprocessing operations and
-maps source results through quantization expansion. This is accounting for the
+maps source results through quantization expansion and through any selected optional
+preprocessing rewrite, which owns the operations it adds. This is accounting for the
 preprocessing seam, not an executable IR stage or proof of semantic equivalence.
 For other function shapes the index explicitly marks the map unavailable. The map
 does not account for later pruning, grouping, target placement or physical buffer ABI.
