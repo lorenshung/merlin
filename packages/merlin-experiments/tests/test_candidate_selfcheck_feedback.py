@@ -169,6 +169,7 @@ def test_main_selfcheck_does_not_count_legacy_screen_or_publish_legacy_artifacts
         ("fail", None, None, "L2", "L2_DONE\n"),
         ("pass", None, None, "L2", None),
         ("pass", "pass", "l3_console.log", "L3", None),
+        ("pass", "fail", "l3_console.log", "L3", "UNREADABLE"),
     ],
 )
 def test_main_selfcheck_uses_only_selected_tier_console(
@@ -208,6 +209,8 @@ def test_main_selfcheck_uses_only_selected_tier_console(
         (artifacts / "l2_console.log").write_text("L2_DONE\n")
         if l3_log is not None and Path(l3_log).name == l3_log:
             (artifacts / l3_log).write_text("L3_PROGRESS\n")
+            if expected_tail == "UNREADABLE":
+                (artifacts / l3_log).chmod(0)
         elif l3_log is not None:
             (artifacts.parent / "private_console.log").write_text("UNRELATED_PRIVATE_CONSOLE\n")
         return {
@@ -229,8 +232,12 @@ def test_main_selfcheck_uses_only_selected_tier_console(
     assert row["barrier_tier"] == expected_tier
     if expected_tail is None and passing_case:
         assert "sim_console_tail" not in row
+    elif expected_tail == "UNREADABLE":
+        # a console that exists and cannot be read is named, not shown as an absent console
+        assert row["sim_console_tail"] is None and row["sim_console_tail_unreadable"].startswith("PermissionError")
     else:
         assert row["sim_console_tail"] == expected_tail
+        assert "sim_console_tail_unreadable" not in row
     if expected_tier == "L3":
         assert "L2_DONE" not in json.dumps(report)
         assert "UNRELATED_PRIVATE_CONSOLE" not in json.dumps(report)

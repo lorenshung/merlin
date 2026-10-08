@@ -1276,7 +1276,7 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
             # the console basename on the tier itself; malformed or absent names stay null.
             _tier_log = _barrier_record.get("console_log") if isinstance(_barrier_record, dict) else None
             _artifacts = cr.parent / "artifacts"
-            console_tail = None
+            console_tail = console_tail_unreadable = None
             if (
                 isinstance(_tier_log, str)
                 and _tier_log.endswith("_console.log")
@@ -1292,8 +1292,8 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
                             _stream.seek(0, os.SEEK_END)
                             _stream.seek(max(0, _stream.tell() - 4096))
                             console_tail = _stream.read(4096).decode("utf-8", errors="replace")[-800:]
-                    except (OSError, UnicodeError):
-                        pass
+                    except (OSError, UnicodeError) as exc:  # reported, never shown as an absent console
+                        console_tail_unreadable = f"{type(exc).__name__}: {exc}"
             # FULL debug detail ONLY for a FAILING capsule (the one you are working). A passing capsule's
             # diff stats / trace dump / console tail are noise that re-inflates the agent's context every
             # round (the self_check output is re-fed each turn) — the pass flag is all that's needed for it.
@@ -1306,6 +1306,7 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
                     "failure": d.get("failure"),  # full plane + detail
                     "your_artifacts": own,  # copied to ./selfcheck_out/<capsule>/
                     "sim_console_tail": console_tail,
+                    **({"sim_console_tail_unreadable": console_tail_unreadable} if console_tail_unreadable else {}),
                 }
             )
         rows.append(row)

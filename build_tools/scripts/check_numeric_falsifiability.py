@@ -150,8 +150,8 @@ def main(argv: list[str] | None = None) -> int:
             f"{len(unloadable)} unloadable declaration(s), {len(unmeasured)} UNMEASURED oracle(s)"
         )
         print(
-            f"  assessed {coverage.get('assessed_policies', 0)}/"
-            f"{coverage.get('applicable_policies', 0)} applicable policies"
+            f"  assessed {coverage.get('assessed_policies', 'UNKNOWN')}/"
+            f"{coverage.get('applicable_policies', 'UNKNOWN')} applicable policies"
         )
         if unloadable or unmeasured:
             print("  PARTIAL audit: unavailable inputs have not received a clean numerical verdict")
