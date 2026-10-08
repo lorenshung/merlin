@@ -25,6 +25,7 @@ _DTYPES = {
     "i8": np.int8,
     "i1": np.bool_,
 }
+_COMPLEX_DTYPES = {"complex<f32>": np.complex64, "complex<f64>": np.complex128}
 
 
 def _json_bytes(document: Any) -> bytes:
@@ -34,9 +35,9 @@ def _json_bytes(document: Any) -> bytes:
 def _tensor_type(abi: dict[str, Any]) -> str:
     shape = [*abi["shape"]]
     dtype = abi["dtype"]
-    if dtype == "complex<f32>":
+    if dtype in _COMPLEX_DTYPES:
         shape.append(2)
-        dtype = "f32"
+        dtype = dtype[len("complex<") : -1]
     if dtype not in _DTYPES:
         raise ValueError(f"unsupported batch ABI dtype {dtype!r}")
     if any(not isinstance(dim, int) or dim < 0 for dim in shape):
@@ -55,16 +56,18 @@ def _tensor_documents(value: Any) -> list[dict[str, Any]]:
 
 
 def _complex_value(value: Any) -> Any:
+    if isinstance(value, dict) and value.get("kind") == "float":
+        return float(value["value"])
     if isinstance(value, dict) and value.get("kind") == "complex":
-        return complex(value["real"], value["imag"])
+        return complex(_complex_value(value["real"]), _complex_value(value["imag"]))
     if isinstance(value, list):
         return [_complex_value(item) for item in value]
     return value
 
 
 def _physical_abi(abi: dict[str, Any]) -> dict[str, Any]:
-    if abi["dtype"] == "complex<f32>":
-        return {"dtype": "f32", "shape": [*abi["shape"], 2]}
+    if abi["dtype"] in _COMPLEX_DTYPES:
+        return {"dtype": abi["dtype"][len("complex<") : -1], "shape": [*abi["shape"], 2]}
     return {"dtype": abi["dtype"], "shape": [*abi["shape"]]}
 
 
@@ -92,7 +95,7 @@ def _matching_brace(source: str, start: int) -> int:
     raise ValueError("unbalanced function braces")
 
 
-def _function_parts(source: str) -> tuple[list[str], str, list[str]]:
+def _function_parts(source: str) -> tuple[list[str], str, list[str], list[str], str]:
     """Extract the one forward body and terminal return from model2MLIR's module."""
     mark = "func.func @forward("
     if source.count(mark) != 1:
@@ -124,7 +127,12 @@ def _function_parts(source: str) -> tuple[list[str], str, list[str]]:
     values = [item.strip() for item in terminal[len(marker) :].split(":", 1)[0].split(",")]
     if not values or any(not value.startswith("%") for value in values):
         raise ValueError("unsupported returned SSA values")
-    return names, body[:return_at], values
+    types = [item.strip() for item in terminal.split(":", 1)[1].split(",")]
+    module_start = source.index("{")
+    if "attributes" in source[:module_start]:
+        module_start = source.index("{", _matching_brace(source, module_start) + 1)
+    declarations = source[module_start + 1 : source.index(mark)] + source[body_end + 1 : source.rfind("}")]
+    return names, body[:return_at], values, types, declarations
 
 
 def _rename_ssa(source: str, prefix: str, argument_names: dict[str, str]) -> str:
@@ -150,7 +158,7 @@ def _rename_ssa(source: str, prefix: str, argument_names: dict[str, str]) -> str
             out.append(char)
             pos += 1
             continue
-        if char not in ("%", "^"):
+        if char not in ("%", "^", "@"):
             out.append(char)
             pos += 1
             continue
@@ -163,7 +171,7 @@ def _rename_ssa(source: str, prefix: str, argument_names: dict[str, str]) -> str
         elif char == "%":
             out.append(argument_names.get(token, "%" + prefix + token[1:]))
         else:
-            out.append("^" + prefix + token[1:])
+            out.append(char + prefix + token[1:])
         pos = end
     return "".join(out)
 
@@ -203,6 +211,7 @@ def build_core_aten_batch(
     result_types: list[str] = []
     results: list[str] = []
     body_lines: list[str] = []
+    declarations: list[str] = []
     records: list[dict[str, Any]] = []
     manifest: dict[str, dict[str, Any]] = {}
     input_order: dict[str, int] = {}
@@ -241,25 +250,44 @@ def build_core_aten_batch(
             records.append(record)
             continue
         try:
-            names, body, returned = _function_parts(mlir_file.read_text(encoding="utf-8"))
+            names, body, returned, local_result_types, local_declarations = _function_parts(
+                mlir_file.read_text(encoding="utf-8")
+            )
             abi_in = meta["input_abi"]
             abi_out = meta["output_abi"]
+            if len(abi_out) == 1 and len(returned) > 1 and len(set(zip(returned, local_result_types))) == 1:
+                # Functional export can expose a mutation and a user result as
+                # the exact same SSA value. Every possible user-result mapping
+                # observes that value; no output-role or shape guess is needed.
+                record["result_projection"] = {"emitted_count": len(returned), "proof": "all_results_identical_ssa"}
+                returned = returned[:1]
+                local_result_types = local_result_types[:1]
+            from merlin.common.mlir_query import forward_signature
+
+            _, declared_results = forward_signature(mlir_file)
+            abi_out = (
+                [
+                    {**item, "declared_shape": [(-1 if d < 0 else d) for d in shape]}
+                    for item, (shape, _) in zip(abi_out, declared_results)
+                ]
+                if len(abi_out) == len(declared_results)
+                else abi_out
+            )
             captured_inputs = json.loads((directory / "inputs.json").read_text(encoding="utf-8"))
             if len(names) != len(abi_in) or len(captured_inputs) != len(abi_in):
                 raise ValueError("captured argument ABI or input count mismatch")
             if len(returned) != len(abi_out):
-                raise ValueError("captured result ABI count mismatch")
+                raise ValueError(
+                    f"captured result ABI count mismatch: emitted {len(returned)} results, "
+                    f"eager ABI has {len(abi_out)}; explicit exported result mapping is absent"
+                )
             local_types = [_tensor_type(item) for item in abi_in]
-            local_result_types = [_tensor_type(item) for item in abi_out]
             local_inputs = []
-            tensor_documents = (
-                _tensor_documents(case["arguments"]) if any(item["dtype"] == "complex<f32>" for item in abi_in) else []
-            )
             for index, (value, item) in enumerate(zip(captured_inputs, abi_in)):
                 physical = _physical_abi(item)
-                if item["dtype"] == "complex<f32>":
-                    logical = np.asarray(_complex_value(tensor_documents[index]["values"]), dtype=np.complex64)
-                    array = np.stack((logical.real, logical.imag), axis=-1).astype(np.float32)
+                if item["dtype"] in _COMPLEX_DTYPES:
+                    logical = np.asarray(_complex_value(value), dtype=_COMPLEX_DTYPES[item["dtype"]])
+                    array = np.stack((logical.real, logical.imag), axis=-1).astype(_DTYPES[physical["dtype"]])
                 else:
                     array = np.asarray(value, dtype=_DTYPES[item["dtype"]])
                 if list(array.shape) != physical["shape"]:
@@ -276,6 +304,7 @@ def build_core_aten_batch(
         first_output = len(results)
         argument_names = {name: f"%arg{first_input + index}" for index, name in enumerate(names)}
         renamed_body = _rename_ssa(body, prefix, argument_names)
+        declarations.append(_rename_ssa(local_declarations, prefix, {}))
         renamed_returns = [_rename_ssa(name, prefix, argument_names) for name in returned]
         body_lines.append(f"    // {overload}\n" + renamed_body.rstrip() + "\n")
         inputs.extend(local_inputs)
@@ -311,12 +340,18 @@ def build_core_aten_batch(
     return_types = ", ".join(result_types)
     module = (
         "builtin.module {\n"
-        f"  func.func @forward({arguments}) -> {outputs} {{\n"
+        + "".join(declarations)
+        + f"  func.func @forward({arguments}) -> {outputs} {{\n"
         + "".join(body_lines)
         + f"    func.return {returns} : {return_types}\n"
         + "  }\n}\n"
     )
     (bundle_root / "model.mlir").write_text(module, encoding="utf-8")
+    if any(item.strip() for item in declarations):
+        from merlin.llvmlower.generic_form import to_generic_form
+
+        generic = to_generic_form(bundle_root / "model.mlir")
+        (bundle_root / "model.mlir").write_bytes(generic.read_bytes())
     _write_npz(bundle_root / "inputs.npz", inputs)
     (bundle_root / "weights.safetensors.manifest.json").write_bytes(_json_bytes(manifest))
     (bundle_root / "input_order.json").write_bytes(_json_bytes(input_order))

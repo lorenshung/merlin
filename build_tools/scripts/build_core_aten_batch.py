@@ -24,6 +24,13 @@ def _write_json(path: Path, document: object) -> None:
     path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _merge_provenance(aggregate: dict, verdict: dict, directory: Path) -> None:
+    """Bind aggregate claims to every shard's actual executable and selected pins."""
+    shards = dict(aggregate.get("provenance", {}).get("shards", {}))
+    shards[str(directory)] = verdict["provenance"]
+    aggregate["provenance"] = {**verdict["provenance"], "shards": shards}
+
+
 def _regrade_existing(output_dir: Path, report: dict) -> dict:
     """Reapply the current comparison policy to retained raw hardware output bytes."""
     aggregate = grade_core_aten_batch(report, execution_error="no recorded hardware execution")
@@ -50,9 +57,15 @@ def _regrade_existing(output_dir: Path, report: dict) -> dict:
             verdict = grade_core_aten_batch(
                 shard,
                 output_bytes,
+                output_shapes=(
+                    json.loads((directory / "spike-output-shapes.json").read_text())
+                    if (directory / "spike-output-shapes.json").is_file()
+                    else None
+                ),
                 execution_error=execution.get("error") if output_bytes is None else None,
             )
             _write_json(directory / "core_aten_batch_verdict.json", verdict)
+            _merge_provenance(aggregate, verdict, directory)
             for overload in item.get("case_ids", item["overloads"]):
                 aggregate["cases"][overload] = verdict["cases"][overload]
     counts: dict[str, int] = {}
@@ -153,8 +166,10 @@ def main(argv: list[str] | None = None) -> int:
                     "overloads": sorted({case["overload"] for case in shard["cases"] if case["status"] == "bundled"}),
                     "execution": execution,
                     "passed": verdict["passed_count"] == shard["bundled_count"],
+                    "provenance": verdict["provenance"],
                 }
                 recoveries.append(recovery)
+                _merge_provenance(aggregate, verdict, directory)
                 for overload in selected:
                     aggregate["cases"][overload] = verdict["cases"][overload]
                 counts: dict[str, int] = {}
@@ -194,6 +209,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 shard_record["execution"] = execution
                 shard_record["passed"] = verdict["passed_count"] == shard["bundled_count"]
+                shard_record["provenance"] = verdict["provenance"]
+                _merge_provenance(aggregate, verdict, directory)
                 for overload in selected:
                     aggregate["cases"][overload] = verdict["cases"][overload]
                 counts: dict[str, int] = {}

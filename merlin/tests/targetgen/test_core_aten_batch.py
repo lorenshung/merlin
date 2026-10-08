@@ -5,10 +5,63 @@ from __future__ import annotations
 import json
 
 import numpy as np
+import pytest
 
 from merlin.frontends.linalg_mlir import parse_mlir_file
 from merlin.targetgen.core_aten_batch import build_core_aten_batch
 from merlin.targetgen.core_aten_batch_grade import grade_core_aten_batch
+
+
+def test_nested_nonfinite_documents_preserve_ieee_values():
+    from merlin.targetgen.core_aten_batch_grade import _complex_values, _grade_output
+
+    values = [{"kind": "float", "value": value} for value in ("nan", "inf", "-inf", "-0.0")]
+    decoded = np.asarray(_complex_values([values]), np.float64)
+    assert np.isnan(decoded[0, 0])
+    assert np.signbit(decoded[0, 3])
+    expected = {"kind": "tensor", "dtype": "float64", "shape": [1, 4], "values": [values]}
+    assert (
+        _grade_output(
+            decoded.tobytes(),
+            {"dtype": "f64", "shape": [1, 4]},
+            expected,
+            {"comparison_parameters": {"equal_nan": True}},
+        )["status"]
+        == "pass"
+    )
+
+
+def test_module_symbols_are_namespaced_and_dynamic_return_is_preserved():
+    from merlin.targetgen.core_aten_batch import _function_parts, _rename_ssa
+
+    source = """builtin.module attributes {prov.example = "source"} {
+      ml_program.global private mutable @state(dense<0> : tensor<i64>) : tensor<i64>
+      func.func @forward(%x: tensor<?xi64>) -> tensor<?xi64> {
+        %s = "ml_program.global_load"() <{global = @state}> : () -> tensor<i64>
+        func.return %x : tensor<?xi64>
+      }
+    }"""
+    names, body, returns, types, declarations = _function_parts(source)
+    assert (names, returns, types) == (["%x"], ["%x"], ["tensor<?xi64>"])
+    assert "@left_state" in _rename_ssa(declarations, "left_", {})
+    assert "@right_state" in _rename_ssa(body, "right_", {})
+    assert '"@state"' == _rename_ssa('"@state"', "left_", {})
+
+
+@pytest.mark.parametrize("extent", [0, 1, 5])
+def test_dynamic_grading_uses_runtime_extents(extent):
+    data = np.arange(extent * 2, dtype=np.int64).reshape(extent, 2)
+    record = {
+        "overload": "fixture",
+        "status": "bundled",
+        "output_indices": [0],
+        "output_abi": [{"dtype": "i64", "shape": [4, 2], "declared_shape": [-1, 2]}],
+        "case": {"expected": {"kind": "tensor", "dtype": "int64", "shape": [extent, 2], "values": data.tolist()}},
+    }
+    assert (
+        grade_core_aten_batch({"cases": [record]}, [data.tobytes()], output_shapes=[[extent, 2]])["passed_count"] == 1
+    )
+    assert grade_core_aten_batch({"cases": [record]}, [data.tobytes()])["passed_count"] == 0
 
 
 def test_batch_inlines_clean_cases_and_keeps_unavailable_case(tmp_path):
@@ -146,3 +199,66 @@ def test_metadata_only_empty_result_uses_contiguous_descriptor_contract():
     record["case"]["expected"]["stride"] = [1, 2]
     failed = grade_core_aten_batch({"cases": [record]}, [raw])
     assert failed["status_counts"] == {"mismatch": 1}
+
+
+def test_identical_functional_results_have_unambiguous_single_user_value(tmp_path):
+    captures = tmp_path / "captures"
+    directory = captures / "fixture"
+    directory.mkdir(parents=True)
+    (directory / "capsule.linalg.mlir").write_text(
+        "builtin.module { func.func @forward(%x: tensor<2xi64>) -> (tensor<2xi64>, tensor<2xi64>) {\n"
+        "func.return %x, %x : tensor<2xi64>, tensor<2xi64>\n} }"
+    )
+    abi = dict(dtype="i64", shape=[2])
+    (directory / "capture.json").write_text(
+        json.dumps({"capture_meta": {"ok": True, "opaque": 0, "input_abi": [abi], "output_abi": [abi]}})
+    )
+    (directory / "inputs.json").write_text("[[5, 9]]")
+    (directory / "golden.json").write_text("[5, 9]")
+    report = build_core_aten_batch(
+        {"cases": [{"overload": "fixture", "expected": {"kind": "tensor"}}]}, captures, tmp_path / "bundle"
+    )
+    assert report["bundled_count"] == 1
+    assert report["output_count"] == 1
+    assert report["cases"][0]["result_projection"]["proof"] == "all_results_identical_ssa"
+
+
+def test_bundle_carries_independent_mutable_globals(tmp_path):
+    from merlin.llvmlower.pipeline import lower_to_llvm_ir
+    from merlin.llvmlower.toolchain import m2m_python
+
+    if not m2m_python().is_file():
+        pytest.skip("native MLIR interpreter unavailable")
+    cases = [{"overload": name, "expected": {"kind": "tensor"}} for name in ("left", "right")]
+    captures = tmp_path / "captures"
+    for case in cases:
+        directory = captures / case["overload"]
+        directory.mkdir(parents=True)
+        (directory / "capsule.linalg.mlir").write_text("""builtin.module {
+          ml_program.global private mutable @state(dense<0> : tensor<i64>) : tensor<i64>
+          func.func @forward() -> tensor<i64> {
+            %state = "ml_program.global_load"() <{global = @state}> : () -> tensor<i64>
+            "ml_program.global_store"(%state) <{global = @state}> : (tensor<i64>) -> ()
+            func.return %state : tensor<i64>
+          }
+        }""")
+        (directory / "capture.json").write_text(
+            json.dumps(
+                {
+                    "capture_meta": {
+                        "ok": True,
+                        "opaque": 0,
+                        "input_abi": [],
+                        "output_abi": [{"dtype": "i64", "shape": []}],
+                    }
+                }
+            )
+        )
+        (directory / "inputs.json").write_text("[]")
+        (directory / "golden.json").write_text("0")
+    bundle = tmp_path / "bundle"
+    report = build_core_aten_batch({"cases": cases}, captures, bundle)
+    assert report["bundled_count"] == 2
+    llvm = lower_to_llvm_ir((bundle / "model.mlir").read_text(), workdir=tmp_path / "lower")
+    assert "@c0_state" in llvm
+    assert "@c1_state" in llvm

@@ -197,15 +197,10 @@ def _quant_for(dtype: str, override: str | None = None):
 
 
 def _to_native(t):
-    """A torch tensor -> JSON-safe lists without rounding integer or boolean values."""
-    import torch
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _capture_tensor_values import to_native
 
-    if isinstance(t, torch.Tensor):
-        value = t.detach().cpu()
-        return (value if not (value.is_floating_point() or value.is_complex()) else value.to(torch.float64)).tolist()
-    if isinstance(t, (list, tuple)):
-        return [_to_native(x) for x in t]
-    return t
+    return to_native(t)
 
 
 def _mlir_dtype(torch_dtype) -> str:
@@ -227,6 +222,8 @@ def _mlir_dtype(torch_dtype) -> str:
         torch.bfloat16: "bf16",
         torch.float32: "f32",
         torch.float64: "f64",
+        torch.complex64: "complex<f32>",
+        torch.complex128: "complex<f64>",
     }
     for name, mlir in (("float8_e4m3fn", "f8E4M3FN"), ("float8_e5m2", "f8E5M2")):
         dtype = getattr(torch, name, None)
