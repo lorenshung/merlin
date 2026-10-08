@@ -6,6 +6,16 @@ and final per-member comparison arithmetic. It does not admit Phase 0 generation
 an authoring transport, hardware receipts or historical telemetry by itself.
 Reviewed upstream publication is not an agent grant; preserve fresh-session and
 actual-runtime isolation requirements before launching a component campaign.
+`numerical_readback.py` reconstructs a complete exact/elementwise observation
+from two evaluator-owned full readbacks, the original fixed `QualityBudget`,
+existing V4 private-input ownership and selected typed build services. Reopen
+the selected recipe/renderer/codec and produced bytes; preserve dtype, full
+roster, signed-zero/raw-bit and nonfinite semantics. Its result grants only
+numerical agreement of protected readbacks. A host-created freeze does not
+authenticate execution, reference generation, source-to-ELF invocation,
+hardware/timer/input identity or complete final campaign membership. Keep
+those joins with the trusted evaluation lifecycle; never turn this observation
+or a caller-supplied hash/boolean into hardware or final-executable authority.
 
 `campaign.py` owns frozen functional admission, exact fork checks, package sandbox
 policy and completion accounting. `prompt.py` owns deterministic task contracts.

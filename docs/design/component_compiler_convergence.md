@@ -9,6 +9,7 @@ code_refs:
   - src/merlin/targetgen/compiler_library.py
   - src/merlin/targetgen/package_runtime.py
   - packages/merlin-experiments/src/merlin_experiments/phase2/component_experiment.py
+  - packages/merlin-experiments/src/merlin_experiments/phase2/numerical_readback.py
 ---
 
 # Component-driven compiler convergence
@@ -147,8 +148,27 @@ and measurement policy before authoring.
 
 `final_component_campaign_gate` checks this comparison arithmetic on already
 verified observations. It does not authenticate hardware flags, arbitrary
-receipt hashes or historical telemetry. Independent hardware/capture/accuracy
-receipt admission and a formal campaign completion gate are still required.
+receipt hashes or historical telemetry. The host-private
+`admit_protected_numerical_readback` reconstructs a `QualityObservation` from
+two full readbacks through existing V4 private ownership, typed build services,
+readback build receipts and the exact original frozen `QualityBudget`. Both
+selected recipes, renderer sources, codec, command buffers, kernel objects,
+harnesses, executables and complete output rosters are rechecked. Exact policy
+compares stored words, including signed zeros and NaN payloads; elementwise
+policy decodes declared float formats and uses the unchanged tolerance over
+every value. Nonfinite values violate the elementwise policy. Integers too
+large for that float64 comparison refuse; task metrics require their own owner.
+
+This numerical observation is not a hardware or execution certificate. The
+trusted evaluator must supply its own original provenance and capabilities;
+a candidate-created snapshot cannot establish reference validity or actual
+execution. The final evaluator still must join its protected source/package
+freeze, compiler invocations and emitted IR/objects/ELF to staged queue bytes,
+actual image/configuration, original inputs, timer boundaries, reference recipe
+and every campaign member. Existing queue logs alone do not establish these
+joins. Missing reference recipes and historical telemetry remain unknown.
+Independent final hardware admission and formal completion remain required;
+normal component authoring stays unavailable.
 
 Final holdout results are not tuning feedback within that campaign. Disclosing
 failures for repair ends the campaign; later work records the exposure and a new
