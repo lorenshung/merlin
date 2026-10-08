@@ -118,6 +118,10 @@ def test_a_worker_importing_its_sibling_by_bare_name_counts_as_a_caller(tmp_path
     monkeypatch.setattr(gate, "PACKAGE_ROOT", tmp_path / "merlin/python")
     assert "merlin.targetgen._helper" in gate._imports(worker)
     assert "merlin.targetgen.sys" not in gate._imports(worker)  # no such sibling file
+    (package / "_reference.py").write_text("def freeze(): ...\n", encoding="utf-8")
+    worker.write_text("import sys\nfrom _reference import freeze\nfrom json import dumps\n", encoding="utf-8")
+    assert "merlin.targetgen._reference" in gate._imports(worker)
+    assert "merlin.targetgen.json" not in gate._imports(worker)  # no such sibling file
 
 
 def test_a_target_workflow_under_examples_is_a_production_caller(tmp_path: Path) -> None:

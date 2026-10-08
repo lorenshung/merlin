@@ -3,7 +3,7 @@ title: model2MLIR frontend
 kind: guide
 status: current
 owner: frontends
-last_verified: 2026-10-05
+last_verified: 2026-10-06
 related: [getting_started, extending_the_stack, phase0_specification, model_lowering, reproducibility]
 code_refs: [src/merlin/frontends, src/merlin/capture/bundle.py, src/merlin/targetgen/_m2m_capture_worker.py, src/merlin/targetgen/frontend_trace.py, src/merlin/frontends/compile_inputs.py, src/merlin/semantic_compiler/linalg_bridge.py, src/merlin/targetgen/cli.py, packages/merlin-experiments/src/merlin_experiments/phase0/m2m_runtime.py]
 ---
@@ -148,6 +148,13 @@ merlin-targetgen native-select --engine merlin_native \
   --snapshot /absolute/native-snapshot --linalg /absolute/region.mlir \
   --linalg-entry work --mode strict-native --out /absolute/selection.json
 ```
+
+The optional `native-select --abi` file fixes boundary addresses with
+`fixed_inputs` and `fixed_outputs`. It may also list `reservations`, which are
+`{storage, start, extent}` intervals that the caller already owns. The selector
+places no value inside a reserved interval and records the reservations in its
+report. A malformed reservation is refused, not ignored. The `native-compile`
+ABI takes only the fixed input and output addresses.
 
 `native-compile` accepts the same `--linalg` and `--linalg-entry` pair alongside
 its required OOT support, ABI, target source and output arguments. Both commands

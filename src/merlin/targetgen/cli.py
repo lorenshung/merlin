@@ -277,6 +277,34 @@ def _load_native_request(args: argparse.Namespace, *, target_identity: str, mode
     return request, "typed_request", ()
 
 
+_SELECT_ABI_KEYS = frozenset({"fixed_inputs", "fixed_outputs"})
+_RESERVATION_KEYS = frozenset({"storage", "start", "extent"})
+
+
+def _load_native_select_abi(path: str | None):
+    """Split a selection ABI into fixed I/O and reserved physical intervals.
+
+    ``reservations`` is optional: each row names a storage view and an interval
+    the caller already owns, so no selected value may be placed there. A
+    malformed row is refused rather than dropped.
+    """
+    from merlin.semantic_compiler.allocate import Reservation
+
+    abi = json.loads(Path(path).read_text()) if path else {"fixed_inputs": {}, "fixed_outputs": None}
+    if (
+        not isinstance(abi, dict)
+        or not _SELECT_ABI_KEYS <= set(abi)
+        or set(abi) - _SELECT_ABI_KEYS - {"reservations"}
+        or not isinstance(abi["fixed_inputs"], dict)
+    ):
+        raise ValueError("native ABI needs fixed_inputs and fixed_outputs; reservations are optional")
+    rows = abi.get("reservations", [])
+    if not isinstance(rows, list) or any(not isinstance(row, dict) or set(row) != _RESERVATION_KEYS for row in rows):
+        raise ValueError("native ABI reservations must be a list of storage/start/extent records")
+    fixed_outputs = None if abi["fixed_outputs"] is None else tuple(abi["fixed_outputs"])
+    return abi["fixed_inputs"], fixed_outputs, tuple(Reservation(**row) for row in rows)
+
+
 def _cmd_native_select(args: argparse.Namespace) -> int:
     from merlin.semantic_compiler.linalg_bridge import LinalgBridgeError
     from merlin.semantic_compiler.search import SearchAblations
@@ -292,16 +320,14 @@ def _cmd_native_select(args: argparse.Namespace) -> int:
         )
         if request.lowering_policy != args.mode:
             raise ValueError("explicit selection mode differs from typed request")
-        abi = json.loads(Path(args.abi).read_text()) if args.abi else {"fixed_inputs": {}, "fixed_outputs": None}
-        if set(abi) != {"fixed_inputs", "fixed_outputs"} or not isinstance(abi["fixed_inputs"], dict):
-            raise ValueError("native ABI needs fixed_inputs and fixed_outputs")
-        fixed_outputs = None if abi["fixed_outputs"] is None else tuple(abi["fixed_outputs"])
+        fixed_inputs, fixed_outputs, reservations = _load_native_select_abi(args.abi)
         ablations = SearchAblations(**{name: name in args.ablation for name in vars(SearchAblations())})
         limits = _load_native_search_limits(args.search_limits)
         result = snapshot.select(
             request,
-            fixed_inputs=abi["fixed_inputs"],
+            fixed_inputs=fixed_inputs,
             fixed_outputs=fixed_outputs,
+            reservations=reservations,
             limits=limits,
             ablations=ablations,
         )
@@ -337,6 +363,7 @@ def _cmd_native_select(args: argparse.Namespace) -> int:
             "rejected_allocation": result.rejected_allocation,
             "pruned_orders": result.pruned_orders,
             "check_fingerprint": result.check_fingerprint,
+            "reservations": [asdict(item) for item in reservations],
             "candidate_digest": result.candidate.digest() if result.candidate else None,
             "selected_graph": asdict(result.graph) if result.graph else None,
             "allocation": asdict(result.allocation) if result.allocation else None,
@@ -547,7 +574,10 @@ def build_parser() -> argparse.ArgumentParser:
     select_source.add_argument("--linalg", help="parsed Linalg MLIR input; admitted integer subset only")
     native_select.add_argument("--linalg-entry", help="entry function name for --linalg")
     native_select.add_argument("--mode", choices=("strict-native", "hybrid", "diagnostic"), default="strict-native")
-    native_select.add_argument("--abi", help="optional fixed_inputs/fixed_outputs JSON; no runtime samples")
+    native_select.add_argument(
+        "--abi",
+        help="optional fixed_inputs/fixed_outputs JSON with optional reserved physical intervals; no runtime samples",
+    )
     native_select.add_argument("--search-limits", help="complete versioned native search-limit JSON")
     native_select.add_argument(
         "--ablation",
