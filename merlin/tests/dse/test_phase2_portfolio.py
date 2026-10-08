@@ -7,8 +7,11 @@ import pytest
 from merlin.perf.phase2_portfolio import (
     AnalyticalMetrics,
     FastEvaluationPolicy,
+    FourModelQualitySchema,
+    PortfolioQualitySchema,
     QualityBudget,
     QualityLimit,
+    QualityObservation,
     evaluate_fast_portfolio,
     standard_four_model_quality_schema,
     unavailable_fast_evaluation,
@@ -208,13 +211,15 @@ def test_four_model_portfolio_retains_only_a_quality_safe_pareto_win():
 
 def test_non_content_addressed_or_incomplete_portfolio_is_refused():
     rows = [_row(model) for model in MODELS]
-    with pytest.raises(ValueError, match="four distinct content-addressed"):
+    with pytest.raises(ValueError, match="nonempty portfolio"):
         evaluate_fast_portfolio(
-            rows[:3],
-            quality_budgets={model: _quality_budget() for model in MODELS[:3]},
+            rows,
+            quality_budgets={model: _quality_budget() for model in MODELS},
             policy=FastEvaluationPolicy(),
-            expected_models=MODELS[:3],
+            expected_models=(),
         )
+    with pytest.raises(ValueError, match="exactly cover"):
+        _evaluate(rows[:3])
 
 
 def test_quality_budget_rejects_a_faster_candidate():
@@ -225,6 +230,148 @@ def test_quality_budget_rejects_a_faster_candidate():
 
     assert report["status"] == "reject"
     assert report["models"][2]["quality_gate"]["status"] == "failed"
+
+
+@pytest.mark.parametrize("count", [1, 3, 5])
+def test_any_nonempty_portfolio_keeps_per_member_quality_and_dimensionless_aggregation(count):
+    members = tuple(hashlib.sha256(f"independent-member-{index}".encode()).hexdigest() for index in range(count))
+    rows = [_row(member) for member in members]
+    budgets = {member: _quality_budget() for member in members}
+    report = evaluate_fast_portfolio(
+        list(reversed(rows)), quality_budgets=budgets, policy=FastEvaluationPolicy(), expected_models=members
+    )
+    assert report["status"] == "retain" and report["models_evaluated"] == count
+    assert tuple(row["model_id"] for row in report["models"]) == members
+    assert report["portfolio_conservative_cycle_speedup_geomean"] == pytest.approx(1.25)
+    rows[-1]["candidate_quality"]["values"]["relative_error"] = 0.5
+    failed = evaluate_fast_portfolio(rows, quality_budgets=budgets, policy=FastEvaluationPolicy())
+    assert failed["status"] == "reject"
+
+
+@pytest.mark.parametrize("members", [(), (MODELS[0], MODELS[0]), ("unbound",)])
+def test_generic_portfolio_refuses_empty_duplicate_and_non_content_identities(members):
+    with pytest.raises(ValueError):
+        PortfolioQualitySchema("exact_only", members, (), "no accuracy evaluator")
+    with pytest.raises(ValueError):
+        evaluate_fast_portfolio([], quality_budgets={}, policy=FastEvaluationPolicy(), expected_models=members)
+
+
+def test_generic_quality_schema_freezes_order_and_legacy_wrapper_wire_identity():
+    members = MODELS[:3]
+    budgets = tuple((member, QualityBudget.exact("complete raw outputs")) for member in members)
+    schema = PortfolioQualitySchema("accuracy_bounded", members, budgets, "independent exact observer")
+    assert schema.to_dict()["schema"] == "phase2_portfolio_quality_schema_v1"
+    assert schema.to_dict()["approximation_allowed"] is False
+    with pytest.raises(ValueError, match="portfolio order"):
+        PortfolioQualitySchema("accuracy_bounded", members, tuple(reversed(budgets)), "wrong order")
+    with pytest.raises(TypeError, match="typed QualityBudget"):
+        PortfolioQualitySchema("accuracy_bounded", (MODELS[0],), ((MODELS[0], {}),), "forged budget")
+    with pytest.raises(ValueError, match="exactly four"):
+        FourModelQualitySchema("exact_only", members, (), "legacy wrapper")
+    legacy = FourModelQualitySchema("exact_only", MODELS, (), "corpus absent")
+    assert legacy.to_dict() == {
+        "schema": "phase2_four_model_quality_schema_v1",
+        "mode": "exact_only",
+        "ordered_member_sha256s": list(MODELS),
+        "budgets": {},
+        "reason": "corpus absent",
+        "approximation_allowed": False,
+    }
+
+
+def _explicit_quality_report(budget, values, *, parameters=None, complete=True, baseline=None):
+    row = _row(MODELS[0])
+    row["candidate_quality"] = {
+        "values": values,
+        "provenance": ["independent full-output quality evaluator"],
+        "complete": complete,
+    }
+    if parameters is not None:
+        row["candidate_quality"]["parameters"] = parameters
+    if baseline is not None:
+        row["baseline_quality"] = baseline
+    return evaluate_fast_portfolio([row], quality_budgets={MODELS[0]: budget}, policy=FastEvaluationPolicy())
+
+
+@pytest.mark.parametrize("count, expected", [(0, "retain"), (1, "reject"), (-1, "needs_evidence")])
+def test_exact_quality_uses_complete_bitwise_mismatch_count(count, expected):
+    report = _explicit_quality_report(QualityBudget.exact("all raw output words"), {"bitwise_mismatch_count": count})
+    assert report["status"] == expected
+
+
+@pytest.mark.parametrize("values", [{"cosine_similarity": 1.0}, {"maximum_abs_error": 0.0}, {}])
+def test_proxies_cannot_supply_an_exact_or_elementwise_quality_metric(values):
+    exact = _explicit_quality_report(QualityBudget.exact("all raw output words"), values)
+    elementwise = _explicit_quality_report(
+        QualityBudget.elementwise("all outputs", atol=0.03, rtol=0.02),
+        values,
+        parameters={"atol": 0.03, "rtol": 0.02},
+    )
+    assert exact["status"] == elementwise["status"] == "needs_evidence"
+
+
+@pytest.mark.parametrize("parameters", [None, {"atol": 0.03}, {"atol": 0.3, "rtol": 0.02}])
+def test_elementwise_observer_must_bind_the_exact_selected_tolerances(parameters):
+    budget = QualityBudget.elementwise("all outputs", atol=0.03, rtol=0.02)
+    report = _explicit_quality_report(budget, {"elementwise_violation_count": 0}, parameters=parameters)
+    assert report["status"] == "needs_evidence"
+    assert "selected metric parameters" in " ".join(report["models"][0]["quality_gate"]["blockers"])
+
+
+@pytest.mark.parametrize("count, expected", [(0, "retain"), (3, "reject"), (-1, "needs_evidence")])
+def test_elementwise_count_preserves_combined_tolerance_metric(count, expected):
+    budget = QualityBudget.elementwise("all outputs", atol=0.03, rtol=0.02)
+    report = _explicit_quality_report(
+        budget, {"elementwise_violation_count": count}, parameters={"atol": 0.03, "rtol": 0.02}
+    )
+    assert report["status"] == expected
+    assert budget.to_dict()["parameters"] == {"atol": 0.03, "rtol": 0.02}
+
+
+@pytest.mark.parametrize(
+    "profile, metric", [("exact", "bitwise_mismatch_count"), ("elementwise", "elementwise_violation_count")]
+)
+def test_incomplete_or_fractional_quality_counts_cannot_pass(profile, metric):
+    budget = (
+        QualityBudget.exact("outputs") if profile == "exact" else QualityBudget.elementwise("outputs", atol=0, rtol=0)
+    )
+    parameters = None if profile == "exact" else {"atol": 0, "rtol": 0}
+    incomplete = _explicit_quality_report(budget, {metric: 0}, parameters=parameters, complete=False)
+    fractional = _explicit_quality_report(budget, {metric: -0.5}, parameters=parameters)
+    assert incomplete["status"] == fractional["status"] == "needs_evidence"
+    with pytest.raises(ValueError, match="zero complete-output"):
+        QualityBudget((QualityLimit(metric, "at_most", 10),), "relaxed named policy", profile)
+
+
+@pytest.mark.parametrize("value", [-1, float("nan"), float("inf"), True])
+def test_elementwise_tolerances_require_finite_nonnegative_numbers(value):
+    with pytest.raises((TypeError, ValueError)):
+        QualityBudget.elementwise("outputs", atol=value, rtol=0.02)
+
+
+def test_task_quality_has_explicit_metrics_and_degradation_against_complete_baseline():
+    budget = QualityBudget.task(
+        "held-out task corpus", limits=(QualityLimit("task_success_rate", "at_least", 0.85, maximum_degradation=0.02),)
+    )
+    baseline = {"values": {"task_success_rate": 0.90}, "provenance": ["independent task evaluator"], "complete": True}
+    assert _explicit_quality_report(budget, {"task_success_rate": 0.89}, baseline=baseline)["status"] == "retain"
+    assert _explicit_quality_report(budget, {"task_success_rate": 0.86}, baseline=baseline)["status"] == "reject"
+    assert _explicit_quality_report(budget, {"cosine_similarity": 1.0}, baseline=baseline)["status"] == "needs_evidence"
+    with pytest.raises(ValueError, match="at least one limit"):
+        QualityBudget.task("task corpus", limits=())
+
+
+def test_legacy_quality_serialization_and_direct_observer_completeness_remain_explicit():
+    assert "parameters" not in _quality_budget().to_dict()
+    assert QualityObservation((("relative_error", 0.1),), ("complete observer",)).to_dict() == {
+        "values": {"relative_error": 0.1},
+        "provenance": ["complete observer"],
+        "complete": True,
+    }
+    with pytest.raises(TypeError, match="boolean"):
+        QualityObservation((("relative_error", 0.1),), ("observer",), complete="true")
+    with pytest.raises(ValueError, match="numeric"):
+        QualityObservation((("relative_error", "0.1"),), ("observer",))
 
 
 def test_unknown_occupancy_and_encoding_are_not_treated_as_zero():
@@ -270,9 +417,7 @@ def test_more_coverage_alone_is_not_a_global_benefit():
     report = _evaluate(rows)
 
     assert report["status"] == "reject"
-    assert report["failures"] == [
-        "portfolio: no robust global benefit; increased placement alone is insufficient"
-    ]
+    assert report["failures"] == ["portfolio: no robust global benefit; increased placement alone is insufficient"]
 
 
 def test_recommended_levers_are_intersected_with_host_frozen_surfaces():
@@ -298,9 +443,7 @@ def test_recommended_levers_are_intersected_with_host_frozen_surfaces():
     }
 
     report = _evaluate(rows, surfaces=surfaces)
-    movement = next(
-        item for item in report["models"][0]["recommended_levers"] if item["lever"] == "data_movement"
-    )
+    movement = next(item for item in report["models"][0]["recommended_levers"] if item["lever"] == "data_movement")
 
     assert [surface["id"] for surface in movement["authorized_surfaces"]] == ["movement-pass"]
 
