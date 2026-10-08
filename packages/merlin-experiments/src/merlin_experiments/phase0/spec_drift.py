@@ -27,15 +27,22 @@ def from_views(
     taxonomy: Mapping[str, Any] | None,
     prohibited_roles: Iterable[str] = (),
 ) -> dict[str, Any]:
-    facts = D.fact_capabilities(
-        target=target,
-        contract=contract,
-        raw_facts=raw_facts,
-        readout_facets=readout_facets,
-        quantization_candidates=quantization_candidates,
-        taxonomy=taxonomy,
-        prohibited_roles=prohibited_roles,
-    )
+    from merlin.targetgen.rtl.facts import observed_facts
+    from merlin.targetgen.target_registry import observed_contract
+
+    # Capability derivation still contains name-based geometry readers. They
+    # must consume these selected documents, including an explicitly absent
+    # facts document, rather than escaping to a live registry or extractor.
+    with observed_contract(target, dict(contract)), observed_facts(target, dict(raw_facts or {})):
+        facts = D.fact_capabilities(
+            target=target,
+            contract=contract,
+            raw_facts=raw_facts,
+            readout_facets=readout_facets,
+            quantization_candidates=quantization_candidates,
+            taxonomy=taxonomy,
+            prohibited_roles=prohibited_roles,
+        )
     # A selection's spec is already resolved; an authored one is resolved against the same facts, so
     # the comparison always sees the values admission will use.
     resolved, _ = D.resolve_spec(software_spec, facts)
