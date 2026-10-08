@@ -19,6 +19,7 @@ code_refs:
   - src/merlin/perf/agent_guidance.py
   - src/merlin/perf/phase2_edit_contract.py
   - src/merlin/perf/phase2_analytical_provider.py
+  - src/merlin/perf/phase2_feature_calibration.py
   - src/merlin/perf/cost_terms.py
   - src/merlin/perf/placement_census.py
   - src/merlin/targetgen/model_coverage.py
@@ -463,6 +464,22 @@ and storage constraints are proved. A cost model can then distinguish fewer comm
 execution: issuing fewer instructions can still increase stalls or reduce transfer/compute overlap.
 Add these capabilities to the existing plan rather than creating a second optimizer-only schedule IR.
 
+**Dropped: a separate schedule action space.** On 2026-09-23 an old-line change tried to make
+`merlin.sched` an action space a loop could drive:
+
+- a move was data, a primitive's name and its arguments;
+- one `lower()` gate checked legality, then shape, then price, then emission;
+- a refused candidate carried its refusals and no artifact;
+- a kernel could be emitted as the instruction trace its loop nest denotes;
+- a declaration said where a schedule attaches to a tool-generated package.
+
+No production caller ever drove it. Its one consumer, the perf-bench `layer_schedule_table.py`
+script, still assembles the same gate inline on main. For that reason it was not ported when the
+old line was consolidated on 2026-10-07. Two of its ideas are already the rule in this plan: check
+legality before emission, and record which moves applied and which were refused beside the result.
+If a phase-2 loop needs a move vocabulary, it belongs in this plan and in the phase-2 edit contracts,
+with a caller, not in a second schedule IR.
+
 ## Logical bindings and physical implementation identity
 
 Keep source semantics, compiled implementation and calibration context as separate identities.
@@ -495,6 +512,35 @@ ranges across sizes and working sets, including saturation, cache and contention
 Use temporal dependencies and measured overlap to compose durations; neither an unconditional sum
 nor an unconditional maximum describes every implementation. A geometric array count alone cannot
 establish an end-to-end lower bound when wave lengths, numerical algorithms or host work differ.
+
+### Retained runs cannot stand in for controlled pairs
+
+Two audits on 2026-09-08 asked whether evidence already on disk could calibrate the Gemmini compute
+and movement features without new execution. Both were refused, for reasons that apply to any target:
+
+- **Compute.** `phase2_feature_calibration` re-read 17 content-addressed candidate files and found no
+  valid controlled point; the one fitted compute parameter needs two. The closest candidates failed
+  for different reasons:
+  - GSIM runs had exact command-buffer MAC counts and measured cycles. They had no
+    controlled-variable or observation contract, no target or source binding and no warm predecessor.
+    Execute-busy cycles are not issued MACs.
+  - A development warm/measured pair had one point and a refused original receipt.
+  - Two compiler before/after probes recorded `declared_plan_status=refused` and
+    `target_route_verified=false` for their selected arms.
+
+  Spike receipts were excluded, because Spike is not performance truth.
+- **Movement.** Six frozen runs could not populate the controlled-pair contract. They had:
+  - no predeclared controls;
+  - only one run with a distinct static emitted movement count;
+  - no executed-command or physical-interface byte measurement;
+  - no warm-predecessor proof;
+  - no receipt binding source, target, package, emitted artifacts and console.
+
+  Their package checksum receipt was also inconsistent.
+
+A calibration point is planned before it is run. Declare the controlled variable and the observation
+contract, bind the target and the warm predecessor, then execute. Mining a campaign's leftovers for
+points produced nothing admissible, and the preparer rightly said `incomplete` rather than fit one.
 
 The agent loop should:
 
