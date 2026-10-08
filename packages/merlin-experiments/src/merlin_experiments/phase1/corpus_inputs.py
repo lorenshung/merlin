@@ -301,6 +301,36 @@ def stage(run_dir: Path, te, bundle: dict, *, contract: Path, capsules_root: Pat
         if fingerprint(source_root) != source_before:
             raise RuntimeError("public/dev override changed during preparation")
         mode = "public_dev_override"
+    # Full-call goldens must follow the relocated host grading view. They are
+    # independent private copies in the host-only input, never candidate grants.
+    from merlin.targetgen import core_aten_capsules
+
+    originals = {cap["name"]: cap for cap in discover_capsules(sources, labels={"public", "dev"}, contract=contract)}
+    for capsule in discover_capsules(public, labels={"public", "dev"}, contract=contract):
+        if not core_aten_capsules.is_full_call(capsule):
+            continue
+        original = originals[capsule["name"]]
+        core_aten_capsules.load_private(original)
+        source_member = Path(original["__dir__"]).resolve()
+        selected = os.environ.get("MERLIN_CORE_ATEN_PRIVATE_ROOT")
+        answers = (
+            Path(selected) if selected else source_member.parent.parent / "_private" / source_member.parent.name
+        ) / original["name"]
+        member = Path(capsule["__dir__"])
+        frozen_answers = member.parent.parent / "_private" / member.parent.name / capsule["name"]
+        if not frozen_answers.is_relative_to(stage_root):
+            raise RuntimeError("full-call answer copy escapes host grading input")
+        copy_input(answers, frozen_answers, private=True)
+        for copied in [frozen_answers, *frozen_answers.rglob("*")]:
+            copied.chmod(copied.stat().st_mode & ~0o077)
+        core_aten_capsules.load_private(capsule)
+        commitments.append(
+            {
+                "original": str(answers),
+                "staged": str(frozen_answers.relative_to(stage_root)),
+                "role": "full_call_answers",
+            }
+        )
     _resources(discover_capsules(public, labels={"public", "dev"}, contract=contract))
     from ..phase0.coverage_commitment import (
         INPUT_PATH,

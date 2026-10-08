@@ -1168,7 +1168,7 @@ def render_prompt(te, manifest, experiment: str = "full", arm: str = "raw_baseli
         screen_tier=s["screen_tier"],
         screen_sim=s["screen_sim"],
     )
-    return _TEMPLATE.format(
+    body = _TEMPLATE.format(
         target=s["target"],
         scope_label=scope,
         corpus_families=families,
@@ -1187,3 +1187,10 @@ def render_prompt(te, manifest, experiment: str = "full", arm: str = "raw_baseli
         isa_dev_tools=isa_dev_tools,
         enforced_workflow=enforced_workflow,
     )
+
+    instructions = (manifest.contract.get("runner") or {}).get("full_call_instructions")
+    if instructions is not None:
+        if not isinstance(instructions, str) or not instructions.strip():
+            raise ValueError("runner.full_call_instructions must be nonempty text")
+        body += "\n\n" + instructions
+    return body

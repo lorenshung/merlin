@@ -856,6 +856,9 @@ def run(
                 "execution_digest": rich.get("execution_digest"),
             }
         )
+        for key in ("lane", "executed_instructions", "cohort", "scored"):
+            if key in pc:
+                per_capsule[-1][key] = pc[key]
         if rich.get("placement_coverage"):
             per_capsule[-1]["placement_coverage"] = rich["placement_coverage"]
         if rich.get("candidate_native_verification") is not None:
@@ -958,6 +961,11 @@ def run(
                 )
             ),
         }
+    for key in ("device_lane_scored_pass", "device_evidence_count", "host_guard_pass", "host_guard_total"):
+        if key in score:
+            verdict[key] = score[key]
+    if score.get("host_guard_pass", 0) < score.get("host_guard_total", 0):
+        verdict["all_pass"] = False
     # AN INFRASTRUCTURE FAULT IS NOT A ROUND RESULT. `grade` already refuses to call such a run
     # gradeable, but this verdict is what gets ARCHIVED as qa_history/verdict_round_NN.json, fed to the
     # next round as the agent's own failure history by round_brief, and read back by every trajectory

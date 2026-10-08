@@ -387,11 +387,7 @@ def test_selfcheck_rejects_unbound_or_inconsistent_score_gates(rows, requested, 
 def test_selfcheck_rejects_score_claiming_operation_capsule_is_gated_model():
     with pytest.raises(ValueError):
         selfcheck_feedback._gated_without_result_rows(
-            {
-                "per_capsule": [
-                    {"capsule": "unit_case", "kind": "model", "status": "gated", "gate_reason": "deferred"}
-                ]
-            },
+            {"per_capsule": [{"capsule": "unit_case", "kind": "model", "status": "gated", "gate_reason": "deferred"}]},
             requested={"unit_case"},
             models=set(),
             represented=set(),
@@ -412,9 +408,7 @@ def test_selfcheck_rejects_result_missing_from_grader_score():
     "result_rows,gated_rows,requested_size,suite_size",
     [(1, 0, 2, 2), (1, 0, 1, 0)],
 )
-def test_selfcheck_missing_or_unknown_requested_cohort_cannot_pass(
-    result_rows, gated_rows, requested_size, suite_size
-):
+def test_selfcheck_missing_or_unknown_requested_cohort_cannot_pass(result_rows, gated_rows, requested_size, suite_size):
     counts = selfcheck_feedback._selfcheck_counts(
         result_rows=result_rows,
         gated_rows=gated_rows,
@@ -751,3 +745,53 @@ def test_dispatch_keeps_neutral_contract_selection_without_metadata_guess(tmp_pa
     context.descriptor.write_text("target: fixture\n")
     assert dispatch.allowed_sims(context) == ("contract",)
     assert dispatch.cert_sim("L3", context=context) == "contract"
+
+
+@pytest.mark.parametrize("guard_pass", [0, 1])
+def test_qa_preserves_device_score_and_separate_guard_counts(tmp_path, monkeypatch, guard_pass):
+    monkeypatch.setattr(qa, "_loop_target_sim_via", lambda context: ("fixture", ""))
+    monkeypatch.setattr(qa.CR, "qa_checkpoint_adapters", lambda *a: {"L2": object()})
+    rows = [
+        dict(
+            capsule="device",
+            label="public",
+            status="pass",
+            lane="device",
+            executed_instructions=7,
+            cohort="public",
+            scored=True,
+            tiers={"L2": "pass"},
+        ),
+        dict(
+            capsule="guard",
+            label="public",
+            status="pass" if guard_pass else "fail",
+            lane="host",
+            executed_instructions=0,
+            cohort="guard",
+            scored=False,
+            tiers={"L2": "pass"},
+        ),
+    ]
+    monkeypatch.setattr(
+        qa.CG,
+        "grade",
+        lambda *a, **k: dict(
+            n_capsules=1,
+            n_passed=1,
+            per_capsule=rows,
+            device_lane_scored_pass=1,
+            device_evidence_count=1,
+            host_guard_pass=guard_pass,
+            host_guard_total=1,
+        ),
+    )
+    verdict = qa.run("submission", str(tmp_path), tmp_path, {"public"}, False, 1, context=_context(tmp_path))
+    assert verdict["n_passed"] == 1 and verdict["n_capsules"] == 1
+    assert verdict["host_guard_pass"] == guard_pass and verdict["host_guard_total"] == 1
+    assert verdict["device_lane_scored_pass"] == 1
+    assert verdict["all_pass"] == bool(guard_pass)
+    assert [(r["lane"], r["executed_instructions"], r["cohort"]) for r in verdict["per_capsule"]] == [
+        ("device", 7, "public"),
+        ("host", 0, "guard"),
+    ]

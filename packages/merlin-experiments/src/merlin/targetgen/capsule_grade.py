@@ -1410,7 +1410,17 @@ def grade(
     deferred = [r for r in results if r.get("status") == "gated"]
     screened = [r for r in results if r.get("status") == "screened_only"]
     graded = [r for r in results if r.get("status") not in NOT_MEASURED_STATUSES]
+    guards = [r for r in graded if r.get("scored") is False]
+    score["host_guard_total"] = len(guards)
+    score["host_guard_pass"] = sum(r["status"] == "pass" and r.get("lane") == "host" for r in guards)
+    graded = [r for r in graded if r.get("scored") is not False]
     n_pass = sum(1 for r in graded if r["status"] == "pass")
+    score["device_lane_scored_pass"] = sum(
+        r["status"] == "pass" and r.get("lane") == "device" and r.get("executed_instructions", 0) > 0 for r in graded
+    )
+    score["device_evidence_count"] = sum(
+        r.get("lane") == "device" and r.get("executed_instructions", 0) > 0 for r in graded
+    )
     score["n_capsules"] = len(graded)
     score["n_passed"] = n_pass
     score["n_not_graded_ineligible"] = len(ungraded)
@@ -1537,7 +1547,9 @@ def grade(
                 "generalizing over shape; `with_runtime_loop` is a statement about the pair."
             ),
         }
-    score["functional_pass"] = int(n_pass == len(graded) and len(graded) > 0)
+    score["functional_pass"] = int(
+        n_pass == len(graded) and len(graded) > 0 and score["host_guard_pass"] == score["host_guard_total"]
+    )
     # Structure-only smoke bookkeeping (honest, never a numeric pass): a capsule is structurally clean
     # when it did not FAIL a structural tier — status `pass` OR `not_gradeable_no_oracle` (numeric verdict
     # withheld under --no-oracle). `gradeable` says whether this run had a numeric oracle at all.
@@ -1906,6 +1918,9 @@ def grade(
             for k in ("contract_obligations", "tiers_unexercised"):
                 if r.get(k):
                     entry[k] = r[k]
+        for key in ("lane", "executed_instructions", "cohort", "scored"):
+            if key in r:
+                entry[key] = r[key]
         score["per_capsule"].append(entry)
 
     # active-vs-waiting rollup: wall is the suite wall-clock (overlapped under parallelism); the sum of
