@@ -59,6 +59,67 @@ def test_policy_is_strictly_versioned_and_does_not_modify_capsule():
     assert ReadbackPolicy.from_record(ReadbackPolicy(FULL_VALUES_BIN).record()) == ReadbackPolicy(FULL_VALUES_BIN)
 
 
+def test_memory_readback_is_explicit_and_never_admits_serial_values():
+    policy = ReadbackPolicy("coherent_dump_v1")
+    assert ReadbackPolicy.from_record(policy.record()) == policy
+    with pytest.raises(ValueError, match="memory admission"):
+        require_full_value_roster(_cb(), "DONE\n", {"out": [[1, 2]]}, policy=policy)
+
+
+def test_memory_build_receipt_has_no_serial_codec_and_rechecks_bytes(monkeypatch, tmp_path):
+    def render(_cb, *, inputs, readback_policy):
+        assert readback_policy == ReadbackPolicy("coherent_dump_v1")
+        return "int main(void) { return 0; }\n"
+
+    service, _source = _service(tmp_path, render)
+    build = tmp_path / "build"
+    build.mkdir()
+    obj = build / "kernel.o"
+    obj.write_bytes(b"kernel")
+    monkeypatch.setattr(
+        "merlin.targetgen.runtime_build.derived_link_script", lambda *_args, **_kwargs: service.recipe.link_script
+    )
+
+    def fake_compile(command, **_kwargs):
+        Path(command[command.index("-o") + 1]).write_bytes(b"elf" if "-T" in command else b"harness-object")
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(compiler.subprocess, "run", fake_compile)
+    policy = ReadbackPolicy("coherent_dump_v1")
+    cb = _cb()
+    saved = copy.deepcopy(cb)
+    elf = compiler.link_elf(
+        cb, obj, build, target="fixture", inputs={"arg": [1]}, _build_service=service, readback_policy=policy
+    )
+    recipe, source_pins = selected_build_inputs("fixture", service.recipe.with_effective_abi(), service, policy=policy)
+
+    def verified():
+        return require_build_receipt(
+            build / BUILD_RECEIPT,
+            policy=policy,
+            cb=cb,
+            target="fixture",
+            recipe_record=recipe,
+            source_pins=source_pins,
+            object_path=obj,
+            harness_path=build / "harness.c",
+            elf_path=elf,
+        )
+
+    receipt = verified()
+    assert receipt["schema"] == "merlin_readback_build_v2"
+    assert receipt["staged_codec_sha256"] is None
+    assert recipe["readback_transport"] == policy.record()
+    assert not (build / "out_b64.h").exists() and not (build / "out_bin.h").exists()
+    assert cb == saved
+    for path in (obj, elf, build / "harness.c"):
+        original = path.read_bytes()
+        path.write_bytes(original + b"changed")
+        with pytest.raises(ValueError, match="receipt"):
+            verified()
+        path.write_bytes(original)
+
+
 def test_binary_receipt_binds_both_staged_headers_and_declared_values(monkeypatch, tmp_path):
     from merlin.runtime.out_bin import parse_binary_console
 
@@ -309,6 +370,128 @@ def test_binary_oracle_preserves_raw_console_and_parses_text_counters(monkeypatc
     assert (tmp_path / "oracle_console.bin").read_bytes() == console
 
 
+@pytest.mark.parametrize(
+    "fault",
+    [
+        None,
+        "no_reader",
+        "no_engine",
+        "changed_engine",
+        "changed_engine_during_decode",
+        "extra_kw",
+        "mixed_serial",
+        "mixed_digest",
+        "incomplete",
+        "changed_build",
+        "changed_preflight",
+        "partial_values",
+        "unproved",
+    ],
+)
+def test_memory_oracle_requires_prelaunch_admission_completion_and_postrun_identity(monkeypatch, tmp_path, fault):
+    from merlin.runtime.backends import base as backends
+    from merlin.targetgen.contract import readback_policy as readback
+
+    elf = tmp_path / "model.elf"
+    elf.write_bytes(b"ELF")
+    seen = []
+    console = "METRIC cycles 7\nDONE\n"
+    if fault == "mixed_serial":
+        console = "OUT out 1 2 1 2\n" + console
+    elif fault == "mixed_digest":
+        console = "OUTSUM out 1 2 0000000000000000\n" + console
+    elif fault == "incomplete":
+        console = "METRIC cycles 7\n"
+
+    def run_elf(_elf, **kwargs):
+        seen.append(("run", kwargs))
+        return console
+
+    def verify(*_args, **_kwargs):
+        seen.append(("verify", None))
+        if fault == "changed_build" and any(step == "run" for step, _ in seen):
+            raise ValueError("readback build receipt changed")
+        return {"selected": True, "elf_sha256": file_digest(elf)}
+
+    def prepare(**kwargs):
+        seen.append(("prepare", kwargs))
+        if fault == "changed_preflight":
+            elf.write_bytes(b"different ELF")
+        return {
+            "memory_readback": {"schema": "fixture", "elf_sha256": file_digest(elf)},
+            **({"timeout": 9999} if fault == "extra_kw" else {}),
+        }
+
+    def decode(text):
+        assert text == console
+        seen.append(("decode", None))
+        return {"out": [[1]] if fault == "partial_values" else [[1, 2]]}, {
+            "schema": "fixture_admission",
+            "status": "unproved" if fault == "unproved" else "complete",
+        }
+
+    def revalidate_engine():
+        seen.append(("engine", None))
+        changed = (fault == "changed_engine" and any(step == "run" for step, _ in seen)) or (
+            fault == "changed_engine_during_decode" and any(step == "decode" for step, _ in seen)
+        )
+        return {"engine_sha256": "changed" if changed else "selected"}
+
+    backend = SimpleNamespace(run_elf=run_elf, parse_output=parse_console, ORACLE={"spike": {"kind": "spike"}})
+    monkeypatch.setattr(backends, "get_backend", lambda _target: backend)
+    monkeypatch.setattr(
+        backends, "harness_build_recipe", lambda _target: SimpleNamespace(with_effective_abi=lambda: "recipe")
+    )
+    monkeypatch.setattr(compiler, "compile_lowered_to_elf", lambda *_args, **_kwargs: elf)
+    monkeypatch.setattr(compiler, "simulator_provenance", lambda *_args: None)
+    monkeypatch.setattr(readback, "selected_build_inputs", lambda *_args, **_kwargs: ({}, []))
+    monkeypatch.setattr(readback, "require_build_receipt", verify)
+    kwargs = {"memory_readback": SimpleNamespace(prepare=prepare, decode=decode)} if fault != "no_reader" else {}
+    if fault != "no_engine":
+        kwargs["oracle_revalidate"] = revalidate_engine
+    if fault is not None:
+        with pytest.raises((ValueError, RuntimeError)):
+            compiler.run_on_oracle(
+                _cb(),
+                "llvm",
+                simulator="spike",
+                target="fixture",
+                workdir=tmp_path,
+                readback_policy=ReadbackPolicy("coherent_dump_v1"),
+                **kwargs,
+            )
+        if fault in {"no_reader", "no_engine", "extra_kw", "changed_preflight"}:
+            assert not any(step == "run" for step, _ in seen)
+        if fault in {"mixed_serial", "mixed_digest", "incomplete", "changed_engine"}:
+            assert not any(step == "decode" for step, _ in seen)
+        return
+    result = compiler.run_on_oracle(
+        _cb(),
+        "llvm",
+        simulator="spike",
+        target="fixture",
+        workdir=tmp_path,
+        readback_policy=ReadbackPolicy("coherent_dump_v1"),
+        **kwargs,
+    )
+    assert result["outputs"] == {"out": [[1, 2]]}
+    assert result["readback_memory"]["status"] == "complete"
+    assert result["raw_metrics"] == {"cycles": 7}
+    assert result["oracle"]["memory_engine"] == {"engine_sha256": "selected"}
+    assert [step for step, _ in seen] == [
+        "verify",
+        "prepare",
+        "engine",
+        "run",
+        "engine",
+        "verify",
+        "decode",
+        "verify",
+        "engine",
+    ]
+    assert (tmp_path / "oracle_console.log").read_text() == console
+
+
 def test_binary_counter_projection_excludes_validated_payload_markers():
     from merlin.perf.hw_counters import parse_counter_output
     from merlin.runtime.out_bin import binary_console_diagnostics, parse_binary_console
@@ -442,7 +625,7 @@ def test_native_postrun_build_mutation_cannot_retain_a_numerical_pass(monkeypatc
         return elf
 
     monkeypatch.setattr(compiler, "compile_lowered_to_elf", compile_selected)
-    monkeypatch.setattr(readback, "selected_build_inputs", lambda *_args: ({"recipe": "selected"}, []))
+    monkeypatch.setattr(readback, "selected_build_inputs", lambda *_args, **_kwargs: ({"recipe": "selected"}, []))
     checks = []
 
     def receipt_check(_path, **kwargs):

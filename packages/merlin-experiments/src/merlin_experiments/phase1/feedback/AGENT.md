@@ -20,6 +20,17 @@ provenance without private paths. It neither selects a validation subset nor cer
 `caller_layout.py` gives an answer-free, layout-only projection from an explicitly
 selected harness provider for a submission-owned command buffer. It never grades or
 imports candidate code; absent provider inspection support refuses.
+`native_output_readback.py` privately reuses that projection to bind output strides,
+physical words and writable ELF symbols before decoding an exact coherent terminal
+dump or a single-output, alias-bounded Spike HTIF signature. The separate fixed
+ET_EXEC and signature-bound preflight APIs must run before a native launch; both
+decoders independently recheck their preflight records. It does not select a
+transport, run a simulator, check normal exit/DONE, compare a golden or grade;
+the eventual consumer must bind its run/receipt and keep full-value checks mandatory.
+`native_memory_readback.py` supplies the one-use trusted hook for an explicitly
+selected backend transport. It stages a fresh command-buffer copy and run-owned
+artifact paths, performs all ELF/alias preflight before launch, then rechecks
+source, request and output bytes; core retains exit/DONE, receipt and grade authority.
 
 `private_prebuilt_receipt.py` admits only diagnostic inspection of an existing
 whole-model build. The shared post-build verifier still checks linked bytes and

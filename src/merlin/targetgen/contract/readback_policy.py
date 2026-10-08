@@ -18,6 +18,8 @@ from typing import Any
 POLICY_SCHEMA = "merlin_readback_policy_v1"
 FULL_VALUES_B64 = "out_b64_v1"
 FULL_VALUES_BIN = "out_bin_v1"
+COHERENT_DUMP_V1 = "coherent_dump_v1"
+READBACK_TRANSPORTS = (FULL_VALUES_B64, FULL_VALUES_BIN, COHERENT_DUMP_V1)
 BUILD_RECEIPT = "readback_build.json"
 
 
@@ -32,7 +34,7 @@ class ReadbackPolicy:
         if (
             type(self) is not ReadbackPolicy
             or self.schema != POLICY_SCHEMA
-            or self.transport not in (FULL_VALUES_B64, FULL_VALUES_BIN)
+            or self.transport not in READBACK_TRANSPORTS
         ):
             raise ValueError("unsupported invocation-only readback policy")
 
@@ -63,7 +65,14 @@ def canonical_sha256(value: Any) -> str:
 
 def _codec_names(policy: ReadbackPolicy | None) -> tuple[str, ...]:
     policy = selected(policy)
+    if policy is not None and policy.transport == COHERENT_DUMP_V1:
+        return ()
     return ("out_b64.h", "out_bin.h") if policy is not None and policy.transport == FULL_VALUES_BIN else ("out_b64.h",)
+
+
+def _staged_codec_sha256(harness_path: Path, policy: ReadbackPolicy) -> str | None:
+    names = _codec_names(policy)
+    return file_sha256(harness_path.parent / names[-1]) if names else None
 
 
 def selected_build_inputs(
@@ -88,7 +97,9 @@ def selected_build_inputs(
         raise ValueError("full-value build recipe has no exact selected input token")
     # The opt-in header is staged next to harness.c. Keep default recipe flags
     # byte-identical, while including these exact bytes in the opt-in identity.
-    if len(codecs) == 1:
+    if not codecs:
+        token = {**token, "readback_transport": policy.record()}
+    elif len(codecs) == 1:
         # Preserve the existing B64 build token and receipt byte-for-byte.
         token = {**token, "readback_codec": {"path": str(codecs[0]), "sha256": file_sha256(codecs[0])}}
     else:
@@ -111,7 +122,7 @@ def selected_build_inputs(
     return token, [{"path": path, "sha256": digest} for path, digest in sorted(pins)]
 
 
-def stage_codec_header(workdir: Path, *, policy: ReadbackPolicy | None = None) -> Path:
+def stage_codec_header(workdir: Path, *, policy: ReadbackPolicy | None = None) -> Path | None:
     """Stage only the selected generic codec closure beside the C harness."""
 
     from merlin.common.paths import runtime_dir
@@ -127,7 +138,6 @@ def stage_codec_header(workdir: Path, *, policy: ReadbackPolicy | None = None) -
         if file_sha256(source) != file_sha256(target):
             raise ValueError("readback codec bytes changed while staging")
         result = target
-    assert result is not None
     return result
 
 
@@ -145,7 +155,7 @@ def build_receipt(
     """Bind selected bytes after linking; this is not full toolchain closure."""
 
     body: dict[str, Any] = {
-        "schema": "merlin_readback_build_v1",
+        "schema": "merlin_readback_build_v2" if policy.transport == COHERENT_DUMP_V1 else "merlin_readback_build_v1",
         "status": "completed",
         "target": target,
         "readback_policy": policy.record(),
@@ -154,7 +164,7 @@ def build_receipt(
         "source_pins": source_pins,
         "kernel_object_sha256": file_sha256(object_path),
         "harness_sha256": file_sha256(harness_path),
-        "staged_codec_sha256": file_sha256(harness_path.parent / _codec_names(policy)[-1]),
+        "staged_codec_sha256": _staged_codec_sha256(harness_path, policy),
         "elf_sha256": file_sha256(elf_path),
         "scope": "selected build inputs and produced bytes; not complete toolchain closure or numerical correctness",
     }
@@ -184,7 +194,8 @@ def require_build_receipt(
     identity = data.get("build_identity_sha256")
     body = {key: value for key, value in data.items() if key != "build_identity_sha256"}
     if (
-        body.get("schema") != "merlin_readback_build_v1"
+        body.get("schema")
+        != ("merlin_readback_build_v2" if policy.transport == COHERENT_DUMP_V1 else "merlin_readback_build_v1")
         or body.get("status") != "completed"
         or body.get("target") != target
         or body.get("readback_policy") != policy.record()
@@ -193,7 +204,7 @@ def require_build_receipt(
         or body.get("source_pins") != source_pins
         or body.get("kernel_object_sha256") != file_sha256(object_path)
         or body.get("harness_sha256") != file_sha256(harness_path)
-        or body.get("staged_codec_sha256") != file_sha256(harness_path.parent / _codec_names(policy)[-1])
+        or body.get("staged_codec_sha256") != _staged_codec_sha256(harness_path, policy)
         or body.get("elf_sha256") != file_sha256(elf_path)
         or identity != canonical_sha256(body)
     ):
@@ -201,7 +212,7 @@ def require_build_receipt(
     if policy.transport == FULL_VALUES_B64:
         if body.get("staged_codec_sha256") != recipe_record.get("readback_codec", {}).get("sha256"):
             raise ValueError("readback build receipt does not bind selected codec bytes")
-    else:
+    elif policy.transport == FULL_VALUES_BIN:
         codecs = recipe_record.get("readback_codecs")
         if (
             type(codecs) is not list
@@ -211,7 +222,87 @@ def require_build_receipt(
             != [item.get("sha256") for item in codecs if type(item) is dict]
         ):
             raise ValueError("readback build receipt does not bind selected codec bytes")
+    elif (
+        recipe_record.get("readback_transport") != policy.record()
+        or body.get("staged_codec_sha256") is not None
+        or "staged_range_sha256" in body
+        or "readback_codec" in recipe_record
+        or "readback_codecs" in recipe_record
+    ):
+        raise ValueError("readback build receipt does not bind external memory transport")
     return data
+
+
+def require_current_build_receipt(
+    *,
+    cb: Mapping[str, Any],
+    target: str,
+    workdir: Path,
+    elf_path: Path,
+    policy: ReadbackPolicy,
+    build_service: Any = None,
+) -> dict[str, Any]:
+    """Independently reselect the build inputs and recheck the completed image."""
+    if build_service is None:
+        from merlin.runtime.backends import base as backends
+
+        recipe = backends.harness_build_recipe(target)
+    else:
+        recipe = build_service.recipe
+    recipe_record, source_pins = selected_build_inputs(
+        target,
+        recipe.with_effective_abi(),
+        build_service,
+        policy=policy,
+    )
+    return require_build_receipt(
+        workdir / BUILD_RECEIPT,
+        policy=policy,
+        cb=cb,
+        target=target,
+        recipe_record=recipe_record,
+        source_pins=source_pins,
+        object_path=workdir / "kernel.o",
+        harness_path=workdir / "harness.c",
+        elf_path=elf_path,
+    )
+
+
+def require_memory_completion(console: str, serial_outputs: Mapping[str, Any]) -> None:
+    """Require completion without any serial substitute for admitted memory."""
+    if type(console) is not str:
+        raise ValueError("memory readback requires a text-only completion console")
+    tokens = [parts[0] for line in console.splitlines() if (parts := line.split())]
+    if console.splitlines().count("DONE") != 1:
+        raise ValueError("memory readback requires exactly one complete DONE marker")
+    if serial_outputs or any(token in {"OUT", "OUTSUM"} or token.startswith("OUT_") for token in tokens):
+        raise ValueError("memory readback cannot mix serial output values with admitted memory")
+
+
+def require_memory_value_roster(cb: Mapping[str, Any], outputs: Mapping[str, Any]) -> None:
+    """Check complete logical geometry after the independent memory decoder."""
+    abi = cb.get("kernel_abi") or {}
+    names = abi.get("outputs")
+    tensors = cb.get("tensors") or {}
+    if (
+        abi.get("kind") != "whole_program"
+        or type(names) is not list
+        or not names
+        or len(names) != len(set(names))
+        or set(outputs) != set(names)
+    ):
+        raise ValueError("memory readback omitted or duplicated a declared output")
+    for name in names:
+        shape = tensors.get(name, {}).get("shape")
+        if type(shape) is not list or not shape or any(type(dim) is not int or dim <= 0 for dim in shape):
+            raise ValueError("memory output requires a positive static declared shape")
+        rows = outputs[name]
+        if (
+            type(rows) is not list
+            or len(rows) != prod(shape[:-1])
+            or any(type(row) is not list or len(row) != shape[-1] for row in rows)
+        ):
+            raise ValueError("memory readback output size differs from declared tensor")
 
 
 def require_full_value_roster(
@@ -222,6 +313,10 @@ def require_full_value_roster(
     policy: ReadbackPolicy | None = None,
 ) -> None:
     """Require one complete packed value frame for every declared output."""
+
+    policy = selected(policy)
+    if policy is not None and policy.transport == COHERENT_DUMP_V1:
+        raise ValueError("coherent output requires independent memory admission, not serial output values")
 
     abi = cb.get("kernel_abi") or {}
     names = abi.get("outputs")

@@ -534,7 +534,7 @@ def simulator_adapter(sim: str, target: str, selection: dict | None = None, *, r
     keeps, and then discarded; a cert that ran on the slow engine because the fast one was missing looked
     exactly like one that ran on the slow engine because it was the only one."""
 
-    from merlin.targetgen.contract.readback_policy import selected
+    from merlin.targetgen.contract.readback_policy import COHERENT_DUMP_V1, selected
 
     readback_policy = selected(readback_policy)
 
@@ -551,6 +551,25 @@ def simulator_adapter(sim: str, target: str, selection: dict | None = None, *, r
             if not exact:
                 raise OracleUnavailable(reason)
         policy_kwargs = {"readback_policy": readback_policy} if readback_policy is not None else {}
+        if readback_policy is not None and readback_policy.transport == COHERENT_DUMP_V1:
+            from merlin_experiments.phase1.feedback.native_memory_readback import (
+                NativeMemoryReadback,
+                select_memory_engine,
+            )
+
+            from merlin.targetgen.rtl.facts import rtl_facts_path
+
+            facts_path = rtl_facts_path(target)
+            citation, revalidate = select_memory_engine(
+                target=target, simulator=sim, backend=backend, facts_path=facts_path
+            )
+
+            def revalidate_memory_engine():
+                revalidate()
+                return citation
+
+            policy_kwargs["memory_readback"] = NativeMemoryReadback(facts_path=facts_path)
+            policy_kwargs["oracle_revalidate"] = revalidate_memory_engine
         res = oot_compile.run_on_oracle(
             cb, llvm_text, simulator=sim, target=target, workdir=workdir, timeout=timeout, **policy_kwargs
         )

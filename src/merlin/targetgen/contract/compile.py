@@ -897,6 +897,8 @@ def run_on_oracle(
     timeout: int = 600,
     inputs: dict | None = None,
     readback_policy=None,
+    memory_readback=None,
+    oracle_revalidate=None,
 ) -> dict[str, Any]:
     """Compile the package's lowered MLIR + run on ``simulator``; return outputs/metrics/console.
 
@@ -910,9 +912,22 @@ def run_on_oracle(
     from merlin.runtime.backends import base as _backends
 
     backend = _backends.get_backend(target)
-    from .readback_policy import FULL_VALUES_BIN, selected
+    from .readback_policy import COHERENT_DUMP_V1, FULL_VALUES_BIN, selected
 
     readback_policy = selected(readback_policy)
+    memory = readback_policy is not None and readback_policy.transport == COHERENT_DUMP_V1
+    # A trusted evaluator supplies the admitted memory reader. Core never
+    # discovers an optional grader, reads a candidate-selected transport, or
+    # substitutes missing serial frames with an empty output roster.
+    if memory:
+        if not callable(getattr(memory_readback, "prepare", None)) or not callable(
+            getattr(memory_readback, "decode", None)
+        ):
+            raise ValueError("memory output requires an explicit trusted admission reader")
+        if not callable(oracle_revalidate):
+            raise ValueError("memory output requires an explicit selected-engine revalidator")
+    elif memory_readback is not None or oracle_revalidate is not None:
+        raise ValueError("memory output reader requires the explicit memory readback policy")
     work = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="oot_run_"))
     binary = readback_policy is not None and readback_policy.transport == FULL_VALUES_BIN
     console_path = work / ("oracle_console.bin" if binary else "oracle_console.log")
@@ -926,25 +941,43 @@ def run_on_oracle(
     elf = compile_lowered_to_elf(cb, lowered_mlir_text, work, target=target, inputs=inputs, **policy_kwargs)
     readback_build = None
     if readback_policy is not None:
-        from .readback_policy import BUILD_RECEIPT, require_build_receipt, selected_build_inputs
+        from .readback_policy import require_current_build_receipt
 
-        recipe = _backends.harness_build_recipe(target).with_effective_abi()
-        recipe_record, source_pins = selected_build_inputs(target, recipe, policy=readback_policy)
-        readback_build = require_build_receipt(
-            work / BUILD_RECEIPT,
-            policy=readback_policy,
+        readback_build = require_current_build_receipt(
             cb=cb,
             target=target,
-            recipe_record=recipe_record,
-            source_pins=source_pins,
-            object_path=work / "kernel.o",
-            harness_path=work / "harness.c",
+            workdir=work,
             elf_path=elf,
+            policy=readback_policy,
         )
     _t1 = time.perf_counter()
+    memory_kwargs = {}
+    memory_engine = None
+    if memory:
+        memory_kwargs = memory_readback.prepare(
+            cb=cb,
+            target=target,
+            elf_path=Path(elf),
+            workdir=work,
+            simulator=simulator,
+            backend=backend,
+        )
+        if (
+            type(memory_kwargs) is not dict
+            or set(memory_kwargs) != {"memory_readback"}
+            or type(memory_kwargs["memory_readback"]) is not dict
+        ):
+            raise ValueError("memory admission must provide only the closed backend readback request")
+        if memory_kwargs["memory_readback"].get("elf_sha256") != readback_build.get("elf_sha256"):
+            raise ValueError("memory admission differs from the completed build ELF identity")
+        from copy import deepcopy
+
+        memory_engine = deepcopy(oracle_revalidate())
+        if type(memory_engine) is not dict or not memory_engine:
+            raise ValueError("memory output requires a selected-engine citation")
     try:
         run_kwargs = {"capture_bytes": True} if binary else {}
-        console = backend.run_elf(elf, simulator=simulator, timeout=timeout, **run_kwargs)
+        console = backend.run_elf(elf, simulator=simulator, timeout=timeout, **run_kwargs, **memory_kwargs)
     except (TimeoutExpired, CalledProcessError) as exc:
         # Standard process failures can carry partial output even with
         # text=True. Preserve bytes verbatim; they are diagnostic evidence,
@@ -959,29 +992,48 @@ def run_on_oracle(
     # boundary, not only on the successful grading path. This is diagnostic
     # evidence, never a completion or numerical verdict.
     console_path.write_bytes(console if type(console) is bytes else console.encode("utf-8"))
+    if memory and oracle_revalidate() != memory_engine:
+        raise ValueError("memory oracle engine changed before output decoding")
+    if memory and readback_build != require_current_build_receipt(
+        cb=cb,
+        target=target,
+        workdir=work,
+        elf_path=elf,
+        policy=readback_policy,
+    ):
+        raise ValueError("memory readback build changed before output decoding")
     outputs, raw = backend.parse_output(console)
+    memory_evidence = None
+    if memory:
+        from .readback_policy import require_memory_completion, require_memory_value_roster
+
+        require_memory_completion(console, outputs)
+        outputs, memory_evidence = memory_readback.decode(console)
+        if (
+            type(outputs) is not dict
+            or type(memory_evidence) is not dict
+            or memory_evidence.get("status") != "complete"
+        ):
+            raise ValueError("memory output reader returned no completed full-value admission")
+        require_memory_value_roster(cb, outputs)
     if readback_policy is not None:
         from .readback_policy import (
-            BUILD_RECEIPT,
-            require_build_receipt,
+            require_current_build_receipt,
             require_full_value_roster,
-            selected_build_inputs,
         )
 
-        require_full_value_roster(cb, console, outputs, policy=readback_policy)
-        recipe_record, source_pins = selected_build_inputs(target, recipe, policy=readback_policy)
-        if readback_build != require_build_receipt(
-            work / BUILD_RECEIPT,
-            policy=readback_policy,
+        if not memory:
+            require_full_value_roster(cb, console, outputs, policy=readback_policy)
+        if readback_build != require_current_build_receipt(
             cb=cb,
             target=target,
-            recipe_record=recipe_record,
-            source_pins=source_pins,
-            object_path=work / "kernel.o",
-            harness_path=work / "harness.c",
+            workdir=work,
             elf_path=elf,
+            policy=readback_policy,
         ):
             raise ValueError("full-value build identity changed during oracle execution")
+    if memory and oracle_revalidate() != memory_engine:
+        raise ValueError("memory oracle engine changed during output decoding")
     # DECODE A FLOAT RESULT THAT CAME BACK AS ITS CONTAINER WORD. `parse_output` yields whatever the
     # console carried; a target whose harness has integer-only formatting prints a float destination
     # buffer's stored PATTERN, so an f32 result arrives as its 32-bit word and a bf16 result as its
@@ -1003,6 +1055,8 @@ def run_on_oracle(
     _prov = simulator_provenance(backend, simulator)
     if _prov:
         _oracle["provenance"] = _prov
+    if memory_engine is not None:
+        _oracle["memory_engine"] = memory_engine
     result = {
         "outputs": outputs,
         "raw_metrics": raw,
@@ -1014,6 +1068,8 @@ def run_on_oracle(
     }
     if readback_build is not None:
         result["readback_build"] = readback_build
+    if memory_evidence is not None:
+        result["readback_memory"] = memory_evidence
     # Counter markers are a target-independent wire protocol.  The event names/codes remain the
     # target's own: this boundary merely preserves readings the runner already paid to collect.  If
     # they exactly cover a structurally derived joint-occupancy block, compute eta; otherwise retain

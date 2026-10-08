@@ -14,6 +14,8 @@ from functools import lru_cache
 from importlib.resources import files
 from pathlib import Path
 
+from merlin.targetgen.contract.readback_policy import READBACK_TRANSPORTS
+
 from .spec import SpecError
 
 PHASE0_MODULE = "merlin_experiments.phase0"
@@ -423,7 +425,7 @@ ADAPTERS = {
             "grade_interval": _POSITIVE,
             "qa_timeout": _POSITIVE,
             "public_object_build_budget_s": _POSITIVE,
-            "readback_policy": Option(choices=("out_b64_v1", "out_bin_v1")),
+            "readback_policy": Option(choices=READBACK_TRANSPORTS),
             "sim_max_jobs": _POSITIVE,
             "model_budget_s": _POSITIVE,
             "plateau_rounds": _POSITIVE,

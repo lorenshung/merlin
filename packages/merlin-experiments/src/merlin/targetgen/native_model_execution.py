@@ -1147,12 +1147,17 @@ def execute_candidate_model(
     execution still need their independent mandatory gates.
     """
     from merlin.targetgen.bundle_harness import emitted_entry_arity, is_executable_emission
-    from merlin.targetgen.contract.readback_policy import FULL_VALUES_BIN, selected
+    from merlin.targetgen.contract.readback_policy import (
+        COHERENT_DUMP_V1,
+        FULL_VALUES_BIN,
+        require_current_build_receipt,
+        selected,
+    )
     from merlin.targetgen.golden_store import load_golden
 
     readback_policy = selected(readback_policy)
     binary_console = readback_policy is not None and readback_policy.transport == FULL_VALUES_BIN
-    readback_input_kwargs = {"policy": readback_policy} if binary_console else {}
+    memory_console = readback_policy is not None and readback_policy.transport == COHERENT_DUMP_V1
 
     source = Path(capsule_dir)
     capture = Path(capture_bundle)
@@ -1267,28 +1272,13 @@ def execute_candidate_model(
             **policy_kwargs,
         )
         if readback_policy is not None:
-            from merlin.targetgen.contract.readback_policy import (
-                BUILD_RECEIPT,
-                require_build_receipt,
-                selected_build_inputs,
-            )
-
-            recipe_record, source_pins = selected_build_inputs(
-                target,
-                service.recipe.with_effective_abi(),
-                service,
-                **readback_input_kwargs,
-            )
-            record["readback_build"] = require_build_receipt(
-                output / "build" / BUILD_RECEIPT,
-                policy=readback_policy,
+            record["readback_build"] = require_current_build_receipt(
                 cb=cb,
                 target=target,
-                recipe_record=recipe_record,
-                source_pins=source_pins,
-                object_path=output / "build" / "kernel.o",
-                harness_path=output / "build" / "harness.c",
+                workdir=output / "build",
                 elf_path=elf,
+                policy=readback_policy,
+                build_service=service,
             )
         record["elf"] = _digest(Path(elf))
         revalidate_source()
@@ -1311,6 +1301,37 @@ def execute_candidate_model(
         if not selected.get("available") or selected.get("engine") != simulator:
             raise NativeModelExecutionError("requested simulator is not the selected RTL oracle")
         facts = selected_firrtl(rtl_facts, target=target, config=board_config)
+        if memory_console:
+            from merlin_experiments.phase1.feedback.native_memory_readback import execute_memory_elf
+
+            def memory_run(selected_backend, engine_name, revalidate_engine):
+                def after_run():
+                    revalidate_engine()
+                    revalidate_source()
+                    current = require_current_build_receipt(
+                        cb=cb,
+                        target=target,
+                        workdir=output / "build",
+                        elf_path=elf,
+                        policy=readback_policy,
+                        build_service=service,
+                    )
+                    if current != record["readback_build"]:
+                        raise NativeModelExecutionError("memory readback build changed before output decoding")
+
+                return execute_memory_elf(
+                    cb=cb,
+                    target=target,
+                    elf_path=Path(elf),
+                    workdir=output / f"memory-{engine_name}",
+                    facts_path=Path(facts["path"]),
+                    simulator=engine_name,
+                    backend=selected_backend,
+                    timeout=timeout,
+                    expected_elf_sha256=record["elf"]["sha256"],
+                    post_run_revalidate=after_run,
+                )
+
         # The functional tier consumes the SAME already-linked candidate ELF.
         # It is independently optional as a diagnostic run, but a mandatory L2
         # remains unavailable in the grade if its engine cannot be byte-bound.
@@ -1318,42 +1339,39 @@ def execute_candidate_model(
             functional_backend, functional_citation, revalidate_functional = _functional_engine(target)
             revalidate_functional()
             capture_kwargs = {"capture_bytes": True} if binary_console else {}
-            functional_console = functional_backend.run_elf(
-                elf,
-                simulator="spike",
-                timeout=timeout,
-                **capture_kwargs,
-            )
+            if memory_console:
+                functional_console, functional_observed, functional_metrics, memory_record = memory_run(
+                    functional_backend, "spike", revalidate_functional
+                )
+                record["readback_memory_l2"] = memory_record
+            else:
+                functional_console = functional_backend.run_elf(
+                    elf,
+                    simulator="spike",
+                    timeout=timeout,
+                    **capture_kwargs,
+                )
             revalidate_functional()
             revalidate_source()
             if _digest(Path(elf)) != record["elf"]:
                 raise NativeModelExecutionError("candidate ELF changed during L2 functional execution")
             if readback_policy is not None:
-                recipe_now, sources_now = selected_build_inputs(
-                    target,
-                    service.recipe.with_effective_abi(),
-                    service,
-                    **readback_input_kwargs,
-                )
-                if (recipe_now, sources_now) != (recipe_record, source_pins):
-                    raise NativeModelExecutionError("full-value build inputs changed during L2 execution")
-                require_build_receipt(
-                    output / "build" / BUILD_RECEIPT,
-                    policy=readback_policy,
+                if record["readback_build"] != require_current_build_receipt(
                     cb=cb,
                     target=target,
-                    recipe_record=recipe_record,
-                    source_pins=source_pins,
-                    object_path=output / "build" / "kernel.o",
-                    harness_path=output / "build" / "harness.c",
+                    workdir=output / "build",
                     elf_path=elf,
-                )
+                    policy=readback_policy,
+                    build_service=service,
+                ):
+                    raise NativeModelExecutionError("full-value build inputs changed during L2 execution")
             functional_path = output / ("console_l2.bin" if binary_console else "console_l2.txt")
             functional_path.write_bytes(
                 functional_console if type(functional_console) is bytes else functional_console.encode("utf-8")
             )
-            functional_observed, functional_metrics = functional_backend.parse_output(functional_console)
-            if readback_policy is not None:
+            if not memory_console:
+                functional_observed, functional_metrics = functional_backend.parse_output(functional_console)
+            if readback_policy is not None and not memory_console:
                 from merlin.targetgen.contract.readback_policy import require_full_value_roster
 
                 require_full_value_roster(cb, functional_console, functional_observed, policy=readback_policy)
@@ -1389,10 +1407,13 @@ def execute_candidate_model(
             else None
         )
         if command is not None:
-            record["native_command"] = command.to_evidence()
+            record["native_base_command" if memory_console else "native_command"] = command.to_evidence()
         revalidate()
         capture_kwargs = {"capture_bytes": True} if binary_console else {}
-        if simulator == "gsim":
+        if memory_console:
+            console, observed, metrics, memory_record = memory_run(backend, simulator, revalidate)
+            record["readback_memory_l3"] = memory_record
+        elif simulator == "gsim":
             from merlin.targetgen.rtl_engine_policy import gsim_runtime_slot
 
             with gsim_runtime_slot(wait_timeout_s=timeout):
@@ -1406,29 +1427,20 @@ def execute_candidate_model(
         if _digest(Path(elf))["sha256"] != record["elf"]["sha256"]:
             raise NativeModelExecutionError("candidate ELF bytes changed during execution")
         if readback_policy is not None:
-            recipe_now, sources_now = selected_build_inputs(
-                target,
-                service.recipe.with_effective_abi(),
-                service,
-                **readback_input_kwargs,
-            )
-            if (recipe_now, sources_now) != (recipe_record, source_pins):
-                raise NativeModelExecutionError("full-value build inputs changed during L3 execution")
-            require_build_receipt(
-                output / "build" / BUILD_RECEIPT,
-                policy=readback_policy,
+            if record["readback_build"] != require_current_build_receipt(
                 cb=cb,
                 target=target,
-                recipe_record=recipe_record,
-                source_pins=source_pins,
-                object_path=output / "build" / "kernel.o",
-                harness_path=output / "build" / "harness.c",
+                workdir=output / "build",
                 elf_path=elf,
-            )
+                policy=readback_policy,
+                build_service=service,
+            ):
+                raise NativeModelExecutionError("full-value build inputs changed during L3 execution")
         console_path = output / ("console.bin" if binary_console else "console.txt")
         console_path.write_bytes(console if type(console) is bytes else console.encode("utf-8"))
-        observed, metrics = backend.parse_output(console)
-        if readback_policy is not None:
+        if not memory_console:
+            observed, metrics = backend.parse_output(console)
+        if readback_policy is not None and not memory_console:
             from merlin.targetgen.contract.readback_policy import require_full_value_roster
 
             require_full_value_roster(cb, console, observed, policy=readback_policy)

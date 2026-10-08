@@ -406,6 +406,7 @@ SUITES = {
             "test_private_pure_stage_support.py",
             "test_capsule_suite_dependencies.py",
             "test_public_caller_layout.py",
+            "test_coherent_output_dump.py",
         ),
         "support_files": ("phase1_feedback_fixtures.py",),
         "source_inputs": ("examples/*/target/descriptor.yaml",),
@@ -453,6 +454,8 @@ SUITES = {
                 "feedback.private_group_provenance",
                 "feedback.private_device_audit",
                 "feedback.caller_layout",
+                "feedback.native_output_readback",
+                "feedback.native_memory_readback",
             )
         ),
         "required_modules": ("xdsl",),

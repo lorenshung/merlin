@@ -41,3 +41,11 @@ result. This is not complete toolchain closure or a numerical-support grant.
 The binary alternative is separately selected and stages its own length-aware
 packer plus the existing range helper; a raw byte console is archived before
 strict parsing. B64 and absent-policy behavior remain unchanged.
+
+The opt-in coherent-memory policy stages no serial codec and uses a distinct
+v2 build receipt. Execution requires an explicitly supplied trusted memory
+reader, selected-engine revalidator and provider request ABI: bound physical output storage is admitted
+before launch; normal exit, exactly one DONE, no serial substitutes, complete
+logical values and unchanged build bytes are required afterward. Optional
+evaluators own the memory decoder; core never imports a grader to select one.
+An output-readback admission does not prove numerical or compiler correctness.
