@@ -26,6 +26,31 @@ torch reference.
 
 Status legend: ✅ built & verified · ◐ partially built · ⏳ planned (approved).
 
+## Explicit generated entry projection
+
+The normal model builder accepts `entry_weight_projection`, an optional typed
+`GeneratedDispatchABI` contract. After shared preparation, the compiler derives
+a complete argument table from the original capture, quant-inner lift and
+quantization hoist. It can remove unused whole immutable stored or generated-zero
+parameters after conservative pure tensor DCE. Model inputs, captured buffers,
+outputs and prepared trailing arguments retain their ownership and semantics.
+
+Selection requires explicit generated-caller, unobserved-address, readonly-weight
+and arithmetic-effect permissions. Every argument/result type and direct caller
+is checked. Unknown symbolic callers and ABI attributes refuse; unknown effects
+and physical memory allocations remain live. Session state or stream declarations
+cannot grant immutable ownership to a captured weight. Source files and the
+presence or absence of optional storage/session/hoist files are checked before
+planning, application and C runtime generation.
+
+One original-to-projected mapping rewrites the entry, direct callers, generated
+C interface, descriptors, state/stream indices and retained packed weight spans.
+The original bundle and module remain unchanged. Default `None` retains the
+existing route. The mechanism is target independent; it grants no device layout
+or DMA alignment fact and predicts no runtime speedup.
+
+Public API: `merlin.llvmlower.entry_weight_projection`.
+
 ---
 
 ## Phase 0 — Frontend ingest & normalization  ✅

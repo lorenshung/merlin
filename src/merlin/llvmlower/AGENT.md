@@ -30,6 +30,18 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
 
 ## What belongs here
 
+- `entry_weight_projection.py` offers explicit removal of unused whole immutable
+  parameter arguments after conservative pure tensor DCE. Its complete captured
+  and prepared argument table binds source files, optional file presence/absence,
+  result types and ownership. Generated caller, readonly weight/address and
+  arithmetic effect permissions must be explicit. Session-owned weights,
+  unknown symbolic escapes, physical allocator effects and unknown effects
+  refuse or remain live. Normal model compilation and C runtime generation
+  rederive one projection for entry types, all callers, descriptors, session
+  indices and retained packed spans. Inputs, captured buffers, outputs and
+  prepared trailing weights remain. Default None performs no projection I/O.
+  This supplies no target alignment fact, automatic selector or cycle forecast.
+
 - `source_scalar_carrier.py` and `source_scalar_carrier_policy.py` provide a
   distinct, explicitly selected approximation budget for a scalar expression
   before its unchanged finishing operations and integer observer. Current

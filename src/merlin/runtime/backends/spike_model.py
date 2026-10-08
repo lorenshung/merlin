@@ -23,7 +23,7 @@ import struct
 import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -39,6 +39,9 @@ from ...llvmlower.source_scalar_carrier_binding import host_admitted
 from ..boards import CONSOLE_HTIF, CONSOLE_UART
 from ..execution_memory import ExecutionMemoryError, MemoryMapBinding, MemoryReservation, admit_execution_memory
 from . import spike as _spike  # toolchain paths (gcc/spike/objdump)
+
+if TYPE_CHECKING:
+    from ...llvmlower.entry_weight_projection import GeneratedDispatchABI
 
 RVV_CFLAGS = ["-march=rv64gcv", "-mabi=lp64d", "-mcmodel=medany", "-O2", "-ffreestanding", "-fno-builtin"]
 
@@ -454,6 +457,7 @@ def build(
     host_math_policy: str = "native",
     math_archive_symbols: Sequence[str] | None = None,
     prepared_model_transform: Callable[[Path, Path], Path] | None = None,
+    entry_weight_projection: GeneratedDispatchABI | None = None,
     masked_contraction_effects: MaskEffectContract | None = None,
     source_observation_effects: IntervalEffectContract | None = None,
     source_scalar_carrier=None,
@@ -680,7 +684,11 @@ def build(
         from ...llvmlower import qinner as _qinner
 
         if not (
-            int8_compute or features or rvv_schedule or prepared_model_transform is not None
+            int8_compute
+            or features
+            or rvv_schedule
+            or prepared_model_transform is not None
+            or entry_weight_projection is not None
         ) and _qinner.plan_for_bundle(prepared_path):
             raise SpikeModelError(
                 f"{model_dir} carries quant-inner tensors, which are bound by lifting them in "
@@ -692,6 +700,7 @@ def build(
             or features
             or rvv_schedule
             or prepared_model_transform is not None
+            or entry_weight_projection is not None
             or (
                 device is not None
                 and (
@@ -721,6 +730,16 @@ def build(
             from ...llvmlower.prepared_model_transform import RECEIPT
 
             compilation.bind_preparation("prepared_model_transform", work / "prepared_model_transform" / RECEIPT)
+        entry_projection_source = None
+        entry_projection_plan = None
+        if entry_weight_projection is not None:
+            from ...llvmlower.entry_weight_projection import RECEIPT, prepare_entry_weight_projection
+
+            entry_projection_source = Path(prepared_path)
+            prepared_path, entry_projection_plan = prepare_entry_weight_projection(
+                entry_projection_source, work, model_dir, entry_weight_projection
+            )
+            compilation.bind_preparation("entry_weight_projection", work / "entry_weight_projection" / RECEIPT)
         if op_profile:
             # Instrumented AFTER preparation, so the ids name the ops that actually run -- instrumenting
             # the raw module would number ops the rewrites go on to split, fuse or route away, and the
@@ -789,7 +808,13 @@ def build(
 
     # 2. generate the data-driven runtime artifacts (arg table, call, weights.bin, io)
     cgen = work / "cgen"
-    info = c_runtime.generate(model_dir, cgen, inputs_npz, prepared_dir=work)
+    projection_options = {}
+    if entry_projection_plan is not None:
+        projection_options = {
+            "entry_projection": entry_projection_plan,
+            "entry_projection_source": entry_projection_source,
+        }
+    info = c_runtime.generate(model_dir, cgen, inputs_npz, prepared_dir=work, **projection_options)
     if output_sha256 and info.get("out_dt") != "f32":
         raise SpikeModelError("full-output SHA256 evidence requires f32 output")
     # The region ahead of the weights blob holds code, the stack, and the harness's STATIC I/O
