@@ -325,6 +325,52 @@ def _console_script_symbols() -> set[str]:
     return symbols
 
 
+#: Dispatchers that reach an entry point by NAME PREFIX -- ``dir(module)`` filtered by a constant they
+#: publish -- in every module they import. Such a call site names no symbol, so the name match below
+#: cannot see it: ``claims/dispatch.resolve`` runs exactly one ``preflight_*`` per analyzer module and
+#: no file spells the three that only it reaches. Each dispatcher is declared with the constant it
+#: publishes, and the prefix is READ from its source, so renaming either cannot leave a stale copy here.
+PREFIX_DISPATCHERS = (
+    ("packages/merlin-experiments/src/merlin_experiments/phase2/claims/dispatch.py", "PREFLIGHT_PREFIX"),
+)
+
+
+def _published_constant(tree: ast.AST | None, name: str) -> str | None:
+    """The non-empty string a module binds to ``name`` at top level, or None."""
+    for node in getattr(tree, "body", ()):
+        if (
+            isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == name for target in node.targets)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+            and node.value.value
+        ):
+            return node.value.value
+    return None
+
+
+def prefix_dispatched() -> dict[str, set[str]]:
+    """``{dotted module: {prefix, ...}}`` for every module a declared prefix dispatcher imports.
+
+    A dispatcher absent from this tree reaches nothing (a fixture tree carries none). One that exists
+    but no longer publishes its constant is an error, never an empty answer: the reach it declared
+    would otherwise vanish and its entry points would read as unwired, or worse, the other way round.
+    """
+    reached: dict[str, set[str]] = {}
+    for relative, constant in PREFIX_DISPATCHERS:
+        path = ROOT / relative
+        if not path.is_file():
+            continue
+        prefix = _published_constant(_tree(path), constant)
+        if prefix is None:
+            raise SystemExit(
+                f"[FAIL] wiring: {relative} no longer publishes {constant}; its dispatch cannot be followed"
+            )
+        for module in _imports(path):
+            reached.setdefault(module, set()).add(prefix)
+    return reached
+
+
 def _export_list_nodes(tree: ast.AST) -> set[int]:
     """Every node under an ``__all__ = [...]`` assignment.
 
@@ -456,6 +502,7 @@ def unwired_symbols(known_unwired_modules: set[str] | None = None) -> list[str]:
     known = {_source_layout.policy_path(path) for path in known_unwired_modules}
 
     definitions: dict[str, list[str]] = {}
+    modules: dict[str, Path] = {}
     for relative, path in _instrumented_files().items():
         policy = _source_layout.policy_path(relative)
         if policy in known:
@@ -463,6 +510,7 @@ def unwired_symbols(known_unwired_modules: set[str] | None = None) -> list[str]:
         names = _public_definitions(path)
         if names:
             definitions[policy] = names
+            modules[policy] = path
 
     candidates = {name for names in definitions.values() for name in names}
     test_references = _referenced_among(_test_files(), candidates)
@@ -471,12 +519,20 @@ def unwired_symbols(known_unwired_modules: set[str] | None = None) -> list[str]:
     used = _console_script_symbols()
     production = (path for root in (*PRODUCTION, *_target_workflow_roots()) for path in _python_files(root))
     used |= _referenced_among(production, test_references - used)
+    # A definition a prefix dispatcher reaches in its own module is used, by that module only.
+    dispatched = prefix_dispatched()
+    reached = {
+        policy: {name for name in names if any(name.startswith(prefix) for prefix in dispatched.get(module, ()))}
+        for policy, names, module in (
+            (policy, names, _module_name(modules[policy])) for policy, names in definitions.items()
+        )
+    }
 
     return sorted(
         f"{policy}::{name}"
         for policy, names in definitions.items()
         for name in names
-        if name not in used and name in test_references
+        if name not in used and name not in reached[policy] and name in test_references
     )
 
 

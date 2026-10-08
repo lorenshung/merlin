@@ -335,3 +335,46 @@ def test_a_relocated_module_keeps_its_symbol_identity(tmp_path: Path) -> None:
     gate = _gate(_tree(tmp_path, files))
     assert gate.unwired_symbols(set()) == [f"{_PERF}/widget.py::orphan"]
     assert gate.unwired_symbols({"src/merlin/perf/widget.py"}) == []
+
+
+# --------------------------------------------------------------------------- prefix dispatch
+
+_DISPATCHER = "packages/merlin-experiments/src/merlin_experiments/phase2/claims/dispatch.py"
+_PREFIX_TREE = {
+    f"{_PERF}/reached_claim.py": "def preflight_reached(x):\n    return x\n\ndef analyze_reached(x):\n    return x\n",
+    f"{_PERF}/other_claim.py": "def preflight_other(x):\n    return x\n",
+    _DISPATCHER: (
+        'PREFLIGHT_PREFIX = "preflight_"\n'
+        "\n"
+        "def _registry():\n"
+        "    from merlin.perf import reached_claim as R\n"
+        "    return {'reached': R.analyze_reached}\n"
+    ),
+    "merlin/tests/infra/test_claims.py": (
+        "from merlin.perf.reached_claim import preflight_reached\nfrom merlin.perf.other_claim import preflight_other\n"
+    ),
+}
+
+
+def test_a_prefix_dispatched_entry_point_is_wired_only_in_a_module_the_dispatcher_imports(tmp_path: Path) -> None:
+    """``dispatch.resolve`` runs the one ``preflight_*`` of each analyzer module it loads, and no file
+    spells that name. The same definition in a module the dispatcher does not import is still debt."""
+    gate = _gate(_tree(tmp_path, _PREFIX_TREE))
+    assert gate.unwired_symbols(set()) == [f"{_PERF}/other_claim.py::preflight_other"]
+
+
+def test_a_dispatcher_that_stops_publishing_its_prefix_fails_rather_than_reaching_nothing(tmp_path: Path) -> None:
+    files = dict(_PREFIX_TREE)
+    files[_DISPATCHER] = files[_DISPATCHER].replace("PREFLIGHT_PREFIX", "ENTRY_PREFIX")
+    gate = _gate(_tree(tmp_path, files))
+    with pytest.raises(SystemExit, match="no longer publishes PREFLIGHT_PREFIX"):
+        gate.unwired_symbols(set())
+
+
+def test_every_declared_prefix_dispatcher_exists_and_publishes_its_prefix() -> None:
+    """On the real tree: a moved or renamed dispatcher must move its declaration with it."""
+    gate = _gate(repo_root())
+    for relative, constant in gate.PREFIX_DISPATCHERS:
+        path = repo_root() / relative
+        assert path.is_file(), relative
+        assert gate._published_constant(gate._tree(path), constant), (relative, constant)

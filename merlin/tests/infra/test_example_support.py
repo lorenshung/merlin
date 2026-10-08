@@ -200,12 +200,15 @@ def test_unset_selection_is_the_targets_vendored_support(record, doc, monkeypatc
 
 
 def test_an_explicit_selection_replaces_the_default(tmp_path, monkeypatch):
-    target = RECORDS[0][1]["target"]
+    record, doc = RECORDS[0]
+    target = doc["target"]
     monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     assert target_registry.explicit_targets() == {}
     assert target_registry.effective_target_path() == ""
-    with pytest.raises(plugins.PluginError, match="explicit MERLIN_TARGET_PATH"):
+    # The refusal names the vendored provider the explicit value replaced, and how to get it back.
+    with pytest.raises(plugins.PluginError, match="explicit MERLIN_TARGET_PATH") as refused:
         plugins.resolve_support(target)
+    assert str(_support_root(record, doc)) in str(refused.value) and "unset the variable" in str(refused.value)
 
     elsewhere = tmp_path / "pinned-support"
     (elsewhere / "contracts").mkdir(parents=True)
