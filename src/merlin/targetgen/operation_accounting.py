@@ -606,6 +606,7 @@ def build_operation_accounting(
             "capture_receipt": copy.deepcopy(application.get("capture_receipt")),
             "capture_execution_attestation": copy.deepcopy((capture_execution_attestations or {}).get(label)),
             "capture_quantization": application.get("capture_quantization"),
+            "capture_integerization": copy.deepcopy(application.get("capture_integerization")),
             "operation_graph_identity": _graph_identity(selected_graph),
             **summary,
             "signatures": entries,

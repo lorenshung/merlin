@@ -536,6 +536,15 @@ def test_selected_application_accounting_is_digest_bound_and_replayed_without_fr
     accounting = json.loads((output / "coverage/operation-accounting.json").read_bytes())
     assert accounting["overall"]["n_mlir_operations"] == 1
     assert accounting["overall"]["pytorch_provenance"]["original_pytorch_invocation_count"] is None
+    basis = json.loads((output / "coverage/performance-basis.json").read_bytes())
+    assert basis["schema"] == "merlin.phase0.performance_basis.v1"
+    assert basis["applications"]["app"]["capture_sha256"] == inventory["applications"]["app"]["capture_sha256"]
+    assert basis["applications"]["app"]["rows"][0]["ordinals"] == [0]
+    artifacts = manifest["artifacts"]
+    assert basis["sources"]["operation_accounting_sha256"] == artifacts["coverage/operation-accounting.json"]["sha256"]
+    facts_path = "hardware/effective-views/performance-facts.json"
+    assert basis["sources"]["performance_facts_artifact_sha256"] == artifacts[facts_path]["sha256"]
+    assert "coverage/performance-basis.json" in manifest["consumers"]["performance_basis"]
     assert "coverage/operation-accounting.json" in manifest["consumers"]["operation_accounting"]
     assert "hardware/effective-views/isa-taxonomy.json" in manifest["consumers"]["corpus_binding"]
     coverage_readme = (output / "coverage/README.md").read_text()

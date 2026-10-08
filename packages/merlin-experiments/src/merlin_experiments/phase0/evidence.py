@@ -1190,6 +1190,8 @@ def _coverage_readme(accounting: dict, quantization: dict) -> bytes:
         "",
         "Inspect [operation-accounting.json](operation-accounting.json) for exact signature ordinals,",
         "per-application provenance groups, registry sets and unobserved declarations.",
+        "Inspect [performance-basis.json](performance-basis.json) for static capture-bound operation mass",
+        "and explicit unknowns; it makes no timing or speedup claim.",
         "Inspect [quantization-contract.json](../software/quantization-contract.json) for parameters,",
         "format-specific recipes, conflicts and reasons each operation is unknown or ineligible.",
         "The selected detailed inventory is copied as `application-inventory.json` when available.",
@@ -1233,6 +1235,7 @@ def export_evidence(selection: EvidenceSelection, artifact_root: str | Path) -> 
     if selection.instruction_semantics_source is not None:
         outputs["software/instruction-semantics-authored.yaml"] = selection.instruction_semantics_source
     from merlin.targetgen.operation_accounting import build_operation_accounting
+    from merlin.targetgen.performance_basis import build_performance_basis
     from merlin.targetgen.quantization_spec import build_quantization_contract, capture_recipe_candidates
 
     accounting = build_operation_accounting(
@@ -1285,6 +1288,17 @@ def export_evidence(selection: EvidenceSelection, artifact_root: str | Path) -> 
         accounting,
     )
     outputs["coverage/operation-accounting.json"] = _json(accounting)
+    outputs["coverage/performance-basis.json"] = _json(
+        build_performance_basis(
+            accounting,
+            selection.performance_facts,
+            target=selection.target,
+            operation_accounting_sha256=_digest(outputs["coverage/operation-accounting.json"]),
+            performance_facts_artifact_sha256=_digest(outputs["hardware/effective-views/performance-facts.json"]),
+            selected_hardware_spec_sha256=_canonical_digest(selection.hardware_spec),
+            raw_rtl_facts_sha256=selection.raw_facts_sha256,
+        )
+    )
     outputs["software/quantization-contract.json"] = _json(quantization)
     recipes = []
     for candidate in capture_recipe_candidates(selection.software_spec, quantization):
@@ -1382,6 +1396,15 @@ def export_evidence(selection: EvidenceSelection, artifact_root: str | Path) -> 
                 "hardware/effective-views/isa-taxonomy.json",
             ],
             "performance_gates": ["hardware/effective-views/performance-facts.json"],
+            "performance_basis": [
+                "coverage/operation-accounting.json",
+                "hardware/effective-views/performance-facts.json",
+                "software/hardware-spec.json",
+                "software/software-spec.json",
+                "software/contract.json",
+                *(["hardware/circt/facts.json"] if selection.raw_facts is not None else []),
+                "coverage/performance-basis.json",
+            ],
             "memory_regime_axes": ["hardware/effective-views/refreshed-facts.json"],
             "readout": [
                 "hardware/effective-views/refreshed-facts.json",
