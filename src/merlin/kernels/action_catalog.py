@@ -1064,7 +1064,7 @@ def build_catalog(divergences: list[Divergence]) -> tuple[list[CompilerAction], 
 # existing seam (a knob/flag/registered feature — a fork can express it today) from writing a NEW pass
 # module. The map is PLUGGABLE and BACKEND-SCOPED so the middle-end can be modified ad-hoc: register a
 # new seam at runtime with :func:`register_seam`, and each backend resolves its OWN seams. For an OOT
-# target (gemmini), seams are expressed relative to the GENERATED OOT PACKAGE the agent authors (a
+# target, seams are expressed relative to the GENERATED OOT PACKAGE the agent authors (a
 # ``<oot_package>`` placeholder), with the in-tree file named only as a reference — so the "where do I
 # modify the compiler" answer points at the pluggable OOT middle-end, never couples the agent to our
 # in-tree core.

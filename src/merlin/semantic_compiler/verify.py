@@ -2,7 +2,7 @@
 
 This checker is deliberately separate from rule generation and Z3 formula
 construction. It validates only the declared finite semantic/placement model;
-it does not certify an Atlas instruction stream or numerical hardware model.
+it does not certify a target instruction stream or numerical hardware model.
 """
 
 from __future__ import annotations

@@ -17,7 +17,7 @@ from ._tokens import match_opcodes
 
 def extract_dispatch(nk: NormalizedKernel, fired: dict[str, list[str]]) -> dict:
     # Which opcodes count as accelerator dispatches is data (the per-family feature contract), not a
-    # `fam == "gemmini"` branch. A family with no dispatch contract has no dispatch metric.
+    # per-family name branch. A family with no dispatch contract has no dispatch metric.
     spec = load_feature_contract(target_family(nk.target)).get("dispatch")
     if not spec:
         return {}  # no declared opcode vocabulary: a zero count would masquerade as a measurement

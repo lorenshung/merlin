@@ -63,8 +63,8 @@ def _pattern_line(name: str, contraction_strategy: str | None) -> str:
 def _rvv_microkernel_resolver(spec) -> list[str]:
     """RVV's realization of the TARGET-AGNOSTIC micro-kernel space (kernels.microkernel.MicrokernelSpec).
 
-    Registered as the ``rvv`` resolver so the same knob space works for any target (Gemmini, Saturn,
-    … register their own). Realizes by CODE GENERATION only — no hand ukernel; the intrinsic driver
+    Registered as the ``rvv`` resolver so the same knob space works for any target (each
+    registers its own). Realizes by CODE GENERATION only — no hand ukernel; the intrinsic driver
     stays a ceiling REFERENCE.
 
       MR/NR/KC  -> a v3 accumulator-resident tuning point (register-resident scf.for iter_arg
@@ -383,7 +383,7 @@ def mint_fork(
 
 
 # Register RVV's realization of the target-agnostic micro-kernel space at import. Other targets
-# (gemmini, saturn_vec, muon, …) register their own resolver the same way, so the SAME knob block
+# (each accelerator's support package) register their own resolver the same way, so the SAME knob block
 # expresses expert-kernel granularity for any compilation target.
 def _register_rvv_microkernel_resolver() -> None:
     from ..kernels.microkernel import register_resolver, register_shape_policy

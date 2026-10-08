@@ -4,7 +4,7 @@ Given an expert CCA and ours (both lifted to the Common Compute Abstraction, ide
 level — the authoritative substrate), emit ``Divergence`` records: one per populated facet field
 that differs. These feed the action catalog (``action_catalog.py``), which maps each to a typed
 compiler change. Comparison is per-facet, so a target only diffs the facets it has (vector for
-RVV, spatial for gemmini, …) — nothing RVV-specific here.
+RVV, spatial for a systolic array, …) — nothing RVV-specific here.
 """
 
 from __future__ import annotations

@@ -143,7 +143,7 @@ if HAS_XDSL:
 
     @irdl_attr_definition
     class DeviceType(ParametrizedAttribute, TypeAttribute):
-        """!runtime.device — a logical device (toy_npu0, saturn_cpu0, ...)."""
+        """!runtime.device — a logical device (toy_npu0, cpu0, ...)."""
 
         name = "runtime.device"
 

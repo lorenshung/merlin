@@ -1,5 +1,5 @@
 """Load a declarative per-target experiment descriptor — the target-parameterized replacement for the
-gemmini-hardcoded experiment setup.
+former single-target hardcoded experiment setup.
 
 Per the derive-first rule, the hardware FACTS (ISA/opcode set, memory map, mesh DIM, arc model) are
 DERIVED from the RTL by mlc (``rtl_backend.target_profile`` / ``mlc_bridge``), never hand-written. What a
@@ -772,7 +772,7 @@ class TargetExperiment:
     @property
     def exp_name(self) -> str:
         """The experiment dir path RELATIVE TO ``merlin/experiments`` (e.g.
-        ``capsule_bench/targets/gemmini``) — for the exp-scoped bundle paths. In the target-neutral layout
+        ``capsule_bench/targets/<target>``) — for the exp-scoped bundle paths. In the target-neutral layout
         each target lives under ``capsule_bench/targets/<target>/``; this returns that full relative path
         (not just the leaf) so ``experiments/{exp_name}/...`` reconstructs the real location. Falls back to
         the bare dir name when the descriptor is not under an ``experiments/`` root."""
@@ -789,7 +789,7 @@ class TargetExperiment:
         """Repo-relative dir of the target's BACKEND package, where its contracts/ live.
 
         Defaults to ``merlin/targets/<target>`` — true whenever the experiment target and the backend
-        package share a name (gemmini, atlas, ...). It is NOT universally true: an experiment target may
+        package share a name. It is NOT universally true: an experiment target may
         be served by a differently-named core package (a SIMT experiment served by its core's package),
         and assuming otherwise silently produces grant paths that can never exist — a bundle that
         *looks* like it hands the CIRCT arm its RTL facts while handing it nothing. So the mapping is a
@@ -844,11 +844,11 @@ class TargetExperiment:
 
     def corpus_siblings(self) -> list[str]:
         """Sibling capsule CATEGORIES that actually EXIST beside the primary corpus (e.g. layers/
-        model_slices) — globbed, not a hardcoded gemmini taxonomy. Repo-root-relative strings.
+        model_slices) — globbed, not a hardcoded taxonomy. Repo-root-relative strings.
 
         A sibling category holds capsule dirs DIRECTLY (``d/*/capsule.yaml``). A subdir that instead holds
         its OWN categories (``d/*/*/capsule.yaml``) is a different TARGET's corpus that merely nests under
-        the same parent (e.g. ``capsules/atlas/`` beside gemmini's ``capsules/isa``) — it is NOT a sibling
+        the same parent (e.g. ``capsules/<other>/`` beside ``capsules/isa``) — it is NOT a sibling
         of this corpus and must be excluded, or a target's capsules leak into another target's set."""
         parent = self.capsule_corpus.parent
         out = []

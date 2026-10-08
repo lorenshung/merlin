@@ -1,6 +1,6 @@
 """RunnerConfig — the per-target grading config that lets ONE capsule runner serve every target.
 
-Today `capsule_runner` (systolic/gemmini) and `muon_capsule_runner` (SIMT) are hand-forked; their only
+Today `capsule_runner` (systolic) and a SIMT target's own capsule runner are hand-forked; their only
 real differences are a handful of scalar/map values + the optional RoCC trace gate. This dataclass
 captures exactly those, built from a target's :class:`CapabilityManifest`, so the shared `run_capsule`
 reads a config instead of module constants. Pure data — no runner/oracle imports — so it is unit-testable

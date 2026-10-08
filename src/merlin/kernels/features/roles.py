@@ -2,7 +2,7 @@
 
 This is the richest layer: rather than flat booleans, it assigns each operand a role
 (streaming / reusable_weight / accumulator / committed_output) and **measures** RHS reuse
-from the code (register blocking on RVV; compute-per-weight-load on Gemmini). The measured
+from the code (register blocking on RVV; compute-per-weight-load on a systolic array). The measured
 ``rhs_reuse_count`` makes ``packed_rhs_policy``'s ``rhs_reuse_count >= 2`` condition applicable
 to the very kernels it was mined from — not merely asserted.
 """
@@ -23,7 +23,7 @@ def _measure_rhs_reuse(nk: NormalizedKernel, fired: dict) -> int:
 
     The measurement METHOD is data (per-ISA-family ``feature_extraction`` contract), not a code
     branch: ``distinct_register`` (RVV register blocking — reuse == number of distinct accumulator
-    registers, i.e. MR), ``compute_per_wload`` (Gemmini — compute ops per weight load-in), or
+    registers, i.e. MR), ``compute_per_wload`` (systolic — compute ops per weight load-in), or
     ``packed_constant`` (a schedule asserts reuse; the default asserts 1). Honest static proxy — no
     runtime trip counts."""
     spec = load_feature_contract(target_family(nk.target)).get("rhs_reuse") or {}

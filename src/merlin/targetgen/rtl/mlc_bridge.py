@@ -19,7 +19,7 @@ exhaustive executable ISA or authorizes a code-generation endpoint.
 TARGET-AGNOSTIC: every entry point here takes a ``target`` argument and holds no target name. mlc is
 target-parameterized (``artifact_paths(target)`` / ``discovered_memory_map(target)`` /
 ``discover_opcode_set(graph)`` / per-target ``runs/circt-arc/<target>``), so the same code plugs any HW
-RTL repo mlc knows (gemmini, atlas, otbn, muon, nvdla, rocket, ...).
+RTL repo mlc knows (systolic arrays, NPUs, SIMT cores, CPUs, ...).
 """
 
 from __future__ import annotations
@@ -357,7 +357,7 @@ def matmul_reuse_prediction(
 # ------------------------------------------------------------------- target-agnostic RTL extraction
 # Everything below is parameterized by ``target`` and holds NO target name — mlc is target-parameterized
 # (artifact_paths/discovered_memory_map/discover_opcode_set/per-target runs/circt-arc/<target>), so the
-# same code plugs any HW RTL repo mlc knows (gemmini, atlas, otbn, muon, nvdla, rocket, ...).
+# same code plugs any HW RTL repo mlc knows (systolic arrays, NPUs, SIMT cores, CPUs, ...).
 
 _ARC_TARGET_CACHE: dict[str, str] = {}
 
@@ -519,10 +519,10 @@ def isa_encoding_for(target: str) -> dict | None:
 
 
 def mx_mmio_for(target: str) -> dict | None:
-    """The target's MX-Gemmini accelerator MMIO command ABI (``{ctrl_base, reg_offsets, inst_word, funct,
+    """The target's MX accelerator MMIO command ABI (``{ctrl_base, reg_offsets, inst_word, funct,
     sf_mem, gpu_dram_offset, dim, group, config_ex, bounds, loop_ws, mxquant_config_mvout, read_smem}``) —
-    the memory-mapped RoCC command surface a Muon SIMT kernel pushes to drive the block-scaled matmul PE.
-    This is an ABI the RTL decoder cannot ground (like gemmini's ``encoding`` residual), so it is declared,
+    the memory-mapped RoCC command surface a SIMT kernel pushes to drive the block-scaled matmul PE.
+    This is an ABI the RTL decoder cannot ground (like a RoCC target's ``encoding`` residual), so it is declared,
     header-derived + human-reviewed, in the target's ``contracts/residual.yaml`` under ``mx_mmio``. Returns
     the parsed fact, or None when the target ships no MX MMIO contract — an honest fallback the emitter/harness
     degrade on (the mxfp8 op is unsupported), never a guessed base/opcode."""
@@ -538,7 +538,7 @@ def mx_mmio_for(target: str) -> dict | None:
 def opu_artifact_paths(target: str) -> dict | None:
     """Resolved ``{hw, man, so}`` artifact paths for a SPATIAL/OPU target via mlc's per-target
     fingerprint map — which knows the two-level ``runs/circt-arc/<family>/<config>/outputs`` layout the
-    OuterProductUnit uses (e.g. ``saturn_opu/mxv256d128``), UNLIKE the flat one-level layout
+    OuterProductUnit uses, UNLIKE the flat one-level layout
     :func:`core_hw_mlir` assumes. Absolute paths under the mlc dir. None when mlc is not resolvable or
     the target is not a known mlc arc target — an honest fallback, never a guessed path.
 
@@ -651,9 +651,7 @@ def _equivalent_decode_signals(graph) -> list[_EquivalentDecodeSignal]:
         values = bucket["values"]
         if len(bucket["signals"]) < 2 or len(values) < 3 or len(values) >= 0.5 * (1 << width):
             continue
-        out.append(
-            _EquivalentDecodeSignal(module, width, tuple(sorted(values)), len(values), len(bucket["signals"]))
-        )
+        out.append(_EquivalentDecodeSignal(module, width, tuple(sorted(values)), len(values), len(bucket["signals"])))
     return sorted(out, key=lambda item: (-item.fanout, -item.width, item.module, item.values))
 
 
@@ -684,7 +682,8 @@ def discover_legal_opcodes(target: str, *, opcode_width: int | None = None) -> d
     graph = load_hw_graph(hw, circt_opt=circt_opt_bin())
     sig = decode.discover_opcode_set(graph, expected_width=opcode_width)
     recovered = [
-        candidate for candidate in _equivalent_decode_signals(graph)
+        candidate
+        for candidate in _equivalent_decode_signals(graph)
         if opcode_width is None or candidate.width == opcode_width
     ]
     if recovered and (sig is None or recovered[0].fanout > sig.fanout):
@@ -849,7 +848,7 @@ def crosscheck_config_subtype(target: str) -> list[str]:
     return dis
 
 
-# The target-agnostic semantic roles the check compiler reasons over (never gemmini opcode names).
+# The target-agnostic semantic roles the check compiler reasons over (never one target's opcode names).
 SEMANTIC_ROLES = ("load", "compute", "store", "config", "barrier")
 
 
@@ -867,7 +866,7 @@ def semantic_roles(target: str) -> dict:
     live arc model (:func:`arc_available`), we run :func:`derive_and_cache_roles` once to populate it, then
     read — so callers get derived roles without a separate manual step. LAZY (only when roles are actually
     requested) + CACHED (a warm cache is never re-probed), so it never slows imports/collection. A target
-    with NO arc (SIMT/prototype like radiance, or mlc absent) keeps the honest empty ``{derived: False,
+    with NO arc (a SIMT/prototype target, or mlc absent) keeps the honest empty ``{derived: False,
     reason}`` — we never auto-regen where the probe is impossible, and a failed probe degrades honestly
     rather than crashing the bundle. Returns ``{roles: {opcode:int -> role}, source, derived: bool,
     reason}``."""
@@ -1184,7 +1183,8 @@ def crosscheck_semantic_class_fine(target: str) -> list[str]:
 # the mesh / DMA / scratchpad, whose region signature is what classifies the role. Idle free-running
 # state (cycle counters, im2col housekeeping) is measured once with no command and subtracted as noise.
 #
-# The region names below are STRUCTURAL heuristics for a RoCC systolic accelerator (gemmini-shaped): the
+# The region names below are STRUCTURAL heuristics for a RoCC systolic accelerator (shaped after the first such target's
+# module names): the
 # systolic-array datapath ("mesh"), the DMA store engine ("store_controller"), the scratchpad control +
 # TLB that a stalled DMA read lights up, and the loop-unroll / config CSR modules. The operand/accumulator
 # banks come from the DISCOVERED memory_map (target-parameterized). A fully target-agnostic classifier
@@ -1582,7 +1582,7 @@ def render_fact_bundle(target: str, bundle: dict | None = None) -> str:
     f = b["fields"]
     # Robust to non-systolic bundle shapes: a simt bundle (mlc_bridge._simt_fact_bundle) has no
     # legal_opcodes/mesh_dim/capacities keys, so a missing OR underived field renders as "unavailable"
-    # rather than raising. Gemmini (systolic) has all three present -> byte-identical brief.
+    # rather than raising. A systolic target has all three present -> byte-identical brief.
     # TODO(simt-render): a dedicated SIMT/vector renderer so a simt target's brief surfaces its
     # registers/shared-memory/fp-datapath facts instead of this honest-degraded all-"unavailable" line.
     lo_f = f.get("legal_opcodes") or {}
@@ -1612,12 +1612,12 @@ def render_fact_bundle(target: str, bundle: dict | None = None) -> str:
 
 # -------------------------------------------------------------- SPATIAL tensor-tile (OPU) fact bundle
 # The spatial siblings of target_fact_bundle / render_fact_bundle. The systolic path (target_fact_bundle
-# above) reads the RoCC decoder + mesh DIM; a spatial tensor tile (Saturn OuterProductUnit) has NO RoCC
+# above) reads the RoCC decoder + mesh DIM; a spatial tensor tile (an OuterProductUnit) has NO RoCC
 # funct decode and its geometry is a cluster x cell tile that discover_mesh_dim mis-derives — so it gets
 # its own structural extractor (merlin.targetgen.rtl.spatial_introspect), delegated to here.
 
 # generate_prompt.py routes through fact_bundle_for + render_fact_bundle_for (below) by KIND, so a
-# spatial/simt target's brief renders from its own extractor; gemmini (systolic) stays byte-identical.
+# spatial/simt target's brief renders from its own extractor; a systolic target stays byte-identical.
 
 
 def spatial_fact_bundle(target: str) -> dict:
@@ -1849,8 +1849,8 @@ def fact_bundle_for(target: str) -> dict:
 
       * ``circt_static`` (systolic/vector/scalar, and the default when no kind resolves) -> the existing
         CIRCT HW-dialect static bundle :func:`target_fact_bundle` (BYTE-IDENTICAL to the pre-dispatch
-        path for gemmini and every current caller);
-      * ``simt_config`` (simt) -> the Muon config+FIRRTL introspect, adapted to the bundle shape;
+        path for every current caller);
+      * ``simt_config`` (simt) -> the SIMT config+FIRRTL introspect, adapted to the bundle shape;
       * ``opu`` (spatial) -> the OuterProductUnit state-manifest introspect
         :func:`spatial_fact_bundle`.
 
@@ -2049,8 +2049,8 @@ def render_fact_bundle_for(target: str, bundle: dict | None = None) -> str:
     Routes ``target``'s kind to the matching bundle renderer: ``opu`` (spatial) ->
     :func:`render_spatial_fact_bundle`; ``simt`` -> :func:`render_simt_fact_bundle`; everything else
     (systolic/vector/scalar ``circt_static``, and the default when no kind resolves) ->
-    :func:`render_fact_bundle`. BYTE-IDENTICAL to :func:`render_fact_bundle` for gemmini and every current
-    ``circt_static`` caller — the same reasoning as ``fact_bundle_for``: gemmini resolves
+    :func:`render_fact_bundle`. BYTE-IDENTICAL to :func:`render_fact_bundle` for every current
+    ``circt_static`` caller — the same reasoning as ``fact_bundle_for``: a systolic target resolves
     ``kind='systolic'`` -> ``fact_extractor='circt_static'`` -> the ``return render_fact_bundle(...)``
     fall-through, on the same ``bundle`` object."""
     # Routes on the extractor SET, so a hybrid that has a spatial tile still gets the tile brief; `kind`
@@ -2065,8 +2065,8 @@ def render_fact_bundle_for(target: str, bundle: dict | None = None) -> str:
 
 #: Registry of SIMT RTL introspects, keyed by the introspect's DECLARED identity (its ``TARGET``) — the
 #: fact-extraction analog of the runtime backend registry and the capsule_runner sim-oracle registry. A
-#: SIMT introspect must expose ``TARGET`` + ``build_facts()``. The reference Muon introspect registers
-#: itself (below); a SECOND SIMT core registers its own introspect via :func:`register_simt_introspect`
+#: SIMT introspect must expose ``TARGET`` + ``build_facts()``. A target's contract declares its
+#: introspect (below); a SECOND SIMT core registers its own introspect via :func:`register_simt_introspect`
 #: (in-tree, or from its out-of-tree package at import) so :func:`_simt_fact_bundle` resolves it WITHOUT
 #: editing this dispatch — the seam that keeps SIMT fact extraction from bottoming out at one core.
 _SIMT_INTROSPECTS: dict = {}
@@ -2114,8 +2114,8 @@ def _register_declared_simt_introspects() -> None:
 
 def _resolve_simt_introspect(target: str):
     """The registered SIMT introspect whose declared identity matches ``target``'s arc alias, or None.
-    Serves by the ARC-target alias (not the merlin name): a composite SIMT target (e.g. radiance) whose
-    RTL IS the introspect's config (RadianceCluster) resolves to that introspect via ``_arc_target``."""
+    Serves by the ARC-target alias (not the merlin name): a composite SIMT target whose
+    RTL IS the introspect's config (its cluster) resolves to that introspect via ``_arc_target``."""
     if not _SIMT_INTROSPECTS:
         _register_declared_simt_introspects()
     return _SIMT_INTROSPECTS.get(_arc_target(target))
@@ -2212,7 +2212,7 @@ def _simt_fact_bundle(target: str) -> dict:
 def simt_facts(target: str) -> dict:
     """SIMT self-hosted-ISA facts adapted to the ``facts.json`` body shape, so the generic manifest
     deriver (:func:`merlin.targetgen.capability_manifests.derive_manifest`) grounds ``endpoint_kind``
-    from them like any other RTL facts. Delegates to the SIMT RTL introspect (``muon_introspect``, via
+    from them like any other RTL facts. Delegates to the registered SIMT RTL introspect (via
     the arc-target alias); the core's OWN instruction encoding is surfaced as a ``self_hosted_isa``
     interface (its ``encoding_bits`` + ``instruction_classes``) — the SIMT analog of a decode table.
     Returns ``{}`` when no SIMT introspect serves the target (honest — the deriver then falls back to the
@@ -2299,9 +2299,9 @@ def arc_available(target: str) -> bool:
 def _arc_model_present(target: str) -> bool:
     """Un-aliased structural check: does mlc register an arc model under THIS EXACT target name? Structural
     consumers (the RoCC role / mesh probes) gate on this, NOT the oracle-aliased :func:`arc_available` — a
-    composite SIMT target (radiance) must not borrow the embedding cluster's arc for structural role
-    derivation (that would fabricate systolic roles it does not have); its oracle still reaches muon via
-    the alias, but its structural profile stays honestly empty."""
+    composite SIMT target must not borrow the embedding cluster's arc for structural role
+    derivation (that would fabricate systolic roles it does not have); its oracle still reaches the SIMT core's model
+    via the alias, but its structural profile stays honestly empty."""
     if mlc_dir() is None:
         return False
     try:

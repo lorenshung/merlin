@@ -929,7 +929,7 @@ def execute(prepared: PreparedRun, runtime: AuthoringRuntime) -> int:
         RI.strip_build_state(vcand)  # clean, relocatable build for the L3 cert (abc9 L3-0/20 'build' bug)
         vruns = run_dir / "_qa_work" / f"vruns_{attempt}"
         # Cycle-accurate checkpoint = the target's FULL oracle ladder, resolved from the descriptor's
-        # target+sim_via via the shared factory (gemmini/chipyard -> spike L2 + verilator L3; an arc/mlc
+        # target+sim_via via the shared factory (a chipyard target -> spike L2 + verilator L3; an arc/mlc
         # target -> its RTL-derived arc tier), so a new target's L3 cert needs no edit here.
         _te_ck = _te()
         adapters = _CR.qa_checkpoint_adapters(_te_ck.target, _te_ck.sim_via)

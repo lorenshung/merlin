@@ -79,7 +79,7 @@ class RvvPackage:
 
 def _check_cflags(cflags: list[str]) -> list[str]:
     """Integrity: a package may only carry compiler flags from an allowlist — the data-not-code
-    analogue of the gemmini harness-import ban (a package must not smuggle arbitrary behavior)."""
+    analogue of the targetgen harness-import ban (a package must not smuggle arbitrary behavior)."""
     bad = [f for f in cflags if not f.startswith(_CFLAGS_ALLOW_PREFIXES)]
     return [f"cflag {f!r} outside allowlist {_CFLAGS_ALLOW_PREFIXES}" for f in bad]
 

@@ -3,7 +3,7 @@
 The agent reads an emitted insight-mining run and proposes critiques (over-claims, unsupported
 leaps, missing caveats) in the *interpretation* layer. Each proposed critique MUST quote an exact
 substring of a real artifact; the deterministic ``citation_gate`` rejects any critique that does
-not. This is the propose/dispose pattern from targetgen's gemmini_kernel_slot, applied to prose review:
+not. This is the propose/dispose pattern of targetgen's agent kernel slot, applied to prose review:
 the agent never produces a number, and an ungrounded critique cannot enter the report.
 
 Usage (the agent is optional; the gate is always testable with an injected runner):
@@ -12,6 +12,7 @@ Usage (the agent is optional; the gate is always testable with an injected runne
     result = critic.run_critic(run_dir)          # uses headless `claude -p`
     critic.emit_critique(result, run_dir)        # writes devils_advocate_critique.md
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -58,7 +59,8 @@ def build_prompt(run_dir: Path) -> str:
         '{"claim": "<the over-claim, in your words>", "severity": "low|medium|high", '
         '"cite": "<exact substring copied from the text>", "suggested_fix": "<one line>"}.\n\n'
         f"Artifacts in this run: {', '.join(files)}\n\n"
-        "=== RUN TEXT (DSE_FINDINGS.md) ===\n" + body)
+        "=== RUN TEXT (DSE_FINDINGS.md) ===\n" + body
+    )
 
 
 def citation_gate(items, run_dir) -> dict:
@@ -79,9 +81,14 @@ def citation_gate(items, run_dir) -> dict:
         elif sev not in _SEVERITIES:
             rejected.append({"item": it, "reason": f"invalid severity {sev!r}"})
         else:
-            accepted.append({"claim": str(it.get("claim", ""))[:300], "severity": sev,
-                             "cite": _norm(it.get("cite", ""))[:300],
-                             "suggested_fix": str(it.get("suggested_fix", ""))[:300]})
+            accepted.append(
+                {
+                    "claim": str(it.get("claim", ""))[:300],
+                    "severity": sev,
+                    "cite": _norm(it.get("cite", ""))[:300],
+                    "suggested_fix": str(it.get("suggested_fix", ""))[:300],
+                }
+            )
     return {"accepted": accepted, "rejected": rejected, "n_proposed": len(items or [])}
 
 
@@ -101,11 +108,13 @@ def run_critic(run_dir, runner=None, *, model: str = "opus") -> dict:
 def emit_critique(result: dict, run_dir) -> Path:
     """Write the gated critique as a report in the run folder (non-committed)."""
     acc, rej = result["accepted"], result["rejected"]
-    L = ["# Devil's-advocate critique (agent-proposed, citation-gated)\n",
-         "> An agent proposed critiques of this run's interpretation; a deterministic gate kept only "
-         "those that quote a real artifact line. The agent produced no numbers. "
-         f"**{len(acc)} accepted / {result['n_proposed']} proposed** "
-         f"({len(rej)} rejected as ungrounded).\n"]
+    L = [
+        "# Devil's-advocate critique (agent-proposed, citation-gated)\n",
+        "> An agent proposed critiques of this run's interpretation; a deterministic gate kept only "
+        "those that quote a real artifact line. The agent produced no numbers. "
+        f"**{len(acc)} accepted / {result['n_proposed']} proposed** "
+        f"({len(rej)} rejected as ungrounded).\n",
+    ]
     if acc:
         L.append("| severity | over-claim | cited from run | suggested fix |")
         L.append("|---|---|---|---|")

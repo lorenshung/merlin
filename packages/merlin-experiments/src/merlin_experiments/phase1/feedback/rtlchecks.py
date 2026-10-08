@@ -115,11 +115,11 @@ def feedback(
     # RTL facts are the regenerated CIRCT artifact now (RUN._FACTS was retired in the facts-as-artifact
     # refactor); load_facts regenerates/reads it on demand. Same full-record shape screen_run expects.
     # Invocation-target-parameterized and ENDPOINT-routed: a RoCC target
-    # (gemmini, endpoint inline_asm_insn) gets the dialect+trace FileCheck over its RoCC stream; a
-    # self-hosted-ISA target (atlas, endpoint external_backend) gets the kernel opcode-LEGALITY FileCheck
+    # (endpoint inline_asm_insn) gets the dialect+trace FileCheck over its RoCC stream; a
+    # self-hosted-ISA target (endpoint external_backend) gets the kernel opcode-LEGALITY FileCheck
     # over its emitted kernel.S. compile_checks picks by the DERIVED endpoint_kind, never by
     # funct_decode_table presence (the mlc extractor synthesises one for a self-hosted decoder too). Never
-    # gemmini facts/ops applied to another target.
+    # one target's facts/ops applied to another target.
     target = context.target
     facts = RUN.load_facts(target)
     index = RUN.capsule_index(capsule_roots)
@@ -128,7 +128,7 @@ def feedback(
     out = []
     if bench.is_dir():
         # Discover per-capsule run dirs by EITHER RTL-check input: a RoCC target emits
-        # generated/instruction_trace.json; a self-hosted-ISA (external_backend, e.g. atlas) emits
+        # generated/instruction_trace.json; a self-hosted-ISA (external_backend) emits
         # generated/kernel.S (screen_run picks the right check by endpoint). Globbing only the RoCC trace
         # silently skipped every external_backend run — so the kernel opcode-legality check never fired.
         dirs = sorted(

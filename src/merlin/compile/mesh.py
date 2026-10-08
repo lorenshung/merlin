@@ -672,7 +672,7 @@ def run_matmul_on_mesh(
 
     # DISPATCH ORDER is deliberate (mirrors capsule_runner.oracle_adapters): a target whose contract
     # DECLARES an EXCLUSIVE bespoke sim (a self-hosted SIMT core graded on its own emitted kernel by its
-    # own oracle, e.g. a cyclotron/muon backend) is routed FIRST — its endpoint is ALSO external_backend,
+    # own oracle, e.g. a cyclotron backend) is routed FIRST — its endpoint is ALSO external_backend,
     # but the arc command-buffer program oracle grades the WRONG artifact for a SIMT kernel, so the bespoke
     # executor must take precedence. Only when no exclusive sim is declared does the endpoint kind pick the
     # path. Derived from the contract's sim_via + the _SIM_ORACLES registry — never a target-name branch.
@@ -1341,12 +1341,12 @@ def _matmul_via_bespoke_sim(
     target, mlir, A, W, *, package, timeout, layer_id: str = "mesh_layer", observed: dict | None = None
 ) -> list | None:
     """Exclusive bespoke-sim path: a self-hosted SIMT core (endpoint ``external_backend``) graded on the
-    kernel its OWN generated package emits, by its OWN declared bespoke oracle (e.g. cyclotron via the muon
-    backend) — NOT the arc command-buffer program oracle, which would grade the wrong artifact for a SIMT
+    kernel its OWN generated package emits, by its OWN declared bespoke oracle (e.g. cyclotron via the SIMT
+    target's backend) — NOT the arc command-buffer program oracle, which would grade the wrong artifact for a SIMT
     kernel. Emits the matmul kernel from the target's generated OOT package via the SAME target-agnostic
     entrypoint runner the grader uses (``capsule_common.run_entrypoints``), INJECTS the real ``A``/``W``
     operands onto the command buffer's leaf tensors (``preload_b64``, decoded harness-side by
-    ``muon_harness``), runs on the target's DECLARED exclusive bespoke oracle, and reads the named output
+    the target's harness), runs on the target's DECLARED exclusive bespoke oracle, and reads the named output
     tensor (``Y0``) back off the device. Target-agnostic: the sim engine + adapters come from the DERIVED
     ``_SIM_ORACLES`` entry (contract ``sim_via``); the kernel/codegen is the generated package's. Fail-closed
     (``None``) on a missing package, an unavailable oracle, or an entrypoint/oracle failure — never a
@@ -1410,7 +1410,7 @@ def _matmul_via_bespoke_sim(
         if cb is None or not kernel_text:
             return _refuse("the package emitted no command buffer or kernel text")
         # INJECT the real operands onto the cb's leaf tensors (encoded for each tensor's declared dtype);
-        # the muon harness decodes ``preload_b64`` and embeds THESE values instead of the materialized ones.
+        # the SIMT harness decodes ``preload_b64`` and embeds THESE values instead of the materialized ones.
         operands = {"A0": A, "W": W}
         for tname, tspec in (cb.get("tensors") or {}).items():
             if tspec.get("role") in ("input", "weight", "bias") and tname in operands:

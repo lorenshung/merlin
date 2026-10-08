@@ -1,6 +1,6 @@
 """Shared, target-agnostic capsule I/O for the capsule runners.
 
-`capsule_runner` (gemmini: spike/verilator oracle) and `muon_capsule_runner` (cyclotron oracle) had
+`capsule_runner` (spike/verilator oracle) and a SIMT target's own capsule runner (cyclotron oracle) had
 byte-identical copies of these helpers. They are the single source now; both runners import them (the
 oracle-specific `run_capsule`/`run_suite` stay per-runner). Kept in `targetgen` (library), not in the
 experiment harness, since the library runners are the consumers.
@@ -236,7 +236,7 @@ def tier_field(entry, field: str):
 def oracle_kind(oracle):
     """The oracle's PROVENANCE STRING, whichever shape it arrived in.
 
-    An adapter reports its oracle either as a bare string (``"gemmini-spike"``) or as a record
+    An adapter reports its oracle either as a bare string (``"<target>-spike"``) or as a record
     (``{"kind": ..., "derived_from_rtl": ..., "fidelity": ...}``) — the record form exists so an oracle
     can state whether it is elaborated RTL rather than leaving that to be guessed from its tier name.
     Callers that only want the human-readable identity go through here, so enriching an adapter never

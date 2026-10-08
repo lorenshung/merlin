@@ -48,7 +48,7 @@ class ComputeFacet:
     # commit ONCE after it?" — the property that distinguishes an expert micro-kernel from a lowering
     # that round-trips the accumulator through memory every reduction tile. It is the same question
     # on every backend, so it lives on ComputeFacet (RVV reads it from the asm via a vfmacc-chain /
-    # no-in-loop-accumulator-spill analysis; SpatialFacet.accumulator_resident is the Gemmini-PE
+    # no-in-loop-accumulator-spill analysis; SpatialFacet.accumulator_resident is the systolic-PE
     # view of the SAME concept; an NPU lifter reads it from on-chip-buffer residency). None = the
     # lifter could not determine it (e.g. a straight-line / fully-unrolled region with no loop).
     accumulator_resident: bool | None = None
@@ -867,9 +867,9 @@ def lift_spatial(
     pe_cols: int | None = None,
     backend: str,
 ) -> CCA:
-    """Spatial/systolic (Gemmini) lifter — fills the SPATIAL facet from decoded accelerator ops
+    """Spatial/systolic lifter — fills the SPATIAL facet from decoded accelerator ops
     (e.g. targetgen.rocc.decode counts of preload/compute/mvin/mvout). Keeps the same CCA schema
-    so a gemmini region compares against a gemmini expert just like RVV does for vector."""
+    so a systolic region compares against a systolic expert just like RVV does for vector."""
     return CCA(
         op=op,
         backend=[backend],

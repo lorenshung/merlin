@@ -127,7 +127,7 @@ def lower_module(
     the MVP repeated-RHS workload, a chained multi-layer model, or a sliced section — the staged
     descent is the same. ``target_package`` (a merlin.targetgen.registry.TargetPackage) lowers
     through an ISOLATED, dynamically-loaded target dialect (no core edits, plug-and-play); built-in
-    reference targets (toy_npu, saturn) still work via ``target``.
+    reference targets still work via ``target``.
     """
     with IrAudit(
         workdir,

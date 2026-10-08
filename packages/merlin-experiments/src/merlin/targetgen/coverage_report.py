@@ -510,7 +510,7 @@ def aggregate(
 
     The instruction-class universe is DERIVED from ``target``'s own ISA unioned with the classes the
     decoded traces actually exercised; the mode universe is the union of the modes the graded capsules
-    declare. So the not-covered rows reflect THIS target's vocabulary, not a hardcoded gemmini list."""
+    declare. So the not-covered rows reflect THIS target's vocabulary, not a hardcoded target's list."""
     capsules = capsules or []
     cap_by_name = {c["name"]: c for c in capsules}
     traces = traces or {}

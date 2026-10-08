@@ -77,15 +77,15 @@ def generate(facts: dict) -> str:
     # DERIVE every value from the target's RTL facts; when a fact is absent, emit ``None`` and let the
     # generated checker FAIL CLOSED (skip that check) — NEVER substitute a per-target default. The old
     # ``or 32`` / ``"i8"`` / ``"i32"`` fallbacks silently handed any target whose facts lacked datapaths
-    # gemmini's numeric-shape rules (the derive-vs-overfit cardinal-rule violation this repo forbids).
+    # the first target's numeric-shape rules (the derive-vs-overfit cardinal-rule violation this repo forbids).
     acc_dtype = dps.get("accumulator", {}).get("dtype")
     # Two RTL facts can ground the accumulation width, and the memory one is not always extracted: some
     # targets' memory facts carry only bytes/depth. The accumulator DATAPATH dtype (e.g. "i32", evidence
     # "AccumulatorMem SInt<32>") carries the same width, so read it as the second source rather than
     # defaulting. This is still derivation -- both values come from the target's own facts. When NEITHER
     # is present the width stays None and the generated checker fail-closed SKIPS the narrow-accumulator
-    # rule, which is the honest outcome; a baked "or 32" here silently handed every target gemmini's
-    # accumulator width, the derive-vs-overfit violation this file exists to avoid.
+    # rule, which is the honest outcome; a baked "or 32" here silently handed every target the first
+    # target's accumulator width, the derive-vs-overfit violation this file exists to avoid.
     acc_bits = acc.get("lane_bits") or _dtype_bits(acc_dtype)
     return _TMPL.format(input_dtype=dps.get("input", {}).get("dtype"), acc_dtype=acc_dtype, acc_bits=acc_bits)
 

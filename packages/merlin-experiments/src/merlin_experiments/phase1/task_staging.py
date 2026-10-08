@@ -254,8 +254,8 @@ def build_task(
         # whole-repo + self-check tool + self-paced READY marker; TASK_realistic is self-contained,
         # so skip the full experiment's grading-tier addendum appended below.
         ws_task = ws / "TASK.md"
-        # A target that ships a hand-authored realistic task uses it (gemmini); a descriptor-only target
-        # (e.g. atlas) has none, so fall back to the GENERATED target-agnostic prompt — exactly what the
+        # A target that ships a hand-authored realistic task uses it; a descriptor-only target
+        # has none, so fall back to the GENERATED target-agnostic prompt — exactly what the
         # 'full' branch below already does. render_prompt is the COMPLETE per-arm task (incl. the seam menu
         # for the assisted/CIRCT arms), so the bundle STARTER_PROMPT is not re-appended in that case.
         _task_md = _te().resource_path("task/TASK_realistic.md")
@@ -344,9 +344,9 @@ def build_task(
             "one (no cmake/`mlir-tblgen`/`*-opt` C++ binary) — a hand C++ backend is NOT acceptable for this "
             "arm. All integrity rules still apply (`integrity_exempt: false`).\n"
         )
-    # Tier wording is TARGET-AGNOSTIC: name the target's own oracle tiers from the manifest, not the
-    # gemmini spike/verilator literals (atlas's loop tier is the arc program-oracle, its checkpoint the
-    # cycle-accurate RTL cosim/Verilator). `_loop`/`_ckpt` are the tier keys the runner resolves.
+    # Tier wording is TARGET-AGNOSTIC: name the target's own oracle tiers from the manifest, not one
+    # target's spike/verilator literals (a self-hosted ISA's loop tier is the arc program-oracle, its
+    # checkpoint the cycle-accurate RTL cosim/Verilator). `_loop`/`_ckpt` are the tier keys the runner resolves.
     from merlin.targetgen import capsule_runner as CR
 
     _loop = min(

@@ -74,7 +74,7 @@ def _skip_ws(s: str, i: int) -> int:
 def _read_symbol(s: str, i: int) -> tuple[str, int] | None:
     """Read the MLIR symbol at ``s[i]`` (which must be ``@``); return ``(name, end)``.
 
-    Handles both spellings: a bare identifier (``@Gemmini``) and a quoted one (``@"odd name"``)."""
+    Handles both spellings: a bare identifier (``@Top``) and a quoted one (``@"odd name"``)."""
     if i >= len(s) or s[i] != "@":
         return None
     i += 1

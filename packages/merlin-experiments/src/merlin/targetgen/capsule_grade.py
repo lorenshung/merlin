@@ -1355,8 +1355,8 @@ def grade(
         _enforce_and_persist_models(results)
 
     # collect decoded traces for coverage — read from the TARGET's own suite dir (run_capsule writes
-    # under cfg.suite, e.g. atlas-capsule-bench), not the gemmini SUITE literal (which left the atlas
-    # coverage dict silently empty; same root cause as the self-check n_capsules:0 blind loop).
+    # under cfg.suite, e.g. <target>-capsule-bench), not one target's SUITE literal (which left every
+    # other target's coverage dict silently empty; same root cause as the self-check n_capsules:0 blind loop).
     traces: dict[str, dict] = {}
     rr = Path(runs_root) / "runs" / CR.suite_for(target)
     for cap in caps:

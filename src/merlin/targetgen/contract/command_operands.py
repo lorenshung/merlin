@@ -76,7 +76,7 @@ def applies(cb: Any) -> bool:
 
     Two other artifact families share the ``capsule.command_buffer.json`` file name and must not be
     reported as defective by an audit that does not describe them: an ISA-level command stream
-    (numeric ``opcode``, e.g. an atlas ``PushWeight`` at opcode 0) and a SIMT warp descriptor (no
+    (numeric ``opcode``, e.g. a weight push at opcode 0) and a SIMT warp descriptor (no
     ``commands`` list at all, carrying ``kernel`` instead). Both are discriminated STRUCTURALLY --
     by the shape of what is there, not by any target or kind literal.
     """

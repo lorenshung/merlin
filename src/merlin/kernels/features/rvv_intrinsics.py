@@ -102,7 +102,7 @@ def _register_block(text: str) -> dict:
 
 
 def extract_rvv_intrinsics(nk: NormalizedKernel, fired: dict[str, list[str]]) -> dict:
-    """RVV decision sub-dict, or {} for non-RVV kernels (no-op for gemmini/avx/neon)."""
+    """RVV decision sub-dict, or {} for non-RVV kernels (no-op for systolic/avx/neon)."""
     if target_family(nk.target) != "rvv":
         return {}
     text = nk.raw_text or ""

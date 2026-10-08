@@ -2,9 +2,9 @@
 
 Runs each capsule in a target's corpus through ONE backend package and reports the target's perf
 headline (from ``BenchTargetSpec.perf_fields``) per kernel + a markdown table. This is the shared core
-for the simple single-backend case (muon; a single gemmini approach). Gemmini's bespoke 8-approach
-cross-backend matrix + bare-metal golden-C arm are NOT modeled here (that would push target
-conditionals into the shared driver) — that script keeps its matrix and can call this per-kernel.
+for the simple single-backend case (one backend, or one approach of a multi-approach target). A
+target's bespoke multi-approach cross-backend matrix + bare-metal golden-C arm are NOT modeled here
+(that would push target conditionals into the shared driver) — that script keeps its matrix and can call this per-kernel.
 """
 
 from __future__ import annotations

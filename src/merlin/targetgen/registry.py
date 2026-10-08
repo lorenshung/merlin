@@ -12,7 +12,7 @@ dynamically and registered for a run:
 
 This gives: (1) isolation — rounds never clobber the core or each other; (2) import/export —
 the directory is the portable unit; (3) run isolation — multiple candidate dialects coexist.
-The core ships only the reference targets (toy_npu, saturn); everything generated is loaded
+The core ships only the built-in reference targets; everything generated is loaded
 from its package via :func:`load_target`.
 """
 

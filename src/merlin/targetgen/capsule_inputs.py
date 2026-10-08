@@ -143,7 +143,7 @@ def canonical_input_raws(capsule: dict, capsule_dir: str | Path | None = None) -
     """The EXACT per-leaf input bytes the independent float golden was computed with, keyed by tensor
     name — read from ``golden.yaml`` ``oracle_provenance.inputs[name].fp8_raw_hex`` (a flat row-major
     list of per-element raw hex). This is the canonical device preload for a float target's program
-    oracle: it must run on the SAME operands the golden used (the atlas exact-fp8 palette), NOT the
+    oracle: it must run on the SAME operands the golden used (the exact-fp8 palette), NOT the
     integer-engine ``Tensor.deterministic`` 0..3 fill (whose bytes-as-fp8 collapse to subnormal/zero).
 
     When a spec records no raw hex but DOES record decoded values, the bytes are ENCODED from those values

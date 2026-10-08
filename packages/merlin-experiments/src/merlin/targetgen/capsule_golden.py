@@ -127,8 +127,8 @@ def _apply_epilogue(t: Tensor, attrs: dict, env: dict[str, Tensor], operands: di
                 )
             t = t.requant(int(shift))
         elif stage == "acc_scale":
-            # The acc_scale readout rounding mode is a named, overridable parameter (default the gemmini
-            # round-half-even). The Tensor engine reproduces half-even exactly; a capsule that declares a
+            # The acc_scale readout rounding mode is a named, overridable parameter (default the systolic
+            # array's round-half-even). The Tensor engine reproduces half-even exactly; a capsule that declares a
             # different mode is a datapath this integer engine cannot reproduce, so fail CLOSED (surface
             # it) rather than silently applying half-even to a target that rounds otherwise.
             mode = attrs.get("requant_round", _DEFAULT_ACC_SCALE_ROUND)
@@ -393,7 +393,7 @@ def mx_operands(capsule: dict, capsule_dir: str | Path | None = None) -> dict | 
 def golden_source(capsule: dict, capsule_dir: str | Path | None = None) -> str:
     """The golden's PROVENANCE: ``merlin_tensor_int`` when it is (re)computed on the integer
     :class:`~merlin.runtime.tensor.Tensor` engine, or the INDEPENDENT source declared in the capsule's
-    ``golden.yaml`` (e.g. ``specir_refmodel_fp8_bf16`` for the atlas fp8-e4m3 -> bf16 path). Defaults to
+    ``golden.yaml`` (e.g. ``specir_refmodel_fp8_bf16`` for an fp8-e4m3 -> bf16 datapath). Defaults to
     ``merlin_tensor_int`` when no ``golden.yaml`` / source is present, so integer capsules keep recomputing."""
     # Resolve this module's loader at call time: legacy overrides are part of the
     # evaluator interface and would be lost through a direct function reexport.
@@ -402,10 +402,10 @@ def golden_source(capsule: dict, capsule_dir: str | Path | None = None) -> str:
 
 def is_independent_float_golden(capsule: dict, capsule_dir: str | Path | None = None) -> bool:
     """True iff the capsule is graded against an INDEPENDENT golden under a FLOAT compare policy — the
-    atlas fp8/bf16 case: the integer Tensor engine cannot recompute the float datapath, so the golden is
+    fp8/bf16 case: the integer Tensor engine cannot recompute the float datapath, so the golden is
     READ from ``golden.yaml`` and the integer reference/simulate tiers do not apply. False for every
-    integer capsule (gemmini / ``exact_int`` / ``golden_source: merlin_tensor_int``) and for a float
-    capsule that ships no independent ``golden.yaml`` (e.g. muon), which keep the recompute path."""
+    integer capsule (``exact_int`` / ``golden_source: merlin_tensor_int``) and for a float capsule
+    that ships no independent ``golden.yaml``, which keep the recompute path."""
     return golden_provenance.is_independent_float_golden(capsule, capsule_dir, source_reader=golden_source)
 
 
@@ -477,7 +477,7 @@ def golden(capsule: dict, capsule_dir: str | Path | None = None) -> dict[str, li
 
 
 def _recompute_golden(capsule: dict) -> dict[str, list]:
-    """Compute the capsule's expected outputs on the integer Tensor engine (the gemmini path)."""
+    """Compute the capsule's expected outputs on the integer Tensor engine (the integer-datapath path)."""
     env = materialize_capsule_leaves(capsule)
     op = capsule["operation"]["op"]
     attrs = capsule["operation"].get("attributes", {})

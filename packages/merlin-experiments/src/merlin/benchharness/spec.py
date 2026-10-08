@@ -1,16 +1,16 @@
 """``BenchTargetSpec`` — the per-target parameters a shared bench driver needs.
 
-The gemmini and muon experiment harnesses cloned the *structure* of a perf bench, a redacted
+The per-target experiment harnesses cloned the *structure* of a perf bench, a redacted
 self-check, and an agentic QA loop, differing only in (a) which capsule-runner family they drive
-(``capsule_runner`` vs ``muon_capsule_runner`` — both expose ``discover_capsules`` + ``run_capsule``
+(the shared ``capsule_runner`` vs a target's own runner — both expose ``discover_capsules`` + ``run_capsule``
 with the same ``{status, tiers, failure, numeric}`` result shape) and (b) how they read a perf number
 off the timing tier + name the peak. A ``BenchTargetSpec`` captures exactly those differences so the
 driver (`benchharness.selfcheck`, `benchharness.perf`) is written once and a NEW target is a spec +
 corpus, not a forked directory.
 
-Deliberately NOT captured here: genuinely bespoke, single-instance machinery (gemmini's 8-approach
-cross-backend matrix + bare-metal golden-C arm, its verilator/simjob broker). Those stay in the
-gemmini experiment as callbacks/extra logic — folding them in would inject target-conditionals into
+Deliberately NOT captured here: genuinely bespoke, single-instance machinery (one target's 8-approach
+cross-backend matrix + bare-metal golden-C arm, its verilator/simjob broker). Those stay in that
+target's experiment as callbacks/extra logic — folding them in would inject target-conditionals into
 the shared driver (the overfit this repo forbids).
 """
 
@@ -28,7 +28,7 @@ class BenchTargetSpec:
     ``runner`` is any module exposing ``discover_capsules(root, *, labels=, contract=)`` and
     ``run_capsule(cap, package_dir, *, runs_root, run_id, contract=, timeout)`` returning the common
     ``{status, tiers, failure, numeric}`` dict (``merlin.targetgen.capsule_runner`` /
-    ``muon_capsule_runner`` both qualify)."""
+    a target's own runner both qualify)."""
 
     name: str
     runner: Any

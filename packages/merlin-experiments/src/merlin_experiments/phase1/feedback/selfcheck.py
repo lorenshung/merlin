@@ -172,8 +172,9 @@ def _strip_build_state(root: Path) -> None:
 
 
 # the PUBLIC capsule set (with goldens — operator-side; output is redacted before the agent sees it),
-# DERIVED per-target from the descriptor's capsule_corpus (atlas fp8/L3, gemmini i8/L2) — no committed
-# gemmini leak. Falls back to the legacy committed set if the descriptor can't be resolved.
+# DERIVED per-target from the descriptor's capsule_corpus (e.g. fp8/L3 or i8/L2) — no committed
+# set leaking one target's capsules into another's check. Falls back to the legacy committed set if
+# the descriptor can't be resolved.
 def _public_capsules(context: InvocationContext) -> Path:
     try:
         from merlin.targetgen.target_experiment import load_target_experiment
@@ -415,10 +416,11 @@ def _sim_policy_error(sim: str, sim_via: str | None) -> str | None:
 
 def _adapters(sim: str, target: str, sim_via: str | None, *, readback_policy=None) -> tuple[dict, str]:
     """Resolve the self-check oracle tiers from the TARGET's contract (target-agnostic, mirrors the driver
-    grade). A chipyard target (gemmini) exposes the spike/verilator/vcs ladder selectable via --sim; any
-    other target grades on its OWN contract-derived RTL tier (atlas external_backend -> the program oracle;
-    an arc target -> the RTL-derived arc cosim), where --sim is not applicable. Routing atlas here through
-    the hardcoded spike/verilator adapters ran the gemmini/RVV lowering path and crashed (AW4)."""
+    grade). A chipyard target exposes the spike/verilator/vcs ladder selectable via --sim; any
+    other target grades on its OWN contract-derived RTL tier (external_backend -> the program oracle;
+    an arc target -> the RTL-derived arc cosim), where --sim is not applicable. Routing a self-hosted-ISA
+    target here through the hardcoded spike/verilator adapters ran the RoCC/RVV lowering path and crashed
+    (AW4)."""
     policy_error = _sim_policy_error(sim, sim_via)
     if policy_error:
         raise ValueError(policy_error)
@@ -994,7 +996,7 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
             _log_telemetry(out, a.capsules)
             return 2
     # barrier = the deepest resolved RTL tier: chipyard maps from --sim; any other target uses its
-    # single contract-derived tier (atlas -> L3 program oracle), so read it from the adapters.
+    # single contract-derived tier (e.g. L3 program oracle), so read it from the adapters.
     barrier_tier = SIM_TIER[sim] if _sim_via == "chipyard" else max(adapters) if adapters else "L3"
     # subset selection (operator-side capsule dirs)
     if a.capsules.strip().lower() == "failing":
@@ -1105,7 +1107,7 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
     out_dir = Path("selfcheck_out")
     out_dir.mkdir(exist_ok=True)
     # Read results from the TARGET'S OWN suite dir. run_capsule writes under cfg.suite
-    # (e.g. atlas-capsule-bench); globbing the gemmini SUITE literal here made every non-gemmini
+    # (e.g. <target>-capsule-bench); globbing one target's SUITE literal here made every other target's
     # self-check return n_capsules:0 with per_capsule:[] — the agent's feedback loop went blind while
     # the driver's in-memory grade was correct (the atlas 0/11 blind-loop bug).
     rows, npass, ncert, nscreened = [], 0, 0, 0

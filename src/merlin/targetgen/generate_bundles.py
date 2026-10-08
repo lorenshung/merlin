@@ -6,9 +6,9 @@ module paths — identical literal strings for every target — plus (b) a small
 block that comes from the descriptor (ISA headers, hwbringup set, corpus) or is DERIVED from the target
 name (the rtl_facts pin, the irdl pin, the prior-backend deny surfaces). This generator emits (a)+(b), so
 a new accelerator drops a descriptor + registers its RTL with mlc and gets the whole ladder — no
-hand-authored, gemmini-overfit YAML.
+hand-authored, single-target-overfit YAML.
 
-Faithful to the hand-authored gemmini bundles (verified by ``test_generate_bundles`` — the generated
+Faithful to the hand-authored bundles of the first target (verified by ``test_generate_bundles`` — the generated
 allow/deny path SETS match, and verify_no_cheat + the sandbox stay green).
 """
 

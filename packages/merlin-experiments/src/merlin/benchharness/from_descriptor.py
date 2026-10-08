@@ -3,7 +3,7 @@
 This puts ANY target on the shared bench spine (``run_perf`` / ``redacted_grade``) without per-target
 wiring: the corpus + target name come from the ``target_experiment.yaml`` descriptor (the declarative
 setup), the capsule runner is injected, and the perf headline is a small extractor. So a target's perf
-+ self-check reuse the one shared loop + report — no hardcoded gemmini path.
++ self-check reuse the one shared loop + report — no hardcoded target path.
 """
 
 from __future__ import annotations

@@ -107,10 +107,10 @@ def lower_model(
     preserve attributes and avoid custom-printer grammar skew.
 
     ``vectorize=True`` bakes native RVV (fixed-width vector ops) into the IR instead of
-    relying on clang auto-vectorization — for the rv64gcv / Saturn-tile target.
+    relying on clang auto-vectorization — for the rv64gcv vector-tile target.
 
     ``parallel_harts=N`` layers an outer OpenMP-parallel loop under that RVV schedule, so
-    the object is BOTH vectorized and multicore (the multi-hart Saturn / Zephyr SMP path).
+    the object is BOTH vectorized and multicore (the multi-hart vector tile / Zephyr SMP path).
     ``parallel_chunks`` (from ``perop_blocks.distinct_parallel_arms``, produced by the same prepare
     step that tagged the IR) makes that split PER OP and block-preserving, so the emitted kernel is
     the 1-hart kernel with a parallel wrapper around it rather than a differently-blocked one; None

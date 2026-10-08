@@ -77,7 +77,7 @@ def derive_march(model: IsaModel) -> str:
 
     Fail-safe: an empty/opaque opcode table yields the integer base (a float kernel then fails closed at
     compile rather than silently mis-compiling). This is how the fork-free build learns a target's FP mode
-    without a hand-set flag — e.g. Muon defines OP_FP + FMA but no FP load/store, so it derives to zfinx."""
+    without a hand-set flag — e.g. a core that defines OP_FP + FMA but no FP load/store derives to zfinx."""
     values = {int(v) for v in model.opcode_table.values()}
     march = "rv32im"
     if _OPV_OP_FP in values:

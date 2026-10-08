@@ -395,7 +395,7 @@ def not_measured(verdict) -> dict[str, str]:
 
 
 def not_measured_labels(verdict) -> list[str]:
-    """`["M2_microvit_gemmini[gated]", ...]` -- the not-measured names WITH the status that excluded
+    """`["M2_example_model[gated]", ...]` -- the not-measured names WITH the status that excluded
     each one, so a dropped row is visible in a one-line report rather than silently absent."""
     return [f"{n}[{st}]" for n, st in not_measured(verdict).items()]
 

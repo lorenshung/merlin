@@ -1,5 +1,5 @@
 """certify_rvv — isolated, measured K-ladder for one (RVV package x workload), coupled across
-spike (correctness + emitted-instruction evidence) and K1 (cycle truth). Mirrors the gemmini
+spike (correctness + emitted-instruction evidence) and K1 (cycle truth). Mirrors the
 oot_runner discipline: never raises for a gate/measurement failure (records status + reason),
 and ``not_run_is_not_pass`` — an unreachable target is ``not_run``, never a false ``pass``.
 
@@ -205,8 +205,11 @@ def certify_rvv(
     if "spike" in targets:
         try:
             run = zm.run_on_spike(
-                build["elf"], dram_base=sim_board.dram_base, harts=harts,
-                mem_bytes=build["ram_bytes"], timeout=timeout,
+                build["elf"],
+                dram_base=sim_board.dram_base,
+                harts=harts,
+                mem_bytes=build["ram_bytes"],
+                timeout=timeout,
             )
             gate = zm._gate(run["prefix"], refs) if refs else {"ok": None}
             rec["correctness"] = {

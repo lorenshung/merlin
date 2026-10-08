@@ -304,7 +304,7 @@ def _capsule_name_for(d: Path) -> str:
 
 def _target_of_run(run_capsule_dir: Path) -> str:
     """DERIVE the target a capsule run belongs to from its own ``run_manifest.yaml`` (the runner stamps
-    ``target`` there). No gemmini default: a run dir without a recorded target is a loud error, so a
+    ``target`` there). No default target: a run dir without a recorded target is a loud error, so a
     caller that omits ``target`` still screens against the run's ACTUAL target, never an assumed one."""
     mf = Path(run_capsule_dir) / "run_manifest.yaml"
     doc = yaml.safe_load(mf.read_text()) if mf.is_file() else None

@@ -50,7 +50,7 @@ class KernelEntry:
     id: str  # stable kernel id (== dispatch symbol)
     symbol: str  # compiled C symbol the replay invokes
     roots: list[str] = field(default_factory=list)  # fused root op names (provenance)
-    capability: str = "scalar"  # required target capability (scalar|rvv|gemmini|simt|...)
+    capability: str = "scalar"  # required target capability (scalar|rvv|systolic|simt|...)
     # Model-layer provenance carried from the dispatch node's ``prov.*`` (see the outliner). The
     # SAME key the cross-compiler compare (ExecuTorch↔Merlin) and the section slicer join on. ``role``
     # is intentionally NOT stored here — it is derived from ``fqn`` downstream (``dse_guidance``) to

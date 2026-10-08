@@ -1,7 +1,7 @@
 """Reproducible native target-selection snapshot, pending full compiler packaging.
 
 This freezes target descriptors and builds the general `egg` bridge from its
-lockfile. It is a component artifact, not an Atlas dialect/emitter/runtime.
+lockfile. It is a component artifact, not a target dialect/emitter/runtime.
 """
 
 from __future__ import annotations

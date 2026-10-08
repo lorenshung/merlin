@@ -435,7 +435,7 @@ def _accum_for_encoding(target: str, operand: str, fallback: str | None) -> str:
     does this unit accumulate this contraction in", and it answers by taking the FIRST declared
     accumulate rule that matches -- which is what every other path in the repo computes for the same
     contraction. A second derivation here would be a second answer to one question, and on a target
-    declaring several rules for one operand (atlas declares both bf16 and f32 for fp8_e4m3, which is a
+    declaring several rules for one operand (e.g. both bf16 and f32 accumulation for fp8_e4m3, which is a
     real capability rather than an ambiguity) the two would disagree.
 
     Falls back to the corpus binding's accumulator only when no unit accepts the operand at all, and

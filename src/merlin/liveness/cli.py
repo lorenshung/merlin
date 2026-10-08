@@ -5,7 +5,7 @@ per-target literal), failing closed on what cannot be derived. Consumes a decode
 ``instruction_trace`` (from ``merlin-targetgen`` / ``rocc_decode``) and/or image-audit flags.
 
 Usage:
-  merlin-liveness --target gemmini --trace path/to/instruction_trace.json --address-model pointer_args
+  merlin-liveness --target <t> --trace path/to/instruction_trace.json --address-model pointer_args
   merlin-liveness --target <t> --trace <t.json> --dram-bytes 0x40000000 --persist
   merlin-liveness --target <t> --trace <t.json> --hostless --has-htif   # host-assist precondition
 

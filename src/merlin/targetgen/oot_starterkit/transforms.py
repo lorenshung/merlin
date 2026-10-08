@@ -1,8 +1,8 @@
 """Generic, target-AGNOSTIC compiler transforms the agent calls. NOT target-specific lowerings.
 
 These are textbook transforms every matmul-capable accelerator backend needs — the same math whether the
-target is Gemmini, a TPU, or a toy NPU. Per the Q2 ruling (agent-callable + generalizable ⇒ legitimate),
-they live in the shared kit, not as a Gemmini answer. They reduce a problem to a 2D matmul / tile it; the
+target is a systolic array, a TPU, or a toy NPU. Per the Q2 ruling (agent-callable + generalizable ⇒ legitimate),
+they live in the shared kit, not as one target's answer. They reduce a problem to a 2D matmul / tile it; the
 agent still maps the resulting matmul to ITS target's instructions (the target-specific work).
 
   * im2col(...)     — conv (NHWC + KHWC weights) -> (im2col matrix, packed weight) shapes + a recipe so a

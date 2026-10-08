@@ -1,7 +1,7 @@
 """Backend taxonomy + registry — address runtime backends by target CLASS, not instance.
 
-The runtime backends are per-instance modules (``spike``, ``saturn_vec``, ``gemmini``, ``muon``,
-``spike_model``, ``zephyr_model``) that share one shape — a ``Backend``: resolve toolchain →
+The runtime backends are per-instance modules (``spike``, ``spike_model``, ``zephyr_model``, and each
+accelerator's support-provided backend) that share one shape — a ``Backend``: resolve toolchain →
 ``compile_command_buffer`` (→ ELF) → ``run_elf`` → ``parse_output`` (→ outputs+metrics) →
 ``run_command_buffer`` (compile+run+parse, gated on the reference oracle). Historically each was
 imported by name; this module classifies them by **target class** (CPU / GPU / NPU) so callers and
@@ -12,7 +12,7 @@ silicon instance — the same instance→class generalization the dialect layer 
 Scope (step 1): the taxonomy + a registry (name → module + class) + the shared ``Backend`` Protocol.
 The per-instance modules keep their current behavior; collapsing their copy-pasted plumbing
 (toolchain resolve / ``OUT/METRIC/DONE`` parse / reference gate) into a shared base is the follow-up
-(and must re-certify the frozen gemmini path byte-for-byte).
+(and must re-certify each frozen backend path byte-for-byte).
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ def target_class_for(target: str) -> TargetClass | None:
 
 
 class BackendKind(str, Enum):
-    KERNEL = "kernel"  # compiles+runs one command buffer (spike, gemmini, muon, saturn_vec)
+    KERNEL = "kernel"  # compiles+runs one command buffer (spike, an accelerator backend)
     WHOLE_MODEL = "whole_model"  # runs a whole captured model (spike_model, zephyr_model)
     MATMUL_ROUTE = "matmul_route"  # routes matmuls to an external/hand GEMM for attribution
     # (xnnpack/openblas/ours on a board; xnnpack on the host)
@@ -654,8 +654,8 @@ def parse_console(
 
     Every backend prints results the same way — ``OUT <name> <rows> <cols> v...`` /
     ``METRIC <name> <int>`` / ``DONE`` — so the parser is shared; the small per-backend variations are
-    flags: ``strip_warnings`` drops Verilator ``%Warning:`` fragments (gemmini/verilator),
-    ``tolerant_metric`` skips malformed METRIC lines instead of raising (gemmini), ``value_parser`` is
+    flags: ``strip_warnings`` drops Verilator ``%Warning:`` fragments (a Verilator-run backend),
+    ``tolerant_metric`` skips malformed METRIC lines instead of raising (a RoCC backend), ``value_parser`` is
     ``int`` for int8/systolic/CPU targets and ``float`` for fp SIMT targets. ``error_cls`` is the
     backend's own exception type (so messages/raises are unchanged from the hand-written versions)."""
     if strip_warnings:

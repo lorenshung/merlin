@@ -29,7 +29,7 @@ def dtype_bits(dtype: str) -> int:
 
     This used to be a literal ``{token: bytes}`` table, and it was the third copy of the dtype
     vocabulary in this repo (after the capsule schema's enum and ``corpus_spec._DTYPE``). It knew
-    neither the MX formats nor ``fp16``, so an mx_gemmini or radiance capsule that LOADED would still
+    neither the MX formats nor ``fp16``, so an MX or fp16 capsule that LOADED would still
     die here at address-map time — the size is the derived fact now:
 
       * a registered format contributes its ``pack.bits`` if it is sub-byte packed (mxfp4 -> 4,
@@ -41,7 +41,7 @@ def dtype_bits(dtype: str) -> int:
     following tensor, which is the defect this module exists to prevent).
 
     NOT included: a block-scaled format's SCALE plane. Where the E8M0 scales live is a property of the
-    target's memory ABI, not of the format — mx_gemmini, for instance, addresses them through a separate
+    target's memory ABI, not of the format — a block-scaled target may, for instance, address them through a separate
     scale-factor memory (its own derived ``SF_MEM`` base), not inline with the operand — so a caller that
     needs to place scales must size them from that target's facts. Sizing them in here would bake one
     target's layout into a module whose whole contract is to be target-agnostic.

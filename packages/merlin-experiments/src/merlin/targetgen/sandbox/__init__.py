@@ -1,6 +1,6 @@
 """Shared, descriptor+manifest-driven agentic bwrap sandbox.
 
-Promotes the per-experiment gemmini sandbox to target-agnostic infra: a new target gets a correct,
+Promotes a per-experiment sandbox (first written for one target) to target-agnostic infra: a new target gets a correct,
 continuously-guarded sandbox from its ``target_experiment.yaml`` (+ capability manifest) with ZERO copied
 scripts. Routing is by compute-unit KIND / sim FAMILY (never a target name):
 
@@ -131,7 +131,7 @@ __all__ = [
 def resolve_kind(te: TargetExperiment) -> str | None:
     """The target's primary compute-unit KIND (systolic|simt|vector|scalar), for family routing. Tries the
     registered capability manifest first; falls back to the ``target_contract`` the descriptor itself
-    names (some targets — e.g. radiance — register their contract under a ``*_oot`` id the roster registry
+    names (some targets register their contract under a ``*_oot`` id the roster registry
     does not yet resolve). Returns None if no contract is reachable (the sandbox still builds — routing
     then rests on ``sim_via`` alone, and the isolation test records 'kind: unknown')."""
     from merlin.targetgen.families import family_profile  # noqa: F401 — ensures kind is a known family

@@ -4,7 +4,7 @@ The linalg-on-tensors grammar has a granted *reader* (:mod:`.contract.linalg_ifa
 uses to parse; authoring the lowering to the target command buffer is the package's own job. This module
 is the REFERENCE backend's lowering — the known-good baseline, NOT an agent tool — so it lives outside the
 granted set (like :mod:`merlin.runtime.reference`). It maps the inventory the reader produces to the
-command-buffer opcodes the reference emitter (:mod:`merlin.targets.muon.backend.muon_codegen_mlir`)
+command-buffer opcodes the SIMT target's reference emitter (its support backend's codegen module)
 supports, fail-closing on any pattern the emitter cannot yet build.
 
 Currently supported patterns (each verified against the reference emitter):

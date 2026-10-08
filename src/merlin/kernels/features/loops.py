@@ -3,7 +3,7 @@
 Decision recorded: *is the computation tiled/blocked* and the *depth* of the iteration nest
 (a structural decision about blocking levels), never the tile sizes themselves.
 
-Families with an explicit tiling directive (Gemmini nested scratchpad loops, Triton
+Families with an explicit tiling directive (systolic nested scratchpad loops, Triton
 ``program_id``/``BLOCK_SIZE`` grids, Exo ``divide_loop``/``tile_outer_loops``) are tiled when
 their marker fires. For C-vector families (RVV/AVX/NEON) the tiling marker is merely
 "a loop exists", so we additionally require either a >=2-deep nest or register blocking

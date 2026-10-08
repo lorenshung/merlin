@@ -1,6 +1,6 @@
 """Shared, target-parametric benchmark-harness primitives.
 
-The gemmini/muon capsule- and perf-bench experiment harnesses historically each hand-rolled their
+The per-target capsule- and perf-bench experiment harnesses historically each hand-rolled their
 own repo-root discovery (`Path(__file__).parents[4]`), run/report routing, and isolation utilities
 (`_common.py`, `_pbcommon.py`). This package is the single home for that shared machinery so the
 per-target harnesses stay thin. It is the seam WS2 (harness unification) grows into — the QA-loop,

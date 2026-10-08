@@ -16,8 +16,8 @@ Discovery (:func:`discovered_targets`) scans ``artifacts/targets/*/contracts/res
 ``manifest_for(name)`` runs the single agnostic derive path over each. A new accelerator brings itself
 up by dropping a descriptor + a residual and letting mlc extract facts — with zero edits to core.
 
-The shipped residuals include ``rvv``, ``mx_gemmini``, ``radiance`` and ``atlas``.
-An observed Atlas decoder field does not by itself establish its encoding or endpoint.
+Which targets ship a residual is discovered, never listed here.
+An observed decoder field does not by itself establish its encoding or endpoint.
 All are provenance-tagged prototypes flagged
 ``requires_human_review`` — NOT RTL-certified.
 """
@@ -103,7 +103,7 @@ def discovered_targets() -> list[str]:
 def manifest_for(name: str) -> dict[str, Any]:
     """Build a target's capability manifest the AGNOSTIC way: load its residual side-input, load RTL
     facts when the residual marks ``facts_source: rtl`` (else none — an all-residual prototype), and run
-    :func:`derive_manifest`. This is the single path for EVERY target (atlas proved it); there is no
+    :func:`derive_manifest`. This is the single path for EVERY target; there is no
     per-target builder or literal manifest dict in core."""
     residual = _load_residual(name)
     facts_source = residual.pop("facts_source", "none")
@@ -207,7 +207,8 @@ def dialect_plan_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
 # codes — already in ``facts.json``) + FAMILY defaults (runner/endpoint from the compute-unit kind) +
 # a small RESIDUAL side-input (the ABI ``encoding`` sub-block, ``requant.ref`` and human prose that RTL
 # cannot ground). Onboarding a target becomes: drop a descriptor, let mlc extract facts, hand it the
-# shrinking residual. The residual is exactly the shape of gemmini's stripped ``target_contract.yaml``.
+# shrinking residual. The residual is exactly the shape of a hand-authored ``target_contract.yaml`` stripped
+# of everything the RTL grounds.
 
 
 def _descriptor_get(descriptor: Any, key: str, default: Any = None) -> Any:
@@ -577,7 +578,7 @@ def derive_manifest(
       remaining generation defaults (rtl_tiers/perf_fields/trace_gate) are filled at read time by
       :func:`merlin.targetgen.target_experiment.load_capability_manifest`, so they are not duplicated
       into the emitted contract.
-    - **RESIDUAL** (``residual``, the intent+prose side-input, exactly the shape of gemmini's stripped
+    - **RESIDUAL** (``residual``, the intent+prose side-input, exactly the shape of a stripped hand-authored
       ``target_contract.yaml``): the compute-unit intent (name/kind/ops/scaling) + ``requant.ref``, the
       encoding ABI sub-block (addr_len/readout_bits/semantic_class/config_subtype), and the human prose
       (family/features/obligations/promises/oracle_ladder/provenance/notes/runner/runtime/...). Facts

@@ -10,7 +10,7 @@ never a per-caller branch.
 
 The mapping is DERIVED from each format's ``(exp_bits, mantissa_bits, bias, top-code scheme)`` — never a
 baked value table — and every unknown spelling FAILS CLOSED (``KeyError``), exactly like the e4m3/e5m2 +
-saturn ``float8`` fix. ``bias`` is itself the derived IEEE value ``(1 << (exp_bits - 1)) - 1``, kept in the
+unnamed ``float8`` fix. ``bias`` is itself the derived IEEE value ``(1 << (exp_bits - 1)) - 1``, kept in the
 row only so the three MX widths read explicitly against their RTL definitions (FP6E3M2/FP4E2M1/e4m3).
 """
 

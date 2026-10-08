@@ -1139,15 +1139,15 @@ def _sim_engine_adapters(sim_via: str, target: str) -> dict[str, Callable]:
 def oracle_adapters(target: str, sim_via: str | None = None, *, readback_policy=None) -> dict[str, Callable]:
     """The oracle adapters per tier for a target. The mlc ARC model is the DEFAULT RTL tier (works for
     ANY mlc target, no bespoke sim); a target that DECLARES a bespoke sim (``sim_via``) additionally gets
-    its higher-fidelity sim tiers (chipyard -> spike L2 / verilator L3), preserving the gemmini path.
+    its higher-fidelity sim tiers (chipyard -> spike L2 / verilator L3), preserving that declared sim's path.
 
-    A self-hosted-ISA target (``endpoint_kind == external_backend``, e.g. atlas) is graded by the generic
+    A self-hosted-ISA target (``endpoint_kind == external_backend``) is graded by the generic
     PROGRAM oracle (assemble the emitted `.word`/`.insn` kernel with STOCK LLVM -> its mlc cosim) instead
     of the command_buffer arc path — routed from the contract, no target-name branch.
 
     ``sim_via=None`` (unspecified) is self-resolved from the target's contract via :func:`_bespoke_sim_via`
-    so a bare ``oracle_adapters(target)`` is fully contract-routed — never a silent gemmini default. An
-    explicit ``""`` (arc-only, e.g. atlas) is honored as-is and NOT re-resolved.
+    so a bare ``oracle_adapters(target)`` is fully contract-routed — never a silent default target. An
+    explicit ``""`` (arc-only) is honored as-is and NOT re-resolved.
 
     Routing order is DELIBERATE: a declared EXCLUSIVE bespoke sim (a self-hosted SIMT core, ``sim_via=
     cyclotron``) takes precedence over the ``external_backend`` program-oracle default. A SIMT core's
@@ -1196,11 +1196,11 @@ def oracle_available(target: str, sim_via: str | None = None) -> tuple[bool, str
     """Probe whether the target's REQUIRED grading oracle can actually run RIGHT NOW — BEFORE an agent
     run spends anything. Target-agnostic, routed from the contract exactly like :func:`oracle_adapters`:
 
-      * ``external_backend`` (self-hosted-ISA program oracle, e.g. atlas) -> the mlc arc cosim AND the
+      * ``external_backend`` (self-hosted-ISA program oracle) -> the mlc arc cosim AND the
         model venv must BOTH be present (the emitted program is assembled/laid-out in the model venv and
         run on the arc cosim);
       * ``command_buffer`` / arc-default target -> the mlc arc model must be present;
-      * a DECLARED bespoke sim (``sim_via == "chipyard"``, e.g. gemmini) -> its fastest loop-tier sim
+      * a DECLARED bespoke sim (``sim_via == "chipyard"``) -> its fastest loop-tier sim
         (spike) binary must be available (else the arc tier, if present, still carries the grade).
 
     Returns ``(ok, reason)``. ``ok is False`` means grading would only ever emit ``oracle_unavailable``:
@@ -1439,7 +1439,7 @@ def _match_by_policy(a: dict, b: dict, policy: dict | None) -> bool:
     """Output-equality per the capsule's numeric_policy — exact for integer policies (the systolic
     default), tolerance for float. This replaces the per-runner hardcoded exact-vs-atol fork: an i8
     capsule matches exactly (identical to _exact_match), an fp capsule matches within its declared
-    atol/rtol (default atol 1e-3, matching the muon path)."""
+    atol/rtol (default atol 1e-3)."""
     compare = (policy or {}).get("compare", "exact_int")
     if compare in ("exact_int", "exact"):
         return _exact_match(a, b)
@@ -2295,8 +2295,8 @@ def _encoding_divergence_hint(
     """A mandatory hardware/oracle tier failed while the cheap tiers already passed (numeric fails raise
     earlier), so the defect is in the emitted hardware artifact, NOT the command buffer. Return a
     target-agnostic localization hint so the failure is never an opaque 'oracle != golden' — plus the first
-    concrete artifact finding if the decoder produced any (gemmini). For a float/oracle-only target (atlas,
-    no cheap trace decode) the generic hint still fires. This is what makes the np12r class localizable on
+    concrete artifact finding if the decoder produced any (a RoCC trace). For a float/oracle-only target
+    (no cheap trace decode) the generic hint still fires. This is what makes the np12r class localizable on
     EVERY endpoint: it names WHERE to look (the artifact encoding), not just THAT hardware disagreed.
 
     When the decoded trace + command buffer are available, an ADVISORY, FAIL-CLOSED cross-check
@@ -4146,7 +4146,7 @@ def _grade_model_capsule_inline(
         # WHICH tier the mesh oracle corresponds to, DERIVED from the target's own declared RTL tiers.
         # This was `[x for x in declared if x not in ("L0", "L1")]` with an `"L3"` fallback -- three tier
         # -name literals standing in for a fact the manifest already carries, which names the wrong tier
-        # confidently on any target whose ladder differs (atlas grades at L3+L4, not L3).
+        # confidently on any target whose ladder differs (e.g. one that grades at L3+L4, not L3).
         _rtl = [t for t in declared if t in _rtl_tiers_of(target)]
         _tier = _rtl[-1] if _rtl else (declared[-1] if declared else None)
         if _tier:
@@ -4879,7 +4879,7 @@ def run_capsule(
 
     ``config`` (a :class:`runner_config.RunnerConfig`) supplies the per-target grading knobs — the
     4th-artifact name, the sim-tier map + RTL tiers + loop order, the optional trace gate, and the perf
-    fields — so ONE runner serves every target. When absent, the implicit gemmini/systolic config is
+    fields — so ONE runner serves every target. When absent, the implicit systolic config is
     built from ``target``/``suite``/``dtype`` (byte-identical to the pre-collapse behavior). Output
     equality uses the capsule's ``numeric_policy`` (exact for integer, tolerance for float). ``perf_extractor``
     (cb -> flops) feeds the SIMT gflops/pct_fp_peak. ``oracle_adapters`` is the per-target oracle set: the
@@ -4901,7 +4901,7 @@ def run_capsule(
 
     # The effective target comes from the config (authoritative — cfg.target drives the run) when one is
     # supplied, else the explicit ``target`` argument. If NEITHER is given we refuse to run rather than
-    # silently defaulting to gemmini (the OV2 rule: no core path silently operates on gemmini).
+    # silently defaulting to one target (the OV2 rule: no core path silently operates on a default target).
     eff_target = config.target if config is not None else target
     if eff_target is None:
         raise ValueError("run_capsule requires a target (or a config carrying one); no default target is assumed")
@@ -5128,7 +5128,7 @@ def run_capsule(
         # The golden is the INDEPENDENT oracle's answer. An exact source-bound PyTorch integer
         # slice is recomputed on its captured typed operands and cross-checked against host eager.
         # Other integer capsules recompute on their declared synthetic stimulus. For a
-        # float capsule that ships an independent golden.yaml (atlas fp8-e4m3 -> bf16, golden_source
+        # float capsule that ships an independent golden.yaml (e.g. fp8-e4m3 -> bf16, golden_source
         # specir_refmodel_fp8_bf16), the integer engine cannot reproduce the float datapath, so the golden
         # is READ from golden.yaml — resolved by policy+source, never a target name.
         capsule_dir = capsule.get("__dir__")
@@ -5237,7 +5237,7 @@ def run_capsule(
 
         # Place any harness-assigned canonical base INSIDE the target's DRAM region [dram_base, +size):
         # a self-hosted-ISA target maps DRAM at a nonzero region base (derived from its facts; 0 for a
-        # 0-based target like gemmini, keeping the base at DEFAULT_BASE unchanged), and the L2 oracle
+        # 0-based target, keeping the base at DEFAULT_BASE unchanged), and the L2 oracle
         # relocates by that same base — so a submission that omits a base still grades against a layout
         # the model can index. Bases the agent DECLARED are left untouched (inject_bases only fills gaps).
         _dram.inject_bases(cb, capsule, base=dram_base_for(eff_target) + _dram.DEFAULT_BASE)
@@ -5511,14 +5511,14 @@ def run_capsule(
 
         # --- oracle tiers -------------------------------------------------------------------
         # Run every tier the config declares (tier_sim ladder) OR an injected adapter provides — so a
-        # target whose RTL tier is supplied by an adapter rather than a static tier_sim (atlas: arc L3,
-        # empty tier_sim) still runs, while gemmini's declared ladder is unchanged. The L0/L1 math floor
+        # target whose RTL tier is supplied by an adapter rather than a static tier_sim (e.g. arc L3 with
+        # an empty tier_sim) still runs, while a declared ladder is unchanged. The L0/L1 math floor
         # is handled above (reference/simulate), NOT here. Sorted for a stable L2<..<L5 ladder order.
         # program_oracle (the external_backend adapters) raises its OWN OracleUnavailable, a RuntimeError
         # that is a DIFFERENT class from this module's OracleUnavailable(Exception) — unrelated by mro. If
         # we catch only the local one, an honest "oracle unavailable" from the program oracle (missing
         # assembler / model venv / cosim import) falls through to the generic handler and is mislabeled a
-        # TOOL_CRASH, so the unavailable->incomplete / not_gradeable_no_oracle path never fires for atlas.
+        # TOOL_CRASH, so the unavailable->incomplete / not_gradeable_no_oracle path never fires for a self-hosted ISA.
         # Catch BOTH so unavailability is honest for every endpoint.
         from .program_oracle import OracleUnavailable as _POUnavailable
 
@@ -6046,7 +6046,7 @@ def run_capsule(
                     and _match_by_policy(res["outputs"], ref, policy)
                     and _match_by_policy(res["outputs"], sim, policy)
                 )
-            # tier_sim is a display LABEL; a tier supplied by an adapter (atlas arc L3) may have no static
+            # tier_sim is a display LABEL; a tier supplied by an adapter (e.g. arc L3) may have no static
             # label, so fall back to the adapter's oracle-provenance string, else the tier name.
             sim_name = (
                 cfg.tier_sim.get(tier) or (res.get("oracle") if isinstance(res.get("oracle"), str) else None) or tier

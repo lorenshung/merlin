@@ -860,7 +860,7 @@ def embed_provenance(dest: str | Path, sel: ChampionSelection) -> None:
     }
     _write(meta / "provenance.yaml", dump_yaml(provenance))
 
-    # 3) recorded certification (oot_runner.certify for gemmini / rvv spike gate)
+    # 3) recorded certification (oot_runner.certify for an OOT accelerator / rvv spike gate)
     gate_ok, gate_detail = _check_gate(sel)
     certification = {
         "target": sel.target,

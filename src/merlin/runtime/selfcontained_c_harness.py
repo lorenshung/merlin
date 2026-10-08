@@ -88,7 +88,7 @@ def build_program(
     print as fixed decimals (matched by the runner's float tolerance); integer outputs as base-10."""
     # Force the kernel to inline into main (single call site) so no R_RISCV_CALL relocation survives the
     # reassemble-after-transcode path. Prepended to the agent's definition (which starts with its return
-    # type), yielding e.g. `static inline __attribute__((always_inline)) void radiance_kernel(...)`.
+    # type), yielding e.g. `static inline __attribute__((always_inline)) void <target>_kernel(...)`.
     kernel_inlined = "static inline __attribute__((always_inline)) " + kernel_fn_src.strip()
     body: list[str] = [
         _render_helpers(model).strip(),

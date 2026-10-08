@@ -1,7 +1,7 @@
 """Vector-length strategy features.
 
 Decision recorded: *is the loop vector-length-agnostic* (scalable, RVV ``vsetvl`` style) vs
-*fixed-width* (AVX/NEON) vs *not applicable* (systolic, e.g. Gemmini). Never records the
+*fixed-width* (AVX/NEON) vs *not applicable* (systolic). Never records the
 concrete VLEN/LMUL — that is a constant, not a decision.
 """
 

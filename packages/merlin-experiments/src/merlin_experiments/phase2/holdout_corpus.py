@@ -444,7 +444,7 @@ def derive_domain(
     # mesh boundary admitted by the public coordinate envelope, test the exact
     # boundary and its two tails.  The upper bound is itself taken from the
     # largest public axis extent.  This catches both tiling and remainder bugs
-    # without embedding a Gemmini dimension or consulting timing results.
+    # without embedding a target's mesh dimension or consulting timing results.
     maximum_extent = max(m, n, maximum_k)
     landmarks = sorted(
         {

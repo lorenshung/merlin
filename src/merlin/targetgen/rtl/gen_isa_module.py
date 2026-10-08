@@ -2,7 +2,7 @@
 
 This promotes the CIRCT facts from a post-hoc CHECKER into a GENERATOR: it reads the deterministic
 RTL-extracted `facts.json` (funct decode table + custom opcode + mesh dims + scratchpad/accumulator
-capacities, all extracted from the elaborated Gemmini RTL by circt_introspect) and emits a self-contained
+capacities, all extracted from the elaborated RoCC accelerator RTL by circt_introspect) and emits a self-contained
 Python module the target backend can build its RoCC encoder on. The agent then writes only the op-LOWERING
 logic (tiling, im2col), not the error-prone ISA encoding it would otherwise re-derive from headers.
 
@@ -13,7 +13,7 @@ largest hand-written chunk (~300 LOC of rocc.py). A pure-C++/headers backend can
 RTL-facts pipeline behind it. Encoding is RTL-grounded; only the *algorithm* is left to the agent.
 
 Usage:
-  python -m merlin.targetgen.rtl.gen_isa_module [--facts <facts.json>] [--out gemmini_isa.py]
+  python -m merlin.targetgen.rtl.gen_isa_module [--facts <facts.json>] [--out <target>_isa.py]
 """
 
 from __future__ import annotations

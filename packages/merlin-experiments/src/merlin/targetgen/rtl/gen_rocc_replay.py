@@ -1,10 +1,10 @@
-"""Build a RoCC replay spec for the arcilator @Gemmini harness from a capsule's decoded trace + golden.
+"""Build a RoCC replay spec for an accelerator's arcilator harness from a capsule's decoded trace + golden.
 
 The decoded trace (`rocc.decode`) already carries raw rs1/rs2 per instruction as either a constant or an
 argbase+offset (a DRAM pointer the kernel was passed). Since the arc harness controls DRAM placement, we
 assign each tensor arg a base address, materialize its deterministic bytes, and emit the exact instruction
 stream (funct, resolved rs1/rs2) the kernel would issue — plus the golden output to check. The harness
-replays this into the isolated @Gemmini arc model. Part of #143-a.
+replays this into the accelerator's isolated arc model. Part of #143-a.
 
 CLI: gen_rocc_replay.py <capsule.yaml> <instruction_trace.json> --out replay.json
 """
@@ -26,7 +26,7 @@ ARG_STRIDE = 0x40000  # 256 KB per arg
 
 
 def _arg_roles(capsule: dict) -> list[str]:
-    """Kernel arg order = inputs (weight/input) then outputs, matching the emitted gemmini_kernel(...)."""
+    """Kernel arg order = inputs (weight/input) then outputs, matching the emitted <target>_kernel(...)."""
     roles = []
     for t in capsule.get("inputs") or []:
         roles.append(t.get("name") or t.get("role"))

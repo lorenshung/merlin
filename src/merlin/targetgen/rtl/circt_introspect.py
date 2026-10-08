@@ -42,7 +42,7 @@ GENERATOR_VERSION = "rtl-introspect-v11-selected-source-receipts"
 # RISC-V ISA STANDARD custom-N major opcodes — fixed by the base ISA for EVERY RISC-V chip, NOT a
 # per-target fact. WHICH custom slot a RoCC accelerator is wired to IS target-specific; it is resolved
 # from the target's own reviewed encoding (contract ``encoding.rocc_custom_slot``) — never a baked
-# gemmini=custom3 assumption. The major opcode is a SoC-config (OpcodeSet) fact the accelerator's own
+# custom-3 assumption. The major opcode is a SoC-config (OpcodeSet) fact the accelerator's own
 # decoder does not carry, so it cannot be recovered from the core HW dialect the funct fan-out uses.
 _RISCV_CUSTOM_OPCODES = {0: 0x0B, 1: 0x2B, 2: 0x5B, 3: 0x7B}  # derived-ok: RISC-V standard custom-0/1/2/3 encodings
 # RoCC ``.insn`` func3 is the xd/xs1/xs2 register-usage field — a RoCC ABI field that varies per
@@ -55,7 +55,7 @@ def _contract_rocc_slot(target: str | None) -> int | None:
     """The RISC-V custom SLOT (0..3) this target's RoCC is wired to, read from its reviewed contract
     (``encoding.rocc_custom_slot``). Reads the raw contract yaml (NOT the manifest — loading the manifest
     would re-enter facts regeneration). None when the target declares no slot (a non-RoCC target, or one
-    that has not declared it) -> the opcode fails closed rather than defaulting to gemmini's custom-3."""
+    that has not declared it) -> the opcode fails closed rather than defaulting to custom-3."""
     if not target:
         return None
     try:
@@ -84,7 +84,7 @@ def _rocc_custom_opcode(target: str | None) -> int | None:
 # ---------------------------------------------------------------------- per-target path resolution
 def _soc_hw_path(target: str) -> Path:
     """The per-target SoC HW-dialect cache (``firtool --ir-hw`` output) the accumulator port-parser
-    reads, under the PURGEABLE rtl cache — never inside merlin/, never a baked gemmini path. This is
+    reads, under the PURGEABLE rtl cache — never inside merlin/, never a baked target path. This is
     the SoC dialect the ``@AccumulatorMem`` port-parse needs (mlc's core dialect drives the decoder)."""
     return rtl_cache_dir(target) / f"{target}_soc.hw.mlir"
 
@@ -92,7 +92,7 @@ def _soc_hw_path(target: str) -> Path:
 def isa_scala_path(target: str, chipyard_root: str | Path | None = None) -> Path:
     """The target's Chisel ISA source, by the chipyard generator convention
     ``generators/<t>/src/main/scala/<t>/<T>ISA.scala`` — DERIVED from the target name, not a hardcoded
-    ``GemminiISA.scala`` (gemmini resolves the identical file it always did). Returns the path whether
+    ISA file name (the first target resolves the identical file it always did). Returns the path whether
     or not it exists; callers gate on ``.is_file()``."""
     root = Path(chipyard_root) if chipyard_root is not None else Path(V1.default_chipyard())
     cap = target[:1].upper() + target[1:]
@@ -1071,15 +1071,15 @@ def _build_facts(
 ) -> dict[str, Any]:
     """Assemble the RTL facts for ``target``. PREFERS mlc RTL discovery (target-agnostic: mesh DIM +
     memory capacities + the decoder-derived ISA); the chipyard FIRRTL grep + HW-port parse is the
-    legacy FALLBACK, run only for a target that ships a Chisel ISA source (gemmini) and skipped
-    entirely otherwise (a non-chipyard target relies wholly on discovery — no gemmini path is touched).
+    legacy FALLBACK, run only for a target that ships a Chisel ISA source and skipped
+    entirely otherwise (a non-chipyard target relies wholly on discovery — no chipyard path is touched).
 
     Every input path is resolved FROM ``target`` when not explicitly overridden: the SoC HW cache
     (``<t>_soc.hw.mlir``), the Chisel ISA source (``<T>ISA.scala`` by generator convention), the
     declared ISA headers. Provenance-stamped; does not write (see :func:`dump_facts`).
 
     ``target`` is required (last so the path overrides can stay positional); a missing target is a
-    loud error, never a silent gemmini fallback."""
+    loud error, never a silent default-target fallback."""
     if target is None:
         raise ValueError("build_facts requires an explicit target (no default is assumed)")
     from . import datapaths as datapath_reader
@@ -1238,7 +1238,7 @@ def _build_facts(
     # this path did not.
     v1.setdefault("target", target)
     # WHICH ELABORATION they describe. The census path records this as ``source`` (the config it read,
-    # e.g. GemminiRocketConfig, with the .fir it came from). Where the census did not run, these facts
+    # e.g. a Chipyard ``*Config``, with the .fir it came from). Where the census did not run, these facts
     # were extracted from a cached HW dialect and NOTHING said which configuration that dialect is of --
     # so the artifact could not be attributed to a device, which is the repo's hardware-provenance rule
     # exactly inverted. The target's own descriptor names it (``rtl.elaboration``), so record that,

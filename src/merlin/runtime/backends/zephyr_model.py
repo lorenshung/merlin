@@ -2395,8 +2395,8 @@ def build_app(
     :func:`prepare_for_lowering` exactly as ``matrix`` is. It is the seam a whole-model DEVICE
     offload arrives through; ``None`` (the default) moves nothing and the build is byte-identical.
 
-    ``backend``: ``"rvv"`` (vector tile / Saturn) or ``"scalar"`` (scalar tile). The
-    scalar build is the portable FireSim-safe path; the vector build targets the Saturn
+    ``backend``: ``"rvv"`` (vector tile) or ``"scalar"`` (scalar tile). The
+    scalar build is the portable FireSim-safe path; the vector build targets the vector
     tile (worker on ``rvv_hart``). Returns ``{elf, app_dir, backend, **c_runtime_info}``.
 
     ``rvv_schedule`` overrides the default ``RVV_TRANSFORM_SCHEDULE`` (the seam through which

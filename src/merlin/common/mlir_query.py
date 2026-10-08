@@ -7,7 +7,7 @@ the IR's real structure. This module is the one grounded query surface: it parse
 captures — Builtin/Func/Arith/Linalg/Tensor/Scf/Math/Cf, ``allow_unregistered``, plus the
 ``} -> (T1,T2)`` normalizer) and exposes small typed accessors over the parsed module.
 
-Custom-dialect ops (``quant_ext.*``, gemmini, anything model2MLIR emits) round-trip as xDSL
+Custom-dialect ops (``quant_ext.*``, a target's own dialect, anything model2MLIR emits) round-trip as xDSL
 ``UnregisteredOp`` — :func:`op_name` recovers their real name, and attribute reads work unchanged.
 
 xDSL-gated: requires the ``xdsl`` install (present in the default .venv). No ``re`` here by design.

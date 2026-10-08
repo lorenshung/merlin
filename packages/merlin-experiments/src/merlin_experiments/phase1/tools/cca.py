@@ -2,10 +2,10 @@
 the assisted arms (arm-3 / arm-4), so the mandated calls resolve as plain imports:
 
     from cca_contract import check_bijection
-    check_bijection("atlas")                      # the CCA<->CompilerAction bijection report
+    check_bijection("<target>")                   # the CCA<->CompilerAction bijection report
 
     from action_catalog import escalation_ladder
-    escalation_ladder("spatial.dataflow", "atlas")  # the FLAG->..->CODEGEN route ladder for one axis
+    escalation_ladder("spatial.dataflow", "<target>")  # the FLAG->..->CODEGEN route ladder for one axis
 
 Imports NOTHING from merlin (full merlin does not import in the sandbox: merlin/kernels/types.py shadows
 stdlib ``types`` on a flat sys.path, and regions.py needs the unstaged merlin.common.paths). It forwards
@@ -15,8 +15,8 @@ Both entry points are ORACLE-FREE (public CCA structure — no golden is ever in
 The module is staged under two names, so it exposes BOTH functions regardless of which name imports it.
 
 CLI (convenience):
-    python cca_contract.py check-bijection atlas
-    python action_catalog.py escalation-ladder spatial.dataflow atlas
+    python cca_contract.py check-bijection <target>
+    python action_catalog.py escalation-ladder spatial.dataflow <target>
 """
 
 from __future__ import annotations

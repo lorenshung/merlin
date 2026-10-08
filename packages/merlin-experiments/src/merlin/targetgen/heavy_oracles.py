@@ -130,7 +130,7 @@ def run_vcs_parallel(
     """Run the corpus through VCS with parallel simv instances (one per capsule).
 
     ``target`` is required and threaded into each per-capsule run so the grade uses that target's config
-    (no silent gemmini default)."""
+    (no silent default target)."""
     from . import capsule_runner as CR
 
     if not vcs_available(target):

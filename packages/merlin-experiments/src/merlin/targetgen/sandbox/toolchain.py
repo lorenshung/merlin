@@ -362,8 +362,8 @@ def sandbox_env(
     harness = curated_harness_dir(te) if harness is None else harness
     if harness:
         # A target-neutral var + the per-target-named one back-compat consumers read. The per-target name
-        # is DERIVED from the target string (gemmini -> MERLIN_GEMMINI_HARNESS_DIR), not hard-coded, so the
-        # gemmini backend/probe see the identical var with zero target branch.
+        # is DERIVED from the target string (<target> -> MERLIN_<TARGET>_HARNESS_DIR), not hard-coded, so the
+        # target's backend/probe see the identical var with zero target branch.
         parts.append(f"export MERLIN_HWBRINGUP_HARNESS_DIR={harness}; ")
         parts.append(f"export MERLIN_{te.target.upper()}_HARNESS_DIR={harness}; ")
     return "".join(parts)

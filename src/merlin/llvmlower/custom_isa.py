@@ -3,7 +3,7 @@
 The Merlin thesis for accelerator/custom instructions: a Merlin op lowers **1:1** to an
 ``llvm.inline_asm`` (or ``llvm.call_intrinsic``), so a custom instruction the compiler has
 no intrinsic for still lands in the binary — without modifying llvm-project. The escape
-hatch for a truly novel encoding (e.g. a Saturn vcix instruction) is the assembler ``.insn``
+hatch for a truly novel encoding (e.g. a vector unit's vcix instruction) is the assembler ``.insn``
 directive inside the inline asm: the toolchain emits the exact word it is told to, even
 though it cannot name the mnemonic.
 
@@ -16,7 +16,7 @@ This module provides:
   function around one ``llvm.inline_asm`` and compile it to an rv64gcv object, so the
   emitted (custom) instruction can be confirmed in the disassembly.
 
-Standard rv64gcv needs none of this (clang auto-vectorizes); it is the on-ramp for Saturn
+Standard rv64gcv needs none of this (clang auto-vectorizes); it is the on-ramp for a vector unit's
 custom instructions and hand-placed RVV sequences.
 """
 

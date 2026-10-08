@@ -42,7 +42,7 @@ TOLERANCES: dict[str, tuple[float, float]] = {
 }
 
 # Precision variants a bundle can carry. The regular floats + int8 are RVV-runnable; fp6/fp4 are
-# sub-byte microscaling formats that ingest + lower but have no RVV datapath (routed to gemmini-mx);
+# sub-byte microscaling formats that ingest + lower but have no RVV datapath (routed to an MX-capable accelerator);
 # `mixed` is a per-module mixed-precision capture (e.g. attention fp16 + MLP fp4).
 _VARIANTS = ("fp32", "fp16", "bf16", "int8", "fp8", "fp6", "fp4", "mixed")
 

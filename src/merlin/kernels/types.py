@@ -41,7 +41,7 @@ class NormalizedKernel:
 
     Attributes:
         source: provenance, e.g. ``"xnnpack" | "autocomp" | "exo"``.
-        target: hardware/ISA family, e.g. ``"rvv" | "gemmini" | "avx2" | "neon"``.
+        target: hardware/ISA family, e.g. ``"rvv" | "avx2" | "neon"`` or an accelerator family.
         path: repo-relative origin path (for the ``kernel_record.path`` field).
         op: operation family, e.g. ``"gemm" | "matmul" | "conv" | "dwconv" | "unknown"``.
         dtype: primary element type, e.g. ``"i8" | "f32" | "f16" | "unknown"``.

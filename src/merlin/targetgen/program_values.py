@@ -192,8 +192,8 @@ def _decode_output(raw: bytes, shape: list[int], dtype: str, physical: dict | No
             f"result. This is a harness fault, not a numeric one"
         )
     arr = _context()._decode_elements(raw, dtype, width).reshape(dims)
-    # physical->logical layout, DECLARED by the emitting backend (not a constant here). The atlas MXU
-    # writes an [2R, C] tensor as two stacked R-row banks; ``{"unstack_row_halves": 2}`` un-stacks it.
+    # physical->logical layout, DECLARED by the emitting backend (not a constant here). An MXU that
+    # writes an [2R, C] tensor as two stacked R-row banks declares ``{"unstack_row_halves": 2}`` to un-stack it.
     halves = (physical or {}).get("unstack_row_halves")
     if halves and dims[0] % halves == 0:
         h = dims[0] // halves

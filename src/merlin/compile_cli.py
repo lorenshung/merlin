@@ -1132,7 +1132,7 @@ def compile_oot(
 ) -> dict:
     """OOT target: build the backend package and run a capsule through it, three-way gated.
 
-    Serves any registered out-of-tree target (gemmini and beyond). ``--workload`` names a capsule
+    Serves any registered out-of-tree target. ``--workload`` names a capsule
     (e.g. A2_single_tile_matmul) and ``--package`` the OOT backend. Accelerators run capsules/kernels,
     not whole VLA models."""
     from .common.paths import runs_root
@@ -1212,7 +1212,7 @@ def compile_oot(
     if run == "none":
         return out
 
-    sim = "spike" if run in ("spike", "k1", "run") else run  # gemmini runs on sim, not the K1 SoC
+    sim = "spike" if run in ("spike", "k1", "run") else run  # an accelerator runs on a sim, not the host SoC
     iface = cap_dir / "capsule.interface.mlir"
     res = oot_runner.certify(
         pkg_dir, iface, runs_root=str(rr), run_id=f"{workload}_{sim}", simulator=sim, timeout=timeout

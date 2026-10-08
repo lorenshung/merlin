@@ -1,6 +1,6 @@
 """Generate a target's agent task prompt from a shared template + DERIVED slots.
 
-The task prompts are the last gemmini-hardcoded surface: the deliverable layout, grading model, QA loop,
+The task prompts are the last surface hardcoded to one target: the deliverable layout, grading model, QA loop,
 integrity rules, and status lines are identical for every target (the EXPERIMENT axis — mode/arm/condition
 — selects which shared blocks compose, and is target-agnostic), while the only target-specific content is
 a small set of slots derived from {the descriptor + the RTL fact bundle + the codegen endpoint}. This
@@ -51,7 +51,7 @@ _ENDPOINT_DESC = {
 
 def _is_simt_mlir(manifest) -> bool:
     """True when the target's 4th artifact is an LLVM-dialect MLIR module (``lowered.llvm.mlir``) that the
-    oracle compiles FORK-FREE (stock LLVM rv32 + the target's RTL-derived Muon re-encode, no vendor fork) —
+    oracle compiles FORK-FREE (stock LLVM rv32 + the target's RTL-derived instruction re-encode, no vendor fork) —
     the thesis path where the agent emits a COMPILER LOWERING, not a hand kernel.
 
     DERIVED, no target literal: resolve the 4th-output filename EXACTLY as the runner does
@@ -84,9 +84,9 @@ def _simt_mlir_grounding(target: str) -> str:
     """The LLVM-dialect MLIR kernel contract for a SIMT core on the fork-free thesis path (replaces the .word
     self-hosted grounding). The agent emits ONLY the kernel FUNCTION as verified LLVM-dialect IR: the runner
     OWNS the harness (embeds the cb operands, calls the kernel, prints OUT/DONE) and the SIMT runtime OWNS the
-    warps/barriers, so the kernel is plain scalar compute over pointer operands. Mirrors the gemmini
+    warps/barriers, so the kernel is plain scalar compute over pointer operands. Mirrors the RoCC
     LLVM-dialect contract (the SAME shared ``llvmlower``→stock-LLVM front), minus the RoCC ``.insn`` — the
-    reference emitter (:func:`merlin.runtime.backends.muon_codegen_mlir.emit_kernel_mlir`) emits this shape."""
+    SIMT target's reference emitter (its support backend's ``emit_kernel_mlir``) emits this shape."""
     sym = f"{target}_kernel"
     skeleton = (
         "module {\n"
@@ -216,7 +216,7 @@ def _cmdbuf_opcodes() -> list[str]:
 
 def _emit_framing(bundle: dict, endpoint: str = "inline_asm_insn", inst_width: int = 32) -> str:
     """A CONCRETE, derived one-liner describing what the 4th-entrypoint artifact must be — derived from
-    the fact bundle + the codegen ENDPOINT (never a gemmini literal). A RoCC ``inline_asm_insn`` target
+    the fact bundle + the codegen ENDPOINT (never a target literal). A RoCC ``inline_asm_insn`` target
     emits a host `.insn` word stream encoding the discovered opcodes; a self-hosted-ISA ``external_backend``
     target emits a ``kernel.S`` of `.word`/`.insn` directives — the target's OWN encoded instructions —
     that STOCK LLVM (`llvm-mc`) assembles into IMEM words, NOT an MLIR module and NOT the model's bespoke
@@ -229,7 +229,7 @@ def _emit_framing(bundle: dict, endpoint: str = "inline_asm_insn", inst_width: i
         if dim.get("derived") and dim.get("value")
         else ""
     )
-    # SELF-HOSTED ISA (external_backend, e.g. atlas): the 4th artifact is a `kernel.S` of `.word`/`.insn`
+    # SELF-HOSTED ISA (external_backend): the 4th artifact is a `kernel.S` of `.word`/`.insn`
     # directives that STOCK LLVM (llvm-mc) assembles to IMEM words — the encoding lives in the emitted
     # directives, grounded on the ISA definition + example kernel shipped in the bundle. NOT an MLIR
     # module, NOT `llvm.inline_asm`, and NOT the model's bespoke assembler mnemonics (llvm-mc can't
@@ -246,7 +246,7 @@ def _emit_framing(bundle: dict, endpoint: str = "inline_asm_insn", inst_width: i
         )
     # SPATIAL tensor-tile (OPU): a command buffer over one-hot op ports driving an outer-product tile —
     # NOT a RoCC .insn stream over a systolic mesh. Frame it from the discovered tile geometry + command
-    # set (gemmini has no tile_dim, so it never takes this branch and stays byte-identical).
+    # set (a systolic RoCC target has no tile_dim, so it never takes this branch and stays byte-identical).
     td = f.get("tile_dim", {})
     if td.get("derived") and isinstance(td.get("value"), dict):
         tv = td["value"]
@@ -292,8 +292,8 @@ def _emit_framing(bundle: dict, endpoint: str = "inline_asm_insn", inst_width: i
     return "; ".join(parts)
 
 
-# The certification-model sentence, DERIVED from the corpus goldens — NOT hardcoded to gemmini's integer
-# 3-way. The grader (capsule_golden.is_independent_float_golden) decides per capsule whether a golden is an
+# The certification-model sentence, DERIVED from the corpus goldens — NOT hardcoded to one target's
+# integer 3-way. The grader (capsule_golden.is_independent_float_golden) decides per capsule whether a golden is an
 # INDEPENDENT float reference graded within a tolerance (a float datapath: fp8/bf16 MXU) or the exact-integer
 # self-consistency check. We classify the target's declared corpus with that SAME signal so the prompt tells
 # the agent the grading model the runner will actually apply — never a per-target English branch.
@@ -531,8 +531,8 @@ def prompt_slots(te, manifest) -> dict:
     _operation_guidance = memory_operation_prompt_block({"operation_capabilities": _operation_contract})
     return {
         "target": target,
-        "tool_stem": f"{target}-opt",  # not "gemmini-opt"
-        "kernel_symbol": f"{target}_kernel",  # not "gemmini_kernel"
+        "tool_stem": f"{target}-opt",  # derived, never one target's tool name
+        "kernel_symbol": f"{target}_kernel",  # derived, never one target's symbol
         # The 4th artifact defines a kernel SYMBOL only when it is a code module (.insn / upstream / an
         # external kernel); a command_buffer endpoint's artifact IS the command buffer (no module symbol).
         "emit_symbol_note": (

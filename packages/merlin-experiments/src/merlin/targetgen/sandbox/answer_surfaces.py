@@ -300,7 +300,7 @@ def _evicted_oracle_modules_result() -> tuple[list[Path], str | None]:
     """``(paths, failure_reason)`` for the registry-driven eviction sweep.
 
     Reference-target BACKENDS + sim-oracles evicted to their own packages (OV11) are oracle ROUTES too
-    — the SIMT cyclotron oracle now lives in the muon package (``muon_oracles`` inside its backend), and a
+    — a SIMT target's cyclotron oracle now lives in that target's support package (inside its backend), and a
     reference backend is the 'answer' codegen. DERIVE their host paths from the plugin registry (the same
     discovery the runtime uses) rather than a per-target literal, so the mask FOLLOWS the eviction instead
     of the now-stale in-tree paths in ORACLE_MODULES.
@@ -473,8 +473,8 @@ def answer_surfaces(te: TargetExperiment) -> list[AnswerSurface]:
 
     # Mask EVERY hidden-capsule dir under the capsule tree, not only THIS target's declared one. The bundle
     # grants the frozen ABI (``merlin/contract/``) broadly, which re-exposes the SHARED
-    # ``capsules/hidden`` set and any OTHER target's ``<t>/hidden`` — a radiance run could otherwise read
-    # the shared/atlas hidden capsules (a held-out answer surface; the ``CANARY_HIDDEN`` marker caught
+    # ``capsules/hidden`` set and any OTHER target's ``<t>/hidden`` — one target's run could otherwise read
+    # the shared or another target's hidden capsules (a held-out answer surface; the ``CANARY_HIDDEN`` marker caught
     # exactly this). Mirrors :func:`golden_files`' whole-tree sweep that masks cross-target/nested goldens.
     #
     # Measured on saturn_opu before the fix: the hidden GOLDENS were masked (they are enumerated
@@ -620,7 +620,7 @@ def audit_tokens(te: TargetExperiment) -> dict[str, tuple[str, ...]]:
     ]
     # A token for EVERY hidden-capsule dir (this target's + the shared one + any other target's), matching
     # the filesystem mask above — the trailing two path components identify each hidden set (e.g.
-    # "radiance/hidden", "capsules/hidden", "atlas/hidden"). A read of any is an answer surface.
+    # "<target>/hidden", "capsules/hidden"). A read of any is an answer surface.
     _hidden_rels = []
     if te.hidden_corpus():
         _hidden_rels.append(te.hidden_corpus().rstrip("/"))

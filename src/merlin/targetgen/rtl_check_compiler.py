@@ -35,10 +35,14 @@ def _endpoint_kind_for(target: str, facts_rec: dict) -> str | None:
     except Exception:  # noqa: BLE001 — no residual/derivation for this target
         pass
     body = _facts_body(facts_rec)
-    if any(
-        itf.get("name") in {"funct_decode_table", "self_hosted_isa"}
-        for itf in (body.get("interfaces") or []) if isinstance(itf, dict)
-    ) and _endpoint_from_facts(body) is None:
+    if (
+        any(
+            itf.get("name") in {"funct_decode_table", "self_hosted_isa"}
+            for itf in (body.get("interfaces") or [])
+            if isinstance(itf, dict)
+        )
+        and _endpoint_from_facts(body) is None
+    ):
         return "unresolved"  # do not let a family default promote this field-local observation
     try:
         from .target_experiment import load_capability_manifest
@@ -196,8 +200,8 @@ def compile_kernel_checks(
 
 def compile_checks(facts_rec: dict, capsule: dict, target: str, *, checks=None) -> dict[str, Any]:
     """Compile the check files for a capsule + a per-family PROVENANCE audit, ENDPOINT-aware and fully
-    derived. A RoCC command-ISA target (endpoint ``inline_asm_insn``, e.g. gemmini) gets the trace
-    FileCheck over its decoded RoCC stream; a self-hosted-ISA target (``external_backend``, e.g. atlas)
+    derived. A RoCC command-ISA target (endpoint ``inline_asm_insn``) gets the trace
+    FileCheck over its decoded RoCC stream; a self-hosted-ISA target (``external_backend``)
     gets supported structural checks over its emitted `.word` stream. The RoCC vs self-hosted
     decision is the DERIVED ``endpoint_kind`` (never funct_decode_table presence — the mlc icmp-fanout
     extractor synthesises a table for a self-hosted decoder too, so that would mis-route). Both families
@@ -213,7 +217,8 @@ def compile_checks(facts_rec: dict, capsule: dict, target: str, *, checks=None) 
         "trace": compile_trace_checks(facts_rec, capsule, target=target, checks=checks) if is_rocc else None,
         "kernel": (
             compile_kernel_checks(capsule, facts_rec=facts_rec, target=target)
-            if endpoint == "external_backend" else None
+            if endpoint == "external_backend"
+            else None
         ),
         "endpoint_status": "resolved" if endpoint in {"inline_asm_insn", "external_backend"} else "unverified",
         "provenance": _provenance(facts_rec, capsule, target),

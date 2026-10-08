@@ -12,12 +12,12 @@ Two deliberate boundaries keep this generic and un-overfit:
   the registry entry, not a copy of its encoding.
 - **Requant/quantize semantics are NOT modelled here.** A unit carries only an opaque ``requant``
   reference (``{ref: <lowering-id>}``) pointing at the target's own out-of-tree lowering. The exact
-  arithmetic (Gemmini's rounding-shift, gemmini-mx's E8M0 block-exponent add + LUT, radiance's
-  none) is mutually incompatible across targets and lives with the target, not in shared code.
+  arithmetic (a rounding-shift, an E8M0 block-exponent add + LUT, or none at all) is mutually
+  incompatible across targets and lives with the target, not in shared code.
 
-Compute units may **compose** (`contains`): a unit can embed others (e.g. a gemmini-mx systolic unit
-inside a radiance cluster), and its *effective* capability is the union of itself and what it
-contains — so gemmini-mx works standalone or as a sub-unit.
+Compute units may **compose** (`contains`): a unit can embed others (e.g. an MX systolic unit
+inside a SIMT cluster), and its *effective* capability is the union of itself and what it
+contains — so the MX unit works standalone or as a sub-unit.
 """
 
 from __future__ import annotations
@@ -360,7 +360,7 @@ def effective(unit: ComputeUnit, all_units: list[ComputeUnit]) -> ComputeUnit:
     """Return ``unit`` with contained units' dtypes/ops/accumulate folded in (composition union).
 
     A composed unit (``contains: [...]``) has the combined capability of itself plus everything it
-    embeds — so a gemmini-mx unit contributes its fp4/fp6/fp8 support when embedded in a larger target.
+    embeds — so an MX systolic unit contributes its fp4/fp6/fp8 support when embedded in a larger target.
     """
     if not unit.contains:
         return unit

@@ -99,7 +99,7 @@ class FieldSpec:
 # a family-indirect tag, leverable only for a backend that actually ROUTES the axis. See
 # `leverable_axes`. The family tag is what keeps a target-agnostic property from having to name every
 # target that has it: an axis like `compute.accumulator_resident` is meaningful for any compute
-# endpoint, and enumerating "rvv", "gemmini", "opu", "radiance", "atlas", ... here would both rot on
+# endpoint, and enumerating every target that has it here would both rot on
 # the next target and put target-name literals in library code that `check_no_target_name` forbids.
 # The routed gate is what makes the family tag safe: a backend never inherits a family axis its
 # hardware does not expose, because it can only inherit one it registered a route for.
@@ -230,7 +230,7 @@ FIELD_REGISTRY: dict[str, FieldSpec] = {
         "output stays PE/accumulator-resident across the reduction "
         "(a discovered accumulator memory implies this lever)",
     ),
-    # --- simt (a threads-of-control engine: muon/radiance) ---
+    # --- simt (a threads-of-control engine) ---
     # Family-tagged "simt", like spatial.*, so any target with that engine picks these up when it
     # routes them -- and no target without one ever does. BACKEND_STUB until the lifter that fills
     # them and the routes that expose them land: a field nothing can populate and nothing can change
@@ -555,8 +555,8 @@ def leverable_axes(backend: str) -> set[str]:
     rvv's own registry list) is leverable unconditionally. A FAMILY-INDIRECT match (only via the facet
     family the target participates in, e.g. a ``spatial`` axis for a systolic target) is leverable only
     when the target's RTL actually ADMITS it — i.e. it registered a route for it — so a target does not
-    inherit family axes its hardware lacks (e.g. atlas has a mesh but no accumulator memory, so
-    ``spatial.accumulator_resident`` is NOT leverable for atlas and is not a phantom orphan)."""
+    inherit family axes its hardware lacks (e.g. on a target with a mesh but no accumulator memory,
+    ``spatial.accumulator_resident`` is NOT leverable and is not a phantom orphan)."""
     fams = _target_families(backend)
     routed = routed_axes(backend)
     out: set[str] = set()

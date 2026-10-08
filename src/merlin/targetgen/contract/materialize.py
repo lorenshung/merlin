@@ -169,14 +169,14 @@ def validate_materialized_cohort(root: str | Path, te, *, corpus_roots: list[Pat
 def _public_capsule_dirs(contract: str | Path | None = None) -> list[Path]:
     """Every capsule dir whose capsule.yaml is label: public, across isa/layers/model_slices.
 
-    This materializes THIS (gemmini) contract's public capsules — its capsules live at
+    This materializes THIS contract's public capsules — its capsules live at
     ``capsules/<category>/<cap>/capsule.yaml`` (rel-depth 3). Another target's corpus that nests under the
-    same root (e.g. ``capsules/atlas/<category>/<cap>/capsule.yaml``, rel-depth 4) must NOT be materialized
-    into the gemmini sandbox, so restrict to the direct category/capsule depth."""
+    same root (e.g. ``capsules/<target>/<category>/<cap>/capsule.yaml``, rel-depth 4) must NOT be
+    materialized into this contract's sandbox, so restrict to the direct category/capsule depth."""
     root = contract_dir(contract) / "capsules"
     out = []
     for cap_yaml in sorted(root.rglob("capsule.yaml")):
-        if len(cap_yaml.relative_to(root).parts) != 3:  # skip nested per-target corpora (atlas/, …)
+        if len(cap_yaml.relative_to(root).parts) != 3:  # skip nested per-target corpora (<target>/, …)
             continue
         try:
             cap = yaml.safe_load(cap_yaml.read_text(encoding="utf-8")) or {}
@@ -279,7 +279,7 @@ def materialize_public_capsules(
 
     ``corpus_roots`` (target-AGNOSTIC): materialize the public capsules found directly under these roots
     (the descriptor's ``capsule_corpus`` + sibling corpora). When omitted, falls back to the legacy
-    gemmini-contract discovery (``contract``) for backward compatibility.
+    single-contract discovery (``contract``) for backward compatibility.
 
     ``exclude`` is the descriptor's ``grading.exclude_capsules`` — capsule DIRECTORY NAMES this
     experiment withholds from the public graded set (see

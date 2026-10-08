@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+
 class ContractViolation(ValueError):
     """A contract artifact failed schema validation (fail-closed)."""
 
@@ -172,7 +173,7 @@ def _resolve_target(obj: Any, target: str) -> Any:
 def render_backend_contract(target: str, *, contract: str | Path | None = None) -> dict[str, Any]:
     """The OOT backend contract resolved for ``target`` — ``kernel_abi.symbol`` becomes ``f"{target}_
     kernel"`` and the entrypoint argv templates resolve ``--convert-iface-to-{target}``, exactly the value
-    ``generate_prompt`` derives. gemmini resolves byte-identically to the former hand-authored literals."""
+    ``generate_prompt`` derives. The first target resolves byte-identically to the former hand-authored literals."""
     import yaml
 
     text = (contract_dir(contract) / "mlir_oot_backend_contract.yaml").read_text(encoding="utf-8")
@@ -182,7 +183,7 @@ def render_backend_contract(target: str, *, contract: str | Path | None = None) 
 def render_oracle_runner_contract(target: str, *, contract: str | Path | None = None) -> dict[str, Any]:
     """The oracle-runner contract resolved for ``target`` — the oracle-ladder level names
     (``spike_{target}_functional`` / ``{target}_verilator_rtl``) and the ``{target}_region`` cycle window
-    fill from the active target. gemmini resolves byte-identically to the former hand-authored names."""
+    fill from the active target. The first target resolves byte-identically to the former hand-authored names."""
     import yaml
 
     text = (contract_dir(contract) / "oracle_runner_contract.yaml").read_text(encoding="utf-8")

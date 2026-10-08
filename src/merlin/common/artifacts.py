@@ -191,7 +191,7 @@ def start_run(
     ts = utc_stamp()
     sha = git_sha7(repo_root())
     # Target at folder level: embed it as the leading suite segment (aet lays runs out at
-    # runs/<suite>/<run-id>, and suites may be slash-nested — mirrors gemmini-conformance etc.).
+    # runs/<suite>/<run-id>, and suites may be slash-nested — mirrors <target>-conformance etc.).
     eff_suite = suite
     if target and not (suite == target or suite.startswith(f"{target}/")):
         eff_suite = f"{target}/{suite}"

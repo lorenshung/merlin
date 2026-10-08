@@ -269,7 +269,7 @@ def graded_capsule_roots(target: str, *, hidden: bool = False) -> list[Path]:
 
     A target's suite is not one directory: the capsules are split by kind into sibling categories
     (``isa`` / ``layers`` / ``model`` / ``model_slices``), and different targets keep those siblings in
-    different places -- gemmini's sit at the corpus root, atlas's under ``atlas/``. Passing their common
+    different places -- one target's sit at the corpus root, another's under ``<target>/``. Passing their common
     parent is NOT the fix, because that parent holds every target's corpus at once; see the warning in
     :func:`merlin.targetgen.capsule_common.discover_capsules`.
 

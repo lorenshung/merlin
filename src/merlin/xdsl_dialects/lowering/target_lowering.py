@@ -134,7 +134,7 @@ if HAS_XDSL:
         """The op/type classes a reference target contributes to the rebuild loop.
 
         ``op_properties`` lets a target dialect require facts that only its own contract can
-        supply. The two in-tree reference targets need none, but a SIMT target does: Radiance
+        supply. The two in-tree reference targets need none, but a SIMT target does: its contract
         carries ``compiler_obligations: [must_map_to_warps]`` and
         ``capabilities.simt.lanes_per_warp``, and an obligation with nowhere to be recorded is not
         an obligation. The rebuild loop merges whatever the package declared and never interprets

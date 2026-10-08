@@ -1,6 +1,6 @@
 """Parametric builder for a tensor-resident target dialect (xDSL).
 
-Every tensor-resident target (toy_npu, saturn, gemmini, …) shares ONE dialect shape — four ops
+Every tensor-resident target (the toy_npu reference and each accelerator) shares ONE dialect shape — four ops
 (pack / matmul / commit / evict) over two types (a resident/packed tensor + an accumulator) — that
 differ only in op/type NAMES and two small structural knobs. Those used to be hand-copied per target
 legacy per-target dialect modules were ~90% identical. This factory synthesizes the IRDL op

@@ -7,7 +7,7 @@ tier by DELEGATING to the derived MX reference ``mlc.validate.mx_ref`` — which
 bit-exact against the radiance-kernels C++ golden (``lib/golden/mx_golden.cpp``, a mirror of the MX RTL /
 ``MxRequantizer.scala``). Merlin does NOT re-implement the schedule; it calls the validated reference and
 fails closed when mlc is unavailable, so an MX capsule gets a live numerical datapath grade without the
-RTL sim. The cycle-accurate RTL cert (a Verilator/VCS build of the gemmini-mx config) stays a separate,
+RTL sim. The cycle-accurate RTL cert (a Verilator/VCS build of the MX accelerator config) stays a separate,
 higher tier.
 
 TARGET-AGNOSTIC: the subject here is the MX *format* (a datapath fact mlc derives from the RTL), not a

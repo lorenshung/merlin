@@ -2,7 +2,7 @@
 
 Decision recorded: *is a weight/RHS operand packed and reused*, not how it is packed. The
 ``packed_rhs`` motif fires on the source-specific markers (RVV pointer-advance,
-Gemmini ``mvin2/3`` staging, AVX ``B_reg`` staging). ``packing`` is the broader "any operand
+systolic ``mvin2/3`` staging, AVX ``B_reg`` staging). ``packing`` is the broader "any operand
 is laid out / staged for reuse" decision.
 """
 

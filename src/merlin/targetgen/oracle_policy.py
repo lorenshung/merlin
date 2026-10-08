@@ -231,8 +231,8 @@ class _SimOracle:
 
 
 def _chipyard_available(target: str) -> tuple[bool, str]:
-    """chipyard (gemmini/mx-gemmini): the loop-tier spike binary carries GO; the mlc arc model is the
-    fallback gold tier when spike is absent. Preserves the prior gemmini availability semantics exactly."""
+    """chipyard: the loop-tier spike binary carries GO; the mlc arc model is the
+    fallback gold tier when spike is absent. Preserves the prior chipyard availability semantics exactly."""
     from .rtl import mlc_bridge
 
     arc_ok = mlc_bridge.arc_available(target)

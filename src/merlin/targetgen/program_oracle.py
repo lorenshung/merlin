@@ -1,10 +1,10 @@
 """Generic ``external_backend`` PROGRAM oracle — run an agent-emitted target-ISA program on the target's
 own cosim, using the target's OWN assembler. The counterpart to the ``command_buffer`` oracle
-(``mlc_bridge.arc_run_command_buffer``, gemmini/OPU) for accelerators that are a self-hosted ISA core
-(their deliverable is an assembled program, e.g. atlas ``kernel.S`` → IMEM words), NOT a RoCC ``.insn``
+(``mlc_bridge.arc_run_command_buffer``, RoCC/OPU) for accelerators that are a self-hosted ISA core
+(their deliverable is an assembled program, e.g. a ``kernel.S`` → IMEM words), NOT a RoCC ``.insn``
 host stream and NOT an ISA-less command buffer.
 
-Design (HW-agnostic; nothing atlas-specific is hardcoded here):
+Design (HW-agnostic; nothing target-specific is hardcoded here):
   * the agent's emitted ``kernel.S`` is a stream of ``.word``/``.insn`` directives (the target's encoded
     instructions, grounded on the target's shipped ISA definition) — assembled to IMEM words by the
     PREBUILT stock LLVM (``llvm-mc`` + ``llvm-objcopy`` from the MLIR install), NOT by a per-target
@@ -410,9 +410,9 @@ def run_program_oracle(
     # RTL-DERIVED IS NOT RTL, AND THE TIER NAME CANNOT TELL THEM APART. This cosim runs the arc MODEL
     # elaborated from the target's RTL -- authoritative about the ISA and the datapath, but not the
     # elaborated Verilog. It lands on the tier named L3, which on a target whose bespoke sim IS verilator
-    # (gemmini) means genuinely-RTL, so classifying by tier NAME credited a model as RTL certification.
+    # means genuinely-RTL, so classifying by tier NAME credited a model as RTL certification.
     # Declaring `derived_from_rtl` here is the seam capsule_runner already reads (it defaults to the tier
-    # name only when the adapter stays silent) and the shape muon's gsim adapter already returns.
+    # name only when the adapter stays silent) and the shape a SIMT target's gsim adapter already returns.
     arc_out: dict[str, Any] = {
         "outputs": outputs,
         "cycles": int(res["cycles"]),
@@ -968,8 +968,8 @@ def run_program_debug(
 
 # --------------------------------------------------------------------------------------------------
 # COMMAND-BUFFER LITE DEBUGGER — the RoCC / command-buffer counterpart of run_program_debug (above).
-# A self-hosted-ISA target ships a kernel.S we run to instruction N; a command-buffer target (gemmini
-# RoCC, OPU) instead ships a COMMAND BUFFER, which we answer on the RTL-derived mlc arc model and read
+# A self-hosted-ISA target ships a kernel.S we run to instruction N; a command-buffer target (a
+# RoCC accelerator, OPU) instead ships a COMMAND BUFFER, which we answer on the RTL-derived mlc arc model and read
 # back the per-op HARDWARE-STATE effects (cycles + scratchpad/accumulator/DRAM-refill counts per command,
 # plus the RTL fingerprint). This gives the agent the observability it lacked: watch its OWN intended
 # computation's traffic on the compiled-from-RTL model, per command, instead of only a redacted verdict.
@@ -1063,7 +1063,7 @@ def run_command_buffer_debug(target: str, *, cb: dict, capsule_dir) -> dict[str,
 # --------------------------------------------------------------------------------------------------
 # CYCLE-ACCURATE VERILATOR tier (L4) — the SAME assembled program run on a program-driven Verilator
 # sim of the target's RTL top (a bare-core TileLink harness), for RTL-CERTIFIED outputs. This is the
-# first truly RTL-grounded atlas oracle: the arc cosim (L3) is the RTL-DERIVED functional gold; this
+# first truly RTL-grounded self-hosted-ISA oracle: the arc cosim (L3) is the RTL-DERIVED functional gold; this
 # runs the elaborated Verilog itself. Additive — arc (L3) stays the required tier. Only emit_bundle
 # (words+preload) + the output-layout resolution are shared; the runner is the external Verilator sim
 # resolved from the target's registered vsim dir (MERLIN_EXT_<TARGET>_VSIM), never a literal here.
@@ -1124,7 +1124,7 @@ from .program_engine_policy import (  # noqa: F401
 
 def _load_rtl_runner(engine_dir: Path, filename: str):
     """Import an engine dir's conventional wrapper (``run_program`` symmetric with
-    ``cosim_atlas.run_program``) BY PATH — target-agnostic (merlin never names the sim binary). Raises
+    ``cosim_<target>.run_program``) BY PATH — target-agnostic (merlin never names the sim binary). Raises
     :class:`OracleUnavailable` if the wrapper is absent / exposes no ``run_program``."""
     wrapper = Path(engine_dir) / filename
     if not wrapper.is_file():
@@ -1161,7 +1161,7 @@ def run_program_verilator_oracle(
     back. Mirrors :func:`run_program_oracle` (same ``emit_bundle`` words+preload, same output-layout
     resolution) but the runner is the external Verilator ``run_program`` instead of the arc cosim. The
     sim's TileLink DRAM slave masks addresses into its window exactly like the arc cosim's
-    ``TileLinkSlave`` (both mirror ``cosim_atlas``), so the real cb DRAM base is passed straight through
+    ``TileLinkSlave`` (both mirror ``cosim_<target>``), so the real cb DRAM base is passed straight through
     as the read region — no functional-tier ``dram_base`` relocation. Returns the SAME result shape
     ``{"outputs": {name: list}, "cycles": int, "oracle": f"{target}-verilator-rtl"}``. Raises
     :class:`OracleUnavailable` if the vsim / wrapper is absent, or the program does not halt."""

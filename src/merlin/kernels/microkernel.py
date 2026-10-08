@@ -1,14 +1,14 @@
 """Target-agnostic MICRO-KERNEL codegen granularity — the knobs an expert kernel exposes, as a
 general compiler capability rather than an RVV-only feature.
 
-An expert micro-kernel (XNNPACK f32-gemm-7x4v, OpenBLAS sgemm 8x8, a Gemmini tile program, …) is a
+An expert micro-kernel (XNNPACK f32-gemm-7x4v, OpenBLAS sgemm 8x8, a systolic tile program, …) is a
 POINT in a small space of codegen decisions. Merlin's job is to make that space expressible BY CODE
 GENERATION for ANY target — never by shipping a hand-written ukernel in the compiler (hand kernels
 stay ceiling REFERENCES only, per the mining contract).
 
 The spec below is deliberately target-neutral: it names WHAT the decision is, not how a particular
 backend realizes it. Each target registers a RESOLVER that turns a :class:`MicrokernelSpec` into that
-target's own realization (RVV -> transform-schedule features; Gemmini -> tile-program knobs; …). A
+target's own realization (RVV -> transform-schedule features; a systolic array -> tile-program knobs; …). A
 target that cannot express an axis says so honestly (``UnsupportedAxis``) instead of silently ignoring
 it — the beam then records it as an open divergence rather than crediting a change that never happened.
 

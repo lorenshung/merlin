@@ -3,8 +3,8 @@
 ONE builder turns an abstract capsule *entry* (op + shapes-in-tiles + epilogue — the target-agnostic test
 definition, declared per target in ``capsules/<target>/corpus_profile.yaml``) plus a *binding* DERIVED from
 the target's descriptor (dtypes, tile dim, compare policy, instruction classes, oracle tiers) into a
-concrete capsule dict + interface MLIR. It replaces the two forked generators (``generate_corpus.py``
-gemmini/integer + ``generate_atlas_corpus.py`` atlas/float): the LOGIC here is shared and carries no target
+concrete capsule dict + interface MLIR. It replaces the two forked per-target generators (one
+integer, one float): the LOGIC here is shared and carries no target
 name or dtype literal in its control flow; the per-target DATA (numeric datapath, which capsules, dtypes)
 lives in the descriptor + the profile.
 
@@ -214,9 +214,9 @@ def _structural_mesh_rows(facts: dict) -> int | None:
 def _tile_dim(target: str, contract: dict, *, operand: str | None = None, facts: dict | None = None) -> int:
     """Tile dim for sizing capsule shapes. When the target has a FIXED HARDWARE mesh, it is DERIVED
     (``capabilities.mesh.rows`` / ``.tile.rows`` from the manifest, else the CIRCT ``arrays[mesh].rows``
-    fact or a source-bound structural mesh observation) — so gemmini's 16 comes from its RTL facts,
+    fact or a source-bound structural mesh observation) — so a 16x16 mesh's 16 comes from its RTL facts,
     never a literal. A target with NO fixed hardware
-    mesh (a SIMT / vector target such as radiance, whose matmul tiling is a SOFTWARE choice, not a
+    mesh (a SIMT / vector target, whose matmul tiling is a SOFTWARE choice, not a
     hardware dimension) has nothing to derive; it uses ``_DEFAULT_SW_TILE`` — a compiler software-tiling
     default, NOT a per-target hardware fact. Both derivation sources are keyed on ``target``."""
     # A matrix extension driven as INSTRUCTIONS has two different tile notions at once, and they are
@@ -510,7 +510,7 @@ def derive_binding(
     c = load_capability_manifest(te.target).contract if contract is None else contract
     cu = (c.get("compute_units") or [{}])[0]
     # The profile may pin the DEFAULT operand/accumulate dtypes (a target with several compute units — e.g.
-    # radiance's simt_cluster + contained mx_pe — needs the profile to say which regime a capsule set drives);
+    # a SIMT cluster with a contained MX PE — needs the profile to say which regime a capsule set drives);
     # both fall back to the primary compute unit's declared datapath, never a target literal.
     declared_dtypes = [dt for unit in (c.get("compute_units") or []) for dt in (unit.get("dtypes") or [])]
     if not declared_dtypes:
@@ -827,7 +827,7 @@ def _resolve_output_dtype(
         return binding.requant_output_dtype
     if "maxpool" in epilogue:
         # A fused max-pool is not an accumulator-side stage: it runs in the STORE DMA, which reads the
-        # target's own operand width (gemmini's `inputType`), not the full-width accumulator container.
+        # target's own operand width (the RTL's `inputType`), not the full-width accumulator container.
         # So the committed dtype is the operand dtype, derived from the descriptor rather than named
         # here. This is what the three hand-authored pooling entries were saying with their explicit
         # `output_dtype: i8`, and deriving it means the SYNTHESIZED pooling capsule -- which declares no
@@ -1914,7 +1914,7 @@ def build_gemv_batched(entry: dict, binding: CorpusBinding) -> tuple[dict, str]:
 def build_conv2d(entry: dict, binding: CorpusBinding) -> tuple[dict, str]:
     """An im2col conv2d capsule (op == conv2d): NHWC IFM + pre-im2col'd weight [KH*KW*Ci, Cout] -> a resident
     matmul over conv windows, output [Ho*Wo, Cout]. Reuses the runtime's canonical conv geometry so the golden
-    (capsule_golden conv2d branch) and the harness agree. Native operand dtype (e.g. gemmini int8)."""
+    (capsule_golden conv2d branch) and the harness agree. Native operand dtype (e.g. int8)."""
     from merlin.runtime.commandbuffer import conv_out_dims
 
     ifm, weight, out = entry.get("ifm", "IFM"), entry.get("weight", "W"), entry.get("out", "Y0")

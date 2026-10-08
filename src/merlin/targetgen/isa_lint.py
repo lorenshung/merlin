@@ -288,7 +288,7 @@ def analyze_schedule(
         [r for r in raw_dependency_rules if isinstance(r, dict)] if isinstance(raw_dependency_rules, list) else []
     )
     # Per rule, remember the most recent write to each physical register bank. A span is target data:
-    # e.g. one Atlas BF16 operand names a two-register pair, whereas a scalar/RVV rule can use one.
+    # e.g. one BF16 operand of a self-hosted NPU may name a two-register pair, whereas a scalar/RVV rule can use one.
     last_register_write: list[dict[int, tuple[int, str, int]]] = [{} for _ in dependency_rules]
 
     def _banks(value, span: int) -> set[int]:

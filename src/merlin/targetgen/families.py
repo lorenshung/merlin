@@ -170,7 +170,7 @@ _PROFILES: dict[str, FamilyProfile] = {
     # A scalar pipe has no replicated compute element: its datapath is the register file's width, which
     # a cell-geometry read cannot reach -- so `compute_element` stays the default "none" and the reader
     # reports that instead of naming whichever module happens to be widest.
-    # Spatial tensor tile (Saturn OuterProductUnit family): a grid of accumulator cells driven by a
+    # Spatial tensor tile (outer-product unit family): a grid of accumulator cells driven by a
     # COMMAND BUFFER over one-hot op ports (macc/mvin/shift) — NOT a RoCC command ISA. So there is no
     # op->``.insn`` encoding to derive (encoding_required=False) and no rocc_insn trace gate; the 4th
     # artifact IS the schema-valid command buffer (command_buffer endpoint). Its facts come from the OPU

@@ -15,9 +15,10 @@ so :meth:`merlin.kernels.compare.RvvFingerprint.from_objdump` consumes it unchan
 
 Two corpora, two difficulty tiers:
 
-* **saturn-vectors/benchmarks** — the GUARANTEED path. Each ``vec-*`` benchmark ships a
-  standalone C kernel TU (e.g. ``vec-dotprod/dotproduct.c``) that includes only a local
-  header. We compile that TU with ``-I<bench> -Icommon -Ienv`` and the RVV cflags.
+* **standalone-benchmark corpora** (layout ``standalone_benchmarks``) — the GUARANTEED path. Each
+  ``vec-*`` benchmark ships a standalone C kernel TU (e.g. ``vec-dotprod/dotproduct.c``) that
+  includes only a local header. We compile that TU with ``-I<bench> -Icommon -Ienv`` and the RVV
+  cflags.
 * **XNNPACK / OpenBLAS** — BEST-EFFORT only. These need framework headers/params structs;
   a single-TU compile usually fails on a missing header/type. We try (rooted at the
   framework src root) and on failure return ``None`` with the reason. Full CMake builds
@@ -47,7 +48,7 @@ from pathlib import Path
 from ..common.paths import repo_root
 from ..llvmlower.custom_isa import disassemble
 
-# RVV cflags (runtime/backends/zephyr_model.py pattern, plus the saturn Makefile's zfh/zvfh).
+# RVV cflags (runtime/backends/zephyr_model.py pattern, plus the vector benchmark corpus Makefile's zfh/zvfh).
 RVV_CFLAGS: tuple[str, ...] = (
     "-march=rv64gcv_zfh_zvfh",
     "-mabi=lp64d",
@@ -317,7 +318,7 @@ def dossier_asm(nk, *, timeout: int = 120) -> str | None:
 
 
 def _bench_from_path(path: str) -> str | None:
-    """Extract the ``vec-*`` bench name from a saturn kernel path."""
+    """Extract the ``vec-*`` bench name from a standalone-benchmark kernel path."""
     for part in Path(path).parts:
         if part.startswith("vec-"):
             return part

@@ -12,7 +12,7 @@ from merlin.kernels.types import NormalizedKernel
 
 def extract_memory(nk: NormalizedKernel, fired: dict[str, list[str]]) -> dict:
     accumulator = "accumulator_lifetime" in fired
-    # Widening accumulation: int8x8->int32 (RVV vw*) or Gemmini int32 accumulator tiles.
+    # Widening accumulation: int8x8->int32 (RVV vw*) or systolic int32 accumulator tiles.
     text = nk.raw_text
     widening = bool(
         accumulator and ("__riscv_vw" in text or "1 << 31" in text or "1u << 31" in text or "0x40000000" in text)

@@ -495,9 +495,9 @@ def _float_golden(entry, binding, *, semantics=None):
 
 # ------------------------------------------------------------------------------------------------
 # MX (microscaling block-scaled FP) golden engine — HARDWARE semantics via mlc's mx_ref, NOT specir
-# (specir is the atlas fp8 refmodel; MX is a different datapath: 16-deep systolic per-column accumulate
+# (specir is a float fp8 refmodel; MX is a different datapath: 16-deep systolic per-column accumulate
 # schedule + one E8M0 scale per 32-element K group). mx_ref is transcribed bit-exactly from the target's
-# own reference (radiance-kernels lib/golden/{mx_fp_math.h,mx_golden.cpp}, mirroring the RTL).
+# own reference host golden (lib/golden/{mx_fp_math.h,mx_golden.cpp}, mirroring the RTL).
 # ------------------------------------------------------------------------------------------------
 def _mx_ref():
     """Import mlc's ``validate/mx_ref.py`` BY FILE PATH (like the specir import) so we do NOT trigger
@@ -968,7 +968,7 @@ def _mx_attention_golden(entry, binding):
 
 
 def _mx_gemv_batched_golden(entry, binding):
-    """Batched MX matmul golden (radiance-kernels decode-time gemv_batched, MX regime): ``B`` independent
+    """Batched MX matmul golden (the MX host golden's decode-time gemv_batched, MX regime): ``B`` independent
     MX GEMMs ``A_b[M,H] @ W_b[H,N]`` on the block-scaled mx_pe, returned as ``[B,M,N]`` bf16.
     (The MX PE tiles N by ``DIM``=16, so N must be a multiple of 16 — a literal N=1 gemv is not expressible
     on the mx_ref datapath; this is the faithful batched analog.) mxfp8 only; golden from mlc mx_ref."""

@@ -1423,7 +1423,7 @@ def _entry_seed(name: str) -> int:
     return sum((i + 1) * ord(c) for i, c in enumerate(name)) or 1
 
 
-# Float tolerance for a host-eager golden. A target whose native datapath is integer (e.g. gemmini,
+# Float tolerance for a host-eager golden. A target whose native datapath is integer (e.g.
 # exact_int) carries no atol/rtol, but a float (bf16/fp16) op still needs one — fall back to a sane
 # default so a fused op on an integer-datapath target is gradeable.
 _DEF_ATOL, _DEF_RTOL = 0.03125, 0.02
@@ -4011,7 +4011,7 @@ def _decode_program_tensors(program: dict) -> dict:
 def _float_program_artifacts(
     gen: str, op: str, program: dict, cov: list, workload, program_emitter: dict[str, str]
 ) -> "SpecArtifacts":
-    """Normalize an fp8/simt program (atlas MXU sequence / radiance warp schedule) into SpecArtifacts:
+    """Normalize an fp8/simt program (an MXU sequence / a warp schedule) into SpecArtifacts:
     role-keyed decoded operands + the already-decoded golden + the program as grounding (float compare)."""
     return SpecArtifacts(
         gen=gen,

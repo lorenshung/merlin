@@ -44,9 +44,9 @@ def _primary_kind(units) -> str:
 
 def _derived_dtype_token(units) -> str:
     """A run-identity dtype token DERIVED from the primary compute unit's first accumulate rule
-    (``<in>x<weight>_<acc>``). Replaces the former gemmini ``i8xi8_i32`` fail-open default so a target
+    (``<in>x<weight>_<acc>``). Replaces the former ``i8xi8_i32`` fail-open default so a target
     that omits ``runner.dtype`` (e.g. an mx target) is labeled by its OWN datapath, never mislabeled as
-    gemmini int8. Falls back to ``"unknown"`` (fail-closed, surfaced in the run label) if no rule."""
+    int8. Falls back to ``"unknown"`` (fail-closed, surfaced in the run label) if no rule."""
     for u in units:
         if u.accumulate:
             a = u.accumulate[0]

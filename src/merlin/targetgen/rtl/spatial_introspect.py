@@ -1,8 +1,8 @@
 """Deterministic, no-LLM extraction of SPATIAL tensor-tile hardware facts from the real RTL.
 
-The spatial-tile analog of :mod:`merlin.targetgen.rtl.circt_introspect` (systolic/Gemmini) and
-:mod:`merlin.targetgen.rtl.muon_introspect` (SIMT/Muon). Its first instance is the **Saturn
-OuterProductUnit (OPU)** — a non-systolic spatial tensor tile: a ``cluster x cell`` grid of accumulator
+The spatial-tile analog of :mod:`merlin.targetgen.rtl.circt_introspect` (systolic) and a SIMT
+target's own introspect (SIMT). Its first instance is a vector unit's
+**OuterProductUnit (OPU)** — a non-systolic spatial tensor tile: a ``cluster x cell`` grid of accumulator
 cells that computes a matmul as a sequence of rank-1 (outer-product) accumulate steps, NOT a
 stationary-weight systolic wavefront. So the geometry is a *tile of cells*, and the facts are the tile
 dimensions, the per-cell multi-register-file (MRF) depth, the operand/accumulator element widths, the
@@ -22,7 +22,7 @@ Two properties make this its own fact family rather than a reuse of the systolic
 
 The hw.mlir + state manifest are resolved through ``mlc``'s per-target fingerprint map
 (:func:`merlin.targetgen.rtl.mlc_bridge.opu_artifact_paths`), which knows the two-level
-``runs/circt-arc/saturn_opu/<config>/outputs`` layout. Facts land in the PURGEABLE cache
+``runs/circt-arc/<target>/<config>/outputs`` layout. Facts land in the PURGEABLE cache
 ``out/artifacts/cache/rtl_introspect/<target>/facts.json`` (like the systolic path), each field carrying
 ``{value, derived, source, evidence}`` — a field that cannot be grounded is reported ``derived=False``
 (value None), never guessed.

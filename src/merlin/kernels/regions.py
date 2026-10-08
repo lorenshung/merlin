@@ -10,7 +10,7 @@ Two levels, by design:
   hook where one exists), and the CCA facet axes it governs. Every RVV CCA LEVER axis is governed by
   EXACTLY one region (``check_regions``) — this is the taxonomy the CCA<->lever bijection broadens onto.
 
-TARGET-AGNOSTIC: these are compiler-wide concerns (RVV is the first instantiation; gemmini/others plug
+TARGET-AGNOSTIC: these are compiler-wide concerns (RVV is the first instantiation; other targets plug
 in per-target edit-points). The ``target-gen`` phase is where the eventual agentic target-DIALECT
 generation hooks in — the same registry drives it.
 

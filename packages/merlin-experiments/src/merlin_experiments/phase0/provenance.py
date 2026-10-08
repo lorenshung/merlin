@@ -234,7 +234,7 @@ def update_provenance_manifest(
     emit something at the same path.
 
     Scoped to the SHARED corpus (``<category>/<capsule>``, rel-depth 2). A target with its own nested
-    corpus (``atlas/<category>/<capsule>``) carries its own provenance and is deliberately untouched.
+    corpus (``<target>/<category>/<capsule>``) carries its own provenance and is deliberately untouched.
 
     HOLDOUTS ARE COUNTED, NEVER NAMED. This file is tracked and sits inside the ``merlin/contract/``
     tree every arm is granted read-only, so listing a ``hidden/<capsule>`` path told the agent under

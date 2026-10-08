@@ -291,7 +291,7 @@ def _resolved_commands(command: str) -> list[tuple[str, list[str]]]:
     """``(basename, argv)`` for EVERY simple command in a possibly-composed shell string.
 
     ``_executable`` returns None the moment it sees a shell control operator, so a single redirect
-    (``... check-bijection atlas > /tmp/b.json``) or two steps joined by a newline made the whole
+    (``... check-bijection <target> > /tmp/b.json``) or two steps joined by a newline made the whole
     call yield no evidence. ``_python_fragments`` already decomposes instead of rejecting, for the
     Python-API spelling of the same work; the SCRIPT spelling kept the all-or-nothing rule, so the
     identical honest command was credited one way and refused the other.

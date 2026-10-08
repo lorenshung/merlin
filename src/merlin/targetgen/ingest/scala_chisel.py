@@ -1,6 +1,6 @@
 """Discover Scala/Chisel RTL files referenced by a SourceManifest.
 
-The UCB targets (Gemmini, Saturn, Radiance) describe hardware in Scala/Chisel. We only
+Many targets (the Chipyard-generated ones among them) describe hardware in Scala/Chisel. We only
 *locate* these files (so the evidence report can cite them); we make no attempt to interpret
 RTL. This deliberately conservative posture is why all non-toy synthesis is flagged
 ``requires_human_review``.

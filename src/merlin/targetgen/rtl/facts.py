@@ -12,7 +12,7 @@ checkout and the purgeable cache. :func:`_committed_facts_path` resolves it; see
 the package is not always named after the target.
 
 This module is the single place that maps a target name -> its facts artifact and its purgeable
-scratch dir, so no consumer hardcodes the gemmini path (they used to, with three different
+scratch dir, so no consumer hardcodes one target's path (they used to, with three different
 ``parents[]`` depths). Mirrors :func:`merlin.targetgen.contract.schemas.contract_dir`.
 
 A TARGET NAME IS NOT ALWAYS A DESIGN. A config variant of another target's generator, and a family name

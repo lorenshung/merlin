@@ -164,8 +164,8 @@ def _capability_utilization(text: str, target: str) -> dict:
 
 
 def _rocc_handle(req: dict, target: str, debug: Callable[[dict], dict] = _unconfigured) -> dict:
-    """RoCC / ``inline_asm_insn`` target (e.g. gemmini): the derived ISA facts live in
-    ``rocc_decode.isa_constants`` (not the atlas IsaModel), and the canonical artifact is
+    """RoCC / ``inline_asm_insn`` target: the derived ISA facts live in
+    ``rocc_decode.isa_constants`` (not a self-hosted ISA's IsaModel), and the canonical artifact is
     ``llvm.inline_asm`` MLIR, not a ``.word`` kernel — so route to rocc_asm/rocc_decode."""
     # The RoCC tools are a package, not legacy top-level ``targetgen`` modules.  Importing the old
     # names made every live Arm4 request fail only after launch, while the fixed-format broker tests
@@ -237,7 +237,7 @@ def _rocc_handle(req: dict, target: str, debug: Callable[[dict], dict] = _unconf
 
 
 def _rocc_debug(req: dict, target: str, context: InvocationContext) -> dict:
-    """LITE DEBUGGER for a RoCC / command-buffer target (e.g. gemmini): answer the agent's OWN command
+    """LITE DEBUGGER for a RoCC / command-buffer target: answer the agent's OWN command
     buffer on the RTL-derived mlc arc model and return the REDACTED per-op hardware state (cycles +
     scratchpad/accumulator/DRAM-refill counts per command + the RTL fingerprint). The counterpart of the
     external_backend kernel.S debugger. Golden-free: it runs the agent's cb over the capsule's CANONICAL

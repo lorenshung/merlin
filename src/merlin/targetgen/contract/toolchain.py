@@ -1,7 +1,7 @@
 """MLIR toolchain resolution for the experiment ABI (env-overridable).
 
 Phase 0 builds a standalone LLVM/MLIR 23 install (from ``third_party/llvm-project``) into
-``third_party/llvm-install``. Out-of-tree C++ packages (``gemmini-opt``) link against it via
+``third_party/llvm-install``. Out-of-tree C++ packages (``<target>-opt``) link against it via
 ``find_package(MLIR REQUIRED CONFIG)`` with ``MLIR_DIR`` pointing at its cmake export; the runner
 uses ``mlir-translate`` from it to take a package's lowered LLVM-dialect MLIR to ``.ll``.
 

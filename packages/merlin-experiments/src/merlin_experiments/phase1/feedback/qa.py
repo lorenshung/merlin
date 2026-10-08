@@ -152,7 +152,7 @@ def _preceding_word(emitted: str) -> str:
 
 def _is_path_like(emitted: str) -> bool:
     """Does the token just before a ':' look like a file path? Trailing identifier-ish run containing a
-    '.' or '/' -- i.e. ``input.interface.mlir`` or ``mlir_oot/gemmini_opt.py``, never a bare number."""
+    '.' or '/' -- i.e. ``input.interface.mlir`` or ``mlir_oot/<target>_opt.py``, never a bare number."""
     j = len(emitted)
     while j and not emitted[j - 1].isspace() and emitted[j - 1] not in "\"'(),":
         j -= 1
@@ -225,7 +225,7 @@ def _scrub_numbers(text: str) -> str:
                 keep = at_source_location or _is_path_like(emitted[:-1])
             if not keep and before == " ":
                 # The OTHER spelling of a source location, the one a Python traceback uses:
-                #   File ".../gemmini_opt.py", line 412
+                #   File ".../<target>_opt.py", line 412
                 # MEASURED on a live re-run: every traceback the agent received still arrived as
                 # ``line #`` after the rest of this scrub was fixed, so it was told its own compiler
                 # raised but never where. A line number in a traceback is a position in the AGENT'S OWN
@@ -259,8 +259,8 @@ def _redact_detail(detail: str | None) -> str | None:
 def _per_capsule_from_results(runs_root: Path) -> dict[str, dict]:
     """Read each capsule_result.json from the operator-only work tree and redact it."""
     out: dict[str, dict] = {}
-    # The runner writes under <target>-capsule-bench (target-derived), NOT the gemmini default baked into
-    # CR.SUITE — keying off CR.SUITE dropped every per-capsule failure detail for any non-gemmini target,
+    # The runner writes under <target>-capsule-bench (target-derived), NOT the one default baked into
+    # CR.SUITE — keying off CR.SUITE dropped every per-capsule failure detail for every other target,
     # so the agent saw plane counts but never the reason. Glob any suite subdir so the reason always
     # surfaces (target-general).
     rr = runs_root / "runs"
@@ -798,7 +798,7 @@ def run(
 ) -> dict:
     # Loop gate = L0+L1+trace + the target's full reachable oracle ladder, screened cheapest-first. The
     # adapters are resolved from the descriptor's target+sim_via via the shared factory, so a non-chipyard
-    # target (arc/cyclotron) grades on its own RTL-derived tier with NO gemmini-specific path.
+    # target (arc/cyclotron) grades on its own RTL-derived tier with NO target-specific path.
     #
     # This used to keep the FASTEST tier only, reserving the cycle-accurate one for an end-of-run barrier,
     # because per-round verilator across three PARALLEL arms was a CPU storm. Fail-fast changes that sum:

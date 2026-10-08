@@ -1,7 +1,7 @@
-"""Command buffer -> bare-metal C driver using RVV vector intrinsics (the Saturn-vectors family).
+"""Command buffer -> bare-metal C driver using RVV vector intrinsics (the RVV vector-benchmark family).
 
 Emits a stripmined RVV kernel (vsetvl / vle / vadd|vmul / vmax / vse / vredsum) for the vector
-opcodes VECTOR_MAP and VREDUCE over 1-D i32 vectors, runs on spike rv64gcv (or the Saturn-OPU
+opcodes VECTOR_MAP and VREDUCE over 1-D i32 vectors, runs on spike rv64gcv (or a vector unit's
 RTL), and prints results as VOUT/METRIC/DONE via the existing HTIF harness. Leaf tensors are
 embedded exactly as the Merlin engine materializes them, so the same bytes feed reference,
 simulator, and this kernel.
