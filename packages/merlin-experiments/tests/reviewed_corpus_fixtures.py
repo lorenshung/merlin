@@ -54,6 +54,13 @@ def build_phase0_handoff(tmp_path, *, copy_sources=True):
     # Admission only stages the toolchain grant. This synthetic fixture never
     # invokes a compiler or claims that the empty installation can compile.
     (workspace / "third_party/llvm-install").mkdir(parents=True)
+    # An inert stand-in, as the package conftest uses on a host without LLVM. Inheriting the host's
+    # MERLIN_CLANG instead selects the real install outside this workspace, and staging grants it
+    # into the bundle snapshot: a ~5 GB deep copy of LLVM under tmp_path for every handoff test.
+    standin = tmp_path / "toolchain-standin" / "clang"
+    standin.parent.mkdir()
+    standin.write_text("#!/bin/sh\nexit 1\n")
+    standin.chmod(0o755)
     support = workspace / "explicit-target-resources"
     for resource in ("rtl_facts", "irdl"):
         directory = support / "contracts" / resource
@@ -151,6 +158,7 @@ def build_phase0_handoff(tmp_path, *, copy_sources=True):
         MERLIN_CONTRACT_DIR=str(data_path("contract").resolve()),
         MERLIN_SCHEMAS_DIR=str(data_path("schemas").resolve()),
         MERLIN_BUNDLE_CAS="",
+        MERLIN_CLANG=str(standin),
         PYTHONPATH=os.pathsep.join([*(map(str, (installed,) if copy_sources else python_import_roots())), str(hooks)]),
         PYTHONSAFEPATH="1",
     )

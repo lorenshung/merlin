@@ -268,6 +268,11 @@ def release_fixture(tmp_path, monkeypatch):
     clang.parent.mkdir(parents=True)
     clang.write_text("#!/bin/sh\nexit 0\n")  # Fixture-only executable for the toolchain presence preflight.
     clang.chmod(0o755)
+    # Select THIS toolchain. The package conftest points MERLIN_CLANG at the host's clang-23 when the
+    # checkout has one, and a selected install outside the fixture checkout is granted to the bundle
+    # -- which, with the content store disabled above, deep-copies the whole LLVM install (~5 GB)
+    # into tmp_path for every test that prepares a release.
+    monkeypatch.setenv("MERLIN_CLANG", str(clang))
     baseline = tmp_path / "baseline"
     _member(baseline, "isa", "generated_member", "public")
     _member(baseline, "layers", "retained_member", "public")

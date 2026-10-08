@@ -132,6 +132,9 @@ def bridge(tmp_path, monkeypatch, request):
         "MERLIN_CONTRACT_DIR",
         "MERLIN_SCHEMAS_DIR",
         "MERLIN_BUNDLE_CAS",
+        # The fixture's inert compiler, not the host's: a selected install outside the workspace
+        # is granted and deep-copied (~5 GB, the content store being off) into the bundle snapshot.
+        "MERLIN_CLANG",
     ):
         monkeypatch.setenv(name, fixture["environment"][name])
     # The model-present variant substitutes only Phase 0's archived model
@@ -181,7 +184,10 @@ def bridge(tmp_path, monkeypatch, request):
     workspace = run / "workspace"
     workspace.mkdir()
     BW.materialize_bundle_inputs(workspace, prepared.bundle, repo=fixture["workspace"])
-    BW.require_snapshot_ownership(BW.verify_bundle_snapshot(workspace, prepared.bundle, repo=fixture["workspace"]))
+    frozen = BW.verify_bundle_snapshot(workspace, prepared.bundle, repo=fixture["workspace"])
+    BW.require_snapshot_ownership(frozen)
+    # The fixture grants an empty toolchain; megabytes here mean a host install was selected and copied.
+    assert frozen["n_bytes"] < 64 << 20, f"bundle snapshot staged {frozen['n_bytes']} bytes"
     snapshot = release.verify_snapshot_for_phase1(
         Path(sealed["seal"]), descriptor, workspace, prepared.bundle, repo=fixture["workspace"]
     )

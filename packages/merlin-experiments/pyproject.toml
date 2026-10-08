@@ -33,3 +33,7 @@ merlin_experiments = ["resources/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Same retention as the root config, which this file shadows when its tests run on their own:
+# keep only the failing tests' trees from the last run, not every tree from the last three.
+tmp_path_retention_count = 1
+tmp_path_retention_policy = "failed"
