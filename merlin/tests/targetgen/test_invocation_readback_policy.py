@@ -18,6 +18,7 @@ from merlin.targetgen.contract.readback_policy import (
     FULL_VALUES_B64,
     FULL_VALUES_BIN,
     ReadbackPolicy,
+    read_console,
     require_build_receipt,
     require_full_value_roster,
     selected_build_inputs,
@@ -122,6 +123,30 @@ def test_memory_build_receipt_rechecks_selected_transport_and_header_bytes(monke
         with pytest.raises(ValueError, match="receipt"):
             verified()
         path.write_bytes(original)
+@pytest.mark.parametrize("transport", [None, FULL_VALUES_B64, FULL_VALUES_BIN])
+def test_console_reader_uses_explicit_policy_not_filename(tmp_path, transport):
+    path = tmp_path / "console.bin"
+    path.write_bytes(b"DONE\n")
+    policy = ReadbackPolicy(transport) if transport else None
+    expected = b"DONE\n" if transport == FULL_VALUES_BIN else "DONE\n"
+    assert read_console(path, policy=policy) == expected
+    path.write_bytes(b"\xff\x00")
+    if transport == FULL_VALUES_BIN:
+        assert read_console(path, policy=policy) == b"\xff\x00"
+    else:
+        with pytest.raises(UnicodeDecodeError):
+            read_console(path, policy=policy)
+
+
+def test_console_reader_refuses_untyped_choice_before_filesystem_access(tmp_path):
+    with pytest.raises(ValueError, match="explicit trusted"):
+        read_console(tmp_path / "absent.bin", policy={"transport": FULL_VALUES_BIN})
+
+
+@pytest.mark.parametrize("transport", ["coherent_dump_v1", "coherent_packet_v1"])
+def test_console_reader_refuses_coherent_memory_before_filesystem_access(tmp_path, transport):
+    with pytest.raises(ValueError, match="independent memory audit"):
+        read_console(tmp_path / "absent.txt", policy=ReadbackPolicy(transport))
 
 
 def test_binary_receipt_binds_both_staged_headers_and_declared_values(monkeypatch, tmp_path):

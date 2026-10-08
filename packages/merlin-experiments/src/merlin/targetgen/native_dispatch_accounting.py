@@ -218,6 +218,7 @@ def _audit_candidate_completed_dispatch(
     target: str,
     entry_symbol: str,
     source_placement: Callable[..., dict[str, Any]],
+    readback_policy=None,
 ) -> dict[str, Any]:
     """Infer mandatory candidate dispatch from exact native completion and codegen.
 
@@ -229,6 +230,9 @@ def _audit_candidate_completed_dispatch(
     transforms or missing attribution stay unverified, not clean.
     """
     try:
+        from merlin.targetgen.contract.readback_policy import read_console, selected
+
+        readback_policy = selected(readback_policy)
         if not isinstance(emission, Mapping) or not isinstance(native, Mapping):
             raise NativeModelExecutionError("candidate emission or native execution is absent")
         placement = source_placement(emission, certificate, target=target)
@@ -423,7 +427,7 @@ def _audit_candidate_completed_dispatch(
             or Counter(object_functs) != Counter(elf_functs)
         ):
             raise NativeModelExecutionError("task command inventory changed across LLVM/object/linked ELF")
-        console = _pinned_native_file(native, "console").read_text(encoding="utf-8")
+        console = read_console(_pinned_native_file(native, "console"), policy=readback_policy)
         from merlin.runtime.backends import base as backends
         from merlin.runtime.backends.base import get_backend
         from merlin.runtime.commandbuffer import declared_output_dtypes
@@ -471,6 +475,10 @@ def _audit_candidate_completed_dispatch(
             raise NativeModelExecutionError("candidate source differs from frozen model interface")
         golden = load_golden(capsule_dir)
         observed, _ = get_backend(target).parse_output(console)
+        if readback_policy is not None:
+            from merlin.targetgen.contract.readback_policy import require_full_value_roster
+
+            require_full_value_roster(cb, console, observed, policy=readback_policy)
         observed = backends.decode_float_readback(observed, declared_output_dtypes(cb))
         if set(observed) != set(golden["outputs"]):
             raise NativeModelExecutionError("completed candidate console has no complete declared full output")

@@ -28,3 +28,9 @@ matching independent golden was selected. Integer surrogate stimuli cannot
 establish fidelity or falsifiability for a declared floating program.
 Only typed `UnavailableGolden` refusals may pass an explicitly partial audit.
 Malformed stored outputs or archives and evaluator failures stay hard failures.
+Candidate mandatory-tier re-audits inherit the trusted invocation's explicit
+ReadbackPolicy from the model context and selected oracle adapters. Default and
+B64 reopen text; selected binary readback reopens raw bytes and checks the
+complete declared value roster before ordinary numerical comparison. A result
+record, console filename or apparent byte format cannot select the transport.
+Decoding full values grants no build, source, dispatch or hardware authority.

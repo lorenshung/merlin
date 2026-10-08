@@ -56,6 +56,20 @@ def selected(policy: ReadbackPolicy | None) -> ReadbackPolicy | None:
     return policy
 
 
+def read_console(path: Path, *, policy: ReadbackPolicy | None = None) -> str | bytes:
+    """Reopen an already-owned console under the trusted transport selection.
+
+    The caller must pin the file and validate its selected build and full output.
+    This helper grants no ownership, execution or numerical authority.
+    """
+    policy = selected(policy)
+    if policy is not None and policy.transport in MEMORY_TRANSPORTS:
+        raise ValueError("coherent memory readback requires an independent memory audit, not serial console values")
+    if policy is not None and policy.transport == FULL_VALUES_BIN:
+        return path.read_bytes()
+    return path.read_text(encoding="utf-8")
+
+
 def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 

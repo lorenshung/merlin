@@ -2971,6 +2971,7 @@ def _grade_candidate_model_capsule_inline(
         result["candidate_source_eligibility_failure"] = {"type": type(exc).__name__, "detail": str(exc)[:2000]}
         return enforce_model_execution_check(result, capsule, target=target)
 
+    readback_policy = None
     try:
         # The child receives a JSON context, not a Python capability. Reconstruct
         # only the exact operator-selected policy record; absent means legacy.
@@ -3036,7 +3037,10 @@ def _grade_candidate_model_capsule_inline(
         # a numerically green native receipt. Keep its durable run artifacts
         # for diagnosis, but never feed that receipt to the pass gate.
         result.pop("candidate_native_execution", None)
-    return enforce_model_execution_check(result, capsule, target=target)
+    return enforce_model_execution_check(
+        result, capsule, target=target,
+        **({"readback_policy": readback_policy} if readback_policy is not None else {}),
+    )
 
 
 def _resolve_model_host_lane(target: str, dtype: str):

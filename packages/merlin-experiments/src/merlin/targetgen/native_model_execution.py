@@ -970,12 +970,18 @@ def audit_candidate_tiers(
     target: str,
     entry_symbol: str,
     completed_dispatch: Mapping[str, Any] | None,
+    readback_policy=None,
 ) -> dict[str, Any]:
     """Audit each frozen mandatory tier against this candidate's own artifact.
 
     L0/L1 are recomputed; L2/L3 reopen console bytes and independent golden.
     Merely listing a tier in the receipt never counts as exercising it.
+    Transport comes only from the trusted invocation's explicit policy, never
+    a candidate receipt, console filename or heuristic inspection of bytes.
     """
+    from merlin.targetgen.contract.readback_policy import read_console, selected
+
+    readback_policy = selected(readback_policy)
     tiers = audit_candidate_static_tiers(emission, certificate, native, target=target, entry_symbol=entry_symbol)
     try:
         if not isinstance(native, Mapping):
@@ -1011,9 +1017,13 @@ def audit_candidate_tiers(
         elf = _pinned_native_file(native, "elf")
         if functional.get("elf") != _digest(elf):
             raise NativeModelExecutionError("L2 ran a different ELF")
-        console = _pinned_native_file(functional, "console").read_text(encoding="utf-8")
+        console = read_console(_pinned_native_file(functional, "console"), policy=readback_policy)
         observed, _metrics = backend.parse_output(console)
         cb = json.loads(_read_pinned_payload(emission, "command_buffer").decode("utf-8"))
+        if readback_policy is not None:
+            from merlin.targetgen.contract.readback_policy import require_full_value_roster
+
+            require_full_value_roster(cb, console, observed, policy=readback_policy)
         observed = backends.decode_float_readback(observed, declared_output_dtypes(cb))
         capsule_dir = _pinned_native_file(native["source"], "capsule_declaration").parent
         _pinned_native_file(native["source"], "golden")
@@ -1104,6 +1114,7 @@ def audit_candidate_completed_dispatch(
     *,
     target: str,
     entry_symbol: str,
+    readback_policy=None,
 ) -> dict[str, Any]:
     """Infer mandatory candidate dispatch from exact native completion and codegen.
 
@@ -1123,6 +1134,7 @@ def audit_candidate_completed_dispatch(
         target=target,
         entry_symbol=entry_symbol,
         source_placement=audit_candidate_source_placement,
+        **({"readback_policy": readback_policy} if readback_policy is not None else {}),
     )
 
 
@@ -1153,7 +1165,6 @@ def execute_candidate_model(
     from merlin.targetgen.contract.readback_policy import (
         FULL_VALUES_BIN,
         MEMORY_TRANSPORTS,
-        require_current_build_receipt,
         selected,
     )
     from merlin.targetgen.golden_store import load_golden
@@ -1275,13 +1286,10 @@ def execute_candidate_model(
             **policy_kwargs,
         )
         if readback_policy is not None:
-            record["readback_build"] = require_current_build_receipt(
-                cb=cb,
-                target=target,
-                workdir=output / "build",
-                elf_path=elf,
-                policy=readback_policy,
-                build_service=service,
+            from .native_readback import verify_build
+
+            recipe_record, source_pins, record["readback_build"] = verify_build(
+                target=target, policy=readback_policy, service=service, output=output, cb=cb, elf=elf,
             )
         record["elf"] = _digest(Path(elf))
         revalidate_source()
@@ -1311,16 +1319,11 @@ def execute_candidate_model(
                 def after_run():
                     revalidate_engine()
                     revalidate_source()
-                    current = require_current_build_receipt(
-                        cb=cb,
-                        target=target,
-                        workdir=output / "build",
-                        elf_path=elf,
-                        policy=readback_policy,
-                        build_service=service,
+                    verify_build(
+                        target=target, policy=readback_policy, service=service, output=output, cb=cb, elf=elf,
+                        expected=(recipe_record, source_pins), expected_receipt=record["readback_build"],
+                        stage="memory pre-decode",
                     )
-                    if current != record["readback_build"]:
-                        raise NativeModelExecutionError("memory readback build changed before output decoding")
 
                 return execute_memory_elf(
                     cb=cb,
@@ -1360,15 +1363,10 @@ def execute_candidate_model(
             if _digest(Path(elf)) != record["elf"]:
                 raise NativeModelExecutionError("candidate ELF changed during L2 functional execution")
             if readback_policy is not None:
-                if record["readback_build"] != require_current_build_receipt(
-                    cb=cb,
-                    target=target,
-                    workdir=output / "build",
-                    elf_path=elf,
-                    policy=readback_policy,
-                    build_service=service,
-                ):
-                    raise NativeModelExecutionError("full-value build inputs changed during L2 execution")
+                verify_build(
+                    target=target, policy=readback_policy, service=service, output=output, cb=cb, elf=elf,
+                    expected=(recipe_record, source_pins), expected_receipt=record["readback_build"], stage="L2",
+                )
             functional_path = output / ("console_l2.bin" if binary_console else "console_l2.txt")
             functional_path.write_bytes(
                 functional_console if type(functional_console) is bytes else functional_console.encode("utf-8")
@@ -1431,15 +1429,10 @@ def execute_candidate_model(
         if _digest(Path(elf))["sha256"] != record["elf"]["sha256"]:
             raise NativeModelExecutionError("candidate ELF bytes changed during execution")
         if readback_policy is not None:
-            if record["readback_build"] != require_current_build_receipt(
-                cb=cb,
-                target=target,
-                workdir=output / "build",
-                elf_path=elf,
-                policy=readback_policy,
-                build_service=service,
-            ):
-                raise NativeModelExecutionError("full-value build inputs changed during L3 execution")
+            verify_build(
+                target=target, policy=readback_policy, service=service, output=output, cb=cb, elf=elf,
+                expected=(recipe_record, source_pins), expected_receipt=record["readback_build"], stage="L3",
+            )
         console_path = output / ("console.bin" if binary_console else "console.txt")
         console_path.write_bytes(console if type(console) is bytes else console.encode("utf-8"))
         if not memory_console:
