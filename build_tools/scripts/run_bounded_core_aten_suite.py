@@ -22,6 +22,7 @@ from merlin.targetgen.core_aten_bounded_runner import (
     bounded_loader_source,
     bundle_admission_reason,
     case_digest,
+    failure_family,
     grade_portable_outputs,
     semantic_observation,
 )
@@ -37,6 +38,18 @@ def stamp(args):
     if args.extension_library:
         artifacts["extension_library"] = args.extension_library
     sources = [Path(__file__), Path(__import__("merlin.targetgen.core_aten_bounded_runner", fromlist=["x"]).__file__)]
+    for relative in (
+        "src/merlin/targetgen/_m2m_capture_worker.py",
+        "src/merlin/targetgen/_capture_result_contract.py",
+        "src/merlin/targetgen/core_aten_capture.py",
+        "src/merlin/targetgen/core_aten_batch.py",
+        "src/merlin/targetgen/core_aten_batch_grade.py",
+        "src/merlin/targetgen/core_aten_semantics.py",
+        "src/merlin/targetgen/core_aten_device.py",
+        "src/merlin/runtime/semantic_readback.py",
+        "src/merlin/llvmlower/semantic_io.py",
+    ):
+        sources.append(args.repo / relative)
     if args.facts:
         sources.append(args.facts)
     pins = {name: provenance.verify(name) for name in args.pin}
@@ -127,25 +140,23 @@ def execute(args, case, block):
                 rtl_facts=args.facts,
             )
             grade = grades["cases"][case["case_id"]]
-            original_grade = grade
-            if execution["status"] == "ran" and grade["status"] == "ungradable":
+            numeric = {"status": "unavailable"}
+            if execution["status"] == "ran":
                 outputs = [
                     bytes.fromhex(item) for item in json.loads((directory / "spike-output-bytes.json").read_text())
                 ]
-                grade = grade_portable_outputs(batch, outputs)["cases"][case["case_id"]]
+                shapes = json.loads((directory / "spike-output-shapes.json").read_text())
+                numeric = grade_portable_outputs(batch, outputs, output_shapes=shapes)["cases"][case["case_id"]]
             if execution["status"] == "failed" and not (directory / "spike-build" / "model.elf").exists():
                 grade["status"] = "compile_lowering_failed"
             evidence = {
                 "lane": grade.get("lane", "host"),
-                "numeric_verdict": grade,
+                "numeric_verdict": numeric,
+                "semantic_verdict": {key: value for key, value in grade.items() if key != "observation"},
+                "routing": grade.get("routing", {}),
                 "execution": execution,
                 "directory": str(directory),
             }
-            if original_grade != grade:
-                evidence.update(
-                    original_numeric_verdict=original_grade,
-                    oracle_decoding="portable nonfinite leaves decoded; comparator and policy unchanged",
-                )
             observation = semantic_observation(grade, evidence)
         except Exception as exc:
             observation = {
@@ -158,7 +169,7 @@ def execute(args, case, block):
         path = directory / filename
         if path.exists():
             doc = json.loads(path.read_text())
-            doc["provenance"] = block
+            doc["provenance"] = {**block, "native_batch": doc.get("provenance", {})}
             atomic_json(path, doc)
     atomic_json(
         directory / "result.json",
@@ -176,8 +187,16 @@ def launch(args, phase, case, block):
     key = case_capture_name(case)
     directory = args.output / "captures" / key if phase == "capture" else args.output / args.label / "shards" / key
     completion = directory / ("capture.json" if phase == "capture" else "result.json")
-    if completion.exists() and json.loads(completion.read_text()).get("case_sha256") == case_digest(case):
-        return "cached"
+    if completion.exists():
+        saved = json.loads(completion.read_text())
+        receipt = saved.get("provenance", {})
+        if (
+            saved.get("case_sha256") == case_digest(case)
+            and receipt.get("source_digest") == block.get("source_digest")
+            and receipt.get("merlin_diff_sha256") == block.get("merlin_diff_sha256")
+            and receipt.get("model2mlir_commit") == block.get("model2mlir_commit")
+        ):
+            return "cached"
     directory.mkdir(parents=True, exist_ok=True)
     request = directory / "request.json"
     atomic_json(request, case)
@@ -215,53 +234,6 @@ def response(args, corpus, block):
     return document
 
 
-def refresh_portable_grades(args):
-    """Upgrade cached byte grades using portable decoding, without re-execution."""
-    block = provenance.record(
-        sources=[Path(__import__("merlin.targetgen.core_aten_bounded_runner", fromlist=["x"]).__file__)],
-        extra={"purpose": "portable oracle decoding; native comparator unchanged"},
-    )
-    changed = Counter()
-    for path in (args.output / args.label / "shards").glob("*/result.json"):
-        record = json.loads(path.read_text())
-        if record["observation"]["status"] == "bundle_unavailable":
-            captured = json.loads((args.output / "captures" / path.parent.name / "capture.json").read_text())
-            reason = bundle_admission_reason(
-                captured, (args.output / "captures" / path.parent.name / "capsule.linalg.mlir").read_text()
-            )
-            if reason and reason != record["observation"]["reason"]:
-                record["pre_admission_diagnostic_observation"] = record["observation"]
-                record["observation"] = {**record["observation"], "reason": reason}
-                record["provenance"]["admission_diagnostic"] = block
-                atomic_json(path, record)
-        evidence = record["observation"].get("evidence", {})
-        old = evidence.get("numeric_verdict", {})
-        if old.get("status") != "ungradable" or evidence.get("execution", {}).get("status") != "ran":
-            continue
-        batch = json.loads(path.with_name("core_aten_batch_map.json").read_text())
-        outputs = [bytes.fromhex(item) for item in json.loads(path.with_name("spike-output-bytes.json").read_text())]
-        new = grade_portable_outputs(batch, outputs)["cases"][record["case_id"]]
-        if new == old:
-            continue
-        record["pre_oracle_decoding_observation"] = record["observation"]
-        evidence = {
-            **evidence,
-            "original_numeric_verdict": old,
-            "numeric_verdict": new,
-            "oracle_decoding": "portable nonfinite leaves decoded; comparator and policy unchanged",
-        }
-        record["observation"] = semantic_observation(new, evidence)
-        record["provenance"]["oracle_decoding"] = block
-        atomic_json(path, record)
-        changed[new["status"]] += 1
-    if changed:
-        atomic_json(
-            args.output / args.label / "oracle-decoding.json",
-            {"case_count": sum(changed.values()), "numeric_status_counts": changed, "provenance": block},
-        )
-    return dict(changed)
-
-
 def summarize(args, corpus, report, block, timings):
     by_overload = defaultdict(Counter)
     partitions = {axis: defaultdict(Counter) for axis in ("dtype", "layout", "values")}
@@ -284,21 +256,48 @@ def summarize(args, corpus, report, block, timings):
             buckets[case["partition_assignment"].get(axis, "unspecified")][status] += 1
         if status != "pass":
             reason = item.get("reason", "")
-            # Group diagnostics structurally at their first line, keep complete examples.
-            diagnostic = reason.splitlines()[-1] if reason.splitlines() else "no diagnostic"
-            if status == "compile_lowering_failed":
-                if "undefined reference" in reason:
-                    diagnostic = "linker undefined reference"
-                elif "returncode=-11" in reason:
-                    diagnostic = "upstream lowering segmentation fault"
-                else:
-                    diagnostic = reason.splitlines()[0].split(":", 1)[0]
-            family = status + ": " + diagnostic[:160]
-            families[family].append({"case_id": case["case_id"], "reason": reason})
+            family, owner, cause = failure_family(status, reason, case["overload"])
+            families[family].append(
+                {"case_id": case["case_id"], "reason": reason, "owner": owner, "suspected_root_cause": cause}
+            )
+    baseline_counts, baseline_families = Counter(), Counter()
+    if args.baseline:
+        baseline = json.loads((args.baseline / args.label / "report.json").read_text())
+        baseline_counts.update(baseline["status_counts"])
+        for identifier, item in baseline["cases"].items():
+            if item["status"] != "pass":
+                family, _, _ = failure_family(item["status"], item.get("reason", ""), identifier.split("::")[0])
+                baseline_families[family] += 1
+    status_delta = {
+        key: {
+            "baseline": baseline_counts[key],
+            "current": report["status_counts"].get(key, 0),
+            "delta": report["status_counts"].get(key, 0) - baseline_counts[key],
+        }
+        for key in sorted(set(baseline_counts) | set(report["status_counts"]))
+    }
+    family_delta = {
+        key: {
+            "baseline": baseline_families[key],
+            "current": len(families.get(key, [])),
+            "delta": len(families.get(key, [])) - baseline_families[key],
+        }
+        for key in sorted(set(baseline_families) | set(families))
+    }
     summary = {
         "case_count": report["case_count"],
         "campaign_complete": report.get("campaign_complete", False),
         "status_counts": report["status_counts"],
+        "full_semantic_passed_count": report["status_counts"].get("pass", 0),
+        "numeric_only_passed_count": numeric.get("pass", 0),
+        "numeric_count_policy": "secondary output-only matches, including full-contract passes",
+        "delta_by_status": status_delta,
+        "delta_by_family": family_delta,
+        "device_lane_evidence": {
+            identifier: item.get("evidence", {}).get("routing", {}).get("execution_evidence")
+            for identifier, item in report["cases"].items()
+            if item.get("evidence", {}).get("lane") == "device"
+        },
         "by_lane": dict(lanes),
         "numeric_status_counts": numeric,
         "per_overload": dict(by_overload),
@@ -306,7 +305,13 @@ def summarize(args, corpus, report, block, timings):
         "numeric_per_overload": dict(numeric_overloads),
         "numeric_by_lane": dict(numeric_lanes),
         "failure_families": [
-            {"family": k, "count": len(v), "examples": v[:2]}
+            {
+                "family": k,
+                "count": len(v),
+                "owner": v[0]["owner"],
+                "suspected_root_cause": v[0]["suspected_root_cause"],
+                "examples": v[:2],
+            }
             for k, v in sorted(families.items(), key=lambda pair: -len(pair[1]))
         ],
         "timings": timings,
@@ -322,7 +327,7 @@ def summarize(args, corpus, report, block, timings):
         "",
         f"Numeric evidence: {dict(numeric)}",
         "",
-        "Numeric successes are ungradable for the complete mutation/alias/metadata contract.",
+        "Full passes are independently validated against the mutation/alias/metadata contract. Numeric matches are a secondary output-only measurement.",
         "",
         f"Timings (seconds): {timings}",
         "",
@@ -351,8 +356,13 @@ def summarize(args, corpus, report, block, timings):
             for name, counts in sorted(buckets.items())
         )
     lines += ["", "Failure families:"]
+    for title, delta in [("Status", status_delta), ("Family", family_delta)]:
+        lines += ["", f"| {title} delta | Baseline | Current | Change |", "| --- | ---: | ---: | ---: |"]
+        lines.extend(
+            f"| {name} | {row['baseline']} | {row['current']} | {row['delta']:+d} |" for name, row in delta.items()
+        )
     for item in summary["failure_families"]:
-        lines += ["", f"- {item['count']}: {item['family']}"]
+        lines += ["", f"- {item['count']}: {item['family']} ({item['owner']})", "", item["suspected_root_cause"]]
         for example in item["examples"]:
             lines += ["", f"  `{example['case_id']}`: {example['reason'].replace(chr(10), ' ')[:1500]}"]
     lines += ["", "Provenance:", "```json", json.dumps(block, indent=2), "```"]
@@ -373,13 +383,20 @@ def main():
     p.add_argument("--execution-timeout", type=int, default=120)
     p.add_argument("--worker-timeout", type=int, default=900)
     p.add_argument("--arena-mb", type=int, default=256)
+    p.add_argument("--baseline", type=Path)
     p.add_argument("--limit", type=int)
     p.add_argument("--worker", choices=["capture", "execute"])
     p.add_argument("--case", type=Path)
     p.add_argument("--evaluate-only", action="store_true")
     args = p.parse_args()
-    if not 1 <= args.workers <= 64:
-        p.error("workers must be between 1 and 64")
+    if args.evaluate_only:
+        try:
+            __import__("torch")
+        except ModuleNotFoundError as exc:
+            if exc.name != "torch":
+                raise
+    if not 1 <= args.workers <= 96:
+        p.error("workers must be between 1 and 96")
     block_path = args.output / args.label / "provenance.json"
     if args.worker:
         block = json.loads(block_path.read_text())
@@ -422,12 +439,6 @@ def main():
                         if phase == "execute":
                             response(args, corpus, block)
             timings[phase] = time.time() - began
-    began = time.time()
-    upgraded = refresh_portable_grades(args)
-    if upgraded:
-        print("portable oracle grades refreshed", upgraded, flush=True)
-    if not args.evaluate_only:
-        timings["oracle_decoding"] = time.time() - began
     document = response(args, corpus, block)
     if not args.evaluate_only:
         atomic_json(args.output / args.label / "timings.json", timings)
@@ -479,7 +490,4 @@ def main():
 
 
 if __name__ == "__main__":
-    # Torch is intentionally absent in the Merlin controller interpreter.
-    if "--evaluate-only" in sys.argv:
-        import torch
     main()
