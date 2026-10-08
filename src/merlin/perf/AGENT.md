@@ -72,12 +72,14 @@ inline frames preserve context and their counts overlap parent call-site totals.
 Instruction counts never imply hardware cycles. The ELF reader explicitly
 refuses unsupported formats rather than guessing them. Tests live in the DSE
 bucket and exercise actual compiler/symbolizer twins plus changed-byte refusals.
+Its production caller is `merlin experiment inspect --trace` (the group build's `debug_companion`).
 
 `address_locality` counts first touches and exact distinct-intervening-region
 recurrence distances from explicitly ordered requested addresses. Granule and
 resource budget are caller inputs; capacity thresholds exclude first touches.
 These are logical locality features, not physical traffic or timing estimates.
-Its production caller is `merlin experiment inspect --trace` (the group build's `debug_companion`).
+Its production caller is `merlin-trace-census locality` (`census_cli`), which reads the
+ordered trace a reader wrote and refuses one longer than the stated budget.
 `fast_estimate_validation` is called by `whole_model_screen.fit_calibration`, which validates every
 refit of the structure screen's calibration against held-out board-measured groups under the board's
 derived noise margin and records the screen's ranking as `unvalidated` whenever that does not hold.
@@ -92,3 +94,5 @@ boundary envelope checks an unpriced subdomain and never approves a ranking.
 The provider owns decoding/ABI and exact artifact verification; the existing
 fitter and held-out ordering gate remain separate. Independent expanded event
 traces and multiple provider geometries test the summary and refusal behavior.
+Its production caller is `merlin-trace-census boundaries` / `boundary-domain`
+(`census_cli`), which reads the provider's records and digests from disk.
