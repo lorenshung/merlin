@@ -945,9 +945,8 @@ def _write_capsule_inner(entry, binding, out_root, facts_sha: str = "", *, captu
         if entry.get("op") == "attention_mx":
             outputs, prov = _golden_cached(_mx_attention_golden, entry, eb, facts_sha)
             engine = (
-                "mlc.validate.mx_ref.mx_matmul x2 (QK & PV, transcribed from "
-                "radiance-kernels "  # target-ok: reference-source provenance, not control flow
-                "lib/golden/mx_golden.cpp) + numpy bf16 row-softmax; P requantized to mxfp8 per-row"
+                "mlc.validate.mx_ref.mx_matmul x2 (QK & PV, the engine's transcription of the MX "
+                "host golden lib/golden/mx_golden.cpp) + numpy bf16 row-softmax; P requantized to mxfp8 per-row"
             )
             datapath = (
                 "O = mx_matmul(softmax(mx_matmul(Q,K^T)/sqrt(H) [+softcap]), V); E8M0 per 32-elt "
@@ -960,8 +959,7 @@ def _write_capsule_inner(entry, binding, out_root, facts_sha: str = "", *, captu
         else:
             outputs, prov = _golden_cached(_mx_golden, entry, eb, facts_sha)
             engine = (
-                "mlc.validate.mx_ref.mx_matmul (transcribed from "
-                "radiance-kernels "  # target-ok: reference-source provenance, not control flow
+                "mlc.validate.mx_ref.mx_matmul (the engine's transcription of the MX host golden "
                 "lib/golden/{mx_fp_math.h,mx_golden.cpp}; mirrors the RTL, bit-exact vs spike)"
             )
             datapath = (
@@ -979,7 +977,7 @@ def _write_capsule_inner(entry, binding, out_root, facts_sha: str = "", *, captu
                     "block_scale": "e8m0",
                     "output_dtype": "bf16",
                     "note": (
-                        "NOT specir (specir is atlas fp8); "  # target-ok: descriptive numeric-regime contrast
+                        "NOT specir (the SpecIR float refmodel is a different datapath); "
                         "MX is a distinct block-scaled datapath."
                     ),
                     "grade_policy": {"compare": eb.compare, "atol": eb.atol, "rtol": eb.rtol},

@@ -92,28 +92,6 @@ entries:
       cap and this entry are deleted together. It is reported per run (`warps_used` vs `warps_declared`)
       so a capped run cannot be mistaken for a full-width one in the meantime.
 
-  # ---------------------------------------------------------------- prose that names a target
-  - id: target-names-in-human-facing-prose
-    kind: target_coupling
-    status: triaged
-    owner: targetgen
-    items:
-      - merlin/python/merlin/kernels/ceiling_drivers/multishape_compare.py
-    why: >-
-      This module names a target inside report text meant for a person: a report
-      paragraph or plot axis label. The name is not a value any code branches on.
-      It is not a docstring, which is why the whole-identifier gate exempts it
-      and the coupling scan does not.
-      It is declared rather than exempted because prose is where a fixed assumption hides in plain
-      sight: a message that names one target reads as instruction on any other, and a report that says
-      "Gemmini" while grading something else is a wrong result presented confidently.
-    blocks: >-
-      Nothing at run time. What it costs is that a second target's user is shown another target's name
-      in a diagnostic, which is how someone concludes the tool does not support their hardware.
-    removal_condition: >-
-      Human-facing text carries the RUN's target rather than a literal — messages and report templates
-      interpolate the resolved target name.
-
   # ---------------------------------------------------------------- surfaced by the derived roster
   - id: names-surfaced-when-the-target-roster-was-derived
     kind: target_coupling

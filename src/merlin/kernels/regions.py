@@ -516,7 +516,7 @@ REGIONS: dict[str, Region] = {
             "target-gen",
             "Target dialect / contract / interface generation",
             "Generate a new target's dialect + contract + interface + lowering scaffolding — where the "
-            "eventual agentic target-dialect generation (gemmini etc.) plugs into this same registry.",
+            "eventual agentic target-dialect generation for any accelerator plugs into this same registry.",
             (
                 "merlin/python/merlin/targetgen/cli.py",
                 "merlin/python/merlin/xdsl_dialects/contract.py",

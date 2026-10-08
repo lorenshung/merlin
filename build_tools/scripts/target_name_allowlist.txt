@@ -5,11 +5,8 @@
 # the rationale (required). The list only ever SHRINKS. Prefer an inline `# target-ok: <why>` on the
 # exact offending line; a whole-file entry here is for files that are inherently one target's code.
 #
-# The remaining exceptions are the gate's own target-name vocabulary and an
-# example-only registry description. New operative target literals in core are blocked.
+# The one remaining exception is the gate's own target-name vocabulary. New operative target
+# literals in core are blocked.
 
 # ---------------------------------------------------------------- the gate itself (its own name list)
 build_tools/scripts/check_no_target_name.py                   # defines the target-name set it hunts
-
-# ---------------------------------------------------------------- target named only as EXAMPLE help/description text (no control flow)
-merlin/python/merlin/kernels/regions.py                      # "(gemmini etc.)" in a registry-entry description

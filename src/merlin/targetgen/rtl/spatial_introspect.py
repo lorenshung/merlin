@@ -665,7 +665,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument(
         "target",
-        help="the OPU target id (e.g. saturn_opu_mxv256d128 / saturn_opu_v128d64)",  # target-ok: help-text example
+        help="the spatial tensor-tile target id, as its experiment descriptor declares it (`target:`)",
     )
     ap.add_argument("--json", action="store_true", help="print the raw provenance-tagged bundle as JSON")
     ap.add_argument("--dump", action="store_true", help="write the purgeable facts.json cache")

@@ -285,7 +285,7 @@ PROTOTYPE_CATALOG: tuple[PassInfo, ...] = (
     PassInfo(
         "merlin-lower-to-target",
         "target",
-        "interface ops -> a reference target dialect (toynpu/saturn)",  # target-ok: example targets named in a pass description
+        "interface ops -> the selected target's dialect",
         "merlin.xdsl_dialects.lowering.target_lowering.lower_to_target",
         input_dialect="interface",
         output_dialect=TARGET_DIALECT,
