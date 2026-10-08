@@ -141,6 +141,10 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
   fastmath and unproved bodies refuse. Tensor semantics and upstream bufferization
   govern aliasing and lifetimes. No target or workload policy is implied, and
   complete emitted allocation/copy/store costs determine profitability.
+- Scalar contraction schedules run after ordinary tensor fusion/generalization
+  and immediately before bufferization. They do not move global named-op
+  generalization in front of fusion. Fused non-pure bodies refuse; prepared
+  physical buffer contracts and complete costs still require qualification.
 - `scalar_contraction.py` also offers an explicit two-row/four-column schedule.
   Exact projected input maps prove immutable coordinate reuse across rows and
   columns; source multiply/add order, seeds, output-coordinate permutations and

@@ -155,8 +155,10 @@ Sub-phases (the actual `pipeline.py` pass list):
   numerical compatibility builders still require the original whole-model gate.
 - **6a Optional exact scalar contractions** (before bufferization):
   `scalar_contraction_accumulator` replaces recognized static f32 tensor generics
-  with scalar loop arguments for their final reduction dimension before elementwise
-  fusion can expand the scalar body. Named operations are generalized first. Pure dimension
+  with scalar loop arguments for their final reduction dimension after ordinary
+  tensor fusion and generalization, immediately before bufferization. Named
+  materializations retain the ordinary fusion boundary; only remaining pure
+  contractions are eligible. Pure dimension
   maps, parallel output dimensions, and an exact separate multiply/add body are
   required. It preserves the initial destination and increasing reduction order,
   including transpose and batch maps; fastmath permissions and unsupported bodies
