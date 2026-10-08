@@ -3,7 +3,7 @@ title: Selecting and checking a simulator
 kind: guide
 status: current
 owner: runtime
-last_verified: 2026-10-06
+last_verified: 2026-10-07
 related: [phase0_specification, target_resolution, reproducing_whole_model_on_rtl]
 code_refs: [src/merlin/targetgen/gsim_emulator.py, src/merlin/targetgen/program_engine_policy.py, src/merlin/targetgen/program_oracle.py, src/merlin/targetgen/mem_perturb.py, src/merlin/targetgen/load_order.py]
 ---
