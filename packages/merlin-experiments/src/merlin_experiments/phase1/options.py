@@ -51,6 +51,7 @@ class RunOptions:
     resume: bool
     seal_current: bool
     seed_submission: str
+    qualify_submission: str
     operator_errata: str
     with_tool: list[str]
     without_tool: list[str]
@@ -313,6 +314,13 @@ def build_parser(
         metavar="DIR",
         help="fresh run only: initialize submission/ from a preserved candidate while the "
         "new run seals its current bundle and records the candidate's exact identity",
+    )
+    ap.add_argument(
+        "--qualify-submission",
+        default="",
+        metavar="DIR",
+        help="fresh unpaid run: grade a preserved submission without launching an author; "
+        "requires reviewed corpus and operator-private inputs",
     )
     ap.add_argument(
         "--operator-errata",

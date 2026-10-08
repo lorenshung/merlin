@@ -559,6 +559,9 @@ def main(argv: list[str] | None = None, *, context: InvocationContext | None = N
     ]
 
     # --- process metrics (from launcher), env, run_manifest ---
+    environment_path = run_dir / "environment.yaml"
+    environment = yaml.safe_load(environment_path.read_bytes()) if environment_path.is_file() else {}
+    qualification_only = isinstance(environment, Mapping) and environment.get("qualification_only") is True
     ctt = {}
     ctt_path = run_dir / "cost_time_toolcalls.yaml"
     if ctt_path.is_file():
@@ -566,6 +569,7 @@ def main(argv: list[str] | None = None, *, context: InvocationContext | None = N
 
     manifest = {
         "run_id": run_dir.name,
+        **({"qualification_only": True, "authoring_converged": False} if qualification_only else {}),
         "arm": a.arm,
         "model": a.model,
         "repo_sha": frozen["repo_sha"],
@@ -578,6 +582,7 @@ def main(argv: list[str] | None = None, *, context: InvocationContext | None = N
         "private_full_models": private_models,
         "completion": {
             "formal_grade_complete": formal_grade_complete,
+            **({"phase1_authoring_complete": False} if qualification_only else {}),
             "required_tier": FORMAL_REQUIRED_TIER,
             "required_full_models": list(required_full_models),
             "required_full_programs": {name: list(required_full_programs[name]) for name in required_full_models},

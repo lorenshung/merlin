@@ -6,6 +6,7 @@ Joined formal/Phase-2 tests use synthetic oracle, sandbox and measurement
 observations, not native qualification.
 """
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -323,6 +324,89 @@ def test_reviewed_model_reaches_private_phase1_diagnostic_and_resumes(bridge, mo
     assert not BW.is_exposed(
         BW.base_argv(fresh.workspace, fresh.bundle, repo=b.fixture["workspace"]), Path(b.model_snapshot)
     )
+
+
+def test_unpaid_qualification_refuses_private_roster_mismatch_before_author(bridge, monkeypatch, tmp_path):
+    from merlin_experiments.phase1 import authoring, workspace_transport
+
+    from merlin.targetgen import runtime_build
+    from merlin.targetgen.sandbox import preflight
+
+    source = importlib.util.spec_from_file_location(
+        "private_source_fixture", Path(__file__).with_name("test_private_source_freeze.py")
+    )
+    helper = importlib.util.module_from_spec(source)
+    source.loader.exec_module(helper)
+    private_root = tmp_path / "private-source"
+    private_root.mkdir()
+    private_spec, _, _, private_manifest = helper._fixture(private_root)
+    selected_manifest = json.loads(private_manifest.read_text())
+    selected_manifest["target"] = bridge.target.target
+    selection = private_manifest.parent / "software/selection.json"
+    selection.write_text(json.dumps({"target": bridge.target.target}) + "\n")
+    selected_manifest["artifacts"]["software/selection.json"] = {
+        "sha256": hashlib.sha256(selection.read_bytes()).hexdigest(),
+        "size_bytes": selection.stat().st_size,
+    }
+    private_manifest.write_text(json.dumps(selected_manifest))
+    selected_private = yaml.safe_load(private_spec.read_text())
+    selected_private["target"] = bridge.target.target
+    # The public fixture descriptor deliberately declares no private model.
+    # Its model-present input must be refused, never silently downgraded.
+    selected_private["models"][0]["recipe_derivation_manifest_sha256"] = hashlib.sha256(
+        private_manifest.read_bytes()
+    ).hexdigest()
+    private_spec.write_text(yaml.safe_dump(selected_private))
+    seed = tmp_path / "preserved-candidate"
+    seed.mkdir()
+    (seed / "manifest.yaml").write_text("target: fixture\n")
+    (seed / "compiler.py").write_text("# inert preserved candidate\n")
+
+    def forbidden_author(*_args, **_kwargs):
+        pytest.fail("unpaid qualification invoked the paid author")
+
+    monkeypatch.setattr(authoring, "execute", forbidden_author)
+
+    monkeypatch.setattr(
+        preflight, "require_working_sandbox", lambda **_kwargs: preflight.SandboxProbe("ok", "synthetic host")
+    )
+    monkeypatch.setattr(PHASE1_SESSION, "repo_sha", lambda **_kwargs: "synthetic-unversioned-workspace")
+    monkeypatch.setattr(workspace_transport, "probe", lambda *_args, **_kwargs: {"pilot_golden_visible_to_agent": "OK"})
+    original_sources = PHASE1_SESSION.SI.paths
+
+    def inventoried_fixture(**kwargs):
+        sources = original_sources(**kwargs)
+        sources["phase1:source:test-qualification-probe"] = str(Path(__file__).resolve())
+        return sources
+
+    monkeypatch.setattr(PHASE1_SESSION.SI, "paths", inventoried_fixture)
+    monkeypatch.setattr(CR, "oracle_available", lambda *_args: (True, "synthetic external oracle"))
+    monkeypatch.setattr(runtime_build, "compiler_smoke", lambda *_args: (True, "synthetic external compiler"))
+    monkeypatch.setenv("MERLIN_CORPUS_SEAL", str(bridge.seal))
+    context = load_context(bridge.descriptor, repo=bridge.fixture["workspace"])
+    options = parse_options(
+        [
+            "--run-id",
+            "fresh-qualification",
+            "--sandbox",
+            "bwrap",
+            "--qualify-submission",
+            str(seed),
+            "--private-full-model-spec",
+            str(private_spec),
+        ]
+    )
+    with pytest.raises(ValueError, match="roster"):
+        PHASE1.run(
+            context,
+            options,
+            bundle_manifest=bridge.manifest,
+            bundle_id=bridge.manifest.parent.name,
+            oracle_timing=bridge.run / "unused-oracle-timing.json",
+        )
+    run = phase_run_dir(context, options.arm, options.run_id, resume=False)
+    assert not (run / "submission_qualification.json").exists()
+    assert not (run / "qa_loop_summary.yaml").exists()
 
 
 @pytest.mark.parametrize("mutation", ["reviewed", "frozen", "manifest"])

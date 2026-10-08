@@ -95,7 +95,84 @@ def validate_seal_current_request(*, seal_current: bool, resume: bool, legacy_co
         raise RuntimeError("--seal-current requires the certified --schedule path, not --continuous")
 
 
-def seed_submission(ws: Path, source: str | Path, run_dir: Path) -> dict:
+def _seed_content(root: Path) -> dict:
+    if root.is_symlink() or not root.is_dir() or not (root / "manifest.yaml").is_file():
+        raise RuntimeError("seed submission snapshot is absent or indirect")
+    content = hashlib.sha256()
+    n_files = 0
+    n_bytes = 0
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink() or not (path.is_dir() or path.is_file()):
+            raise RuntimeError("seed submission snapshot contains an indirect or nonregular member")
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root).as_posix()
+        data = path.read_bytes()
+        content.update(rel.encode("utf-8"))
+        content.update(b"\0")
+        content.update(str(len(data)).encode("ascii"))
+        content.update(b"\0")
+        content.update(data)
+        content.update(b"\0")
+        n_files += 1
+        n_bytes += len(data)
+    return {"content_sha256": content.hexdigest(), "n_files": n_files, "n_bytes": n_bytes}
+
+
+def verify_seed_submission(ws: Path, run_dir: Path, expected: Mapping) -> None:
+    """Require the staged candidate and its run-owned seed receipt to match."""
+    receipt = Path(run_dir) / "seed_submission.json"
+    if receipt.is_symlink() or not receipt.is_file():
+        raise RuntimeError("unpaid qualification has no ordinary seed receipt")
+    try:
+        recorded = json.loads(receipt.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("unpaid qualification seed receipt is unreadable") from exc
+    if not isinstance(expected, Mapping) or recorded != dict(expected) or expected.get("version") != 1:
+        raise RuntimeError("unpaid qualification seed receipt differs from the environment")
+    observed = _seed_content(Path(ws) / "submission")
+    if any(expected.get(key) != value for key, value in observed.items()):
+        raise RuntimeError("unpaid qualification submission changed after selection")
+
+
+def verify_selected_seed_source(ws: Path, expected: Mapping) -> None:
+    """Keep the operator-selected source stable across the official grade."""
+    from merlin.common.tree_hash import hash_tree
+
+    if not isinstance(expected, Mapping) or not isinstance(expected.get("selected_source_tree_sha256"), str):
+        raise RuntimeError("unpaid qualification has no selected source tree identity")
+    source = validate_seed_submission_source(expected.get("source", ""), Path(ws) / "submission")
+    if hash_tree(source)["sha256"] != expected["selected_source_tree_sha256"]:
+        raise RuntimeError("unpaid qualification selected source changed after freezing")
+
+
+def graded_source_hash(root: Path) -> str:
+    """Use the formal freeze's source identity, rejecting indirect members."""
+    from merlin.common.tree_hash import hash_tree
+
+    if root.is_symlink() or not root.is_dir():
+        raise RuntimeError("unpaid qualification grading submission is absent or indirect")
+    for path in root.rglob("*"):
+        if path.is_symlink() or not (path.is_dir() or path.is_file()):
+            raise RuntimeError("unpaid qualification grading submission contains an indirect member")
+    return hash_tree(root)["sha256"]
+
+
+def snapshot_seed_for_grade(ws: Path, run_dir: Path, expected: Mapping) -> Path:
+    """Copy only a verified staged candidate into a fresh official grading path."""
+    verify_seed_submission(ws, run_dir, expected)
+    source = Path(ws) / "submission"
+    destination = Path(run_dir) / "submission"
+    if destination.exists() or destination.is_symlink():
+        raise RuntimeError("unpaid qualification grading submission already exists")
+    shutil.copytree(source, destination)
+    if any(expected.get(key) != value for key, value in _seed_content(destination).items()):
+        raise RuntimeError("unpaid qualification copied submission differs from selected bytes")
+    verify_seed_submission(ws, run_dir, expected)
+    return destination
+
+
+def seed_submission(ws: Path, source: str | Path, run_dir: Path, *, require_stable_source: bool = False) -> dict:
     """Seed a *fresh* workspace from a preserved candidate and record its exact bytes.
 
     A changed public contract requires a new sealed run rather than a resume.  This copies only the
@@ -104,6 +181,10 @@ def seed_submission(ws: Path, source: str | Path, run_dir: Path) -> dict:
     """
     seeded = Path(ws).resolve(strict=True) / "submission"
     source_dir = validate_seed_submission_source(source, seeded)
+    if require_stable_source:
+        from merlin.common.tree_hash import hash_tree
+
+        source_before = hash_tree(source_dir)["sha256"]
 
     if seeded.is_symlink():
         raise RuntimeError(f"seed submission destination must not be a symlink: {seeded}")
@@ -119,26 +200,13 @@ def seed_submission(ws: Path, source: str | Path, run_dir: Path) -> dict:
     _make_agent_owned_tree_writable(seeded)
     strip_build_state(seeded)
 
-    content = hashlib.sha256()
-    n_files = 0
-    n_bytes = 0
-    for path in sorted(p for p in seeded.rglob("*") if p.is_file()):
-        rel = path.relative_to(seeded).as_posix()
-        data = path.read_bytes()
-        content.update(rel.encode("utf-8"))
-        content.update(b"\0")
-        content.update(str(len(data)).encode("ascii"))
-        content.update(b"\0")
-        content.update(data)
-        content.update(b"\0")
-        n_files += 1
-        n_bytes += len(data)
+    if require_stable_source and hash_tree(source_dir)["sha256"] != source_before:
+        raise RuntimeError("unpaid qualification selected submission changed while copying")
     record = {
         "version": 1,
         "source": str(source_dir),
-        "content_sha256": content.hexdigest(),
-        "n_files": n_files,
-        "n_bytes": n_bytes,
+        **_seed_content(seeded),
+        **({"selected_source_tree_sha256": source_before} if require_stable_source else {}),
     }
     record_path = Path(run_dir) / "seed_submission.json"
     record_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
