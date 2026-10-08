@@ -432,3 +432,8 @@ small source-derived capsule to exercise RTL, and keep large model-derived
 shapes as separate functional-model checks when their RTL cost exceeds the
 budget; neither result substitutes for the other's coverage obligation. This
 check does not qualify a complete model or the Phase 0 corpus.
+
+The [core_aten/](core_aten/) provider supplies Gemmini's pinned configuration and candidate
+pool to the generic additive Core ATen overlay (`merlin.targetgen.core_aten_overlay`);
+`build_overlay.py` writes the overlay under the artifacts root. Its cases never replace portable
+Core ATen obligations.
