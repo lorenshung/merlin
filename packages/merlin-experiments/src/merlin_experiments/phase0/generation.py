@@ -569,7 +569,9 @@ def generate_target(
     from .sealed_generation import bind_source
 
     selected_capture = bind_source(entries, verified=evidence is not None and evidence_mode != "diagnostic")
-    capture_option = {"capture": selected_capture} if selected_capture is not None else {}
+    writer_options = {"capture": selected_capture} if selected_capture is not None else {}
+    if component_only:
+        writer_options["component_only"] = True
     entries = [
         _prepare_model_capture_entry(
             entry,
@@ -666,7 +668,7 @@ def generate_target(
                     e = diagnostic_entry(e, decision)
             if evidence is None:
                 w = write_staged(
-                    lambda root, e=e: _write_capsule(e, binding, root, facts.get("sha256", ""), **capture_option),
+                    lambda root, e=e: _write_capsule(e, binding, root, facts.get("sha256", ""), **writer_options),
                     out_root,
                     member=_member_path(e),
                 )
@@ -682,7 +684,7 @@ def generate_target(
                     ),
                 ):
                     w = write_staged(
-                        lambda root, e=e: _write_capsule(e, binding, root, facts.get("sha256", ""), **capture_option),
+                        lambda root, e=e: _write_capsule(e, binding, root, facts.get("sha256", ""), **writer_options),
                         out_root,
                         member=_member_path(e),
                     )

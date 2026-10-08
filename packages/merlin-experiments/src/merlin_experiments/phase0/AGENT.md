@@ -39,6 +39,10 @@ declarations, never model/capture/hidden/history selectors. The existing writer,
 goldens and concrete program screen remain authoritative. Its global coverage,
 functional guard obligation and candidate numerical acceptance stay unestablished;
 recording a zero-MAC performance objective does not invent cost or certification.
+The trusted Boolean mode reaches the writer explicitly. Independent generation
+must not look up, stat, read or stamp capture-derived shape census data; legacy
+default generation retains its existing census annotation. Performance metadata
+does not choose the input mode.
 
 `resource_boundaries` derives aligned/tail extent points from explicit simultaneous
 allocations in one selected physical store. Reuse generic address-space row sizing;

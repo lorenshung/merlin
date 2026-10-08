@@ -557,3 +557,145 @@ def test_cli_and_normal_adapter_forward_explicit_component_option(independent, m
     adapters.ADAPTERS["capsule_derivation"].validate(config)
     with pytest.raises(adapters.SpecError, match="hidden inputs"):
         adapters.ADAPTERS["capsule_derivation"].validate({**config, "hidden_profile": "/do-not-read"})
+
+
+def contraction_sweep(options):
+    contract = yaml.safe_load(options["capability_contract"].read_bytes())
+    unit = contract["compute_units"][0]
+    unit["accumulate"] = [{"in": "int8", "weight": "int8", "acc": "i32"}]
+    unit["semantic_capabilities"][0]["ranks"] = [2, 3]
+    write(options["capability_contract"], contract)
+    template = yaml.safe_load(options["performance_template"].read_bytes())
+    sweep = template["sweeps"][0]
+    sweep["base"]["op"] = "matmul"
+    sweep["axes"]["K"] = [2, 3]
+    sweep["name"] = "contraction_{M}_{K}_{N}"
+    write(options["performance_template"], template)
+    software = yaml.safe_load(options["software_spec"].read_bytes())
+    software["operations"]["contraction"]["ranks"] = [2, 3]
+    software["component_performance"]["hardware"]["contract_sha256"] = hashlib.sha256(
+        (json.dumps(contract, sort_keys=True, indent=2) + "\n").encode()
+    ).hexdigest()
+    software["component_performance"]["objectives"] = []
+    write(options["software_spec"], software)
+
+
+@pytest.mark.parametrize("operation", ["movement", "matmul"])
+def test_independent_generation_never_consults_capture_census(independent, monkeypatch, tmp_path, operation):
+    from merlin.perf import member_geometry
+    from merlin.verify import lattice
+
+    if operation == "matmul":
+        contraction_sweep(independent)
+    census = write(
+        tmp_path / "private-conformance.yaml",
+        {
+            "shape_geometry": {
+                "required": [
+                    {
+                        "class": "CAPTURE_ONLY_CLASS",
+                        "mac_fraction": 0.875,
+                        "n_regions": 123457,
+                        "out_elements": 7654321,
+                    }
+                ]
+            }
+        },
+    )
+    original = census.read_bytes()
+    calls = []
+    stamp = member_geometry.stamp_for
+    stat, opened = Path.stat, Path.open
+
+    def selected_spec(target):
+        calls.append(("lookup", target))
+        return census
+
+    def recorded_stamp(*args, **kwargs):
+        calls.append(("stamp", kwargs["target"]))
+        return stamp(*args, **kwargs)
+
+    def recorded_stat(path, *args, **kwargs):
+        if path == census:
+            calls.append(("stat", str(path)))
+        return stat(path, *args, **kwargs)
+
+    def recorded_open(path, *args, **kwargs):
+        if path == census:
+            calls.append(("open", str(path)))
+        return opened(path, *args, **kwargs)
+
+    monkeypatch.setattr(lattice, "spec_path", selected_spec)
+    monkeypatch.setattr(member_geometry, "stamp_for", recorded_stamp)
+    monkeypatch.setattr(Path, "stat", recorded_stat)
+    monkeypatch.setattr(Path, "open", recorded_open)
+    written = generation.generate_target("fixture", **independent)
+    assert len(written) == (8 if operation == "matmul" else 4)
+    assert calls == []
+    for path in written:
+        capsule = yaml.safe_load((path / "capsule.yaml").read_bytes())
+        assert "shape_geometry" not in capsule["performance"]
+        assert capsule["software_screen"]["status"] == "admitted"
+        assert GS.load_golden(path)["outputs"]
+    with opened(census, "rb") as stream:
+        assert stream.read() == original
+    assert not any(
+        b"CAPTURE_ONLY_CLASS" in path.read_bytes() for path in independent["output_root"].rglob("*") if path.is_file()
+    )
+
+
+def test_default_writer_retains_capture_stamp_and_exact_false_bytes(independent, monkeypatch, tmp_path):
+    from merlin_experiments.phase0 import writer
+
+    from merlin.capture.shape_taxonomy import classify_geometry
+    from merlin.perf import member_geometry
+    from merlin.verify import lattice
+
+    contraction_sweep(independent)
+    classes = sorted({classify_geometry(m, n, k) for m in (2, 3) for n in (2, 5) for k in (2, 3)})
+    census = write(
+        tmp_path / "legacy-census.yaml",
+        {
+            "shape_geometry": {
+                "required": [{"class": name, "mac_fraction": 0.875, "n_regions": 123457} for name in classes]
+            }
+        },
+    )
+    monkeypatch.setattr(lattice, "spec_path", lambda target: census)
+    calls = []
+
+    def recorded(entry, binding, root, facts_sha, **kwargs):
+        assert kwargs["component_only"] is True
+        calls.append((deepcopy(entry), binding, facts_sha, kwargs))
+        return writer._write_capsule(entry, binding, root, facts_sha, **kwargs)
+
+    monkeypatch.setattr(generation, "_write_capsule", recorded)
+    written = generation.generate_target("fixture", **independent)
+    assert len(written) == len(calls) == 8
+    entry, binding, facts_sha, kwargs = calls[0]
+    kwargs = {key: value for key, value in kwargs.items() if key != "component_only"}
+    default = writer._write_capsule(entry, binding, tmp_path / "default", facts_sha, **kwargs)
+    repeated = writer._write_capsule(
+        entry,
+        binding,
+        tmp_path / "explicit-false",
+        facts_sha,
+        component_only=False,
+        **kwargs,
+    )
+    expected = {p.relative_to(default): p.read_bytes() for p in default.rglob("*") if p.is_file()}
+    actual = {p.relative_to(repeated): p.read_bytes() for p in repeated.rglob("*") if p.is_file()}
+    assert actual == expected
+    geometry = yaml.safe_load((repeated / "capsule.yaml").read_bytes())["performance"]["shape_geometry"]
+    assert geometry["in_census"] is True and geometry["census_mac_fraction"] == 0.875
+    assert geometry["census_regions"] == 123457
+    assert member_geometry.census_classes("fixture")
+
+
+@pytest.mark.parametrize("untyped", [None, 1, "false", {}])
+def test_writer_refuses_untyped_independent_mode_before_writing(monkeypatch, tmp_path, untyped):
+    from merlin_experiments.phase0 import writer
+
+    monkeypatch.setattr(writer, "_write_capsule_inner", lambda *a, **k: pytest.fail("must refuse before writing"))
+    with pytest.raises(TypeError, match="component_only must be an explicit Boolean"):
+        writer._write_capsule({}, object(), tmp_path, component_only=untyped)

@@ -387,7 +387,7 @@ def _is_source_backed(entry: dict) -> bool:
 
 
 # ------------------------------------------------------------------------------------------------
-def _write_capsule(entry, binding, out_root, facts_sha: str = "", *, capture=None):
+def _write_capsule(entry, binding, out_root, facts_sha: str = "", *, capture=None, component_only: bool = False):
     """Write one capsule, then GUARANTEE it carries its generalization-intent block.
 
     The stamp is a post-step rather than something each writer does, because there are four writers
@@ -396,6 +396,8 @@ def _write_capsule(entry, binding, out_root, facts_sha: str = "", *, capture=Non
     capsules unannotated -- exactly the silent-gap failure mode this block exists to close -- so it is
     applied here, at the one point every path must pass through.
     """
+    if type(component_only) is not bool:
+        raise TypeError("component_only must be an explicit Boolean")
     written = _write_capsule_inner(
         entry, binding, out_root, facts_sha, **({"capture": capture} if capture is not None else {})
     )
@@ -447,7 +449,8 @@ def _write_capsule(entry, binding, out_root, facts_sha: str = "", *, capture=Non
     # verifies is worse than none, because it reports the assertion as checked.
     _verify_a_forbidden_lane_is_provable(d, cap, getattr(binding, "target", None))
     dirty = _cap_oracle_tiers(entry, cap) or dirty
-    dirty = _stamp_member_geometry(cap, binding) or dirty
+    if not component_only:
+        dirty = _stamp_member_geometry(cap, binding) or dirty
     # THE TOLERANCE MUST BE FALSIFIABLE AT THIS GOLDEN'S SCALE, and here is the first point at which
     # both the capsule and its golden exist for EVERY writer -- the same reason the generalization stamp
     # lives here. A profile declares ONE absolute tolerance for a whole target, which is the right shape
