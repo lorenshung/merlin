@@ -1,0 +1,27 @@
+# Full 193-overload Core ATen policy; select corpus paths and ISA headers through the stage_inputs.py of examples/gemmini/core_aten.
+# hidden/ is discovered beside public/ and remains host-private.
+target: gemmini
+resources_root: examples/gemmini/core_aten_193/phase1
+rtl:
+  via: mlc
+hardware_spec:
+  target_contract: examples/gemmini/core_aten_193/target/target_contract.yaml
+capsule_corpus: out/artifacts/probes/phase1-corpus/public
+grading:
+  release_admission: derive_from_corpus_v1
+  resource_bound:
+    policy: representative_l3_capstones_v1
+answer_surfaces:
+  prior_backends:
+  - merlin_native_v0
+  - hand_smoke_oot
+  - agent_spec_v0_mlir_oot
+  - agent_spec_v1_mlir_oot
+  prior_backend_exemptions: []
+toolchain:
+  sim_via: chipyard
+host:
+  board: gemmini_rocket_verilator
+  catalog: examples/gemmini/target/board-catalog.yaml
+workload_spec:
+  certification_floor: L2

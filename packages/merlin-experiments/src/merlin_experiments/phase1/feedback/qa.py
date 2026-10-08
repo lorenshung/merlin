@@ -961,7 +961,13 @@ def run(
                 )
             ),
         }
-    for key in ("device_lane_scored_pass", "device_evidence_count", "host_guard_pass", "host_guard_total"):
+    for key in (
+        "device_lane_scored_pass",
+        "host_lane_scored_pass",
+        "device_evidence_count",
+        "host_guard_pass",
+        "host_guard_total",
+    ):
         if key in score:
             verdict[key] = score[key]
     if score.get("host_guard_pass", 0) < score.get("host_guard_total", 0):

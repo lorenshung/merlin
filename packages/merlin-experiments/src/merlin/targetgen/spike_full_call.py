@@ -90,11 +90,13 @@ def full_call_adapter(
                     prepare = getattr(provider, "prepare_bundle", None)
                     if prepare is not None:
                         prepare(bundle, target=target, facts=facts)
-                    if (capsule or {}).get("scored", True):
+                    declared = capsule or {}
+                    if declared.get("scored", True):
                         if package_dir is None:
                             raise ValueError("source-bound execution requires the submitted package")
                         routing, reason = routing_for_bundle(bundle, target, Path(package_dir), provider, facts)
-                        if routing is None:
+                        # An ``any`` capsule falls back to the host lane; the lane is recorded, never inferred.
+                        if routing is None and declared.get("lane_expectation") != "any":
                             raise ValueError("submitted backend did not route this capsule: " + reason)
             build = spike_model.build(
                 bundle,

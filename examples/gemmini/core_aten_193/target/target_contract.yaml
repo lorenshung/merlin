@@ -1,0 +1,301 @@
+name: gemmini
+version: 0.1
+family: tensor_resident
+endpoint_kind: inline_asm_insn
+rtl_extraction:
+  firrtl_role_probe:
+    array:
+      name: mesh
+      parent_module_contains: Mesh
+      child_module_prefix: Tile
+    memory:
+      name: scratchpad
+      declaration_contains: 'smem mem : UInt<'
+      source_contains: Scratchpad.scala
+      datapath_name: input
+    interfaces:
+    - module: ReservationStation
+      name: rocc_cmd
+      evidence: module ReservationStation (RoCC decode/dispatch)
+    - module: FrontendTLB
+      name: dma_tlb
+      evidence: module FrontendTLB
+  scala_funct_block:
+    start_comment: // funct values
+    stop_declaration: CONFIG_EX
+  accumulator_memory:
+    module: AccumulatorMem
+    memory_name: accumulator
+    address_port: io_write_bits_addr
+    data_prefix: io_write_bits_data_
+    data_suffix: _0
+    mask_prefix: io_write_bits_mask_
+    firrtl_data_field: io.write.bits.data
+  boolean_feature_gate:
+    feature: max_pool
+    module: StoreController
+    node: pooling_is_enabled
+    dynamic_operand_contains: pool
+    config_field: has_max_pool
+runner:
+  suite: gemmini-capsule-bench
+  dtype: i8xi8_i32
+  tier_sim:
+    L2: spike
+    L3: elaborated_rtl
+    L4: firesim
+  sim_via: chipyard
+  enabled_oracle_tiers:
+  - L2
+  full_call_provider: examples/gemmini/phase0/core_aten/execution_provider.py
+  full_call_instructions: '## Scored Core ATen full-call backend interface
+
+    Start with an empty submission; do not copy a prior backend. Implement the standard
+    manifest and four entrypoints with xDSL/Python and integrity_exempt: false. Every
+    public capsule is one Core ATen call with full-call semantics (results, mutation,
+    aliasing and dynamic shapes). Merlin owns the host lowering, full-call ABI, allocation,
+    linking and readback, so a capsule that your backend does not offload still executes
+    on the HOST lane and can pass there. The score of interest is the DEVICE lane: a
+    capsule counts for the device lane only when your source-bound device catalog is
+    compiled through Merlin DeviceRouting, the call reads back correctly, and nonzero
+    retired accelerator instructions are matched to linked ELF PCs. Host-lane and
+    device-lane passes are reported separately; the lane is observed, never declared by you.
+
+
+    Provide submission/mlir_oot/golden_device_catalog.py (the name is a retained catalog
+    API name; no golden values are available). Expose build_catalog(source: str) ->
+    (module, inventory). Parse the current source MLIR structurally, match supported
+    contractions, and report inventory[''covered_contractions'']; zero declines device
+    routing. Expose merlin_builder(llvm_bin: Path) returning build(prepared: Path,
+    workdir: Path) -> (manifest_json: Path, object_file: Path). Compile device kernels
+    from that exact final prepared source, with no unresolved symbols; do not emit
+    host C compute or scalar fallback for eligible contractions. Device kernel calling
+    convention: void symbol(lhs pointer, rhs pointer, out pointer), dense row-major
+    buffers, whole-batch calls for batched contractions. Derive operand/accumulator
+    precision and hardware encodings from the public capability contract and RTL facts.
+
+
+    The JSON inventory and compiled manifest contain: abi {argument_order: [lhs,rhs,out],
+    pointee_layout: dense_row_major, batch_call: whole_batch, dtypes: [operand IR
+    type, weight IR type, accumulator IR type]}; source_sha256 of exact prepared text;
+    coverage_complete: true; matched_contractions and covered_contractions equal;
+    unique_kernels; kernels [{symbol, batched: bool, dimensions: {batch,m,n,k}}];
+    bindings [{source_operation_ordinal, region, symbol, tensor_types}]. The ordinal
+    is the index in the parsed module.walk() including the module; region is the current
+    prov.region_id; tensor_types are string forms of the current lhs/rhs/result tensor
+    types. Preserve exact source bindings. The compiled manifest additionally carries
+    compilation.object_sha256 of the returned object. Kernel symbols must be valid
+    unique identifiers, externally defined exactly once, with no unresolved references.
+
+
+    Public and hidden cases are scored on full-call passes by the same rule. Some calls
+    may be unattainable on any lane; they remain in the corpus. Only L2 is enabled for
+    this experiment.
+
+    '
+encoding:
+  addr_len: 32
+  rocc_custom_slot: 3
+  semantic_class:
+    0: CONFIG
+    1: MVIN2
+    2: MVIN
+    3: MVOUT
+    4: COMPUTE_PRELOADED
+    5: COMPUTE_ACCUMULATE
+    6: PRELOAD
+    7: FLUSH
+    8: LOOP_WS
+    15: LOOP_CONV
+  config_subtype:
+    0: CONFIG_EX
+    1: CONFIG_LD
+    2: CONFIG_ST
+  corpus_issue_order:
+  - FLUSH
+  - CONFIG_EX
+  - CONFIG_LD
+  - MVIN
+  - CONFIG_ST
+  - PRELOAD
+  - COMPUTE_PRELOADED
+  - MVOUT
+  class_subsumes:
+    LOOP_CONV:
+    - MVIN
+    - PRELOAD
+    - COMPUTE_PRELOADED
+    - MVOUT
+    LOOP_WS:
+    - MVIN
+    - PRELOAD
+    - COMPUTE_PRELOADED
+    - MVOUT
+status: prototype
+features:
+- systolic_array
+- resident_packed_tensor
+- accumulator_commit
+- command_buffer
+- metrics
+runtime:
+  backends:
+  - simulator
+  - spike_gemmini
+  - verilator
+  default_backend: baremetal
+  rtl_sim_config: GemminiRocketConfig
+compute_units:
+- name: systolic_mesh
+  kind: systolic
+  dtypes:
+  - int8
+  ops:
+  - matmul
+  scaling: per_tensor
+  requant:
+    ref: gemmini.accumulator_scale
+  semantic_capabilities:
+  - family: contraction
+    dtypes:
+    - int8
+    ranks:
+    - 2
+    - 3
+    - 4
+  - family: elementwise_map
+    dtypes:
+    - int8
+    standalone_evidence:
+    - fact: accumulate_on_load
+      roles:
+      - operand_load
+      - config
+      - readout
+      - commit
+  - family: movement
+    dtypes:
+    - int8
+    forms:
+    - copy
+  - family: reduction
+    dtypes:
+    - int8
+    composed_with:
+    - contraction
+    - movement
+capabilities: {}
+measurement:
+  cycles_from: spike
+  wall_from: k1
+  cycles_tier: functional
+  wall_tier: silicon
+  speed_of_light: mesh_macs_per_cycle
+  citable_tier: rtl
+  notes:
+  - k1 also carries a `cycles` field, but it is an rdtime-derived ESTIMATE, not authoritative.
+    Picking cycles by field name rather than by authority gets that estimate.
+memory_model:
+  resident: true
+  accumulators: true
+  dma:
+    max_transfer_bytes: 64
+  hazard_resolution: interlocked
+  hazard_evidence:
+    kind: target_rtl
+    sources:
+    - 'elaborated design hierarchy: rockettile.gemmini.reservation_station (io_busy)'
+    note: The accelerator tracks its own command dependencies, so a reordering of
+      a legal command stream cannot change the answer. A correctness falsifier therefore
+      cannot fire on a scheduling change here, and the falsifier must be measured
+      occupancy instead.
+prototype_scope:
+  workload: repeated_rhs_matmul
+  conformance_level: C0
+  epilogue: none
+  output_dtype: i32
+oracle_ladder:
+  level_0:
+    name: merlin_reference_and_command_buffer_sim
+    derived_from_rtl: false
+  level_1:
+    name: spike_gemmini_functional
+    derived_from_rtl: false
+  level_2:
+    name: gemmini_verilator_rtl
+    derived_from_rtl: true
+  level_3:
+    name: firesim
+    derived_from_rtl: true
+oracle_blind_spots:
+- id: accumulator_base_rotation
+  tiers:
+  - L2
+  engine: spike_gemmini_functional
+  axes:
+  - - instruction_class
+    - LOOP_WS
+  - - instruction_class
+    - LOOP_CONV
+  what: After every loop command issued with a non-zero output address the RTL rotates
+    the accumulator base by the accumulator depth over the number of concurrent loops.
+    The functional model pins the base at row zero, so a program that reads the accumulator
+    across two loop commands sees different rows on the two engines.
+  evidence: 'One executable, unchanged: the functional tier reported 0 of 1000 outputs
+    wrong and the FPGA reported 1000 of 1000 wrong, with a different top-1 class.'
+  reproducer: Two back-to-back loop commands that write through the accumulator with
+    an output address set, the second reading what the first accumulated.
+- id: residual_operand_store_state
+  tiers:
+  - L0
+  - L1
+  engine: merlin_reference_and_command_buffer_sim
+  axes:
+  - - mode
+    - padded_edge
+  what: The command-buffer simulator models tensors and has no operand store. A program
+    whose result depends on what the store held at entry (the out-of-bounds taps of
+    a padded convolution that the program never wrote) is judged there as if the store
+    were zero.
+  evidence: 'One padded 3x3 convolution run after a command that left non-zero rows
+    in the store: the instruction-level functional tier differs from the declared
+    convolution in 8 of 27 elements, and the command-buffer tiers report no difference.'
+  reproducer: Move a non-zero tensor into the operand-store rows a padded convolution
+    gathers from, then run the convolution.
+compiler_obligations:
+- must_prove_rhs_immutable_for_residency
+- must_tile_to_mesh_shape
+- must_commit_accumulator_before_reuse
+- must_respect_scratchpad_capacity
+hardware_promises:
+- weight_stationary_resident_array
+- widening_integer_accumulate
+- cycle_counter
+runtime_promises:
+- command_buffer
+- metrics
+certification:
+  status: uncertified
+confidence: medium
+requires_human_review: true
+notes: 'Hand-curated prototype contract for the Gemmini C0 RTL-certification path.
+  Mesh geometry, scratchpad/ accumulator capacities and datapath dtypes are CIRCT-extracted
+  facts (not declared here); consumers read them from the fact bundle. Spike-Gemmini
+  is a functional bootstrap model (derived_from_rtl: false); only Verilator/FireSim
+  count as RTL-certified.'
+harness_abi:
+  entry_symbol: gemmini_kernel
+  fence_symbol: gemmini_fence
+  includes:
+  - include/gemmini_testutils.h
+  cycle_window_metric: cycle_window_gemmini_region
+hardware_pins:
+- gemmini_rtl
+unmaterializable_families:
+  elementwise_map: 'no probe path today: an elementwise capsule is authored through
+    the PyTorch/linalg source with a host-eager golden (needs the m2m venv, so not
+    a deterministic offline probe), and capsule_golden._recompute_golden has no elementwise
+    op, so it cannot be graded at all on an exact-integer datapath. Needs a merlin_iface
+    elementwise mnemonic + a recompute entry.'
+isa:
+  march: rv64gc_zba_zbb_zbs_zfh

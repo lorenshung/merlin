@@ -18,6 +18,10 @@ from ..corpus.phase_selection import generate_phase_selections
 
 SCHEMA = "merlin.phase0.core_aten_stage.v1"
 COHORTS = ("public", "hidden", "host_guard")
+REQUIRED_COHORTS = ("public", "hidden")
+#: ``device`` requires retired accelerator instructions; ``any`` lets the grader route to the device when the
+#: submission covers the call and otherwise run the host lane, recording the lane per capsule.
+LANE_EXPECTATIONS = ("device", "any")
 
 
 def _json(value: object) -> bytes:
@@ -54,17 +58,23 @@ def selection(recipe: Path) -> tuple[list[dict], dict[str, str]]:
     from merlin.targetgen.core_aten_capture import case_capture_name
 
     block = declaration(recipe)
-    if block is None or set(block.get("cohorts", {})) != set(COHORTS):
-        raise ValueError("Core ATen stage requires public, hidden and host_guard declarations")
+    declared = set((block or {}).get("cohorts", {}))
+    if block is None or not set(REQUIRED_COHORTS) <= declared <= set(COHORTS):
+        raise ValueError("Core ATen stage requires public and hidden declarations (host_guard optional)")
     paths: dict[str, str] = {}
     overlay = _path(recipe, block.get("overlay"))
     paths[str(overlay)] = _sha(overlay)
     batches, identities = [], set()
     for cohort in COHORTS:
+        if cohort not in block["cohorts"]:
+            continue
         rows = block["cohorts"][cohort]
         if not isinstance(rows, list) or not rows:
             raise ValueError("every Core ATen cohort must declare at least one case selection")
         for row in rows:
+            expectation = row.get("lane_expectation", "device")
+            if expectation not in LANE_EXPECTATIONS or (cohort == "host_guard" and "lane_expectation" in row):
+                raise ValueError("lane_expectation must be device or any, and never set on host_guard rows")
             cases_path = _path(recipe, row.get("cases"))
             captures = _path(recipe, row.get("captures"))
             if not captures.is_dir():
@@ -109,6 +119,7 @@ def selection(recipe: Path) -> tuple[list[dict], dict[str, str]]:
             batches.append(
                 {
                     "cohort": cohort,
+                    "lane_expectation": expectation,
                     "corpus": {"cases": cases, "denominator_sha256": corpus.get("denominator_sha256")},
                     "captures": str(captures),
                 }
@@ -228,9 +239,18 @@ def generate(
                 capsule = yaml.safe_load(declaration_path.read_bytes())
                 capsule["cohort"] = "guard" if cohort == "host_guard" else cohort
                 capsule["scored"] = cohort != "host_guard"
-                capsule["lane_expectation"] = "host-guard" if cohort == "host_guard" else "device"
-                capsule["semantic"] = {"must_accelerate": cohort != "host_guard"}
-                capsule["lanes"] = {"forbid" if cohort == "host_guard" else "require": ["on_mesh"]}
+                if cohort == "host_guard":
+                    capsule["lane_expectation"] = "host-guard"
+                    capsule["semantic"] = {"must_accelerate": False}
+                    capsule["lanes"] = {"forbid": ["on_mesh"]}
+                elif batch["lane_expectation"] == "any":
+                    capsule["lane_expectation"] = "any"
+                    capsule["semantic"] = {"must_accelerate": False}
+                    capsule.pop("lanes", None)
+                else:
+                    capsule["lane_expectation"] = "device"
+                    capsule["semantic"] = {"must_accelerate": True}
+                    capsule["lanes"] = {"require": ["on_mesh"]}
                 declaration_path.write_text(yaml.safe_dump(capsule, sort_keys=False))
                 row.setdefault("digests", {})["capsule.yaml"] = _sha(declaration_path)
                 call_digest = hashlib.sha256()

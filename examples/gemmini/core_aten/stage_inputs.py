@@ -22,6 +22,12 @@ def main() -> None:
         "--output", type=Path, required=True, help="fresh diagnostic staging root beneath out/artifacts"
     )
     parser.add_argument("--oracle-timing", type=Path, required=True, help="selected genuine timing path; may be absent")
+    parser.add_argument(
+        "--definition",
+        type=Path,
+        default=Path("examples/gemmini/core_aten"),
+        help="repo-relative directory holding experiment.yaml and target/descriptor.yaml",
+    )
     parser.add_argument("--rtl-facts", type=Path, required=True)
     parser.add_argument("--isa-header", type=Path, action="append", required=True, help="selected ordinary ISA header")
     args = parser.parse_args()
@@ -38,7 +44,7 @@ def main() -> None:
         parser.error("generated inputs must be beneath the configured out/artifacts root")
     if output.is_relative_to(public.parent) or public.parent.is_relative_to(output):
         parser.error("staging output must not overlap the source corpus")
-    source = repo_root() / "examples/gemmini/core_aten"
+    source = repo_root() / args.definition
     document = yaml.safe_load((source / "target/descriptor.yaml").read_text())
     document["capsule_corpus"] = str(public)
     resources = output / "payload/experiment"

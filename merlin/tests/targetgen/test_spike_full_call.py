@@ -54,3 +54,43 @@ def test_build_refusal_returns_durable_execution_error(tmp_path, monkeypatch):
     assert result["output_bytes"] is None
     assert result["execution_error"] == "ValueError: candidate build refused"
     assert result["lane"] == "host" and result["executed_instructions"] == 0
+
+
+def _provider_adapter(tmp_path, monkeypatch, routing):
+    from merlin.runtime.backends import spike_model
+    from merlin.targetgen import core_aten_device, core_aten_provenance
+
+    provider = tmp_path / "provider.py"
+    provider.write_text("TARGET = 't'\n")
+    seen = {}
+
+    def build(*args, **kwargs):
+        seen["device"] = kwargs.get("device")
+        raise ValueError("stop after routing")
+
+    from contextlib import nullcontext
+
+    monkeypatch.setattr(spike_model, "build", build)
+    monkeypatch.setattr(core_aten_provenance, "batch_provenance", lambda *a, **k: {"scope": "test"})
+    monkeypatch.setattr(core_aten_device, "load_execution_provider", lambda *a, **k: object())
+    monkeypatch.setattr(core_aten_device, "selected_facts", lambda *a, **k: nullcontext({}))
+    monkeypatch.setattr(core_aten_device, "routing_for_bundle", lambda *a, **k: (routing, "declined"))
+    adapter = spike_full_call.full_call_adapter("t", isa="declared-isa", execution_provider=provider)
+    return adapter, seen
+
+
+def test_any_lane_capsule_falls_back_to_the_host_lane(tmp_path, monkeypatch):
+    adapter, seen = _provider_adapter(tmp_path, monkeypatch, None)
+    result = adapter.run_full_call(
+        bundle=tmp_path, llvm_mlir="", package_dir=tmp_path, capsule={"scored": True, "lane_expectation": "any"}
+    )
+    assert seen["device"] is None and result["execution_error"] == "ValueError: stop after routing"
+    assert result["lane"] == "host"
+
+
+def test_device_lane_capsule_still_refuses_without_routing(tmp_path, monkeypatch):
+    adapter, seen = _provider_adapter(tmp_path, monkeypatch, None)
+    result = adapter.run_full_call(
+        bundle=tmp_path, llvm_mlir="", package_dir=tmp_path, capsule={"scored": True, "lane_expectation": "device"}
+    )
+    assert "did not route" in result["execution_error"] and "device" not in seen

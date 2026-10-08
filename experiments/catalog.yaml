@@ -3,6 +3,7 @@ experiments:
   baseline-functional-template: definitions/baseline-functional-template.yaml
   gemmini-functional: ../examples/gemmini/experiment.yaml
   gemmini-core-aten-functional: ../examples/gemmini/core_aten/experiment.yaml
+  gemmini-core-aten-193-functional: ../examples/gemmini/core_aten_193/experiment.yaml
   gemmini-universal-functional: ../examples/gemmini_universal/experiment.yaml
   atlas-functional: ../examples/atlas/experiment.yaml
   radiance-functional: ../examples/radiance/experiment.yaml

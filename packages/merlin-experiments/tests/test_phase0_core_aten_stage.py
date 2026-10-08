@@ -203,3 +203,34 @@ def test_unattested_legacy_capture_contract_is_refused(tmp_path):
     with pytest.raises(ValueError, match="result contract"):
         stage.derive(recipe, tmp_path / "derive", target="synthetic")
     assert not (tmp_path / "derive").exists()
+
+
+def test_guardless_corpus_with_any_lane_expectation(tmp_path, monkeypatch):
+    recipe = fixture_recipe(tmp_path)
+    document = yaml.safe_load(recipe.read_text())
+    del document["core_aten"]["cohorts"]["host_guard"]
+    for cohort in ("public", "hidden"):
+        document["core_aten"]["cohorts"][cohort][0]["lane_expectation"] = "any"
+    recipe.write_text(yaml.safe_dump(document))
+    result = stage.derive(recipe, tmp_path / "derive", target="synthetic")
+    assert result["counts"] == {"public": 1, "hidden": 1, "host_guard": 0}
+    install_writer(monkeypatch)
+    generated = tmp_path / "run/phase0/capsules"
+    stage.generate(Path(result["recipe"]), generated, target="synthetic")
+    declared = yaml.safe_load((generated / "public/public/capsule.yaml").read_bytes())
+    assert declared["lane_expectation"] == "any" and declared["scored"] is True
+    assert "lanes" not in declared and declared["semantic"] == {"must_accelerate": False}
+
+
+def test_lane_expectation_is_closed_and_never_set_on_guards(tmp_path):
+    recipe = fixture_recipe(tmp_path)
+    document = yaml.safe_load(recipe.read_text())
+    document["core_aten"]["cohorts"]["public"][0]["lane_expectation"] = "host"
+    recipe.write_text(yaml.safe_dump(document))
+    with pytest.raises(ValueError, match="lane_expectation"):
+        stage.derive(recipe, tmp_path / "derive", target="synthetic")
+    document["core_aten"]["cohorts"]["public"][0]["lane_expectation"] = "any"
+    document["core_aten"]["cohorts"]["host_guard"][0]["lane_expectation"] = "any"
+    recipe.write_text(yaml.safe_dump(document))
+    with pytest.raises(ValueError, match="lane_expectation"):
+        stage.derive(recipe, tmp_path / "derive2", target="synthetic")

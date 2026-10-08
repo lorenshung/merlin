@@ -1418,6 +1418,9 @@ def grade(
     score["device_lane_scored_pass"] = sum(
         r["status"] == "pass" and r.get("lane") == "device" and r.get("executed_instructions", 0) > 0 for r in graded
     )
+    score["host_lane_scored_pass"] = sum(
+        r["status"] == "pass" and r.get("lane") == "host" and not r.get("executed_instructions", 0) for r in graded
+    )
     score["device_evidence_count"] = sum(
         r.get("lane") == "device" and r.get("executed_instructions", 0) > 0 for r in graded
     )
