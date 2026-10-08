@@ -1,14 +1,21 @@
 ---
 title: "Design note: the perf corpus cannot express the optimizations that matter"
 kind: design
-status: current
+status: superseded
 owner: core
-last_verified: 2026-09-05
-related: [performance_levers_per_archetype, performance_budget_unit, expert_gap_attribution]
+last_verified: 2026-10-08
+related: [phase2_test_justification, performance_levers_per_archetype, performance_budget_unit, expert_gap_attribution]
 code_refs: [experiments/templates/phase0/performance.yaml, merlin/contract/capsules/generate_corpus.py, src/merlin/targetgen/corpus_spec.py, src/merlin/runtime/reference.py, src/merlin/perf/work_volume.py, packages/merlin-experiments/src/merlin/targetgen/capsule_golden.py, src/merlin/targetgen/tier_policy.py]
 ---
 
 # The perf corpus cannot express the optimizations that matter
+
+> Historical diagnosis of the September 2026 corpus, not the current generated
+> Phase 2 membership or qualification state. Start with the
+> [Phase 2 test-justification guide](../guides/phase2_test_justification.md)
+> and the exact frozen `test_justification.json` for a current run. The counts
+> below describe the campaign analyzed at the time and must not be used as
+> current coverage or performance claims.
 
 ## The symptom
 
