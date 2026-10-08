@@ -103,6 +103,17 @@ def test_retired_checkout_paths_do_not_match_new_in_package_adapters():
             assert gate._match_retired("use src/merlin/integrations/tool", needle, pre, post) is None
 
 
+def test_public_example_artifact_guides_are_checked_for_retired_paths(tmp_path, monkeypatch):
+    gate = _gate("check_doc_paths")
+    monkeypatch.setattr(gate, "ROOT", tmp_path)
+    _write(tmp_path, "examples/device/artifacts/README.md", "See generated_targets/ for the result.\n")
+    _write(tmp_path, "out/artifacts/README.md", "See generated_targets/ for the result.\n")
+    assert [p.relative_to(tmp_path).as_posix() for p in gate._doc_files()] == ["examples/device/artifacts/README.md"]
+    assert gate.scan() == [
+        "examples/device/artifacts/README.md:1: retired generated_targets/ -> out/artifacts/targets/"
+    ]
+
+
 @pytest.mark.parametrize(
     "name", ["check_no_regex", "check_no_target_name", "check_no_assumed_constants", "check_fact_provenance"]
 )

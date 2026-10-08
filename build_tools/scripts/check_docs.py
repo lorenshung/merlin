@@ -7,7 +7,7 @@ Runs the doc generators + linters in --check mode (no writes) and reports any st
   - gen_schema_docs.py    (docs/reference/schemas.md vs merlin/schemas/)
   - gen_docs_index.py     (docs/README.md hub vs front-matter)
   - check_docs_freshness.py (front-matter schema validity)
-  - check_doc_paths.py    (no retired paths in docs/ + AGENT.md)
+  - check_doc_paths.py    (no retired paths in docs/, examples/ or AGENT.md)
   - root scaffold-phrase guard (README.md / AGENT.md)
 
 Usage:

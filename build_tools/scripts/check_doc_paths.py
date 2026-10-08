@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Lint docs + AGENT.md for references to RETIRED repo paths (living-docs anti-drift).
+"""Lint public docs, examples and AGENT.md for references to retired repo paths.
 
 Not a general path-exists checker (that would false-positive on globs, illustrative
 paths, and not-yet-generated ``out/artifacts/``/``out/runs/`` outputs). Instead a precise
@@ -110,7 +110,6 @@ SKIP_PARTS = {
     "venv",
     "out",
     "build",
-    "artifacts",
     "runs",
     "output",
     "third_party",
@@ -144,8 +143,13 @@ def _doc_files() -> list[Path]:
             and not _is_other_checkout(here / d)
         ]
         for f in files:
+            base_path = Path(base)
             if f.endswith(".md") and (
-                f == "AGENT.md" or Path(base) == ROOT / "docs" or (ROOT / "docs") in Path(base).parents
+                f == "AGENT.md"
+                or base_path == ROOT / "docs"
+                or (ROOT / "docs") in base_path.parents
+                or base_path == ROOT / "examples"
+                or (ROOT / "examples") in base_path.parents
             ):
                 out.append(Path(base) / f)
     return sorted(out)
