@@ -18,6 +18,7 @@ import yaml
 
 from merlin.common.access import PUBLIC_INPUT_MODULE, is_harness_module, is_public_input_module
 
+from .compiler_library import CompilerLibraryContract, CompilerLibraryError
 from .contract import compile as oot_compile  # noqa: F401 -- legacy evaluator monkeypatch seam
 from .contract import schemas
 
@@ -77,7 +78,7 @@ def _is_input_dialect(mod: str) -> bool:
     return is_public_input_module(mod)
 
 
-def _py_imports_merlin(text: str) -> str | None:
+def _py_imports_merlin(text: str, *, compiler_library: CompilerLibraryContract | None = None) -> str | None:
     """Return the offending module name iff source imports a non-exempt core/extension harness module.
     The historical function name remains compatible. AST-based: docstrings, comments and ``merlin_iface``
     never match. The public input dialect (:data:`_INPUT_DIALECT_EXEMPT`) is allowed (using the interface,
@@ -88,10 +89,14 @@ def _py_imports_merlin(text: str) -> str | None:
         tree = ast.parse(text)
     except SyntaxError:
         return None
+
+    def permitted(module: str) -> bool:
+        return _is_input_dialect(module) or (compiler_library is not None and compiler_library.permits(module))
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for a in node.names:
-                if is_harness_module(a.name) and not _is_input_dialect(a.name):
+                if is_harness_module(a.name) and not permitted(a.name):
                     return a.name
         elif isinstance(node, ast.ImportFrom):
             if node.level != 0:
@@ -99,12 +104,12 @@ def _py_imports_merlin(text: str) -> str | None:
             mod = node.module or ""
             if not is_harness_module(mod):
                 continue
-            if _is_input_dialect(mod):
+            if permitted(mod):
                 continue
             # `from merlin.xdsl_dialects import interface` resolves each imported name to its FQN; allow only
             # when EVERY name is the exempt input dialect, else flag the module (e.g. a `lowering` sibling).
             fqns = [f"{mod}.{a.name}" for a in node.names]
-            if fqns and all(_is_input_dialect(f) for f in fqns):
+            if fqns and all(permitted(f) for f in fqns):
                 continue
             return mod
     return None
@@ -425,13 +430,32 @@ def build_package(pkg: Package, *, timeout: int = 1800) -> None:
             )
 
 
-def integrity_scan(pkg: Package, *, additional_forbidden: tuple[str, ...] = ()) -> None:
+def integrity_scan(
+    pkg: Package,
+    *,
+    additional_forbidden: tuple[str, ...] = (),
+    compiler_library: CompilerLibraryContract | None = None,
+    compiler_library_root: Path | None = None,
+) -> None:
     """Reject harness/reference access, with optional host-owned stricter markers.
 
     Supplemental markers belong to one invocation and cannot remove the default
     oracle markers or structural import restrictions. Never read them from a
     candidate manifest or mutate the process-wide defaults for an experiment.
     """
+    if (compiler_library is None) != (compiler_library_root is None):
+        raise CertFailure(
+            "integrity", "structural_invariant_violation", "library contract and root must be supplied together"
+        )
+    if compiler_library is not None:
+        if type(compiler_library) is not CompilerLibraryContract or pkg.integrity_exempt:
+            raise CertFailure(
+                "integrity", "forbidden_pattern", "reviewed-library candidates cannot claim an integrity exemption"
+            )
+        try:
+            compiler_library.verify(compiler_library_root)
+        except (CompilerLibraryError, OSError) as exc:
+            raise CertFailure("integrity", "forbidden_pattern", str(exc)) from exc
     if pkg.integrity_exempt:
         return
     for src in pkg.directory.rglob("*"):
@@ -449,7 +473,7 @@ def integrity_scan(pkg: Package, *, additional_forbidden: tuple[str, ...] = ()) 
                     f"(a non-exempt package must not read the reference/oracle)",
                 )
         if src.suffix == ".py":  # real merlin-harness import (AST, not substring)
-            mod = _py_imports_merlin(text)
+            mod = _py_imports_merlin(text, compiler_library=compiler_library)
             if mod is not None:
                 raise CertFailure(
                     "integrity",

@@ -126,6 +126,11 @@ launching, capsule grading, golden generation, sandboxing and certification. The
 
 ## Interfaces
 
+`compiler_library.py` binds explicit host-reviewed public leaf APIs, dependency
+members and resource bytes for independent compiler packages. Candidate metadata
+cannot grant access. Direct-import closure is not dynamic/interpreter isolation;
+the owning experiment must independently qualify its minimal runtime boundary.
+
 - Produces artifacts that validate against `merlin/schemas/*.schema.yaml`.
 - `pipeline.build(...)` returns a `BuildResult`; `cli.py` exposes `build` and `inspect`.
 - Consumes `merlin.common` (paths/io/yaml/artifacts/schemas) and `merlin.validation`.
