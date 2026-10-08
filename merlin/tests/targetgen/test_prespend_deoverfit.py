@@ -193,3 +193,14 @@ def test_answer_surfaces_masks_all_hidden_dirs():
     for hd in caps.rglob("hidden"):
         if hd.is_dir():
             assert str(hd) in masked, f"hidden dir not masked: {hd}"
+
+
+def test_rtl_digest_reports_unknown_register_usage_without_inventing_funct3(monkeypatch):
+    from merlin.targetgen.rtl import gen_rtl_digest
+
+    body = {"interfaces": [{"name": "funct_decode_table", "custom_opcode": 1, "names": {}}]}
+    monkeypatch.setattr(gen_rtl_digest, "decode_body", lambda *args, **kwargs: body)
+    digest = gen_rtl_digest.generate({})
+    assert "funct3 `UNKNOWN (not declared)`" in digest
+    body["interfaces"][0]["funct3"] = 2
+    assert "funct3 `2`" in gen_rtl_digest.generate({})

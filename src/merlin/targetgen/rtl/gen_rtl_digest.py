@@ -14,13 +14,16 @@ arm explores the RTL itself) — which preserves the merlin-vs-merlin+CIRCT dist
 
 Usage: python -m merlin.targetgen.rtl.gen_rtl_digest [--facts <facts.json>] [--out RTL_DIGEST.md]
 """
+
 from __future__ import annotations
+
 import argparse
 import json
 from pathlib import Path
 
-from .facts import decode_body, load_facts
 from merlin.common.facts_view import interface as _facts_interface
+
+from .facts import decode_body, load_facts
 
 
 class NotARoccTarget(ValueError):
@@ -38,7 +41,8 @@ def generate(facts: dict) -> str:
         raise NotARoccTarget(
             "target facts carry no RoCC funct_decode_table interface (endpoint is not a RoCC command "
             "ISA); the RTL digest generator does not apply — a SIMT / self-hosted-ISA target is "
-            "documented by its own derived isa_tools model instead.")
+            "documented by its own derived isa_tools model instead."
+        )
     names = {int(k): v for k, v in fd["names"].items()}
     mesh = next((a for a in f.get("arrays", []) if a.get("name") == "mesh"), {})
     mems = {m["name"]: m for m in f.get("memories", [])}
@@ -57,21 +61,27 @@ def generate(facts: dict) -> str:
     L.append("")
     L.append("## Module map (what to target)")
     for i in f.get("interfaces", []):
-        L.append(f"- **{i.get('name')}** — {i.get('evidence','')}")
+        L.append(f"- **{i.get('name')}** — {i.get('evidence', '')}")
     L.append("")
     L.append("## Compute fabric")
-    L.append(f"- Systolic mesh: **{mesh.get('rows')}×{mesh.get('cols')}** PEs ({mesh.get('tiles')} tiles, "
-             f"square={mesh.get('square')}). **Tile every matmul operand to DIM={mesh.get('rows')}.**")
+    L.append(
+        f"- Systolic mesh: **{mesh.get('rows')}×{mesh.get('cols')}** PEs ({mesh.get('tiles')} tiles, "
+        f"square={mesh.get('square')}). **Tile every matmul operand to DIM={mesh.get('rows')}.**"
+    )
     for d in f.get("datapaths", []):
         L.append(f"- datapath **{d.get('name')}**: dtype `{d.get('dtype')}` ({d.get('evidence')})")
     L.append("")
     L.append("## Memory map (respect these capacities)")
     if spad:
-        L.append(f"- **Scratchpad**: {spad.get('banks')} banks × depth {spad.get('depth')} rows × "
-                 f"{spad.get('row_elems')} elems × {spad.get('elem_bits')}b = {spad.get('bytes')} B. Inputs live here.")
+        L.append(
+            f"- **Scratchpad**: {spad.get('banks')} banks × depth {spad.get('depth')} rows × "
+            f"{spad.get('row_elems')} elems × {spad.get('elem_bits')}b = {spad.get('bytes')} B. Inputs live here."
+        )
     if acc:
-        L.append(f"- **Accumulator**: {acc.get('banks')} banks × depth {acc.get('depth')} × {acc.get('lanes')} "
-                 f"lanes × {acc.get('lane_bits')}b = {acc.get('bytes')} B. Partial sums live here.")
+        L.append(
+            f"- **Accumulator**: {acc.get('banks')} banks × depth {acc.get('depth')} × {acc.get('lanes')} "
+            f"lanes × {acc.get('lane_bits')}b = {acc.get('bytes')} B. Partial sums live here."
+        )
     L.append("")
     # A SELF-HOSTED ISA HAS NO RISC-V CUSTOM SLOT, and that is a fact about the device rather than a
     # missing fact about it. `hex(None)` raised here for every such target, which took a digest that
@@ -82,32 +92,52 @@ def generate(facts: dict) -> str:
     if _slot is None:
         L.append(f"## ISA — no RISC-V custom opcode ({len(names)} legal funct codes)")
         L.append("")
-        L.append("> This device does NOT hang off the RoCC custom slot: its facts carry a funct decode "
-                 "table but no `custom_opcode`, which is what a SELF-HOSTED ISA looks like — the device "
-                 "fetches and decodes its own instruction stream. Encode against the target's own ISA "
-                 "definition, not a `custom-3` encoding. Nothing is guessed here: an opcode this digest "
-                 "does not have is reported absent rather than invented.")
+        L.append(
+            "> This device does NOT hang off the RoCC custom slot: its facts carry a funct decode "
+            "table but no `custom_opcode`, which is what a SELF-HOSTED ISA looks like — the device "
+            "fetches and decodes its own instruction stream. Encode against the target's own ISA "
+            "definition, not a `custom-3` encoding. Nothing is guessed here: an opcode this digest "
+            "does not have is reported absent rather than invented."
+        )
     else:
-        L.append(f"## ISA — custom opcode `{hex(_slot)}`, funct3 `{fd['funct3']}` "
-                 f"({len(names)} legal funct codes)")
+        L.append(
+            f"## ISA — custom opcode `{hex(_slot)}`, funct3 `{fd.get('funct3') if fd.get('funct3') is not None else 'UNKNOWN (not declared)'}` "
+            f"({len(names)} legal funct codes)"
+        )
     L.append("| funct | name | role |")
     L.append("|---|---|---|")
     for c in sorted(names):
         n = names[c]
-        role = ("config" if "CONFIG" in n else "compute" if "COMPUTE" in n else
-                "load" if "LOAD" in n else "store" if "STORE" in n else
-                "loop" if "LOOP" in n else "control")
+        role = (
+            "config"
+            if "CONFIG" in n
+            else "compute"
+            if "COMPUTE" in n
+            else "load"
+            if "LOAD" in n
+            else "store"
+            if "STORE" in n
+            else "loop"
+            if "LOOP" in n
+            else "control"
+        )
         L.append(f"| {c} | `{n}` | {role} |")
     L.append("")
     L.append("## Legal-sequencing rules (the structural invariants the hardware enforces)")
-    L.append("1. **Config before use** — emit the relevant `*CONFIG*` funct before the first `COMPUTE_*` "
-             "(exec config) and before the first `STORE` (store config). Violations are rejected.")
-    L.append("2. **Decode-clean** — only the funct codes above are legal; any other custom-3 funct is an "
-             "UNKNOWN instruction the RTL rejects.")
-    L.append("3. **Movement** (`LOAD`→`STORE`, no `COMPUTE`); **matmul** (`LOAD`/`PRELOAD`→`COMPUTE`→`STORE`); "
-             "**conv** ⇒ im2col to 2D then matmul. Tile to DIM; keep residency within the capacities above.")
+    L.append(
+        "1. **Config before use** — emit the relevant `*CONFIG*` funct before the first `COMPUTE_*` "
+        "(exec config) and before the first `STORE` (store config). Violations are rejected."
+    )
+    L.append(
+        "2. **Decode-clean** — only the funct codes above are legal; any other custom-3 funct is an "
+        "UNKNOWN instruction the RTL rejects."
+    )
+    L.append(
+        "3. **Movement** (`LOAD`→`STORE`, no `COMPUTE`); **matmul** (`LOAD`/`PRELOAD`→`COMPUTE`→`STORE`); "
+        "**conv** ⇒ im2col to 2D then matmul. Tile to DIM; keep residency within the capacities above."
+    )
     L.append("")
-    L.append(f"_Provenance: {gen.get('method','')[:200]}_")
+    L.append(f"_Provenance: {gen.get('method', '')[:200]}_")
     return "\n".join(L)
 
 
@@ -126,7 +156,7 @@ def main(argv=None):
     try:
         md = generate(facts)
     except NotARoccTarget as e:
-        print(f"n/a: {e}")            # honest n/a — not a crash: does not apply to this target's endpoint
+        print(f"n/a: {e}")  # honest n/a — not a crash: does not apply to this target's endpoint
         return 0
     if a.out:
         Path(a.out).write_text(md)
