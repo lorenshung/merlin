@@ -7,12 +7,14 @@ last_verified: 2026-10-08
 related: [beam_cca_architecture]
 code_refs:
   - packages/merlin-experiments/src/merlin_experiments/phase2/component_workflow.py
+  - packages/merlin-experiments/src/merlin_experiments/phase2/component_cca.py
   - packages/merlin-experiments/src/merlin_experiments/phase2/broker_policy.py
   - packages/merlin-experiments/src/merlin_experiments/phase2/stage_inputs.py
   - packages/merlin-experiments/src/merlin_experiments/phase2/stage_prompt.py
   - packages/merlin-experiments/src/merlin_experiments/phase2/authoring.py
   - packages/merlin-experiments/src/merlin_experiments/phase2/authoring_cli.py
   - packages/merlin-experiments/tests/test_component_workflow.py
+  - packages/merlin-experiments/tests/test_component_cca.py
   - packages/merlin-experiments/src/merlin_experiments/phase0/component_generation.py
   - packages/merlin-experiments/src/merlin_experiments/phase0/generation.py
   - packages/merlin-experiments/src/merlin_experiments/phase2/corpus.py
@@ -28,8 +30,8 @@ actions and receipt rules. A historical receipt is never relabelled as a new
 component experiment.
 
 The new registry includes candidate manifest commands, a compiler edit-surface
-inventory, optional command-buffer structural analysis, optional analytical
-feedback and optional component RTL feedback. It excludes target-descriptor shell
+inventory, optional command-buffer structural analysis, optional complete CCA
+feedback, optional analytical feedback and optional component RTL feedback. It excludes target-descriptor shell
 probes, complete-model graph/analysis actions and all legacy global context,
 source-pair and mechanism-probe providers. Passing those services to the policy
 is an admission error. Registry inspection without providers advertises the
@@ -123,7 +125,7 @@ dependency graph. Compiler-library/runtime import admission must separately bind
 dependencies and resources. No implicit current-checkout or installed-target
 fallback is authorized by this profile.
 
-An active analytical policy also snapshots its selected callable and Python code
+An active analytical or CCA policy also snapshots its selected callable and Python code
 object. Replacing that callable with another function in the same pinned file or
 changing its code object refuses execution. This guards active selection drift;
 it does not prove arbitrary closure state or dynamic dependency integrity. The
@@ -155,6 +157,47 @@ cannot be presented as RTL or FPGA timing. A provider must bound its own executi
 the policy checks elapsed time on return but does not supervise an arbitrary
 in-process callback that hangs. A future isolated runner must own cancellation
 before this profile can support a bounded scientific campaign.
+
+## Complete structural CCA feedback
+
+The trusted host may explicitly supply a `ComponentCCAProvider` and select
+`component-cca-feedback` through the same broker registry. Its baseline is a
+separately pinned compiler tree; candidate metadata cannot select that tree or
+the provider. The callback must supply exactly one typed baseline/candidate
+`ComponentCCAObservation` pair for every frozen generated member. Each observation
+binds the actual emitted artifact bytes, compiler revision, generated member,
+corpus and target descriptor. Provider source, executing callable/code selection,
+baseline tree, candidate tree, corpus and descriptor are rechecked around the
+call. Unknown callback dependencies or closure state still need separate trusted
+runtime admission. The callback is responsible for a faithful source-bound lift;
+matching hashes alone do not establish that the lift is scientifically correct.
+
+`component_cca.complete_report` uses the core all-facet `cca_compare.compare`
+and `uncomparable_axes`. It reflects every facet field and refuses differing
+operation, backend or scope membership. Populated unequal axes must be present
+in the comparator's gaps. A missing side remains explicitly uncomparable; fields
+missing on both sides remain UNKNOWN, including absent communication and coverage
+facets. The existing register-block inference can appear as a structural hint
+while that field is still UNKNOWN. Agreement on a subset never establishes full
+agreement. Program scope describes the generated component program, not an
+application: application coverage and calibrated or measured cycles remain UNKNOWN.
+
+Only typed structural facet values and digest-projected provenance reach broker
+stdout. Private artifact paths, raw lifting metadata, baseline programs and
+source text are not returned. The callback executes on the trusted host with
+private input access; this action does not grant that access to a participant.
+The canonical private receipt binds the same stdout bytes and feedback envelope
+as the other component actions. Its validator reconstructs the complete report
+from both projected CCAs, rejecting omitted or changed facets, gaps, UNKNOWN
+axes and input bindings. Archived report replay does not independently re-lift
+the artifacts or re-admit the original corpus; it verifies internal evidence
+and receipt consistency. Active policy admission owns exact corpus membership.
+
+Synthetic broker and installed-package checks qualify these interfaces and
+refusals. They do not qualify a hardware lifter, hidden oracle isolation, fresh
+participant transport, a complete optimization campaign or measured convergence.
+Normal component authoring remains refused until its separate launch prerequisites
+are qualified. Structural feedback retains `NO_FINAL_ACCEPTANCE`.
 
 ## Prompt and normal launch
 
@@ -190,8 +233,6 @@ sealed, without exposing answers through inner-loop services. This owner does
 not run those gates, change their thresholds, submit FireSim jobs, or certify a
 complete-model speedup.
 
-The structural command-buffer action does not yet expose a complete CCA gap
-report. A future component CCA route must use the existing all-facet comparator
-and `uncomparable_axes`, preserve scope and provenance, and report missing
-communication or coverage evidence as UNKNOWN. A partial agreement predicate
-cannot stand in for that report.
+The command-buffer structural action and complete CCA action remain separate:
+neither substitutes a partial agreement predicate for the all-facet report or
+establishes final acceptance.

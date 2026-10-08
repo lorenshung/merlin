@@ -43,6 +43,15 @@ The action profile and prompt are not fresh-session launch authority. Normal
 authoring and its CLI refuse this profile until an approved minimal view, verified
 runtime isolation and qualified zero-history transport are independently supplied.
 Never fall back to the legacy networked authoring policy for this scientific claim.
+`component_cca.py` owns the optional trusted generated-component CCA provider,
+exact baseline/candidate/member/corpus/descriptor bindings and complete structural
+report replay. Delegate gaps to the core all-facet comparator; reflect every field,
+keep missing communication/coverage explicitly UNKNOWN and refuse scope mismatch.
+Private artifact paths, baseline programs and raw source metadata cannot enter
+participant feedback. Source-file identity does not replace executing callable/code
+selection or full runtime admission. This route grants neither measured cycles nor
+application coverage, fresh transport or final acceptance; test with synthetic
+host providers through the selected broker and receipt validator.
 `broker_evidence.py` owns shared identity checks: new receipt rows bind the selected
 workflow; historical absent IDs remain explicitly unbound and are never inferred or rewritten.
 The same bound workflow executes and qualifies a round. No policy imports a native

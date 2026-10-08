@@ -117,7 +117,14 @@ def test_registry_contains_no_model_or_descriptor_probe_actions(tmp_path, monkey
     monkeypatch.setattr(BP.TC, "required_tool_probes", lambda *_: pytest.fail("descriptor probes were selected"))
     actions = BP.action_registry(BP.COMPONENT_ONLY_V1, selected["candidate"], selected["target_experiment"])
     names = {action.name for action in actions}
-    assert names == {"candidate-parse", CW.ANALYTICAL_ACTION, CW.RTL_ACTION, BP.INVENTORY_ACTION, BP.ANALYSIS_ACTION}
+    assert names == {
+        "candidate-parse",
+        CW.ANALYTICAL_ACTION,
+        CW.RTL_ACTION,
+        CW.CCA_ACTION,
+        BP.INVENTORY_ACTION,
+        BP.ANALYSIS_ACTION,
+    }
     assert {action.name for action in actions if action.required} == {"candidate-parse"}
     assert not any(action.available for action in actions if action.name in (CW.ANALYTICAL_ACTION, CW.RTL_ACTION))
     policy = BP.select_workflow(BP.COMPONENT_ONLY_V1, **selected)
