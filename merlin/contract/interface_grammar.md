@@ -48,6 +48,48 @@ contract surface describes the *computation*, not where it runs.
 | `!merlin_iface.resident` | an opaque handle to a resident (packed, stationary) weight |
 | `!merlin_iface.acc<i32>` | an opaque integer accumulator handle |
 
+## Op index
+
+The complete list of ops the grammar accepts, **generated from the reference parser's own tables**
+(`interface_emit._OP_TO_OPCODE` + `_NAMED_OP_OPERAND_KEYS` + its structural ops), which the canonical
+parser fails CLOSED on: an op not in this table is not in the grammar, and a module using one is
+rejected naming the mnemonic. `build_tools/scripts/check_grammar_documentation.py` holds this table,
+the prose sections below, `interface_dialect_contract.yaml` and the registered dialect
+(`merlin_iface.irdl.mlir`) together by content, and regenerates the table (`--print-index`).
+
+| op | command-buffer opcode | positional operands (in order) | registered dialect (IRDL) |
+| --- | --- | --- | --- |
+| `attention_pv` | `ATTENTION_PV` | `p`, `v` | no |
+| `attention_qk` | `ATTENTION_QK` | `q`, `k` | no |
+| `bias_add` | `BIAS_ADD` | `src`, `bias` | no |
+| `commit` | `COMMIT` | — | yes |
+| `conv2d` | `CONV2D` | `ifm`, `weight` | yes |
+| `evict` | `EVICT` | — | yes |
+| `matmul` | `MATMUL_RESIDENT` | — | yes |
+| `matmul_batched` | `BATCHED_MATMUL` | `a`, `w` | no |
+| `movement` | `MOVEMENT` | `src` | yes |
+| `resident_pack` | `RES_PACK` | — | yes |
+| `residual_add` | `RESIDUAL_ADD` | `lhs`, `rhs` | no |
+| `rmsnorm` | `RMSNORM` | `src`, `gamma` | no |
+| `rope` | `ROPE` | `src` | no |
+| `softmax` | `SOFTMAX` | `src` | no |
+| `tensor` | — (declares a leaf, issues no command) | — | yes |
+
+Positional operands are given in the order the op takes them; the parser refuses a count that does not
+match (truncating either side would change the ABI). Every whole-op result is recorded as
+`role = "output"` under its `name` attribute, which becomes the command's `dst` operand. The residency
+ops (`resident_pack`, `matmul`, `commit`, `evict`) name their operands in their own sections.
+
+The last column says whether the dynamically registered dialect a C++ tool loads
+(`mlir-opt --irdl-file=merlin_iface.irdl.mlir`, generated from the reference ODS) declares the op. An op
+marked `no` is accepted by the reference parser and graded in capsules, but that registered dialect
+does not yet verify it, so a C++ consumer has to accept it through its own parser.
+
+The **semantics** of each opcode -- its attributes, defaults and arithmetic -- live in
+`command_buffer_abi.yaml` under that opcode, not here: this document specifies the input SURFACE, the
+ABI what the command means. Three opcodes (`RMSNORM`, `ROPE`, `SOFTMAX`) are accepted by the parser and
+have no ABI entry yet; they are recorded as debt in `build_tools/scripts/undocumented_opcodes_ratchet.txt`.
+
 ## Ops
 
 ### `merlin_iface.tensor` — declare a leaf input/weight
@@ -147,6 +189,83 @@ output selection is then determined by command dataflow rather than by the role 
 merlin_iface.evict %W_res : (!merlin_iface.resident) -> ()
 ```
 Maps to `EVICT` (`operands: {handle}`).
+
+### `merlin_iface.conv2d` — im2col convolution
+```mlir
+%Y0 = merlin_iface.conv2d %IFM, %W_res {
+        name = "Y0", kernel = [3, 3, 64, 64], stride = [1, 1], padding = [1, 1, 1, 1],
+        dilation = [1, 1], layout = "nhwc", epilogue = [], output_dtype = "i32"
+      } : (tensor<1x28x28x64xi8>, !merlin_iface.resident) -> tensor<784x64xi32>
+```
+Maps to `CONV2D` (`operands: {ifm, weight, dst}`). An NHWC activation contracted against a
+**pre-im2col'd** weight `[Kh*Kw*Ci, Co]` that has been made resident, producing `[N*Ho*Wo, Co]`. The
+geometry rides in the ATTRIBUTES -- `kernel = [kh, kw, ci, co]` (required), `stride`, `padding`,
+`dilation`, `layout` -- never in extra operands, so the operand list is the activation and the weight.
+There is no separate `commit`: `epilogue` is the same readout a commit applies, including a fused
+`maxpool` with the same required pooling attributes, `bias` naming a `role = "bias"` tensor in the
+accumulator's dtype, and `acc_scale` required iff its stage is listed. `output_dtype` is an integer
+dtype. Only `nhwc` is defined; grouped convolution has no attribute and is rejected. Full attribute
+rules: `command_buffer_abi.yaml` → `CONV2D`.
+
+### `merlin_iface.movement` — identity round-trip through the accelerator
+```mlir
+%Y0 = merlin_iface.movement %A0 {name = "Y0", output_dtype = "i32", semantic = "mvin_mvout"} :
+      (tensor<16x16xi8>) -> tensor<16x16xi32>
+```
+Maps to `MOVEMENT` (`operands: {src, dst}`). A load→store round trip: `dst` holds `src`'s values
+UNCHANGED, only the container dtype widens. No clamp, no requantize -- the point of the capsule is that
+the data survives the trip bit-for-bit. Its capsules carry exactly ONE op, so a parser that skips it
+reads them as empty programs.
+
+### `merlin_iface.attention_qk` — the first matmul of attention
+```mlir
+%S = merlin_iface.attention_qk %Q, %K {name = "S", output_dtype = "i32", epilogue = []} :
+     (tensor<16x64xi8>, tensor<32x64xi8>) -> tensor<16x32xi32>
+```
+Maps to `ATTENTION_QK` (`operands: {q, k, dst}`). `dst = q @ transpose(k)`: `q` is `[m, d]`, `k` is
+`[n, d]` stored ROW-PER-KEY, so the contraction is over the TRAILING head dim of BOTH operands and `dst`
+is `[m, n]`. **The transpose is part of the op's definition and is not spelled as an attribute** --
+there is no `transpose_rhs` / `rhs_transposed` / `transpose_b` flag, and an unrecognised attribute is
+rejected rather than ignored. `epilogue` is an ordered subset of `[acc_scale, requant, relu]`.
+
+### `merlin_iface.attention_pv` — the second matmul of attention
+```mlir
+%O = merlin_iface.attention_pv %P, %V {name = "O", output_dtype = "i32", epilogue = []} :
+     (tensor<16x32xi8>, tensor<32x64xi8>) -> tensor<16x64xi32>
+```
+Maps to `ATTENTION_PV` (`operands: {p, v, dst}`). `dst = p @ v`, a plain `[m, s] x [s, d]` contraction
+with **no transpose** -- the sibling of `attention_qk` and deliberately not the same shape rule. Until
+this op was defined, every shipped flash-attention capsule parsed without its second matmul while the
+parser reported success.
+
+### `merlin_iface.residual_add` — two quantized tensors summed into one output domain
+```mlir
+%Y0 = merlin_iface.residual_add %X, %R {
+        name = "Y0", lhs_scale = 0.5 : f32, rhs_scale = 0.25 : f32, bound_lsb = 1 : i64,
+        epilogue = [], output_dtype = "i8"
+      } : (tensor<16x16xi8>, tensor<16x16xi8>) -> tensor<16x16xi8>
+```
+Maps to `RESIDUAL_ADD` (`operands: {lhs, rhs, dst}`). Each operand carries its own multiplier into the
+output's domain, the sum is rounded ONCE, and `bound_lsb` declares how many output steps a conforming
+target may lie from that reference. `lhs_scale`, `rhs_scale` and `bound_lsb` are REQUIRED with no
+defaults; `epilogue` is an ordered subset of `[relu]` and `output_dtype` an integer dtype. Exact rounding
+and saturation: `command_buffer_abi.yaml` → `RESIDUAL_ADD`. Without this op a residual connection has
+no command at all and can only ever be host work.
+
+### `merlin_iface.rmsnorm` · `merlin_iface.rope` · `merlin_iface.softmax`
+```mlir
+%Y0 = merlin_iface.rmsnorm %X, %G {name = "Y0", output_dtype = "i8"} :
+      (tensor<16x64xi8>, tensor<64xi8>) -> tensor<16x64xi8>
+%Y1 = merlin_iface.rope    %X     {name = "Y1", output_dtype = "i8"} : (tensor<16x64xi8>) -> tensor<16x64xi8>
+%Y2 = merlin_iface.softmax %X     {name = "Y2", output_dtype = "i8"} : (tensor<16x64xi8>) -> tensor<16x64xi8>
+```
+Map to `RMSNORM` (`operands: {src, gamma, dst}`), `ROPE` (`{src, dst}`) and `SOFTMAX` (`{src, dst}`).
+
+> **These three have no `command_buffer_abi.yaml` entry.** The parser accepts them and the ABI states
+> no attributes and no arithmetic for them, so a capsule using one asks you to infer the operation from
+> its name. They are recorded as debt in `undocumented_opcodes_ratchet.txt`, which may only shrink; if
+> you meet one and the ABI still says nothing, that is a gap in the contract you were handed, not a
+> detail you were expected to know.
 
 ## Attribute encoding
 
