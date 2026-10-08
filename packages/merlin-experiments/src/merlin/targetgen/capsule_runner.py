@@ -1326,7 +1326,10 @@ def _resolve_oracle_adapters(target: str) -> dict[str, Callable]:
 
 
 def qa_loop_adapters(
-    target: str, sim_via: str | None = None, *, declared_tiers: set[str] | None = None,
+    target: str,
+    sim_via: str | None = None,
+    *,
+    declared_tiers: set[str] | None = None,
     readback_policy=None,
 ) -> dict[str, Callable]:
     """The FAST per-round QA-loop oracle set for ``target`` — resolved from :func:`oracle_adapters`, never
@@ -4866,6 +4869,21 @@ def run_capsule(
     required = set(capsule.get("required_oracle_tiers", []))
 
     paths = make_run_paths(runs_root, run_id, suite=cfg.suite, target=cfg.target, dtype=cfg.dtype, benchmark=name)
+
+    from . import core_aten_capsules
+
+    if core_aten_capsules.is_full_call(capsule):
+        return core_aten_capsules.run_capsule(
+            capsule,
+            package_dir,
+            paths=paths,
+            config=cfg,
+            adapters=adapters,
+            pkg=pkg,
+            contract=contract,
+            timeout=timeout,
+            no_oracle=no_oracle,
+        )
 
     # Whole-model capsule: graded end to end by compiling the captured model through the merlin
     # whole-model flow (compile_rvv) and gating vs its golden — NOT the per-op tier ladder. Write the
