@@ -33,6 +33,7 @@ def support(tmp_path, monkeypatch):
     # The checkout's vendored support is masked whatever is selected; this fixture models a checkout
     # without any, so its owner sets are exact. test_example_support.py covers the vendored trees.
     monkeypatch.setattr(target_registry, "in_repo_support", lambda: {})
+    monkeypatch.setattr(target_registry, "vendored_support_dirs", lambda: ())
     monkeypatch.setattr(surfaces, "repo_root", lambda: repo)
     monkeypatch.setattr(surfaces, "artifacts_dir", lambda: repo / "out/artifacts")
     monkeypatch.setattr(surfaces, "MODULE_ACCESS", ())

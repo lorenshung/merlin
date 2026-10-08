@@ -242,6 +242,22 @@ def in_repo_support() -> dict[str, Path]:
     return found
 
 
+def vendored_support_dirs() -> tuple[Path, ...]:
+    """Every ``examples/<example>/support`` directory in the checkout, whether or not it declares a
+    provider.
+
+    :func:`in_repo_support` SELECTS, so it counts only valid declarations. What must be WITHHELD is
+    wider: a support tree without a ``provider.yaml`` (or before its declaration is written) is still
+    target support bytes, so a mask keyed on the declaration alone would leave it readable. Empty for an
+    installed distribution, which has no checkout.
+    """
+    checkout = checkout_root()
+    if checkout is None:
+        return ()
+    found = (checkout / "examples").glob(f"*/{IN_REPO_SUPPORT_DIR}")
+    return tuple(sorted(path.resolve() for path in found if path.is_dir()))
+
+
 def default_support_root(target: str) -> Path | None:
     """The in-repo support provider ``MERLIN_TARGET_PATH`` defaults to for ``target``, if one exists."""
     return in_repo_support().get(target)

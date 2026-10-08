@@ -438,9 +438,28 @@ def _support_package_dirs() -> list[Path]:
             if alias is not None and alias != provider.root:
                 roots.add(alias)
     # Vendored support is tracked source inside the checkout, so every copy is masked whatever
-    # MERLIN_TARGET_PATH selects. Selection decides which support EXECUTES, not which is private.
+    # MERLIN_TARGET_PATH selects. Selection decides which support EXECUTES, not which is private --
+    # and a support directory is private whether or not it declares a provider.
     roots.update(target_registry.in_repo_support().values())
+    roots.update(target_registry.vendored_support_dirs())
     return sorted(roots)
+
+
+def _git_store(root: Path) -> list[Path]:
+    """The checkout's git metadata: ``.git`` itself and, for a linked worktree, the directories its
+    ``gitdir:`` pointer and that directory's ``commondir`` name. The object store holds every tracked
+    byte the other masks withhold, the vendored support included."""
+    entry = root / ".git"
+    found = [entry] if entry.exists() else []
+    if entry.is_file():
+        key, _, value = entry.read_text(encoding="utf-8").strip().partition(":")
+        if key.strip() == "gitdir" and value.strip():
+            gitdir = (root / value.strip()).resolve()
+            found.append(gitdir)
+            common = gitdir / "commondir"
+            if common.is_file():
+                found.append((gitdir / common.read_text(encoding="utf-8").strip()).resolve())
+    return [path for path in dict.fromkeys(found) if path.exists()]
 
 
 def _backend_package_dirs(te: TargetExperiment) -> list[Path]:
@@ -574,6 +593,11 @@ def answer_surfaces(te: TargetExperiment) -> list[AnswerSurface]:
     if mem.is_dir():
         out.append(AnswerSurface("experimenter-memory", mem, "dir", "memory"))
 
+    # A bind of the checkout root also binds its git store, from which any masked tracked file can be
+    # read back. Masked only where a bind exposes it, like every other surface.
+    for store in _git_store(root):
+        out.append(AnswerSurface(f"git:{shown_path(store)}", store, "dir" if store.is_dir() else "file", "git"))
+
     return out
 
 
@@ -683,10 +707,16 @@ def audit_tokens(te: TargetExperiment) -> dict[str, tuple[str, ...]]:
     # A package inside the checkout is named by its repo-relative path: every vendored support root is
     # spelled ``examples/<example>/support``, and the bare "support/<child>" would match any tree an agent
     # happens to call ``support`` -- including its own workspace.
+    # The ``<example>/support/<child>`` spelling is emitted too, for a read made from inside
+    # ``examples/`` (``cd examples && cat <example>/support/...``), which the full path never matches.
     _repo = repo_root()
     for _bp in _backend_package_dirs(te):
         _name = _bp.relative_to(_repo).as_posix() if _bp.is_relative_to(_repo) else _bp.name
+        _parts = _name.split("/")
+        _names = [_name]
+        if len(_parts) == 3 and _parts[0] == "examples":
+            _names.append("/".join(_parts[1:]))
         for _child in sorted(_bp.iterdir()):
             if _child.name != PACKAGE_CONTRACT_SUBDIR:
-                answer.append(f"{_name}/{_child.name}")
+                answer.extend(f"{name}/{_child.name}" for name in _names)
     return {"answer": tuple(dict.fromkeys(answer)), "grader": grader, "oracle_subpath": ORACLE_CALLABLE_SUBPATHS}

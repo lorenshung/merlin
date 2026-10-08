@@ -428,3 +428,40 @@ def test_vendored_support_tests_that_need_an_external_checkout(record, doc, entr
     root = _support_root(record, doc)
     result = _run_suite(root, tmp_path, [str(root / entry["test"])])
     assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-2000:]
+
+
+def test_a_support_directory_without_a_declaration_is_still_masked(sandbox, tmp_path, monkeypatch):
+    """Selection counts declared providers; the mask must not. A ``support/`` tree with no
+    ``provider.yaml`` is still target support bytes."""
+    undeclared = tmp_path / "examples" / "draft" / target_registry.IN_REPO_SUPPORT_DIR
+    (undeclared / "backend").mkdir(parents=True)
+    monkeypatch.setattr(target_registry, "checkout_root", lambda: tmp_path)
+    assert target_registry.in_repo_support() == {}
+    assert target_registry.vendored_support_dirs() == (undeclared.resolve(),)
+    monkeypatch.undo()
+    monkeypatch.setattr(target_registry, "vendored_support_dirs", lambda: (undeclared.resolve(),))
+    assert undeclared.resolve() in sandbox.surfaces._support_package_dirs()
+
+
+def test_exposing_the_checkout_does_not_expose_its_git_store(sandbox):
+    """``.git`` holds every tracked byte the masks withhold, the vendored support included."""
+    from merlin.targetgen.target_experiment import load_target_experiment
+
+    derived = sandbox.surfaces.answer_surfaces(load_target_experiment(DESCRIPTORS[0]))
+    repo = repo_root()
+    store = repo / ".git"
+    assert store in [item.path for item in derived if item.origin == "git"]
+    masked = sandbox.bwrap.apply_answer_masks(["--ro-bind", str(repo), str(repo)], derived)
+    assert sandbox.bwrap.is_exposed(["--ro-bind", str(repo), str(repo)], store)
+    assert not sandbox.bwrap.is_exposed(masked, store)
+
+
+def test_the_transcript_audit_names_a_support_read_made_from_inside_examples(sandbox):
+    """``cd examples && cat <example>/support/...`` carries no ``examples/`` prefix; it is still a read."""
+    from merlin.targetgen.target_experiment import load_target_experiment
+
+    tokens = sandbox.surfaces.audit_tokens(load_target_experiment(DESCRIPTORS[0]))["answer"]
+    for root in target_registry.in_repo_support().values():
+        for child in root.iterdir():
+            if child.name != sandbox.surfaces.PACKAGE_CONTRACT_SUBDIR:
+                assert f"{root.parent.name}/{root.name}/{child.name}" in tokens, child
