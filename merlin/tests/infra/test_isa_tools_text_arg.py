@@ -52,3 +52,21 @@ def test_a_short_non_path_string_is_text_not_an_error():
 def test_an_embedded_nul_does_not_crash():
     weird = "  .word 0x1\x00234"
     assert _text_of(weird) == weird
+
+
+def test_full_call_cli_forwards_the_authors_symbol(tmp_path, monkeypatch, capsys):
+    import json
+
+    from merlin_experiments.phase1.tools import isa
+
+    monkeypatch.setattr(isa, "__file__", str(tmp_path / "isa_tools.py"))
+    monkeypatch.setattr(isa.os, "getpid", lambda: 123)
+    monkeypatch.setattr(isa.time, "time", lambda: 0)
+    channel = tmp_path / ".isa_channel"
+    channel.mkdir()
+    (channel / "resp_123_0.json").write_text('{"mlir": "fixture", "n": 1}')
+    (channel / "done_123_0").touch()
+    assert isa.main(["asm", "FENCE", "--kernel-symbol", "catalog_kernel"]) == 0
+    request = json.loads((channel / "req_123_0.json").read_text())
+    assert request["kernel_symbol"] == "catalog_kernel" and request["text"] == "FENCE"
+    assert json.loads(capsys.readouterr().out)["n"] == 1

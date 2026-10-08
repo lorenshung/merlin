@@ -176,7 +176,7 @@ def _rocc_handle(req: dict, target: str, debug: Callable[[dict], dict] = _unconf
     cmd = req.get("cmd")
     if cmd == "asm":
         try:
-            mlir = rocc_asm.assemble_text(target, req.get("text", ""))
+            mlir = rocc_asm.assemble_text(target, req.get("text", ""), kernel_symbol=req.get("kernel_symbol"))
         except rocc_asm.AsmError as e:
             return {"error": str(e)}
         return {"mlir": mlir, "n": mlir.count("llvm.inline_asm")}

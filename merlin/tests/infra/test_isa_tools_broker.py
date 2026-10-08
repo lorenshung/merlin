@@ -169,3 +169,28 @@ def test_unknown_cmd_and_empty_model(broker):
     assert "unknown cmd" in BR._handle({"cmd": "bogus"}, ctx)["error"]
     empty = replace(ctx, model=lambda: IsaModel(target="bare"))
     assert "no derived ISA model" in BR._handle({"cmd": "asm", "text": "x"}, empty)["error"]
+
+
+def test_rocc_full_call_symbol_does_not_need_leaf_harness(monkeypatch):
+    from types import SimpleNamespace
+
+    from merlin.targetgen.contract import harness_abi
+    from merlin.targetgen.rocc import asm, decode
+
+    def missing(target):
+        raise harness_abi.HarnessAbiError("no leaf harness")
+
+    monkeypatch.setattr(harness_abi, "for_target", missing)
+    monkeypatch.setattr(
+        decode,
+        "_semantics",
+        lambda target: SimpleNamespace(isa_constants=lambda target: {"CUSTOM_OPCODE": 43, "FUNCT3": None}),
+    )
+    BR = _load_broker()
+    result = BR._rocc_handle({"cmd": "asm", "text": "FENCE", "kernel_symbol": "catalog_kernel_2"}, "synthetic")
+    assert result["n"] == 1 and "@catalog_kernel_2()" in result["mlir"]
+    with pytest.raises(harness_abi.HarnessAbiError, match="no leaf harness"):
+        BR._rocc_handle({"cmd": "asm", "text": "FENCE"}, "synthetic")
+    for symbol in ("", "bad symbol", "bad()", 7, "ümlaut"):
+        result = BR._rocc_handle({"cmd": "asm", "text": "FENCE", "kernel_symbol": symbol}, "synthetic")
+        assert "identifier" in result["error"]

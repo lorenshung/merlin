@@ -286,3 +286,15 @@ def test_selected_release_facts_replace_the_legacy_pin(tmp_path, monkeypatch):
     monkeypatch.setattr(compiler, "compile_checks", lambda *args: {"kernel": "CHECK: op"})
     monkeypatch.setattr(runner, "find_filecheck", lambda *args: "/bin/FileCheck")
     assert all(row["ok"] for row in R._frozen_rtl_checks(te, ws, bundle, capsule.parent, repo=context.repo))
+
+
+def test_full_call_probe_owns_symbol_while_leaf_requires_contract(monkeypatch):
+    import merlin.targetgen.target_experiment as T
+
+    for runner, expected in (({"full_call_provider": "selected/provider.py"}, "authoring_readiness_probe"), ({}, None)):
+        monkeypatch.setattr(T, "load_capability_manifest", lambda target: SimpleNamespace(contract={"runner": runner}))
+        symbol = R._assembly_symbol("synthetic")
+        assert symbol == expected
+        script = R._sandbox_probe("synthetic", ("isa_tools",), "FENCE", kernel_symbol=symbol)
+        compile(script, "<full-call probe>", "exec")
+        assert ("--kernel-symbol" in script) == (expected is not None)

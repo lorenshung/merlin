@@ -39,6 +39,9 @@ Only parsed syntax is cached; every decode resolves support and reads facts agai
 traces never alias cache-owned dictionaries. Loaded-provider ownership checks still apply;
 this is not an attestation of arbitrary in-process mutation or complete source bytes.
 Assembly resolves an omitted kernel symbol through the selected contract's `harness_abi`.
+Full-call catalogs own per-source kernel symbols; authors supply `--kernel-symbol` to the ISA
+broker instead of requiring a fixed leaf harness entry. Readiness names its diagnostic function
+explicitly for a declared full-call provider and retains ABI refusal for leaf harnesses.
 
 Structural checking is a separate `rocc_semantics.rtl_checks` capability. It exposes
 `load_default_facts(target)`, `project_facts(facts_rec)`,

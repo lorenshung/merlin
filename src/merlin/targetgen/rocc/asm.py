@@ -34,11 +34,14 @@ def assemble_program(target: str, listing: list[tuple[str, int, int]], *, kernel
     ``kernel_symbol`` defaults to the one the TARGET declares in its contract's ``harness_abi`` block,
     not to any particular target's spelling. It was a literal default here only because there was
     nowhere to read it from; now that the block exists, an omitted argument resolves per target and an
-    explicit one overrides."""
+    explicit one overrides. Full-call catalog authors supply their source-bound symbol explicitly;
+    no fixed leaf harness ABI is required for that assembly request."""
     if kernel_symbol is None:
         from ..contract.harness_abi import for_target
 
         kernel_symbol = for_target(target).entry_symbol
+    if not isinstance(kernel_symbol, str) or not kernel_symbol.isascii() or not kernel_symbol.isidentifier():
+        raise AsmError("kernel_symbol must be a nonempty ASCII identifier")
     semantics = RD._semantics(target)
     isa = semantics.isa_constants(target)
     opcode, func3 = isa["CUSTOM_OPCODE"], isa["FUNCT3"]

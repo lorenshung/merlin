@@ -126,7 +126,15 @@ def _asm_probe(context) -> str:
     return names[0]
 
 
-def _sandbox_probe(target: str, tools: tuple[str, ...], mnemonic: str) -> str:
+def _assembly_symbol(target: str) -> str | None:
+    """A full-call diagnostic owns its symbol; leaf probes use the target ABI."""
+    from merlin.targetgen.target_experiment import load_capability_manifest
+
+    runner = load_capability_manifest(target).contract.get("runner") or {}
+    return "authoring_readiness_probe" if runner.get("full_call_provider") else None
+
+
+def _sandbox_probe(target: str, tools: tuple[str, ...], mnemonic: str, *, kernel_symbol: str | None = None) -> str:
     has = set(tools)
     lines = ["import json, subprocess, sys"]
     if "xdsl_kit" in has:
@@ -181,8 +189,9 @@ def _sandbox_probe(target: str, tools: tuple[str, ...], mnemonic: str) -> str:
             "    assert gen_rtl_digest.generate(doc).strip()",
         ]
     if "isa_tools" in has:
+        symbol_args = ["--kernel-symbol", kernel_symbol] if kernel_symbol is not None else []
         lines += [
-            f"r = subprocess.run([sys.executable, 'isa_tools.py', 'asm', {mnemonic!r}],",
+            f"r = subprocess.run([sys.executable, 'isa_tools.py', 'asm', {mnemonic!r}, *{symbol_args!r}],",
             "                   capture_output=True, text=True, timeout=30)",
             "assert r.returncode == 0, (r.stdout, r.stderr)",
             "isa = json.loads(r.stdout)",
@@ -232,7 +241,13 @@ def _live_probe(context, te, ws: Path, bundle: dict, tools: tuple[str, ...]) -> 
                     )
                 finally:
                     log.close()
-            probe = _sandbox_probe(context.target, tools, _asm_probe(context) if "isa_tools" in tools else "")
+            # Full-call kernels have source-bound catalog symbols, not a fixed leaf
+            # harness entry. Name this diagnostic function explicitly through the
+            # same public assembler API an author uses for each catalog kernel.
+            symbol = _assembly_symbol(context.target) if "isa_tools" in tools else None
+            probe = _sandbox_probe(
+                context.target, tools, _asm_probe(context) if "isa_tools" in tools else "", kernel_symbol=symbol
+            )
             command = TC.sandbox_env(te, probe_ws) + " python3 -c " + shlex.quote(probe)
             result = subprocess.run(
                 [*BW.full_argv(te, probe_ws, bundle), "bash", "-c", command],

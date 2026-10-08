@@ -6,6 +6,8 @@ golden is ever involved — asm encodes the syntax YOU chose; disasm/lint inspec
 
   # assemble a mnemonic listing -> the correct .word lines for your kernel.S
   python isa_tools.py asm ops.txt
+  # full-call catalog kernels own their symbols (there is no fixed leaf harness entry)
+  python isa_tools.py asm ops.txt --kernel-symbol my_catalog_kernel
   # relative branch labels use the target-declared PC/immediate units (no hand-scaled offsets)
   # loop: ADDI rd=5,rs1=5,imm=4095
   #       BNE rs1=5,rs2=0,imm=loop
@@ -62,6 +64,11 @@ def main(argv=None):
         "(RoCC/command-buffer target: your emitted command_buffer.json)",
     )
     ap.add_argument("--op", default="matmul", help="lint coverage: the capsule op (default matmul)")
+    ap.add_argument(
+        "--kernel-symbol",
+        default=None,
+        help="asm: symbol for a source-bound full-call kernel; omission requires the target leaf harness ABI",
+    )
     ap.add_argument("--output-dtype", default=None)
     ap.add_argument("--movement", action="store_true", help="lint coverage: a data-movement capsule")
     ap.add_argument(
@@ -126,6 +133,8 @@ def main(argv=None):
             "movement": a.movement,
             "cycle_budget": a.cycle_budget,
         }
+        if a.cmd == "asm" and a.kernel_symbol is not None:
+            req["kernel_symbol"] = a.kernel_symbol
         req["text" if a.cmd == "asm" else "kernel_s"] = text
 
     ws = Path(__file__).resolve().parent  # the shim lives at <ws>/isa_tools.py
