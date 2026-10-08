@@ -456,6 +456,7 @@ def plan(
     *,
     row_pitch_elements: int,
     weight_manifest: Mapping[str, Any] | None = None,
+    argument_indices: Mapping[str, int] | None = None,
     session_states: Sequence[SessionState] = (),
     alignment: int = DEFAULT_ALIGNMENT,
 ) -> PackPlan:
@@ -465,6 +466,11 @@ def plan(
     ``weights.safetensors.manifest.json`` shape). It is checked against the read-only prefix by INDEX
     rather than by count, so a gap like SmolVLA's missing ``arg809`` is reported instead of shifting
     every later tensor by one.
+
+    ``argument_indices`` optionally supplies a caller-verified source argument
+    index for every read-only ABI buffer. This supports arbitrary compiler
+    buffer names without guessing from ABI position. Legacy ``arg<N>`` indices
+    must agree, and omissions, duplicates and invalid indices are refused.
 
     ``session_states`` are the carries the capture declares (:func:`session_states_from_contract`).
     Each named input keeps its bytes in the const blob as a ``seed`` and gains a ``mutable`` working
@@ -479,6 +485,17 @@ def plan(
     if not isinstance(abi, Mapping):
         raise BundlePackError("the command buffer declares no kernel ABI, so it has no pointer order")
     read, write = read_only_prefix(abi)
+    if argument_indices is not None:
+        if not isinstance(argument_indices, Mapping) or set(argument_indices) != {ref.tensor for ref in read}:
+            raise BundlePackError("source argument indices must cover the exact read-only ABI roster")
+        indices = tuple(argument_indices[ref.tensor] for ref in read)
+        if any(type(index) is not int or index < 0 for index in indices) or len(set(indices)) != len(indices):
+            raise BundlePackError("source argument indices must be unique nonnegative integers")
+        if any(ref.index >= 0 and ref.index != index for ref, index in zip(read, indices, strict=True)):
+            raise BundlePackError("named captured argument index differs from source argument index")
+        read = tuple(
+            ArgRef(tensor=ref.tensor, index=index, access=ref.access) for ref, index in zip(read, indices, strict=True)
+        )
     out_abi_order = tuple(ref.tensor for ref in (*read, *write))
 
     # Resolve each declared carry against the ABI before laying anything out, so a contract that

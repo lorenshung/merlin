@@ -239,6 +239,20 @@ def test_native_frozen_leaf_binding_excludes_source_written_intermediate(tmp_pat
     two["params"]["global_program_plan"]["tasks"][0]["reads"].append("arg1")
     bound, _ = _bind_inputs(two, bundle, target="synthetic")
     assert bound == {"arg0": [3.0], "arg1": [7.0]}
+    renamed = copy.deepcopy(two)
+    aliases = {"arg0": "entry_left", "arg1": "entry_right"}
+    for before, after in aliases.items():
+        renamed["tensors"][after] = renamed["tensors"].pop(before)
+    for arg in renamed["kernel_abi"]["args"]:
+        arg["tensor"] = aliases.get(arg["tensor"], arg["tensor"])
+    renamed_plan = renamed["params"]["global_program_plan"]
+    renamed_plan["entry_bindings"] = [aliases[name] for name in renamed_plan["entry_bindings"]]
+    renamed_plan["tasks"][0]["reads"] = [aliases[name] for name in renamed_plan["tasks"][0]["reads"]]
+    # ABI order is independent of source entry order; equal shapes cannot join the leaves.
+    renamed["kernel_abi"]["args"][:2] = reversed(renamed["kernel_abi"]["args"][:2])
+    bound, binding = _bind_inputs(renamed, bundle, target="synthetic")
+    assert bound == {"entry_left": [3.0], "entry_right": [7.0]}
+    assert [row["index"] for row in binding["pack"]["const"]] == [1, 0]
     swapped = copy.deepcopy(two)
     swapped["params"]["global_program_plan"]["entry_bindings"] = ["arg1", "arg0"]
     with pytest.raises(NativeModelExecutionError, match="source argument index"):

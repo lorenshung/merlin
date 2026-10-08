@@ -167,6 +167,28 @@ def _bind_inputs(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict):
         raise NativeModelExecutionError("frozen weight manifest is not a mapping")
+    # Source entry order, not ABI spelling/order, identifies captured leaves.
+    # Validate the complete source/plan join before accepting that mapping.
+    from merlin.runtime.commandbuffer import whole_program_entry_bindings
+    from merlin.targetgen.oot_starterkit.plan import source_operation_inventory, validate_mixed_program_plan
+
+    source_path = capture_bundle / "model.mlir"
+    if source_path.is_symlink() or not source_path.is_file():
+        raise NativeModelExecutionError("frozen model interface is absent or indirect")
+    source_bytes = source_path.read_bytes()
+    validation = validate_mixed_program_plan(source_bytes, command_buffer)
+    if not validation.get("ok"):
+        raise NativeModelExecutionError(
+            f"candidate source/entry plan is incomplete: {validation.get('findings', [])[:2]}"
+        )
+    entry = whole_program_entry_bindings(command_buffer)
+    abi = command_buffer["kernel_abi"]["args"]
+    read = {str(arg["tensor"]) for arg in abi if arg["access"] == "read"}
+    if entry is None or set(entry) != read or len(entry) != len(read):
+        raise NativeModelExecutionError("frozen source entry bindings differ from exact read-only pointer ABI")
+    argument_indices = {name: index for index, name in enumerate(entry)}
+    if any((named := parse_arg_index(name)) is not None and named != index for name, index in argument_indices.items()):
+        raise NativeModelExecutionError("physical captured argument index differs from source argument index")
     # Prefer the explicitly selected RTL array's column count.  A named target
     # can otherwise resolve its own geometry through the existing capability
     # path, which refuses rather than guessing an unavailable fixed array.
@@ -189,7 +211,7 @@ def _bind_inputs(
         pitch = arrays[0]["cols"]
     else:
         pitch = tile_edge(target)
-    packed = plan(command_buffer, row_pitch_elements=pitch, weight_manifest=manifest)
+    packed = plan(command_buffer, row_pitch_elements=pitch, weight_manifest=manifest, argument_indices=argument_indices)
     capture_source, source_report = capture_tensor_source(capture_bundle, packed, weight_manifest=manifest)
     inputs: dict[str, Any] = {}
     for row in packed.const:
@@ -206,29 +228,6 @@ def _bind_inputs(
     # Conversely, a true entry-bound readwrite pointer needs a carried-state
     # seed; this one-shot model runner has no such session contract. Check the
     # complete source/plan join before treating any mutable buffer as scratch.
-    from merlin.runtime.commandbuffer import whole_program_entry_bindings
-    from merlin.targetgen.oot_starterkit.plan import source_operation_inventory, validate_mixed_program_plan
-
-    source_path = capture_bundle / "model.mlir"
-    if source_path.is_symlink() or not source_path.is_file():
-        raise NativeModelExecutionError("frozen model interface is absent or indirect")
-    source_bytes = source_path.read_bytes()
-    validation = validate_mixed_program_plan(source_bytes, command_buffer)
-    if not validation.get("ok"):
-        raise NativeModelExecutionError(
-            f"candidate source/entry plan is incomplete: {validation.get('findings', [])[:2]}"
-        )
-    entry = whole_program_entry_bindings(command_buffer)
-    abi = command_buffer["kernel_abi"]["args"]
-    read = {str(arg["tensor"]) for arg in abi if arg["access"] == "read"}
-    if entry is None or set(entry) != read or len(entry) != len(read):
-        raise NativeModelExecutionError("frozen source entry bindings differ from exact read-only pointer ABI")
-    # The packer resolves captured bytes by the physical arg<N> index, while
-    # entry_bindings maps those physical names to source argument positions.
-    # Equal shapes/types cannot prove this correspondence: a swap would run the
-    # right program on the wrong frozen input/weight bytes.
-    if any(parse_arg_index(name) != source_index for source_index, name in enumerate(entry)):
-        raise NativeModelExecutionError("physical captured argument index differs from source argument index")
     if set(inputs) != read or len(inputs) != len(read):
         raise NativeModelExecutionError("captured leaf binding does not cover the exact source entry ABI")
 
@@ -1283,8 +1282,13 @@ def execute_candidate_model(
         record["host_build_sources"] = [{"path": p, "sha256": digest} for p, digest in service.source_pins]
         policy_kwargs = {"readback_policy": readback_policy} if readback_policy is not None else {}
         elf = compile_lowered_to_elf(
-            cb, lowered_mlir_text, output / "build", target=target, inputs=inputs,
-            _build_service=service, **policy_kwargs,
+            cb,
+            lowered_mlir_text,
+            output / "build",
+            target=target,
+            inputs=inputs,
+            _build_service=service,
+            **policy_kwargs,
         )
         if readback_policy is not None:
             from merlin.targetgen.contract.readback_policy import (
@@ -1294,14 +1298,21 @@ def execute_candidate_model(
             )
 
             recipe_record, source_pins = selected_build_inputs(
-                target, service.recipe.with_effective_abi(), service, **readback_input_kwargs,
+                target,
+                service.recipe.with_effective_abi(),
+                service,
+                **readback_input_kwargs,
             )
             record["readback_build"] = require_build_receipt(
                 output / "build" / BUILD_RECEIPT,
-                policy=readback_policy, cb=cb, target=target,
-                recipe_record=recipe_record, source_pins=source_pins,
+                policy=readback_policy,
+                cb=cb,
+                target=target,
+                recipe_record=recipe_record,
+                source_pins=source_pins,
                 object_path=output / "build" / "kernel.o",
-                harness_path=output / "build" / "harness.c", elf_path=elf,
+                harness_path=output / "build" / "harness.c",
+                elf_path=elf,
             )
         record["elf"] = _digest(Path(elf))
         revalidate_source()
@@ -1332,7 +1343,10 @@ def execute_candidate_model(
             revalidate_functional()
             capture_kwargs = {"capture_bytes": True} if binary_console else {}
             functional_console = functional_backend.run_elf(
-                elf, simulator="spike", timeout=timeout, **capture_kwargs,
+                elf,
+                simulator="spike",
+                timeout=timeout,
+                **capture_kwargs,
             )
             revalidate_functional()
             revalidate_source()
@@ -1340,15 +1354,23 @@ def execute_candidate_model(
                 raise NativeModelExecutionError("candidate ELF changed during L2 functional execution")
             if readback_policy is not None:
                 recipe_now, sources_now = selected_build_inputs(
-                    target, service.recipe.with_effective_abi(), service, **readback_input_kwargs,
+                    target,
+                    service.recipe.with_effective_abi(),
+                    service,
+                    **readback_input_kwargs,
                 )
                 if (recipe_now, sources_now) != (recipe_record, source_pins):
                     raise NativeModelExecutionError("full-value build inputs changed during L2 execution")
                 require_build_receipt(
-                    output / "build" / BUILD_RECEIPT, policy=readback_policy, cb=cb, target=target,
-                    recipe_record=recipe_record, source_pins=source_pins,
+                    output / "build" / BUILD_RECEIPT,
+                    policy=readback_policy,
+                    cb=cb,
+                    target=target,
+                    recipe_record=recipe_record,
+                    source_pins=source_pins,
                     object_path=output / "build" / "kernel.o",
-                    harness_path=output / "build" / "harness.c", elf_path=elf,
+                    harness_path=output / "build" / "harness.c",
+                    elf_path=elf,
                 )
             functional_path = output / ("console_l2.bin" if binary_console else "console_l2.txt")
             functional_path.write_bytes(
@@ -1409,15 +1431,23 @@ def execute_candidate_model(
             raise NativeModelExecutionError("candidate ELF bytes changed during execution")
         if readback_policy is not None:
             recipe_now, sources_now = selected_build_inputs(
-                target, service.recipe.with_effective_abi(), service, **readback_input_kwargs,
+                target,
+                service.recipe.with_effective_abi(),
+                service,
+                **readback_input_kwargs,
             )
             if (recipe_now, sources_now) != (recipe_record, source_pins):
                 raise NativeModelExecutionError("full-value build inputs changed during L3 execution")
             require_build_receipt(
-                output / "build" / BUILD_RECEIPT, policy=readback_policy, cb=cb, target=target,
-                recipe_record=recipe_record, source_pins=source_pins,
+                output / "build" / BUILD_RECEIPT,
+                policy=readback_policy,
+                cb=cb,
+                target=target,
+                recipe_record=recipe_record,
+                source_pins=source_pins,
                 object_path=output / "build" / "kernel.o",
-                harness_path=output / "build" / "harness.c", elf_path=elf,
+                harness_path=output / "build" / "harness.c",
+                elf_path=elf,
             )
         console_path = output / ("console.bin" if binary_console else "console.txt")
         console_path.write_bytes(console if type(console) is bytes else console.encode("utf-8"))
