@@ -170,7 +170,7 @@ def test_main_selfcheck_does_not_count_legacy_screen_or_publish_legacy_artifacts
         ("pass", None, None, "L2", None, False),
         ("pass", "pass", "l3_console.log", "L3", None, False),
         # A console that exists but cannot be read is named as unreadable, never as an empty tail.
-        ("pass", "fail", "l3_console.log", "L3", "<console unreadable: PermissionError", True),
+        ("pass", "fail", "l3_console.log", "L3", None, True),
     ],
 )
 def test_main_selfcheck_uses_only_selected_tier_console(
@@ -234,9 +234,11 @@ def test_main_selfcheck_uses_only_selected_tier_console(
     if expected_tail is None and passing_case:
         assert "sim_console_tail" not in row
     elif unreadable:
-        assert row["sim_console_tail"].startswith(expected_tail)
+        # a console that exists and cannot be read is named, not shown as an absent console
+        assert row["sim_console_tail"] is None and row["sim_console_tail_unreadable"].startswith("PermissionError")
     else:
         assert row["sim_console_tail"] == expected_tail
+        assert "sim_console_tail_unreadable" not in row
     if expected_tier == "L3":
         assert "L2_DONE" not in json.dumps(report)
         assert "UNRELATED_PRIVATE_CONSOLE" not in json.dumps(report)

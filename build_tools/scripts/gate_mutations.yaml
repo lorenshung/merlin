@@ -60,6 +60,18 @@ proofs:
       not, and the source contains nothing else that could produce the same finding. The paired
       CLEAN cases remove the opposite risk, that a scanner reporting everything would pass too.
 
+  check_grammar_documentation.py:
+    proof: merlin/tests/targetgen/test_grammar_documentation.py::test_a_removed_row_and_a_reordered_operand_are_both_caught
+    mutation: >-
+      On a private copy of the grammar spec, delete the `rope` index row and swap the operand order of
+      the `attention_qk` row, and require the gate to report the missing row and the drifted one and
+      exit non-zero.
+    removes: >-
+      Both satisfiers of the index rule for those two ops: `rope` keeps its prose heading but loses the
+      only row that states its opcode and operands, and `attention_qk` keeps its row but with an order
+      the parser does not use. The real-spec tests must pass on the unmutated copy, so a gate that
+      reported everything would not pass both.
+
   check_wiring.py:
     proof: merlin/tests/infra/test_check_wiring.py::test_new_debt_fails_and_a_stale_entry_fails
     mutation: >-

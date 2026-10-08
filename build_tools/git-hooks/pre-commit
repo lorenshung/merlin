@@ -60,6 +60,11 @@ echo "[pre-commit] ratchets may only shrink (staged)…"
 echo "[pre-commit] epilogue vocabulary (tree)…"
 "$PY" build_tools/scripts/check_epilogue_vocabulary.py
 
+# Whole-tree (~1 s): the grammar spec an agent reads, the dialect contract, the registered IRDL dialect
+# and the reference parser are four statements of one grammar; an edit to any one must keep the others.
+echo "[pre-commit] interface grammar documentation (tree)…"
+"$PY" build_tools/scripts/check_grammar_documentation.py
+
 # Whole-tree static gate: prove every declared shape/token resolves against a probe. Dynamic
 # certification needs an explicitly selected OOT renderer and runs in provider-qualified release
 # checks; pre-commit must not silently select ignored local build products.

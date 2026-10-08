@@ -225,8 +225,16 @@ def _probe_integer_model_route(args: argparse.Namespace) -> int:
     with destination.open("x", encoding="utf-8") as handle:
         json.dump(result, handle, indent=2, sort_keys=True, allow_nan=False)
         handle.write("\n")
-    print(json.dumps({"out": str(destination), "candidate_count": result["candidate_count"],
-                      "emission_counts": result["emission_counts"]}, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "out": str(destination),
+                "candidate_count": result["candidate_count"],
+                "emission_counts": result["emission_counts"],
+            },
+            sort_keys=True,
+        )
+    )
     return 0
 
 
@@ -248,9 +256,14 @@ def _stage_integer_model_admission(args: argparse.Namespace) -> int:
             raise ValueError(f"--{label} must name a regular, non-symlink file")
         selected[label] = path.read_bytes()
     result = stage_integer_model_admission(
-        selected["mlir"], target=args.target, software_spec=selected["software-spec"],
-        capability_contract=selected["capability-contract"], package_dir=args.package,
-        operation_id=args.operation_id, rtl_facts=selected.get("rtl-facts"), timeout=args.timeout,
+        selected["mlir"],
+        target=args.target,
+        software_spec=selected["software-spec"],
+        capability_contract=selected["capability-contract"],
+        package_dir=args.package,
+        operation_id=args.operation_id,
+        rtl_facts=selected.get("rtl-facts"),
+        timeout=args.timeout,
     )
     destination = Path(args.out).absolute()
     if destination.is_symlink() or any(parent.is_symlink() for parent in destination.parents):
@@ -261,9 +274,7 @@ def _stage_integer_model_admission(args: argparse.Namespace) -> int:
         if "rtl-facts" not in selected:
             raise ValueError("--build-dir requires exact --rtl-facts bytes")
         build_dir = Path(args.build_dir).absolute()
-        if build_dir.exists() or build_dir.is_symlink() or any(
-            parent.is_symlink() for parent in build_dir.parents
-        ):
+        if build_dir.exists() or build_dir.is_symlink() or any(parent.is_symlink() for parent in build_dir.parents):
             raise ValueError("--build-dir must be fresh and may not traverse a symlink")
         if destination.is_relative_to(build_dir):
             raise ValueError("admission review artifact must be outside the fresh build directory")
@@ -271,16 +282,25 @@ def _stage_integer_model_admission(args: argparse.Namespace) -> int:
     with destination.open("x", encoding="utf-8") as handle:
         json.dump(result, handle, indent=2, sort_keys=True, allow_nan=False)
         handle.write("\n")
-    summary = {"out": str(destination), "candidate_count": result["candidate_count"],
-               "review_required": result["review_required"]}
+    summary = {
+        "out": str(destination),
+        "candidate_count": result["candidate_count"],
+        "review_required": result["review_required"],
+    }
     if args.build_dir:
         receipt = build_staged_candidate(
-            result, model=selected["mlir"], target=args.target,
+            result,
+            model=selected["mlir"],
+            target=args.target,
             software_spec=selected["software-spec"],
-            capability_contract=selected["capability-contract"], package_dir=args.package,
-            operation_id=args.operation_id, rtl_facts=selected["rtl-facts"],
-            workdir=build_dir, codegen_target=args.codegen_target,
-            cflags=args.cflag, timeout=args.timeout,
+            capability_contract=selected["capability-contract"],
+            package_dir=args.package,
+            operation_id=args.operation_id,
+            rtl_facts=selected["rtl-facts"],
+            workdir=build_dir,
+            codegen_target=args.codegen_target,
+            cflags=args.cflag,
+            timeout=args.timeout,
         )
         receipt_path = build_dir / "candidate-build-receipt.json"
         with receipt_path.open("x", encoding="utf-8") as handle:
@@ -290,6 +310,34 @@ def _stage_integer_model_admission(args: argparse.Namespace) -> int:
         summary["build_status"] = receipt["status"]
     print(json.dumps(summary, sort_keys=True))
     return 0
+
+
+def _mem_perturb_variant(args: argparse.Namespace) -> int:
+    """Build the memory-perturbing variant of a Verilator simulator (:mod:`.mem_perturb`).
+
+    The declared digest of the stock simulator comes from the pin registry by artifact name, so the
+    control relink is compared with what was pinned rather than with whatever sits on disk."""
+    from merlin.common import provenance
+
+    from . import mem_perturb
+
+    out = Path(args.out)
+    if out.exists() and any(out.iterdir()):
+        raise SystemExit(f"{out} is not empty; a variant is built into a fresh directory, never over another")
+    base_digest = ""
+    if args.base_artifact:
+        artifacts = provenance.load_artifacts()
+        if args.base_artifact not in artifacts:
+            raise SystemExit(f"no artifact named {args.base_artifact!r} in the pin registry")
+        base_digest = artifacts[args.base_artifact].digest
+        if not base_digest:
+            raise SystemExit(f"{args.base_artifact!r} declares no digest, so the control relink has nothing to match")
+    receipt = mem_perturb.build_verilator_variant(
+        args.obj_dir, out, makefile=args.makefile, control=not args.no_control, base_digest=base_digest
+    )
+    print(json.dumps(receipt, sort_keys=True))
+    control = receipt["control_relink"]
+    return 0 if args.no_control or control.get("matches_declared_base") is not False else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -360,9 +408,7 @@ def build_parser() -> argparse.ArgumentParser:
     outline.add_argument("--out", required=True, help="fresh directory for kernel interfaces and source bindings")
     outline.set_defaults(func=_outline_integer_matmuls)
 
-    route = sub.add_parser(
-        "probe-int-mm-route", help="observe OOT command emission for exact model integer matmuls"
-    )
+    route = sub.add_parser("probe-int-mm-route", help="observe OOT command emission for exact model integer matmuls")
     route.add_argument("--target", required=True)
     route.add_argument("--mlir", required=True, help="exact captured model MLIR")
     route.add_argument("--software-spec", required=True, help="selected software-spec YAML or JSON")
@@ -390,6 +436,16 @@ def build_parser() -> argparse.ArgumentParser:
     stage.add_argument("--timeout", type=int, default=30, help="seconds per selected package entrypoint")
     stage.add_argument("--out", required=True, help="fresh JSON review artifact destination")
     stage.set_defaults(func=_stage_integer_model_admission)
+
+    perturb = sub.add_parser(
+        "mem-perturb-variant", help="relink a Verilator simulator with the seeded response-reordering memory model"
+    )
+    perturb.add_argument("--obj-dir", required=True, help="the simulator's Verilator object directory (read only)")
+    perturb.add_argument("--makefile", required=True, help="the makefile in --obj-dir that links the simulator")
+    perturb.add_argument("--out", required=True, help="fresh directory for the variant and its build receipt")
+    perturb.add_argument("--base-artifact", help="pin-registry artifact the stock simulator is declared as")
+    perturb.add_argument("--no-control", action="store_true", help="skip the control relink of unmodified objects")
+    perturb.set_defaults(func=_mem_perturb_variant)
     return parser
 
 

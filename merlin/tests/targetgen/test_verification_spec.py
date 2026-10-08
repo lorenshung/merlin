@@ -91,3 +91,128 @@ def test_real_target_ops_and_policy_derive():
     assert any("exact_int" in a for a in spec["ops"]["matmul"]["accept"])
     md = VS.render_markdown(load_target_experiment(p))
     assert "acceptance contract for `gemmini`" in md and "outputs:" not in md
+
+
+# --------------------------------------------------------------------------- the JSON sibling
+
+
+def _schema():
+    import json
+
+    from merlin.common.paths import merlin_dir
+
+    return json.loads((merlin_dir() / "contract/schemas/verification_spec.schema.json").read_text(encoding="utf-8"))
+
+
+def test_the_json_sibling_is_written_and_schema_valid(tmp_path):
+    """The markdown is for the agent to read; the JSON is what a checker or the agent's own tooling can
+    consume without parsing prose. There was no JSON sibling and no schema, so nothing downstream could
+    read the acceptance contract at all."""
+    import json
+
+    import jsonschema
+
+    cap = tmp_path / "isa" / "T0_matmul"
+    cap.mkdir(parents=True)
+    (cap / "capsule.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "T0_matmul",
+                "label": "public",
+                "inputs": [{"name": "A", "role": "input", "dtype": "i8"}],
+                "operation": {"op": "matmul", "attributes": {"output_dtype": "i32"}},
+                "numeric_policy": {"compare": "exact_int"},
+                "expected": {"instruction_classes": ["MVIN", "MVOUT"]},
+                "required_oracle_tiers": ["L0", "L2"],
+                "semantic": {"must_accelerate": True},
+            }
+        )
+    )
+    te = _synth_te(tmp_path)
+    ws = tmp_path / "ws"
+    VS.write_spec(te, ws)
+    assert (ws / "verification_spec.md").is_file()
+    payload = json.loads((ws / "verification_spec.json").read_text(encoding="utf-8"))
+    jsonschema.validate(payload, _schema())
+    assert payload["ops"]["matmul"]["checked_by"] == {
+        "oracle_tiers": ["L0", "L2"],
+        "datapath_coverage": True,
+        "must_accelerate": True,
+    }
+
+
+def test_not_checked_names_the_obligations_nothing_enforces(tmp_path):
+    """The spec's value is telling the agent what will be CHECKED. An op whose capsules declare no
+    tier, no instruction classes and no `must_accelerate` is one where the stated acceptance policy,
+    the stated coverage requirement and the whole point of the accelerator are all unenforced -- and
+    before this the spec printed the same confident prose for it as for a fully checked op."""
+    for name, declaration in (
+        (
+            "T0_checked",
+            {
+                "operation": {"op": "matmul", "attributes": {"output_dtype": "i32"}},
+                "expected": {"instruction_classes": ["MVIN"]},
+                "required_oracle_tiers": ["L2"],
+                "semantic": {"must_accelerate": True},
+            },
+        ),
+        ("T1_bare", {"operation": {"op": "gelu", "attributes": {"output_dtype": "i8"}}}),
+    ):
+        d = tmp_path / "isa" / name
+        d.mkdir(parents=True)
+        declaration.update({"name": name, "label": "public", "numeric_policy": {"compare": "exact_int"}})
+        (d / "capsule.yaml").write_text(yaml.safe_dump(declaration))
+
+    spec = VS.build_spec(_synth_te(tmp_path))
+    unchecked = {(e["obligation"], e["scope"]) for e in spec["not_checked"]}
+    # the fully-declared op raises NO finding
+    assert not any(scope == "`matmul`" for _, scope in unchecked)
+    # the bare op raises all three
+    assert ("numeric acceptance", "`gelu`") in unchecked
+    assert ("datapath coverage", "`gelu`") in unchecked
+    assert ("work lands on the accelerator", "`gelu`") in unchecked
+    # and the standing admission is always present
+    assert any(e["obligation"] == "this document" for e in spec["not_checked"])
+    md = VS.render_markdown(_synth_te(tmp_path))
+    assert "## What is NOT checked" in md and "NOT CHECKED" in md
+
+
+def test_the_grammar_ops_no_capsule_exercises_are_named_but_the_decomposed_ones_are_not(tmp_path):
+    """`resident_pack` / `matmul` / `commit` / `evict` are the residency decomposition every contraction
+    capsule emits, so reporting them as never exercised would be a false finding in the agent's face."""
+    d = tmp_path / "isa" / "T0"
+    d.mkdir(parents=True)
+    (d / "capsule.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "T0",
+                "label": "public",
+                "operation": {"op": "matmul", "attributes": {"output_dtype": "i32"}},
+                "numeric_policy": {"compare": "exact_int"},
+            }
+        )
+    )
+    spec = VS.build_spec(_synth_te(tmp_path))
+    grammar_entry = [e for e in spec["not_checked"] if e["obligation"].startswith("interface ops")]
+    assert len(grammar_entry) == 1
+    scope = grammar_entry[0]["scope"]
+    for decomposed in ("resident_pack", "commit", "evict"):
+        assert f"`{decomposed}`" not in scope, f"{decomposed} is emitted by every contraction capsule"
+    assert "`attention_pv`" in scope
+
+
+def test_a_real_targets_spec_validates_and_admits_something(tmp_path):
+    import jsonschema
+    import pytest
+
+    from merlin.common.paths import merlin_dir
+    from merlin.targetgen.target_experiment import load_target_experiment
+
+    p = merlin_dir() / "experiments/capsule_bench/targets/gemmini/target_experiment.yaml"
+    if not p.is_file():
+        pytest.skip("descriptor absent")
+    spec = VS.build_spec(load_target_experiment(p))
+    if not spec["ops"]:
+        pytest.skip("corpus not generated")
+    jsonschema.validate(spec, _schema())
+    assert len(spec["not_checked"]) > 1, "a real corpus with 20 ops leaves nothing unchecked?"

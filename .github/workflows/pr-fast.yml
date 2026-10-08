@@ -125,6 +125,12 @@ jobs:
         run: uv run --no-sync python build_tools/scripts/check_capability_backing.py
       - name: opcode-documentation gate (every accepted op has ABI semantics)
         run: uv run --no-sync python build_tools/scripts/check_opcode_documentation.py
+      # The sibling one layer up: the ABI gate asks whether an accepted op has SEMANTICS; this asks
+      # whether it is in the grammar spec the agent reads, and whether the dialect contract and the
+      # registered IRDL dialect say the same. Measured 2026-09-24: the parser defined 15 ops and
+      # interface_grammar.md described 7.
+      - name: grammar-documentation gate (spec, dialect and parser accept the same ops)
+        run: uv run --no-sync python build_tools/scripts/check_grammar_documentation.py
       # Fresh CI has no generated OOT contracts. Keep new weakenings fatal for contracts it CAN read,
       # but print an explicit UNQUALIFIED list for the rest. Release qualification runs the same gate
       # without this flag after provisioning the generated contracts; it refuses unresolved targets.

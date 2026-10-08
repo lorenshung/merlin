@@ -1,4 +1,10 @@
-"""The wiring gate: an import in production code wires a module; a test, a comment or itself does not."""
+"""The wiring gate: a production reference wires a module -- and a symbol; a test does not.
+
+The second half of this file is the FUNCTION granularity. An imported module is "wired" whatever is
+inside it, so ``llvmlower/device_build.py`` could carry ``routing_for_placement`` -- zero callers, ten
+test references -- and report clean forever. Each symbol test below names the gate line it would fail
+without; the ``__all__`` case is the exact line that hid the real defect.
+"""
 
 from __future__ import annotations
 
@@ -20,6 +26,7 @@ def _gate(root: Path):
     spec.loader.exec_module(module)
     module.ROOT, module.PACKAGE_ROOT = root, root / "merlin" / "python"
     module.LEDGER = root / "build_tools" / "scripts" / "unwired_ratchet.txt"
+    module.SYMBOL_LEDGER = root / "build_tools" / "scripts" / "unwired_symbols_ratchet.txt"
     return module
 
 
@@ -206,3 +213,125 @@ def test_from_bare_sibling_resolves_only_existing_local_modules(tmp_path, source
     assert "merlin.targetgen.absent" not in imports
     assert "merlin.targetgen.external.helper" not in imports
     assert gate.unwired() == []
+
+
+# --------------------------------------------------------------------------------------------
+# Function granularity. Each test names the gate line it would fail without.
+# --------------------------------------------------------------------------------------------
+
+#: A package whose public definitions differ only in HOW they are reached. `orphan` is the shape the
+#: gate exists for: exported, tested, called by nothing.
+_SYMBOL_TREE = {
+    f"{_PERF}/__init__.py": "",
+    f"{_PERF}/widget.py": (
+        '"""A wired module with one orphan inside it."""\n'
+        "\n"
+        '__all__ = ["called_one", "orphan", "registered_one", "dispatched", "Untested"]\n'
+        "\n"
+        "def _register(fn):\n"
+        "    return fn\n"
+        "\n"
+        "def called_one():\n"
+        "    return 1\n"
+        "\n"
+        "def orphan(placement):\n"
+        "    return placement\n"
+        "\n"
+        "@_register\n"
+        "def registered_one():\n"
+        "    return 3\n"
+        "\n"
+        "def dispatched():\n"
+        "    return 5\n"
+        "\n"
+        "class Untested:\n"
+        "    pass\n"
+        "\n"
+        "def _private_orphan():\n"
+        "    return 4\n"
+    ),
+    f"{_PERF}/caller.py": (
+        "from merlin.perf.widget import called_one\n"
+        "import merlin.perf.widget as W\n"
+        "\n"
+        "def go():\n"
+        '    return called_one() + getattr(W, "dispatched")()\n'
+    ),
+    "merlin/experiments/run.py": "import merlin.perf.caller\nimport merlin.perf.widget\n",
+    "merlin/tests/infra/test_widget.py": (
+        "from merlin.perf.widget import dispatched, orphan, registered_one\n"
+        "\n"
+        "def test_orphan():\n"
+        "    assert orphan(1) == 1 and registered_one() == 3 and dispatched() == 5\n"
+    ),
+}
+
+
+def test_a_public_definition_with_tests_and_no_caller_is_named(tmp_path: Path) -> None:
+    """THE REGRESSION. `orphan` is exported, imported by a test, and called by no production code.
+
+    `called_one` has a production caller; `dispatched` is reached by name through `getattr`;
+    `registered_one` is decorated, so the gate declines to judge it; `Untested` has no test behind it
+    and belongs to ordinary dead-code review; `_private_orphan` is private.
+    """
+    gate = _gate(_tree(tmp_path, _SYMBOL_TREE))
+    assert gate.unwired_symbols(set()) == [f"{_PERF}/widget.py::orphan"]
+
+
+def test_an_export_list_is_not_a_caller(tmp_path: Path) -> None:
+    """`__all__` NAMES a symbol, it does not USE one. Counting it made a function with ten test
+    references and no caller read as wired. Drop `_export_list_nodes` and this goes red."""
+    gate = _gate(_tree(tmp_path, _SYMBOL_TREE))
+    assert "orphan" not in gate._referenced_names(tmp_path / f"{_PERF}/widget.py")
+    assert "called_one" in gate._referenced_names(tmp_path / f"{_PERF}/caller.py")
+
+
+def test_a_test_reference_does_not_wire_a_symbol_and_a_package_test_counts_as_a_test(tmp_path: Path) -> None:
+    """Counting a test suite as production is the other way to make this gate unable to fail; and a
+    distribution's own tests are tests, so a symbol only they exercise is still debt."""
+    files = dict(_SYMBOL_TREE)
+    files["packages/merlin-extra/tests/test_more.py"] = "from merlin.perf.widget import Untested\n"
+    gate = _gate(_tree(tmp_path, files))
+    assert not any(part.endswith("tests") for part in gate.PRODUCTION)
+    assert gate.unwired_symbols(set()) == [f"{_PERF}/widget.py::Untested", f"{_PERF}/widget.py::orphan"]
+
+
+def test_a_symbol_whose_module_is_already_ledgered_is_not_recorded_twice(tmp_path: Path) -> None:
+    """One debt, one entry. The coarser ledger owns a module nothing imports at all."""
+    gate = _gate(_tree(tmp_path, _SYMBOL_TREE))
+    assert gate.unwired_symbols({f"{_PERF}/widget.py"}) == []
+
+
+def test_a_console_script_entry_point_is_wired_by_its_packaging(tmp_path: Path) -> None:
+    """An entry point has no in-tree caller by construction; the metadata is its caller."""
+    files = dict(_SYMBOL_TREE)
+    files[f"{_PERF}/widget.py"] = files[f"{_PERF}/widget.py"].replace("def orphan(", "def main(")
+    files["merlin/tests/infra/test_widget.py"] = "from merlin.perf.widget import main\n"
+    files["pyproject.toml"] = '[project.scripts]\nwidget = "merlin.perf.widget:main"\n'
+    gate = _gate(_tree(tmp_path, files))
+    assert gate.unwired_symbols(set()) == []
+
+
+def test_a_new_unwired_symbol_fails_and_a_stale_symbol_entry_fails(tmp_path: Path, capsys) -> None:
+    """The verdict path, not just the scan: the symbol ledger must be able to turn the exit code."""
+    gate = _gate(_tree(tmp_path, _SYMBOL_TREE))
+    gate.LEDGER.parent.mkdir(parents=True, exist_ok=True)
+    gate.LEDGER.write_text("", encoding="utf-8")
+    assert gate.main([]) == 1
+    assert "unwired symbol" in capsys.readouterr().out
+    gate.SYMBOL_LEDGER.write_text(f"{_PERF}/widget.py::orphan\n", encoding="utf-8")
+    assert gate.main([]) == 0
+    gate.SYMBOL_LEDGER.write_text(
+        f"{_PERF}/widget.py::orphan\n{_PERF}/widget.py::called_one  # was debt once\n", encoding="utf-8"
+    )
+    assert gate.main([]) == 1
+    assert "stale ledger entry" in capsys.readouterr().out
+
+
+def test_a_relocated_module_keeps_its_symbol_identity(tmp_path: Path) -> None:
+    """Symbol debt is keyed by the stable policy path, so moving a module into `src/` neither forgives
+    its entries nor makes them look new."""
+    files = {k.replace("merlin/python/merlin", "src/merlin"): v for k, v in _SYMBOL_TREE.items()}
+    gate = _gate(_tree(tmp_path, files))
+    assert gate.unwired_symbols(set()) == [f"{_PERF}/widget.py::orphan"]
+    assert gate.unwired_symbols({"src/merlin/perf/widget.py"}) == []

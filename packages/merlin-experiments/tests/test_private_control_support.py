@@ -227,7 +227,8 @@ def test_internal_compaction_near_misses_never_discharge_cursor(changed) -> None
 def test_internal_compaction_requires_selected_byte_span_and_linked_identity() -> None:
     from copy import deepcopy
 
-    assert _prove(_source_internal_cast(), bits=5)["internal_compaction_support"] == []
+    narrow = _prove(_source_internal_cast(), bits=5)
+    assert narrow["internal_compaction_support"] == [] and narrow["internal_compaction_refusals"]
     proof = _prove(_source_internal_cast(), bits=64)
     selected = _selected_index()
     proof["selected_index_observation"] = deepcopy(selected)

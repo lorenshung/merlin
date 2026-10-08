@@ -17,6 +17,7 @@ no target-name literal, no regex.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -78,10 +79,30 @@ def _io_dtypes(cap: dict) -> tuple[str, str]:
     return ("+".join(operand) if operand else "?", out_dt)
 
 
+def _whole_op_mnemonics() -> set[str]:
+    """The WHOLE-OP mnemonics the frozen interface grammar defines, from the reference parser's own
+    table -- the ones that stand 1:1 with a capsule's ``operation.op``, so "no graded capsule declares
+    this op" is a true statement about them.
+
+    Deliberately NOT every defined mnemonic. ``resident_pack`` / ``matmul`` / ``commit`` / ``evict`` are
+    the residency decomposition every contraction capsule emits, so reporting them as never exercised
+    would be false. The parser is core code beside this module, so an import failure is a defect and
+    raises rather than quietly dropping the entry."""
+    from merlin.targetgen.contract import interface_emit
+
+    return set(interface_emit._NAMED_OP_OPERAND_KEYS)
+
+
 def build_spec(te: Any) -> dict[str, Any]:
     """The verification spec as structured data, DERIVED from the suite's declared capsules. Shape:
-    ``{target, n_capsules, ops: {op: {dtypes: [...], accept: [...], coverage: [...]}}, acceptance, notes}``.
-    Answer-free by construction (only ``capsule.yaml`` is read)."""
+    ``{target, n_capsules, ops: {op: {dtypes, accept, coverage, epilogues, checked_by}}, not_checked,
+    isa_docs}``. Answer-free by construction (only ``capsule.yaml`` is read).
+
+    ``checked_by`` and ``not_checked`` exist because this spec is derived from the GRADED CORPUS: what
+    the corpus does not demand, the spec does not require, and the agent could not tell the difference
+    between "this is not required" and "this is required and nothing looks". A spec whose value is
+    telling you what will be CHECKED has to admit what will not.
+    """
     caps = _capsules(te)
     ops: dict[str, dict[str, set]] = {}
     for cap in caps:
@@ -93,10 +114,23 @@ def build_spec(te: Any) -> dict[str, Any]:
         # tolerance detail, when the policy declares one (float targets); acc_scale when present
         tol = {k: pol[k] for k in ("atol", "rtol", "acc_scale") if k in pol}
         classes = tuple((cap.get("expected") or {}).get("instruction_classes") or [])
-        slot = ops.setdefault(op, {"dtypes": set(), "accept": set(), "coverage": set(), "epilogues": set()})
+        slot = ops.setdefault(
+            op,
+            {
+                "dtypes": set(),
+                "accept": set(),
+                "coverage": set(),
+                "epilogues": set(),
+                "tiers": set(),
+                "accelerate": set(),
+            },
+        )
         slot["dtypes"].add(f"{operand} -> {out_dt}")
         slot["accept"].add(accept + (f" ({tol})" if tol else ""))
         slot["coverage"].update(classes)
+        # WHAT ACTUALLY LOOKS at a submission for this op, as the capsules declare it.
+        slot["tiers"].update(str(t) for t in (cap.get("required_oracle_tiers") or ()))
+        slot["accelerate"].add(bool((cap.get("semantic") or {}).get("must_accelerate")))
         if epi:
             slot["epilogues"].add("+".join(epi))
     ops_out = {
@@ -105,15 +139,93 @@ def build_spec(te: Any) -> dict[str, Any]:
             "accept": sorted(s["accept"]),
             "coverage": sorted(s["coverage"]),
             "epilogues": sorted(s["epilogues"]),
+            "checked_by": {
+                "oracle_tiers": sorted(s["tiers"]),
+                "datapath_coverage": bool(s["coverage"]),
+                "must_accelerate": True in s["accelerate"],
+            },
         }
         for op, s in sorted(ops.items())
     }
     return {
+        "schema": "verification_spec_v1",
         "target": getattr(te, "target", "?"),
         "n_capsules": len(caps),
         "ops": ops_out,
+        "not_checked": _not_checked(ops_out, caps),
         "isa_docs": list(getattr(te, "isa_headers", []) or []),
     }
+
+
+#: The standing admission, true of every target: nothing compares a submission to this document. It is
+#: a rendering of what the graded corpus demands, not an independently enforced contract, and an
+#: obligation the corpus omits is absent from this spec entirely rather than listed as unchecked.
+_SPEC_HAS_NO_CHECKER = {
+    "obligation": "this document",
+    "scope": "the whole spec",
+    "why_not_checked": (
+        "no checker compares your submission to this spec. It is DERIVED from the graded capsules, so "
+        "it restates what they demand -- an obligation the corpus does not demand is not weakened here, "
+        "it is absent. Your verdict comes from the capsules and the tiers below, never from this file."
+    ),
+}
+
+
+def _not_checked(ops_out: dict[str, dict], caps: list[dict]) -> list[dict[str, str]]:
+    """Obligations this spec states (or implies) that NOTHING enforces, derived per op from the
+    declarations. Each entry names the obligation, its scope, and why nothing looks."""
+    out: list[dict[str, str]] = [dict(_SPEC_HAS_NO_CHECKER)]
+    for op, spec in ops_out.items():
+        checked = spec["checked_by"]
+        if not checked["oracle_tiers"]:
+            out.append(
+                {
+                    "obligation": "numeric acceptance",
+                    "scope": f"`{op}`",
+                    "why_not_checked": (
+                        "no graded capsule declaring this op declares a required oracle tier, so the "
+                        "acceptance policy stated above is not enforced for it by any tier"
+                    ),
+                }
+            )
+        if not checked["datapath_coverage"]:
+            out.append(
+                {
+                    "obligation": "datapath coverage",
+                    "scope": f"`{op}`",
+                    "why_not_checked": (
+                        "no graded capsule declaring this op declares `expected.instruction_classes`, "
+                        "so nothing asserts which hardware classes your lowering must actually use"
+                    ),
+                }
+            )
+        if not checked["must_accelerate"]:
+            out.append(
+                {
+                    "obligation": "work lands on the accelerator",
+                    "scope": f"`{op}`",
+                    "why_not_checked": (
+                        "no graded capsule declaring this op declares `must_accelerate`, so a "
+                        "numerically correct implementation that runs entirely on the host passes it"
+                    ),
+                }
+            )
+    declared_ops = set(ops_out)
+    grammar = _whole_op_mnemonics()
+    ungraded = sorted(grammar - declared_ops)
+    if grammar and ungraded:
+        out.append(
+            {
+                "obligation": "interface ops the frozen grammar defines",
+                "scope": ", ".join(f"`{m}`" for m in ungraded),
+                "why_not_checked": (
+                    "the interface grammar defines these and no graded capsule uses them, so how your "
+                    "package handles them is not measured. They can still appear in a module you are "
+                    "handed, and a parser that fails closed on them is still the correct behaviour"
+                ),
+            }
+        )
+    return out
 
 
 def render_markdown(te: Any) -> str:
@@ -168,6 +280,30 @@ def render_markdown(te: Any) -> str:
         "- **Legality:** every emitted instruction must be one the target's decoder accepts (ISA "
         "legality), and the program must terminate."
     )
+    L.append("")
+    L.append("## What each operation is CHECKED BY")
+    L.append("")
+    L.append("| operation | oracle tiers | datapath coverage | must land on the accelerator |")
+    L.append("| --- | --- | --- | --- |")
+    for op, d in spec["ops"].items():
+        c = d["checked_by"]
+        tiers = ", ".join(c["oracle_tiers"]) or "—"
+        L.append(
+            f"| `{op}` | {tiers} | {'yes' if c['datapath_coverage'] else 'NOT CHECKED'} "
+            f"| {'yes' if c['must_accelerate'] else 'NOT CHECKED'} |"
+        )
+    L.append("")
+    L.append("## What is NOT checked")
+    L.append("")
+    L.append(
+        "This spec is DERIVED from the graded capsules, so it can only state what they demand. The "
+        "entries below are obligations this document states or implies that **nothing enforces** — "
+        'listed because an agent cannot otherwise tell "not required" from "required and nobody '
+        'looks", and both were reaching you as the same silence.'
+    )
+    L.append("")
+    for entry in spec["not_checked"]:
+        L.append(f"- **{entry['obligation']}** ({entry['scope']}) — {entry['why_not_checked']}")
     if spec["isa_docs"]:
         L.append("")
         L.append("## ISA / ABI references")
@@ -177,13 +313,25 @@ def render_markdown(te: Any) -> str:
     return "\n".join(L) + "\n"
 
 
-def write_spec(te: Any, dest_dir: str | Path, *, name: str = "verification_spec.md") -> Path:
-    """Render + write the verification spec into ``dest_dir`` (e.g. the agent workspace root). Returns the
-    written path. Regenerable at any time from the (answer-free) capsule declarations."""
+def write_spec(
+    te: Any,
+    dest_dir: str | Path,
+    *,
+    name: str = "verification_spec.md",
+    json_name: str = "verification_spec.json",
+) -> Path:
+    """Render + write the verification spec into ``dest_dir`` (e.g. the agent workspace root). Returns
+    the markdown path. Regenerable at any time from the (answer-free) capsule declarations.
+
+    The JSON sibling is written beside it and validates against
+    ``merlin/contract/schemas/verification_spec.schema.json``. The markdown is for the agent to read;
+    the JSON is what a checker, a report or the agent's own tooling can consume without parsing prose.
+    """
     dest = Path(dest_dir)
     dest.mkdir(parents=True, exist_ok=True)
     out = dest / name
     out.write_text(render_markdown(te), encoding="utf-8")
+    (dest / json_name).write_text(json.dumps(build_spec(te), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return out
 
 

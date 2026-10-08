@@ -1561,6 +1561,33 @@ artifacts:
     target: gemmini
     role: verilator_binary
 
+  gemmini_verilator_memperturb_v2_simulator:
+    description: >-
+      The reference simulator above, relinked with its SimDRAM harness rebuilt through the seeded,
+      response-reordering memory model (merlin/contract/external/sim_memory/). It is the engine the
+      opt-in memory-order tier (merlin.targetgen.load_order) re-runs a certified program on: the stock
+      testchipip mm_magic_t answers every read in acceptance order, so a program whose answer depends on
+      two independent requests completing in issue order passes every cheap tier and fails on a board.
+      Latency may be per response or a property of the ADDRESS region, and the knobs may be given as
+      MERLIN_MEM_PERTURB_* environment variables, so the engine runs with the command line its backend
+      uses. Without a seed it builds the stock in-order model. A distinct role on purpose: a lookup for
+      THE verilator_binary must never resolve to this one.
+    path: out/build/rtl_engines/gemmini/verilator_memperturb_v2/emulator
+    repo_relative: true
+    digest: "2ca5598ef56d9d661c01515a72871f99f93a45b9529e7fe5c0f1ac56c07f70cc"
+    built_from:
+      - gemmini_verilator_simulator
+    config: GemminiRocketConfig
+    target: gemmini
+    role: verilator_binary_mem_perturb
+    notes: >-
+      Built by merlin.targetgen.mem_perturb.build_verilator_variant from the reference build's own
+      objects, read-only; its build_receipt.json sits beside it and records the preload invocation it
+      derived by content (+permissive +loadmem={elf} +permissive-off). The same build relinked the
+      UNMODIFIED objects as a control, and the result was byte-identical to gemmini_verilator_simulator
+      (5b6c7021), so the variant differs from the pinned engine in SimDRAM.o plus mm_perturb.o and
+      nothing else. Model sources at build time: mm_perturb.cc e2d3180a, mm_perturb.h 0ada7b30.
+
   gemmini_universal_verilator_firrtl:
     description: >-
       The TestHarness elaboration of the "Universal" Gemmini configuration -- the one a gsim or
