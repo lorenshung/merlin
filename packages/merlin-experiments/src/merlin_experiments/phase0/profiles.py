@@ -495,6 +495,11 @@ def _validate_declared_fit_axes(sweep: dict, *, owner: str) -> None:
                     f"{owner}: fitted axis {axis} declares an unknown derivation "
                     f"{points.get('derive')!r}; known derivations are {list(_DERIVED_AXES)}"
                 )
+            if points.get("derive") == "resident_allocation_boundary":
+                from .resource_boundaries import validate
+
+                validate(points, owner=owner)
+                continue
             if int(points.get("points_per_regime", 0)) < 2:
                 raise ValueError(
                     f"{owner}: fitted axis {axis} derives fewer than two points per regime; a rate "
@@ -904,7 +909,9 @@ def profile_targets(*, profiles_root: str | Path | None = None) -> list[str]:
 #: interlocked target here before it existed: the whole `_perf` corpus sat in ``fits_double`` while the
 #: overwhelming majority of contraction regions in the real captures land in ``spills``, so every
 #: coefficient was fitted where almost no real work lands.
-_DERIVED_AXES = ("memory_regime_reduction_depth",)
+#: ``resident_allocation_boundary`` instead derives both sides of a declared
+#: aggregate physical-store size limit, including explicitly requested tails.
+_DERIVED_AXES = ("memory_regime_reduction_depth", "resident_allocation_boundary")
 
 
 def build_comparison_manifest(targets: list[str], *, profiles_root: str | Path | None = None) -> dict:

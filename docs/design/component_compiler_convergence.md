@@ -10,6 +10,7 @@ code_refs:
   - src/merlin/targetgen/package_runtime.py
   - packages/merlin-experiments/src/merlin_experiments/phase2/component_experiment.py
   - packages/merlin-experiments/src/merlin_experiments/phase2/numerical_readback.py
+  - packages/merlin-experiments/src/merlin_experiments/phase0/resource_boundaries.py
 ---
 
 # Component-driven compiler convergence
@@ -91,6 +92,43 @@ cannot revise the corpus, supply exact validation shapes to authors, or choose
 optimization actions. Frozen source coverage and numerical qualification are
 different obligations; a small coverage witness basis proves neither arithmetic
 nor a complete compiler.
+
+### Declared resident size boundaries
+
+The normal Phase 0 sweep resolver accepts `resident_allocation_boundary` on an
+extent axis. An external shared template declares one named physical store,
+`capacity_fact` and `reservation_facts` paths relative to the selected refreshed
+facts body, a `quantum` using the existing tile grammar, and explicit integer
+`tail_offsets`. All referenced counts are bytes. Capacity must name that store's
+actual `memories[index].bytes`; each reservation must be an exact physical row
+multiple. Missing or unsized selected facts produce an explicit unavailable
+derivation, independently of malformed declarations, which stop generation.
+
+Each named simultaneous allocation declares a `shape` of axis names or extent
+tokens, a `dtype` (or `operand` for the selected operand type), positive integer
+`copies`, and optional `round_up` dimension indices. Rounded dimensions use the
+declared quantum; minor-axis physical row rounding uses the existing generic
+address-space implementation. The resolver sums every allocation plus declared
+reservations in that one store. Separate address spaces require separate
+declarations and are never combined into a fictitious capacity.
+
+Generation derives a positive aligned point below the boundary, the last
+fitting aligned point, the first overflowing aligned point, and declared tails
+around the latter two. A last fitting point need not exactly fill the capacity.
+An unavailable below point is recorded rather than clamped to zero or copied
+from another point. Distinct tails remain separate even when padding gives them
+the same footprint. An offset outside the resolved quantum records an unavailable
+tail while retaining aligned boundary points; an empty offset list explicitly
+declares no tail coverage. Each emitted member retains the selected fact identities,
+declaration, allocation footprints and aggregate inequalities. Normal builders,
+interfaces, software screens and independent golden engines still execute;
+the existing sweep member limit remains in force.
+
+This implements a declared size obligation. It does not infer allocator
+placement, live ranges, cache state, profitability or hardware admission.
+Consumer/reuse/effect/publication/ablation scenario generation and comprehensive
+supported-domain coverage remain separate work; this axis does not establish
+those obligations or a generated compiler's correctness.
 
 ## Phase 1 establishes a functional compiler
 

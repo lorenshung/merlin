@@ -39,3 +39,9 @@ declarations, never model/capture/hidden/history selectors. The existing writer,
 goldens and concrete program screen remain authoritative. Its global coverage,
 functional guard obligation and candidate numerical acceptance stay unestablished;
 recording a zero-MAC performance objective does not invent cost or certification.
+
+`resource_boundaries` derives aligned/tail extent points from explicit simultaneous
+allocations in one selected physical store. Reuse generic address-space row sizing;
+capacity/reservation paths refer only to refreshed selected facts. Keep missing
+facts and missing below points explicit. Size inequalities do not prove placement,
+lifetime, cache behavior, profitable scheduling or target execution.
