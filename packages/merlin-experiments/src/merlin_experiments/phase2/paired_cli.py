@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from merlin.targetgen.target_experiment import TargetExperiment, load_target_experiment
+from merlin_experiments.phase2 import bottleneck_priority as BP
 from merlin_experiments.phase2 import campaign as PC
 from merlin_experiments.phase2 import measurement_evidence as ME
 from merlin_experiments.phase2 import measurement_support as MS
@@ -240,6 +241,30 @@ def main(
     if refusal:
         print(f"NO-GO: {refusal}")
         return 2
+    if args.phase == "tuning":
+        # A priority sidecar is downstream interpretation, not a condition of the
+        # measured campaign's GO. Older frozen corpora may lack Phase 0 context.
+        try:
+            priority = BP.publish_optional_report(
+                inputs.corpus.root,
+                out_dir / "campaign_manifest.json",
+                expected=ME.MeasurementBinding(
+                    phase=args.phase,
+                    functional_run_id=inputs.functional.run_id,
+                    functional_submission_sha256=inputs.baseline_sha256,
+                    candidate_record_sha256=inputs.handoff.record_sha256,
+                    candidate_sha256=inputs.candidate_sha256,
+                    corpus_manifest_sha256=inputs.corpus.manifest_sha256,
+                    corpus_capsules_sha256=inputs.corpus.capsules_sha256,
+                    certificate_sha256=inputs.gsim_certificate.sha256,
+                ),
+            )
+            if priority["status"] in {"written", "already_present"}:
+                print(f"bottleneck priority: {priority['path']} ({priority['sha256']})")
+            else:
+                print(f"bottleneck priority unavailable: {priority['reason']}")
+        except Exception as exc:
+            print(f"bottleneck priority unavailable: {type(exc).__name__}: {exc}")
     print(f"GO: {manifest['completion']['expected']} cells")
     return 0
 

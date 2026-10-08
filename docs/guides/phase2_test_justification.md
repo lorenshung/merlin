@@ -2,11 +2,12 @@
 title: "Justifying Phase 2 tests from Phase 0 evidence"
 kind: guide
 status: current
-last_verified: 2026-10-05
+last_verified: 2026-10-08
 owner: experiments
 related: [phase0_specification, generating_capsules, perf_phase2_wiring]
 code_refs:
   - packages/merlin-experiments/src/merlin_experiments/phase2/test_justification.py
+  - packages/merlin-experiments/src/merlin_experiments/phase2/bottleneck_priority.py
   - packages/merlin-experiments/src/merlin_experiments/phase2/corpus.py
   - experiments/templates/phase0/performance.yaml
 ---
@@ -25,20 +26,107 @@ snapshot, and replay verifies its hashes. An incomplete corpus without `MANIFEST
 admitted. The receipt is generated under the run's output directory; it is not an authored test
 definition.
 
+## Choose tests before compiling a headline model
+
+Phase 0 first counts typed operation forms in explicitly selected development
+captures. `performance-basis.json` keeps their M/K/N, precision, static occurrence
+count, recognized MAC mass, unknown mass and unresolved placement. Selected RTL
+facts constrain which experiments are legal and which machine regimes, such as
+tile depth or operand residency, are worth probing. Neither static MAC mass nor
+an RTL capacity proves a runtime bottleneck.
+
+The shared performance template defines a falsifiable machine law or a matched
+comparison with a negative control. A capture-shaped member is generated only
+when its observed point fits that family's unchanged cohort rules; other forms
+remain explicit uncovered or deferred demand. Such a member tests shape
+relevance, not equivalence to the source operation. Phase 2 must check emitted
+code and correctness, measure with the selected timing oracle and replicates,
+then compare cycles only after the analyzer confirms equal demand. A small
+graph-island witness is useful when standalone timing depends on surrounding
+placement or reuse. Full-model runs remain an independent validation of the
+extrapolation, never a source for Phase 0 test selection.
+
+Use a staged cost ladder: isolated primitive for a machine law; a connected
+development-workload slice for placement, transfer and reuse; then a reduced
+iteration model for composed effects. Generate dimensions from the selected
+development capture and RTL capacity boundaries, including points on both sides
+of a tile, accumulator or storage limit. A small model is representative only
+for the named constraint it actually crosses and measures. Its operation count
+and static MAC mass cannot weight the expected benefit in a headline model.
+Rank levers using identity-matched RTL cycle measurements for the *measured
+tuning corpus*; whole-model priority additionally needs a calibrated connected
+slice or host-private validation measurement. Preserve unknown and excluded
+source chains rather than replacing them with a convenient synthetic graph.
+
+For Gemmini, the current development captures contain mixed-lane
+movement→contraction→map chains whose FP32 cast/map and fusion placement are
+not yet admitted by the selected software spec. The generated contraction-depth
+chain is therefore not a substitute for those source chains. First resolve the
+software/placement obligation or produce an independently justified host/accel
+boundary witness; only then can its timing support a connected-slice claim.
+
+## Turn a measured gap into a development capsule
+
+Use the same identity-bound program and measurement method for the candidate
+and its reference. First separate *placement* (an eligible operation stayed on
+the host or in a vendor fallback), *algorithm* (tile, reuse, fusion or transfer
+choice), *machine scheduling* (the same work takes more target cycles), and
+*build throughput* (compilation is too slow to iterate). A host fallback is a
+coverage or Phase 1 obligation before it is a Phase 2 speedup opportunity;
+do not count a faster host routine as improved accelerator placement.
+
+For an optimization question, derive the smallest source-faithful unit from an
+allowed development capture and retain its operand values, layout, neighbors,
+transfer boundary and output oracle. An isolated operation tests a machine
+law. A connected slice tests whether placement, fusion and reuse survive the
+surrounding graph. A reduced model tests composition only if it preserves the
+named resource constraint, such as working-set size, launch count or live
+buffer pressure. Record which property was preserved and which was not.
+Then compare standalone and in-program cycles for the *same* unit on both
+candidate and reference paths. If cache warmth, setup or neighboring work
+causes a material offset, the standalone capsule is diagnostic until the
+offset is explained or calibrated. Exact numerical output and equal-work
+checks precede timing; a cheap pre-screen cannot replace them.
+
+Keep compiler-build latency and peak memory as separate reproducible receipts
+for large generated programs: per-stage timings, unique-kernel counts and
+compiled-function sizes expose caching and host-code scaling problems that a
+device-cycle capsule cannot see. None of these measurements should reveal a
+sealed validation model to the Phase 1 or Phase 2 authoring agent. Periodic
+held-out whole-model runs test transfer of the selected optimization, not the
+rule used to select or tune its capsules.
+
 Each row answers a concrete question:
 
 | Question | Receipt field | What establishes it |
 | --- | --- | --- |
 | Why this target? | `hardware_basis` | Required traits and execution capabilities from the frozen Phase 0 performance facts; an unsatisfied gate refuses a generated member. |
-| Why this workload shape? | `workload_need` | The capsule's shape census stamp and the selected application inventory identity. `off_census` and `not_established` remain visible. |
+| Why this workload shape? | `workload_need` | Frozen Phase 0 performance-basis rows are compared with the capsule's exact shape and typed arithmetic form. A geometry-class stamp alone never establishes a match. Structural and shape-only candidates remain unverified. |
 | What could be false? | `hypothesis` | The declared observation and falsifier from the shared performance family. |
 | What is compared? | `matched_comparator` | Declared equal-demand fields and, when present, the candidate group members. Matching remains `planned_unverified` until the analyzer checks emitted programs and results. |
 | What detects a spurious effect? | `negative_control` | The family's declared control. Its presence is a plan; the control is not established by generation. |
 | How is it measured? | `measurement`, `correctness`, `repeat_dispersion` | Instrument, the concrete timing and correctness engines with their tiers, replicate plan and dispersion rule. A missing policy stays missing rather than becoming zero noise. |
 | Can this member run? | `support` | The software screen; unknown support stays unverified and an explicit refusal stays unsupported. |
 
-The receipt binds the shared template digest, raw RTL digest, derived performance facts, operation
-accounting, evidence manifest, provenance manifest and each capsule's byte tree. It refuses a
+The receipt also reports `workload_accounting`: captured static MAC mass, known and unknown
+denominators, exact arithmetic-form matches, and each still-uncovered contraction demand with
+its candidate capsules. These are counts from selected development captures, not model runtime
+frequencies or cycle estimates. A matching arithmetic form does not establish a complete
+operation, accelerator placement, functional correctness or speedup.
+
+The receipt binds the shared template digest, raw RTL digest, derived performance facts,
+`coverage/operation-accounting.json`, `coverage/performance-basis.json`, selected software and
+hardware views, evidence manifest, provenance manifest and each capsule's byte tree. Freeze
+copies the basis into `test_justification_inputs/` for replay. When the selected
+Phase 0 evidence contains a conformance-spec source snapshot, freeze also copies
+a small canonical `performance-scope.json`: the required and excluded connected
+chain identities and reasons, not the complete software requirement or private
+captures. Its digest is bound to the original requirement snapshot digest and
+the frozen corpus manifest. The post-GO priority report replays this scope; for
+current Gemmini captures it records the `no_eligible_chain` refusal rather than
+silently crediting standalone matmuls with connected-chain coverage. Older frozen
+corpora without this projection remain `unknown` and need a newly frozen run for
+verified connected-scope reporting. Freeze refuses a
 changed comparator, control or evidence byte between discovery and freeze. Its status is always
 `diagnostic_unmeasured`: it does not certify simulator fidelity, functional correctness, a
 negative control, statistical significance or a speedup. Those claims require completed,
@@ -60,7 +148,8 @@ still an unmeasured hypothesis; separate measured evidence must establish both a
 demand and the selected timing oracle.
 
 Read `test_justification.json` next to a frozen `performance_corpus_manifest.json`. First inspect
-`families_not_generated`, then each member's workload and support status. A missing family may be
+`workload_accounting.uncovered_demands` and `families_not_generated`, then each member's workload
+and support status. A missing family may be
 inapplicable, unimplemented or failed; it is not evidence that the compiler handles that lever.
 Families admitted only by the selected frozen requirement (a captured multi-region scope chain or
 a derived model form class) are listed as `skipped_inapplicable` when that requirement selects
@@ -69,3 +158,28 @@ the template declares but this cohort cannot measure, such as claims decided fro
 instruction stream rather than from cycles, are also listed as `blocked_unimplemented`.
 For a performance conclusion, inspect the later measured result and its analyzer verdict as a
 separate artifact. Do not promote a generated test or a diagnostic receipt to a measured claim.
+
+After an admitted paired tuning campaign, `bottleneck_priority.json` requires every selected
+member's baseline and candidate results at both the correctness and RTL timing tiers, in both
+replicates. It reports the candidate's share of **this selected tuning corpus**, the matching
+development-capture demand, and paired cycle savings or regressions. These numbers help decide
+which measured capsule to investigate next. They do not establish statistical significance,
+source-connected placement, a family-level optimization claim, or whole-model time share;
+`whole_model_priority` stays insufficient until separately calibrated evidence exists. A
+candidate-only or correctness-incomplete run is not a paired priority report.
+
+For a cheaper **development iteration subset**, pass `--capsules representative`
+to Phase 2 authoring. This option is separate from the default full cohort and
+explicit capsule-name selection. It derives a deterministic greedy cover of
+exact selected-capture arithmetic forms, exact generated operation/input
+tensor forms, selected RTL-trait axes, and each
+declared optimization lever/level/claim from the
+complete `test_justification.json`, with each performance family indivisible.
+Fit grids, paired arms and their declared controls therefore stay together.
+The frozen corpus binds `representative_selection.json`; inspect its omitted
+families/levers, `uncovered_static_axes`, `uncovered_source_demands`, and
+connected-slice refusals before interpreting results. This is not a
+mathematically minimum corpus or a replacement for full-family confirmation.
+It neither weights model runtime with static MACs nor turns standalone
+capsules into source-equivalent connected slices. If no complete family covers
+a selected evidence axis, selection refuses instead of producing an empty run.
