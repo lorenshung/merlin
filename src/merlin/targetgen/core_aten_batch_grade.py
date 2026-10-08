@@ -162,11 +162,12 @@ def grade_core_aten_batch(
     *,
     execution_error: str | None = None,
     output_shapes: Sequence[Sequence[int]] | None = None,
+    semantic_readback: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return a complete pass/mismatch/unavailable ledger, including noncaptured cases.
 
-    This measures the final numeric result on the hardware bytes. Mutation, alias, and
-    stride behavior cannot be inferred from this readback and are not asserted here.
+    Lossless bytes alone earn numeric-only passes. Exported boundary metadata,
+    pre-call snapshots and pointer alias frames additionally judge the full corpus contract.
     """
     verdicts: dict[str, dict[str, Any]] = {}
     for record in batch_map["cases"]:
@@ -208,7 +209,17 @@ def grade_core_aten_batch(
             status = "mismatch"
         else:
             status = "ungradable"
-        verdicts[overload] = {"status": status, "results": details, "output_indices": indices}
+        verdicts[overload] = {
+            "status": status,
+            "results": details,
+            "output_indices": indices,
+            "semantic_scope": "numeric_only",
+        }
+        from merlin.targetgen.core_aten_semantics import validate_full
+
+        full = validate_full(record, output_bytes, semantic_readback)
+        if full is not None:
+            verdicts[overload].update(full)
     for record in batch_map["cases"]:
         identifier = str(record.get("case_id") or record["overload"])
         verdict = verdicts[identifier]
@@ -255,5 +266,11 @@ def grade_core_aten_batch(
             lane: sum(v["status"] == "pass" and v["lane"] == lane for v in verdicts.values())
             for lane in ("host", "device")
         },
-        "scope": "final result values only; mutation, aliases, and strides are not observed",
+        "full_semantic_passed_count": sum(
+            v["status"] == "pass" and v.get("semantic_scope") == "full" for v in verdicts.values()
+        ),
+        "numeric_only_passed_count": sum(
+            v["status"] == "pass" and v.get("semantic_scope") != "full" for v in verdicts.values()
+        ),
+        "scope": "full exported call contract when boundary readback is present; otherwise numeric only",
     }

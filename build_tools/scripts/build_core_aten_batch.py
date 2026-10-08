@@ -20,6 +20,12 @@ def _passed_by_lane(verdict: dict) -> dict:
     }
 
 
+def _semantic_counts(verdict: dict) -> dict:
+    cases = verdict["cases"].values()
+    full = sum(case["status"] == "pass" and case.get("semantic_scope") == "full" for case in cases)
+    return dict(full_semantic_passed_count=full, numeric_only_passed_count=verdict["passed_count"] - full)
+
+
 def _write_json(path: Path, document: object) -> None:
     path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -62,6 +68,11 @@ def _regrade_existing(output_dir: Path, report: dict) -> dict:
                     if (directory / "spike-output-shapes.json").is_file()
                     else None
                 ),
+                semantic_readback=(
+                    json.loads((directory / "spike-semantic-readback.json").read_text())
+                    if (directory / "spike-semantic-readback.json").is_file()
+                    else None
+                ),
                 execution_error=execution.get("error") if output_bytes is None else None,
             )
             _write_json(directory / "core_aten_batch_verdict.json", verdict)
@@ -74,6 +85,7 @@ def _regrade_existing(output_dir: Path, report: dict) -> dict:
         counts[status] = counts.get(status, 0) + 1
     aggregate["status_counts"] = dict(sorted(counts.items()))
     aggregate["passed_count"] = counts.get("pass", 0)
+    aggregate.update(_semantic_counts(aggregate))
     aggregate["passed_by_lane"] = _passed_by_lane(aggregate)
     _write_json(output_dir / "core_aten_batch_verdict.json", aggregate)
     return aggregate
@@ -178,6 +190,7 @@ def main(argv: list[str] | None = None) -> int:
                     counts[status] = counts.get(status, 0) + 1
                 aggregate["status_counts"] = dict(sorted(counts.items()))
                 aggregate["passed_count"] = counts.get("pass", 0)
+                aggregate.update(_semantic_counts(aggregate))
                 aggregate["passed_by_lane"] = _passed_by_lane(aggregate)
                 _write_json(args.output_dir / "core_aten_batch_verdict.json", aggregate)
                 _write_json(args.output_dir / f"{args.recovery_label}_executions.json", recoveries)
@@ -219,6 +232,7 @@ def main(argv: list[str] | None = None) -> int:
                     counts[status] = counts.get(status, 0) + 1
                 aggregate["status_counts"] = dict(sorted(counts.items()))
                 aggregate["passed_count"] = counts.get("pass", 0)
+                aggregate.update(_semantic_counts(aggregate))
                 aggregate["passed_by_lane"] = _passed_by_lane(aggregate)
                 _write_json(args.output_dir / "core_aten_batch_verdict.json", aggregate)
                 print(f"shard {shard_number}: {execution} {verdict['status_counts']}", flush=True)
