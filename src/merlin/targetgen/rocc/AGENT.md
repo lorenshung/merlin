@@ -34,7 +34,8 @@ assisted submission.
 
 Core retains MLIR/SSA resolution, R-type transport parsing, fences, UNKNOWN records and trace
 construction. CONFIG subtypes, packed addresses and transfer/compute meaning are not common
-RoCC semantics. Gemmini's implementation lives in its companion support package.
+RoCC semantics. Gemmini's implementation lives in its support provider, vendored at
+`examples/gemmini/support` and selected when `MERLIN_TARGET_PATH` is unset.
 Only parsed syntax is cached; every decode resolves support and reads facts again. Returned
 traces never alias cache-owned dictionaries. Loaded-provider ownership checks still apply;
 this is not an attestation of arbitrary in-process mutation or complete source bytes.
