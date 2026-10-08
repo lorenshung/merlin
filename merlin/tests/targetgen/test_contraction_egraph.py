@@ -139,6 +139,10 @@ class TestTheCostDecidesAndTheChoiceIsReadBack:
 
 
 class TestItFailsClosedWithoutCosts:
+    def test_selector_requires_a_selected_microkernel_symbol(self):
+        with pytest.raises(TypeError, match="symbol"):
+            CE.egraph_selector(lambda _shape, _which: 1)
+
     def test_no_costs_means_no_choice_rather_than_an_arbitrary_one(self):
         _mod, (op, sh) = _one_contraction()
         got = CE.extract_contraction_choice(op, symbol=_SYM, shape=sh, costs={})
