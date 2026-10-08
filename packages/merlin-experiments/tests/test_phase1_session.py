@@ -53,6 +53,147 @@ def test_phase1_requires_the_exact_reviewed_phase0_handoff(monkeypatch):
         S._verify_phase0_handoff({"whole_workload_phase1": {"required": True}}, report)
 
 
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--resume"],
+        ["--continuous"],
+        ["--seed-submission", "/other/candidate"],
+        ["--seal-current"],
+        ["--no-oracle"],
+        ["--skip-hidden"],
+        ["--sandbox", "none", "--allow-unsandboxed"],
+    ],
+)
+def test_unpaid_qualification_refuses_incompatible_modes(extra):
+    options = parse_options(
+        [
+            "--run-id",
+            "qualify",
+            "--qualify-submission",
+            "/operator/candidate",
+            "--private-full-model-spec",
+            "/operator/private.yaml",
+            *extra,
+        ]
+    )
+    with pytest.raises(RuntimeError, match="qualification"):
+        S.validate_options(options)
+
+
+def test_unpaid_qualification_refuses_missing_private_spec():
+    options = parse_options(["--run-id", "qualify", "--qualify-submission", "/operator/candidate"])
+    with pytest.raises(RuntimeError, match="private"):
+        S.validate_options(options)
+
+
+def test_unpaid_qualification_uses_formal_child_and_refuses_selected_source_drift(project, monkeypatch, tmp_path):
+    from merlin_experiments.phase1 import formal_invocation, qualification, run_inputs
+
+    from merlin.targetgen.sandbox import bwrap
+
+    context = load_context(project / "target_experiment.yaml", repo=project)
+    selected = tmp_path / "preserved-submission"
+    selected.mkdir()
+    (selected / "manifest.yaml").write_text("target: fixture\n")
+    (selected / "compiler.py").write_text("# selected candidate\n")
+    private_spec = tmp_path / "private.yaml"
+    private_spec.write_text("models: []\n")
+    public = project / "corpus/isa"
+    hidden = project / "corpus/hidden"
+    monkeypatch.setattr(bwrap, "frozen_selected_rtl_facts", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bwrap, "verify_bundle_snapshot", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bwrap, "bundle_snapshot_root", lambda *_args, **_kwargs: tmp_path)
+    monkeypatch.setattr(run_inputs, "hidden_snapshot_dir", lambda *_args, **_kwargs: hidden)
+    monkeypatch.setattr(run_inputs, "verify_persisted_run_inputs", lambda *_args, **_kwargs: hidden)
+
+    def prepared(name, *, relative_source=False):
+        ws, run = tmp_path / name / "workspace", tmp_path / name / "run"
+        ws.mkdir(parents=True)
+        run.mkdir()
+        seed = run_inputs.seed_submission(ws, selected, run, require_stable_source=True)
+        source_arg = str(selected.relative_to(tmp_path)) if relative_source else str(selected)
+        options = parse_options(
+            [
+                "--run-id",
+                name,
+                "--sandbox",
+                "bwrap",
+                "--qualify-submission",
+                source_arg,
+                "--private-full-model-spec",
+                str(private_spec),
+            ]
+        )
+        request = SimpleNamespace(
+            options=options,
+            context=context,
+            resolved_tools=lambda: (),
+        )
+        return SimpleNamespace(
+            request=request,
+            workspace=ws,
+            run_dir=run,
+            resuming=False,
+            bundle={"bundle_id": "fixture"},
+            bundle_dir=project / "input_bundles/fixture",
+            public_root=public,
+            private_full_model_spec=private_spec,
+            contract_root=None,
+            scope_roots={"public_roots": [public], "hidden_roots": [hidden], "contract": None},
+            environment={
+                "corpus_review": {"status": "reviewed"},
+                "private_full_model_spec": {"source_freeze": {"status": "selected"}},
+                "seed_submission": seed,
+                "implementation_sources": {"source": "fixture"},
+            },
+            verify_inputs=lambda: run_inputs.verify_seed_submission(ws, run, seed),
+        )
+
+    calls = []
+
+    def unavailable_formal(argv, **_kwargs):
+        calls.append(argv)
+        assert "merlin_experiments.phase1.feedback.formal" in argv
+        assert "--private-full-model-spec" in argv
+        assert "--hidden-capsules" in argv
+        return subprocess.CompletedProcess(argv, 1)
+
+    monkeypatch.setattr(formal_invocation.subprocess, "run", unavailable_formal)
+    first = prepared("incomplete")
+    assert qualification.execute(first) == 1
+    receipt = json.loads((first.run_dir / "submission_qualification.json").read_text())
+    assert receipt["qualification_only"] is True
+    assert receipt["authoring_converged"] is False
+    assert receipt["official_grade"]["complete"] is False
+    assert len(receipt["initial_candidate_sha256"]) == 64
+    assert len(receipt["graded_source_sha256"]) == 64
+    assert len(calls) == 1
+
+    def changed_during_formal(argv, **_kwargs):
+        (selected / "compiler.py").write_text("# changed while the child ran\n")
+        return subprocess.CompletedProcess(argv, 1)
+
+    monkeypatch.chdir(tmp_path)
+    second = prepared("source-drift", relative_source=True)
+    monkeypatch.setattr(formal_invocation.subprocess, "run", changed_during_formal)
+    with pytest.raises(RuntimeError, match="selected source changed"):
+        qualification.execute(second)
+    assert not (second.run_dir / "submission_qualification.json").exists()
+
+    (selected / "compiler.py").write_text("# selected candidate\n")
+
+    def changed_graded_copy(argv, **_kwargs):
+        (third.run_dir / "submission/compiler.py").write_text("# illicit source change\n")
+        return subprocess.CompletedProcess(argv, 1)
+
+    third = prepared("graded-drift")
+    monkeypatch.setattr(formal_invocation.subprocess, "run", changed_graded_copy)
+    with pytest.raises(RuntimeError, match="graded source changed"):
+        qualification.execute(third)
+    assert not (third.run_dir / "submission_qualification.json").exists()
+
+
 def assemble(bundle, ws, sandbox, *, context):
     assert sandbox == "bwrap"
     BW.materialize_bundle_inputs(ws, bundle, repo=Path(os.environ["SESSION_TEST_ROOT"]))

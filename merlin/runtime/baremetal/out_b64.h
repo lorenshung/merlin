@@ -196,6 +196,60 @@ static int merlin_out_b64_word(merlin_out_b64 *out, uint64_t word) {
   return 1;
 }
 
+/* A typed contiguous buffer can select the wire-width checks once instead of
+ * rebuilding a mask and sign extension for every word.  This is an optional
+ * packing path: callers must prove their logical traversal is contiguous and
+ * pass the same count they would have fed to merlin_out_b64_word.  Bounds are
+ * still checked on every ACTUAL value, including values changed since a range
+ * scan.  The staging buffer, chunk framing, and completion checks are shared.
+ */
+static inline int merlin_out_b64_words_i32_bounded(
+    merlin_out_b64 *out, const int32_t *words, uint64_t count,
+    int64_t lower, int64_t upper, unsigned wire_bytes) {
+  for (uint64_t index = 0; index < count; ++index) {
+    int64_t value = words[index];
+    if (value < lower || value > upper)
+      return 0;
+    if (out->raw_len + wire_bytes > MERLIN_OUT_B64_RAW_CAP && !merlin_out_b64_flush(out))
+      return 0;
+    uint64_t raw = (uint64_t)value;
+    for (unsigned byte = 0; byte < wire_bytes; ++byte)
+      out->raw[out->raw_len++] = (unsigned char)(raw >> (8u * byte));
+    ++out->seen_words;
+  }
+  return 1;
+}
+
+static inline int merlin_out_b64_words_i32(merlin_out_b64 *out,
+                                     const int32_t *words, uint64_t count) {
+  if (!out || (count && !words) || !out->valid || !out->write_text ||
+      !merlin_out_b64_width_valid(out->word_bytes) ||
+      (out->signed_words != 0 && out->signed_words != 1) ||
+      out->raw_len > MERLIN_OUT_B64_RAW_CAP ||
+      out->raw_len % out->word_bytes != 0 ||
+      out->seen_words > out->expected_words ||
+      count > out->expected_words - out->seen_words)
+    return 0;
+  switch (out->word_bytes) {
+  case 1u:
+    return out->signed_words
+               ? merlin_out_b64_words_i32_bounded(out, words, count, INT8_MIN, INT8_MAX, 1u)
+               : merlin_out_b64_words_i32_bounded(out, words, count, 0, UINT8_MAX, 1u);
+  case 2u:
+    return out->signed_words
+               ? merlin_out_b64_words_i32_bounded(out, words, count, INT16_MIN, INT16_MAX, 2u)
+               : merlin_out_b64_words_i32_bounded(out, words, count, 0, UINT16_MAX, 2u);
+  case 4u:
+    return merlin_out_b64_words_i32_bounded(out, words, count,
+                                             out->signed_words ? INT32_MIN : 0,
+                                             INT32_MAX, 4u);
+  case 8u:
+    return merlin_out_b64_words_i32_bounded(out, words, count, INT32_MIN, INT32_MAX, 8u);
+  default:
+    return 0;
+  }
+}
+
 static int merlin_out_b64_finish(merlin_out_b64 *out) {
   if (!out->valid || out->seen_words != out->expected_words)
     return 0;

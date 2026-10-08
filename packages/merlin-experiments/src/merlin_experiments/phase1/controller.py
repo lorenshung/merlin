@@ -120,4 +120,8 @@ def run(
         )
         if isinstance(prepared, int):
             return prepared
+        if options.qualify_submission:
+            from . import qualification
+
+            return qualification.execute(prepared)
         return authoring.execute(prepared, authoring.AuthoringRuntime(bundle_id, oracle_timing, public_root))

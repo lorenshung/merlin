@@ -98,7 +98,9 @@ class RunRequest:
         return {
             "schedule": a.schedule,
             "session_mode": (
-                "legacy_progress_only"
+                "submission_qualification"
+                if a.qualify_submission
+                else "legacy_progress_only"
                 if a.continuous
                 else "certified_continuous"
                 if a.schedule == "continuous"
@@ -342,6 +344,13 @@ def phase_run_dir(context, arm: str, run_id: str, *, resume: bool) -> Path:
 
 def validate_options(a: RunOptions) -> int | None:
     """Pre-initialization refusals shared by native and installed admission."""
+    if a.qualify_submission:
+        if a.resume or a.seed_submission or a.seal_current or a.continuous:
+            raise RuntimeError("unpaid qualification requires a fresh run and one selected submission")
+        if a.no_oracle or a.skip_hidden or a.sandbox != "bwrap":
+            raise RuntimeError("unpaid qualification requires isolated public, hidden and oracle grading")
+        if not a.private_full_model_spec:
+            raise RuntimeError("unpaid qualification requires an operator-private full-model specification")
     if a.resume and a.seed_submission:
         raise RuntimeError("--seed-submission cannot be combined with --resume")
     if a.resume and a.operator_errata:
@@ -397,6 +406,8 @@ def prepare(
     bundle = yaml.safe_load(request.bundle_manifest.read_text())
     bundle_dir = request.bundle_manifest.parent
     _corpus_seal = os.environ.get("MERLIN_CORPUS_SEAL", "").strip()
+    if a.qualify_submission and not _corpus_seal:
+        raise RuntimeError("unpaid qualification requires an explicitly selected reviewed corpus seal")
     if _corpus_seal:
         CI.require_reviewed_bundle(_te(), request.bundle_manifest, bundle)
 
@@ -441,8 +452,9 @@ def prepare(
     # interrupted setup whose run directory was never completed.  If that source is inside the workspace
     # this invocation is about to replace, refuse before ``rmtree`` can erase the only copy.
     _seed_source_preflight = None
-    if a.seed_submission:
-        _seed_source_preflight = RI.validate_seed_submission_source(a.seed_submission, ws / "submission")
+    _seed_source = a.qualify_submission or a.seed_submission
+    if _seed_source:
+        _seed_source_preflight = RI.validate_seed_submission_source(_seed_source, ws / "submission")
     # Never infer abandonment from a stale directory or a missing run record. It may contain the only
     # candidate from an interrupted setup, or still have live workers. A new run needs a new identity.
     _have_ws = _resuming and (ws / "submission").exists()
@@ -495,8 +507,10 @@ def prepare(
         assembly = transport.assemble(bundle, ws, a.sandbox, context=context)
         denied_names, viol, copy_report = assembly.denied_names, assembly.violations, assembly.copy_report
     _seed_submission_record = None
-    if a.seed_submission:
-        _seed_submission_record = RI.seed_submission(ws, _seed_source_preflight, run_dir)
+    if _seed_source:
+        _seed_submission_record = RI.seed_submission(
+            ws, _seed_source_preflight, run_dir, require_stable_source=bool(a.qualify_submission)
+        )
     _bundle_snapshot_record = None
     _model_host_lane_snapshot = None
     _hidden_snapshot_record = None
@@ -734,7 +748,8 @@ def prepare(
             "subagent_model": a.subagent_model or None,
             "background_model": a.background_model or None,
             "sandbox": a.sandbox,
-            "qa_loop": True,
+            "qa_loop": not bool(a.qualify_submission),
+            **({"qualification_only": True} if a.qualify_submission else {}),
             "run_config": _run_config,
             **(
                 {"public_object_build_selection": _public_build_selection_record}

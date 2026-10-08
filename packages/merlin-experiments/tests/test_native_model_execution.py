@@ -353,6 +353,39 @@ def test_non_whole_program_never_builds_and_leaves_failure_receipt(tmp_path):
     assert json.loads((out / "result.json").read_text()) == result
 
 
+def test_native_entry_guard_accepts_registered_pretty_llvm_definition(tmp_path, monkeypatch):
+    """The production mixed-program spelling must reach the next native ABI check."""
+    from merlin.runtime.backends import base as backends
+
+    monkeypatch.setattr(
+        backends,
+        "harness_build_recipe",
+        lambda _target: SimpleNamespace(
+            require_kernel_stack_frame=lambda: SimpleNamespace(entry_symbol="candidate_entry")
+        ),
+    )
+    source, capture = tmp_path / "source", tmp_path / "capture"
+    source.mkdir()
+    capture.mkdir()
+    result = execute_candidate_model(
+        command_buffer={
+            "kernel_abi": {
+                "kind": "whole_program",
+                "args": [{"tensor": "I0", "access": "read"}],
+                "outputs": [],
+            },
+            "params": {"mesh_regions": [{}], "host_lane_regions": [{}]},
+        },
+        lowered_mlir_text="module { llvm.func @candidate_entry(%arg0: !llvm.ptr) { llvm.return } }",
+        capsule_dir=source,
+        capture_bundle=capture,
+        target="synthetic",
+        out_dir=tmp_path / "output",
+    )
+    assert result["status"] == "incomplete"
+    assert "one declared whole-model output is required" in result["failure"]["detail"]
+
+
 def test_existing_artifact_directory_is_not_overwritten(tmp_path):
     out = tmp_path / "output"
     out.mkdir()

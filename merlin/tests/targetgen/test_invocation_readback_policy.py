@@ -214,6 +214,7 @@ def test_qa_factories_carry_explicit_policy_without_changing_default(monkeypatch
 def test_native_postrun_build_mutation_cannot_retain_a_numerical_pass(monkeypatch, tmp_path):
     from merlin.compile import model_execution_inputs
     from merlin.runtime import route_quality
+    from merlin.runtime.backends import base as backends
     from merlin.targetgen import bundle_harness, capsule_golden, golden_store, native_model_execution, oracle_policy
     from merlin.targetgen.contract import compile as compiler
     from merlin.targetgen.contract import readback_policy as readback
@@ -230,7 +231,7 @@ def test_native_postrun_build_mutation_cannot_retain_a_numerical_pass(monkeypatc
     cb = _cb()
     cb["kernel_abi"]["args"] = []
     monkeypatch.setattr(bundle_harness, "is_executable_emission", lambda *_args, **_kw: (True, ""))
-    monkeypatch.setattr(bundle_harness, "emitted_entry_arity", lambda _text: 0)
+    monkeypatch.setattr(bundle_harness, "emitted_entry_arity", lambda _text, **_kw: 0)
     monkeypatch.setattr(golden_store, "load_golden", lambda _source: {"outputs": {"out": [[1, 2]]}})
     monkeypatch.setattr(native_model_execution, "_bind_inputs", lambda *_args, **_kw: (
         {"arg": [[1, 2]]}, {"source_entry_binding": {"source_owned_mutables": []}},
@@ -245,6 +246,7 @@ def test_native_postrun_build_mutation_cannot_retain_a_numerical_pass(monkeypatc
         with_effective_abi=lambda: "recipe",
     )
     service = SimpleNamespace(recipe=recipe, source_pins=(("pinned", "digest"),))
+    monkeypatch.setattr(backends, "harness_build_recipe", lambda _target: recipe)
     monkeypatch.setattr(native_model_execution, "_build_service_for", lambda *_args, **_kw: service)
 
     def compile_selected(_cb, _lowered, work, **_kwargs):

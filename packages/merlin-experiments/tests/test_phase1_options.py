@@ -34,6 +34,16 @@ def test_public_object_build_probe_is_explicit_and_bounded():
             parse_options(["--run-id", "probe", "--public-object-build-budget-s", bad], environ={})
 
 
+def test_unpaid_qualification_selects_a_submission_explicitly():
+    assert parse_options(["--run-id", "probe"], environ={}).qualify_submission == ""
+    assert (
+        parse_options(
+            ["--run-id", "probe", "--qualify-submission", "/operator/candidate"], environ={}
+        ).qualify_submission
+        == "/operator/candidate"
+    )
+
+
 def test_environment_defaults_are_invocation_inputs_not_import_state(monkeypatch):
     explicit = {"AWS_REGION": "region-a", "AWS_PROFILE": "profile-a", "CLAUDE_CONFIG_DIR": "account-a"}
     args = parse_options(["--run-id", "probe"], environ=explicit)

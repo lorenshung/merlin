@@ -11,6 +11,9 @@ issues commands, computes addresses and walks tiles: work proportional to the nu
 Host code doing the group's arithmetic is proportional to the number of ELEMENTS: it loads,
 computes and stores each one. So the audit counts, per group, the dynamic host operations of the
 function that implements it, and compares them with the elements the group produces.
+Only independently proved pointer-plus-constant setup is excluded from the compute
+budget. The raw arithmetic and excluded address counts remain visible: a narrow
+output may require many commands without any host arithmetic on tensor values.
 
 The host is always a RISC-V core, scalar or vector, so nothing here depends on the accelerator:
 the counts come from the emitted LLVM-dialect function (:mod:`merlin.perf.host_cfg_activity`), the
@@ -141,19 +144,30 @@ def audit_group(site: GroupSite, function: Any | None, budget: Budget = Budget()
     activity = analyze_host_cfg_activity(function)
     dynamic = activity.get("dynamic_operations")
     row["activity_status"] = activity.get("status")
-    if dynamic is None:
+    if dynamic is None or activity.get("status") != "derived":
         row.update(
             verdict=UNKNOWN,
-            why="dynamic host work could not be counted: "
-            + "; ".join(activity.get("problems") or ["no reason recorded"])[:300],
+            why="dynamic host work or scalar memory payload could not be counted: "
+            + "; ".join(activity.get("problems") or ["unknown scalar memory payload"])[:300],
         )
         return row
-    arithmetic = sum(int(dynamic.get(name, 0)) for name in _ARITHMETIC)
+    # Pointer-plus-constant setup is permitted command work, not tensor compute.
+    # Keep the raw instruction totals visible; exclude only the independently
+    # proved SSA subset from the compute budget, never all integer arithmetic.
+    address_arithmetic = activity.get("dynamic_pointer_setup_arithmetic")
+    if not isinstance(address_arithmetic, int) or isinstance(address_arithmetic, bool) or address_arithmetic < 0:
+        row.update(verdict=UNKNOWN, why="pointer-setup arithmetic has no derived execution count")
+        return row
+    total_arithmetic = sum(int(dynamic.get(name, 0)) for name in _ARITHMETIC)
+    arithmetic = total_arithmetic - address_arithmetic
     value_arithmetic = sum(int(dynamic.get(name, 0)) for name in _VALUE_ONLY)
     payload = (activity.get("load_payload_bytes") or 0) + (activity.get("store_payload_bytes") or 0)
     top = (activity.get("block_signatures") or [{}])[0]
     row.update(
+        arithmetic_basis="pointer_offset_provenance_v1",
         host_arithmetic=arithmetic,
+        host_total_arithmetic=total_arithmetic,
+        host_address_arithmetic=address_arithmetic,
         host_value_arithmetic=value_arithmetic,
         host_payload_bytes=payload,
         dominant_block={

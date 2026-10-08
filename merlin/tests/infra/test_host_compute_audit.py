@@ -107,6 +107,15 @@ def test_work_that_cannot_be_counted_is_unknown_never_clean() -> None:
     assert missing["groups"][0]["verdict"] == HA.NOT_EMITTED and not missing["proven_clean"]
 
 
+def test_unknown_memory_payload_is_not_zero_bytes_or_clean() -> None:
+    # A pointer load has no derived byte width in this accounting instrument.
+    # Known trip counts must not turn its unknown payload into zero traffic.
+    body = '    %p = "llvm.load"(%in) : (!llvm.ptr) -> !llvm.ptr'
+    report = HA.audit(_module(_loop("pointer_load", 4, body)), [_site("pointer_load")])
+    assert report["groups"][0]["verdict"] == HA.UNKNOWN
+    assert not report["proven_clean"]
+
+
 def test_the_budget_is_data_and_a_tighter_one_changes_the_verdict() -> None:
     module = _module(_loop("issue", 512, _ISSUE))  # a command every two elements
     assert HA.audit(module, [_site("issue")])["groups"][0]["verdict"] == HA.HOST_COMPUTE
@@ -151,6 +160,79 @@ def test_an_emitted_program_is_audited_from_its_own_buffer_and_artifact() -> Non
     assert OC.host_compute_row("p", buffer, text, "host_only")["verdict"] == HA.DECLARED_HOST
     # A device program is not host code; it is unknown to this audit, never clean.
     assert OC.host_compute_row("p", buffer, ".word 0x0000007b", "offloaded")["verdict"] == HA.UNKNOWN
+
+
+@pytest.mark.parametrize("loaded_offset", [False, True])
+def test_pointer_setup_is_not_payload_compute_but_loaded_offsets_are(loaded_offset: bool) -> None:
+    """Replay the census/grading seam for a narrow output with many device commands.
+
+    Pointer-plus-constant setup can exceed an output-normalized arithmetic budget
+    without computing even one tensor element. A loaded offset must NOT receive
+    that exemption: its value is tensor data, even if later used as an address.
+    """
+    from merlin.targetgen import offload_census as OC
+
+    offset = (
+        '%offset = "llvm.load"(%in) : (!llvm.ptr) -> i64'
+        if loaded_offset
+        else '%offset = "llvm.mlir.constant"() <{value = 16 : i64}> : () -> i64'
+    )
+    setup = [
+        '%base = "llvm.ptrtoint"(%in) : (!llvm.ptr) -> i64',
+        offset,
+    ]
+    for i in range(8):
+        setup.extend(
+            (
+                f'%addr{i} = "llvm.add"(%base, %offset) : (i64, i64) -> i64',
+                f'"llvm.inline_asm"(%addr{i}) <{{asm_string = "", constraints = "r", has_side_effects}}> : (i64) -> ()',
+            )
+        )
+    text = (
+        '"builtin.module"() ({ "llvm.func"() <{sym_name = "entry", '
+        "function_type = !llvm.func<void (!llvm.ptr)>}> ({ ^entry(%in: !llvm.ptr):\n"
+        + "\n".join(setup)
+        + '\n "llvm.return"() : () -> () }) : () -> () }) : () -> ()'
+    )
+    buffer = {
+        "tensors": {"y": {"shape": [2], "dtype": "i8"}},
+        "kernel_abi": {"kind": "whole_program", "args": [], "outputs": ["y"]},
+        "commands": [{"opcode": "COMMIT", "operands": {"dst": "y"}}],
+    }
+    row = OC.host_compute_row("neutral", buffer, text, "offloaded")
+    assert row["verdict"] == (HA.HOST_COMPUTE if loaded_offset else HA.CLEAN), row
+    assert row["arithmetic_per_element"] == (4.0 if loaded_offset else 0.0)
+    assert row["host_total_arithmetic"] == 8
+    assert row["host_address_arithmetic"] == (0 if loaded_offset else 8)
+    assert row["arithmetic_basis"] == "pointer_offset_provenance_v1"
+
+
+@pytest.mark.parametrize("sink", ["return", "store"])
+def test_pointer_derived_scalar_values_do_not_get_an_address_exemption(sink: str) -> None:
+    from xdsl.context import Context
+    from xdsl.dialects import builtin, llvm
+    from xdsl.parser import Parser
+
+    end = "llvm.return %value : i64" if sink == "return" else "llvm.store %value, %in : i64, !llvm.ptr\n llvm.return"
+    result_type = " -> i64" if sink == "return" else ""
+    text = f"""module {{
+      llvm.func @entry(%in: !llvm.ptr){result_type} {{
+        %base = llvm.ptrtoint %in : !llvm.ptr to i64
+        %one = llvm.mlir.constant(1 : i64) : i64
+        %next = llvm.add %base, %one : i64
+        %value = llvm.add %next, %one : i64
+        {end}
+      }}
+    }}"""
+    ctx = Context()
+    for dialect in (builtin.Builtin, llvm.LLVM):
+        ctx.load_dialect(dialect)
+    module = Parser(ctx, text).parse_module()
+    module.verify()
+    (row,) = HA.audit(module, [_site("entry", elements=1)])["groups"]
+    assert row["verdict"] == HA.HOST_COMPUTE
+    assert row["host_address_arithmetic"] == 0
+    assert row["arithmetic_per_element"] == 2.0
 
 
 def _graded_run(tmp_path, name: str, artifact: str, buffer: dict):
