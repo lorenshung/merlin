@@ -498,3 +498,13 @@ The output directory must be fresh under `out/`. Inspect its `receipt.json`,
 `incomplete_support_provenance` while support-source identity or the
 compiler-package-to-support binding is unproven. A finite Spike match does not
 review the software spec, prove RTL execution, or establish whole-model offload.
+
+### Reproduce the accumulator load-order race
+
+[acc_race/](acc_race/README.md) holds bare-metal reproducers for two loads into
+the same accumulator rows (overwrite, then accumulate) that complete out of
+issue order. Each wrong element is classified by which operand survived, and a
+fenced harness copy serves as the control. Spike and in-order RTL simulators
+never show the race; the board and a reordering memory model do. The measured
+evidence and its consequences for verification are in the
+[design note](../../../docs/design/accumulator_load_order.md).
