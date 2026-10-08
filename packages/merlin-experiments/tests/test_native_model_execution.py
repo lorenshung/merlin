@@ -809,6 +809,19 @@ def test_task_scoped_host_compute_distinguishes_addressing_host_island_and_viola
         require_clean_host_compute(_host_compute_report(cb, artifact(unscoped), entry_symbol="gemmini_kernel"))
 
 
+def test_host_compute_report_keeps_lazy_accounting_seam(monkeypatch):
+    from merlin.targetgen import native_dispatch_accounting, native_model_execution
+
+    marker = object()
+
+    def accounting_report(command_buffer, lowered_mlir_text, *, entry_symbol):
+        assert (command_buffer, lowered_mlir_text, entry_symbol) == ({"tasks": []}, "module", "entry")
+        return marker
+
+    monkeypatch.setattr(native_dispatch_accounting, "_host_compute_report", accounting_report)
+    assert native_model_execution._host_compute_report({"tasks": []}, "module", entry_symbol="entry") is marker
+
+
 def test_emitted_host_audit_reopens_exact_pinned_artifacts(tmp_path):
     cb = {
         "kernel_abi": {"kind": "whole_program", "args": [{"tensor": "arg0", "access": "read"}]},
