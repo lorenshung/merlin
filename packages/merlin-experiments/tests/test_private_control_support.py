@@ -167,6 +167,7 @@ def test_exact_unsigned_mask_count_guards_are_source_tautologies(extent: int) ->
 def test_complete_mask_compaction_and_scatter_proves_only_exact_index_ordinals(extent: int) -> None:
     proof = _prove(_source_scatter(extent))
     assert len(proof["index_data_support"]) == 1
+    assert proof["index_data_refusals"] == []
     chain = proof["index_data_support"][0]
     assert chain["extent"] == extent
     for operation, ordinals in (
@@ -218,12 +219,17 @@ def test_internal_compaction_near_misses_never_discharge_cursor(changed) -> None
     except ValueError:
         return
     assert proof["internal_compaction_support"] == []
+    # A cast that was tried and refused is recorded beside the admitted chains, never absent.
+    assert proof["internal_compaction_refusals"] and all(
+        type(row["cast_ordinal"]) is int and row["reason"] for row in proof["internal_compaction_refusals"]
+    )
 
 
 def test_internal_compaction_requires_selected_byte_span_and_linked_identity() -> None:
     from copy import deepcopy
 
-    assert _prove(_source_internal_cast(), bits=5)["internal_compaction_support"] == []
+    narrow = _prove(_source_internal_cast(), bits=5)
+    assert narrow["internal_compaction_support"] == [] and narrow["internal_compaction_refusals"]
     proof = _prove(_source_internal_cast(), bits=64)
     selected = _selected_index()
     proof["selected_index_observation"] = deepcopy(selected)
@@ -383,6 +389,10 @@ def test_index_data_support_refuses_nearby_cursor_or_mask_changes(changed) -> No
     proof = _prove(changed(_source_scatter()))
     assert proof["count"] == 2  # The independent assertion proof remains intact.
     assert proof["index_data_support"] == []
+    # A refused data chain is recorded, never indistinguishable from no chain.
+    assert len(proof["index_data_refusals"]) == 1
+    assert type(proof["index_data_refusals"][0]["cast_ordinal"]) is int
+    assert proof["index_data_refusals"][0]["reason"].startswith("source bounded-control proof:")
 
 
 def test_guard_predicate_result_must_not_feed_another_control_or_data_user() -> None:
