@@ -39,6 +39,12 @@ def batch_provenance(
         repo_root() / "src/merlin" / path
         for path in (
             "targetgen/core_aten_batch.py",
+            "targetgen/core_aten_semantics.py",
+            "targetgen/_m2m_capture_worker.py",
+            "targetgen/_capture_result_contract.py",
+            "targetgen/capsule_source.py",
+            "llvmlower/semantic_io.py",
+            "runtime/semantic_readback.py",
             "targetgen/core_aten_batch_grade.py",
             "targetgen/core_aten_device.py",
             "targetgen/core_aten_provenance.py",
@@ -48,6 +54,7 @@ def batch_provenance(
             "runtime/backends/spike_model.py",
         )
     ]
+    sources.append(repo_root() / "merlin/runtime/baremetal/spike/model_main.c")
     options = runner_options or {}
     artifacts = {}
     simulator = Path(options.get("spike_binary") or spike_path())
@@ -62,7 +69,7 @@ def batch_provenance(
         sources.append(facts)
         artifacts["rtl_facts"] = facts
     if directory:
-        for name in ("model.mlir", "inputs.npz", "spike-build/model.elf"):
+        for name in ("model.mlir", "inputs.npz", "semantic_io.json", "spike-build/model.elf"):
             path = directory / name
             if path.is_file():
                 artifacts[name] = path

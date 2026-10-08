@@ -167,6 +167,7 @@ def run_spike_bundle(
 
     output_bytes = None
     output_shapes = None
+    semantic_readback = None
     options = {}
     try:
         bundled = [case for case in report["cases"] if case["status"] == "bundled"]
@@ -242,6 +243,9 @@ def run_spike_bundle(
         if len(output_bytes) != report["output_count"]:
             raise RuntimeError(f"hardware emitted {len(output_bytes)} outputs; bundle expects {report['output_count']}")
         (directory / "spike-console.txt").write_text(run["console"], encoding="utf-8")
+        semantic_readback = run.get("semantic_readback")
+        if semantic_readback is not None:
+            _write_json(directory / "spike-semantic-readback.json", semantic_readback)
         output_shapes = run.get("output_shapes") or None
         _write_json(directory / "spike-output-shapes.json", output_shapes)
         _write_json(directory / "spike-output-bytes.json", [item.hex() for item in output_bytes])
@@ -268,7 +272,18 @@ def run_spike_bundle(
         report,
         output_bytes,
         output_shapes=output_shapes,
+        semantic_readback=semantic_readback,
         execution_error=execution.get("error") if execution["status"] != "ran" else None,
     )
+    for case_verdict in verdict["cases"].values():
+        observation = case_verdict.get("observation")
+        if observation is not None:
+            observation["evidence"].update(
+                target=target,
+                lane=case_verdict["lane"],
+                receipt=execution.get("build_hash"),
+                elf=execution.get("elf"),
+                artifact_digests=report["provenance"]["artifact_digests"],
+            )
     _write_json(directory / "core_aten_batch_verdict.json", verdict)
     return execution, verdict

@@ -215,6 +215,9 @@ def build_core_aten_batch(
     records: list[dict[str, Any]] = []
     manifest: dict[str, dict[str, Any]] = {}
     input_order: dict[str, int] = {}
+    semantic_outputs = []
+    semantic_inputs = []
+    semantic_posts = []
 
     for case in corpus["cases"]:
         overload = case["overload"]
@@ -255,7 +258,47 @@ def build_core_aten_batch(
             )
             abi_in = meta["input_abi"]
             abi_out = meta["output_abi"]
-            if len(abi_out) == 1 and len(returned) > 1 and len(set(zip(returned, local_result_types))) == 1:
+            contract = meta.get("result_contract")
+            if contract is not None:
+                role_results = contract["results"]
+                if len(role_results) != len(returned):
+                    raise ValueError("same-conversion result roles differ from emitted results")
+                dtype_map = {str(np.dtype(v)): k for k, v in _DTYPES.items()}
+                dtype_map.update(bool="i1", complex64="complex<f32>", complex128="complex<f64>")
+                abi_out = [{"shape": r["shape"], "dtype": dtype_map[r["dtype"]]} for r in role_results]
+                user_ordinals = [i for i, r in enumerate(role_results) if r["role"] == "user_output"]
+                post_ordinals = []
+                post_abi = []
+                post_semantics = []
+                for i, (name, input_type, input_meta) in enumerate(zip(names, abi_in, contract["inputs"])):
+                    mutation = [
+                        j
+                        for j, r in enumerate(role_results)
+                        if r.get("input_index") == i and r["role"] == "user_input_mutation"
+                    ]
+                    if len(mutation) > 1:
+                        raise ValueError("multiple exported mutation results for one input")
+                    if mutation:
+                        j = mutation[0]
+                        post_ordinals.append(j)
+                        post_abi.append(abi_out[j])
+                        post_semantics.append(role_results[j])
+                    else:
+                        post_ordinals.append(len(returned))
+                        returned.append(name)
+                        local_result_types.append(_tensor_type(input_type))
+                        abi_out.append(input_type)
+                        post_abi.append(input_type)
+                        post_semantics.append(input_meta)
+                all_semantics = role_results + [
+                    contract["inputs"][i] for i, j in enumerate(post_ordinals) if j >= len(role_results)
+                ]
+            if (
+                contract is None
+                and len(abi_out) == 1
+                and len(returned) > 1
+                and len(set(zip(returned, local_result_types))) == 1
+            ):
                 # Functional export can expose a mutation and a user result as
                 # the exact same SSA value. Every possible user-result mapping
                 # observes that value; no output-role or shape guess is needed.
@@ -311,6 +354,25 @@ def build_core_aten_batch(
         arg_types.extend(local_types)
         results.extend(renamed_returns)
         result_types.extend(local_result_types)
+        user_indices = list(range(first_output, len(results)))
+        user_abi = abi_out
+        if contract is not None:
+            user_indices = [first_output + i for i in user_ordinals]
+            user_abi = [abi_out[i] for i in user_ordinals]
+            post_indices = [first_output + i for i in post_ordinals]
+            # Mutation outputs establish each post-call input's storage identity as well.
+            record["semantic_boundary"] = dict(
+                post_indices=post_indices, post_abi=post_abi, authority=contract["authority"]
+            )
+            for i, semantic in enumerate(all_semantics):
+                aliases = list(semantic.get("alias_inputs", []))
+                if i in post_ordinals:
+                    aliases = []
+                semantic_outputs.append({**semantic, "alias_outputs": [post_indices[j] for j in aliases]})
+            semantic_inputs.extend(range(first_input, len(inputs)))
+            semantic_posts.extend(post_indices)
+        else:
+            semantic_outputs.extend([None] * len(renamed_returns))
         for index, item in enumerate(abi_in):
             global_index = first_input + index
             physical = _physical_abi(item)
@@ -325,9 +387,9 @@ def build_core_aten_batch(
             status="bundled",
             capture_status=capture.get("status"),
             input_indices=list(range(first_input, len(inputs))),
-            output_indices=list(range(first_output, len(results))),
+            output_indices=user_indices,
             input_abi=abi_in,
-            output_abi=abi_out,
+            output_abi=user_abi,
             capture_golden_observation=json.loads((directory / "golden.json").read_text(encoding="utf-8")),
         )
         records.append(record)
@@ -352,6 +414,20 @@ def build_core_aten_batch(
 
         generic = to_generic_form(bundle_root / "model.mlir")
         (bundle_root / "model.mlir").write_bytes(generic.read_bytes())
+    semantic_path = bundle_root / "semantic_io.json"
+    if semantic_outputs and all(item is not None for item in semantic_outputs):
+        semantic_path.write_bytes(
+            _json_bytes(
+                dict(
+                    schema_version=1,
+                    outputs=semantic_outputs,
+                    input_indices=semantic_inputs,
+                    post_indices=semantic_posts,
+                )
+            )
+        )
+    else:
+        semantic_path.unlink(missing_ok=True)
     _write_npz(bundle_root / "inputs.npz", inputs)
     (bundle_root / "weights.safetensors.manifest.json").write_bytes(_json_bytes(manifest))
     (bundle_root / "input_order.json").write_bytes(_json_bytes(input_order))

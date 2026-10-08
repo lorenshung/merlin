@@ -44,6 +44,9 @@ void merlin_prof_dump(void);
 #define OUT ((float *)MERLIN_OUTPUT_PTR[0])
 #endif
 static merlin_descriptor_t DESCS[MERLIN_N_ARGS];
+#if defined(MERLIN_DUMP_ALL_OUTPUTS) && __has_include("semantic_io.h")
+#include "semantic_io.h"
+#endif
 
 int main(int hart) {
   if (hart != 0) {
@@ -58,6 +61,9 @@ int main(int hart) {
 
   merlin_reset_session();
   merlin_prepare_step(0);
+#ifdef MERLIN_SEMANTIC_IO
+  merlin_semantic_before();
+#endif
   merlin_run_multi(MERLIN_ARGS, MERLIN_N_ARGS, (const void *)MERLIN_WEIGHTS_BASE_ADDR,
                    MERLIN_INPUT_PTR, MERLIN_OUTPUT_PTR, DESCS);
 #if MERLIN_N_STATE_PAIRS > 0
@@ -72,6 +78,9 @@ int main(int hart) {
   __asm__ volatile("csrr %0, mcycle" : "=r"(c1));
 
 #ifdef MERLIN_DUMP_ALL_OUTPUTS
+#ifdef MERLIN_SEMANTIC_IO
+  merlin_semantic_after();
+#endif
   /* Lossless storage readback in MLIR result order, outside model timing. */
   for (int output = 0; output < MERLIN_N_OUTPUTS; output++) {
 #ifdef MERLIN_RETURNED_DESCRIPTORS

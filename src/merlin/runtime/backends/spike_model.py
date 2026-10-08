@@ -934,6 +934,9 @@ def build(
     _hh = _hashlib.sha256()
     for _f in (work / "model.o", cgen / "weights.bin"):
         _hh.update(_f.read_bytes())
+    semantic_header = cgen / "semantic_io.h"
+    if semantic_header.is_file():
+        _hh.update(semantic_header.read_bytes())
     quantization_policy = None
     if int8_compute:
         raw_policy = (work / "quantization-policy.json").read_bytes()
@@ -1249,7 +1252,16 @@ def _parse_bytes_console(console: str) -> dict[str, Any]:
             raise SpikeModelError("malformed OUT_SHAPE result index, rank or extents") from exc
     if shapes and len(shapes) != len(output_bytes):
         raise SpikeModelError("result shape/byte frame count differs")
-    return {"output_bytes": output_bytes, "output_shapes": shapes, "metrics": metrics, "console": console}
+    from merlin.runtime.semantic_readback import parse_semantic_readback
+
+    semantic = parse_semantic_readback(console, len(output_bytes))
+    return {
+        "output_bytes": output_bytes,
+        "output_shapes": shapes,
+        "metrics": metrics,
+        "console": console,
+        **({"semantic_readback": semantic} if semantic is not None else {}),
+    }
 
 
 def parse_console(console: str) -> dict[str, Any]:

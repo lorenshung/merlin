@@ -692,6 +692,14 @@ def generate(
             )
         call_c.append("}")
 
+    semantic_path = model_dir / "semantic_io.json"
+    if dump_all_outputs and semantic_path.is_file():
+        from .semantic_io import generate_observer
+
+        generate_observer(semantic_path, out_dir / "semantic_io.h", out_specs, embedded_arrays, DT_BYTES)
+    else:
+        (out_dir / "semantic_io.h").unlink(missing_ok=True)
+
     (out_dir / "weights.bin").write_bytes(bytes(blob) + bytes(appended))
     (out_dir / "model_gen.h").write_text("\n".join(h) + "\n")
     (out_dir / "model_io.h").write_text("\n".join(io) + "\n")
