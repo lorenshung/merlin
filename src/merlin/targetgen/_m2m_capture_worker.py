@@ -1332,6 +1332,15 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
             and quant_stats.get("annotated_contractions", 0) > 0
         ):
             realized_scheme = q.scheme
+        elif (
+            # A dynamic float8 recipe goes through quantize_, not PT2E; without this row its capture
+            # recorded `scheme: None` even when every planned Linear had been transformed.
+            q.scheme.startswith("fp8_")
+            and q.scheme.endswith("_dynamic_act_weight")
+            and quant_stats.get("api") == "quantize_"
+            and quant_stats.get("layers_quantized", 0) > 0
+        ):
+            realized_scheme = q.scheme
 
     (out / "linalg.mlir").write_text(res.mlir_text, encoding="utf-8")
     frontend_trace = getattr(res, "capture_trace", None)
