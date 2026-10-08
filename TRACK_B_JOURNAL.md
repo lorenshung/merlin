@@ -57,7 +57,12 @@ separate from the main tree so Track A's uncommitted edits are untouched. Host `
   (`git rebase --onto upstream/main 183cbb09f track-b`), clean.
 - **Verified on new base:** inventory tests 22 passed; `check_no_target_name`, `check_no_regex`,
   `check_structure`, `check_artifact_layout`, `check_docs`, `check_doc_paths` exit 0; ruff clean.
-  Neighbouring tests not re-run on the new base.
+  A/B vs base (changed sources reverted): identical failing ids on 21 directly-affected files
+  (sequential) and 271 broader files (`-n 2`); only diff = 22 new passing tests. `cert_capsule_cover`
+  byte-identical on 48 cases across all 8 capsule-bench descriptors. `/scratch` is ~100% full, which
+  makes `-n 8` runs fail spuriously (pytest temp root).
+- **Inventory on new base:** gemmini 44 rows (0/3/41, unchanged); atlas 43 rows (0 covered / 6 missing /
+  37 unknown). The old-base atlas spec/contract disagreement is gone after upstream's atlas changes.
 
 ## Commits on `track-b`
 1. `feat(targetgen): add per-item Phase 1 coverage inventory join` — the four code/test files.

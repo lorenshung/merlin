@@ -45,20 +45,29 @@ Supplying a held-out claim model (`merlin/contract/claim_models.yaml`) as an inp
 | Target | Rows | Covered | Missing | Unknown |
 | --- | --- | --- | --- | --- |
 | gemmini | 44 | 0 | 3 | 41 |
-| atlas | 46 | 0 | 7 | 39 |
+| atlas | 43 | 0 | 6 | 37 |
 
-"0 covered" is expected: nothing has been graded on this machine yet. Notable: the tracked atlas
-conformance spec requires bf16/elementwise cells on the accelerator that the atlas contract does not
-declare (it declares only fp8 contraction) — the spec looks stale. Flagged, not changed.
+(Recomputed on `4a7cb1821`.) "0 covered" is expected: nothing has been graded on this machine yet.
+- gemmini missing: host lanes `movement/bf16`, `movement/f32`; shape-geometry class `unknown`.
+- atlas missing: host lanes `attention/bf16`, `contraction/i8`, `movement/f32`, `movement/i8`,
+  `normalization/bf16`, `reduction/bf16`. All 15 atlas cells require the accelerator and have witnesses;
+  they are `unknown` only because none was graded. (On the old base `183cbb09f` atlas had a spec/contract
+  disagreement; upstream's atlas changes since then removed it.)
 
 ## Verification (on the rebased branch)
 
 - `pytest merlin/tests/targetgen/test_coverage_inventory.py` — 22 passed.
 - `check_no_target_name`, `check_no_regex`, `check_structure`, `check_artifact_layout`, `check_docs`,
   `check_doc_paths` — all exit 0. `ruff check` clean.
-- Neighbouring tests (cover, claim-set, conformance, promotion wiring) were run on the old base
-  (`183cbb09f`): 5 pre-existing failures that do not reach the changed code (missing recapture store;
-  tracked `atlas.yaml` cites a held-out model). **Not re-run on the new base.**
+- **No regressions vs `upstream/main`.** A/B on the new base (branch vs. the three changed sources
+  reverted to base), identical failing-test ids in both states; the only difference is the 22 new passing tests:
+  - 21 files that reference the changed code, sequential: 13 failed / 321 passed (branch) vs 13 / 299 (base).
+  - 271 files matching `claim_models|materialize|conformance`, `-n 2`: 251 failed + 64 errors in both.
+  - Those failures are environmental (no `MERLIN_EXT_*`, no llvm-install/clang, missing `out/` corpora).
+- **Refactor is behaviour-preserving:** `cert_capsule_cover` output byte-identical across 48 argument
+  combinations on all 8 tracked capsule-bench descriptors.
+- **Test-env caveat:** `/scratch` (pytest temp root) is ~100% full; `-n 8` runs cascade into hundreds of
+  spurious `could not create numbered dir` errors. Use `-n 2` or point `MERLIN_TEST_TEMPROOT` elsewhere.
 
 ## M0 audit findings (not code — context for B1)
 
