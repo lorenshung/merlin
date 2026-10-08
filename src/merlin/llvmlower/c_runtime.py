@@ -145,6 +145,7 @@ def generate(
     prepared_dir: str | Path | None = None,
     entry_projection: EntryWeightProjection | None = None,
     entry_projection_source: str | Path | None = None,
+    dump_all_outputs: bool = False,
 ) -> dict:
     """Emit the runtime-driving artifacts for a captured model into ``out_dir``.
 
@@ -511,6 +512,10 @@ def generate(
         dimstr = ",".join(str(d) for d in dims) or "0"
         h.append(f"  {{{kind}, {off}L, {rank}, {{{dimstr}}}, {elem}}},")
     h += ["};"]
+    if dump_all_outputs:
+        h.append("#define MERLIN_DUMP_ALL_OUTPUTS 1")
+        sizes = ",".join(str(int(np.prod(shape)) * DT_BYTES[dt]) for shape, dt in out_specs)
+        h.append(f"static const size_t MERLIN_OUTPUT_NBYTES[MERLIN_N_OUTPUTS] = {{{sizes}}};")
     h.append("#endif")
 
     io = [

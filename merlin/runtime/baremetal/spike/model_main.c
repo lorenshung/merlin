@@ -37,7 +37,7 @@ void merlin_prof_dump(void);
 #define MERLIN_WEIGHTS_BASE_ADDR 0x200000000ULL
 #endif
 
-#if !MERLIN_OUT_IS_F32 && !MERLIN_OUT_IS_I64 && !MERLIN_OUT_IS_I1
+#if !defined(MERLIN_DUMP_ALL_OUTPUTS) && !MERLIN_OUT_IS_F32 && !MERLIN_OUT_IS_I64 && !MERLIN_OUT_IS_I1
 #error "bare-metal model output supports only f32, i64 or i1"
 #endif
 #if MERLIN_OUT_IS_F32
@@ -71,6 +71,21 @@ int main(int hart) {
   uint64_t c1;
   __asm__ volatile("csrr %0, mcycle" : "=r"(c1));
 
+#ifdef MERLIN_DUMP_ALL_OUTPUTS
+  /* Lossless storage readback in MLIR result order, outside model timing. */
+  for (int output = 0; output < MERLIN_N_OUTPUTS; output++) {
+    const unsigned char *bytes = (const unsigned char *)MERLIN_OUTPUT_PTR[output];
+    htif_puts("OUT_BYTES ");
+    htif_putd((long)output);
+    htif_putc(' ');
+    htif_putd((long)MERLIN_OUTPUT_NBYTES[output]);
+    for (size_t i = 0; i < MERLIN_OUTPUT_NBYTES[output]; i++) {
+      htif_putc(' ');
+      htif_putd((long)bytes[i]);
+    }
+    htif_putc('\n');
+  }
+#else
   /* Output protocol:
    *   OUT <k> <bits...>     : the first k = min(N, 4096) raw values (exact prefix).
    *   OUT_I64 <k> <lo hi...>: i64 values as unsigned 32-bit halves, low first.
@@ -151,6 +166,7 @@ int main(int hart) {
   htif_putc('\n');
 #endif
 #endif
+#endif /* MERLIN_DUMP_ALL_OUTPUTS */
   htif_puts("METRIC cycles ");
   htif_putd((long)(c1 - c0));
   htif_putc('\n');
