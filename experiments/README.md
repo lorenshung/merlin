@@ -160,6 +160,12 @@ coverage can include functional capsules, so it is not the selected Phase 2
 performance-cohort coverage. It does not establish numerical correctness, graded
 admission, or whole-model compilation.
 
+For retained Core ATen recipes, `corpus derive` returns an explicit generated
+recipe, conformance spec and synthesis profile. Select all three in a fresh
+Phase 0 run before preparing the release. Their digest-bound selection verifies
+the finite retained-call packaging contract; execution coverage stays unverified.
+Older recipe-only runs must be re-derived and frozen again before sealing.
+
 For Phase 1, the catalog examples require a reviewed release and a newly generated
 bundle. Keep the authored definition unchanged and select both inputs explicitly:
 
