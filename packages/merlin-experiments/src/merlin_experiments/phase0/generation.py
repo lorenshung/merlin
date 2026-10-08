@@ -200,6 +200,33 @@ def _frozen_application_captures(root: Path, manifest: dict) -> dict[str, Path]:
     return captures
 
 
+def _frozen_performance_basis(root: Path, manifest: dict, target: str) -> tuple[dict | None, str | None]:
+    """Load the exported capture basis by its manifest-bound bytes, not an ambient path.
+
+    Evidence exported before the basis existed names no such member: that is reported as no
+    basis (the capture-shape sweeps then record why they were skipped), never as a basis.
+    A member the manifest does name must be present, direct and byte-identical.
+    """
+    member = "coverage/performance-basis.json"
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict):
+        raise ValueError("frozen evidence manifest has no artifact roster")
+    if member not in artifacts:
+        return None, None
+    identity = artifacts[member]
+    path = root / member
+    if not isinstance(identity, dict) or path.is_symlink() or not path.is_file():
+        raise ValueError("frozen performance basis is absent or indirect")
+    raw = path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != identity.get("sha256") or len(raw) != identity.get("size_bytes"):
+        raise ValueError("frozen performance basis differs from exported evidence")
+    basis = json.loads(raw)
+    if basis.get("schema") != "merlin.phase0.performance_basis.v1" or basis.get("target") != target:
+        raise ValueError("frozen performance basis has wrong schema or target")
+    return basis, digest
+
+
 def _with_selected_model_recipe(
     entry: dict,
     *,
@@ -459,6 +486,11 @@ def generate_target(
     selected_requirement = yaml.safe_load(requirement_bytes) if requirement_bytes is not None else None
     if selected_requirement is not None and not isinstance(selected_requirement, dict):
         raise ValueError("selected conformance requirement must be a mapping")
+    selected_performance_basis, performance_basis_sha256 = (
+        _frozen_performance_basis(artifact_root, evidence_manifest, hardware_target)
+        if evidence is not None and selected_requirement is not None
+        else (None, None)
+    )
     entries = expand_sweeps(
         profile,
         binding,
@@ -468,6 +500,8 @@ def generate_target(
         errors=_performance_errors,
         selected_requirement=selected_requirement,
         requirement_sha256=hashlib.sha256(requirement_bytes).hexdigest() if requirement_bytes is not None else None,
+        selected_performance_basis=selected_performance_basis,
+        performance_basis_sha256=performance_basis_sha256,
         **({"evidence": evidence} if evidence is not None else {}),
     )
     assert_no_claim_capsules(entries, held_out_models(te))
@@ -526,7 +560,7 @@ def generate_target(
         performance = entry.get("performance") or {}
         basis = performance.get("requirement_basis") or {}
         family = performance.get("family")
-        if basis.get("axis") == "scope.performance.required" and family:
+        if basis.get("axis") in {"scope.performance.required", "coverage.performance-basis.capture_shape"} and family:
             record = {
                 "family": family,
                 "claim": performance.get("claim"),

@@ -10,6 +10,7 @@ from merlin.perf.profile import TRAITS, derive_profile  # noqa: E402
 from merlin.runtime.backends.base import EXECUTION_CAPABILITIES, execution_capability_facts  # noqa: E402
 from merlin.targetgen import corpus_spec as CS  # noqa: E402
 
+from .capture_residency import _bound_capture_inventory, _capture_residency_sweep
 from .profiles import _DERIVED_AXES, _comparison_roles, _validate_performance_block
 from .provenance import _document_digest
 
@@ -242,7 +243,7 @@ def _memory_regime_axis(
             "parameters and cannot be separated by fewer than two points in the same regime"
         )
     ceiling = float(spec.get("spills_max_fraction_of_capacity", 2.0))
-    tiles = {}
+    extents = {}
     for axis in ("M", "N"):
         points = fixed.get(axis) or []
         if len(set(points)) != 1:
@@ -251,9 +252,9 @@ def _memory_regime_axis(
                 f"(got {points}); the band is a property of one parallel shape"
             )
         extent = int(points[0])
-        if extent % tile:
-            raise ValueError(f"{owner}: {axis}={extent} is not a whole number of {tile}-wide tiles")
-        tiles[axis] = extent // tile
+        if extent < 1:
+            raise ValueError(f"{owner}: {axis}={extent} is not a positive parallel extent")
+        extents[axis] = extent
     selected_store = {}
     if evidence is not None:
         from merlin.targetgen import address_space as AS
@@ -261,13 +262,17 @@ def _memory_regime_axis(
         space = AS.derive_address_space(target, facts=evidence.refreshed_facts)
         resolved_store = AS.operand_store(space, dtype=dtype)
         selected_store = {"store": resolved_store.store, "capacity": resolved_store.capacity_rows(dtype) or 0}
+    parallel = (
+        {"m_tiles": extents["M"] // tile, "n_tiles": extents["N"] // tile}
+        if extents["M"] % tile == 0 and extents["N"] % tile == 0
+        else {"m_extent": extents["M"], "n_extent": extents["N"]}
+    )
     record = MR.reduction_depth_regimes(
         target,
         regimes,
         tile_dim=tile,
         dtype=dtype,
-        m_tiles=tiles["M"],
-        n_tiles=tiles["N"],
+        **parallel,
         points_per_regime=points_per_regime,
         spills_max_fraction=ceiling,
         **selected_store,
@@ -733,6 +738,174 @@ def _scope_requirement_sweeps(
     return expanded
 
 
+def _capture_shape_sweeps(
+    sweeps: list[dict],
+    binding,
+    basis: dict | None,
+    basis_sha256: str | None,
+    requirement: dict | None,
+    requirement_sha256: str | None,
+    skipped: list | None,
+    evidence=None,
+) -> list[dict]:
+    """Add the smallest capture-shaped law cohorts preserving the original K grid.
+
+    This selects *shape relevance*, not source equivalence, compiler placement,
+    numerical safety, or achieved cycles. Every other independent contraction
+    remains visible in the generation audit, including off-grid shapes.
+    """
+    expanded = []
+    for sweep in sweeps:
+        pattern = sweep.get("capture_shape_pattern")
+        if isinstance(pattern, dict) and pattern.get("kind") == "observed_mn_for_memory_regime":
+            expanded.extend(
+                _capture_residency_sweep(
+                    sweep, binding, basis, basis_sha256, requirement, requirement_sha256, evidence, skipped
+                )
+            )
+            continue
+        expanded.append(sweep)
+        if pattern is None:
+            continue
+        family = str(sweep.get("id") or "")
+        if (
+            not isinstance(pattern, dict)
+            or pattern.get("kind") != "observed_mn_on_existing_k_grid"
+            or type(pattern.get("max_cohorts")) is not int
+            or pattern["max_cohorts"] < 1
+            or (sweep.get("base") or {}).get("op") != "matmul"
+        ):
+            raise ValueError(f"performance sweep {family}: unsupported capture-shape pattern")
+        if basis is None:
+            if skipped is not None:
+                skipped.append(
+                    {
+                        "family": f"{family}.capture_shape",
+                        "status": "skipped_inapplicable",
+                        "reason": "no frozen selected-capture performance basis",
+                    }
+                )
+            continue
+        inventory_digest = _bound_capture_inventory(
+            basis, basis_sha256, requirement, requirement_sha256, str(getattr(binding, "target", ""))
+        )
+        tile = int(getattr(binding, "tile_dim", 0) or 0)
+        if tile < 1 or sweep.get("axes", {}).get("K") != ["tile", "2*tile", "4*tile", "8*tile"]:
+            raise ValueError(f"performance sweep {family}: capture-shape law needs its unchanged four-point K grid")
+        k_grid = {tile, 2 * tile, 4 * tile, 8 * tile}
+        operand_dtype = getattr(binding, "operand_dtype", None)
+        from merlin.common import quant_formats
+
+        wanted_dtype = quant_formats.get(operand_dtype).name
+
+        def canonical_format(value: object) -> str | None:
+            try:
+                return quant_formats.get(value).name if isinstance(value, str) else None
+            except KeyError:
+                return None
+
+        eligible, remainder = [], []
+        for application, app in sorted((basis.get("applications") or {}).items()):
+            for index, row in enumerate(app.get("rows") or []):
+                if row.get("independent_compute_demand") is not True or row.get("semantic_family") != "contraction":
+                    continue
+                shape = row.get("contraction_shape") or {}
+                m, k, n = (shape.get(axis) for axis in ("M", "K", "N"))
+                total = (row.get("macs") or {}).get("total")
+                witness = {
+                    "application": application,
+                    "capture_sha256": app.get("capture_sha256"),
+                    "signature_index": index,
+                    "operation": row.get("operation"),
+                    "shape": {"M": m, "K": k, "N": n},
+                    "count": row.get("count"),
+                    "known_static_macs": total,
+                    "source_mlir_operation": row.get("mlir_operation"),
+                    "source_operand_format": row.get("operand_format"),
+                    "source_result_dtypes": copy.deepcopy(row.get("result_dtypes")),
+                    "source_shape_confidence": row.get("shape_confidence"),
+                }
+                if any(type(axis) is not int or axis < 1 for axis in (m, k, n)) or type(total) is not int or total < 1:
+                    reason = "no recognized exact static single-MAC shape"
+                elif k not in k_grid:
+                    reason = "observed K is outside the unchanged four-point law grid"
+                elif canonical_format(row.get("operand_format")) is None:
+                    reason = "captured operand format is not a known selected encoding"
+                elif canonical_format(row.get("operand_format")) != wanted_dtype:
+                    reason = "captured operand format differs from selected corpus binding"
+                else:
+                    reason = None
+                if reason is None:
+                    eligible.append(witness)
+                else:
+                    remainder.append({**witness, "reason": reason})
+        groups: dict[tuple[int, int], list[dict]] = {}
+        for witness in eligible:
+            shape = witness["shape"]
+            groups.setdefault((shape["M"], shape["N"]), []).append(witness)
+        ranked = sorted(
+            groups.items(),
+            key=lambda item: (-sum(row["known_static_macs"] for row in item[1]), item[0]),
+        )
+        if not ranked:
+            if skipped is not None:
+                skipped.append(
+                    {
+                        "family": f"{family}.capture_shape",
+                        "status": "skipped_inapplicable",
+                        "reason": "no selected contraction fits the unchanged law grid and dtype",
+                        "performance_basis_sha256": basis_sha256,
+                        "remainder": remainder,
+                    }
+                )
+            continue
+        max_cohorts = pattern["max_cohorts"]
+        for _, witnesses in ranked[max_cohorts:]:
+            remainder.extend(
+                {**row, "reason": f"deferred by shared-template max_cohorts={max_cohorts}"} for row in witnesses
+            )
+        remainder.sort(key=lambda row: (row["application"], row["signature_index"]))
+        if skipped is not None and remainder:
+            skipped.append(
+                {
+                    "family": f"{family}.capture_shape.remainder",
+                    "status": "skipped_inapplicable",
+                    "reason": "captured contraction demands excluded by the existing K grid, dtype, or declared cohort cap",
+                    "performance_basis_sha256": basis_sha256,
+                    "remainder": remainder,
+                }
+            )
+        for (m, n), witnesses in ranked[:max_cohorts]:
+            witnesses = sorted(witnesses, key=lambda row: (row["application"], row["signature_index"]))
+            identity = hashlib.sha256(f"{basis_sha256}:{m}:{n}".encode()).hexdigest()[:12]
+            derived = copy.deepcopy(sweep)
+            del derived["capture_shape_pattern"]
+            derived["id"] = f"{family}_capture_{identity}"
+            derived["axes"] = {"M": [m], "N": [n], "K": list(sweep["axes"]["K"])}
+            derived["base"]["performance"]["family"] = derived["id"]
+            derived["base"]["performance"]["requirement_basis"] = {
+                "axis": "coverage.performance-basis.capture_shape",
+                "sha256": requirement_sha256,
+                "performance_basis_sha256": basis_sha256,
+                "selected_inventory_sha256": inventory_digest,
+                "pattern_family": family,
+                "observed_mn": {"M": m, "N": n},
+                "observed_k": sorted({row["shape"]["K"] for row in witnesses}),
+                "source_witnesses": witnesses,
+                "source_match": "capture_shape_candidate",
+                "qualification": (
+                    "observed M/N and listed K points in the unchanged law grid; no source-body equivalence, "
+                    "compiler placement, source range safety, timing, or speedup is asserted"
+                ),
+            }
+            derived["source_reference"] = (
+                f"selected frozen performance basis {basis_sha256}: observed M={m}, N={n}, "
+                f"K={sorted({row['shape']['K'] for row in witnesses})}; shape-only diagnostic"
+            )
+            expanded.append(derived)
+    return expanded
+
+
 def expand_sweeps(
     profile: dict,
     binding,
@@ -745,6 +918,8 @@ def expand_sweeps(
     evidence=None,
     selected_requirement: dict | None = None,
     requirement_sha256: str | None = None,
+    selected_performance_basis: dict | None = None,
+    performance_basis_sha256: str | None = None,
 ) -> list[dict]:
     """Return the profile's capsule entries with any ``sweeps:`` block expanded.
 
@@ -782,6 +957,16 @@ def expand_sweeps(
         requirement_sha256,
         skipped,
         blocked_unimplemented,
+    )
+    sweeps = _capture_shape_sweeps(
+        sweeps,
+        binding,
+        selected_performance_basis,
+        performance_basis_sha256,
+        selected_requirement,
+        requirement_sha256,
+        skipped,
+        evidence,
     )
     if not sweeps:
         return entries
