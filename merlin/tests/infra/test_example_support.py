@@ -7,7 +7,9 @@ is covered the day its record lands.
 
 Three properties are held:
 
-* the vendored bytes are the recorded source (its git tree id, recomputed from the files on disk);
+* the vendored bytes are the recorded source (its git tree id, recomputed from the files on disk), except
+  the files ``SOURCE.yaml`` lists as normalized, and putting their companion blobs back reproduces the
+  companion's tree, so nothing else can differ;
 * with ``MERLIN_TARGET_PATH`` unset, each target's executable support is its vendored provider, and any
   explicit value -- the empty string included -- replaces that default;
 * the vendored trees stay experimenter-side: a sandbox that exposes the whole checkout, a bundle snapshot
@@ -63,15 +65,20 @@ def _tracked(root: Path) -> list[str]:
     return sorted(item.decode()[len(prefix) :] for item in out.split(b"\0") if item)
 
 
-def _git_tree_id(root: Path, members: list[str]) -> str:
-    """The git tree id ``members`` would have, computed from the bytes and modes on disk."""
+def _git_tree_id(root: Path, members: list[str], blobs: dict[str, str] | None = None) -> str:
+    """The git tree id ``members`` would have, computed from the bytes and modes on disk.
+
+    ``blobs`` substitutes a recorded blob id for a member's bytes (same mode): the companion's blob for a
+    file that was normalized when it was vendored.
+    """
+    blobs = blobs or {}
     tree: dict = {}
     for rel in members:
         node = tree
         *parents, leaf = rel.split("/")
         for part in parents:
             node = node.setdefault(part, {})
-        node[leaf] = root / rel
+        node[leaf] = (root / rel, blobs.get(rel))
 
     def digest(node: dict) -> bytes:
         entries = []
@@ -79,12 +86,14 @@ def _git_tree_id(root: Path, members: list[str]) -> str:
             if isinstance(value, dict):
                 entries.append((name + "/", b"40000", name, digest(value)))
                 continue
-            if value.is_symlink():
-                mode, data = b"120000", os.readlink(value).encode()
+            path, recorded = value
+            if path.is_symlink():
+                mode, data = b"120000", os.readlink(path).encode()
             else:
-                mode = b"100755" if value.stat().st_mode & 0o100 else b"100644"
-                data = value.read_bytes()
-            entries.append((name, mode, name, hashlib.sha1(b"blob %d\0" % len(data) + data).digest()))
+                mode = b"100755" if path.stat().st_mode & 0o100 else b"100644"
+                data = path.read_bytes()
+            blob = bytes.fromhex(recorded) if recorded else hashlib.sha1(b"blob %d\0" % len(data) + data).digest()
+            entries.append((name, mode, name, blob))
         entries.sort(key=lambda entry: entry[0].encode())
         body = b"".join(mode + b" " + name.encode() + b"\0" + sha for _, mode, name, sha in entries)
         return hashlib.sha1(b"tree %d\0" % len(body) + body).digest()
@@ -105,7 +114,13 @@ def test_vendored_support_is_its_recorded_source(record, doc):
     root = _support_root(record, doc)
     members = _tracked(root)
     assert len(members) == doc["file_count"]
-    assert _git_tree_id(root, members) == doc["source"]["tree"], "vendored bytes differ from the recorded tree"
+    assert _git_tree_id(root, members) == doc["vendored_tree"], "vendored bytes differ from the recorded tree"
+    normalized = {entry["path"]: entry["companion_blob"] for entry in doc["normalized"]}
+    assert set(normalized) <= set(members), "a normalized file is not part of the vendored tree"
+    assert all(entry["change"].strip() for entry in doc["normalized"]), "a normalization states no change"
+    # Only the listed files may differ: with their companion blobs back, the tree is the companion's.
+    assert _git_tree_id(root, members, normalized) == doc["source"]["tree"], "an unlisted file differs"
+    assert (doc["vendored_tree"] == doc["source"]["tree"]) == (not normalized)
     provider = read_provider(root)
     assert (provider.id, provider.target) == (doc["provider_id"], doc["target"])
     records = doc["records"]
@@ -126,9 +141,10 @@ def test_the_migration_manifest_agrees_with_every_source_record():
         entry = listed[path.relative_to(repo_root()).as_posix()]
         vendored = entry["vendored"]
         assert entry["target"] == doc["target"]
-        assert (vendored["commit"], vendored["tree"], vendored["file_count"]) == (
+        assert (vendored["commit"], vendored["tree"], vendored["vendored_tree"], vendored["file_count"]) == (
             doc["source"]["commit"],
             doc["source"]["tree"],
+            doc["vendored_tree"],
             doc["file_count"],
         )
         assert vendored.get("merge_parents") == doc["source"].get("merge_parents")

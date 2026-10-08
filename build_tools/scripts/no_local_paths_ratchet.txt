@@ -25,13 +25,6 @@ merlin/experiments/cpu_host_compiler_v0/experiment.yaml
 examples/gemmini_universal/target/contracts/abi/abi.yaml
 examples/gemmini_universal/target/contracts/target_contract.yaml
 merlin/tests/data/torchao_affine/PROVENANCE.json
-# growth-accepted: vendored support migration records (2026-10-07). Each provenance.json names the
-# Merlin source file every support file was copied from; examples/<target>/SOURCE.yaml pins the
-# whole tree byte-identical to its companion commit, so editing the record would break that pin.
-# The debt is relocated from the companion repositories, not added.
-examples/atlas/support/provenance.json
-examples/gemmini/support/provenance.json
-examples/rvv/support/provenance.json
 
 # -- 2. retained machine-readable evidence ----------------------------------------------------
 out/artifacts/capsule-bench/gemmini/generalization_arr.json
