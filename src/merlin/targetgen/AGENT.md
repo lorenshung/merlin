@@ -13,6 +13,13 @@ launching, capsule grading, golden generation, sandboxing and certification. The
 
 ## What belongs here
 
+- `artifact_bundle.py` supplies explicit profile-bound structural checks for a
+  draft artifact composition. File identities and logical-buffer ordering grant
+  no artifact ABI, physical alias, capability, synchronization or execution
+  proof. ABI `0.2` has no normal executor/certification adapter. Default package
+  invocation refuses that version; typed profile permission admits structural
+  emission only. ABI `0.1` and its existing text-entry aliases remain unchanged.
+
 - `cli.py` / `pipeline.py` — the deterministic, LLM-free entry points.
 - `ingest/` — record inputs as a SourceManifest (no crawling, no vendoring).
 - `evidence/` — deterministic file discovery + keyword concept detection.

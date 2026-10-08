@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+
 class ContractViolation(ValueError):
     """A contract artifact failed schema validation (fail-closed)."""
 
@@ -30,7 +31,23 @@ def load_schema(name: str, *, contract: str | Path | None = None) -> dict[str, A
     path = contract_dir(contract) / "schemas" / f"{name}.schema.json"
     if not path.is_file():
         raise FileNotFoundError(f"contract schema not found: {path}")
-    return json.loads(path.read_text(encoding="utf-8"))
+    schema = json.loads(path.read_text(encoding="utf-8"))
+    if name == "manifest" and "common" in schema.get("$defs", {}):
+        # Preserve the historical flat schema inspection API as well as v0.1
+        # validation. The file owns one common definition shared with v0.2.
+        common = schema["$defs"]["common"]
+        common["properties"]["commands"]["required"] = schema["allOf"][1]["properties"]["commands"]["required"]
+        return {key: value for key, value in schema.items() if key not in ("$defs", "allOf")} | common
+    if name == "manifest_v2":
+        # The published schema inherits the v0.1 common definition. Resolve that
+        # one declared local reference here, without network schema discovery.
+        reference = {"$ref": "manifest.schema.json#/$defs/common"}
+        parents = schema.get("allOf", [])
+        if parents.count(reference) != 1:
+            raise ContractViolation("manifest_v2 must inherit the shared manifest definition")
+        inherited = json.loads((path.parent / "manifest.schema.json").read_text(encoding="utf-8"))
+        parents[parents.index(reference)] = inherited["$defs"]["common"]
+    return schema
 
 
 def validate(obj: Any, name: str, *, contract: str | Path | None = None) -> None:
@@ -146,7 +163,13 @@ def validate_command_buffer(cb: Any, *, contract: str | Path | None = None) -> N
 
 
 def validate_manifest(man: Any, *, contract: str | Path | None = None) -> None:
-    validate(man, "manifest", contract=contract)
+    version = man.get("abi_version", "0.1") if isinstance(man, dict) else "0.1"
+    if version == "0.1":
+        validate(man, "manifest", contract=contract)
+    elif version == "0.2":
+        validate(man, "manifest_v2", contract=contract)
+    else:
+        raise ContractViolation(f"unsupported experiment ABI version {version!r}")
 
 
 # --- {target}-parameterized generic contracts --------------------------------------------------------
