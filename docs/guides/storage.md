@@ -17,7 +17,9 @@ code_refs: [src/merlin/common/content_store.py,
             merlin/contract/storage.yaml,
             .claude/hooks/guard_artifact_writes.py,
             packages/merlin-experiments/src/merlin/targetgen/sandbox/bwrap.py,
-            merlin/tests/conftest.py]
+            merlin/tests/conftest.py,
+            build_tools/scripts/provision_worktree.py,
+            build_tools/scripts/worktree_provisioning.yaml]
 ---
 
 # Disk under `out/` — why it grows and what is safe to reclaim
@@ -205,6 +207,15 @@ live process holds open:
   its size (`du`, without following links), `locked`/`prunable`, and the number of live processes
   holding it. It runs `git --no-optional-locks`, so surveying another session's tree never refreshes
   its index.
+
+A new worktree carries tracked files only. `python build_tools/scripts/provision_worktree.py <worktree>
+[--from CHECKOUT] [--verify]` links in the gitignored inputs it needs before a run can answer truthfully
+-- `.env`, `.venv`, the LLVM install and build, the capsule answer keys, model weights and hidden
+cohorts (hard links, since their loaders refuse a symlink), the derived RTL facts cache and the pinned
+RTL engines -- from the roster in `build_tools/scripts/worktree_provisioning.yaml`, where each entry
+states the symptom its absence produces. Anything it cannot provide is named and the tool exits
+non-zero, and it reports which checkout's `merlin` the worktree's python imports, with the
+`PYTHONPATH` that pins its own `src/`.
 
 The open-file check is `lsof` (one listing of this user's processes, queried by path prefix), or
 `fuser` over the walked entries when `lsof` is absent. With neither installed the operation is
