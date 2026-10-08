@@ -482,7 +482,17 @@ def test_installed_grader_is_unreadable_in_real_bwrap(tmp_path, isolated_policy)
     if probe.returncode:
         pytest.skip(f"bubblewrap unavailable on this host: {probe.stderr.strip()}")
     grader = _write(tmp_path, ".venv/lib/python3.12/site-packages/merlin/targetgen/capsule_grade.py", "PRIVATE\n")
-    read = ["--", sys.executable, "-c", "import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_text())", str(grader)]
+    # Native bwrap overlays an empty file; the operator's supported bwrap shim
+    # may deny open instead. Both prevent reading bytes. Other subprocess or
+    # interpreter errors still fail check=True, and the exposed control must read.
+    read = [
+        "--",
+        sys.executable,
+        "-c",
+        "import pathlib,sys\ntry: print(pathlib.Path(sys.argv[1]).read_text())\n"
+        "except PermissionError: print('READ_DENIED')",
+        str(grader),
+    ]
     exposed = subprocess.run([*base, *read], capture_output=True, text=True, check=True)
     assert exposed.stdout.strip() == "PRIVATE"  # negative control: the actual bind exposes wheel bytes
     protected = subprocess.run(
@@ -491,7 +501,7 @@ def test_installed_grader_is_unreadable_in_real_bwrap(tmp_path, isolated_policy)
         text=True,
         check=True,
     )
-    assert protected.stdout.strip() == ""
+    assert protected.stdout.strip() in {"", "READ_DENIED"}
 
 
 def test_non_filesystem_active_namespace_is_refused(tmp_path, monkeypatch):
