@@ -5,7 +5,7 @@ status: current
 owner: runtime
 last_verified: 2026-10-06
 related: [phase0_specification, target_resolution, reproducing_whole_model_on_rtl]
-code_refs: [src/merlin/targetgen/gsim_emulator.py, src/merlin/targetgen/program_engine_policy.py, src/merlin/targetgen/program_oracle.py]
+code_refs: [src/merlin/targetgen/gsim_emulator.py, src/merlin/targetgen/program_engine_policy.py, src/merlin/targetgen/program_oracle.py, src/merlin/targetgen/mem_perturb.py, src/merlin/targetgen/load_order.py]
 ---
 
 # Selecting and checking a simulator
@@ -161,3 +161,39 @@ Persist producer-generated inputs, intermediate MLIR/assembly, executable,
 console, output tensors and receipts under a new run/artifact directory. Do not
 hand-edit the simulator's source, a frozen compiler payload, or existing results
 to make a qualification pass.
+
+## Check memory-order sensitivity (opt-in)
+
+Every engine above answers memory in issue order: the chipyard RTL simulators bind the SoC's AXI port
+to testchipip's `mm_magic_t`, which returns each read the cycle after it was accepted. A program that is
+correct only while two independent requests complete in issue order therefore passes L2 and L3 and fails
+on a board whose memory controller reorders them. Measured: an overwrite-then-accumulate residual add
+whose two accumulator loads were ordered by issue alone passed both tiers and failed on FireSim; its
+fenced rebuild passed on the same board.
+
+The memory-order tier re-runs a certified program on a variant of the cert engine whose memory model
+completes responses with DIFFERENT AXI ids out of order (same-id order, burst contiguity and the stock
+data sampling are kept), each after a seeded latency:
+
+1. Build the variant from the reference build's own objects, never writing to them:
+   `merlin.targetgen.mem_perturb.build_verilator_variant(obj_dir, out_dir, makefile=..., base_digest=...)`.
+   The memory harness is found by content, patched to construct the model in
+   `merlin/contract/external/sim_memory/`, and relinked into `out_dir`. A control relink of the
+   unmodified objects is compared with the declared reference simulator, and the receipt beside the
+   binary records that comparison and the preload invocation (derived by content) that makes the
+   program's operands actually reach the memory model.
+2. Pin it in `merlin/contract/hardware_pins.yaml` under the role `verilator_binary_mem_perturb`, so a
+   lookup for the reference `verilator_binary` can never resolve to it.
+3. Grade with `MERLIN_L3_ORDER_SEEDS=<n>`. Unset or `0`, the tier is off and a grade is byte-identical to
+   one without it. On, `merlin.targetgen.load_order` checks the decoded trace after a passing cert tier:
+   two inbound transfers into overlapping accumulator rows with no barrier between them, or anything it
+   cannot resolve, trigger a sweep (in order plus `n` seeds dealt over two latency profiles, or the one
+   profile the `MERLIN_L3_ORDER_*` knobs name). A wrong answer under any seed fails the cert tier on the
+   `<tier>_order` plane, naming the seeds that reproduce it.
+
+The result carries an `order_check` record whose `status` is `static_clear`, `order_stable`,
+`order_sensitive`, `unjudged`, `unavailable` (no verified engine or no executable), `not_applicable`
+(the target derives no accumulator layout) or `error`. `order_stable` is evidence, not proof: the seeds
+sample the schedule space, they do not cover it. `order_sensitive` is a statement about the program
+under the ordering freedom AXI4 grants, not a claim that a particular chip reorders those requests.
+

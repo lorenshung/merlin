@@ -661,6 +661,37 @@ def _cb_with_leaf_values(cb: dict) -> dict:
 #    eliminate and still may never certify.
 
 
+def _order_after_certificate(target, cfg, tiers, trace, generated, *, gold, policy, gsource):
+    """The opt-in memory-order tier (:mod:`merlin.targetgen.load_order`), judged by this capsule's golden.
+
+    A reordered run is held to exactly the standard the certificate was: the capsule's own comparison
+    under its own policy, read through the target backend's console reader when it has one."""
+    from merlin.targetgen import load_order as _LO
+
+    from . import elf_lanes as _EL
+
+    def _parse(text):
+        try:
+            reader = getattr(_backends_mod.get_backend(target), "parse_output", None)
+        except KeyError:
+            reader = None
+        if callable(reader):
+            return reader(text)[0]
+        return _backends_mod.parse_console(text, strip_warnings=True, tolerant_metric=True)[0]
+
+    def _compare(outputs):
+        return CG.compare(gold, outputs, policy, golden_source=gsource)["status"] == "pass"
+
+    return _LO.after_certificate(
+        target=target,
+        tiers=tiers,
+        rtl_tiers=cfg.rtl_tiers,
+        trace=trace,
+        elf=Path(generated) / _EL.PACKAGE_ELF_NAME,
+        judge=_LO.console_judge(_compare, _parse),
+    )
+
+
 def _clear_stale_executable(generated) -> None:
     """Remove an executable left in this run directory by an EARLIER grade.
 
@@ -1326,7 +1357,10 @@ def _resolve_oracle_adapters(target: str) -> dict[str, Callable]:
 
 
 def qa_loop_adapters(
-    target: str, sim_via: str | None = None, *, declared_tiers: set[str] | None = None,
+    target: str,
+    sim_via: str | None = None,
+    *,
+    declared_tiers: set[str] | None = None,
     readback_policy=None,
 ) -> dict[str, Callable]:
     """The FAST per-round QA-loop oracle set for ``target`` — resolved from :func:`oracle_adapters`, never
@@ -4962,6 +4996,7 @@ def run_capsule(
     # would be indistinguishable from one that needs no pricing. See the finalize call below.
     cb: dict | None = None
     decoded_trace: dict | None = None  # kept for the advisory divergence localizer (D2)
+    order_check: dict | None = None  # the opt-in memory-order record, present only when that tier ran
     # WHICH TIERS COULD HAVE EXECUTED THIS PROGRAM, bound out here for the same reason `decoded_trace`
     # is: the finalize call below reads it to decide whether a required lane has execution evidence, and
     # a run that never reached the tier ladder must read as "nothing ran", not raise NameError.
@@ -6120,6 +6155,17 @@ def run_capsule(
                     raise _cf
 
         _stamp_cache_refusals()
+        if _first_cert_failure is None:
+            # MEMORY ORDER (opt-in): a certificate earned on an in-order memory model says nothing about a
+            # program whose answer depends on two loads completing in issue order.
+            _order = _order_after_certificate(eff_target, cfg, tiers, decoded_trace, paths.generated,
+                                              gold=gold, policy=policy, gsource=gsource)  # fmt: skip
+            if _order is not None:
+                order_check = _order.record
+                if _order.failed:
+                    _cert_tier = order_check["cert_tier"]
+                    tiers[_cert_tier] = dataclasses.replace(tiers[_cert_tier], status="fail", reason=_order.reason)
+                    _first_cert_failure = CertFailure(f"{_cert_tier}_order", _cat("FUNCTIONAL_MISMATCH"), _order.reason)
         if _first_cert_failure is not None:
             raise _first_cert_failure
 
@@ -6239,6 +6285,7 @@ def run_capsule(
             "command_buffer_artifact": _cb_artifact,
             "movement_volume": _movement_volume,
             **_lane_extra,
+            **({"order_check": order_check} if order_check is not None else {}),
         },
     )
 
