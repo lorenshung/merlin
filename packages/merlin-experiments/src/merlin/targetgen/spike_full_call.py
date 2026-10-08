@@ -91,7 +91,7 @@ def full_call_adapter(
                     if prepare is not None:
                         prepare(bundle, target=target, facts=facts)
                     declared = capsule or {}
-                    if declared.get("scored", True):
+                    if declared.get("scored", True) and declared.get("lane_expectation") not in {"host", "host-guard"}:
                         if package_dir is None:
                             raise ValueError("source-bound execution requires the submitted package")
                         routing, reason = routing_for_bundle(bundle, target, Path(package_dir), provider, facts)

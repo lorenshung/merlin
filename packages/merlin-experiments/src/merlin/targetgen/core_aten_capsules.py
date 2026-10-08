@@ -339,8 +339,18 @@ def run_capsule(capsule, package_dir, *, paths, config, adapters, pkg, contract,
             row = next(iter(verdict["cases"].values()))
             passed = row["status"] == "pass"
             if capsule.get("lane_expectation") == "device":
-                passed = passed and result["lane"] == "device" and result["executed_instructions"] > 0
-            elif capsule.get("lane_expectation") == "host-guard":
+                from merlin.targetgen.core_aten_device import verify_execution_evidence
+
+                evidence = run.get("execution_evidence") or {}
+                passed = (
+                    passed
+                    and result["lane"] == "device"
+                    and result["executed_instructions"] > 0
+                    and evidence.get("target") == config.target
+                    and evidence.get("executed_instructions") == result["executed_instructions"]
+                    and verify_execution_evidence(evidence)
+                )
+            elif capsule.get("lane_expectation") in {"host", "host-guard"}:
                 passed = passed and result["lane"] == "host" and result["executed_instructions"] == 0
             result["tiers"][tier] = {
                 "status": "pass" if passed else "fail",

@@ -305,3 +305,89 @@ def observe_contractions(src: "str | Path | Any") -> "list[tuple[Any, Contractio
 def contraction_shapes(src: "str | Path | Any") -> list[ContractionShape]:
     """Every contraction in ``src`` (a path, MLIR text, or a parsed module), shapes included."""
     return [cs for _, cs in observe_contractions(src)]
+
+
+def observe_contraction_demands(module) -> list[tuple[Any, ContractionShape]]:
+    """Include scalar product reductions whose operands need host materialization.
+
+    This is a hardware demand inventory, not the dense matrix rewrite's legality
+    proof. A captured gather/subtract/square/sum is still a dot product demand:
+    its scalar operands can be materialized before a batched matrix contraction.
+    Existing dense offload consumers keep using ``observe_contractions``; a
+    backend must separately prove and implement the materialization and binding.
+    """
+    from xdsl.dialects import arith
+    from xdsl.dialects.linalg.ops import GenericOp, IndexOp, YieldOp
+    from xdsl.dialects.tensor import ExtractOp
+
+    from ..common import mlir_query as mq
+
+    found = observe_contractions(module)
+    seen = {op for op, _ in found}
+    for op in mq.walk(module):
+        if op in seen or not isinstance(op, GenericOp):
+            continue
+        its = _iterator_types(op)
+        if not its or its[-1] != "reduction" or its.count("reduction") != 1:
+            continue
+        n_par = len(its) - 1
+        block = op.body.block
+        if len(op.outputs) != 1 or len(op.results) != 1 or not block.args:
+            continue
+        terminator = block.last_op
+        if not isinstance(terminator, YieldOp) or len(terminator.operands) != 1:
+            continue
+        add = terminator.operands[0].owner
+        if not isinstance(add, (arith.AddfOp, arith.AddiOp)) or add.parent_block() is not block:
+            continue
+        accumulator = block.args[-1]
+        if sum(v is accumulator for v in add.operands) != 1 or len(tuple(accumulator.uses)) != 1:
+            continue
+        product = next(v for v in add.operands if v is not accumulator).owner
+        if not isinstance(product, (arith.MulfOp, arith.MuliOp)) or product.parent_block() is not block:
+            continue
+        if any(v is accumulator for child in block.ops if child is not add for v in child.operands):
+            continue
+        # Product leaves may be gathered/computed, but not nested effects or calls.
+        allowed = (
+            arith.AddfOp,
+            arith.AddiOp,
+            arith.SubfOp,
+            arith.SubiOp,
+            arith.MulfOp,
+            arith.MuliOp,
+            arith.ConstantOp,
+            arith.IndexCastOp,
+            IndexOp,
+            YieldOp,
+            ExtractOp,
+        )
+        if any(not isinstance(child, allowed) for child in block.ops):
+            continue
+        out = _shaped(op.results[0])
+        maps = indexing_maps(op)
+        if out is None or len(out[0]) != n_par or maps is None or len(maps) != len(op.operands):
+            continue
+        if [_dim_position(e) for e in maps[-1]] != list(range(n_par)):
+            continue
+        extents = set()
+        for value, expressions in zip(op.operands, maps, strict=True):
+            shaped = _shaped(value)
+            if shaped is not None:
+                for extent, expression in zip(shaped[0], expressions, strict=True):
+                    if _dim_position(expression) == n_par:
+                        extents.add(extent)
+        if len(extents) != 1:
+            continue
+        dtypes = tuple(str(v.type) for v in product.operands) + (out[1],)
+        if len(set(dtypes)) != 1:
+            continue
+        found.append(
+            (
+                op,
+                ContractionShape(
+                    op="product_reduction", parallel=tuple(out[0]), reduction=(extents.pop(),), dtypes=dtypes
+                ),
+            )
+        )
+    return found

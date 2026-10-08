@@ -94,3 +94,10 @@ def test_device_lane_capsule_still_refuses_without_routing(tmp_path, monkeypatch
         bundle=tmp_path, llvm_mlir="", package_dir=tmp_path, capsule={"scored": True, "lane_expectation": "device"}
     )
     assert "did not route" in result["execution_error"] and "device" not in seen
+
+
+def test_scored_host_capsule_skips_device_routing_even_if_backend_covers_it(tmp_path, monkeypatch):
+    adapter, seen = _provider_adapter(tmp_path, monkeypatch, object())
+    result = adapter.run_full_call(bundle=tmp_path, llvm_mlir="", capsule={"scored": True, "lane_expectation": "host"})
+    assert seen["device"] is None
+    assert result["lane"] == "host" and result["execution_error"] == "ValueError: stop after routing"

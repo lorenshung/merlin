@@ -194,11 +194,50 @@ def test_source_bundle_scoring_requires_device_evidence_and_reports_guards(packa
     adapter = SimpleNamespace(run_full_call=execute, compiles_source_bundle=True)
     assert C.run_capsule(capsule, tmp_path, adapters={"L2": adapter}, **options)["status"] == "fail"
     observation["executed_instructions"] = 3
+    # A bare counter cannot establish retired instruction evidence.
+    assert C.run_capsule(capsule, tmp_path, adapters={"L2": adapter}, **options)["status"] == "fail"
+    observation["execution_evidence"] = {"target": "test_target", "executed_instructions": 3}
+    monkeypatch.setattr(
+        "merlin.targetgen.core_aten_device.verify_execution_evidence",
+        lambda e: e == {"target": "test_target", "executed_instructions": 3},
+    )
     result = C.run_capsule(capsule, tmp_path, adapters={"L2": adapter}, **options)
     assert result["status"] == "pass"
     assert (result["lane"], result["executed_instructions"], result["cohort"]) == ("device", 3, "public")
+    observation["execution_evidence"]["target"] = "foreign_target"
+    assert C.run_capsule(capsule, tmp_path, adapters={"L2": adapter}, **options)["status"] == "fail"
+    observation["execution_evidence"].update(target="test_target", executed_instructions=2)
+    assert C.run_capsule(capsule, tmp_path, adapters={"L2": adapter}, **options)["status"] == "fail"
+    observation["execution_evidence"]["executed_instructions"] = 3
     capsule.update(cohort="host_guard", scored=False, lane_expectation="host-guard")
     assert C.run_capsule(capsule, tmp_path, adapters={"L2": adapter}, **options)["status"] == "fail"
     observation.update(lane="host", executed_instructions=0)
     result = C.run_capsule(capsule, tmp_path, adapters={"L2": adapter}, **options)
     assert result["status"] == "pass" and result["cohort"] == "guard" and result["scored"] is False
+
+
+def test_scored_host_expectation_enforces_host_lane(packaged, tmp_path):
+    capsule, raw, readback, _, _ = packaged
+    capsule.update(cohort="public", scored=True, lane_expectation="host")
+    observation = dict(
+        output_bytes=raw,
+        semantic_readback=readback,
+        provenance={"scope": "test"},
+        engine="test",
+        derived_from_rtl=False,
+        lane="device",
+        executed_instructions=1,
+    )
+    adapter = SimpleNamespace(run_full_call=lambda **kw: observation, compiles_source_bundle=True)
+    options = dict(
+        paths=SimpleNamespace(run_path=tmp_path / "runs"),
+        config=SimpleNamespace(target="test_target", fourth_output_name="lowered.mlir", rtl_tiers={"L3"}),
+        pkg=None,
+        contract=None,
+        timeout=1,
+        no_oracle=False,
+    )
+    assert C.run_capsule(capsule, tmp_path, adapters={"L2": adapter}, **options)["status"] == "fail"
+    observation.update(lane="host", executed_instructions=0)
+    result = C.run_capsule(capsule, tmp_path, adapters={"L2": adapter}, **options)
+    assert result["status"] == "pass" and result["scored"] is True

@@ -228,7 +228,7 @@ def test_guardless_corpus_with_any_lane_expectation(tmp_path, monkeypatch):
 def test_lane_expectation_is_closed_and_never_set_on_guards(tmp_path):
     recipe = fixture_recipe(tmp_path)
     document = yaml.safe_load(recipe.read_text())
-    document["core_aten"]["cohorts"]["public"][0]["lane_expectation"] = "host"
+    document["core_aten"]["cohorts"]["public"][0]["lane_expectation"] = "invalid"
     recipe.write_text(yaml.safe_dump(document))
     with pytest.raises(ValueError, match="lane_expectation"):
         stage.derive(recipe, tmp_path / "derive", target="synthetic", descriptor=tmp_path / "descriptor.yaml")
@@ -286,3 +286,91 @@ def test_selected_synthesis_refuses_changed_selection(tmp_path, changed):
             recipe=derived["recipe"],
             descriptor=descriptor,
         )
+
+
+def placement_recipe(tmp_path):
+    recipe = fixture_recipe(tmp_path)
+    facts = tmp_path / "facts.json"
+    facts.write_text(
+        json.dumps(
+            {
+                "facts": {
+                    "target": "synthetic",
+                    "datapaths": [{"name": "input", "dtype": "f32"}, {"name": "accumulator", "dtype": "f32"}],
+                }
+            }
+        )
+    )
+    document = yaml.safe_load(recipe.read_text())
+    document["core_aten"]["placement"] = {"policy": "supported_contractions_v1", "rtl_facts": str(facts)}
+    recipe.write_text(yaml.safe_dump(document))
+    for role in stage.COHORTS:
+        source = next((tmp_path / f"{role}-captures").glob("*/capsule.linalg.mlir"))
+        source.write_text("builtin.module { func.func @forward() { func.return } }")
+    source = next((tmp_path / "public-captures").glob("*/capsule.linalg.mlir"))
+    source.write_text("""builtin.module {
+      func.func @forward(%a: tensor<2x3xf32>, %b: tensor<3x4xf32>) -> tensor<2x4xf32> {
+        %z = arith.constant 0.0 : f32
+        %init = tensor.splat %z : tensor<2x4xf32>
+        %r = linalg.matmul ins(%a, %b : tensor<2x3xf32>, tensor<3x4xf32>)
+             outs(%init : tensor<2x4xf32>) -> tensor<2x4xf32>
+        func.return %r : tensor<2x4xf32>
+      }
+    }""")
+    return recipe, facts
+
+
+def test_derived_placement_uses_ir_and_facts_not_overload(tmp_path, monkeypatch):
+    recipe, facts = placement_recipe(tmp_path)
+    # All fixture overloads say aten.add.Tensor, but the public IR contains a matmul.
+    batches, paths = stage.selection(recipe, target="synthetic")
+    assert {b["cohort"]: b["lane_expectation"] for b in batches} == {
+        "public": "device",
+        "hidden": "host",
+        "host_guard": "device",
+    }
+    assert paths[str(facts)] == hashlib.sha256(facts.read_bytes()).hexdigest()
+    derived = stage.derive(recipe, tmp_path / "derived", target="synthetic", descriptor=tmp_path / "descriptor.yaml")
+    install_writer(monkeypatch)
+    output = tmp_path / "run/phase0/capsules"
+    stage.generate(Path(derived["recipe"]), output, target="synthetic")
+    host = yaml.safe_load((output / "hidden/hidden/capsule.yaml").read_bytes())
+    assert host["lane_expectation"] == "host" and host["scored"] is True
+    assert host["lanes"] == {"forbid": ["on_mesh"]}
+    assert (output / "hardware/effective-views/loaded-facts.json").exists()
+    facts.write_text(
+        json.dumps(
+            {
+                "facts": {
+                    "target": "synthetic",
+                    "datapaths": [{"name": "input", "dtype": "i8"}, {"name": "accumulator", "dtype": "i32"}],
+                }
+            }
+        )
+    )
+    assert stage.selection(recipe)[0][0]["lane_expectation"] == "host"
+    with pytest.raises(ValueError, match="selection changed"):
+        stage.generate(Path(derived["recipe"]), tmp_path / "other/phase0/capsules", target="synthetic")
+
+
+def test_derived_placement_refuses_wrong_target_and_unparseable_ir(tmp_path):
+    recipe, _ = placement_recipe(tmp_path)
+    with pytest.raises(ValueError, match="different"):
+        stage.selection(recipe, target="other")
+    next((tmp_path / "public-captures").glob("*/capsule.linalg.mlir")).write_text("broken IR")
+    with pytest.raises(Exception):
+        stage.selection(recipe, target="synthetic")
+
+
+def test_derived_placement_refuses_authored_lanes_and_mismatched_exports(tmp_path):
+    recipe, _ = placement_recipe(tmp_path)
+    derived = stage.derive(recipe, tmp_path / "derived", target="synthetic", descriptor=tmp_path / "descriptor.yaml")
+    other = tmp_path / "other.json"
+    other.write_text("{}")
+    with pytest.raises(ValueError, match="differ from placement"):
+        stage.generate(Path(derived["recipe"]), tmp_path / "run/phase0/capsules", target="synthetic", rtl_facts=other)
+    doc = yaml.safe_load(recipe.read_text())
+    doc["core_aten"]["cohorts"]["public"][0]["lane_expectation"] = "host"
+    recipe.write_text(yaml.safe_dump(doc))
+    with pytest.raises(ValueError, match="cannot mix"):
+        stage.selection(recipe)

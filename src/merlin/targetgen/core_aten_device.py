@@ -30,6 +30,9 @@ def selected_facts(target: str, explicit: Path | None):
     """Pin nested consumers and lowering subprocesses to the same selected facts file."""
     path = ensure_facts(target, explicit=explicit)
     document = load_facts(target, explicit=path)
+    declared = document.get("facts", {}).get("target", document.get("target"))
+    if declared is not None and declared != target:
+        raise ValueError("selected facts name a different target")
     previous = os.environ.get("MERLIN_RTL_FACTS")
     os.environ["MERLIN_RTL_FACTS"] = str(path.resolve())
     try:
@@ -46,10 +49,10 @@ def routing_for_bundle(directory: Path, target: str, package: Path, provider, fa
     """Report structural refusals, then ask the provider to bind supported source operations."""
     from merlin.frontends.linalg_mlir import parse_mlir_file
     from merlin.kernels.shapes import observe_contractions, zero_initialised
-    from merlin.system.offload import device_contraction_ranks, device_dtype_triples, why_not
+    from merlin.system.offload import device_contraction_ranks, facts_dtype_triples, why_not
 
     module = parse_mlir_file(directory / "model.mlir")
-    triples, ranks = device_dtype_triples(target), device_contraction_ranks(target)
+    triples, ranks = facts_dtype_triples(facts), device_contraction_ranks(target)
     eligible, declined = [], []
     for op, shape in observe_contractions(module):
         reason = why_not(shape, triples=triples, ranks=ranks)
@@ -69,6 +72,32 @@ def routing_for_bundle(directory: Path, target: str, package: Path, provider, fa
     if routing.select is not None or (routing.catalog_builder is None and routing.exact_selection is None):
         raise ValueError("batch device mode requires source-bound catalog or exact selection")
     return routing, "provider selected source-bound contractions"
+
+
+def submitted_catalog_routing(directory, *, target, package, facts, eligible):
+    """Bind a submitted catalog to the precision of the selected facts and source."""
+    from merlin.llvmlower import toolchain
+    from merlin.llvmlower.device_build import DeviceRouting
+    from merlin.system.offload import facts_dtype_triples
+
+    triples = {tuple(shape.dtypes) for _, shape in eligible}
+    if len(triples) != 1 or not triples.issubset(set(facts_dtype_triples(facts))):
+        raise ValueError("ambiguous or underivable device datapath")
+    operand, weight, accum = next(iter(triples))
+    if operand != weight:
+        raise ValueError("catalog requires identical operand storage types")
+    backend = load_module(package, "mlir_oot.golden_device_catalog", package_name="core_aten_backend")
+    source = (Path(directory) / "model.mlir").read_text()
+    _, inventory = backend.build_catalog(source)
+    if not inventory["covered_contractions"]:
+        return None
+    return DeviceRouting(
+        device=target,
+        package_dir=package,
+        operand_dtype=operand,
+        accum_dtype=accum,
+        catalog_builder=backend.merlin_builder(toolchain.llvm_install() / "bin"),
+    )
 
 
 def executed_device_instructions(trace: Path, elf: Path, target: str) -> dict[str, Any]:

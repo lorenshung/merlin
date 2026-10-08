@@ -21,7 +21,24 @@ COHORTS = ("public", "hidden", "host_guard")
 REQUIRED_COHORTS = ("public", "hidden")
 #: ``device`` requires retired accelerator instructions; ``any`` lets the grader route to the device when the
 #: submission covers the call and otherwise run the host lane, recording the lane per capsule.
-LANE_EXPECTATIONS = ("device", "any")
+LANE_EXPECTATIONS = ("device", "any", "host")
+
+
+def contraction_lane(source: Path, facts: dict) -> str:
+    """Place a captured call by typed contraction semantics and selected datapaths."""
+    from merlin.frontends.linalg_mlir import parse_mlir_file
+    from merlin.kernels.shapes import observe_contraction_demands
+    from merlin.system.offload import facts_dtype_triples, why_not
+
+    triples = facts_dtype_triples(facts)
+    return (
+        "device"
+        if any(
+            why_not(shape, triples=triples, ranks=None) is None
+            for _, shape in observe_contraction_demands(parse_mlir_file(source))
+        )
+        else "host"
+    )
 
 
 def _json(value: object) -> bytes:
@@ -53,7 +70,7 @@ def _path(recipe: Path, value: object) -> Path:
     return lexical
 
 
-def selection(recipe: Path) -> tuple[list[dict], dict[str, str]]:
+def selection(recipe: Path, *, target: str | None = None) -> tuple[list[dict], dict[str, str]]:
     """Read only explicitly selected cases/captures, never discover another cohort."""
     from merlin.targetgen.core_aten_capture import case_capture_name
 
@@ -64,6 +81,25 @@ def selection(recipe: Path) -> tuple[list[dict], dict[str, str]]:
     paths: dict[str, str] = {}
     overlay = _path(recipe, block.get("overlay"))
     paths[str(overlay)] = _sha(overlay)
+    placement = block.get("placement")
+    facts = None
+    if placement is not None:
+        if (
+            not isinstance(placement, dict)
+            or set(placement) != {"policy", "rtl_facts"}
+            or placement["policy"] != "supported_contractions_v1"
+        ):
+            raise ValueError("Core ATen placement requires supported_contractions_v1 and selected rtl_facts")
+        facts_path = _path(recipe, placement["rtl_facts"])
+        paths[str(facts_path)] = _sha(facts_path)
+        facts = json.loads(facts_path.read_bytes())
+        payload = facts.get("facts", facts)
+        if (
+            not isinstance(payload, dict)
+            or not payload.get("target")
+            or (target is not None and payload["target"] != target)
+        ):
+            raise ValueError("selected placement facts name a different or missing target")
     batches, identities = [], set()
     for cohort in COHORTS:
         if cohort not in block["cohorts"]:
@@ -72,9 +108,11 @@ def selection(recipe: Path) -> tuple[list[dict], dict[str, str]]:
         if not isinstance(rows, list) or not rows:
             raise ValueError("every Core ATen cohort must declare at least one case selection")
         for row in rows:
+            if placement is not None and "lane_expectation" in row:
+                raise ValueError("derived placement cannot mix authored lane_expectation")
             expectation = row.get("lane_expectation", "device")
             if expectation not in LANE_EXPECTATIONS or (cohort == "host_guard" and "lane_expectation" in row):
-                raise ValueError("lane_expectation must be device or any, and never set on host_guard rows")
+                raise ValueError("lane_expectation must be device, host or any, and never set on host_guard rows")
             cases_path = _path(recipe, row.get("cases"))
             captures = _path(recipe, row.get("captures"))
             if not captures.is_dir():
@@ -90,6 +128,7 @@ def selection(recipe: Path) -> tuple[list[dict], dict[str, str]]:
             if len(by_id) != len(corpus["cases"]) or set(wanted) - set(by_id):
                 raise ValueError("selected cases are missing or ambiguous")
             cases = [by_id[key] for key in sorted(wanted)]
+            placed = {}
             for case in cases:
                 name = case_capture_name(case).replace("-", "_")
                 if name in identities:
@@ -116,14 +155,21 @@ def selection(recipe: Path) -> tuple[list[dict], dict[str, str]]:
                         raise ValueError("selected capture contains indirect or special entries")
                     if member.is_file():
                         paths[str(member)] = _sha(member)
-            batches.append(
-                {
-                    "cohort": cohort,
-                    "lane_expectation": expectation,
-                    "corpus": {"cases": cases, "denominator_sha256": corpus.get("denominator_sha256")},
-                    "captures": str(captures),
-                }
-            )
+                lane = (
+                    contraction_lane(source / "capsule.linalg.mlir", facts)
+                    if facts is not None and cohort != "host_guard"
+                    else expectation
+                )
+                placed.setdefault(lane, []).append(case)
+            for lane, lane_cases in sorted(placed.items()):
+                batches.append(
+                    {
+                        "cohort": cohort,
+                        "lane_expectation": lane,
+                        "corpus": {"cases": lane_cases, "denominator_sha256": corpus.get("denominator_sha256")},
+                        "captures": str(captures),
+                    }
+                )
         del by_id, corpus  # Do not retain an unselected bounded suite while loading the next batch.
     return batches, dict(sorted(paths.items()))
 
@@ -173,7 +219,7 @@ def _requirement(batches: list[dict], receipt: dict) -> dict:
 
 def verify_synthesis(recipe: Path, requirement: dict, synthesis: dict) -> dict:
     """Recompute membership and receipts; input digests alone do not prove selection."""
-    batches, paths = selection(recipe)
+    batches, paths = selection(recipe, target=requirement.get("target"))
     receipt_path = _path(recipe, declaration(recipe).get("derivation"))
     receipt = json.loads(receipt_path.read_bytes())
     expected = {
@@ -199,7 +245,7 @@ def verify_synthesis(recipe: Path, requirement: dict, synthesis: dict) -> dict:
 
 
 def derive(recipe: Path, output: Path, *, target: str, descriptor: Path) -> dict:
-    batches, paths = selection(recipe)
+    batches, paths = selection(recipe, target=target)
     output = output.absolute()
     if output.exists():
         raise ValueError("Core ATen derivation output already exists")
@@ -217,6 +263,8 @@ def derive(recipe: Path, output: Path, *, target: str, descriptor: Path) -> dict
     # Resolve authored owners once; generated recipe never discovers siblings.
     block = document["core_aten"]
     block["overlay"] = str(_path(recipe, block["overlay"]))
+    if block.get("placement"):
+        block["placement"]["rtl_facts"] = str(_path(recipe, block["placement"]["rtl_facts"]))
     for rows in block["cohorts"].values():
         for row in rows:
             for key in ("cases", "captures"):
@@ -271,8 +319,13 @@ def generate(
 ) -> list[Path]:
     from merlin.targetgen.core_aten_capsules import write_capsules
 
-    batches, paths = selection(recipe)
+    batches, paths = selection(recipe, target=target)
     block = declaration(recipe)
+    if block.get("placement"):
+        selected = _path(recipe, block["placement"]["rtl_facts"])
+        if rtl_facts is not None and _sha(rtl_facts) != _sha(selected):
+            raise ValueError("exported RTL facts differ from placement facts")
+        rtl_facts = selected
     receipt_path = _path(recipe, block.get("derivation"))
     receipt = json.loads(receipt_path.read_bytes())
     if receipt != {
@@ -317,8 +370,8 @@ def generate(
                 capsule = yaml.safe_load(declaration_path.read_bytes())
                 capsule["cohort"] = "guard" if cohort == "host_guard" else cohort
                 capsule["scored"] = cohort != "host_guard"
-                if cohort == "host_guard":
-                    capsule["lane_expectation"] = "host-guard"
+                if cohort == "host_guard" or batch["lane_expectation"] == "host":
+                    capsule["lane_expectation"] = "host-guard" if cohort == "host_guard" else "host"
                     capsule["semantic"] = {"must_accelerate": False}
                     capsule["lanes"] = {"forbid": ["on_mesh"]}
                 elif batch["lane_expectation"] == "any":
