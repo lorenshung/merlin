@@ -1,0 +1,15 @@
+target: riscv_scalar
+resources_root: examples/riscv_scalar/phase1
+rtl:
+  via: none
+hardware_spec:
+  target_contract: examples/riscv_scalar/target/contracts/target_contract.yaml
+capsule_corpus: ../phase1/corpus/public
+toolchain:
+  sim_via: spike
+grading:
+  release_admission: derive_from_corpus_v1
+  resource_bound:
+    policy: representative_l3_capstones_v1
+workload_spec:
+  certification_floor: L2

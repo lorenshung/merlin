@@ -1,0 +1,29 @@
+# Plain scalar RISC-V core, executed on Spike. No accelerator, no RTL: every compute operation is
+# ordinary integer/floating-point host code, so a backend for this target is a scalar code generator.
+name: riscv_scalar
+version: 0.1
+family: scalar_host
+endpoint_kind: external_backend
+features: [scalar_fallback]
+runtime:
+  backends: [spike]
+  default_backend: spike
+  tier_sim: {L2: spike}
+runner:
+  sim_via: spike
+isa:
+  march: rv64gc
+  abi: lp64d
+  xlen: 64
+compute_units:
+  - name: scalar_core
+    kind: scalar
+    dtypes: [int8, int16, int32, fp32, fp64]
+    ops: [matmul, elementwise, reduction]
+    scaling: none
+    requant: {ref: none}
+confidence: low
+requires_human_review: true
+notes: >-
+  Reference target for the Core ATen Phase 1 comparison. Execution is plain rv64gc on Spike, a
+  functional model: it supports no cycle or silicon claim.

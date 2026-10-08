@@ -95,3 +95,11 @@ def test_explicit_paths_drive_binds_environment_and_probes(tmp_path, monkeypatch
         paths.llvm,
         paths.clang_bin,
     ]
+
+
+def test_plain_spike_family_has_functional_tools_without_rtl(monkeypatch, tmp_path):
+    monkeypatch.setattr(TC, "ext_path", lambda key: tmp_path)
+    family = TC._spike()
+    assert family.bind_paths == (str(tmp_path / ".conda-env"),)
+    assert {"spike", "riscv64-unknown-elf-gcc", "dtc"} == {p.label for p in family.probes}
+    assert not any("verilator" in path for path in family.bind_paths)

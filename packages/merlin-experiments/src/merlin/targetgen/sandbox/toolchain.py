@@ -194,6 +194,23 @@ def _chipyard() -> SimToolchain:
     )
 
 
+def _spike() -> SimToolchain:
+    """Plain functional ISA tools, without an accelerator or RTL simulator mount."""
+    ch = ext_path("chipyard")
+    conda = str(ch / ".conda-env") if ch else "/nonexistent/chipyard/.conda-env"
+    return SimToolchain(
+        bind_paths=(conda,),
+        path_dirs=(conda + "/bin", conda + "/riscv-tools/bin"),
+        ld_dirs=(conda + "/lib", conda + "/riscv-tools/lib"),
+        env_extra={"RISCV": conda + "/riscv-tools"},
+        probes=(
+            ToolProbe("spike", "spike --help 2>&1 | head -1", conda),
+            ToolProbe("riscv64-unknown-elf-gcc", "riscv64-unknown-elf-gcc --version | head -1", conda),
+            ToolProbe("dtc", "dtc --version", conda),
+        ),
+    )
+
+
 class _SimToolchainRegistry(UserDict[str, SimToolchain | Callable[[], SimToolchain]]):
     """Resolve configured families on first access, retaining the mapping interface."""
 
@@ -218,6 +235,7 @@ class _SimToolchainRegistry(UserDict[str, SimToolchain | Callable[[], SimToolcha
 SIM_TOOLCHAINS = _SimToolchainRegistry(
     {
         "chipyard": _chipyard,
+        "spike": _spike,
         "": SimToolchain(),
     }
 )

@@ -1,0 +1,26 @@
+schema_version: 1
+id: riscv-scalar-core-aten-functional
+target: riscv_scalar
+description: Functional compiler authoring for a plain rv64gc scalar RISC-V core executed
+  on Spike over the Core ATen single-operator corpus; requires a reviewed corpus release
+  and a generated bundle.
+inputs:
+  target: target/descriptor.yaml
+phases:
+  1:
+    adapter: capsule_bench
+    config:
+      require_reviewed_corpus: true
+      descriptor: target/descriptor.yaml
+      level: EL1
+      bundle: raw_baseline_public_v0
+      bundle_manifest: phase1/input_bundles/raw_baseline_public_v0/input_bundle_manifest.yaml
+      oracle_timing: phase1/.oracle_timing.json
+      model: gpt-6.1-sol
+      effort: high
+      driver: codex
+      provider: subscription
+      max_wall_s: 43200
+      round_timeout: 43200
+      grade_interval: 900
+      sim_max_jobs: 2

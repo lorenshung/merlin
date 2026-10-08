@@ -4,6 +4,7 @@ experiments:
   gemmini-functional: ../examples/gemmini/experiment.yaml
   gemmini-core-aten-functional: ../examples/gemmini/core_aten/experiment.yaml
   gemmini-universal-functional: ../examples/gemmini_universal/experiment.yaml
+  riscv-scalar-core-aten-functional: ../examples/riscv_scalar/experiment.yaml
   atlas-functional: ../examples/atlas/experiment.yaml
   radiance-functional: ../examples/radiance/experiment.yaml
   mx-gemmini-functional: ../examples/mx_gemmini/experiment.yaml
