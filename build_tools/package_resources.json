@@ -141,6 +141,7 @@
     "merlin/schemas/dse_axis_triage.schema.yaml",
     "merlin/schemas/dse_result.schema.yaml",
     "merlin/schemas/evidence_report.schema.yaml",
+    "merlin/schemas/exactness_contract.schema.yaml",
     "merlin/schemas/exploitability_report.schema.yaml",
     "merlin/schemas/interface_candidate.schema.yaml",
     "merlin/schemas/kernel_record.schema.yaml",
