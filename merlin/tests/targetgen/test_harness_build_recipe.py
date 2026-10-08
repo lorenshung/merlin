@@ -115,6 +115,38 @@ def test_explicit_recipe_abi_wins_without_query_and_rejects_duplicates(monkeypat
         _recipe(cflags=("-march=rv64gc", "-mabi=ilp32")).mabi()
 
 
+@pytest.mark.parametrize("first_returncode", [0, 1])
+def test_missing_abi_preserves_selected_query_diagnostics(monkeypatch, first_returncode):
+    calls = []
+
+    def query(command, **kwargs):
+        calls.append(command)
+        if "--help=target" in command:
+            return SimpleNamespace(returncode=first_returncode, stdout="no ABI here", stderr="query diagnostic")
+        return SimpleNamespace(returncode=0, stdout="", stderr="gcc driver without a cc1 ABI")
+
+    monkeypatch.setattr(build_recipe.subprocess, "run", query)
+    with pytest.raises(ValueError, match="no unique effective -mabi") as error:
+        _recipe(cflags=("-O2", "-march=rv64gc")).mabi()
+    message = str(error.value)
+    assert "/opt/cc" in message and "--help=target" in message
+    assert f"exit={first_returncode}" in message
+    assert "no ABI here" in message and "query diagnostic" in message
+    if first_returncode:
+        assert "-###" in message and "gcc driver without a cc1 ABI" in message
+    assert len(calls) == (2 if first_returncode else 1)
+
+
+def test_clang_dry_run_still_resolves_its_selected_abi(monkeypatch):
+    def query(command, **kwargs):
+        if "--help=target" in command:
+            return SimpleNamespace(returncode=1, stdout="", stderr="unsupported driver query")
+        return SimpleNamespace(returncode=0, stdout="", stderr='"/opt/cc" "-cc1" "-target-abi" "lp64d"\n')
+
+    monkeypatch.setattr(build_recipe.subprocess, "run", query)
+    assert _recipe(cflags=("-march=rv64gc",)).mabi() == "-mabi=lp64d"
+
+
 # ------------------------------------------------------------------ the registry lookup
 def test_a_backend_without_a_recipe_refuses_by_name():
     """A host/simulator backend legitimately has none; the refusal must say which target and why."""
