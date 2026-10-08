@@ -1,18 +1,22 @@
-"""Gemmini primitive extraction uses its decoded completion, not a host-ISA fallback."""
+"""Gemmini primitive extraction uses its decoded completion, not a host-ISA fallback.
+
+The extractor is the one in gemmini's vendored support (``backend/primitive_program.py``); the example
+used to carry a byte-identical second copy, which nothing kept in step with the vendored one.
+"""
 
 import importlib.util
 import sys
-from pathlib import Path
 
 import pytest
 from xdsl.dialects import llvm
 from xdsl.dialects.builtin import ModuleOp
 from xdsl.ir import Block, Region
 
+from merlin.common.paths import repo_root
 from merlin.targetgen.rocc import decode
 
-_EXAMPLE = Path(__file__).resolve().parents[3] / "examples/gemmini/phase2/primitive_probe.py"
-_SPEC = importlib.util.spec_from_file_location("gemmini_example_primitive_probe", _EXAMPLE)
+_SUPPORT = repo_root() / "examples/gemmini/support/backend/primitive_program.py"
+_SPEC = importlib.util.spec_from_file_location("gemmini_support_primitive_program", _SUPPORT)
 assert _SPEC is not None and _SPEC.loader is not None
 primitive_probe = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = primitive_probe

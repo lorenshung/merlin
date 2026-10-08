@@ -113,10 +113,12 @@ policy in [firesim_loop.py](firesim_loop.py). This is example-owned policy for t
 board and workload, not a Merlin core default. It submits nothing on import;
 the study's launcher opts into it when running a measured batch.
 
-The [primitive probe](primitive_probe.py) is likewise an example-owned Gemmini
-diagnostic for splitting a decoded RoCC short kernel into setup, compute and
-readback. It is not part of Merlin's shared Phase 2 API or the measured-claims
-runner; use the target-neutral provider interface for new accelerators.
+The primitive probe, a Gemmini diagnostic for splitting a decoded RoCC short
+kernel into setup, compute and readback, lives only in the vendored support
+provider (`../support/backend/primitive_program.py`); this directory no longer
+keeps a second copy. It is not part of Merlin's shared Phase 2 API or the
+measured-claims runner; use the target-neutral provider interface for new
+accelerators.
 
 ## Whole model, measured
 
