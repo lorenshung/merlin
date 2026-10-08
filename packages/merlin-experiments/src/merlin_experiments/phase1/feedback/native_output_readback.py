@@ -16,6 +16,7 @@ from pathlib import Path
 from .caller_layout import _canonical, _ordinary_member, _sha256, inspect_caller_layout
 
 _COHERENT_OUTPUT_DTYPES = frozenset({"i8", "i16", "i32", "i64", "f32"})
+_MAX_SIGNATURE_REGION_BYTES = 256 * 1024 * 1024
 
 
 def _elf_output_symbols(
@@ -344,7 +345,7 @@ def decode_coherent_output_dump(
     if not unchanged:
         raise ValueError("coherent output fixed-address preflight changed before dump decoding")
     outputs = admission["outputs"]
-    expected = [(row["address"], row["bytes"]) for row in outputs]
+    expected = sorted((row["address"], row["bytes"]) for row in outputs)
     dump_path = Path(dump_path)
     if dump_path.is_symlink() or not dump_path.is_file() or not stat.S_ISREG(dump_path.stat().st_mode):
         raise ValueError("coherent output dump is not an ordinary complete file")
@@ -402,7 +403,7 @@ def admit_htif_signature_bounds(
     facts_path: Path,
     elf_path: Path,
 ) -> dict:
-    """Preflight exact single-output ELF signature aliases before Spike launch.
+    """Preflight an exact, contiguous output-only ELF signature window.
 
     Stock HTIF can allocate memory from the begin/end alias range. This check must
     precede launch; decoding rechecks the same exact source and ELF bytes later.
@@ -424,33 +425,44 @@ def admit_htif_signature_bounds(
         elf_path=elf_path,
     )
     outputs = current["outputs"]
-    if len(outputs) != 1:
-        raise ValueError("HTIF signature requires exactly one output allocation")
-    row = outputs[0]
+    ordered = sorted(outputs, key=lambda row: row["address"])
+    if any(left["address"] + left["bytes"] != right["address"] for left, right in zip(ordered, ordered[1:])):
+        raise ValueError("HTIF signature output symbols do not exactly tile one window")
+    begin = ordered[0]["address"]
+    end = ordered[-1]["address"] + ordered[-1]["bytes"]
+    size = end - begin
+    if size <= 0 or size > _MAX_SIGNATURE_REGION_BYTES:
+        raise ValueError("HTIF signature output window exceeds its bounded physical extent")
     elf_path = Path(elf_path)
     elf_raw = elf_path.read_bytes()
     if _sha256(elf_raw) != current["elf_sha256"]:
         raise ValueError("HTIF signature ELF changed before alias inspection")
     _, aliases = _elf_output_symbols(
-        elf_raw, {row["symbol"]: row["bytes"]}, aliases=("begin_signature", "end_signature")
+        elf_raw, {row["symbol"]: row["bytes"] for row in ordered}, aliases=("begin_signature", "end_signature")
     )
-    if aliases != {"begin_signature": row["address"], "end_signature": row["address"] + row["bytes"]}:
-        raise ValueError("HTIF signature aliases do not exactly bound the selected output")
+    if aliases != {"begin_signature": begin, "end_signature": end}:
+        raise ValueError("HTIF signature aliases do not exactly bound the selected outputs")
     if _sha256(elf_path.read_bytes()) != current["elf_sha256"]:
         raise ValueError("HTIF signature ELF changed during alias inspection")
-    return {
-        "schema": "htif_signature_bounds_v1",
+    bounds = {
+        "schema": "htif_signature_bounds_v1" if len(outputs) == 1 else "htif_signature_bounds_v2",
         "status": "prelaunch_only",
         "fixed_address_admission_sha256": _sha256(_canonical(fixed)),
         "layout_admission_sha256": _sha256(_canonical(current)),
         "elf_sha256": current["elf_sha256"],
-        "symbol": row["symbol"],
-        "begin": row["address"],
-        "end": row["address"] + row["bytes"],
-        "bytes": row["bytes"],
+        "begin": begin,
+        "end": end,
+        "bytes": size,
         "signature_granularity_bytes": 1,
-        "signature_file_bytes": 3 * row["bytes"],
+        "signature_file_bytes": 3 * size,
     }
+    if len(outputs) == 1:
+        bounds["symbol"] = ordered[0]["symbol"]
+    else:
+        bounds["outputs"] = [
+            {"symbol": row["symbol"], "address": row["address"], "bytes": row["bytes"]} for row in ordered
+        ]
+    return bounds
 
 
 def decode_htif_signature(
@@ -464,7 +476,7 @@ def decode_htif_signature(
     elf_path: Path,
     signature_path: Path,
 ) -> dict:
-    """Decode one complete Spike HTIF signature, without judging exit or DONE.
+    """Decode a complete output-only Spike signature, without judging exit or DONE.
 
     The caller must execute this exact preflight before launch, select the same
     ELF, and separately prove normal exit and a completed harness protocol.
@@ -493,7 +505,6 @@ def decode_htif_signature(
         facts_path=facts_path,
         elf_path=elf_path,
     )
-    row = current["outputs"][0]
     signature_path = Path(signature_path)
     if (
         signature_path.is_symlink()
@@ -507,8 +518,8 @@ def decode_htif_signature(
     if len(raw) != bounds["signature_file_bytes"]:
         raise ValueError("HTIF signature changed during bounded read")
     digits = b"0123456789abcdef"
-    physical = bytearray(row["bytes"])
-    for index in range(row["bytes"]):
+    physical = bytearray(bounds["bytes"])
+    for index in range(bounds["bytes"]):
         first, second, newline = raw[3 * index : 3 * index + 3]
         if first not in digits or second not in digits or newline != 10:
             raise ValueError("HTIF signature is not canonical lowercase byte-per-line hex")
@@ -518,12 +529,21 @@ def decode_htif_signature(
         or sha256_file(signature_path) != signature_sha256
     ):
         raise ValueError("HTIF signature changed during decoding")
+    regions = {
+        (row["address"], row["bytes"]): bytes(
+            physical[row["address"] - bounds["begin"] : row["address"] - bounds["begin"] + row["bytes"]]
+        )
+        for row in current["outputs"]
+    }
+    value_schema = (
+        "htif_signature_output_values_v1" if len(current["outputs"]) == 1 else "htif_signature_output_values_v2"
+    )
     return {
-        "schema": "htif_signature_output_values_v1",
+        "schema": value_schema,
         "source": "htif_signature",
         "bounds_admission_sha256": _sha256(_canonical(bounds)),
         "layout_admission_sha256": _sha256(_canonical(current)),
         "elf_sha256": current["elf_sha256"],
         "signature_sha256": signature_sha256,
-        "outputs": _decode_physical_regions(current["outputs"], {(row["address"], row["bytes"]): bytes(physical)}),
+        "outputs": _decode_physical_regions(current["outputs"], regions),
     }

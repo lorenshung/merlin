@@ -22,7 +22,8 @@ selected harness provider for a submission-owned command buffer. It never grades
 imports candidate code; absent provider inspection support refuses.
 `native_output_readback.py` privately reuses that projection to bind output strides,
 physical words and writable ELF symbols before decoding an exact coherent terminal
-dump or a single-output, alias-bounded Spike HTIF signature. The separate fixed
+dump or a Spike HTIF signature whose output symbols exactly tile the alias-bounded
+physical window in ELF-address order. The separate fixed
 ET_EXEC and signature-bound preflight APIs must run before a native launch; both
 decoders independently recheck their preflight records. It does not select a
 transport, run a simulator, check normal exit/DONE, compare a golden or grade;

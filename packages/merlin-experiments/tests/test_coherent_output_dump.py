@@ -62,7 +62,7 @@ def selected_layout(tmp_path, monkeypatch):
         return {
             "schema": "caller_storage_layout_v1",
             "policy": {"mode": "legacy_aligned_row_major_v1", "row_alignment_elements": 4},
-            "tensors": [row(name, spec) for name, spec in cb["tensors"].items()],
+            "tensors": [row(arg["tensor"], cb["tensors"][arg["tensor"]]) for arg in cb["kernel_abi"]["args"]],
         }
 
     module = SimpleNamespace(
@@ -134,6 +134,56 @@ def _elf(
         [cc, "-O0", "-no-pie" if fixed_exec else "-pie", *sources, "-o", str(elf)], check=True, capture_output=True
     )
     return elf
+
+
+def _multi_elf(
+    tmp_path: Path, *, names: tuple[str, ...], gap: int = 0, short_end: bool = False, overlap: bool = False
+) -> Path:
+    """Build neutral, explicitly sized writable symbols in physical—not CB—order."""
+    cc = shutil.which("cc")
+    if cc is None:
+        pytest.skip("a neutral host C compiler is unavailable")
+    sizes = {"Y": 16, "Z": 64, "X": 64}
+    lines = [".pushsection .data"]
+    for index, name in enumerate(names):
+        if index and gap:
+            lines.append(f".zero {gap}")
+        if overlap and name == "Y":
+            lines.extend((".globl T_Y", ".set T_Y,T_Z+8", ".type T_Y,@object", ".size T_Y,16"))
+        else:
+            lines.extend(
+                (
+                    f".globl T_{name}",
+                    f".type T_{name},@object",
+                    f"T_{name}:",
+                    f".zero {sizes[name]}",
+                    f".size T_{name},{sizes[name]}",
+                )
+            )
+    lines.extend(
+        (
+            ".globl begin_signature",
+            f".set begin_signature,T_{names[0]}",
+            ".globl end_signature",
+            f".set end_signature,T_{names[-1]}+{sizes[names[-1]] - int(short_end)}",
+            ".popsection",
+        )
+    )
+    source = tmp_path / "multi.c"
+    source.write_text('__asm__("' + "\\n".join(lines) + '\\n");\nint main(void) { return 0; }\n')
+    elf = tmp_path / "multi.elf"
+    subprocess.run([cc, "-O0", "-no-pie", str(source), "-o", str(elf)], check=True, capture_output=True)
+    return elf
+
+
+def _selected_outputs(selected_layout, *names: str) -> None:
+    submission, _, cb = selected_layout
+    for name, dtype in (("Z", "i32"), ("X", "f32")):
+        if name in names:
+            cb["kernel_abi"]["args"].append({"tensor": name, "access": "write"})
+            cb["kernel_abi"]["outputs"].append(name)
+            cb["tensors"][name] = {"shape": [2, 3], "dtype": dtype, "role": "output"}
+    (submission / "command_buffer.json").write_text(json.dumps(cb))
 
 
 def _admit(selected_layout, elf: Path) -> dict:
@@ -304,8 +354,134 @@ def test_two_outputs_require_the_exact_complete_ordered_dump_roster(selected_lay
         _decode(selected_layout, elf, admission, _dump_regions(tmp_path / "one.dump", regions[:1]))
     with pytest.raises(ValueError, match="regions asked for"):
         _decode(selected_layout, elf, admission, _dump_regions(tmp_path / "reordered.dump", regions[::-1]))
-    with pytest.raises(ValueError, match="exactly one output"):
+    with pytest.raises(ValueError, match="signature alias|exactly tile"):
         _signature(selected_layout, elf, admission, _write_signature(tmp_path / "both.sig", bytes(y["bytes"])))
+
+
+@pytest.mark.parametrize("names", [("Z", "Y"), ("Z", "Y", "X")])
+def test_multi_output_signature_tiles_actual_elf_addresses_and_decodes_all_values(selected_layout, tmp_path, names):
+    _selected_outputs(selected_layout, *names)
+    elf = _multi_elf(tmp_path, names=names)
+    admission = _admit(selected_layout, elf)
+    assert [row["tensor"] for row in admission["outputs"]] == ["Y", "Z", *(["X"] if "X" in names else [])]
+    submission, facts, cb = selected_layout
+    bounds = admit_htif_signature_bounds(
+        admission=admission,
+        submission=submission,
+        command_buffer_member="command_buffer.json",
+        target="neutral",
+        facts_path=facts,
+        elf_path=elf,
+    )
+    assert bounds["schema"] == "htif_signature_bounds_v2"
+    assert [row["symbol"] for row in bounds["outputs"]] == [f"T_{name}" for name in names]
+    assert bounds["bytes"] == sum(row["bytes"] for row in admission["outputs"])
+    physical = bytearray(bounds["bytes"])
+    rows = {row["tensor"]: row for row in admission["outputs"]}
+    logical = {"Y": [-2, 3, -4, 5, -6, 7], "Z": [-257, 2, -3, 4, -5, 6]}
+    float_bits = [0x80000000, 0x3F800000, 0xBF000000, 0, 0x40000000, 0xC0000000]
+    for name in names:
+        row = rows[name]
+        first = row["address"] - bounds["begin"]
+        for index, offset in enumerate((0, 1, 2, 4, 5, 6)):
+            address = first + offset * row["physical_word_bytes"]
+            if name == "Y":
+                struct.pack_into("<b", physical, address, logical[name][index])
+            elif name == "Z":
+                struct.pack_into("<i", physical, address, logical[name][index])
+            else:
+                struct.pack_into("<I", physical, address, float_bits[index])
+    signature = _write_signature(tmp_path / "multi.sig", physical)
+    decoded = _signature(selected_layout, elf, admission, signature)
+    assert decoded["schema"] == "htif_signature_output_values_v2"
+    assert decoded["outputs"]["Y"] == [logical["Y"][:3], logical["Y"][3:]]
+    assert decoded["outputs"]["Z"] == [logical["Z"][:3], logical["Z"][3:]]
+    if "X" in names:
+        assert decoded["outputs"]["X"][1] == [0.0, 2.0, -2.0]
+        assert math.copysign(1, decoded["outputs"]["X"][0][0]) == -1
+    backend = backends.get_backend("neutral")
+    backend.memory_readback_transport = lambda simulator: "htif_signature_v1"
+    workdir = tmp_path / "run"
+    workdir.mkdir()
+    hook = NativeMemoryReadback(facts_path=facts)
+    request = hook.prepare(cb=cb, target="neutral", elf_path=elf, workdir=workdir, simulator="spike", backend=backend)[
+        "memory_readback"
+    ]
+    assert request["regions"] == [{"base": bounds["begin"], "bytes": bounds["bytes"]}]
+    _write_signature(Path(request["output_path"]), physical)
+    hook_outputs, evidence = hook.decode("METRIC cycles 7\nDONE\n")
+    assert hook_outputs == decoded["outputs"]
+    assert evidence["schema"] == "oracle_memory_readback_evidence_v2"
+
+
+@pytest.mark.parametrize("gap,short_end,overlap", [(8, False, False), (0, True, False), (0, False, True)])
+def test_multi_output_signature_refuses_gaps_overlaps_and_stale_aliases(
+    selected_layout, tmp_path, gap, short_end, overlap
+):
+    _selected_outputs(selected_layout, "Z", "X")
+    elf = _multi_elf(tmp_path, names=("Z", "Y", "X"), gap=gap, short_end=short_end, overlap=overlap)
+    if overlap:
+        with pytest.raises(ValueError, match="aliases distinct output allocations"):
+            _admit(selected_layout, elf)
+        return
+    admission = _admit(selected_layout, elf)
+    with pytest.raises(ValueError, match="exactly tile|signature aliases"):
+        _signature(selected_layout, elf, admission, _write_signature(tmp_path / "multi.sig", bytes(144)))
+
+
+def test_multi_output_gsim_keeps_separate_physical_regions_in_address_order(selected_layout, tmp_path, monkeypatch):
+    _selected_outputs(selected_layout, "Z", "X")
+    elf = _multi_elf(tmp_path, names=("Z", "Y", "X"))
+    _, facts, cb = selected_layout
+    backend = backends.get_backend("neutral")
+    monkeypatch.setattr(backend, "memory_readback_transport", lambda simulator: "gsim_coherent_dump_v1", raising=False)
+    workdir = tmp_path / "run"
+    workdir.mkdir()
+    hook = NativeMemoryReadback(facts_path=facts)
+    request = hook.prepare(cb=cb, target="neutral", elf_path=elf, workdir=workdir, simulator="gsim", backend=backend)[
+        "memory_readback"
+    ]
+    assert len(request["regions"]) == 3
+    assert [row["base"] for row in request["regions"]] == sorted(row["base"] for row in request["regions"])
+    assert Path(request["regions_path"]).read_text() == "".join(
+        f"{row['base']:#x} {row['bytes']}\n" for row in request["regions"]
+    )
+    _dump_regions(
+        Path(request["output_path"]),
+        [(row["base"], bytes(row["bytes"])) for row in request["regions"]],
+    )
+    outputs, evidence = hook.decode("METRIC cycles 7\nDONE\n")
+    assert set(outputs) == {"Y", "Z", "X"}
+    assert evidence["status"] == "complete"
+
+
+def test_multi_output_signature_refuses_stale_prelaunch_roster(selected_layout, tmp_path):
+    _selected_outputs(selected_layout, "Z", "X")
+    elf = _multi_elf(tmp_path, names=("Z", "Y", "X"))
+    admission = _admit(selected_layout, elf)
+    submission, facts, _ = selected_layout
+    bounds = admit_htif_signature_bounds(
+        admission=admission,
+        submission=submission,
+        command_buffer_member="command_buffer.json",
+        target="neutral",
+        facts_path=facts,
+        elf_path=elf,
+    )
+    stale = copy.deepcopy(bounds)
+    stale["outputs"][0]["bytes"] -= 1
+    signature = _write_signature(tmp_path / "multi.sig", bytes(bounds["bytes"]))
+    with pytest.raises(ValueError, match="prelaunch bounds changed"):
+        decode_htif_signature(
+            admission=admission,
+            bounds_admission=stale,
+            submission=submission,
+            command_buffer_member="command_buffer.json",
+            target="neutral",
+            facts_path=facts,
+            elf_path=elf,
+            signature_path=signature,
+        )
 
 
 def test_htif_signature_decodes_the_same_selected_signed_physical_region(selected_layout, tmp_path):

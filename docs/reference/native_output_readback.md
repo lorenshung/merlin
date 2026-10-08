@@ -29,8 +29,12 @@ Coherent readback stages no serial codec. The OOT harness provider must explicit
 accept the policy and declare its memory export protocol. The trusted evaluator
 binds each output's logical shape, physical strides and writable ELF storage
 before launch. Current readers support fixed-address ELF64 little-endian
-executables, coherent `GSIMDMP1` exports, and single-output Spike HTIF signatures
-with exact `begin_signature`/`end_signature` aliases and byte granularity.
+executables, coherent `GSIMDMP1` exports, and Spike HTIF signatures with exact
+`begin_signature`/`end_signature` aliases and byte granularity. Multiple outputs
+must exactly tile that signature window by their verified ELF addresses: unknown
+gaps, overlaps or linker-order assumptions refuse. The reader splits the physical
+bytes at those proven offsets and decodes every declared logical tensor. GSim
+exports each output as a separate region, ordered by its verified address.
 Missing provider support refuses; serial output is not a substitute.
 
 The execution path requires normal simulator exit, exactly one `DONE`, no serial
@@ -45,6 +49,10 @@ records the independently selected engine citation. Native model receipts label
 the prepared command `native_base_command` when memory-export arguments are
 separately carried in the closed readback request. Partial consoles remain
 diagnostic artifacts, never completed numerical results.
+
+Single-output Spike bounds/value records retain their v1 schema. Multi-output
+records use `htif_signature_bounds_v2` and `htif_signature_output_values_v2`,
+binding the complete sized-symbol roster. Historical records are not restamped.
 
 Readback admission establishes transport and attribution, not numerical
 correctness, accelerator placement, performance improvement, or universal model

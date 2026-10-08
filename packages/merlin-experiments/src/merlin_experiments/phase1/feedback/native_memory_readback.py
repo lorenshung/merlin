@@ -183,7 +183,14 @@ class NativeMemoryReadback:
                 facts_path=self.facts_path,
                 elf_path=elf_path,
             )
-        regions = [{"base": row["address"], "bytes": row["bytes"]} for row in admission["outputs"]]
+        regions = (
+            [{"base": bounds["begin"], "bytes": bounds["bytes"]}]
+            if bounds is not None
+            else [
+                {"base": row["address"], "bytes": row["bytes"]}
+                for row in sorted(admission["outputs"], key=lambda row: row["address"])
+            ]
+        )
         output_path = source / ("output.signature" if bounds is not None else "output.dump")
         if output_path.exists() or output_path.is_symlink():
             raise ValueError("memory readback output path is not fresh")
@@ -281,7 +288,11 @@ class NativeMemoryReadback:
             )
             artifact_sha256 = values["dump_sha256"]
         evidence = {
-            "schema": "oracle_memory_readback_evidence_v1",
+            "schema": (
+                "oracle_memory_readback_evidence_v2"
+                if state["bounds"] is not None and state["bounds"]["schema"] == "htif_signature_bounds_v2"
+                else "oracle_memory_readback_evidence_v1"
+            ),
             "status": "complete",
             "scope": (
                 "complete physical-region and logical-output decoding only; normal exit, DONE, "
