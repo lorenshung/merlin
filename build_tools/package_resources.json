@@ -51,6 +51,7 @@
     "merlin/contract/schemas/performance_term.schema.json",
     "merlin/contract/schemas/result.schema.json",
     "merlin/contract/schemas/rtl_facts.schema.json",
+    "merlin/contract/schemas/verification_spec.schema.json",
     "merlin/contract/scoring.yaml",
     "merlin/contract/software_pins.yaml",
     "merlin/contract/storage.yaml",
