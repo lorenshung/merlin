@@ -7,7 +7,7 @@ Status: active — the `feat/kernel-vs-compiler` study tooling is folded into ma
 Study of where two ways of bringing workloads to a new accelerator (Radiance) cross over: repeatedly
 LLM-generating a kernel per workload, versus spending LLM effort once to generate a compiler, freezing
 it, and compiling unseen workloads with no further agentic adaptation. `TASKS.md` is the task register
-with DONE/PARTIAL/OPEN state; `merlin-study-status board` reads it beside the run matrices and the
+with DONE/PARTIAL/OPEN state; `merlin experiment study board` reads it beside the run matrices and the
 baseline record, so every number comes from disk rather than from the register.
 
 ## Layout

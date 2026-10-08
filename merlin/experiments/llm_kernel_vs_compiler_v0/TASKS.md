@@ -89,7 +89,7 @@ Bedrock ceiling is shared with prior work.
 | 5.9 | Time-to-first-correct and time-to-within-X%-of-best curves | **OPEN** — *addition to the plan*; inputs already recorded |
 | 5.10 | Model × family capability matrix | **OPEN** — *addition to the plan*; may be a headline finding if model choice dominates the kernel arm |
 | 5.11 | Cert (GSIM) pass over accepted kernels | **PARTIAL** — tier validated at 84 s; not yet run across the accepted set. Yields RTL-backed correctness, **not** cycle-accurate latency |
-| 5.12 | Reference baseline every arm is relative to | **DONE** — `merlin-study-status baseline` over the graded reference results; reference_v0 at L2/fast: R0 631,721 · R4 284,694 · R3 673,923. Until it existed the study recorded absolute cycle counts and nothing else |
+| 5.12 | Reference baseline every arm is relative to | **DONE** — `merlin experiment study baseline` over the graded reference results; reference_v0 at L2/fast: R0 631,721 · R4 284,694 · R3 673,923. Until it existed the study recorded absolute cycle counts and nothing else |
 | 5.13 | Failure taxonomy: an unparseable submission is not a `tool_crash` | **OPEN** — it currently reads as our infrastructure breaking, which would understate the model's failure and overstate ours |
 
 ## Phase 6 — Pilot gate
@@ -105,11 +105,11 @@ Bedrock ceiling is shared with prior work.
 
 ## How to check this file against reality
 
-`merlin-study-status board` reads the register here and, independently, the run matrices and the
+`merlin experiment study board` reads the register here and, independently, the run matrices and the
 baseline record. The states above are hand-maintained and therefore drift -- three rows once said
 `OPEN` for work that had already landed. Every *number* comes from disk at the moment you ask:
 
-    merlin-study-status board \
+    merlin experiment study board \
       --register merlin/experiments/llm_kernel_vs_compiler_v0/TASKS.md \
       --runs-root out/runs/kvc \
       --void merlin/experiments/llm_kernel_vs_compiler_v0/voided_runs.yaml \

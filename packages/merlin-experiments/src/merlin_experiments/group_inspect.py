@@ -16,8 +16,11 @@ directory under the purgeable cache, and prints where everything is:
    (:mod:`merlin.common.compile_trace`); a package whose compiler lowers through Merlin reports its
    stages from its own process. ``--stage S`` prints the IR of one stage, or one product.
 4. **An instruction trace** (``--trace``): the group's program on the candidate's own functional
-   model -- the ``spike`` machine its job declares -- with the simulator's execution log, stopped
-   after ``--run-to`` instructions.
+   model -- the ``spike`` machine its job declares -- with the simulator's execution and commit log,
+   stopped after ``--run-to`` instructions. Every memory request the log commits is recorded, in
+   order, as ``requested_addresses.json``; with ``--locality-granule`` its exact recurrence census
+   (:func:`merlin.perf.address_locality.address_locality`) is taken at each granule, and
+   ``merlin experiment census locality`` re-takes it at any other.
 5. **Source-line attribution** (``--trace``): the program is linked a second time from the same
    inputs with debug information added, and that companion is admitted only if its allocated bytes and
    relocations are the program's (:func:`merlin.perf.debug_companion.verify_debug_companion`). The
@@ -53,6 +56,9 @@ DEFAULT_LINES = 60
 #: The build options a group program needs, as a measured job's ``build_options`` names them.
 _REQUIRED = ("model_capsule", "machine", "header")
 _SPIKE = "spike"
+#: The commit-log token that precedes one memory request's address: ``mem 0xADDR`` for a load,
+#: ``mem 0xADDR 0xDATA`` for a store, once per element of a vector access (``--log-commits``).
+_MEMORY_REQUEST = "mem"
 
 
 class InspectError(RuntimeError):
@@ -69,6 +75,18 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     )
     group.add_argument(
         "--run-to", type=int, default=DEFAULT_RUN_TO, help="instructions the log covers (default %(default)s)"
+    )
+    group.add_argument(
+        "--locality-granule",
+        type=int,
+        action="append",
+        help="--trace: census the recorded memory requests in regions of this many bytes (repeatable)",
+    )
+    group.add_argument(
+        "--locality-capacity",
+        type=int,
+        action="append",
+        help="--trace: count recurrences at or above this many distinct intervening regions (repeatable)",
     )
     group.add_argument("--lines", type=int, default=DEFAULT_LINES, help="lines of the stage's IR to print")
     group.add_argument("--out", type=Path, help="work directory (default: a fresh one under the cache)")
@@ -270,7 +288,8 @@ def instruction_trace(candidate: Mapping[str, Any], elf: str | None, work: Path,
     """The group's program on the candidate's functional model, with the simulator's execution log.
 
     The machine is the one the candidate's own job runs its local grade on; only a ``spike``-kind
-    machine has an execution log (``-l --log=FILE --instructions=N`` are that simulator's own options)."""
+    machine has an execution log (``-l --log=FILE --log-commits --instructions=N`` are that simulator's
+    own options; the commit records carry each memory request :func:`requested_addresses` reads)."""
     machine = candidate.get("machine")
     if machine is None:
         return {
@@ -283,7 +302,7 @@ def instruction_trace(candidate: Mapping[str, Any], elf: str | None, work: Path,
     if not command:
         return {"available": False, "why": "the functional-model machine names no command"}
     log = work / "instruction_trace.log"
-    argv = [command[0], "-l", f"--log={log}", f"--instructions={int(run_to)}", *command[1:], str(elf)]
+    argv = [command[0], "-l", f"--log={log}", "--log-commits", f"--instructions={int(run_to)}", *command[1:], str(elf)]
     env = {**os.environ, **{str(k): str(v) for k, v in (machine.get("environment") or {}).items()}}
     try:
         done = subprocess.run(argv, capture_output=True, text=True, timeout=1800, env=env)
@@ -298,6 +317,71 @@ def instruction_trace(candidate: Mapping[str, Any], elf: str | None, work: Path,
         "log_lines": lines,
         "stdout_tail": (done.stdout or "")[-1500:],
     }
+
+
+def requested_addresses(log: str) -> list[int]:
+    """Every memory request the functional model's commit log records, in the order it committed.
+
+    A commit record reads ``core N: PRIV 0xPC (0xINSN) [reg value]... [mem 0xADDR [0xDATA]]...``; the
+    disassembly record beside it has the PC where the privilege level stands, and is skipped. Each
+    ``mem`` token is followed by the requested address. One that is not an address raises: a request
+    the log names and this cannot read is not silently left out of the trace.
+    """
+    found: list[int] = []
+    for line in log.splitlines():
+        tokens = line.split()
+        if len(tokens) < 4 or tokens[0] != "core" or not tokens[2].isdigit():
+            continue
+        for index, token in enumerate(tokens):
+            if token != _MEMORY_REQUEST:
+                continue
+            try:
+                found.append(int(tokens[index + 1], 16))
+            except (IndexError, ValueError):
+                raise ValueError(f"a committed memory request names no address: {line.strip()!r}") from None
+    return found
+
+
+def address_census(
+    trace: Mapping[str, Any], work: Path, *, granules: Sequence[int] = (), capacities: Sequence[int] = ()
+) -> dict[str, Any]:
+    """The program's requested addresses, recorded beside its log, and their exact locality census.
+
+    The trace is what the functional model committed within ``--run-to`` instructions of the whole
+    one-group program (its setup and checks included): logical addresses, not physical traffic, and a
+    prefix of the run when the budget stopped it. Each granule is the caller's; nothing here knows a
+    line size. Without one the addresses are recorded and the census is not taken."""
+    from dataclasses import asdict
+
+    from merlin.perf import address_locality as AL
+
+    log = trace.get("log")
+    if not trace.get("available") or not log or not Path(log).is_file():
+        return _unknown("the functional model wrote no execution log, so no memory request was recorded")
+    try:
+        addresses = requested_addresses(Path(log).read_text(encoding="utf-8", errors="replace"))
+    except ValueError as exc:
+        return _unknown(str(exc))
+    path = work / "requested_addresses.json"
+    path.write_text(json.dumps(addresses) + "\n", encoding="utf-8")
+    document: dict[str, Any] = {
+        "status": "recorded",
+        "addresses": str(path),
+        "requests": len(addresses),
+        "scope": "memory requests the functional model committed in the traced instructions; logical, not traffic",
+        "censuses": [],
+    }
+    if not granules:
+        document["why"] = "no --locality-granule was given; `merlin experiment census locality` takes it from the file"
+    try:
+        for granule in granules:
+            census = AL.address_locality(
+                addresses, granule=granule, max_requests=len(addresses), capacities=tuple(capacities)
+            )
+            document["censuses"].append({"schema": "address_locality_v1", **asdict(census)})
+    except ValueError as exc:
+        return _unknown(f"the locality census refused its inputs: {exc}", addresses=str(path), requests=len(addresses))
+    return document
 
 
 # ---------------------------------------------------------------------------- source attribution
@@ -442,6 +526,12 @@ def inspect_group(source: str | Path, group: str, args: argparse.Namespace) -> d
             out["stage"]["why"] = "no stage or product of this rebuild has that name; see trace and products"
     if args.trace:
         out["instruction_trace"] = instruction_trace(candidate, record.get("elf"), work, run_to=args.run_to)
+        out["address_locality"] = address_census(
+            out["instruction_trace"],
+            work,
+            granules=getattr(args, "locality_granule", None) or (),
+            capacities=getattr(args, "locality_capacity", None) or (),
+        )
         out["source_attribution"] = source_attribution(candidate, record, work)
     if getattr(args, "time", False) or getattr(args, "profile", False):
         out.update(_probes(candidate, record, work, args))
@@ -511,6 +601,17 @@ def _print(result: Mapping[str, Any], *, lines: int) -> None:
             )
             if trace.get("error"):
                 print(f"    {trace['error']}")
+    locality = result.get("address_locality")
+    if locality:
+        if locality.get("status") != "recorded":
+            print(f"  memory requests: {locality['status']}: {locality['why']}")
+        else:
+            print(f"  memory requests: {locality['addresses']} ({locality['requests']:,} in commit order)")
+            for census in locality["censuses"]:
+                print(
+                    f"    granule {census['granule']}: {census['first_touches']:,} first touches; "
+                    f"recurrence distances {census['distance_histogram'][:8]}"
+                )
     timing = result.get("timing")
     if timing:
         if timing.get("status") != "graded":
@@ -560,11 +661,13 @@ def run_from_args(args: argparse.Namespace) -> int:
 
 __all__: Sequence[str] = (
     "InspectError",
+    "address_census",
     "configure_parser",
     "functional_machine",
     "inspect_group",
     "instruction_trace",
     "rebuild",
+    "requested_addresses",
     "resolve_candidate",
     "run_from_args",
     "source_attribution",

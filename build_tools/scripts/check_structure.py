@@ -310,23 +310,54 @@ def check_test_target_marker(errors):
             errors.append(f"target-heavy test without `pytestmark = pytest.mark.target(...)`: {rel}")
 
 
-def check_module_size(errors):
-    """No library module may grow past MODULE_SIZE_LIMIT lines unless it is recorded debt.
+def _module_size_ceilings(errors) -> dict[str, int]:
+    """``module_size_ratchet.txt`` as ``{debt identity: line ceiling}``.
 
-    Existing offenders are listed in module_size_ratchet.txt, which may only shrink; a module leaves it
-    by being split. A NEW module over the limit fails here. Counts physical lines of the file as
-    committed-shape source, i.e. after ruff format, so a formatter pass cannot push a module over.
+    Each entry is ``<module>  # <ceiling>``. The number is enforced, not a note: the ledger used to
+    excuse a listed module at ANY size, and listed modules grew past their recorded sizes with nothing
+    able to notice (capsule_runner.py: recorded at 5,145 lines, 6,821 by 2026-10-08). An entry without
+    a numeric ceiling is itself an error.
     """
-    ratchet = set()
-    if os.path.isfile(MODULE_SIZE_RATCHET):
-        with open(MODULE_SIZE_RATCHET, encoding="utf-8") as fh:
-            ratchet = {ln.split("#", 1)[0].strip() for ln in fh if ln.split("#", 1)[0].strip()}
+    ceilings: dict[str, int] = {}
+    if not os.path.isfile(MODULE_SIZE_RATCHET):
+        return ceilings
+    with open(MODULE_SIZE_RATCHET, encoding="utf-8") as fh:
+        for line in fh:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            key, _, ceiling = stripped.partition("#")
+            key, ceiling = key.strip(), ceiling.strip()
+            if not ceiling.isdigit():
+                errors.append(f"module-size ratchet entry has no numeric line ceiling after '#': {key}")
+                continue
+            ceilings[key] = int(ceiling)
+    return ceilings
+
+
+def check_module_size(errors):
+    """No library module may grow past MODULE_SIZE_LIMIT lines, nor a recorded one past its ceiling.
+
+    Existing offenders are listed in module_size_ratchet.txt with the line count each may not exceed;
+    the ledger may only shrink (check_ratchets_shrink.py holds both the entries and the ceilings). A
+    listed module may shrink but not grow, and leaves the ledger by being split under the limit. A NEW
+    module over the limit fails here. Counts physical lines of the file as committed-shape source, i.e.
+    after ruff format, so a formatter pass cannot push a module over.
+    """
+    ceilings = _module_size_ceilings(errors)
     for relative in _source_layout.python_files(Path(ROOT), _source_layout.SOURCE_SCAN_ROOTS):
         rel = relative.as_posix()
         with open(Path(ROOT) / relative, encoding="utf-8", errors="replace") as fh:
             n = sum(1 for _ in fh)
-        if n > MODULE_SIZE_LIMIT and rel not in ratchet and _source_layout.policy_path(rel) not in ratchet:
-            errors.append(f"module over {MODULE_SIZE_LIMIT} lines ({n}); split it: {rel}")
+        key = rel if rel in ceilings else _source_layout.policy_path(rel)
+        ceiling = ceilings.get(key)
+        if ceiling is None:
+            if n > MODULE_SIZE_LIMIT:
+                errors.append(f"module over {MODULE_SIZE_LIMIT} lines ({n}); split it: {rel}")
+        elif n > ceiling:
+            errors.append(f"module grew past its recorded ceiling ({n} > {ceiling} lines); shrink or split it: {rel}")
+        elif n <= MODULE_SIZE_LIMIT:
+            errors.append(f"module is now within {MODULE_SIZE_LIMIT} lines ({n}); delete its ratchet entry: {rel}")
 
 
 def check_schemas(errors):

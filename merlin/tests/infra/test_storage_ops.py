@@ -43,6 +43,28 @@ def _tree(root: Path) -> Path:
     return root
 
 
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-C", str(cwd), "-c", "user.email=t@t", "-c", "user.name=t", *args],
+        check=True,
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
+    )
+
+
+@pytest.fixture
+def own_repository(tmp_path):
+    """``tmp_path`` as its own empty git repository.
+
+    The CLI's move and dedup refuse a tree that the enclosing git index tracks or cannot be read
+    (``storage_cli._holds_tracked_files``). Which repository encloses pytest's temp directory is a fact
+    about the host -- a checkout, none, or a directory another account owns whose index cannot be
+    read -- so a test that drives the CLI brings its own and holds the same answer everywhere.
+    """
+    _git(tmp_path, "init", "-q")
+    return tmp_path
+
+
 # --- move ------------------------------------------------------------------------------------------
 
 
@@ -147,7 +169,8 @@ def test_protection_reasons_from_the_caller_are_honoured(tmp_path):
 
 
 @needs_rsync
-def test_the_cli_move_is_a_dry_run_by_default(tmp_path, monkeypatch, capsys):
+def test_the_cli_move_is_a_dry_run_by_default(own_repository, monkeypatch, capsys):
+    tmp_path = own_repository
     source = _tree(tmp_path / "data")
     monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "out"))
     monkeypatch.setattr(SO, "open_file_checker", lambda: _Holders())
@@ -155,6 +178,21 @@ def test_the_cli_move_is_a_dry_run_by_default(tmp_path, monkeypatch, capsys):
     assert SC.main(["move", str(source), str(tmp_path / "dest")]) == 0
 
     assert "dry run" in capsys.readouterr().out
+    assert source.is_dir() and not source.is_symlink() and not (tmp_path / "dest").exists()
+
+
+@needs_rsync
+def test_the_cli_refuses_to_move_a_tree_its_repository_tracks(own_repository, monkeypatch, capsys):
+    """The other direction of the fixture above: the same tree, once tracked, is not moved."""
+    tmp_path = own_repository
+    source = _tree(tmp_path / "data")
+    _git(tmp_path, "add", "data/sub/b.txt")
+    monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "out"))
+    monkeypatch.setattr(SO, "open_file_checker", lambda: _Holders())
+
+    assert SC.main(["move", str(source), str(tmp_path / "dest")]) == 1
+
+    assert "tracked files" in capsys.readouterr().out
     assert source.is_dir() and not source.is_symlink() and not (tmp_path / "dest").exists()
 
 
@@ -234,8 +272,9 @@ def test_a_symlink_is_never_linked_or_followed(tmp_path):
     assert other.stat().st_ino != real.stat().st_ino
 
 
-def test_dedup_peers_from_the_cli(tmp_path, monkeypatch):
+def test_dedup_peers_from_the_cli(own_repository, monkeypatch):
     """``dedup --peers`` finds the groups the store-based dedup finds and links them to each other."""
+    tmp_path = own_repository
     monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "out"))
     declared = dict(SC.contract(), scan_roots=[])
     monkeypatch.setattr(SC, "contract", lambda: declared)
@@ -256,15 +295,6 @@ def test_dedup_peers_from_the_cli(tmp_path, monkeypatch):
 
 
 # --- worktree census -------------------------------------------------------------------------------
-
-
-def _git(cwd: Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-C", str(cwd), "-c", "user.email=t@t", "-c", "user.name=t", *args],
-        check=True,
-        capture_output=True,
-        stdin=subprocess.DEVNULL,
-    )
 
 
 def test_worktrees_are_classified_without_writing_to_them(tmp_path):
@@ -339,9 +369,10 @@ def test_the_real_check_sees_a_process_holding_a_file_under_a_tree(tmp_path, too
         sleeper.wait()
 
 
-def test_store_dedup_skips_a_name_held_open_and_refuses_without_a_check(tmp_path, monkeypatch):
+def test_store_dedup_skips_a_name_held_open_and_refuses_without_a_check(own_repository, monkeypatch):
     """The store-based ``dedup`` takes the same open-file check: a writer holding a name would keep
     writing to the inode the name no longer points at."""
+    tmp_path = own_repository
     monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "out"))
     monkeypatch.setenv("MERLIN_BUNDLE_CAS", str(tmp_path / "out" / "artifacts" / "cache" / "cas"))
     declared = dict(SC.contract(), scan_roots=[])

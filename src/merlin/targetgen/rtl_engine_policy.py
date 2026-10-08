@@ -316,11 +316,6 @@ def _locked_slot_census(root: Path, *, own_index: int) -> _SlotCensus:
     return _SlotCensus(count, tuple(held))
 
 
-def _locked_slot_count(root: Path, *, own_index: int) -> int:
-    """Conservative scalar slot census for diagnostics and legacy callers."""
-    return _locked_slot_census(root, own_index=own_index).count
-
-
 def _lock_owners(locks: bytes, held: tuple[_HeldSlot, ...]) -> dict[_HeldSlot, int]:
     """Return only exact held inodes with one unambiguous kernel FLOCK owner."""
     owners: dict[_HeldSlot, list[int]] = {slot: [] for slot in held}
@@ -413,9 +408,7 @@ def _verified_native_slot_overlap(
         if owner is None or not _matching_owner_fd(owner_member, slot):
             continue
         children = [
-            child
-            for child in natives.matchable
-            if child.ppid == owner_pid and child.starttime > owner.starttime
+            child for child in natives.matchable if child.ppid == owner_pid and child.starttime > owner.starttime
         ]
         if len(children) != 1:
             continue

@@ -26,11 +26,17 @@ def _machine(*, rows=16, cols=16, muls=1, dram=None) -> DB.Machine:
     )
 
 
-# --------------------------------------------------------------------------------------- macs_and_bytes
+# --------------------------------------------------------------------------------------- contraction_for
+
+
+def _counted(op, facts):
+    """``(macs, moved_bytes)`` of the contraction a group's shape facts state, or ``None``."""
+    work = GH.contraction_for(op, facts)
+    return None if work is None else (work.macs, work.moved_bytes)
 
 
 def test_matmul_macs_and_bytes_are_the_plain_gemm_count():
-    counted = GH.macs_and_bytes("matmul", {"M": 4, "K": 8, "N": 16, "operand_dtype": "i8", "output_dtype": "i8"})
+    counted = _counted("matmul", {"M": 4, "K": 8, "N": 16, "operand_dtype": "i8", "output_dtype": "i8"})
     assert counted == (4 * 8 * 16, 4 * 8 + 8 * 16 + 4 * 16)
 
 
@@ -49,7 +55,7 @@ def test_conv_bytes_are_the_units_own_tensors_not_the_im2col_matrix():
         "operand_dtype": "i8",
         "output_dtype": "i8",
     }
-    counted = GH.macs_and_bytes("conv2d", facts)
+    counted = _counted("conv2d", facts)
     hout = wout = 10 - 3 + 1
     assert counted[0] == hout * wout * 8 * 4 * 3 * 3
     image_bytes = 10 * 10 * 4
@@ -62,14 +68,14 @@ def test_conv_bytes_are_the_units_own_tensors_not_the_im2col_matrix():
 
 
 def test_an_op_this_module_has_no_formula_for_is_none():
-    assert GH.macs_and_bytes("residual_add", {"anything": 1}) is None
-    assert GH.macs_and_bytes("window_mean", {}) is None
+    assert _counted("residual_add", {"anything": 1}) is None
+    assert _counted("window_mean", {}) is None
 
 
 def test_a_missing_extent_or_dtype_is_none_not_a_default():
-    assert GH.macs_and_bytes("matmul", {"M": 4, "K": 8, "operand_dtype": "i8"}) is None  # no N
-    assert GH.macs_and_bytes("matmul", {"M": 4, "K": 8, "N": 16}) is None  # no dtype
-    assert GH.macs_and_bytes("conv2d", {"N": 8, "ci": 4, "Himg": 10, "Wimg": 10, "kh": 3, "kw": 3}) is None
+    assert _counted("matmul", {"M": 4, "K": 8, "operand_dtype": "i8"}) is None  # no N
+    assert _counted("matmul", {"M": 4, "K": 8, "N": 16}) is None  # no dtype
+    assert _counted("conv2d", {"N": 8, "ci": 4, "Himg": 10, "Wimg": 10, "kh": 3, "kw": 3}) is None
 
 
 # --------------------------------------------------------------------------------------- group_bound
@@ -178,13 +184,16 @@ _CONV = {
 
 
 def test_the_bound_and_the_rank_price_the_same_contraction():
-    """``macs_and_bytes`` is the contraction's own count, so the two signals cannot drift apart."""
+    """The headroom document's bound is priced on the contraction's own count, so the bound and the
+    rank beside it cannot drift apart."""
+    machine = _machine(rows=16, cols=16, muls=1)
     for op, facts in (
         ("matmul", {"M": 4, "K": 8, "N": 16, "operand_dtype": "i8", "output_dtype": "i8"}),
         ("conv2d", _CONV),
     ):
         work = GH.contraction_for(op, facts)
-        assert GH.macs_and_bytes(op, facts) == (work.macs, work.moved_bytes)
+        document = GH.group_headroom(op=op, shape_facts=facts, ours_cycles=1, reference_cycles=1, machine=machine)
+        assert (document["macs"], document["moved_bytes"]) == (work.macs, work.moved_bytes)
 
 
 def test_a_convolution_streams_one_output_row_and_reads_its_image_not_its_im2col():

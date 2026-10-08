@@ -64,8 +64,9 @@ explicitly before the commands below:
 export MERLIN_MLC_DIR=/path/to/ModelIR
 ```
 
-The Gemmini support provider is vendored at [`../support`](../support), byte-identical to the
-companion revision recorded in [`../SOURCE.yaml`](../SOURCE.yaml) and
+The Gemmini support provider is vendored at [`../support`](../support), byte-identical (except the
+normalized `provenance.json` that record lists) to the companion revision recorded in
+[`../SOURCE.yaml`](../SOURCE.yaml) and
 [`target_support.json`](../../../build_tools/upstreams/target_support.json). With
 `MERLIN_TARGET_PATH` unset it is the selected support; set the variable only to try another
 revision, and keep the whole tree host-private.

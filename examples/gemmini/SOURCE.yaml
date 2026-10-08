@@ -1,6 +1,7 @@
-# Provenance of support/: a byte-identical copy of one companion provider root.
-# The vendored directory's git tree id equals source.tree; merlin/tests/infra/test_example_support.py
-# recomputes it and the file count from the committed bytes. Do not edit support/ in place: a change
+# Provenance of support/: a copy of one companion provider root, byte-identical except the files
+# listed under `normalized`. The vendored directory's git tree id is vendored_tree; putting each
+# normalized file's companion_blob back reproduces source.tree. merlin/tests/infra/test_example_support.py
+# recomputes both, and the file count, from the committed bytes. Do not edit support/ in place: a change
 # is a new vendoring with its own source commit, recorded here.
 schema: merlin.vendored_support.v1
 target: gemmini
@@ -18,9 +19,24 @@ source:
   merge_parents:
     - 0d0e62fb335c85ffb0d379774d539120e3141107
     - 87ef5587c1a1eb1eb13c7da3f32a5b5e9b2a52fd
+vendored_tree: 876564b3fad77b9bb6224164540bf5e526c98815
+normalized:
+  - path: provenance.json
+    companion_blob: e0c7d89a50b2d779df34a75a99cd0483acb0acfa
+    date: 2026-10-08
+    change: >-
+      Each files[].source named the copied file by an absolute path on the vendoring host. It
+      is now relative to the Merlin checkout at each entry's source_revision; path,
+      source_revision and sha256 are unchanged, so each entry still names the same file and the
+      same bytes.
 pinned:
   manifest: build_tools/upstreams/target_support.json
+  # Two commits, one provider tree. source.commit is the MERGED TIP the bytes were copied from:
+  # this pin merged with 87ef5587 (the declined-artifact guard). companion_commit is the BASE PIN:
+  # the support-branch commit target_support.json pins. Both carry provider_tree.
   companion_commit: 29818c8ce1ba2f48d5e62cc0d585f1d250c59fb4
+  companion_commit_date: "2026-10-01T15:53:33-07:00"
+  relation: base_pin_of_merged_tip
   provider_tree: 7f724638afb20ba6dd904286be37177884b672da
   identical_to_source: true
 records:
@@ -47,3 +63,11 @@ records:
     - support/transport_alignment_migration.json
     - support/whole_model_backend_migration.json
     - support/whole_model_driver_migration.json
+tests:
+  requires_external:
+    - test: tests/test_conformance_recording.py
+      external: chipyard
+      reason: >-
+        Records conformance runs whose manifest stamps the toolchain revisions of a Chipyard checkout
+        (MERLIN_EXT_CHIPYARD); without one the recorder refuses with ExternalPathUnset before any
+        assertion. The rest of the suite needs no external checkout.

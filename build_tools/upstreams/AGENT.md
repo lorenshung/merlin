@@ -15,6 +15,8 @@ These records are not discovery defaults, target hardware facts, or compiler cer
 - No canonical target source is removed until its consumers and behavioral qualifiers migrate.
 - Each companion's provider root is vendored byte-identically at `examples/<example>/support`, with its
   source commit, tree and date in `examples/<example>/SOURCE.yaml`; the manifest's `vendored` block
-  must agree with that record. That vendored copy is the runtime default when `MERLIN_TARGET_PATH` is
+  must agree with that record. The one permitted difference is a file the record lists under
+  `normalized` (with its companion blob id and the change), such as a provenance record whose
+  absolute vendoring-host paths were made repo-relative: this repository is public. That vendored copy is the runtime default when `MERLIN_TARGET_PATH` is
   unset; an explicit value always wins. Ignored local clone paths in manifests are operator records only.
 - Re-vendoring is a new copy from a recorded companion commit, never an in-place edit of a vendored tree.

@@ -18,6 +18,13 @@ import pytest
 
 from merlin.common import compile_trace as T
 from merlin.common.paths import python_import_roots
+from merlin.llvmlower import toolchain
+
+#: A stage past the xDSL half runs in the native MLIR pass manager, which the lowering reaches through
+#: the compiler's Python. Without that interpreter there is no such stage to stop at or dump.
+native = pytest.mark.skipif(
+    not toolchain.compiler_python().is_file(), reason="the compiler's Python (native MLIR pass manager) is absent"
+)
 
 _MODULE = """
 func.func @forward(%a: tensor<4xf32>, %b: tensor<4xf32>) -> tensor<4xf32> {
@@ -50,9 +57,9 @@ def _stop(tmp_path: Path, stage: str) -> tuple[T.StopAfterStage, Path, Path]:
     ("stage", "holds"),
     [
         ("xdsl-pruned", "linalg.add"),  # an xDSL rewrite: the module is still on tensors
-        ("mlir:one-shot-bufferize", "memref"),  # a native pass: bufferized, still before any LLVM
-        ("mlir:cse#2", "llvm.func"),  # the SECOND cse of the pipeline, after LLVM conversion
-        ("llvm-final", "define"),  # the LLVM IR the object would be compiled from
+        pytest.param("mlir:one-shot-bufferize", "memref", marks=native),  # bufferized, still before any LLVM
+        pytest.param("mlir:cse#2", "llvm.func", marks=native),  # the SECOND cse, after LLVM conversion
+        pytest.param("llvm-final", "define", marks=native),  # the LLVM IR the object would be compiled from
     ],
 )
 def test_stop_after_writes_that_stages_ir_and_nothing_after_it(tmp_path, stage, holds):
@@ -71,6 +78,7 @@ def test_stop_after_writes_that_stages_ir_and_nothing_after_it(tmp_path, stage, 
         assert not (work / "model.ll").exists()
 
 
+@native
 def test_dump_ir_after_all_indexes_every_stage_in_route_order(tmp_path):
     from merlin.llvmlower import lower as L
     from merlin.llvmlower import pipeline as P
@@ -95,6 +103,7 @@ def test_dump_ir_after_all_indexes_every_stage_in_route_order(tmp_path):
     assert index["native_segments"] and "one-shot-bufferize" in index["native_segments"][0]["pipeline"]
 
 
+@native
 def test_dump_ir_before_writes_the_previous_stage_and_the_native_before_dump(tmp_path):
     trace = tmp_path / "trace"
     with T.session(T.Request(directory=str(trace), dump_before=("upstream", "mlir:convert-scf-to-cf"))):
@@ -107,6 +116,7 @@ def test_dump_ir_before_writes_the_previous_stage_and_the_native_before_dump(tmp
     assert "scf." in (trace / native[0]["files"][0]).read_text(encoding="utf-8")
 
 
+@native
 def test_a_stage_the_route_never_reaches_completes_and_says_so(tmp_path):
     trace = tmp_path / "trace"
     with T.session(T.Request(directory=str(trace), stop_after="contract")):  # a staged-route stage
@@ -133,6 +143,7 @@ def test_the_staged_route_records_exactly_its_declared_stages(tmp_path):
     assert [e["stage"] for e in _index(tmp_path / "stop")["stages"]] == list(pipeline.STAGES[:3])
 
 
+@native
 def test_a_child_process_dumps_into_the_trace_and_only_the_owner_stops(tmp_path):
     """A stage reached in a child (a package entrypoint) is dumped under ir/p<pid>/ and recorded as the
     stop; the child is NOT stopped (its caller would read that as a failed group), the owner is."""

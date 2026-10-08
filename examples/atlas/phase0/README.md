@@ -43,7 +43,8 @@ step in Phase 0. Keep raw facts separate from the effective consumer views.
 For a machine-dialect generation campaign, audit the **selected decoder-mode
 population** separately from the model-derived capsule population. Supply the
 exact selected RTL pattern and decoder files, the corresponding model ISA file,
-and a reviewed mode ledger from the explicitly selected OOT support package:
+and a reviewed mode ledger from the selected support package (the vendored `examples/atlas/support`
+when `MERLIN_TARGET_PATH` is unset):
 
 ```sh
 merlin-targetgen audit-isa \
@@ -182,7 +183,8 @@ and derive again from those exact bytes before generating a realized corpus.
 ## 5. Generate a fresh corpus and keep cohorts distinct
 
 Select the newly derived requirement/profile together for inspect, preflight and run:
-Pin the same OOT support and independent SpecIR oracle selected for derivation.
+Pin the same support (below, the vendored provider, named explicitly) and the independent SpecIR
+oracle selected for derivation.
 The NPU model selection is required for an established ISA taxonomy; leaving it
 unset produces a diagnostic unknown and stops capsule materialization. Atlas is a
 self-hosted ISA target: do not add a command-ISA `corpus_issue_order` to bypass a
@@ -194,7 +196,7 @@ until their tool/runtime has an explicit frozen selection; the four
 already-materialized iteration captures remain exact Phase 0 inputs.
 
 ```sh
-MERLIN_TARGET_PATH="$ATLAS_SUPPORT_ROOT" SPECIR_ROOT="$SPECIR_ROOT" \
+MERLIN_TARGET_PATH="$PWD/examples/atlas/support" SPECIR_ROOT="$SPECIR_ROOT" \
   MERLIN_EXT_NPU_MODEL="$NPU_MODEL_ROOT" \
   merlin experiment run atlas-functional --phase 0 \
   --phase0-rtl-facts "$RTL_ROOT/facts.json" \

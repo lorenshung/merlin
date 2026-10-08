@@ -78,8 +78,11 @@ Its production caller is `merlin experiment inspect --trace` (the group build's 
 recurrence distances from explicitly ordered requested addresses. Granule and
 resource budget are caller inputs; capacity thresholds exclude first touches.
 These are logical locality features, not physical traffic or timing estimates.
-Its production caller is `merlin-trace-census locality` (`census_cli`), which reads the
-ordered trace a reader wrote and refuses one longer than the stated budget.
+Its production callers are `merlin experiment inspect --group gN --trace`, which records the
+group program's committed memory requests from the functional model's commit log
+(`requested_addresses.json`) and censuses them at each `--locality-granule`, and
+`merlin experiment census locality` (`census_cli`), which re-takes the census from that file and
+refuses a trace longer than the stated budget.
 `fast_estimate_validation` is called by `whole_model_screen.fit_calibration`, which validates every
 refit of the structure screen's calibration against held-out board-measured groups under the board's
 derived noise margin and records the screen's ranking as `unvalidated` whenever that does not hold.
@@ -94,8 +97,10 @@ boundary envelope checks an unpriced subdomain and never approves a ranking.
 The provider owns decoding/ABI and exact artifact verification; the existing
 fitter and held-out ordering gate remain separate. Independent expanded event
 traces and multiple provider geometries test the summary and refusal behavior.
-Its production caller is `merlin-trace-census boundaries` / `boundary-domain`
-(`census_cli`), which reads the provider's records and digests from disk.
+Its production caller is `merlin experiment census boundaries` / `boundary-domain`
+(`census_cli`), which reads the provider's records and digests from disk. No provider writes those
+records yet: call kinds, callees and stack widths are host-ABI decoding a target's support owns, and
+no vendored provider declares a decoder for them. A provider that adds one is the producer.
 
 `schedule_proxy` prices what a schedule asks the device for in array-tile transactions (compute tiles
 plus moved bytes, never one without the other). It is validated as an ORDER against 71 FireSim-measured

@@ -40,7 +40,6 @@ __all__ = [
     "group_bound",
     "group_headroom",
     "group_rank",
-    "macs_and_bytes",
     "machine_for",
 ]
 
@@ -55,13 +54,6 @@ TRAFFIC_TERM = "dram_traffic"
 def _dtype_bytes(dtype: Any) -> int | None:
     bits = _width_bits(dtype)
     return None if bits is None else -(-bits // 8)  # ceil: a sub-byte width still occupies one byte
-
-
-def macs_and_bytes(op: Any, facts: Mapping[str, Any]) -> tuple[int, int] | None:
-    """``(macs, moved_bytes)`` for one group's shape facts, or ``None`` when ``op`` states no
-    MAC-bearing contraction this estimate covers, or a needed extent/dtype is missing."""
-    work = contraction_for(op, facts)
-    return None if work is None else (work.macs, work.moved_bytes)
 
 
 def contraction_for(op: Any, facts: Mapping[str, Any], *, label: str = "") -> Contraction | None:

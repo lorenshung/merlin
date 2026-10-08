@@ -3,7 +3,7 @@ title: Generating capsules for a target
 kind: guide
 status: current
 owner: targetgen
-last_verified: 2026-10-06
+last_verified: 2026-10-08
 related: [adding_a_target, gemmini_experiment, capsule_bench, integrations, phase0_specification]
 code_refs:
   - experiments/catalog.yaml
@@ -101,6 +101,15 @@ software spec or recipe requires new synthesis commitments; legacy references
 remain diagnostic, while genuine digest-bound mismatches refuse generation.
 Regenerate and explicitly select the new requirement/synthesis pair, never edit
 old evidence to match new input bytes.
+
+Performance-family cohorts can also come from the captures themselves. When the frozen evidence
+manifest names `coverage/performance-basis.json` (the static, capture-bound performance basis the
+evidence export writes), generation reads it by its manifest-bound digest and size and derives
+cohorts at the captured contraction shapes, recorded with the requirement basis
+`coverage.performance-basis.capture_shape`. Evidence exported before the basis existed names no such
+member; the capture-shape sweeps then record why they were skipped. A named member that is absent,
+indirect, different or for another target refuses generation. Software-spec screening of each entry
+uses the numeric binding the writer selects for that entry, not the corpus default.
 
 For standalone invocation, `python -m merlin_experiments.phase0 --help` describes the
 installed generator's explicit inputs, including required `--output-root`. Do not use the

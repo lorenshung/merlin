@@ -3,7 +3,7 @@ title: Selecting a target definition package
 kind: guide
 status: current
 owner: targetgen
-last_verified: 2026-10-07
+last_verified: 2026-10-08
 related: [adding_a_target, generated_target_repos, targetgen, target_publishing]
 code_refs: [src/merlin/targetgen/target_registry.py, src/merlin/targetgen/providers.py, src/merlin/targetgen/capability_manifests.py, build_tools/upstreams/target_support.json]
 ---
@@ -99,8 +99,12 @@ champion tree does not make it safe to grant to a candidate.
 
 Merlin's own support provider for a target is target-specific code, so it is tracked beside the
 target's example at `examples/<example>/support/`, with an `examples/<example>/SOURCE.yaml` that
-records the companion repository, commit and git tree it was copied from (byte-identical; the tree id
-is re-checked by `merlin/tests/infra/test_example_support.py`). The migration manifest
+records the companion repository, commit and git tree it was copied from. The copy is byte-identical
+except the files the record lists under `normalized`, each with its companion blob id and the change
+(a provenance record whose absolute vendoring-host paths were made repo-relative, for example).
+`merlin/tests/infra/test_example_support.py` recomputes the vendored tree id (`vendored_tree`) from
+the tracked bytes, and the companion's (`source.tree`) with the normalized files' companion blobs put
+back, so no unlisted file can differ. The migration manifest
 [`target_support.json`](../../build_tools/upstreams/target_support.json) lists each one.
 
 | `MERLIN_TARGET_PATH` | Support selected for target `T` |

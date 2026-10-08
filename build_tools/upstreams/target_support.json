@@ -12,7 +12,8 @@
     "root": "examples/<example>/support",
     "record": "examples/<example>/SOURCE.yaml",
     "date": "2026-10-07",
-    "verification": "merlin/tests/infra/test_example_support.py recomputes each vendored tree id from the tracked bytes"
+    "verification": "merlin/tests/infra/test_example_support.py recomputes each vendored tree id from the tracked bytes, and the companion tree id with each normalized file's companion blob put back",
+    "normalization": "A vendored file may differ from its companion only where SOURCE.yaml lists it under normalized, with the companion blob id and the change. Absolute vendoring-host paths in provenance records are rewritten repo-relative there."
   },
   "companions": [
     {
@@ -24,6 +25,7 @@
       "catalog_commit": null,
       "root_role": "support",
       "companion_commit": "5d52f2bb5660a909ba947420ed6f44ba92a43986",
+      "companion_commit_relation": "same_commit",
       "provider_root": ".",
       "provider_role": "support",
       "vendored": {
@@ -31,6 +33,7 @@
         "source_record": "examples/muon/SOURCE.yaml",
         "commit": "5d52f2bb5660a909ba947420ed6f44ba92a43986",
         "tree": "6293adbf1e53084daec008a08119680f557032d1",
+        "vendored_tree": "6293adbf1e53084daec008a08119680f557032d1",
         "file_count": 26
       },
       "copied_files": 19,
@@ -58,6 +61,7 @@
       "catalog_commit": "a568f412625539cfdb29484869093721b027be5c",
       "root_role": "host_schedule",
       "companion_commit": "d6863380d43f61dcc22ebe498c0f6b9341018e29",
+      "companion_commit_relation": "same_commit",
       "provider_root": "saturn-support",
       "provider_role": "support",
       "vendored": {
@@ -65,6 +69,7 @@
         "source_record": "examples/saturn/SOURCE.yaml",
         "commit": "d6863380d43f61dcc22ebe498c0f6b9341018e29",
         "tree": "8febeda8958c9edcae820d5b50c3247dec31c4b4",
+        "vendored_tree": "8febeda8958c9edcae820d5b50c3247dec31c4b4",
         "file_count": 19
       },
       "copied_files": 7,
@@ -95,6 +100,7 @@
       "catalog_commit": "3b8dbc57fd405058597481bcf28198702b6befde",
       "root_role": "candidate_compiler",
       "companion_commit": "29818c8ce1ba2f48d5e62cc0d585f1d250c59fb4",
+      "companion_commit_relation": "base_pin_of_merged_tip",
       "provider_root": "merlin-support",
       "provider_role": "support",
       "vendored": {
@@ -102,6 +108,7 @@
         "source_record": "examples/gemmini/SOURCE.yaml",
         "commit": "9e99fc264cd5b9f21f51948dcdce94377ca86727",
         "tree": "7f724638afb20ba6dd904286be37177884b672da",
+        "vendored_tree": "876564b3fad77b9bb6224164540bf5e526c98815",
         "merge_parents": ["0d0e62fb335c85ffb0d379774d539120e3141107", "87ef5587c1a1eb1eb13c7da3f32a5b5e9b2a52fd"],
         "file_count": 151
       },
@@ -161,6 +168,7 @@
       "catalog_commit": "a568f412625539cfdb29484869093721b027be5c",
       "root_role": "host_schedule",
       "companion_commit": "d6863380d43f61dcc22ebe498c0f6b9341018e29",
+      "companion_commit_relation": "same_commit",
       "provider_root": "merlin-support",
       "provider_role": "support",
       "vendored": {
@@ -168,6 +176,7 @@
         "source_record": "examples/rvv/SOURCE.yaml",
         "commit": "d6863380d43f61dcc22ebe498c0f6b9341018e29",
         "tree": "cdfed452de48491da2f09a772b251b8b827e8bda",
+        "vendored_tree": "0e857f223910460294bd028998534883ca81238a",
         "file_count": 6
       },
       "copied_files": 1,
@@ -189,6 +198,7 @@
       "catalog_commit": null,
       "root_role": null,
       "companion_commit": "392eb077c8a48bd3a21b253d9e488ba3d7ad74cf",
+      "companion_commit_relation": "same_commit",
       "provider_root": "merlin-support",
       "provider_role": "support",
       "vendored": {
@@ -196,6 +206,7 @@
         "source_record": "examples/atlas/SOURCE.yaml",
         "commit": "392eb077c8a48bd3a21b253d9e488ba3d7ad74cf",
         "tree": "42315503deaf7d52b1196354abd9b24eabaf7dc4",
+        "vendored_tree": "c68fb5508610f67372b73936231edd476c6fe2e0",
         "file_count": 10
       },
       "copied_files": 2,

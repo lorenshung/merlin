@@ -1,4 +1,4 @@
-"""``merlin-trace-census``: the command a trace reader or a target provider hands its records to.
+"""``merlin experiment census``: the command a trace reader or a target provider hands its records to.
 
 Each case runs the CLI on records written to disk and compares the printed document with the library
 call on the same records, so the command can neither reshape a result nor swallow a refusal.
@@ -129,3 +129,24 @@ def test_a_malformed_provider_record_is_refused(tmp_path, capsys):
     del document["census_sha256"]
     path.write_text(json.dumps(document))
     assert _run(capsys, "boundaries", str(path))[0] == CLI.REFUSED
+
+
+def test_the_census_is_a_merlin_experiment_subcommand_with_no_script_of_its_own(tmp_path, capsys):
+    """One experiment front door, and the locality census it serves reads the file ``inspect --trace``
+    records (a JSON list of requested addresses in commit order)."""
+    import tomllib
+
+    from merlin.common.paths import repo_root
+
+    cli = pytest.importorskip("merlin_experiments.cli")
+    trace = [0x80001010, 0x80001010, 0x80002000, 0x80002004]
+    path = tmp_path / "requested_addresses.json"
+    path.write_text(json.dumps(trace) + "\n")
+    assert cli.main(["census", "locality", str(path), "--granule", "16", "--max-requests", "4"]) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document == {
+        "schema": "address_locality_v1",
+        **json.loads(json.dumps(asdict(address_locality(trace, granule=16, max_requests=4)))),
+    }
+    scripts = tomllib.loads((repo_root() / "pyproject.toml").read_text())["project"]["scripts"]
+    assert not [name for name, entry in scripts.items() if entry.startswith("merlin.perf.census_cli")]

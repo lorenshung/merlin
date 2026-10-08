@@ -60,7 +60,6 @@ __all__ = [
     "REFUSED",
     "SELECTOR_FIELD",
     "capacity_from_selector",
-    "load_state_capacity",
     "load_state_selector",
     "movement_in_classes_for",
     "residency_findings",
@@ -96,8 +95,21 @@ def load_state_selector(target: str) -> dict[str, int] | None:
     """``{"offset", "width", "capacity"}`` of ``target``'s load-state selector, or ``None``.
 
     The capacity travels WITH the selector rather than beside it, because the two are derived from
-    different facts (see :func:`load_state_capacity`) and a caller that threaded only the field would
-    silently get the wider of the two bounds. One object, both facts, no way to carry half of it.
+    different facts and a caller that threaded only the field would silently get the wider of the two
+    bounds. One object, both facts, no way to carry half of it. The capacity is the SMALLER of two
+    derived bounds, because over-reading it is the one way the demand could ask for something the
+    machine cannot do:
+
+    * the selector's own span -- how many states the ENCODING can name;
+    * how many distinct inbound-movement instruction classes the target's decode table declares --
+      how many states a program can actually ADDRESS, since a state it has no instruction to reach is
+      a state it cannot use.
+
+    Measured on the target this was written against, those are 4 and 2: the selector is two bits wide
+    while the manifest declares two load classes. Taking the width alone would have demanded four
+    held configurations from a program that has two ways to ask for one. Under-reading is the safe
+    direction -- it only ever makes the verdict REFUSE where it might have failed -- so a target whose
+    classes cannot be counted falls back to the selector's span and nothing is invented.
 
     Read from the target's extracted load-configuration register bundle -- the same source the store
     configuration's field layout comes from. ``None`` is a real answer and callers must treat it as a
@@ -139,26 +151,6 @@ def capacity_from_selector(selector: Mapping[str, Any] | None) -> int | None:
     if not isinstance(width, int) or width < 1:
         return None
     return 1 << width
-
-
-def load_state_capacity(target: str) -> int | None:
-    """``target``'s addressable load-state count, or ``None`` when its RTL does not say.
-
-    TWO derived bounds, and the SMALLER wins, because over-reading this number is the one way the
-    demand could ask for something the machine cannot do:
-
-    * the selector's own span -- how many states the ENCODING can name;
-    * how many distinct inbound-movement instruction classes the target's decode table declares --
-      how many states a program can actually ADDRESS, since a state it has no instruction to reach is
-      a state it cannot use.
-
-    Measured on the target this was written against, those are 4 and 2: the selector is two bits wide
-    while the manifest declares two load classes. Taking the width alone would have demanded four
-    held configurations from a program that has two ways to ask for one. Under-reading is the safe
-    direction -- it only ever makes the verdict REFUSE where it might have failed -- so a target whose
-    classes cannot be counted falls back to the selector's span and nothing is invented.
-    """
-    return capacity_from_selector(load_state_selector(target))
 
 
 def movement_in_classes_for(target: str) -> frozenset:

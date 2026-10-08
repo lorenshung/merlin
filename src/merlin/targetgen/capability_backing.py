@@ -600,6 +600,17 @@ def audit(target: str, *, ratchet: set[str] | None = None) -> dict:
     return _verdict(target, claims(target), set(ratchet or ()), _pin_read_paths(target))
 
 
+def unreadable(target: str, reason: str) -> dict:
+    """The audit document for a contract that could not be read structurally: one problem, no claims.
+
+    The same shape :func:`audit` returns, so a printer or JSON consumer reads one kind of document; the
+    problem is what makes it fail, and "no claims" is never offered as the answer on its own.
+    """
+    doc = _verdict(target, (), set(), {})
+    doc["problems"] = [f"contract could not be read structurally: {reason}"]
+    return doc
+
+
 def _verdict(target: str, found: tuple[Claim, ...], ratchet: set, pin_reads: dict) -> dict:
     unbacked = tuple(c for c in found if not c.backed)
     rotted = tuple(c for c in found if c.backed and c.broken)
