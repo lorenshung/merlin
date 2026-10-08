@@ -123,3 +123,20 @@ def test_function_and_capture_abi_counts_must_agree():
     assert "result ABI" in bundle_admission_reason(
         {"capture_meta": {"input_abi": [abi], "output_abi": [abi, abi]}}, source
     )
+
+
+def test_same_conversion_roles_admit_mutation_and_user_results():
+    source = """builtin.module {
+  func.func @forward(%arg0: tensor<2xf32>) -> (tensor<2xf32>, tensor<2xf32>) {
+    func.return %arg0, %arg0 : tensor<2xf32>, tensor<2xf32>
+  }
+}"""
+    abi = {"dtype": "f32", "shape": [2]}
+    meta = {
+        "input_abi": [abi],
+        "output_abi": [abi],
+        "result_contract": {"results": [{"role": "user_input_mutation"}, {"role": "user_output"}]},
+    }
+    assert bundle_admission_reason({"capture_meta": meta}, source) is None
+    meta["result_contract"]["results"].pop()
+    assert "result ABI" in bundle_admission_reason({"capture_meta": meta}, source)
