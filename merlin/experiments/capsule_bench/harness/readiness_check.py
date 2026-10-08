@@ -12,7 +12,8 @@ Sections (each is an independent pass/fail; a failure does not abort the rest):
   E. anti-cheat gate     — verify_no_cheat.py PASS (delegated)
   F. bundle integrity    — all 6 bundles exist, parse, and every API a prompt names actually imports
 
-Exit 0 = GO. Non-zero = NO-GO.  Usage: readiness_check.py
+Exit 0 = GO. Non-zero = NO-GO. For Chipyard, pass
+``--reference-backend /absolute/path/to/oot/package``.
 """
 
 from __future__ import annotations
@@ -1103,7 +1104,7 @@ def _oracle_sim_via() -> str:
     return (load_target_experiment(desc).sim_via or "").strip() if desc.is_file() else ""
 
 
-def test_oracles_endtoend():
+def test_oracles_endtoend(reference_backend: str | None = None):
     """G. Prove the target's REAL grading oracle can produce a verdict — the safeguard abc7 lacked.
     Routed by the target's oracle kind (contract, no target literal):
 
@@ -1114,7 +1115,7 @@ def test_oracles_endtoend():
       the exact preflight the launcher runs) and that ``oracle_adapters`` resolves BOTH graded tiers to
       the program oracle — the precise wiring a graded round uses. That is the honest pre-launch proof;
       the numeric bit-exact check runs against a known-good npu_model program at grade time.
-    * ``chipyard`` (gemmini): actually RUN spike + verilator on the committed reference backend to a real
+    * ``chipyard`` (gemmini): actually RUN spike + verilator on an operator-selected backend to a real
       verdict, measure verilator's per-capsule time, and NO-GO on the abc7 signature (0 capsules/timeout).
     """
     import json as _json
@@ -1232,10 +1233,14 @@ def test_oracles_endtoend():
         except Exception as e:  # noqa: BLE001
             _ok("oracle_adapters resolves the program-oracle ladder", False, f"{type(e).__name__}: {e}")
         return
-    ref = REPO / "out/artifacts/targets" / TARGET / "agent_spec_v1_mlir_oot"
-    if not (ref / "manifest.yaml").is_file():
-        _ok("reference backend agent_spec_v1 present", False, "missing")
+    from readiness_reference import select_reference_backend
+
+    try:
+        ref, ref_manifest = select_reference_backend(reference_backend, target=TARGET)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        _ok("operator-selected reference backend", False, str(exc))
         return
+    _ok("operator-selected reference backend", True, f"{ref} ({ref_manifest.get('package_id', 'unidentified')})")
     # This is a fixed reference *simulator smoke*, independent of the grading release.
     # The separate graded-path check below must still reject Phase-0 admission inputs until
     # an operator has prepared and reviewed a release. Without an explicit probe root the
@@ -1312,19 +1317,22 @@ def test_oracles_endtoend():
         # tempfile already honours TMPDIR and falls back to /tmp; hardcoding dir="/tmp" overrode a
         # correctly-set TMPDIR and put this full C++ tree copy + cmake configure on the root
         # filesystem, which is the small, nearly-full one on this host.
-        clean = Path(_tf.mkdtemp(prefix="clean_cpp_")) / "sub"
-        import shutil as _sh
+        if ref_manifest["language"] == "cpp":
+            clean = Path(_tf.mkdtemp(prefix="clean_cpp_")) / "sub"
+            import shutil as _sh
 
-        _sh.copytree(ref, clean, symlinks=True)
-        for bd in clean.rglob("build"):
-            if bd.is_dir():
-                _sh.rmtree(bd, ignore_errors=True)
-        cb = _grade(clean, "spike", 700)
-        _ok(
-            "C++ builds FROM CLEAN (cmake configure ok — catches libidn-class env bugs)",
-            cb.get("n_capsules") == 1 and "FAIL[build]" not in str(cb.get("error", "")) and "libidn" not in str(cb),
-            f"n={cb.get('n_passed')}/{cb.get('n_capsules')} {str(cb.get('error', ''))[:60]}",
-        )
+            _sh.copytree(ref, clean, symlinks=True)
+            for bd in clean.rglob("build"):
+                if bd.is_dir():
+                    _sh.rmtree(bd, ignore_errors=True)
+            cb = _grade(clean, "spike", 700)
+            _ok(
+                "C++ builds FROM CLEAN (cmake configure ok — catches libidn-class env bugs)",
+                cb.get("n_capsules") == 1 and "FAIL[build]" not in str(cb.get("error", "")) and "libidn" not in str(cb),
+                f"n={cb.get('n_passed')}/{cb.get('n_capsules')} {str(cb.get('error', ''))[:60]}",
+            )
+        else:
+            _na("C++ builds FROM CLEAN", "selected package declares language: python")
 
         # What this probe means is "the SCREEN tier runs and returns a real verdict". It must not assert
         # all_pass: the capsules declare a cycle-accurate cert tier as mandatory, and --sim spike supplies
@@ -1344,9 +1352,9 @@ def test_oracles_endtoend():
         # spike check above reads), so the old tiers["L3"] read was a field-name bug that ALWAYS yielded
         # None: a false NO-GO that also blocked .oracle_timing.json, which the launcher refuses to start
         # without. Verilator was running fine the whole time.
-        t0 = _time.time()
+        t0 = _time.monotonic()
         ve = _grade(ref, "verilator", 900, cap="A2_single_tile_matmul")
-        dt = _time.time() - t0
+        dt = _time.monotonic() - t0
         cv = (ve.get("per_capsule") or [{}])[0]
         l3 = (
             ve.get("all_pass")
@@ -1386,6 +1394,10 @@ def test_oracles_endtoend():
                             "config": config,
                             "verilator_per_capsule_s": round(dt, 1),
                             "simulator_sha256": sha256_file(sim),
+                            "reference_backend": str(ref),
+                            "reference_package_id": ref_manifest.get("package_id"),
+                            "reference_manifest_sha256": sha256_file(ref / "manifest.yaml"),
+                            "measured_capsule": "A2_single_tile_matmul",
                             "measured_by": "readiness_check",
                         },
                         sort_keys=True,
@@ -1550,7 +1562,15 @@ def test_the_launch_interpreter_runs_this_checkout():
     )
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run target readiness checks without launching an agent")
+    parser.add_argument(
+        "--reference-backend",
+        help="absolute path to an operator-selected MLIR OOT backend for Chipyard L2/L3 timing",
+    )
+    args = parser.parse_args(argv)
     sys.path.insert(0, str(REPO / "merlin" / "python"))
     print("READINESS CHECK — exercising all tooling (no agent launched)")
     for fn in (
@@ -1572,7 +1592,7 @@ def main() -> int:
         test_the_launch_interpreter_runs_this_checkout,
     ):
         try:
-            fn()
+            fn(args.reference_backend) if fn is test_oracles_endtoend else fn()
         except Exception as e:
             _ok(f"{fn.__name__} (uncaught)", False, f"{type(e).__name__}: {e}")
     n_pass = sum(1 for _, ok, _ in results if ok is True)
