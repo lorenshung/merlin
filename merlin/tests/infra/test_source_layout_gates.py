@@ -177,7 +177,7 @@ def test_module_size_ratchet_follows_core_but_not_new_extension(tmp_path, monkey
     gate = _gate("check_structure")
     monkeypatch.setattr(gate, "ROOT", str(tmp_path))
     monkeypatch.setattr(gate, "MODULE_SIZE_LIMIT", 2)
-    ratchet = _write(tmp_path, "size.txt", "merlin/python/merlin/large.py\n")
+    ratchet = _write(tmp_path, "size.txt", "merlin/python/merlin/large.py  # 3\n")
     monkeypatch.setattr(gate, "MODULE_SIZE_RATCHET", str(ratchet))
     _write(tmp_path, "src/merlin/large.py", "x=1\ny=2\nz=3\n")
     _write(tmp_path, "packages/merlin-analysis/src/merlin_analysis/large.py", "x=1\ny=2\nz=3\n")
