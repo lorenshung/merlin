@@ -30,8 +30,10 @@ _EXPECTED_DTYPES = {
 
 
 def _complex_values(value: Any) -> Any:
+    if isinstance(value, Mapping) and value.get("kind") == "float":
+        return float(value["value"])
     if isinstance(value, Mapping) and value.get("kind") == "complex":
-        return complex(value["real"], value["imag"])
+        return complex(_complex_values(value["real"]), _complex_values(value["imag"]))
     if isinstance(value, list):
         return [_complex_values(item) for item in value]
     return value
@@ -52,19 +54,18 @@ def _leaves(document: Any) -> list[Any]:
 def _grade_output(raw: bytes, abi: Mapping[str, Any], expected: Any, case: Mapping[str, Any]) -> dict[str, Any]:
     dtype = str(abi["dtype"])
     shape = tuple(int(dim) for dim in abi["shape"])
-    if dtype == "complex<f32>":
-        physical = np.frombuffer(raw, dtype=np.float32)
+    if dtype in {"complex<f32>", "complex<f64>"}:
+        complex_dtype = np.complex64 if dtype == "complex<f32>" else np.complex128
         count = int(np.prod(shape)) if shape else 1
-        if len(physical) != count * 2:
-            return {"status": "mismatch", "reason": f"complex result has {len(raw)} bytes; expected {count * 8}"}
-        actual = (physical.reshape((*shape, 2))[..., 0] + 1j * physical.reshape((*shape, 2))[..., 1]).astype(
-            np.complex64
-        )
+        nbytes = count * np.dtype(complex_dtype).itemsize
+        if len(raw) != nbytes:
+            return {"status": "mismatch", "reason": f"complex result has {len(raw)} bytes; expected {nbytes}"}
+        actual = np.frombuffer(raw, dtype=complex_dtype).reshape(shape)
         if not isinstance(expected, Mapping) or expected.get("kind") != "tensor":
             return {"status": "ungradable", "reason": "complex result lacks a canonical tensor document"}
-        if expected.get("dtype") != "complex64" or tuple(expected.get("shape", ())) != shape:
+        if expected.get("dtype") != np.dtype(complex_dtype).name or tuple(expected.get("shape", ())) != shape:
             return {"status": "mismatch", "reason": "output dtype or shape differs from canonical complex result"}
-        reference = np.asarray(_complex_values(expected.get("values")), dtype=np.complex64).reshape(shape)
+        reference = np.asarray(_complex_values(expected.get("values")), dtype=complex_dtype).reshape(shape)
         parameters = case.get("comparison_parameters") or {}
         equal = np.isclose(
             actual,
@@ -132,7 +133,7 @@ def _grade_output(raw: bytes, abi: Mapping[str, Any], expected: Any, case: Mappi
     else:
         expected_value = expected
     try:
-        reference = np.asarray(expected_value, dtype=_DTYPES[dtype]).reshape(shape)
+        reference = np.asarray(_complex_values(expected_value), dtype=_DTYPES[dtype]).reshape(shape)
     except (TypeError, ValueError) as exc:
         return {"status": "ungradable", "reason": f"cannot decode canonical expected value: {exc}"}
     parameters = case.get("comparison_parameters") or {}
@@ -160,6 +161,7 @@ def grade_core_aten_batch(
     output_bytes: Sequence[bytes] | None = None,
     *,
     execution_error: str | None = None,
+    output_shapes: Sequence[Sequence[int]] | None = None,
 ) -> dict[str, Any]:
     """Return a complete pass/mismatch/unavailable ledger, including noncaptured cases.
 
@@ -187,10 +189,19 @@ def grade_core_aten_batch(
         if any(index >= len(output_bytes) for index in indices):
             verdicts[overload] = {"status": "execution_failed", "reason": "hardware did not emit all result indices"}
             continue
-        details = [
-            _grade_output(output_bytes[index], abi, item, record["case"])
-            for index, abi, item in zip(indices, abis, expected)
-        ]
+        details = []
+        for index, abi, item in zip(indices, abis, expected):
+            if output_shapes is not None:
+                shape = list(output_shapes[index])
+                declared = abi.get("declared_shape", abi["shape"])
+                if len(shape) != len(declared) or any(d >= 0 and d != s for d, s in zip(declared, shape)):
+                    details.append({"status": "mismatch", "reason": "runtime shape differs from declared result"})
+                    continue
+                abi = {**abi, "shape": shape}
+            elif any(d < 0 for d in abi.get("declared_shape", abi["shape"])):
+                details.append({"status": "ungradable", "reason": "dynamic result lacks runtime extent evidence"})
+                continue
+            details.append(_grade_output(output_bytes[index], abi, item, record["case"]))
         if all(item["status"] == "pass" for item in details):
             status = "pass"
         elif any(item["status"] == "mismatch" for item in details):
@@ -231,7 +242,10 @@ def grade_core_aten_batch(
     counts: dict[str, int] = {}
     for item in verdicts.values():
         counts[item["status"]] = counts.get(item["status"], 0) + 1
+    from merlin.targetgen.core_aten_provenance import batch_provenance
+
     return {
+        "provenance": batch_map.get("provenance") or batch_provenance(),
         "schema_version": 1,
         "case_count": len(verdicts),
         "passed_count": counts.get("pass", 0),

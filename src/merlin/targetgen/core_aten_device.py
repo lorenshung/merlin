@@ -166,6 +166,8 @@ def run_spike_bundle(
     from merlin.targetgen.core_aten_batch_grade import grade_core_aten_batch
 
     output_bytes = None
+    output_shapes = None
+    options = {}
     try:
         bundled = [case for case in report["cases"] if case["status"] == "bundled"]
         if target:
@@ -240,6 +242,8 @@ def run_spike_bundle(
         if len(output_bytes) != report["output_count"]:
             raise RuntimeError(f"hardware emitted {len(output_bytes)} outputs; bundle expects {report['output_count']}")
         (directory / "spike-console.txt").write_text(run["console"], encoding="utf-8")
+        output_shapes = run.get("output_shapes") or None
+        _write_json(directory / "spike-output-shapes.json", output_shapes)
         _write_json(directory / "spike-output-bytes.json", [item.hex() for item in output_bytes])
         execution = {
             "status": "ran",
@@ -252,11 +256,18 @@ def run_spike_bundle(
         for case in report["cases"]:
             if case["status"] == "bundled":
                 case["routing"]["failure_reason"] = execution["error"]
+    from merlin.targetgen.core_aten_provenance import batch_provenance
+
+    report["provenance"] = batch_provenance(
+        directory, target=target, package=device_package, runner_options=options, rtl_facts=rtl_facts
+    )
+    execution["provenance"] = report["provenance"]
     _write_json(directory / "core_aten_batch_map.json", report)
     _write_json(directory / "spike-execution.json", execution)
     verdict = grade_core_aten_batch(
         report,
         output_bytes,
+        output_shapes=output_shapes,
         execution_error=execution.get("error") if execution["status"] != "ran" else None,
     )
     _write_json(directory / "core_aten_batch_verdict.json", verdict)
