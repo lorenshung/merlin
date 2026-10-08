@@ -738,7 +738,10 @@ def test_shipped_targets_all_consume_the_same_claim_separated_perf_template():
     shared = yaml.safe_load((for_target("gemmini").performance_template).read_text(encoding="utf-8"))
     shared_ids = [s["id"] for s in shared["sweeps"]]
     claims = {s["base"]["performance"]["claim"] for s in shared["sweeps"]}
-    assert claims == {"PREDICTS", "DIFFERENTIAL"}
+    # Every claim the template declares must be one phase 0 admits. Pinning the exact SET went stale
+    # the moment a family with a new claim shape (EMITS) was unblocked -- the staleness the comment
+    # below records for the id roster -- and said nothing about the property this test is named for.
+    assert claims and claims <= PROFILES._PERFORMANCE_CLAIMS
     assert all(s["base"]["cat"] == "_perf" and s["base"]["label"] == "dev" for s in shared["sweeps"])
     # THE INVARIANT IS THAT EVERY TARGET GETS THE SAME TEMPLATE, not that the template has a
     # particular membership. Freezing the roster here asserted ["PK", "PS", "PC"] and {"PL", "PF"},

@@ -198,6 +198,12 @@ def preflight_cohort(formal_claim: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(str(value) for value in identities)
 
 
+#: The claims this coordinator can seal: each is decided from cells measured on its correctness and
+#: timing lanes. An ``EMITS`` family is a canonical claim (see ``prompt.CANONICAL_CLAIMS``) that is
+#: decided elsewhere, so it is refused here by name rather than run against lanes it never declared.
+_MEASURED_CLAIMS = ("RECOVERS", "PREDICTS", "DIFFERENTIAL")
+
+
 def prepare_formal_claim(
     capsules: Sequence[CORPUS.PerformanceCapsule], requested_replicates: int | None = None
 ) -> dict[str, Any]:
@@ -209,6 +215,16 @@ def prepare_formal_claim(
     """
     identity, module, preflight_entry, family = declared_claim_analyzer(capsules)
     descriptors = [capsule.descriptor for capsule in capsules]
+    claim = (descriptors[0].get("performance") or {}).get("claim")
+    if claim not in _MEASURED_CLAIMS:
+        # Refused BEFORE any work is authored: this coordinator measures a correctness lane and a
+        # timing lane, and a family decided from the emitted stream declares neither as its evidence.
+        # Its verdict comes from trace_check's declared mode and the analyzer dispatch, not from here.
+        raise StageGateError(
+            f"frozen {family} declares a {claim} claim, which is decided from the candidate's emitted "
+            "stream by its own analyzer; the measured-claims coordinator observes correctness and "
+            "timing lanes only and cannot seal it"
+        )
     identities = replicate_schedule(descriptors[0].get("performance"), requested_replicates)
     label = f"{identity.module}.{preflight_entry.__name__}"
     kwargs = analyzer_kwargs(preflight_entry, {"replicates": lambda: list(identities)}, label=label)
@@ -254,7 +270,7 @@ def _validate_formal_claim_facts(
         or formal.get("schema_version") != 1
         or not isinstance(formal.get("family"), str)
         or not formal.get("family")
-        or formal.get("claim") not in ("RECOVERS", "PREDICTS", "DIFFERENTIAL")
+        or formal.get("claim") not in _MEASURED_CLAIMS
         or formal.get("status") != "READY"
         or formal.get("refusal_reasons") != []
     ):

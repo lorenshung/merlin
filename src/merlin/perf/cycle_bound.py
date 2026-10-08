@@ -42,6 +42,11 @@ NO_CYCLE_BOUND: dict[str, str] = {
         "this member exists to be measured, not to be held to a ceiling -- a law-fitting point has no "
         "budget it could exceed"
     ),
+    "not_a_cycle_observable": (
+        "this member's property is read from the instruction stream the candidate EMITTED, not from a "
+        "cycle count -- so it owes no ceiling, and one derived for it would be a budget checked "
+        "against a number nothing in its evidence produces"
+    ),
 }
 
 #: The subset of :data:`NO_CYCLE_BOUND` whose members are a PROMISE OF A DERIVATION rather than a

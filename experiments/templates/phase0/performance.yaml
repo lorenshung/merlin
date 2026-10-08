@@ -1537,6 +1537,420 @@ sweeps:
   source_reference: >-
     form-perf member derived from the iteration workloads' compute groups (scope.performance.forms)
 
+# ---------------------------------------------------------------------------------------------
+# THE EMITTED-STREAM FAMILIES (claim EMITS). Every family above is decided from measured cycles, and a
+# cycle measurement is about the MACHINE: it is silent about whether the compiler under test used the
+# mechanism that makes the machine fast. These three are decided from the candidate's own decoded
+# instruction stream against a property derived from the target, by the analyzer each acceptance block
+# names (merlin.perf.{load_state,stationary,movein}_claim, dispatched by
+# merlin_experiments.phase2.claims.dispatch). Passing says redundant or exposed work is ABSENT; none of
+# them is a speedup claim. They read no cycles, so their members cap at the correctness tier and owe no
+# ceiling (`not_a_cycle_observable`).
+#
+# PD -- LOAD-CONFIGURATION RESIDENCY. A configuration command carries no address, so a second command
+# with an identical payload establishes state the load path already holds and is provably inert. The
+# demand: issued load configurations must not exceed the distinct configurations used, whenever that
+# count is inside the target's derived addressable state count (the selector field of its extracted
+# load-configuration layout, published by its selected support). A contraction's operands move at their
+# own row pitches, so the (N, K) cross product mints members needing two configurations (lever-bearing)
+# and members needing one (control); the analyzer refuses a cohort missing either kind.
+- id: PD
+  fit_axes:
+  - N
+  comparison_roles:
+  - lever_bearing
+  - control
+  base:
+    cat: _perf
+    kind: model_slice
+    op: matmul
+    out: Y0
+    label: dev
+    source_role: derived_sweep
+    # THE FAMILY READS NO CYCLES, so it must not ask for the cycle-accurate rung; declaring the cap is
+    # what makes that machine-readable to the affordability gate.
+    max_oracle_tier: L2
+    # DECLARED so the demand reaches the author through the channel it already reads (trace_check),
+    # not only through a family verdict computed after the fact. The other three restate the defaults
+    # this member would otherwise get (writing `modes` at all replaces them).
+    modes:
+      relu: false
+      acc_scale: false
+      i8: false
+      load_state_resident: true
+    performance:
+      level: L2_intra_layer
+      family: PD
+      lever: load_configuration_residency
+      # re-measured on every candidate: the redundant commands it forbids are dispatched work
+      member_class: OBJECTIVE
+      claim: EMITS
+      comparand:
+        kind: emitted_instruction_property
+        against: the_programs_own_distinct_load_configuration_count
+        cancels:
+        - operation
+        - shape
+        - operands
+        - epilogue
+        - oracle
+        demand_equal:
+        - the_candidates_own_emitted_stream_is_the_only_evidence
+      falsifier:
+        observation: load_configuration_commands_issued_against_distinct_configurations_used
+        fires_when: a_command_re_establishes_a_configuration_the_load_path_already_holds
+        negative_control: the_members_whose_operand_row_pitches_coincide_need_one_configuration_and_must_pass
+      gate:
+        traits:
+        - persistent_configuration_state
+        - explicit_dma
+        - managed_scratchpad
+        instrument: decoded_instruction_stream
+        capacity: at_least_two_addressable_load_configuration_states
+        on_missing: skip_with_evidence
+      regime:
+        separation: the_operand_row_pitches_are_the_only_varied_property_and_they_follow_from_N_and_K
+        layout: one_tiled_contraction_whose_two_operands_move_at_their_own_pitches
+      emitter:
+        status: existing
+        entry: merlin.targetgen.corpus_spec.build
+        knobs:
+          operation: matmul
+          varied_axes: N_and_K
+          axis_role: the_pair_decides_whether_the_two_operands_share_a_movement_configuration
+      cost:
+        tier: 1
+        runs: one_observation_per_member_because_a_decoded_stream_is_not_a_measurement
+        # NOT a budget: this family reads no cycle count, so a ceiling derived for it would be checked
+        # against a number its own evidence never produces.
+        projected_cycles: not_a_cycle_observable
+        basis: the emitted stream is read once per candidate at the correctness tier the member already
+          pays for, so the family adds no cycle-accurate cell at all
+      acceptance:
+        schema_version: 1
+        analyzer: merlin.perf.load_state_claim.analyze_load_state_claim/v1
+        property:
+          module: merlin.perf.load_state_residency
+          decides: residency_verdict
+          predicate: issued_load_configurations_must_not_exceed_distinct_load_configurations_used
+          admission: distinct_configurations_must_be_within_the_targets_derived_addressable_state_count
+        derivation:
+          selector_field_source: the_targets_extracted_load_configuration_register_bundle_published_by_its_selected_support
+          capacity_source: the_smaller_of_that_selectors_span_and_the_declared_inbound_movement_classes
+          on_underivable: refuse_with_the_reason_never_pass
+        cohort:
+          operation: matmul
+          classification: the_count_of_distinct_trailing_operand_extents_the_declaration_carries
+          must_contain_both:
+          - lever_bearing
+          - control
+          why: a cohort whose every member could pass without the lever is a demand that cannot fail; the
+            analyzer refuses such a cohort rather than scoring it
+        replicates:
+          exact_count: 1
+          identities:
+          - r000
+          why: the evidence is a decoded instruction stream, which is a property of the submitted program and
+            not a measurement -- a second identical read would report the same bytes and measure nothing
+        evidence:
+          correctness_simulator: $target_oracle:L2
+          correctness_tier: L2
+          structural_instrument: merlin.targetgen.rocc.decode
+          structural_tier: L1
+          # DELIBERATELY ABSENT: no timing simulator, timing tier or timing oracle kind -- this family's
+          # observable is the emitted stream, so it buys no cycle-accurate cell and owes none.
+        overclaim_guard:
+          passing_means: the_redundant_configuration_work_is_absent
+          passing_does_not_mean: the_movement_schedule_is_otherwise_good_or_that_a_speedup_was_measured
+  axes:
+    M:
+    - tile
+    N:
+    - 2*tile
+    - 4*tile
+    K:
+    - 2*tile
+    - 4*tile
+  name: '{id}{i:02d}_n{N}_k{K}'
+  source_reference: >-
+    shared load-configuration residency cross product: one tiled contraction per (N, K) pair at a single
+    output-row tile, so the pair alone decides whether the two operands' row pitches coincide -- the members
+    where they differ can only be satisfied by keeping both movement configurations, and the members where
+    they coincide are the control on which the property must hold regardless
+
+# PA -- STATIONARY-OPERAND RESIDENCY. On a target whose array retains one operand across commands, a
+# staging command either NAMES a block (shifting it through the array) or names the ABI's retain
+# sentinel. The instruction count is ISA-forced either way, so the demand is on the property: naming the
+# block the array already holds re-establishes state already established. Measured on pinned elaborated
+# RTL, bit-exact against the vendor kernel in the same binary, presenting the block once per run of
+# consecutive positions cut one shape's execute-controller busy count by 24.6%.
+#
+# TWO FLOORS, because one is dodgeable: one naming command per run of consecutive distinct tiles, and --
+# where the target's derived accumulator capacity admits the reuse-ordered nest -- one per distinct tile,
+# which no loop order dodges. A lever-bearing member decided at the weaker floor is reported UNDECIDED,
+# never passed. A member whose output spans more than one array row block is lever-bearing; one whose
+# output fits one row block presents a different block at every position and is the control.
+- id: PA
+  fit_axes:
+  - K
+  comparison_roles:
+  - lever_bearing
+  - control
+  base:
+    cat: _perf
+    kind: model_slice
+    op: matmul
+    out: Y0
+    label: dev
+    source_role: derived_sweep
+    max_oracle_tier: L2
+    modes:
+      relu: false
+      acc_scale: false
+      i8: false
+      stationary_resident: true
+    performance:
+      level: L2_intra_layer
+      family: PA
+      lever: stationary_operand_residency
+      member_class: OBJECTIVE
+      claim: EMITS
+      comparand:
+        kind: emitted_instruction_property
+        against: the_programs_own_floor_of_stationary_block_presentations
+        cancels:
+        - operation
+        - shape
+        - operands
+        - epilogue
+        - oracle
+        demand_equal:
+        - the_candidates_own_emitted_stream_is_the_only_evidence
+      falsifier:
+        observation: staging_commands_naming_a_block_against_the_floor_the_stream_itself_computes
+        fires_when: a_command_names_the_stationary_block_the_array_already_holds
+        negative_control: the_members_whose_output_fits_one_array_row_block_present_a_different_block_at_every_position_and_must_pass
+      gate:
+        traits:
+        - managed_scratchpad
+        - banked_memory
+        - feedback_sequenced_units
+        instrument: decoded_instruction_stream
+        capacity: at_least_two_compute_forms_inheriting_one_staging_command
+        on_missing: skip_with_evidence
+      regime:
+        separation: the_output_row_extent_is_the_only_varied_property_and_it_decides_the_reuse_depth
+        layout: one_tiled_contraction_whose_stationary_block_serves_a_run_of_output_row_positions
+      emitter:
+        status: existing
+        entry: merlin.targetgen.corpus_spec.build
+        knobs:
+          operation: matmul
+          varied_axes: M_and_K
+          axis_role: M_decides_how_many_positions_one_stationary_block_serves_and_K_is_the_fitted_axis
+      cost:
+        tier: 1
+        runs: one_observation_per_member_because_a_decoded_stream_is_not_a_measurement
+        projected_cycles: not_a_cycle_observable
+        basis: the emitted stream is read once per candidate at the correctness tier the member already
+          pays for, so the family adds no cycle-accurate cell at all
+      acceptance:
+        schema_version: 1
+        analyzer: merlin.perf.stationary_claim.analyze_stationary_claim/v1
+        property:
+          module: merlin.perf.stationary_residency
+          decides: residency_verdict
+          predicate: staging_commands_naming_a_block_must_not_exceed_the_floor_the_stream_computes
+          floors:
+          - run_length_one_naming_command_per_run_of_consecutive_distinct_tiles
+          - reuse_ordered_one_naming_command_per_distinct_tile
+          admission: the_reuse_ordered_floor_applies_only_where_the_committed_output_fits_the_targets_derived_accumulator_capacity
+          on_weak_floor_for_a_lever_bearing_member: report_undecided_never_passed
+        derivation:
+          vocabulary_source: the_emitted_abis_own_def_use_model
+          retain_form_source: more_than_one_compute_class_inheriting_one_staging_command_plus_the_selected_supports_retain_sentinel
+          accumulator_capacity_source: the_targets_extracted_accumulator_depth_over_its_extracted_array_row_count
+          tile_identity: the_off_chip_source_the_presented_bytes_were_moved_in_from_never_the_staging_slot
+          on_underivable: refuse_with_the_reason_never_pass
+        cohort:
+          operation: matmul
+          classification: the_declared_output_extent_against_the_targets_own_array_row_count
+          must_contain_both:
+          - lever_bearing
+          - control
+          why: a cohort whose every member could pass without the lever is a demand that cannot fail; the
+            analyzer refuses such a cohort, and refuses one whose control fails, because a lever-bearing
+            failure beside a failing control is not attributable
+        replicates:
+          exact_count: 1
+          identities:
+          - r000
+          why: the evidence is a decoded instruction stream, which is a property of the submitted program and
+            not a measurement -- a second identical read would report the same bytes and measure nothing
+        evidence:
+          correctness_simulator: $target_oracle:L2
+          correctness_tier: L2
+          structural_instrument: merlin.targetgen.rocc.decode
+          structural_tier: L1
+        overclaim_guard:
+          passing_means: the_redundant_stationary_shift_in_work_is_absent
+          passing_does_not_mean: the_movement_schedule_is_good_or_that_any_speedup_was_measured
+  axes:
+    M:
+    - tile
+    - 4*tile
+    N:
+    - tile
+    K:
+    - tile
+    - 2*tile
+  name: '{id}{i:02d}_m{M}_k{K}'
+  source_reference: >-
+    shared stationary-operand residency cross product: one tiled contraction per (M, K) pair at a single
+    output-column tile, so the output row extent alone decides how many consecutive positions one
+    stationary block serves -- the members spanning several row blocks can only be satisfied by keeping the
+    block the array holds, and the members fitting one row block are the control
+
+# PJ -- MOVE-IN PLACEMENT, and REGIME-CONDITIONAL by measurement. Placing each operand transfer beside
+# the position that first reads it rather than hoisting the slab in front of the nest measured -22.3%
+# and -12.7% on two LOAD-critical shapes and -3.2% / -0.6% on two MESH-critical ones, where the order PA
+# demands stages a run of moving windows together. So the demand is made of load-critical members,
+# WAIVED on mesh-critical ones, and the cohort must contain a waived member. The bracket declares both
+# EDGES of the interval the four measured points bound (reload multiplicity in (4, 7]) rather than a
+# boundary inside it; a member landing between them refuses the cohort. Only the exposed PREFIX is
+# demanded -- movement issued before any compute cannot be overlapped with any -- while the mid-stream
+# load window is not published by the extracted facts and is recorded UNKNOWN, never failed on.
+- id: PJ
+  fit_axes:
+  - K
+  comparison_roles:
+  - lever_bearing
+  - control
+  - exempt
+  base:
+    cat: _perf
+    kind: model_slice
+    op: matmul
+    out: Y0
+    label: dev
+    source_role: derived_sweep
+    max_oracle_tier: L2
+    performance:
+      level: L2_intra_layer
+      family: PJ
+      lever: movein_placement_against_the_exposed_prefix
+      member_class: OBJECTIVE
+      claim: EMITS
+      comparand:
+        kind: emitted_instruction_property
+        against: the_transfers_the_programs_own_first_compute_position_reads
+        cancels:
+        - operation
+        - shape
+        - operands
+        - epilogue
+        - oracle
+        demand_equal:
+        - the_candidates_own_emitted_stream_is_the_only_evidence
+      falsifier:
+        observation: inbound_transfers_issued_before_the_first_compute_against_what_that_position_reads
+        fires_when: a_transfer_is_staged_while_no_compute_has_issued_and_no_position_yet_needs_it
+        negative_control: the_single_position_members_whole_movement_set_is_compulsory_before_the_first_compute_and_must_pass
+      gate:
+        traits:
+        - explicit_dma
+        - managed_scratchpad
+        - independent_engine_ports
+        instrument: decoded_instruction_stream
+        capacity: at_least_one_load_critical_and_one_mesh_critical_geometry
+        on_missing: skip_with_evidence
+      regime:
+        separation: the_output_row_extent_is_the_only_varied_property_and_it_decides_which_lever_pays
+        layout: one_tiled_contraction_whose_operand_transfers_may_be_hoisted_or_placed_at_first_use
+      emitter:
+        status: existing
+        entry: merlin.targetgen.corpus_spec.build
+        knobs:
+          operation: matmul
+          varied_axes: M_and_K
+          axis_role: M_decides_the_reload_multiplicity_and_therefore_the_regime_and_K_is_the_fitted_axis
+      cost:
+        tier: 1
+        runs: one_observation_per_member_because_a_decoded_stream_is_not_a_measurement
+        projected_cycles: not_a_cycle_observable
+        basis: the emitted stream is read once per candidate at the correctness tier the member already
+          pays for, so the family adds no cycle-accurate cell at all
+      acceptance:
+        schema_version: 1
+        analyzer: merlin.perf.movein_claim.analyze_movein_claim/v1
+        property:
+          module: merlin.perf.movein_placement
+          decides: placement_verdict
+          predicate: transfers_issued_before_the_first_compute_must_not_exceed_what_the_admitted_positions_read
+          # The depth at which movement and compute can first be CONCURRENT at all: one position in flight
+          # and one being consumed. Declared rather than defaulted; the analyzer refuses a contract without it.
+          admitted_staging_positions: 2
+          per_position_need: read_from_the_candidates_own_stream_never_from_the_declared_shape
+          not_demanded: mid_stream_bursts_whose_absorption_depends_on_the_undisclosed_load_window
+        regime:
+          discriminant: reload_multiplicity_output_row_blocks_spanned
+          # The two EDGES of the interval the four measured points bound, not a boundary inside it.
+          load_critical_at_or_below: 4
+          mesh_critical_at_or_above: 7
+          undecided_band: refuse_the_cohort_rather_than_assign_a_lever_by_coin_toss
+          basis: >-
+            four shapes on pinned elaborated RTL, each arm bit-exact against the vendor kernel in the same
+            binary: 3136x64x64 (mult 196, burst->jit -3.2%), 49x512x1024 at a 7-row geometry (mult 7,
+            -0.6%), 64x512x1024 (mult 4, -22.3%), 64x256x1024 (mult 4, -12.7%)
+          waiver: >-
+            the demand is NOT made of mesh-critical members; just-in-time placement is measured to do nothing
+            on them, and the order that does pay there stages a run of moving windows together, so demanding
+            it would fight the PA lever
+        derivation:
+          vocabulary_source: the_emitted_abis_own_def_use_model
+          row_block_source: the_targets_extracted_array_row_count
+          load_window_source: not_published_by_the_extracted_facts_recorded_UNKNOWN_and_surfaced
+          on_underivable: refuse_with_the_reason_never_pass
+        cohort:
+          operation: matmul
+          classification: the_declared_extents_against_the_targets_own_array_row_count
+          must_contain_all:
+          - lever_bearing
+          - control
+          - exempt
+          why: without a lever-bearing member the demand cannot fail; without a control a failure is not
+            attributable; and without an exempt member the regime conditioning is never exercised
+        replicates:
+          exact_count: 1
+          identities:
+          - r000
+          why: the evidence is a decoded instruction stream, which is a property of the submitted program and
+            not a measurement -- a second identical read would report the same bytes and measure nothing
+        evidence:
+          correctness_simulator: $target_oracle:L2
+          correctness_tier: L2
+          structural_instrument: merlin.targetgen.rocc.decode
+          structural_tier: L1
+        overclaim_guard:
+          passing_means: the_nest_does_not_stand_a_transfer_burst_in_front_of_itself_where_that_is_measured_to_cost
+          passing_does_not_mean: the_movement_volume_or_the_mid_stream_placement_is_good_or_that_any_speedup_was_measured
+  axes:
+    M:
+    - tile
+    - 4*tile
+    - 8*tile
+    N:
+    - tile
+    K:
+    - tile
+    - 2*tile
+  name: '{id}{i:02d}_m{M}_k{K}'
+  source_reference: >-
+    shared move-in placement cross product: one tiled contraction per (M, K) pair at a single output-column
+    tile, so the output row extent alone decides both how many compute positions the nest has and which
+    regime it is in -- the single-position member is the control, the load-critical multi-position members
+    are the ones a hoisted burst can be refuted on, and the mesh-critical members are waived
+
 blocked_unimplemented:
 - family: PT
   status: blocked_unimplemented
@@ -1655,135 +2069,3 @@ blocked_unimplemented:
       # the machine's own rate. `unbounded` is the word for that and always was.
       projected_cycles: unbounded
       basis: four_members_before_repetition_at_fixed_drained_output_bytes
-- family: PD
-  status: blocked_unimplemented
-  reason: >-
-    an EMITS claim: it decides a property of the candidate's decoded instruction stream, not a
-    measured cycle count, and this cohort admits measured claims only. Its analyzer
-    (merlin.perf.load_state_claim.analyze_load_state_claim/v1) and the trace-check mode it demands are not on this line, so the family is
-    declared and recorded as blocked rather than silently absent. It does not overlap PN, which fits
-    a cycle law over a captured multi-region chain.
-  fit_axes: []
-  comparison_roles: [lever_bearing, control]
-  performance:
-    level: L2_intra_layer
-    family: PD
-    lever: load_configuration_residency
-    member_class: OBJECTIVE
-    claim: EMITS
-    comparand:
-      kind: emitted_instruction_property
-      against: the_programs_own_distinct_load_configuration_count
-      cancels: [operation, shape, operands, epilogue, oracle]
-      demand_equal: [the_candidates_own_emitted_stream_is_the_only_evidence]
-    falsifier:
-      observation: load_configuration_commands_issued_against_distinct_configurations_used
-      fires_when: a_command_re_establishes_a_configuration_the_load_path_already_holds
-      negative_control: the_members_whose_operand_row_pitches_coincide_need_one_configuration_and_must_pass
-    gate:
-      traits: [persistent_configuration_state, explicit_dma, managed_scratchpad]
-      instrument: decoded_instruction_stream
-      capacity: at_least_two_addressable_load_configuration_states
-      on_missing: skip_with_evidence
-    regime:
-      separation: the_operand_row_pitches_are_the_only_varied_property_and_they_follow_from_N_and_K
-      layout: one_tiled_contraction_whose_two_operands_move_at_their_own_pitches
-    emitter:
-      status: blocked
-      entry: new:merlin.perf.load_state_claim
-      knobs:
-        operation: matmul
-        needs: the_emitted_stream_analyzer_and_its_trace_check_mode
-    cost:
-      tier: 1
-      runs: one_observation_per_member_because_a_decoded_stream_is_not_a_measurement
-      projected_cycles: not_a_cycle_observable
-      basis: the emitted stream is read once per candidate at the correctness tier the member already pays for
-- family: PA
-  status: blocked_unimplemented
-  reason: >-
-    an EMITS claim: it decides a property of the candidate's decoded instruction stream, not a
-    measured cycle count, and this cohort admits measured claims only. Its analyzer
-    (merlin.perf.stationary_claim.analyze_stationary_claim/v1) and the trace-check mode it demands are not on this line, so the family is
-    declared and recorded as blocked rather than silently absent. It does not overlap PN, which fits
-    a cycle law over a captured multi-region chain.
-  fit_axes: []
-  comparison_roles: [lever_bearing, control]
-  performance:
-    level: L2_intra_layer
-    family: PA
-    lever: stationary_operand_residency
-    member_class: OBJECTIVE
-    claim: EMITS
-    comparand:
-      kind: emitted_instruction_property
-      against: the_programs_own_floor_of_stationary_block_presentations
-      cancels: [operation, shape, operands, epilogue, oracle]
-      demand_equal: [the_candidates_own_emitted_stream_is_the_only_evidence]
-    falsifier:
-      observation: staging_commands_naming_a_block_against_the_floor_the_stream_itself_computes
-      fires_when: a_command_names_the_stationary_block_the_array_already_holds
-      negative_control: the_members_whose_output_fits_one_array_row_block_present_a_different_block_at_every_position_and_must_pass
-    gate:
-      traits: [managed_scratchpad, banked_memory, feedback_sequenced_units]
-      instrument: decoded_instruction_stream
-      capacity: at_least_two_compute_forms_inheriting_one_staging_command
-      on_missing: skip_with_evidence
-    regime:
-      separation: the_output_row_extent_is_the_only_varied_property_and_it_decides_the_reuse_depth
-      layout: one_tiled_contraction_whose_stationary_block_serves_a_run_of_output_row_positions
-    emitter:
-      status: blocked
-      entry: new:merlin.perf.stationary_claim
-      knobs:
-        operation: matmul
-        needs: the_emitted_stream_analyzer_and_its_trace_check_mode
-    cost:
-      tier: 1
-      runs: one_observation_per_member_because_a_decoded_stream_is_not_a_measurement
-      projected_cycles: not_a_cycle_observable
-      basis: the emitted stream is read once per candidate at the correctness tier the member already pays for
-- family: PJ
-  status: blocked_unimplemented
-  reason: >-
-    an EMITS claim: it decides a property of the candidate's decoded instruction stream, not a
-    measured cycle count, and this cohort admits measured claims only. Its analyzer
-    (merlin.perf.movein_claim.analyze_movein_claim/v1) and the trace-check mode it demands are not on this line, so the family is
-    declared and recorded as blocked rather than silently absent. It does not overlap PN, which fits
-    a cycle law over a captured multi-region chain.
-  fit_axes: []
-  comparison_roles: [lever_bearing, control]
-  performance:
-    level: L2_intra_layer
-    family: PJ
-    lever: movein_placement_against_the_exposed_prefix
-    member_class: OBJECTIVE
-    claim: EMITS
-    comparand:
-      kind: emitted_instruction_property
-      against: the_transfers_the_programs_own_first_compute_position_reads
-      cancels: [operation, shape, operands, epilogue, oracle]
-      demand_equal: [the_candidates_own_emitted_stream_is_the_only_evidence]
-    falsifier:
-      observation: inbound_transfers_issued_before_the_first_compute_against_what_that_position_reads
-      fires_when: a_transfer_is_staged_while_no_compute_has_issued_and_no_position_yet_needs_it
-      negative_control: the_single_position_members_whole_movement_set_is_compulsory_before_the_first_compute_and_must_pass
-    gate:
-      traits: [explicit_dma, managed_scratchpad, independent_engine_ports]
-      instrument: decoded_instruction_stream
-      capacity: at_least_one_load_critical_and_one_mesh_critical_geometry
-      on_missing: skip_with_evidence
-    regime:
-      separation: the_output_row_extent_is_the_only_varied_property_and_it_decides_which_lever_pays
-      layout: one_tiled_contraction_whose_operand_transfers_may_be_hoisted_or_placed_at_first_use
-    emitter:
-      status: blocked
-      entry: new:merlin.perf.movein_claim
-      knobs:
-        operation: matmul
-        needs: the_emitted_stream_analyzer_and_its_trace_check_mode
-    cost:
-      tier: 1
-      runs: one_observation_per_member_because_a_decoded_stream_is_not_a_measurement
-      projected_cycles: not_a_cycle_observable
-      basis: the emitted stream is read once per candidate at the correctness tier the member already pays for

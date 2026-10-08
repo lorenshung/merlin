@@ -226,10 +226,20 @@ def functional_emission_guard(
             base_trace = RD.decode_text(base_llvm, source="baseline", target=target_experiment.target)
             cand_trace = RD.decode_text(cand_llvm, source="candidate", target=target_experiment.target)
             base_findings = set(
-                TCK.check(base_trace, expected, json.loads(base_buffer) if base_buffer else None)["violations"]
+                TCK.check(
+                    base_trace,
+                    expected,
+                    json.loads(base_buffer) if base_buffer else None,
+                    target=target_experiment.target,
+                )["violations"]
             )
             cand_findings = set(
-                TCK.check(cand_trace, expected, json.loads(cand_buffer) if cand_buffer else None)["violations"]
+                TCK.check(
+                    cand_trace,
+                    expected,
+                    json.loads(cand_buffer) if cand_buffer else None,
+                    target=target_experiment.target,
+                )["violations"]
             )
             introduced = sorted(cand_findings - base_findings)
             row["introduced_findings"] = introduced

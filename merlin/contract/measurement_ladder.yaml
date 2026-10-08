@@ -81,6 +81,7 @@ rungs:
     summary: An analytic transaction-count model of what a schedule asks the device for.
     tier: static                    # merlin.kernels.measurement.TIER_ORDER
     engines: []                     # not an engine; arithmetic over the schedule
+    implemented_by: merlin.perf.schedule_proxy
     cost: microseconds
     establishes:
       - ranking
@@ -100,6 +101,9 @@ rungs:
       worst_absolute_relative_error: 1.05
       measured_points: 71
       adjudicated_by: fpga_firesim
+      # The 71 points themselves, with the contraction each group presents and the machine the proxy
+      # was scored with; merlin/tests/dse/test_schedule_proxy.py re-derives the figures above from it.
+      points: examples/gemmini/phase2/schedule-proxy-validation.json
     why_not_cycles: >-
       The rank statistics are strong and the magnitude error is not: median 43%, worst 105%, with the
       slot cost FITTED ON THE SAME POINTS. A signal that orders candidates to 93.2% pairwise accuracy

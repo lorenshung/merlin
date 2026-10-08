@@ -1326,7 +1326,10 @@ def _resolve_oracle_adapters(target: str) -> dict[str, Callable]:
 
 
 def qa_loop_adapters(
-    target: str, sim_via: str | None = None, *, declared_tiers: set[str] | None = None,
+    target: str,
+    sim_via: str | None = None,
+    *,
+    declared_tiers: set[str] | None = None,
     readback_policy=None,
 ) -> dict[str, Callable]:
     """The FAST per-round QA-loop oracle set for ``target`` — resolved from :func:`oracle_adapters`, never
@@ -5399,6 +5402,8 @@ def run_capsule(
                 # A design with a hardware loop performs several declared
                 # classes with one instruction; its contract says which.
                 subsumes=TCK.subsumption_for(eff_target),
+                # Whose derived facts a declared residency mode reads.
+                target=eff_target,
             )
             # The MODE-FREE movement diagnostic, kept OUT of `violations` on purpose. It is a
             # whole-program performance observation, not a conformance one: `violations` feeds

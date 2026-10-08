@@ -139,10 +139,10 @@ def discover_performance_corpus(
             raise StageGateError(f"performance capsule {name!r} is not a generated dev member")
         family = CONTRACTS.safe_component(str(performance.get("family") or ""), label="performance family")
         claim = performance.get("claim")
-        if claim not in ("RECOVERS", "PREDICTS", "DIFFERENTIAL"):
+        if claim not in PP.CANONICAL_CLAIMS:
             raise StageGateError(f"performance capsule {name!r} has no canonical claim")
-        if claim == "PREDICTS" and not isinstance(performance.get("acceptance"), Mapping):
-            raise StageGateError(f"predictive performance capsule {name!r} has no frozen acceptance contract")
+        if claim in ("PREDICTS", "EMITS") and not isinstance(performance.get("acceptance"), Mapping):
+            raise StageGateError(f"{claim} performance capsule {name!r} has no frozen acceptance contract")
         tree = CONTRACTS.exact_tree_record(source)
         found.append(
             PerformanceCapsule(

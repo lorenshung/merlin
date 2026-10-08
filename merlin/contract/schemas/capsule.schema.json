@@ -440,9 +440,10 @@
                   "type": "string",
                   "enum": [
                     "derived_at_preflight",
-                    "unbounded"
+                    "unbounded",
+                    "not_a_cycle_observable"
                   ],
-                  "description": "This member declares no ceiling, and which of the two reasons applies."
+                  "description": "This member declares no ceiling, and which reason applies (merlin.perf.cycle_bound.NO_CYCLE_BOUND): derived at assessment, a law-fitting point with no budget, or a property read from the emitted stream rather than a cycle count."
                 }
               ]
             }

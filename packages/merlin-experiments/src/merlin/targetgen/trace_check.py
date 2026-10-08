@@ -6,7 +6,8 @@ Given a trace from :mod:`merlin.targetgen.rocc.decode` and a capsule's ``expecte
 * the legal ordering invariants hold (FLUSH/FENCE bracketing, config-before-use,
   preload/compute pairing);
 * the declared *modes* are actually exercised (i8 readout, relu activation bits, non-identity
-  acc_scale, K-accumulation, resident reuse, movement-only);
+  acc_scale, K-accumulation, resident reuse, load-configuration residency, stationary-operand
+  residency, movement-only);
 * (optionally) decoded tile counts are consistent with the command-buffer tensor shapes.
 
 Returns ``{"status": "pass"|"fail", "violations": [...]}``. Never raises on a mere mismatch — a
@@ -262,7 +263,12 @@ def movement_findings(trace: dict, bound: dict | None) -> list[str]:
 
 
 def check(
-    trace: dict, expected: dict, cb: dict | None = None, address_model: str | None = None, subsumes: dict | None = None
+    trace: dict,
+    expected: dict,
+    cb: dict | None = None,
+    address_model: str | None = None,
+    subsumes: dict | None = None,
+    target: str | None = None,
 ) -> dict:
     """Validate ``trace`` against capsule ``expected`` (+ optional command buffer).
 
@@ -270,7 +276,11 @@ def check(
     declared-mode checks that help the author, but do NOT decide pass/fail. The verdict is the oracle
     (numerics + L2/L3 RTL, which execute the actual emitted stream); an instruction we cannot classify
     (``UNKNOWN``) is our decoder's limit, not the backend's defect, so it is reported, never gated on.
-    The sole gating signal derived here is :func:`drives_accelerator` (anti-cheese)."""
+    The sole gating signal derived here is :func:`drives_accelerator` (anti-cheese).
+
+    ``target`` names whose derived facts the two residency modes read (the load-state selector, the
+    retain sentinel and the accumulator bound); without one, a declared residency mode reports a
+    refusal rather than passing in silence."""
     violations: list[str] = []
     #: Not violations: what the program did INSTEAD, where the target says it amounts to the same.
     notes: list[str] = []
@@ -363,6 +373,22 @@ def check(
             violations.append("mode resident_reuse declared but <2 output commits (no reuse visible)")
         violations += _residency_findings(ins)
         violations += _stale_mode_config_findings(ins)
+    if modes.get("load_state_resident"):
+        # A load configuration re-establishing state the load path already holds is provably inert
+        # work, decidable from the emitted stream alone -- the stale-mode argument above, on the load
+        # side. The selector's position and the addressable state count come from the target's own
+        # register-bundle layout through its selected support; absent, this refuses in words.
+        from merlin.perf import load_state_residency as _LSR
+
+        selector = _LSR.load_state_selector(str(target)) if target else None
+        violations += _LSR.residency_findings({"instructions": ins}, selector=selector)
+    if modes.get("stationary_resident"):
+        # The same argument on the ARRAY side: a staging command naming the block the array already
+        # holds shifts identical bytes through it for nothing. Floors and the accumulator bound are
+        # derived from the target's own ABI and RTL by the module below.
+        from merlin.perf import stationary_residency as _SR
+
+        violations += _SR.residency_findings({"instructions": ins}, target=target)
     if modes.get("movement"):
         bad = present & _COMPUTE | (present & {"PRELOAD"})
         if bad:

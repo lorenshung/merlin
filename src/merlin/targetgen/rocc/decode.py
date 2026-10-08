@@ -46,6 +46,22 @@ def funct_class_for(target: str) -> dict:
     return isa_constants(target)["FUNCT_CLASS"]
 
 
+def retain_sentinel(target: str) -> int | None:
+    """The operand value the selected support's ABI accepts in place of a staged address, or ``None``.
+
+    Some ABIs let a staging command say "keep what the array already holds" by naming a reserved
+    address instead of a block. Which value that is belongs to the support: read from its ISA facts
+    (``RETAIN_SENTINEL``) or, for support that keeps it beside its decoder, the ``GARBAGE`` constant
+    that decoder compares against. ``None`` means the support publishes none, and a consumer that
+    needs it must refuse rather than assume one.
+    """
+    semantics = _semantics(target)
+    for value in (semantics.isa_constants(target).get("RETAIN_SENTINEL"), getattr(semantics, "GARBAGE", None)):
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return int(value)
+    return None
+
+
 # --- structural IR decode (parse the IR, do not string-match text) ----------------------------
 # This decoder is a fair MEASUREMENT of whatever the backend emitted, so it must SEE every legal
 # SPELLING of an instruction and fail closed (UNKNOWN) on anything it cannot fully decode — never

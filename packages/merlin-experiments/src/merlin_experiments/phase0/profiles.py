@@ -276,7 +276,12 @@ _PERFORMANCE_FIELDS = frozenset(
         "cost",
     }
 )
-_PERFORMANCE_CLAIMS = frozenset({"RECOVERS", "PREDICTS", "DIFFERENTIAL"})
+#: ``EMITS`` is the claim shape a demand on the COMPILER needs: decided from the candidate's own emitted
+#: instruction stream against a property derived from the target, rather than from measured cycles,
+#: which measure the machine. Such a family is decided only by its declared analyzer, so its block must
+#: name one (see :func:`_validate_performance_block`).
+_PERFORMANCE_CLAIMS = frozenset({"RECOVERS", "PREDICTS", "DIFFERENTIAL", "EMITS"})
+_STREAM_CLAIMS = frozenset({"EMITS"})
 #: WHAT A MEMBER IS FOR, which is not the same question as what it CLAIMS. A family declares a claim
 #: (does the law hold?); a member additionally has a job in the search, and the two had been conflated
 #: with a measurable cost.
@@ -362,11 +367,6 @@ def _normalize_public_capsules(profile: dict, *, source: Path) -> None:
     profile["capsules"] = normalized
 
 
-#: A blocked family may declare a claim kind this cohort cannot yet admit (an emitted-stream EMITS
-#: property); it is recorded, never materialized, so it cannot reach a measured claim analyzer.
-_BLOCKED_ONLY_CLAIMS = frozenset({"EMITS"})
-
-
 def _validate_performance_block(block, *, owner: str, blocked: bool = False) -> dict:
     """Validate the claim-bearing contract before a family can be admitted.
 
@@ -384,8 +384,17 @@ def _validate_performance_block(block, *, owner: str, blocked: bool = False) -> 
         if not isinstance(block[field], str) or not block[field].strip():
             raise ValueError(f"{owner}: performance.{field} must be a non-empty string")
     claim = block.get("claim")
-    if claim not in _PERFORMANCE_CLAIMS and not (blocked and claim in _BLOCKED_ONLY_CLAIMS):
+    if claim not in _PERFORMANCE_CLAIMS:
         raise ValueError(f"{owner}: performance.claim must be one of {sorted(_PERFORMANCE_CLAIMS)}, got {claim!r}")
+    if claim in _STREAM_CLAIMS and not blocked:
+        acceptance = block.get("acceptance")
+        analyzer = acceptance.get("analyzer") if isinstance(acceptance, dict) else None
+        if not isinstance(analyzer, str) or not analyzer.strip():
+            raise ValueError(
+                f"{owner}: an {claim} claim is decided only by the analyzer its contract names, so "
+                "performance.acceptance.analyzer is required -- without one the family reads its "
+                "stream and nothing ever turns that reading into a verdict"
+            )
     member_class = block.get("member_class")
     if member_class not in _MEMBER_CLASSES:
         raise ValueError(
