@@ -102,11 +102,19 @@ def _spec(tensor: Mapping[str, Any], *, is_weight: bool, eps: float):
             f"{granularity!r} has no PT2E spec; the recipe asks for something this "
             f"path cannot express"
         )
+    quant_min, quant_max = tensor.get("quant_min"), tensor.get("quant_max")
+    if floating_format and quant_min is None and quant_max is None:
+        # A derived float recipe states no range: the format's own finite range is the range. Left
+        # as None, TorchAO's calculate_qmin_qmax falls back to (0, 15) for a float8 dtype, which
+        # clamped every negative operand to zero and scaled by amax/7.5 -- measured on the mixed MLP,
+        # an fp8 static capture agreed with fp32 at cosine 0.55.
+        finfo = torch.finfo(dtype)
+        quant_min, quant_max = int(finfo.min), int(finfo.max)
     return QuantizationSpec(
         dtype=dtype,
         observer_or_fake_quant_ctr=observer.with_args(eps=eps),
-        quant_min=tensor.get("quant_min"),
-        quant_max=tensor.get("quant_max"),
+        quant_min=quant_min,
+        quant_max=quant_max,
         qscheme=qscheme,
         ch_axis=axis,
     )
