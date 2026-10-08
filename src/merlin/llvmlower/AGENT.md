@@ -105,6 +105,18 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
   numeric/effect equivalence and final object/link qualification remain caller
   obligations; the completed recipe identifies LLVM IR, not an executable.
 
+- `host_transform_chain.py` requires an explicit ordered typed stage contract,
+  pinned implementation and semantic-proof artifacts, and actual input/output
+  emission verification for every selected stage. Normal host compilation
+  keeps the existing single hook as a terminal after added stages; missing
+  promises, mutable source/proof bytes and skipped emissions refuse. Each
+  stage receives an owned immutable input snapshot. Ordinary lowering and
+  compilation receipts bind the complete chain through final completion.
+  Provider verifiers own semantic theorems and effects; core does not infer
+  equivalence from names or metadata. The absent chain preserves the legacy
+  single-hook/default path. Tool/dependency closure and profitability remain
+  separate obligations.
+
 - `exact_row_radix_pack.py` offers an explicit source-exact producer row proof
   for the existing canonical BF16 signed radix128 representation. The mandatory
   finite source scan proves a nonzero normal row's exponent span fits the grid;

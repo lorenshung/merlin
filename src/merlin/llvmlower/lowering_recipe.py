@@ -8,6 +8,7 @@ compilation still require their own provenance.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -65,3 +66,27 @@ class LoweringRecipe:
         """Bind an exact native-stage source that later lowering consumed."""
         self.record["sources"][name] = _identity(Path(path))
         write_pretty_json(self.path, self.record)
+
+
+def bind_host_transform_chain(recipe: Path, receipt: Path, *, source: Path, selected: Path) -> None:
+    """Bind an actual complete late transform chain to its ordinary upstream receipt.
+
+    The original returned LLVM witness is retained. This extends observation
+    through host LLVM emission only, never claiming codegen/link qualification.
+    """
+    from .host_transform_chain import recheck_host_transform_chain
+
+    record = json.loads(recipe.read_text())
+    chain = recheck_host_transform_chain(receipt)
+    original, output = _identity(source), _identity(selected)
+    if (
+        record.get("schema") != "merlin.lowering_recipe.v1"
+        or record.get("status") != "returned"
+        or record.get("returned_llvm_ir") != {"sha256": original["sha256"], "bytes": original["bytes"]}
+        or chain["source"] != original
+        or chain["selected"] != output
+    ):
+        raise ValueError("host chain is not bound to the actual returned upstream LLVM and selected emission")
+    record["host_transform_chain"] = _identity(receipt)
+    record["selected_host_llvm_ir"] = output
+    write_pretty_json(recipe, record)

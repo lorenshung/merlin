@@ -42,6 +42,7 @@ from . import spike as _spike  # toolchain paths (gcc/spike/objdump)
 
 if TYPE_CHECKING:
     from ...llvmlower.entry_weight_projection import GeneratedDispatchABI
+    from ...llvmlower.host_transform_chain import HostLLVMTransformChain
 
 RVV_CFLAGS = ["-march=rv64gcv", "-mabi=lp64d", "-mcmodel=medany", "-O2", "-ffreestanding", "-fno-builtin"]
 
@@ -104,6 +105,8 @@ def _transform_host_ir(
     source: Path,
     workdir: Path,
     transform: Callable[[Path, Path], Path] | None,
+    *,
+    chain: HostLLVMTransformChain | None = None,
 ) -> tuple[Path, dict | None]:
     """Keep target-selected late legalization inside the normal object build.
 
@@ -111,6 +114,17 @@ def _transform_host_ir(
     LLVM IR, and its compiled object participates in the existing build hash.
     The optional callback owns its semantic proof and supporting artifacts.
     """
+    if chain is not None:
+        from ...llvmlower.host_transform_chain import apply_host_transform_chain
+
+        return apply_host_transform_chain(
+            source,
+            workdir,
+            chain,
+            terminal=(lambda current, work: _transform_host_ir(current, work, transform))
+            if transform is not None
+            else None,
+        )
     if transform is None:
         return source, None
     import hashlib
@@ -462,6 +476,7 @@ def build(
     source_observation_effects: IntervalEffectContract | None = None,
     source_scalar_carrier=None,
     host_llvm_transform: Callable[[Path, Path], Path] | None = None,
+    host_llvm_transform_chain: HostLLVMTransformChain | None = None,
     host_provider_builder: Callable | None = None,
     cflags_override: list[str] | None = None,
     vlen: int | None = None,
@@ -527,6 +542,12 @@ def build(
     and returns the LLVM file to compile. The compiled replacement participates
     in the normal build hash, harness generation, linking and final ELF audit.
 
+    ``host_llvm_transform_chain`` adds an explicitly ordered typed stage chain
+    with actual emission verifiers and retained source/semantic witnesses.
+    The existing ``host_llvm_transform`` remains its terminal hook, so adding
+    helper stages cannot replace that selected late legalization. Missing
+    promised stages refuse; the absent chain preserves the single-hook path.
+
     ``host_provider_builder`` supplies separately pinned mixed host/provider
     objects through the normal link. Their complete source/model identities,
     imported compilation pins and typed required/defined function symbols are
@@ -580,6 +601,12 @@ def build(
     (Path(work) / COMPILATION_RECIPE).unlink(missing_ok=True)
     supplier_flags = () if math_archive_symbols is None else trace_symbol_flags(math_archive_symbols)
     (Path(work) / "execution_memory_admission.json").unlink(missing_ok=True)
+    if host_llvm_transform_chain is not None:
+        from ...llvmlower.host_transform_chain import HostLLVMTransformChain
+
+        if type(host_llvm_transform_chain) is not HostLLVMTransformChain:
+            raise TypeError("typed host transform chain required")
+        host_llvm_transform_chain.validate()
     if execution_memory_map is not None:
         if not isinstance(execution_memory_map, MemoryMapBinding):
             raise ExecutionMemoryError("execution_memory_map requires a selected MemoryMapBinding")
@@ -796,7 +823,20 @@ def build(
         compilation.bind_preparation("source_observation", work / "lower" / REPORT)
     from merlin.common.digest import sha256_file
 
-    model_ir, host_ir_receipt = _transform_host_ir(res.ll_path, work / "host_llvm", host_llvm_transform)
+    if host_llvm_transform_chain is None:
+        model_ir, host_ir_receipt = _transform_host_ir(res.ll_path, work / "host_llvm", host_llvm_transform)
+    else:
+        from ...llvmlower.lowering_recipe import FILENAME as LOWERING_RECIPE
+        from ...llvmlower.lowering_recipe import bind_host_transform_chain
+
+        model_ir, host_ir_receipt = _transform_host_ir(
+            res.ll_path, work / "host_llvm", host_llvm_transform, chain=host_llvm_transform_chain
+        )
+        host_chain_receipt = Path(host_ir_receipt["chain"]["path"])
+        bind_host_transform_chain(
+            res.workdir / LOWERING_RECIPE, host_chain_receipt, source=res.ll_path, selected=model_ir
+        )
+        compilation.bind_preparation("host_transform_chain", host_chain_receipt)
     compilation.run(
         [clang, CLANG_TARGET, *model_cflags, "-c", model_ir, "-o", work / "model.o"],
         runner=_run,
@@ -1178,6 +1218,11 @@ def build(
             elf, execution_memory_map, runtime_reservations + execution_memory_reservations
         )
         (work / "execution_memory_admission.json").write_text(json.dumps(memory_admission, indent=2) + "\n")
+    if host_llvm_transform_chain is not None:
+        from ...llvmlower.host_transform_chain import recheck_host_transform_chain
+
+        host_llvm_transform_chain.validate()
+        recheck_host_transform_chain(host_chain_receipt, expected_chain=host_llvm_transform_chain)
     compilation.completed(elf)
     return {
         "elf": elf,
