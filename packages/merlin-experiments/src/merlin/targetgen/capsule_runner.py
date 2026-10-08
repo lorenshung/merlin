@@ -69,6 +69,15 @@ from .runner_config import (
 # injection; late lookup preserves existing monkeypatches of _sim_engine_adapters.
 _oracle_policy.bind_sim_oracle_adapters("chipyard", lambda target: _sim_engine_adapters("chipyard", target))
 
+
+def _spike_adapters(target: str) -> dict:
+    from . import spike_full_call
+
+    return spike_full_call.sim_adapters(target)
+
+
+_oracle_policy.bind_sim_oracle_adapters("spike", _spike_adapters)
+
 # Most capsules the suite will run SERIALLY to price the tier ladder before fanning out. Small:
 # the loop stops as soon as a capsule prices nothing new, and this only bounds the pathological
 # case where each early capsule is refuted by a different tier.
