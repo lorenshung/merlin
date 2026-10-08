@@ -614,6 +614,15 @@ _PREPROCESS = (
 PREPROCESS_STAGES = ("xdsl-parsed", *(stage for _, stage, _ in _PREPROCESS))
 
 
+def _layer_norm_chunked_sums_selected() -> bool:
+    """Whether the numerics-changing ``layer-norm-chunked-sums`` pass runs (default off)."""
+    import os
+
+    from .optional_passes import switched
+
+    return switched("layer-norm-chunked-sums", os.environ.get("MERLIN_LAYER_NORM_CHUNKED_SUMS") == "1")
+
+
 def _preprocess_module(module, *, audit=None, on_quant_rewrite=None) -> dict:
     from ..xdsl_dialects.ir_inspection import record_stage
 
@@ -629,6 +638,15 @@ def _preprocess_module(module, *, audit=None, on_quant_rewrite=None) -> dict:
         )
         if audit is not None:
             record_stage(audit, stage, module, generic=True)
+        if statistic == "quant_ext_lowered" and _layer_norm_chunked_sums_selected():
+            # Optional and default off, so an unselected build records the same stages and emits the same
+            # module. Selecting the pass grants both of its numerical permissions; its rewrite lands in the
+            # next recorded stage, and the transform map owns every operation it adds.
+            from .normalization_reassociation import chunk_layer_norm_sums
+
+            stats["layer_norm_sums_chunked"] = chunk_layer_norm_sums(
+                module, allow_reassociation=True, assume_finite_intermediates=True, on_rewrite=on_quant_rewrite
+            )
     return stats
 
 

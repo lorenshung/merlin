@@ -358,6 +358,10 @@ Whole-model lowering: linalg-on-tensors MLIR (model2MLIR artifacts) → upstream
   `MERLIN_*` variable, an integer-datapath pass, a capture key). A selection (`--pass`/`--no-pass`,
   the builder's `lowering_passes`, `MERLIN_PASSES`) flips exactly those switches; an empty one changes
   nothing. A new optional pass gets an entry there.
+- `normalization_reassociation.py` — the numerics-changing `layer-norm-chunked-sums` rewrite (default
+  off): a `prov.op = "layer_norm"` f32 innermost-axis row sum becomes a sum of contiguous chunk sums.
+  `passes_xdsl._preprocess_module` runs it only when selected; selecting it grants both reassociation
+  and finite intermediates, and anything outside its strict scope is left unchanged.
 - `int_softmax_table.py` + `_int_softmax_table_rt.py` — the `int-softmax-table` rewrite. The `_rt` file
   is runner SOURCE (spliced into every runner variant, executed by the compiler's Python), not a module
   Merlin calls: keep it self-contained and its names `_ist_`-prefixed. It runs on the module as parsed,
