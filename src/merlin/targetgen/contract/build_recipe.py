@@ -114,7 +114,7 @@ class HarnessBuildRecipe:
             )
         return self.kernel_stack_frame
 
-    def command(self, *, sources: "Sequence[Path]", output: Path, link_script: Path | None = None) -> list[str]:
+    def command(self, *, sources: Sequence[Path], output: Path, link_script: Path | None = None) -> list[str]:
         """The full compiler invocation for ``sources`` -> ``output``."""
         cmd = [str(self.compiler), *self.cflags]
         for root in self.include_roots:
@@ -177,11 +177,25 @@ class HarnessBuildRecipe:
         if declared:
             abi = declared[0]
         else:
+
+            def diagnostic(command: list[str], answer: subprocess.CompletedProcess[str]) -> str:
+                # Preserve the actual selected query, not just the last parser's
+                # refusal. A failed GCC query can precede a successful driver
+                # trace that has no Clang cc1 ABI; losing the first diagnostic
+                # makes that infrastructure failure impossible to distinguish.
+                return (
+                    f"exit={answer.returncode}, stderr={answer.stderr[-600:]!r}, "
+                    f"stdout={answer.stdout[-600:]!r}, command={shlex.join(command)!r}"
+                )
+
             command = [str(self.compiler), *self.cflags, "-Q", "--help=target"]
             try:
                 answer = subprocess.run(command, capture_output=True, text=True, timeout=10)
             except (OSError, subprocess.TimeoutExpired) as exc:
-                raise self.error_cls(f"cannot query selected compiler's effective ABI: {exc}") from exc
+                raise self.error_cls(
+                    f"cannot query selected compiler's effective ABI: command={shlex.join(command)!r}: {exc}"
+                ) from exc
+            first_diagnostic = diagnostic(command, answer)
             if answer.returncode == 0:
                 values = [
                     parts[1]
@@ -189,7 +203,7 @@ class HarnessBuildRecipe:
                     if (parts := line.split()) and len(parts) == 2 and parts[0] == "-mabi="
                 ]
                 if len(values) != 1:
-                    raise self.error_cls("selected compiler returned no unique effective -mabi")
+                    raise self.error_cls("selected compiler returned no unique effective -mabi: " + first_diagnostic)
                 abi = values[0]
             else:
                 # Clang reports its resolved cc1 target ABI in a dry-run driver trace.
@@ -197,9 +211,13 @@ class HarnessBuildRecipe:
                 try:
                     answer = subprocess.run(command, capture_output=True, text=True, timeout=10)
                 except (OSError, subprocess.TimeoutExpired) as exc:
-                    raise self.error_cls(f"cannot query selected compiler's effective ABI: {exc}") from exc
+                    raise self.error_cls(
+                        f"cannot query selected compiler's effective ABI: {first_diagnostic}; "
+                        f"driver trace command={shlex.join(command)!r}: {exc}"
+                    ) from exc
+                query_diagnostics = first_diagnostic + "; driver trace " + diagnostic(command, answer)
                 if answer.returncode:
-                    raise self.error_cls("selected compiler cannot report its effective -mabi")
+                    raise self.error_cls("selected compiler cannot report its effective -mabi: " + query_diagnostics)
                 values = []
                 for line in answer.stderr.splitlines():
                     args = shlex.split(line)
@@ -207,7 +225,7 @@ class HarnessBuildRecipe:
                         continue
                     values += [args[index + 1] for index, arg in enumerate(args[:-1]) if arg == "-target-abi"]
                 if len(values) != 1:
-                    raise self.error_cls("selected compiler returned no unique effective -mabi")
+                    raise self.error_cls("selected compiler returned no unique effective -mabi: " + query_diagnostics)
                 abi = values[0]
         march = self.march().partition("=")[2]
         if (
@@ -218,7 +236,7 @@ class HarnessBuildRecipe:
             raise self.error_cls(f"build recipe has invalid -mabi={abi!s} for -march={march}")
         return f"-mabi={abi}"
 
-    def with_effective_abi(self) -> "HarnessBuildRecipe":
+    def with_effective_abi(self) -> HarnessBuildRecipe:
         """Pin the selected ABI in each harness compile/link command, including implicit defaults."""
         abi = self.mabi()
         flags: list[str] = []
@@ -230,7 +248,7 @@ class HarnessBuildRecipe:
                 flags.append(flag)
         return replace(self, cflags=(*flags, abi))
 
-    def link_command(self, *, objects: "Sequence[Path]", output: Path, link_script: Path | None = None) -> list[str]:
+    def link_command(self, *, objects: Sequence[Path], output: Path, link_script: Path | None = None) -> list[str]:
         """Link already-compiled objects. Support sources are NOT re-appended: they are among them."""
         cmd = [str(self.compiler), *self.cflags]
         for root in self.include_roots:

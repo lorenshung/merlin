@@ -19,6 +19,10 @@ from typing import Any
 class NativeModelExecutionError(ValueError):
     """The frozen model, candidate artifact, and pointer ABI cannot be joined."""
 
+    def __init__(self, detail: str, *, code: str | None = None):
+        super().__init__(detail)
+        self.code = code
+
 
 def _digest(path: Path) -> dict[str, Any]:
     digest = hashlib.sha256()
@@ -269,7 +273,10 @@ def _bind_inputs(
             or len(writers) != 1
             or producer[0] not in writers[0]["source_op_indices"]
         ):
-            raise NativeModelExecutionError(f"output writer lacks exact source-result task ownership: {name!r}")
+            raise NativeModelExecutionError(
+                f"output writer lacks exact source-result task ownership: {name!r}",
+                code="output_writer_source_result_ownership_unverified",
+            )
 
     def has_source_initializer(name: str, task: Mapping[str, Any]) -> bool:
         binding = source_values.get(name)
@@ -377,41 +384,10 @@ def _build_service_for(target: str, *, source_owned_mutables: tuple[str, ...] | 
 
 
 def _host_compute_report(command_buffer: Mapping[str, Any], lowered_mlir_text: str, *, entry_symbol: str):
-    """Audit only task-scoped host IR of the emitted entry, or report why it is unverified.
+    """Retain the historical import and monkeypatch seam for host-compute audits."""
+    from .native_dispatch_accounting import _host_compute_report as accounting_report
 
-    The independent route-quality analyzer owns the dataflow decision.  Parsing
-    may be narrower than upstream MLIR's LLVM metadata vocabulary; that never
-    becomes a clean report merely because the executable build accepts it.
-    """
-    from merlin.runtime.route_quality import host_compute
-
-    try:
-        from xdsl.parser import Parser
-
-        from merlin.targetgen.oot_starterkit.llvm_context import make_llvm_context
-
-        # LLVM metadata that xDSL does not model (for example loop-unroll
-        # hints) must not hide a task-scoped function that upstream MLIR can
-        # compile.  Unregistered operations are still handled conservatively
-        # by route_quality, which marks unknown dataflow incomplete.
-        context = make_llvm_context()
-        module = Parser(context, lowered_mlir_text).parse_module()
-        matches = [
-            op
-            for op in module.body.block.ops
-            if op.name == "llvm.func" and getattr(op.properties.get("sym_name"), "data", None) == entry_symbol
-        ]
-        if len(matches) != 1:
-            raise NativeModelExecutionError(
-                f"candidate LLVM has {len(matches)} parsed entry function(s) named {entry_symbol!r}"
-            )
-        return host_compute(command_buffer, function=matches[0])
-    except Exception as exc:  # noqa: BLE001 -- no parse/attribution is not a clean audit
-        return host_compute(
-            command_buffer,
-            function=None,
-            absent_cause=f"candidate host IR is not task-scoped/auditable: {type(exc).__name__}: {str(exc)[:350]}",
-        )
+    return accounting_report(command_buffer, lowered_mlir_text, entry_symbol=entry_symbol)
 
 
 def audit_emitted_host_compute(emission: Mapping[str, Any] | None, *, entry_symbol: str) -> dict[str, Any]:
@@ -1298,7 +1274,10 @@ def execute_candidate_model(
             )
 
             recipe_record, source_pins = selected_build_inputs(
-                target, service.recipe.with_effective_abi(), service, **readback_input_kwargs
+                target,
+                service.recipe.with_effective_abi(),
+                service,
+                **readback_input_kwargs,
             )
             record["readback_build"] = require_build_receipt(
                 output / "build" / BUILD_RECEIPT,
@@ -1339,14 +1318,22 @@ def execute_candidate_model(
             functional_backend, functional_citation, revalidate_functional = _functional_engine(target)
             revalidate_functional()
             capture_kwargs = {"capture_bytes": True} if binary_console else {}
-            functional_console = functional_backend.run_elf(elf, simulator="spike", timeout=timeout, **capture_kwargs)
+            functional_console = functional_backend.run_elf(
+                elf,
+                simulator="spike",
+                timeout=timeout,
+                **capture_kwargs,
+            )
             revalidate_functional()
             revalidate_source()
             if _digest(Path(elf)) != record["elf"]:
                 raise NativeModelExecutionError("candidate ELF changed during L2 functional execution")
             if readback_policy is not None:
                 recipe_now, sources_now = selected_build_inputs(
-                    target, service.recipe.with_effective_abi(), service, **readback_input_kwargs
+                    target,
+                    service.recipe.with_effective_abi(),
+                    service,
+                    **readback_input_kwargs,
                 )
                 if (recipe_now, sources_now) != (recipe_record, source_pins):
                     raise NativeModelExecutionError("full-value build inputs changed during L2 execution")
@@ -1420,7 +1407,10 @@ def execute_candidate_model(
             raise NativeModelExecutionError("candidate ELF bytes changed during execution")
         if readback_policy is not None:
             recipe_now, sources_now = selected_build_inputs(
-                target, service.recipe.with_effective_abi(), service, **readback_input_kwargs
+                target,
+                service.recipe.with_effective_abi(),
+                service,
+                **readback_input_kwargs,
             )
             if (recipe_now, sources_now) != (recipe_record, source_pins):
                 raise NativeModelExecutionError("full-value build inputs changed during L3 execution")
@@ -1471,6 +1461,8 @@ def execute_candidate_model(
         if record.get("tiers", {}).get("L3", {}).get("status") == "pass":
             record["tiers"]["L3"] = {"status": "unavailable", "detail": "post-run source or build check failed"}
         record["failure"] = {"type": type(exc).__name__, "detail": str(exc)[:2000]}
+        if isinstance(exc, NativeModelExecutionError) and exc.code is not None:
+            record["failure"]["code"] = exc.code
         return record
     finally:
         record["build_artifacts"] = _build_artifacts(output)

@@ -479,6 +479,25 @@ def _candidate_native_feedback(result: dict) -> dict | None:
         "numeric_mismatch_diagnostic",
     }:
         summary["native_status"] = native_status
+    native = result.get("candidate_native_execution")
+    if (
+        isinstance(native, dict)
+        and native.get("schema") == "merlin_candidate_native_model_execution_v1"
+        and native.get("status") == "incomplete"
+    ):
+        failure = native.get("failure")
+        if (
+            isinstance(failure, dict)
+            and failure.get("type") == "NativeModelExecutionError"
+            and failure.get("code") == "output_writer_source_result_ownership_unverified"
+        ):
+            # A closed refusal from the trusted binder, never its raw error text,
+            # tensor names, source contents, or numerical expectations. This
+            # diagnoses missing evidence without changing any grading decision.
+            summary["native_failure"] = {
+                "stage": "source_binding",
+                "code": "output_writer_source_result_ownership_unverified",
+            }
     coverage = check.get("candidate_source_coverage")
     counts = [
         coverage.get(key) if isinstance(coverage, dict) else None
