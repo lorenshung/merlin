@@ -735,13 +735,41 @@ def apply_recipe(
         # and TorchAO refuses to hold both that and a per-layer mapping. Which layers are
         # quantized is the plan's verdict, derived from the target; being a Linear is not a reason.
         quantize_(model, config, filter_fn=None)
-        placed = sum(1 for value in config.fqn_to_config.values() if value is not None)
+        planned = [fqn for fqn, value in config.fqn_to_config.items() if value is not None]
+        # A layer counts as quantized only if quantize_ actually replaced its weight. TorchAO can
+        # decline a configured layer with a log line and no error (its float8 path skips a Linear
+        # whose dimensions fail its kernel shape check), and counting the plan instead labelled an
+        # unquantized fp32 capture with an fp8 scheme.
+        modules = dict(model.named_modules())
+        untransformed = [
+            fqn
+            for fqn in planned
+            if type(getattr(modules.get(fqn), "weight", None)) in (torch.Tensor, torch.nn.Parameter)
+        ]
+        if planned and len(untransformed) == len(planned):
+            # The recipe asked for a quantized model and the framework produced the floating one. Writing
+            # that capture would hand the compiler an fp32 graph under a quantized recipe's hash.
+            raise RecipeError(
+                f"quantize_ transformed none of the {len(planned)} layers the plan assigned it "
+                f"({untransformed}); their weights are still plain tensors"
+            )
+        for fqn in untransformed:
+            notes.append(
+                {
+                    "fqn": fqn,
+                    "kind": type(modules[fqn]).__name__,
+                    "refusal": FRAMEWORK_CANNOT_EXPRESS,
+                    "why": "configured for quantize_, but its weight is still a plain tensor afterwards",
+                    "by": "framework",
+                }
+            )
         model._recipe_quantization_stats = {  # type: ignore[attr-defined]
             "api": "quantize_",
             "recipe_sha256": recipe.get("recipe_sha256"),
             "plan_sha256": layer_plan.get("plan_sha256"),
             "layers_seen": len(config.fqn_to_config),
-            "layers_quantized": placed,
+            "layers_planned": len(planned),
+            "layers_quantized": len(planned) - len(untransformed),
             # Every layer that is NOT in the target's numeric form, and whose limit put it there.
             "layers_on_host": notes,
             "refusals": layer_plan.get("refusals"),
