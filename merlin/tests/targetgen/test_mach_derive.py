@@ -218,6 +218,29 @@ def test_a_rule_that_names_no_unit_becomes_an_unknown_not_a_guess():
     assert any(u.quantity == "latency.unit" and u.where == "mxu0_matmul_resource" for u in machine.unknowns)
 
 
+def test_an_unrecognised_declared_completion_is_an_unknown_not_immediate():
+    """A misspelled ``polled`` read as ``immediate`` would cost a data-dependent completion as no wait
+    at all. An absent completion stays immediate: an issue gap declares no completion."""
+
+    def machine(**completion):
+        rule = {"name": "vis", "unit": "u", "producers": ["OP"], "cycles": 66, **completion}
+        return derive(
+            "gemmini",
+            contract={
+                "memory_model": {"hazard_resolution": "explicit"},
+                "endpoint_kind": "inline_asm_insn",
+                "compute_units": [{"name": "u", "kind": "systolic"}],
+            },
+            schedule_contract={"register_dependency_gap": [rule]},
+        )
+
+    misspelled = machine(completion="poled")
+    assert misspelled.latency("OP", "u") is None
+    assert any(u.quantity == "latency.completion" and u.where == "vis" for u in misspelled.unknowns)
+    assert machine(completion="polled").latency("OP", "u").completion == "polled"
+    assert machine().latency("OP", "u").completion == "immediate"
+
+
 def test_a_machine_with_no_schedule_contract_says_it_has_no_costs():
     """Zero latencies is not the same claim as "this machine's instructions are free".
 
