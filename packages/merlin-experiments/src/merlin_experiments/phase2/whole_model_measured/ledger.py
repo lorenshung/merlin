@@ -262,7 +262,7 @@ def export_best(
         state = J.attribution_state(objective.screen.attribution(row["package_sha256"]))
         raise LedgerError(f"the best's bytes are {state}: no authored round earned them, so they are no champion")
     records = champion_records(objective, row["package_sha256"], roles=roles, **provenance)
-    return champions.export_champion(target, ledger.repo, package_id=package_id, **records)
+    return champions.export_champion(target, ledger.repo, package_id=package_id, phase=champions.PHASE2, **records)
 
 
 __all__ = [

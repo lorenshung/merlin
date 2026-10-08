@@ -136,7 +136,7 @@ def _phase2(target: str, problems: list) -> list[dict]:
 
 
 def _champions(target: str, artifacts_root: str | Path | None, problems: list) -> list[dict]:
-    from .champions import champions_root, layout_problems, read_champion
+    from .champions import champions_root, exported_history, layout_problems, read_champion
 
     out = []
     for root in _dirs(champions_root(target, artifacts_root=artifacts_root)):
@@ -154,6 +154,7 @@ def _champions(target: str, artifacts_root: str | Path | None, problems: list) -
             {
                 "package_id": root.name,
                 "path": _rel(root),
+                "phase": provenance.get("phase"),
                 "package_digest": provenance.get("package_digest"),
                 "firesim": {
                     "cycles": firesim.get("cycles"),
@@ -175,7 +176,7 @@ def _champions(target: str, artifacts_root: str | Path | None, problems: list) -
                     "phase0_evidence_digest": provenance.get("phase0_evidence_digest"),
                     "unsealed_legacy": legacy is not None,
                     "legacy_run_dirs": list((legacy or {}).get("run_dirs") or ()),
-                    "reconstructed": bool((provenance.get("phase2") or {}).get("reconstructed")),
+                    "reconstructed": bool(exported_history(provenance).get("reconstructed")),
                     "composed": provenance.get("composition") is not None,
                 },
             }
