@@ -177,6 +177,14 @@ whole_program_attribution:
     repeated operations in one region. Do not invent a region ID from a capsule name,
     opcode count or output shape. A group may contain several source operations, but
     it may not hide an unassigned or duplicated source operation.
+    For the one-shot whole-program pointer ABI, each output_bindings tensor must
+    bind exactly one source_values operation result and have exactly one task
+    declaring it in writes; that task's source_op_indices must include the
+    result's source operation. Its kernel_abi.args entry must be write-only.
+    An output cannot borrow another task's writer or alias an entry argument:
+    neither an input/output alias nor an epilogue copy is declared by this ABI.
+    The public plan validate preflight checks this source/plan consistency; it
+    does not prove actual output writes, execution, numerics or placement.
   lowered_ir_task: >-
     Carry the same task_index into the lowered LLVM-dialect IR as the
     merlin.global_task attribute on operations owned by that task, including host

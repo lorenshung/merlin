@@ -63,6 +63,26 @@ def _buffer():
     }
 
 
+def _split_output_tasks(*, writers: tuple[int, ...]) -> dict:
+    cb = _buffer()
+    plan = cb["params"]["global_program_plan"]
+    plan["tasks"] = [
+        {
+            "task_index": index,
+            "kind": "host",
+            "source_op_indices": [index],
+            "instruction_start": index + 1,
+            "instruction_end": index + 2,
+            "reads": [],
+            "writes": ["result"] if index in writers else [],
+        }
+        for index in range(2)
+    ]
+    plan["schedule_instruction_count"] = 4
+    plan["epilogue_instruction_range"] = [3, 4]
+    return cb
+
+
 def test_exact_direct_source_inventory_includes_init_and_pins_bytes():
     inventory = source_operation_inventory(SOURCE)
     assert inventory["source_op_count"] == 2
@@ -81,6 +101,26 @@ def test_public_preflight_accepts_structural_plan_without_claiming_execution():
     cb = _buffer()
     del cb["params"]["global_program_plan"]["compiler_temporaries"]
     assert validate_mixed_program_plan(SOURCE, cb, LOWERED)["ok"]
+
+
+def test_output_writer_requires_one_task_owning_its_exact_source_result():
+    assert validate_mixed_program_plan(SOURCE, _split_output_tasks(writers=(1,)))["ok"]
+    for writers in ((), (0,), (0, 1)):
+        result = validate_mixed_program_plan(SOURCE, _split_output_tasks(writers=writers))
+        assert not result["ok"]
+        assert "output writer" in " ".join(result["findings"])
+
+
+def test_non_output_temporary_writer_does_not_need_output_result_ownership():
+    cb = _split_output_tasks(writers=(1,))
+    cb["tensors"]["temporary"] = {"shape": [2], "dtype": "i32", "role": "intermediate"}
+    cb["kernel_abi"]["args"].append({"tensor": "temporary", "access": "readwrite"})
+    plan = cb["params"]["global_program_plan"]
+    plan["compiler_temporaries"] = [
+        {"tensor": "temporary", "source_op_index": 0, "source_result_index": 0, "purpose": "temporary storage"}
+    ]
+    plan["tasks"][0]["writes"].append("temporary")
+    assert validate_mixed_program_plan(SOURCE, cb)["ok"]
 
 
 def test_public_preflight_rejects_misnumbering_duplicate_region_and_crossing():
@@ -187,6 +227,11 @@ def test_cli_inventory_and_validation(tmp_path, capsys):
     bad["params"]["global_program_plan"]["source_op_count"] = 1
     cb.write_text(json.dumps(bad))
     assert main(["validate", "--source", str(source), "--command-buffer", str(cb)]) == 1
+    capsys.readouterr()
+    wrong_writer = _split_output_tasks(writers=(0,))
+    cb.write_text(json.dumps(wrong_writer))
+    assert main(["validate", "--source", str(source), "--command-buffer", str(cb)]) == 1
+    assert "output writer lacks exact source-result task ownership" in json.loads(capsys.readouterr().out)["findings"]
 
 
 def test_cli_explains_unowned_hoisted_constant_without_changing_refusal(tmp_path, capsys):

@@ -20,6 +20,8 @@ from merlin.common.ir_lock import IR_LOCK
 from merlin.common.paths import data_path
 from merlin.targetgen.contract.linalg_iface import make_linalg_context
 
+OUTPUT_WRITER_OWNERSHIP_FINDING = "output writer lacks exact source-result task ownership"
+
 
 def _attribute_text(op, name: str) -> str | None:
     from xdsl.dialects.builtin import StringAttr
@@ -251,6 +253,20 @@ def _source_plan_problems(
             )
             if key is None or values.get(key) != name:
                 problems.append("output_bindings differ from actual source return order")
+    # This one-shot whole-program ABI has no input/output alias or epilogue-copy
+    # contract. A source return bound to an output must have one materialized
+    # source-result owner and exactly one writer in that same source-owning task.
+    # The public check is structural only; the grader independently rechecks it.
+    for name in plan["output_bindings"]:
+        source_results = [row for row in plan["source_values"] if row["tensor"] == name]
+        writers = [row for row in tasks if name in row["writes"]]
+        if (
+            not any(arg.get("tensor") == name and arg.get("access") == "write" for arg in abi_args)
+            or len(source_results) != 1
+            or len(writers) != 1
+            or source_results[0]["op_index"] not in writers[0]["source_op_indices"]
+        ):
+            problems.append(OUTPUT_WRITER_OWNERSHIP_FINDING)
     temporary_names = set()
     for row in plan.get("compiler_temporaries", []):
         name, i, j = row["tensor"], row["source_op_index"], row["source_result_index"]

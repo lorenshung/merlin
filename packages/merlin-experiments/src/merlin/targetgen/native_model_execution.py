@@ -174,6 +174,7 @@ def _bind_inputs(
     # Source entry order, not ABI spelling/order, identifies captured leaves.
     # Validate the complete source/plan join before accepting that mapping.
     from merlin.runtime.commandbuffer import whole_program_entry_bindings
+    from merlin.targetgen.oot_starterkit.plan import OUTPUT_WRITER_OWNERSHIP_FINDING as output_finding
     from merlin.targetgen.oot_starterkit.plan import source_operation_inventory, validate_mixed_program_plan
 
     source_path = capture_bundle / "model.mlir"
@@ -181,9 +182,11 @@ def _bind_inputs(
         raise NativeModelExecutionError("frozen model interface is absent or indirect")
     source_bytes = source_path.read_bytes()
     validation = validate_mixed_program_plan(source_bytes, command_buffer)
+    findings = validation.get("findings", [])
     if not validation.get("ok"):
         raise NativeModelExecutionError(
-            f"candidate source/entry plan is incomplete: {validation.get('findings', [])[:2]}"
+            f"candidate source/entry plan is incomplete: {findings[:2]}",
+            code="output_writer_source_result_ownership_unverified" if findings == [output_finding] else None,
         )
     entry = whole_program_entry_bindings(command_buffer)
     abi = command_buffer["kernel_abi"]["args"]

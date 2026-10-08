@@ -172,13 +172,25 @@ def test_native_frozen_leaf_binding_excludes_source_written_intermediate(tmp_pat
 
     output_carry = copy.deepcopy(command)
     output_carry["kernel_abi"]["args"][-1]["access"] = "readwrite"
-    with pytest.raises(NativeModelExecutionError, match="carried-state seed"):
+    with pytest.raises(NativeModelExecutionError, match="output writer lacks exact source-result task ownership"):
         _bind_inputs(output_carry, bundle, target="synthetic")
+    # The public plan check refuses this one-shot output first. Independently
+    # retain coverage of the native carried-state guard if that earlier check
+    # is ever bypassed by a caller with an already-validated plan.
+    from merlin.targetgen.oot_starterkit import plan as public_plan
+
+    with monkeypatch.context() as isolated:
+        isolated.setattr(public_plan, "validate_mixed_program_plan", lambda *_args: {"ok": True})
+        with pytest.raises(
+            NativeModelExecutionError, match="readwrite entry/output requires an explicit carried-state seed"
+        ):
+            _bind_inputs(output_carry, bundle, target="synthetic")
 
     wrong_entry = copy.deepcopy(command)
     wrong_entry["params"]["global_program_plan"]["entry_bindings"] = ["tmp0"]
-    with pytest.raises(NativeModelExecutionError, match="source/entry plan is incomplete"):
+    with pytest.raises(NativeModelExecutionError, match="source/entry plan is incomplete") as failure:
         _bind_inputs(wrong_entry, bundle, target="synthetic")
+    assert failure.value.code is None
 
     overwritten_entry = copy.deepcopy(command)
     overwritten_entry["kernel_abi"]["args"].pop(1)
