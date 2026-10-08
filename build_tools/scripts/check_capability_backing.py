@@ -173,24 +173,10 @@ def main(argv=None) -> int:
     docs = []
     for target in targets:
         try:
-            doc = _decorate(CB.audit(target, ratchet=ratchet))
+            doc = CB.audit(target, ratchet=ratchet)
         except Exception as exc:  # noqa: BLE001 -- an unreadable contract is a finding, not a crash
-            docs.append(
-                {
-                    "target": target,
-                    "n_claims": 0,
-                    "claims": [],
-                    "sources": [],
-                    "pins": {},
-                    "unbacked": [],
-                    "rotted": [],
-                    "ratcheted": [],
-                    "stale_ratchet_entries": [],
-                    "problems": [f"contract could not be read structurally: {exc}"],
-                }
-            )
-            continue
-        docs.append(doc)
+            doc = CB.unreadable(target, str(exc))
+        docs.append(_decorate(doc))
 
     if args.write_ratchet:
         entries = {e for doc in docs for e in doc["unbacked"] + doc["rotted"]}

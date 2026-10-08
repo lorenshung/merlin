@@ -10,7 +10,7 @@ uses diagnostic mode until evidence, semantics and coverage are qualified.
 
 | Step | Authored inputs and instructions | Generated result |
 | --- | --- | --- |
-| Target setup | [`target/`](target/README.md): descriptor, reference contracts, explicit OOT support selection | Extracted facts and tool qualification, kept outside examples |
+| Target setup | [`target/`](target/README.md): descriptor and reference contracts; support is the vendored [`support/`](support/README.md) provider, selected when `MERLIN_TARGET_PATH` is unset | Extracted facts and tool qualification, kept outside examples |
 | Phase 0: hardware-guided test generation | [`phase0/`](phase0/README.md): public coverage recipe | Run-owned capsules, then an explicitly reviewed corpus release |
 | Phase 1: functional compiler generation | [`phase1/`](phase1/README.md): prompts and public runtime harness | Frozen compiler submission and separately attributed certification |
 | Phase 2: performance optimization | [`phase2/`](phase2/README.md): selecting frozen inputs and the shared templates | Optimization runs and evidence tied to the exact functional compiler |

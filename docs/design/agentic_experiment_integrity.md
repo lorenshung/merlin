@@ -3,7 +3,7 @@ title: "Design: rules for citable agentic-compiler experiments"
 kind: design
 status: current
 owner: core
-last_verified: 2026-10-06
+last_verified: 2026-10-08
 related: [capsule_generation, capsule_phase_split, radiance_staged_evaluation]
 code_refs:
   - packages/merlin-experiments/src/merlin/targetgen/capsule_grade.py
@@ -68,7 +68,12 @@ and a candidate tier without an explicit `derived_from_rtl` flag is not counted 
 name. The agent-facing verdict carries the same redacted candidate facet and no execution digest
 for such a row, so a certificate is never reused across the two programs. A capsule that inherits
 a deeper tier from a sibling reads that sibling's certificate only from the same selected suite
-run, never from ambient output roots.
+run, never from ambient output roots. Every engine on the ladder answers memory in issue order, so
+a program correct only under that order passes L2 and L3 and can still fail on a board. The opt-in
+memory-order tier (`MERLIN_L3_ORDER_SEEDS` > 0) sweeps a passing cert tier under seeded
+out-of-order responses when the decoded trace shows an unbarriered ordering hazard, and fails it on
+`<tier>_order` with the reproducing seeds. Off, a grade is byte-identical, so a cited cert result
+states whether that tier ran.
 
 ## 2. Compare arms on one cohort, pinned before launch
 
@@ -153,7 +158,9 @@ GO. In another, the conformance parser could not read composed shell commands an
 arm non-conformant. In a third, the same model on the same task scored 0/20 in one driver and 15/20 in
 another.
 
-**Gate.** `readiness_check.py` (visibility checked from inside the sandbox); `conformance.py`;
+**Gate.** `readiness_check.py` (visibility checked from inside the sandbox; its Chipyard timing probe
+runs on an explicitly selected reference backend, recorded by path, package id and manifest digest,
+and fails without one rather than timing whatever package is on disk); `conformance.py`;
 feedback-channel health on every verdict. Under the outer sandbox, the Codex driver runs its
 candidate commands in a second, deny-by-default permission profile and proves it with a no-model
 probe through the same mounts (credential unreadable, workspace writable, tools runnable) before

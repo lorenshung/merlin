@@ -3,7 +3,7 @@ title: Integrations
 kind: guide
 status: current
 owner: kernels
-last_verified: 2026-10-07
+last_verified: 2026-10-08
 related: [kernel_mining, architecture, repo_structure]
 code_refs: [src/merlin/kernels/ingest, packages/merlin-experiments/pyproject.toml, packages/merlin-analysis/pyproject.toml, packages/merlin-experiments/src/merlin/benchharness/chia_bridge.py, packages/merlin-experiments/src/merlin/benchharness/chia_tasks.py, packages/merlin-experiments/src/merlin/targetgen/aet_bridge.py, packages/merlin-experiments/src/merlin_experiments/phase2/telemetry.py]
 ---

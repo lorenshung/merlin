@@ -1,4 +1,4 @@
-# Matrix runs invalidated by a harness defect, read by `merlin-study-status board --void`.
+# Matrix runs invalidated by a harness defect, read by `merlin experiment study board --void`.
 #
 # A voided run is NOT deleted: it consumed tokens and money, and hiding it would understate what the
 # study cost. It is kept out of every solved rate and cycle claim and reported on its own line.

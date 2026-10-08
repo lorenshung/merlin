@@ -28,7 +28,6 @@ Core console-scripts are installed with `pip install -e .` from the repo root. O
 | `merlin-target-publish` | `merlin.targetgen.publish:main` |
 | `merlin-target-tools` | `merlin.targetgen.tool_cli:main` |
 | `merlin-targetgen` | `merlin.targetgen.cli:main` |
-| `merlin-trace-census` | `merlin.perf.census_cli:main` |
 | `merlin-verify` | `merlin.verify.cli:main` |
 | `merlin-whole-model-gate` | `merlin.perf.whole_model_gate:main` |
 | `merlin-whole-model-gsim` | `merlin.perf.whole_model_gsim:main` |
@@ -55,7 +54,6 @@ Core console-scripts are installed with `pip install -e .` from the repo root. O
 |---|---|
 | `merlin-evaluation-cohort` | `merlin.targetgen.evaluation_cohort:main` |
 | `merlin-experiment` | `merlin_experiments.cli:main` |
-| `merlin-study-status` | `merlin.benchharness.study_status:main` |
 
 ## merlin-mining
 

@@ -57,8 +57,42 @@ def test_recorded_debt_is_excused_and_only_that(tmp_path):
     mod = _module()
     big = mod.MODULE_SIZE_LIMIT + 50
     root = _tree(tmp_path, {"old.py": big, "new.py": big})
-    errors = _run(mod, root, ["merlin/python/merlin/old.py  # recorded"])
+    errors = _run(mod, root, [f"merlin/python/merlin/old.py  # {big}"])
     assert len(errors) == 1 and "new.py" in errors[0]
+
+
+def test_recorded_debt_may_shrink_but_not_grow_past_its_ceiling(tmp_path):
+    mod = _module()
+    ceiling = mod.MODULE_SIZE_LIMIT + 50
+    root = _tree(tmp_path, {"shrunk.py": ceiling - 10, "grown.py": ceiling + 1})
+    errors = _run(
+        mod, root, [f"merlin/python/merlin/shrunk.py  # {ceiling}", f"merlin/python/merlin/grown.py  # {ceiling}"]
+    )
+    assert len(errors) == 1 and "grown.py" in errors[0] and f"{ceiling + 1} > {ceiling}" in errors[0]
+
+
+def test_an_entry_without_a_numeric_ceiling_is_an_error(tmp_path):
+    """The number used to be a note, which is how a listed module grew without limit."""
+    mod = _module()
+    big = mod.MODULE_SIZE_LIMIT + 50
+    root = _tree(tmp_path, {"old.py": big})
+    errors = _run(mod, root, ["merlin/python/merlin/old.py  # recorded"])
+    assert any("no numeric line ceiling" in e and "old.py" in e for e in errors), errors
+
+
+def test_a_split_module_must_leave_the_ledger(tmp_path):
+    mod = _module()
+    root = _tree(tmp_path, {"split.py": mod.MODULE_SIZE_LIMIT})
+    errors = _run(mod, root, [f"merlin/python/merlin/split.py  # {mod.MODULE_SIZE_LIMIT + 50}"])
+    assert len(errors) == 1 and "delete its ratchet entry" in errors[0]
+
+
+def test_every_ledger_ceiling_holds_on_this_tree():
+    """The real ledger against the real tree: every entry carries a ceiling and no module exceeds it."""
+    mod = _module()
+    errors: list[str] = []
+    mod.check_module_size(errors)
+    assert errors == []
 
 
 def test_the_build_copy_under_data_is_not_counted(tmp_path):

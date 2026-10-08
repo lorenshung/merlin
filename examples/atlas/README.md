@@ -13,7 +13,8 @@ target `atlas`; provider identity and hardware configuration are separate inputs
 - [Whole-model entrypoints](whole-model/README.md): capture/lowering inspection and separate deployment prerequisites.
 - [Artifact navigation](artifacts/README.md): raw CIRCT facts, actual consumer views, coverage and capsule lineage.
 
-[Target setup](target/README.md) describes explicit OOT support and local tooling prerequisites.
+[Target setup](target/README.md) describes support selection (the vendored [`support/`](support/README.md)
+provider is selected when `MERLIN_TARGET_PATH` is unset) and local tooling prerequisites.
 The hand-authored reference is separate from Merlin's generated compiler and ACT
 comparison. Its examples are fixed 32×32 diagnostic tiles; their ELF words ran on
 the selected standalone AtlasCore through ModeLIR. They have not been run as

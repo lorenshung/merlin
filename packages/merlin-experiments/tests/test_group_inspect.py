@@ -411,3 +411,68 @@ def test_a_profile_without_a_run_reads_only_a_named_console_from_a_trusted_engin
     assert json.loads(capsys.readouterr().out)["profile"]["counters"]["values"]["status"] == "refused"
     assert cli.main([*base, "--counter-engine", "fixture-rtl", "--out", str(tmp_path / "c")]) == 0
     assert "busy A: 7" in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------------------ requested addresses
+
+_COMMIT_LOG = """\
+core   0: 0x0000000080000000 (0x0062a023) sw      t1, 0(t0)
+core   0: 3 0x0000000080000000 (0x0062a023) mem 0x0000000080001010 0x00001234
+core   0: 0x0000000080000004 (0x0002a383) lw      t2, 0(t0)
+core   0: 3 0x0000000080000004 (0x0002a383) x7  0x0000000000001234 mem 0x0000000080001010
+core   0: 0x0000000080000008 (0x00000013) nop
+core   0: 3 0x0000000080000008 (0x00000013)
+core   0: >>>>  kernel
+core   0: 3 0x000000008000000c (0x02028407) mem 0x0000000080002000 mem 0x0000000080002004
+"""
+
+
+def test_every_committed_memory_request_is_read_in_commit_order():
+    """Loads, stores and every element of a vector access, in the order they committed; the
+    disassembly record and a symbol banner beside them are not requests."""
+    assert GI.requested_addresses(_COMMIT_LOG) == [0x80001010, 0x80001010, 0x80002000, 0x80002004]
+
+
+def test_a_committed_request_without_an_address_is_refused_not_dropped():
+    with pytest.raises(ValueError, match="names no address"):
+        GI.requested_addresses("core   0: 3 0x0000000080000000 (0x0062a023) mem\n")
+
+
+def test_the_census_records_the_requests_and_takes_each_granule(tmp_path):
+    from dataclasses import asdict
+
+    from merlin.perf.address_locality import address_locality
+
+    log = tmp_path / "instruction_trace.log"
+    log.write_text(_COMMIT_LOG)
+    document = GI.address_census({"available": True, "log": str(log)}, tmp_path, granules=(16, 4096), capacities=(1,))
+    recorded = json.loads(Path(document["addresses"]).read_text())
+    assert document["status"] == "recorded" and recorded == GI.requested_addresses(_COMMIT_LOG)
+    expected = [
+        {
+            "schema": "address_locality_v1",
+            **asdict(address_locality(recorded, granule=g, max_requests=4, capacities=(1,))),
+        }
+        for g in (16, 4096)
+    ]
+    assert document["censuses"] == expected
+    assert GI.address_census({"available": False}, tmp_path / "none")["status"] == "UNKNOWN"
+
+
+def test_the_functional_model_is_asked_for_its_commit_records(tmp_path):
+    """The trace the census reads is the one the functional model was asked to write."""
+    model = tmp_path / "functional_model"
+    model.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "assert '--log-commits' in sys.argv\n"
+        "log = next(a.split('=', 1)[1] for a in sys.argv if a.startswith('--log='))\n"
+        f"open(log, 'w').write({_COMMIT_LOG!r})\n"
+    )
+    model.chmod(0o755)
+    elf = tmp_path / "program.elf"
+    elf.write_bytes(b"\x7fELF")
+    candidate = {"machine": {"kind": "spike", "command": [str(model)]}}
+    trace = GI.instruction_trace(candidate, str(elf), tmp_path, run_to=8)
+    assert trace["returncode"] == 0 and "--log-commits" in trace["argv"]
+    assert GI.address_census(trace, tmp_path)["requests"] == 4

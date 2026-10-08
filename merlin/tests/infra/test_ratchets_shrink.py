@@ -105,3 +105,46 @@ def test_all_zero_base_is_unmeasured_not_ok(repo):
     root, _ = repo
     rc, out = _gate(root, "--base", "0" * 40)
     assert rc == 0 and "UNMEASURED" in out and "OK" not in out, out
+
+
+@pytest.fixture
+def ceilings(repo):
+    """A ledger whose trailing numbers are declared ceilings, committed as the base."""
+    root, _ = repo
+    led = root / "build_tools" / "scripts" / "size_ratchet.txt"
+    led.write_text("# ceilings: the number is a line bound\na.py  # 2000\nb.py  # 1600\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "ceilings")
+    return root, led
+
+
+def test_raising_a_declared_ceiling_fails_like_growth(ceilings):
+    root, led = ceilings
+    led.write_text("# ceilings: the number is a line bound\na.py  # 2100\nb.py  # 1600\n")
+    rc, out = _gate(root)
+    assert rc == 1 and "a.py: 2000 -> 2100" in out, out
+
+
+def test_lowering_a_declared_ceiling_passes(ceilings):
+    root, led = ceilings
+    led.write_text("# ceilings: the number is a line bound\na.py  # 1900\nb.py  # 1600\n")
+    rc, out = _gate(root)
+    assert rc == 0 and "OK" in out, out
+
+
+def test_a_raised_ceiling_passes_only_with_a_new_accept_marker(ceilings):
+    root, led = ceilings
+    led.write_text(
+        "# ceilings: the number is a line bound\n# growth-accepted: measured wrong\na.py  # 2100\nb.py  # 1600\n"
+    )
+    rc, out = _gate(root)
+    assert rc == 0 and "ACCEPTED" in out and "measured wrong" in out, out
+
+
+def test_without_the_declaration_a_trailing_number_is_only_a_comment(repo):
+    root, led = repo
+    led.write_text("# header comment\na.py  # 10\nb.py  # rationale\n")
+    _git(root, "commit", "-qam", "numbers")
+    led.write_text("# header comment\na.py  # 99\nb.py  # rationale\n")
+    rc, out = _gate(root)
+    assert rc == 0, out

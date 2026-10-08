@@ -121,7 +121,7 @@ def test_the_selector_and_its_narrowed_capacity_come_from_the_selected_support(s
     # two bits name four states, but the table declares two ways to ask for one
     assert selector == {"offset": 3, "width": 2, "capacity": 2}
     assert LSR.movement_in_classes_for("synthetic") == frozenset({"MVIN", "MVIN2"})
-    assert LSR.load_state_capacity("synthetic") == 2
+    assert LSR.capacity_from_selector(selector) == 2
 
 
 def test_a_support_publishing_no_layout_has_no_selector(monkeypatch):

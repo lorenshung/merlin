@@ -256,12 +256,24 @@ def _rule_into(
         unknowns.append(Unknown(f"latency.{field}", "the rule declares no positive cycle count", name))
         return
     declared_completion = rule.get("completion")
-    if declared_completion not in COMPLETION_KINDS:
+    if declared_completion is None:
         # An issue gap says when the NEXT instruction may issue; it does not say how a consumer learns
         # this one finished. Reading "the target has a delay instruction" as "therefore every cost is
         # discharged by counting cycles" would put a counted completion on a resource constraint that
         # has no completion at all, and oblige a compiler to emit a wait for a count nothing declared.
         declared_completion = "immediate"
+    elif declared_completion not in COMPLETION_KINDS:
+        # DECLARED, but not a kind this model knows. Reading it as immediate would turn a misspelled
+        # polled or counted completion into no wait at all -- the one wrong answer nothing downstream
+        # can notice -- so the rule is reported and not costed.
+        unknowns.append(
+            Unknown(
+                "latency.completion",
+                f"the rule declares completion {declared_completion!r}, which is none of {COMPLETION_KINDS}",
+                name,
+            )
+        )
+        return
     producers: Sequence[Any] = rule.get("producers") or ()
     for instr in producers:
         if not isinstance(instr, str) or not instr:

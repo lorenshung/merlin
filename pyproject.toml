@@ -99,9 +99,6 @@ merlin-liveness = "merlin.liveness.cli:main"
 merlin-firesim-checkpoint = "merlin.perf.firesim_checkpoint:main"
 merlin-firesim-receipt = "merlin.perf.firesim_receipt:main"
 merlin-deployment-check = "merlin.perf.deployment_admissibility:main"
-# Exact, unpriced censuses of one observed execution from records a trace reader or a target
-# provider wrote: requested-address recurrence, and call/stack boundaries with their training domain.
-merlin-trace-census = "merlin.perf.census_cli:main"
 merlin-compile-kernel = "merlin.triton.cli:main"
 
 [tool.setuptools]

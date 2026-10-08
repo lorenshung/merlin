@@ -15,6 +15,8 @@ refusing 16 of ResNet-50's 71 device groups.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from merlin.common.paths import repo_root
@@ -365,6 +367,22 @@ def _gate_script():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def test_the_gate_reports_an_unreadable_contract_as_a_problem(tmp_path, monkeypatch, capsys) -> None:
+    """The error path builds the library's own document shape, and it FAILS rather than reading clean."""
+    gate = _gate_script()
+    contract = tmp_path / "contract.yaml"
+    contract.write_text("name: [unclosed\n", encoding="utf-8")
+    monkeypatch.setattr(CB, "gated_targets", lambda: ("t",))
+    monkeypatch.setattr(CB, "contract_documents", lambda target: ((contract, contract.read_text()),))
+    monkeypatch.setattr(CB, "_pin_read_paths", lambda target: {})
+
+    assert gate.main(["--no-ratchet", "--json"]) == 1
+    (doc,) = json.loads(capsys.readouterr().out)
+    assert doc.keys() == CB.unreadable("t", "x").keys() | {"sources"}
+    assert doc["claims"] == [] and len(doc["problems"]) == 1
+    assert doc["problems"][0].startswith("contract could not be read structurally")
 
 
 def test_the_gate_fails_on_a_reintroduced_unbacked_narrowing(tmp_path, monkeypatch) -> None:

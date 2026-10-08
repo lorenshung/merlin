@@ -3,7 +3,7 @@ title: Compiling a whole model onto an accelerator
 kind: guide
 status: current
 owner: compiler
-last_verified: 2026-10-06
+last_verified: 2026-10-08
 related: [compilation_strategies, targetgen, adding_a_target, gemmini_experiment, reproducing_whole_model_on_rtl, firesim]
 code_refs: [src/merlin/compile_cli.py, src/merlin/compile/command.py, src/merlin/compile/baremetal_model.py, src/merlin/compile/model_execution_inputs.py, src/merlin/llvmlower/group_offload.py, src/merlin/llvmlower/device_build.py, src/merlin/targetgen/coverage_certificate.py, packages/merlin-experiments/src/merlin/targetgen/native_model_execution.py]
 ---
@@ -71,7 +71,8 @@ selected L3 engine cannot use these two native choices through this command.
 
 Keep the saved bundle, host package, board catalog, DTS, RTL facts and provider selection stable
 across diagnostics. Each `--output` must be a **fresh directory below `MERLIN_OUT_ROOT`**; the receipt
-pins input tree hashes, selected engine, ELF hash and console. Reuse a prior artifact as evidence only
+pins input tree hashes, selected engine, ELF hash and console, and the build's compilation recipe by
+path and digest when the build writes one (`output.compilation_recipe`). Reuse a prior artifact as evidence only
 with its identity and provenance intact. In particular, rebuilding separately for gSIM and Verilator
 does not establish a *same-ELF* comparison unless their ELF byte hashes agree. Do not recapture or
 replace a reference between runs and present the results as one comparison.
@@ -132,12 +133,18 @@ routing from a placement and the saved capture (for example, `routing_for_placem
 device package and declared granularity; do not manufacture `select=lambda shape: True` to make a
 coverage number. The build records a device sidecar, but labels it
 `device_requested_dispatch_unverified`: static calls or nonzero opcodes do not prove a completed
-accelerator dispatch. The host baseline ELF cannot be relabeled as a candidate ELF.
+accelerator dispatch. The host baseline ELF cannot be relabeled as a candidate ELF. The device build
+translates and compiles each byte-distinct emitted artifact once and renames a copy per entry symbol
+(`DeviceBuild.object_dedup` records which symbols share one); a caller that needs every object can
+stop at the first failed symbol instead of recording each refusal and building the rest.
 
 The OOT whole-program route is different again. The grader's candidate diagnostic links the
 candidate-emitted whole-program LLVM and command buffer against the frozen capture, rather than
-substituting a core-generated host baseline. Its `numeric_match_diagnostic` status records a native
-numerical comparison, **not** a final grade or device-execution proof. Keep the candidate artifact,
+substituting a core-generated host baseline. Its model inputs are bound to the capture through the
+checked source entry mapping, never by assuming `arg<N>` buffer names, and its outputs are read back as
+[native output readback](../reference/native_output_readback.md) describes. Its
+`numeric_match_diagnostic` status records a native numerical comparison, **not** a final grade or
+device-execution proof. Keep the candidate artifact,
 capture, selected provider, board and facts byte-identical when comparing engines or resuming a run.
 Use the reviewed corpus and grader workflow for a verdict; a manually invoked native run is only a
 diagnostic.

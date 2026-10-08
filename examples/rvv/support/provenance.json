@@ -19,7 +19,7 @@
   "files": [
     {
       "path": "contracts/target_contract.yaml",
-      "source": "/scratch/agustin/projects/oscar-merlin/out/artifacts/targets/rvv/contracts/target_contract.yaml",
+      "source": "out/artifacts/targets/rvv/contracts/target_contract.yaml",
       "source_revision": null,
       "sha256": "b08117fecc0eef967ce639ab55314d2b8a163dd1733603f11133f452dd8ec4a4"
     }

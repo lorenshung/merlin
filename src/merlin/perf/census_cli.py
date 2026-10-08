@@ -1,21 +1,25 @@
-"""``merlin-trace-census``: exact, unpriced censuses of one observed execution, from records on disk.
+"""``merlin experiment census``: exact, unpriced censuses of one observed execution, from records on disk.
 
 Two analyses whose inputs come from a trace reader or a TARGET PROVIDER, never from the core:
 
-    merlin-trace-census locality ADDRESSES.json --granule BYTES --max-requests N [--capacity C ...]
-    merlin-trace-census boundaries RECORDS.json [--entry FUNCTION] [--admit DOMAIN.json --domain-sha256 S]
-    merlin-trace-census boundary-domain SUMMARY.json ... --entry FUNCTION --pointer P ... --domain-sha256 S
+    merlin experiment census locality ADDRESSES.json --granule BYTES --max-requests N [--capacity C ...]
+    merlin experiment census boundaries RECORDS.json [--entry FUNCTION] [--admit DOMAIN.json --domain-sha256 S]
+    merlin experiment census boundary-domain SUMMARY.json ... --entry FUNCTION --pointer P ... --domain-sha256 S
 
 ``locality`` reads an ordered JSON list of requested addresses and prints the exact recurrence census
 of :func:`merlin.perf.address_locality.address_locality` -- first touches and the distinct-intervening-
 region distance histogram. The granule and the request budget are the caller's: nothing here knows a
-line size, and a trace longer than the budget is refused rather than truncated.
+line size, and a trace longer than the budget is refused rather than truncated. Its producer is
+``merlin experiment inspect --group gN --trace``, which records the group program's committed memory
+requests as ``requested_addresses.json``; this re-takes the census at another granule without a rerun.
 
 ``boundaries`` reads a provider's decoded function extents and instruction records (the provider owns
 instruction decoding, the ABI and the digests of the program, census and its own artifacts) and prints
 :func:`merlin.perf.execution_boundaries.summarize_boundaries`. With ``--entry`` it adds the features
 normalised to that function's invocations; with ``--admit`` it checks those features against a
 boundary domain derived from training summaries (``boundary-domain``), which never approves a ranking.
+No provider writes those records yet: call kinds, callees and stack access widths are host-ABI
+decoding a target's support owns, and none of the vendored providers declares a decoder for them.
 
 Every command prints one JSON document and exits 0, or names its refusal on stderr and exits 2. Unknown
 facts stay ``null``; nothing is read as zero.
@@ -110,7 +114,7 @@ def boundary_domain(args: argparse.Namespace) -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="merlin-trace-census", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+        prog="merlin experiment census", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     sub = parser.add_subparsers(dest="command", required=True)
     loc = sub.add_parser("locality", help="exact recurrence census of an ordered requested-address trace")

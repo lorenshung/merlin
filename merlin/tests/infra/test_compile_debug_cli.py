@@ -16,6 +16,13 @@ import pytest
 from merlin import compile_cli
 from merlin.common import compile_trace as T
 from merlin.compile import debug
+from merlin.llvmlower import toolchain
+
+#: The fixture's real lowering runs its native MLIR passes through the compiler's Python; a test whose
+#: compile gets that far needs the interpreter, one refused at the parser does not.
+native = pytest.mark.skipif(
+    not toolchain.compiler_python().is_file(), reason="the compiler's Python (native MLIR pass manager) is absent"
+)
 
 _MODULE = """
 func.func @forward(%a: tensor<4xf32>, %b: tensor<4xf32>) -> tensor<4xf32> {
@@ -75,6 +82,7 @@ def test_an_unknown_stage_is_refused_before_anything_runs(lowering):
     assert exited.value.code == 2 and not lowering["reached"]
 
 
+@native
 def test_stop_after_exits_zero_with_the_ir_and_no_artifact(lowering, tmp_path, capsys):
     trace = tmp_path / "trace"
     assert compile_cli.main(_args("--stop-after", "mlir:one-shot-bufferize", "--trace-dir", str(trace))) == 0
@@ -87,6 +95,7 @@ def test_stop_after_exits_zero_with_the_ir_and_no_artifact(lowering, tmp_path, c
     assert all((trace / f).is_file() for f in index["stop"]["files"])
 
 
+@native
 def test_dump_ir_after_all_writes_a_trace_index_and_reports_it(lowering, tmp_path, capsys):
     trace = tmp_path / "trace"
     code = compile_cli.main(
@@ -103,12 +112,14 @@ def test_dump_ir_after_all_writes_a_trace_index_and_reports_it(lowering, tmp_pat
     assert (trace / T.PIPELINE).is_file() and index["pass_log"].endswith(T.PASS_LOG)
 
 
+@native
 def test_a_stop_stage_the_route_never_reaches_is_not_a_success(lowering, tmp_path, capsys):
     code = compile_cli.main(_args("--stop-after", "contract", "--trace-dir", str(tmp_path / "trace"), "--json"))
     result = json.loads(capsys.readouterr().out)
     assert code == 1 and result["status"] == "stop_stage_not_reached" and "never reached" in result["reason"]
 
 
+@native
 def test_without_trace_dir_the_trace_goes_under_the_out_root(lowering, tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "out"))
     assert compile_cli.main(_args("--dump-ir-after", "upstream", "--json")) == 0

@@ -32,7 +32,6 @@ merlin/python/merlin/perf/campaign.py::complete_family
 merlin/python/merlin/perf/campaign.py::decide_promotion
 merlin/python/merlin/perf/capability_refusal.py::unblocking_sequence
 merlin/python/merlin/perf/comparand.py::fusion_comparands
-merlin/python/merlin/perf/comparison_group_claim.py::preflight_comparison_group_claim
 merlin/python/merlin/perf/composer.py::operator_sensitivity
 merlin/python/merlin/perf/contract.py::contract_table
 merlin/python/merlin/perf/counter_harvest.py::corpus_map
@@ -63,19 +62,15 @@ merlin/python/merlin/perf/fork.py::fork_from_dict
 merlin/python/merlin/perf/fork.py::requeue
 merlin/python/merlin/perf/gate_phase.py::declared_gates
 merlin/python/merlin/perf/global_planner.py::optimize_program
-merlin/python/merlin/perf/group_headroom.py::macs_and_bytes
 merlin/python/merlin/perf/harvest.py::harvested_term
 merlin/python/merlin/perf/headroom.py::corpus_headroom
 merlin/python/merlin/perf/historical_reference.py::bind_historical_reference
 merlin/python/merlin/perf/host_source_witness.py::assess_narrow_readout_equivalence
 merlin/python/merlin/perf/instruction_motif.py::extract_task_instruction_motif
-merlin/python/merlin/perf/load_state_claim.py::preflight_load_state_evidence
-merlin/python/merlin/perf/load_state_residency.py::load_state_capacity
 merlin/python/merlin/perf/measurement_ladder.py::require_adjudicated
 merlin/python/merlin/perf/mechanism_probe.py::authorize_probe_timing
 merlin/python/merlin/perf/mechanism_probe.py::extract_mechanism_evidence
 merlin/python/merlin/perf/mechanism_probe.py::fit_probe_calibration
-merlin/python/merlin/perf/movein_claim.py::preflight_movein_evidence
 merlin/python/merlin/perf/movement_balance.py::saturated_bandwidth
 merlin/python/merlin/perf/optimization_ledger.py::append_attempts
 merlin/python/merlin/perf/oracle_cost.py::concurrency_inflation
@@ -91,7 +86,6 @@ merlin/python/merlin/perf/select.py::candidates_from
 merlin/python/merlin/perf/select.py::derive_axes
 merlin/python/merlin/perf/select.py::emit_product
 merlin/python/merlin/perf/simt_occupancy.py::occupancy_for_target
-merlin/python/merlin/perf/stationary_claim.py::preflight_stationary_evidence
 merlin/python/merlin/perf/structural_transitions.py::strided_copy_transition
 merlin/python/merlin/perf/target_reference.py::load_program_identities
 merlin/python/merlin/perf/target_reference.py::score_against_reference
@@ -159,7 +153,6 @@ merlin/python/merlin/targetgen/rtl_backend.py::lift_cca_from_trace
 merlin/python/merlin/targetgen/sandbox/preflight.py::reset_probe_cache
 merlin/python/merlin/targetgen/scope_census.py::region_configs
 merlin/python/merlin/targetgen/semantic_families.py::isa_role_requires
-merlin/python/merlin/targetgen/target_registry.py::default_support_root
 merlin/python/merlin/targetgen/tier_affordability.py::reset_cache
 merlin/python/merlin/targetgen/tier_policy.py::certify_order
 merlin/python/merlin/targetgen/tier_policy.py::is_calibrated

@@ -7,7 +7,9 @@ is covered the day its record lands.
 
 Three properties are held:
 
-* the vendored bytes are the recorded source (its git tree id, recomputed from the files on disk);
+* the vendored bytes are the recorded source (its git tree id, recomputed from the files on disk), except
+  the files ``SOURCE.yaml`` lists as normalized, and putting their companion blobs back reproduces the
+  companion's tree, so nothing else can differ;
 * with ``MERLIN_TARGET_PATH`` unset, each target's executable support is its vendored provider, and any
   explicit value -- the empty string included -- replaces that default;
 * the vendored trees stay experimenter-side: a sandbox that exposes the whole checkout, a bundle snapshot
@@ -21,6 +23,7 @@ import hashlib
 import os
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -63,15 +66,20 @@ def _tracked(root: Path) -> list[str]:
     return sorted(item.decode()[len(prefix) :] for item in out.split(b"\0") if item)
 
 
-def _git_tree_id(root: Path, members: list[str]) -> str:
-    """The git tree id ``members`` would have, computed from the bytes and modes on disk."""
+def _git_tree_id(root: Path, members: list[str], blobs: dict[str, str] | None = None) -> str:
+    """The git tree id ``members`` would have, computed from the bytes and modes on disk.
+
+    ``blobs`` substitutes a recorded blob id for a member's bytes (same mode): the companion's blob for a
+    file that was normalized when it was vendored.
+    """
+    blobs = blobs or {}
     tree: dict = {}
     for rel in members:
         node = tree
         *parents, leaf = rel.split("/")
         for part in parents:
             node = node.setdefault(part, {})
-        node[leaf] = root / rel
+        node[leaf] = (root / rel, blobs.get(rel))
 
     def digest(node: dict) -> bytes:
         entries = []
@@ -79,12 +87,14 @@ def _git_tree_id(root: Path, members: list[str]) -> str:
             if isinstance(value, dict):
                 entries.append((name + "/", b"40000", name, digest(value)))
                 continue
-            if value.is_symlink():
-                mode, data = b"120000", os.readlink(value).encode()
+            path, recorded = value
+            if path.is_symlink():
+                mode, data = b"120000", os.readlink(path).encode()
             else:
-                mode = b"100755" if value.stat().st_mode & 0o100 else b"100644"
-                data = value.read_bytes()
-            entries.append((name, mode, name, hashlib.sha1(b"blob %d\0" % len(data) + data).digest()))
+                mode = b"100755" if path.stat().st_mode & 0o100 else b"100644"
+                data = path.read_bytes()
+            blob = bytes.fromhex(recorded) if recorded else hashlib.sha1(b"blob %d\0" % len(data) + data).digest()
+            entries.append((name, mode, name, blob))
         entries.sort(key=lambda entry: entry[0].encode())
         body = b"".join(mode + b" " + name.encode() + b"\0" + sha for _, mode, name, sha in entries)
         return hashlib.sha1(b"tree %d\0" % len(body) + body).digest()
@@ -105,7 +115,13 @@ def test_vendored_support_is_its_recorded_source(record, doc):
     root = _support_root(record, doc)
     members = _tracked(root)
     assert len(members) == doc["file_count"]
-    assert _git_tree_id(root, members) == doc["source"]["tree"], "vendored bytes differ from the recorded tree"
+    assert _git_tree_id(root, members) == doc["vendored_tree"], "vendored bytes differ from the recorded tree"
+    normalized = {entry["path"]: entry["companion_blob"] for entry in doc["normalized"]}
+    assert set(normalized) <= set(members), "a normalized file is not part of the vendored tree"
+    assert all(entry["change"].strip() for entry in doc["normalized"]), "a normalization states no change"
+    # Only the listed files may differ: with their companion blobs back, the tree is the companion's.
+    assert _git_tree_id(root, members, normalized) == doc["source"]["tree"], "an unlisted file differs"
+    assert (doc["vendored_tree"] == doc["source"]["tree"]) == (not normalized)
     provider = read_provider(root)
     assert (provider.id, provider.target) == (doc["provider_id"], doc["target"])
     records = doc["records"]
@@ -126,13 +142,50 @@ def test_the_migration_manifest_agrees_with_every_source_record():
         entry = listed[path.relative_to(repo_root()).as_posix()]
         vendored = entry["vendored"]
         assert entry["target"] == doc["target"]
-        assert (vendored["commit"], vendored["tree"], vendored["file_count"]) == (
+        assert (vendored["commit"], vendored["tree"], vendored["vendored_tree"], vendored["file_count"]) == (
             doc["source"]["commit"],
             doc["source"]["tree"],
+            doc["vendored_tree"],
             doc["file_count"],
         )
         assert vendored.get("merge_parents") == doc["source"].get("merge_parents")
         assert entry["companion_commit"] == doc["pinned"]["companion_commit"]
+        assert entry["companion_commit_relation"] == doc["pinned"]["relation"]
+
+
+#: How the pinned companion commit relates to the commit the bytes were copied from.
+PIN_RELATIONS = {"same_commit", "base_pin_of_merged_tip"}
+
+
+@pytest.mark.parametrize(("record", "doc"), RECORDS, ids=IDS)
+def test_the_pinned_commit_and_the_copied_commit_are_told_apart(record, doc):
+    """Two different commits in one record must say which is which, and must carry one provider tree.
+
+    A merged tip (``source.commit``, with its ``merge_parents``) may be what the bytes were copied from
+    while the manifest pins the support-branch commit it merged (the base pin). That is consistent only
+    if the record names the relation and both commits carry the same provider tree; an unexplained
+    second commit is the inconsistency this refuses.
+    """
+    source, pinned = doc["source"], doc["pinned"]
+    relation = pinned["relation"]
+    assert relation in PIN_RELATIONS
+    if relation == "same_commit":
+        assert pinned["companion_commit"] == source["commit"]
+        assert "merge_parents" not in source
+    else:
+        assert pinned["companion_commit"] != source["commit"]
+        assert len(source.get("merge_parents") or []) >= 2, "a merged tip names its parents"
+        assert pinned["provider_tree"] == source["tree"], "the base pin and the merged tip carry one tree"
+        when = datetime.fromisoformat
+        assert when(pinned["companion_commit_date"]) <= when(source["commit_date"]), "a pin newer than its merge"
+
+
+def test_a_second_commit_without_a_relation_is_refused():
+    """The relation check above can fail: a record that pins a different commit as ``same_commit`` is caught."""
+    path, doc = next((path, doc) for path, doc in RECORDS if doc["pinned"]["relation"] == "same_commit")
+    forged = {**doc, "pinned": {**doc["pinned"], "companion_commit": "0" * 40}}
+    with pytest.raises(AssertionError):
+        test_the_pinned_commit_and_the_copied_commit_are_told_apart(path, forged)
 
 
 @pytest.mark.parametrize(("record", "doc"), RECORDS, ids=IDS)
@@ -147,12 +200,15 @@ def test_unset_selection_is_the_targets_vendored_support(record, doc, monkeypatc
 
 
 def test_an_explicit_selection_replaces_the_default(tmp_path, monkeypatch):
-    target = RECORDS[0][1]["target"]
+    record, doc = RECORDS[0]
+    target = doc["target"]
     monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     assert target_registry.explicit_targets() == {}
     assert target_registry.effective_target_path() == ""
-    with pytest.raises(plugins.PluginError, match="explicit MERLIN_TARGET_PATH"):
+    # The refusal names the vendored provider the explicit value replaced, and how to get it back.
+    with pytest.raises(plugins.PluginError, match="explicit MERLIN_TARGET_PATH") as refused:
         plugins.resolve_support(target)
+    assert str(_support_root(record, doc)) in str(refused.value) and "unset the variable" in str(refused.value)
 
     elsewhere = tmp_path / "pinned-support"
     (elsewhere / "contracts").mkdir(parents=True)
@@ -302,30 +358,24 @@ def test_vendored_support_cannot_be_published_as_a_candidate(record, doc):
 
 # --------------------------------------------------------------------------------- vendored suites
 SUITES = [(path, doc) for path, doc in RECORDS if (_support_root(path, doc) / "tests").is_dir()]
+#: A suite's tests that need an operator's external checkout, recorded in SOURCE.yaml with the
+#: checkout's ``MERLIN_EXT_<NAME>`` key and why: they run where it is set and skip, by name, where not.
+NEEDS_EXTERNAL = [
+    (path, doc, entry) for path, doc in SUITES for entry in ((doc.get("tests") or {}).get("requires_external") or [])
+]
 
 
-@pytest.mark.integration
-@pytest.mark.parametrize(("record", "doc"), SUITES, ids=[path.parent.name for path, _ in SUITES])
-def test_vendored_support_suite_passes_from_its_new_home(record, doc, tmp_path):
-    """Each provider's own tests, run from its in-repo home the way its README documents.
+def _run_suite(root: Path, tmp_path: Path, selection: list[str]) -> subprocess.CompletedProcess:
+    """A provider's own tests, run from its in-repo home the way its README documents.
 
     The README selects the provider alone on ``MERLIN_TARGET_PATH``; so does this, with the vendored
-    root, so the suite sees exactly the plugins it saw at its companion. Integration: a suite may read
-    operator tool paths from ``.env`` (Gemmini's conformance recording needs ``MERLIN_EXT_CHIPYARD``).
-    Each suite runs in its own interpreter because the suites import their provider's modules by bare
-    name and share test-module basenames.
+    root, so the suite sees exactly the plugins it saw at its companion. Each suite runs in its own
+    interpreter because the suites import their provider's modules by bare name and share test-module
+    basenames.
     """
-    root = _support_root(record, doc)
     env = dict(os.environ, MERLIN_TARGET_PATH=str(root), PYTHONDONTWRITEBYTECODE="1")
     env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(root), os.environ.get("PYTHONPATH"))))
-    # A test bound to the companion repository's own layout (a sibling directory the vendored tree
-    # does not reproduce) is recorded, with its reason, in SOURCE.yaml rather than edited in place.
-    repo = repo_root().resolve()
-    deselected = [
-        f"--deselect={(root / entry['test']).relative_to(repo).as_posix()}"
-        for entry in (doc.get("tests") or {}).get("deselect", [])
-    ]
-    result = subprocess.run(
+    return subprocess.run(
         [
             sys.executable,
             "-m",
@@ -333,14 +383,48 @@ def test_vendored_support_suite_passes_from_its_new_home(record, doc, tmp_path):
             "-q",
             "-p",
             "no:cacheprovider",
-            f"--rootdir={repo}",
+            f"--rootdir={repo_root().resolve()}",
             f"--basetemp={tmp_path / 'basetemp'}",
-            *deselected,
-            str(root / "tests"),
+            *selection,
         ],
         cwd=tmp_path,
         env=env,
         capture_output=True,
         text=True,
     )
+
+
+@pytest.mark.parametrize(("record", "doc"), SUITES, ids=[path.parent.name for path, _ in SUITES])
+def test_vendored_support_suite_passes_from_its_new_home(record, doc, tmp_path):
+    """Every vendored provider's suite, in the fast CI job: a core change that breaks a provider which is
+    never edited in place has to fail somewhere.
+
+    Two recorded exclusions, each with its reason in SOURCE.yaml rather than an edit to the vendored
+    tree: a test bound to the companion repository's own layout (``tests.deselect``), and a test that
+    needs an operator's external checkout (``tests.requires_external``), which runs in the test below.
+    """
+    root = _support_root(record, doc)
+    repo = repo_root().resolve()
+    tests = doc.get("tests") or {}
+    excluded = [entry["test"] for entry in (*tests.get("deselect", []), *(tests.get("requires_external") or []))]
+    assert all((root / relative.partition("::")[0]).is_file() for relative in excluded), "an exclusion names nothing"
+    selection = [f"--deselect={(root / relative).relative_to(repo).as_posix()}" for relative in excluded]
+    result = _run_suite(root, tmp_path, [*selection, str(root / "tests")])
+    assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-2000:]
+
+
+@pytest.mark.parametrize(
+    ("record", "doc", "entry"),
+    NEEDS_EXTERNAL,
+    ids=[f"{path.parent.name}-{entry['external']}" for path, _, entry in NEEDS_EXTERNAL],
+)
+def test_vendored_support_tests_that_need_an_external_checkout(record, doc, entry, tmp_path):
+    from merlin.common.paths import ExternalPathUnset, ext_path
+
+    try:
+        ext_path(entry["external"])
+    except ExternalPathUnset:
+        pytest.skip(f"MERLIN_EXT_{entry['external'].upper()} is unset: {' '.join(entry['reason'].split())}")
+    root = _support_root(record, doc)
+    result = _run_suite(root, tmp_path, [str(root / entry["test"])])
     assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-2000:]

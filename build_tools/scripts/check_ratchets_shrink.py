@@ -13,6 +13,10 @@ Accepted baseline, recorded so the growth above is not re-litigated: mesh_assert
 added); provenance's from ae2fe4e3 (K1 cross-framework baselines ratcheted as pre-dating the
 convention); conformance's from c327c25e. From here on every ledger may only fall.
 
+A ledger may also declare per-entry CEILINGS with a ``# ceilings:`` comment line: the integer after
+``#`` on each entry is then a bound (module_size_ratchet.txt's line counts). A ceiling may only fall,
+so raising one fails exactly like adding an entry, under the same growth-accepted allowance.
+
 Two deliberate allowances, both visible in the diff a reviewer reads:
   * a same-count SWAP (one entry retired, another added) passes -- entries legitimately change
     spelling when a file moves -- but every new entry is printed;
@@ -38,6 +42,7 @@ from pathlib import Path
 LEDGER_DIR = "build_tools/scripts"
 SUFFIXES = ("_ratchet.txt", "_allowlist.txt")
 ACCEPT_MARKER = "# growth-accepted:"
+CEILING_MARKER = "# ceilings:"
 ZERO_SHA = "0" * 40
 
 
@@ -54,6 +59,20 @@ def _entries(text: str | None) -> list[str]:
         s = line.strip()
         if s and not s.startswith("#"):
             out.append(s.split("#", 1)[0].strip())
+    return out
+
+
+def _ceilings(text: str | None) -> dict[str, int]:
+    """Entry -> integer ceiling, for a ledger that declares one with a ``# ceilings:`` line; else empty."""
+    if text is None or not any(ln.strip().startswith(CEILING_MARKER) for ln in text.splitlines()):
+        return {}
+    out: dict[str, int] = {}
+    for line in text.splitlines():
+        s = line.strip()
+        if s and not s.startswith("#"):
+            key, _, bound = s.partition("#")
+            if bound.strip().isdigit():
+                out[key.strip()] = int(bound.strip())
     return out
 
 
@@ -99,6 +118,19 @@ def compare(root: Path, base: str, staged: bool) -> tuple[list[str], list[str]]:
                 notes.append(f"{rel}: new ledger ({len(new)} entries) -- its baseline starts here")
             continue
         added = [e for e in new if e not in set(old)]
+        before_bounds, now_bounds = _ceilings(before), _ceilings(now)
+        raised = [
+            f"{key}: {before_bounds[key]} -> {bound}"
+            for key, bound in now_bounds.items()
+            if key in before_bounds and bound > before_bounds[key]
+        ]
+        if raised:
+            reasons = _accept_reasons(now) - _accept_reasons(before)
+            if reasons:
+                notes.append(f"{rel}: raised {len(raised)} ceiling(s), ACCEPTED ({'; '.join(sorted(reasons))})")
+            else:
+                listing = "".join(f"\n      ^ {r}" for r in raised)
+                failures.append(f"{rel}: raised {len(raised)} ceiling(s){listing}")
         if len(new) > len(old):
             reasons = _accept_reasons(now) - _accept_reasons(before)
             if reasons:
