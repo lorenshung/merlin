@@ -216,6 +216,10 @@ exclude = ["third_party", "out", ".venv"]
 extend-exclude = [
     "merlin/contract/capsules/**/capsule.pytorch.py",
     "merlin/contract/capsules/**/capsule.loader_deps/**",
+    # Vendored target support: byte-identical copies of companion commits, recorded (with their git
+    # tree ids) in examples/<target>/SOURCE.yaml. Restyling one would make it a different tree from
+    # the source it claims to be; its style belongs to the companion it was copied from.
+    "examples/*/support/**",
 ]
 
 [tool.ruff.lint]

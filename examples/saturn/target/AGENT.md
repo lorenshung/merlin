@@ -3,8 +3,9 @@
 ## Purpose
 
 Retained reference metadata for the Saturn RVV vector unit. Target-specific backend
-and dialect implementation live in the RVV companion's separate `saturn-support/`
-provider, selected explicitly through `MERLIN_TARGET_PATH`. This reference tree
+and dialect implementation live in the support provider vendored at `../support`
+(the RVV companion's `saturn-support/`, recorded in `../SOURCE.yaml`), selected when
+`MERLIN_TARGET_PATH` is unset or names it. This reference tree
 does not authorize executable plugin loading; no implementation should be added here.
 
 ## What belongs here

@@ -3,9 +3,9 @@ title: Selecting a target definition package
 kind: guide
 status: current
 owner: targetgen
-last_verified: 2026-09-20
+last_verified: 2026-10-07
 related: [adding_a_target, generated_target_repos, targetgen, target_publishing]
-code_refs: [src/merlin/targetgen/target_registry.py, src/merlin/targetgen/providers.py, src/merlin/targetgen/capability_manifests.py]
+code_refs: [src/merlin/targetgen/target_registry.py, src/merlin/targetgen/providers.py, src/merlin/targetgen/capability_manifests.py, build_tools/upstreams/target_support.json]
 ---
 
 # Selecting a target definition package
@@ -54,7 +54,7 @@ package whose contract `name` matches. Precedence, highest first:
 
 | # | Source | `kind` | Use it for |
 | - | ------ | ------ | ---------- |
-| 1 | **`MERLIN_TARGET_PATH`** entries | `external` | **Explicit selection** — a specific versioned/named package, or a repo you cloned yourself. Always wins. |
+| 1 | **`MERLIN_TARGET_PATH`** entries | `external` | **Explicit selection** — a specific versioned/named package, or a repo you cloned yourself. Always wins. **Unset**, the entries are the checkout's vendored support providers (`examples/*/support`, see below). |
 | 2 | Reference metadata: legacy `merlin/targets/` roots, then checkout `examples/*/target/` | `reference` | Inspect authored inputs; Gemmini's contract now lives in its example. Legacy roots win duplicate names during migration. |
 | 3 | `out/build/generated/<name>/` | `external` | The **freshly generated** package — dropped here by onboarding / `write_oot_target`, so a just-generated target resolves with **zero env**. |
 | 4 | `out/artifacts/targets/<name>/` | `generated` | Legacy generated location (fallback). |
@@ -84,9 +84,9 @@ Resolution is read-only: it never fetches, generates contracts, or imports provi
 `merlin-target-fetch` for network retrieval or `target_registry.materialize` for derivation first.
 
 Inspection is not execution permission. Backend, dialect and simulator-oracle plugins load
-only from support providers explicitly selected on `MERLIN_TARGET_PATH`, including when
-the provider was just generated. In-tree reference metadata and the generated home do
-not autoload executable plugins. Candidate-compiler and host-schedule packages cannot
+only from support providers selected on `MERLIN_TARGET_PATH` (or, with it unset, the vendored
+`examples/*/support` providers), including when the provider was just generated. In-tree reference
+metadata and the generated home do not autoload executable plugins. Candidate-compiler and host-schedule packages cannot
 substitute for support providers. Removing a loaded provider's explicit selection requires
 a fresh process, even if the same directory remains discoverable as reference metadata.
 
@@ -94,6 +94,43 @@ The host reads the selected support contract to construct the declared public in
 (such as ISA, mesh and dtypes). The support package itself remains private: it may
 contain oracle implementations and answers. A directory's location outside the
 champion tree does not make it safe to grant to a candidate.
+
+## Vendored support: the default when `MERLIN_TARGET_PATH` is unset
+
+Merlin's own support provider for a target is target-specific code, so it is tracked beside the
+target's example at `examples/<example>/support/`, with an `examples/<example>/SOURCE.yaml` that
+records the companion repository, commit and git tree it was copied from (byte-identical; the tree id
+is re-checked by `merlin/tests/infra/test_example_support.py`). The migration manifest
+[`target_support.json`](../../build_tools/upstreams/target_support.json) lists each one.
+
+| `MERLIN_TARGET_PATH` | Support selected for target `T` |
+| -------------------- | ------------------------------- |
+| unset | the vendored provider whose `provider.yaml` declares `target: T`, if any |
+| `""` (set, empty) | none: executable support refuses, reference metadata still resolves |
+| any other value | exactly the listed entries; the vendored default is not consulted |
+
+The default is keyed by each provider's **declared** target, never by its example directory name,
+and is computed by `target_registry.in_repo_support()` (`default_support_root(target)` for one
+target). Two examples declaring the same target raise `TargetCollisionError`; an invalid
+`provider.yaml` raises instead of dropping out of the selection. An installed distribution has no
+checkout and therefore no default. A caller that hands the selection to a child or prepends an entry
+should use `target_registry.effective_target_path()`, which spells the default out, so an unset
+variable never turns into an explicit selection that silently drops it.
+
+With the variable unset every vendored provider is selected at once, so the first registry query
+loads each one's declared plugins. Plugin ownership is still process-immutable: changing the
+selection afterwards in the same process (for example a test that sets `MERLIN_TARGET_PATH` to one
+fixture) is refused for every loaded target. Select explicitly before the first query, or run in a
+fresh process, when only one provider should load. For that reason the test suites
+(`merlin/tests`, `packages/merlin-experiments/tests`) start with `MERLIN_TARGET_PATH=""` unless you
+export a value: run support-dependent tests with, for example,
+`MERLIN_TARGET_PATH=$PWD/examples/gemmini/support`.
+
+The vendored trees remain experimenter-side. Every `examples/*/support` directory is an answer
+surface whatever is selected: agent sandboxes, bundle snapshots and clean rooms withhold it (only an
+explicit grant of its `contracts/` sub-tree can reach inside, and no bundle declares one), and
+publication refuses a support provider as a candidate. Do not edit a vendored tree in place; a change
+is a new vendoring from a recorded companion commit.
 
 ## The three common cases
 
@@ -117,8 +154,10 @@ python -c "from merlin.targetgen.capability_manifests import write_oot_target; \
 export MERLIN_TARGET_PATH=$PWD/out/build/generated/atlas-v0.3-abc1234
 ```
 
-**3 — Bring your own support package.** Clone a target repository containing a support provider and
-point at that provider root (not a candidate-only or schedule-only repository root):
+**3 — Bring your own support package.** To test a support revision other than the vendored one, clone
+a target repository containing a support provider and point at that provider root (not a
+candidate-only or schedule-only repository root). An explicit value replaces the vendored default for
+every target, so list each provider the process needs:
 
 ```bash
 export MERLIN_TARGET_PATH=/path/to/target-repo/merlin-support

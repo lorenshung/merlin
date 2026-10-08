@@ -17,10 +17,14 @@ COMPARISON IS BY SHAPE, NOT BY TEXT. Identifiers, attribute names, constants and
 erased before hashing, so a copy that renamed its variables and swapped its constants still matches.
 Renaming is exactly what someone does while copying, which is why comparing text would miss it.
 
-Once target implementations have been extracted to OOT providers, the in-tree comparison is
-not applicable. That state is accepted only when the tracked migration manifest declares the
-extraction and no Python implementation remains under ``merlin/targets``. An unrecorded empty
-scan still refuses: a gate that could not run must never report success.
+WHERE TARGET PACKAGES LIVE. The legacy in-tree packages under ``merlin/targets/<target>/`` and the
+vendored support providers under ``examples/<example>/support/`` -- the target support that was
+extracted to companion repositories and is now tracked beside its example. A provider's own tests are
+not implementations and are not compared: each provider carries the same contract-identity test.
+
+If neither location holds any Python, the comparison is not applicable. That state is accepted only
+when the tracked migration manifest declares the extraction. An unrecorded empty scan still refuses:
+a gate that could not run must never report success.
 
 Exit codes: 0 clean or recorded extraction with no in-tree implementation, 1 a shape is
 implemented in more than one target package, 2 CANNOT DECIDE.
@@ -76,12 +80,28 @@ def shape_of(fn: ast.FunctionDef) -> str:
     return hashlib.sha256(ast.dump(normalised).encode()).hexdigest()[:16]
 
 
+#: ``(directory holding one package per child, glob of a package's implementation files)``. The vendored
+#: support directory name is ``merlin.targetgen.target_registry.IN_REPO_SUPPORT_DIR``; this gate stays
+#: free of a merlin import so it runs before the tree is importable.
+PACKAGE_ROOTS = (("merlin/targets", "*/**/*.py"), ("examples", "*/support/**/*.py"))
+#: A package's own test directory: provider contract tests repeat by design and implement nothing.
+TEST_DIR = "tests"
+
+
+def _implementation_files(base: Path):
+    for parent, pattern in PACKAGE_ROOTS:
+        for path in sorted((base / parent).glob(pattern)):
+            parts = path.relative_to(base / parent).parts
+            if TEST_DIR in parts[1:-1]:
+                continue
+            yield parts[0], path
+
+
 def shapes(root: Path | None = None) -> dict[str, list[tuple[str, str, str]]]:
     """``{shape: [(package, file, function)]}`` over every target package's code."""
     base = root or ROOT
     found: dict[str, list[tuple[str, str, str]]] = collections.defaultdict(list)
-    for path in sorted(base.glob("merlin/targets/*/**/*.py")):
-        package = path.relative_to(base / "merlin" / "targets").parts[0]
+    for package, path in _implementation_files(base):
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except (OSError, SyntaxError):
@@ -138,13 +158,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stop-hook", action="store_true")
     args = parser.parse_args(argv)
 
-    targets = ROOT / "merlin" / "targets"
     found = shapes()
     if not found:
-        remaining_code = sorted(targets.rglob("*.py")) if targets.is_dir() else []
+        remaining_code = [path for _, path in _implementation_files(ROOT)]
         if not remaining_code and _recorded_extraction(ROOT):
             text = (
-                f"{_GATE}: no in-tree target Python implementations; OOT extraction is recorded. "
+                f"{_GATE}: no target Python implementations in the tree; OOT extraction is recorded. "
                 "Cross-provider duplication requires the selected companion checkouts."
             )
             if args.json:
@@ -155,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"[  ok] {text}")
             return 0
         text = (
-            f"{_GATE}: no functions were parsed out of {targets}; "
+            f"{_GATE}: no functions were parsed out of {', '.join(parent for parent, _ in PACKAGE_ROOTS)}; "
             "unrecorded extraction or unreadable target code is not a clean scan."
         )
         if args.stop_hook:

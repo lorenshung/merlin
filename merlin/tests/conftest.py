@@ -42,6 +42,12 @@ _PACKAGE_ROOT = _CHECKOUT_ROOT / "src"
 # Board facts are OOT data. Tests deliberately select the example catalog before
 # importing any runtime module; an installed Merlin without that selection has none.
 os.environ.setdefault("MERLIN_BOARD_CATALOG", str(_CHECKOUT_ROOT / "examples/board-catalog.yaml"))
+# Unset, MERLIN_TARGET_PATH selects every vendored examples/*/support provider at once, and the first
+# registry query loads all their plugins -- after which a test that selects one fixture provider is
+# refused for every other loaded target. The suite therefore starts with NO support selected unless
+# the operator chose one: a test that needs support selects it (a vendored provider or a fixture),
+# and the tests of the default itself delete the variable (merlin/tests/infra/test_example_support.py).
+os.environ.setdefault("MERLIN_TARGET_PATH", "")
 _REPLAY_ROOT = (
     Path(os.environ["MERLIN_REPLAY_PYTHONPATH"]).resolve() if os.environ.get("MERLIN_REPLAY_PYTHONPATH") else None
 )

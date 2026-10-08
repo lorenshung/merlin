@@ -1,20 +1,21 @@
 # Saturn reference metadata
 
 This directory retains reference contracts and documentation only. Executable
-backend and dialect implementations live in the local RVV companion repository's
-`saturn-support/` provider. The exact revision is recorded in
-[`target_support.json`](../../../build_tools/upstreams/target_support.json).
-Those companion changes are local and have not been pushed upstream.
+backend and dialect implementations live in the provider vendored at
+[`../support`](../support), a byte-identical copy of the RVV companion's
+`saturn-support/` directory at the revision recorded in [`../SOURCE.yaml`](../SOURCE.yaml)
+and [`target_support.json`](../../../build_tools/upstreams/target_support.json).
 
-Select that provider explicitly before loading the Saturn dialect or the
-`saturn_vec` backend:
+With `MERLIN_TARGET_PATH` unset it is the selected Saturn support, so the Saturn
+dialect and the `saturn_vec` backend load without configuration. To try another
+revision, select it explicitly:
 
 ```sh
 export MERLIN_TARGET_PATH=/absolute/path/to/rvv-mlir/saturn-support
 ```
 
-The companion's separate `merlin-support/` directory describes target `rvv`;
-it does not select Saturn. Neither identity is the `saturn_opu_mxv256d128`
+The companion's separate `merlin-support/` directory, vendored at
+[`../../rvv/support`](../../rvv/support), describes target `rvv`; it does not select Saturn. Neither identity is the `saturn_opu_mxv256d128`
 experiment target. These names must not be treated as interchangeable aliases.
 The shared generic RVV emitters remain in Merlin; this provider reuses them.
 

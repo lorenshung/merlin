@@ -39,12 +39,14 @@ under the configured output root. Evidence concepts come from the **selected**
 target directory, which may be an OOT provider instead of this example.
 
 ```sh
-export MERLIN_TARGET_PATH=/path/to/gemmini-mlir/merlin-support
 export MERLIN_MLC_DIR=/path/to/ModelIR
 ```
 
-Use the companion revision recorded in
-[`target_support.json`](../../../build_tools/upstreams/target_support.json).
+The Gemmini support provider is vendored at [`../support`](../support), byte-identical to the
+companion revision recorded in [`../SOURCE.yaml`](../SOURCE.yaml) and
+[`target_support.json`](../../../build_tools/upstreams/target_support.json). With
+`MERLIN_TARGET_PATH` unset it is the selected support; set the variable only to try another
+revision, and keep the whole tree host-private.
 Calibration coefficients are screening estimates, not new measurements.
 
 ### Why `software-spec.yaml` is marked reviewed
@@ -223,11 +225,11 @@ contraction capsules against an independent scalar integer matmul, the capsules'
 goldens, native Gemmini Spike, and native Gemmini Verilator. First produce a
 corpus with `isa/SY_contraction_i8_aligned` and
 `isa/SY_contraction_i8_partial`, and a selected source bundle whose hashes are
-bound by that corpus's `_evidence/evidence-manifest.json`. Select the OOT
-Gemmini support and Chipyard toolchain explicitly:
+bound by that corpus's `_evidence/evidence-manifest.json`. The probe reads the support root from
+`MERLIN_TARGET_PATH`, so name the vendored provider explicitly, with the Chipyard toolchain:
 
 ```sh
-export MERLIN_TARGET_PATH=/selected/gemmini-mlir/merlin-support
+export MERLIN_TARGET_PATH=$PWD/examples/gemmini/support
 export MERLIN_CHIPYARD=/selected/chipyard
 python examples/gemmini/verification/probe_native_kernel.py \
   --corpus /generated/gemmini/corpus-1 \

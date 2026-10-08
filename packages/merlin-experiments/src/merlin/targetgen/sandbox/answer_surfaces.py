@@ -432,9 +432,14 @@ def _support_package_dirs() -> list[Path]:
             # A legacy reference link and its physical example are two paths to
             # the same support bytes.  Mask both, even when installed resolution
             # promotes the physical package for provider-boundary validation.
+            # A reference shadowed by a selected provider keeps its mask too:
+            # selecting support must not unmask the target's authored metadata.
             alias = references.get(name)
-            if info.kind == "reference" and alias is not None and alias != provider.root:
+            if alias is not None and alias != provider.root:
                 roots.add(alias)
+    # Vendored support is tracked source inside the checkout, so every copy is masked whatever
+    # MERLIN_TARGET_PATH selects. Selection decides which support EXECUTES, not which is private.
+    roots.update(target_registry.in_repo_support().values())
     return sorted(roots)
 
 
@@ -675,8 +680,13 @@ def audit_tokens(te: TargetExperiment) -> dict[str, tuple[str, ...]]:
     # Tokenising the package as a whole would accuse every arm-4 agent of reading its own RTL facts,
     # which is the cry-wolf failure `test_audit_token_precision` exists to stop. Derived by walking the
     # package's own children, so a new sibling dir of derivations is covered without an edit here.
+    # A package inside the checkout is named by its repo-relative path: every vendored support root is
+    # spelled ``examples/<example>/support``, and the bare "support/<child>" would match any tree an agent
+    # happens to call ``support`` -- including its own workspace.
+    _repo = repo_root()
     for _bp in _backend_package_dirs(te):
+        _name = _bp.relative_to(_repo).as_posix() if _bp.is_relative_to(_repo) else _bp.name
         for _child in sorted(_bp.iterdir()):
             if _child.name != PACKAGE_CONTRACT_SUBDIR:
-                answer.append(f"{_bp.name}/{_child.name}")
+                answer.append(f"{_name}/{_child.name}")
     return {"answer": tuple(dict.fromkeys(answer)), "grader": grader, "oracle_subpath": ORACLE_CALLABLE_SUBPATHS}

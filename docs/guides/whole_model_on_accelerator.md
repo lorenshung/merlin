@@ -60,8 +60,9 @@ the board's byte-pinned elaborated DTS must describe that CPU ISA, DRAM and hart
 requires a bare-metal HTIF board, one hart, a code reserve and one inference. It checks the linked
 ELF ISA against the DTS rather than assuming the build machine's ISA.
 
-Select target support explicitly with `MERLIN_TARGET_PATH` pointing at the intended trusted provider.
-The core's target name or a generated candidate package is not a substitute for that provider. For
+Select target support with `MERLIN_TARGET_PATH` pointing at the intended trusted provider; left
+unset, it is the checkout's vendored `examples/<example>/support` provider for the target, if one
+exists. The core's target name or a generated candidate package is not a substitute for that provider. For
 native `gsim` or `verilator`, also select `--rtl-facts` from the same elaborated target/config as the
 board and the selected L3 engine. The executor binds the facts to their FIRRTL bytes and revalidates
 the concrete engine provenance. The provider must expose a public `run_elf` implementation for the

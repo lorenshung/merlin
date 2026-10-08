@@ -1,13 +1,19 @@
 {
-  "schema": "merlin.upstream_support_migration.v1",
-  "status": "local_companion_branches_no_push",
+  "schema": "merlin.upstream_support_migration.v2",
+  "status": "vendored_in_repo",
   "merlin_source_baseline": "6b83c05a7ea7e7eb50fc688670cfa547f16f315c",
   "branch": "refactor/merlin-phase-architecture",
   "runtime_defaults_changed": true,
   "canonical_sources_removed": true,
-  "selection": "Explicit MERLIN_TARGET_PATH provider roots only; local_worktree paths are operator records, never runtime defaults.",
+  "selection": "MERLIN_TARGET_PATH selects support explicitly and always wins. Unset, each target's vendored provider under examples/<example>/support is selected, keyed by its provider.yaml target, never by directory name; an empty value selects none. local_worktree paths are historical operator records of where each companion was developed, never runtime defaults.",
   "qualification_scope": "Read-only provider identity, exact source SHA256 parity, plugin reference existence, schema diagnostic parity. No hardware execution or compiler qualification.",
-  "candidate_boundary": "Support plugins are experimenter-side answer-bearing code, not candidate payload. Existing recursive integrity policy remains unchanged. Export/select candidate artifacts without merlin-support before grading or publishing; no automatic exporter is introduced here.",
+  "candidate_boundary": "Support plugins are experimenter-side answer-bearing code, not candidate payload. Every vendored examples/*/support tree is an answer surface whatever MERLIN_TARGET_PATH selects: agent sandboxes, bundle snapshots and clean rooms withhold it (only an explicit contracts/ grant can reach inside, and no bundle declares one), and publication refuses a support provider as a candidate. Existing recursive integrity policy remains unchanged.",
+  "vendoring": {
+    "root": "examples/<example>/support",
+    "record": "examples/<example>/SOURCE.yaml",
+    "date": "2026-10-07",
+    "verification": "merlin/tests/infra/test_example_support.py recomputes each vendored tree id from the tracked bytes"
+  },
   "companions": [
     {
       "target": "muon",
@@ -20,6 +26,13 @@
       "companion_commit": "5d52f2bb5660a909ba947420ed6f44ba92a43986",
       "provider_root": ".",
       "provider_role": "support",
+      "vendored": {
+        "path": "examples/muon/support",
+        "source_record": "examples/muon/SOURCE.yaml",
+        "commit": "5d52f2bb5660a909ba947420ed6f44ba92a43986",
+        "tree": "6293adbf1e53084daec008a08119680f557032d1",
+        "file_count": 26
+      },
       "copied_files": 19,
       "file_provenance": "provenance.json",
       "contract_sha256": "c39878928d8d674ded768a293b8bd8f662bf1b7f6f09d2e36f8208c310cb14d1",
@@ -47,6 +60,13 @@
       "companion_commit": "d6863380d43f61dcc22ebe498c0f6b9341018e29",
       "provider_root": "saturn-support",
       "provider_role": "support",
+      "vendored": {
+        "path": "examples/saturn/support",
+        "source_record": "examples/saturn/SOURCE.yaml",
+        "commit": "d6863380d43f61dcc22ebe498c0f6b9341018e29",
+        "tree": "8febeda8958c9edcae820d5b50c3247dec31c4b4",
+        "file_count": 19
+      },
       "copied_files": 7,
       "file_provenance": "saturn-support/provenance.json",
       "contract_sha256": "a123384e2132b3491b9d2747194a3efae27344077506060a5e45fc60f3c3b76a",
@@ -77,6 +97,14 @@
       "companion_commit": "29818c8ce1ba2f48d5e62cc0d585f1d250c59fb4",
       "provider_root": "merlin-support",
       "provider_role": "support",
+      "vendored": {
+        "path": "examples/gemmini/support",
+        "source_record": "examples/gemmini/SOURCE.yaml",
+        "commit": "9e99fc264cd5b9f21f51948dcdce94377ca86727",
+        "tree": "7f724638afb20ba6dd904286be37177884b672da",
+        "merge_parents": ["0d0e62fb335c85ffb0d379774d539120e3141107", "87ef5587c1a1eb1eb13c7da3f32a5b5e9b2a52fd"],
+        "file_count": 151
+      },
       "copied_files": 34,
       "file_provenance": "merlin-support/provenance.json",
       "conformance_provenance": "merlin-support/conformance_migration.json",
@@ -135,6 +163,13 @@
       "companion_commit": "d6863380d43f61dcc22ebe498c0f6b9341018e29",
       "provider_root": "merlin-support",
       "provider_role": "support",
+      "vendored": {
+        "path": "examples/rvv/support",
+        "source_record": "examples/rvv/SOURCE.yaml",
+        "commit": "d6863380d43f61dcc22ebe498c0f6b9341018e29",
+        "tree": "cdfed452de48491da2f09a772b251b8b827e8bda",
+        "file_count": 6
+      },
       "copied_files": 1,
       "file_provenance": "merlin-support/provenance.json",
       "contract_sha256": "b08117fecc0eef967ce639ab55314d2b8a163dd1733603f11133f452dd8ec4a4",
@@ -156,6 +191,13 @@
       "companion_commit": "392eb077c8a48bd3a21b253d9e488ba3d7ad74cf",
       "provider_root": "merlin-support",
       "provider_role": "support",
+      "vendored": {
+        "path": "examples/atlas/support",
+        "source_record": "examples/atlas/SOURCE.yaml",
+        "commit": "392eb077c8a48bd3a21b253d9e488ba3d7ad74cf",
+        "tree": "42315503deaf7d52b1196354abd9b24eabaf7dc4",
+        "file_count": 10
+      },
       "copied_files": 2,
       "file_provenance": "merlin-support/provenance.json",
       "contract_sha256": "1eefe1d5941869b3063a09e82944fbb765934f50a93f27b78ebde86bddd98af0",

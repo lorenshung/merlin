@@ -34,7 +34,7 @@ def unavailable_external_evidence(tmp_path, monkeypatch):
     from merlin.targetgen import isa_taxonomy
     from merlin.targetgen.rtl import mlc_bridge
 
-    monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "isolated-out"))
     monkeypatch.setattr(mlc_bridge, "compute_unit_dtypes", lambda target: None)
     monkeypatch.setattr(isa_taxonomy, "taxonomy_for_target", lambda target: {})
@@ -105,7 +105,7 @@ def test_gemmini_materializes_into_the_zero_env_generated_home(tmp_path, monkeyp
     ``MERLIN_TARGET_PATH``, and the generated contract matches the derived manifest. The in-tree
     authored example still wins metadata ``resolve()`` (precedence 2 > the generated home).
     Neither metadata source authorizes runtime provider execution without explicit selection."""
-    monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path))  # isolated generated home
     root = cm.materialize_generated_target("gemmini")
     assert root == tr.generated_target_home() / "gemmini"

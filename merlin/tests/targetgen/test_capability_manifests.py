@@ -228,13 +228,18 @@ def test_write_and_route_target(tmp_path):
     from merlin.targetgen import target_registry as tr
 
     cm.write_all(base_root=tmp_path)
+    previous = os.environ.get("MERLIN_TARGET_PATH")
     os.environ["MERLIN_TARGET_PATH"] = os.pathsep.join(str(tmp_path / n) for n in cm.MANIFESTS)
     try:
         assert tr.resolve("mx_gemmini").kind == "external"
         res = rt.route_target([rt.OpDemand("matmul", "mxfp6", "mxfp6")], "mx_gemmini")
         assert res[0].unit == "mx_pe" and res[0].acc == "f32"
     finally:
-        os.environ.pop("MERLIN_TARGET_PATH", None)
+        # Restore the session's selection; unset would mean every vendored provider.
+        if previous is None:
+            os.environ.pop("MERLIN_TARGET_PATH", None)
+        else:
+            os.environ["MERLIN_TARGET_PATH"] = previous
 
 
 def test_target_resolution_is_read_only_and_materialization_is_explicit(tmp_path, monkeypatch):
@@ -252,7 +257,7 @@ def test_target_resolution_is_read_only_and_materialization_is_explicit(tmp_path
         (contracts / "target_contract.yaml").write_text(f"name: {selected}\n", encoding="utf-8")
         return root
 
-    monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     monkeypatch.delenv("MERLIN_TARGET_CONTRACT", raising=False)
     monkeypatch.setenv("MERLIN_TARGETS_DIR", str(tmp_path / "references"))
     monkeypatch.setenv("MERLIN_OUT_ROOT", str(tmp_path / "out"))

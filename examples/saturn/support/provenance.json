@@ -1,0 +1,59 @@
+{
+  "schema": "merlin.support_migration.v1",
+  "target": "saturn",
+  "upstream": {
+    "url": "https://github.com/ucb-bar/rvv-mlir.git",
+    "root_role": "host_schedule"
+  },
+  "merlin_source_baseline": "e06b496c04dd917b533de34010196ddb1e47ce73",
+  "qualification": {
+    "level": "source_identity_snapshot",
+    "schema_valid": null,
+    "hardware_executed": false,
+    "candidate_certification": false
+  },
+  "files": [
+    {
+      "path": "backend/__init__.py",
+      "source": "merlin/targets/saturn/backend/__init__.py",
+      "source_revision": "e06b496c04dd917b533de34010196ddb1e47ce73",
+      "sha256": "10afa953abaae94d53bcd48d4605f7777f5b85ce86f6d1f3bb611d178e3f9aff"
+    },
+    {
+      "path": "backend/saturn_vec.py",
+      "source": "merlin/targets/saturn/backend/saturn_vec.py",
+      "source_revision": "e06b496c04dd917b533de34010196ddb1e47ce73",
+      "sha256": "8c97027410e2ff54645eb031555419840ce7368cfb29a62ee93b862e163514b1"
+    },
+    {
+      "path": "backend/saturn_vec_codegen.py",
+      "source": "merlin/targets/saturn/backend/saturn_vec_codegen.py",
+      "source_revision": "e06b496c04dd917b533de34010196ddb1e47ce73",
+      "sha256": "ac648d1a369e12fa5d5b072b384c5fa5af74d22a88e5c871beba01354a7a826a"
+    },
+    {
+      "path": "backend/saturn_vec_mlir.py",
+      "source": "merlin/targets/saturn/backend/saturn_vec_mlir.py",
+      "source_revision": "e06b496c04dd917b533de34010196ddb1e47ce73",
+      "sha256": "e0ce18c94b93b81aaf423855e5d9e3d3cce2cc952de3dc10bac1c089bc7d0321"
+    },
+    {
+      "path": "dialect/__init__.py",
+      "source": "merlin/targets/saturn/dialect/__init__.py",
+      "source_revision": "e06b496c04dd917b533de34010196ddb1e47ce73",
+      "sha256": "0c0d8509cd7187b208e03f5f2c58716e9f09c2475a6de25c3f5627c79e72e903"
+    },
+    {
+      "path": "contracts/target_contract.yaml",
+      "source": "merlin/targets/saturn/contracts/target_contract.yaml",
+      "source_revision": "e06b496c04dd917b533de34010196ddb1e47ce73",
+      "sha256": "c65d8d79bed08532b727758e23c554ec2f7abfb76a2163ae684b944329397950"
+    },
+    {
+      "path": "contracts/dialect_plan.yaml",
+      "source": "merlin/targets/saturn/contracts/dialect_plan.yaml",
+      "source_revision": "e06b496c04dd917b533de34010196ddb1e47ce73",
+      "sha256": "04949e0ce99c80068d5ad697d69b7035c3707928e65d2ac0354e3baffac72857"
+    }
+  ]
+}

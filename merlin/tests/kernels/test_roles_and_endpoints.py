@@ -118,7 +118,7 @@ class TestEndpointsBindToTheirOwnDerivedTable:
 
     def test_an_unavailable_derivation_is_not_reported_as_missing_roles(self, monkeypatch):
         """An absent toolchain is not evidence about the hardware."""
-        monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)
+        monkeypatch.setenv("MERLIN_TARGET_PATH", "")
         ep = EP.load_endpoint("saturn_opu")
         assert ep.roles == {}
         assert ep.missing == {}

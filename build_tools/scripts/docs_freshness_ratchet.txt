@@ -65,7 +65,6 @@ guides/reproducibility.md
 guides/reproducing_whole_model_on_rtl.md
 guides/rvv_e2e.md
 guides/search.md
-guides/target_resolution.md
 guides/targetgen.md
 guides/tinyllama_int8_rvv_zephyr.md
 guides/vision_workloads_rvv_zephyr.md

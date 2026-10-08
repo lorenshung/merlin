@@ -26,7 +26,7 @@ CALLER_API = ("_anchors", "_build_cmd", "_matmul_golden", "build", "run", "matmu
 
 @pytest.fixture(autouse=True)
 def isolated_selection(monkeypatch, tmp_path):
-    monkeypatch.delenv("MERLIN_TARGET_PATH", raising=False)
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     monkeypatch.setenv("MERLIN_TARGETS_DIR", str(tmp_path / "references"))
     monkeypatch.setattr(target_registry, "generated_target_home", lambda: tmp_path / "generated")
     before = set(sys.modules)
@@ -116,7 +116,7 @@ def test_removed_selection_cannot_reuse_cached_reference_module(tmp_path, monkey
     monkeypatch.setenv("MERLIN_TARGET_PATH", str(package))
     module = plugins.load_declared(name, KEY)
     assert module._anchors()
-    monkeypatch.delenv("MERLIN_TARGET_PATH")
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     assert target_registry.resolve(name).base == package
     with pytest.raises(plugins.PluginError):
         plugins.load_declared(name, KEY)

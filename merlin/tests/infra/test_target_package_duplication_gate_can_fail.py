@@ -126,14 +126,50 @@ def test_an_unreadable_target_tree_is_a_refusal_not_a_pass(monkeypatch, tmp_path
     assert gate.main([]) == 2, "an absent target tree exited clean; it examined nothing"
 
 
-def test_the_live_tree_has_a_recorded_extraction_not_an_unexamined_package():
-    """An empty scan is valid only after an explicit OOT move with no in-tree Python left."""
+def test_the_live_tree_scans_every_vendored_support_provider():
+    """Extracted support is tracked again under examples/*/support, so the comparison runs over it.
+
+    Every vendored provider that holds an implementation contributes shapes, legacy in-tree packages hold
+    none, and the live verdict is clean. An empty scan would mean the gate stopped looking.
+    """
+    from merlin.targetgen.target_registry import in_repo_support
+
     gate = _gate()
     found = gate.shapes()
-    assert found == {}
     assert not list((repo_root() / "merlin" / "targets").rglob("*.py"))
-    assert gate._recorded_extraction(repo_root())
+    scanned = {package for sites in found.values() for package, _, _ in sites}
+    with_code = {
+        root.parent.name
+        for root in in_repo_support().values()
+        if any(gate.TEST_DIR not in path.relative_to(root).parts[:-1] for path in root.rglob("*.py"))
+    }
+    assert with_code and scanned == with_code
+    assert gate.verdict(found, gate._ratchet()) == ([], 0)
     assert gate.main([]) == 0
+
+
+def _vendored(tmp_path: Path, files: dict[str, str]) -> Path:
+    for rel, body in files.items():
+        path = tmp_path / "examples" / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(textwrap.dedent(body), encoding="utf-8")
+    return tmp_path
+
+
+def test_a_copy_across_two_vendored_support_providers_is_flagged(tmp_path):
+    gate = _gate()
+    root = _vendored(tmp_path, {"alpha/support/backend/sched.py": ORIGINAL, "beta/support/lower.py": RENAMED_COPY})
+    problems, rc = gate.verdict(gate.shapes(root), set())
+    assert rc == 1 and any("alpha/sched.py:pick_tiles" in p and "beta/lower.py:choose_blocks" in p for p in problems)
+
+
+def test_a_vendored_providers_own_tests_are_not_implementations(tmp_path):
+    """Each provider ships the same contract-identity test; that is not generic logic in a target."""
+    gate = _gate()
+    root = _vendored(
+        tmp_path, {"alpha/support/tests/test_contract.py": ORIGINAL, "beta/support/tests/test_contract.py": ORIGINAL}
+    )
+    assert gate.shapes(root) == {}
 
 
 def test_a_remaining_in_tree_module_cannot_claim_extraction(monkeypatch, tmp_path):

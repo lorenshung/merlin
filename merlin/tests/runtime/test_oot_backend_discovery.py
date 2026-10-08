@@ -38,10 +38,10 @@ _FIXTURE_PKG_PKG = _FIXTURE_ROOT / "fixture_npu_pkg"
 def _run(code: str, *, target_path: str | None, targets_dir: str | None = None) -> dict:
     """Run ``code`` in a clean interpreter and return the JSON dict it prints on the last line.
 
-    ``target_path`` is set as ``MERLIN_TARGET_PATH`` (or removed when ``None``) so each case starts
+    ``target_path`` is set as ``MERLIN_TARGET_PATH`` (empty, i.e. nothing selected, when ``None``) so each case starts
     from a known env; nothing else about the parent env is disturbed."""
     env = dict(os.environ)
-    env.pop("MERLIN_TARGET_PATH", None)
+    env["MERLIN_TARGET_PATH"] = ""
     env.pop("MERLIN_TARGETS_DIR", None)
     if targets_dir is not None:
         env["MERLIN_TARGETS_DIR"] = targets_dir

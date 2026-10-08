@@ -154,8 +154,12 @@ def _ensure_contract_on_path(descriptor: Path) -> None:
     tc = (raw.get("hardware_spec") or {}).get("target_contract")
     if not tc:
         return
+    from merlin.targetgen.target_registry import effective_target_path
+
     pkg = (repo_root() / tc).resolve().parent.parent  # .../contracts/target_contract.yaml -> package root
-    cur = os.environ.get("MERLIN_TARGET_PATH", "")
+    # Prepend to the EFFECTIVE selection: an unset variable means the in-repo support default, and
+    # writing only this package would silently deselect it.
+    cur = effective_target_path()
     if str(pkg) not in cur.split(os.pathsep):
         os.environ["MERLIN_TARGET_PATH"] = os.pathsep.join([str(pkg), cur]) if cur else str(pkg)
 

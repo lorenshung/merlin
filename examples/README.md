@@ -86,7 +86,12 @@ a [Phase 2 handoff guide](gemmini/phase2/README.md), and a
 does not claim independently qualified accelerator deployment. The Atlas, Radiance
 and MX Gemmini maps now include their Phase 2 handoffs and whole-model entrypoints;
 they do not claim target-specific Phase 2 or whole-model qualification.
-Reusable target support stays OOT; generated capsules,
+Each target's Merlin support provider (backend, oracle, build support and tests) is
+vendored at `<example>/support/`, byte-identical to the companion commit recorded in
+`<example>/SOURCE.yaml`, and is the selected support when `MERLIN_TARGET_PATH` is unset
+(see [target resolution](../docs/guides/target_resolution.md)). It is experimenter-side:
+agent sandboxes and published candidates never see it. Compiler candidates stay in their
+own repositories; generated capsules,
 weights and compiler artifacts stay under the configured output root. Do not copy
 private holdouts, goldens or credentials into examples.
 

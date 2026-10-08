@@ -55,7 +55,7 @@ def test_descriptor_remains_authoritative_even_with_selected_support(selected):
 
 
 def test_legacy_tracked_declaration_still_available(selected, monkeypatch):
-    monkeypatch.delenv("MERLIN_TARGET_PATH")
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     authority = authority_for("synthetic")
     assert authority.cycles_from == "native" and authority.source == "tracked_contract"
 

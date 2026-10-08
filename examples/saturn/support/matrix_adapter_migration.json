@@ -1,0 +1,15 @@
+{
+  "schema": "merlin.support_transformation.v1",
+  "baseline_commit": "943fb9be105c5b8d9734a067759547607568f069",
+  "scope": "Transitional explicit-selection adapter; not physical OPU extraction or execution qualification",
+  "modified": [{
+    "path": "contracts/target_contract.yaml",
+    "source_sha256": "c65d8d79bed08532b727758e23c554ec2f7abfb76a2163ae684b944329397950",
+    "sha256": "7bf1c7c8b0abb57671b2490230045ec16933405f73ee27a75a852aab195e375f"
+  }],
+  "added": [{
+    "path": "matrix_lowering.py",
+    "origin": "newly authored adapter, not byte-preserved migrated implementation",
+    "sha256": "2bc7ffec8b9b6988a03710c6e23576d42324b595d456069d695083908d6ec1c5"
+  }]
+}

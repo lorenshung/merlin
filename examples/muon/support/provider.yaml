@@ -1,0 +1,5 @@
+schema: merlin.provider.v1
+id: muon-support
+target: muon
+role: support
+contract: contracts/target_contract.yaml

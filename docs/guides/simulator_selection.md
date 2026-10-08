@@ -23,7 +23,8 @@ construct the required sandbox; do not remove `--unshare-net` to obtain a pass.
 
 ## Select the support package and engine explicitly
 
-Choose a target-owned support provider with `MERLIN_TARGET_PATH`; compiler
+Choose a target-owned support provider with `MERLIN_TARGET_PATH` (unset, the vendored
+`examples/<example>/support` provider for the target); compiler
 candidates alone do not necessarily supply an execution backend. Use the
 provider's documented toolchain and harness. In particular, a generated
 parameter header from another configuration can compile successfully and

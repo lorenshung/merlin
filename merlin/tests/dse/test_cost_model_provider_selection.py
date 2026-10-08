@@ -64,7 +64,7 @@ def test_selected_resources_must_not_escape_provider(selected, tmp_path, member)
 
 
 def test_legacy_native_calibration_remains_available(selected, monkeypatch):
-    monkeypatch.delenv("MERLIN_TARGET_PATH")
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "")
     assert LinearCostModel.for_target("synthetic").predict({"native": 1}) == 198
 
 

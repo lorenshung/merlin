@@ -155,8 +155,9 @@ captures and layer frequencies do not select or tune the derivation corpus.
 With installed `merlin-experiments`, explicit captures and fresh facts:
 
 Select the *same* out-of-tree support package and capability contract for
-derivation and the subsequent Phase 0 run. For example, set
-`MERLIN_TARGET_PATH` to the Gemmini support directory and
+derivation and the subsequent Phase 0 run. For example, leave
+`MERLIN_TARGET_PATH` unset (the vendored `examples/gemmini/support`) or set it to the same
+support directory for both, and set
 `MERLIN_TARGET_CONTRACT` to
 `examples/gemmini/target/contracts/target_contract.yaml` before both commands.
 The support package's raw contract alone omits the example's corpus command

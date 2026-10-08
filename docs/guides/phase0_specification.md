@@ -336,7 +336,9 @@ frozen, and its broader capability list cannot bypass typed SW admission.
 
 When reviewing a backend declaration separately from its implementation,
 `MERLIN_TARGET_CONTRACT=/selected/target_contract.yaml` explicitly selects that
-declaration while `MERLIN_TARGET_PATH` still selects the OOT support code. Phase 0
+declaration while `MERLIN_TARGET_PATH` (unset: the vendored `examples/<example>/support`
+provider) still selects the support code. A descriptor that names an out-of-tree contract package
+prepends it to that effective selection rather than replacing it. Phase 0
 records both source selections and refuses a different target identity. Frozen
 execution consumes the saved contract bytes, not the live override. Selecting a
 new declaration does not prove that the older implementation satisfies it.
