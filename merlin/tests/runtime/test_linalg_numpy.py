@@ -113,6 +113,27 @@ module {
     assert out.shape == () and int(out) == 10
 
 
+def test_a_generic_whose_body_only_adds_is_a_sum_not_a_contraction() -> None:
+    text = """
+module {
+  func.func @forward(%x: tensor<2x3x4xf32>) -> tensor<2x3xf32> {
+    %zero = arith.constant 0.0 : f32
+    %e = tensor.empty() : tensor<2x3xf32>
+    %f = linalg.fill ins(%zero : f32) outs(%e : tensor<2x3xf32>) -> tensor<2x3xf32>
+    %r = linalg.generic {indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d1, d2)>, affine_map<(d0, d1, d2) -> (d0, d1)>], iterator_types = ["parallel", "parallel", "reduction"]} ins(%x : tensor<2x3x4xf32>) outs(%f : tensor<2x3xf32>) {
+    ^bb0(%v: f32, %acc: f32):
+      %s = arith.addf %v, %acc : f32
+      linalg.yield %s : f32
+    } -> tensor<2x3xf32>
+    return %r : tensor<2x3xf32>
+  }
+}
+"""
+    x = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+    (out,) = _evaluate(text, x)
+    assert np.array_equal(out, x.sum(axis=2))
+
+
 def test_a_bf16_result_is_rounded_to_nearest_even_and_stored_as_its_bits() -> None:
     text = f"""
 module {{

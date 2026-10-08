@@ -521,8 +521,9 @@ def _contraction(op, block, element_in: list[str]):
     if split is None or split[0][0].name not in ("arith.addf", "arith.addi"):
         return None
     _combiner, product = split[0]
+    # A plain sum (``acc + in``) adds a block argument, whose owner is the block, not an operation.
     owner = getattr(product, "owner", None)
-    if owner is None or owner.name not in ("arith.mulf", "arith.muli"):
+    if getattr(owner, "name", None) not in ("arith.mulf", "arith.muli"):
         return None
 
     def chain(value):
