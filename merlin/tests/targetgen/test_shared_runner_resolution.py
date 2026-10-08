@@ -81,11 +81,12 @@ def test_legacy_map_replacement_and_mutation_preserve_consumers(monkeypatch):
     config = runner_config._default_config("fixture", "suite", "f32")
     assert config.tier_sim == mapping and config.tier_sim is not mapping
     assert config.rtl_tiers == frozenset({"L3"})
-    assert "l2" in tier_affordability._engine_vocabulary()[1]
-    assert "l4" not in tier_affordability._engine_vocabulary()[1]
+    # A numbered tier names a rung, never an engine, whatever this target's map happens to hold.
+    assert tier_affordability.normalize_engine("L2") == tier_affordability.ENGINE_UNATTRIBUTED
+    assert tier_affordability.normalize_engine("L37_console.log") == tier_affordability.ENGINE_UNATTRIBUTED
     mapping["L5"] = "last-engine"
     assert runner_config.conventional_tier_sim()["L5"] == "last-engine"
-    assert "l5" in tier_affordability._engine_vocabulary()[1]
+    assert tier_affordability.normalize_engine("L5") == tier_affordability.ENGINE_UNATTRIBUTED
 
 
 def test_model_interpreter_and_missing_error_preserve_legacy_registry(monkeypatch, tmp_path):
@@ -131,8 +132,7 @@ def absent(target):
     raise ValueError("absent")
 target_experiment.load_capability_manifest = absent
 assert config.selected_runner_config("fixture", None, "f32").fourth_output_name == "lowered.llvm.mlir"
-assert tier_affordability._engine_vocabulary()[1] >= {"l2", "l3", "l4", "l5"}
-assert "l0" not in tier_affordability._engine_vocabulary()[1]
+assert tier_affordability.normalize_engine("L42_console.log") == tier_affordability.ENGINE_UNATTRIBUTED
 engines.ext_path = lambda name: Path(sys.argv[1])
 try:
     engines.selected_model_venv_python("fixture")

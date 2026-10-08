@@ -261,20 +261,17 @@ def _engine_vocabulary() -> "tuple[tuple[str, ...], frozenset[str]]":
 
     The engine names are ``rtl_engine_policy.ENGINE_PRIORITY`` -- the one place this repo declares which
     elaborated-RTL engines exist and in what cost order -- so adding an engine needs no edit here. The
-    second set is what must never become a bucket: ``ELABORATED_RTL`` is a FIDELITY every one of those
-    engines answers at, and the ``tier_sim`` map's keys are TIER INDICES, so a record whose only
-    discriminator is one of those has named a rung and not a machine.
+    second set contains fidelity labels, which name no engine. Numbered tier labels are recognized
+    structurally by :func:`_is_tier_token` without assuming any target's ladder.
     """
     from .rtl_engine_policy import ELABORATED_RTL, ENGINE_PRIORITY
 
-    not_an_engine = {ELABORATED_RTL.lower()}
-    try:
-        from .runner_config import conventional_tier_sim
+    return ENGINE_PRIORITY, frozenset({ELABORATED_RTL.lower()})
 
-        not_an_engine |= {str(k).lower() for k in conventional_tier_sim()}
-    except Exception:  # noqa: BLE001 - an unimportable map is no vocabulary
-        pass
-    return ENGINE_PRIORITY, frozenset(not_an_engine)
+
+def _is_tier_token(token: str) -> bool:
+    """A numbered tier is a rung, regardless of how many rungs a target declares."""
+    return token.startswith("l") and token[1:].isdigit()
 
 
 def normalize_engine(value) -> str:
@@ -302,7 +299,7 @@ def normalize_engine(value) -> str:
     for name in known:
         if str(name).lower() in tokens:
             return str(name)
-    if raw.lower() in not_an_engine or (tokens & not_an_engine):
+    if raw.lower() in not_an_engine or (tokens & not_an_engine) or any(_is_tier_token(t) for t in tokens):
         return ENGINE_UNATTRIBUTED
     return raw
 
