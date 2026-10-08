@@ -11,8 +11,9 @@ mode=inner_compute, bit-exact-verified, the cycle count for
   (5) ours      fused_vfmacc_tiled
 
 MEASUREMENT METHOD — identical footing for ALL five columns:
-  Every column is a tiny bare-metal Saturn ELF (crt.S + syscalls.c + test.ld,
-  -nostdlib) that wraps ONLY the compute call in read_csr(mcycle) on a FUNCTIONAL
+  Every column is a tiny bare-metal ELF on the benchmark corpus's own harness (crt.S +
+  syscalls.c + test.ld, -nostdlib; see ``run_expert_gemm.harness_config``) that wraps
+  ONLY the compute call in read_csr(mcycle) on a FUNCTIONAL
   spike (cycle proxy, not cycle-accurate; same proxy the runner records). The
   one-time setup (expert operand pack; ours' memref-descriptor build) is hoisted
   OUTSIDE the timed region. So the timer, ISA, harness and inner-compute scope are
@@ -87,10 +88,11 @@ def _build_expert(
     from ...runtime.backends import spike
 
     gcc = spike.gcc_path()
-    sat = bench_ceiling.build_asm.benchmarks_dir()
+    config = expert.harness_config()
+    sat = config.benchmarks_dir()
     if sat is None:
         return "no standalone-benchmark corpus registered (merlin/contract/corpora.yaml)"
-    enc = bench_ceiling._encoding_include_dir()
+    enc = config.encoding_include_dir()
     if enc is None:
         return "encoding.h not found (set MERLIN_CHIPYARD)"
     inc_flags: list[str] = []
@@ -141,7 +143,7 @@ def measure_intrinsic(*, M: int, N: int, K: int) -> dict:
         "source": source,
         "target": "spike",
         "mode": "inner_compute",
-        "isa": bench_ceiling.DEFAULT_ISA,
+        "isa": expert.harness_config().isa,
         "kernel_file": "merlin/python/merlin/kernels/ceiling_drivers/ours_intrinsic_gemm_driver.c",
         "measure_method": "standalone_baremetal_inner_compute",
         "fingerprint_key": bench_ceiling.fingerprint_key("matmul", "f32", regime),
@@ -169,7 +171,7 @@ def measure_expert(source: str, *, M: int, N: int, K: int) -> dict:
         "source": source,
         "target": "spike",
         "mode": "inner_compute",
-        "isa": bench_ceiling.DEFAULT_ISA,
+        "isa": expert.harness_config().isa,
         "kernel_file": spec["kernel_file"],
         "measure_method": "standalone_baremetal_inner_compute",
         "fingerprint_key": bench_ceiling.fingerprint_key("matmul", spec["dtype"], regime),
@@ -221,7 +223,7 @@ def measure_ours(run_id: str, features: list[str], *, M: int, N: int, K: int, ti
         "source": run_id,
         "target": "spike",
         "mode": "inner_compute",
-        "isa": bench_ceiling.DEFAULT_ISA,
+        "isa": expert.harness_config().isa,
         "kernel_file": f"merlin RVV codegen fork (features={features or 'baseline'})",
         "compiler_features": features,
         "measure_method": "standalone_baremetal_inner_compute",
@@ -255,7 +257,7 @@ def measure_ours(run_id: str, features: list[str], *, M: int, N: int, K: int, ti
                 "blocker": f"missing model.o or cgen artifacts under {work}",
             }
 
-        # 2. link our bare-metal driver + generic runtime + model.o on the Saturn harness.
+        # 2. link our bare-metal driver + generic runtime + model.o on the corpus's bare-metal harness.
         elf = Path(tmp) / "ours_gemm.riscv"
         err = _build_ours(elf, model_o, cgen, M=M, N=N, K=K, timeout=timeout)
         if err is not None:
@@ -268,10 +270,11 @@ def _build_ours(out: Path, model_o: Path, cgen: Path, *, M: int, N: int, K: int,
     from ...runtime.backends import spike
 
     gcc = spike.gcc_path()
-    sat = bench_ceiling.build_asm.benchmarks_dir()
+    config = expert.harness_config()
+    sat = config.benchmarks_dir()
     if sat is None:
         return "no standalone-benchmark corpus registered (merlin/contract/corpora.yaml)"
-    enc = bench_ceiling._encoding_include_dir()
+    enc = config.encoding_include_dir()
     if enc is None:
         return "encoding.h not found (set MERLIN_CHIPYARD)"
     runtime_c = runtime_dir() / "c" / "merlin_model.c"
@@ -282,7 +285,7 @@ def _build_ours(out: Path, model_o: Path, cgen: Path, *, M: int, N: int, K: int,
         inc_flags += ["-I", str(d)]
     inc_flags += ["-I", str(sat / "env"), "-I", str(sat / "common"), "-I", str(enc)]
     shape = [f"-DGEMM_M={M}", f"-DGEMM_N={N}", f"-DGEMM_K={K}"]
-    # model.o is rv64gcv (Saturn vector); compile the C the same march/abi as the experts.
+    # model.o is rv64gcv (the vector unit's ISA); compile the C the same march/abi as the experts.
     # baremetal_support.c supplies malloc/free (bump allocator) for the lowered model's
     # tensor.empty allocs; mlir_runtime.c supplies memrefCopy — both absent under -nostdlib.
     cmd = [
@@ -318,7 +321,8 @@ def _run_spike(elf: Path, *, timeout: int = 600) -> tuple[str | None, str]:
     (tohost!=0) surfaces as a precise blocker instead of a vague 'failed/empty'."""
     from ...runtime.backends import spike
 
-    cmd = [str(spike.spike_path()), f"--isa={bench_ceiling.DEFAULT_ISA}", "-p1", bench_ceiling.SPIKE_MEM, str(elf)]
+    config = expert.harness_config()
+    cmd = [str(spike.spike_path()), f"--isa={config.isa}", "-p1", config.spike_memory, str(elf)]
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -414,7 +418,12 @@ def _emit(row: dict, out_path: Path) -> None:
         print(f"  {row['source']:24s} {row['M']}^3  NOT_RUN: {row.get('blocker', '')[:160]}")
 
 
-def write_matrix(grid: dict, out_md: Path) -> None:
+def write_matrix(grid: dict, out_md: Path, config: bench_ceiling.BenchConfig | None = None) -> None:
+    """Render the matrix. ``config`` (default: the harness config) names the ISA and the target whose
+    bare-metal harness every column ran on, so the report's prose describes the machine measured."""
+    config = config or expert.harness_config()
+    machine = config.target
+    march = " ".join(flag for flag in expert._CFLAGS if flag.startswith(("-march=", "-mabi=")))
     cols = [
         ("openblas", "OpenBLAS"),
         ("xnnpack", "XNNPACK"),
@@ -433,7 +442,7 @@ def write_matrix(grid: dict, out_md: Path) -> None:
     lines: list[str] = []
     lines.append("# Cross-framework fp32 GEMM ceiling matrix (spike, one substrate)\n")
     lines.append(
-        "All columns measured on **spike** (functional, ISA `rv64gcv_zfh_zvfh`), "
+        f"All columns measured on **spike** (functional, ISA `{config.isa}`), "
         "`mode=inner_compute`, bit-exact verified vs a scalar reference, cycles read "
         "from the `mcycle` CSR (a **cycle proxy**, not cycle-accurate).\n"
     )
@@ -529,7 +538,7 @@ def write_matrix(grid: dict, out_md: Path) -> None:
             "Reading the blockers: the only remaining not_run is "
             "**`ours_vfmacc_contraction @ 128^3`**, which hits an `R_RISCV_JAL relocation "
             "truncated` — the FULLY-UNROLLED 128^3 `model.o` `.text` (16,384 fma, code that grows "
-            "with M·N·K) exceeds the ±1 MB JAL reach of the shared Saturn `crt.S`/`test.ld` "
+            f"with M·N·K) exceeds the ±1 MB JAL reach of the shared {machine} `crt.S`/`test.ld` "
             "bare-metal layout (a harness link limit, NOT a numerical/codegen-quality result; the "
             "full-unroll fork builds, runs and verifies at 32^3 and 64^3). It is exactly the "
             "unbounded-code failure that the new **`ours_vfmacc_tiled`** (scalable) column fixes: "
@@ -543,13 +552,13 @@ def write_matrix(grid: dict, out_md: Path) -> None:
     lines.append("## Comparability caveats (read before trusting the numbers)\n")
     lines.append(
         "- **Same substrate / timer / harness for ALL five columns.** Every column is a "
-        "standalone bare-metal Saturn ELF (crt.S + syscalls.c + test.ld, `-nostdlib`, "
-        "`-march=rv64gcv_zfh_zvfh -mabi=lp64d`, `-O3 -ffast-math`) run on the SAME functional "
+        f"standalone bare-metal {machine} ELF (crt.S + syscalls.c + test.ld, `-nostdlib`, "
+        f"`{march}`, `-O3 -ffast-math`) run on the SAME functional "
         "spike, timing the compute with `read_csr(mcycle)`. The cycle count is a **functional-"
         "spike proxy** (`cycle_accurate=false`), identical in kind for ours and the experts — "
-        "NOT a Saturn-RTL / FireSim cycle-accurate number. On the functional model IPC=1, so "
+        f"NOT a {machine}-RTL / FireSim cycle-accurate number. On the functional model IPC=1, so "
         "`cycles ≈ instret` (retired instructions); the proxy therefore ranks codegen by "
-        "**instruction count**, not by RTL timing — a real Saturn would re-rank vector-heavy "
+        f"**instruction count**, not by RTL timing — the real {machine} hardware would re-rank vector-heavy "
         "kernels, but the cross-framework ORDERING here is robust because all columns share it."
     )
     lines.append(

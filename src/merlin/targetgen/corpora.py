@@ -113,6 +113,14 @@ def kernel_corpus_for_source(source: str | None) -> str | None:
     return None
 
 
+def kernel_corpus_target(name: str | None) -> str | None:
+    """The target that owns corpus ``name``'s kernel-ceiling bench config (its registry ``target:``), or
+    None when the corpus is unregistered or declares no owner."""
+    spec = kernel_corpora().get(name or "")
+    owner = str((spec or {}).get("target") or "").strip()
+    return owner or None
+
+
 def kernel_corpus_env(name: str) -> str:
     """The environment variable pointing at corpus ``name``'s checkout: ``MERLIN_<NAME>_REPO`` -- the
     convention the kernel-index CLI already reads, derived from the name rather than listed."""

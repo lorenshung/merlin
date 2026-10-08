@@ -2,7 +2,8 @@
 
 This is the S4.2 ceiling for the f32 64x64x64 GEMM, the *expert* bar our compiler's
 RVV codegen is ranked against. Each expert kernel is compiled into a tiny bare-metal
-ELF (its own ``main`` + the saturn HTIF console/crt) that:
+ELF (its own ``main`` + the standalone-benchmark corpus's HTIF console/crt, located through
+:func:`harness_config`) that:
 
   1. inits A/B (and bias for XNNPACK) and computes a scalar reference,
   2. PRE-PACKS the operands (ncopy/tcopy for OpenBLAS; goi weight pack for XNNPACK)
@@ -33,8 +34,8 @@ from .. import bench_ceiling
 # Core owns the C driver resources used by runtime backends as well as studies.
 HERE = module_source_path(__package__).parent
 
-# Saturn harness flags (mirrors bench_ceiling._SATURN_CFLAGS) + NDEBUG so the
-# XNNPACK microkernel's assert() preconditions compile out under -nostdlib.
+# The bare-metal harness flags (the benchmark corpus's own cflags, as its kernel_ceiling.yaml records
+# them, at -O3) + NDEBUG so the XNNPACK microkernel's assert() preconditions compile out under -nostdlib.
 _CFLAGS = (
     "-DNDEBUG",
     "-DPREALLOCATE=1",
@@ -77,15 +78,32 @@ def _experts() -> dict:
     }
 
 
+def harness_config() -> bench_ceiling.BenchConfig:
+    """The bench config whose corpus supplies the bare-metal harness (``crt.S``/``syscalls.c``/
+    ``test.ld``), the toolchain header and the spike ISA/memory map: the config of the corpus
+    registry's default standalone-benchmark corpus, owned by the target the registry names.
+
+    Raises :class:`~merlin.kernels.bench_ceiling.BenchConfigMissing` when there is none, rather than
+    measuring on a harness nobody declared.
+    """
+    config = bench_ceiling.bench_config_for_source()
+    if config is None:
+        raise bench_ceiling.BenchConfigMissing(
+            "no standalone-benchmark corpus with an owning target is registered (merlin/contract/corpora.yaml)"
+        )
+    return config
+
+
 def _build(driver: Path, incs: list[Path], out: Path, *, timeout: int = 300) -> str | None:
     """Build one expert driver ELF; return None on success, else the error text (blocker)."""
     from ...runtime.backends import spike
 
     gcc = spike.gcc_path()
-    sat = bench_ceiling.build_asm.benchmarks_dir()
+    config = harness_config()
+    sat = config.benchmarks_dir()
     if sat is None:
         return "no standalone-benchmark corpus registered (merlin/contract/corpora.yaml)"
-    enc = bench_ceiling._encoding_include_dir()
+    enc = config.encoding_include_dir()
     if enc is None:
         return "encoding.h not found (set MERLIN_CHIPYARD)"
     inc_flags: list[str] = []
@@ -114,10 +132,11 @@ def _build(driver: Path, incs: list[Path], out: Path, *, timeout: int = 300) -> 
     return None
 
 
-def _run(elf: Path, *, isa: str = bench_ceiling.DEFAULT_ISA, timeout: int = 300) -> str | None:
+def _run(elf: Path, *, isa: str | None = None, timeout: int = 300) -> str | None:
     from ...runtime.backends import spike
 
-    cmd = [str(spike.spike_path()), f"--isa={isa}", "-p1", bench_ceiling.SPIKE_MEM, str(elf)]
+    config = harness_config()
+    cmd = [str(spike.spike_path()), f"--isa={isa or config.isa}", "-p1", config.spike_memory, str(elf)]
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except (subprocess.TimeoutExpired, OSError):
@@ -125,8 +144,10 @@ def _run(elf: Path, *, isa: str = bench_ceiling.DEFAULT_ISA, timeout: int = 300)
     return p.stdout if p.returncode == 0 else None
 
 
-def measure_one(source: str, *, M: int = 64, N: int = 64, K: int = 64, isa: str = bench_ceiling.DEFAULT_ISA) -> dict:
-    """Build+run one expert kernel; return a ceiling row (cycles set) or a not_run row."""
+def measure_one(source: str, *, M: int = 64, N: int = 64, K: int = 64, isa: str | None = None) -> dict:
+    """Build+run one expert kernel; return a ceiling row (cycles set) or a not_run row. ``isa`` defaults
+    to the harness config's spike ISA."""
+    isa = isa or harness_config().isa
     spec = _experts()[source]
     regime = bench_ceiling.shape_regime("matmul", M, N, K)
     base = {
