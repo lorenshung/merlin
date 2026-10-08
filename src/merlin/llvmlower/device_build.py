@@ -20,6 +20,7 @@ all arguments.
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
@@ -200,6 +201,8 @@ class DeviceBuild:
     #: archive that held some of each while reporting only "N kernels" would say nothing about
     #: which of a model's layers kept their readout.
     built_from: dict[str, str] = field(default_factory=dict)
+    #: Coarse build receipt: distinct compiled artifact texts versus exported kernel symbols.
+    object_dedup: dict[str, int] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -596,6 +599,16 @@ def build_device_objects(
     kernels: dict[str, str] = {}
     built_from: dict[str, str] = {}
     oc = _objcopy()
+    # The selected interface is still checked and emitted for every signature. Two
+    # interfaces may nevertheless produce the same LLVM artifact; compile its raw
+    # object once, then rename a separate copy for each shim entry.
+    compiled_by_artifact: dict[str, list[tuple[Path, Path]]] = {}
+
+    def dedup_receipt() -> dict[str, int]:
+        return {
+            "unique_artifacts": sum(map(len, compiled_by_artifact.values())),
+            "emitted_symbols": len(kernels),
+        }
 
     for index, sym in enumerate(sorted(signatures)):
         if stop_on_first_failure and skipped:
@@ -644,18 +657,27 @@ def build_device_objects(
             continue
         art = stem.with_suffix(".device.mlir")
         art.write_text(r.stdout, encoding="utf-8")
+        digest = hashlib.sha256(r.stdout.encode("utf-8")).hexdigest()
+        # Compare actual bytes as well, so a digest collision cannot merge kernels.
+        raw = next(
+            (base for source, base in compiled_by_artifact.get(digest, ()) if source.read_bytes() == art.read_bytes()),
+            None,
+        )
+        if raw is None:
+            ll = stem.with_suffix(".ll")
+            t = _run_build_tool([mlir_translate(), "--mlir-to-llvmir", str(art), "-o", str(ll)], timeout=timeout)
+            if t.returncode != 0:
+                skipped.append((sym, f"mlir-translate: {(t.stderr or '').strip()[:200]}"))
+                continue
 
-        ll = stem.with_suffix(".ll")
-        t = _run_build_tool([mlir_translate(), "--mlir-to-llvmir", str(art), "-o", str(ll)], timeout=timeout)
-        if t.returncode != 0:
-            skipped.append((sym, f"mlir-translate: {(t.stderr or '').strip()[:200]}"))
-            continue
-
-        raw = stem.with_suffix(".raw.o")
-        c = _run_build_tool([clang(), *_flags(codegen_target, cflags), "-c", str(ll), "-o", str(raw)], timeout=timeout)
-        if c.returncode != 0:
-            skipped.append((sym, f"clang: {(c.stderr or '').strip()[:200]}"))
-            continue
+            raw = stem.with_suffix(".raw.o")
+            c = _run_build_tool(
+                [clang(), *_flags(codegen_target, cflags), "-c", str(ll), "-o", str(raw)], timeout=timeout
+            )
+            if c.returncode != 0:
+                skipped.append((sym, f"clang: {(c.stderr or '').strip()[:200]}"))
+                continue
+            compiled_by_artifact.setdefault(digest, []).append((art, raw))
 
         obj = stem.with_suffix(".o")
         if oc is None:
@@ -677,10 +699,11 @@ def build_device_objects(
             kernels=kernels,
             built_from=built_from,
             skipped=tuple(skipped),
+            object_dedup=dedup_receipt(),
         )
 
     if not kernels:
-        return DeviceBuild(device=device, skipped=tuple(skipped))
+        return DeviceBuild(device=device, skipped=tuple(skipped), object_dedup=dedup_receipt())
 
     unit = emit_translation_unit(
         device,
@@ -696,6 +719,7 @@ def build_device_objects(
             kernels=kernels,
             built_from=built_from,
             skipped=tuple([*skipped, *unit.skipped]),
+            object_dedup=dedup_receipt(),
         )
     # A KERNEL THE SHIM DECLINED IS NOT A KERNEL THIS ARCHIVE CAN OFFER. The shim is what defines the
     # symbol the model's own call binds to, so a kernel object with no entry beside it ships a private
@@ -718,7 +742,12 @@ def build_device_objects(
     if s.returncode != 0:
         skipped.append(("shim", f"clang: {(s.stderr or '').strip()[:300]}"))
         return DeviceBuild(
-            device=device, objects=tuple(objs), kernels=kernels, built_from=built_from, skipped=tuple(skipped)
+            device=device,
+            objects=tuple(objs),
+            kernels=kernels,
+            built_from=built_from,
+            skipped=tuple(skipped),
+            object_dedup=dedup_receipt(),
         )
 
     return DeviceBuild(
@@ -728,6 +757,7 @@ def build_device_objects(
         kernels=kernels,
         built_from=built_from,
         skipped=tuple(skipped),
+        object_dedup=dedup_receipt(),
     )
 
 

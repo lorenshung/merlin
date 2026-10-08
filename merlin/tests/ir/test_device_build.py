@@ -74,6 +74,64 @@ def test_each_signature_gets_a_distinct_kernel_symbol(tmp_path):
     )
 
 
+def test_repeated_artifacts_compile_once_but_keep_distinct_symbols(tmp_path, monkeypatch):
+    """A reduced repeated-group proxy: three signatures, two identical emitted kernels."""
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from merlin.llvmlower import device_build, device_shim, toolchain
+    from merlin.targetgen import corpus_spec, package_runtime
+
+    monkeypatch.setattr(device_build, "objects_buildable", lambda device: None)
+    monkeypatch.setattr(device_build, "_objcopy", lambda: "objcopy")
+    monkeypatch.setattr("merlin.compile.mesh._mesh_tile_binding", lambda *args, **kwargs: None)
+    monkeypatch.setattr(device_shim, "kernel_abi_for", lambda device: SimpleNamespace(symbol="kernel"))
+    monkeypatch.setattr(
+        device_shim,
+        "emit_translation_unit",
+        lambda device, signatures, *args, **kwargs: SimpleNamespace(
+            symbols=tuple(signatures), text="void entry(void) {}", skipped=()
+        ),
+    )
+    monkeypatch.setattr(corpus_spec, "build", lambda entry, binding: (None, entry["name"]))
+    monkeypatch.setattr(package_runtime, "load_package", lambda path: SimpleNamespace(target="synthetic"))
+    emitted = {"a": "same artifact", "b": "same artifact", "c": "different artifact"}
+    monkeypatch.setattr(
+        package_runtime,
+        "run_entrypoint",
+        lambda pkg, name, path, **kwargs: SimpleNamespace(returncode=0, stdout=emitted[path.read_text()], stderr=""),
+    )
+    monkeypatch.setattr(toolchain, "mlir_translate", lambda: "translate")
+    monkeypatch.setattr(toolchain, "clang", lambda: "clang")
+    calls = []
+
+    def fake_run(argv, *, timeout):
+        calls.append(argv[0])
+        if argv[0] == "objcopy":
+            Path(argv[-1]).write_bytes(Path(argv[-2]).read_bytes() + argv[1].encode())
+        else:
+            Path(argv[argv.index("-o") + 1]).write_bytes(str(argv).encode())
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(device_build, "_run_build_tool", fake_run)
+    built = device_build.build_device_objects(
+        "synthetic",
+        {s: (2, 2, 2) for s in emitted},
+        {s: ("i8", "i8", "i32") for s in emitted},
+        package_dir=tmp_path,
+        workdir=tmp_path / "build",
+        operand_dtype="i8",
+        accum_dtype="i32",
+    )
+    assert built.ok
+    assert built.object_dedup == {"unique_artifacts": 2, "emitted_symbols": 3}
+    assert calls.count("translate") == 2
+    assert calls.count("clang") == 3  # two kernels and the shared shim
+    assert calls.count("objcopy") == 3
+    assert len(set(built.kernels.values())) == 3
+    assert len({path.read_bytes() for path in built.objects[:3]}) == 3
+
+
 def test_every_kernel_object_defines_exactly_its_renamed_symbol(tmp_path):
     b = _built(tmp_path)
     for sym, kernel in b.kernels.items():
@@ -193,17 +251,20 @@ def test_exact_model_build_hands_the_selected_interface_to_the_oot_package(tmp_p
     from merlin.targetgen.contract.interface_emit import emit_interface_mlir
 
     cb = {
-        "abi_version": "0.1", "target": "gemmini",
+        "abi_version": "0.1",
+        "target": "gemmini",
         "tensors": {
             "B": {"shape": [19, 8], "dtype": "i8", "role": "input"},
             "A": {"shape": [4, 19], "dtype": "i8", "role": "input"},
         },
         "commands": [
-            {"opcode": "RES_PACK", "operands": {"src": "B", "dst": "B_res"},
-             "attributes": {"layout": "packed_rhs"}},
+            {"opcode": "RES_PACK", "operands": {"src": "B", "dst": "B_res"}, "attributes": {"layout": "packed_rhs"}},
             {"opcode": "MATMUL_RESIDENT", "operands": {"lhs": "A", "rhs": "B_res", "dst": "acc"}},
-            {"opcode": "COMMIT", "operands": {"src": "acc", "dst": "Y"},
-             "attributes": {"output_dtype": "i32", "epilogue": []}},
+            {
+                "opcode": "COMMIT",
+                "operands": {"src": "acc", "dst": "Y"},
+                "attributes": {"output_dtype": "i32", "epilogue": []},
+            },
         ],
     }
     interface = emit_interface_mlir(cb)
@@ -213,7 +274,8 @@ def test_exact_model_build_hands_the_selected_interface_to_the_oot_package(tmp_p
     monkeypatch.setattr("merlin.llvmlower.device_build.objects_buildable", lambda _device: None)
     monkeypatch.setattr(oot_runner, "load_package", lambda _path: SimpleNamespace(target="gemmini"))
     monkeypatch.setattr(
-        "merlin.targetgen.corpus_spec.build", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        "merlin.targetgen.corpus_spec.build",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("shape-based capsule regeneration is forbidden")
         ),
     )
@@ -225,8 +287,13 @@ def test_exact_model_build_hands_the_selected_interface_to_the_oot_package(tmp_p
 
     monkeypatch.setattr(oot_runner, "run_entrypoint", inspect_package_call)
     result = build_device_objects(
-        "gemmini", {"selected": (4, 8, 19)}, {"selected": ("i8", "i8", "i32")},
-        package_dir=package, workdir=tmp_path / "build", operand_dtype="int8", accum_dtype="i32",
+        "gemmini",
+        {"selected": (4, 8, 19)},
+        {"selected": ("i8", "i8", "i32")},
+        package_dir=package,
+        workdir=tmp_path / "build",
+        operand_dtype="int8",
+        accum_dtype="i32",
         expected_interfaces={"selected": {"mlir": interface, "sha256": sha256_text(interface)}},
         package_sha256=hash_tree(package)["sha256"],
     )
@@ -237,8 +304,13 @@ def test_exact_model_build_hands_the_selected_interface_to_the_oot_package(tmp_p
     swapped = emit_interface_mlir(cb)
     with pytest.raises(ValueError, match="pointer ABI"):
         build_device_objects(
-            "gemmini", {"selected": (4, 8, 19)}, {"selected": ("i8", "i8", "i32")},
-            package_dir=package, workdir=tmp_path / "bad", operand_dtype="int8", accum_dtype="i32",
+            "gemmini",
+            {"selected": (4, 8, 19)},
+            {"selected": ("i8", "i8", "i32")},
+            package_dir=package,
+            workdir=tmp_path / "bad",
+            operand_dtype="int8",
+            accum_dtype="i32",
             expected_interfaces={"selected": {"mlir": swapped, "sha256": sha256_text(swapped)}},
             package_sha256=hash_tree(package)["sha256"],
         )
