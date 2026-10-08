@@ -359,3 +359,55 @@ def test_cli_keeps_overlay_variants_separate_in_single_case_device_shards(tmp_pa
     assert len(calls) == 2 and all(call["target"] == "synthetic_core_aten" for call in calls)
     verdict = json.loads((output / "core_aten_batch_verdict.json").read_text())
     assert verdict["passed_count"] == 2 and set(verdict["cases"]) == {"fixture-a", "fixture-b"}
+
+
+def test_execution_providers_and_catalogs_are_isolated_by_snapshot(tmp_path, monkeypatch):
+    import merlin.targetgen.plugins as P
+    import merlin.targetgen.target_experiment as T
+    from merlin.targetgen import oracle_policy
+
+    selected = []
+    monkeypatch.setattr(
+        T,
+        "load_capability_manifest",
+        lambda target: SimpleNamespace(contract={"runner": {"full_call_provider": str(selected[-1])}}),
+    )
+    monkeypatch.setattr("merlin.llvmlower.toolchain.llvm_install", lambda: tmp_path)
+    fp32 = D.load_execution_provider("gemmini_fp32")
+    providers, catalogs = [], []
+    for index in range(3):
+        root = tmp_path / str(index)
+        root.mkdir()
+        path = root / "execution_provider.py"
+        path.write_text(f"TARGET = 'synthetic'\nVALUE = {index}\n")
+        selected.append(path)
+        provider = D.load_execution_provider("synthetic", path)
+        assert D.load_execution_provider("synthetic", path) is provider
+        full_call = oracle_policy.selected_full_call_provider("synthetic")
+        assert full_call.VALUE == provider.VALUE == index
+        providers.append(provider)
+        package = root / "submission"
+        catalog = package / "mlir_oot"
+        catalog.mkdir(parents=True)
+        (catalog / "__init__.py").write_text("")
+        (catalog / "helper.py").write_text(f"VALUE = {index}\n")
+        (catalog / "golden_device_catalog.py").write_text(
+            "from .helper import VALUE\ndef build_catalog(source): return None, {'covered_contractions': 1}\ndef merlin_builder(llvm): return VALUE\n"
+        )
+        (root / "model.mlir").write_text("fixture source")
+        route = fp32.routing(
+            root,
+            target="synthetic",
+            package=package,
+            facts={
+                "facts": {"datapaths": [{"name": "input", "dtype": "f32"}, {"name": "accumulator", "dtype": "f32"}]}
+            },
+            eligible=[(None, SimpleNamespace(dtypes=("f32", "f32", "f32")))],
+        )
+        catalogs.append(route.catalog_builder)
+    assert catalogs == [0, 1, 2]
+    assert [p.VALUE for p in providers] == [0, 1, 2]
+    # The low-level loader still refuses genuinely conflicting ownership.
+    P.load_module(selected[0].parent, selected[0].name, package_name="intentional_collision")
+    with pytest.raises(P.PluginError, match="two packages claim"):
+        P.load_module(selected[1].parent, selected[1].name, package_name="intentional_collision")

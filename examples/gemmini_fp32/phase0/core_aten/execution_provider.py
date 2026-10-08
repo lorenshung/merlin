@@ -8,6 +8,8 @@ TARGET = "gemmini_fp32"
 def routing(directory, *, target, package, facts, eligible):
     from merlin.targetgen.core_aten_device import submitted_catalog_routing
 
+    # The shared adapter scopes catalog imports to the canonical submission root,
+    # keeping repeated graded snapshots isolated in a long-lived worker.
     return submitted_catalog_routing(directory, target=target, package=package, facts=facts, eligible=eligible)
 
 

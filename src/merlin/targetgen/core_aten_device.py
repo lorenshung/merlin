@@ -19,7 +19,11 @@ def load_execution_provider(target: str, path: Path | None = None):
     if not target or Path(target).name != target or target in {".", ".."}:
         raise ValueError("target must be a single name")
     selected = path or repo_root() / "examples" / target / "phase0" / "core_aten" / "execution_provider.py"
-    module = load_module(selected.parent, selected.name, package_name="core_aten_execution")
+    module = load_module(
+        selected.parent,
+        selected.name,
+        package_name="core_aten_execution_" + hashlib.sha256(str(selected.parent.resolve()).encode()).hexdigest(),
+    )
     if getattr(module, "TARGET", None) != target:
         raise ValueError("execution provider does not declare the selected target")
     return module
@@ -86,7 +90,12 @@ def submitted_catalog_routing(directory, *, target, package, facts, eligible):
     operand, weight, accum = next(iter(triples))
     if operand != weight:
         raise ValueError("catalog requires identical operand storage types")
-    backend = load_module(package, "mlir_oot.golden_device_catalog", package_name="core_aten_backend")
+    # Immutable snapshots at different roots must not share cached Python modules.
+    backend = load_module(
+        package,
+        "mlir_oot.golden_device_catalog",
+        package_name="core_aten_backend_" + hashlib.sha256(str(Path(package).resolve()).encode()).hexdigest(),
+    )
     source = (Path(directory) / "model.mlir").read_text()
     _, inventory = backend.build_catalog(source)
     if not inventory["covered_contractions"]:

@@ -241,3 +241,92 @@ def test_scored_host_expectation_enforces_host_lane(packaged, tmp_path):
     observation.update(lane="host", executed_instructions=0)
     result = C.run_capsule(capsule, tmp_path, adapters={"L2": adapter}, **options)
     assert result["status"] == "pass" and result["scored"] is True
+
+
+def test_two_snapshot_backends_grade_consecutively_in_one_process(packaged, tmp_path, monkeypatch):
+    from merlin.common.paths import repo_root
+    from merlin.llvmlower import toolchain
+    from merlin.targetgen.plugins import load_module
+
+    provider = load_module(
+        repo_root() / "examples" / "gemmini_fp32" / "phase0" / "core_aten",
+        "execution_provider.py",
+        package_name="test_snapshot_execution_provider",
+    )
+    monkeypatch.setattr(toolchain, "llvm_install", lambda: tmp_path)
+    capsule, raw, readback, _, _ = packaged
+    packages = []
+    for marker in ("first", "second"):
+        package = tmp_path / marker / "submission"
+        module = package / "mlir_oot"
+        module.mkdir(parents=True)
+        (module / "identity.py").write_text(f"MARKER = {marker!r}\n")
+        (module / "golden_device_catalog.py").write_text(
+            "from .identity import MARKER\n"
+            "def build_catalog(source):\n"
+            "    return None, {'covered_contractions': [MARKER]}\n"
+            "def merlin_builder(tools):\n"
+            "    return MARKER\n"
+        )
+        packages.append(package)
+    loaded = []
+
+    def execute(*, bundle, package_dir, **kwargs):
+        routing = provider.routing(
+            bundle,
+            target="test_target",
+            package=package_dir,
+            facts={"facts": {"datapaths": [{"name": "input", "dtype": "i8"}, {"name": "accumulator", "dtype": "i32"}]}},
+            eligible=[(None, SimpleNamespace(dtypes=("i8", "i8", "i32")))],
+        )
+        loaded.append(routing.catalog_builder)
+        return dict(output_bytes=raw, semantic_readback=readback, provenance={"scope": "test"})
+
+    config = SimpleNamespace(target="test_target", fourth_output_name="lowered.mlir", rtl_tiers=set())
+    adapter = SimpleNamespace(run_full_call=execute, compiles_source_bundle=True)
+    # Revisit the first snapshot too: cached imports must retain their original identity.
+    for index, package in enumerate([*packages, packages[0]]):
+        result = C.run_capsule(
+            capsule,
+            package,
+            paths=SimpleNamespace(run_path=tmp_path / f"grade-{index}"),
+            config=config,
+            adapters={"L2": adapter},
+            pkg=None,
+            contract=None,
+            timeout=1,
+            no_oracle=False,
+        )
+        assert result["status"] == "pass", result["failure"]
+    assert loaded == ["first", "second", "first"]
+
+
+@pytest.mark.parametrize(
+    "error", ["PluginError: two packages claim the namespace 'backend'", "ValueError: build refused", None]
+)
+def test_execution_refusal_preserves_tier_reason_and_compile_category(packaged, tmp_path, error):
+    from merlin.targetgen.tier_integrity import reason_for
+
+    capsule, _, _, _, _ = packaged
+    adapter = SimpleNamespace(
+        compiles_source_bundle=True,
+        run_full_call=lambda **_: dict(output_bytes=None, execution_error=error, provenance={"scope": "test"}),
+    )
+    result = C.run_capsule(
+        capsule,
+        tmp_path,
+        paths=SimpleNamespace(run_path=tmp_path / "grade"),
+        config=SimpleNamespace(target="test_target", fourth_output_name="lowered.mlir", rtl_tiers=set()),
+        adapters={"L2": adapter},
+        pkg=None,
+        contract=None,
+        timeout=1,
+        no_oracle=False,
+    )
+    reason = error or "no hardware output"
+    assert result["status"] == "fail"
+    assert result["failure"] == dict(plane="compile", category="PROTOCOL_VIOLATION", tier="L2", detail=reason)
+    assert result["numeric"]["status"] == "skipped"
+    assert result["tiers"]["L2"]["reason"] == reason
+    assert reason_for("L2", result["tiers"]["L2"]) == reason
+    assert json.loads((tmp_path / "grade" / "capsule_result.json").read_text())["tiers"]["L2"]["reason"] == reason
