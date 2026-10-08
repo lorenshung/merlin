@@ -2,7 +2,7 @@
 
 from .format import CodegenError, Container, container_for, container_words
 from .measurement import assemble_measurement_fragments
-from .whole_program import render_whole_program
+from .whole_program import describe_whole_program_layout, render_whole_program
 
 
 def build_source_paths():

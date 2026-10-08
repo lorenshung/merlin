@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 
-from merlin.targetgen.address_space import derive_address_space
+from merlin.targetgen.address_space import accumulator_store, derive_address_space, operand_store
 from merlin.targetgen.rtl.register_slices import (
     decode_register_slices,
     derive_register_slices,
@@ -76,7 +76,7 @@ def _readout_types(facts: dict) -> dict:
     if not isinstance(target, str) or not target:
         return {"full_c_0": None, "full_c_1": None, "status": "UNKNOWN", "reason": "facts do not identify their target"}
     space = derive_address_space(target, facts=facts)
-    narrow, full = space.store("scratchpad"), space.store("accumulator")
+    narrow, full = operand_store(space).store, accumulator_store(space).store
     narrow_type = _physical_type(narrow) if narrow is not None else None
     full_type = _physical_type(full) if full is not None else None
     status = "derived" if narrow_type is not None and full_type is not None else "UNKNOWN"

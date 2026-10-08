@@ -21,8 +21,9 @@ Schema status: **unqualified**. The exact canonical source contract lacks the re
 field. The migration check asserts this recorded diagnostic remains unchanged; a passing migration
 test is not a schema-validity claim. Resolve that source contract defect in a separate reviewed change.
 
-This directory contains the target definition and, where present, reference support plugins.
-Select it explicitly with `MERLIN_TARGET_PATH=/path/to/this/repo/merlin-support`.
+This directory is Merlin's canonical Gemmini support package, including its target definition
+and reference plugins. With `MERLIN_TARGET_PATH` unset, Merlin selects this in-repo provider;
+an explicit `MERLIN_TARGET_PATH` overrides that selection.
 It is not an evaluated compiler candidate and this metadata grants no trust or certification.
 
 The files recorded in `provenance.json` are byte-identical migration snapshots. Existing contracts
@@ -32,13 +33,11 @@ conformance relocation removes its old canonical owners and records that separat
 `conformance_migration.json`. Ignored/generated source
 artifacts have content hashes but no invented source commit.
 
-The historical candidate/schedule payload and its certificates remain unchanged outside this tree.
-Those certificates describe their original revisions, not the current branch with added support.
-Do not grade or publish this entire repository as a candidate: export the original candidate or
-schedule payload without `merlin-support/`. Existing recursive integrity checks intentionally
-remain unchanged and may reject harness-importing support code inside a candidate tree.
+Historical candidate and schedule payloads remain separate OOT compiler packages. Their
+certificates describe their original revisions, not this host support. Never grade or publish
+this support directory as a candidate; candidate integrity checks retain their stricter boundary.
 
-The OOT `backend/gemmini_sched.py` now derives non-curated single-instruction
+The canonical `backend/gemmini_sched.py` derives non-curated single-instruction
 schedule bindings from the selected header, RTL legal-funct evidence and declared
 semantic classes. `schedule_vocabulary_migration.json` records the exact support
 file transition from the earlier local companion revision and the incoming Merlin
@@ -47,11 +46,15 @@ implementation. Its pure header test does not qualify RTL evidence or hardware.
 Reference backend/tool plugins are experimenter-side answer-bearing code. Their presence does not
 make them public agent inputs; only reviewed contract grants may cross that boundary.
 
-Run the lightweight checks with an installed Merlin core:
+From the Merlin checkout root, run the lightweight checks with an installed Merlin core:
+
+Set `MERLIN_EXT_CHIPYARD` to the selected Chipyard checkout for the conformance
+recording checks. They record source identity without running a simulator.
 
 ```sh
-MERLIN_TARGET_PATH="$PWD/merlin-support" PYTHONPATH="$PWD/merlin-support" \
-  python -m pytest merlin-support/tests
+MERLIN_REPO_ROOT="$PWD" MERLIN_TARGET_PATH="$PWD/examples/gemmini/support" \
+  PYTHONPATH="$PWD/src:$PWD/examples/gemmini/support" \
+  python -m pytest examples/gemmini/support/tests
 ```
 
 ## Conformance and kernel authoring
@@ -68,7 +71,8 @@ and agentic kernel slot. It requires the Merlin experiments distribution and thi
 selected support provider; a same-named native backend is not a fallback. Inspect the CLI with:
 
 ```sh
-MERLIN_TARGET_PATH="$PWD/merlin-support" PYTHONPATH="$PWD/merlin-support" \
+MERLIN_REPO_ROOT="$PWD" MERLIN_TARGET_PATH="$PWD/examples/gemmini/support" \
+  PYTHONPATH="$PWD/src:$PWD/examples/gemmini/support" \
   python -m gemmini_conformance --help
 ```
 

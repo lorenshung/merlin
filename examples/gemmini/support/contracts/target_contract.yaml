@@ -149,7 +149,8 @@ compute_units:
     scaling: per_tensor
     requant: {ref: gemmini.accumulator_scale}
     # Semantic-family capability (ARR denominator): a GEMM accelerator — int8 contraction on the mesh
-    # (matmul + conv2d via im2col), fused relu/acc-scale/bias on readout,
+    # (matmul + conv2d via im2col), fused relu/acc-scale on readout, bias seeded
+    # into the accumulator before contraction,
     # mvin/mvout DMA (movement), and max pooling fused on the store path (reduction).
     #
     # ⚠️ WHAT IS ENCODABLE IS NOT WHAT IS BUILT, and this is the one place that distinction bites.
@@ -202,7 +203,7 @@ compute_units:
         standalone_evidence:
           - fact: accumulate_on_load
             roles: [operand_load, config, readout, commit]
-      - {family: movement, dtypes: [int8]}
+      - {family: movement, dtypes: [int8], forms: [copy]}
       # Max pooling, fused on the readout/store path -- NOT a standalone reduction unit, which is why
       # it composes with the two families that can produce the values it pools. Derived, and derived
       # from the ELABORATED design rather than from the ISA: the fact bundle records

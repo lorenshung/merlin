@@ -1,18 +1,16 @@
-"""Vendored target support: identical to its recorded source, selected by default, and never agent-visible.
+"""In-repo target support: recorded ownership, default selection, and agent-private bytes.
 
 Each target's Merlin support provider is tracked at ``examples/<example>/support``, with a ``SOURCE.yaml``
-beside it naming the companion commit the bytes were copied from. Everything here is derived from those
-records and from the providers' own declarations, so no target is named and a newly vendored provider
-is covered the day its record lands.
+beside it naming either canonical example ownership or a historical companion snapshot. Everything
+here is derived from those records and providers' own declarations, so no target is named.
 
 Three properties are held:
 
-* the vendored bytes are the recorded source (its git tree id, recomputed from the files on disk), except
-  the files ``SOURCE.yaml`` lists as normalized, and putting their companion blobs back reproduces the
-  companion's tree, so nothing else can differ;
-* with ``MERLIN_TARGET_PATH`` unset, each target's executable support is its vendored provider, and any
+* canonical examples bind their current tracked tree; historical snapshots bind their companion tree,
+  except the explicit path-normalized files whose original blobs reproduce that tree;
+* with ``MERLIN_TARGET_PATH`` unset, each target's executable support is its in-repo provider, and any
   explicit value -- the empty string included -- replaces that default;
-* the vendored trees stay experimenter-side: a sandbox that exposes the whole checkout, a bundle snapshot
+* support trees stay experimenter-side: a sandbox that exposes the whole checkout, a bundle snapshot
   or clean room built from a grant over all of ``examples/``, the transcript audit and publication all
   withhold or refuse them.
 """
@@ -35,6 +33,8 @@ from merlin.targetgen import plugins, target_registry
 from merlin.targetgen.providers import ProviderError, read_provider
 
 RECORD = "SOURCE.yaml"
+VENDORED_SCHEMA = "merlin.vendored_support.v1"
+CANONICAL_SCHEMA = "merlin.canonical_example_support.v1"
 
 
 def _records() -> list[tuple[Path, dict]]:
@@ -47,6 +47,7 @@ def _records() -> list[tuple[Path, dict]]:
 
 RECORDS = _records()
 IDS = [path.parent.name for path, _ in RECORDS]
+VENDORED_RECORDS = [(path, doc) for path, doc in RECORDS if doc.get("schema") == VENDORED_SCHEMA]
 
 
 def _support_root(record: Path, doc: dict) -> Path:
@@ -102,7 +103,7 @@ def _git_tree_id(root: Path, members: list[str], blobs: dict[str, str] | None = 
     return digest(tree).hex()
 
 
-def test_every_vendored_support_has_a_source_record():
+def test_every_in_repo_support_has_a_source_record():
     """No provider under ``examples/*/support`` without a record, and no record without its provider."""
     vendored = {root for root in target_registry.in_repo_support().values()}
     recorded = {_support_root(path, doc) for path, doc in RECORDS}
@@ -110,36 +111,115 @@ def test_every_vendored_support_has_a_source_record():
     assert vendored == recorded
 
 
-@pytest.mark.parametrize(("record", "doc"), RECORDS, ids=IDS)
-def test_vendored_support_is_its_recorded_source(record, doc):
+def _assert_source_record(record: Path, doc: dict) -> None:
     root = _support_root(record, doc)
     members = _tracked(root)
     assert len(members) == doc["file_count"]
-    assert _git_tree_id(root, members) == doc["vendored_tree"], "vendored bytes differ from the recorded tree"
-    normalized = {entry["path"]: entry["companion_blob"] for entry in doc["normalized"]}
-    assert set(normalized) <= set(members), "a normalized file is not part of the vendored tree"
-    assert all(entry["change"].strip() for entry in doc["normalized"]), "a normalization states no change"
-    # Only the listed files may differ: with their companion blobs back, the tree is the companion's.
-    assert _git_tree_id(root, members, normalized) == doc["source"]["tree"], "an unlisted file differs"
-    assert (doc["vendored_tree"] == doc["source"]["tree"]) == (not normalized)
+    if doc.get("schema") == VENDORED_SCHEMA:
+        assert _git_tree_id(root, members) == doc["vendored_tree"], "vendored bytes differ from the recorded tree"
+        normalized = {entry["path"]: entry["companion_blob"] for entry in doc["normalized"]}
+        assert set(normalized) <= set(members), "a normalized file is not part of the vendored tree"
+        assert all(entry["change"].strip() for entry in doc["normalized"]), "a normalization states no change"
+        # Only listed files may differ: their companion blobs reproduce the companion tree.
+        assert _git_tree_id(root, members, normalized) == doc["source"]["tree"], "an unlisted file differs"
+        assert (doc["vendored_tree"] == doc["source"]["tree"]) == (not normalized)
+        if doc["pinned"]["identical_to_source"]:
+            assert doc["pinned"]["provider_tree"] == doc["source"]["tree"]
+    elif doc.get("schema") == CANONICAL_SCHEMA:
+        assert set(doc) == {
+            "schema",
+            "target",
+            "provider_id",
+            "path",
+            "role",
+            "visibility",
+            "external_support_checkout_required",
+            "file_count",
+            "canonical_since",
+            "canonical_tree",
+            "origin",
+            "records",
+            "tests",
+        }
+        assert doc["role"] == "support" and doc["visibility"] == "experimenter_only"
+        assert doc["external_support_checkout_required"] is False
+        assert _git_tree_id(root, members) == doc["canonical_tree"], "canonical support bytes changed"
+        origin = doc["origin"]
+        assert set(origin) == {"repository", "published", "commit", "commit_date", "provider_root", "tree"}
+        assert origin["repository"].startswith("https://") and type(origin["published"]) is bool
+        assert all(
+            len(origin[key]) == 40 and all(ch in "0123456789abcdef" for ch in origin[key]) for key in ("commit", "tree")
+        )
+        datetime.fromisoformat(origin["commit_date"])
+        assert origin["provider_root"] and not Path(origin["provider_root"]).is_absolute()
+    else:
+        raise AssertionError("unknown support ownership schema")
     provider = read_provider(root)
     assert (provider.id, provider.target) == (doc["provider_id"], doc["target"])
     records = doc["records"]
     for relative in (records["file_provenance"], *records["migrations"]):
         assert (record.parent / relative).is_file(), relative
-    if doc["pinned"]["identical_to_source"]:
-        assert doc["pinned"]["provider_tree"] == doc["source"]["tree"]
+
+
+@pytest.mark.parametrize(("record", "doc"), RECORDS, ids=IDS)
+def test_support_matches_its_recorded_ownership(record, doc):
+    _assert_source_record(record, doc)
+
+
+@pytest.mark.parametrize("mutation", ["tree", "count", "role", "external_pin"])
+def test_canonical_support_record_refuses_mutation(mutation):
+    record, original = next((path, doc) for path, doc in RECORDS if doc.get("schema") == CANONICAL_SCHEMA)
+    doc = {**original}
+    if mutation == "tree":
+        doc["canonical_tree"] = "0" * 40
+    elif mutation == "count":
+        doc["file_count"] += 1
+    elif mutation == "role":
+        doc["role"] = "candidate"
+    else:
+        doc["pinned"] = {"companion_commit": "0" * 40}
+    with pytest.raises(AssertionError):
+        _assert_source_record(record, doc)
 
 
 def test_the_migration_manifest_agrees_with_every_source_record():
-    """``target_support.json`` lists each vendored copy with the same commit, tree and file count."""
+    """The registry distinguishes historical companion pins from canonical current trees."""
     import json
 
     manifest = json.loads((repo_root() / "build_tools/upstreams/target_support.json").read_text(encoding="utf-8"))
-    listed = {entry["vendored"]["source_record"]: entry for entry in manifest["companions"] if "vendored" in entry}
-    assert set(listed) == {path.relative_to(repo_root()).as_posix() for path, _ in RECORDS}
+    listed_legacy = {
+        entry["vendored"]["source_record"]: entry for entry in manifest["companions"] if "vendored" in entry
+    }
+    listed_canonical = {
+        entry["canonical_example"]["source_record"]: entry
+        for entry in manifest["companions"]
+        if "canonical_example" in entry
+    }
+    assert not (set(listed_legacy) & set(listed_canonical))
+    assert set(listed_legacy) | set(listed_canonical) == {
+        path.relative_to(repo_root()).as_posix() for path, _ in RECORDS
+    }
     for path, doc in RECORDS:
-        entry = listed[path.relative_to(repo_root()).as_posix()]
+        key = path.relative_to(repo_root()).as_posix()
+        if doc["schema"] == CANONICAL_SCHEMA:
+            entry = listed_canonical[key]
+            canonical = entry["canonical_example"]
+            assert set(canonical) == {"path", "source_record", "tree", "file_count"}
+            assert entry["ownership"] == "canonical_example"
+            assert entry["external_support_checkout_required"] is False
+            assert (
+                entry["provider_root"]
+                == canonical["path"]
+                == _support_root(path, doc).relative_to(repo_root()).as_posix()
+            )
+            assert (canonical["tree"], canonical["file_count"]) == (doc["canonical_tree"], doc["file_count"])
+            assert all(entry["origin"][field] == value for field, value in doc["origin"].items())
+            assert "vendored" not in entry and "companion_commit" not in entry
+            assert "companion_commit_relation" not in entry
+            assert (entry["provider_role"], entry["target"]) == (doc["role"], doc["target"])
+            continue
+        assert doc["schema"] == VENDORED_SCHEMA
+        entry = listed_legacy[key]
         vendored = entry["vendored"]
         assert entry["target"] == doc["target"]
         assert (vendored["commit"], vendored["tree"], vendored["vendored_tree"], vendored["file_count"]) == (
@@ -157,7 +237,7 @@ def test_the_migration_manifest_agrees_with_every_source_record():
 PIN_RELATIONS = {"same_commit", "base_pin_of_merged_tip"}
 
 
-@pytest.mark.parametrize(("record", "doc"), RECORDS, ids=IDS)
+@pytest.mark.parametrize(("record", "doc"), VENDORED_RECORDS, ids=[path.parent.name for path, _ in VENDORED_RECORDS])
 def test_the_pinned_commit_and_the_copied_commit_are_told_apart(record, doc):
     """Two different commits in one record must say which is which, and must carry one provider tree.
 
@@ -182,7 +262,7 @@ def test_the_pinned_commit_and_the_copied_commit_are_told_apart(record, doc):
 
 def test_a_second_commit_without_a_relation_is_refused():
     """The relation check above can fail: a record that pins a different commit as ``same_commit`` is caught."""
-    path, doc = next((path, doc) for path, doc in RECORDS if doc["pinned"]["relation"] == "same_commit")
+    path, doc = next((path, doc) for path, doc in VENDORED_RECORDS if doc["pinned"]["relation"] == "same_commit")
     forged = {**doc, "pinned": {**doc["pinned"], "companion_commit": "0" * 40}}
     with pytest.raises(AssertionError):
         test_the_pinned_commit_and_the_copied_commit_are_told_apart(path, forged)

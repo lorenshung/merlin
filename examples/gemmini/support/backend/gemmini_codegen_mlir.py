@@ -49,7 +49,7 @@ GARBAGE = 0xFFFFFFFF  # universal, not target-specific — no derivation needed
 # import line rather than at the thing that actually needed the facts.
 @cache
 def _isa() -> SimpleNamespace:
-    from merlin.targetgen.address_space import derive_address_space
+    from merlin.targetgen.address_space import accumulator_store, derive_address_space, operand_store
     from merlin.targetgen.rtl.facts import load_facts
     from merlin.targetgen.target_experiment import load_capability_manifest
 
@@ -74,8 +74,8 @@ def _isa() -> SimpleNamespace:
     # width), not the per-bank depth. Using depth rejected valid retained pool planes and made operand
     # residency four times more conservative on the pinned 4-bank scratchpad.
     address_space = derive_address_space("gemmini", facts=facts_rec)
-    sp_store = address_space.store("scratchpad")
-    acc_store = address_space.store("accumulator")
+    sp_store = operand_store(address_space).store
+    acc_store = accumulator_store(address_space).store
     sp_rows = sp_store.total_rows if sp_store is not None else None
     acc_rows = acc_store.total_rows if acc_store is not None else None
     # The CONTAINER the accumulator holds, derived from the same CIRCT memory fact that gives its row

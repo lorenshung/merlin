@@ -29,7 +29,7 @@ import sys
 import tempfile
 import threading
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +37,7 @@ from merlin.runtime.backends.base import BackendInfo, BackendKind, TargetClass, 
 from merlin.runtime.metrics import COMMON_METRIC_NAMES
 
 from .gemmini_codegen import DIM, CodegenError, generate_driver  # sibling — moves with this backend package
+from .gemmini_memory_readback import memory_readback_transport, prepare_memory_readback
 
 # Self-register this reference NPU backend with the class registry (base._REGISTRY). Discovery in
 # base._ensure_discovered imports this module to run the call, so the core carries no name -> module
@@ -283,30 +284,56 @@ def readout_epilogue_capability() -> list[dict[str, Any]]:
     full-width bit. ``requant`` is deliberately ABSENT from both: merlin's integer round-half-up
     shift is not what this hardware's float scale computes, so it stays a host-side op rather than
     being declared as something this readout applies.
+
+    A fused bias is a program-level operation: the load path seeds accumulator rows with the bias,
+    then the mesh accumulates its first product onto those rows. The readout has no bias operand or
+    bias adder, so neither spelling of that stage belongs in its ``applies`` set.
     """
     return [
         {
             "selector": "i8",
-            "applies": ["acc_scale", "relu", "bias_add", "bias", "maxpool"],
-            "evidence": "the narrowing readout applies the accumulator scale and the activation; "
+            "applies": ["acc_scale", "relu", "maxpool"],
+            "evidence": "the narrowing readout applies accumulator scale and activation; bias is "
+            "loaded into the accumulator before computation, not added during readout "
+            "(GemminiRocketConfig AccumulatorScale and LoopMatmulLdD/LoopConvLdBias); "
             "RTL-certified bit-exact against Tensor.requant_acc_scale (decision A)",
         },
         {
             "selector": "i32",
-            # THE BIAS IS NOT A READOUT STAGE ON THIS TARGET: it is preloaded into the accumulator (the
-            # D operand) before the contraction accumulates onto it, so the raw accumulator the
-            # full-width readout writes already carries it. Declaring it unapplied refused every
-            # biased int32 commit -- ResNet-50's classifier among them -- for every package, and left
-            # the group to a library host path. MEASURED: the vendor library's full-width matmul with
-            # a bias (D) on the GSIM emulator, job 6169f722 (vendor_reference_gsimdump), classifier g71
-            # correct and argmax 21 = oracle.
-            "applies": ["bias_add", "bias"],
-            "evidence": "the full-width readout writes the raw accumulator -- the preloaded bias plus "
-            "the products -- discarding the scaled and activated value it computed (RoCC model, "
-            "accumulator mvout path); measured correct with a bias on the GSIM emulator (vendor "
-            "reference 6169f722, classifier g71)",
+            "applies": [],
+            "evidence": "the full-width readout writes the raw accumulator without applying an "
+            "epilogue stage (RoCC accumulator mvout path); any contraction bias already in "
+            "the accumulator was loaded before computation, via the separate accumulator_seed "
+            "route (vendor reference gsimdump 6169f722, classifier g71)",
         },
     ]
+
+
+def epilogue_stage_routes() -> list[dict[str, Any]]:
+    """Contraction bias is seeded through MVIN, never added by either readout.
+
+    LoopMatmulLdD and LoopConvLdBias write bias rows with accumulate=0 into the accumulator.
+    The OOT program emitter loads the named bias before its first PRELOAD/COMPUTE_PRELOADED.
+    The route is restricted to contraction command-buffer paths; a RESIDUAL_ADD overwriting
+    the same accumulator cannot inherit this route.
+    """
+    return [{
+        "stages": ["bias_add", "bias"],
+        "site": "accumulator_seed",
+        "composed_with": "contraction",
+        "readouts": ["i8", "i32"],
+        "producer_opcodes": ["MATMUL_RESIDENT", "CONV2D"],
+        "consumer_opcodes": ["COMMIT", "CONV2D"],
+        "operand_attribute": "bias",
+        "operand_role": "bias",
+        "evidence": "Selected GemminiRocketConfig FIRRTL LoopMatmulLdD and LoopConvLdBias "
+        "write bias into AccumulatorMem with accumulate=0; AccumulatorScale has no bias "
+        "operand. OOT gemmini_codegen_mlir emits bias MVIN before PRELOAD/COMPUTE_PRELOADED; "
+        "gemmini_loop_conv requires the bias operand and uses the bias-load loop path. "
+        "the decoded emitted-trace witness is test_gemmini_bias_epilogue.py::"
+        "test_bias_is_moved_into_the_accumulator_with_a_repeating_row_stride and "
+        "::test_every_k_tile_accumulates_onto_the_bias_including_the_first.",
+    }]
 
 
 def readout_scalar_abi() -> dict[str, Any] | None:
@@ -736,9 +763,14 @@ def prepare_short_program_execution(elf, **kwargs):
     return prepare_gsim_command(elf, **kwargs)
 
 
-def run_elf(elf: str | Path, simulator: str = "verilator", timeout: int = 600) -> str:
-    """Run the ELF on the chosen oracle; return raw console output."""
+def run_elf(
+    elf: str | Path, simulator: str = "verilator", timeout: int = 600, *, capture_bytes: bool = False,
+    memory_readback: Mapping[str, object] | None = None,
+) -> str | bytes:
+    """Run the ELF on the chosen oracle; an explicit export never changes the default command."""
     preexec = None
+    slot = nullcontext()
+    export = prepare_memory_readback(elf, simulator, memory_readback) if memory_readback is not None else None
     if simulator == "spike":
         env = dict(os.environ)
         # WHICH functional model, resolved from the target's own contract rather than from the ambient
@@ -755,19 +787,24 @@ def run_elf(elf: str | Path, simulator: str = "verilator", timeout: int = 600) -
         # Likewise the harts and the ISA a two-hart image states (its host code on a vector hart).
         harts, isa = declared_harts(elf), declared_isa(elf)
         machine = [*([f"-p{harts}"] if harts else []), *([f"--isa={isa}"] if isa else [])]
-        cmd = [str(spike_path()), *flags, *machine, *memory, str(elf)]
+        cmd = [str(spike_path()), *flags, *machine, *memory, *(export.argv_suffix if export else ()), str(elf)]
     elif simulator == "verilator":
         env = dict(os.environ)
         cmd = [str(verilator_path()), str(elf)]
         preexec = _unlimited_stack
     elif simulator == "gsim":
+        from merlin.targetgen import rtl_engine_policy
+
+        if getattr(rtl_engine_policy, "GSIM_RUNTIME_SLOT_PROTOCOL", None) != "reentrant_per_thread_v1":
+            raise GemminiError("GSim requires Merlin runtime slot protocol reentrant_per_thread_v1")
+        slot = rtl_engine_policy.gsim_runtime_slot(wait_timeout_s=timeout)
         env = dict(os.environ)
         # The SAME ELF the Verilator path runs, so the console it prints is the same OUT/METRIC/DONE text
         # and `parse_output` is unchanged. GSIM re-roots the circuit at ChipTop and so has no SimTSI to
         # load the image: `+loadmem` is the backdoor that writes it into the backing store, and it is
         # passed BESIDE the positional argument rather than instead of it (the emitted harness reads the
         # symbol table from the positional path). `+max-cycles` is the hang bound, not a perf knob.
-        cmd = _gsim_argv(elf)
+        cmd = [*_gsim_argv(elf), *(export.argv_suffix if export else ())]
         preexec = _unlimited_stack
         # NB the console is buffered in this process, like every other oracle here. That is fine for the
         # OUT/METRIC/DONE protocol but NOT for a model built with a per-instruction commit trace: on the
@@ -775,12 +812,19 @@ def run_elf(elf: str | Path, simulator: str = "verilator", timeout: int = 600) -
         # GSIM model is ever emitted with tracing on, this branch needs that same treatment.
     else:
         raise GemminiError(f"unknown simulator {simulator!r}")
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env, preexec_fn=preexec)
+    with slot:
+        if export is not None:
+            export.revalidate()
+        proc = subprocess.run(
+            cmd, capture_output=True, text=not capture_bytes, timeout=timeout, env=env, preexec_fn=preexec,
+        )
     # The Verilator harness exits 0 on $finish; spike exits 0 on htif_exit(0); the GSIM-emitted model
     # exits 0 when the design's own stop condition fires before +max-cycles.
     if proc.returncode != 0:
         raise GemminiError(f"{simulator} exited {proc.returncode}:\n{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}")
-    _refuse_on_rtl_assertion(simulator, proc.stdout, proc.stderr)
+    _refuse_on_rtl_assertion(simulator, proc.stdout, proc.stderr, binary_output=capture_bytes)
+    if export is not None:
+        export.revalidate(completed=True)
     return proc.stdout
 
 
@@ -790,7 +834,9 @@ def run_elf(elf: str | Path, simulator: str = "verilator", timeout: int = 600) -
 _RTL_ASSERTION_MARKER = "Assertion failed"
 
 
-def _refuse_on_rtl_assertion(simulator: str, stdout: str, stderr: str) -> None:
+def _refuse_on_rtl_assertion(
+    simulator: str, stdout: str | bytes, stderr: str | bytes, *, binary_output: bool = False,
+) -> None:
     """Fail a run whose design asserted, whatever the engine did about it afterwards.
 
     The exit code alone is not enough, and the gap is in the dangerous direction. Verilator turns a
@@ -805,7 +851,17 @@ def _refuse_on_rtl_assertion(simulator: str, stdout: str, stderr: str) -> None:
     is the wrong-device hazard in miniature: the numbers would describe a machine that would not have
     run this.
     """
+    if binary_output:
+        from merlin.runtime.out_bin import binary_console_diagnostics
+
+        if type(stdout) is not bytes:
+            raise GemminiError("binary readback requires raw stdout bytes")
+        stdout = binary_console_diagnostics(stdout)
     for stream in (stdout, stderr):
+        if isinstance(stream, bytes):
+            # Only assertion diagnostics are projected as text; raw stdout is
+            # returned and archived unchanged by the selected binary caller.
+            stream = stream.decode("utf-8", errors="replace")
         if not stream or _RTL_ASSERTION_MARKER not in stream:
             continue
         # The marker line carries the message; the SITE is on the next line (`at <file>:<line> ...`).
@@ -826,10 +882,14 @@ def _refuse_on_rtl_assertion(simulator: str, stdout: str, stderr: str) -> None:
         )
 
 
-def parse_output(text: str) -> tuple[dict[str, list], dict[str, int]]:
+def parse_output(text: str | bytes) -> tuple[dict[str, list], dict[str, int]]:
     """Parse the OUT/METRIC/DONE console into (outputs, raw metrics) — shared protocol parser, with
     the gemmini-specific robustness: strip stray Verilator ``%Warning:`` fragments + tolerate a
     malformed METRIC line instead of raising."""
+    if type(text) is bytes:
+        from merlin.runtime.out_bin import parse_binary_console
+
+        return parse_binary_console(text)
     from merlin.runtime.backends.base import _strip_warning_fragments, parse_console
 
     cleaned = _strip_warning_fragments(text)
@@ -1079,6 +1139,7 @@ def whole_model_driver():
 # metric), read through `harness_abi.for_target` below.
 from .gemmini_codegen_mlir import (
     _batched_matmul_harness_c,
+    _const_operand,
     _harness_c,
     _measurement_c_fragments,
     container_for,
@@ -1236,7 +1297,8 @@ def _flat_matrix_shape(spec: dict, *, name: str) -> tuple[int, int]:
     return rows, shape[-1]
 
 
-def _native_interface_harness_c(cb: dict, command: dict, *, inputs: dict | None = None) -> str:
+def _native_interface_harness_c(cb: dict, command: dict, *, inputs: dict | None = None,
+                                blobs: dict | None = None) -> str:
     """Harness for a schema-native whole op with the interface's pointer ABI.
 
     The tensor table is emitted by the interface parser in declaration order.  Preserve that order
@@ -1253,7 +1315,7 @@ def _native_interface_harness_c(cb: dict, command: dict, *, inputs: dict | None 
     if opcode == "BATCHED_MATMUL":
         # This helper validates the exact a/w/dst interface, preserves rank-N output, and uses the
         # identical target-padded buffer geometry as the direct MLIR emitter.
-        return _batched_matmul_harness_c(cb, inputs=inputs)
+        return _batched_matmul_harness_c(cb, inputs=inputs, blobs=blobs)
     operands = command.get("operands") or {}
     packs = {
         item.get("operands", {}).get("dst"): item.get("operands", {}).get("src")
@@ -1306,10 +1368,8 @@ def _native_interface_harness_c(cb: dict, command: dict, *, inputs: dict | None 
         if name not in leaves:
             raise CodegenError(f"native interface input {name!r} was not materialized")
         padded = _pad_rowmajor(list(leaves[name].data), rows, cols, prows, pcols)
-        decls.append(
-            f"static const elem_t T_{name}[{prows * pcols}] row_align(1) = "
-            f"{{{','.join(str(int(value)) for value in padded)}}};"
-        )
+        decls.append(_const_operand(f"T_{name}", "elem_t", padded,
+                                    dtype=leaves[name].dtype, blobs=blobs))
 
     call = ", ".join(f"(void*)T_{name}" for name in args)
     prints: list[str] = []
@@ -1420,7 +1480,14 @@ def _strict_warm_profile_renderer(*, target: str, warm_profile):
 
 
 def _whole_program_harness_c(
-    cb: dict, *, target: str, inputs: dict | None = None, prepack_authorizations=None, warm_profile=None
+    cb: dict,
+    *,
+    target: str,
+    inputs: dict | None = None,
+    prepack_authorizations=None,
+    warm_profile=None,
+    source_owned_mutables=None,
+    readback_policy=None,
 ) -> str:
     """Legacy entrypoint: delegate to the one pure renderer with unchanged policy."""
     from merlin.runtime.commandbuffer import materialize_inputs
@@ -1431,6 +1498,8 @@ def _whole_program_harness_c(
         cb,
         inputs=inputs,
         prepack_authorizations=prepack_authorizations,
+        source_owned_mutables=source_owned_mutables,
+        readback_policy=readback_policy,
         legacy_helpers=(_ceil_dim, _pad_rowmajor, _buffer_extent, materialize_inputs),
         measurement_fragments=_measurement_c_fragments,
         strict_profile_renderer=(
@@ -1446,6 +1515,40 @@ def build_source_paths():
     from .gemmini_codegen import _build_support
 
     return _build_support.build_source_paths()
+
+
+def describe_caller_layout(cb: dict, *, target: str, facts: dict) -> dict:
+    """Expose only the selected caller's physical pointer layout, never tensor values."""
+    from .gemmini_codegen import DIM, _build_support, _ceil_dim
+
+    if not isinstance(cb, dict) or not isinstance(facts, dict) or not isinstance(facts.get("facts"), dict):
+        raise CodegenError("selected caller geometry requires typed command buffer and RTL facts")
+    arrays = facts["facts"].get("arrays") or ()
+    mesh = [row for row in arrays if isinstance(row, dict) and row.get("name") == "mesh"]
+    if (
+        cb.get("target") != target
+        or (facts.get("inputs") or {}).get("target") != target
+        or len(mesh) != 1
+        or type(mesh[0].get("cols")) is not int
+        or mesh[0]["cols"] != DIM
+    ):
+        raise CodegenError("selected caller geometry differs from the pinned target and RTL facts")
+    return _build_support.describe_whole_program_layout(cb, legacy_helpers=(_ceil_dim, _buffer_extent))
+
+
+def caller_layout_source_paths():
+    """Exact target-owned code whose bytes define the public layout projection."""
+    from pathlib import Path
+
+    from .gemmini_codegen import _build_support
+
+    backend = Path(__file__).resolve().parent
+    return (
+        backend / "__init__.py",
+        backend / "gemmini.py",
+        backend / "gemmini_codegen.py",
+        *_build_support.build_source_paths(),
+    )
 
 
 def _host_lane_harness_c(cb: dict, *, target: str, inputs: dict | None = None) -> str:
@@ -1564,6 +1667,9 @@ def render_harness(
     prepack_authorizations=None,
     compact_caller=None,
     warm_profile=None,
+    blobs: dict | None = None,
+    source_owned_mutables=None,
+    readback_policy=None,
 ) -> str:
     """Render the runner-owned harness for ``cb`` — the `harness_renderer` capability.
 
@@ -1577,17 +1683,29 @@ def render_harness(
     reported as a functional failure of the target.
     """
     whole_program = (cb.get("kernel_abi") or {}).get("kind") == "whole_program"
+    if source_owned_mutables is not None and not whole_program:
+        raise CodegenError("source-owned scratch requires an explicit whole-program ABI")
     if warm_profile is not None and not whole_program:
         raise CodegenError("strict warm profiling is available only for an explicit whole-program kernel ABI")
+    if readback_policy is not None and not whole_program:
+        raise CodegenError("full-value readback requires an explicit whole-program kernel ABI")
     if compact_caller is not None:
-        if inputs is not None or prepack_authorizations is not None:
+        if readback_policy is not None:
+            raise CodegenError("full-value readback cannot use a prepared compact caller")
+        if inputs is not None or prepack_authorizations is not None or source_owned_mutables is not None:
             raise CodegenError("compact caller accepts only its already validated explicit byte inputs")
         from .gemmini_compact_caller import render_compact_caller
 
         return render_compact_caller(cb, compact_caller, target=target, warm_profile=warm_profile)
     if whole_program:
         return _whole_program_harness_c(
-            cb, target=target, inputs=inputs, prepack_authorizations=prepack_authorizations, warm_profile=warm_profile
+            cb,
+            target=target,
+            inputs=inputs,
+            prepack_authorizations=prepack_authorizations,
+            warm_profile=warm_profile,
+            source_owned_mutables=source_owned_mutables,
+            readback_policy=readback_policy,
         )
     if prepack_authorizations is not None:
         raise CodegenError("host prepack authorization requires the explicit whole-program caller")
@@ -1597,5 +1715,5 @@ def render_harness(
         return _movement_harness_c(cb, target=target, inputs=inputs)
     native = _native_interface_command(cb)
     if native is not None:
-        return _native_interface_harness_c(cb, native, inputs=inputs)
-    return _harness_c(cb, inputs)
+        return _native_interface_harness_c(cb, native, inputs=inputs, blobs=blobs)
+    return _harness_c(cb, inputs, blobs=blobs)

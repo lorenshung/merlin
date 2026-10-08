@@ -32,6 +32,24 @@ def test_explicit_harness_override_is_not_replaced(monkeypatch, tmp_path):
     assert backend().rocc_tests_dir() == tmp_path
 
 
+def test_bias_is_not_declared_as_a_readout_operation():
+    readouts = {row["selector"]: row for row in backend().readout_epilogue_capability()}
+    assert {"acc_scale", "relu"} <= set(readouts["i8"]["applies"])
+    assert not {"bias_add", "bias"} & set(readouts["i8"]["applies"])
+    assert not readouts["i32"]["applies"]
+    assert "loaded into the accumulator before computation" in readouts["i8"]["evidence"]
+
+
+def test_bias_route_is_contraction_seed_not_operand_sum_readout():
+    [route] = backend().epilogue_stage_routes()
+    assert route["site"] == "accumulator_seed"
+    assert route["composed_with"] == "contraction"
+    assert {"bias_add", "bias"} == set(route["stages"])
+    assert {"i8", "i32"} == set(route["readouts"])
+    assert "RESIDUAL_ADD" not in route["producer_opcodes"]
+    assert "LoopMatmulLdD" in route["evidence"] and "LoopConvLdBias" in route["evidence"]
+
+
 def _conv():
     module = importlib.import_module(backend().__name__ + ".gemmini_loop_conv")
     module.derive_native_conv_contract.cache_clear()

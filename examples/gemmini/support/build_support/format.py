@@ -1,6 +1,8 @@
 """Pure target buffer declarations and storage words; no backend discovery or execution."""
 from __future__ import annotations
+
 from dataclasses import dataclass
+
 
 class CodegenError(RuntimeError):
     pass
@@ -42,6 +44,8 @@ class Container:
     align: str
     cast: str
     conv: str
+    word_bytes: int
+    signed: bool
 
     def decl(self, symbol: str, elems: int, *, const: bool = False,
              initializer: str | None = None) -> str:
@@ -73,7 +77,7 @@ def container_for(dtype: str) -> Container:
     from merlin.common.quant_formats import storage_bits
     from merlin.runtime.fp8_formats import float_format_of
     if dtype == OPERAND_DTYPE:
-        return Container(OPERAND_CTYPE, "row_align", "int", "%d")
+        return Container(OPERAND_CTYPE, "row_align", "int", "%d", 1, True)
     bits = storage_bits(dtype)                    # fails closed on an unregistered spelling
     if bits % 8 or bits not in (8, 16, 32, 64):
         # A SUB-BYTE LOGICAL WIDTH IS NOT A STORAGE WIDTH. `storage_bits` answers how many bits the
@@ -96,9 +100,10 @@ def container_for(dtype: str) -> Container:
                 f"buffer")
     if float_format_of(dtype) is not None:
         return Container(f"uint{bits}_t", "row_align_acc",
-                         "unsigned long long" if bits > 32 else "unsigned", "%llu" if bits > 32 else "%u")
+                         "unsigned long long" if bits > 32 else "unsigned", "%llu" if bits > 32 else "%u",
+                         bits // 8, False)
     return Container(f"int{bits}_t", "row_align_acc",
-                     "long long" if bits > 32 else "int", "%lld" if bits > 32 else "%d")
+                     "long long" if bits > 32 else "int", "%lld" if bits > 32 else "%d", bits // 8, True)
 
 
 def container_words(values, dtype: str) -> list[int]:

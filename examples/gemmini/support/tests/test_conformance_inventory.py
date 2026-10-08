@@ -24,8 +24,29 @@ TRANSFORMATIONS = (
     "primitive_helper_migration.json",
     "transport_alignment_migration.json",
     "standalone_elementwise_review.json",
+    "support_integration_review.json",
+    "rocc_contract_key_import_review.json",
+    "support_publication_review.json",
 )
 OUTPUT_SCOPES = {
+    "support_publication_review.json": {
+        "backend/gemmini.py",
+        "build_support/AGENT.md",
+        "build_support/__init__.py",
+        "build_support/format.py",
+        "build_support/whole_program.py",
+        "resources/gemmini-rocc-tests/riscv-tests/benchmarks/common/syscalls.c",
+    },
+    "rocc_contract_key_import_review.json": {"backend/rocc_semantics.py"},
+    "support_integration_review.json": {
+        "backend/gemmini.py",
+        "backend/gemmini_codegen_mlir.py",
+        "backend/gemmini_loop_matmul_decode.py",
+        "backend/rtl_checks.py",
+        "contracts/target_contract.yaml",
+        "contracts/residual.yaml",
+        "tests/test_provider_resources.py",
+    },
     "standalone_elementwise_review.json": {"contracts/target_contract.yaml", "contracts/residual.yaml"},
     "transport_alignment_migration.json": {
         "gemmini_conformance/kernel_slot.py",
@@ -61,6 +82,8 @@ def evolved_identity(root, path, expected, *, after=None):
             outputs = document["current_files"]
             assert set(outputs) == OUTPUT_SCOPES[inventory], "unexpected supersession scope"
             assert document["supersedes"], "output replacement must declare supersession"
+            if path in outputs and "previous_files" in document:
+                assert document["previous_files"][path] == expected, "discontinuous integration identity"
             expected = outputs.get(path, expected)
         else:
             changes = {row["destination"]: row for row in document["files"]}
@@ -127,3 +150,62 @@ def test_changed_or_conflicting_migration_records_refuse(tmp_path, mutation):
     (tmp_path / TRANSFORMATIONS[0]).write_text(json.dumps(record))
     with pytest.raises(AssertionError):
         evolved_identity(tmp_path, row["destination"], expected)
+
+
+def test_integration_refuses_relabelled_predecessor(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    name = "support_integration_review.json"
+    record = json.loads((root / name).read_text())
+    record["previous_files"]["backend/gemmini.py"] = "0" * 64
+    (tmp_path / name).write_text(json.dumps(record))
+    with pytest.raises(AssertionError, match="discontinuous integration identity"):
+        evolved_identity(
+            tmp_path,
+            "backend/gemmini.py",
+            "8ec831a02f779620389484bfa5f9e4e71b7b2f6600fd3b3e2918f557f03df955",
+            after="standalone_elementwise_review.json",
+        )
+
+
+@pytest.mark.parametrize("mutation", ["predecessor", "scope"])
+def test_rocc_key_import_review_refuses_relabelled_predecessor_or_scope(tmp_path, mutation):
+    root = Path(__file__).resolve().parents[1]
+    name = "rocc_contract_key_import_review.json"
+    record = json.loads((root / name).read_text())
+    if mutation == "predecessor":
+        record["previous_files"]["backend/rocc_semantics.py"] = "0" * 64
+    else:
+        record["current_files"]["backend/unrelated.py"] = "0" * 64
+    (tmp_path / name).write_text(json.dumps(record))
+    with pytest.raises(AssertionError):
+        evolved_identity(
+            tmp_path,
+            "backend/rocc_semantics.py",
+            "7c1e3e3714b08c70d587513c9ea0ad149d63cd16ead03d58494c1c6c14312b6f",
+            after="support_integration_review.json",
+        )
+
+
+@pytest.mark.parametrize("mutation", ["predecessor", "output", "scope"])
+def test_publication_review_refuses_changed_chain_or_output(tmp_path, mutation):
+    root = Path(__file__).resolve().parents[1]
+    for inventory in TRANSFORMATIONS:
+        (tmp_path / inventory).write_bytes((root / inventory).read_bytes())
+    name = "support_publication_review.json"
+    record = json.loads((tmp_path / name).read_text())
+    path = "backend/gemmini.py"
+    if mutation == "predecessor":
+        record["previous_files"][path] = "0" * 64
+    elif mutation == "output":
+        record["current_files"][path] = "0" * 64
+    else:
+        record["current_files"]["backend/unrelated.py"] = "0" * 64
+    (tmp_path / name).write_text(json.dumps(record))
+    with pytest.raises(AssertionError):
+        expected = evolved_identity(
+            tmp_path,
+            path,
+            "f19891c351a6adf155db3228e972342aef1523d64d47075ea377146ccfafd8a3",
+            after="support_integration_review.json",
+        )
+        assert expected == hashlib.sha256((root / path).read_bytes()).hexdigest()

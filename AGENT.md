@@ -17,12 +17,14 @@ certify a functional compiler (1), and optimize target performance (2).
 ## Invariants
 
 Read `CLAUDE.md`, local instructions, and `docs/reference/architecture.md` before changes.
-Target-specific facts and implementations belong in OOT support packages. Evaluated compiler
-candidates have stricter import/access rules than trusted support plugins.
+Target compiler payloads and target dialect implementations belong OOT. Trusted target evaluator
+adapters and reference support may be canonical under `examples/<target>/support`; generic mechanisms
+belong in core. Evaluated compiler candidates have stricter import/access rules than support plugins.
 
-**Compiler ownership rule:** all target-specific implementations belong in the target's OOT
+**Compiler ownership rule:** target-specific compiler implementations belong in the target's OOT
 MLIR dialect repository: dialect operations, instruction encodings, device kernels/schedules,
-hardware layout and resource facts, target ABI glue, and target execution support. Merlin owns
+hardware layout and resource facts, and target ABI glue. Trusted, agent-private evaluator adapters,
+reference programs and selected simulator support may live in `examples/<target>/support`. Merlin owns
 reusable host code generation, packing, requantization, graph/global optimizations, dispatch,
 buffer ownership, device compilation orchestration, and runtime infrastructure. A transform
 that can be selected independently of the accelerator belongs in Merlin even if its first

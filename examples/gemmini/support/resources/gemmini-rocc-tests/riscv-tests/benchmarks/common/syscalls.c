@@ -79,6 +79,13 @@ void printstr(const char* s)
   syscall(SYS_write, 1, (uintptr_t)s, strlen(s));
 }
 
+/* Length-taking coherent output for the explicit binary readback protocol.
+ * Unlike printstr, embedded NUL bytes are part of the payload. */
+int printbuf(const void* data, size_t length)
+{
+  return length != 0 && syscall(SYS_write, 1, (uintptr_t)data, length) == length;
+}
+
 void __attribute__((weak)) thread_entry(int cid, int nc)
 {
   // multi-threaded programs override this function.

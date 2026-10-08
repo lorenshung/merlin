@@ -78,18 +78,16 @@ def load_default_facts(target: str) -> dict[str, Any]:
         mesh = next((a for a in f.get("arrays", []) if a["name"] == "mesh"), None)
         if mesh:
             facts["mesh"] = [mesh["rows"], mesh["cols"]]
-        sp = next((m for m in f.get("memories", []) if m["name"] == "scratchpad"), None)
-        if sp and sp.get("bytes"):
-            facts["scratchpad_bytes"] = sp["bytes"]
         # A local-address operand is not necessarily a flat scratchpad row number.  Derive both
         # memory capacities in the units the ISA addresses (rows) from the same CIRCT facts record;
         # address_space also accounts for the accumulator's wider element type and banked depth.
         try:
-            from merlin.targetgen.address_space import derive_address_space
+            from merlin.targetgen.address_space import accumulator_store, derive_address_space, operand_store
             space = derive_address_space(target, facts=rec)
-            scratchpad = space.store("scratchpad")
-            accumulator = space.store("accumulator")
+            scratchpad = operand_store(space).store
+            accumulator = accumulator_store(space).store
             if scratchpad is not None:
+                facts["scratchpad_bytes"] = scratchpad.nbytes
                 facts["scratchpad_rows"] = scratchpad.total_rows
                 if isinstance(scratchpad.total_rows, int):
                     width = max(1, (scratchpad.total_rows - 1).bit_length())
@@ -2123,12 +2121,18 @@ def project_facts(facts_rec: dict) -> dict:
     (mesh + scratchpad capacity)."""
     facts = facts_rec.get("facts", facts_rec)
     mesh = next((a for a in facts.get("arrays", []) if a["name"] == "mesh"), {})
-    sp = next((m for m in facts.get("memories", []) if m["name"] == "scratchpad"), {})
     out = {}
     if mesh:
         out["mesh"] = [mesh["rows"], mesh["cols"]]
-    if sp.get("bytes"):
-        out["scratchpad_bytes"] = sp["bytes"]
+    target = facts.get("target")
+    if isinstance(target, str) and target:
+        try:
+            from merlin.targetgen.address_space import derive_address_space, operand_store
+            scratchpad = operand_store(derive_address_space(target, facts=facts_rec)).store
+            if scratchpad is not None and scratchpad.nbytes is not None:
+                out["scratchpad_bytes"] = scratchpad.nbytes
+        except Exception:
+            pass  # The advisory check leaves a fact unknown rather than guessing a memory by name.
     layouts = next((i.get("bundles", {}) for i in facts.get("interfaces", [])
                     if i.get("name") == "register_bundle_layouts"), {})
     mvout_layout = layouts.get("ConfigMvoutRs1") if isinstance(layouts, dict) else None

@@ -18,9 +18,10 @@ Experiment definitions start at `experiments/catalog.yaml`; retained research in
 
 ## Compiler and OOT ownership rule
 
-All target-specific dialect operations, instruction encodings, device kernels and schedules,
-hardware layout/resource facts, ABI glue and target execution support belong in the target's
-OOT MLIR dialect repository. Reusable host code generation, packing, requantization,
+Target-specific compiler dialect operations, instruction encodings, device kernels and schedules,
+hardware layout/resource facts and ABI glue belong in the target's OOT MLIR dialect repository.
+Trusted evaluator adapters, reference programs and selected simulator support may be canonical under
+`examples/<target>/support`; they are not candidate payloads. Reusable host code generation, packing, requantization,
 graph/global optimizations, dispatch, buffer ownership, device compilation orchestration and
 runtime infrastructure belong in Merlin. An optimization selectable independently of the
 accelerator belongs in Merlin even when first measured on one target. Split mixed changes at
@@ -29,13 +30,14 @@ Promote generic OOT prototypes into Merlin and make the provider delegate; do no
 duplicate implementations. Preserve explicit numeric policy selection and correctness gates.
 
 Merlin's own **support provider** for a target (backend, oracles, build support and their tests)
-is target-specific code, so it is vendored at `examples/<target>/support/`, byte-identical to the
-companion commit recorded in `examples/<target>/SOURCE.yaml` except the provenance files that
-`SOURCE.yaml` lists as path-normalized (host paths rewritten repo-relative, original blob ids
-recorded). It is the selected support when
+is trusted target-specific code under `examples/<target>/support/`. `SOURCE.yaml` distinguishes
+canonical example ownership, whose tracked tree is verified directly, from historical vendored
+snapshots, whose bytes match a recorded companion commit except explicitly path-normalized files.
+The in-repo provider is the selected support when
 `MERLIN_TARGET_PATH` is unset, it is never agent-visible, and it is never a compiler candidate.
-Change it by re-vendoring from a recorded commit, not by editing it in place. Compiler candidates
-stay in their OOT repositories. See `docs/guides/target_resolution.md`.
+Canonical support changes require a new reviewed tracked-tree identity; historical snapshots change
+by re-vendoring from a recorded commit. Compiler candidates stay in their OOT repositories.
+See `docs/guides/target_resolution.md`.
 
 The OOT dialect is a **general compiler backend**, not a workload-specific kernel generator.
 Production passes derive choices from input operation semantics, shapes, layouts, numeric

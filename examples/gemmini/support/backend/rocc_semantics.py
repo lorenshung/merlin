@@ -39,6 +39,45 @@ def encoding_fields(declared: dict) -> dict:
         encoding["readout_bits"] = derived_readout_bits(int(encoding["addr_len"]))
     return encoding
 
+
+def _numeric_code_map(declared: object, *, field: str, width: object) -> dict[int, str]:
+    """Import only this RoCC ABI's code-indexed maps across YAML/JSON boundaries.
+
+    JSON requires object keys to be strings, whereas the authored YAML uses integer
+    keys.  Accept the two unambiguous representations, then use the RTL-derived
+    field width to reject codes the instruction cannot carry.  No other contract
+    map is rewritten, and malformed or colliding spellings never become aliases.
+    Labels are unique because instruction_funct inverts these maps to assemble a
+    class name; duplicate labels would make that inverse ambiguous.
+    """
+    if type(width) is not int or width <= 0:
+        raise ValueError(f"{field} has no positive RTL-derived code width")
+    if not isinstance(declared, dict) or not declared:
+        raise ValueError(f"{field} must be a nonempty code-to-class mapping")
+    normalized: dict[int, str] = {}
+    for source, label in declared.items():
+        if type(source) is int:
+            code = source
+        elif type(source) is str:
+            try:
+                code = int(source)
+            except ValueError as exc:
+                raise ValueError(f"{field} has a nonnumeric code {source!r}") from exc
+            if str(code) != source:
+                raise ValueError(f"{field} has a noncanonical decimal code {source!r}")
+        else:
+            raise ValueError(f"{field} has a noninteger code {source!r}")
+        if code < 0 or code >= (1 << width):
+            raise ValueError(f"{field} code {code} exceeds its {width}-bit field")
+        if code in normalized:
+            raise ValueError(f"{field} has colliding spellings for code {code}")
+        if not isinstance(label, str) or not label:
+            raise ValueError(f"{field} code {code} has no class label")
+        normalized[code] = label
+    if len(set(normalized.values())) != len(normalized):
+        raise ValueError(f"{field} has duplicate class labels")
+    return normalized
+
 def isa_constants(target: str) -> dict:
     """Derive the RoCC ISA constants for ``target`` from its RTL facts + capability manifest. No target
     is baked in — the caller passes the target it is grading; the decoder holds no default."""
@@ -62,11 +101,20 @@ def isa_constants(target: str) -> dict:
     fdt = _facts_interface(facts, "funct_decode_table") or {}
     layouts = next((i.get("bundles", {}) for i in facts.get("interfaces", [])
                     if i.get("name") == "register_bundle_layouts"), {})
+    # The selected register-bundle fact owns the CONFIG rs1 low-bit selector width.
+    st_layout = layouts.get("ConfigMvoutRs1") or {}
+    subtype_field = (st_layout.get("fields") or {}).get("cmd_type") or {}
+    funct_class = _numeric_code_map(
+        enc.get("semantic_class"), field="semantic_class", width=fdt.get("width")
+    )
+    config_subtype = _numeric_code_map(
+        enc.get("config_subtype"), field="config_subtype", width=subtype_field.get("width")
+    )
     custom_opcode = fdt.get("custom_opcode")
     return {"DIM": dim, "F1": rb["f1"], "C_ACC": rb["c_acc"], "ACC_I8": rb["acc_i8"],
             "ACC_ACCUM": rb["acc_accum"], "FULL_C_BIT": rb["full_c_bit"],
             "CUSTOM_OPCODE": custom_opcode, "FUNCT3": fdt.get("funct3"),
-            "FUNCT_CLASS": dict(enc["semantic_class"]), "CONFIG_SUBTYPE": dict(enc["config_subtype"]),
+            "FUNCT_CLASS": funct_class, "CONFIG_SUBTYPE": config_subtype,
             # Extracted from the target's Scala Bundle by circt_introspect.  Keeping the layout beside
             # the other decoded ISA facts lets every consumer read CONFIG_ST without copying bit offsets.
             "CONFIG_ST_LAYOUT": layouts.get("ConfigMvoutRs1")}

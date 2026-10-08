@@ -139,7 +139,8 @@ compute_units:
     scaling: per_tensor
     requant: {ref: gemmini.accumulator_scale}
     # Semantic-family capability (ARR denominator): a GEMM accelerator — int8 contraction on the mesh
-    # (matmul + conv2d via im2col), the fused relu/requant/bias epilogue (elementwise_map on readout),
+    # (matmul + conv2d via im2col), fused relu/acc-scale on readout and bias seeded
+    # into the accumulator before contraction,
     # and mvin/mvout DMA (movement). It has NO general reduction / softmax / attention / normalization
     # hardware, so those families are honestly absent (regions needing them fall back off-mesh).
     semantic_capabilities:
@@ -183,7 +184,7 @@ compute_units:
         standalone_evidence:
           - fact: accumulate_on_load
             roles: [operand_load, config, readout, commit]
-      - {family: movement, dtypes: [int8]}
+      - {family: movement, dtypes: [int8], forms: [copy]}
       # Preserve the existing reference contract's composed reduction declaration;
       # this input is not new evidence or hardware qualification.
       - {family: reduction, dtypes: [int8], composed_with: [contraction, movement]}
