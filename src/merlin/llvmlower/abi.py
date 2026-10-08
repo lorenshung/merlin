@@ -8,8 +8,12 @@ sizes[N], strides[N]}, result buffers appended last (buffer-results-to-out-param
 from __future__ import annotations
 
 import ctypes
+import hashlib
+import os
+import tempfile
 from dataclasses import dataclass
 from itertools import product
+from pathlib import Path
 from typing import Any, Sequence
 
 _SCALAR_CTYPE = {
@@ -91,7 +95,9 @@ class StridedMemRefArg:
         # A zero-extent memref accesses no element. For a nonempty memref,
         # include the last element of every dimension in the maximum address.
         nonempty = all(shape)
-        last = self.offset + sum((size - 1) * stride for size, stride in zip(shape, strides)) if nonempty else self.offset
+        last = (
+            self.offset + sum((size - 1) * stride for size, stride in zip(shape, strides)) if nonempty else self.offset
+        )
         if last > maximum or (last >= self.storage_elements if nonempty else self.offset > self.storage_elements):
             raise ValueError("memref logical footprint exceeds declared storage_elements")
         if nonempty and self.access != "input":
@@ -177,17 +183,23 @@ def _copy_pitched(arg: StridedMemRefArg, dense, *, to_dense: bool) -> None:
         # Preserve contiguous inner rows as one transfer, including on pitched
         # 2-D/ND buffers. The generic branch handles arbitrary positive strides.
         width = arg.shape[-1]
-        pairs = ((row * width, arg.offset + sum(i * s for i, s in zip(outer, arg.strides)), width)
-                 for row, outer in enumerate(product(*(range(n) for n in arg.shape[:-1]))))
+        pairs = (
+            (row * width, arg.offset + sum(i * s for i, s in zip(outer, arg.strides)), width)
+            for row, outer in enumerate(product(*(range(n) for n in arg.shape[:-1])))
+        )
     else:
-        pairs = ((linear, arg.offset + sum(i * s for i, s in zip(index, arg.strides)), 1)
-                 for linear, index in enumerate(product(*(range(n) for n in arg.shape))))
+        pairs = (
+            (linear, arg.offset + sum(i * s for i, s in zip(index, arg.strides)), 1)
+            for linear, index in enumerate(product(*(range(n) for n in arg.shape)))
+        )
     for dense_index, physical_index, count in pairs:
         dense_address = dense_ptr + dense_index * item_bytes
         physical_address = arg.pointer + physical_index * item_bytes
-        ctypes.memmove(dense_address if to_dense else physical_address,
-                       physical_address if to_dense else dense_address,
-                       count * item_bytes)
+        ctypes.memmove(
+            dense_address if to_dense else physical_address,
+            physical_address if to_dense else dense_address,
+            count * item_bytes,
+        )
 
 
 def _trampoline_source(name: str, n_args: int) -> str:
@@ -204,6 +216,73 @@ def _trampoline_source(name: str, n_args: int) -> str:
     )
 
 
+@dataclass(frozen=True)
+class PrivateHostImagePolicy:
+    """Explicit sibling staging in an invocation-owned native build directory.
+
+    This is a trusted build/load choice, not filesystem authorization or
+    dependency/build provenance. The owner must permit temporary creation and
+    cleanup. Default artifact readers do not acquire this write requirement.
+    """
+
+    directory: Path
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.directory, Path)
+            or not self.directory.is_absolute()
+            or ".." in self.directory.parts
+            or self.directory.resolve(strict=True) != self.directory
+            or not self.directory.is_dir()
+        ):
+            raise ValueError("private host image requires an exact absolute build directory")
+
+
+def _load_image(so_path: str, mode: int, policy: PrivateHostImagePolicy) -> tuple[Any, str]:
+    """Load a private copy, preserving the source directory's dependency lookup.
+
+    dlopen may return an already loaded image when its pathname is reused after
+    recompilation. A private sibling freezes the requested bytes and gives the
+    loader a new pathname without changing $ORIGIN. The host build directory
+    must permit temporary image creation. Dependencies themselves are not frozen
+    by this helper; their ownership belongs to the selected native build service.
+    """
+    source_path = Path(so_path).absolute()
+    if type(policy) is not PrivateHostImagePolicy or source_path.parent != policy.directory:
+        raise ValueError("private host image must remain in its selected build directory")
+    image = None
+    digest = hashlib.sha256()
+
+    def identity(stat):
+        return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+    try:
+        with source_path.open("rb") as source:
+            before = identity(os.fstat(source.fileno()))
+            with tempfile.NamedTemporaryFile(
+                prefix=".merlin-host-image-",
+                suffix=source_path.suffix,
+                dir=policy.directory,
+                delete=False,
+            ) as destination:
+                image = Path(destination.name)
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    destination.write(chunk)
+                    digest.update(chunk)
+            if before != identity(os.fstat(source.fileno())) or before != identity(source_path.stat()):
+                raise ValueError("native shared image changed while staging its load")
+        # Include bytes in the load name as well as the temporary nonce: even a
+        # later reused temporary basename cannot alias a different loaded image.
+        content_path = image.with_name(image.name + "-" + digest.hexdigest() + source_path.suffix)
+        image.rename(content_path)
+        image = content_path
+        image.chmod(0o400)
+        return ctypes.CDLL(str(image), mode=mode), digest.hexdigest()
+    finally:
+        if image is not None:
+            image.unlink(missing_ok=True)
+
+
 @dataclass
 class HostModel:
     """forward() runner on host: blob pointer + arg table."""
@@ -211,11 +290,24 @@ class HostModel:
     lib: Any
     fn: Any
     trampoline: Any = None
+    image_sha256: str | None = None
 
     @classmethod
     def load(
-        cls, so_path: str, name: str = "forward", n_args: int | None = None, rtld_global: bool | None = None
+        cls,
+        so_path: str,
+        name: str = "forward",
+        n_args: int | None = None,
+        rtld_global: bool | None = None,
+        *,
+        image_policy: PrivateHostImagePolicy | None = None,
     ) -> "HostModel":
+        """Load an artifact, or explicitly freeze a fresh owned build image.
+
+        Default loading retains native loader caching and read-only compatibility;
+        it supplies no current-image digest. The selected policy requires writable
+        sibling staging and identifies only the image, not its dependencies.
+        """
         # Give the trampoline this library's exact entry address instead of asking the dynamic
         # loader to resolve a process-global symbol. Keep even many-argument models LOCAL: their
         # shared forward/memrefCopy names could otherwise bind a later A/B variant to the first
@@ -223,12 +315,17 @@ class HostModel:
         if rtld_global is None:
             rtld_global = False
         mode = ctypes.RTLD_GLOBAL if rtld_global else ctypes.RTLD_LOCAL
-        lib = ctypes.CDLL(so_path, mode=mode)
+        if image_policy is None:
+            # Preserve artifact loading, including read-only paths and native
+            # dependency search. A reused pathname cannot attest current bytes.
+            lib, image_sha256 = ctypes.CDLL(so_path, mode=mode), None
+        else:
+            lib, image_sha256 = _load_image(so_path, mode, image_policy)
         fn = getattr(lib, f"_mlir_ciface_{name}", None)
         if fn is None:
             raise ValueError(f"{so_path}: missing _mlir_ciface_{name}")
         fn.restype = None
-        model = cls(lib, fn)
+        model = cls(lib, fn, image_sha256=image_sha256)
         if n_args is not None:
             model._build_trampoline(so_path, name, n_args)
         return model

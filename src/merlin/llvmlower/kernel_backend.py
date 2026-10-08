@@ -80,12 +80,14 @@ def extract_kernel(module, symbol: str, entry: str = "forward"):
 def compile_host(kernel_module, workdir: str | Path):
     """Lower one kernel module to a host ``.so`` and load it (RTLD_LOCAL)."""
     from ..xdsl_dialects._common import text as to_text
-    from .abi import HostModel
+    from .abi import HostModel, PrivateHostImagePolicy
     from .lower import lower_model
 
-    workdir = Path(workdir)
+    # Lowering creates a missing build directory. Resolve its parent aliases
+    # first so the selected private sibling retains the compiler's exact origin.
+    workdir = Path(workdir).resolve()
     res = lower_model(to_text(kernel_module), workdir, targets=("host",))
-    return HostModel.load(str(res.host_so))
+    return HostModel.load(str(res.host_so), image_policy=PrivateHostImagePolicy(workdir.resolve(strict=True)))
 
 
 def run_random(model, sig: KernelSignature, seed: int = 0) -> tuple[list[np.ndarray], list[np.ndarray]]:
