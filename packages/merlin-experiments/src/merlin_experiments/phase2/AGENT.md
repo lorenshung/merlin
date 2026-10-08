@@ -1,5 +1,12 @@
 # AGENT.md — packages/merlin-experiments/src/merlin_experiments/phase2
 
+`component_experiment.py` owns explicit minimal agent-view materialization and
+verification, strict networkless tool-policy construction, bounded probe refusal
+and final per-member comparison arithmetic. It does not admit Phase 0 generation,
+an authoring transport, hardware receipts or historical telemetry by itself.
+Reviewed upstream publication is not an agent grant; preserve fresh-session and
+actual-runtime isolation requirements before launching a component campaign.
+
 `campaign.py` owns frozen functional admission, exact fork checks, package sandbox
 policy and completion accounting. `prompt.py` owns deterministic task contracts.
 `functional_inputs.py` joins that admission to the immutable Phase 1 input/host-lane
