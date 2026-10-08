@@ -353,7 +353,7 @@ def test_the_inbound_classes_are_read_from_the_shared_vocabulary(support, monkey
     monkeypatch.setitem(SF._ISA_CLASS_DIRECTION, "XFER_IN", "in")
     support["synthetic"] = SimpleNamespace(rocc_semantics=_Support(movement=("MVIN", "XFER_IN", "MVOUT")))
     assert LSR.movement_in_classes_for("synthetic") == frozenset({"MVIN", "XFER_IN"})
-    assert LSR.load_state_capacity("synthetic") == 2
+    assert LSR.load_state_selector("synthetic")["capacity"] == 2
 
 
 def test_the_load_configuration_class_is_the_shared_inbound_configuration():

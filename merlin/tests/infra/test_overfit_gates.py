@@ -114,68 +114,81 @@ def test_the_lift_detector_reports_the_live_tree_without_enforcing(gate):
 # ------------------------------------------------------------------ the token check
 # Identifiers and the text a program emits, case-insensitively. The literal check above reads only
 # lower-case whole-identifier string constants, which is how `SATURN_BENCHES`, `class SaturnBench` and
-# "a bare-metal Saturn ELF" sat in the core with the gate green.
-def _token_hits(gate, path, names=None):
+# "a bare-metal Saturn ELF" sat in the core with the gate green. Most cases run against a SYNTHETIC
+# roster so the expectations name no real target; the mutation proofs below use the derived one.
+SYNTHETIC = frozenset({"zorb", "mx_zorb", "quux_hw"})
+
+
+def _token_hits(gate, path, names=SYNTHETIC):
     return [(kind, name) for _ln, name, kind, _snip in gate._scan_tokens(path, names)]
 
 
 def test_the_token_check_catches_a_target_inside_an_identifier(gate, tmp_path):
     src = tmp_path / "generic.py"
-    src.write_text("FOO_SATURN_X = 1\nclass SaturnBench:\n    pass\n", encoding="utf-8")
-    assert _token_hits(gate, src) == [("identifier", "saturn"), ("identifier", "saturn")]
+    src.write_text("FOO_ZORB_X = 1\nclass ZorbBench:\n    pass\n", encoding="utf-8")
+    assert _token_hits(gate, src) == [("identifier", "zorb"), ("identifier", "zorb")]
 
 
 def test_the_token_check_reads_program_text_case_insensitively(gate, tmp_path):
     src = tmp_path / "generic.py"
     src.write_text(
-        'MSG = "a bare-metal Saturn ELF"\nENV = "MERLIN_MUON_CONFIG"\nREF = f"from radiance-kernels {MSG}"\n',
+        'MSG = "a bare-metal Zorb ELF"\nENV = "MERLIN_ZORB_CONFIG"\nREF = f"from quux-hw-kernels {MSG}"\n',
         encoding="utf-8",
     )
-    assert _token_hits(gate, src) == [("string", "saturn"), ("string", "muon"), ("string", "radiance")]
+    assert _token_hits(gate, src) == [("string", "zorb"), ("string", "zorb"), ("string", "quux_hw")]
 
 
 def test_the_token_check_leaves_comments_and_docstrings_to_review(gate, tmp_path):
     src = tmp_path / "generic.py"
     src.write_text(
-        '"""Measured on saturn: 26055 cycles."""\n'
-        "# the gemmini mesh drains here\n"
+        '"""Measured on zorb: 26055 cycles."""\n'
+        "# the zorb mesh drains here\n"
         "def f():\n"
-        '    """Atlas example."""\n'
-        '    "a bare prose statement about Radiance"\n'
+        '    """Zorb example."""\n'
+        '    "a bare prose statement about Quux-HW"\n'
         "    return 1\n",
         encoding="utf-8",
     )
-    assert gate._scan_tokens(src) == []
+    assert _token_hits(gate, src) == []
 
 
 def test_the_token_check_reports_the_most_specific_target(gate, tmp_path):
     src = tmp_path / "generic.py"
-    src.write_text("MX_GEMMINI_ROUTE = 1\n", encoding="utf-8")
-    assert _token_hits(gate, src) == [("identifier", "mx_gemmini")]
+    src.write_text("MX_ZORB_ROUTE = 1\n", encoding="utf-8")
+    assert _token_hits(gate, src) == [("identifier", "mx_zorb")]
 
 
 def test_the_token_check_honours_the_marker_on_the_tokens_own_line(gate, tmp_path):
     src = tmp_path / "generic.py"
-    src.write_text(f'ENV = "MERLIN_MUON_CONFIG"  {gate.INLINE_MARKER} the variable a gate hunts\n', encoding="utf-8")
-    assert gate._scan_tokens(src) == []
+    src.write_text(f'ENV = "MERLIN_ZORB_CONFIG"  {gate.INLINE_MARKER} the variable a gate hunts\n', encoding="utf-8")
+    assert _token_hits(gate, src) == []
 
 
 def test_a_word_that_merely_contains_a_target_is_not_one(gate, tmp_path):
-    """Whole WORDS, not substrings: `irradiance` and `saturnine` name no target."""
+    """Whole WORDS, not substrings: `zorbite` and `subzorb` name no target."""
     src = tmp_path / "generic.py"
-    src.write_text('irradiance = "saturnine"\n', encoding="utf-8")
-    assert gate._scan_tokens(src) == []
+    src.write_text('subzorb = "zorbite"\n', encoding="utf-8")
+    assert _token_hits(gate, src) == []
+
+
+def test_an_untokenizable_file_fails_closed(gate, tmp_path):
+    src = tmp_path / "broken.py"
+    src.write_text('X = """never closed\n', encoding="utf-8")
+    assert [(kind, name) for _ln, name, kind, _snip in gate._scan_tokens(src, SYNTHETIC)] == [
+        ("file", "<untokenizable>")
+    ]
 
 
 def test_a_path_owns_the_targets_its_words_name(gate):
-    assert gate._token_owned("merlin/contract/external/gsim/model_build/gsim_gemmini_cmd_encode.py", "gemmini")
-    assert gate._token_owned("src/merlin/targetgen/mx_gemmini_route.py", "mx_gemmini")
-    assert not gate._token_owned("src/merlin/targetgen/mx_oracle.py", "mx_gemmini")
-    assert not gate._token_owned("src/merlin/kernels/bench_ceiling.py", "saturn")
+    assert gate._token_owned("merlin/contract/external/gsim/model_build/gsim_zorb_cmd_encode.py", "zorb")
+    assert gate._token_owned("src/merlin/targetgen/mx_zorb_route.py", "mx_zorb")
+    assert not gate._token_owned("src/merlin/targetgen/mx_oracle.py", "mx_zorb")
+    assert not gate._token_owned("src/merlin/kernels/bench_ceiling.py", "zorb")
 
 
 def test_the_token_check_uses_the_derived_roster(gate, tmp_path):
-    """No new hand-kept list: a target declared only in a registry is caught in an identifier."""
+    """No new hand-kept list: a target declared only in a registry is caught in an identifier, and the
+    gate's own name set is exactly the derived roster."""
     roster = importlib.util.spec_from_file_location("_target_roster_t", GATE.parent / "_target_roster.py")
     module = importlib.util.module_from_spec(roster)
     roster.loader.exec_module(module)
@@ -197,8 +210,9 @@ def test_mutating_a_clean_core_module_with_a_target_identifier_is_caught(gate, t
     assert gate.token_hits(rel) == []
     mutant = tmp_path / "bench_ceiling.py"
     mutant.write_text(live.read_text(encoding="utf-8") + "\nFOO_SATURN_X = 1\n", encoding="utf-8")
-    hits = gate._scan_tokens(mutant)
-    assert [(kind, name, snip) for _ln, name, kind, snip in hits] == [("identifier", "saturn", "FOO_SATURN_X")]
+    ((_ln, name, kind, snippet),) = gate._scan_tokens(mutant)
+    assert (kind, snippet) == ("identifier", "FOO_SATURN_X") and name in gate.TARGET_NAMES
+    assert gate._words(snippet)[1] == name
 
 
 def test_a_target_identifier_planted_in_a_clean_module_fails_the_gate(gate, tmp_path, monkeypatch, capsys):
