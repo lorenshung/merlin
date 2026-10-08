@@ -45,8 +45,12 @@ def _fixture(tmp_path, monkeypatch):
     monkeypatch.setattr(selected, "_bwrap_binary", lambda *_: bwrap)
     run, destination = tmp_path / "fresh-run", tmp_path / "selection"
     arguments = {
-        "m2m_root": roots["m2m"], "workload_root": roots["workload"], "worker": worker,
-        "venv": roots["venv"], "schemas_root": roots["schemas"], "run_dir": run,
+        "m2m_root": roots["m2m"],
+        "workload_root": roots["workload"],
+        "worker": worker,
+        "venv": roots["venv"],
+        "schemas_root": roots["schemas"],
+        "run_dir": run,
         "output_dir": destination,
     }
     return plan, library, bwrap, run, destination, arguments
@@ -115,18 +119,27 @@ def test_independent_replay_binds_selection_and_keeps_admission_closed(tmp_path,
     guest_library.parent.mkdir(parents=True)
     shutil.copy2(library, guest_library)
     pending = run / "sealed_m2m_pending.json"
-    pending.write_text(json.dumps({
-        "schema": sealed_m2m.SCHEMA,
-        "capture_selection_sha256": identity["sha256"],
-        "plan": plan,
-        "policy_sha256": manifest["sandbox_policy_sha256"],
-        "bwrap_sha256": manifest["bwrap"]["sha256"],
-        "issuer_sha256": manifest["issuer_source_sha256"],
-    }))
-    monkeypatch.setattr(sealed_m2m, "replay_verify", lambda *_args, **_kwargs: {
-        "status": "verified_sandbox_replay", "sealed_source_closure_replayed": True,
-        "receipt_sha256": _file_digest(pending),
-    })
+    pending.write_text(
+        json.dumps(
+            {
+                "schema": sealed_m2m.SCHEMA,
+                "capture_selection_sha256": identity["sha256"],
+                "plan": plan,
+                "policy_sha256": manifest["sandbox_policy_sha256"],
+                "bwrap_sha256": manifest["bwrap"]["sha256"],
+                "issuer_sha256": manifest["issuer_source_sha256"],
+            }
+        )
+    )
+    monkeypatch.setattr(
+        sealed_m2m,
+        "replay_verify",
+        lambda *_args, **_kwargs: {
+            "status": "verified_sandbox_replay",
+            "sealed_source_closure_replayed": True,
+            "receipt_sha256": _file_digest(pending),
+        },
+    )
     result = selected.verify(path, expected_sha256=identity["sha256"], model_path=capture / "model.mlir")
     assert result["status"] == "verified_preselected_replay"
     assert result["phase0_admission"] == "not_granted"
@@ -154,12 +167,23 @@ def test_derivation_cli_forwards_complete_preselection_without_upgrading_legacy(
     facts = tmp_path / "facts.json"
     facts.write_text("{}\n")
     received = []
-    monkeypatch.setattr(requirements, "derive", lambda *args, **kwargs: received.append((args, kwargs)) or {
-        "status": "diagnostic", "phase0_admission": "not_granted"
-    })
+    monkeypatch.setattr(
+        requirements,
+        "derive",
+        lambda *args, **kwargs: (
+            received.append((args, kwargs)) or {"status": "diagnostic", "phase0_admission": "not_granted"}
+        ),
+    )
     argv = [
-        "corpus", "derive", str(definition), "--application-capture", f"iteration={model}",
-        "--rtl-facts", str(facts), "--output", str(tmp_path / "derived"),
+        "corpus",
+        "derive",
+        str(definition),
+        "--application-capture",
+        f"iteration={model}",
+        "--rtl-facts",
+        str(facts),
+        "--output",
+        str(tmp_path / "derived"),
     ]
     assert cli.main(argv) == 0
     assert received[-1][1]["capture_preselections"] == {}
@@ -170,18 +194,58 @@ def test_derivation_cli_forwards_complete_preselection_without_upgrading_legacy(
     assert received[-1][1]["capture_preselections"] == {"iteration": (manifest, digest)}
     assert cli.main([*argv, "--application-quant-policy", f"iteration={manifest}@{digest}"]) == 0
     assert received[-1][1]["quantization_policies"] == {"iteration": (manifest, digest)}
-    assert quantization_policy_specs([f"iteration={manifest}@{digest}"]) == {
-        "iteration": (manifest, digest)
-    }
+    assert quantization_policy_specs([f"iteration={manifest}@{digest}"]) == {"iteration": (manifest, digest)}
 
     monkeypatch.undo()
     monkeypatch.setattr(requirements, "from_definition", lambda _: SimpleNamespace(descriptor=definition))
-    monkeypatch.setattr(requirements, "load_target_experiment", lambda _: SimpleNamespace(
-        workload_spec={"applications": ["iteration"]}
-    ))
+    monkeypatch.setattr(
+        requirements, "load_target_experiment", lambda _: SimpleNamespace(workload_spec={"applications": ["iteration"]})
+    )
     with pytest.raises(ValueError, match="entire declared iteration roster"):
         requirements.derive(
-            definition, {"iteration": model}, rtl_facts=facts, output_root=tmp_path / "never-written",
+            definition,
+            {"iteration": model},
+            rtl_facts=facts,
+            output_root=tmp_path / "never-written",
             capture_preselections={"other": (manifest, digest)},
         )
     assert not (tmp_path / "never-written").exists()
+
+
+def test_installed_capture_cli_selects_schemas_from_its_worker_package(tmp_path, monkeypatch, capsys):
+    from merlin.common import paths
+
+    package = tmp_path / "site-packages/merlin"
+    bundled = package / "_data/schemas"
+    bundled.mkdir(parents=True)
+    checkout_schemas = tmp_path / "checkout/merlin/schemas"
+    checkout_schemas.mkdir(parents=True)
+    monkeypatch.delenv("MERLIN_SCHEMAS_DIR", raising=False)
+    monkeypatch.setattr(paths, "module_source_path", lambda _: package / "__init__.py")
+    monkeypatch.setattr(paths, "schemas_dir", lambda: checkout_schemas)
+    selected_arguments = []
+    monkeypatch.setattr(selected, "select", lambda **kwargs: selected_arguments.append(kwargs) or {"sha256": "a" * 64})
+
+    assert (
+        cli.main(
+            [
+                "corpus",
+                "capture",
+                "select",
+                "--m2m-root",
+                str(tmp_path / "m2m"),
+                "--workload-root",
+                str(tmp_path / "workload"),
+                "--venv",
+                str(tmp_path / "venv"),
+                "--run-dir",
+                str(tmp_path / "run"),
+                "--output",
+                str(tmp_path / "selection"),
+            ]
+        )
+        == 0
+    )
+    assert selected_arguments[0]["worker"] == package / "targetgen/_m2m_capture_worker.py"
+    assert selected_arguments[0]["schemas_root"] == bundled
+    assert '"sha256"' in capsys.readouterr().out
