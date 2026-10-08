@@ -16,6 +16,7 @@ from merlin.targetgen.contract.build_service import BuildOnlyService, file_diges
 from merlin.targetgen.contract.readback_policy import (
     BUILD_RECEIPT,
     FULL_VALUES_B64,
+    FULL_VALUES_BIN,
     ReadbackPolicy,
     require_build_receipt,
     require_full_value_roster,
@@ -55,6 +56,87 @@ def test_policy_is_strictly_versioned_and_does_not_modify_capsule():
             ReadbackPolicy.from_record(bad)
     with pytest.raises(ValueError):
         ReadbackPolicy("other")
+    assert ReadbackPolicy.from_record(ReadbackPolicy(FULL_VALUES_BIN).record()) == ReadbackPolicy(FULL_VALUES_BIN)
+
+
+def test_binary_receipt_binds_both_staged_headers_and_declared_values(monkeypatch, tmp_path):
+    from merlin.runtime.out_bin import parse_binary_console
+
+    def render(_cb, *, inputs, readback_policy):
+        assert readback_policy == ReadbackPolicy(FULL_VALUES_BIN)
+        return '#include "out_bin.h"\nint main(void) { return 0; }\n'
+
+    service, _source = _service(tmp_path, render)
+    build = tmp_path / "build"
+    build.mkdir()
+    obj = build / "kernel.o"
+    obj.write_bytes(b"kernel")
+    monkeypatch.setattr(
+        "merlin.targetgen.runtime_build.derived_link_script",
+        lambda *_args, **_kwargs: service.recipe.link_script,
+    )
+
+    def fake_compile(command, **_kwargs):
+        Path(command[command.index("-o") + 1]).write_bytes(b"elf" if "-T" in command else b"harness-object")
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(compiler.subprocess, "run", fake_compile)
+    policy = ReadbackPolicy(FULL_VALUES_BIN)
+    cb = _cb()
+    elf = compiler.link_elf(
+        cb,
+        obj,
+        build,
+        target="fixture",
+        inputs={"arg": [1]},
+        _build_service=service,
+        readback_policy=policy,
+    )
+    recipe, source_pins = selected_build_inputs(
+        "fixture",
+        service.recipe.with_effective_abi(),
+        service,
+        policy=policy,
+    )
+    assert len(recipe["readback_codecs"]) == 2
+
+    def verified():
+        return require_build_receipt(
+            build / BUILD_RECEIPT,
+            policy=policy,
+            cb=cb,
+            target="fixture",
+            recipe_record=recipe,
+            source_pins=source_pins,
+            object_path=obj,
+            harness_path=build / "harness.c",
+            elf_path=elf,
+        )
+
+    assert verified()["staged_range_sha256"]
+    for name in ("out_b64.h", "out_bin.h"):
+        path = build / name
+        original = path.read_bytes()
+        path.write_bytes(original + b"\n")
+        with pytest.raises(ValueError, match="receipt"):
+            verified()
+        path.write_bytes(original)
+
+    raw = b"\x01\x02"
+    checksum = 0xCBF29CE484222325
+    for byte in raw:
+        checksum = ((checksum ^ byte) * 0x100000001B3) & ((1 << 64) - 1)
+    console = b"OUT_BIN_BEGIN v1 out 1 2 1 u 2\n" + raw + f"OUT_BIN_END v1 {checksum:016x}\nDONE\n".encode()
+    outputs, _metrics = parse_binary_console(console)
+    require_full_value_roster(cb, console, outputs, policy=policy)
+    wide = b"\x01\x00\x02\x00"
+    checksum = 0xCBF29CE484222325
+    for byte in wide:
+        checksum = ((checksum ^ byte) * 0x100000001B3) & ((1 << 64) - 1)
+    wide_console = b"OUT_BIN_BEGIN v1 out 1 2 2 u 4\n" + wide + f"OUT_BIN_END v1 {checksum:016x}\nDONE\n".encode()
+    wide_outputs, _metrics = parse_binary_console(wide_console)
+    with pytest.raises(ValueError, match="wire width"):
+        require_full_value_roster(cb, wide_console, wide_outputs, policy=policy)
 
 
 def test_optin_bypasses_legacy_build_cache(monkeypatch, tmp_path):

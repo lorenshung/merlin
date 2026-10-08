@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -11,6 +12,67 @@ import pytest
 import yaml
 
 from merlin.common.paths import data_path, python_import_roots
+
+
+@pytest.mark.parametrize(
+    "fault", ["wrong_firrtl", "wrong_roster", "wrong_digest", "changed_in_scope", "changed_reader", "raises"]
+)
+def test_private_facts_refuse_drift_and_restore_public_environment(tmp_path, monkeypatch, fault):
+    from merlin_experiments.phase1.feedback import private_full_models as models
+    from merlin_experiments.phase1.feedback.private_facts import selected_input_facts
+
+    firrtl = tmp_path / "input.fir"
+    firrtl.write_text("synthetic selected RTL\n")
+    digest = hashlib.sha256(firrtl.read_bytes()).hexdigest()
+    document = {
+        "inputs": {
+            "target": "fixture",
+            "fir_sha256": digest,
+            "firrtl_inputs": [{"path": str(firrtl), "sha256": digest}],
+        },
+        "facts": {"source": {"config": "Fixture"}},
+    }
+    raw = tmp_path / "raw.json"
+    raw.write_text(json.dumps(document))
+    effective = tmp_path / "effective.json"
+    if fault == "wrong_firrtl":
+        other = tmp_path / "other.fir"
+        other.write_text("another RTL\n")
+        other_digest = hashlib.sha256(other.read_bytes()).hexdigest()
+        document["inputs"].update(fir_sha256=other_digest, firrtl_inputs=[{"path": str(other), "sha256": other_digest}])
+    effective.write_text(json.dumps(dict(document, host_view=True)))
+    spec = tmp_path / "private.yaml"
+    spec.write_text(
+        yaml.safe_dump(
+            {
+                "schema": models.SCHEMA,
+                "target": "fixture",
+                "models": [
+                    {
+                        "id": "different" if fault == "wrong_roster" else "model",
+                        "rtl_facts": str(raw),
+                        "rtl_config": "Fixture",
+                        "rtl_facts_sha256": "0" * 64
+                        if fault == "wrong_digest"
+                        else hashlib.sha256(raw.read_bytes()).hexdigest(),
+                    }
+                ],
+            }
+        )
+    )
+    monkeypatch.setenv("MERLIN_RTL_FACTS", str(effective))
+    before = dict(os.environ)
+    with pytest.raises((ValueError, RuntimeError)):
+        with selected_input_facts(spec, target="fixture", required_models=("model",)):
+            assert os.environ["MERLIN_RTL_FACTS"] == str(raw)
+            if fault == "changed_in_scope":
+                raw.write_text(raw.read_text() + " ")
+            elif fault == "changed_reader":
+                os.environ["MERLIN_RTL_FACTS"] = str(effective)
+            elif fault == "raises":
+                os.environ["IN_SCOPE_ONLY"] = "must not leak"
+                raise RuntimeError("synthetic build refusal")
+    assert dict(os.environ) == before
 
 
 @pytest.mark.parametrize("owner,flag", [("formal", "--descriptor"), ("freeze", "--repo")])
@@ -70,6 +132,8 @@ def freeze_and_observe(root, *, repo):
     return record
 freeze.freeze = freeze_and_observe
 def external_execution(caps, package_dir, *, runs_root, oracle_adapters, target, **kwargs):
+    if '--qa-timeout' in sys.argv:
+        assert kwargs['timeout'] == int(sys.argv[sys.argv.index('--qa-timeout') + 1])
     labels = {cap['label'] for cap in caps}
     hidden = labels == {'hidden'}
     assert bool((run / 'freeze.json').exists()) == hidden
@@ -158,6 +222,14 @@ def test_real_public_freeze_rehash_hidden_lifecycle_outside_checkout(tmp_path):
     assert manifest["hidden"]["cohort_admission"]["policy"] == "frozen_target_capability_operand_dtype"
     assert (run / "iterations/iteration_000/notes.md").is_file()
     assert (run / "final_report.md").is_file()
+
+
+def test_selected_step_timeout_reaches_public_and_hidden_grade(tmp_path):
+    run, result = _run_formal(tmp_path, flags=("--qa-timeout", "3217"))
+    assert result.returncode == 1, result.stderr + result.stdout
+    manifest = yaml.safe_load((run / "run_manifest.yaml").read_text())
+    assert manifest["grading_budget"]["step_timeout_s"] == 3217
+    assert manifest["public_dev"]["n_passed"] == manifest["hidden"]["n_passed"] == 1
 
 
 @pytest.mark.parametrize("flags", [("--no-oracle",), ("--skip-hidden",)])

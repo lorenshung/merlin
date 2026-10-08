@@ -1172,10 +1172,12 @@ def execute_candidate_model(
     execution still need their independent mandatory gates.
     """
     from merlin.targetgen.bundle_harness import emitted_entry_arity, is_executable_emission
-    from merlin.targetgen.contract.readback_policy import selected
+    from merlin.targetgen.contract.readback_policy import FULL_VALUES_BIN, selected
     from merlin.targetgen.golden_store import load_golden
 
     readback_policy = selected(readback_policy)
+    binary_console = readback_policy is not None and readback_policy.transport == FULL_VALUES_BIN
+    readback_input_kwargs = {"policy": readback_policy} if binary_console else {}
 
     source = Path(capsule_dir)
     capture = Path(capture_bundle)
@@ -1296,7 +1298,12 @@ def execute_candidate_model(
                 selected_build_inputs,
             )
 
-            recipe_record, source_pins = selected_build_inputs(target, service.recipe.with_effective_abi(), service)
+            recipe_record, source_pins = selected_build_inputs(
+                target,
+                service.recipe.with_effective_abi(),
+                service,
+                **readback_input_kwargs,
+            )
             record["readback_build"] = require_build_receipt(
                 output / "build" / BUILD_RECEIPT,
                 policy=readback_policy,
@@ -1335,13 +1342,24 @@ def execute_candidate_model(
         try:
             functional_backend, functional_citation, revalidate_functional = _functional_engine(target)
             revalidate_functional()
-            functional_console = functional_backend.run_elf(elf, simulator="spike", timeout=timeout)
+            capture_kwargs = {"capture_bytes": True} if binary_console else {}
+            functional_console = functional_backend.run_elf(
+                elf,
+                simulator="spike",
+                timeout=timeout,
+                **capture_kwargs,
+            )
             revalidate_functional()
             revalidate_source()
             if _digest(Path(elf)) != record["elf"]:
                 raise NativeModelExecutionError("candidate ELF changed during L2 functional execution")
             if readback_policy is not None:
-                recipe_now, sources_now = selected_build_inputs(target, service.recipe.with_effective_abi(), service)
+                recipe_now, sources_now = selected_build_inputs(
+                    target,
+                    service.recipe.with_effective_abi(),
+                    service,
+                    **readback_input_kwargs,
+                )
                 if (recipe_now, sources_now) != (recipe_record, source_pins):
                     raise NativeModelExecutionError("full-value build inputs changed during L2 execution")
                 require_build_receipt(
@@ -1355,13 +1373,15 @@ def execute_candidate_model(
                     harness_path=output / "build" / "harness.c",
                     elf_path=elf,
                 )
-            functional_path = output / "console_l2.txt"
-            functional_path.write_text(functional_console, encoding="utf-8")
+            functional_path = output / ("console_l2.bin" if binary_console else "console_l2.txt")
+            functional_path.write_bytes(
+                functional_console if type(functional_console) is bytes else functional_console.encode("utf-8")
+            )
             functional_observed, functional_metrics = functional_backend.parse_output(functional_console)
             if readback_policy is not None:
                 from merlin.targetgen.contract.readback_policy import require_full_value_roster
 
-                require_full_value_roster(cb, functional_console, functional_observed)
+                require_full_value_roster(cb, functional_console, functional_observed, policy=readback_policy)
             functional_observed = backends.decode_float_readback(functional_observed, declared_output_dtypes(cb))
             functional_numeric = compare(
                 golden["outputs"],
@@ -1396,13 +1416,14 @@ def execute_candidate_model(
         if command is not None:
             record["native_command"] = command.to_evidence()
         revalidate()
+        capture_kwargs = {"capture_bytes": True} if binary_console else {}
         if simulator == "gsim":
             from merlin.targetgen.rtl_engine_policy import gsim_runtime_slot
 
             with gsim_runtime_slot(wait_timeout_s=timeout):
-                console = backend.run_elf(elf, simulator=simulator, timeout=timeout)
+                console = backend.run_elf(elf, simulator=simulator, timeout=timeout, **capture_kwargs)
         else:
-            console = backend.run_elf(elf, simulator=simulator, timeout=timeout)
+            console = backend.run_elf(elf, simulator=simulator, timeout=timeout, **capture_kwargs)
         if command is not None:
             command.revalidate()
         revalidate()
@@ -1410,7 +1431,12 @@ def execute_candidate_model(
         if _digest(Path(elf))["sha256"] != record["elf"]["sha256"]:
             raise NativeModelExecutionError("candidate ELF bytes changed during execution")
         if readback_policy is not None:
-            recipe_now, sources_now = selected_build_inputs(target, service.recipe.with_effective_abi(), service)
+            recipe_now, sources_now = selected_build_inputs(
+                target,
+                service.recipe.with_effective_abi(),
+                service,
+                **readback_input_kwargs,
+            )
             if (recipe_now, sources_now) != (recipe_record, source_pins):
                 raise NativeModelExecutionError("full-value build inputs changed during L3 execution")
             require_build_receipt(
@@ -1424,13 +1450,13 @@ def execute_candidate_model(
                 harness_path=output / "build" / "harness.c",
                 elf_path=elf,
             )
-        console_path = output / "console.txt"
-        console_path.write_text(console, encoding="utf-8")
+        console_path = output / ("console.bin" if binary_console else "console.txt")
+        console_path.write_bytes(console if type(console) is bytes else console.encode("utf-8"))
         observed, metrics = backend.parse_output(console)
         if readback_policy is not None:
             from merlin.targetgen.contract.readback_policy import require_full_value_roster
 
-            require_full_value_roster(cb, console, observed)
+            require_full_value_roster(cb, console, observed, policy=readback_policy)
         observed = backends.decode_float_readback(observed, declared_output_dtypes(cb))
         comparison = compare(
             golden["outputs"], observed, policy, golden_source=str(golden.get("golden_source") or "independent_capsule")

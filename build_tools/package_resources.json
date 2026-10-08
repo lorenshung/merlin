@@ -62,6 +62,7 @@
     "merlin/prompts/rvv_tuning_v1.md",
     "merlin/runtime/abi/mlir_runtime.c",
     "merlin/runtime/baremetal/out_b64.h",
+    "merlin/runtime/baremetal/out_bin.h",
     "merlin/runtime/baremetal/spike/console_uart.c",
     "merlin/runtime/baremetal/spike/crt.S",
     "merlin/runtime/baremetal/spike/htif.c",

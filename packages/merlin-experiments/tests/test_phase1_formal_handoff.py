@@ -192,7 +192,39 @@ def build_handoff(tmp_path, monkeypatch, *, reviewed=None, authored_submission=N
     from merlin.compile.model_execution_inputs import strict_tree_sha256
 
     private_spec = tmp_path / "synthetic-private-spec.yaml"
-    private_spec.write_text("synthetic test boundary\n")
+    target = load_context(descriptor, repo=repo).target
+    firrtl = tmp_path / "selected.fir"
+    firrtl.write_text("synthetic FIRRTL input\n")
+    firrtl_sha = hashlib.sha256(firrtl.read_bytes()).hexdigest()
+    raw_facts = tmp_path / "raw-facts.json"
+    facts = {
+        "inputs": {
+            "target": target,
+            "fir_sha256": firrtl_sha,
+            "firrtl_inputs": [{"path": str(firrtl), "sha256": firrtl_sha}],
+        },
+        "facts": {"source": {"config": "FixtureConfig"}},
+    }
+    raw_facts.write_text(json.dumps(facts))
+    effective_facts = tmp_path / "effective-facts.json"
+    effective_facts.write_text(json.dumps(dict(facts, effective_host_view=True)))
+    monkeypatch.setenv("MERLIN_RTL_FACTS", str(effective_facts))
+    private_spec.write_text(
+        yaml.safe_dump(
+            {
+                "schema": PFM.SCHEMA,
+                "target": target,
+                "models": [
+                    {
+                        "id": "fixture_complete_model",
+                        "rtl_config": "FixtureConfig",
+                        "rtl_facts": str(raw_facts),
+                        "rtl_facts_sha256": hashlib.sha256(raw_facts.read_bytes()).hexdigest(),
+                    }
+                ],
+            }
+        )
+    )
     monkeypatch.setattr(PFM, "requirements_for", lambda _descriptor: ("fixture_complete_model",))
     monkeypatch.setattr(PFM, "program_requirements_for", lambda _descriptor: {"fixture_complete_model": ("model",)})
     monkeypatch.setattr(
@@ -202,6 +234,7 @@ def build_handoff(tmp_path, monkeypatch, *, reviewed=None, authored_submission=N
     )
 
     def external_private_gate(submission, _spec, *, target, required_models, required_programs, **_kwargs):
+        assert os.environ["MERLIN_RTL_FACTS"] == str(raw_facts)
         sha = strict_tree_sha256(Path(submission))["sha256"]
         spec_sha = hashlib.sha256(Path(_spec).read_bytes()).hexdigest()
         return {
@@ -291,6 +324,7 @@ def build_handoff(tmp_path, monkeypatch, *, reviewed=None, authored_submission=N
         context=load_context(descriptor, repo=repo),
     )
     assert status == (1 if post_freeze_failure else 0)
+    assert os.environ["MERLIN_RTL_FACTS"] == str(effective_facts)
     assert events == ["public", "hidden"]
     digest = hash_tree(run / "submission")["sha256"]
     return SimpleNamespace(run=run, runs=runs, digest=digest, environment=environment, events=events)
