@@ -473,6 +473,17 @@ remains diagnostic until actual writers, oracles, placement and independent
 numerical checks satisfy the obligations. Repeating the same selection into its
 immutable output root must preserve bytes; changed inputs need a new root.
 
+Retained Core ATen recipes instead declare explicit public, hidden and host-guard
+case selections and capture owners. Their derivation emits `recipe.yaml`,
+`requirements.yaml` and `synth.yaml`; select all three as the fresh run's
+`recipe`, `conformance_spec` and `synth_profile`. The requirement declares finite
+full-call obligations and aggregate cohort commitments. Selected synthesis binds
+the exact recipe, requirement, descriptor workload declaration, selection receipt
+and complete selected capture bytes. Verification recomputes the selection and
+refuses changed inputs. This verifies packaging identity; numerical agreement,
+compiler support and lane execution remain Phase 1 obligations. It does not
+satisfy a whole-application demand inventory or upgrade hardware evidence.
+
 ## Inspect exactly what the generator used
 
 The experiment selects `software_spec`, `hardware_spec` and `evidence_mode`; the recipe
