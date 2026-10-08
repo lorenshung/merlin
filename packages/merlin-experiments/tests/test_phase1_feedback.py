@@ -245,6 +245,42 @@ def test_candidate_verification_feedback_only_exposes_verified_counts(tmp_path):
     assert "PRIVATE_ANSWER_SENTINEL" not in json.dumps(summary)
 
 
+@pytest.mark.parametrize(
+    "code", ["output_writer_source_result_ownership_unverified", "PRIVATE_ANSWER_SENTINEL", None, []]
+)
+def test_candidate_native_binding_refusal_survives_closed_selfcheck(tmp_path, code):
+    check = {
+        "schema": "merlin_candidate_native_model_check_v1",
+        "status": "incomplete",
+        "violations": ["candidate_full_model_native_unverified"],
+    }
+    result = {
+        "capsule": "model_case",
+        "kind": "model",
+        "status": "incomplete",
+        "candidate_native_model_check": check,
+        "candidate_native_execution": {
+            "schema": "merlin_candidate_native_model_execution_v1",
+            "status": "incomplete",
+            "failure": {"type": "NativeModelExecutionError", "code": code, "detail": "PRIVATE_ANSWER_SENTINEL"},
+        },
+    }
+    result_path = tmp_path / "runs" / "fixture-suite" / "model_case" / "capsule_result.json"
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text(json.dumps(result))
+    projected = qa._per_capsule_from_results(tmp_path)["model_case"]
+    row, certified = selfcheck_feedback._candidate_selfcheck_row(
+        result, projected, name="model_case", barrier_tier="L3"
+    )
+    assert not certified
+    assert "PRIVATE_ANSWER_SENTINEL" not in json.dumps(row)
+    summary = row["candidate_native_verification"]
+    if code == "output_writer_source_result_ownership_unverified":
+        assert summary["native_failure"] == {"stage": "source_binding", "code": code}
+    else:
+        assert "native_failure" not in summary
+
+
 def test_candidate_verified_numeric_mismatch_has_closed_failure_feedback(tmp_path):
     check = {
         "schema": "merlin_candidate_native_model_check_v1",
@@ -387,11 +423,7 @@ def test_selfcheck_rejects_unbound_or_inconsistent_score_gates(rows, requested, 
 def test_selfcheck_rejects_score_claiming_operation_capsule_is_gated_model():
     with pytest.raises(ValueError):
         selfcheck_feedback._gated_without_result_rows(
-            {
-                "per_capsule": [
-                    {"capsule": "unit_case", "kind": "model", "status": "gated", "gate_reason": "deferred"}
-                ]
-            },
+            {"per_capsule": [{"capsule": "unit_case", "kind": "model", "status": "gated", "gate_reason": "deferred"}]},
             requested={"unit_case"},
             models=set(),
             represented=set(),
@@ -412,9 +444,7 @@ def test_selfcheck_rejects_result_missing_from_grader_score():
     "result_rows,gated_rows,requested_size,suite_size",
     [(1, 0, 2, 2), (1, 0, 1, 0)],
 )
-def test_selfcheck_missing_or_unknown_requested_cohort_cannot_pass(
-    result_rows, gated_rows, requested_size, suite_size
-):
+def test_selfcheck_missing_or_unknown_requested_cohort_cannot_pass(result_rows, gated_rows, requested_size, suite_size):
     counts = selfcheck_feedback._selfcheck_counts(
         result_rows=result_rows,
         gated_rows=gated_rows,

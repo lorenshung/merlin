@@ -19,6 +19,10 @@ from typing import Any
 class NativeModelExecutionError(ValueError):
     """The frozen model, candidate artifact, and pointer ABI cannot be joined."""
 
+    def __init__(self, detail: str, *, code: str | None = None):
+        super().__init__(detail)
+        self.code = code
+
 
 def _digest(path: Path) -> dict[str, Any]:
     digest = hashlib.sha256()
@@ -269,7 +273,10 @@ def _bind_inputs(
             or len(writers) != 1
             or producer[0] not in writers[0]["source_op_indices"]
         ):
-            raise NativeModelExecutionError(f"output writer lacks exact source-result task ownership: {name!r}")
+            raise NativeModelExecutionError(
+                f"output writer lacks exact source-result task ownership: {name!r}",
+                code="output_writer_source_result_ownership_unverified",
+            )
 
     def has_source_initializer(name: str, task: Mapping[str, Any]) -> bool:
         binding = source_values.get(name)
@@ -1454,6 +1461,8 @@ def execute_candidate_model(
         if record.get("tiers", {}).get("L3", {}).get("status") == "pass":
             record["tiers"]["L3"] = {"status": "unavailable", "detail": "post-run source or build check failed"}
         record["failure"] = {"type": type(exc).__name__, "detail": str(exc)[:2000]}
+        if isinstance(exc, NativeModelExecutionError) and exc.code is not None:
+            record["failure"]["code"] = exc.code
         return record
     finally:
         record["build_artifacts"] = _build_artifacts(output)

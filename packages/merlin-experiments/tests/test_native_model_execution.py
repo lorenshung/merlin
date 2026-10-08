@@ -200,12 +200,19 @@ def test_native_frozen_leaf_binding_excludes_source_written_intermediate(tmp_pat
     wrong_output_writer = copy.deepcopy(command)
     wrong_output_writer["params"]["global_program_plan"]["tasks"][0]["writes"].append("out")
     wrong_output_writer["params"]["global_program_plan"]["tasks"][1]["writes"] = []
-    with pytest.raises(NativeModelExecutionError, match="output writer"):
+    with pytest.raises(NativeModelExecutionError, match="output writer") as failure:
         _bind_inputs(wrong_output_writer, bundle, target="synthetic")
+    assert failure.value.code == "output_writer_source_result_ownership_unverified"
+    multiple_output_writers = copy.deepcopy(command)
+    multiple_output_writers["params"]["global_program_plan"]["tasks"][0]["writes"].append("out")
+    with pytest.raises(NativeModelExecutionError, match="output writer") as failure:
+        _bind_inputs(multiple_output_writers, bundle, target="synthetic")
+    assert failure.value.code == "output_writer_source_result_ownership_unverified"
     missing_output_writer = copy.deepcopy(command)
     missing_output_writer["params"]["global_program_plan"]["tasks"][1]["writes"] = []
-    with pytest.raises(NativeModelExecutionError, match="output writer"):
+    with pytest.raises(NativeModelExecutionError, match="output writer") as failure:
         _bind_inputs(missing_output_writer, bundle, target="synthetic")
+    assert failure.value.code == "output_writer_source_result_ownership_unverified"
     undeclared_writable_role = copy.deepcopy(command)
     undeclared_writable_role["tensors"]["tmp0"]["role"] = "input"
     undeclared_writable_role["kernel_abi"]["args"][1]["access"] = "write"
@@ -398,6 +405,48 @@ def test_native_entry_guard_accepts_registered_pretty_llvm_definition(tmp_path, 
     )
     assert result["status"] == "incomplete"
     assert "one declared whole-model output is required" in result["failure"]["detail"]
+
+
+def test_native_binding_refusal_code_is_preserved_in_durable_receipt(tmp_path, monkeypatch):
+    from merlin.runtime.backends import base as backends
+    from merlin.targetgen import golden_store
+    from merlin.targetgen import native_model_execution as native
+
+    monkeypatch.setattr(
+        backends,
+        "harness_build_recipe",
+        lambda _target: SimpleNamespace(
+            require_kernel_stack_frame=lambda: SimpleNamespace(entry_symbol="candidate_entry")
+        ),
+    )
+    monkeypatch.setattr(golden_store, "load_golden", lambda _source: {"outputs": {"out": [0]}})
+    code = "output_writer_source_result_ownership_unverified"
+
+    def refuse_binding(*_args, **_kwargs):
+        raise NativeModelExecutionError("output writer lacks exact source-result task ownership: 'out'", code=code)
+
+    monkeypatch.setattr(native, "_bind_inputs", refuse_binding)
+    source, capture = tmp_path / "source", tmp_path / "capture"
+    source.mkdir()
+    capture.mkdir()
+    out = tmp_path / "output"
+    result = execute_candidate_model(
+        command_buffer={
+            "kernel_abi": {"kind": "whole_program", "args": [{"tensor": "out", "access": "write"}], "outputs": ["out"]},
+            "tensors": {"out": {"dtype": "i32", "role": "output", "shape": [1]}},
+            "params": {"mesh_regions": [{}], "host_lane_regions": [{}]},
+        },
+        lowered_mlir_text="module { llvm.func @candidate_entry(%arg0: !llvm.ptr) { llvm.return } }",
+        capsule_dir=source,
+        capture_bundle=capture,
+        target="synthetic",
+        out_dir=out,
+        numeric_policy={"compare": "exact_int"},
+    )
+    assert result["status"] == "incomplete"
+    assert result["failure"]["code"] == code
+    assert json.loads((out / "result.json").read_text()) == result
+    assert result["build_artifacts"] == {}
 
 
 def test_existing_artifact_directory_is_not_overwritten(tmp_path):
