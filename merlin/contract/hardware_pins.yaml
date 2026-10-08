@@ -35,6 +35,10 @@
 #   local_edits              path -> sha256 of bytes that are KNOWINGLY not the pinned revision's. Pins
 #                            the content so a DIFFERENT edit is still refused; never a way to quiet a
 #                            check, and never a claim that the file matches upstream.
+#   build_products           path -> sha256 of a BUILT file inside the checkout, compared by content on
+#                            every verify. A build product is usually gitignored, so git reports it
+#                            neither dirty nor untracked and `local_edits` would never compare it.
+# Bytes that are gone for good are recorded under `lost_artifacts:` at the end of this file.
 # Three states per file, never two: pinned / off_pin / undeterminable. "Nobody could tell which revision
 # these bytes are" is not a softer "wrong revision" — it means do not publish the claim at all.
 #
@@ -282,6 +286,15 @@ pins:
       # and false of the machine. A read set that omits what the RTL build consumes cannot answer the
       # only question a performance claim asks of this pin.
       - src/main/scala/gemmini/LoadController.scala
+      # THE NORMALIZATION EXCLUSION rests on these two. The contract (examples/gemmini/target/contracts/
+      # target_contract.yaml) leaves `normalization` and `softmax` undeclared because AccumulatorScale's
+      # LAYERNORM / IGELU / SOFTMAX arms are gated on `has_normalizations`, which GemminiConfigs defaults
+      # to false and `defaultConfig` never sets. A family declared nowhere has no contract line for
+      # check_capability_backing.py to attach a citation to, so until these were read here an edit to
+      # either file could move that verdict while the pin stayed clean. Both are byte-identical to the
+      # pinned revision (checked 2026-10-06).
+      - src/main/scala/gemmini/AccumulatorScale.scala
+      - src/main/scala/gemmini/GemminiConfigs.scala
     # CONTENT, not `git status`. Turned on for the same reason the sibling pin below turns it on: the
     # dirty heuristic answers "differs from HEAD", and it cannot distinguish a reviewed edit whose
     # bytes are declared here from an unreviewed one. With this on, each read path gets a per-file
@@ -881,6 +894,17 @@ pins:
       src/graphPartition.cpp: 74c5fdec53753ff0ef0ac1193139d48d5e604287c5ded3d99bd49adac852eafb
       src/splitArray.cpp: dfccdbb9a91ba15800c8e015123aad5fb1c22508ba8ed8f4e8279e8f0711afd0
       src/splitNodes.cpp: 4026fb78d304b104f9d1a4391ba54918b1dea0e7549e49bfd2c1f828b7dbff9d
+    # THE EMITTER BINARY, BY ITS BYTES. `build/gsim/gsim` has always been in `requires_paths`, which asks
+    # only whether the file exists, and the path is gitignored, so no content check ever reached it. It
+    # was rebuilt in place and `verify()` stayed ok while the results attributed to the old binary kept
+    # citing its digest; that loss is recorded under `lost_artifacts:` (gsim_emitter_246bfdac).
+    #
+    # This digest is the binary at the path TODAY (re-hashed 2026-10-06; unchanged since 2026-09-23). It
+    # is NOT the emitter the earlier corpus was produced by, and its own provenance is weak: it was built
+    # by another workstream at an unrecorded commit, and the checkout has since moved past this pin. It
+    # is declared so the NEXT in-place rebuild is drift the gate reports, not a later discovery.
+    build_products:
+      build/gsim/gsim: "6da1580d3a54ed050bd4126d23a852e41ba64d5d1b963979829aca4839cd4aa9"
     notes: >-
       The patch set is reproduced at merlin/contract/external/gsim/gsim-merlin-patches.diff so it does not
       live only in one developer's dirty working tree, which is how it was found. Build with clang >= 19
@@ -1806,3 +1830,84 @@ artifacts:
         arms ran here (narrow readout, curated header wrong for it). A capsule result and a model result
         are not comparable without saying so, and no capsule can exercise the accumulator-readout path
         this device lacks.
+
+
+# ------------------------------------------------------------------------------------------------------
+# BYTES A BODY OF RESULTS IS ATTRIBUTED TO, WHICH NO LONGER EXIST AND CANNOT BE REPRODUCED.
+#
+# Read by `merlin.common.provenance_lost` (`load_lost`, `lost_for_digest`). A digest recorded here is
+# CLAIMED: no pin's `local_edits` or `build_products` and no `artifacts:` entry may declare it, and the
+# loaders refuse the registry if one does. Of the three things one can do with bytes gone missing under
+# a corpus of results, two are worse than the loss: repointing the declaration at whatever is on disk
+# now (every citation stays, silently wrong) and deleting the declaration (every citation dangles). The
+# third is to record the loss -- what, when, why it cannot be rebuilt, and what still verifies.
+# ------------------------------------------------------------------------------------------------------
+lost_artifacts:
+  gsim_emitter_246bfdac:
+    state: UNRECOVERABLE
+    digest: "246bfdac0a99bd88dfd860e0543cada0af048f8f699315209d6b50b48fe87446"
+    bytes_declared: 13275688
+    path: build/gsim/gsim
+    root_env: MERLIN_EXT_GSIM
+    what: >-
+      The FIRRTL-to-C++ simulator compiler built from the `gsim_compiler` pin -- the GSIM EMITTER that
+      produced the RTL-derived C++ models the elaborated-RTL runs used. The same RTL through a different
+      emitter is a different simulator, and an emitted model carries no revision of its own.
+    lost_on: "2026-09-08T10:40Z"
+    discovered_on: "2026-09-23"
+    cause: >-
+      Rebuilt IN PLACE at that path by another workstream sharing the checkout; nothing was deleted on
+      purpose. The successor binary's mtime (2026-09-08 03:40 PDT) dates the overwrite. The path now
+      holds 6da1580d (13,281,968 bytes). Files citing the successor sit under another target's engine
+      tree, files citing the lost digest under this one's: two workstreams, one output path.
+    superseded_by: "6da1580d3a54ed050bd4126d23a852e41ba64d5d1b963979829aca4839cd4aa9"
+    why_unrecoverable: >-
+      The build is deterministic except for two values that were never recorded and are baked into the
+      binary. At the pinned commit 65a1f89a the Makefile sets `GSIM_BUILD_DATE ?= $(shell date -u ...)`
+      (line 149) and compiles it in (line 151), so the wall-clock second of the build is inside the ELF;
+      and `-ggdb` (line 146) embeds the absolute build directory. Two rebuilds with both held fixed came
+      out byte-identical, so those two values are the whole of the non-determinism, and neither original
+      is known. A rebuild at the pinned commit is therefore a SIBLING of 246bfdac, not 246bfdac (the
+      2026-09-23 audit measured adc2383d for one). Three digests are in play and are NOT alternative
+      accounts of one binary: 246bfdac is the lost emitter the corpus cites, 6da1580d occupies the path
+      now, adc2383d is what a fresh rebuild yields. No copy exists: every local filesystem and the home
+      directory were swept by size window and none holds a file of the declared length and digest.
+    cited_by: >-
+      Counted 2026-09-23 by sweeping the generated-output root: 244 JSON artifacts (246 files counting
+      one REPORT.md and one rows.jsonl, neither asserting a pin), dated 2026-09-06 to 2026-09-24 -- 205
+      sharded layer_cache entries, 26 perf-bench receipts and context files, 8 layer/shape/schedule
+      tables, 5 probe tables, 2 refused certificates, 1 autocomp table, 1 external kernel table, and the
+      one build receipt (out/build/rtl_engines/<target>/gsim/build_receipt.json) the rest copy. The
+      digest appears under five key paths -- `engine.receipt.tools.gsim_emitter`,
+      `engine_provenance.receipt.tools.gsim_emitter`, `rows.N.engine.receipt.tools.gsim_emitter`,
+      `tools.gsim_emitter.sha256` and `engine_binding.receipt_identity.tools.gsim_emitter` -- so a sweep
+      keyed on one spelling finds a fraction. None re-hashes at load, so none fails.
+    still_verifies:
+      - >-
+        The SOURCES the emitter was built from: eight of the nine `gsim_compiler` local_edits are
+        byte-identical to the pin today (re-checked 2026-10-06). The ninth, src/cppEmitter.cpp, is not:
+        the checkout is at 319a099d, past the pinned 65a1f89a, with that file at 26e0caea against the
+        declared 3df277f4. `verify('gsim_compiler')` reports both.
+      - >-
+        The GENERATED MODEL the emitter produced (17 files, sealed manifest f822a628), intact and pinned:
+        the strongest surviving witness to what the emitter did.
+      - >-
+        The compiled EMULATOR the capsule path runs, artifact `gemmini_gsim_emulator`, present and
+        matching its declared digest.
+    do_not:
+      - >-
+        Do NOT repoint any receipt's `tools.gsim_emitter` at the successor digest: the citations would
+        keep asserting 246bfdac while different bytes claimed to be what they cite.
+      - >-
+        Do NOT substitute a rebuild. adc2383d comes from the same source at the same commit and is NOT
+        these bytes; presenting it as them would make every citation false undetectably.
+      - Do NOT delete this record when the last citing artifact is archived; the archive still cites it.
+    attestation_decision: >-
+      Decided 2026-09-23, in two tenses. GOING FORWARD the emitter is witnessed by its ELF, now checked
+      by content (`build_products` on the `gsim_compiler` pin); the proposal to let the generated-model
+      manifest stand in for it is rejected, because an output witness attests that a model is intact,
+      not which emitter produced it. RETROSPECTIVELY, for the corpus that cited the lost bytes, the
+      sealed manifest f822a628 is the only witness left and is accepted as such, and it is WEAKER: a
+      result from that corpus may be cited as "produced from model f822a628", never as "produced by
+      emitter 246bfdac verified". A claim that turns on the emitter's own revision must be re-run, not
+      re-attributed.

@@ -550,6 +550,15 @@ class TestABuildProductIsVerifiedByItsBytes:
         assert P.load_pins()
         assert all(isinstance(pin.build_products, tuple) for pin in P.load_pins().values())
 
+    def test_the_shipped_pins_leave_no_build_product_on_an_existence_check(self):
+        """Any required path under a build directory carries a content digest -- as a property of the
+        registry, so a second pin acquiring the same shape is covered without editing this test."""
+        for name, p in P.load_pins().items():
+            declared = {rel for rel, _ in p.build_products}
+            for rel in p.requires_paths:
+                if rel.startswith("build/"):
+                    assert rel in declared, f"{name}: requires {rel} but declares no build_products digest"
+
 
 class TestBytesThatAreGoneAreRecordedAsGone:
     """An UNRECOVERABLE record, and the two repairs it forbids: the digest is CLAIMED by the record and
@@ -624,6 +633,23 @@ class TestBytesThatAreGoneAreRecordedAsGone:
             assert rec.still_verifies
         assert P.load_pins()
         assert isinstance(P.load_artifacts(), dict)
+
+    def test_the_shipped_registry_records_the_emitter_loss_and_nothing_re_declares_it(self):
+        lost = P.load_lost()
+        assert lost, "the registry records no loss; the emitter loss must stay written down"
+        claimed = {rec.digest for rec in lost.values()}
+        for rec in lost.values():
+            assert rec.still_verifies and rec.do_not, rec.name
+            assert rec.superseded_by not in claimed, "a successor must not itself be recorded as lost"
+        for p in P.load_pins().values():
+            assert not {digest for _, digest in (*p.local_edits, *p.build_products)} & claimed
+        assert not {a.digest.lower() for a in P.load_artifacts().values()} & claimed
+
+    def test_the_emitter_loss_names_the_weaker_witness_that_replaced_it(self):
+        """A weaker attestation is a decision, and a decision has to be findable to be disagreed with."""
+        rec = P.load_lost()["gsim_emitter_246bfdac"]
+        assert "WEAKER" in rec.attestation_decision.upper()
+        assert rec.to_dict()["attestation_decision"] == rec.attestation_decision
 
     def test_a_loss_record_preserves_its_explicit_weaker_witness(self, tmp_path):
         reg = self._reg(

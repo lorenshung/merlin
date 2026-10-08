@@ -25,6 +25,10 @@ directory under the purgeable cache, and prints where everything is:
    symbolizer of the target's own toolchain (beside the compiler its build recipe names) and attributed
    per function and source line (:func:`merlin.perf.debug_companion.attribute_symbolized_pcs`). Any step
    that cannot be taken leaves the attribution ``UNKNOWN``, with the reason.
+6. **Timing and a counter profile** (``--time``, ``--profile``; :mod:`.group_probes`): the group's
+   program on the elaborated-RTL emulator, graded exactly and tagged a ranking signal; and the group's
+   hardware-counter facts and values (names from the target's counter header, values only from a
+   trusted engine's console) with its instruction census by role.
 
 Each step uses a hook the TARGET provides (its whole-model driver, a functional-model machine). A
 target or candidate without one is told "not available for this target" and why; nothing is guessed,
@@ -79,6 +83,20 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--phase0-recipe", help="package mode: the Phase 0 recipe naming the corpus binding")
     group.add_argument("--descriptor", help="package mode: the target descriptor")
     group.add_argument("--machine-spec", type=Path, help="package mode: a JSON functional-model machine for --trace")
+    group.add_argument(
+        "--time", action="store_true", help="time the group's program on the elaborated-RTL emulator (a ranking signal)"
+    )
+    group.add_argument(
+        "--profile",
+        action="store_true",
+        help="the group's counter facts and values, and its instruction census by role",
+    )
+    group.add_argument("--counter-console", type=Path, help="--profile: read counter values from this console file")
+    group.add_argument(
+        "--counter-engine", help="--profile: the engine that printed --counter-console (its counters must be trusted)"
+    )
+    group.add_argument("--max-cycles", type=int, default=60_000_000, help="--time: emulator cycle budget")
+    group.add_argument("--timeout-s", type=float, default=1800.0, help="--time: emulator wall-clock budget")
 
 
 # ------------------------------------------------------------------------------------- candidate
@@ -425,7 +443,37 @@ def inspect_group(source: str | Path, group: str, args: argparse.Namespace) -> d
     if args.trace:
         out["instruction_trace"] = instruction_trace(candidate, record.get("elf"), work, run_to=args.run_to)
         out["source_attribution"] = source_attribution(candidate, record, work)
+    if getattr(args, "time", False) or getattr(args, "profile", False):
+        out.update(_probes(candidate, record, work, args))
     return out
+
+
+def _probes(candidate: Mapping[str, Any], record: Mapping[str, Any], work: Path, args: argparse.Namespace) -> dict:
+    """``--time`` and ``--profile`` (:mod:`.group_probes`). A profile reads its counter values from
+    ``--counter-console`` when one is named, else from the console of the ``--time`` run."""
+    from . import group_probes as GP
+
+    found: dict[str, Any] = {}
+    target = candidate["target"]
+    if args.time:
+        found["timing"] = GP.time_group(
+            record,
+            target=target,
+            model_capsule=candidate["options"]["model_capsule"],
+            out=work / "timing",
+            max_cycles=args.max_cycles,
+            timeout_s=args.timeout_s,
+        )
+    if args.profile:
+        console, engine = None, None
+        if args.counter_console is not None:
+            console = Path(args.counter_console).read_text(encoding="utf-8", errors="replace")
+            engine = args.counter_engine
+        elif found.get("timing", {}).get("console"):
+            console = Path(found["timing"]["console"]).read_text(encoding="utf-8", errors="replace")
+            engine = GP.engine_of(found["timing"])
+        found["profile"] = GP.profile_group(record, target=target, console=console, engine=engine)
+    return found
 
 
 def _print(result: Mapping[str, Any], *, lines: int) -> None:
@@ -463,6 +511,29 @@ def _print(result: Mapping[str, Any], *, lines: int) -> None:
             )
             if trace.get("error"):
                 print(f"    {trace['error']}")
+    timing = result.get("timing")
+    if timing:
+        if timing.get("status") != "graded":
+            print(f"  timing: {timing.get('status')}: {timing.get('refusal')}")
+        else:
+            state = (timing.get("cycles_adjudication") or {}).get("state")
+            print(
+                f"  timing: {timing['cycles']:,} cycles, correct={timing.get('correct')} ({timing['signal']}; {state})"
+            )
+    profile = result.get("profile")
+    if profile:
+        facts, values = profile["counters"]["facts"], profile["counters"]["values"]
+        print(f"  counters: {facts.get('status')} {facts.get('engines') or ''}; values {values['status']}")
+        if values["status"] == "measured":
+            for combo, value in values["busy_cycles"].items():
+                print(f"    busy {combo}: {value}")
+        elif values.get("why"):
+            print(f"    {values['why']}")
+        census = profile["instruction_census"]
+        if census["status"] == "measured":
+            print(f"  census: kernel {census['kernel']['by_kind']}; program code {census['program_code']['by_kind']}")
+        else:
+            print(f"  census: {census['status']}: {census['why']}")
     attribution = result.get("source_attribution")
     if attribution:
         if attribution.get("status") != "attributed":

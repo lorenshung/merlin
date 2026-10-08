@@ -332,3 +332,82 @@ def test_a_companion_that_is_not_the_program_is_refused(group_build, monkeypatch
     assert cli.main(argv) == 0
     attribution = json.loads(capsys.readouterr().out)["source_attribution"]
     assert attribution["status"] == "UNKNOWN" and "not the program" in attribution["why"]
+
+
+# ------------------------------------------------------------------------------ timing and profile
+
+
+@pytest.fixture
+def probes(monkeypatch, tmp_path):
+    """A group build that writes only the program record, and the emulator run, the counter header and the
+    trust table it is probed with -- all made up (no target named, nothing lowered)."""
+    import hashlib
+
+    from merlin.perf import counter_trust as CT
+    from merlin.perf import hw_counters as HWC
+    from merlin.perf import whole_model_group_timing as GT
+
+    monkeypatch.setattr("merlin.runtime.backends.base.whole_model_driver", lambda target: object())
+
+    def build_group_programs(package_dir, groups, *, out, **_kw):
+        (group,) = groups
+        elf = Path(out) / f"g{group}/program/program.elf"
+        elf.parent.mkdir(parents=True)
+        elf.write_bytes(b"\x7fELF")
+        return {group: {"group": group, "on": "package", "elf": str(elf)}}
+
+    monkeypatch.setattr(GT, "build_group_programs", build_group_programs)
+
+    header = tmp_path / "counters.h"
+    header.write_text("#define UNIT_A_CYCLES 1\n#define UNIT_B_CYCLES 2\n#define UNIT_A_B_CYCLES 3\n")
+    digest = hashlib.sha256(header.read_bytes()).hexdigest()
+    monkeypatch.setattr(
+        HWC, "counters_for_target", lambda _t: {"status": "derived", "header": str(header), "header_sha256": digest}
+    )
+    monkeypatch.setattr(CT, "_declared", lambda: {"fixture-rtl": CT.Verdict("fixture-rtl", CT.REAL)})
+    timed = []
+
+    def time_group_programs(programs, *, out, model_capsule, cache, **_kw):
+        timed.append({"groups": sorted(programs), "model_capsule": model_capsule, "cache": cache})
+        (group,) = programs
+        run = Path(out) / f"g{group}"
+        run.mkdir(parents=True)
+        (run / "console.txt").write_text("MERLIN_HWCOUNTER UNIT_A_CYCLES 50\nMERLIN_HWCOUNTER UNIT_B_CYCLES 20\n")
+        verdict = {"cycles_adjudication": {"instrument": "fixture-rtl", "state": "UNADJUDICATED"}}
+        (run / "verdict.json").write_text(json.dumps(verdict))
+        return {group: {"group": group, "status": "graded", "cycles": 999, "correct": True, "run_dir": str(run)}}
+
+    monkeypatch.setattr(GT, "time_group_programs", time_group_programs)
+    return timed
+
+
+def test_time_and_profile_read_the_groups_own_run(probes, tmp_path, capsys):
+    job = _job(tmp_path)
+    argv = ["inspect", str(job), "--group", "g2", "--time", "--profile", "--out", str(tmp_path / "w"), "--json"]
+    assert cli.main(argv) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert probes == [{"groups": [2], "model_capsule": str(tmp_path / "capsule"), "cache": None}]
+    timing = result["timing"]
+    assert timing["cycles"] == 999 and timing["signal"] == "ranking" and timing["console"]
+    values = result["profile"]["counters"]["values"]
+    assert values["status"] == "measured" and values["engine"] == "fixture-rtl"
+    assert values["busy_cycles"] == {"A": 50, "B": 20, "A+B": None}  # a counter the console lacks is unknown
+    # The fixture's record names no compiler, so the census says it could not run rather than counting zero.
+    assert result["profile"]["instruction_census"]["status"] == "UNKNOWN"
+    text = ["inspect", str(job), "--group", "g2", "--time", "--out", str(tmp_path / "text")]
+    assert (
+        cli.main(text) == 0 and "timing: 999 cycles, correct=True (ranking; UNADJUDICATED)" in capsys.readouterr().out
+    )
+
+
+def test_a_profile_without_a_run_reads_only_a_named_console_from_a_trusted_engine(probes, tmp_path, capsys):
+    console = tmp_path / "console.txt"
+    console.write_text("MERLIN_HWCOUNTER UNIT_A_CYCLES 7\n")
+    base = ["inspect", str(_job(tmp_path)), "--group", "g2", "--profile", "--counter-console", str(console)]
+    assert cli.main([*base, "--counter-engine", "fixture-rtl", "--out", str(tmp_path / "a"), "--json"]) == 0
+    values = json.loads(capsys.readouterr().out)["profile"]["counters"]["values"]
+    assert values["status"] == "measured" and values["busy_cycles"]["A"] == 7 and probes == []
+    assert cli.main([*base, "--out", str(tmp_path / "b"), "--json"]) == 0  # no engine named: refused
+    assert json.loads(capsys.readouterr().out)["profile"]["counters"]["values"]["status"] == "refused"
+    assert cli.main([*base, "--counter-engine", "fixture-rtl", "--out", str(tmp_path / "c")]) == 0
+    assert "busy A: 7" in capsys.readouterr().out

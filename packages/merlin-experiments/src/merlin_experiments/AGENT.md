@@ -26,7 +26,9 @@ catalog preflight never grants a performance verdict or native sandbox qualifica
 `group_inspect.py` owns `merlin experiment inspect <candidate> --group gN`: it rebuilds one
 group through the core per-group program build inside a compile trace. It reaches every hook
 (whole-model driver, functional-model machine) through the target and says "not available"
-when one is absent; it never names a target.
+when one is absent; it never names a target. `group_probes.py` owns its `--time` and
+`--profile` probes: one group timed on the elaborated-RTL emulator (a ranking signal, never a
+cycle claim) and its counter facts, trusted counter values and instruction census by role.
 
 `corpus/admission.py` owns evaluated conformance and default public-cohort tier
 selection. Query actual constructed adapters, never substitute advertised metadata.
