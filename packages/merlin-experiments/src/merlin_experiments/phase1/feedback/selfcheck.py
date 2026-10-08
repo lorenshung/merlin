@@ -1292,8 +1292,9 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
                             _stream.seek(0, os.SEEK_END)
                             _stream.seek(max(0, _stream.tell() - 4096))
                             console_tail = _stream.read(4096).decode("utf-8", errors="replace")[-800:]
-                    except (OSError, UnicodeError):
-                        pass
+                    except (OSError, UnicodeError) as exc:
+                        # An unreadable console is reported as such, never as a console with no tail.
+                        console_tail = f"<console unreadable: {type(exc).__name__}: {exc}>"
             # FULL debug detail ONLY for a FAILING capsule (the one you are working). A passing capsule's
             # diff stats / trace dump / console tail are noise that re-inflates the agent's context every
             # round (the self_check output is re-fed each turn) — the pass flag is all that's needed for it.
