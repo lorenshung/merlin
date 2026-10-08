@@ -25,9 +25,9 @@ Two properties make the store safe to keep under the declared-purgeable cache ro
 
 ``MERLIN_BUNDLE_CAS`` relocates the store (a hard link cannot cross a filesystem, so point it at the
 volume holding an out-of-tree workspace); setting it **empty** disables sharing and every consumer
-falls back to a plain copy, which is the escape hatch if a filesystem ever reports links it does not
-honor. Every entry point degrades to a copy rather than failing, so the store is an optimization and
-never a dependency.
+falls back to a read-only copy with the same executable classification, which is the escape hatch
+if a filesystem ever reports links it does not honor. Store or hard-link unavailability degrades
+to a copy, so the store is an optimization and never a dependency.
 """
 
 from __future__ import annotations
@@ -169,9 +169,14 @@ def place_file(
     """Put ``source``'s bytes at ``dst``. Returns whether the store's inode is now shared.
 
     Falls back to a copy whenever the link cannot be made -- no store, a cross-filesystem
-    destination (``EXDEV``), or a filesystem without hard links. The result is byte-identical
-    either way; only its disk cost differs.
+    destination (``EXDEV``), or a filesystem without hard links. The result has identical bytes
+    and mode 0444, or 0555 when the source is executable, either way; only its disk cost differs.
+    The caller owns destination paths and any existing regular file it allows to be overwritten.
+    A destination symlink refuses before placement; this helper grants no ownership over other
+    hard links to an existing destination or aliases in its parent path.
     """
+    if dst.is_symlink():
+        raise ValueError(f"refusing to freeze destination symlink: {dst}")
     if observe is not None:
         canonical = source.resolve(strict=True)
         _observe_source(source, canonical, dst, observe)
@@ -183,7 +188,9 @@ def place_file(
             return True
         except OSError:
             pass
+    mode = 0o555 if source.stat().st_mode & 0o111 else 0o444
     shutil.copy2(source, dst, follow_symlinks=True)
+    dst.chmod(mode)
     return False
 
 
