@@ -3,7 +3,7 @@ title: Compile debugging — stop at a stage, dump its IR, trace a build, inspec
 kind: guide
 status: current
 owner: compiler
-last_verified: 2026-10-06
+last_verified: 2026-10-08
 related: [optional_passes, model_lowering, whole_model_on_accelerator]
 code_refs: [src/merlin/common/compile_trace.py,
             src/merlin/perf/debug_companion.py,
@@ -14,7 +14,8 @@ code_refs: [src/merlin/common/compile_trace.py,
             src/merlin/perf/whole_model_build_cli.py,
             src/merlin/perf/whole_model_partial.py,
             packages/merlin-experiments/src/merlin_experiments/group_inspect.py,
-            packages/merlin-experiments/src/merlin_experiments/group_probes.py]
+            packages/merlin-experiments/src/merlin_experiments/group_probes.py,
+            src/merlin/perf/census_cli.py]
 ---
 
 # Compile debugging
@@ -107,7 +108,8 @@ refusal too, because a program is what its caller is owed.
 ## Inspect one group of a candidate
 
 ```bash
-merlin experiment inspect <job-dir> --group g12 [--stage S] [--trace] [--run-to N] [--time] [--profile]
+merlin experiment inspect <job-dir> --group g12 [--stage S] [--trace] [--run-to N] [--locality-granule B]
+                         [--time] [--profile]
 merlin experiment inspect <package-dir> --group g12 --target T --build-options opts.yaml ...
 ```
 
@@ -122,7 +124,14 @@ whole-model driver. The rebuild runs inside a trace that dumps every stage, and 
 - `--stage S`: the IR of a stage the trace reached (for example `mlir:cse#2` from the package's own
   lowering), or of a product (`command_buffer`, `artifact`, `iface`);
 - `--trace`: the group's program on the candidate's functional model (the `spike` machine its job
-  declares), with the simulator's execution log stopped after `--run-to` instructions;
+  declares), with the simulator's execution and commit log stopped after `--run-to` instructions;
+- with `--trace`, the program's **memory requests**: every request the commit log records, in commit
+  order, as `requested_addresses.json` in the work directory. With `--locality-granule B` (repeatable;
+  `--locality-capacity C` adds recurrence thresholds) the exact recurrence census of
+  `merlin.perf.address_locality` is taken at each granule. These are logical addresses of the whole
+  one-group program within the traced instructions, not physical traffic.
+  `merlin experiment census locality requested_addresses.json --granule B --max-requests N` re-takes
+  the census at another granule without a rerun;
 - with `--trace`, the program's **source-line attribution**. The group build links the program a
   second time from the same model, kernels and recipe with the compiler's debug option (`-g`) appended
   to its recorded flags. That companion is admitted only if its allocated bytes and relocations, of the

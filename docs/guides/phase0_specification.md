@@ -3,7 +3,7 @@ title: Defining and inspecting Phase 0 inputs
 kind: guide
 status: current
 owner: targetgen
-last_verified: 2026-10-06
+last_verified: 2026-10-08
 related: [generating_capsules, adding_a_target, integrations]
 code_refs:
   - src/merlin/targetgen/software_spec.py
@@ -499,13 +499,20 @@ Each new run writes the following beneath `<run>/phase0/`:
 | `coverage/operation-accounting.json` | Per-application and combined operation partitions, provenance groups, signature/ordinal traceability and declared-versus-observed support |
 | `coverage/phase1-capsule-coverage.json` → `phase1_witness_basis` | Finite source-operation and typed-edge witness universe, a compact inventoried selection from the selected cohort, uncovered obligations and the selection's minimum-proof status |
 | `coverage/README.md` | Automatically rendered summary of those same operation and quantization views |
+| `coverage/performance-basis.json` | Static, capture-bound work per selected operation: MACs for an observed single-MAC contraction, ABI tensor bytes when every extent and element width is known, the admitted placement and the reason for each value it cannot state; bound to the accounting, performance-facts, spec and RTL-facts digests it was built from. Selected operations only: not traffic, timing or a speedup claim. Generation derives capture-shape performance cohorts from it |
 | `coverage/spec-fact-drift.json` | Field-by-field comparison of the resolved spec with the fact-derived capability; blocking findings stay open in the coverage commitment |
 | `software/quantization-contract.json` | All authored formats, matching hardware recipes, parameter unknowns and operation-scoped quantization decisions |
 | `coverage/generation.json` | Written/omitted capsules, failures, synthesis input identity and diagnostic status |
 | `capsules/MANIFEST.yaml` | Actual members and distinct functional/performance/diagnostic selections |
 
 Raw extraction and resolved consumer views have separate hashes. Current tool observations
-do not retroactively identify the tools that produced unstamped old facts. Matching target
+do not retroactively identify the tools that produced unstamped old facts.
+With an explicit capability contract, the selected executable provider's own contract is compared
+with it: each unit whose scaling the provider states differently, or that the provider lacks, is
+recorded as a `support-contract` contradiction bound to both contracts' digests, and neither
+declaration replaces the other. A target-resolution home that has not been materialized is recorded
+as an unknown support diagnostic, never inventoried as a provider. An evidence member may not be
+absolute, contain `..`, or land under `private/`, where a frozen run keeps its source snapshot. Matching target
 names, configuration names or dates does not prove that separate HW-MLIR, FIRRTL and hierarchy
 files came from one elaboration.
 
