@@ -828,6 +828,11 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
         or a.integer_nonlinear
     ):
         ap.error("--stage-fp32 requires FP32 or an explicit int8 recipe without additional rewrites")
+    # When the dtype token alone decides the numeric form, a token the table does not know is refused:
+    # looking it up with a (None, None) default captured an unquantized fp32 model under the requested
+    # name, so `--dtype fp8_e5m2` produced an fp32 capture with no error.
+    if not (a.recipe or a.scheme or a.already_quantized) and a.dtype not in _SCHEME:
+        ap.error(f"--dtype {a.dtype!r} has no capture scheme; known: {sorted(_SCHEME)} (or pass --recipe/--scheme)")
 
     if a.m2m_dir and a.m2m_dir not in sys.path:
         sys.path.insert(0, a.m2m_dir)
