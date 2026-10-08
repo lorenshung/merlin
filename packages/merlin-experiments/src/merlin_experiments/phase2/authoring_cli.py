@@ -60,7 +60,11 @@ def main(
     parser.add_argument("--max-tool-calls", type=int, default=100)
     parser.add_argument("--tool-timeout-seconds", type=int, default=900)
     parser.add_argument("--families", default="all")
-    parser.add_argument("--capsules", default="all")
+    parser.add_argument(
+        "--capsules",
+        default="all",
+        help="all, comma-separated generated capsule names, or representative (diagnostic family-closed subset)",
+    )
     parser.add_argument(
         "--waive-functional-gate",
         action="append",
