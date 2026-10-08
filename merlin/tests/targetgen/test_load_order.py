@@ -341,3 +341,18 @@ def test_the_promotion_ledger_records_an_order_failure_as_a_failed_cert(tmp_path
     cert = {"per_capsule": [{"capsule": "A", "status": res["status"], "execution_digest": "a" * 64}]}
     B.record_cert(ws, cert, "L3", sys.stderr)
     assert B._tier_state(ws)["A"]["L3"]["status"] == "fail"
+
+
+def test_which_classes_stay_on_chip_is_the_shared_vocabulary(monkeypatch):
+    """The local-only set is read from the shared class table at use: a class that table declares
+    plumbing is skipped, a loop class (whose unroller issues loads the trace cannot see) is not, and a
+    class the table does not know is opaque."""
+    from merlin.targetgen import semantic_families as SF
+
+    local = SF.local_only_classes()
+    assert {"CONFIG_LD", "PRELOAD"} <= local and "LOOP_WS" not in local
+    trace = _trace({"index": 0, "class": "CONFIG_LD", "decoded": {}}, {"index": 1, "class": "LOOP_WS", "decoded": {}})
+    loads = [LO._as_load(row, FACTS) for row in trace["instructions"]]
+    assert loads[0] is None and loads[1] is not None and loads[1].rows is None
+    monkeypatch.setattr(SF, "_ISA_PLUMBING_CLASSES", SF._ISA_PLUMBING_CLASSES | {"LOOP_WS"})
+    assert LO._as_load(trace["instructions"][1], FACTS) is None

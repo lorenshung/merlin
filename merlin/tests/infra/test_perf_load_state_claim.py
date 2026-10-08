@@ -337,3 +337,27 @@ def test_the_preflight_refuses_a_target_whose_selector_is_underivable(monkeypatc
     monkeypatch.setattr(base, "get_backend", lambda target: SimpleNamespace(rocc_semantics=_Support(layout=False)))
     decided = LSC.preflight_load_state_evidence(_cohort(), replicates=["r000"], target="synthetic")
     assert decided["status"] == LSC.REFUSED and decided["refusal_reasons"]
+
+
+# --------------------------------------------------------------------------------------------
+# The class vocabulary is the shared one, never a re-listed copy.
+# --------------------------------------------------------------------------------------------
+
+
+def test_the_inbound_classes_are_read_from_the_shared_vocabulary(support, monkeypatch):
+    """A class the shared table declares as inbound movement is counted with no edit to this module,
+    and an outbound one never is."""
+    from merlin.targetgen import semantic_families as SF
+
+    monkeypatch.setitem(SF._ISA_CLASS_FAMILY, "XFER_IN", "movement")
+    monkeypatch.setitem(SF._ISA_CLASS_DIRECTION, "XFER_IN", "in")
+    support["synthetic"] = SimpleNamespace(rocc_semantics=_Support(movement=("MVIN", "XFER_IN", "MVOUT")))
+    assert LSR.movement_in_classes_for("synthetic") == frozenset({"MVIN", "XFER_IN"})
+    assert LSR.load_state_capacity("synthetic") == 2
+
+
+def test_the_load_configuration_class_is_the_shared_inbound_configuration():
+    from merlin.targetgen import semantic_families as SF
+
+    assert SF.configuration_classes("in") == frozenset({LSR.CONFIG_LOAD_CLASS})
+    assert LSR.CONFIG_LOAD_CLASS not in SF.configuration_classes("out")

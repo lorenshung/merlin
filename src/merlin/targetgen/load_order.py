@@ -46,15 +46,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-#: Shared decoded-ABI classes that issue NO memory request of their own: configuration, cache
-#: maintenance, and the preload/compute pair whose operands are already on chip. These are names from the
-#: human-owned class vocabulary every capability manifest maps its RTL funct codes onto (see
-#: ``semantic_families._ISA_CLASS_FAMILY`` and ``perf.deps.rocc.INHERITS_DESTINATION``), not facts about
-#: one device. A class outside this set that carries no transfer evidence is OPAQUE -- it may issue loads
-#: the trace cannot see -- and is treated as an unresolved load.
-LOCAL_ONLY_CLASSES = frozenset(
-    {"CONFIG", "CONFIG_LD", "CONFIG_ST", "CONFIG_EX", "FLUSH", "PRELOAD", "COMPUTE_PRELOADED", "COMPUTE_ACCUMULATE"}
-)
+#: Which decoded-ABI classes issue NO memory request of their own -- configuration, cache maintenance,
+#: and the preload/compute steps whose operands are already on chip -- is read from the shared class
+#: vocabulary every capability manifest maps its RTL funct codes onto
+#: (:func:`merlin.targetgen.semantic_families.local_only_classes`), never re-listed here and never a fact
+#: about one device. A class outside that set that carries no transfer evidence is OPAQUE -- it may issue
+#: loads the trace cannot see -- and is treated as an unresolved load.
 
 #: The shared class family that orders memory (a host fence drains the accelerator's queues).
 BARRIER_FAMILY = "synchronization"
@@ -163,7 +160,9 @@ def _as_load(row: Mapping, facts: OrderFacts) -> _Load | None:
     transfer = OFF_CHIP_FIELD in payload or _family(cls) == MOVEMENT_FAMILY
     if not transfer:
         # no transfer evidence: a local-only command issues no request; anything else is opaque
-        return None if cls in LOCAL_ONLY_CLASSES else _Load(index, cls, None)
+        from .semantic_families import local_only_classes
+
+        return None if cls in local_only_classes() else _Load(index, cls, None)
     direction = _destination(payload)
     if direction == "out":
         return None

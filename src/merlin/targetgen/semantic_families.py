@@ -146,7 +146,29 @@ _ISA_CLASS_FAMILY: dict[str, str] = {
     "STORE": "movement",
     # ordering / visibility
     "FENCE": "synchronization",
-    # CONFIG / CONFIG_EX / CONFIG_LD / CONFIG_ST / FLUSH: plumbing, deliberately absent
+    # CONFIG / CONFIG_EX / CONFIG_LD / CONFIG_ST / FLUSH: plumbing, deliberately absent (see below)
+}
+
+#: The shared classes that are PLUMBING -- configuration and cache maintenance. Named here, rather than
+#: only left out of :data:`_ISA_CLASS_FAMILY`, so a consumer that must know "does this class issue a
+#: memory request of its own?" asks this module instead of re-listing the vocabulary.
+_ISA_PLUMBING_CLASSES = frozenset({"CONFIG", "CONFIG_EX", "CONFIG_LD", "CONFIG_ST", "FLUSH"})
+
+#: Contraction classes whose operands are already on chip, so they issue no memory request. The loop
+#: classes are NOT here: a hardware loop unroller issues loads the decoded stream cannot see.
+_ISA_ON_CHIP_CLASSES = frozenset({"PRELOAD", "COMPUTE_PRELOADED", "COMPUTE_ACCUMULATE"})
+
+#: Which way a shared class moves data, or which movement a configuration class configures: ``in`` onto
+#: the chip, ``out`` off it. Part of the same closed vocabulary; a target's mnemonics never appear here.
+_ISA_CLASS_DIRECTION: dict[str, str] = {
+    "MVIN": "in",
+    "MVIN2": "in",
+    "MVIN3": "in",
+    "LOAD": "in",
+    "MVOUT": "out",
+    "STORE": "out",
+    "CONFIG_LD": "in",
+    "CONFIG_ST": "out",
 }
 
 # --- structural ISA ROLE -> canonical family ----------------------------------------------------
@@ -463,6 +485,26 @@ def from_isa_class(isa_class: str | None) -> str | None:
     if not isa_class:
         return None
     return _ISA_CLASS_FAMILY.get(isa_class.strip().upper())
+
+
+def movement_classes(direction: str) -> frozenset[str]:
+    """The shared ``movement``-family classes that move data ``direction`` (``in`` / ``out``)."""
+    return frozenset(
+        name
+        for name, family in _ISA_CLASS_FAMILY.items()
+        if family == "movement" and _ISA_CLASS_DIRECTION.get(name) == direction
+    )
+
+
+def configuration_classes(direction: str) -> frozenset[str]:
+    """The shared plumbing classes that configure movement in ``direction`` (``in`` / ``out``)."""
+    return frozenset(name for name in _ISA_PLUMBING_CLASSES if _ISA_CLASS_DIRECTION.get(name) == direction)
+
+
+def local_only_classes() -> frozenset[str]:
+    """The shared classes that issue NO memory request of their own: plumbing, and contraction steps
+    whose operands are already on chip. Any other class may touch memory."""
+    return _ISA_PLUMBING_CLASSES | _ISA_ON_CHIP_CLASSES
 
 
 def from_isa_role(isa_role: str | None) -> str | None:

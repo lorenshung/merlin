@@ -52,9 +52,10 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from merlin.targetgen import semantic_families as SF
+
 __all__ = [
     "CONFIG_LOAD_CLASS",
-    "MOVEMENT_IN_CLASSES",
     "PASS",
     "FAIL",
     "REFUSED",
@@ -71,18 +72,14 @@ PASS = "PASS"
 FAIL = "FAIL"
 REFUSED = "REFUSED"
 
-#: The instruction class a load configuration decodes to. This is the shared CLASS vocabulary the
-#: capability manifest's ``config_subtype`` maps its own encoding onto -- the same token
-#: ``trace_check`` matches on -- not an encoding and not a target's spelling. A target whose manifest
-#: declares no such subtype simply never produces one, and the verdict below refuses for want of
-#: evidence rather than passing an empty cohort.
-CONFIG_LOAD_CLASS = "CONFIG_LD"
-
-#: The shared inbound-movement CLASS vocabulary a target's decode table maps its encoding onto -- the
-#: same class names :mod:`merlin.targetgen.trace_check` orders configuration against. Which of them a
-#: target actually declares is a fact about that target, read from its own table
-#: (:func:`movement_in_classes_for`); this set is only the vocabulary, never an encoding.
-MOVEMENT_IN_CLASSES = frozenset({"MVIN", "MVIN2", "MVIN3"})
+#: The instruction class a load configuration decodes to: the one shared plumbing class that configures
+#: INBOUND movement, read from the shared class vocabulary
+#: (:func:`merlin.targetgen.semantic_families.configuration_classes`) the capability manifest's
+#: ``config_subtype`` maps its own encoding onto -- not an encoding and not a target's spelling. A target
+#: whose manifest declares no such subtype simply never produces one, and the verdict below refuses for
+#: want of evidence rather than passing an empty cohort. Unpacked, so a vocabulary that ever named two
+#: fails at import instead of silently checking one.
+(CONFIG_LOAD_CLASS,) = SF.configuration_classes("in")
 
 #: The EXTRACTOR'S field name for the load-state selector inside the load-configuration register
 #: bundle. This is the RTL introspection vocabulary (the same vocabulary that names the bundle itself
@@ -165,12 +162,14 @@ def movement_in_classes_for(target: str) -> frozenset:
     """The DECLARED inbound-movement instruction classes ``target``'s own decode table names.
 
     Read through the selected support's ISA facts (:func:`merlin.targetgen.rocc.decode.funct_class_for`)
-    and intersected with the shared :data:`MOVEMENT_IN_CLASSES` vocabulary, so a target declaring one
-    load class is never assumed to have three. Raises when the table cannot be read; callers decide.
+    and intersected with the shared vocabulary's inbound-movement classes
+    (:func:`merlin.targetgen.semantic_families.movement_classes`), so a target declaring one load class
+    is never assumed to have three. Raises when the table cannot be read; callers decide.
     """
     from merlin.targetgen.rocc import decode as _decode
 
-    return frozenset(MOVEMENT_IN_CLASSES & {str(name) for name in _decode.funct_class_for(str(target)).values()})
+    declared = {str(name) for name in _decode.funct_class_for(str(target)).values()}
+    return frozenset(SF.movement_classes("in") & declared)
 
 
 def _addressable_movement_classes(target: str) -> int | None:
