@@ -3,7 +3,7 @@ title: Architecture
 kind: reference
 status: current
 owner: core
-last_verified: 2026-10-05
+last_verified: 2026-10-08
 related: [repo_structure, core_dialects, lowering_pipeline]
 code_refs: [src/merlin, packages, experiments/catalog.yaml]
 ---
@@ -29,7 +29,8 @@ legacy symlink to core, not a second implementation.
 | Owner | Implementation |
 | --- | --- |
 | Merlin | Reusable host code generation, packing, requantization, graph/global optimizations, dispatch, buffer ownership, device compilation orchestration, and runtime infrastructure |
-| Target OOT MLIR dialect repository | Target dialect operations, instruction encodings, device kernels/schedules, hardware layout/resource facts, target ABI glue, and target execution support |
+| Target OOT MLIR dialect repository | Target compiler dialect operations, instruction encodings, device kernels/schedules, hardware layout/resource facts, and target ABI glue |
+| `examples/<target>/support` | Trusted, agent-private evaluator adapters, reference programs and selected simulator support; not an evaluated compiler candidate |
 
 An optimization that can be selected independently of the accelerator belongs in Merlin,
 including one first measured on a particular device. A mixed optimization uses an explicit
@@ -78,8 +79,8 @@ linalg / tensor / scf
 
 - Core source lives under `src/merlin`; optional research source lives under `packages/`.
 - Experiment definitions have one catalog; generated state belongs under `out/{runs,artifacts,build}`.
-- Target-specific support belongs OOT where qualified; retained reference resources are not
-  proof that an exported package is a standalone compiler.
+- Target compiler payloads belong OOT. Trusted evaluator support can be canonical in an example;
+  retained reference resources do not prove that an exported package is a standalone compiler.
 - Coordinate through schemas, not prose.
 - Integrations are adapters, never vendored repos.
 - Prototype in xDSL; promote to MLIR/C++ only when stable.

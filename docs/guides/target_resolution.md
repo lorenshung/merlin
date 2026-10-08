@@ -27,10 +27,12 @@ compiler candidate or host schedule does **not** necessarily contain these suppo
 The target's **name** comes from the contract's `name:`
 field — not the directory name — so a package can live anywhere and be versioned however you like.
 
-## Provider roles
+## Provider roles and ownership
 
-New support packages declare `provider.yaml` at their own root, separate from a compiler candidate's
-`manifest.yaml`. For example a compiler repository can own `merlin-support/provider.yaml`:
+Support packages declare `provider.yaml` at their own root, separate from a compiler candidate's
+`manifest.yaml`. The default Gemmini provider is canonical in this checkout at
+`examples/gemmini/support/provider.yaml`; an independently selected repository can use the same
+declaration at `merlin-support/provider.yaml`:
 
 ```yaml
 schema: merlin.provider.v1
@@ -54,7 +56,7 @@ package whose contract `name` matches. Precedence, highest first:
 
 | # | Source | `kind` | Use it for |
 | - | ------ | ------ | ---------- |
-| 1 | **`MERLIN_TARGET_PATH`** entries | `external` | **Explicit selection** — a specific versioned/named package, or a repo you cloned yourself. Always wins. **Unset**, the entries are the checkout's vendored support providers (`examples/*/support`, see below). |
+| 1 | **`MERLIN_TARGET_PATH`** entries | `external` | **Explicit selection** — a specific versioned/named package, or a repo you cloned yourself. Always wins. **Unset**, the entries are the checkout's in-repo support providers (`examples/*/support`, see below). |
 | 2 | Reference metadata: legacy `merlin/targets/` roots, then checkout `examples/*/target/` | `reference` | Inspect authored inputs; Gemmini's contract now lives in its example. Legacy roots win duplicate names during migration. |
 | 3 | `out/build/generated/<name>/` | `external` | The **freshly generated** package — dropped here by onboarding / `write_oot_target`, so a just-generated target resolves with **zero env**. |
 | 4 | `out/artifacts/targets/<name>/` | `generated` | Legacy generated location (fallback). |
@@ -84,7 +86,7 @@ Resolution is read-only: it never fetches, generates contracts, or imports provi
 `merlin-target-fetch` for network retrieval or `target_registry.materialize` for derivation first.
 
 Inspection is not execution permission. Backend, dialect and simulator-oracle plugins load
-only from support providers selected on `MERLIN_TARGET_PATH` (or, with it unset, the vendored
+only from support providers selected on `MERLIN_TARGET_PATH` (or, with it unset, the in-repo
 `examples/*/support` providers), including when the provider was just generated. In-tree reference
 metadata and the generated home do not autoload executable plugins. Candidate-compiler and host-schedule packages cannot
 substitute for support providers. Removing a loaded provider's explicit selection requires
@@ -95,23 +97,27 @@ The host reads the selected support contract to construct the declared public in
 contain oracle implementations and answers. A directory's location outside the
 champion tree does not make it safe to grant to a candidate.
 
-## Vendored support: the default when `MERLIN_TARGET_PATH` is unset
+## In-repo support: the default when `MERLIN_TARGET_PATH` is unset
 
-Merlin's own support provider for a target is target-specific code, so it is tracked beside the
-target's example at `examples/<example>/support/`, with an `examples/<example>/SOURCE.yaml` that
-records the companion repository, commit and git tree it was copied from. The copy is byte-identical
-except the files the record lists under `normalized`, each with its companion blob id and the change
-(a provenance record whose absolute vendoring-host paths were made repo-relative, for example).
-`merlin/tests/infra/test_example_support.py` recomputes the vendored tree id (`vendored_tree`) from
-the tracked bytes, and the companion's (`source.tree`) with the normalized files' companion blobs put
-back, so no unlisted file can differ. The migration manifest
-[`target_support.json`](../../build_tools/upstreams/target_support.json) lists each one.
+Merlin's trusted, agent-private support provider for a target is tracked beside its example at
+`examples/<example>/support/`. `SOURCE.yaml` states one of two ownership forms:
+
+- `merlin.canonical_example_support.v1` binds the **current tracked support tree** and file count.
+  Gemmini uses this form; its external `origin` records history, not a required checkout or a
+  byte-identity claim about the current tree. A change needs a reviewed new tree identity.
+- `merlin.vendored_support.v1` is a historical companion snapshot. It binds the companion commit
+  and source tree; only listed `normalized` files may differ, with each original blob ID recorded.
+  A change to this form is a new re-vendoring from a recorded companion commit.
+
+`merlin/tests/infra/test_example_support.py` recomputes each tree from tracked members and checks
+its record against [`target_support.json`](../../build_tools/upstreams/target_support.json). Neither
+form is a compiler candidate or an authorization to show the support tree to an agent.
 
 | `MERLIN_TARGET_PATH` | Support selected for target `T` |
 | -------------------- | ------------------------------- |
-| unset | the vendored provider whose `provider.yaml` declares `target: T`, if any |
+| unset | the in-repo provider whose `provider.yaml` declares `target: T`, if any |
 | `""` (set, empty) | none: executable support refuses, reference metadata still resolves |
-| any other value | exactly the listed entries; the vendored default is not consulted |
+| any other value | exactly the listed entries; the in-repo default is not consulted |
 
 The default is keyed by each provider's **declared** target, never by its example directory name,
 and is computed by `target_registry.in_repo_support()` (`default_support_root(target)` for one
@@ -121,7 +127,7 @@ checkout and therefore no default. A caller that hands the selection to a child 
 should use `target_registry.effective_target_path()`, which spells the default out, so an unset
 variable never turns into an explicit selection that silently drops it.
 
-With the variable unset every vendored provider is selected at once, so the first registry query
+With the variable unset every in-repo provider is selected at once, so the first registry query
 loads each one's declared plugins. Plugin ownership is still process-immutable: changing the
 selection afterwards in the same process (for example a test that sets `MERLIN_TARGET_PATH` to one
 fixture) is refused for every loaded target. Select explicitly before the first query, or run in a
@@ -130,11 +136,11 @@ fresh process, when only one provider should load. For that reason the test suit
 export a value: run support-dependent tests with, for example,
 `MERLIN_TARGET_PATH=$PWD/examples/gemmini/support`.
 
-The vendored trees remain experimenter-side. Every `examples/*/support` directory is an answer
+The in-repo support trees remain experimenter-side. Every `examples/*/support` directory is an answer
 surface whatever is selected: agent sandboxes, bundle snapshots and clean rooms withhold it (only an
 explicit grant of its `contracts/` sub-tree can reach inside, and no bundle declares one), and
-publication refuses a support provider as a candidate. Do not edit a vendored tree in place; a change
-is a new vendoring from a recorded companion commit.
+publication refuses a support provider as a candidate. Canonical and historical snapshot updates
+follow their different `SOURCE.yaml` identity rules above.
 
 ## The three common cases
 
@@ -158,9 +164,9 @@ python -c "from merlin.targetgen.capability_manifests import write_oot_target; \
 export MERLIN_TARGET_PATH=$PWD/out/build/generated/atlas-v0.3-abc1234
 ```
 
-**3 — Bring your own support package.** To test a support revision other than the vendored one, clone
+**3 — Bring your own support package.** To test a support revision other than the in-repo default, clone
 a target repository containing a support provider and point at that provider root (not a
-candidate-only or schedule-only repository root). An explicit value replaces the vendored default for
+candidate-only or schedule-only repository root). An explicit value replaces the in-repo default for
 every target, so list each provider the process needs:
 
 ```bash

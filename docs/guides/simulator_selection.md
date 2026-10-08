@@ -3,7 +3,7 @@ title: Selecting and checking a simulator
 kind: guide
 status: current
 owner: runtime
-last_verified: 2026-10-07
+last_verified: 2026-10-08
 related: [phase0_specification, target_resolution, reproducing_whole_model_on_rtl]
 code_refs: [src/merlin/targetgen/gsim_emulator.py, src/merlin/targetgen/program_engine_policy.py, src/merlin/targetgen/program_oracle.py, src/merlin/targetgen/mem_perturb.py, src/merlin/targetgen/load_order.py]
 ---
@@ -23,12 +23,17 @@ construct the required sandbox; do not remove `--unshare-net` to obtain a pass.
 
 ## Select the support package and engine explicitly
 
-Choose a target-owned support provider with `MERLIN_TARGET_PATH` (unset, the vendored
+Choose a target-owned support provider with `MERLIN_TARGET_PATH` (unset, the in-repo
 `examples/<example>/support` provider for the target); compiler
 candidates alone do not necessarily supply an execution backend. Use the
 provider's documented toolchain and harness. In particular, a generated
 parameter header from another configuration can compile successfully and
 produce incorrect results on the selected hardware.
+
+Gemmini's trusted support is canonical in `examples/gemmini/support`; no separate support branch
+checkout is needed. Its historical external origin is not the selected provider or a compiler
+candidate. The gSIM emitter and native model are separate dependencies; see the
+[AWS gSIM setup guide](aws_gsim.md) when provisioning a new worker.
 
 Program-driven engines consume assembled instruction words and memory regions.
 Their directory contains `<engine>_run.py` exposing `run_program`. ELF-driven
@@ -49,8 +54,9 @@ a different engine.
 
 For program engines, `MERLIN_EXT_<TARGET>_GSIM` or
 `MERLIN_EXT_<TARGET>_VSIM` names the exact wrapper directory. For ELF-driven GSIM,
-`MERLIN_GSIM_EMU_<TARGET>` names the binary; a provider may also retain a documented
-historical spelling. Keep machine-specific paths in process configuration or
+`MERLIN_GSIM_EMU_<TARGET>` names the binary; Gemmini's provider also accepts its documented
+`MERLIN_GEMMINI_GSIM_EMU` spelling. If both are set, bind them to the same reviewed binary rather
+than allowing two resolver paths to disagree. Keep machine-specific paths in process configuration or
 the local, untracked `.env`, not in shared library code.
 
 ## Inspect the choice before execution
@@ -127,7 +133,7 @@ declared string arguments are provider policy, not an inferred ISA encoding.
 Use a program that exercises nonzero operands, the actual compute instruction,
 memory transfers and a declared termination. Run it with a bounded cycle budget
 and wall-clock deadline through the existing execution adapter. A program-driven
-GSIM run holds one of a fixed number of per-user GSIM slots for the whole
+GSIM run holds one of at most five per-user GSIM slots for the whole
 simulation; when every slot is busy it waits up to its timeout and then fails,
 rather than oversubscribing the host. Check:
 
