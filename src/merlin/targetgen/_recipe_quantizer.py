@@ -477,16 +477,42 @@ def quantize_config(recipe: Mapping[str, Any]):
     weight, activation = _require(recipe)
     if activation.get("mode") != "dynamic":
         raise RecipeError("quantize_config realises dynamic recipes")
-    granularity = {"tensor": PerTensor, "channel": PerRow}.get(str(weight.get("granularity")))
-    if granularity is None:
+    # Each tensor's granularity is read from its OWN spec. Reading the weight's for both once built a
+    # per-row activation scale for a recipe that asked for one scale per tensor, while the capture
+    # stats reported the recipe's activation granularity as if it had been honoured.
+    w_granularity = {"tensor": PerTensor, "channel": PerRow}.get(str(weight.get("granularity")))
+    a_granularity = {"tensor": PerTensor, "token": PerRow}.get(str(activation.get("granularity")))
+    if w_granularity is None or a_granularity is None:
         raise RecipeError(
-            f"a dynamic recipe with weights per {weight.get('granularity')!r} has no configuration in this build"
+            f"a dynamic recipe with weights per {weight.get('granularity')!r} and activations per "
+            f"{activation.get('granularity')!r} has no configuration in this build"
         )
     dtype = str(weight.get("dtype"))
+    if str(activation.get("dtype")) != dtype:
+        raise RecipeError(
+            f"a dynamic recipe with {activation.get('dtype')!r} activations and {dtype!r} weights has no "
+            "configuration in this build"
+        )
     if dtype == "int8":
-        return Int8DynamicActivationInt8WeightConfig(granularity=granularity())
+        # TorchAO's int8 dynamic activation scale is per token; a per-tensor request is a different
+        # datapath, not a near miss.
+        if a_granularity is not PerRow:
+            raise RecipeError("int8 dynamic activations are scaled per token in this build, not per tensor")
+        return Int8DynamicActivationInt8WeightConfig(granularity=w_granularity())
     if dtype in ("fp8_e4m3", "fp8_e5m2"):
-        return Float8DynamicActivationFloat8WeightConfig(granularity=granularity())
+        if a_granularity is not w_granularity:
+            raise RecipeError(
+                f"this build's dynamic float8 config scales activations and weights at one granularity; "
+                f"the recipe asks for activations per {activation.get('granularity')!r} and weights per "
+                f"{weight.get('granularity')!r}"
+            )
+        # The element formats are passed explicitly: the config's defaults are e4m3fn for both, so
+        # leaving them out realised an e5m2 recipe as e4m3 without a word.
+        return Float8DynamicActivationFloat8WeightConfig(
+            activation_dtype=_torch_dtype(activation["dtype"]),
+            weight_dtype=_torch_dtype(dtype),
+            granularity=(a_granularity(), w_granularity()),
+        )
     raise RecipeError(f"no dynamic configuration for recipe dtype {dtype!r}")
 
 
