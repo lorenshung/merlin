@@ -484,3 +484,20 @@ author session. The handwritten compiler is only a sealed private final golden;
 its compiler code, schedules, structural CCA answers and runtime/measurement
 helpers cannot implement or seed either authoring phase. Target execution support
 requires independent RTL and minimal software-contract provenance.
+
+`component_final_qualification` reopens the qualified fresh baseline, preserves
+its original roster/build/instruction/runtime owners, and invokes the ordinary
+compile-role evaluator for the actual observed descendant. The baseline's old
+proof cannot qualify edited bytes. Missing or UNKNOWN original static roles
+refuse before numerical qualification, which receives only the new evaluation.
+The authoring policy retains its exact original baseline/runtime owners when
+its private receipt path changes; final acceptance remains a separate gate.
+
+`component_stage` owns the executing component authoring controller; the public
+launch function delegates lazily without selecting new runtime or policies.
+Telemetry pins this executing owner, and the ordinary author/broker/lineage
+lifecycle and refusal sealing retain their original gates.
+
+`component_launch_probe` retains the fixed actual private-file/network-denial
+observation, with the reachable host listener and exact native marker. The
+existing launch qualifier alone consumes it; it issues no saved-report authority.

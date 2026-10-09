@@ -9,40 +9,37 @@ from __future__ import annotations
 
 import os
 import shlex
-import shutil
-import socket
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from merlin.benchharness import hash_tree
 from merlin.common.digest import is_sha256, sha256_bytes
-from merlin_experiments.phase1.component_lineage import run_component_origin_round
-from merlin_experiments.phase1.component_qualification import ComponentQualification, qualify_component_compiler
+from merlin_experiments.phase1.component_qualification import ComponentQualification
 from merlin_experiments.phase1.providers import codex_agent as CA
 
 from . import broker as B
 from . import contracts as C
-from . import stage_inputs as SI
-from . import stage_prompt as SP
-from . import telemetry as TEL
 from .component_experiment import ComponentView, RuntimeGrant, strict_tool_policy, verify_component_view
+from .component_launch_probe import probe_private_denial
 from .component_workflow import ComponentOnlyPolicy
 from .edit_authority import FrozenEditAuthority
-from .transcript_audit import audit_codex_transcript
 
 _ISSUER = object()
 
 
 def public_component_manifest(corpus) -> bytes:
     """Disclose only admitted development commitments and program identities."""
-    return C.canonical_json({
-        "schema": "merlin.component_development_view.v1", "manifest_sha256": corpus.manifest_sha256,
-        "capsules_sha256": corpus.capsules_sha256,
-        "members": [{"family": row.family, "capsule": row.capsule, "sha256": row.source_sha256}
-                    for row in corpus.capsules],
-    })
+    return C.canonical_json(
+        {
+            "schema": "merlin.component_development_view.v1",
+            "manifest_sha256": corpus.manifest_sha256,
+            "capsules_sha256": corpus.capsules_sha256,
+            "members": [
+                {"family": row.family, "capsule": row.capsule, "sha256": row.source_sha256} for row in corpus.capsules
+            ],
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -54,9 +51,12 @@ class ComponentReadinessProbe:
     def verify(self) -> None:
         if self.capability not in {"compiler", "linker", "simulator", "isa", "cca"}:
             raise C.StageGateError("component readiness needs an explicit declared capability")
-        if (not isinstance(self.command, tuple) or not self.command
+        if (
+            not isinstance(self.command, tuple)
+            or not self.command
             or any(not isinstance(value, str) or not value or "\0" in value for value in self.command)
-            or not is_sha256(self.stdout_sha256)):
+            or not is_sha256(self.stdout_sha256)
+        ):
             raise C.StageGateError("component readiness requires an exact command and expected output identity")
 
 
@@ -118,8 +118,9 @@ class ComponentLaunchInputs:
         manifest = verify_component_view(self.view)
         if self.view.generation_sha256 != self.qualification.coverage_sha256:
             raise C.StageGateError("component public view is not bound to the independently admitted coverage")
-        public_manifest = [row for row in manifest["members"]
-                           if row["path"] == "contract/performance_corpus_manifest.json"]
+        public_manifest = [
+            row for row in manifest["members"] if row["path"] == "contract/performance_corpus_manifest.json"
+        ]
         public_bytes = public_component_manifest(self.policy.component_corpus)
         if len(public_manifest) != 1 or public_manifest[0]["sha256"] != sha256_bytes(public_bytes):
             raise C.StageGateError("component public manifest differs from the exact development corpus")
@@ -133,18 +134,26 @@ class ComponentLaunchInputs:
         self.policy._validate()
         if not (self.policy.component_analytical or self.policy.component_cca or self.policy.component_rtl):
             raise C.StageGateError("component authoring requires an evaluated generated-component feedback provider")
-        if (self.stage_root.resolve().is_relative_to(self.candidate.resolve())
-            or self.stage_root.resolve().is_relative_to(self.view.root)):
+        if self.stage_root.resolve().is_relative_to(
+            self.candidate.resolve()
+        ) or self.stage_root.resolve().is_relative_to(self.view.root):
             raise C.StageGateError("private component stage overlaps an author grant")
-        if (not isinstance(self.runtime, tuple) or not self.runtime or not isinstance(self.control_runtime, tuple)
-            or not self.control_runtime or not isinstance(self.readiness, tuple)
-            or any(type(row) is not RuntimeGrant for row in (*self.runtime, *self.control_runtime))):
+        if (
+            not isinstance(self.runtime, tuple)
+            or not self.runtime
+            or not isinstance(self.control_runtime, tuple)
+            or not self.control_runtime
+            or not isinstance(self.readiness, tuple)
+            or any(type(row) is not RuntimeGrant for row in (*self.runtime, *self.control_runtime))
+        ):
             raise C.StageGateError("component launch requires exact reviewed runtime file membership")
         self.sandbox_binary
         for grant in (*self.runtime, *self.control_runtime):
             grant.verify()
-        if any(row.source == self.auth_source or row.destination.endswith("/auth.json")
-               for row in (*self.runtime, *self.control_runtime)):
+        if any(
+            row.source == self.auth_source or row.destination.endswith("/auth.json")
+            for row in (*self.runtime, *self.control_runtime)
+        ):
             raise C.StageGateError("candidate/runtime grant cannot contain a control credential")
         if self.auth_source.is_symlink() or not self.auth_source.is_file():
             raise C.StageGateError("component control credential source is absent or linked")
@@ -172,11 +181,18 @@ class ComponentToolPolicy:
     def verify_execution(self) -> None:
         self.inputs.verify()
         expected = strict_tool_policy(
-            self.inputs.view, self.inputs.candidate, runtime=self.inputs.runtime,
-            candidate_destination=str(self.inputs.candidate), bwrap_binary=self.inputs.sandbox_binary,
+            self.inputs.view,
+            self.inputs.candidate,
+            runtime=self.inputs.runtime,
+            candidate_destination=str(self.inputs.candidate),
+            bwrap_binary=self.inputs.sandbox_binary,
         )
-        if (self.argv != expected or self.network != "isolated_networkless"
-            or not self.clear_environment or self.env_prefix):
+        if (
+            self.argv != expected
+            or self.network != "isolated_networkless"
+            or not self.clear_environment
+            or self.env_prefix
+        ):
             raise C.StageGateError("component execution policy changed")
 
 
@@ -213,8 +229,10 @@ def _bindings(inputs: ComponentLaunchInputs) -> dict:
         "corpus_sha256": inputs.policy.component_corpus.capsules_sha256,
         "runtime": [{"destination": row.destination, "sha256": row.sha256} for row in inputs.runtime],
         "control_runtime": [{"destination": row.destination, "sha256": row.sha256} for row in inputs.control_runtime],
-        "readiness": [{"capability": row.capability, "command": list(row.command),
-                       "stdout_sha256": row.stdout_sha256} for row in inputs.readiness],
+        "readiness": [
+            {"capability": row.capability, "command": list(row.command), "stdout_sha256": row.stdout_sha256}
+            for row in inputs.readiness
+        ],
         "codex_destination": inputs.codex_destination,
         "price_table_sha256": C.sha256_file(inputs.price_table),
     }
@@ -225,8 +243,17 @@ def _runtime_binds(inputs: ComponentLaunchInputs, home: Path) -> list[str]:
         raise C.StageGateError("component control home overlaps candidate inputs")
     # The caller's credential file is bound only to the control home. Neither
     # strict_tool_policy nor the candidate permission profile admits that home.
-    return ["--bind", str(home), str(home), "--bind", str(inputs.auth_source), str(home / "auth.json"),
-            "--setenv", "CODEX_HOME", str(home)]
+    return [
+        "--bind",
+        str(home),
+        str(home),
+        "--bind",
+        str(inputs.auth_source),
+        str(home / "auth.json"),
+        "--setenv",
+        "CODEX_HOME",
+        str(home),
+    ]
 
 
 def _control_command(inputs: ComponentLaunchInputs, inner: str, ws: Path, _bundle: dict, *, extra_binds=None) -> str:
@@ -235,14 +262,25 @@ def _control_command(inputs: ComponentLaunchInputs, inner: str, ws: Path, _bundl
         raise C.StageGateError("component control command differs from its frozen workspace")
     # The native provider supplies the one explicit home from its isolated
     # per-round owner. Reject broader mounts or inherited provider defaults.
-    if (len(extra_binds) != 9 or extra_binds[:1] != ["--bind"] or extra_binds[3] != "--bind"
-        or extra_binds[6:] != ["--setenv", "CODEX_HOME", extra_binds[1]]):
+    if (
+        len(extra_binds) != 9
+        or extra_binds[:1] != ["--bind"]
+        or extra_binds[3] != "--bind"
+        or extra_binds[6:] != ["--setenv", "CODEX_HOME", extra_binds[1]]
+    ):
         raise C.StageGateError("component control runtime contains unreviewed binds")
     home = Path(extra_binds[1])
     if extra_binds != _runtime_binds(inputs, home):
         raise C.StageGateError("component control credential binding changed")
-    argv = list(strict_tool_policy(inputs.view, inputs.candidate, runtime=inputs.control_runtime,
-                                  candidate_destination=str(inputs.candidate), bwrap_binary=inputs.sandbox_binary))
+    argv = list(
+        strict_tool_policy(
+            inputs.view,
+            inputs.candidate,
+            runtime=inputs.control_runtime,
+            candidate_destination=str(inputs.candidate),
+            bwrap_binary=inputs.sandbox_binary,
+        )
+    )
     # Only the model client's control namespace shares network. Candidate
     # commands use the independently probed mandatory networkless native policy.
     argv.insert(argv.index("--unshare-all") + 1, "--share-net")
@@ -278,14 +316,20 @@ def _control_command(inputs: ComponentLaunchInputs, inner: str, ws: Path, _bundl
 
 
 def _read_paths(inputs: ComponentLaunchInputs) -> tuple[str, ...]:
-    public_ipc = tuple("/perf-control/" + name
-                       for name in ("perf_tool.py", ".perf_broker.json", "channel.sock", "receipts.jsonl"))
-    return tuple(dict.fromkeys(("/component-inputs", *public_ipc,
-                               *(row.destination for row in inputs.control_runtime))))
+    public_ipc = tuple(
+        "/perf-control/" + name for name in ("perf_tool.py", ".perf_broker.json", "channel.sock", "receipts.jsonl")
+    )
+    return tuple(
+        dict.fromkeys(("/component-inputs", *public_ipc, *(row.destination for row in inputs.control_runtime)))
+    )
 
 
 def qualify_component_launch(
-    inputs: ComponentLaunchInputs, *, model: str, effort: str, timeout_s: int = 45,
+    inputs: ComponentLaunchInputs,
+    *,
+    model: str,
+    effort: str,
+    timeout_s: int = 45,
 ) -> QualifiedComponentLaunch:
     """No-model probes of the same tool namespace and native control boundary."""
     inputs.verify(require_baseline=True)
@@ -294,31 +338,63 @@ def qualify_component_launch(
     if inputs.stage_root.exists() or inputs.stage_root.is_symlink():
         raise C.StageGateError("fresh component launch refuses existing stage/session state")
     inputs.stage_root.mkdir(parents=True, mode=0o700)
-    tool = ComponentToolPolicy(inputs, strict_tool_policy(inputs.view, inputs.candidate, runtime=inputs.runtime,
-                              candidate_destination=str(inputs.candidate), bwrap_binary=inputs.sandbox_binary))
+    tool = ComponentToolPolicy(
+        inputs,
+        strict_tool_policy(
+            inputs.view,
+            inputs.candidate,
+            runtime=inputs.runtime,
+            candidate_destination=str(inputs.candidate),
+            bwrap_binary=inputs.sandbox_binary,
+        ),
+    )
     results = []
     try:
         for probe in inputs.readiness:
             tool.verify_execution()
-            result = subprocess.run([*tool.argv, "--", *probe.command],
-                                    capture_output=True, timeout=timeout_s, check=False)
+            result = subprocess.run(
+                [*tool.argv, "--", *probe.command], capture_output=True, timeout=timeout_s, check=False
+            )
             passed = result.returncode == 0 and sha256_bytes(result.stdout) == probe.stdout_sha256
-            results.append({"capability": probe.capability, "returncode": result.returncode,
-                            "stdout_sha256": sha256_bytes(result.stdout), "stderr_sha256": sha256_bytes(result.stderr)})
+            results.append(
+                {
+                    "capability": probe.capability,
+                    "returncode": result.returncode,
+                    "stdout_sha256": sha256_bytes(result.stdout),
+                    "stderr_sha256": sha256_bytes(result.stderr),
+                }
+            )
             if not passed:
                 raise C.StageGateError("component live readiness failed for " + probe.capability)
         # Stage a real normal broker and prove an advertised read-only roundtrip
         # through Codex's native networkless tool sandbox, before paying a model.
         deadline = time.monotonic() + timeout_s
         actions = inputs.policy.build_registry()
-        broker = B.Broker(tool, inputs.policy.target_experiment, inputs.candidate, actions, inputs.policy.receipt_path,
-                          deadline=deadline, workflow=inputs.policy, max_calls=1, max_tool_seconds=timeout_s,
-                          public_control_dir=inputs.public_control_dir)
-        B.stage_broker_shim(inputs.public_control_dir, host="", port=0, token=broker.token,
-                            tool_timeout_s=timeout_s, actions=actions, socket_path="/perf-control/channel.sock")
+        broker = B.Broker(
+            tool,
+            inputs.policy.target_experiment,
+            inputs.candidate,
+            actions,
+            inputs.policy.receipt_path,
+            deadline=deadline,
+            workflow=inputs.policy,
+            max_calls=1,
+            max_tool_seconds=timeout_s,
+            public_control_dir=inputs.public_control_dir,
+        )
+        B.stage_broker_shim(
+            inputs.public_control_dir,
+            host="",
+            port=0,
+            token=broker.token,
+            tool_timeout_s=timeout_s,
+            actions=actions,
+            socket_path="/perf-control/channel.sock",
+        )
         home = inputs.stage_root / "probe_home"
-        home_info = CA.prepare_codex_home(home, model=model, effort=effort, workspace=inputs.candidate,
-                                          candidate_read_paths=_read_paths(inputs))
+        home_info = CA.prepare_codex_home(
+            home, model=model, effort=effort, workspace=inputs.candidate, candidate_read_paths=_read_paths(inputs)
+        )
         CA._verify_frozen_config(home, home_info["config_sha256"])
         rounds = inputs.stage_root / "probe_rounds"
         rounds.mkdir()
@@ -327,48 +403,38 @@ def qualify_component_launch(
         private_canary.write_text('{"private":"must remain unreadable"}')
         public_sibling.write_text('{"private":"directory binds must not expose this sibling"}')
         with broker.serving(socket_path=inputs.socket_path):
+
             def command(inner, ws, bundle, extra_binds=None):
                 return _control_command(inputs, inner, ws, bundle, extra_binds=extra_binds)
+
             CA._preflight_candidate_sandbox(
-                inputs.candidate, home, str(inputs.codex_binary), {}, command, rounds, 0,
+                inputs.candidate,
+                home,
+                str(inputs.codex_binary),
+                {},
+                command,
+                rounds,
+                0,
                 runtime_binds=lambda selected_home: _runtime_binds(inputs, selected_home),
             )
-            # A live reachable host TCP listener distinguishes actual network
-            # denial from a harmless connection-refused on an absent service.
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-                listener.bind(("127.0.0.1", 0))
-                listener.listen(1)
-                port = listener.getsockname()[1]
-                controls = [str(private_canary), "/perf-control/private-golden-canary.json",
-                            "/perf-control/unadmitted-sibling.json", str(home / "auth.json")]
-                script = (
-                    "import pathlib,socket\n"
-                    f"for path in {controls!r}:\n"
-                    " try: pathlib.Path(path).read_bytes()\n"
-                    " except (OSError,PermissionError): pass\n"
-                    " else: raise SystemExit('private sibling or control credential readable')\n"
-                    "client=socket.socket(socket.AF_INET,socket.SOCK_STREAM);client.settimeout(2)\n"
-                    f"try: client.connect(('127.0.0.1',{port}))\n"
-                    "except OSError: pass\n"
-                    "else: raise SystemExit('candidate TCP was not denied')\n"
-                    "print('COMPONENT_PRIVATE_FILES_AND_NETWORK_DENIED')\n"
+            results.append(probe_private_denial(inputs, home, private_canary, timeout_s=timeout_s))
+            probe_command = shlex.join(
+                (
+                    str(inputs.codex_binary),
+                    "sandbox",
+                    "--permission-profile",
+                    CA._CANDIDATE_PERMISSION_PROFILE,
+                    "-C",
+                    str(inputs.candidate),
+                    "--",
+                    "/usr/bin/python3",
+                    B.BROKER_NAME,
+                    "inspect-optimization-surfaces",
                 )
-                native = shlex.join((str(inputs.codex_binary), "sandbox", "--permission-profile",
-                                    CA._CANDIDATE_PERMISSION_PROFILE, "-C", str(inputs.candidate), "--",
-                                    "/usr/bin/python3", "-c", script))
-                payload = _control_command(inputs, native, inputs.candidate, {},
-                                           extra_binds=_runtime_binds(inputs, home))
-                denied = subprocess.run(["/bin/sh", "-c", payload], capture_output=True, timeout=timeout_s, check=False)
-                if denied.returncode != 0 or denied.stdout.strip() != b"COMPONENT_PRIVATE_FILES_AND_NETWORK_DENIED":
-                    raise C.StageGateError("component actual private sibling/credential/network denial probe failed")
-                results.append({"capability": "private_files_and_network_denial", "returncode": denied.returncode,
-                                "stdout_sha256": sha256_bytes(denied.stdout),
-                                "stderr_sha256": sha256_bytes(denied.stderr)})
-            probe_command = shlex.join((str(inputs.codex_binary), "sandbox", "--permission-profile",
-                                       CA._CANDIDATE_PERMISSION_PROFILE, "-C", str(inputs.candidate), "--",
-                                       "/usr/bin/python3", B.BROKER_NAME, "inspect-optimization-surfaces"))
-            control = _control_command(inputs, probe_command, inputs.candidate, {},
-                                       extra_binds=_runtime_binds(inputs, home))
+            )
+            control = _control_command(
+                inputs, probe_command, inputs.candidate, {}, extra_binds=_runtime_binds(inputs, home)
+            )
             result = subprocess.run(["/bin/sh", "-c", control], capture_output=True, timeout=timeout_s, check=False)
             if result.returncode != 0 or not broker.calls or broker.calls[-1].get("returncode") != 0:
                 raise C.StageGateError("component native sandbox/broker roundtrip failed")
@@ -377,9 +443,18 @@ def qualify_component_launch(
     except Exception as exc:  # noqa: BLE001 - failed probes remain durable and non-authorizing
         status, refusal = "refused", type(exc).__name__ + ": " + str(exc)[:500]
     receipt = inputs.stage_root / "launch_qualification.json"
-    C.write_json(receipt, {"schema": "merlin.component_launch_qualification.v1", "status": status,
-                           "bindings": _bindings(inputs), "readiness_results": results,
-                           "model": model, "effort": effort, "refusal": refusal})
+    C.write_json(
+        receipt,
+        {
+            "schema": "merlin.component_launch_qualification.v1",
+            "status": status,
+            "bindings": _bindings(inputs),
+            "readiness_results": results,
+            "model": model,
+            "effort": effort,
+            "refusal": refusal,
+        },
+    )
     receipt.chmod(0o400)
     if status != "qualified":
         raise C.StageGateError("component authoring isolation/readiness remains unavailable: " + str(refusal))
@@ -387,108 +462,24 @@ def qualify_component_launch(
 
 
 def run_component_stage(
-    launch: QualifiedComponentLaunch, *, model: str, effort: str,
-    wall_budget_seconds: int, max_tool_calls: int, tool_timeout_seconds: int, suite: str,
+    launch: QualifiedComponentLaunch,
+    *,
+    model: str,
+    effort: str,
+    wall_budget_seconds: int,
+    max_tool_calls: int,
+    tool_timeout_seconds: int,
+    suite: str,
 ) -> Path:
-    """Author one fresh bounded session, audit receipts, and requalify final bytes."""
-    if type(launch) is not QualifiedComponentLaunch:
-        raise C.StageGateError("component authoring requires evaluated launch prerequisites")
-    launch.verify()
-    if model != launch.selected_model or effort != launch.selected_effort:
-        raise C.StageGateError("component authoring cannot change the qualified model transport")
-    if (any(type(value) is not int or value <= 0
-            for value in (wall_budget_seconds, max_tool_calls, tool_timeout_seconds)) or tool_timeout_seconds > 600):
-        raise C.StageGateError("component authoring budgets require positive integers and a bounded tool ceiling")
-    inputs = launch.inputs
-    if not isinstance(suite, str) or not suite.strip():
-        raise C.StageGateError("component authoring requires an explicit accounting suite")
-    telemetry_preflight = TEL.prepare(model=model, authoring_stage=run_component_stage,
-                                      price_table=inputs.price_table, codex_binary=inputs.codex_binary)
-    # Readiness receipts are retained as a separate pre-authoring attempt. Use a
-    # new exact policy owner for authoring rather than adopting probe feedback.
-    policy = ComponentOnlyPolicy(
-        candidate=inputs.candidate, target_experiment=inputs.policy.target_experiment,
-        receipt_path=inputs.stage_root / "control-authoring" / "receipts.jsonl",
-        component_corpus=inputs.policy.component_corpus, component_analytical=inputs.policy.component_analytical,
-        component_cca=inputs.policy.component_cca, component_rtl=inputs.policy.component_rtl,
-        services=inputs.policy.services,
+    """Preserve the public launch entrypoint over the ordinary stage controller."""
+    from .component_stage import run_component_stage as run
+
+    return run(
+        launch,
+        model=model,
+        effort=effort,
+        wall_budget_seconds=wall_budget_seconds,
+        max_tool_calls=max_tool_calls,
+        tool_timeout_seconds=tool_timeout_seconds,
+        suite=suite,
     )
-    # Copy only the immutable launch configuration with this new receipt owner.
-    from dataclasses import replace
-    authored_inputs = replace(inputs, policy=policy)
-    tool = ComponentToolPolicy(authored_inputs, strict_tool_policy(
-                              inputs.view, inputs.candidate, runtime=inputs.runtime,
-                              candidate_destination=str(inputs.candidate), bwrap_binary=inputs.sandbox_binary))
-    actions = policy.build_registry()
-    prompt_inputs = SI.prepare_component_prompt_inputs(
-        policy, corpus_manifest_path="/component-inputs/contract/performance_corpus_manifest.json",
-        candidate_path=str(inputs.candidate), allowed_paths=(
-        "/component-inputs", "/component-inputs/contract/performance_corpus_manifest.json",
-        str(inputs.candidate), B.BROKER_NAME, str(B.BROKER_RECEIPT_MOUNT)),
-        wall_budget_seconds=wall_budget_seconds, max_tool_calls=max_tool_calls,
-        tool_timeout_seconds=tool_timeout_seconds, broker_path=B.BROKER_NAME,
-        broker_receipt_path=str(B.BROKER_RECEIPT_MOUNT),
-        public_manifest_sha256=sha256_bytes(public_component_manifest(policy.component_corpus)),
-    )
-    prompt = SP.render_component_prompt(prompt_inputs)
-    broker = B.Broker(tool, policy.target_experiment, inputs.candidate, actions, policy.receipt_path,
-                      deadline=time.monotonic() + wall_budget_seconds, workflow=policy,
-                      max_calls=max_tool_calls, max_tool_seconds=tool_timeout_seconds,
-                      public_control_dir=authored_inputs.public_control_dir)
-    B.stage_broker_shim(authored_inputs.public_control_dir, host="", port=0, token=broker.token, actions=actions,
-                        tool_timeout_s=tool_timeout_seconds, socket_path="/perf-control/channel.sock")
-    refusals, audit, receipts, final_qualification, telemetry = [], None, None, None, None
-    started = time.monotonic()
-    with broker.serving(socket_path=authored_inputs.socket_path):
-        rc, transcript, lineage = run_component_origin_round(
-            launch, authored_inputs, model=model, effort=effort,
-            wall_budget_seconds=wall_budget_seconds, prompt=prompt,
-        )
-    try:
-        round_telemetry = TEL.collect_round(inputs.stage_root, 0, model=model, agent_exit_code=rc,
-                                           preflight_record=telemetry_preflight)
-        telemetry = TEL.finalize(inputs.stage_root, [{"round": 0, "telemetry": round_telemetry}],
-                                 model=model, target=policy.target_experiment.target, suite=suite,
-                                 run_id=inputs.stage_root.name, preflight_record=telemetry_preflight)
-        authored_inputs.verify()
-        audit = audit_codex_transcript(transcript, policy.target_experiment, inputs.candidate, actions)
-        if audit.get("clean") is not True:
-            raise C.StageGateError("component authoring transcript audit failed")
-        digest = str(hash_tree(inputs.candidate)["sha256"])
-        receipts = policy.verify_receipts(policy.receipt_path, actions, audit, candidate_sha256=digest)
-        if rc not in (0, C.ROUND_DEADLINE_EXIT):
-            raise C.StageGateError("component model transport did not complete an admitted bounded session")
-        final_qualification = qualify_component_compiler(
-            inputs.candidate, corpus_root=inputs.qualification.corpus_root,
-            target_experiment=policy.target_experiment, contract_root=inputs.qualification.contract_root,
-            source_root=inputs.qualification.source_root,
-            evidence_root=inputs.stage_root / "final_functional_qualification",
-            runtime=inputs.qualification.runtime, view=inputs.view, timeout_s=tool_timeout_seconds,
-            compiler_origin=inputs.qualification.compiler_origin, compiler_lineage=lineage,
-            runtime_authority=inputs.qualification.runtime_authority,
-        )
-        final_qualification.verify()
-    except Exception as exc:  # noqa: BLE001 - seal refused evidence without promotion
-        refusals.append(type(exc).__name__ + ": " + str(exc)[:500])
-    sealed = inputs.stage_root / "sealed_candidate"
-    shutil.copytree(inputs.candidate, sealed)
-    for path in (sealed, *sealed.rglob("*")):
-        if path.is_symlink():
-            raise C.StageGateError("component final candidate contains a symlink")
-        path.chmod(path.stat().st_mode & ~0o222)
-    record = inputs.stage_root / "candidate_record.json"
-    C.write_json(record, {
-        "schema": "merlin.component_authoring_candidate.v1", "workflow_id": policy.workflow_id,
-        "candidate_path": str(sealed), "candidate_sha256": str(hash_tree(sealed)["sha256"]),
-        "launch_qualification_sha256": launch.qualification_sha256,
-        "functional_qualification_sha256": final_qualification.receipt_sha256 if final_qualification else None,
-        "phase1_origin_sha256": inputs.qualification.compiler_origin.receipt_sha256,
-        "phase2_lineage_sha256": lineage.receipt_sha256,
-        "transcript": str(transcript), "transcript_sha256": C.sha256_file(transcript), "exit_code": rc,
-        "audit": audit, "receipts": receipts, "wall_seconds": time.monotonic() - started,
-        "telemetry": telemetry,
-        "admission": {"consumable": not refusals, "refusal": "; ".join(refusals) or None},
-        "final_acceptance": "NOT_ESTABLISHED",
-    })
-    record.chmod(0o400)
-    return record
