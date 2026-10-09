@@ -31,6 +31,12 @@ import shutil
 import sys
 from pathlib import Path
 
+try:  # the package import in Merlin's own interpreter; a sibling import when run as the capture script
+    from . import _capture_receipts as CR
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import _capture_receipts as CR
+
 # canonical dtype token -> (torchAO scheme | None, base-weight dtype cast | None). Mirrors
 # workloads/capture.py SCHEME + DTYPE_CAST so a capsule's precision matches how models are captured.
 _SCHEME = {
@@ -208,35 +214,6 @@ def _to_native(t):
     return t
 
 
-def _mlir_dtype(torch_dtype) -> str:
-    """Canonical MLIR element spelling for a captured torch tensor dtype.
-
-    Do not infer this from JSON values: ``_to_native`` deliberately converts tensors through float64,
-    so integral-looking values and genuinely integral tensors are indistinguishable after serialization.
-    """
-    import torch
-
-    spelling = {
-        torch.bool: "i1",
-        torch.int8: "i8",
-        torch.uint8: "ui8",
-        torch.int16: "i16",
-        torch.int32: "i32",
-        torch.int64: "i64",
-        torch.float16: "f16",
-        torch.bfloat16: "bf16",
-        torch.float32: "f32",
-        torch.float64: "f64",
-    }
-    for name, mlir in (("float8_e4m3fn", "f8E4M3FN"), ("float8_e5m2", "f8E5M2")):
-        dtype = getattr(torch, name, None)
-        if dtype is not None:
-            spelling[dtype] = mlir
-    if torch_dtype not in spelling:
-        raise RuntimeError(f"unsupported captured input dtype: {torch_dtype}")
-    return spelling[torch_dtype]
-
-
 def _scalars(mapping) -> dict:
     """The JSON-safe scalar entries of a loader-declared mapping (tensors and streams are dropped).
 
@@ -305,7 +282,7 @@ def _input_abi(inputs):
     bad = [type(x).__name__ for x in leaves if not isinstance(x, torch.Tensor)]
     if bad:
         raise RuntimeError(f"model loader inputs must have only tensor leaves; got {bad}")
-    return leaves, [{"shape": list(x.shape), "dtype": _mlir_dtype(x.dtype)} for x in leaves]
+    return leaves, [{"shape": list(x.shape), "dtype": CR.mlir_dtype(x.dtype)} for x in leaves]
 
 
 def _freeze_calibration(samples, *, limit, normalize, torch):
@@ -334,7 +311,7 @@ def _float_reference(mdl, inputs, torch) -> dict:
     try:
         with torch.no_grad():
             y = mdl(*inputs)
-        leaves, abi = _output_abi(y)
+        leaves, abi = CR.output_abi(y)
         leaves = [leaf.detach().clone() for leaf in leaves]
         values = [_to_native(x) for x in leaves]
     finally:
@@ -342,154 +319,6 @@ def _float_reference(mdl, inputs, torch) -> dict:
         np.random.set_state(states[1])
         torch.set_rng_state(states[2])
     return {"outputs": values[0] if len(values) == 1 else values, "output_abi": abi, "leaves": leaves}
-
-
-def _output_abi(outputs):
-    """Flatten model results and preserve the ABI of every tensor result.
-
-    Whole-model captures historically recorded only the nested JSON values.  A list-shaped tensor and
-    a tuple of tensors are indistinguishable in that representation, which made the parent silently
-    retain only result zero.  The pytree flattening performed while torch still owns the values is the
-    authoritative result cardinality and dtype record.
-    """
-    import torch
-
-    leaves, _spec = torch.utils._pytree.tree_flatten(outputs)
-    bad = [type(x).__name__ for x in leaves if not isinstance(x, torch.Tensor)]
-    if bad:
-        raise RuntimeError(f"model outputs must have only tensor leaves; got {bad}")
-    return leaves, [{"shape": list(x.shape), "dtype": _mlir_dtype(x.dtype)} for x in leaves]
-
-
-def _integerized_agreement(before, after, *, atol: float, rtol: float) -> dict:
-    """Compare two independently supplied executions on the capture input."""
-    import torch
-
-    left, left_abi = _output_abi(before)
-    right, right_abi = _output_abi(after)
-    rows = []
-    compatible = left_abi == right_abi and bool(left)
-    for original, rewritten in zip(left, right):
-        lhs = original.detach().to(torch.float64)
-        rhs = rewritten.detach().to(torch.float64)
-        same_shape = lhs.shape == rhs.shape
-        finite = bool(torch.isfinite(lhs).all() and torch.isfinite(rhs).all()) if same_shape else False
-        if same_shape and finite and lhs.numel():
-            delta = (lhs - rhs).abs()
-            max_abs = float(delta.max())
-            max_rel = float((delta / lhs.abs().clamp_min(1e-12)).max())
-            within = bool(torch.all(delta <= atol + rtol * lhs.abs()))
-        elif same_shape and finite:
-            max_abs = max_rel = 0.0
-            within = True
-        else:
-            max_abs = max_rel = 0.0
-            within = False
-        rows.append(
-            {
-                "max_abs": max_abs,
-                "max_rel": max_rel,
-                "within_tolerance": within,
-                "finite": finite,
-                "atol": atol,
-                "rtol": rtol,
-                "shape": list(original.shape),
-            }
-        )
-    passed = compatible and len(rows) == len(left) and all(row["within_tolerance"] for row in rows)
-    return {
-        "status": "passed" if passed else "failed",
-        "samples": 1,
-        "atol": atol,
-        "rtol": rtol,
-        "max_abs": max((row["max_abs"] for row in rows), default=0.0),
-        "max_rel": max((row["max_rel"] for row in rows), default=0.0),
-        "outputs": rows,
-        "finite": compatible and all(row["finite"] for row in rows),
-    }
-
-
-def _fp32_stage_observation(
-    original: dict, staged_leaves, original_input_abi: list[dict], staged_input_abi: list[dict]
-) -> dict:
-    """Measure a selected precision change; this is not an accuracy or quantization gate."""
-    import torch
-
-    before = original["leaves"]
-    _, after_abi = _output_abi(tuple(staged_leaves))
-    before_abi = original["output_abi"]
-    if len(before) != len(staged_leaves) or not before:
-        raise RuntimeError("FP32 staging changed output cardinality")
-    rows = []
-    for left, right, old, new in zip(before, staged_leaves, before_abi, after_abi, strict=True):
-        if left.shape != right.shape:
-            raise RuntimeError("FP32 staging changed output shape")
-        if not left.is_floating_point():
-            if right.dtype != left.dtype or not torch.equal(left, right):
-                raise RuntimeError("FP32 staging changed an exact integer/bool result")
-            rows.append(
-                {
-                    "shape": list(left.shape),
-                    "original_dtype": old["dtype"],
-                    "staged_dtype": new["dtype"],
-                    "comparison": "exact_nonfloating",
-                    "max_abs": 0.0,
-                    "max_rel": 0.0,
-                }
-            )
-            continue
-        if right.dtype != torch.float32:
-            raise RuntimeError("FP32 staging retained a non-FP32 floating output")
-        lhs, rhs = left.detach().to(torch.float64), right.detach().to(torch.float64)
-        if not bool(torch.isfinite(lhs).all() and torch.isfinite(rhs).all()):
-            raise RuntimeError("FP32 staging output comparison is nonfinite")
-        delta = (lhs - rhs).abs()
-        rows.append(
-            {
-                "shape": list(left.shape),
-                "original_dtype": old["dtype"],
-                "staged_dtype": new["dtype"],
-                "comparison": "observed_floating",
-                "max_abs": float(delta.max()) if delta.numel() else 0.0,
-                "max_rel": float((delta / lhs.abs().clamp_min(1e-12)).max()) if delta.numel() else 0.0,
-            }
-        )
-    return {
-        "status": "observed",
-        "scope": "original computation versus staged FP32; not accuracy equivalence",
-        "original_input_abi": original_input_abi,
-        "staged_input_abi": staged_input_abi,
-        "original_output_abi": before_abi,
-        "staged_output_abi": after_abi,
-        "output_cardinality": len(rows),
-        "output_metrics": rows,
-    }
-
-
-def _exported_integer_mm_count(module) -> int:
-    """Count proven i8×i8→i32 contractions in the emitted, unnormalized MLIR."""
-    from xdsl.dialects.builtin import IntegerType, TensorType
-
-    def width(value) -> int | None:
-        typ = getattr(value, "type", None)
-        if not isinstance(typ, TensorType) or not isinstance(typ.element_type, IntegerType):
-            return None
-        return int(typ.element_type.width.data)
-
-    if module is None:
-        return 0
-    count = 0
-    for op in module.walk():
-        if op.name != "linalg.generic" or len(op.operands) < 3 or len(op.results) != 1:
-            continue
-        prov = op.attributes.get("prov.op")
-        if (
-            str(getattr(prov, "data", "")) == "int_matmul"
-            and [width(value) for value in op.operands[:2]] == [8, 8]
-            and width(op.results[0]) == 32
-        ):
-            count += 1
-    return count
 
 
 def _framework_catalog(torch) -> dict:
@@ -559,7 +388,7 @@ def _materialize_session(
             program.module.eval()
             reference = _float_reference(program.module, program.inputs, torch) if args.stage_fp32 else None
             if reference is None:
-                _, output_abi = _output_abi(program.module(*program.inputs))
+                _, output_abi = CR.output_abi(program.module(*program.inputs))
             else:
                 stage_references[program.name] = reference
                 output_abi = reference["output_abi"]
@@ -1049,7 +878,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
 
         session = freeze_fp32_session_reference(mdl, inputs, session)
         staged_reference = _float_reference(mdl, inputs, torch)
-        fp32_staging = _fp32_stage_observation(
+        fp32_staging = CR.fp32_stage_observation(
             float_reference, staged_reference["leaves"], original_input_abi, _input_abi(inputs)[1]
         )
         fp32_staging.update(
@@ -1204,7 +1033,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
             integerization_receipt["partition_error"] = str(exc)
         with torch.no_grad():
             integer_output = mdl(*inputs)
-        portable_agreement = _integerized_agreement(
+        portable_agreement = CR.integerized_agreement(
             portable_output, integer_output, atol=a.agreement_atol, rtol=a.agreement_rtol
         )
         portable_agreement["reference"] = "portable_pt2e"
@@ -1217,7 +1046,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
                     "reason": independent_error or "selected integer reference returned no result",
                 }
             else:
-                golden_agreement = _integerized_agreement(independent.output, integer_output, atol=0.0, rtol=0.0)
+                golden_agreement = CR.integerized_agreement(independent.output, integer_output, atol=0.0, rtol=0.0)
                 executed = independent.contraction_count
                 selected = quant_stats.get("annotated_contractions") if isinstance(quant_stats, dict) else None
                 seen = integerization_receipt["quantized_contractions_seen"]
@@ -1227,7 +1056,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
                     golden_agreement["reason"] = (
                         "selected/observed census or independently executed integer partition differs"
                     )
-                reference_leaves, reference_abi = _output_abi(independent.output)
+                reference_leaves, reference_abi = CR.output_abi(independent.output)
                 reference_bytes = (
                     json.dumps(
                         {
@@ -1303,7 +1132,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
     opaque = opaque_report(res.mlir_text)
     n_opaque = sum(opaque.values())
     if integerization_receipt is not None:
-        integerization_receipt["exported_integer_mm_count"] = _exported_integer_mm_count(res.module)
+        integerization_receipt["exported_integer_mm_count"] = CR.exported_integer_mm_count(res.module)
     integerization_ok = integerization_receipt is None or (
         integer_partition is not None
         and integerization_receipt.get("accumulator_bound_checked") is True
@@ -1311,41 +1140,14 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
         and integerization_receipt["integer_mm_emitted"] <= integerization_receipt["exported_integer_mm_count"]
         and integerization_receipt["golden_agreement"]["status"] == "passed"
     )
-    # A recipe requests a format; only the applied transform and its emitted
-    # arithmetic establish the captured scheme. In particular, an already-
-    # integer graph that skipped observers must not inherit the request's label.
-    realized_scheme = (
-        None if a.already_quantized else (a.scheme or _SCHEME.get(a.dtype, (None, None))[0] if recipe is None else None)
+    realized_scheme = CR.realized_scheme(
+        requested=a.scheme or _SCHEME.get(a.dtype, (None, None))[0],
+        recipe_selected=recipe is not None,
+        already_quantized=a.already_quantized,
+        applied_scheme=q.scheme if q is not None else None,
+        quant_stats=quant_stats,
+        integerization_ok=integerization_receipt is not None and integerization_ok,
     )
-    if recipe is not None and q is not None and quant_stats is not None:
-        if (
-            q.scheme == "int8_static_act_int8_weight"
-            and quant_stats.get("api") == "pt2e"
-            and integerization_receipt is not None
-            and integerization_ok
-        ):
-            realized_scheme = q.scheme
-        elif (
-            q.scheme == "int8_dyn_act_int8_weight"
-            and quant_stats.get("api") == "quantize_"
-            and quant_stats.get("layers_quantized", 0) > 0
-        ):
-            realized_scheme = q.scheme
-        elif (
-            q.scheme.startswith("fp8_")
-            and quant_stats.get("api") == "pt2e"
-            and quant_stats.get("annotated_contractions", 0) > 0
-        ):
-            realized_scheme = q.scheme
-        elif (
-            # A dynamic float8 recipe goes through quantize_, not PT2E; without this row its capture
-            # recorded `scheme: None` even when every planned Linear had been transformed.
-            q.scheme.startswith("fp8_")
-            and q.scheme.endswith("_dynamic_act_weight")
-            and quant_stats.get("api") == "quantize_"
-            and quant_stats.get("layers_quantized", 0) > 0
-        ):
-            realized_scheme = q.scheme
 
     (out / "linalg.mlir").write_text(res.mlir_text, encoding="utf-8")
     frontend_trace = getattr(res, "capture_trace", None)
@@ -1372,7 +1174,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
     # The census of the forward that produced the golden, taken before anything runs the model again.
     act_sites = act_census.to_dict() if act_census is not None else None
     nl_sites = nl_census.to_dict() if nl_census is not None else None
-    output_leaves, output_abi = _output_abi(y)
+    output_leaves, output_abi = CR.output_abi(y)
     output_values = [_to_native(x) for x in output_leaves]
     # Preserve the version-1 single-result JSON shape so existing operator capsules and caches remain
     # byte-compatible.  ``output_abi`` is what disambiguates one list-shaped tensor from many results.
