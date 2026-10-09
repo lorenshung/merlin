@@ -9,6 +9,8 @@ from types import SimpleNamespace
 from typing import get_args, get_type_hints
 
 import pytest
+from component_baseline_fixture import synthetic_component_controller as synthetic_component_controller
+from component_baseline_fixture import unissued_runtime
 from merlin_experiments.phase2 import broker
 from merlin_experiments.phase2 import broker_policy as BP
 from merlin_experiments.phase2 import component_cca as CC
@@ -20,6 +22,8 @@ from test_component_workflow import context
 from merlin.benchharness import hash_tree
 from merlin.kernels.cca import CCA, CommunicationFacet, ComputeFacet, CoverageFacet
 from merlin.kernels.cca_contract import FACET_CLASSES
+
+pytestmark = pytest.mark.usefixtures("synthetic_component_controller")
 
 
 def observations(*, baseline, candidate, corpus, target_descriptor, timeout_s):
@@ -55,11 +59,12 @@ def observations(*, baseline, candidate, corpus, target_descriptor, timeout_s):
 
 def selected(tmp_path, callback=observations):
     inputs = context(tmp_path)
-    baseline = tmp_path / "baseline-compiler"
-    baseline.mkdir()
-    (baseline / "compiler").write_text("separate immutable baseline compiler")
+    baseline = inputs["baseline_admission"].baseline
+    runtime = unissued_runtime(target_descriptor=inputs["target_experiment"].path, cca_provider=callback)
+    inputs["independent_runtime"] = runtime
     source = Path(__file__)
-    provider = CC.ComponentCCAProvider(callback, source, sha256_file(source), baseline, hash_tree(baseline)["sha256"])
+    provider = CC.ComponentCCAProvider(callback, source, sha256_file(source), baseline,
+                                      hash_tree(baseline)["sha256"], inputs["baseline_admission"], runtime)
     return inputs, provider
 
 
@@ -215,6 +220,9 @@ def test_exact_multiple_generated_members_are_bound_without_reference_inputs(tmp
         )
     )
     inputs["component_corpus"] = C.freeze_performance_corpus(live, tmp_path / "frozen-pair")
+    # Re-freeze the synthetic baseline's domain before constructing this policy.
+    inputs["baseline_admission"] = replace(inputs["baseline_admission"], corpus=inputs["component_corpus"])
+    provider = replace(provider, baseline_admission=inputs["baseline_admission"])
     _policy, result = execute(inputs, provider)
     assert result["returncode"] == 0, result
     rows = json.loads(result["stdout"])["evidence"]
@@ -362,8 +370,8 @@ def test_component_cca_refuses_untyped_provider_and_overlapping_compiler_arms(tm
     overlapping = replace(
         provider, baseline=inputs["candidate"], baseline_sha256=hash_tree(inputs["candidate"])["sha256"]
     )
-    _policy, result = execute(inputs, overlapping)
-    assert result["returncode"] == 125 and not result["stdout"]
+    with pytest.raises(StageGateError, match="different baseline"):
+        execute(inputs, overlapping)
 
 
 @pytest.mark.parametrize(
@@ -406,3 +414,17 @@ def test_serialized_feedback_replays_all_facets_and_input_bindings(tmp_path, fai
         document["provider_sha256"] = "d" * 64
     with pytest.raises(StageGateError):
         CW.validate_component_feedback(document)
+
+
+def test_correspondence_reports_users_effects_lifetimes_and_editable_owners():
+    a = CC.ComponentCorrespondence(users=("producer.consumer",), effects=("read.immutable",),
+                                   lifetimes=(("buffer", 0, 3),),
+                                   edit_owners=(("packing", "merlin.llvmlower"),))
+    b = replace(a, effects=("read.epoch_mutation",), lifetimes=None)
+    report = CC.complete_report(projection(), projection(), a, b)
+    assert report["correspondence"]["effects"]["status"] == "DIVERGENCE"
+    assert report["correspondence"]["lifetimes"]["status"] == "UNKNOWN"
+    assert report["correspondence"]["edit_owners"]["status"] == "SAME"
+    assert report["correspondence"]["resource_pressure"]["missing"] == ["baseline", "candidate"]
+    with pytest.raises(StageGateError):
+        CC.complete_report(projection(), projection(), replace(a, users=("/private/answers",)), b)

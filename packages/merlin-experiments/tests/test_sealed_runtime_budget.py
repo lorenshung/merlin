@@ -160,3 +160,81 @@ def test_discounted_issue_refuses_cache_mutation_during_link(tmp_path, monkeypat
     assert linked > 0
     assert not (run / "sealed_m2m_pending.json").exists()
     assert not (run / "capture").exists()
+
+
+def test_concurrent_runtime_snapshot_during_inventory_keeps_exact_cached_identity(tmp_path, monkeypatch):
+    from merlin_experiments.capture_execution import sealed_static
+
+    monkeypatch.setenv(runtime_store.STORE_ENV, str(tmp_path / "store"))
+    plan = _plan(tmp_path)
+    entry = runtime_store.store_entry(plan)
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    cache = runtime_store.verified_cached_entry(plan, first)
+    assert cache is not None
+    source = entry / "opt/capture-venv/lib/module.bin"
+    original_digest = sealed_static._file_digest
+    inventories, observations = 0, []
+
+    def interleaved_digest(path):
+        nonlocal inventories
+        if path == source:
+            inventories += 1
+            if inventories == 2:
+                before = source.stat()
+                # The second actual caller links the same immutable inode while
+                # the first caller's post-link inventory is reading that file.
+                runtime_store.link_runtime(plan, second, verified_cache=cache)
+                after = source.stat()
+                observations.append((before, after))
+        return original_digest(path)
+
+    monkeypatch.setattr(sealed_static, "_file_digest", interleaved_digest)
+    runtime_store.link_runtime(plan, first, verified_cache=cache)
+    assert len(observations) == 1
+    before, after = observations[0]
+    assert before.st_nlink + 1 == after.st_nlink
+    assert before.st_ctime_ns != after.st_ctime_ns
+    assert (before.st_ino, before.st_size, before.st_mtime_ns) == (after.st_ino, after.st_size, after.st_mtime_ns)
+    assert runtime_store.verified_cached_entry(plan, first) == cache
+    for destination in (first, second):
+        linked = destination / "opt/capture-venv/lib/module.bin"
+        assert linked.stat().st_ino == source.stat().st_ino
+        assert original_digest(linked) == original_digest(source)
+
+
+@pytest.mark.parametrize("change", ["bytes_restored_mtime", "mode", "continuous_link_churn"])
+def test_link_count_rehash_never_admits_changed_content_modes_or_unstable_reads(tmp_path, monkeypatch, change):
+    from merlin_experiments.capture_execution import sealed_static
+
+    monkeypatch.setenv(runtime_store.STORE_ENV, str(tmp_path / "store"))
+    plan = _plan(tmp_path)
+    entry = runtime_store.store_entry(plan)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    cache = runtime_store.verified_cached_entry(plan, runtime)
+    assert cache is not None
+    source = entry / "opt/capture-venv/lib/module.bin"
+    original_digest = sealed_static._file_digest
+    inventories = 0
+
+    def changed_digest(path):
+        nonlocal inventories
+        if path == source:
+            inventories += 1
+            if inventories == 2 or (inventories > 2 and change == "continuous_link_churn"):
+                before = source.stat()
+                if change == "bytes_restored_mtime":
+                    with source.open("r+b") as stream:
+                        stream.write(b"x")
+                    os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+                elif change == "mode":
+                    source.chmod(before.st_mode ^ 0o100)
+                os.link(source, tmp_path / f"other_snapshot_{inventories}")
+        return original_digest(path)
+
+    monkeypatch.setattr(sealed_static, "_file_digest", changed_digest)
+    with pytest.raises(sealed_m2m.SealedM2MError, match="cached runtime changed during hard-link snapshot"):
+        runtime_store.link_runtime(plan, runtime, verified_cache=cache)
+    assert inventories <= 4  # Initial admission plus at most three post-link reads.

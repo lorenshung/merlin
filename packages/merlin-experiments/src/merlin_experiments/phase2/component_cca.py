@@ -21,11 +21,14 @@ from merlin.kernels.cca_contract import FACET_CLASSES
 
 from . import corpus as C
 from .broker_evidence import _is_sha256
+from .component_baseline import verify_baseline_admission
+from .component_runtime import require_independent_runtime
 from .contracts import StageGateError, document_sha256, sha256_file
 
 ACTION = "component-cca-feedback"
 TIER = "structural_component_cca"
-REPORT_SCHEMA = "merlin.component_cca_report.v1"
+LEGACY_REPORT_SCHEMA = "merlin.component_cca_report.v1"
+REPORT_SCHEMA = "merlin.component_cca_report.v2"
 _PROVENANCE = {"level", "source_sha256", "producer_sha256", "private_metadata_sha256"}
 
 
@@ -129,6 +132,39 @@ def _decode(document):
 
 
 @dataclass(frozen=True)
+class ComponentCorrespondence:
+    """Provider-bound use/effect/ownership facts for the exact emitted program.
+
+    Atoms are reviewed structural vocabulary or opaque identities; source text,
+    raw baseline programs and private absolute paths never enter the projection.
+    """
+
+    users: tuple[str, ...] | None = None
+    effects: tuple[str, ...] | None = None
+    representations: tuple[str, ...] | None = None
+    lifetimes: tuple[tuple[str, int, int], ...] | None = None
+    resource_pressure: tuple[tuple[str, float], ...] | None = None
+    emitted_choices: tuple[str, ...] | None = None
+    refusal_reasons: tuple[str, ...] | None = None
+    edit_owners: tuple[tuple[str, str], ...] | None = None
+
+
+def _correspondence(value):
+    if value is None:
+        value = ComponentCorrespondence()
+    if type(value) is ComponentCorrespondence:
+        raw = {field.name: getattr(value, field.name) for field in fields(ComponentCorrespondence)}
+    elif isinstance(value, Mapping):
+        raw = dict(value)
+    else:
+        raise StageGateError("component correspondence requires typed provider facts")
+    hints = get_type_hints(ComponentCorrespondence)
+    if set(raw) != set(hints):
+        raise StageGateError("component correspondence facet schema is incomplete")
+    return {name: _value(_typed(raw[name], annotation)) for name, annotation in hints.items()}
+
+
+@dataclass(frozen=True)
 class ComponentCCAObservation:
     """Host-private typed observation of one exact generated member artifact."""
 
@@ -139,6 +175,7 @@ class ComponentCCAObservation:
     member_sha256: str
     corpus_sha256: str
     target_sha256: str
+    correspondence: ComponentCorrespondence | None = None
 
 
 class ComponentCCAEvaluation(Protocol):
@@ -155,21 +192,29 @@ class ComponentCCAEvaluation(Protocol):
 
 @dataclass(frozen=True)
 class ComponentCCAProvider:
-    """Explicit trusted callback and baseline, revalidated before and after use.
-
-    The policy separately snapshots callable/code identity. Owner and artifact
-    pins do not close arbitrary callback dependencies or captured state.
-    """
+    """Independent observation and the fresh seed, revalidated around each use."""
 
     evaluate: ComponentCCAEvaluation
     implementation: Path
     implementation_sha256: str
     baseline: Path
     baseline_sha256: str
+    baseline_admission: object = None
+    independent_runtime: object = None
 
     def validate(self):
         from .component_workflow import _callable_source
 
+        verify_baseline_admission(self.baseline_admission, baseline=self.baseline,
+                                  corpus=None, target_descriptor=None)
+        runtime = require_independent_runtime(self.independent_runtime, required_roles=("cca_provider",),
+                                              target_descriptor=self.baseline_admission.target_descriptor)
+        verify_binding = getattr(runtime.qualification, "verify_component_binding", None)
+        if not callable(verify_binding):
+            raise StageGateError("component CCA lacks independent exact compiler/cohort observation qualification")
+        verify_binding(self.baseline_admission)
+        if self.evaluate is not runtime.services.cca_provider:
+            raise StageGateError("component CCA differs from independently evaluated observation support")
         owner = _artifact(self.implementation, self.implementation_sha256)
         if _callable_source(self.evaluate)[0] != owner:
             raise StageGateError("component CCA callback differs from its pinned owner")
@@ -184,7 +229,9 @@ class ComponentCCAProvider:
         return baseline.resolve()
 
     def configuration_sha256(self, target_sha256):
-        return document_sha256({"baseline_sha256": self.baseline_sha256, "target_sha256": target_sha256})
+        return document_sha256({"baseline_sha256": self.baseline_sha256, "target_sha256": target_sha256,
+                                "baseline_admission_sha256": self.baseline_admission.sha256,
+                                "independent_runtime_sha256": self.independent_runtime.sha256})
 
 
 def _projection(observation, *, compiler_sha256, member, corpus, target_sha256, provider_sha256):
@@ -213,7 +260,7 @@ def _projection(observation, *, compiler_sha256, member, corpus, target_sha256, 
     return cca.to_dict()
 
 
-def complete_report(baseline, candidate):
+def complete_report(baseline, candidate, baseline_correspondence=None, candidate_correspondence=None):
     """All reflected facets, including unknown on both sides, with core gaps."""
     left, right = _decode(baseline), _decode(candidate)
     if left.scope != right.scope or left.op != right.op or left.backend != right.backend:
@@ -250,8 +297,15 @@ def complete_report(baseline, candidate):
         }
     if divergent - set(reflected):
         raise StageGateError("core CCA comparison has an unreflected axis")
+    correspondence = {}
+    ca, cb = _correspondence(baseline_correspondence), _correspondence(candidate_correspondence)
+    for axis in ca:
+        missing = [arm for arm, value in (("baseline", ca[axis]), ("candidate", cb[axis])) if value is None]
+        correspondence[axis] = {"status": "UNKNOWN" if missing else "SAME" if ca[axis] == cb[axis] else "DIVERGENCE",
+                                "missing": missing, "baseline": ca[axis], "candidate": cb[axis]}
     return {
         "schema": REPORT_SCHEMA,
+        "correspondence": correspondence,
         "scope": left.scope,
         "scope_basis": "exact_generated_component",
         "reflected_axes": reflected,
@@ -317,10 +371,14 @@ def evaluate(provider, *, candidate, candidate_sha256, corpus, target_descriptor
                 "manifest_sha256": corpus.manifest_sha256,
                 "target_sha256": target_sha,
                 "baseline_compiler_sha256": provider.baseline_sha256,
+                "baseline_admission_sha256": provider.baseline_admission.sha256,
+                "independent_runtime_sha256": provider.independent_runtime.sha256,
                 "candidate_compiler_sha256": candidate_sha256,
                 "baseline_cca": projections[0],
                 "candidate_cca": projections[1],
-                "report": complete_report(*projections),
+                "baseline_correspondence": _correspondence(pair[0].correspondence),
+                "candidate_correspondence": _correspondence(pair[1].correspondence),
+                "report": complete_report(*projections, pair[0].correspondence, pair[1].correspondence),
             }
         )
     return evidence
@@ -344,8 +402,17 @@ def validate_evidence(document):
             "candidate_compiler_sha256",
             "baseline_cca",
             "candidate_cca",
+            "baseline_correspondence",
+            "candidate_correspondence",
             "report",
         }
+        legacy = (isinstance(row, Mapping) and isinstance(row.get("report"), Mapping)
+                  and row["report"].get("schema") == LEGACY_REPORT_SCHEMA)
+        if legacy:
+            expected -= {"baseline_correspondence", "candidate_correspondence"}
+        for key in ("baseline_admission_sha256", "independent_runtime_sha256"):
+            if isinstance(row, Mapping) and key in row:
+                expected.add(key)
         if not isinstance(row, Mapping) or set(row) != expected:
             raise StageGateError("component CCA member schema is invalid")
         identity = row["family"], row["capsule"]
@@ -358,16 +425,22 @@ def validate_evidence(document):
             raise StageGateError("component CCA compiler differs from feedback envelope")
         if row["corpus_sha256"] != document["corpus_sha256"] or row["manifest_sha256"] != document["manifest_sha256"]:
             raise StageGateError("component CCA corpus differs from feedback envelope")
-        configurations.add(
-            document_sha256({"baseline_sha256": row["baseline_compiler_sha256"], "target_sha256": row["target_sha256"]})
-        )
+        configuration = {"baseline_sha256": row["baseline_compiler_sha256"], "target_sha256": row["target_sha256"]}
+        if "baseline_admission_sha256" in row:
+            configuration["baseline_admission_sha256"] = row["baseline_admission_sha256"]
+        if "independent_runtime_sha256" in row:
+            configuration["independent_runtime_sha256"] = row["independent_runtime_sha256"]
+        configurations.add(document_sha256(configuration))
         for arm in ("baseline_cca", "candidate_cca"):
             cca = _decode(row[arm])
             if cca.provenance["producer_sha256"] != document["provider_sha256"]:
                 raise StageGateError("component CCA producer differs from feedback envelope")
-        if document_sha256(complete_report(row["baseline_cca"], row["candidate_cca"])) != document_sha256(
-            row["report"]
-        ):
+        replay = complete_report(row["baseline_cca"], row["candidate_cca"],
+                                 row.get("baseline_correspondence"), row.get("candidate_correspondence"))
+        if legacy:
+            replay.pop("correspondence")
+            replay["schema"] = LEGACY_REPORT_SCHEMA
+        if document_sha256(replay) != document_sha256(row["report"]):
             raise StageGateError("component CCA report omits or changes reflected evidence")
     if configurations != {document["configuration_sha256"]}:
         raise StageGateError("component CCA configuration differs from feedback envelope")

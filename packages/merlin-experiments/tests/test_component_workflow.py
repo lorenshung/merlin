@@ -1,12 +1,20 @@
 """Real component broker admission/receipts; synthetic services, no engines or agents."""
 
 import json
+import shutil
 import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from component_baseline_fixture import (
+    synthetic_component_controller as synthetic_component_controller,
+)
+from component_baseline_fixture import (
+    unissued_baseline,
+    unissued_runtime,
+)
 from merlin_experiments.phase2 import authoring, authoring_cli, broker, stage_inputs, stage_prompt
 from merlin_experiments.phase2 import broker_policy as BP
 from merlin_experiments.phase2 import component_workflow as CW
@@ -15,6 +23,8 @@ from merlin_experiments.phase2.contracts import StageGateError, document_sha256,
 
 from merlin.benchharness import hash_tree
 from merlin.xdsl_dialects.lowering.global_plan import CycleInterval
+
+pytestmark = pytest.mark.usefixtures("synthetic_component_controller")
 
 
 def generated_corpus(tmp_path, *, kind=None):
@@ -75,12 +85,19 @@ def context(tmp_path):
     )
     descriptor = tmp_path / "target.yaml"
     descriptor.write_text("target: fixture\n")
-    return dict(
+    result = dict(
         candidate=candidate,
         target_experiment=SimpleNamespace(target="fixture", path=descriptor),
         receipt_path=tmp_path / "control" / "receipts.jsonl",
         component_corpus=generated_corpus(tmp_path),
     )
+    baseline = tmp_path / "fresh-functional-baseline"
+    shutil.copytree(candidate, baseline)
+    result["baseline_admission"] = unissued_baseline(
+        baseline=baseline, corpus=result["component_corpus"], target_descriptor=descriptor,
+    )
+    result["target_experiment"].fixture_inputs = result
+    return result
 
 
 def analytical(candidate, corpus, timeout_s):
@@ -95,21 +112,31 @@ def analytical(candidate, corpus, timeout_s):
 
 
 def provider(tmp_path, monkeypatch, target):
+    from merlin_experiments.phase2 import component_analytical as CA
+
+    from merlin.perf.component_cost import ComponentCostScope
+
     adapter = tmp_path / "adapter.json"
     adapter.write_text("{}")
     calibration = {"target_sha256": sha256_file(target.path), "controlled": True}
-    monkeypatch.setattr(
-        CW,
-        "prepare_phase2_calibration",
-        lambda path: {
-            "status": "ready",
-            "calibration": calibration,
-        },
-    )
+    for module in (CW, CA):
+        monkeypatch.setattr(module, "prepare_phase2_calibration",
+                            lambda _: {"status": "ready", "calibration": calibration})
     source = Path(__file__)
-    return CW.ComponentAnalyticalProvider(
-        analytical, source, sha256_file(source), adapter, sha256_file(adapter), document_sha256(calibration)
+    selected = target.fixture_inputs
+    admission = selected["baseline_admission"]
+    runtime = unissued_runtime(target_descriptor=target.path, feature_provider=analytical,
+                               source_pins=((adapter, sha256_file(adapter)),))
+    selected["independent_runtime"] = runtime
+    bound = CA.build_component_analytical_provider(
+        baseline=admission.baseline, corpus=selected["component_corpus"], target_descriptor=target.path,
+        feature_provider=analytical, calibration_adapter=adapter,
+        scope=ComponentCostScope(*(document_sha256(value) for value in ("timer", "accuracy", "inputs"))),
+        output=tmp_path / "analytical-output", lease_path=tmp_path / "engine.lease",
+        dependencies={}, memory_per_worker_bytes=1 << 20, baseline_admission=admission,
+        independent_runtime=runtime,
     )
+    return replace(bound, evaluate=analytical, implementation=source, implementation_sha256=sha256_file(source))
 
 
 def test_registry_contains_no_model_or_descriptor_probe_actions(tmp_path, monkeypatch):
@@ -318,6 +345,9 @@ def test_component_prompt_uses_only_generated_inputs_and_selected_capabilities(t
         broker_receipt_path=paths[3],
     )
     text = stage_prompt.render_component_prompt(prepared)
+    from merlin.targetgen.generalization_prompt import GENERAL_COMPILER_CONTRACT_V1
+
+    assert text.count(GENERAL_COMPILER_CONTRACT_V1) == 1
     document = json.loads(text.split("```json\n")[1].split("\n```")[0])
     assert document["workflow_id"] == BP.COMPONENT_ONLY_V1
     assert document["final_acceptance"] == "NOT_ESTABLISHED"
@@ -325,6 +355,10 @@ def test_component_prompt_uses_only_generated_inputs_and_selected_capabilities(t
     assert document["corpus"]["members"] == [{"family": "generated-family", "capsule": "member"}]
     assert all(action["name"] != BP.E2E_ANALYSIS_ACTION for action in document["actions"])
     assert not next(action for action in document["actions"] if action["name"] == CW.RTL_ACTION)["available"]
+    for action in prepared.actions:
+        assert f"- `{action.name}`: {action.purpose}" in text
+        if not action.available:
+            assert f"UNAVAILABLE: {action.unavailable_reason}" in text
     assert "e2e_sentinel" not in document and "functional_bundle_snapshot" not in document
     assert str(selected["component_corpus"].root) not in text
     forged = broker.BrokerAction(BP.E2E_ANALYSIS_ACTION, ("host",), (), "forged", False)
@@ -511,13 +545,16 @@ def _synthetic_rtl_policy(tmp_path, monkeypatch):
     rtl = DF.DevelopmentGsimFeedback(
         certificate=record,
         corpus=selected["component_corpus"],
-        baseline=selected["candidate"],
-        baseline_sha256=hash_tree(selected["candidate"])["sha256"],
+        baseline=selected["baseline_admission"].baseline,
+        baseline_sha256=selected["baseline_admission"].baseline_sha256,
         target_experiment=selected["target_experiment"],
         rtl_identity={"fixture": True},
         work_root=tmp_path / "host-rtl",
         decisions={("generated-family", "member"): decision},
         executor=no_engine_executor,
+    )
+    selected["independent_runtime"] = unissued_runtime(
+        target_descriptor=selected["target_experiment"].path, rtl_executor=no_engine_executor,
     )
     policy = BP.select_workflow(BP.COMPONENT_ONLY_V1, **selected, component_rtl=rtl, feedback_round=0)
     return policy, rtl, calls

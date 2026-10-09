@@ -12,6 +12,7 @@ import json
 import math
 import os
 import secrets
+import socketserver
 import subprocess
 import threading
 import time
@@ -142,7 +143,8 @@ def inner_command(
     timeout_s: int,
 ) -> list[str]:
     """Construct one shell-free payload for the inner broker."""
-    if policy.network != "available_not_an_isolation_claim" or not policy.clear_environment:
+    if (policy.network not in {"available_not_an_isolation_claim", "isolated_networkless"}
+        or not policy.clear_environment):
         raise StageGateError("inner command requires the explicit clear-environment policy")
     if (
         not argv
@@ -158,6 +160,10 @@ def inner_command(
         raise StageGateError("inner command requires a captured execution policy")
     verifier()
     environment = policy.env_prefix
+    if policy.network == "isolated_networkless":
+        if environment:
+            raise StageGateError("component tool environment must be encoded in the captured policy")
+        return [*policy.argv, "--", *argv]
     return [*policy.argv, "--chdir", str(candidate), "bash", "-c", environment + 'exec "$@"', "perf-tool", *argv]
 
 
@@ -177,6 +183,7 @@ class Broker:
         max_calls: int,
         max_tool_seconds: int,
         mandatory_analysis_reserve_seconds: float = 0.0,
+        public_control_dir: Path | None = None,
     ):
         self.workflow = workflow
         if (
@@ -186,6 +193,18 @@ class Broker:
         ):
             raise StageGateError("broker workflow is bound to another invocation")
         self.policy = policy
+        self.public_control_dir = Path(public_control_dir) if public_control_dir is not None else None
+        if self.public_control_dir is not None:
+            if (not self.public_control_dir.is_absolute() or self.public_control_dir.is_symlink()
+                or self.public_control_dir == receipt_path.parent or self.public_control_dir.is_relative_to(candidate)):
+                raise StageGateError(
+                    "component public broker control must be separate from private evidence and candidate"
+                )
+            self.public_control_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            public_receipt = self.public_control_dir / "receipts.jsonl"
+            if public_receipt.exists() or public_receipt.is_symlink():
+                raise StageGateError("component public broker receipt projection must be fresh")
+            public_receipt.touch(mode=0o600)
         self.target_experiment = target_experiment
         self.candidate = candidate
         self.deadline = deadline
@@ -441,10 +460,19 @@ class Broker:
             with self.receipt_path.open("ab", buffering=0) as stream:
                 stream.write(payload)
                 os.fsync(stream.fileno())
+            if self.public_control_dir is not None:
+                # Public status projection has no private artifact paths, input
+                # identities, provenance, goldens or evaluator source records.
+                projection = {key: receipt[key] for key in
+                              ("index", "action", "state", "returncode", "stdout_sha256", "stderr_sha256",
+                               "bindings_command_sha256", "receipt_schema_version") if key in receipt}
+                with (self.public_control_dir / "receipts.jsonl").open("ab", buffering=0) as stream:
+                    stream.write(_canonical_json(projection))
+                    os.fsync(stream.fileno())
         return result
 
     @contextlib.contextmanager
-    def serving(self) -> Iterator[tuple[str, int]]:
+    def serving(self, *, socket_path: Path | None = None) -> Iterator[tuple[str, int]]:
         owner = self
 
         class ReceiptJoiningHTTPServer(ThreadingHTTPServer):
@@ -513,19 +541,39 @@ class Broker:
             def log_message(self, _format: str, *args: object) -> None:
                 return
 
-        self._server = ReceiptJoiningHTTPServer(("127.0.0.1", 0), Handler)
+            def address_string(self) -> str:
+                return "local"  # Unix peers have no host/port tuple.
+
+        if socket_path is None:
+            self._server = ReceiptJoiningHTTPServer(("127.0.0.1", 0), Handler)
+        else:
+            socket_path = Path(socket_path)
+            if not socket_path.is_absolute() or socket_path.exists() or socket_path.is_symlink():
+                raise StageGateError("component broker socket must be a fresh absolute path")
+            socket_owner = self.public_control_dir or self.receipt_path.parent
+            if socket_path.parent.resolve() != socket_owner.resolve():
+                raise StageGateError("component broker socket must share its private receipt owner")
+
+            class ReceiptJoiningUnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+                daemon_threads = False
+                block_on_close = True
+
+            self._server = ReceiptJoiningUnixServer(str(socket_path), Handler)
+            socket_path.chmod(0o600)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         try:
-            yield "127.0.0.1", int(self._server.server_address[1])
+            yield ("127.0.0.1", int(self._server.server_address[1])) if socket_path is None else (str(socket_path), 0)
         finally:
             self._server.shutdown()
             self._server.server_close()
             self._thread.join(timeout=5)
+            if socket_path is not None:
+                socket_path.unlink(missing_ok=True)
 
 
 _BROKER_SHIM = """#!/usr/bin/env python3
-import json, pathlib, sys, urllib.error, urllib.request
+import http.client, json, pathlib, socket, sys, urllib.error, urllib.request
 cfg = json.loads((pathlib.Path(__file__).parent / ".perf_broker.json").read_text())
 argv = sys.argv[1:]
 if not argv or argv[0] not in cfg["actions"]:
@@ -538,13 +586,29 @@ for item in argv[1:]:
     if not name or name in bindings:
         raise SystemExit("broker action binding is empty or repeated")
     bindings[name] = value
-request = urllib.request.Request(
-    cfg["url"], data=json.dumps({"action": action, "bindings": bindings,
-                                 "timeout_s": cfg["tool_timeout_s"]}).encode(),
-    headers={"Content-Type": "application/json", "X-Perf-Token": cfg["token"]}, method="POST")
+body = json.dumps({"action": action, "bindings": bindings, "timeout_s": cfg["tool_timeout_s"]}).encode()
+headers = {"Content-Type": "application/json", "X-Perf-Token": cfg["token"]}
 try:
-    with urllib.request.urlopen(request, timeout=cfg["tool_timeout_s"] + 10) as response:
-        result = json.load(response)
+    if cfg.get("unix_socket"):
+        class UnixConnection(http.client.HTTPConnection):
+            def connect(self):
+                self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                self.sock.settimeout(self.timeout)
+                self.sock.connect(cfg["unix_socket"])
+        connection = UnixConnection("localhost", timeout=cfg["tool_timeout_s"] + 10)
+        try:
+            connection.request("POST", "/execute", body, headers)
+            response = connection.getresponse()
+            result = json.load(response)
+            if response.status != 200:
+                sys.stderr.write(json.dumps(result))
+                raise SystemExit(125)
+        finally:
+            connection.close()
+    else:
+        request = urllib.request.Request(cfg["url"], data=body, headers=headers, method="POST")
+        with urllib.request.urlopen(request, timeout=cfg["tool_timeout_s"] + 10) as response:
+            result = json.load(response)
 except urllib.error.HTTPError as exc:
     sys.stderr.write(exc.read().decode(errors="replace"))
     raise SystemExit(125)
@@ -555,7 +619,8 @@ raise SystemExit(int(result.get("returncode", 125)))
 
 
 def stage_broker_shim(
-    control_dir: Path, *, host: str, port: int, token: str, tool_timeout_s: int, actions: Sequence[BrokerAction]
+    control_dir: Path, *, host: str, port: int, token: str, tool_timeout_s: int, actions: Sequence[BrokerAction],
+    socket_path: str | None = None,
 ) -> Path:
     if control_dir.is_symlink() or (control_dir.exists() and not control_dir.is_dir()):
         raise StageGateError(f"broker control directory is unsafe: {control_dir}")
@@ -571,6 +636,7 @@ def stage_broker_shim(
         config,
         {
             "url": f"http://{host}:{port}/execute",
+            **({"unix_socket": socket_path} if socket_path is not None else {}),
             "token": token,
             "tool_timeout_s": tool_timeout_s,
             "actions": sorted(action.name for action in actions),

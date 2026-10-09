@@ -11,6 +11,7 @@ from typing import Any, Protocol
 
 from merlin.common.digest import sha256_bytes as _sha256
 from merlin.perf.execution_policy import ITERATION_MAX_SECONDS
+from merlin.targetgen.generalization_prompt import GENERAL_COMPILER_CONTRACT_V1
 
 from . import broker_policy as BP
 from . import prompt as PP
@@ -120,6 +121,7 @@ class ComponentPromptInputs:
     tool_timeout_seconds: int
     broker_path: str
     broker_receipt_path: str
+    public_manifest_sha256: str | None = None
 
 
 def render_component_prompt(inputs: ComponentPromptInputs) -> str:
@@ -127,6 +129,8 @@ def render_component_prompt(inputs: ComponentPromptInputs) -> str:
     for value in (inputs.corpus_manifest_sha256, inputs.corpus_sha256, inputs.candidate_sha256):
         if not _is_sha256(value):
             raise StageGateError("component prompt requires exact source and candidate identities")
+    if inputs.public_manifest_sha256 is not None and not _is_sha256(inputs.public_manifest_sha256):
+        raise StageGateError("component prompt public projection requires an exact identity")
     if (
         not inputs.members
         or len(set(inputs.members)) != len(inputs.members)
@@ -164,6 +168,8 @@ def render_component_prompt(inputs: ComponentPromptInputs) -> str:
         "corpus": {
             "manifest": inputs.corpus_manifest_path,
             "manifest_sha256": inputs.corpus_manifest_sha256,
+            **({"public_manifest_sha256": inputs.public_manifest_sha256}
+               if inputs.public_manifest_sha256 is not None else {}),
             "sha256": inputs.corpus_sha256,
             "members": [{"family": family, "capsule": capsule} for family, capsule in inputs.members],
         },
@@ -179,6 +185,12 @@ def render_component_prompt(inputs: ComponentPromptInputs) -> str:
         "launch_admission": "REQUIRED_SEPARATELY",
         "final_acceptance": "NOT_ESTABLISHED",
     }
+    action_inventory = "\n".join(
+        f"- `{action.name}`: {action.purpose} "
+        + ("AVAILABLE" if action.available else f"UNAVAILABLE: {action.unavailable_reason}")
+        + ("; invocation required by this launch." if action.required else "; optional.")
+        for action in inputs.actions
+    )
     return (
         "# Generated component compiler optimization\n\n"
         "Edit the compiler library through its declared entrypoints and reusable transforms. "
@@ -193,7 +205,12 @@ def render_component_prompt(inputs: ComponentPromptInputs) -> str:
         "services are absent from this training profile. Preserve the fixed grader and accuracy gates.\n\n"
         "This prompt grants no launch authority. The host must independently admit the approved "
         "minimal view, isolated runtime and zero-history session before any authoring starts.\n\n"
-        "```json\n" + json.dumps(document, sort_keys=True, indent=2) + "\n```\n"
+        + "## Phase 2 broker actions for this launch\n\n"
+        + action_inventory
+        + "\n\nUse the exact broker and argv bindings in the JSON below; an unavailable action "
+        "cannot supply evidence. This inventory changes no execution authority.\n\n"
+        + GENERAL_COMPILER_CONTRACT_V1
+        + "\n```json\n" + json.dumps(document, sort_keys=True, indent=2) + "\n```\n"
     )
 
 

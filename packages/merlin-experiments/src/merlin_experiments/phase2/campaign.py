@@ -1092,13 +1092,17 @@ def boxed_entrypoints(policy: PackageSandboxPolicy) -> Iterator[None]:
 
 
 def _refuse_build(pkg, *, timeout: int = 1800) -> None:
+    active = getattr(oot_runner, "active_package_executor", None)
+    if callable(active) and active() is not None:
+        return _ORIGINALS["build_package"](pkg, timeout=timeout)
     build = pkg.manifest.get("build") or {}
     if any(build.get(key) for key in ("configure", "command")):
         raise CampaignGateError("Arm-4 performance package declares an untrusted build step; no host build is allowed")
 
 
 def _run_boxed(
-    pkg, name: str, input_mlir: Path, output_json: Path | None = None, *, timeout: int = 600
+    pkg, name: str, input_mlir: Path, output_json: Path | None = None, *, timeout: int = 600,
+    write_bytecode: bool = False, artifact_profile=None, invocation_directory: Path | None = None,
 ) -> subprocess.CompletedProcess:
     """Run one untrusted package entrypoint inside the CALLING THREAD's sandbox policy.
 
@@ -1106,6 +1110,14 @@ def _run_boxed(
     a closure: an invocation that arrives on a thread nobody boxed must not fall through to an
     unsandboxed execution, which is exactly what the previous save/restore could produce.
     """
+    active = getattr(oot_runner, "active_package_executor", None)
+    if callable(active) and active() is not None:
+        return _ORIGINALS["run_entrypoint"](
+            pkg, name, input_mlir, output_json, timeout=timeout, write_bytecode=write_bytecode,
+            artifact_profile=artifact_profile, invocation_directory=invocation_directory,
+        )
+    if write_bytecode or artifact_profile is not None:
+        raise CampaignGateError("legacy package box has no reviewed artifact-profile or bytecode service")
     policy = active_sandbox_policy()
     if policy is None:
         raise CampaignGateError("untrusted package execution reached a thread that is not inside a sandbox policy")
@@ -1122,12 +1134,14 @@ def _run_boxed(
     if oot_runner._needs_interpreter(pkg, argv):
         argv = [sys.executable, *argv]
     shell = policy.env_prefix + 'exec "$@"'
-    return subprocess.run(
-        [*policy.argv, "--chdir", str(policy.package), "bash", "-c", shell, "perf-package", *argv],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    command = [*policy.argv, "--chdir", str(policy.package), "bash", "-c", shell, "perf-package", *argv]
+    if invocation_directory is None:
+        return subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    from merlin.common import invocation_record
+
+    return invocation_record.run(command, directory=invocation_directory, stage=name, inputs=(input_mlir,),
+                                 outputs=(output_json,) if output_json else (), dependencies=(Path(__file__),),
+                                 capture_output=True, text=True, timeout=timeout)
 
 
 def completion_report(results: Sequence[Mapping], expected: Sequence[PerfCell]) -> dict:

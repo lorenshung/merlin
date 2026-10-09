@@ -275,7 +275,7 @@ _FROZEN_CONFIG = (
 )
 
 
-def _candidate_permission_config(codex_home: Path) -> str:
+def _candidate_permission_config(codex_home: Path, *, read_paths: tuple[str, ...] | None = None) -> str:
     """Freeze the candidate's filesystem policy into the isolated Codex config.
 
     The outer bwrap masks /scratch and /scratch2 before remounting only declared
@@ -286,6 +286,25 @@ def _candidate_permission_config(codex_home: Path) -> str:
     """
     if not codex_home.is_absolute():
         raise ValueError("isolated CODEX_HOME must be absolute")
+    if read_paths is not None:
+        if (not isinstance(read_paths, tuple) or not read_paths or len(set(read_paths)) != len(read_paths)
+            or any(not isinstance(path, str) or not Path(path).is_absolute() or ".." in Path(path).parts
+                   or Path(path) == Path("/") or codex_home.is_relative_to(Path(path))
+                   or Path(path).is_relative_to(codex_home) for path in read_paths)):
+            raise ValueError("explicit candidate read grants must be exact absolute paths without control credentials")
+        grants = "".join(f'{json.dumps(path)} = "read"\n' for path in read_paths)
+        return (
+            f"[permissions.{_CANDIDATE_PERMISSION_PROFILE}]\n"
+            'extends = ":workspace"\n'
+            f"[permissions.{_CANDIDATE_PERMISSION_PROFILE}.filesystem]\n"
+            '":root" = "deny"\n'
+            '":minimal" = "read"\n' + grants +
+            f'{json.dumps(str(codex_home))} = "deny"\n'
+            f'[permissions.{_CANDIDATE_PERMISSION_PROFILE}.filesystem.":workspace_roots"]\n'
+            '"." = "write"\n'
+            f"[permissions.{_CANDIDATE_PERMISSION_PROFILE}.network]\n"
+            "enabled = false\n"
+        )
     launcher_dir = Path.home() / ".local" / "bin"
     package_roots = dict.fromkeys((real_codex_home() / "packages", Path.home() / ".codex" / "packages"))
     runtime_grants = "".join(
@@ -340,7 +359,10 @@ def real_codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
 
 
-def prepare_codex_home(dest: Path, *, model: str, effort: str, workspace: Path) -> dict:
+def prepare_codex_home(
+    dest: Path, *, model: str, effort: str, workspace: Path,
+    candidate_read_paths: tuple[str, ...] | None = None,
+) -> dict:
     """Build an ISOLATED ``CODEX_HOME`` at *dest* and describe it.
 
     Why not just bind the real ``~/.codex``: it contains ``sessions/`` — every
@@ -373,7 +395,7 @@ def prepare_codex_home(dest: Path, *, model: str, effort: str, workspace: Path) 
     config = _FROZEN_CONFIG.format(
         model=json.dumps(_BR.codex_model_name(model)),
         effort=json.dumps(effort or "high"),
-        profile=_candidate_permission_config(dest),
+        profile=_candidate_permission_config(dest, read_paths=candidate_read_paths),
         provider=provider,
         trust=f'[projects.{json.dumps(str(workspace))}]\ntrust_level = "trusted"\n',
     )
@@ -757,6 +779,8 @@ def _preflight_candidate_sandbox(
     sandbox_command: Callable[..., str],
     rounds: Path,
     rnd: int,
+    *,
+    runtime_binds: Callable[[Path], list[str]] | None = None,
 ) -> None:
     """No-model proof that the installed CLI enforces the frozen profile.
 
@@ -793,7 +817,9 @@ def _preflight_candidate_sandbox(
         rounds,
         rnd,
         -1,
-        sandbox_command(inner, ws, bundle, extra_binds=codex_runtime_binds(codex_home)),
+        sandbox_command(
+            inner, ws, bundle, extra_binds=(codex_runtime_binds if runtime_binds is None else runtime_binds)(codex_home)
+        ),
     )
     result = subprocess.run(script, cwd=str(ws), capture_output=True, text=True, timeout=45)
     if result.returncode:
@@ -822,6 +848,10 @@ def run_round(
     sandbox_command: Callable[..., str] | None = None,
     codex_binary: str | Path | None = None,
     codex_home_root: Path | None = None,
+    candidate_read_paths: tuple[str, ...] | None = None,
+    runtime_binds: Callable[[Path], list[str]] | None = None,
+    require_fresh_home: bool = False,
+    continuation_prompt: str | None = None,
     **_ignored,
 ) -> tuple[int, Path]:
     """Drive ONE capsule-bench round via ``codex exec``. Returns ``(rc, transcript_path)``.
@@ -940,12 +970,19 @@ def run_round(
         codex_home = home_root / f"{run_dir.name}_r{rnd:02d}"
         if codex_home.resolve().is_relative_to(ws.resolve()) or ws.resolve().is_relative_to(codex_home.resolve()):
             raise ValueError("isolated CODEX_HOME must not overlap the candidate workspace")
-        home_info = prepare_codex_home(codex_home, model=resolved, effort=effort, workspace=ws)
+        if require_fresh_home and (codex_home.exists() or codex_home.is_symlink()):
+            raise ValueError("fresh authoring refuses an existing Codex home or session history")
+        home_options = {"candidate_read_paths": candidate_read_paths} if candidate_read_paths is not None else {}
+        home_info = prepare_codex_home(codex_home, model=resolved, effort=effort, workspace=ws, **home_options)
+        runtime_selector = codex_runtime_binds if runtime_binds is None else runtime_binds
         _verify_frozen_config(codex_home, home_info["config_sha256"])
-        _preflight_candidate_sandbox(ws, codex_home, codex_bin, bundle, sandbox_command, rounds, rnd)
+        preflight_options = {"runtime_binds": runtime_selector} if runtime_binds is not None else {}
+        _preflight_candidate_sandbox(
+            ws, codex_home, codex_bin, bundle, sandbox_command, rounds, rnd, **preflight_options
+        )
         inner = " ".join(shlex.quote(c) for c in run_cmd)
         cmd = _sandbox_script(
-            rounds, rnd, 0, sandbox_command(inner, ws, bundle, extra_binds=codex_runtime_binds(codex_home))
+            rounds, rnd, 0, sandbox_command(inner, ws, bundle, extra_binds=runtime_selector(codex_home))
         )
     else:
         cmd = run_cmd
@@ -966,7 +1003,7 @@ def run_round(
     stamped_f = open(stamped_path, "w")
     #: Sent when resuming. Deliberately the SAME standing instruction, never a hint: an arm that got
     #: extra guidance mid-session would not be comparable to one that did not.
-    _CONTINUE_MSG = (
+    _CONTINUE_MSG = continuation_prompt if continuation_prompt is not None else (
         "Continue. Re-read qa/verdict.json for the latest grade, then keep repairing the "
         "backend under submission/. With agent_selfcheck, re-check only the smallest affected "
         "capsule or coherent cluster after each edit; use `--capsules all` only after focused "
@@ -1012,7 +1049,7 @@ def run_round(
                         rounds,
                         rnd,
                         turn_index,
-                        sandbox_command(_inner, ws, bundle, extra_binds=codex_runtime_binds(codex_home)),
+                        sandbox_command(_inner, ws, bundle, extra_binds=runtime_selector(codex_home)),
                     )
                 else:
                     cmd = resume_argv

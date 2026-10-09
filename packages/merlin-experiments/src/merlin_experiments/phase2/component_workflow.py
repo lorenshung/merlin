@@ -1,9 +1,8 @@
 """Explicit generated-component feedback; no complete-model training authority.
 
-This broker profile is not fresh-campaign admission. The launcher must separately
-admit its minimal view, zero-history session and runtime isolation. Analytical
-reports are calibrated estimates, never target measurements or accuracy evidence.
-The optional RTL route delegates to the existing exact-workload GSIM gate.
+The launcher admits its minimal view and fresh session isolation separately.
+Comparisons use the Phase 1 compiler. Estimates confer no measurement or accuracy;
+RTL uses its exact workload gate.
 """
 
 from __future__ import annotations
@@ -58,7 +57,7 @@ _GLOBAL_INPUTS = (
 
 
 def unavailable_component_actions(*, analytical=False, rtl=False, structural=False, cca=False):
-    """An unknown provider resolves to unavailable, including registry-only inspection."""
+    """Unknown providers remain unavailable during registry inspection."""
     choices = (
         (ANALYTICAL_ACTION, analytical, "explicit calibrated component provider is unavailable"),
         (RTL_ACTION, rtl, "explicit certified component RTL provider is unavailable"),
@@ -145,12 +144,7 @@ class ComponentAnalyticalEvaluation(Protocol):
 
 @dataclass(frozen=True)
 class ComponentAnalyticalProvider:
-    """Host-selected callback and controlled calibration, rechecked on use.
-
-    The callback consumes this corpus, not a model sentinel. It returns one
-    baseline/candidate CycleInterval pair per exact member. Bounds remain provider
-    estimates; this owner grants no numerical or final-performance acceptance.
-    """
+    """One exact component cohort and calibration; estimates confer no acceptance."""
 
     evaluate: ComponentAnalyticalEvaluation
     implementation: Path
@@ -158,6 +152,7 @@ class ComponentAnalyticalProvider:
     calibration_adapter: Path
     calibration_adapter_sha256: str
     calibration_sha256: str
+    binding: object | None = None
 
     def validate(self):
         implementation = _pin(self.implementation, self.implementation_sha256)
@@ -170,7 +165,18 @@ class ComponentAnalyticalProvider:
             raise StageGateError("component analytical calibration is unavailable")
         if not _is_sha256(self.calibration_sha256) or document_sha256(calibration) != self.calibration_sha256:
             raise StageGateError("component analytical calibration changed")
+        if self.binding is not None:
+            from .component_analytical import ComponentAnalyticalBinding
+            if type(self.binding) is not ComponentAnalyticalBinding:
+                raise StageGateError("component analytical binding is not host-owned")
+            self.binding.validate(calibration)
         return calibration
+
+    @property
+    def configuration_sha256(self):
+        return (document_sha256({"binding_sha256": self.binding.sha256,
+                                 "calibration_sha256": self.calibration_sha256})
+                if self.binding is not None else self.calibration_sha256)
 
 
 def _interval(value):
@@ -229,8 +235,13 @@ def validate_component_feedback(document):
         "evidence",
         "promotion",
     }
-    if not isinstance(document, Mapping) or set(document) != fields or document.get("schema") != SCHEMA:
+    if (
+        not isinstance(document, Mapping) or set(document) not in (fields, fields | {"screening"})
+        or document.get("schema") != SCHEMA
+    ):
         raise StageGateError("component feedback schema is invalid")
+    if "screening" in document and document.get("tier") != "calibrated_component_analytical":
+        raise StageGateError("component screening requires complete analytical cost feedback")
     if document["workflow_id"] != COMPONENT_ONLY_V1 or document["promotion"] != "NO_FINAL_ACCEPTANCE":
         raise StageGateError("component feedback cannot grant final acceptance")
     for key in ("candidate_sha256", "corpus_sha256", "manifest_sha256", "provider_sha256", "configuration_sha256"):
@@ -252,8 +263,22 @@ def validate_component_feedback(document):
             raise StageGateError("component analytical evidence is empty")
         seen = set()
         for row in evidence:
-            if not isinstance(row, Mapping) or set(row) != {"family", "capsule", "baseline", "candidate"}:
+            if not isinstance(row, Mapping) or set(row) not in (
+                {"family", "capsule", "baseline", "candidate"},
+                {"family", "capsule", "baseline", "candidate", "complete_cost"},
+            ):
                 raise StageGateError("component analytical member schema is invalid")
+            if "complete_cost" in row:
+                from merlin.perf.component_cost import validate_complete_cost_report
+                detailed = row["complete_cost"]
+                if not isinstance(detailed, Mapping) or set(detailed) != {"baseline", "candidate", "objective"}:
+                    raise StageGateError("component complete-cost projection is invalid")
+                if detailed["objective"] not in ("cold", "warm"):
+                    raise StageGateError("component complete-cost regime is invalid")
+                for arm in ("baseline", "candidate"):
+                    validate_complete_cost_report(detailed[arm])
+                    if detailed[arm]["regimes"][detailed["objective"]]["total"] != row[arm]:
+                        raise StageGateError("component complete-cost total differs from analytical interval")
             identity = row["family"], row["capsule"]
             if any(not isinstance(item, str) or not item for item in identity) or identity in seen:
                 raise StageGateError("component analytical member identity is invalid")
@@ -277,6 +302,10 @@ def validate_component_feedback(document):
                 )
                 if _interval(parsed) != dict(interval):
                     raise StageGateError("component analytical interval is inconsistent")
+        if "screening" in document:
+            from .component_screening import validate_screening_projection
+
+            validate_screening_projection(document["screening"], evidence)
     else:
         raise StageGateError("component tier is unsupported; Spike is not RTL timing")
     return dict(document)
@@ -288,7 +317,8 @@ class ComponentOnlyPolicy(WorkflowPolicy):
         return COMPONENT_ONLY_V1
 
     def __init__(
-        self, *, component_corpus, component_analytical=None, component_rtl=None, component_cca=None, **inputs
+        self, *, component_corpus, component_analytical=None, component_rtl=None, component_cca=None,
+        baseline_admission=None, independent_runtime=None, **inputs
     ):
         if any(inputs.get(key) is not None for key in _GLOBAL_INPUTS):
             raise StageGateError("component profile refuses inherited whole-model/legacy feedback capabilities")
@@ -302,13 +332,16 @@ class ComponentOnlyPolicy(WorkflowPolicy):
         self.component_analytical = component_analytical
         self.component_rtl = component_rtl
         self.component_cca = component_cca
+        self.baseline_admission = baseline_admission
+        self.independent_runtime = independent_runtime
         if component_analytical is not None and type(component_analytical) is not ComponentAnalyticalProvider:
             raise StageGateError("explicit typed component analytical provider required")
         self._component_bindings = (component_corpus.manifest_sha256, component_corpus.capsules_sha256)
         self._target_binding = sha256_file(self.target_experiment.path)
         if component_cca is not None and type(component_cca) is not CC.ComponentCCAProvider:
             raise StageGateError("explicit typed component CCA provider required")
-        self._provider_selections = (component_analytical, component_rtl, component_cca, services)
+        self._provider_selections = (component_analytical, component_rtl, component_cca, services,
+                                     baseline_admission, independent_runtime)
         self._cca_callable = component_cca.evaluate if component_cca is not None else None
         self._cca_code = _callable_code(self._cca_callable)
         self._analytical_callable = component_analytical.evaluate if component_analytical is not None else None
@@ -319,7 +352,6 @@ class ComponentOnlyPolicy(WorkflowPolicy):
         self._rtl_configuration = None
         if component_rtl is not None:
             from .development_feedback import DevelopmentGsimFeedback
-
             if type(component_rtl) is not DevelopmentGsimFeedback:
                 raise StageGateError("component RTL must use the existing certified GSIM evaluator")
             rtl = component_rtl
@@ -336,6 +368,8 @@ class ComponentOnlyPolicy(WorkflowPolicy):
         self._validate()
 
     def _validate(self):
+        from .component_baseline import verify_policy_baselines
+        verify_policy_baselines(self)
         if sha256_file(self.target_experiment.path) != self._target_binding:
             raise StageGateError("component target configuration changed")
         if (
@@ -343,6 +377,7 @@ class ComponentOnlyPolicy(WorkflowPolicy):
             self.component_rtl,
             self.component_cca,
             self.services,
+            self.baseline_admission, self.independent_runtime,
         ) != self._provider_selections:
             raise StageGateError("component provider selection changed")
         if self._structural_source is not None:
@@ -469,6 +504,7 @@ class ComponentOnlyPolicy(WorkflowPolicy):
                 return None  # Only the sealed candidate command contract reaches the sandbox.
             raise StageGateError("action is outside the component capability profile")
         try:
+            screening = None
             remaining = timeout_s - (time.monotonic() - started)
             if remaining <= 0:
                 raise StageGateError("component evaluation exhausted its wall budget before invocation")
@@ -480,13 +516,15 @@ class ComponentOnlyPolicy(WorkflowPolicy):
                 provider = self.component_cca
                 if provider is None:
                     raise StageGateError("component CCA provider is unavailable")
-                evidence = CC.evaluate(
-                    provider,
+                from .supervised_feedback import bounded_feedback
+                evidence = bounded_feedback(
+                    CC.evaluate, timeout_s=remaining, output=self.receipt_path.parent / "component_workers",
+                    kwargs=dict(provider=provider,
                     candidate=self.candidate,
                     candidate_sha256=candidate_sha,
                     corpus=self.component_corpus,
                     target_descriptor=self.target_experiment.path,
-                    timeout_s=remaining,
+                    timeout_s=remaining),
                 )
                 tier, provider_sha, config_sha = (
                     CC.TIER,
@@ -497,7 +535,12 @@ class ComponentOnlyPolicy(WorkflowPolicy):
                 provider = self.component_analytical
                 if provider is None:
                     raise StageGateError("component analytical provider is unavailable")
-                raw = provider.evaluate(candidate=self.candidate, corpus=self.component_corpus, timeout_s=remaining)
+                from .supervised_feedback import bounded_feedback
+                raw = bounded_feedback(
+                    provider.evaluate, timeout_s=remaining, output=self.receipt_path.parent / "component_workers",
+                    kwargs=dict(candidate=self.candidate, corpus=self.component_corpus, timeout_s=remaining),
+                    lease_path=None if provider.binding is None else provider.binding.lease_path,
+                )
                 if set(raw) != self._validate():
                     raise StageGateError("analytical feedback does not cover the exact generated components")
                 evidence = [
@@ -506,13 +549,18 @@ class ComponentOnlyPolicy(WorkflowPolicy):
                         "capsule": identity[1],
                         "baseline": _interval(pair[0]),
                         "candidate": _interval(pair[1]),
+                        **({"complete_cost": raw.reports[identity]} if hasattr(raw, "reports") else {}),
                     }
                     for identity, pair in sorted(raw.items())
                 ]
+                if getattr(raw, "screening", None) is not None:
+                    from .component_screening import project_screening
+
+                    screening = project_screening(raw.screening, evidence)
                 tier, provider_sha, config_sha = (
                     "calibrated_component_analytical",
                     provider.implementation_sha256,
-                    provider.calibration_sha256,
+                    provider.configuration_sha256,
                 )
             else:
                 rtl = self.component_rtl
@@ -551,6 +599,7 @@ class ComponentOnlyPolicy(WorkflowPolicy):
                     "provider_sha256": provider_sha,
                     "configuration_sha256": config_sha,
                     "evidence": evidence,
+                    **({"screening": screening} if screening is not None else {}),
                     "promotion": "NO_FINAL_ACCEPTANCE",
                 }
             )
@@ -564,6 +613,15 @@ class ComponentOnlyPolicy(WorkflowPolicy):
                 document,
             )
         except Exception as exc:
+            try:
+                from .supervised_feedback import record_feedback_refusal
+
+                record_feedback_refusal(
+                    output=self.receipt_path.parent / "component_workers", action=action_name, call_index=call_index,
+                    candidate=self.candidate, expected_candidate_sha256=locals().get("candidate_sha"), error=exc,
+                )
+            except Exception:  # noqa: BLE001 - private evidence failure cannot replace the primary refusal
+                pass
             _record_host_refusal(self, exc, round_index=self.feedback_round, call_index=call_index)
             return (
                 {

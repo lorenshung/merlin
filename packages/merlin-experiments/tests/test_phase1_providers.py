@@ -146,7 +146,7 @@ def test_codex_invocation_configuration_is_local(tmp_path, monkeypatch, explicit
 
     def prepare(home, **kwargs):
         homes.append(home)
-        assert kwargs == {"model": "offline", "effort": ""}
+        assert kwargs == {"model": "offline", "effort": "", "workspace": tmp_path / "workspace"}
         return {"config_sha256": "offline-fixture"}
 
     class PolicyReached(Exception):
