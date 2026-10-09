@@ -48,13 +48,14 @@ from typing import Any
 from merlin.common.paths import ext_path
 
 from .extraction_contract import accumulator_layout, firrtl_role_probe
+from .firrtl_memory_lines import observed_memory_lines
 
 # FIRRTL surface tokens. These are the FIRRTL LANGUAGE's own keywords and the RISC-V co-processor
 # ABI's own field names — a spec vocabulary shared by every design the format can express, not a
 # fact about any one target.
 _MODULE_KEYWORDS = ("module", "public module", "extmodule", "intmodule")
 _DEFINED_MODULE_KEYWORDS = ("module", "public module")  # keywords that carry a body we can read
-_MEM_KEYWORDS = ("smem", "cmem")  # a synchronous / combinational SRAM
+_MEM_KEYWORDS = ("smem", "cmem", "mem")  # source and explicit lowered memory declarations
 _UINT_MARKERS = ("UInt<", "SInt<")
 #: The sub-bundle field names a RISC-V co-processor instruction handoff carries. Fixed by the base
 #: ISA's instruction format, so matching them classifies a port without naming any target.
@@ -398,7 +399,7 @@ def scan_fir(fir: str | Path, generator: str) -> tuple[set[str], dict[str, list[
     ports: dict[str, str] = {}
     current, in_scope = "", False
     with Path(fir).open(encoding="utf-8", errors="ignore") as fh:
-        for raw in fh:
+        for raw in observed_memory_lines(fh):
             stripped = raw.strip()
             head = _module_head(stripped)
             if head is not None:

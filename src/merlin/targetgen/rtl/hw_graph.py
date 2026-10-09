@@ -4,15 +4,14 @@ import subprocess
 from pathlib import Path
 
 
-def load_hw_graph(path: str | Path, *, circt_opt):
-    """Use upstream discovery graphs without changing selected hardware bytes.
+def parse_generic_hw(text: str):
+    """Parse a lossless generic HW module without requiring discovery tooling.
 
     xDSL's unregistered-attribute parser stops at ``>``; CIRCT's HW parameter
     declarations may also carry a trailing type. Preserve that type in the opaque
     attribute representation rather than deleting external modules or parameters.
     The graph is for analysis only; never serialize it as replacement hardware.
     """
-    from mlc.discover.irgraph import HwGraph, to_generic
     from xdsl.context import Context
     from xdsl.dialects.builtin import Builtin, UnregisteredAttr
     from xdsl.parser import Parser
@@ -33,6 +32,13 @@ def load_hw_graph(path: str | Path, *, circt_opt):
 
     context = Context(allow_unregistered=True)
     context.load_dialect(Builtin)
+    return HardwareParser(context, text).parse_module()
+
+
+def load_hw_graph(path: str | Path, *, circt_opt):
+    """Use upstream discovery graphs without changing selected hardware bytes."""
+    from mlc.discover.irgraph import HwGraph, to_generic
+
     from .source_selection import active_selection, digest
 
     selected = active_selection()
@@ -62,4 +68,4 @@ def load_hw_graph(path: str | Path, *, circt_opt):
             }
         elif digest(path) != receipt["input"]["sha256"] or digest(generic) != receipt["output"]["sha256"]:
             raise ValueError("selected CIRCT genericization bytes changed during observation")
-    return HwGraph(HardwareParser(context, generic.read_text()).parse_module())
+    return HwGraph(parse_generic_hw(generic.read_text()))
