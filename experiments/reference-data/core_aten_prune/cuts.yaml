@@ -9,8 +9,4 @@ parent:
   name: bounded_core_aten_suite.json
   sha256: 8db0a20d05a10bc7591a4d024f66826ed2100c84ebb21ee176114d2b29eb74fb
   profile: core-aten-semantic-pairwise-v2-int8
-cuts:
-  - id: drop-int64-bool-complex64
-    drop:
-      dtype: [int64, bool, complex64]
-    rationale: Remove the int64, bool and complex64 dtype partitions.
+cuts: []

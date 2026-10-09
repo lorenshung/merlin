@@ -80,4 +80,5 @@ def test_committed_ledger_is_well_formed():
     from merlin.common.paths import repo_root
 
     ledger = load_ledger(repo_root() / "experiments/reference-data/core_aten_prune/cuts.yaml")
-    assert ledger["cuts"][0]["drop"] == {"dtype": ["int64", "bool", "complex64"]}
+    assert len(ledger["parent"]["sha256"]) == 64
+    assert all(cut["drop"] for cut in ledger["cuts"])
