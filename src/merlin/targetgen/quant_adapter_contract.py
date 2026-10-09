@@ -16,6 +16,7 @@ import hashlib
 import json
 import math
 from collections.abc import Mapping
+from pathlib import Path
 
 from merlin.common import quant_formats
 
@@ -288,3 +289,47 @@ def build(
         "families": families,
         "unknowns": dict(sorted(unknowns.items())),
     }
+
+
+_EVIDENCE_SCHEMA = "phase0_evidence_v1"
+_SPEC_MEMBER = "software/software-spec.json"
+_CONTRACT_MEMBER = "software/quantization-contract.json"
+
+
+def _bundle_member(root: Path, inventory: Mapping, member: str) -> bytes:
+    """One inventoried member's bytes, refused when absent, indirect or changed since export."""
+    path = root / member
+    if path.is_symlink() or any(parent.is_symlink() for parent in path.parents if parent.is_relative_to(root)):
+        raise ValueError(f"evidence member traverses a symlink: {member}")
+    record = inventory.get(member)
+    if not isinstance(record, Mapping):
+        raise ValueError(f"evidence bundle does not inventory {member}")
+    raw = path.read_bytes()
+    if record.get("sha256") != hashlib.sha256(raw).hexdigest() or record.get("size_bytes") != len(raw):
+        raise ValueError(f"evidence member changed since export: {member}")
+    return raw
+
+
+def from_evidence_bundle(bundle: str | Path, *, format_id: str) -> dict:
+    """Build the contract from a saved Phase 0 evidence bundle, reading only its inventoried bytes."""
+    root = Path(bundle).absolute()
+    manifest_path = root / "evidence-manifest.json"
+    if manifest_path.is_symlink():
+        raise ValueError("evidence manifest is a symlink")
+    manifest = json.loads(manifest_path.read_bytes())
+    if not isinstance(manifest, Mapping) or manifest.get("schema") != _EVIDENCE_SCHEMA:
+        raise ValueError(f"expected a {_EVIDENCE_SCHEMA} evidence manifest")
+    inventory = manifest.get("artifacts")
+    if not isinstance(inventory, Mapping):
+        raise ValueError("evidence manifest has no artifact inventory")
+    spec_raw = _bundle_member(root, inventory, _SPEC_MEMBER)
+    software_spec = json.loads(spec_raw)
+    quantization = json.loads(_bundle_member(root, inventory, _CONTRACT_MEMBER))
+    if software_spec.get("target") != manifest.get("target"):
+        raise ValueError("evidence software spec names a different target than its manifest")
+    return build(
+        software_spec,
+        quantization,
+        format_id=format_id,
+        spec_source={"path": _SPEC_MEMBER, "sha256": hashlib.sha256(spec_raw).hexdigest()},
+    )

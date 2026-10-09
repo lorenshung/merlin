@@ -214,6 +214,43 @@ def _cmd_stage_capture(args: argparse.Namespace) -> int:
     return status
 
 
+def _cmd_quant_contract(args: argparse.Namespace) -> int:
+    """Write the adapter contract one saved Phase 0 evidence bundle determines."""
+    from .quant_adapter_contract import canonical_bytes, from_evidence_bundle
+
+    contract = from_evidence_bundle(args.evidence_bundle, format_id=args.format_id)
+    raw = canonical_bytes(contract)
+    if args.out:
+        destination = Path(args.out)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        from merlin.common.artifacts import new_product
+
+        product = new_product(
+            "quantization-contract",
+            version=1,
+            target=contract["target"],
+            sources=[str(Path(args.evidence_bundle).absolute())],
+            notes=f"adapter contract for format {args.format_id}; status {contract['status']}",
+        )
+        destination = product.add_artifact("adapter-contract.json")
+    destination.write_bytes(raw)
+    if not args.out:
+        product.write_manifest()
+    print(
+        json.dumps(
+            {
+                "path": str(destination),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "status": contract["status"],
+                "unknowns": sorted(contract["unknowns"]),
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def _cmd_native_build(args: argparse.Namespace) -> int:
     from merlin.semantic_compiler.snapshot import (
         NativeTargetProfile,
@@ -555,6 +592,16 @@ def build_parser() -> argparse.ArgumentParser:
     stage.add_argument("--out", required=True, help="fresh compiler-only directory")
     stage.add_argument("--status-file", help="invocation-owned machine-readable status JSON")
     stage.set_defaults(func=_cmd_stage_capture)
+
+    quant_contract = sub.add_parser(
+        "quant-contract", help="derive an external quantization adapter's contract from saved Phase 0 evidence"
+    )
+    quant_contract.add_argument("--evidence-bundle", required=True, help="saved Phase 0 evidence directory")
+    quant_contract.add_argument("--format-id", required=True, help="declared quantization format id")
+    quant_contract.add_argument(
+        "--out", help="write the contract bytes here instead of a new versioned quantization-contract product"
+    )
+    quant_contract.set_defaults(func=_cmd_quant_contract)
 
     native_build = sub.add_parser("native-build", help="build an offline Merlin-native selection snapshot")
     native_build.add_argument("--engine", choices=("merlin_native",), required=True)
