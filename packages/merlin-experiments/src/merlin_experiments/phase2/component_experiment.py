@@ -210,21 +210,30 @@ class RuntimeGrant:
     destination: str
     sha256: str
 
-    def verify(self) -> None:
-        target = PurePosixPath(self.destination)
+    @staticmethod
+    def verify_destination(destination: str) -> None:
+        if not isinstance(destination, str) or any(ord(char) < 32 for char in destination):
+            raise StageGateError("runtime grant must be an explicit system-tool file")
+        target = PurePosixPath(destination)
         if (
             not target.is_absolute()
-            or str(target) != self.destination
+            or str(target) != destination
             or ".." in target.parts
             or any(part in _EXCLUDED for part in target.parts)
             or target.parts[1:2] not in (("usr",), ("lib",), ("lib64",), ("bin",), ("etc",))
         ):
             raise StageGateError("runtime grant must be an explicit system-tool file")
+
+    def verify(self) -> None:
+        self.verify_destination(self.destination)
         _read(self.source, self.sha256)
 
 
 def strict_tool_policy(
-    view: ComponentView, candidate: Path, *, runtime: tuple[RuntimeGrant, ...],
+    view: ComponentView,
+    candidate: Path,
+    *,
+    runtime: tuple[RuntimeGrant, ...],
     candidate_destination: str = "/candidate",
     bwrap_binary: Path | None = None,
 ) -> tuple[str, ...]:
