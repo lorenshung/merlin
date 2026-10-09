@@ -127,6 +127,50 @@ def test_environment_removes_source_and_provider_overrides(monkeypatch):
     assert not {"UV_OVERRIDE", "UV_EXCLUDE", "UV_CONSTRAINT", "UV_BUILD_CONSTRAINT"} & environment.keys()
 
 
+@pytest.mark.parametrize("suite", ["compile-only", "component-convergence"])
+def test_explicit_native_roster_is_closed_complete_and_bound_to_actual_bytes(tmp_path, monkeypatch, suite):
+    selections = []
+    for name in Q.SUITES[suite]["native_tools"]:
+        tool = tmp_path / name
+        tool.write_text("#!/bin/sh\nexit 0\n")
+        tool.chmod(0o700)
+        selections.append(name + "=" + str(tool))
+    monkeypatch.setenv("MERLIN_TARGET_PATH", "must not leak")
+    monkeypatch.setenv("MERLIN_CLANG", "/unrecorded/compiler")
+    selected = Q.capture_native_tools(suite, selections)
+    recorder = Q.Recorder(tmp_path, {"commands": [], "native_tools": selected}, 5)
+    assert "MERLIN_TARGET_PATH" not in recorder.environment
+    assert recorder.environment["MERLIN_CLANG"] == selected["clang"]["path"]
+    Q.verify_native_tools(selected)
+    Path(selected["clang"]["path"]).write_text("changed selected compiler")
+    with pytest.raises(Q.QualificationFailed, match="changed"):
+        recorder.run("must-not-launch", [sys.executable, "-c", "raise SystemExit(0)"], tmp_path)
+    assert recorder.report["commands"] == []
+
+
+@pytest.mark.parametrize("defect", ["unknown", "duplicate", "incomplete", "relative", "non-executable", "wrong-suite"])
+def test_explicit_native_selection_refuses_bad_rosters(tmp_path, defect):
+    tool = tmp_path / "tool"
+    tool.write_text("#!/bin/sh\nexit 0\n")
+    tool.chmod(0o700)
+    selections = [name + "=" + str(tool) for name in Q.SUITES["compile-only"]["native_tools"]]
+    suite = "compile-only"
+    if defect == "unknown":
+        selections[0] = "provider=" + str(tool)
+    elif defect == "duplicate":
+        selections.append(selections[0])
+    elif defect == "incomplete":
+        selections.pop()
+    elif defect == "relative":
+        selections[0] = "clang=relative/compiler"
+    elif defect == "non-executable":
+        tool.chmod(0o600)
+    else:
+        suite = "phase1"
+    with pytest.raises(Q.QualificationFailed):
+        Q.capture_native_tools(suite, selections)
+
+
 def test_versions_and_assisted_extra_come_from_projects(tmp_path):
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname="custom-core"\nversion="9.8.7"\n[project.optional-dependencies]\nxdsl=["xdsl>=1"]\n'
@@ -229,8 +273,21 @@ def test_probe_compares_actual_installed_bytes(probe, monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("missing_extra", [False, True])
-@pytest.mark.parametrize("suite", list(Q.SUITES))
-def test_pipeline_uses_archived_versions_extra_and_probe_before_pytest(monkeypatch, tmp_path, missing_extra, suite):
+@pytest.mark.parametrize(
+    "suite,native",
+    [
+        *((suite, False) for suite in Q.SUITES),
+        ("compile-only", True),
+        ("component-convergence", True),
+    ],
+)
+def test_pipeline_uses_archived_versions_extra_and_probe_before_pytest(
+    monkeypatch,
+    tmp_path,
+    missing_extra,
+    suite,
+    native,
+):
     output = tmp_path / "evidence"
     output.mkdir()
     calls = []
@@ -267,9 +324,53 @@ def test_pipeline_uses_archived_versions_extra_and_probe_before_pytest(monkeypat
             (directory / ("fixture.tar.gz" if label.endswith("-sdist") else "fixture.whl")).write_bytes(b"artifact")
         elif label == "freeze":
             Path(stdout).write_text("pytest==synthetic\n")
+        elif label == "tests" and native:
+            from xml.etree import ElementTree as ET
+
+            # Synthetic orchestration fixture, never a native qualification.
+            xml = ET.Element("testsuites")
+            selected = ET.SubElement(xml, "testsuite")
+            for name in Q.SUITES[suite]["native_test_files"]:
+                ET.SubElement(
+                    selected,
+                    "testcase",
+                    {
+                        "file": name,
+                        "classname": Path(name).with_suffix("").as_posix().replace("/", "."),
+                        "name": "test_synthetic_pipeline",
+                    },
+                )
+            if suite == "component-convergence":
+                other = ET.SubElement(
+                    selected,
+                    "testcase",
+                    {
+                        "file": "test_component_generation.py",
+                        "classname": "test_component_generation",
+                        "name": "test_synthetic_unselected_prerequisite",
+                    },
+                )
+                ET.SubElement(other, "skipped", {"message": "separate synthetic prerequisite"})
+            ET.ElementTree(xml).write(argv[argv.index("--junitxml") + 1])
 
     monkeypatch.setattr(Q.Recorder, "run", run)
-    success = Q.qualify(repo_root(), output, "b" * 40, suite, 5, requested_ref="named-ref", invocation=["synthetic"])
+    selections = []
+    if native:
+        for name in Q.SUITES[suite]["native_tools"]:
+            tool = tmp_path / name
+            tool.write_text("#!/bin/sh\nexit 0\n")
+            tool.chmod(0o700)
+            selections.append(name + "=" + str(tool))
+    success = Q.qualify(
+        repo_root(),
+        output,
+        "b" * 40,
+        suite,
+        5,
+        requested_ref="named-ref",
+        invocation=["synthetic"],
+        native_tools=selections,
+    )
     report = json.loads((output / "report.json").read_text())
     assert report["requested_ref"] == "named-ref" and report["ref"] == "b" * 40
     if missing_extra and Q.SUITES[suite]["core_extras"]:
@@ -307,6 +408,15 @@ def test_pipeline_uses_archived_versions_extra_and_probe_before_pytest(monkeypat
         assert (external / "qualification-tests" / name).read_text() == "# committed synthetic test\n"
     assert dict(calls)["tests"][-1] == str(external / "qualification-tests")
     test_command = dict(calls)["tests"]
+    assert ("--junitxml" in test_command) is native
+    if native:
+        assert test_command[test_command.index("--rootdir") + 1] == str(external / "qualification-tests")
+        assert "junit_family=xunit1" in test_command
+        assert report["native_test_counts"] == {"tests": len(Q.SUITES[suite]["native_test_files"]), "skipped": 0}
+        assert report["missing_native_test_files"] == []
+        assert report["native_zero_skip_scope"] == "declared_native_test_files"
+        assert report["other_test_counts"]["skipped"] == int(suite == "component-convergence")
+        assert report["native_test_report"]["sha256"] == Q.digest(output / "tests.xml")
     guarded = bool(Q.SUITES[suite].get("guarded_tests"))
     assert ("--guarded-tests" in test_command) is guarded
     assert report["test_process_policy"] == ("deny_processes_and_listeners" if guarded else "suite_defined")

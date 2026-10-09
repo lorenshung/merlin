@@ -5,6 +5,13 @@ phase1 replays controller, CLI, RTL-feedback and private model-gate tests with c
 runtime-admission checks cross-process simulator reservations without launching native simulators.
 device-shim replays native C-interface ABI and numerical shim tests from the installed core.
 phase0-inputs replays explicit recipe loading and declaration resolution, not hardware derivation.
+compile-only checks ordinary source/object/link transport without tensor values or semantic authority.
+Its optional --native-tool selections pin all three native executables and require zero test skips.
+component-convergence admits the same tools for its declared Phase-1 compile-role transport tests;
+other component tests retain their own prerequisites and their skips are reported separately.
+host-arithmetic checks shared CPU arithmetic and admits an explicit host toolchain;
+with that selection every test in its original roster must execute without skips.
+invocation-record checks actual subprocess environment and executable provenance.
 reviewed-corpus joins derivation, explicit review, installed Phase-1 authoring,
 formal receipts and the Phase-2 checkpoint lifecycle against the same candidate
 bytes. Agent transport, oracle results, measurement and OS isolation are synthetic;
@@ -61,15 +68,221 @@ import tempfile
 import time
 import tomllib
 import uuid
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 SUITES = {
+    "host-arithmetic": {
+        "include_experiments": False,
+        "native_tools": ("riscv-gcc",),
+        "native_test_files": ("runtime/test_host_arithmetic.py",),
+        "tests_root": "merlin/tests",
+        "tests": ("runtime/test_host_arithmetic.py",),
+        "core_extras": (),
+        "probe_modules": ("merlin.runtime.host_arithmetic", "merlin.runtime.host_outward"),
+        "required_modules": (),
+    },
+    "invocation-record": {
+        "include_experiments": False,
+        "tests_root": "merlin/tests",
+        "tests": ("infra/test_invocation_record.py",),
+        "core_extras": (),
+        "probe_modules": ("merlin.common.invocation_record",),
+        "required_modules": (),
+    },
+    "compile-only": {
+        "native_tools": ("clang", "mlir-translate", "riscv-gcc"),
+        "native_test_files": (
+            "targetgen/test_compile_only_transport.py",
+            "targetgen/test_stack_frame_preflight.py",
+            "targetgen/test_explicit_execution_service.py",
+            "infra/test_build_only_service.py",
+        ),
+        "tests_root": "merlin/tests",
+        "tests": (
+            "targetgen/test_compile_only_transport.py",
+            "targetgen/test_stack_frame_preflight.py",
+            "targetgen/test_explicit_execution_service.py",
+            "infra/test_build_only_service.py",
+        ),
+        "core_extras": ("xdsl", "targetgen"),
+        "probe_modules": (
+            "merlin.targetgen.compile_only_execution",
+            "merlin.targetgen.contract.compile_only",
+            "merlin.targetgen.contract.tensor_types",
+            "merlin.targetgen.contract.compile",
+            "merlin.targetgen.native_component_execution",
+        ),
+        "required_modules": ("xdsl", "jsonschema"),
+    },
+    "component-cost": {
+        "include_experiments": False,
+        "tests_root": "merlin/tests/dse",
+        "tests": (
+            "test_component_cost.py",
+            "test_warm_profile_harness.py",
+            "test_phase2_calibration_bundle.py",
+            "test_phase2_feature_calibration.py",
+            "test_perf_calibration_plan.py",
+        ),
+        "core_extras": ("xdsl",),
+        "probe_modules": (
+            "merlin.perf.component_cost",
+            "merlin.perf.component_screen",
+            "merlin.perf.warm_profile_harness",
+            "merlin.perf.phase2_calibration_bundle",
+        ),
+        "required_modules": ("xdsl",),
+    },
+    "component-convergence": {
+        "native_tools": ("clang", "mlir-translate", "riscv-gcc"),
+        "native_test_files": ("test_component_compile_role_transport.py",),
+        "tests": (
+            "test_component_generation.py",
+            "test_independent_rtl_intake.py",
+            "test_independent_command_intake.py",
+            "test_independent_accessor_intake.py",
+            "test_independent_source_predicate_intake.py",
+            "test_independent_software_intake.py",
+            "test_fresh_phase1_software_origin.py",
+            "test_fresh_phase1_generation_budget.py",
+            "test_component_instruction_policy.py",
+            "test_component_instruction_audit.py",
+            "test_general_compiler_prompts.py",
+            "test_phase1_task_staging.py",
+            "test_component_origin.py",
+            "test_component_lineage.py",
+            "test_component_stage_lineage.py",
+            "test_component_baseline.py",
+            "test_component_runtime.py",
+            "test_component_runtime_qualification.py",
+            "test_component_runtime_support.py",
+            "test_component_runtime_controls.py",
+            "test_component_measurement_qualification.py",
+            "test_component_applicability.py",
+            "test_component_observer.py",
+            "test_rtl_engine_probe.py",
+            "test_component_coverage.py",
+            "test_component_execution_budget.py",
+            "test_component_integer_bounds.py",
+            "test_component_graph_variants.py",
+            "test_component_large_source_init.py",
+            "test_component_compile_sources.py",
+            "test_component_compile_graphs.py",
+            "test_component_compile_admission.py",
+            "test_component_compile_role_transport.py",
+            "test_component_copy_proof.py",
+            "test_component_input_palettes.py",
+            "test_component_mechanisms.py",
+            "test_component_minimal_spec.py",
+            "test_component_semantic_basis.py",
+            "test_component_workflow.py",
+            "test_component_qualification.py",
+            "test_component_package_execution.py",
+            "test_container_transport.py",
+            "test_component_source_applicability.py",
+            "test_component_launch.py",
+            "test_component_launch_authority.py",
+            "test_component_analytical.py",
+            "test_component_screening.py",
+            "test_supervised_feedback.py",
+            "test_feedback_guardian.py",
+            "test_component_normal_execution.py",
+            "test_component_cca.py",
+            "test_component_experiment.py",
+            "test_component_final_policy.py",
+            "test_numerical_readback.py",
+            "test_protected_final_evaluation.py",
+            "test_protected_verifier_qualification.py",
+            "test_phase2_guard_link.py",
+            "test_phase2_authoring_cli.py",
+        ),
+        # Only copied, committed test fixtures are added. The origin guard still
+        # requires every compiler and orchestration import to come from wheels.
+        "test_fixture_imports": True,
+        "support_files": (
+            "test_phase2_broker.py",
+            "test_phase0_freeze.py",
+            "component_baseline_fixture.py",
+            "test_edit_authority.py",
+            "reviewed_corpus_fixtures.py",
+            "component_launch_fixture.py",
+        ),
+        "core_extras": ("xdsl", "targetgen"),
+        "probe_modules": (
+            "merlin_experiments.phase0.component_coverage",
+            "merlin_experiments.phase0.component_execution_budget",
+            "merlin_experiments.phase0.component_integer_bounds",
+            "merlin_experiments.phase0.component_graph_variants",
+            "merlin_experiments.phase0.component_graph_relations",
+            "merlin_experiments.phase0.rtl_intake",
+            "merlin_experiments.phase0.command_intake",
+            "merlin_experiments.phase0.accessor_intake",
+            "merlin_experiments.phase0.source_predicate_intake",
+            "merlin_experiments.phase0.minimal_software",
+            "merlin_experiments.phase0.software_intake",
+            "merlin_experiments.phase1.component_origin",
+            "merlin_experiments.phase1.component_generation_admission",
+            "merlin_experiments.phase1.component_compile_admission",
+            "merlin_experiments.phase1.component_compile_roles",
+            "merlin_experiments.phase1.component_copy_proof",
+            "merlin_experiments.phase1.component_pointer_storage",
+            "merlin.targetgen.contract.pointer_storage",
+            "merlin.llvmlower.counted_copy_check",
+            "merlin.llvmlower.layout_observation",
+            "merlin_experiments.phase1.component_lineage",
+            "merlin_experiments.phase2.component_runtime_authority",
+            "merlin_experiments.phase2.component_runtime_qualification",
+            "merlin_experiments.phase2.component_runtime_support",
+            "merlin_experiments.phase2.component_runtime_controls",
+            "merlin_experiments.phase2.component_instruction_policy",
+            "merlin_experiments.phase2.component_instruction_audit",
+            "merlin.targetgen.contract.elf_admission",
+            "merlin.targetgen.generalization_prompt",
+            "merlin.targetgen.generate_prompt",
+            "merlin_experiments.phase1.task_staging",
+            "merlin_experiments.phase2.component_measurement_qualification",
+            "merlin_experiments.phase2.component_applicability",
+            "merlin.perf.component_applicability",
+            "merlin_experiments.phase2.component_baseline",
+            "merlin_experiments.phase2.component_observer",
+            "merlin_experiments.phase2.rtl_engine_protocol",
+            "merlin_experiments.phase2.rtl_engine_probe",
+            "merlin_experiments.phase0.component_semantic_basis",
+            "merlin_experiments.phase0.component_compile_plan",
+            "merlin_experiments.phase0.component_compile_sources",
+            "merlin_experiments.phase0.component_compile_graphs",
+            "merlin.targetgen.input_palette",
+            "merlin.targetgen.component_sources",
+            "merlin_experiments.phase1.component_qualification",
+            "merlin_experiments.phase1.component_qualification_evidence",
+            "merlin_experiments.phase1.component_source_applicability",
+            "merlin_experiments.phase2.component_launch",
+            "merlin_experiments.phase2.component_launch_inputs",
+            "merlin_experiments.phase2.component_analytical",
+            "merlin_experiments.phase2.component_screening",
+            "merlin_experiments.phase2.feedback_protocol",
+            "merlin_experiments.phase2.supervised_feedback",
+            "merlin_experiments.phase2.feedback_guardian",
+            "merlin_experiments.execution.owned_children",
+            "merlin_experiments.execution.container_image",
+            "merlin_experiments.execution.container_policy",
+            "merlin_experiments.execution.container_transport",
+            "merlin_experiments.phase2.component_execution",
+            "merlin_experiments.phase2.component_final_policy",
+            "merlin_experiments.phase2.protected_final_evaluation",
+            "merlin_experiments.phase2.protected_verifier_qualification",
+        ),
+        "required_modules": ("xdsl", "jsonschema"),
+    },
     "readback": {
         # The policy tests exercise core builds and experiments-owned oracle adapters.
         "include_experiments": True,
         "tests_root": "merlin/tests",
         "tests": (
             "runtime/test_out_b64.py",
+            "runtime/test_direct_kernel_harness.py",
+            "targetgen/test_explicit_execution_service.py",
             "runtime/test_out_bin.py",
             "runtime/test_out_bin_bulk.py",
             "runtime/test_out_bin_memory.py",
@@ -81,6 +294,9 @@ SUITES = {
         "core_extras": ("xdsl",),
         "probe_modules": (
             "merlin.runtime.out_b64",
+            "merlin.runtime.direct_kernel_harness",
+            "merlin.targetgen.contract.execution_service",
+            "merlin.targetgen.native_component_execution",
             "merlin.runtime.out_bin",
             "merlin.runtime.out_packet",
             "merlin.targetgen.contract.readback_policy",
@@ -725,6 +941,107 @@ def clean_environment():
     }
 
 
+NATIVE_TOOL_ENVIRONMENT = {
+    "clang": "MERLIN_CLANG",
+    "mlir-translate": "MERLIN_MLIR_TRANSLATE",
+    "riscv-gcc": "MERLIN_TEST_RISCV_GCC",
+}
+
+
+def capture_native_tools(suite, selections):
+    """Explicit executable selections, never ambient provider/env overrides."""
+    selected = {}
+    admitted = SUITES[suite].get("native_tools", ())
+    for selection in selections:
+        name, separator, supplied = selection.partition("=")
+        if not separator or name not in admitted or name in selected:
+            raise QualificationFailed("unknown, duplicate or suite-inadmissible native tool")
+        path = Path(supplied)
+        if not path.is_absolute():
+            raise QualificationFailed("native tool must have an explicit absolute path")
+        actual = path.resolve(strict=True)
+        if not actual.is_file() or not os.access(actual, os.X_OK):
+            raise QualificationFailed("native tool must resolve to an executable file")
+        selected[name] = {
+            "selected_path": str(path),
+            "path": str(actual),
+            "sha256": digest(actual),
+            "environment_key": NATIVE_TOOL_ENVIRONMENT[name],
+        }
+    if selected and set(selected) != set(admitted):
+        raise QualificationFailed("selected native suite needs its complete explicit tool roster")
+    return selected
+
+
+def verify_native_tools(selected):
+    for tool in selected.values():
+        if digest(tool["path"]) != tool["sha256"]:
+            raise QualificationFailed("selected native executable changed")
+
+
+def check_native_test_report(suite, path, report):
+    """Require every declared native file to execute; distinguish other skips.
+
+    The actual pytest child supplies xunit1 file identities relative to the
+    explicit archived test root. This is packaging evidence, not native tool or
+    compiler qualification. The retained XML preserves complete skip messages.
+    """
+    configured = SUITES[suite]
+    required = configured.get("native_test_files", ())
+    admitted = (*configured["tests"], *configured.get("support_files", ()))
+    if not required or len(set(required)) != len(required) or not set(required) <= set(configured["tests"]):
+        raise QualificationFailed("native suite has no closed declared test subset")
+    cases = list(ET.parse(path).getroot().iter("testcase"))
+    report["native_test_report"] = {"path": str(path), "sha256": digest(path)}
+    report["native_test_files"] = list(required)
+    report["native_zero_skip_scope"] = "declared_native_test_files"
+    report["suite_test_counts"] = {"tests": len(cases), "skipped": 0}
+    report["native_test_counts"] = {"tests": 0, "skipped": 0}
+    report["other_test_counts"] = {"tests": 0, "skipped": 0}
+    report["test_skips"] = {"native": [], "other": []}
+    modules = {filename: Path(filename).with_suffix("").as_posix().replace("/", ".") for filename in admitted}
+    observed, identities = set(), set()
+    errors = []
+    for case in cases:
+        name, filename, classname = (case.get(key, "") for key in ("name", "file", "classname"))
+        module = modules.get(filename)
+        identity = (filename, classname, name)
+        if (
+            module is None
+            or not name
+            or identity in identities
+            or not (classname == module or classname.startswith(module + "."))
+        ):
+            errors.append("testcase lacks a unique admitted archived file identity")
+        identities.add(identity)
+        category = "native" if filename in required else "other"
+        report[category + "_test_counts"]["tests"] += 1
+        if category == "native":
+            observed.add(filename)
+        skipped = case.find("skipped")
+        if skipped is not None:
+            report["suite_test_counts"]["skipped"] += 1
+            report[category + "_test_counts"]["skipped"] += 1
+            report["test_skips"][category].append(
+                {
+                    "file": filename,
+                    "classname": classname,
+                    "name": name,
+                    "type": skipped.get("type", ""),
+                    "message": skipped.get("message", ""),
+                }
+            )
+        if case.find("failure") is not None or case.find("error") is not None:
+            errors.append("testcase has a failure or error")
+    report["missing_native_test_files"] = sorted(set(required) - observed)
+    if errors:
+        raise QualificationFailed(errors[0])
+    if report["missing_native_test_files"]:
+        raise QualificationFailed("explicit native qualification did not execute every declared native test file")
+    if report["native_test_counts"]["skipped"]:
+        raise QualificationFailed("explicit native qualification requires declared native tests with zero skips")
+
+
 def resolve_ref(root, ref):
     return subprocess.check_output(
         ["git", "rev-parse", "--verify", "--end-of-options", ref + "^{commit}"],
@@ -760,11 +1077,15 @@ class Recorder:
     def __init__(self, output, report, timeout):
         self.output, self.report, self.timeout = output, report, timeout
         self.environment = clean_environment()
+        self.environment.update(
+            (tool["environment_key"], tool["path"]) for tool in report.get("native_tools", {}).values()
+        )
 
     def save(self):
         (self.output / "report.json").write_text(json.dumps(self.report, indent=2) + "\n")
 
     def run(self, label, argv, cwd, *, stdout=None):
+        verify_native_tools(self.report.get("native_tools", {}))
         argv = list(map(str, argv))
         log = self.output / (label + ".log")
         record = {
@@ -869,7 +1190,7 @@ def selected_source_inputs(snapshot, patterns):
     return tuple(sorted(names))
 
 
-def qualify(root, output, commit, suite, timeout, *, requested_ref=None, invocation=None):
+def qualify(root, output, commit, suite, timeout, *, requested_ref=None, invocation=None, native_tools=()):
     own = Path(__file__).resolve()
     helper = own.with_name("installed_qualification_probe.py")
     tests_root = Path(SUITES[suite].get("tests_root", "packages/merlin-experiments/tests"))
@@ -890,6 +1211,7 @@ def qualify(root, output, commit, suite, timeout, *, requested_ref=None, invocat
         "tool_source_note": "Actual executing bytes; hashes may include working-tree edits not in tooling_revision.",
         "selected_tests": list(SUITES[suite]["tests"]),
         "support_files": list(support_files),
+        "test_fixture_imports": bool(SUITES[suite].get("test_fixture_imports")),
         "source_inputs": {},
         "tests_root": tests_root.as_posix(),
         "core_extras": list(SUITES[suite]["core_extras"]),
@@ -899,10 +1221,17 @@ def qualify(root, output, commit, suite, timeout, *, requested_ref=None, invocat
         "test_process_policy": (
             "deny_processes_and_listeners" if SUITES[suite].get("guarded_tests") else "suite_defined"
         ),
+        "native_tools": {},
+        "requested_native_tools": list(native_tools),
+        "native_test_files": list(SUITES[suite].get("native_test_files", ())),
+        "native_tool_policy": "Explicit executable bytes only; system dependencies are not a frozen toolchain closure.",
     }
     runner = Recorder(output, report, timeout)
     runner.save()
     try:
+        report["native_tools"] = capture_native_tools(suite, native_tools)
+        runner.environment.update((tool["environment_key"], tool["path"]) for tool in report["native_tools"].values())
+        runner.save()
         copied_helper = output / "installed_qualification_probe.py"
         shutil.copyfile(helper, copied_helper)
         if digest(copied_helper) != report["tool_sources"][str(helper.relative_to(root))]:
@@ -1021,13 +1350,29 @@ def qualify(root, output, commit, suite, timeout, *, requested_ref=None, invocat
                 "-p",
                 "no:cacheprovider",
                 "--import-mode=importlib",
+                *(["-o", "pythonpath=" + str(tests)] if SUITES[suite].get("test_fixture_imports") else []),
                 # This venv is fresh and unique; pytest must not clean shared user temp roots.
                 "--basetemp",
                 external / "test-tmp",
+                *(
+                    [
+                        "--rootdir",
+                        tests,
+                        "-o",
+                        "junit_family=xunit1",
+                        "--junitxml",
+                        output / "tests.xml",
+                    ]
+                    if report["native_tools"]
+                    else []
+                ),
                 tests,
             ],
             external,
         )
+        verify_native_tools(report["native_tools"])
+        if report["native_tools"]:
+            check_native_test_report(suite, output / "tests.xml", report)
         if any(digest(root / name) != expected for name, expected in report["tool_sources"].items()):
             raise QualificationFailed("qualification tooling changed during execution")
         report["status"] = "passed"
@@ -1046,6 +1391,13 @@ def main(argv=None):
     parser.add_argument("--suite", choices=SUITES, default="phase1")
     parser.add_argument("--label", help="New output directory name beneath build_dir()/python/qualified-installs")
     parser.add_argument("--timeout", type=int, default=300, help="Maximum seconds per child command")
+    parser.add_argument(
+        "--native-tool",
+        action="append",
+        default=[],
+        metavar="NAME=ABSOLUTE_PATH",
+        help="Explicit suite-admitted executable; pin bytes and require zero skips in declared native test files",
+    )
     args = parser.parse_args(argv)
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
@@ -1068,6 +1420,7 @@ def main(argv=None):
             args.timeout,
             requested_ref=args.ref,
             invocation=[sys.executable, str(Path(__file__).resolve()), *(sys.argv[1:] if argv is None else argv)],
+            native_tools=args.native_tool,
         )
         else 1
     )
