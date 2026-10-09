@@ -30,6 +30,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 merlin_experiments = ["resources/*.json"]
+"merlin_experiments.execution" = ["container_guardian.c"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
