@@ -26,7 +26,9 @@ from .minimal_software import validate_minimal_software
 from .software_intake import REVIEW_SCHEMA, IndependentSoftwareIntake, _bindings
 
 SCHEMA = "merlin.component_automatic_policy.v1"
+EFFECT_POLICY_SCHEMA = "merlin.component_automatic_policy.v2"
 RECEIPT_SCHEMA = "merlin.component_automatic_derivation.v1"
+EFFECT_RECEIPT_SCHEMA = "merlin.component_automatic_derivation.v2"
 _FIELDS = {
     "schema",
     "status",
@@ -54,10 +56,15 @@ def _read(pin):
 
 
 def _closed_policy(policy):
+    fields = _FIELDS | (
+        {"operator_schema_intake_sha256"}
+        if isinstance(policy, dict) and policy.get("schema") == EFFECT_POLICY_SCHEMA
+        else set()
+    )
     if (
         not isinstance(policy, dict)
-        or set(policy) != _FIELDS
-        or policy["schema"] != SCHEMA
+        or set(policy) != fields
+        or policy["schema"] not in {SCHEMA, EFFECT_POLICY_SCHEMA}
         or policy["status"] != "reviewed"
     ):
         raise ValueError(
@@ -101,7 +108,7 @@ def _relations(basis):
 def require_basis_selection(path, *, recipe, software_intake):
     """Reject substituted graph selection before opening any example source."""
     document = yaml.safe_load(Path(path).read_bytes())
-    if not isinstance(document, dict) or document.get("schema") != SCHEMA:
+    if not isinstance(document, dict) or document.get("schema") not in {SCHEMA, EFFECT_POLICY_SCHEMA}:
         return
     if type(software_intake) is not IndependentSoftwareIntake:
         raise ValueError("automatic coverage needs the live protected minimal software intake")
@@ -119,11 +126,13 @@ def require_basis_selection(path, *, recipe, software_intake):
         raise ValueError("automatic example roster differs from the protected source selection")
 
 
-def resolve(path, *, evidence, semantic_basis, hardware_intake, software_intake, output_root):
+def resolve(
+    path, *, evidence, semantic_basis, hardware_intake, software_intake, output_root, operator_schema_intake=None
+):
     """Resolve old explicit plans or the new independently derived normal v2 plan."""
     raw = Path(path).read_bytes()
     selected = yaml.safe_load(raw)
-    if not isinstance(selected, dict) or selected.get("schema") != SCHEMA:
+    if not isinstance(selected, dict) or selected.get("schema") not in {SCHEMA, EFFECT_POLICY_SCHEMA}:
         return ComponentCoveragePlan.load(path, evidence=evidence, semantic_basis=semantic_basis), None
     if type(software_intake) is not IndependentSoftwareIntake or software_intake.hardware is not hardware_intake:
         raise ValueError("automatic coverage needs the live protected minimal software and identical hardware intake")
@@ -140,7 +149,27 @@ def resolve(path, *, evidence, semantic_basis, hardware_intake, software_intake,
     if protected_graphs != {source.path for source in semantic_basis.graph_sources}:
         raise ValueError("automatic graph sources differ from exact protected independent example membership")
     relations = _relations(semantic_basis)
-    declaration, unknowns = P.derive(policy, spec=spec, review=review, basis=semantic_basis, relations=relations)
+    effects, schema_record = None, None
+    if policy["schema"] == EFFECT_POLICY_SCHEMA:
+        from .operator_schema_intake import IndependentOperatorSchemaIntake
+
+        if (
+            type(operator_schema_intake) is not IndependentOperatorSchemaIntake
+            or operator_schema_intake.software is not software_intake
+        ):
+            raise ValueError("automatic effect selection needs the identical live independent schema/software intake")
+        schema_record = operator_schema_intake.record()
+        if policy["operator_schema_intake_sha256"] != operator_schema_intake.sha256:
+            raise ValueError("automatic effect selection differs from protected native schema observations")
+        effects = [
+            (member, operator_schema_intake.effects(graph_path=source.path))
+            for (member, _), source in zip(relations, semantic_basis.graph_sources, strict=True)
+        ]
+    elif operator_schema_intake is not None:
+        raise ValueError("operator effects require the explicit versioned automatic policy")
+    declaration, unknowns = P.derive(
+        policy, spec=spec, review=review, basis=semantic_basis, relations=relations, effects=effects
+    )
     destination = Path(output_root) / "coverage" / "automatic-selection"
     if any(member.is_symlink() for member in (destination, *destination.parents)):
         raise ValueError("automatic selection output must have an ordinary explicit path")
@@ -166,7 +195,7 @@ def resolve(path, *, evidence, semantic_basis, hardware_intake, software_intake,
         )
     ]
     record = {
-        "schema": RECEIPT_SCHEMA,
+        "schema": EFFECT_RECEIPT_SCHEMA if schema_record is not None else RECEIPT_SCHEMA,
         "hardware_intake_sha256": hardware_intake.sha256,
         "software_intake_sha256": software_intake.sha256,
         "sources": sources,
@@ -175,6 +204,11 @@ def resolve(path, *, evidence, semantic_basis, hardware_intake, software_intake,
         "required_unknowns": unknowns,
         "qualification": "fresh bounded source classes; no original dimensions/topology or physical resource grants",
     }
+    if schema_record is not None:
+        record["operator_schema_intake"] = schema_record
+        record["operator_effect_semantics"] = [
+            {"member": member, **effect.public_semantics()} for member, effect in effects
+        ]
     record["sha256"] = digest(record)
     receipt_path = destination / "derivation.json"
     receipt_path.write_text(json.dumps(record, sort_keys=True, indent=2) + "\n")
@@ -194,7 +228,7 @@ def resolve(path, *, evidence, semantic_basis, hardware_intake, software_intake,
 
 def verify(record, *, report, verify_sources=True):
     """Reopen all selected originals and recompute the complete required roster."""
-    if record.get("schema") != RECEIPT_SCHEMA or digest(
+    if record.get("schema") not in {RECEIPT_SCHEMA, EFFECT_RECEIPT_SCHEMA} or digest(
         {k: v for k, v in record.items() if k != "sha256"}
     ) != record.get("sha256"):
         raise ValueError("automatic component derivation identity changed")
@@ -251,7 +285,44 @@ def verify(record, *, report, verify_sources=True):
         raise ValueError("automatic derivation protected source review binding changed")
     _bindings(review, spec, basis)
     relations = _relations(basis)
-    declaration, unknowns = P.derive(policy, spec=spec, review=review, basis=basis, relations=relations)
+    effects = None
+    if record["schema"] == EFFECT_RECEIPT_SCHEMA:
+        from merlin.targetgen.frontend_operator_effects import original_operator_effects
+
+        from .operator_schema_intake import verify_record
+
+        schema_record = verify_record(record["operator_schema_intake"])
+        if (
+            policy["schema"] != EFFECT_POLICY_SCHEMA
+            or hashlib.sha256(
+                (json.dumps(schema_record, sort_keys=True, indent=2, allow_nan=False) + "\n").encode()
+            ).hexdigest()
+            != policy["operator_schema_intake_sha256"]
+            or schema_record["software_intake_sha256"] != record["software_intake_sha256"]
+        ):
+            raise ValueError("automatic effect receipt differs from its exact protected intake identity")
+        schema_members = {row["graph_path"]: row for row in schema_record["members"]}
+        if set(schema_members) != {source.path for source in basis.graph_sources}:
+            raise ValueError("automatic effects lost protected original graph membership")
+        effects = [
+            (
+                member,
+                original_operator_effects(
+                    json.loads(Path(source.path).read_bytes()),
+                    json.loads(Path(schema_members[source.path]["observation"]).read_bytes()),
+                ),
+            )
+            for (member, _), source in zip(relations, basis.graph_sources, strict=True)
+        ]
+        if record["operator_effect_semantics"] != [
+            {"member": member, **effect.public_semantics()} for member, effect in effects
+        ]:
+            raise ValueError("automatic effects differ from native source/argument/result replay")
+    elif policy["schema"] != SCHEMA or set(record) & {"operator_schema_intake", "operator_effect_semantics"}:
+        raise ValueError("historical automatic policy cannot acquire new effect authority")
+    declaration, unknowns = P.derive(
+        policy, spec=spec, review=review, basis=basis, relations=relations, effects=effects
+    )
     if (
         yaml.safe_load(_read(record["derived_plan"])) != declaration
         or report["declaration"] != declaration

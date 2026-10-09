@@ -22,7 +22,13 @@ def _program(factory):
         return {"axis": name}
 
     inputs = [{"name": "A", "role": "input", "shape": [axis("M"), axis("K")], "dtype": "operand"}]
-    if factory == "movement":
+    if factory == "may_alias_result":
+        # A logical identity view is an independent possibility admitted by
+        # may-alias annotations. It does not exercise arbitrary view shapes
+        # or require physical pointer equality from a downstream compiler.
+        nodes = [{"name": "P", "op": "alias", "inputs": ["A"]}, {"name": "C", "op": "copy", "inputs": ["P"]}]
+        outputs = [{"name": "Yinput", "value": "A"}, {"name": "Yview", "value": "P"}, {"name": "Ycopy", "value": "C"}]
+    elif factory == "movement":
         nodes = [{"name": "P", "op": "copy", "inputs": ["A"]}]
         outputs = [{"name": "Y", "value": "P"}]
     else:
@@ -57,7 +63,7 @@ def _unknown(kind, selector, reason):
     }
 
 
-def derive(policy, *, spec, review, basis, relations):
+def derive(policy, *, spec, review, basis, relations, effects=None):
     """Construct a complete required class roster without invented permissions.
 
     One and two are fresh bounded semantic extents, independent of target or
@@ -122,6 +128,39 @@ def derive(policy, *, spec, review, basis, relations):
             unknowns.append(
                 _unknown("interaction", interaction, "interaction lacks a unique reviewed compatible source factory")
             )
+    if effects is not None:
+        movement = {owner for factory, owner in cases if factory == "movement"}
+        for member, effect in effects:
+            for unknown in effect.unknowns():
+                unknowns.append(_unknown("operator_effect", unknown["target"], unknown["reason"]))
+            for kind in effect.effect_classes:
+                eligible = {
+                    link["owner"]
+                    for link in review["operation_basis"]
+                    if link["member"] == member
+                    and any(
+                        witness["target"] in link["operations"] and witness["kind"] == kind
+                        for witness in effect.witnesses()
+                    )
+                } & movement
+                if kind == "may_alias_result" and len(eligible) == 1:
+                    owner = next(iter(eligible))
+                    cases.setdefault((kind, owner), set()).add(member)
+                    unknowns.append(
+                        _unknown(
+                            "physical_effect",
+                            kind,
+                            "logical alias sources do not establish physical ownership, layout, lifetime or completion",
+                        )
+                    )
+                else:
+                    unknowns.append(
+                        _unknown(
+                            "effect",
+                            kind,
+                            "observed source effect has no uniquely reviewed supported logical source factory",
+                        )
+                    )
     unknowns.append(
         _unknown(
             "effect_domain",
@@ -155,7 +194,7 @@ def derive(policy, *, spec, review, basis, relations):
                 "M": {"kind": "extent", "values": extents},
                 "K": {"kind": "extent", "values": [1] if guard else [2]},
             }
-            if factory != "movement":
+            if factory not in {"movement", "may_alias_result"}:
                 axes["N"] = {"kind": "extent", "values": extents}
             obligations.append(
                 {
@@ -173,7 +212,9 @@ def derive(policy, *, spec, review, basis, relations):
                 }
             )
     unique_unknowns = {row["id"]: row for row in unknowns}
-    declaration = {key: value for key, value in policy.items() if key != "schema"}
+    declaration = {
+        key: value for key, value in policy.items() if key not in {"schema", "operator_schema_intake_sha256"}
+    }
     declaration.update(schema=BUDGETED_PLAN_SCHEMA, effects=[], obligations=obligations)
     return declaration, sorted(unique_unknowns.values(), key=lambda row: row["id"])
 

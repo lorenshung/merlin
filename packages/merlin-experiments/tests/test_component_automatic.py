@@ -26,7 +26,7 @@ from test_independent_rtl_intake import selected  # noqa: F401 -- real determini
 
 from merlin.targetgen import golden_store
 from merlin.targetgen.capsule_inputs import materialize_capsule_leaves
-from merlin.targetgen.frontend_trace import _digest
+from merlin.targetgen.frontend_trace import _digest, original_operation_semantics
 from merlin.targetgen.rtl import facts
 from merlin.targetgen.rtl.source_selection import produce_selection
 
@@ -143,8 +143,7 @@ def automatic(independent, selected, tmp_path, monkeypatch, request):  # noqa: F
                 "path": str(source),
                 "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
                 "schema": "m2m.frontend_trace.v1",
-                "operation_semantics": ["aten.matmul.default", "aten.clone.default"]
-                + (["unreviewed.operation"] if choices.get("unknown") else []),
+                "operation_semantics": list(original_operation_semantics(json.loads(source.read_bytes()))[1]),
                 "effect_semantics": [],
             }
         ],
@@ -164,8 +163,19 @@ def automatic(independent, selected, tmp_path, monkeypatch, request):  # noqa: F
             "semantic_basis": recipe["semantic_basis"],
             "numerical_choices": spec["numerical_semantics"],
             "operation_basis": [
-                {"owner": owner, "member": "source-example", "operations": [operation]}
-                for owner, operation in (("movement", "aten.clone.default"), ("contraction", "aten.matmul.default"))
+                {
+                    "owner": owner,
+                    "member": "source-example",
+                    "operations": [
+                        operation
+                        for operation in operations
+                        if operation in roster["members"][0]["operation_semantics"]
+                    ],
+                }
+                for owner, operations in (
+                    ("movement", ["aten.clone.default", "aten.reshape.default"]),
+                    ("contraction", ["aten.matmul.default"]),
+                )
             ],
         },
     )

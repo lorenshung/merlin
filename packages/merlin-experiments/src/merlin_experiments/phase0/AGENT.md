@@ -210,3 +210,17 @@ Recompute the private derivation from its exact selected originals; re-signed
 metadata cannot replace source factories or erase required missing classes.
 Current automatic replay requires original source paths; relocated source
 closures and automatic resource-role expansion are explicitly unqualified.
+
+`operator_schema_intake` observes captured graph-level schemas against clean
+tracked public function declarations and the actual registered native schemas.
+The fixed reader retains typed alias sets, exact original argument/result joins
+and process/environment evidence. Names never supply effect meanings. Direct
+Tensor may-alias/may-write annotations remain distinct from concrete allocation
+and mutation outcomes; wildcard, changing and container aliases stay UNKNOWN.
+Automatic policy v2 binds the live schema/minimal-SW origin before generation.
+An observed may-alias class selects a fresh bounded logical identity-view/copy
+source with every input/view/copy output checked by the original normal oracle.
+It does not cover arbitrary view layouts or grant physical pointer equality,
+ownership, lifetime, completion, non-schema purity, hardware axis/resource roles
+or installed-framework historical source correspondence. Retain those mandatory
+gaps and unsupported effect classes. Policy/receipt v1 remains unchanged.
