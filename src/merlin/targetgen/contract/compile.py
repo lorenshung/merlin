@@ -24,6 +24,9 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from merlin.common import execution_deadline as _deadline_owner
+from merlin.common.execution_deadline import ExecutionDeadline, selected_deadline
+
 from .build_recipe import named_object_paths
 from .harness_blobs import stage_harness_blobs
 
@@ -31,8 +34,15 @@ from .harness_blobs import stage_harness_blobs
 def _observed_run(argv, *, workdir, stage, inputs=(), outputs=(), **kwargs):
     from merlin.common import invocation_record
 
-    return invocation_record.run(argv, directory=workdir, stage=stage, inputs=inputs, outputs=outputs,
-                                 dependencies=(Path(__file__),), **kwargs)
+    return invocation_record.run(
+        argv,
+        directory=workdir,
+        stage=stage,
+        inputs=inputs,
+        outputs=outputs,
+        dependencies=(Path(__file__), Path(_deadline_owner.__file__)),
+        **kwargs,
+    )
 
 
 def _module_target_abi(llvm_text: str) -> str | None:
@@ -84,6 +94,7 @@ def llvm_mlir_to_object(
     target: str | None = None,
     _build_service=None,
     build_timeout_s: int | None = None,
+    execution_deadline: ExecutionDeadline | None = None,
 ) -> Path:
     """Lower package-emitted llvm-dialect MLIR to an rv64 object (.o) for ``target``'s own ISA.
 
@@ -103,19 +114,12 @@ def llvm_mlir_to_object(
     """
     from merlin.llvmlower import codegen
 
-    if build_timeout_s is not None and (
-        _build_service is None or type(build_timeout_s) is not int or build_timeout_s <= 0
-    ):
-        raise ValueError("explicit object-build timeout requires a pure build service and positive seconds")
-    deadline = time.monotonic() + build_timeout_s if build_timeout_s is not None else None
+    deadline = selected_deadline(seconds=build_timeout_s, parent=execution_deadline, build_service=_build_service)
 
     def remaining() -> float | None:
         if deadline is None:
             return None
-        left = deadline - time.monotonic()
-        if left <= 0:
-            raise TimeoutError("public object-build budget expired")
-        return left
+        return deadline.remaining("public object-build budget expired")
 
     workdir.mkdir(parents=True, exist_ok=True)
     source = workdir / "kernel.llvm.mlir"
@@ -161,7 +165,10 @@ def llvm_mlir_to_object(
         try:
             translated = _observed_run(
                 [str(toolchain.mlir_translate()), "--mlir-to-llvmir", str(source), "-o", str(workdir / "kernel.ll")],
-                workdir=workdir, stage="llvm_translation", inputs=(source,), outputs=(workdir / "kernel.ll",),
+                workdir=workdir,
+                stage="llvm_translation",
+                inputs=(source,),
+                outputs=(workdir / "kernel.ll",),
                 capture_output=True,
                 text=True,
                 timeout=remaining(),
@@ -181,11 +188,18 @@ def llvm_mlir_to_object(
         requested = getattr(executor, "record_stage_inspection", False) is True
         audit = IrAudit(workdir, enabled=requested, producer="merlin.targetgen.contract.compile", source=__file__)
 
-        with audit, invocation_record.observe_call(
-            workdir, stage="llvm_translation", function=lower_to_llvm_ir,
-            arguments={"workdir": str(workdir.resolve())}, inputs=(source,), outputs=(workdir / "kernel.ll",),
-            dependencies=(Path(__file__),),
-        ) as observed:
+        with (
+            audit,
+            invocation_record.observe_call(
+                workdir,
+                stage="llvm_translation",
+                function=lower_to_llvm_ir,
+                arguments={"workdir": str(workdir.resolve())},
+                inputs=(source,),
+                outputs=(workdir / "kernel.ll",),
+                dependencies=(Path(__file__),),
+            ) as observed,
+        ):
             options = {"audit": audit} if requested else {}
             ll = lower_to_llvm_ir(lowered_mlir_text, workdir=workdir, **options)
             (workdir / "kernel.ll").write_text(ll, encoding="utf-8")
@@ -423,6 +437,7 @@ def link_elf(
     _build_service=None,
     _compile_only_linkage=None,
     build_timeout_s=None,
+    execution_deadline: ExecutionDeadline | None = None,
     warm_profile=None,
     readback_policy=None,
 ) -> Path:
@@ -439,19 +454,12 @@ def link_elf(
     the ordinary kernel without tensor data, readback or execution authority.
     """
     warm_profile = _strict_warm_profile(warm_profile, cb)
-    if build_timeout_s is not None and (
-        _build_service is None or type(build_timeout_s) is not int or build_timeout_s <= 0
-    ):
-        raise ValueError("explicit link-build timeout requires a pure build service and positive seconds")
-    deadline = time.monotonic() + build_timeout_s if build_timeout_s is not None else None
+    deadline = selected_deadline(seconds=build_timeout_s, parent=execution_deadline, build_service=_build_service)
 
     def remaining():
         if deadline is None:
             return None
-        left = deadline - time.monotonic()
-        if left <= 0:
-            raise TimeoutError("public link-build budget expired")
-        return left
+        return deadline.remaining("public link-build budget expired")
 
     def deadline_options():
         return {} if deadline is None else {"timeout": remaining()}
@@ -459,9 +467,14 @@ def link_elf(
     if _compile_only_linkage is not None:
         from .compile_only import CompileOnlyLinkage
 
-        if (type(_compile_only_linkage) is not CompileOnlyLinkage or _build_service is None
-            or any(value is not None for value in (inputs, prepack_authorizations, _compact_caller,
-                                                  warm_profile, readback_policy))):
+        if (
+            type(_compile_only_linkage) is not CompileOnlyLinkage
+            or _build_service is None
+            or any(
+                value is not None
+                for value in (inputs, prepack_authorizations, _compact_caller, warm_profile, readback_policy)
+            )
+        ):
             raise ValueError("compile-only linking needs explicit pure build support and no value/execution authority")
         _compile_only_linkage.verify(cb)
     from .readback_policy import BUILD_RECEIPT, selected
@@ -615,14 +628,31 @@ def link_elf(
         else:
             command = recipe.compile_command(source=source, output=unit)
             compile_cwd = None
-        step = _observed_run(command, workdir=workdir, stage="harness_object", inputs=(source,), outputs=(unit,),
-                             cwd=compile_cwd, capture_output=True, text=True, **deadline_options())
+        step = _observed_run(
+            command,
+            workdir=workdir,
+            stage="harness_object",
+            inputs=(source,),
+            outputs=(unit,),
+            cwd=compile_cwd,
+            capture_output=True,
+            text=True,
+            **deadline_options(),
+        )
         if step.returncode != 0:
             raise recipe.error_cls(f"compile of {source.name} failed:\n{step.stderr[-2000:]}")
         objects.append(unit)
     cmd = recipe.link_command(objects=objects, output=elf, link_script=link_ld)
-    proc = _observed_run(cmd, workdir=workdir, stage="elf", inputs=(*objects, link_ld), outputs=(elf,),
-                         capture_output=True, text=True, **deadline_options())
+    proc = _observed_run(
+        cmd,
+        workdir=workdir,
+        stage="elf",
+        inputs=(*objects, link_ld),
+        outputs=(elf,),
+        capture_output=True,
+        text=True,
+        **deadline_options(),
+    )
     if proc.returncode != 0:
         # A FREESTANDING LINK IS ALLOWED ONE DECLARED RETRY. newlib's libm references a handful of
         # hosted-libc symbols that a bare-metal image does not provide: a whole-model harness that
@@ -651,8 +681,13 @@ def link_elf(
         shim_c.write_text(support, encoding="utf-8")
         shim_o = workdir / "freestanding_support.o"
         step = _observed_run(
-            recipe.compile_command(source=shim_c, output=shim_o), workdir=workdir,
-            stage="freestanding_support_object", inputs=(shim_c,), outputs=(shim_o,), capture_output=True, text=True,
+            recipe.compile_command(source=shim_c, output=shim_o),
+            workdir=workdir,
+            stage="freestanding_support_object",
+            inputs=(shim_c,),
+            outputs=(shim_o,),
+            capture_output=True,
+            text=True,
             **deadline_options(),
         )
         if step.returncode != 0:
@@ -660,8 +695,16 @@ def link_elf(
         # Appended, so the order of every pre-existing object -- which decides placement within a
         # section and therefore cycles -- is unchanged.
         retry = recipe.link_command(objects=[*objects, shim_o], output=elf, link_script=link_ld)
-        proc = _observed_run(retry, workdir=workdir, stage="elf", inputs=(*objects, shim_o, link_ld), outputs=(elf,),
-                             capture_output=True, text=True, **deadline_options())
+        proc = _observed_run(
+            retry,
+            workdir=workdir,
+            stage="elf",
+            inputs=(*objects, shim_o, link_ld),
+            outputs=(elf,),
+            capture_output=True,
+            text=True,
+            **deadline_options(),
+        )
         if proc.returncode != 0:
             raise recipe.error_cls(f"link failed after supplying freestanding {list(missing)}:\n{proc.stderr[-2000:]}")
     if _compact_caller is not None:
@@ -712,6 +755,7 @@ def compile_lowered_to_elf(
     _build_service=None,
     warm_profile=None,
     readback_policy=None,
+    execution_deadline: ExecutionDeadline | None = None,
 ) -> Path:
     """Full package-lowered-MLIR -> rv64 ELF (object + runner harness + link).
 
@@ -737,6 +781,7 @@ def compile_lowered_to_elf(
     invocation, cycles only); the target renderer supplies launch/completion
     hooks and keeps result readback outside the cycle window.
     """
+    deadline = selected_deadline(seconds=None, parent=execution_deadline, build_service=_build_service)
     warm_profile = _strict_warm_profile(warm_profile, cb)
     from .readback_policy import selected
 
@@ -754,13 +799,22 @@ def compile_lowered_to_elf(
             raise ValueError("build-only service requires explicit inputs and no alternate caller authority")
         _build_service.verify(target)
         work = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="oot_build_only_"))
-        obj = llvm_mlir_to_object(lowered_mlir_text, work, target=target, _build_service=_build_service)
+        budget_options = {"execution_deadline": deadline} if deadline is not None else {}
+        obj = llvm_mlir_to_object(
+            lowered_mlir_text, work, target=target, _build_service=_build_service, **budget_options
+        )
+        if deadline is not None:
+            deadline.remaining()
         kwargs = {"target": target, "inputs": inputs, "_build_service": _build_service}
+        kwargs.update(budget_options)
         if warm_profile is not None:
             kwargs["warm_profile"] = warm_profile
         if readback_policy is not None:
             kwargs["readback_policy"] = readback_policy
-        return link_elf(cb, obj, work, **kwargs)
+        elf = link_elf(cb, obj, work, **kwargs)
+        if deadline is not None:
+            deadline.remaining()
+        return elf
     from merlin.runtime.backends import base as _backends
 
     from .. import build_cache as _bc
@@ -965,6 +1019,7 @@ def run_on_oracle(
     execution_revalidate=None,
     _execution_service=None,
     _elf_admission=None,
+    execution_deadline: ExecutionDeadline | None = None,
 ) -> dict[str, Any]:
     """Compile the package's lowered MLIR + run on ``simulator``; return outputs/metrics/console.
 
@@ -972,8 +1027,14 @@ def run_on_oracle(
     subprocess) are *active* time; ``oracle_wait_s`` is queue/FPGA-slot wait (0 for local sims like
     spike/verilator — only VCS/FireSim adapters that route through a queue set it).
     """
-    import time
     from subprocess import CalledProcessError, TimeoutExpired
+
+    deadline = selected_deadline(seconds=None, parent=execution_deadline, build_service=_build_service)
+    if deadline is not None and _execution_service is None:
+        raise ValueError("shared oracle deadline requires explicit independent execution support")
+
+    def check_budget():
+        return None if deadline is None else deadline.remaining()
 
     from merlin.runtime.backends import base as _backends
 
@@ -1029,9 +1090,18 @@ def run_on_oracle(
     _t0 = time.perf_counter()
     policy_kwargs = {"readback_policy": readback_policy} if readback_policy is not None else {}
     service_kwargs = {"_build_service": _build_service} if _build_service is not None else {}
+    if deadline is not None:
+        service_kwargs["execution_deadline"] = deadline
     elf = compile_lowered_to_elf(
-        cb, lowered_mlir_text, work, target=target, inputs=inputs, **policy_kwargs, **service_kwargs,
+        cb,
+        lowered_mlir_text,
+        work,
+        target=target,
+        inputs=inputs,
+        **policy_kwargs,
+        **service_kwargs,
     )
+    check_budget()
     readback_build = None
     if readback_policy is not None:
         from .readback_policy import require_current_build_receipt
@@ -1045,7 +1115,9 @@ def run_on_oracle(
             **({"build_service": _build_service} if _build_service is not None else {}),
         )
     _t1 = time.perf_counter()
+    check_budget()
     verify_execution()
+    check_budget()
     admission = None
     if _elf_admission is not None:
         from .elf_admission import LinkedElfAdmissionService
@@ -1053,13 +1125,17 @@ def run_on_oracle(
         if type(_elf_admission) is not LinkedElfAdmissionService or _execution_service is None:
             raise ValueError("linked ELF admission requires the explicit independent execution route")
         admission = _elf_admission.evaluate(elf=elf, target=target, evidence_root=work / "elf_admission")
+        check_budget()
         if admission["status"] == "refused":
             # This is a completed build and evaluated rejection, never an
             # executed binary, numerical verdict or simulator measurement.
             return {
-                "status": "refused_before_execution", "elf": str(elf),
-                "elf_admission": admission, "readback_build": readback_build,
-                "console": "", "execution": "not_attempted",
+                "status": "refused_before_execution",
+                "elf": str(elf),
+                "elf_admission": admission,
+                "readback_build": readback_build,
+                "console": "",
+                "execution": "not_attempted",
             }
     memory_kwargs = {}
     memory_engine = None
@@ -1093,23 +1169,35 @@ def run_on_oracle(
         # engine subprocess argv and its own lower-level invocation records.
         provenance = (simulator_provenance(backend, simulator) or {}) if _execution_service is None else {}
         engine_path = provenance.get("binary")
-        dependencies = (Path(__file__),)
+        dependencies = (Path(__file__), Path(_deadline_owner.__file__))
         if isinstance(engine_path, str) and Path(engine_path).is_file():
             dependencies += (Path(engine_path),)
         if execution_identity is not None:
-            dependencies += tuple(Path(row["path"]) for row in execution_identity.values()
-                                  if type(row) is dict and isinstance(row.get("path"), str))
+            dependencies += tuple(
+                Path(row["path"])
+                for row in execution_identity.values()
+                if type(row) is dict and isinstance(row.get("path"), str)
+            )
         if _execution_service is not None:
             dependencies += tuple(Path(path) for path, _ in _execution_service.source_pins)
         if admission is not None:
             _elf_admission.revalidate(elf=elf, result=admission, target=target)
+        run_timeout = timeout if deadline is None else min(timeout, deadline.remaining())
         with invocation_record.observe_call(
-            work, stage="execution", function=backend.run_elf,
-            arguments={"target": target, "simulator": simulator, "timeout_s": timeout,
-                       "capture_bytes": binary, "memory_transport": memory},
-            inputs=(elf,), dependencies=dependencies,
+            work,
+            stage="execution",
+            function=backend.run_elf,
+            arguments={
+                "target": target,
+                "simulator": simulator,
+                "timeout_s": run_timeout,
+                "capture_bytes": binary,
+                "memory_transport": memory,
+            },
+            inputs=(elf,),
+            dependencies=dependencies,
         ) as observed:
-            console = backend.run_elf(elf, simulator=simulator, timeout=timeout, **run_kwargs, **memory_kwargs)
+            console = backend.run_elf(elf, simulator=simulator, timeout=run_timeout, **run_kwargs, **memory_kwargs)
             observed.returned(stdout=console)
     except (TimeoutExpired, CalledProcessError) as exc:
         # Standard process failures can carry partial output even with
@@ -1125,6 +1213,7 @@ def run_on_oracle(
     # boundary, not only on the successful grading path. This is diagnostic
     # evidence, never a completion or numerical verdict.
     console_path.write_bytes(console if type(console) is bytes else console.encode("utf-8"))
+    check_budget()
     verify_execution()
     if admission is not None:
         _elf_admission.revalidate(elf=elf, result=admission, target=target)
@@ -1139,7 +1228,9 @@ def run_on_oracle(
         **({"build_service": _build_service} if _build_service is not None else {}),
     ):
         raise ValueError("memory readback build changed before output decoding")
+    check_budget()
     outputs, raw = backend.parse_output(console)
+    check_budget()
     memory_evidence = None
     if memory:
         from .readback_policy import require_memory_completion, require_memory_value_roster
@@ -1153,6 +1244,7 @@ def run_on_oracle(
         ):
             raise ValueError("memory output reader returned no completed full-value admission")
         require_memory_value_roster(cb, outputs)
+    check_budget()
     if readback_policy is not None:
         from .readback_policy import (
             require_current_build_receipt,
@@ -1172,6 +1264,7 @@ def run_on_oracle(
             raise ValueError("full-value build identity changed during oracle execution")
     if memory and oracle_revalidate() != memory_engine:
         raise ValueError("memory oracle engine changed during output decoding")
+    check_budget()
     # DECODE A FLOAT RESULT THAT CAME BACK AS ITS CONTAINER WORD. `parse_output` yields whatever the
     # console carried; a target whose harness has integer-only formatting prints a float destination
     # buffer's stored PATTERN, so an f32 result arrives as its 32-bit word and a bf16 result as its
@@ -1238,8 +1331,11 @@ def run_on_oracle(
         result["counters"] = {
             "status": "unknown",
             "readings": None,
-            "why": ("explicit functional transport has no qualified RTL counter authority"
-                    if _execution_service is not None else _trust.refusal()),
+            "why": (
+                "explicit functional transport has no qualified RTL counter authority"
+                if _execution_service is not None
+                else _trust.refusal()
+            ),
             "engine": _trust.to_dict(),
         }
     elif readings:
@@ -1297,4 +1393,5 @@ def run_on_oracle(
     if _cap is not None:
         result["timing_observations"] = _obs
         result["timing_capability"] = _cap
+    check_budget()
     return result

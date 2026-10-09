@@ -14,7 +14,9 @@ import json
 import math
 from pathlib import Path
 
+from merlin.common import execution_deadline as _deadline_owner
 from merlin.common import invocation_record
+from merlin.common.execution_deadline import ExecutionDeadline
 from merlin.targetgen import capsule_common as CC
 from merlin.targetgen.contract import readback_policy as RB
 from merlin.targetgen.contract.build_service import BuildOnlyService
@@ -188,6 +190,21 @@ def _bind(capsule: dict, cb: dict, source: Path) -> tuple[dict, dict, dict]:
     return bound, projected, {"inputs": bindings, "outputs": dict(zip(output_names, emitted_outputs, strict=True))}
 
 
+def _publish_result(output, record, deadline):
+    # Closing failed evidence remains mandatory after expiry. Recheck both
+    # sides of publication so a late result cannot retain completed status.
+    for write in (False, True):
+        if write:
+            _write(output / "result.json", record)
+        if "failure" not in record:
+            try:
+                deadline.remaining()
+            except TimeoutError as error:
+                record.update(status="unavailable", failure={"type": type(error).__name__, "detail": str(error)})
+                _write(output / "result.json", record)
+                raise
+
+
 def execute_component(
     *,
     package_dir: Path,
@@ -223,6 +240,7 @@ def execute_component(
         )
     if P.active_package_executor() is None:
         raise NativeComponentExecutionError("independent native route requires an explicit scoped package executor")
+    deadline = ExecutionDeadline.start(timeout_s)
     package_dir, capsule_dir, contract_root, output = map(_plain, (package_dir, capsule_dir, contract_root, out_dir))
     if output.exists() or any(output.is_relative_to(root) for root in (package_dir, capsule_dir, contract_root)):
         raise NativeComponentExecutionError("independent native evidence destination must be fresh and separate")
@@ -257,8 +275,10 @@ def execute_component(
         package = P.load_package(package_dir, contract=contract_root)
         if package.manifest.get("target") != target:
             raise NativeComponentExecutionError("independent native package differs from selected target")
+        deadline.remaining()
         P.integrity_scan(package)
-        P.build_package(package)
+        P.build_package(package, timeout=deadline.remaining())
+        deadline.remaining()
         generated.mkdir()
         products = tuple(
             generated / name
@@ -273,15 +293,28 @@ def execute_component(
             outputs=products,
             dependencies=tuple(Path(row["path"]) for kind in ("package", "contract") for row in frozen[kind].values()),
         ) as observation:
-            cb, artifact = CC.lower_interface(package, source, generated, contract=contract_root, timeout=timeout_s)
+
+            def invoke(*args, **kwargs):
+                kwargs["timeout"] = deadline.remaining()
+                kwargs["invocation_directory"] = generated
+                result = P.run_entrypoint(*args, **kwargs)
+                deadline.remaining()
+                return result
+
+            cb, artifact = CC.lower_interface(
+                package, source, generated, contract=contract_root, timeout=deadline.remaining(), invoke=invoke
+            )
             observation.returned(stdout=artifact)
+        deadline.remaining()
         entry = build_service.recipe.require_kernel_stack_frame().entry_symbol
         if (cb.get("kernel_abi") or {}).get("kind") != "whole_program" or emitted_entry_arity(
             artifact, entry_symbol=entry
         ) != len((cb.get("kernel_abi") or {}).get("args") or ()):
             raise NativeComponentExecutionError("independent native artifact has no exact whole-program entry ABI")
         bound, inputs, bindings = _bind(capsule, cb, source)
+        deadline.remaining()
         expected = CG.golden(capsule, capsule_dir)
+        deadline.remaining()
         if set(expected) != set(bindings["outputs"]):
             raise NativeComponentExecutionError(
                 "independent native golden does not cover the complete declared output roster"
@@ -302,6 +335,7 @@ def execute_component(
                 "input_projection": output / "input_projection.json",
             }.items()
         }
+        deadline.remaining()
         record["source_correspondence"] = source_verifier(
             source=source,
             command_buffer=bound,
@@ -311,6 +345,7 @@ def execute_component(
             package_root=package_dir,
             generated_root=generated,
         )
+        deadline.remaining()
         if type(record["source_correspondence"]) is not dict:
             raise NativeComponentExecutionError("independent native source verifier returned no closed observation")
 
@@ -333,7 +368,7 @@ def execute_component(
                 generated / "lowered.llvm.mlir",
                 output / "input_projection.json",
             ),
-            dependencies=tuple(Path(path) for path, _ in build_service.source_pins),
+            dependencies=(*tuple(Path(path) for path, _ in build_service.source_pins), Path(_deadline_owner.__file__)),
         ) as observation:
             native = run_on_oracle(
                 bound,
@@ -348,8 +383,10 @@ def execute_component(
                 _execution_service=execution_service,
                 execution_revalidate=selected_execution,
                 _elf_admission=elf_admission,
+                execution_deadline=deadline,
             )
             observation.returned(stdout=native["console"])
+        deadline.remaining()
         unchanged()
         if native.get("status") == "refused_before_execution":
             record.update(status="refused_before_execution", native=native, elf=_digest(Path(native["elf"])))
@@ -357,7 +394,9 @@ def execute_component(
         observed = {
             source_name: native["outputs"][emitted_name] for source_name, emitted_name in bindings["outputs"].items()
         }
+        deadline.remaining()
         report = CG.compare(expected, observed, policy, golden_source=CG.golden_source(capsule, capsule_dir))
+        deadline.remaining()
         native.pop("console")  # Exact raw bytes remain in oracle_console, bound below.
         record.update(
             status="numeric_match_diagnostic" if report["status"] == "pass" else "numeric_mismatch_diagnostic",
@@ -374,10 +413,13 @@ def execute_component(
             {"record": _digest(path), "stage": invocation_record.verify(path)["stage"]}
             for path in sorted(output.rglob("invocation.json"))
         ]
+        deadline.remaining()
         return record
     except Exception as error:
+        if isinstance(error, TimeoutError):
+            record["status"] = "unavailable"
         record["failure"] = {"type": type(error).__name__, "detail": str(error)}
         raise
     finally:
         record["build_artifacts"] = _build_artifacts(output)
-        _write(output / "result.json", record)
+        _publish_result(output, record, deadline)

@@ -34,3 +34,10 @@ B64 reopen text; selected binary readback reopens raw bytes and checks the
 complete declared value roster before ordinary numerical comparison. A result
 record, console filename or apparent byte format cannot select the transport.
 Decoding full values grants no build, source, dispatch or hardware authority.
+
+The selected native component route spends one explicit wall deadline across
+package build, all ordinary lowering commands, source checks, object/link,
+execution, original output comparison and result publication. Failed attempt
+evidence is retained after expiry; it cannot become a completed result.
+Boundary checks do not preempt arbitrary in-process callbacks or confer any
+semantic, physical or performance authority.

@@ -77,3 +77,7 @@ each peer/store duplicate replacement boundary. Census may reuse its original
 listing; a destructive operation may not. Live fuser checks and injected checkers
 retain their holders interface. A refused late check preserves the original
 name and removes only the operation's temporary staged link.
+
+`execution_deadline` carries one explicit monotonic wall budget across selected
+ordinary stages. Passing a parent never resets it; absent selection changes no
+legacy caller behavior. It owns no correctness, runtime or hardware timer authority.

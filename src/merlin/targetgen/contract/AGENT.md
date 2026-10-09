@@ -91,3 +91,11 @@ pointer renderer may enforce the exact selected call binding. Source provenance,
 actual allocation, lifetime, resource capacity and runtime effects remain
 independent obligations; the optional experiment owner freezes a live selection
 before authoring and exact public projection.
+
+An explicitly selected `ExecutionDeadline` accompanies pure build and functional
+services through ordinary translation, object, harness, link and execution.
+Each subprocess receives the declining remainder and later stages refuse after
+expiry. Completed in-process work is checked at stage boundaries; Python callbacks
+are not preempted. Partial console and interrupted records remain diagnostics,
+never completed values or a timer qualification. Unselected calls retain their
+existing timeout behavior.
