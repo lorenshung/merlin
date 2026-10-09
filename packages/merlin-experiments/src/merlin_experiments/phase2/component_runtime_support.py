@@ -1,0 +1,408 @@
+"""Prepared private controls for explicit independent source/native diagnostics.
+
+The controls originate in generic upstream tensor IR and an independently
+written private primitive compiler. They are never a public scaffold or author
+input. Accelerator instruction effects, physical ownership/synchronization and
+hardware/model equivalence remain UNKNOWN here: those missing mechanisms refuse
+the fixed fourteen-control runtime qualifier rather than issuing authority.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import inspect
+from dataclasses import asdict, dataclass, field
+from dataclasses import replace as dataclass_replace
+from pathlib import Path
+from weakref import WeakKeyDictionary
+
+from merlin.common import invocation_record
+from merlin.targetgen import package_runtime
+from merlin.targetgen.contract import readback_policy as RB
+from merlin.targetgen.contract.build_service import BuildOnlyService
+from merlin.targetgen.contract.execution_service import FunctionalExecutionService
+from merlin.targetgen.native_component_execution import execute_component
+
+from . import component_runtime_controls as controls
+from . import component_runtime_instruction_control as instruction_control
+from .component_runtime_authority import IndependentRuntimeServices
+from .component_runtime_control_execution import PrivateRuntimeControlExecutor
+from .component_runtime_fixture import prepare_source_control
+from .component_runtime_qualification import (
+    CONTROL_CASES,
+    RuntimeControlRefusal,
+    _argument_binding,
+    _fixture_binding,
+)
+from .contracts import StageGateError, document_sha256, exact_tree_record, mapping_file, sha256_file, write_json
+
+_PREPARED = WeakKeyDictionary()
+_SUPPORTED_DIAGNOSTICS = {
+    "source_correspondence",
+    "original_output_roster",
+    "original_numeric_gate",
+}
+
+
+def _plain(path):
+    path = Path(path).absolute()
+    if path.resolve() != path or any(part.is_symlink() for part in (path, *path.parents)):
+        raise StageGateError("independent runtime preparation requires canonical unlinked paths")
+    return path
+
+
+@dataclass(frozen=True, eq=False)
+class PreparedIndependentRuntimeContext:
+    """Concrete source/native diagnostic context; not a runtime issuer.
+
+    Construct with explicit independently selected build and functional transport.
+    Neither constructor bytes nor a selected target name qualify those services.
+    The fixed qualifier executes this owner and refuses missing physical proof.
+    """
+
+    hardware_intake: object
+    target_descriptor: Path
+    contract_root: Path
+    build_service: BuildOnlyService
+    execution_service: FunctionalExecutionService
+    source_pins: tuple[tuple[Path, str], ...]
+    instruction_check: object = None
+    services: IndependentRuntimeServices = field(init=False)
+
+    def __post_init__(self):
+        object.__setattr__(self, "services", IndependentRuntimeServices(self.grade, self.stage_verifier))
+        _PREPARED[self] = {}
+
+    @property
+    def sha256(self):
+        recipe = asdict(self.build_service.recipe)
+        error_class = recipe.pop("error_cls")
+        recipe["error_cls"] = error_class.__module__ + "." + error_class.__qualname__
+        return document_sha256(
+            {
+                "scope": "private source/native controls; physical target runtime remains unqualified",
+                "hardware_intake_sha256": self.hardware_intake.sha256,
+                "target_descriptor_sha256": sha256_file(self.target_descriptor),
+                "contract_sha256": exact_tree_record(self.contract_root)["sha256"],
+                "build_recipe": _argument_binding(recipe),
+                "execution": self.execution_service.verify(self.build_service.target, self.execution_service.simulator),
+                "source_pins": [(str(path), digest) for path, digest in self.source_pins],
+                "instruction_check": self.instruction_check.verify() if self.instruction_check is not None else None,
+            }
+        )
+
+    def verify(self):
+        from merlin_experiments.phase0.rtl_intake import IndependentHardwareIntake
+
+        if type(self.hardware_intake) is not IndependentHardwareIntake or self not in _PREPARED:
+            raise StageGateError("runtime preparation requires live independently produced hardware intake")
+        self.hardware_intake.verify()
+        descriptor = mapping_file(_plain(self.target_descriptor), yaml_file=True)
+        if (
+            type(self.build_service) is not BuildOnlyService
+            or type(self.execution_service) is not FunctionalExecutionService
+            or descriptor.get("target") != self.hardware_intake.target
+            or descriptor["target"] != self.build_service.target
+        ):
+            raise StageGateError("prepared runtime source/build/target selections disagree")
+        _plain(self.contract_root)
+        declared = {
+            "schemas/" + name
+            for name in (
+                "manifest.schema.json",
+                "capsule.schema.json",
+                "command_buffer.schema.json",
+            )
+        }
+        exact_tree_record(self.contract_root)
+        if {
+            path.relative_to(self.contract_root).as_posix() for path in self.contract_root.rglob("*") if path.is_file()
+        } != declared:
+            raise StageGateError("independent runtime contract must contain only the three shared ABI schemas")
+        self.build_service.verify(descriptor["target"])
+        self.execution_service.verify(descriptor["target"], self.execution_service.simulator)
+        required = {
+            Path(inspect.getsourcefile(value)).resolve()
+            for value in (
+                PreparedIndependentRuntimeContext,
+                controls.parse_primitive,
+                execute_component,
+                PrivateRuntimeControlExecutor,
+                prepare_source_control,
+            )
+        }
+        required.update(
+            Path(path) for path, _ in (*self.build_service.source_pins, *self.execution_service.source_pins)
+        )
+        if self.instruction_check is not None:
+            from .component_instruction_audit import IndependentLinkedInstructionCheck
+
+            if (
+                type(self.instruction_check) is not IndependentLinkedInstructionCheck
+                or self.instruction_check.policy.command_intake.hardware is not self.hardware_intake
+            ):
+                raise StageGateError("instruction audit and runtime hardware source origins disagree")
+            self.instruction_check.verify()
+            required.update(path for path, _ in self.instruction_check.source_pins)
+            required.add(Path(instruction_control.__file__))
+        required.add(self.target_descriptor)
+        required.update(path for path in self.contract_root.rglob("*") if path.is_file())
+        if (
+            not isinstance(self.source_pins, tuple)
+            or len(self.source_pins) != len(dict(self.source_pins))
+            or not required <= set(dict(self.source_pins))
+        ):
+            raise StageGateError("prepared runtime omits actual control, build or execution source membership")
+        for path, digest in self.source_pins:
+            if not _plain(path).is_file() or sha256_file(path) != digest:
+                raise StageGateError("prepared independent runtime source/tool changed")
+        return self.sha256
+
+    def prepare_control(self, name, workspace):
+        self.verify()
+        if name not in CONTROL_CASES:
+            raise StageGateError("unknown independent runtime control")
+        mechanism, _, direction = name.partition(".")
+        if mechanism not in _SUPPORTED_DIAGNOSTICS and not (
+            mechanism == "instruction_audit" and self.instruction_check is not None
+        ):
+            raise StageGateError("independent physical/accelerator control remains UNKNOWN: " + mechanism)
+        root = _plain(workspace)
+        fixture = prepare_source_control(
+            name=name,
+            root=root,
+            build_service=self.build_service,
+            contract_root=self.contract_root,
+            target_descriptor=self.target_descriptor,
+        )
+        candidate, capsule = fixture.grade_arguments["package_dir"], fixture.capsule_root
+        mutation = None
+        if name == "instruction_audit.negative":
+            mutation = instruction_control.prepare_mutation(root=root, check=self.instruction_check)
+        if mechanism == "instruction_audit":
+            fixture = dataclass_replace(
+                fixture,
+                required_invocation_stages=(
+                    *fixture.required_invocation_stages,
+                    "component_native_execution",
+                    "whole_linked_instruction_policy",
+                    "native_accessor_decode",
+                ),
+            )
+        _PREPARED[self][root] = (
+            fixture,
+            exact_tree_record(candidate),
+            exact_tree_record(capsule),
+            sha256_file(root / "original_policy.json"),
+            document_sha256(_fixture_binding(fixture)),
+            mutation,
+        )
+        self.verify_control(fixture)
+        return fixture
+
+    def verify_control(self, fixture):
+        self.verify()
+        stored = _PREPARED[self].get(fixture.evidence_root)
+        if stored is None or stored[0] is not fixture:
+            raise StageGateError("runtime fixture was not actually prepared by this private context")
+        candidate = fixture.grade_arguments["package_dir"]
+        if (
+            exact_tree_record(candidate) != stored[1]
+            or exact_tree_record(fixture.capsule_root) != stored[2]
+            or sha256_file(fixture.evidence_root / "original_policy.json") != stored[3]
+            or document_sha256(_fixture_binding(fixture)) != stored[4]
+            or (
+                instruction_control.mutation_identity(fixture.evidence_root, self.instruction_check)
+                if fixture.case_id == "instruction_audit.negative"
+                else None
+            )
+            != stored[5]
+        ):
+            raise StageGateError("private runtime control source, original gate or compiler products changed")
+        return fixture.case_id
+
+    def _fixture_for(self, capsule):
+        matches = [row[0] for row in _PREPARED[self].values() if row[0].capsule_root == capsule]
+        return matches[0] if len(matches) == 1 else None
+
+    def _evaluate_source(self, source, lowered, fixture):
+        """Return an evaluated rejection as data before the normal gate raises."""
+        try:
+            proof = controls.verify_primitive_llvm(
+                source.read_text(),
+                lowered.read_text(),
+                entry_symbol=self.build_service.recipe.require_kernel_stack_frame().entry_symbol,
+            )
+            capsule = mapping_file(source.parent / "capsule.yaml", yaml_file=True)
+            if fixture is not None and capsule["numeric_policy"] != mapping_file(
+                fixture.evidence_root / "original_policy.json"
+            ):
+                raise ValueError("original numeric policy was weakened")
+            return {"status": "accepted", "proof": proof}
+        except ValueError as error:
+            return {"status": "refused", "actual_reason": str(error)}
+
+    def _source_verifier(self, *, source, command_buffer, lowered_mlir, **kwargs):
+        source, lowered = _plain(source), _plain(lowered_mlir)
+        fixture = self._fixture_for(source.parent)
+        owner, proof_path = lowered.parent, lowered.parent / "source_correspondence.json"
+        inputs = (source, lowered, source.parent / "capsule.yaml")
+        if fixture is not None:
+            inputs += (fixture.evidence_root / "original_policy.json",)
+        with invocation_record.observe_call(
+            owner,
+            stage="primitive_source_verification",
+            function=self._evaluate_source,
+            arguments={"entry_symbol": self.build_service.recipe.require_kernel_stack_frame().entry_symbol},
+            inputs=inputs,
+            outputs=(proof_path,),
+            dependencies=(Path(controls.__file__),),
+        ) as observation:
+            evaluated = self._evaluate_source(source, lowered, fixture)
+            write_json(proof_path, evaluated)
+            observation.returned()
+        if evaluated["status"] == "accepted":
+            return evaluated["proof"]
+        reason = evaluated["actual_reason"]
+        mechanism = fixture.case_id.partition(".")[0] if fixture is not None else None
+        reasons = {
+            "source_correspondence": "private primitive LLVM does not preserve every original output expression",
+            "original_numeric_gate": "original numeric policy was weakened",
+        }
+        if (
+            fixture is not None
+            and fixture.case_id.endswith(".negative")
+            and mechanism in reasons
+            and reason.startswith(reasons[mechanism])
+        ):
+            raise RuntimeControlRefusal(
+                case_id=fixture.case_id, mechanism=mechanism, evidence_files=((proof_path, sha256_file(proof_path)),)
+            )
+        raise StageGateError("independent source gate refused: " + reason)
+
+    def grade(
+        self,
+        package_dir,
+        *,
+        capsules_root,
+        runs_root,
+        contract,
+        target,
+        timeout,
+        max_workers=1,
+        labels=None,
+        model_snapshot_root=None,
+    ):
+        """Execute the shared ordinary source/build/original-full-numeric diagnostic."""
+        self.verify()
+        if (
+            max_workers != 1
+            or type(timeout) is not int
+            or not 0 < timeout <= 600
+            or Path(contract) != self.contract_root
+            or target != self.build_service.target
+        ):
+            raise StageGateError("independent diagnostic grade changes its bounded source/runtime selection")
+        root, package = _plain(runs_root), _plain(package_dir)
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        rows = []
+        for capsule in capsules_root:
+            capsule = _plain(capsule)
+            fixture = self._fixture_for(capsule)
+            if fixture is not None:
+                self.verify_control(fixture)
+            active = package_runtime.active_package_executor()
+            if active is None and (fixture is None or package != fixture.grade_arguments["package_dir"]):
+                raise StageGateError("authored compiler diagnostics require the ordinary isolated package executor")
+            declaration = mapping_file(capsule / "capsule.yaml", yaml_file=True)
+            output = root / declaration["name"]
+            context = (
+                package_runtime.scoped_package_executor(
+                    PrivateRuntimeControlExecutor(
+                        package,
+                        root,
+                        exact_tree_record(package)["sha256"],
+                    )
+                )
+                if active is None
+                else contextlib.nullcontext()
+            )
+            try:
+                with context:
+                    result = execute_component(
+                        package_dir=package,
+                        capsule_dir=capsule,
+                        contract_root=self.contract_root,
+                        target=target,
+                        out_dir=output,
+                        build_service=instruction_control.scoped_build_service(
+                            build=self.build_service,
+                            fixture=fixture,
+                            check=self.instruction_check,
+                        ),
+                        execution_service=self.execution_service,
+                        source_verifier=self._source_verifier,
+                        readback_policy=RB.ReadbackPolicy(RB.FULL_VALUES_B64),
+                        timeout_s=timeout,
+                        elf_admission=(
+                            self.instruction_check.admission_service() if self.instruction_check is not None else None
+                        ),
+                    )
+            except Exception as error:
+                # An output-roster defect is rejected before source validation,
+                # so re-open its actual emitted buffer to attribute that failure.
+                from merlin.targetgen.native_component_execution import (
+                    NativeComponentAdmissionRefusal,
+                    NativeComponentExecutionError,
+                )
+
+                if (
+                    fixture is not None
+                    and fixture.case_id == "instruction_audit.negative"
+                    and type(error) is NativeComponentAdmissionRefusal
+                ):
+                    instruction_control.attribute_refusal(
+                        fixture=fixture, check=self.instruction_check, result=error.result
+                    )
+
+                if (
+                    fixture is not None
+                    and fixture.case_id == "original_output_roster.negative"
+                    and type(error) is NativeComponentExecutionError
+                    and str(error) == "independent native ABI does not cover every input/output"
+                ):
+                    buffer_path = output / "generated" / "command_buffer.json"
+                    if buffer_path.is_file():
+                        actual = mapping_file(buffer_path)
+                        if len((actual.get("kernel_abi") or {}).get("outputs", [])) != len(
+                            fixture.member["output_roster"]
+                        ):
+                            raise RuntimeControlRefusal(
+                                case_id=fixture.case_id,
+                                mechanism="original_output_roster",
+                                evidence_files=((buffer_path, sha256_file(buffer_path)),),
+                            ) from error
+                raise
+            row = {
+                "capsule": declaration["name"],
+                "status": "pass" if result["numeric_report"]["status"] == "pass" else "fail",
+                "numeric": result["numeric_report"]["status"],
+                "scope": "ordinary source/build/full-output diagnostic; physical runtime unqualified",
+            }
+            write_json(output / "capsule_result.json", row)
+            rows.append(row)
+        self.verify()
+        return {
+            "integrity_status": "clean",
+            "per_capsule": rows,
+            "scope": "original full-output numerical diagnostics only; no runtime qualification",
+        }
+
+    def stage_verifier(self, *, result_path, **kwargs):
+        self.verify()
+        result = mapping_file(_plain(result_path))
+        if result.get("status") != "pass" or result.get("numeric") != "pass":
+            raise StageGateError("source/native diagnostic did not pass its original numerical gate")
+        raise StageGateError(
+            "independent accelerator ISA/effects/ownership/synchronization/hardware-runtime proofs remain UNKNOWN"
+        )
