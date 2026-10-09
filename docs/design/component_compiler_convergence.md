@@ -9,6 +9,9 @@ code_refs:
   - packages/merlin-experiments/src/merlin_experiments/phase0/component_automatic.py
   - packages/merlin-experiments/src/merlin_experiments/phase0/component_automatic_plan.py
   - src/merlin/targetgen/frontend_use_def.py
+  - src/merlin/targetgen/frontend_operator_effects.py
+  - src/merlin/targetgen/torch_schema_observer.py
+  - packages/merlin-experiments/src/merlin_experiments/phase0/operator_schema_intake.py
   - src/merlin/targetgen/compiler_library.py
   - src/merlin/targetgen/package_runtime.py
   - packages/merlin-experiments/src/merlin_experiments/phase2/component_experiment.py
@@ -118,6 +121,17 @@ The resulting plan remains incomplete while any required row is unavailable.
 The protected report rederives the roster from exact selected original sources;
 re-signed metadata cannot remove required unknowns or replace the fixed generic
 semantic factories. Relocated automatic source replay is not qualified yet.
+
+Automatic policy v2 additionally binds a live public operator-schema intake to
+the same independent software origin. The fixed native observer joins captured,
+registered and clean tracked source schemas. Exact original argument/result
+bindings derive possible direct-tensor alias and write classes. A uniquely
+supported may-alias movement selects bounded logical view/copy cases with all
+input, view and copy outputs checked. Operator names do not supply effects.
+Container, wildcard and changing aliases, actual physical alias/ownership,
+non-schema effects, whole-effect completeness and hardware axis/resource roles
+remain mandatory gaps. Schema equality does not prove the installed framework's
+historical build correspondence. Policy v1 keeps its previous unknowns.
 
 Keep the selected software spec minimal: semantic and numerical behavior plus
 operation support that the selected RTL cannot determine. Extract hardware

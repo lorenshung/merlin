@@ -3,7 +3,7 @@ title: Independent component feedback authority
 kind: design
 status: current
 owner: experiments
-last_verified: 2026-10-08
+last_verified: 2026-10-09
 related: [component_phase2_workflow, component_final_evaluation]
 code_refs:
   - packages/merlin-experiments/src/merlin_experiments/phase2/component_baseline.py
@@ -20,6 +20,7 @@ code_refs:
   - packages/merlin-experiments/src/merlin_experiments/phase2/component_observer.py
   - packages/merlin-experiments/src/merlin_experiments/phase2/rtl_engine_protocol.py
   - packages/merlin-experiments/src/merlin_experiments/phase2/rtl_engine_probe.py
+  - packages/merlin-experiments/src/merlin_experiments/phase2/rtl_state_control.py
 ---
 
 # Independent component feedback authority
@@ -136,6 +137,15 @@ closure. Codex and the private authentication source retain that closure's origi
 selection. Readiness probes use only admitted tool destinations and are actually
 executed by launch qualification; a declared expected output is not a passed probe.
 
+`inventory_runtime` accepts optional explicit dependency prefix relocations for
+trusted tools whose loader paths belong to a selected SDK. The prefixes define
+coordinates, not tree grants: only individual dependencies actually reported by
+the selected executable are inventoried. The inventory preserves needed aliases
+and layout, rejects escaping or overlapping mappings and destination collisions,
+and pins every file before grants are constructed. A system destination does not
+establish source independence or complete loader closure; actual tool execution
+and separate admission remain required.
+
 The analytical declaration contains only `calibration_adapter`, `qualification`,
 `objective`, `max_workers`, `memory_per_worker_bytes`, `engine_slots`, `output` and
 `lease_path`. Calibration and the selected cold or warm held screen must match the
@@ -204,6 +214,21 @@ performance role was issued, and the actual private numeric controls remain wait
 for a compatible independently qualified runtime route.
 
 ## Source-pinned engine readiness
+
+`rtl_state_control` renders a bounded private transport driver from an actual
+native-produced scalar I/O layout and a complete original stimulus roster. The
+selected compiled engine implements state, memories and clocks. The driver only
+writes declared input bytes, calls the explicitly named evaluation function and
+reads every declared output. It does not infer clocks, reset sequences, cycle
+counts, boot/loading protocols or target semantics. Unsupported native layouts
+refuse, including lifecycle interfaces beyond the current scalar format.
+
+Small original memory/clock controls exercise read latencies, write enables and
+masks, independent clock edges, reset and complete readbacks through selected
+stock tools. A selected-version register-vector conversion is rejected when it
+changes the original no-edge readback. These controls qualify their observed
+transport behavior only; whole-target preparation, physical correspondence,
+program loading, ABI and timer authority remain separate requirements.
 
 The experiment now has a generic private RTL control executor. An operator selects
 explicit support sources, tools and producer records with
