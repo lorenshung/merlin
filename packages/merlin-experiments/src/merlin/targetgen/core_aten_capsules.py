@@ -18,7 +18,7 @@ from pathlib import Path
 import yaml
 
 from merlin.targetgen.capsule_common import load_capsule
-from merlin.targetgen.core_aten_batch import build_core_aten_batch
+from merlin.targetgen.core_aten_batch import build_core_aten_batch, caller_boundary_layouts
 from merlin.targetgen.core_aten_batch_grade import grade_core_aten_batch
 from merlin.targetgen.core_aten_capture import case_capture_name
 from merlin.targetgen.core_aten_cover import _provenance_ops
@@ -246,7 +246,12 @@ def runtime_bundle(capsule: dict, destination: Path) -> dict:
     shutil.copyfile(root / "capsule.interface.mlir", destination / "model.mlir")
     for filename in ("inputs.npz", "input_order.json", "weights.safetensors.manifest.json"):
         shutil.copyfile(root / filename, destination / filename)
-    _json(destination / "semantic_io.json", golden["semantic_io"])
+    # Reconstruct caller layouts also for previously sealed normalized captures.
+    # The sealed records remain immutable; only runtime boundary metadata changes.
+    semantic_io = caller_boundary_layouts(
+        (destination / "model.mlir").read_text(), golden["semantic_io"], golden["batch_map"]["cases"]
+    )
+    _json(destination / "semantic_io.json", semantic_io)
     return golden["batch_map"]
 
 

@@ -7,6 +7,7 @@ without such a module remain explicit unavailable records in the result map.
 
 from __future__ import annotations
 
+import copy
 import io
 import json
 import zipfile
@@ -133,6 +134,36 @@ def _function_parts(source: str) -> tuple[list[str], str, list[str], list[str], 
         module_start = source.index("{", _matching_brace(source, module_start) + 1)
     declarations = source[module_start + 1 : source.index(mark)] + source[body_end + 1 : source.rfind("}")]
     return names, body[:return_at], values, types, declarations
+
+
+def caller_boundary_layouts(source: str, semantic_io: dict, records: list[dict]) -> dict:
+    """Restore caller layouts for post results that directly forward input SSA values.
+
+    Exported placeholder metadata can describe normalized compiler tensors. A direct
+    input return preserves the caller's logical layout, independently of that packed
+    tensor ABI. Mutation results retain their same-conversion exported metadata.
+    Only source argument metadata is used here, never expected post-call observations.
+    """
+    names, _, returned, _, _ = _function_parts(source)
+    boundary = copy.deepcopy(semantic_io)
+    for record in records:
+        arguments = _tensor_documents(record["case"]["arguments"])
+        inputs = record["input_indices"]
+        posts = record["semantic_boundary"]["post_indices"]
+        if len(arguments) != len(inputs) or len(inputs) != len(posts):
+            raise ValueError("caller tensor count differs from semantic boundary")
+        for document, input_index, post_index in zip(arguments, inputs, posts):
+            entry = boundary["outputs"][post_index]
+            if entry.get("role") == "user_input_mutation":
+                continue
+            if returned[post_index] != names[input_index]:
+                continue
+            for key in ("dtype", "shape"):
+                if entry[key] != document[key]:
+                    raise ValueError("pass-through caller type differs from exported boundary")
+            for key in ("stride", "storage_offset", "requires_grad"):
+                entry[key] = copy.deepcopy(document[key])
+    return boundary
 
 
 def _rename_ssa(source: str, prefix: str, argument_names: dict[str, str]) -> str:
@@ -418,11 +449,15 @@ def build_core_aten_batch(
     if semantic_outputs and all(item is not None for item in semantic_outputs):
         semantic_path.write_bytes(
             _json_bytes(
-                dict(
-                    schema_version=1,
-                    outputs=semantic_outputs,
-                    input_indices=semantic_inputs,
-                    post_indices=semantic_posts,
+                caller_boundary_layouts(
+                    (bundle_root / "model.mlir").read_text(),
+                    dict(
+                        schema_version=1,
+                        outputs=semantic_outputs,
+                        input_indices=semantic_inputs,
+                        post_indices=semantic_posts,
+                    ),
+                    [record for record in records if record["status"] == "bundled"],
                 )
             )
         )

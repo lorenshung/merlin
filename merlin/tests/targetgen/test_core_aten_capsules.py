@@ -293,3 +293,84 @@ def test_execution_refusal_preserves_tier_reason_and_compile_category(packaged, 
     assert result["tiers"]["L2"]["reason"] == reason
     assert reason_for("L2", result["tiers"]["L2"]) == reason
     assert json.loads((tmp_path / "grade" / "capsule_result.json").read_text())["tiers"]["L2"]["reason"] == reason
+
+
+def test_packaging_and_sealed_runtime_preserve_transposed_caller(tmp_path):
+    values = np.arange(6, dtype=np.float32).reshape(2, 3).T
+    tensor = dict(
+        kind="tensor",
+        dtype="float32",
+        shape=[3, 2],
+        stride=[1, 3],
+        storage_offset=0,
+        requires_grad=False,
+        values=values.tolist(),
+    )
+    arguments = dict(args=dict(kind="tuple", items=[tensor]), kwargs={})
+    expected = {**tensor, "stride": [2, 1], "values": (-values).tolist()}
+    case = dict(
+        overload="aten.neg.default",
+        arguments=arguments,
+        post_arguments=copy.deepcopy(arguments),
+        expected=expected,
+        comparison="torch_close",
+        comparison_parameters={"rtol": 0, "atol": 0},
+        mutated_arguments=[],
+        output_input_aliases=[],
+    )
+    source = tmp_path / "captures" / case_capture_name(case)
+    source.mkdir(parents=True)
+    meta = {key: value for key, value in expected.items() if key not in {"kind", "values"}}
+    capture = dict(
+        overload=case["overload"],
+        status="captured_exact",
+        capture_meta=dict(
+            ok=True,
+            opaque=0,
+            input_abi=[dict(dtype="f32", shape=[3, 2])],
+            output_abi=[dict(dtype="f32", shape=[3, 2])],
+            result_contract=dict(
+                authority="same_conversion_exported_program",
+                inputs=[meta],
+                results=[dict(meta, role="user_output", alias_inputs=[])],
+            ),
+        ),
+    )
+    (source / "capture.json").write_text(json.dumps(capture))
+    (source / "inputs.json").write_text(json.dumps([values.tolist()]))
+    (source / "golden.json").write_text(json.dumps(expected["values"]))
+    (source / "capsule.pytorch.py").write_text("# loader fixture\n")
+    (source / "capsule.linalg.mlir").write_text("""builtin.module {
+      func.func @forward(%x: tensor<3x2xf32>) -> tensor<3x2xf32> {
+        %out = tensor.empty() : tensor<3x2xf32>
+        %y = linalg.generic {indexing_maps = [affine_map<(d0,d1)->(d0,d1)>,
+          affine_map<(d0,d1)->(d0,d1)>], iterator_types = ["parallel", "parallel"],
+          prov.aten = "aten.neg.default"}
+          ins(%x : tensor<3x2xf32>) outs(%out : tensor<3x2xf32>) {
+          ^bb0(%a: f32, %b: f32):
+            %n = arith.negf %a : f32
+            linalg.yield %n : f32
+          } -> tensor<3x2xf32>
+        func.return %y : tensor<3x2xf32>
+      }
+    }""")
+    public, private = tmp_path / "public", tmp_path / "_private" / "public"
+    manifest = C.write_capsules({"cases": [case]}, source.parent, public, private)
+    capsule = capsule_common.load_capsule(public / manifest["capsules"][0]["id"])
+    golden = C.load_private(capsule)
+    assert golden["semantic_io"]["outputs"][1]["stride"] == [1, 3]
+    # Simulate an older sealed contract without editing its files or commitments.
+    legacy = copy.deepcopy(golden)
+    legacy["semantic_io"]["outputs"][1]["stride"] = [2, 1]
+    from unittest.mock import patch
+
+    with patch.object(C, "load_private", return_value=legacy):
+        C.runtime_bundle(capsule, tmp_path / "runtime")
+    boundary = json.loads((tmp_path / "runtime" / "semantic_io.json").read_text())
+    assert boundary["outputs"][1]["stride"] == [1, 3]
+    raw = [(-values).tobytes(), values.tobytes()]
+    readback = dict(metadata=boundary["outputs"], aliases=[[], [1]], pre_bytes={"0": raw[1].hex()})
+    verdict = C.grade_readback(capsule, raw, semantic_readback=readback, provenance={"scope": "test"})
+    assert verdict["passed_count"] == 1
+    assert next(iter(verdict["cases"].values()))["semantic_scope"] == "full"
+    assert legacy["semantic_io"]["outputs"][1]["stride"] == [2, 1]
