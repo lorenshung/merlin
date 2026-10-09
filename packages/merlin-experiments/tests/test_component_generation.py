@@ -103,7 +103,7 @@ def independent(tmp_path, monkeypatch):
             "accumulator_dtype": "i32",
             "readout_dtype": "i32",
             "subnormal_operand_flush": False,
-            "overflow": "wrap_internal_mac",
+            "overflow": "modular_wrap",
         },
         "operations": {
             "movement": {"placement": "accelerator", "dtypes": ["int8"], "layouts": ["row_major_contiguous"]},
@@ -187,7 +187,12 @@ def independent(tmp_path, monkeypatch):
     baseline.mkdir(parents=True)
     descriptor = write(
         tmp_path / "target.yaml",
-        {"target": "fixture", "backend_package_dir": str(provider), "capsule_corpus": str(baseline)},
+        {
+            "target": "fixture",
+            "backend_package_dir": str(provider),
+            "capsule_corpus": str(baseline),
+            "contracts_root": str(Path(__file__).resolve().parents[3] / "merlin/contract"),
+        },
     )
     return {
         "descriptor": descriptor,

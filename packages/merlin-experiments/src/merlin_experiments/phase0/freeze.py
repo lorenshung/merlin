@@ -53,9 +53,14 @@ def selection(command: dict, target: str):
 
 
 def selected_inputs(command: dict, target: str) -> tuple[dict[str, str], dict]:
+    from .component_semantic_basis import ComponentSemanticBasis
+
     observed = selection(command, target)
     paths = {f"phase0:evidence:{i:04d}": str(path) for i, path in enumerate(observed.source_paths)}
     paths.update({f"phase0:materialized:{i:04d}": str(path) for i, path in enumerate(_materialized_inputs(command))})
+    basis = ComponentSemanticBasis.from_recipe(command.get("inputs", {}).get("recipe"))
+    if basis is not None:
+        paths.update({f"phase0:semantic_basis:{i:04d}": source["path"] for i, source in enumerate(basis.sources())})
     return paths, {
         "status": observed.status,
         "raw_facts_sha256": observed.raw_facts_sha256,
@@ -144,6 +149,13 @@ def stage(plan: dict) -> dict:
         raise ValueError("explicit software selection lacks planned Phase 0 evidence")
     target, run_root = frozen["target"], Path(frozen["run_dir"])
     evidence = selection(command, target)
+    from .component_semantic_basis import ComponentSemanticBasis
+
+    basis = ComponentSemanticBasis.from_recipe(command["inputs"].get("recipe"))
+    basis_sources = basis.sources() if basis is not None else []
+    basis_pins = [pin for name, pin in frozen["inputs"].items() if name.startswith("phase0:semantic_basis:")]
+    if basis_pins != [{"path": row["path"], "sha256": row["sha256"]} for row in basis_sources]:
+        raise ValueError("selected semantic basis membership or bytes changed before freezing")
     selected_digest = command["phase0_evidence"].get("views_sha256")
     if selected_digest is not None and selected_digest != hashlib.sha256(evidence.views_json).hexdigest():
         raise ValueError("Phase 0 resolved evidence changed before staging; create a new experiment plan")
@@ -238,6 +250,15 @@ def stage(plan: dict) -> dict:
     for name, source in zip(expected, manifest["sources"], strict=True):
         frozen["input_paths"][name] = str(artifact_root / source["path"])
     path_map = {value: frozen["input_paths"][name] for name, value in original_paths.items()}
+    if basis is not None:
+        recipe_path = str(Path(command["inputs"]["recipe"]).resolve())
+        recipe_pin = {"path": recipe_path, "sha256": fingerprint(recipe_path)}
+        for source in [*basis_sources, recipe_pin]:
+            captured = path_map[source["path"]]
+            if fingerprint(captured) != source["sha256"]:
+                raise ValueError("selected semantic basis bytes changed during source staging")
+            captured_paths[source["path"]] = captured
+        frozen["phase0_semantic_basis"] = {**basis.record(), "recipe": recipe_pin}
     command["argv"] = [path_map.get(arg, arg) for arg in command["argv"]]
     command["inputs"] = {name: path_map.get(value, value) for name, value in command["inputs"].items()}
     # Absent sidecars remain absent frozen selections, never live-path probes.
@@ -349,12 +370,27 @@ def _verify_frozen_sources(plan: dict) -> dict:
     paths = plan["phase0_frozen_source_paths"]
     if command["env"].get("MERLIN_PHASE0_FROZEN_SOURCE_MAP") != json.dumps(paths, sort_keys=True):
         raise ValueError("frozen Phase 0 semantic source routing changed")
-    if set(paths) != {str(source.path) for source in evidence.source_snapshots}:
+    basis_receipt = plan.get("phase0_semantic_basis")
+    basis_sources = [*basis_receipt["selected_sources"], basis_receipt["recipe"]] if basis_receipt is not None else []
+    if set(paths) != {str(source.path) for source in evidence.source_snapshots} | {
+        row["path"] for row in basis_sources
+    }:
         raise ValueError("frozen Phase 0 semantic source membership changed")
     for source in evidence.source_snapshots:
         path = Path(paths[str(source.path)])
         if not path.is_relative_to(snapshot) or path.read_bytes() != source.content:
             raise ValueError("frozen Phase 0 semantic source bytes changed")
+    if basis_receipt is not None:
+        from .component_semantic_basis import ComponentSemanticBasis
+
+        for source in basis_sources:
+            path = Path(paths[source["path"]])
+            if not path.is_relative_to(snapshot) or fingerprint(path) != source["sha256"]:
+                raise ValueError("frozen Phase 0 semantic basis source bytes changed")
+        basis = ComponentSemanticBasis.from_recipe(command["inputs"]["recipe"], routing=paths)
+        expected = {key: basis_receipt[key] for key in ("schema", "sha256", "semantics")}
+        if basis is None or basis.reviewed_semantics() != expected:
+            raise ValueError("frozen Phase 0 reviewed semantic basis changed")
     for key, value in plan["phase0_numerical_environment"].items():
         if command["env"].get(key) != value:
             raise ValueError("frozen Phase 0 numerical model routing changed")

@@ -348,6 +348,9 @@ def generate_target(
     hidden_profile: str | Path | None = None,
     prohibited_instruction_roles: list[str] | None = None,
     component_only: bool = False,
+    component_coverage: str | Path | None = None,
+    hardware_intake=None,
+    software_intake=None,
 ) -> list[Path]:
     from merlin.common.paths import checkout_root
 
@@ -355,6 +358,18 @@ def generate_target(
         raise ValueError("Phase 0 requires an explicit output_root; generated capsules must not default to source data")
     if type(component_only) is not bool:
         raise TypeError("component_only must be an explicit Boolean")
+    if component_coverage is not None and not component_only:
+        raise ValueError("component_coverage requires the explicit independent component_only mode")
+    if hardware_intake is not None and not component_only:
+        raise ValueError("independent hardware authority requires component_only generation")
+    if software_intake is not None and (not component_only or hardware_intake is None):
+        raise ValueError("independent minimal software requires component_only and independently issued hardware")
+    if software_intake is not None:
+        from .software_intake import IndependentSoftwareIntake
+
+        if type(software_intake) is not IndependentSoftwareIntake or software_intake.hardware is not hardware_intake:
+            raise ValueError("component hardware and minimal software must share exact independently issued inputs")
+        software_intake.verify()
     if component_only:
         from .component_generation import require_inputs
 
@@ -456,6 +471,8 @@ def generate_target(
                 hardware_spec=hardware_spec,
                 conformance_spec=conformance_spec,
                 prohibited_roles=tuple(prohibited_instruction_roles or ()),
+                hardware_intake=hardware_intake,
+                software_intake=software_intake,
             )
         if evidence_mode != "diagnostic" and evidence.status != "verified":
             raise ValueError(
@@ -536,11 +553,50 @@ def generate_target(
     entries = [_with_candidate_policy(e, instruction_policy) for e in entries]
     entries = [_with_reference_gate(e, te, descriptor) for e in entries]
     component_identity = None
+    component_plan = None
+    component_coverage_report = None
+    execution_budget = None
+    execution_admission = None
+    preallocation_denials = {}
+    semantic_basis = None
     if component_only:
         from .component_generation import bind_entries
+        from .component_semantic_basis import ComponentSemanticBasis
 
+        semantic_basis = ComponentSemanticBasis.from_recipe(recipe)
+
+        if component_coverage is not None:
+            from .component_coverage_inputs import expand
+            from .component_coverage_plan import ComponentCoveragePlan
+
+            component_plan = ComponentCoveragePlan.load(
+                component_coverage, evidence=evidence, semantic_basis=semantic_basis
+            )
+            execution_budget = component_plan.to_dict().get("execution_budget")
+            coverage_entries, component_coverage_report = expand(component_plan, binding=binding, evidence=evidence)
+            coverage_entries = [_with_candidate_policy(e, instruction_policy) for e in coverage_entries]
+            coverage_entries = [_with_reference_gate(e, te, descriptor) for e in coverage_entries]
+            entries.extend(coverage_entries)
+        if execution_budget is not None:
+            from .component_execution_budget import admit
+
+            execution_admission = admit(entries, binding=binding, policy=execution_budget)
+            component_coverage_report["execution_admission"] = execution_admission
+            preallocation_denials = {
+                row["name"]: row["reason"] for row in execution_admission["decisions"] if row["state"] != "admitted"
+            }
         entries, component_identity = bind_entries(
-            entries, evidence=evidence, profile=profile, recipe=recipe, performance_template=performance_template
+            entries,
+            evidence=evidence,
+            profile=profile,
+            recipe=recipe,
+            performance_template=performance_template,
+            coverage_plan_sha256=component_plan.source_sha256 if component_plan is not None else None,
+            execution_budget=execution_budget,
+            execution_admission=execution_admission,
+            semantic_basis=semantic_basis,
+            hardware_intake=hardware_intake,
+            software_intake=software_intake,
         )
     semantics = (profile.get("datapath") or {}).get("numerical_semantics")
     if semantics is not None:
@@ -555,9 +611,20 @@ def generate_target(
                 json.dumps(sorted(model_sources), separators=(",", ":")).encode()
             ).hexdigest()
         entries = [{**entry, "numerical_semantics": copy.deepcopy(semantics)} for entry in entries]
+    from .component_integer_bounds import preflight_entry
+
+    for entry in entries:
+        if entry.get("op") == "component_program" and entry["name"] not in preallocation_denials:
+            try:
+                preflight_entry(entry, binding=binding)
+            except ValueError as exc:
+                preallocation_denials[entry["name"]] = str(exc)
     if evidence is not None and evidence.software_spec:
         screened = []
         for entry in entries:
+            if entry["name"] in preallocation_denials:
+                screened.append(entry)
+                continue
             decision = _screen_selected_entry(
                 evidence.software_spec,
                 entry,
@@ -568,12 +635,24 @@ def generate_target(
         entries = screened
     from .sealed_generation import bind_source
 
-    selected_capture = bind_source(entries, verified=evidence is not None and evidence_mode != "diagnostic")
+    capture_selection_failure = None
+    try:
+        selected_capture = bind_source(
+            [entry for entry in entries if entry["name"] not in preallocation_denials],
+            verified=component_plan is not None or (evidence is not None and evidence_mode != "diagnostic"),
+        )
+    except (ValueError, RuntimeError) as exc:
+        if component_plan is None:
+            raise
+        selected_capture = None
+        capture_selection_failure = str(exc)
     writer_options = {"capture": selected_capture} if selected_capture is not None else {}
     if component_only:
         writer_options["component_only"] = True
     entries = [
-        _prepare_model_capture_entry(
+        entry
+        if entry["name"] in preallocation_denials
+        else _prepare_model_capture_entry(
             entry,
             evidence_root=artifact_root if evidence is not None else None,
             target=hardware_target,
@@ -634,6 +713,10 @@ def generate_target(
     for e in entries:
         family = (e.get("performance") or {}).get("family")
         try:
+            if e["name"] in preallocation_denials:
+                raise ValueError(preallocation_denials[e["name"]])
+            if capture_selection_failure is not None and (e.get("source") == "pytorch" or e.get("pytorch_ref")):
+                raise ValueError("independent frontend obligation unavailable: " + capture_selection_failure)
             if evidence is not None and e.get("micro_model"):
                 captures = _frozen_application_captures(artifact_root, evidence_manifest)
                 declared = set((evidence.application_inventory or {}).get("applications") or {})
@@ -753,7 +836,11 @@ def generate_target(
                         host_capabilities=evidence.host_capabilities,
                     )
                 admission.append({"capsule": e.get("name"), "observation": "emitted_capsule", **observed})
-                if observed["status"] == "unsupported" and Path(w).parent.name != "_diagnostic":
+                if (
+                    observed["status"] == "unsupported"
+                    and Path(w).parent.name != "_diagnostic"
+                    and (e.get("component_coverage") or {}).get("cohort") != "withheld_transfer"
+                ):
                     diagnostic = out_root / "_diagnostic" / Path(w).name
                     diagnostic.parent.mkdir(parents=True, exist_ok=True)
                     if diagnostic.exists():
@@ -924,6 +1011,23 @@ def generate_target(
                 f"{disjointness['overlapping_hidden_capsules']} hidden capsule(s) repeat a public program",
             )
         )
+    if component_coverage_report is not None:
+        from .component_coverage import finalize, public_summary, write_report
+
+        component_coverage_report = finalize(
+            component_coverage_report,
+            root=out_root,
+            written=written,
+            failures=failures,
+            generation_identity=component_identity,
+            semantic_basis=semantic_basis,
+        )
+        write_report(out_root, component_coverage_report)
+        performance_record["component_coverage"] = public_summary(component_coverage_report)
+        if component_coverage_report["status"] != "complete":
+            failures.append(
+                ("component coverage", "mandatory independent obligations unavailable; inspect private coverage report")
+            )
     superseded = _prune_superseded_synth(entries, written, target=target)
     if superseded:
         print(
@@ -984,15 +1088,20 @@ def generate_target(
                 "n_capsules": report["cohort"]["n_capsules"],
             }
         if component_only:
-            guard_link = {
-                "schema": "merlin.phase0.component_guard_obligation.v1",
-                "status": "not_established",
-                "guards": [],
-                "reason": (
-                    "independent component generation supplies no application conformance or Phase 1 certification"
-                ),
-                "qualification": "generated goldens and program admission do not accept a candidate numerically",
-            }
+            if component_coverage_report is not None:
+                from .component_coverage import build_guard_link
+
+                guard_link = build_guard_link(component_coverage_report)
+            else:
+                guard_link = {
+                    "schema": "merlin.phase0.component_guard_obligation.v1",
+                    "status": "not_established",
+                    "guards": [],
+                    "reason": (
+                        "independent component generation supplies no application conformance or Phase 1 certification"
+                    ),
+                    "qualification": "generated goldens and program admission do not accept a candidate numerically",
+                }
         else:
             from .phase2_guards import build_guard_link
 
@@ -1036,6 +1145,8 @@ def generate_target(
                 for path in sorted(written)
             ],
         }
+        if component_coverage_report is not None:
+            receipt["component_coverage"] = public_summary(component_coverage_report)
         (coverage_root / "generation.json").write_text(json.dumps(receipt, sort_keys=True, indent=2) + "\n")
         manifest_path = out_root / "MANIFEST.yaml"
         manifest = yaml.safe_load(manifest_path.read_text()) or {}

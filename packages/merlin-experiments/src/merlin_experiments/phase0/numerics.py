@@ -83,7 +83,7 @@ def _specir_fp8(D, fmt_token: str):
     return getattr(D, attr)
 
 
-def _det_fp8(D, name, shape, salt, fmt_token, d_fp8):
+def _det_fp8(D, name, shape, salt, fmt_token, d_fp8, *, palette=None, palette_dtype=None):
     """Structured, format-DERIVED operand bytes: distinct rows AND columns + asymmetric (so a wrong row
     stride / base offset / transposed load changes the output), spanning the fp8 format's representable
     range. Replaces the old 11-magnitude flat-hash fill (~6 distinct values, ~11/32 distinct rows) that hid
@@ -91,12 +91,20 @@ def _det_fp8(D, name, shape, salt, fmt_token, d_fp8):
     from merlin.targetgen import corpus_operands as CO
 
     salt_int = sum((i + 1) * ord(c) for i, c in enumerate(f"{salt}|{name}")) or 1
-    vals = CO.operand_values(tuple(shape), fmt_token, salt_int)
+    if palette is not None:
+        from merlin.targetgen.input_palette import realize
+
+        vals = realize(palette, name=name, shape=shape, dtype=palette_dtype or fmt_token)
+    else:
+        vals = None
+    explicit = vals is not None
+    if vals is None:
+        vals = CO.operand_values(tuple(shape), fmt_token, salt_int)
     raw = [D.encode_float(v, d_fp8) for v in vals]
     # Self-enforcing rigor: fail generation loudly if the ENCODED bytes are not distinct-per-row/col +
     # asymmetric (e.g. a future palette/fill change, or an encode that collapsed distinct values). A weak
     # operand silently hides addressing/stride/transpose bugs — never let a regeneration ship one.
-    if len(shape) == 2:
+    if len(shape) == 2 and not explicit:
         problems = CO.rigor_findings([float(b) for b in raw], tuple(shape))
         if problems:
             raise AssertionError(f"non-rigorous operand {name}{tuple(shape)}: {problems}")
@@ -252,7 +260,7 @@ def _float_golden(entry, binding, *, semantics=None):
         image with N=1 IS the matrix [H*W, Ci] in row-major order -- so the rigor guarantee (distinct rows,
         distinct columns, asymmetric) lands on exactly the axes a conv can get wrong, spatial position and
         channel, instead of being skipped because the declared rank is not two."""
-        raw, vals = _det_fp8(D, name, shape, salt, fmt_token, FP8)
+        raw, vals = _det_fp8(D, name, shape, salt, fmt_token, FP8, palette=entry.get("input_palette"))
         prov[name] = {
             "shape": list(declared_shape or shape),
             "fp8_raw_hex": [f"0x{r:02x}" for r in raw],
@@ -277,7 +285,16 @@ def _float_golden(entry, binding, *, semantics=None):
         from merlin.targetgen import corpus_operands as CO
 
         if len(shape) == 2:
-            _, vals = _det_fp8(D, name, shape, salt, fmt_token, ACC)
+            _, vals = _det_fp8(
+                D,
+                name,
+                shape,
+                salt,
+                fmt_token,
+                ACC,
+                palette=entry.get("input_palette"),
+                palette_dtype=selected["accumulator_dtype"],
+            )
         else:
             # A bias is a VECTOR, and `operand_values` shapes a matrix. Ask it for one row and flatten.
             # The per-row/per-column rigor `_det_fp8` enforces is not the right check for a vector --
@@ -286,8 +303,15 @@ def _float_golden(entry, binding, *, semantics=None):
             # axis. So distinctness ALONG the vector is asserted here instead of skipped.
             (n,) = shape
             salt_int = sum((i + 1) * ord(c) for i, c in enumerate(f"{salt}|{name}")) or 1
-            vals = list(CO.operand_values((1, n), fmt_token, salt_int))
-            if n > 1 and len(set(vals)) < 2:
+            from merlin.targetgen.input_palette import realize
+
+            explicit = (
+                realize(entry["input_palette"], name=name, shape=shape, dtype=selected["accumulator_dtype"])
+                if entry.get("input_palette") is not None
+                else None
+            )
+            vals = explicit if explicit is not None else list(CO.operand_values((1, n), fmt_token, salt_int))
+            if explicit is None and n > 1 and len(set(vals)) < 2:
                 raise AssertionError(
                     f"non-rigorous bias {name}({n},): every element is {vals[0]!r}, so a kernel that "
                     f"broadcast one value along the wrong axis would still match the golden"
@@ -1080,8 +1104,15 @@ def _simt_golden(entry, binding):
         return a.astype(np.float32).astype(np.float64)
 
     def synth(name, shape):
-        vals = CO.operand_values(shape, tok, _salt(entry["name"], name))
-        problems = CO.rigor_findings(vals, shape)
+        from merlin.targetgen.input_palette import realize
+
+        explicit = (
+            realize(entry["input_palette"], name=name, shape=shape, dtype=tok)
+            if entry.get("input_palette") is not None
+            else None
+        )
+        vals = explicit if explicit is not None else CO.operand_values(shape, tok, _salt(entry["name"], name))
+        problems = CO.rigor_findings(vals, shape) if explicit is None else []
         if problems:
             raise AssertionError(f"non-rigorous SIMT operand {name}{shape}: {problems}")
         return q(np.array(vals, dtype=np.float64).reshape(shape))

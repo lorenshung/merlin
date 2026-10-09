@@ -50,6 +50,11 @@ def main(argv=None) -> int:
         help="independent generated components from reviewed HW/SW declarations",
     )
     ap.add_argument(
+        "--component-coverage",
+        type=Path,
+        help="explicit reviewed private independent coverage plan; requires --component-only",
+    )
+    ap.add_argument(
         "--descriptor",
         type=Path,
         default=None,
@@ -138,6 +143,8 @@ def main(argv=None) -> int:
             options["prohibited_instruction_roles"] = list(a.prohibited_instruction_roles)
         if a.component_only:
             options["component_only"] = True
+        if a.component_coverage is not None:
+            options["component_coverage"] = a.component_coverage
         written = generate_target(t, **options)
         print(f"{t}: wrote {len(written)} capsules -> {written[0].parent.parent if written else '(none)'}")
     if a.comparison_manifest or not a.target:

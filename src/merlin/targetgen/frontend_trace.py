@@ -98,6 +98,33 @@ def _unresolved_call(graph: dict, identity: str) -> dict:
     }
 
 
+def original_operation_semantics(trace: dict) -> tuple[str, tuple[str, ...]]:
+    """Validate a selected original graph and project only its operation roster.
+
+    Shapes, graph size and invocation counts remain source audit information;
+    this projection supplies no workload-derived input or objective weights.
+    """
+    if not isinstance(trace, dict) or trace.get("schema") != "m2m.frontend_trace.v1":
+        raise ValueError("semantic basis requires an original frontend trace")
+    errors = []
+    snapshots = trace.get("graphs")
+    if not isinstance(snapshots, dict):
+        raise ValueError("semantic basis requires a selected original frontend graph")
+    snapshot = snapshots.get("original")
+    try:
+        graph = _graph(snapshot, "original", errors)
+    except (TypeError, KeyError) as exc:
+        raise ValueError("original semantic graph is malformed") from exc
+    if errors or graph["status"] != "verified":
+        raise ValueError("original semantic graph is invalid: " + "; ".join(errors))
+    operations = tuple(sorted(graph["by_target"]))
+    if not operations or any(not isinstance(op, str) or not op for op in operations):
+        raise ValueError("original semantic graph requires concrete operation targets")
+    if snapshot.get("by_target") is not None and snapshot["by_target"] != graph["by_target"]:
+        raise ValueError("original semantic graph operation roster disagrees with its call nodes")
+    return graph["sha256"], operations
+
+
 def _recorded_unresolved_status(transition: dict, field: str, computed: set[str]) -> str:
     recorded = transition.get(field)
     if recorded is None:
@@ -295,9 +322,9 @@ def join_frontend_trace(trace: dict | None, application_graph: dict | None, *, c
                         break
             base["prepared_lowering_obligations"] = {
                 "status": "unknown" if not correspondence_valid else "unresolved" if unresolved else "verified",
-                "unresolved_calls": [
-                    _unresolved_call(graphs["prepared"], identity) for identity in sorted(unresolved)
-                ] if correspondence_valid else [],
+                "unresolved_calls": [_unresolved_call(graphs["prepared"], identity) for identity in sorted(unresolved)]
+                if correspondence_valid
+                else [],
             }
             if not correspondence_valid:
                 errors.append("prepared call-site lowering receipt disagrees with exact MLIR source identities")

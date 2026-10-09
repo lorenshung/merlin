@@ -409,6 +409,8 @@ def select_evidence(
     inventory_path=None,
     native_qualifications=None,
     prohibited_roles=(),
+    hardware_intake=None,
+    software_intake=None,
 ) -> EvidenceSelection:
     """Observe selected source bytes once; never extract facts or modify a checkout.
 
@@ -419,6 +421,24 @@ def select_evidence(
     from merlin.runtime.backends.base import execution_capability_facts
     from merlin.targetgen import readout_facet, target_registry
     from merlin.targetgen.rtl import facts as rtl_facts
+
+    if hardware_intake is not None:
+        from .rtl_intake import IndependentHardwareIntake, RtlIntakeRefusal
+
+        if type(hardware_intake) is not IndependentHardwareIntake or hardware_intake.target != target:
+            raise RtlIntakeRefusal("fresh evidence requires the selected independently issued hardware authority")
+        hardware_intake.verify()
+        if facts_path is None:
+            raise RtlIntakeRefusal("fresh evidence requires its explicit issued public facts member")
+        hardware_intake.verify_public_facts(facts_path)
+    if software_intake is not None:
+        from .software_intake import IndependentSoftwareIntake
+
+        if type(software_intake) is not IndependentSoftwareIntake or software_intake.hardware is not hardware_intake:
+            raise ValueError(
+                "fresh software evidence requires the exact independent minimal source and hardware intake"
+            )
+        software_intake.verify_selected_source(software_spec)
 
     sources: dict[Path, EvidenceSource] = {}
     diagnostics: list[dict[str, Any]] = []
@@ -456,6 +476,8 @@ def select_evidence(
 
     descriptor_path = getattr(descriptor, "path", descriptor)
     descriptor_doc = document(descriptor_path, "descriptor") if descriptor_path is not None else {}
+    if hardware_intake is not None and descriptor_doc.get("isa_headers"):
+        raise RtlIntakeRefusal("fresh evidence may not select an ISA header transcription")
     application_inventory = None
     frontend_traces, application_graphs, framework_catalogs, host_capabilities = {}, {}, {}, {}
     inventory_identity = {"status": "not_available", "reason": "no selected detailed application inventory"}
@@ -598,7 +620,7 @@ def select_evidence(
     )
     residual, provider = {}, None
     try:
-        provider = target_registry.resolve(target)
+        provider = target_registry.resolve(target) if hardware_intake is None else None
     except (KeyError, FileNotFoundError, ValueError) as exc:
         diagnostics.append({"component": "support", "status": "unknown", "reason": str(exc)})
     if (
@@ -695,6 +717,8 @@ def select_evidence(
         "instructions": [],
     }
     instruction_resource = contract.get("instruction_semantics")
+    if hardware_intake is not None and instruction_resource is not None:
+        raise RtlIntakeRefusal("fresh evidence may not select legacy instruction semantics resources")
     if instruction_resource is not None:
         if provider is None or not isinstance(instruction_resource, str) or not instruction_resource.strip():
             raise ValueError("instruction_semantics requires a selected support provider and relative resource")
@@ -756,7 +780,7 @@ def select_evidence(
         if isinstance(record, Mapping) and record.get("name") == "register_bundle_layouts" and record.get("source"):
             observe(record["source"], "readout-register-source")
     taxonomy = copy.deepcopy(body.get("isa_taxonomy") or {})
-    if descriptor_path is not None:
+    if descriptor_path is not None and hardware_intake is None:
         from merlin.targetgen import isa_taxonomy
         from merlin.targetgen.target_experiment import load_target_experiment
 
@@ -842,8 +866,10 @@ def select_evidence(
                 )
     snapshot_bytes = {str(path): source.content for path, source in sources.items()}
     refreshed_facts = dict(readout_facet.with_current_register_layouts(loaded_facts, source_bytes=snapshot_bytes))
-    with rtl_facts.observed_facts(target, refreshed_facts, selected_path):
-        readout_inputs = readout_facet.capture_inputs(target, facts=refreshed_facts, include_taxonomy=False)
+    readout_inputs = {}
+    if hardware_intake is None:
+        with rtl_facts.observed_facts(target, refreshed_facts, selected_path):
+            readout_inputs = readout_facet.capture_inputs(target, facts=refreshed_facts, include_taxonomy=False)
     readout_inputs["taxonomy"] = taxonomy
     facets = readout_facet.for_target(target, contract=contract, facts=refreshed_facts, readout_inputs=readout_inputs)
     # The selected contract's scale claim must agree with the selected RTL
@@ -902,8 +928,21 @@ def select_evidence(
                 }
             )
     target_profile = derive_profile(target, facts=refreshed_facts, residual=residual, contract=contract).to_dict()
-    with rtl_facts.observed_facts(target, refreshed_facts, selected_path):
-        execution = execution_capability_facts(target)
+    if hardware_intake is None:
+        with rtl_facts.observed_facts(target, refreshed_facts, selected_path):
+            execution = execution_capability_facts(target)
+    else:
+        from merlin.runtime.backends.base import EXECUTION_CAPABILITIES
+
+        execution = {
+            name: {
+                "satisfied": None,
+                "tier": "not_established",
+                "evidence": "independent RTL observations do not qualify an executable support implementation",
+                "missing": ["independently issued live runtime qualification"],
+            }
+            for name in EXECUTION_CAPABILITIES
+        }
     performance_doc = {"target_profile": target_profile, "execution_capabilities": execution}
     performance_facts = {
         "target": target,

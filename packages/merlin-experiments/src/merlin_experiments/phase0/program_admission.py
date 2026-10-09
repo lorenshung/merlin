@@ -280,6 +280,17 @@ def screen_written(capsule: dict, directory: Path, *, target: str, evidence) -> 
     materialized = capsule.get("materialized_capture") or {}
     if materialized:
         screen = _check_saved_inventory(screen, materialized, evidence)
+    from .numeric_domains import screen as screen_numeric_domain
+
+    domain = screen_numeric_domain(capsule, directory, (evidence.software_spec or {}).get("numerical_semantics") or {})
+    if domain is not None:
+        screen["numeric_domain"] = domain
+        if domain["status"] in {"unsupported", "unknown"}:
+            screen.update(
+                status=domain["status"],
+                constraints_status="refused" if domain["status"] == "unsupported" else "unknown",
+                reason="selected numerical domain: " + domain["reason"],
+            )
     return screen
 
 

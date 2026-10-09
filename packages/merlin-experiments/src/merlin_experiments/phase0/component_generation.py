@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import yaml
@@ -42,7 +43,15 @@ def require_inputs(*, descriptor, recipe, performance_template, profiles_root, e
         raise ValueError(
             "component generation requires explicit diagnostic evidence mode; whole coverage is not verified"
         )
-    if any(value is not None for value in sidecars.values()):
+    supplied = {name: value for name, value in sidecars.items() if value is not None}
+    if "evidence_input" in supplied:
+        from merlin_experiments.frozen_python import active_source_identity
+
+        if active_source_identity() is not None:
+            # The normal orchestrator selected and source-froze these bytes.
+            # Ordinary direct calls still refuse historical evidence inputs.
+            supplied.pop("evidence_input")
+    if supplied:
         raise ValueError(
             "component generation refuses capture, synthesis, hidden and previously exported evidence inputs"
         )
@@ -61,12 +70,32 @@ def require_inputs(*, descriptor, recipe, performance_template, profiles_root, e
         raise ValueError("component generation refuses capture-derived form-scope sweeps")
 
 
-def bind_entries(entries, *, evidence, profile, recipe, performance_template):
+def bind_entries(
+    entries,
+    *,
+    evidence,
+    profile,
+    recipe,
+    performance_template,
+    coverage_plan_sha256=None,
+    execution_budget=None,
+    execution_admission=None,
+    semantic_basis=None,
+    hardware_intake=None,
+    software_intake=None,
+):
     """Bind reviewed objectives and the actual selected generator/source identity."""
     if evidence is None or evidence.software_spec.get("status") != "reviewed":
         raise ValueError("component generation requires selected reviewed software and hardware evidence")
     spec = evidence.software_spec
-    declaration = spec.get("component_performance")
+    recipe_document = yaml.safe_load(Path(recipe).read_bytes())
+    if not isinstance(recipe_document, dict):
+        raise ValueError("component objective recipe must be an explicit mapping")
+    recipe_declaration = recipe_document.get("component_performance")
+    legacy_declaration = spec.get("component_performance")
+    if recipe_declaration is not None and legacy_declaration is not None:
+        raise ValueError("component objective must have one explicit owner; recipe and software spec both declare it")
+    declaration = recipe_declaration if recipe_declaration is not None else legacy_declaration
     if (
         not isinstance(declaration, dict)
         or set(declaration) != {"schema", "status", "hardware", "objectives"}
@@ -80,6 +109,10 @@ def bind_entries(entries, *, evidence, profile, recipe, performance_template):
     snapshots = [row for row in evidence.source_snapshots if row.role == "software-spec"]
     if len(snapshots) != 1 or snapshots[0].sha256 != (profile.get("_software_spec_identity") or {}).get("sha256"):
         raise ValueError("component declaration is not bound to the selected software source bytes")
+    declaration_source = {
+        "kind": "recipe" if recipe_declaration is not None else "legacy_software_spec",
+        "sha256": _source(recipe)["sha256"] if recipe_declaration is not None else snapshots[0].sha256,
+    }
     if evidence.application_inventory or evidence.whole_program_admission:
         raise ValueError("component generation refuses application/capture evidence")
     owners = {row["id"]: row for row in spec["operations"] if row.get("status", "reviewed") == "reviewed"}
@@ -91,6 +124,7 @@ def bind_entries(entries, *, evidence, profile, recipe, performance_template):
     provenance = (
         f"software-spec:{snapshots[0].sha256}",
         f"component-declaration:{digest(declaration)}",
+        f"component-declaration-source:{declaration_source['kind']}:{declaration_source['sha256']}",
         *(f"{key}:{value}" for key, value in hardware.items()),
     )
     for row in rows:
@@ -115,6 +149,32 @@ def bind_entries(entries, *, evidence, profile, recipe, performance_template):
         selected[family] = {"operations": list(operations), "objective": typed.to_dict()}
     source_paths = [*Path(__file__).parent.glob("*.py")]
     source_paths += [Path(owner.__file__) for owner in (corpus_spec, phase_policy, software_spec)]
+    if coverage_plan_sha256 is not None:
+        from merlin.common.paths import module_source_path
+
+        source_paths += [
+            module_source_path(name)
+            for name in (
+                "merlin.targetgen.component_program",
+                "merlin.targetgen.component_sources",
+                "merlin.targetgen.capsule_results",
+                "merlin.targetgen.capsule_golden",
+                "merlin.targetgen.capsule_inputs",
+                "merlin.targetgen.capsule_source",
+                "merlin.targetgen._m2m_capture_worker",
+                "merlin.runtime.tensor",
+                "merlin.runtime.commandbuffer",
+                "merlin.targetgen.operation_accounting",
+                "merlin.targetgen.application_inventory",
+                "merlin.targetgen.address_space",
+                "merlin.targetgen.golden_store",
+                "merlin.targetgen.corpus_operands",
+                "merlin.targetgen.model_coverage",
+                "merlin.targetgen.input_palette",
+                "merlin.runtime.fp8_formats",
+                "merlin.common.quant_formats",
+            )
+        ]
     identity = {
         "schema": SCHEMA,
         "status": "generated_from_reviewed_component_declarations",
@@ -125,23 +185,69 @@ def bind_entries(entries, *, evidence, profile, recipe, performance_template):
         "hardware": hardware,
         "software_spec_sha256": snapshots[0].sha256,
         "declaration_sha256": digest(declaration),
+        "declaration_source": declaration_source,
         "recipe": _source(recipe),
         "shared_template": _source(performance_template),
         "generator_sources": [_source(path) for path in sorted(source_paths)],
         "families": selected,
     }
+    if execution_budget is not None:
+        from .component_execution_budget import validate
+
+        identity["execution_budget_sha256"] = digest(validate(execution_budget))
+        if execution_admission is None or execution_admission.get("policy") != execution_budget:
+            raise ValueError("budgeted component identity requires its actual complete admission roster")
+        identity["execution_admission_sha256"] = digest(execution_admission)
+    elif execution_admission is not None:
+        raise ValueError("component execution admission requires an explicit frozen policy")
+    if hardware_intake is not None:
+        from .rtl_intake import bind_component_hardware
+
+        identity.update(bind_component_hardware(evidence, hardware_intake))
+    if software_intake is not None:
+        from .software_intake import bind_component_software
+
+        identity.update(bind_component_software(evidence, software_intake))
+    if coverage_plan_sha256 is not None:
+        identity["component_coverage_plan_sha256"] = coverage_plan_sha256
+        from merlin_experiments.frozen_python import active_source_identity
+
+        routing = (
+            json.loads(os.environ.get("MERLIN_PHASE0_FROZEN_SOURCE_MAP", "{}")) if active_source_identity() else {}
+        )
+        selected_sources = []
+        for source in evidence.source_snapshots:
+            path = routing.get(str(source.path), str(source.path))
+            selected_source = _source(path)
+            if selected_source["sha256"] != source.sha256:
+                raise ValueError("selected component semantic/hardware/numerical source changed")
+            selected_sources.append({**selected_source, "role": source.role})
+        identity["selected_sources"] = selected_sources
+    if semantic_basis is not None:
+        identity["semantic_basis"] = semantic_basis.reviewed_semantics()
     bound = []
     for entry in entries:
+        coverage = entry.get("component_coverage")
+        covered = isinstance(coverage, dict) and coverage_plan_sha256 is not None
+        if coverage is not None and (not covered or coverage.get("plan_sha256") != coverage_plan_sha256):
+            raise ValueError("component coverage membership must come from the selected independent plan")
+        functional = covered and coverage.get("cohort") in {"functional_guard", "withheld_transfer"}
         if (
-            entry.get("cat") != "_perf"
-            or entry.get("label") != "dev"
+            (not functional and (entry.get("cat") != "_perf" or entry.get("label") != "dev"))
             or entry.get("source_role") != "derived_sweep"
             or entry.get("kind") == "model"
             or any(entry.get(key) for key in _CAPTURE_FIELDS)
             or (entry.get("performance") or {}).get("global_objective")
         ):
-            raise ValueError("component generation admits only independent derived dev sweeps")
+            raise ValueError(
+                "component generation admits only independent derived sweeps and selected coverage obligations"
+            )
         value = copy.deepcopy(entry)
+        if covered:
+            value["component_coverage"]["generation_sha256"] = digest(identity)
+        if functional:
+            bound.append(value)
+            continue
         performance = value["performance"]
         if "component_generation_sha256" in performance or "objective" in performance:
             raise ValueError("component objective identity is generated, never authored by the sweep")
@@ -164,8 +270,20 @@ def bind_entries(entries, *, evidence, profile, recipe, performance_template):
 def require_written(capsule):
     """Keep unknown work and unreviewed placement out of the component corpus."""
     screen = capsule.get("software_screen") or {}
+    coverage = capsule.get("component_coverage") or {}
+    if coverage.get("expectation") == "unsupported_program":
+        if screen.get("status") != "unsupported":
+            raise ValueError(
+                "declared refusal obligation was not independently refused by the concrete program screen: "
+                + str(screen.get("status"))
+                + ": "
+                + str(screen.get("reason"))
+            )
+        return
     if screen.get("status") != "admitted":
         raise ValueError("component generated program lacks reviewed concrete software/hardware admission")
+    if coverage.get("cohort") in {"functional_guard", "withheld_transfer"}:
+        return
     objective = (capsule.get("performance") or {}).get("objective")
     typed = None
     if objective is not None:

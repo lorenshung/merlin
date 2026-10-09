@@ -208,6 +208,7 @@ _PHASE0_OPTIONAL_INPUTS = frozenset(
         "capability_contract",
         "hardware_spec",
         "rtl_facts",
+        "component_coverage",
     }
 )
 
@@ -466,6 +467,7 @@ def resolve_plan(
     phase0_capability_contract: Path | None = None,
     phase0_synth_profile: Path | None = None,
     phase0_hidden_profile: Path | None = None,
+    phase0_component_coverage: Path | None = None,
     phase0_rtl_facts: Path | None = None,
     phase0_evidence_mode: str | None = None,
     phase0_m2m_root: Path | None = None,
@@ -507,6 +509,7 @@ def resolve_plan(
                 phase0_capability_contract,
                 phase0_synth_profile,
                 phase0_hidden_profile,
+                phase0_component_coverage,
                 phase0_rtl_facts,
                 phase0_evidence_mode,
                 phase0_m2m_root,
@@ -522,6 +525,7 @@ def resolve_plan(
         ("capability_contract", phase0_capability_contract),
         ("synth_profile", phase0_synth_profile),
         ("hidden_profile", phase0_hidden_profile),
+        ("component_coverage", phase0_component_coverage),
         ("rtl_facts", phase0_rtl_facts),
     ):
         if path is None:
@@ -615,12 +619,13 @@ def resolve_plan(
                     Path(choice["m2m_root"]),
                     Path(choice["m2m_python"]),
                     synth_profile=Path(profile) if profile else None,
-                    require_source_origin=config.get("evidence_mode") != "diagnostic",
+                    require_source_origin=config.get("component_coverage") is not None
+                    or config.get("evidence_mode") != "diagnostic",
                 )
                 command["input_owner_roots"].append(command["phase0_m2m_selection"]["base"])
             except (OSError, ValueError) as exc:
                 raise SpecError(f"invalid selected Model2MLIR runtime: {exc}") from exc
-            if config.get("evidence_mode") != "diagnostic":
+            if config.get("component_coverage") is not None or config.get("evidence_mode") != "diagnostic":
                 # Verified Phase 0 admits a generation-time capture only from the sealed runner
                 # (operator policy, 2026-10-01): every PyTorch capture this run makes is preselected,
                 # sandboxed, replayed and attested against the runtime selected here.

@@ -46,6 +46,7 @@ _ELEM_DTYPE: dict[str, str] = {
     "f16": "fp16",
     "bf16": "bf16",
     "i8": "int8",
+    "i32": "int32",
     "i4": "int4",
 }
 

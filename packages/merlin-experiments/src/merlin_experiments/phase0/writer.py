@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 from pathlib import Path
 
@@ -76,6 +77,11 @@ def _integer_reference_bound(entry: dict, cap: dict) -> dict:
     semantics = entry.get("numerical_semantics") or {}
     operation = cap["operation"]
     op, attrs = operation["op"], operation.get("attributes") or {}
+    if op == "component_program":
+        from .component_execution_budget import source_for_capsule
+        from .component_integer_bounds import derive
+
+        return derive(source_for_capsule(cap), semantics)
     policy = (semantics.get("internal_arithmetic") or {}).get("full_operation_overflow_policy")
     if policy != "bounded_exact_requires_each_partial_sum":
         if op == "host_island_seam":
@@ -495,6 +501,8 @@ def _write_capsule(entry, binding, out_root, facts_sha: str = "", *, capture=Non
 #:                      is how the first host-only capsule generated with `lanes: None` and asserted
 #:                      nothing at all.
 _DECLARED_BLOCKS = (
+    "component_coverage",
+    "input_palette",
     "performance",
     "comparison_group",
     "pass_requirements",
@@ -816,6 +824,12 @@ def _emit_micro_model_loader(entry: dict, target: str, out_root, *, capture_dtyp
 
 def _write_capsule_inner(entry, binding, out_root, facts_sha: str = "", *, capture=None):
     regime, eb = CS.entry_binding(entry, binding)
+    if entry.get("op") == "component_program":
+        from .component_integer_bounds import preflight_entry
+
+        preflight_entry(entry, binding=binding)
+    if entry.get("input_palette") is not None and regime == "mx":
+        raise ValueError("component input palettes require separately declared typed block-scale inputs on MX")
     # Whole-model capsule: a small representative network lowered end-to-end via model2MLIR, graded vs its
     # host torch-eager output, GATED so it runs only after the op suite proves itself. Additive: skipped
     # (loudly) when the m2m venv is absent.
@@ -890,6 +904,8 @@ def _write_capsule_inner(entry, binding, out_root, facts_sha: str = "", *, captu
             print(f"  [skip] {entry['name']}: {e}")
             return None
     cap, mlir = CS.build(entry, eb)
+    if cap["operation"]["op"] == "component_program":
+        cap["numerical_semantics"] = copy.deepcopy(entry.get("numerical_semantics") or {})
     d = Path(out_root) / entry["cat"] / entry["name"]
     d.mkdir(parents=True, exist_ok=True)
     (d / "capsule.yaml").write_text(yaml.safe_dump(cap, sort_keys=False), encoding="utf-8")
@@ -901,13 +917,21 @@ def _write_capsule_inner(entry, binding, out_root, facts_sha: str = "", *, captu
         bound = _integer_reference_bound(entry, cap)
         cap["integer_partial_sum_bound"] = bound
         (d / "capsule.yaml").write_text(yaml.safe_dump(cap, sort_keys=False), encoding="utf-8")
+        if cap["operation"]["op"] == "component_program":
+            from .component_numerics import evaluate
+
+            outputs = evaluate(cap)
+            source = "merlin_tensor_component_program"
+        else:
+            outputs = CG.golden({**cap, "__dir__": ""})
+            source = "merlin_tensor_int"
         GS.write_golden(
             d,
             {
-                "golden_source": "merlin_tensor_int",
+                "golden_source": source,
                 "integer_partial_sum_bound": bound,
                 "qualification": "mathematical reference; target execution and full-mesh ordering unverified",
-                "outputs": CG.golden({**cap, "__dir__": ""}),
+                "outputs": outputs,
             },
         )
     elif regime == "specir":

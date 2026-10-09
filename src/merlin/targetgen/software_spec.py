@@ -113,6 +113,14 @@ def validate_numerical_semantics(document: dict) -> dict:
             raise ValueError(f"numerical_semantics.{field} must be an explicit dtype")
     if type(document.get("subnormal_operand_flush")) is not bool:
         raise ValueError("numerical_semantics.subnormal_operand_flush must be explicit Boolean")
+    for field in ("input_domain", "output_domain"):
+        domain = document.get(field)
+        if domain is not None and (
+            not isinstance(domain, dict)
+            or set(domain) != {"nonfinite"}
+            or domain["nonfinite"] not in {"allow", "forbid"}
+        ):
+            raise ValueError(f"numerical_semantics.{field} requires an explicit allow/forbid nonfinite policy")
     if model["engine"] == "specir_fp_reduce":
         if document.get("rounding") not in _IEEE_ROUNDING:
             raise ValueError("numerical_semantics.rounding must select a supported IEEE mode")

@@ -86,6 +86,13 @@ def screen_entry(
     admission invented here.
     """
     defaults = defaults or {}
+    if capsule is None and entry.get("component_coverage"):
+        return {
+            "status": "unknown",
+            "constraints_status": "unknown",
+            "decisions": [],
+            "reason": "component obligation requires the concrete emitted per-operation program screen",
+        }
     operation = (capsule or {}).get("operation") or {}
     op = operation.get("op") or entry.get("op", "unknown")
     attrs = operation.get("attributes") or {}

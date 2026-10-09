@@ -104,15 +104,26 @@ def _tree(root: Path) -> dict[str, dict[str, Any]]:
             for child in children:
                 visit(child, child.name if name == "." else f"{name}/{child.name}")
         elif stat.S_ISREG(before.st_mode):
-            digest = _file_digest(path)
-            after = path.stat(follow_symlinks=False)
 
             def identity(row):
-                return row.st_dev, row.st_ino, row.st_size, row.st_mtime_ns, row.st_ctime_ns
+                return row.st_dev, row.st_ino, row.st_size, row.st_mtime_ns, row.st_mode, row.st_uid, row.st_gid
 
-            if identity(before) != identity(after):
-                raise SealedCaptureError(f"file changed during inventory: {name}")
-            members[name] = {"kind": "file", "mode": mode, "bytes": before.st_size, "sha256": digest}
+            for attempt in range(3):
+                digest = _file_digest(path)
+                after = path.stat(follow_symlinks=False)
+                unchanged = identity(before) == identity(after)
+                if unchanged and before.st_ctime_ns == after.st_ctime_ns:
+                    members[name] = {"kind": "file", "mode": mode, "bytes": before.st_size, "sha256": digest}
+                    break
+                # Another immutable-runtime snapshot can legitimately link or
+                # unlink this inode while it is hashed, changing only ctime and
+                # its link count. Never accept that unstable read: rehash and
+                # require a fully stable identity, including ctime, afterward.
+                # Actual content/mode/owner/mtime changes still fail immediately;
+                # callers also compare the final content SHA to selected bytes.
+                if not unchanged or before.st_nlink == after.st_nlink or attempt == 2:
+                    raise SealedCaptureError(f"file changed during inventory: {name}")
+                before = after
         else:
             raise SealedCaptureError(f"tree contains a nonregular member: {name}")
 

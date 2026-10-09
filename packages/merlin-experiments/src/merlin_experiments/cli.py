@@ -127,6 +127,11 @@ def main(argv: list[str] | None = None) -> int:
             type=Path,
             help="operator-owned private Phase 0 profile; never put it in examples",
         )
+        child.add_argument(
+            "--phase0-component-coverage",
+            type=Path,
+            help="explicit reviewed private independent component coverage plan",
+        )
         child.add_argument("--phase0-rtl-facts", type=Path, help="select exact extracted facts for a new Phase 0 run")
         child.add_argument(
             "--phase0-capability-contract",
@@ -531,6 +536,7 @@ def main(argv: list[str] | None = None) -> int:
                 phase0_rtl_facts=args.phase0_rtl_facts,
                 phase0_evidence_mode=args.phase0_evidence_mode,
                 phase0_hidden_profile=args.phase0_hidden_profile,
+                phase0_component_coverage=args.phase0_component_coverage,
                 phase0_m2m_root=args.phase0_m2m_root,
                 phase0_m2m_python=args.phase0_m2m_python,
             )
