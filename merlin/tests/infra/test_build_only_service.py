@@ -2,6 +2,7 @@
 
 import builtins
 import hashlib
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -76,10 +77,25 @@ def test_invalid_capability_before_compile(tmp_path, monkeypatch, defect):
 def test_package_reuse_refuses_changed_source(tmp_path):
     initializer = tmp_path / "__init__.py"
     initializer.write_text("VALUE = 1")
-    assert load_build_package(initializer).VALUE == 1
-    initializer.write_text("VALUE = 2")
-    with pytest.raises(ValueError, match="changed"):
-        load_build_package(initializer)
+    original_modules = set(sys.modules)
+    try:
+        assert load_build_package(initializer).VALUE == 1
+        initializer.write_text("VALUE = 2")
+        with pytest.raises(ValueError, match="changed"):
+            load_build_package(initializer)
+    finally:
+        # The production cache must survive the mutation check. Afterwards,
+        # remove only new modules loaded from this disposable fixture; keeping
+        # them would correctly fail the installed package origin guard.
+        for name, module in tuple(sys.modules.items()):
+            filename = getattr(module, "__file__", None)
+            if (
+                name not in original_modules
+                and name.startswith("merlin._pure_build_packages.")
+                and filename
+                and Path(filename).resolve().is_relative_to(tmp_path.resolve())
+            ):
+                sys.modules.pop(name, None)
 
 
 def test_build_translation_refuses_non_llvm_before_tool(tmp_path, monkeypatch):
@@ -177,17 +193,23 @@ def test_explicit_public_object_budget_refuses_translator_timeout(tmp_path, monk
         )
 
 
-def test_explicit_object_compiler_limit_is_tighter_than_global_default(monkeypatch):
+def test_explicit_object_compiler_limit_is_tighter_than_global_default(tmp_path, monkeypatch):
+    import subprocess
+
     from merlin.llvmlower import codegen
 
     seen = []
     monkeypatch.setattr(codegen, "clang", lambda: Path("/fixture/clang"))
-    monkeypatch.setattr(codegen._proc, "run_checked", lambda _command, **kwargs: seen.append(kwargs["timeout"]))
-    codegen.compile_ll("fixture.ll", "fixture.o", timeout_s=0.5)
+    def observed(command, **kwargs):
+        seen.append(kwargs["timeout"])
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(codegen._proc, "run_checked", observed)
+    codegen.compile_ll(tmp_path / "fixture.ll", tmp_path / "fixture.o", timeout_s=0.5)
     assert seen == [0.5]
     for invalid in (0, -1, True, float("nan"), float("inf")):
         with pytest.raises(ValueError, match="explicit compile timeout"):
-            codegen.compile_ll("fixture.ll", "fixture.o", timeout_s=invalid)
+            codegen.compile_ll(tmp_path / "fixture.ll", tmp_path / "fixture.o", timeout_s=invalid)
 
 
 def test_legacy_object_path_retains_original_lowering(tmp_path, monkeypatch):
