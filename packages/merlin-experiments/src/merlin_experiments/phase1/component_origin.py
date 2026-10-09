@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import shlex
 import shutil
-import subprocess
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
@@ -29,6 +28,8 @@ from merlin_experiments.phase2.component_experiment import (
 
 from .component_compile_admission import verify_compile_roster
 from .component_generation_admission import verify_bounded_generation
+from .component_package_execution import selected_compiler_transport
+from .component_tool_readiness import probe_shared_tools
 
 _ISSUED: dict[object, tuple] = {}
 _DRIVER = '''"""Structure-only OOT entrypoint. Author the compiler in this package."""
@@ -128,6 +129,10 @@ class FreshPhase1Inputs:
     auth_source: Path
     compile_roster: object = None
     pointer_storage: object = None
+
+    @property
+    def compiler_transport(self):
+        return selected_compiler_transport(self.execution_support, view=self.view, runtime=self.runtime)
 
     @property
     def sandbox_binary(self) -> Path:
@@ -232,6 +237,9 @@ class FreshPhase1Inputs:
             "hardware_intake_sha256": self.hardware.sha256,
             "software_intake_sha256": self.software.sha256,
             "runtime_authority_sha256": self.execution_support.sha256,
+            "compiler_transport_sha256": self.compiler_transport.sha256
+            if self.compiler_transport is not None
+            else None,
             "compile_source_roster_sha256": compile_roster_sha,
             "original_pointer_storage_sha256": pointer_storage_sha,
             "view_sha256": self.view.manifest_sha256,
@@ -347,19 +355,7 @@ def _control_command(inputs: FreshPhase1Inputs, inner: str, workspace: Path, _bu
 
 
 def _probe_shared_tools(inputs: FreshPhase1Inputs, policy: tuple[str, ...]) -> None:
-    probes = inputs.output / "readiness"
-    probes.mkdir(mode=0o700)
-    for probe in inputs.readiness:
-        with invocation_record.observe(
-            probes / probe.capability,
-            stage="fresh_phase1_" + probe.capability,
-            argv=[*policy, "--", *probe.command],
-            dependencies=tuple(row.source for row in inputs.runtime),
-        ) as observation:
-            result = subprocess.run([*policy, "--", *probe.command], capture_output=True, timeout=45)
-            observation.complete(result)
-        if result.returncode or C.sha256_file(observation.directory / "stdout.bin") != probe.stdout_sha256:
-            raise C.StageGateError("fresh Phase 1 admitted tool readiness failed: " + probe.capability)
+    probe_shared_tools(inputs, policy, compiler_transport=inputs.compiler_transport)
 
 
 def render_fresh_phase1_prompt() -> str:

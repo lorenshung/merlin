@@ -22,9 +22,12 @@ from merlin.targetgen.contract import readback_policy as RB
 from merlin.targetgen.contract.build_service import BuildOnlyService
 from merlin.targetgen.contract.execution_service import FunctionalExecutionService
 from merlin.targetgen.native_component_execution import execute_component
+from merlin_experiments.execution.container_transport import PreparedContainerTransport
+from merlin_experiments.phase1.component_package_execution import ComponentPackageExecutor, qualified_package_execution
 
 from . import component_runtime_controls as controls
 from . import component_runtime_instruction_control as instruction_control
+from .component_experiment import ComponentView, RuntimeGrant, verify_component_view
 from .component_runtime_authority import IndependentRuntimeServices
 from .component_runtime_control_execution import PrivateRuntimeControlExecutor
 from .component_runtime_fixture import prepare_source_control
@@ -67,6 +70,9 @@ class PreparedIndependentRuntimeContext:
     execution_service: FunctionalExecutionService
     source_pins: tuple[tuple[Path, str], ...]
     instruction_check: object = None
+    container_transport: PreparedContainerTransport | None = None
+    compiler_view: ComponentView | None = None
+    compiler_runtime: tuple[RuntimeGrant, ...] = ()
     services: IndependentRuntimeServices = field(init=False)
 
     def __post_init__(self):
@@ -88,6 +94,7 @@ class PreparedIndependentRuntimeContext:
                 "execution": self.execution_service.verify(self.build_service.target, self.execution_service.simulator),
                 "source_pins": [(str(path), digest) for path, digest in self.source_pins],
                 "instruction_check": self.instruction_check.verify() if self.instruction_check is not None else None,
+                "compiler_commands": self._compiler_commands(),
             }
         )
 
@@ -147,6 +154,12 @@ class PreparedIndependentRuntimeContext:
             required.add(Path(instruction_control.__file__))
         required.add(self.target_descriptor)
         required.update(path for path in self.contract_root.rglob("*") if path.is_file())
+        self._compiler_commands()
+        if self.container_transport is not None:
+            required.update(path for path, _ in self.container_transport.source_pins)
+            required.update(path for path in self.compiler_view.root.rglob("*") if path.is_file())
+            required.update(row.source for row in self.compiler_runtime)
+            required.add(Path(inspect.getsourcefile(ComponentPackageExecutor)).resolve())
         if (
             not isinstance(self.source_pins, tuple)
             or len(self.source_pins) != len(dict(self.source_pins))
@@ -157,6 +170,29 @@ class PreparedIndependentRuntimeContext:
             if not _plain(path).is_file() or sha256_file(path) != digest:
                 raise StageGateError("prepared independent runtime source/tool changed")
         return self.sha256
+
+    def _compiler_commands(self):
+        if self.container_transport is None:
+            if self.compiler_view is not None or self.compiler_runtime:
+                raise StageGateError("compiler grants require an explicit prepared command transport")
+            return None
+        if (
+            type(self.container_transport) is not PreparedContainerTransport
+            or type(self.compiler_view) is not ComponentView
+            or not isinstance(self.compiler_runtime, tuple)
+            or not self.compiler_runtime
+            or any(type(row) is not RuntimeGrant for row in self.compiler_runtime)
+        ):
+            raise StageGateError("runtime compiler commands require exact prepared transport/view/runtime grants")
+        self.container_transport.verify()
+        verify_component_view(self.compiler_view)
+        for row in self.compiler_runtime:
+            row.verify()
+        return {
+            "transport_sha256": self.container_transport.sha256,
+            "view_sha256": self.compiler_view.manifest_sha256,
+            "runtime": [(str(row.source), row.destination, row.sha256) for row in self.compiler_runtime],
+        }
 
     def prepare_control(self, name, workspace):
         self.verify()
@@ -314,10 +350,28 @@ class PreparedIndependentRuntimeContext:
             active = package_runtime.active_package_executor()
             if active is None and (fixture is None or package != fixture.grade_arguments["package_dir"]):
                 raise StageGateError("authored compiler diagnostics require the ordinary isolated package executor")
+            if active is not None and (
+                getattr(active, "container_transport", None) is not self.container_transport
+                or self.container_transport is not None
+                and (
+                    type(active) is not ComponentPackageExecutor
+                    or active.view != self.compiler_view
+                    or active.runtime != self.compiler_runtime
+                )
+            ):
+                raise StageGateError("active compiler executor differs from the prepared command transport/grants")
             declaration = mapping_file(capsule / "capsule.yaml", yaml_file=True)
             output = root / declaration["name"]
             context = (
-                package_runtime.scoped_package_executor(
+                qualified_package_execution(
+                    candidate=package,
+                    view=self.compiler_view,
+                    runtime=self.compiler_runtime,
+                    evidence_root=root,
+                    container_transport=self.container_transport,
+                )
+                if active is None and self.container_transport is not None
+                else package_runtime.scoped_package_executor(
                     PrivateRuntimeControlExecutor(
                         package,
                         root,

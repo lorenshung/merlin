@@ -126,6 +126,7 @@ def test_mount_grammar_refuses_unclosed_linked_special_or_changed_sources(tmp_pa
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
                 server.bind(f"/proc/self/fd/{directory}/{source.name}")
+                assert source.is_socket()
                 with pytest.raises(StageGateError):
                     T.mount_from_source(source, "/run/service.sock", read_only=True)
         finally:

@@ -38,6 +38,7 @@ def _selection(*, roster, origin, lineage, candidate, instruction_check):
     else:
         raise C.StageGateError("source-only evaluation has no matching observed compiler lineage")
     inputs = origin.inputs
+    compiler_transport = inputs.compiler_transport
     if roster is not inputs.compile_roster:
         raise C.StageGateError("source-only evaluation changed the original preauthor required roster")
     roster_sha = verify_compile_roster(
@@ -54,6 +55,7 @@ def _selection(*, roster, origin, lineage, candidate, instruction_check):
         "phase2_lineage_sha256": lineage.receipt_sha256 if lineage is not None else None,
         "instruction_selection_sha256": instruction_check.verify(),
         "target_descriptor_sha256": C.sha256_file(roster.target_descriptor),
+        "compiler_transport_sha256": compiler_transport.sha256 if compiler_transport is not None else None,
     }
 
 
@@ -251,7 +253,11 @@ def evaluate_component_compile_roles(
     proofs = []
     rows, deadline = [], time.monotonic() + timeout_s
     with qualified_package_execution(
-        candidate=clone, view=compiler_origin.inputs.view, runtime=compiler_origin.inputs.runtime, evidence_root=cases
+        candidate=clone,
+        view=compiler_origin.inputs.view,
+        runtime=compiler_origin.inputs.runtime,
+        evidence_root=cases,
+        container_transport=compiler_origin.inputs.compiler_transport,
     ):
         for member in roster.members:
             output = cases / member.name

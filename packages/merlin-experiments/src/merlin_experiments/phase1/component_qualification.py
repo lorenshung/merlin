@@ -19,7 +19,7 @@ from . import component_qualification_evidence as E
 from .component_compile_admission import qualification_compile_roles
 from .component_lineage import ComponentCompilerLineage
 from .component_origin import FreshCompilerOrigin, _authority_identity
-from .component_package_execution import qualified_package_execution
+from .component_package_execution import qualified_package_execution, selected_compiler_transport
 
 _ISSUED: dict[object, tuple] = {}
 
@@ -63,29 +63,7 @@ def _component_sources() -> dict:
 
 
 def _evaluator_distribution() -> dict:
-    """Require installed AET metadata and bind its actual imported implementation."""
-    from importlib import metadata
-
-    from merlin.common.paths import module_source_path
-    from merlin.common.source_membership import python_members
-
-    try:
-        distribution = metadata.distribution("aet")
-        metadata_files = {
-            str(distribution.locate_file(path).resolve()): C.sha256_file(distribution.locate_file(path))
-            for path in distribution.files or ()
-            if ".dist-info" in str(path) and distribution.locate_file(path).is_file()
-        }
-        package = module_source_path("aet").resolve().parent
-        sources = {
-            name: {"path": str(path), "sha256": C.sha256_file(path)}
-            for name, path in python_members(package, label="installed AET").items()
-        }
-    except (metadata.PackageNotFoundError, OSError, ImportError) as error:
-        raise C.StageGateError("component qualification requires the actual installed AET distribution") from error
-    if not metadata_files or not sources:
-        raise C.StageGateError("component qualification has no installed AET source/metadata membership")
-    return {"version": distribution.version, "metadata": metadata_files, "sources": sources}
+    return E.evaluator_distribution()
 
 
 @dataclass(frozen=True)
@@ -111,6 +89,7 @@ class ComponentQualification:
     runtime_authority_sha256: str
     _issuer: object = field(repr=False, compare=False)
     compile_role_evaluation: object = None
+    container_transport: object = None
 
     def verify(self, *, candidate: Path | None = None) -> dict:
         """Reopen all frozen authorities; caller hashes and booleans grant nothing."""
@@ -127,8 +106,11 @@ class ComponentQualification:
         ):
             raise C.StageGateError("component compiler has no evaluated domain qualification")
         compile_roles, unresolved = qualification_compile_roles(
-            self.compile_role_evaluation, origin=self.compiler_origin, lineage=self.compiler_lineage,
-            candidate=self.candidate if candidate is None else candidate, contract_root=self.contract_root,
+            self.compile_role_evaluation,
+            origin=self.compiler_origin,
+            lineage=self.compiler_lineage,
+            candidate=self.candidate if candidate is None else candidate,
+            contract_root=self.contract_root,
         )
         if unresolved:
             raise C.StageGateError("required original compilation/static roles remain incomplete")
@@ -147,6 +129,11 @@ class ComponentQualification:
             != self.runtime_authority_sha256
         ):
             raise C.StageGateError("component qualification independent runtime changed")
+        transport = selected_compiler_transport(self.runtime_authority, view=self.view, runtime=self.runtime)
+        if transport is not self.container_transport or document.get("compiler_transport_sha256") != (
+            transport.sha256 if transport is not None else None
+        ):
+            raise C.StageGateError("component qualification compiler command transport changed")
         if C.exact_tree_record(selected)["sha256"] != self.candidate_sha256:
             raise C.StageGateError("component compiler changed after domain qualification")
         if C.sha256_file(self.target_descriptor) != self.target_descriptor_sha256:
@@ -228,9 +215,13 @@ def qualify_component_compiler(
         raise C.StageGateError("component qualification requires bounded execution and one scoped compiler worker")
     origin_binding = _verify_origin(compiler_origin, compiler_lineage, Path(candidate))
     runtime_digest = _verify_runtime(runtime_authority, compiler_origin, Path(target_experiment.path))
+    container_transport = selected_compiler_transport(runtime_authority, view=view, runtime=runtime)
     compile_roles, compile_failures = qualification_compile_roles(
-        compile_role_evaluation, origin=compiler_origin, lineage=compiler_lineage,
-        candidate=Path(candidate), contract_root=contract_root,
+        compile_role_evaluation,
+        origin=compiler_origin,
+        lineage=compiler_lineage,
+        candidate=Path(candidate),
+        contract_root=contract_root,
     )
     from merlin_experiments.phase0.component_coverage import build_guard_link, verify_report
 
@@ -274,7 +265,11 @@ def qualify_component_compiler(
     score, failures, result_evidence, stage_witnesses, source_observations = None, list(compile_failures), [], [], []
     try:
         with qualified_package_execution(
-            candidate=clone, view=view, runtime=runtime, evidence_root=evidence_root / "grade"
+            candidate=clone,
+            view=view,
+            runtime=runtime,
+            evidence_root=evidence_root / "grade",
+            container_transport=container_transport,
         ):
             score = runtime_authority.grader(
                 clone,
@@ -415,8 +410,11 @@ def qualify_component_compiler(
     ):
         failures.append("target or grading contract changed during qualification")
     if qualification_compile_roles(
-        compile_role_evaluation, origin=compiler_origin, lineage=compiler_lineage,
-        candidate=candidate, contract_root=contract_root,
+        compile_role_evaluation,
+        origin=compiler_origin,
+        lineage=compiler_lineage,
+        candidate=candidate,
+        contract_root=contract_root,
     ) != (compile_roles, compile_failures):
         failures.append("original compilation/static evidence changed during qualification")
     status = "qualified" if not failures else "refused"
@@ -429,6 +427,7 @@ def qualify_component_compiler(
             "compiler_origin": origin_binding,
             "compile_roles": compile_roles,
             "runtime_authority_sha256": runtime_digest,
+            "compiler_transport_sha256": container_transport.sha256 if container_transport is not None else None,
             "candidate_sha256": before,
             "compiler_snapshot_sha256": snapshot_digest,
             "invocation_evidence": invocation_evidence,
@@ -480,6 +479,7 @@ def qualify_component_compiler(
         runtime_digest,
         object(),
         compile_role_evaluation,
+        container_transport,
     )
     _ISSUED[qualification._issuer] = _authority_identity(qualification)
     return qualification

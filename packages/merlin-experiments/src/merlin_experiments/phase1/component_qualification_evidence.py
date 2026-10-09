@@ -17,6 +17,32 @@ from .component_witness import (
 )
 
 
+def evaluator_distribution() -> dict:
+    """Require installed AET metadata and bind its actual imported implementation."""
+    from importlib import metadata
+
+    from merlin.common.paths import module_source_path
+    from merlin.common.source_membership import python_members
+
+    try:
+        distribution = metadata.distribution("aet")
+        metadata_files = {
+            str(distribution.locate_file(path).resolve()): C.sha256_file(distribution.locate_file(path))
+            for path in distribution.files or ()
+            if ".dist-info" in str(path) and distribution.locate_file(path).is_file()
+        }
+        package = module_source_path("aet").resolve().parent
+        sources = {
+            name: {"path": str(path), "sha256": C.sha256_file(path)}
+            for name, path in python_members(package, label="installed AET").items()
+        }
+    except (metadata.PackageNotFoundError, OSError, ImportError) as error:
+        raise C.StageGateError("component qualification requires the actual installed AET distribution") from error
+    if not metadata_files or not sources:
+        raise C.StageGateError("component qualification has no installed AET source/metadata membership")
+    return {"version": distribution.version, "metadata": metadata_files, "sources": sources}
+
+
 def _direct_directory(path):
     path = Path(path).absolute()
     if not path.is_dir() or path.resolve() != path or any(owner.is_symlink() for owner in (path, *path.parents)):

@@ -48,6 +48,39 @@ class PreparedContainerTransport:
     guardian_build: Path
     _issuer: object = field(repr=False, compare=False)
 
+    @property
+    def source_pins(self):
+        """Reopened command owner, production record and explicit data/tool closure."""
+        self.verify()
+        build = invocation_record.verify(self.guardian_build)
+        files = {
+            self.client,
+            self.configuration,
+            self.image_archive,
+            self.guardian,
+            self.guardian_build,
+            Path(__file__),
+            Path(__file__).with_name("container_image.py"),
+            Path(__file__).with_name("container_policy.py"),
+            Path(invocation_record.__file__),
+        }
+        files.update(Path(row["path"]) for row in [build["executable"], *build["inputs"], *build["dependencies"]])
+        return tuple((path.resolve(), _sha(path)) for path in sorted(files))
+
+    @property
+    def sha256(self):
+        """Selection identity only; never an isolation/runtime qualification receipt."""
+        binding = {
+            "scope": "explicit compiler command transport; no author/runtime/physical authority",
+            "endpoint": self.endpoint,
+            "client": str(self.client),
+            "guardian": str(self.guardian),
+            "configuration": str(self.configuration),
+            "archive": str(self.image_archive),
+            "source_pins": [(str(path), digest) for path, digest in self.source_pins],
+        }
+        return hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
     def verify(self):
         if _PREPARED.get(self._issuer) is not self:
             raise StageGateError(

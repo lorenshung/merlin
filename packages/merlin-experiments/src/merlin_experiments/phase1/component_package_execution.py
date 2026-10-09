@@ -22,6 +22,34 @@ from merlin_experiments.phase2 import contracts as C
 from merlin_experiments.phase2.component_experiment import ComponentView, RuntimeGrant, strict_tool_policy
 
 
+def selected_compiler_transport(runtime_authority, *, view, runtime):
+    """Consume the exact command selection of already qualified runtime controls.
+
+    Serialized selections, callable import strings and available local services
+    cannot choose the compiler sandbox. Runtime qualification is still mandatory.
+    """
+    from merlin_experiments.phase2.component_runtime_authority import IndependentComponentRuntime
+    from merlin_experiments.phase2.component_runtime_support import PreparedIndependentRuntimeContext
+
+    if type(runtime_authority) is not IndependentComponentRuntime:
+        raise C.StageGateError("compiler command selection requires independently issued runtime authority")
+    runtime_authority.verify(required_roles=("grade", "stage_verifier"))
+    context = runtime_authority.qualification.context
+    if type(context) is not PreparedIndependentRuntimeContext:
+        raise C.StageGateError("compiler command selection requires its original prepared runtime context")
+    context.verify()
+    transport = context.container_transport
+    if transport is not None:
+        if (
+            type(transport) is not PreparedContainerTransport
+            or context.compiler_view != view
+            or context.compiler_runtime != runtime
+        ):
+            raise C.StageGateError("compiler command transport changes its qualified public view/runtime grants")
+        transport.verify()
+    return transport
+
+
 @dataclass(frozen=True)
 class ComponentPackageExecutor:
     candidate: Path

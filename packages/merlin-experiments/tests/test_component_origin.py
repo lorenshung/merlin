@@ -160,7 +160,9 @@ def test_real_shared_probe_reads_stdout_from_recorders_actual_directory(tmp_path
 
     command = (sys.executable, "-I", "-B", "-c", "print('native readiness control')")
     probe = FreshToolProbe("linker", command, hashlib.sha256(b"native readiness control\n").hexdigest())
-    O._probe_shared_tools(SimpleNamespace(output=tmp_path, readiness=(probe,), runtime=()), ("/usr/bin/env",))
+    O._probe_shared_tools(
+        SimpleNamespace(output=tmp_path, readiness=(probe,), runtime=(), compiler_transport=None), ("/usr/bin/env",)
+    )
     records = list(tmp_path.rglob("invocation.json"))
     assert len(records) == 1
     observed = invocation_record.verify(records[0])

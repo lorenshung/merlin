@@ -126,6 +126,7 @@ def domain(tmp_path, monkeypatch):
         Q, "_verify_origin", lambda *_args: {"phase1_origin_sha256": "4" * 64, "phase2_lineage_sha256": None}
     )
     monkeypatch.setattr(Q, "_verify_runtime", lambda *_args: "5" * 64)
+    monkeypatch.setattr(Q, "selected_compiler_transport", lambda *_args, **_kwargs: None)
     # Static-role admission is a separate isolated facet here. These synthetic
     # numerical/witness controls never issue an experiment's source-only proof.
     monkeypatch.setattr(Q, "qualification_compile_roles", lambda *_args, **_kwargs: ({"unit_facet": "isolated"}, []))

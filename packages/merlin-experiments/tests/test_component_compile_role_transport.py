@@ -129,6 +129,7 @@ def transport(tmp_path, monkeypatch):
     gate = LinkedElfAdmissionService("structural_control", diagnostic_gate, ((str(owner), file_digest(owner)),))
     origin = SimpleNamespace(inputs=SimpleNamespace(
         hardware=SimpleNamespace(target="structural_control"), view=SimpleNamespace(root=tmp_path / "view"), runtime=(),
+        compiler_transport=None,
         corpus_root=tmp_path / "numeric-corpus",
     ))
     monkeypatch.setattr(R, "_selection", lambda **kwargs: {"scope": "unit provenance facets isolated, no authority"})
