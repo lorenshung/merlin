@@ -110,6 +110,35 @@ class FreshToolProbe:
             raise C.StageGateError("fresh Phase 1 tools need exact independent shared-tool probes")
 
 
+def _verify_author_tool_containment(*, runtime, control_runtime, readiness) -> None:
+    """Join admitted tool declarations to the actual author mount closure.
+
+    Readiness in a separate compiler transport does not make a tool reachable
+    inside the author control process. This membership check issues no runtime,
+    author isolation, compiler correctness or physical execution authority.
+    """
+    indexes = []
+    for rows in (runtime, control_runtime):
+        if not isinstance(rows, tuple) or any(type(row) is not RuntimeGrant for row in rows):
+            raise C.StageGateError("fresh author tools require exact immutable runtime grants")
+        index = {}
+        for row in rows:
+            row.verify()
+            if row.destination in index:
+                raise C.StageGateError("fresh author tools contain duplicate runtime destinations")
+            index[row.destination] = row
+        indexes.append(index)
+    tools, control = indexes
+    if any(control.get(destination) != row for destination, row in tools.items()):
+        raise C.StageGateError("fresh author control closure omits or changes an admitted tool grant")
+    if not isinstance(readiness, tuple) or any(type(row) is not FreshToolProbe for row in readiness):
+        raise C.StageGateError("fresh author readiness requires exact tool probes")
+    for probe in readiness:
+        probe.verify()
+        if probe.command[0] not in tools:
+            raise C.StageGateError("fresh author readiness executable is outside its admitted tool grants")
+
+
 @dataclass(frozen=True)
 class FreshPhase1Inputs:
     hardware: object
@@ -232,6 +261,9 @@ class FreshPhase1Inputs:
             )
         for row in self.readiness:
             row.verify()
+        _verify_author_tool_containment(
+            runtime=self.runtime, control_runtime=self.control_runtime, readiness=self.readiness
+        )
         self.sandbox_binary
         return {
             "hardware_intake_sha256": self.hardware.sha256,
