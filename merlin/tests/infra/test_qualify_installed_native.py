@@ -29,7 +29,8 @@ def actual_report(tmp_path, *, native="pass"):
             if native == "skip"
             else "def test_native_one(): pass\ndef test_native_two(): pass\n"
         )
-        (tests / "test_component_compile_role_transport.py").write_text(content)
+        for filename in Q.SUITES["component-convergence"]["native_test_files"]:
+            (tests / filename).write_text(content)
     (tests / "test_component_generation.py").write_text(
         "import pytest\ndef test_other_scope():\n    pytest.skip('independent source selection absent')\n"
     )
@@ -68,8 +69,8 @@ def actual_report(tmp_path, *, native="pass"):
 def test_actual_pytest_native_subset_executes_while_other_skip_is_separately_retained(tmp_path):
     xml, report = actual_report(tmp_path), {}
     Q.check_native_test_report("component-convergence", xml, report)
-    assert report["suite_test_counts"] == {"tests": 3, "skipped": 1}
-    assert report["native_test_counts"] == {"tests": 2, "skipped": 0}
+    assert report["suite_test_counts"] == {"tests": 5, "skipped": 1}
+    assert report["native_test_counts"] == {"tests": 4, "skipped": 0}
     assert report["other_test_counts"] == {"tests": 1, "skipped": 1}
     assert report["missing_native_test_files"] == []
     assert report["test_skips"]["native"] == []
@@ -88,10 +89,13 @@ def test_actual_pytest_skipped_or_omitted_native_subset_refuses_and_retains_deno
     assert report["native_test_report"]["sha256"] == Q.digest(xml)
     assert report["other_test_counts"] == {"tests": 1, "skipped": 1}
     if native == "missing":
-        assert report["missing_native_test_files"] == ["test_component_compile_role_transport.py"]
+        assert report["missing_native_test_files"] == [
+            "test_component_compile_role_transport.py",
+            "test_component_native_deadline.py",
+        ]
         assert report["native_test_counts"] == {"tests": 0, "skipped": 0}
     else:
-        assert report["native_test_counts"] == {"tests": 1, "skipped": 1}
+        assert report["native_test_counts"] == {"tests": 2, "skipped": 2}
         assert "selected translator absent" in report["test_skips"]["native"][0]["message"]
 
 
@@ -120,6 +124,14 @@ def test_mutating_actual_child_report_cannot_substitute_a_native_identity(tmp_pa
 def test_compile_only_retains_zero_skip_scope_for_every_original_declared_test_file(tmp_path):
     configured = Q.SUITES["compile-only"]
     assert configured["native_test_files"] == configured["tests"]
+    assert configured["native_test_files"] == (
+        "targetgen/test_compile_only_transport.py",
+        "targetgen/test_shared_execution_deadline.py",
+        "targetgen/test_frontend_use_def.py",
+        "targetgen/test_stack_frame_preflight.py",
+        "targetgen/test_explicit_execution_service.py",
+        "infra/test_build_only_service.py",
+    )
     xml, report = tmp_path / "synthetic.xml", {}
     root = ET.Element("testsuites")
     suite = ET.SubElement(root, "testsuite")
@@ -135,7 +147,7 @@ def test_compile_only_retains_zero_skip_scope_for_every_original_declared_test_f
         )
     ET.ElementTree(root).write(xml)
     Q.check_native_test_report("compile-only", xml, report)
-    assert report["native_test_counts"] == {"tests": 4, "skipped": 0}
+    assert report["native_test_counts"] == {"tests": 6, "skipped": 0}
     ET.SubElement(suite[-1], "skipped", {"message": "unit prerequisite removed"})
     ET.ElementTree(root).write(xml)
     with pytest.raises(Q.QualificationFailed, match="zero skips"):
@@ -145,12 +157,19 @@ def test_compile_only_retains_zero_skip_scope_for_every_original_declared_test_f
 def test_component_roster_imports_and_archives_only_explicit_new_owners():
     configured = Q.SUITES["component-convergence"]
     assert configured["native_tools"] == ("clang", "mlir-translate", "riscv-gcc")
-    assert configured["native_test_files"] == ("test_component_compile_role_transport.py",)
+    assert configured["native_test_files"] == (
+        "test_component_compile_role_transport.py",
+        "test_component_native_deadline.py",
+    )
     assert {
         "test_component_compile_admission.py",
         "test_component_compile_role_transport.py",
         "test_component_compile_graphs.py",
         "test_feedback_guardian.py",
+        "test_component_automatic.py",
+        "test_component_native_deadline.py",
+        "test_component_container_context.py",
+        "test_fresh_author_tools.py",
     } <= set(configured["tests"])
     assert {
         "merlin_experiments.phase1.component_generation_admission",
@@ -159,6 +178,14 @@ def test_component_roster_imports_and_archives_only_explicit_new_owners():
         "merlin_experiments.phase0.component_compile_graphs",
         "merlin_experiments.phase2.feedback_guardian",
         "merlin_experiments.execution.owned_children",
+        "merlin_experiments.phase0.component_automatic",
+        "merlin_experiments.phase0.component_automatic_plan",
+        "merlin_experiments.phase1.component_tool_readiness",
+        "merlin_experiments.phase2.component_stage",
+        "merlin_experiments.phase2.component_final_qualification",
+        "merlin_experiments.phase2.component_launch_probe",
+        "merlin_experiments.phase2.protected_final_observation",
+        "merlin_experiments.phase2.physical_final_admission",
     } <= set(configured["probe_modules"])
     assert configured["support_files"] == (
         "test_phase2_broker.py",
