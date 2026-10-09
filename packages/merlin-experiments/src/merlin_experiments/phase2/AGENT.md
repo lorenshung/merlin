@@ -32,6 +32,18 @@ ELF loading, physical equivalence or timer authority. Keep clock/reset, memory
 and grammar refusal explicit before candidate execution; never discover a
 simulator/target or rewrite RTL in this generic owner.
 
+`rtl_state_control.py` renders a private opaque-state native I/O driver from
+exact native-produced scalar port offsets/widths/storage and explicit original
+stimuli, evaluation calls and complete readback membership. The compiled engine
+owns all clock/reset, memory and state semantics. Unsupported lifecycle/context,
+wide ports, overlapping storage or incomplete declarations refuse; no engine
+discovery, memory model, boot/loading glue, inferred clock domain or cycle claim.
+Only the normal source/product/invocation/output joins can admit its exact private
+diagnostics. Native allocator alignment and scalar I/O offsets do not establish
+hardware ABI alignment or runtime equivalence. Defined latency, write-mask,
+enable and separate-clock controls retain their original outputs; undefined
+initial/disabled/collision read values are not newly fixed by an observer.
+
 `component_runtime_support.py` owns prepared private source/native control
 fixtures with explicit build and functional transport. Its independent
 `component_runtime_controls.py` compiler and `component_runtime_control_execution.py`
