@@ -1,6 +1,8 @@
 """Real callback processes exercise bounded data and late-result refusals."""
+
 import json
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -12,6 +14,7 @@ import pytest
 from component_baseline_fixture import synthetic_component_controller as synthetic_component_controller
 from merlin_experiments.phase2 import broker_policy as policy_owner
 from merlin_experiments.phase2 import component_workflow as workflow
+from merlin_experiments.phase2 import supervised_feedback as supervisor
 from merlin_experiments.phase2.component_analytical import ComponentAnalyticalResults
 from merlin_experiments.phase2.contracts import StageGateError, sha256_file
 from merlin_experiments.phase2.feedback_protocol import (
@@ -50,8 +53,9 @@ def test_actual_callback_roundtrip_retains_owned_cleanup_and_unrequested_lease_s
 
 
 def test_closed_codec_preserves_existing_analytical_envelope():
-    value = ComponentAnalyticalResults(return_plain_result(), {("family", "member"): {"stages": ["complete"]}},
-                                       {"promotion": "SCREENING_ONLY"})
+    value = ComponentAnalyticalResults(
+        return_plain_result(), {("family", "member"): {"stages": ["complete"]}}, {"promotion": "SCREENING_ONLY"}
+    )
     limits = FeedbackValueLimits()
     observed = decode_feedback_value(encode_feedback_value(value, limits=limits), limits=limits)
     assert type(observed) is ComponentAnalyticalResults and observed == value
@@ -79,8 +83,9 @@ def test_actual_worker_cannot_schedule_arbitrary_parent_deserialization(tmp_path
     marker = tmp_path / "decoder-ran"
     started = time.monotonic()
     with pytest.raises(StageGateError, match="unsupported result type"):
-        bounded_feedback(return_reconstruction_trap, timeout_s=1, output=tmp_path / "workers",
-                         kwargs={"marker": marker})
+        bounded_feedback(
+            return_reconstruction_trap, timeout_s=1, output=tmp_path / "workers", kwargs={"marker": marker}
+        )
     assert time.monotonic() - started < 2 and not marker.exists()
     assert lifecycle(tmp_path / "workers")["status"] == "refused"
 
@@ -111,8 +116,12 @@ def hold_lease_and_stall(*, lease_path, marker):
 def test_direct_worker_exit_releases_this_observed_lock_without_general_lease_authority(tmp_path):
     lease_path, marker = tmp_path / "host.lease", tmp_path / "held"
     with pytest.raises(StageGateError, match="deadline"):
-        bounded_feedback(hold_lease_and_stall, timeout_s=0.3, output=tmp_path / "workers",
-                         kwargs={"lease_path": lease_path, "marker": marker})
+        bounded_feedback(
+            hold_lease_and_stall,
+            timeout_s=0.3,
+            output=tmp_path / "workers",
+            kwargs={"lease_path": lease_path, "marker": marker},
+        )
     assert marker.exists()
     handle = acquire_host_resource_lease(tmp_path / "reacquired", lease_path=lease_path)
     assert handle is not None
@@ -120,40 +129,107 @@ def test_direct_worker_exit_releases_this_observed_lock_without_general_lease_au
     assert lifecycle(tmp_path / "workers")["lease_release"]["status"] == "NOT_REQUESTED"
 
 
-def pause_coordinator_and_publish(*, coordinator):
-    # Only an owned, separate test coordinator is stopped. Its independent child
-    # resumes it after the deadline, while the feedback worker publishes in time.
-    os.kill(coordinator, signal.SIGSTOP)
+def publish_ready_result():
     return {"published": True}
 
 
 def paused_coordinator_case(root):
-    helper = subprocess.Popen([sys.executable, "-c",
-                               "import os,signal,time,sys; time.sleep(0.7); os.kill(int(sys.argv[1]),signal.SIGCONT)",
-                               str(os.getpid())], start_new_session=True)
+    # Observe the actual complete file at the normal reception boundary. Stop
+    # only this separate owned test coordinator; its guardian remains live.
+    original_receive = supervisor.receive_feedback_value
+
+    def pause_before_receive(path, *, limits, deadline):
+        assert decode_feedback_value(path.read_bytes(), limits=limits) == {"result": {"published": True}}
+        ready = {
+            "state": "result_ready",
+            "path": str(path),
+            "sha256": sha256_file(path),
+            "ready_observed_at": time.monotonic(),
+            "deadline": deadline,
+        }
+        assert ready["ready_observed_at"] < deadline
+        print(json.dumps(ready), flush=True)
+        os.kill(os.getpid(), signal.SIGSTOP)
+        # Preserve the actual publication/resume observations without claiming
+        # target timing, process cleanup, or result acceptance from this file.
+        resumed = {**ready, "resumed_at": time.monotonic(), "scope": "test coordination only"}
+        (root / "publication_control.json").write_text(json.dumps(resumed))
+        assert resumed["resumed_at"] >= deadline
+        return original_receive(path, limits=limits, deadline=deadline)
+
+    supervisor.receive_feedback_value = pause_before_receive
     try:
-        bounded_feedback(pause_coordinator_and_publish, timeout_s=0.3, output=root, kwargs={"coordinator": os.getpid()})
+        bounded_feedback(publish_ready_result, timeout_s=2, output=root, kwargs={})
     except StageGateError as error:
-        print(json.dumps({"status": "refused", "detail": str(error)}))
+        print(json.dumps({"status": "refused", "detail": str(error)}), flush=True)
     else:
-        print(json.dumps({"status": "accepted"}))
+        print(json.dumps({"status": "accepted"}), flush=True)
     finally:
-        helper.wait(timeout=2)
+        supervisor.receive_feedback_value = original_receive
 
 
 def test_real_ready_file_cannot_bypass_parent_deadline_after_resume(tmp_path):
-    script = ("import pathlib,runpy,sys; "
-              "sys.path.insert(0,str(pathlib.Path(sys.argv[1]).parent)); "
-              "runpy.run_path(sys.argv[1])['paused_coordinator_case'](pathlib.Path(sys.argv[2]))")
+    script = (
+        "import pathlib,runpy,sys; "
+        "sys.path.insert(0,str(pathlib.Path(sys.argv[1]).parent)); "
+        "runpy.run_path(sys.argv[1])['paused_coordinator_case'](pathlib.Path(sys.argv[2]))"
+    )
     root = tmp_path / "workers"
-    result = subprocess.run([sys.executable, "-c", script, str(Path(__file__).resolve()), str(root)],
-                            capture_output=True, text=True, timeout=8)
-    assert result.returncode == 0, result.stderr
-    observed = json.loads(result.stdout)
-    assert observed["status"] == "refused" and "result deadline" in observed["detail"]
+    coordinator = subprocess.Popen(
+        [sys.executable, "-I", "-B", "-c", script, str(Path(__file__).resolve()), str(root)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        assert select.select([coordinator.stdout], [], [], 8)[0], "coordinator never observed an in-time result"
+        ready = json.loads(coordinator.stdout.readline())
+        assert ready["state"] == "result_ready" and ready["ready_observed_at"] < ready["deadline"]
+        result_path = Path(ready["path"])
+        assert result_path.parent.parent == root and sha256_file(result_path) == ready["sha256"]
+        # Kernel state, not a fixed relative sleep, establishes the stop. The
+        # wait is bounded; polling latency never substitutes for its result.
+        stop_limit = time.monotonic() + 2
+        while True:
+            waited, status = os.waitpid(coordinator.pid, os.WNOHANG | os.WUNTRACED)
+            if waited:
+                assert os.WIFSTOPPED(status) and os.WSTOPSIG(status) == signal.SIGSTOP
+                break
+            remaining = stop_limit - time.monotonic()
+            assert remaining > 0, "owned coordinator never stopped"
+            select.select([], [], [], min(0.01, remaining))
+        stopped_at = time.monotonic()
+        assert ready["ready_observed_at"] <= stopped_at < ready["deadline"]
+        # Resume against the same original absolute deadline, after both actual
+        # publication and actual stop have been observed. No wakeup assumes a
+        # worker stage or accepts an already-expired relative timing guess.
+        while (remaining := ready["deadline"] - time.monotonic()) > 0:
+            select.select([], [], [], remaining)
+        resumed_at = time.monotonic()
+        os.kill(coordinator.pid, signal.SIGCONT)
+        stdout, stderr = coordinator.communicate(timeout=8)
+        assert coordinator.returncode == 0, stderr
+        observed = json.loads(stdout)
+        assert observed["status"] == "refused" and "result deadline" in observed["detail"]
+    finally:
+        if coordinator.poll() is None:
+            os.kill(coordinator.pid, signal.SIGCONT)
+            coordinator.terminate()
+            coordinator.communicate(timeout=8)
+    publication = json.loads((root / "publication_control.json").read_text())
+    assert (
+        publication["ready_observed_at"]
+        <= stopped_at
+        < publication["deadline"]
+        <= resumed_at
+        <= publication["resumed_at"]
+    )
+    assert sha256_file(result_path) == publication["sha256"]
     assert len(list(root.glob("component_worker_*/result.json"))) == 1
     receipt = lifecycle(root)
     assert receipt["received_bytes"] is None and receipt["deadline_exceeded"] and receipt["worker"]["reaped"]
+    assert receipt["guardian"]["reaped"] and receipt["cleanup"]["status"] == "COMPLETE"
 
 
 def oversized_result(*, kind):
@@ -167,15 +243,19 @@ def oversized_result(*, kind):
     return result
 
 
-@pytest.mark.parametrize("kind,limits", [
-    ("bytes", FeedbackValueLimits(max_bytes=2048)),
-    ("nodes", FeedbackValueLimits(max_nodes=64)),
-    ("depth", FeedbackValueLimits(max_depth=12)),
-])
+@pytest.mark.parametrize(
+    "kind,limits",
+    [
+        ("bytes", FeedbackValueLimits(max_bytes=2048)),
+        ("nodes", FeedbackValueLimits(max_nodes=64)),
+        ("depth", FeedbackValueLimits(max_depth=12)),
+    ],
+)
 def test_actual_worker_excessive_results_refuse_before_parent_acceptance(tmp_path, kind, limits):
     with pytest.raises(StageGateError, match="limit"):
-        bounded_feedback(oversized_result, timeout_s=2, output=tmp_path / "workers",
-                         kwargs={"kind": kind}, limits=limits)
+        bounded_feedback(
+            oversized_result, timeout_s=2, output=tmp_path / "workers", kwargs={"kind": kind}, limits=limits
+        )
     assert lifecycle(tmp_path / "workers")["status"] == "refused"
 
 
@@ -216,8 +296,10 @@ def test_normal_path_refuses_and_retains_actual_mutation_without_restoration(tmp
     source = Path(__file__).resolve()
     original = hash_tree(selected["candidate"])["sha256"]
     selected["component_analytical"] = replace(
-        provider(tmp_path, monkeypatch, selected["target_experiment"]), evaluate=mutate_candidate,
-        implementation=source, implementation_sha256=sha256_file(source),
+        provider(tmp_path, monkeypatch, selected["target_experiment"]),
+        evaluate=mutate_candidate,
+        implementation=source,
+        implementation_sha256=sha256_file(source),
     )
     policy = policy_owner.select_workflow(policy_owner.COMPONENT_ONLY_V1, **selected)
     result, document = policy.execute({}, workflow.ANALYTICAL_ACTION, {}, 0, 5, time.monotonic())
@@ -235,8 +317,10 @@ def test_normal_path_timeout_retains_original_candidate_and_private_refusal(tmp_
     selected, source = context(tmp_path), Path(__file__).resolve()
     original = hash_tree(selected["candidate"])["sha256"]
     selected["component_analytical"] = replace(
-        provider(tmp_path, monkeypatch, selected["target_experiment"]), evaluate=stall_without_mutation,
-        implementation=source, implementation_sha256=sha256_file(source),
+        provider(tmp_path, monkeypatch, selected["target_experiment"]),
+        evaluate=stall_without_mutation,
+        implementation=source,
+        implementation_sha256=sha256_file(source),
     )
     policy = policy_owner.select_workflow(policy_owner.COMPONENT_ONLY_V1, **selected)
     result, document = policy.execute({}, workflow.ANALYTICAL_ACTION, {}, 0, 0.3, time.monotonic())
