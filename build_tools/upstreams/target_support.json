@@ -40,8 +40,12 @@
       "file_provenance": "provenance.json",
       "contract_sha256": "c39878928d8d674ded768a293b8bd8f662bf1b7f6f09d2e36f8208c310cb14d1",
       "schema_valid": null,
-      "removed_canonical_directories": ["merlin/targets/muon/backend"],
-      "removed_canonical_owners": ["merlin/targets/muon/sim_oracle.py"],
+      "removed_canonical_directories": [
+        "merlin/targets/muon/backend"
+      ],
+      "removed_canonical_owners": [
+        "merlin/targets/muon/sim_oracle.py"
+      ],
       "qualification_scope": "Original 19-file migration provenance retained; subsequent companion changes include an OOT-owned codegen smoke and shared OracleUnavailable inheritance. Isolated explicit provider/oracle metadata imports, private support classification, synthetic runtime ABI/cache tests, and nine process-blocked codegen smoke cases. No native execution.",
       "blockers": [
         "Standalone local support repository only; no publication remote configured and no changes pushed.",
@@ -89,78 +93,6 @@
         "Shared Spike harness/toolchain dependencies remain in Merlin. Broader OPU implementations and reference metadata still require migration.",
         "No native compiler, simulator, hardware or candidate certification. Existing RVV publication certification does not extend to this support package.",
         "Companion branch is local and unpushed; frozen historical inputs remain unchanged."
-      ]
-    },
-    {
-      "target": "gemmini",
-      "ownership": "canonical_example",
-      "external_support_checkout_required": false,
-      "provider_root": "examples/gemmini/support",
-      "provider_role": "support",
-      "canonical_example": {
-        "path": "examples/gemmini/support",
-        "source_record": "examples/gemmini/SOURCE.yaml",
-        "tree": "aedbb9dd40685a0da45d7fe4faaaa561a21dda22",
-        "file_count": 161
-      },
-      "origin": {
-        "repository": "https://github.com/ucb-bar/gemmini-mlir.git",
-        "published": true,
-        "commit": "4a02558d8b34f8706d57f17bd9fafa80cbc5c93a",
-        "commit_date": "2026-10-08T13:47:57-07:00",
-        "tree": "7c7e90c8cb4465beac4eb61e5b37b6bd1afc2acb",
-        "provider_root": "merlin-support",
-        "local_worktree": "out/build/upstreams/gemmini-mlir",
-        "base_ref": "stable/gemmini_xdsl_rtl_v0",
-        "base_commit": "390623a67db81bcf595ec3805f0921f1fb69e378",
-        "catalog_commit": "3b8dbc57fd405058597481bcf28198702b6befde",
-        "historical_base_root_role": "candidate_compiler"
-      },
-      "copied_files": 34,
-      "file_provenance": "merlin-support/provenance.json",
-      "conformance_provenance": "merlin-support/conformance_migration.json",
-      "build_support_provenance": "merlin-support/build_support_migration.json",
-      "resource_provenance": "merlin-support/resource_migration.json",
-      "build_source_identity_provenance": "merlin-support/build_source_identity_migration.json",
-      "rocc_semantics_provenance": "merlin-support/rocc_semantics_migration.json",
-      "rtl_checks_provenance": "merlin-support/rtl_checks_migration.json",
-      "readout_encoding_provenance": "merlin-support/readout_encoding_migration.json",
-      "model_slices_provenance": "merlin-support/model_slices_migration.json",
-      "pinned_runtime_provenance": "merlin-support/pinned_runtime_migration.json",
-      "runtime_environment_provenance": "merlin-support/runtime_environment_migration.json",
-      "portfolio_capabilities_provenance": "merlin-support/portfolio_capabilities_migration.json",
-      "completion_capability_provenance": "merlin-support/completion_capability_migration.json",
-      "whole_model_driver_provenance": "merlin-support/whole_model_driver_migration.json",
-      "removed_canonical_directories": [
-        "merlin/targets/gemmini/backend",
-        "merlin/targets/gemmini/build_support",
-        "merlin/targets/gemmini/tools",
-        "merlin/targets/gemmini/cost_model"
-      ],
-      "required_capabilities": {
-        "portfolio": "Shared portfolio assembly selects host_witness_abi and primitive_probe modules explicitly. Missing optional capabilities remain unavailable; explicitly requested probes require a complete declared capability. Pure module identity tests do not qualify runtime execution.",
-        "rocc_semantics": "Core RoCC tooling now requires this selected-provider capability; legacy native support is not a fallback. Supply RTL facts explicitly when the provider has no fact bundle.",
-        "rocc_semantics.rtl_checks": "Structural screening, fact projection, TRACE assertions and rendering are support-owned. Shared dispatch requires the complete capability; unavailable evidence is not a pass. Synthetic protocol/geometry regressions preserve diagnostics, not hardware certification.",
-        "pinned_runtime": "Host GSIM qualification requires provider-owned binary/cycle configuration; shared qualification independently checks both engine hashes. Pure configuration/restoration tests do not certify simulator execution.",
-        "runtime_environment": "Child stages require the selected provider's pure copied-environment policy for both engines and the cycle cap. Shared orchestration independently checks both binary hashes; no ambient target fallback or simulator qualification is implied."
-      },
-      "removed_canonical_owners": [
-        "merlin.targetgen.eval.gemmini_conformance",
-        "merlin.targetgen.eval.gemmini_suite",
-        "merlin.targetgen.eval.gemmini_dispatcher",
-        "merlin.targetgen.agent.gemmini_kernel_slot",
-        "merlin.targetgen.model_slice_export"
-      ],
-      "contract_sha256": "81795bea25f5fd2d8905614e729e9e34f625b035491b922cc747c11115c2046e",
-      "schema_valid": false,
-      "blockers": [
-        "Preserved canonical contract lacks required legality field; schema-unqualified. Migration tests assert the original diagnostic, not validity.",
-        "Backend, pure build support, reference tools and calibrated cost model now live only in this explicitly selected companion; reference target metadata remains migration work in Merlin.",
-        "Conformance and kernel authoring now live OOT; selected support lacks RTL facts and historical integration fixtures still require an explicit Merlin fixture root.",
-        "Installed-source collection and worker admission pass focused tests, including declared resource and pure-Python membership mutation refusal; compilation and complete frozen sandbox execution remain unqualified.",
-        "Broader installed conformance-recording tests require explicit Chipyard provenance; five tests fail when MERLIN_EXT_CHIPYARD is unset. No full-suite pass is claimed.",
-        "Historical curated header comment contains conflict-marker text and whitespace, preserved byte-for-byte rather than silently repaired during relocation.",
-        "No standalone candidate export qualification or backend execution performed; historical certificate applies only to the original base revision."
       ]
     },
     {
@@ -217,7 +149,9 @@
       "file_provenance": "merlin-support/provenance.json",
       "contract_sha256": "1eefe1d5941869b3063a09e82944fbb765934f50a93f27b78ebde86bddd98af0",
       "program_emitter_provenance": "merlin-support/program_emitter_migration.json",
-      "removed_canonical_owners": ["merlin.targetgen.oracle_helpers.npu_emit"],
+      "removed_canonical_owners": [
+        "merlin.targetgen.oracle_helpers.npu_emit"
+      ],
       "required_capabilities": {
         "runner.program_emitter": "Named-program assembly and explicit tensor layout require the selected support helper. Encoding options are target-owned; no in-tree fallback remains."
       },

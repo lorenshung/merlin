@@ -42,13 +42,11 @@ target directory, which may be an OOT provider instead of this example.
 export MERLIN_MLC_DIR=/path/to/ModelIR
 ```
 
-The Gemmini support provider is vendored at [`../support`](../support), byte-identical (except the
-normalized `provenance.json` that record lists) to the companion revision recorded in
-[`../SOURCE.yaml`](../SOURCE.yaml) and
-[`target_support.json`](../../../build_tools/upstreams/target_support.json). With
-`MERLIN_TARGET_PATH` unset it is the selected support; set the variable only to try another
-revision, and keep the whole tree host-private.
-Calibration coefficients are screening estimates, not new measurements.
+The handwritten support provider and its automatic selection have been removed.
+Fresh experiments require independently derived and qualified runtime support,
+selected alongside the public RTL and minimal software contract. The retained
+contracts and historical diagnostics in this directory do not establish that
+authority. The handwritten compiler remains a private final reference.
 
 ### Why `software-spec.yaml` is marked reviewed
 
@@ -227,10 +225,10 @@ goldens, native Gemmini Spike, and native Gemmini Verilator. First produce a
 corpus with `isa/SY_contraction_i8_aligned` and
 `isa/SY_contraction_i8_partial`, and a selected source bundle whose hashes are
 bound by that corpus's `_evidence/evidence-manifest.json`. The probe reads the support root from
-`MERLIN_TARGET_PATH`, so name the vendored provider explicitly, with the Chipyard toolchain:
+`MERLIN_TARGET_PATH`, so select independently qualified support explicitly, with the Chipyard toolchain:
 
 ```sh
-export MERLIN_TARGET_PATH=$PWD/examples/gemmini/support
+export MERLIN_TARGET_PATH=${MERLIN_INDEPENDENT_TARGET_SUPPORT:?independent runtime support required}
 export MERLIN_CHIPYARD=/selected/chipyard
 python examples/gemmini/verification/probe_native_kernel.py \
   --corpus /generated/gemmini/corpus-1 \

@@ -5,7 +5,7 @@ status: current
 owner: runtime
 last_verified: 2026-10-08
 related: [getting_started, target_resolution, simulator_selection, phase0_specification]
-code_refs: [examples/gemmini/support, src/merlin/targetgen/gsim_emulator.py, build_tools/scripts/package_worker_inputs.py]
+code_refs: [src/merlin/targetgen/gsim_emulator.py, build_tools/scripts/package_worker_inputs.py, packages/merlin-experiments/src/merlin_experiments/phase0/rtl_intake.py]
 ---
 
 # Provisioning Gemmini gSIM on a Linux worker
@@ -14,6 +14,12 @@ This is a source-and-input setup procedure, **not** an AWS qualification result.
 worker, storage and access controls yourself. Use an x86-64 Linux worker for the documented native
 model; an x86-64 emulator does not run natively on an ARM/Graviton worker. Keep private inputs,
 credentials and generated simulator artifacts outside Git and candidate-visible workspaces.
+
+The native fork procedure below is retained inspection material. Fresh compiler
+experiments require independently issued hardware, minimal software and runtime
+authorities; these build commands alone do not admit an engine or its helpers.
+See [fresh compiler origin](../design/fresh_compiler_origin.md). The handwritten
+support provider and copied kernel headers have been removed from Merlin.
 
 ## Clone and install the source stack
 
@@ -35,9 +41,9 @@ checkpoints. Use the [LLVM toolchain guide](llvm_toolchain.md) and the selected 
 configuration. If regenerating frontend captures, also follow the [model2MLIR guide](model2mlir.md)
 and record its source and framework versions independently.
 
-A Merlin clone already contains the canonical trusted provider at `examples/gemmini/support`;
-**do not clone a separate `merlin-support` branch** to obtain it. Compiler candidates and target
-dialect implementation remain out-of-tree and are selected separately.
+Select independently derived and qualified target support explicitly. A Merlin
+clone supplies shared orchestration and runtime mechanisms; target implementation
+and the private handwritten reference remain out of tree.
 
 Clone the [public gSIM fork](https://github.com/copparihollmann/gsim) at an exact commit of its
 `merlin` branch (not `master`). The published Merlin integration commit below is an example pin;
@@ -92,10 +98,10 @@ binary and requires its own receipt and qualification. The builder's `native/bui
 it does **not** prove which RTL revision originally elaborated the FIRRTL. Retain that source recipe,
 Chipyard/toolchain revisions and the generated ABI header separately.
 
-From the Merlin checkout, select the canonical provider, exact model and facts explicitly:
+From the Merlin checkout, select admitted independent support, exact model and facts explicitly:
 
 ```sh
-export MERLIN_TARGET_PATH="$PWD/examples/gemmini/support"
+export MERLIN_TARGET_PATH=${MERLIN_INDEPENDENT_TARGET_SUPPORT:?independent runtime support required}
 export MERLIN_EXT_GSIM=/absolute/pinned/gsim
 export MERLIN_CHIPYARD=/absolute/selected/chipyard
 export MERLIN_EXT_CHIPYARD="$MERLIN_CHIPYARD"

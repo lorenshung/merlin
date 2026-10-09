@@ -30,9 +30,10 @@ field — not the directory name — so a package can live anywhere and be versi
 ## Provider roles and ownership
 
 Support packages declare `provider.yaml` at their own root, separate from a compiler candidate's
-`manifest.yaml`. The default Gemmini provider is canonical in this checkout at
-`examples/gemmini/support/provider.yaml`; an independently selected repository can use the same
-declaration at `merlin-support/provider.yaml`:
+`manifest.yaml`. An independently selected repository can use the declaration at
+`merlin-support/provider.yaml`. Gemmini has no in-repo executable support default:
+its handwritten provider and copied headers have been removed from this repository.
+Fresh experiments require separately issued independent support authority.
 
 ```yaml
 schema: merlin.provider.v1
@@ -103,8 +104,8 @@ Merlin's trusted, agent-private support provider for a target is tracked beside 
 `examples/<example>/support/`. `SOURCE.yaml` states one of two ownership forms:
 
 - `merlin.canonical_example_support.v1` binds the **current tracked support tree** and file count.
-  Gemmini uses this form; its external `origin` records history, not a required checkout or a
-  byte-identity claim about the current tree. A change needs a reviewed new tree identity.
+  Its external `origin` records history, not a required checkout or a byte-identity
+  claim about the current tree. A change needs a reviewed new tree identity.
 - `merlin.vendored_support.v1` is a historical companion snapshot. It binds the companion commit
   and source tree; only listed `normalized` files may differ, with each original blob ID recorded.
   A change to this form is a new re-vendoring from a recorded companion commit.
@@ -112,6 +113,8 @@ Merlin's trusted, agent-private support provider for a target is tracked beside 
 `merlin/tests/infra/test_example_support.py` recomputes each tree from tracked members and checks
 its record against [`target_support.json`](../../build_tools/upstreams/target_support.json). Neither
 form is a compiler candidate or an authorization to show the support tree to an agent.
+Fresh compiler experiments additionally exclude handwritten support from the
+repository and require independent hardware, minimal software and runtime issuance.
 
 | `MERLIN_TARGET_PATH` | Support selected for target `T` |
 | -------------------- | ------------------------------- |
@@ -133,8 +136,9 @@ selection afterwards in the same process (for example a test that sets `MERLIN_T
 fixture) is refused for every loaded target. Select explicitly before the first query, or run in a
 fresh process, when only one provider should load. For that reason the test suites
 (`merlin/tests`, `packages/merlin-experiments/tests`) start with `MERLIN_TARGET_PATH=""` unless you
-export a value: run support-dependent tests with, for example,
-`MERLIN_TARGET_PATH=$PWD/examples/gemmini/support`.
+export a value. Support-dependent tests require an explicitly selected external
+provider. From-scratch experiments separately qualify its independent derivation;
+selecting a provider is not experimental admission.
 
 The in-repo support trees remain experimenter-side. Every `examples/*/support` directory is an answer
 surface whatever is selected: agent sandboxes, bundle snapshots and clean rooms withhold it (only an

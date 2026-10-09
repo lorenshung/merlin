@@ -9,12 +9,9 @@ numeric_profile: examples/gemmini/phase0/recipe.yaml
 rtl:
   via: mlc            # RTL facts are DERIVED from mlc discovery (MERLIN_MLC_DIR, the target above)
 
-hardware_spec:
-  isa_headers:
-    - experiments/capsule_bench/targets/gemmini/contracts/hwbringup_gemmini_v0/isa_include/gemmini.h
-    - experiments/capsule_bench/targets/gemmini/contracts/hwbringup_gemmini_v0/isa_include/gemmini_params.h
-  hwbringup_set: experiments/capsule_bench/targets/gemmini/contracts/hwbringup_gemmini_v0
-  curated_harness: contracts/harness_curated/gemmini-rocc-tests
+# Runtime/ISA facts must be independently derived from the selected RTL.
+# No curated library kernels or handwritten backend headers are provided.
+hardware_spec: {}
 
 capsule_corpus: merlin/contract/capsules/isa
 

@@ -168,7 +168,26 @@ def test_support_matches_its_recorded_ownership(record, doc):
 
 @pytest.mark.parametrize("mutation", ["tree", "count", "role", "external_pin"])
 def test_canonical_support_record_refuses_mutation(mutation):
-    record, original = next((path, doc) for path, doc in RECORDS if doc.get("schema") == CANONICAL_SCHEMA)
+    # Test this metadata protocol without requiring a canonical reference backend
+    # to remain installed. Derive a diagnostic record from an existing tracked
+    # snapshot; it confers no runtime or fresh-experiment authority.
+    record, snapshot = VENDORED_RECORDS[0]
+    original = {
+        "schema": CANONICAL_SCHEMA,
+        "target": snapshot["target"],
+        "provider_id": snapshot["provider_id"],
+        "path": snapshot["path"],
+        "role": "support",
+        "visibility": "experimenter_only",
+        "external_support_checkout_required": False,
+        "file_count": snapshot["file_count"],
+        "canonical_since": snapshot["vendored"],
+        "canonical_tree": snapshot["vendored_tree"],
+        "origin": snapshot["source"],
+        "records": snapshot["records"],
+        "tests": [],
+    }
+    _assert_source_record(record, original)
     doc = {**original}
     if mutation == "tree":
         doc["canonical_tree"] = "0" * 40

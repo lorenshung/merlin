@@ -240,19 +240,9 @@ and review bundles instead of relying on those links as sandbox grants. Generate
 capsules, workspaces, compiler payloads and certification records remain artifacts,
 not files in this example. The remaining harness resources still require a checkout.
 
-## Public runtime harness
+## Independent runtime support
 
-`contracts/harness_curated/gemmini-rocc-tests/` contains the supplied headers,
-linker scripts and runtime scaffolding used by the compiler experiment. The
-descriptor's `contracts_root` selects this example-owned tree; generated bundles
-and local environment files keep their separately declared resource locations.
-Vendor licenses and the three internal linker-script aliases are preserved.
-
-The former harness directory is a compatibility link for retained experiment
-variants. Gemmini Universal keeps its own parameter overrides while linking shared
-headers to this owner. The pinned G3 batch descriptor is unchanged. These links do
-not authorize verified execution of old frozen runs; prepare and review fresh inputs.
-
-This does not relocate or qualify the external Chipyard ISA/RTL bring-up links.
-Those still contain machine-specific paths and require a separate pinned-source
-provisioning migration. No external referents were copied into this example.
+The copied kernel headers and legacy harness aliases have been removed. Fresh
+experiments require separately derived support from the admitted public RTL and
+minimal reviewed software contract. The handwritten compiler and its runtime
+remain a private final reference; they cannot supply authoring or feedback tools.

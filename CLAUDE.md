@@ -18,10 +18,9 @@ Experiment definitions start at `experiments/catalog.yaml`; retained research in
 
 ## Compiler and OOT ownership rule
 
-Target-specific compiler dialect operations, instruction encodings, device kernels and schedules,
-hardware layout/resource facts and ABI glue belong in the target's OOT MLIR dialect repository.
-Trusted evaluator adapters, reference programs and selected simulator support may be canonical under
-`examples/<target>/support`; they are not candidate payloads. Reusable host code generation, packing, requantization,
+All target-specific dialect operations, instruction encodings, device kernels and schedules,
+hardware layout/resource facts, ABI glue and target execution support belong in the target's
+OOT MLIR dialect repository. Reusable host code generation, packing, requantization,
 graph/global optimizations, dispatch, buffer ownership, device compilation orchestration and
 runtime infrastructure belong in Merlin. An optimization selectable independently of the
 accelerator belongs in Merlin even when first measured on one target. Split mixed changes at
@@ -29,15 +28,16 @@ an explicit contract: generic mechanism in Merlin, target facts and implementati
 Promote generic OOT prototypes into Merlin and make the provider delegate; do not maintain
 duplicate implementations. Preserve explicit numeric policy selection and correctness gates.
 
-Merlin's own **support provider** for a target (backend, oracles, build support and their tests)
-is trusted target-specific code under `examples/<target>/support/`. `SOURCE.yaml` distinguishes
-canonical example ownership, whose tracked tree is verified directly, from historical vendored
-snapshots, whose bytes match a recorded companion commit except explicitly path-normalized files.
-The in-repo provider is the selected support when
-`MERLIN_TARGET_PATH` is unset, it is never agent-visible, and it is never a compiler candidate.
-Canonical support changes require a new reviewed tracked-tree identity; historical snapshots change
-by re-vendoring from a recorded commit. Compiler candidates stay in their OOT repositories.
-See `docs/guides/target_resolution.md`.
+Target **support providers** (backends, target oracles, build support and their tests)
+belong in the companion OOT repository. A historical support snapshot may be
+retained only with exact companion provenance and explicit evaluation scope;
+its presence does not establish a default provider or independent qualification.
+Fresh compiler authoring admits only its independently qualified runtime and
+public source intake. Protected reference backends, support adapters, schedules
+and prebuilt compiler answers remain outside its inputs and tools. Removing a
+reference provider must not leave instructions to rediscover it through a legacy
+default. Compiler candidates stay in their OOT repositories. See
+`docs/guides/target_resolution.md`.
 
 The OOT dialect is a **general compiler backend**, not a workload-specific kernel generator.
 Production passes derive choices from input operation semantics, shapes, layouts, numeric

@@ -10,7 +10,7 @@ uses diagnostic mode until evidence, semantics and coverage are qualified.
 
 | Step | Authored inputs and instructions | Generated result |
 | --- | --- | --- |
-| Target setup | [`target/`](target/README.md): descriptor and reference contracts; support is the vendored [`support/`](support/README.md) provider, selected when `MERLIN_TARGET_PATH` is unset | Extracted facts and tool qualification, kept outside examples |
+| Target setup | [`target/`](target/README.md): authored descriptor and reference contracts; fresh experiments require independently derived runtime support | Extracted facts and tool qualification, kept outside examples |
 | Phase 0: hardware-guided test generation | [`phase0/`](phase0/README.md): public coverage recipe | Run-owned capsules, then an explicitly reviewed corpus release |
 | Phase 1: functional compiler generation | [`phase1/`](phase1/README.md): prompts and public runtime harness | Frozen compiler submission and separately attributed certification |
 | Phase 2: performance optimization | [`phase2/`](phase2/README.md): selecting frozen inputs and the shared templates | Optimization runs and evidence tied to the exact functional compiler |
@@ -27,6 +27,13 @@ uses the installed controller. Model-portfolio mode uses the installed portfolio
 launcher with an explicit deployment record. See the phase guides.
 Private holdouts,
 goldens and credentials must never be copied into this public example.
+
+The handwritten support provider and copied kernel headers have been removed.
+Fresh Phase 1 and Phase 2 use the independently issued hardware, runtime and
+compiler-origin authorities described in the
+[fresh compiler design](../../docs/design/fresh_compiler_origin.md).
+Historical probes and authored contracts below are inspection material; they
+do not supply an admitted compiler, runtime or fresh experiment input.
 
 These commands inspect configuration without starting an agent or simulator:
 

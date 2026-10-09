@@ -3,7 +3,7 @@ title: Architecture
 kind: reference
 status: current
 owner: core
-last_verified: 2026-10-08
+last_verified: 2026-10-05
 related: [repo_structure, core_dialects, lowering_pipeline]
 code_refs: [src/merlin, packages, experiments/catalog.yaml]
 ---
@@ -29,8 +29,7 @@ legacy symlink to core, not a second implementation.
 | Owner | Implementation |
 | --- | --- |
 | Merlin | Reusable host code generation, packing, requantization, graph/global optimizations, dispatch, buffer ownership, device compilation orchestration, and runtime infrastructure |
-| Target OOT MLIR dialect repository | Target compiler dialect operations, instruction encodings, device kernels/schedules, hardware layout/resource facts, and target ABI glue |
-| `examples/<target>/support` | Trusted, agent-private evaluator adapters, reference programs and selected simulator support; not an evaluated compiler candidate |
+| Target OOT MLIR dialect repository | Target dialect operations, instruction encodings, device kernels/schedules, hardware layout/resource facts, target ABI glue, and target execution support |
 
 An optimization that can be selected independently of the accelerator belongs in Merlin,
 including one first measured on a particular device. A mixed optimization uses an explicit
@@ -38,6 +37,13 @@ contract: Merlin supplies the generic algorithm and verifies its semantic obliga
 provider supplies target legality facts, instruction selection and implementation. Generic
 OOT prototypes move into Merlin when promoted, with provider delegation replacing duplicated
 code. Optional numeric policies retain explicit selection and their original accuracy gates.
+
+Host CPU implementations are shared independently of accelerator selection. Two
+targets with the same host ISA, ABI and numerical/effect capabilities reuse the
+same host code generation and runtime; a different host selects an explicitly
+supported CPU implementation. Device layout and ABI bridges remain target-owned.
+See [shared host arithmetic](host_cpu_arithmetic.md). Shared host support does not
+admit a target compiler seed, device schedule or protected performance answer.
 
 The OOT dialect is a general compiler backend. Production decisions follow operation
 semantics, shapes, layouts, numeric contracts and hardware capabilities, with legality and
@@ -79,8 +85,8 @@ linalg / tensor / scf
 
 - Core source lives under `src/merlin`; optional research source lives under `packages/`.
 - Experiment definitions have one catalog; generated state belongs under `out/{runs,artifacts,build}`.
-- Target compiler payloads belong OOT. Trusted evaluator support can be canonical in an example;
-  retained reference resources do not prove that an exported package is a standalone compiler.
+- Target-specific support belongs OOT where qualified; retained reference resources are not
+  proof that an exported package is a standalone compiler.
 - Coordinate through schemas, not prose.
 - Integrations are adapters, never vendored repos.
 - Prototype in xDSL; promote to MLIR/C++ only when stable.

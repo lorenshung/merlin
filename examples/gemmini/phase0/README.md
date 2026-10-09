@@ -156,7 +156,7 @@ With installed `merlin-experiments`, explicit captures and fresh facts:
 
 Select the *same* out-of-tree support package and capability contract for
 derivation and the subsequent Phase 0 run. For example, leave
-`MERLIN_TARGET_PATH` unset (the vendored `examples/gemmini/support`) or set it to the same
+`MERLIN_TARGET_PATH` explicitly set to independently derived external support, selecting the same
 support directory for both, and set
 `MERLIN_TARGET_CONTRACT` to
 `examples/gemmini/target/contracts/target_contract.yaml` before both commands.

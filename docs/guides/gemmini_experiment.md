@@ -139,8 +139,9 @@ wedged one.
 ## 3. Certify (RTL conformance)
 
 ```bash
-# The vendored support provider carries the conformance example.
-GEMMINI_SUPPORT=$PWD/examples/gemmini/support
+# Select independently derived external test support. The handwritten
+# reference has no experiment feedback adapter and is never an authoring dependency.
+GEMMINI_SUPPORT=${MERLIN_INDEPENDENT_TARGET_SUPPORT:?independent runtime support required}
 MERLIN_TARGET_PATH="$GEMMINI_SUPPORT" PYTHONPATH="$GEMMINI_SUPPORT" \
   .venv/bin/python "$GEMMINI_SUPPORT/examples/conformance/run.py" --simulators spike,verilator
 ```

@@ -1,5 +1,10 @@
 # Gemmini verification walkthrough
 
+These retained probes are historical inspection tools. Fresh Phase 1 and Phase 2
+require independently issued hardware and runtime authorities; running a probe
+with a previously written compiler does not issue those authorities. The
+handwritten support provider and copied kernel headers have been removed.
+
 ### Qualify a matching gSIM build
 
 [qualify_gsim.py](qualify_gsim.py) exercises an existing generated compiler on
@@ -64,13 +69,9 @@ explicitly before the commands below:
 export MERLIN_MLC_DIR=/path/to/ModelIR
 ```
 
-The Gemmini support provider is vendored at [`../support`](../support), byte-identical (except the
-normalized `provenance.json` that record lists) to the companion revision recorded in
-[`../SOURCE.yaml`](../SOURCE.yaml) and
-[`target_support.json`](../../../build_tools/upstreams/target_support.json). With
-`MERLIN_TARGET_PATH` unset it is the selected support; set the variable only to try another
-revision, and keep the whole tree host-private.
-Calibration coefficients are screening estimates, not new measurements.
+No support provider is selected automatically for this target. Fresh experiments
+derive support from admitted public sources and qualify its actual execution;
+the handwritten compiler, calibration and runtime are private final references.
 
 The selected integer RTL has 8-bit signed operands, a 20-bit MAC result and
 32-bit accumulator storage. Those are different quantities. A mathematical
@@ -215,7 +216,7 @@ readout scale. The Phase 0 review status is not changed by this probe.
 
 ```sh
 export PYTHONPATH=src:packages/merlin-experiments/src
-export MERLIN_TARGET_PATH=$PWD/examples/gemmini/support
+export MERLIN_TARGET_PATH=${MERLIN_INDEPENDENT_TARGET_SUPPORT:?independent runtime support required}
 export MERLIN_CHIPYARD=/selected/chipyard
 python examples/gemmini/verification/probe_residual_readout.py \
   --phase0 /generated/gemmini/run/phase0 \
@@ -257,7 +258,7 @@ Gemmini support and Chipyard toolchain explicitly:
 
 ```sh
 export PYTHONPATH=src:packages/merlin-experiments/src
-export MERLIN_TARGET_PATH=$PWD/examples/gemmini/support
+export MERLIN_TARGET_PATH=${MERLIN_INDEPENDENT_TARGET_SUPPORT:?independent runtime support required}
 export MERLIN_CHIPYARD=/selected/chipyard
 python examples/gemmini/verification/probe_native_kernel.py \
   --corpus /generated/gemmini/corpus-1 \
@@ -311,7 +312,7 @@ support package and toolchain selections used for the Phase 0 diagnostic:
 
 ```sh
 export PYTHONPATH=src:packages/merlin-experiments/src
-export MERLIN_TARGET_PATH=$PWD/examples/gemmini/support
+export MERLIN_TARGET_PATH=${MERLIN_INDEPENDENT_TARGET_SUPPORT:?independent runtime support required}
 export MERLIN_CHIPYARD=/selected/chipyard
 export MERLIN_RTL_FACTS=/selected/facts/facts.json
 export MERLIN_M2M_VENV=/selected/model2MLIR/.venv

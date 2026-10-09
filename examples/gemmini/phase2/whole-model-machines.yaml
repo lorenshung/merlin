@@ -9,7 +9,6 @@ target: gemmini
 # A launch compares the chosen machine's header and cannot_express limits with every other board here
 # and warns about what it lacks (the lean board's missing full-width readout, for one).
 capability_headers:
-  - ../phase1/contracts/harness_curated/gemmini-rocc-tests/include/gemmini_params.h
   - {env: MERLIN_CHIPYARD_GEMMINI_STOCK, join: generators/gemmini/software/gemmini-rocc-tests/include/gemmini_params.h}
 machines:
   # Preferred full Gemmini/Rocket U250 design. Its queue name resolves to the
