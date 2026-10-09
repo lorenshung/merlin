@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Iterable
 
+from merlin.targetgen.generalization_prompt import append_general_compiler_contract
+
 
 class PerfPromptContractError(ValueError):
     """The proposed performance task is not safe or complete enough to serve."""
@@ -843,7 +845,7 @@ End your own report with exactly one honest line:
 2. `Arm4 performance candidate is not ready; remaining blockers and affected identities are listed.`
 3. `Arm4 performance result is non-comparable because the fork, integrity, or evidence boundary was violated.`
 """
-    return prompt.rstrip() + "\n"
+    return append_general_compiler_contract(prompt)
 
 
 def prompt_sha256(inputs: PerfPromptInputs) -> str:

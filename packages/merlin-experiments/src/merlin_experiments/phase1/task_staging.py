@@ -18,6 +18,7 @@ from pathlib import Path
 import yaml
 
 from merlin.targetgen import tool_registry as _TR
+from merlin.targetgen.generalization_prompt import append_general_compiler_contract
 from merlin.targetgen.target_experiment import load_capability_manifest, load_target_experiment
 
 from . import authoring as A
@@ -142,6 +143,36 @@ def arm_from_bundle_id(bundle_id: str) -> str:
     if not best:
         raise KeyError(f"bundle id {bundle_id!r} matches no ladder rung (stems: {sorted(_ALL_ARMS.values())})")
     return best
+
+
+def task_tool_inventory_block(config: TaskStagingConfig) -> str:
+    """Describe the actual selected treatment, including explicit tool ablations."""
+    names = resolved_tools(
+        config.bundle_id,
+        bundle_dir=config.bundle_dir,
+        add_tools=config.add_tools,
+        drop_tools=config.drop_tools,
+    )
+    lines = [
+        "\n\n## Selected Phase 1 tool inventory (launch-specific)\n",
+        "Use the common feedback clients staged for this launch: "
+        + ", ".join(f"`{filename}`" for _, filename in _TR.COMMON_CLIENTS)
+        + ". Read their help for the admitted commands and scope.",
+        "The treatment tools below come from the selected bundle and explicit add/drop choices. "
+        "Their selection grants no access beyond the admitted mounts. A declared tool is not proof "
+        "of runtime readiness; report failed or unavailable checks rather than claiming they passed.",
+    ]
+    for name in names:
+        tool = _TR.spec(name)
+        access = (
+            "Broker client: " + ", ".join(f"`{filename}`" for _, filename in tool.broker.shims)
+            if tool.broker is not None
+            else "Use its admitted library/source paths and documentation in the bundle inventory."
+        )
+        lines.append(f"- `{name}`: {tool.blurb} {access}")
+    if not names:
+        lines.append("No additional treatment tools are selected; use the common substrate and admitted toolchain.")
+    return "\n".join(lines) + "\n"
 
 
 def _warn_if_grants_disagree(bdir: Path, tools: tuple, *, warned: set[Path] | None = None) -> None:
@@ -292,6 +323,8 @@ def build_task(
         if starter:
             body += "\n\n---\n\n# Starter plan / approach for THIS arm (read this)\n\n" + starter
         body += task_runtime_scope_block(_te(), sandbox, context=context, scope=task_scope)
+        body += task_tool_inventory_block(config)
+        body = append_general_compiler_contract(body)
         if arm == "merlin_assisted":
             add = (bdir / "TASK_ADDENDUM.md").read_text() if (bdir / "TASK_ADDENDUM.md").exists() else ""
             ws_task.write_text(body + ("\n\n---\n\n" + add if add else ""))
@@ -357,6 +390,8 @@ def build_task(
     )
     _ckpt = max(CR.qa_checkpoint_adapters(_te().target, _te().sim_via) or {"L3": 1})
     pilot += task_runtime_scope_block(_te(), sandbox, context=context, scope=task_scope)
+    pilot += task_tool_inventory_block(config)
+    pilot = append_general_compiler_contract(pilot)
     pilot += (
         "\n\n## Grading tiers (READ THIS)\n"
         f"- Each round the QA gate runs **L0+L1+trace + your fast RTL oracle tier ({_loop})** and returns "

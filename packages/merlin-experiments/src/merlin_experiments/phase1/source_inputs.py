@@ -173,6 +173,8 @@ def paths(
         ("rtl_checks", "merlin.targetgen.rtl_checks"),
         ("circt_gate", "merlin.targetgen.circt_gate"),
         ("software_spec", "merlin.targetgen.software_spec"),
+        ("task_prompt", "merlin.targetgen.generate_prompt"),
+        ("general_compiler_contract", "merlin.targetgen.generalization_prompt"),
         ("semantic_search", "merlin.targetgen.semantic_search.search"),
         ("linalg_inventory", "merlin.targetgen.contract.linalg_iface"),
         ("instruction_semantics", "merlin.targetgen.instruction_semantics"),

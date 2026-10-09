@@ -13,6 +13,8 @@ or the endpoint kind.
 
 from __future__ import annotations
 
+from .generalization_prompt import GENERAL_COMPILER_CONTRACT_V1
+
 # How the 4th-entrypoint artifact is described to the agent, per codegen endpoint. Fork-free .insn on
 # stock LLVM is the default (see memory no-forked-toolchain-bringup); never prescribes a forked toolchain.
 _ENDPOINT_DESC = {
@@ -598,6 +600,8 @@ Derive everything (rounding, tiling, dtypes, im2col, padding) from the contract 
 below — nothing is restated here. The numeric reference golden is withheld; iterate against the QA gate.
 Build ONE general backend for every family — do not special-case individual capsules.
 
+{general_compiler_contract}
+
 ## Deliverable (write into `submission/`)
 ```
 submission/
@@ -996,10 +1000,10 @@ def _enforced_workflow(
         "   SAME operation at one tile and at two tiles in each of M, K and N. It costs no simulator (it runs",
         "   only your emit path), so run it often. **The capsules are a FIXED SET OF SHAPES: passing all of",
         "   them says nothing about whether you lower anything else, and you are graded on shapes you have",
-        "   not seen.** `emitted_work` is how many instructions you emitted per shape — a bigger problem",
-        "   cannot need a smaller program, so a corner reported `collapsed` is a shape you silently refused.",
-        "   `multi_tile_axes_uncovered` names the axis your lowering does not loop over: fix the LOOP, not",
-        "   the arithmetic. A round is not converged while any axis is uncovered.",
+        "   not seen.** Treat emission counts and `collapsed` findings as diagnostics: a loop can perform",
+        "   more work without emitting more static instructions. Check actual bounds, tails, reductions",
+        "   and output coverage before claiming an axis is supported. These emit-only probes establish",
+        "   neither numerical correctness nor full-domain coverage.",
         "   And run `python3 agent_selfcheck.py --submission submission --offload-census`: per public",
         "   program, the work your package put on the accelerator, what it placed on the host, what it",
         "   declined, and what it emitted with no statement at all. It also runs only your emit path.",
@@ -1171,6 +1175,7 @@ def render_prompt(te, manifest, experiment: str = "full", arm: str = "raw_baseli
     return _TEMPLATE.format(
         target=s["target"],
         scope_label=scope,
+        general_compiler_contract=GENERAL_COMPILER_CONTRACT_V1,
         corpus_families=families,
         tool_stem=s["tool_stem"],
         kernel_symbol=s["kernel_symbol"],

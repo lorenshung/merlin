@@ -6,6 +6,9 @@ import pytest
 from merlin_experiments.phase1 import source_inputs, treatments
 from merlin_experiments.phase1 import task_staging as TS
 from merlin_experiments.phase1.context import InvocationContext
+from merlin_experiments.phase1.levels import LEVELS
+
+from merlin.targetgen.generalization_prompt import GENERAL_COMPILER_CONTRACT_V1
 
 
 def config(root, target="synthetic"):
@@ -34,7 +37,7 @@ def stage(conf, arm="raw_baseline"):
     return ws
 
 
-@pytest.mark.parametrize("arm", ["raw_baseline", "merlin_assisted"])
+@pytest.mark.parametrize("arm", [level["bundle_arm"] for level in LEVELS])
 @pytest.mark.parametrize("task_override", [False, True])
 def test_actual_authored_task_explicit_bundle_and_descriptor(tmp_path, monkeypatch, arm, task_override):
     conf = config(tmp_path / "operator-root")
@@ -60,6 +63,7 @@ def test_actual_authored_task_explicit_bundle_and_descriptor(tmp_path, monkeypat
     assert "Required public/dev capsules: **7**" in text
     assert "Held-out capsules: **3**" in text
     assert "unsandboxed diagnostic override" in text
+    assert text.count(GENERAL_COMPILER_CONTRACT_V1) == 1
     assert ("selected TASK_ADDENDUM.md" in text) == (arm == "merlin_assisted")
     for doc in TS.RI.MERLIN_WS_DOCS:
         assert (ws / doc).exists() == (arm == "merlin_assisted")
@@ -89,9 +93,32 @@ def test_tools_are_observed_after_callback_creation_and_again_after_changes(tmp_
     assert callback() == ("sim_job", "isa_query")
 
 
+@pytest.mark.parametrize("level", LEVELS, ids=[level["id"] for level in LEVELS])
+def test_actual_tool_inventory_follows_selected_level_and_explicit_ablation(tmp_path, level):
+    from merlin.targetgen.generate_bundles import _ALL_ARMS
+
+    conf = config(tmp_path / "operator")
+    conf = replace(conf, bundle_id=_ALL_ARMS[level["bundle_arm"]] + "_synthetic")
+    names = TS._TR.ARM_TOOLS[level["bundle_arm"]]
+    (conf.bundle_dir / "tools.txt").write_text("\n".join(names))
+    text = TS.task_tool_inventory_block(conf)
+    for name in names:
+        assert f"- `{name}`:" in text
+        assert TS._TR.spec(name).blurb in text
+    assert "agent_selfcheck.py" in text and "await_verdict.py" in text
+    # The selected file and add/drop arguments override the label. This guards
+    # against advertising extra capabilities merely because an EL is named.
+    dropped = replace(conf, drop_tools=names)
+    assert "No additional treatment tools" in TS.task_tool_inventory_block(dropped)
+    (conf.bundle_dir / "tools.txt").write_text("")
+    assert "No additional treatment tools" in TS.task_tool_inventory_block(conf)
+
+
 def test_callbacks_are_actual_inventoried_source_functions(tmp_path):
     conf = config(tmp_path / "operator")
     owners = source_inputs.record(repo=conf.context.repo, entrypoint=conf.context.repo / "external.py")
+    contract_source = owners["inputs"]["phase1:startup:general_compiler_contract"]
+    assert contract_source["sha256"] == source_inputs.fingerprint(contract_source["path"])
     selected = TS.callbacks(conf)
     for function in (selected.stage_task, selected.resolved_tools):
         identity = treatments.callback_reference(function, owners, label="task staging")
@@ -130,6 +157,7 @@ def test_generated_task_composition_keeps_starter_and_addendum_rules(tmp_path, m
     text = (ws / "TASK.md").read_text()
     assert calls[0][1:] == ({"target": "synthetic"}, experiment, arm, {"merlin/tool.py"})
     assert text.startswith("generated task")
+    assert text.count(GENERAL_COMPILER_CONTRACT_V1) == 1
     assert "must not duplicate" not in text
     assert ("selected addendum" in text) == (arm == "merlin_assisted")
     assert ("## Grading tiers" in text) == (experiment == "full")
