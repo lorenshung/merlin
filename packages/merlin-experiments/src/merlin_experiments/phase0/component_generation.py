@@ -83,6 +83,7 @@ def bind_entries(
     semantic_basis=None,
     hardware_intake=None,
     software_intake=None,
+    automatic_derivation=None,
 ):
     """Bind reviewed objectives and the actual selected generator/source identity."""
     if evidence is None or evidence.software_spec.get("status") != "reviewed":
@@ -225,6 +226,8 @@ def bind_entries(
         identity["selected_sources"] = selected_sources
     if semantic_basis is not None:
         identity["semantic_basis"] = semantic_basis.reviewed_semantics()
+    if automatic_derivation is not None:
+        identity["automatic_derivation_sha256"] = digest(automatic_derivation)
     bound = []
     for entry in entries:
         coverage = entry.get("component_coverage")

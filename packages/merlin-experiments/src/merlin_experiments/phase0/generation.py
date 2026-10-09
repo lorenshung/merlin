@@ -559,21 +559,38 @@ def generate_target(
     execution_admission = None
     preallocation_denials = {}
     semantic_basis = None
+    automatic_derivation = None
     if component_only:
         from .component_generation import bind_entries
         from .component_semantic_basis import ComponentSemanticBasis
 
+        if component_coverage is not None:
+            from .component_automatic import require_basis_selection
+
+            require_basis_selection(component_coverage, recipe=recipe, software_intake=software_intake)
         semantic_basis = ComponentSemanticBasis.from_recipe(recipe)
 
         if component_coverage is not None:
+            from .component_automatic import resolve
             from .component_coverage_inputs import expand
-            from .component_coverage_plan import ComponentCoveragePlan
 
-            component_plan = ComponentCoveragePlan.load(
-                component_coverage, evidence=evidence, semantic_basis=semantic_basis
+            component_plan, automatic_derivation = resolve(
+                component_coverage,
+                evidence=evidence,
+                semantic_basis=semantic_basis,
+                hardware_intake=hardware_intake,
+                software_intake=software_intake,
+                output_root=artifact_root,
             )
             execution_budget = component_plan.to_dict().get("execution_budget")
             coverage_entries, component_coverage_report = expand(component_plan, binding=binding, evidence=evidence)
+            if automatic_derivation is not None:
+                from .component_automatic_plan import required_unknown_rows
+
+                component_coverage_report["automatic_derivation"] = automatic_derivation
+                component_coverage_report["obligations"].extend(
+                    required_unknown_rows(automatic_derivation["required_unknowns"])
+                )
             coverage_entries = [_with_candidate_policy(e, instruction_policy) for e in coverage_entries]
             coverage_entries = [_with_reference_gate(e, te, descriptor) for e in coverage_entries]
             entries.extend(coverage_entries)
@@ -597,6 +614,7 @@ def generate_target(
             semantic_basis=semantic_basis,
             hardware_intake=hardware_intake,
             software_intake=software_intake,
+            automatic_derivation=automatic_derivation,
         )
     semantics = (profile.get("datapath") or {}).get("numerical_semantics")
     if semantics is not None:

@@ -198,6 +198,12 @@ def verify_report(root, report=None, *, verify_sources=True):
     if report.get("software_intake_sha256") != (report.get("generation_identity") or {}).get("software_intake_sha256"):
         raise ValueError("component coverage independent software binding changed")
     report["sha256"] = stated
+    if "automatic_derivation" in report:
+        from .component_automatic import verify
+
+        verify(report["automatic_derivation"], report=report, verify_sources=verify_sources)
+    elif "automatic_derivation_sha256" in report.get("generation_identity", {}):
+        raise ValueError("component coverage lost the independently selected automatic derivation")
     if report["status"] != "complete" or any(
         row["mandatory"] and row["state"] == "unavailable" for row in report["obligations"]
     ):

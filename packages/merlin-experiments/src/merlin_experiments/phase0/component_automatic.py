@@ -1,0 +1,271 @@
+"""Protected automatic component selection wired into ordinary generation.
+
+The live minimal software issuer supplies correspondences. Strict original
+graph replay derives interaction classes; a fixed generic source factory makes
+fresh bounded programs. Saved receipts recheck selected source bytes and the
+derivation, but cannot issue hardware/software authority or complete UNKNOWNs.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+
+import yaml
+
+from merlin.common.paths import module_source_path
+from merlin.targetgen.frontend_use_def import original_use_def_semantics
+
+from . import component_automatic_plan as P
+from .component_coverage_plan import ComponentCoveragePlan
+from .component_execution_budget import validate as validate_budget
+from .component_generation import digest
+from .component_semantic_basis import BasisSource, ComponentSemanticBasis
+from .minimal_software import validate_minimal_software
+from .software_intake import REVIEW_SCHEMA, IndependentSoftwareIntake, _bindings
+
+SCHEMA = "merlin.component_automatic_policy.v1"
+RECEIPT_SCHEMA = "merlin.component_automatic_derivation.v1"
+_FIELDS = {
+    "schema",
+    "status",
+    "hardware",
+    "software_spec_sha256",
+    "numerical_semantics_sha256",
+    "semantic_basis_sha256",
+    "budget",
+    "execution_budget",
+}
+
+
+def _pin(path, role):
+    path = Path(path).absolute()
+    if any(member.is_symlink() for member in (path, *path.parents)) or not path.is_file():
+        raise ValueError("automatic selection requires ordinary explicit source files")
+    return {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "role": role}
+
+
+def _read(pin):
+    selected = _pin(pin["path"], pin["role"])
+    if selected != pin:
+        raise ValueError("automatic derivation selected source bytes or identity changed")
+    return Path(pin["path"]).read_bytes()
+
+
+def _closed_policy(policy):
+    if (
+        not isinstance(policy, dict)
+        or set(policy) != _FIELDS
+        or policy["schema"] != SCHEMA
+        or policy["status"] != "reviewed"
+    ):
+        raise ValueError(
+            "automatic coverage requires the closed reviewed preauthor policy without authored obligations"
+        )
+    validate_budget(policy["execution_budget"])
+    budget = policy["budget"]
+    if (
+        not isinstance(budget, dict)
+        or set(budget) != {"max_members", "max_interaction_cells"}
+        or any(type(value) is not int or value < 1 for value in budget.values())
+    ):
+        raise ValueError("automatic coverage needs explicit finite member and interaction budgets")
+    return policy
+
+
+def _policy(raw, *, evidence, basis):
+    policy = _closed_policy(yaml.safe_load(raw))
+    if basis is None or policy["semantic_basis_sha256"] != basis.source.sha256:
+        raise ValueError("automatic coverage requires the exact selected independent semantic basis")
+    expected = {key: evidence.derivation_identity[key] for key in ("contract_sha256", "raw_facts_sha256")}
+    sources = [row for row in evidence.source_snapshots if row.role == "software-spec"]
+    if (
+        policy["hardware"] != expected
+        or len(sources) != 1
+        or policy["software_spec_sha256"] != sources[0].sha256
+        or policy["numerical_semantics_sha256"] != digest(evidence.software_spec["numerical_semantics"])
+    ):
+        raise ValueError("automatic coverage selected hardware/software/numerical identity changed")
+    return policy
+
+
+def _relations(basis):
+    declaration = json.loads(basis.declaration_json)
+    return [
+        (member["id"], original_use_def_semantics(json.loads(Path(source.path).read_bytes())))
+        for member, source in zip(declaration["members"], basis.graph_sources, strict=True)
+    ]
+
+
+def require_basis_selection(path, *, recipe, software_intake):
+    """Reject substituted graph selection before opening any example source."""
+    document = yaml.safe_load(Path(path).read_bytes())
+    if not isinstance(document, dict) or document.get("schema") != SCHEMA:
+        return
+    if type(software_intake) is not IndependentSoftwareIntake:
+        raise ValueError("automatic coverage needs the live protected minimal software intake")
+    software_intake.verify()
+    review_pin = next(pin for pin in software_intake.source_pins if pin.role == "protected-minimal-review")
+    review = yaml.safe_load(Path(review_pin.path).read_bytes())
+    selected = (yaml.safe_load(Path(recipe).read_bytes()) or {}).get("semantic_basis")
+    if not isinstance(selected, dict) or set(selected) != {"path", "sha256"}:
+        raise ValueError("automatic coverage needs the exact protected example roster selection")
+    chosen = Path(selected["path"])
+    chosen = chosen if chosen.is_absolute() else Path(recipe).absolute().parent / chosen
+    expected = Path(review["semantic_basis"]["path"])
+    expected = expected if expected.is_absolute() else Path(review_pin.path).parent / expected
+    if chosen.absolute() != expected.absolute() or selected["sha256"] != review["semantic_basis"]["sha256"]:
+        raise ValueError("automatic example roster differs from the protected source selection")
+
+
+def resolve(path, *, evidence, semantic_basis, hardware_intake, software_intake, output_root):
+    """Resolve old explicit plans or the new independently derived normal v2 plan."""
+    raw = Path(path).read_bytes()
+    selected = yaml.safe_load(raw)
+    if not isinstance(selected, dict) or selected.get("schema") != SCHEMA:
+        return ComponentCoveragePlan.load(path, evidence=evidence, semantic_basis=semantic_basis), None
+    if type(software_intake) is not IndependentSoftwareIntake or software_intake.hardware is not hardware_intake:
+        raise ValueError("automatic coverage needs the live protected minimal software and identical hardware intake")
+    software_intake.verify()
+    policy = _policy(raw, evidence=evidence, basis=semantic_basis)
+    receipt = json.loads(software_intake.receipt_json)
+    if receipt["semantic_basis_sha256"] != semantic_basis.source.sha256:
+        raise ValueError("automatic coverage example basis differs from protected minimal software review")
+    review_pin = next(pin for pin in software_intake.source_pins if pin.role == "protected-minimal-review")
+    review = yaml.safe_load(Path(review_pin.path).read_bytes())
+    spec = software_intake.public_facts()
+    _bindings(review, spec, semantic_basis)
+    protected_graphs = {pin.path for pin in software_intake.source_pins if pin.role == "independent-example-graph"}
+    if protected_graphs != {source.path for source in semantic_basis.graph_sources}:
+        raise ValueError("automatic graph sources differ from exact protected independent example membership")
+    relations = _relations(semantic_basis)
+    declaration, unknowns = P.derive(policy, spec=spec, review=review, basis=semantic_basis, relations=relations)
+    destination = Path(output_root) / "coverage" / "automatic-selection"
+    if any(member.is_symlink() for member in (destination, *destination.parents)):
+        raise ValueError("automatic selection output must have an ordinary explicit path")
+    destination.mkdir(parents=True, exist_ok=False, mode=0o700)
+    plan_path = destination / "derived-plan.json"
+    plan_path.write_text(json.dumps(declaration, sort_keys=True, indent=2) + "\n")
+    plan_path.chmod(0o600)
+    sources = [
+        _pin(path, "automatic-policy"),
+        _pin(review_pin.path, "minimal-review"),
+        _pin(software_intake.source.path, "minimal-software"),
+    ]
+    sources += [_pin(row["path"], row["role"]) for row in semantic_basis.sources()]
+    sources += [
+        _pin(module_source_path(name), "automatic-reader")
+        for name in (
+            __name__,
+            P.__name__,
+            "merlin.targetgen.frontend_use_def",
+            "merlin.targetgen.frontend_trace",
+            "merlin_experiments.phase0.component_semantic_basis",
+            "merlin_experiments.phase0.minimal_software",
+        )
+    ]
+    record = {
+        "schema": RECEIPT_SCHEMA,
+        "hardware_intake_sha256": hardware_intake.sha256,
+        "software_intake_sha256": software_intake.sha256,
+        "sources": sources,
+        "derived_plan": _pin(plan_path, "automatic-derived-plan"),
+        "relation_semantics": [{"member": member, **relation.public_semantics()} for member, relation in relations],
+        "required_unknowns": unknowns,
+        "qualification": "fresh bounded source classes; no original dimensions/topology or physical resource grants",
+    }
+    record["sha256"] = digest(record)
+    receipt_path = destination / "derivation.json"
+    receipt_path.write_text(json.dumps(record, sort_keys=True, indent=2) + "\n")
+    receipt_path.chmod(0o600)
+    plan = (
+        ComponentCoveragePlan.load(plan_path, evidence=evidence, semantic_basis=semantic_basis)
+        if declaration["obligations"]
+        else ComponentCoveragePlan(
+            str(plan_path),
+            hashlib.sha256(plan_path.read_bytes()).hexdigest(),
+            json.dumps(declaration, sort_keys=True, separators=(",", ":")),
+            (),
+        )
+    )
+    return plan, record
+
+
+def verify(record, *, report, verify_sources=True):
+    """Reopen all selected originals and recompute the complete required roster."""
+    if record.get("schema") != RECEIPT_SCHEMA or digest(
+        {k: v for k, v in record.items() if k != "sha256"}
+    ) != record.get("sha256"):
+        raise ValueError("automatic component derivation identity changed")
+    identity = report["generation_identity"]
+    if identity.get("automatic_derivation_sha256") != digest(record) or any(
+        record[key] != identity.get(key) for key in ("hardware_intake_sha256", "software_intake_sha256")
+    ):
+        raise ValueError("automatic derivation independent generation binding changed")
+    if not verify_sources:
+        raise ValueError(
+            "automatic derivation requires its explicit original source replay; relocated closure is unqualified"
+        )
+    sources = record["sources"]
+    for source in sources:
+        _read(source)
+
+    def one(role):
+        rows = [row for row in sources if row["role"] == role]
+        if len(rows) != 1:
+            raise ValueError("automatic derivation requires exact selected source membership")
+        return rows[0]
+
+    policy = _closed_policy(yaml.safe_load(_read(one("automatic-policy"))))
+    basis_pin = one("semantic-basis-roster")
+    basis = ComponentSemanticBasis.load(
+        _read(basis_pin),
+        source=BasisSource(basis_pin["path"], basis_pin["sha256"], basis_pin["role"]),
+        parent=Path(basis_pin["path"]).parent,
+        routing={},
+    )
+    if {row["path"] for row in sources if row["role"] == "semantic-basis-graph"} != {
+        row.path for row in basis.graph_sources
+    }:
+        raise ValueError("automatic derivation independent graph membership changed")
+    review = yaml.safe_load(_read(one("minimal-review")))
+    if (
+        not isinstance(review, dict)
+        or set(review) != {"schema", "target", "source", "semantic_basis", "numerical_choices", "operation_basis"}
+        or review["schema"] != REVIEW_SCHEMA
+    ):
+        raise ValueError("automatic derivation protected review schema changed")
+    spec = validate_minimal_software(yaml.safe_load(_read(one("minimal-software"))), target=review["target"])
+    if (
+        policy["hardware"] != report["hardware"]
+        or policy["software_spec_sha256"] != one("minimal-software")["sha256"]
+        or policy["semantic_basis_sha256"] != basis.source.sha256
+        or policy["numerical_semantics_sha256"] != digest(spec["numerical_semantics"])
+    ):
+        raise ValueError("automatic derivation selected semantic identity changed")
+    if (
+        review["source"]["sha256"] != one("minimal-software")["sha256"]
+        or review["semantic_basis"]["sha256"] != basis.source.sha256
+    ):
+        raise ValueError("automatic derivation protected source review binding changed")
+    _bindings(review, spec, basis)
+    relations = _relations(basis)
+    declaration, unknowns = P.derive(policy, spec=spec, review=review, basis=basis, relations=relations)
+    if (
+        yaml.safe_load(_read(record["derived_plan"])) != declaration
+        or report["declaration"] != declaration
+        or record["required_unknowns"] != unknowns
+        or record["relation_semantics"]
+        != [{"member": member, **relation.public_semantics()} for member, relation in relations]
+    ):
+        raise ValueError("automatic derivation disagrees with original graph replay or source factory")
+    expected = [row["id"] for row in declaration["obligations"]] + [row["id"] for row in unknowns]
+    if [row["id"] for row in report["obligations"]] != expected:
+        raise ValueError("automatic derivation lost an original required obligation")
+    for actual, wanted in zip(
+        report["obligations"][len(declaration["obligations"]) :], P.required_unknown_rows(unknowns), strict=True
+    ):
+        if actual != wanted:
+            raise ValueError("automatic unsupported/resource obligation cannot acquire a fabricated witness")
+    return record

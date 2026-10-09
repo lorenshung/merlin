@@ -191,3 +191,22 @@ and complete-roster metadata budgets before unroll. Preserve every original
 snapshot/escape/final ABI slot and requested pair member. Numerical v2 stays
 separate and unchanged. Source aliases/epochs are functionalized SSA, never
 physical reuse, timing, numerical equivalence or static target proof.
+
+`frontend_use_def` strictly replays original result ownership and every serialized
+args/kwargs reference against the complete typed edge roster. Historical basis
+readers remain readable; missing use-def data cannot enter automatic derivation.
+`component_automatic` accepts a closed protected policy containing only source
+identities and finite budgets through the ordinary component coverage option.
+Require the original live HW/minimal SW selection and exact protected example
+roster before reading graph sources. Reviewed owner correspondences plus only
+source interaction class presence select fixed generic one/two-contraction or
+copy programs. Fresh bounded extents never copy original shapes, topology size,
+frequencies, numerical policies or workload selectors. Ordinary budget admission,
+writer, complete independent outputs and concrete screen remain authoritative.
+Keep every unreviewed operator, unsupported original operator form/interaction,
+effect interpretation and unqualified RTL resource/axis map mandatory UNKNOWN.
+Source generation cannot certify the original graph or large-shape applicability.
+Recompute the private derivation from its exact selected originals; re-signed
+metadata cannot replace source factories or erase required missing classes.
+Current automatic replay requires original source paths; relocated source
+closures and automatic resource-role expansion are explicitly unqualified.
