@@ -3,7 +3,7 @@ title: Mandatory original source-only compiler evaluation
 kind: design
 status: current
 owner: merlin-experiments
-last_verified: 2026-10-08
+last_verified: 2026-10-09
 related: [component_compile_sources, component_scale_generalization, fresh_compiler_origin, component_launch_qualification, counted_copy_static_proof]
 code_refs:
   - packages/merlin-experiments/src/merlin_experiments/phase1/component_compile_admission.py
@@ -66,6 +66,15 @@ obligation is unresolved. Qualification verification and subsequent launch
 reopen the same live evaluation. Historical receipts remain inspectable; missing
 source-only authority cannot grant a new qualified launch.
 
+Phase 2 preserves the original baseline and runtime owners when launching a
+descendant. Before promotion it independently evaluates the current descendant's
+original compilation and static obligations again; the baseline's live evaluation
+cannot stand in for changed compiler bytes. Original numerical grading follows
+that join. Each selected component execution deadline is shared across its
+compile, source checks, link, execution, readback and publication boundaries;
+individual subprocesses use the remaining time. Synchronous Python work is
+checked at boundaries rather than forcibly preempted.
+
 ## Evidence and remaining work
 
 Actual native tests replay independently selected RTL/software/source rosters,
@@ -88,9 +97,15 @@ performance remain separate evidence modes, with their original gates.
 archives the committed component tests, including conditional copy and container
 transport controls, and verifies their imports come from built wheels outside
 the checkout. Explicit native compiler selections require zero skips in the
-original compile-role transport roster. Other tests retain and report missing
+original compile-role transport and shared-deadline rosters. Other tests retain and report missing
 prerequisites separately; the suite grants no container or LLVM library tools
 implicitly.
+
+Each installed qualification owns a unique external test temporary root and
+retains passing as well as failed fixtures. Original invocation records and
+native products remain available for reopening after the suite completes;
+pytest's passing-fixture cleanup cannot erase that evidence. Retention does not
+change the declared zero-skip subset or grant execution authority.
 
 The core-only `host-arithmetic` suite checks shared CPU arithmetic, with an
 explicit host toolchain requiring zero skips throughout its original test

@@ -3,7 +3,7 @@ title: "Component launch qualification"
 kind: design
 status: current
 owner: merlin-experiments
-last_verified: 2026-10-08
+last_verified: 2026-10-09
 code_refs:
   - packages/merlin-experiments/src/merlin_experiments/phase1/component_qualification.py
   - packages/merlin-experiments/src/merlin_experiments/phase1/component_witness.py
@@ -66,6 +66,13 @@ are a separate `auth_source`; they are not runtime files. `/usr/bin/bwrap` must 
 pinned in the control inventory. Extra resource trees become individual file
 grants; no directory mount is generated. The inventory records membership and
 hashes. The actual readiness probes establish whether the closure runs.
+
+Every admitted tool runtime grant must occur with the same source, destination
+and digest in the author control runtime. Readiness commands must use an exact
+absolute admitted executable destination. A successful probe in a separate
+compiler transport does not prove that the fresh author can reach that tool.
+Missing membership refuses before readiness or a paid model starts; this check
+does not automatically add file grants or issue runtime/isolation authority.
 
 ## Closed configuration
 
@@ -143,3 +150,11 @@ private broker receipts and detailed cost/CCA records remain evaluator-owned.
 The final changed compiler is fully requalified against the original goldens
 before a frozen candidate is marked consumable. Failed probes and refused
 qualifications retain private records with the exact observed failure.
+
+No-model native controls exercise an owned reachable TCP listener and private
+canary files visible to the outer control process. The nested candidate profile
+must deny direct, symlink, sibling and self/parent process-root access and TCP,
+while the selected public interpreter can read admitted inputs and write its
+candidate. These controls establish only their observed boundary and tool
+usability. An actual fresh author session and independent target execution
+qualification remain separate requirements.

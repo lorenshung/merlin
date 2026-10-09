@@ -3,11 +3,13 @@ title: "Protected component campaign final evaluation"
 kind: design
 status: current
 owner: merlin-experiments
-last_verified: 2026-10-08
+last_verified: 2026-10-09
 related: [component_compiler_convergence, component_phase2_workflow]
 code_refs:
   - packages/merlin-experiments/src/merlin_experiments/phase2/component_final_policy.py
   - packages/merlin-experiments/src/merlin_experiments/phase2/protected_final_evaluation.py
+  - packages/merlin-experiments/src/merlin_experiments/phase2/protected_final_observation.py
+  - packages/merlin-experiments/src/merlin_experiments/phase2/physical_final_admission.py
   - packages/merlin-experiments/src/merlin_experiments/phase2/protected_verifier_qualification.py
   - packages/merlin-experiments/src/merlin_experiments/phase2/numerical_readback.py
   - packages/merlin-experiments/tests/test_component_final_policy.py
@@ -52,12 +54,13 @@ or the semantic validity of a reference.
 
 `ProtectedExecutionVerifier.validate_selection` and `observe_arm` pin and inspect
 an explicitly selected verifier without admitting it. `validate` and the final
-admission path require an in-memory `ProtectedVerifierQualification` issued by
+observation path require an in-memory `ProtectedVerifierQualification` issued by
 `qualify_protected_execution_verifier`. Its source, deterministic callable code,
 dependency closure and original controls are rechecked around execution.
-Qualification covers compiler invocation, source
-correspondence, original reference generation, dependency closure, hardware
-execution, timer scope and whole-executable instruction audit. Returned arm
+Qualification checks callback observations for compiler invocation, source
+correspondence, original reference generation, dependency closure, declared hardware
+execution, timer scope and whole-executable instruction audit. It does not qualify
+the physical meaning of those observations. Returned arm
 witnesses must bind actual executable/console bytes, staged executable, input,
 hardware, timer, compiler and positive integer cycles to the original binding.
 Each witness must name an actual reopened private evidence file.
@@ -78,8 +81,9 @@ arm and reopened pre-frozen evidence. A crash, generic exception, wrong diagnosi
 or accepted negative fails issuance. Original plan, inputs, dependency bytes and
 current evaluator source membership are checked before and after every call.
 All controls bind one exact runtime, toolchain, hardware and timer domain; the
-issued verifier cannot admit an arm from a different execution domain.
-The newly written readonly v2 receipt documents these observations; replaying its
+issued verifier cannot observe an arm from a different declared execution domain.
+The newly written readonly v3 receipt records `observation_qualified` and only the
+`private_witness_observation` role. Replaying its
 JSON or reconstructing a dataclass does not create an issued capability.
 
 The evaluator owner supplies concrete source/build/invocation joins,
@@ -89,6 +93,18 @@ controls establish only lifecycle joins and refusals. Missing actual target
 controls leave hardware qualification unavailable; no generic parser turns a
 copied UART log into hardware authority. Selected files and their ancestors must
 be direct paths; matching bytes through a symlink cannot establish ownership.
+
+`observe_protected_final_comparison` executes the complete original snapshot,
+callback and numerical lifecycle and returns `ProtectedFinalObservation`.
+Its cycle fields are reported callback values and `physical_status` remains
+**UNKNOWN**. Strict final comparison arithmetic refuses this distinct type.
+`admit_protected_final_comparison` requires a separate independently issued
+physical execution domain. Its production issuer is not implemented yet, so
+admission and the final campaign explicitly refuse. Callback qualifications,
+declared hashes, saved reports, success flags or supplied physical callbacks
+cannot replace that issuer. Actual source-to-loaded-hardware, runtime, reset,
+clock and timer correspondence must be implemented and observed before final
+physical comparisons become available.
 
 ## Three numerical and performance roles
 
@@ -100,7 +116,7 @@ other can double the permitted error and is insufficient.
 
 Full reconstruction checks every declared output word, shape and dtype; it keeps
 the original exact or elementwise policy and rejects partial readbacks. Both
-arms must pass. Performance cycles come only from the separately authenticated
+arms must pass. Admitted performance cycles must come from separately authenticated
 execution witnesses; instruction counts, native wall time and analytical bounds
 cannot substitute for them. The selected target verifier must apply the
 original prohibited-instruction contract to every executable section.
@@ -120,3 +136,5 @@ substitution, incomplete rosters and strict integer parity. The injected executi
 verifier uses synthetic cycle records solely to test joins and refusals. These
 tests do not qualify a FireSim verifier, an actual image, final workload parity,
 fresh participant convergence or historical elapsed-time accounting.
+They also check that every diagnostic qualification and supplied physical
+declaration is refused by final physical admission.

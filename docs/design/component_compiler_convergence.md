@@ -3,9 +3,12 @@ title: Component-driven compiler convergence and experiment isolation
 kind: design
 status: draft
 owner: experiments
-last_verified: 2026-10-08
+last_verified: 2026-10-09
 related: [agentic_experiment_integrity, capsule_phase_split, perf_phase2_wiring, phase0_specification]
 code_refs:
+  - packages/merlin-experiments/src/merlin_experiments/phase0/component_automatic.py
+  - packages/merlin-experiments/src/merlin_experiments/phase0/component_automatic_plan.py
+  - src/merlin/targetgen/frontend_use_def.py
   - src/merlin/targetgen/compiler_library.py
   - src/merlin/targetgen/package_runtime.py
   - packages/merlin-experiments/src/merlin_experiments/phase2/component_experiment.py
@@ -97,6 +100,24 @@ different obligations; a small coverage witness basis proves neither arithmetic
 nor a complete compiler.
 
 ### Reviewed component obligation plans
+
+The ordinary component coverage option also accepts a closed
+`merlin.component_automatic_policy.v1` containing only independently selected
+hardware, software and source-basis identities and finite generation/execution
+budgets. It cannot contain authored obligations, shapes or topologies. The
+generator strictly replays original result ownership and all typed args/kwargs
+edges before deriving interaction class presence. Supported classes produce
+fresh bounded contraction and copy programs through the ordinary writer and
+complete independent output oracle. Original shapes, graph sizes and frequencies
+do not select generated dimensions.
+
+Automatic derivation currently supports only a subset of source forms and
+interactions. Every unsupported original operator or interaction, effect domain
+and unresolved RTL resource/axis role stays a mandatory unavailable obligation.
+The resulting plan remains incomplete while any required row is unavailable.
+The protected report rederives the roster from exact selected original sources;
+re-signed metadata cannot remove required unknowns or replace the fixed generic
+semantic factories. Relocated automatic source replay is not qualified yet.
 
 Keep the selected software spec minimal: semantic and numerical behavior plus
 operation support that the selected RTL cannot determine. Extract hardware
