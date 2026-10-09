@@ -86,6 +86,55 @@ def exact_int_mm_generic_operation(op) -> bool:
     )
 
 
+#: Quantization manifest schemas a capture receipt may bind, with the site statuses each admits.
+#: Version 2 adds ``preserved``: a site kept in floating point on a named execution route, which is
+#: distinct from a host fallback.
+_MANIFEST_SITE_STATUSES = {
+    "m2m.quantization_manifest.v1": frozenset({"quantized", "host", "skipped"}),
+    "m2m.quantization_manifest.v2": frozenset({"quantized", "host", "skipped", "preserved"}),
+}
+
+
+def _manifest_structure_errors(manifest) -> list[str]:
+    """Structural problems in a bound quantization manifest, checked here rather than trusted.
+
+    The producer validates its manifest before writing it; this repeats the structural checks
+    on the bytes the receipt binds so a manifest edited or written by another producer cannot
+    pass as a census.
+    """
+    if not isinstance(manifest, dict):
+        return ["manifest is not an object"]
+    statuses = _MANIFEST_SITE_STATUSES.get(manifest.get("schema"))
+    if statuses is None:
+        return [f"unsupported manifest schema {manifest.get('schema')!r}"]
+    errors = []
+    if not isinstance(manifest.get("adapter_id"), str) or not manifest["adapter_id"]:
+        errors.append("manifest names no adapter_id")
+    for field in ("contract_sha256", "policy_sha256"):
+        if not is_sha256(manifest.get(field)):
+            errors.append(f"manifest {field} is not a sha256 digest")
+    sites = manifest.get("sites")
+    if not isinstance(sites, list) or not sites:
+        return [*errors, "manifest needs a nonempty site census"]
+    seen = set()
+    for index, site in enumerate(sites):
+        if not isinstance(site, dict) or not isinstance(site.get("site_id"), str) or not site["site_id"]:
+            errors.append(f"site {index} has no site_id")
+            continue
+        site_id = site["site_id"]
+        if site_id in seen:
+            errors.append(f"duplicate site_id {site_id!r}")
+        seen.add(site_id)
+        status = site.get("status")
+        if status not in statuses:
+            errors.append(f"site {site_id!r} has status {status!r}, not one of {sorted(statuses)}")
+        elif status == "preserved" and (
+            not isinstance(site.get("execution_route"), str) or not site["execution_route"]
+        ):
+            errors.append(f"preserved site {site_id!r} names no execution_route")
+    return errors
+
+
 def verify_capture_receipt(path: str | Path) -> dict:
     """Verify the capture's materialized artifact bytes against its adjacent receipt.
 
@@ -171,8 +220,9 @@ def verify_capture_receipt(path: str | Path) -> dict:
                 ):
                     raise ValueError("manifest bytes differ from receipt")
                 manifest = json.loads(manifest_bytes)
-                if not isinstance(manifest, dict) or manifest.get("schema") != "m2m.quantization_manifest.v1":
-                    raise ValueError("unsupported manifest schema")
+                structure = _manifest_structure_errors(manifest)
+                if structure:
+                    raise ValueError("; ".join(structure))
                 manifest_sha = hashlib.sha256(
                     json.dumps(
                         manifest,

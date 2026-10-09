@@ -253,6 +253,7 @@ def test_external_capture_contract_must_match_selected_spec(tmp_path):
     policy_sha = hashlib.sha256(policy_path.read_bytes()).hexdigest()
     manifest = {
         "schema": "m2m.quantization_manifest.v1",
+        "adapter_id": "fixture",
         "contract_sha256": contract_sha,
         "policy_sha256": policy_sha,
         "sites": [{"site_id": "one", "status": "host"}],
