@@ -1,7 +1,9 @@
-"""Join evaluator-owned execution witnesses to full numerical readbacks.
+"""Join private verifier observations to complete original numerical readbacks.
 
 The selected host verifier owns actual build, source, toolchain, hardware,
-timer and instruction authentication. This lifecycle does not infer them from
+timer and instruction authentication. Observation controls do not establish
+those physical roles; production admission requires a separate live issuer.
+This lifecycle does not infer physical authority from
 a candidate report, a process exit or a copied log. Missing witnesses refuse
 comparison construction. Selecting/pinning a callback alone does not qualify
 that verifier; its admission must come from the evaluator's protected lifecycle.
@@ -23,10 +25,11 @@ from merlin.targetgen.contract.build_service import BuildOnlyService
 from merlin.targetgen.sandbox import bwrap as BW
 
 from .campaign import verify_private_input_snapshot
-from .component_experiment import FinalMemberComparison
 from .component_final_policy import strict_final_component_campaign_gate
 from .contracts import StageGateError, canonical_json, sha256_file
 from .numerical_readback import ReadbackFiles, admit_protected_numerical_readback
+from .physical_final_admission import admit_protected_final_comparison
+from .protected_final_observation import ProtectedFinalObservation
 
 REQUIRED_WITNESSES = (
     "compiler_invocation",
@@ -98,7 +101,7 @@ class FinalExecutionBinding:
 
 @dataclass(frozen=True)
 class FinalExecutionWitness:
-    """An executed qualified host verifier's arm observation, not a public claim."""
+    """Executed callback arm data; independent physical correspondence is separate."""
 
     binding_sha256: str
     arm: str
@@ -266,7 +269,7 @@ def observe_arm(
     ):
         raise StageGateError("protected final arm differs from original build/input/hardware/timer binding")
     if type(result.cycles) is not int or result.cycles <= 0:
-        raise StageGateError("protected final arm lacks positive measured hardware cycles")
+        raise StageGateError("protected final arm lacks positive reported cycle data")
     if (
         type(result.witnesses) is not tuple
         or len(result.witnesses) != len(REQUIRED_WITNESSES)
@@ -292,7 +295,7 @@ def _arm(verifier, binding, arm, files, original_reference) -> FinalExecutionWit
     return result
 
 
-def admit_protected_final_comparison(
+def observe_protected_final_comparison(
     *,
     binding: FinalExecutionBinding,
     original_binding: Path,
@@ -307,10 +310,13 @@ def admit_protected_final_comparison(
     candidate_build: BuildOnlyService,
     original_reference: ReadbackFiles,
     original_reference_build: BuildOnlyService,
-) -> FinalMemberComparison:
-    """Execute trusted arm verification and recompute the complete numerical gate."""
+    physical_execution_domain=None,
+) -> ProtectedFinalObservation:
+    """Recompute complete numerical and witness joins without physical admission."""
     if type(binding) is not FinalExecutionBinding or type(verifier) is not ProtectedExecutionVerifier:
         raise StageGateError("protected final admission requires original evaluator capabilities")
+    if physical_execution_domain is not None:
+        raise StageGateError("observation-only final lifecycle cannot consume physical authority declarations")
     binding.identity()
     verifier.validate()
     provenance = copy.deepcopy(environment)
@@ -391,7 +397,7 @@ def admit_protected_final_comparison(
         "elements": observations[0].element_count,
         "outputs": observations[0].outputs,
     }
-    return FinalMemberComparison(
+    return ProtectedFinalObservation(
         binding.member,
         a.cycles,
         b.cycles,
@@ -399,8 +405,9 @@ def admit_protected_final_comparison(
         sha256_bytes(canonical_json(vars(b) | {"evidence": [(str(p), s) for p, s in b.evidence]})),
         sha256_bytes(canonical_json(identity)),
         all(dict(row.quality.values)[metric] == 0 for row in observations),
-        True,
-        True,
+        observations[0].element_count,
+        observations[0].outputs,
+        verifier.qualification.scope,
     )
 
 
@@ -425,6 +432,7 @@ class ProtectedFinalMember:
     candidate_build: BuildOnlyService
     original_reference: ReadbackFiles
     original_reference_build: BuildOnlyService
+    physical_execution_domain: object = None
 
 
 def evaluate_protected_final_campaign(

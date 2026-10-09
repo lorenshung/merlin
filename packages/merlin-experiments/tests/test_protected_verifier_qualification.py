@@ -21,6 +21,8 @@ def test_json_receipt_and_reconstructed_record_never_mint_capability(native_case
     record = F._mapping(capability.receipt)
     assert len(record["controls"]) == 2 * len(F.REQUIRED_WITNESSES)
     assert "synthetic" in record["scope"]
+    assert record["status"] == "observation_qualified"
+    assert record["qualified_roles"] == ["private_witness_observation"]
     assert {row["status"] for row in record["controls"]} == {"observed", "refused"}
 
 

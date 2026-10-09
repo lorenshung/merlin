@@ -479,6 +479,16 @@ stage/effect evaluations or warm timer scopes. Historical rates and run corpora
 are not fitting inputs for this independent route.
 # From-scratch experiment boundary
 
+Protected verifier controls qualify private callback observations only. The
+complete original numerical/snapshot/witness lifecycle returns a distinct
+`ProtectedFinalObservation`, which strict final arithmetic does not accept.
+Reported callback cycles are unqualified data. Production final admission is
+explicitly refused while a separate independent physical execution-domain issuer
+is absent. Supplied callbacks, hashes, saved reports and observation qualifications
+cannot replace it. This closes false final admission; it does not implement RTL,
+loaded-hardware/runtime/reset/clock/timer correspondence or change the original
+physical acceptance denominator.
+
 Phase 2 starts from the independently issued, qualified output of a fresh Phase 1
 author session. The handwritten compiler is only a sealed private final golden;
 its compiler code, schedules, structural CCA answers and runtime/measurement

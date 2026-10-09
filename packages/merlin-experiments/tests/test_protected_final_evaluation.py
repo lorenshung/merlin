@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import replace
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from merlin_experiments.phase2 import protected_final_evaluation as F
@@ -79,15 +79,24 @@ def _json(path, record):
     path.write_text(json.dumps(record))
 
 
-def _request(case, *, mode=None, candidate_cycles=99, reference=None, original_reference=None,
-             control_fault=None, omit_control=False):
+def _request(
+    case,
+    *,
+    mode=None,
+    candidate_cycles=99,
+    reference=None,
+    original_reference=None,
+    control_fault=None,
+    omit_control=False,
+):
     root = case.private / "execution"
     root.mkdir()
     owner = root / "verifier.py"
     owner.write_text(VERIFIER)
     options = root / "options.json"
-    _json(options, dict(reference_cycles=100, candidate_cycles=candidate_cycles, mode=mode,
-                       control_fault=control_fault))
+    _json(
+        options, dict(reference_cycles=100, candidate_cycles=candidate_cycles, mode=mode, control_fault=control_fault)
+    )
     records = []
     for role in F.REQUIRED_WITNESSES:
         record = root / (role + ".json")
@@ -100,7 +109,12 @@ def _request(case, *, mode=None, candidate_cycles=99, reference=None, original_r
     code_sha = F.callable_code_sha256(module.verify)
     dependencies = tuple((path, sha256_file(path)) for path in (owner, options, *records))
     verifier = F.ProtectedExecutionVerifier(
-        module.verify, owner, dependencies, None, None, code_sha,
+        module.verify,
+        owner,
+        dependencies,
+        None,
+        None,
+        code_sha,
     )
     oracle = original_reference or case.arms[0]
     binding = F.FinalExecutionBinding(
@@ -136,20 +150,39 @@ def _request(case, *, mode=None, candidate_cycles=99, reference=None, original_r
             control_binding = replace(binding, member="control/" + name)
             original = control_root / (name + "_binding.json")
             _json(original, vars(control_binding))
-            controls.append(Q.ProtectedVerifierControl(
-                name, kind, expected, control_binding, original, "candidate", case.arms[1], oracle,
-                tuple((path, sha256_file(path)) for path in (*records, control_file)),
-            ))
+            controls.append(
+                Q.ProtectedVerifierControl(
+                    name,
+                    kind,
+                    expected,
+                    control_binding,
+                    original,
+                    "candidate",
+                    case.arms[1],
+                    oracle,
+                    tuple((path, sha256_file(path)) for path in (*records, control_file)),
+                )
+            )
     if omit_control:
         controls.pop()
     plan = root / "control_plan.json"
-    _json(plan, dict(schema=Q.CONTROL_SCHEMA, scope="synthetic joins only; no actual source or hardware qualification",
-                     dependencies=[[str(path), digest] for path, digest in dependencies],
-                     controls=[row.record() for row in controls]))
+    _json(
+        plan,
+        dict(
+            schema=Q.CONTROL_SCHEMA,
+            scope="synthetic joins only; no actual source or hardware qualification",
+            dependencies=[[str(path), digest] for path, digest in dependencies],
+            controls=[row.record() for row in controls],
+        ),
+    )
     inputs = case.freeze()
     verifier = Q.qualify_protected_execution_verifier(
-        selection=verifier, original_plan=plan, controls=tuple(controls), run_dir=inputs["run_dir"],
-        environment=inputs["environment"], receipt=inputs["run_dir"] / "private-qualification/receipt.json",
+        selection=verifier,
+        original_plan=plan,
+        controls=tuple(controls),
+        run_dir=inputs["run_dir"],
+        environment=inputs["environment"],
+        receipt=inputs["run_dir"] / "private-qualification/receipt.json",
     )
     if reference is not None:
         inputs["reference"] = reference
@@ -165,16 +198,61 @@ def _request(case, *, mode=None, candidate_cycles=99, reference=None, original_r
 
 def test_final_lifecycle_reconstructs_all_native_values(native_case):
     request = _request(native_case)
-    row = F.admit_protected_final_comparison(**vars(request))
-    assert row.accuracy_passed and row.final_executable_passed
-    assert (row.reference_cycles, row.candidate_cycles) == (100, 99)
-    verdict = F.evaluate_protected_final_campaign(
-        (request,),
-        original_campaign=request.original_binding.parent / "campaign.json",
-        expected_members=(row.member,),
-    )
-    assert verdict["status"] == "pass"
-    assert verdict["convergence"]["status"] == "unknown"
+    row = F.observe_protected_final_comparison(**vars(request))
+    assert row.accuracy_passed and row.physical_status == "UNKNOWN"
+    assert (row.reference_reported_cycles, row.candidate_reported_cycles) == (100, 99)
+    assert type(row) is F.ProtectedFinalObservation
+    with pytest.raises(StageGateError, match="physical final admission UNKNOWN"):
+        F.evaluate_protected_final_campaign(
+            (request,),
+            original_campaign=request.original_binding.parent / "campaign.json",
+            expected_members=(row.member,),
+        )
+
+
+def test_actual_observation_controls_cannot_authorize_physical_final_admission(native_case):
+    request = _request(native_case)
+    observed = F.observe_protected_final_comparison(**vars(request))
+    assert observed.accuracy_passed and observed.physical_status == "UNKNOWN"
+    capability = request.verifier.qualification
+    declaration = {
+        "status": "qualified",
+        "hardware_sha256": request.binding.hardware_sha256,
+        "runtime_sha256": request.binding.runtime_sha256,
+        "timer_scope_sha256": request.binding.timer_scope_sha256,
+    }
+
+    def must_not_run(**kwargs):
+        pytest.fail("a supplied physical callback was treated as authority")
+
+    for authority in (
+        None,
+        capability,
+        capability.receipt,
+        capability.receipt_sha256,
+        declaration,
+        must_not_run,
+        SimpleNamespace(verify=must_not_run, qualified=True),
+    ):
+        changed = replace(request, physical_execution_domain=authority)
+        with pytest.raises(StageGateError, match="physical final admission UNKNOWN"):
+            F.admit_protected_final_comparison(**vars(changed))
+        with pytest.raises(StageGateError, match="physical final admission UNKNOWN"):
+            F.evaluate_protected_final_campaign(
+                (changed,),
+                original_campaign=request.original_binding.parent / "campaign.json",
+                expected_members=(request.binding.member,),
+            )
+    from merlin_experiments.phase2.component_final_policy import strict_final_component_campaign_gate
+
+    with pytest.raises(StageGateError, match="typed immutable comparison"):
+        strict_final_component_campaign_gate((observed,), expected_members=(observed.member,))
+
+
+def test_observation_lifecycle_refuses_a_declared_physical_authority(native_case):
+    request = replace(_request(native_case), physical_execution_domain={"status": "qualified"})
+    with pytest.raises(StageGateError, match="observation-only final lifecycle"):
+        F.observe_protected_final_comparison(**vars(request))
 
 
 @pytest.mark.parametrize(
@@ -191,27 +269,27 @@ def test_final_lifecycle_reconstructs_all_native_values(native_case):
 def test_incomplete_or_changed_execution_cannot_make_comparison(native_case, mode, pattern):
     request = _request(native_case, mode=mode)
     with pytest.raises(StageGateError, match=pattern):
-        F.admit_protected_final_comparison(**vars(request))
+        F.observe_protected_final_comparison(**vars(request))
 
 
 def test_cycle_boolean_is_not_hardware_cycles(native_case):
     request = _request(native_case, candidate_cycles=True)
-    with pytest.raises(StageGateError, match="positive measured"):
-        F.admit_protected_final_comparison(**vars(request))
+    with pytest.raises(StageGateError, match="positive reported"):
+        F.observe_protected_final_comparison(**vars(request))
 
 
 def test_selected_binding_cannot_be_replaced_after_freeze(native_case):
     request = _request(native_case)
     request = replace(request, binding=replace(request.binding, timer_scope_sha256="a" * 64))
     with pytest.raises(StageGateError, match="original evaluator freeze"):
-        F.admit_protected_final_comparison(**vars(request))
+        F.observe_protected_final_comparison(**vars(request))
 
 
 def test_original_console_cannot_drift_from_frozen_numerical_bytes(native_case):
     request = _request(native_case)
     request.candidate.console.write_text(request.candidate.console.read_text() + "new bytes")
     with pytest.raises(StageGateError, match="absent, indirect or changed"):
-        F.admit_protected_final_comparison(**vars(request))
+        F.observe_protected_final_comparison(**vars(request))
 
 
 def test_public_verifier_selection_is_not_a_private_capability(native_case, tmp_path):
@@ -220,12 +298,12 @@ def test_public_verifier_selection_is_not_a_private_capability(native_case, tmp_
     public_binding.write_bytes(request.original_binding.read_bytes())
     request = replace(request, original_binding=public_binding)
     with pytest.raises(StageGateError, match="private host input"):
-        F.admit_protected_final_comparison(**vars(request))
+        F.observe_protected_final_comparison(**vars(request))
 
 
 def test_campaign_does_not_accept_precomputed_comparisons(native_case):
     request = _request(native_case)
-    row = F.admit_protected_final_comparison(**vars(request))
+    row = F.observe_protected_final_comparison(**vars(request))
     with pytest.raises(StageGateError, match="lifecycle inputs"):
         F.evaluate_protected_final_campaign(
             (row,),
@@ -282,16 +360,14 @@ def test_two_approximations_do_not_double_original_tolerance(native_case):
         candidate_build=case.service,
     )
     assert dict(pair_only.quality.values)["elementwise_violation_count"] == 0
-    row = F.admit_protected_final_comparison(**vars(request))
+    row = F.observe_protected_final_comparison(**vars(request))
     assert not row.accuracy_passed
-    assert (
+    with pytest.raises(StageGateError, match="physical final admission UNKNOWN"):
         F.evaluate_protected_final_campaign(
             (request,),
             original_campaign=request.original_binding.parent / "campaign.json",
             expected_members=(row.member,),
-        )["status"]
-        == "fail"
-    )
+        )
 
 
 def test_campaign_cannot_exclude_an_original_member(native_case):

@@ -1,4 +1,4 @@
-"""Issue private verifier capabilities by executing frozen independent controls.
+"""Issue observation-only verifier capabilities from frozen control execution.
 
 Receipts document execution; they cannot be reopened into admission authority.
 The selected target owner supplies concrete source/hardware controls. Synthetic
@@ -29,7 +29,7 @@ from .protected_final_evaluation import (
 )
 
 CONTROL_SCHEMA = "merlin.protected_final_controls.v1"
-QUALIFICATION_SCHEMA = "merlin.protected_final_verifier.v2"
+QUALIFICATION_SCHEMA = "merlin.protected_final_verifier.v3"
 _ISSUER = object()
 
 
@@ -98,7 +98,7 @@ class ProtectedVerifierControl:
 
 @dataclass(frozen=True)
 class ProtectedVerifierQualification:
-    """An in-memory issuance, joined to the exact pre-frozen control selection."""
+    """Executed callback observation controls; no physical execution authority."""
 
     receipt: Path
     receipt_sha256: str
@@ -132,7 +132,8 @@ class ProtectedVerifierQualification:
         provenance = json.loads(self.environment_json)
         _protected_files(self.run_dir, provenance, tuple(path for path, _sha in self.inputs))
         record = _mapping(self.receipt)
-        if (record.get("schema") != QUALIFICATION_SCHEMA or record.get("status") != "qualified"
+        if (record.get("schema") != QUALIFICATION_SCHEMA or record.get("status") != "observation_qualified"
+            or record.get("qualified_roles") != ["private_witness_observation"]
             or record.get("code_sha256") != self.code_sha256
             or record.get("control_plan_sha256") != self.plan_sha256
             or record.get("scope") != self.scope):
@@ -234,13 +235,14 @@ def qualify_protected_execution_verifier(
                                  "observation_sha256": sha256_bytes(canonical_json(vars(result) | {
                                      "evidence": [[str(p), s] for p, s in result.evidence]}))})
     recheck()
-    record = {"schema": QUALIFICATION_SCHEMA, "status": "qualified", "scope": plan["scope"],
+    record = {"schema": QUALIFICATION_SCHEMA, "status": "observation_qualified", "scope": plan["scope"],
+              "qualified_roles": ["private_witness_observation"],
               "code_sha256": selection.code_sha256, "control_plan_sha256": sha256_file(original_plan),
               "dependencies": plan["dependencies"], "controls": observations,
               "issuer_sources": [[str(p), s] for p, s in issuer_sources],
               "execution_domain": list(domain),
               "inputs": [[str(p), s] for p, s in inputs],
-              "authority": "in-memory independent issuer; JSON replay never grants admission"}
+              "authority": "private callback observations only; no physical hardware/runtime/timer authority"}
     receipt.parent.mkdir(parents=True, exist_ok=True)
     write_json(receipt, record)
     receipt.chmod(0o400)
