@@ -217,13 +217,17 @@ class RuntimeGrant:
             or str(target) != self.destination
             or ".." in target.parts
             or any(part in _EXCLUDED for part in target.parts)
-            or target.parts[1:2] not in (("usr",), ("lib",), ("lib64",), ("bin",))
+            or target.parts[1:2] not in (("usr",), ("lib",), ("lib64",), ("bin",), ("etc",))
         ):
             raise StageGateError("runtime grant must be an explicit system-tool file")
         _read(self.source, self.sha256)
 
 
-def strict_tool_policy(view: ComponentView, candidate: Path, *, runtime: tuple[RuntimeGrant, ...]) -> tuple[str, ...]:
+def strict_tool_policy(
+    view: ComponentView, candidate: Path, *, runtime: tuple[RuntimeGrant, ...],
+    candidate_destination: str = "/candidate",
+    bwrap_binary: Path | None = None,
+) -> tuple[str, ...]:
     """Networkless tool subprocess policy; no broad checkout/home/system binds.
 
     Runtime files are explicitly reviewed. This policy is not an authenticated
@@ -234,6 +238,9 @@ def strict_tool_policy(view: ComponentView, candidate: Path, *, runtime: tuple[R
     if candidate.is_symlink() or not candidate.is_dir():
         raise StageGateError("component candidate is absent or linked")
     candidate = candidate.resolve()
+    destination = PurePosixPath(candidate_destination)
+    if not destination.is_absolute() or ".." in destination.parts or str(destination) != candidate_destination:
+        raise StageGateError("candidate mount destination must be canonical and absolute")
     if candidate == view.root or candidate.is_relative_to(view.root) or view.root.is_relative_to(candidate):
         raise StageGateError("writable candidate overlaps frozen component view")
     if any(
@@ -246,7 +253,7 @@ def strict_tool_policy(view: ComponentView, candidate: Path, *, runtime: tuple[R
     if len({grant.destination for grant in runtime}) != len(runtime):
         raise StageGateError("duplicate runtime destination")
     argv = [
-        "bwrap",
+        str(bwrap_binary) if bwrap_binary is not None else "bwrap",
         "--die-with-parent",
         "--new-session",
         "--unshare-all",
@@ -282,9 +289,9 @@ def strict_tool_policy(view: ComponentView, candidate: Path, *, runtime: tuple[R
         "/component-inputs",
         "--bind",
         str(candidate),
-        "/candidate",
+        candidate_destination,
         "--chdir",
-        "/candidate",
+        candidate_destination,
     ]
     return tuple(argv)
 
