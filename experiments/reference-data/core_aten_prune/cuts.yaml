@@ -1,0 +1,16 @@
+# Intentional cuts over the bounded Core ATen suite, applied in order.
+#
+# Each cut drops the selected cases whose partition_assignment matches every axis listed under
+# `drop` (a case matches an axis when its value is one of the listed values). Cuts are chosen by
+# hand and recorded here; build_tools/scripts/prune_bounded_core_aten_suite.py applies them and
+# reports the state of the set after each one.
+schema_version: 1
+parent:
+  name: bounded_core_aten_suite.json
+  sha256: 8db0a20d05a10bc7591a4d024f66826ed2100c84ebb21ee176114d2b29eb74fb
+  profile: core-aten-semantic-pairwise-v2-int8
+cuts:
+  - id: drop-int64-bool-complex64
+    drop:
+      dtype: [int64, bool, complex64]
+    rationale: Remove the int64, bool and complex64 dtype partitions.
