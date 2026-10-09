@@ -170,6 +170,11 @@ def test_component_roster_imports_and_archives_only_explicit_new_owners():
         "test_component_native_deadline.py",
         "test_component_container_context.py",
         "test_fresh_author_tools.py",
+        "test_fresh_author_compiler_tools.py",
+        "test_runtime_dependency_projection.py",
+        "test_component_operator_schemas.py",
+        "test_rtl_state_control.py",
+        "test_rtl_native_memory.py",
     } <= set(configured["tests"])
     assert {
         "merlin_experiments.phase1.component_generation_admission",
@@ -186,6 +191,10 @@ def test_component_roster_imports_and_archives_only_explicit_new_owners():
         "merlin_experiments.phase2.component_launch_probe",
         "merlin_experiments.phase2.protected_final_observation",
         "merlin_experiments.phase2.physical_final_admission",
+        "merlin_experiments.phase0.operator_schema_intake",
+        "merlin.targetgen.frontend_operator_effects",
+        "merlin.targetgen.torch_schema_observer",
+        "merlin_experiments.phase2.rtl_state_control",
     } <= set(configured["probe_modules"])
     assert configured["support_files"] == (
         "test_phase2_broker.py",
@@ -194,6 +203,7 @@ def test_component_roster_imports_and_archives_only_explicit_new_owners():
         "test_edit_authority.py",
         "reviewed_corpus_fixtures.py",
         "component_launch_fixture.py",
+        "rtl_native_control_cases.py",
     )
     for filename in (*configured["tests"], *configured["support_files"]):
         assert (repo_root() / "packages/merlin-experiments/tests" / filename).is_file()
