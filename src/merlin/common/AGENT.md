@@ -56,6 +56,24 @@ records before consumers interpret them; it does not confer provenance or admiss
 `jsonio.strict_json_equal` compares closed JSON records without Python bool/int,
 float/int, or tuple/list aliases; callers still own source and receipt identity.
 
+`invocation_record` retains exact file/tool/source pins and complete stdout/stderr
+at actually invoked process or Python-call boundaries. Interrupted observations
+remain unavailable. Caller-owned destinations stay outside invoked packages;
+callers own dependency completeness, sandbox routing and semantic stage lift.
+The observer confers no correctness, stage applicability or admission.
+Actual subprocess runs freeze the selected effective environment and bind its
+complete process-byte mapping by digest and key roster without recording values.
+`require_environment` compares an explicit protected expected mapping; legacy
+receipts cannot supply that identity. A matching environment is not a runtime,
+dependency-closure, secret-management or sandbox qualification. Python call
+observations do not claim a child process environment.
+
 `provenance_lost` records explicitly declared unrecoverable artifact identities.
 Pin and artifact loaders reject redeclaring those identities as live; build products
 use ordinary checkout-relative paths and are hashed independently of git status.
+
+`storage_ops` refreshes cached lsof listings after a verified move copy and at
+each peer/store duplicate replacement boundary. Census may reuse its original
+listing; a destructive operation may not. Live fuser checks and injected checkers
+retain their holders interface. A refused late check preserves the original
+name and removes only the operation's temporary staged link.

@@ -19,6 +19,11 @@ launching, capsule grading, golden generation, sandboxing and certification. The
   proof. ABI `0.2` has no normal executor/certification adapter. Default package
   invocation refuses that version; typed profile permission admits structural
   emission only. ABI `0.1` and its existing text-entry aliases remain unchanged.
+- `package_runtime.scoped_package_executor` accepts explicit caller-owned build
+  and entrypoint execution services. It never discovers an optional evaluator;
+  invocation without the scoped owner during a guarded run refuses, including
+  threads that did not inherit the execution context. Normal unguarded calls
+  retain their existing package contract and runtime behavior.
 
 - `cli.py` / `pipeline.py` — the deterministic, LLM-free entry points.
 - `ingest/` — record inputs as a SourceManifest (no crawling, no vendoring).
@@ -121,6 +126,16 @@ launching, capsule grading, golden generation, sandboxing and certification. The
   encoding flag remains. Verdict-cache source inventories include helper dependencies
   and the declaring contract; this is not complete frozen subprocess qualification.
 
+`compile_only_execution` runs the ordinary scoped package lowering, LLVM/object
+compiler and linker with a static original ABI and explicit build/ELF admission
+services. It retains the linked entry and reopens exact source/tool selections,
+package/contract membership, products and actual invocations. It accepts no
+capsule, tensor values, golden or execution service. Semantic, index, resource
+and complete-output obligations remain UNKNOWN; independent source authority
+and the required grading denominator belong to the phase owners. Transport
+reports cannot issue those authorities. A product overwritten after an observed
+invocation remains unavailable rather than gaining an evidence exception.
+
 ## What does not belong here
 
 - LLM/API dependencies — TargetGen is deterministic.
@@ -132,6 +147,21 @@ launching, capsule grading, golden generation, sandboxing and certification. The
 - The Merlin core dialects or runtime ABI (those live elsewhere in the repo).
 
 ## Interfaces
+
+`input_palette.py` describes explicit deterministic input-only stress patterns
+along static tensor axes. Values and numerical landmarks must be exactly
+representable in selected storage; it never computes answers or changes oracle
+order/tolerances. Normal MLIR builders and builtin PyTorch sources consume it.
+Connected builtin attention/residual/norm, MLP/residual and conv/residual/pool
+sources remain closed programs through ordinary sealed Model2MLIR conversion;
+they do not admit arbitrary loaders, models or captures.
+`component_sources` owns those closed compositions and the producer→RNE/clamp
+quantizer observer. Its source scales are finite exactly represented f32 values,
+with a power-of-two quantizer scale; signed i8 bounds come from the format registry.
+`capsule_results` checks every multiple-result ABI against the actual parsed
+program signature and complete result values before ordinary publication. The
+observer publishes code values as f32; exact source witnesses do not grant a
+different candidate comparison, signed-zero policy or per-output integer policy.
 
 `compiler_library.py` binds explicit host-reviewed public leaf APIs, dependency
 members and resource bytes for independent compiler packages. Candidate metadata
@@ -220,3 +250,10 @@ one grade must not be attributed to different hardware revisions — and a large
 
 - `toy_npu` is the bundled reference target. Generated skeletons and support plugins are not
   qualified compiler submissions; consult target contracts and qualification records for status.
+
+`capsule_builtin_source.py` renders builtin PyTorch templates with typed shape,
+scalar and input-palette validation; `capsule_source.build_loader_src` supplies
+its existing template registry. `corpus_builder.py` enforces common declaration
+preservation across operation builders: palettes, epilogues, stimulus ranges,
+oracle applicability and semantic coverage. These owners contain no target
+schedule or workload-specific optimization.

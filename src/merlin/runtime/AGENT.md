@@ -24,11 +24,21 @@ the per-backend adapters under `backends/`.
 - `host_math.py` — explicit portable libm evaluation policies and their compiled runtime objects.
   The default emits nothing. A selected policy changes linked-byte identity and must pass the
   caller's original numerical contract; it does not promise errno or exception-flag equivalence.
+- `host_arithmetic.py` and `host_outward.py` share explicitly selected CPU
+  arithmetic implementations independently of accelerators. ISA/ABI, source
+  arithmetic and effect permissions remain caller obligations. Namespaces bind
+  symbols without selecting a workload or numeric policy. The available host
+  profile refuses unsupported CPUs; it grants no hardware/runtime authority.
+  Target ABI bindings delegate here rather than duplicate host instructions.
 - `out_b64.py` — lossless, opt-in chunked container-word console decoding. Complete
   frames reconstruct every value before ordinary numerical checks; malformed,
   missing, duplicated or interrupted frames refuse. The shared console parser
   still requires terminal `DONE`. Transport changes grant no numerical support,
   output sampling, digest-only qualification or simulator certification.
+- `direct_kernel_harness.py` — pure pointer-call storage and full-value publishing
+  from an explicit software ABI and exact input bytes. Contains no target
+  instruction or reference compiler. Calling a declared completion symbol does
+  not independently prove synchronization, ownership or hardware correspondence.
 - `out_bin.py` — separate opt-in byte-oriented full-value framing. It consumes
   exact length-delimited raw payloads without text-decoding their NUL/non-UTF-8
   contents, checks the transport checksum, and requires END/DONE and a closed

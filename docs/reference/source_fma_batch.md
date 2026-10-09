@@ -7,6 +7,7 @@ last_verified: 2026-10-06
 related: []
 code_refs:
   - src/merlin/llvmlower/source_fma_batch.py
+  - src/merlin/runtime/host_arithmetic.py
   - merlin/runtime/c/prepared_polynomial_batch.h
 ---
 
@@ -21,7 +22,9 @@ The caller supplies proofs of finite operands/results, distinct private operand
 and product storage, stable rounding, gradual underflow, nontrapping arithmetic,
 and unobserved exception flags and errno. Missing obligations refuse emission.
 `emit_source_fma_batch_permission` selects an independently supplied mathematical
-hook. CPU instruction selection and register constraints belong to the provider.
+hook. CPU instruction selection and register constraints belong to an explicitly
+selected host implementation. Merlin shares those implementations independently
+of accelerator backends; target wrappers retain only ABI/symbol bindings.
 
 The current consumer is the explicit four-cell polynomial alternative. Its
 fraction and polynomial arrays are distinct private locals; the admitted source

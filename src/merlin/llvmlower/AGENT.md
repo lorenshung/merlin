@@ -2,6 +2,16 @@
 
 ## Purpose
 
+`counted_copy_check` proves only a closed original integer tensor identity/copy
+to scalar LLVM counted loop under explicit original software pointer objects.
+It checks complete source/body/CFG, ordinal/byte bounds, pointer bases, loaded
+value stores and alignment, without shape allocation or iteration unrolling.
+`layout_observation` queries the actual selected compiler and native public LLVM
+DataLayout API, retaining real tool/header/library and invocation pins. Missing
+storage/layout, opaque operations, aggregate literals, poison/provenance flags,
+general graphs and unsupported control remain UNKNOWN. These conditional IR
+facets do not prove physical resources/lifetime, machine code or runtime/timing.
+
 `endpoint_narrowing` is a separate default-off capability for finite interval
 subsets in a private original-source epoch. It preserves the legacy prepared
 owner's mandatory invalidation and derives its own retained magnitude fact.

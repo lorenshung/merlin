@@ -4,6 +4,12 @@ The provisioned `native_supervisor` is the direct parent/reaper of every guardia
 `native_guardian` owns only its descendant tree. `chia_native` adapts public Chia
 hooks; no worker-side Popen or private upstream tracker mutation is permitted.
 `_protocol` owns bounded local packets, descriptor transfer and peer identity.
+`owned_children` owns the shared kernel subreaper setup and direct/adopted child
+pidfd termination and waitpid/ECHILD completion check. Both the existing native
+guardian and the separately forked component feedback guardian use this primitive;
+neither may replace actual closure with a /proc descendant snapshot. Callback
+forking preserves live evaluator authorities and does not create native service
+sessions or authorize delegated/non-descendant execution.
 
 Require a private authenticated same-host/PID-namespace endpoint, explicit sessions,
 worker and driver pidfds, and independent native-tree and guardian-reaping evidence.
@@ -11,6 +17,21 @@ Unknown cleanup is never success. Preserve native stdio/environment without expo
 session capabilities to candidates or receipts. Do not launch a background daemon on
 import or automatically change an existing cluster. Service/host failure is not
 qualified by worker-loss tests. Historical task receipts retain their old meaning.
+
+The optional `container_transport` prepares an actual immutable static PID-1
+command owner from packaged `container_guardian.c`. It uses only an explicitly
+selected existing service and independently supplied image config/export byte
+join; it never starts a daemon, pulls/imports/tags images, or grants the service
+socket. `container_policy` converts the original closed tool-grant language;
+image directory scopes are derived and hidden, with only original exact runtime
+and input/output grants restored. Child output is encoded into a separate native
+owner protocol. Cleanup completion requires that owner to observe `waitpid`
+ending in `ECHILD`; service state/removal alone cannot supply it. A command can
+cancel its owner, but cannot publish a completion receipt or access its output FD.
+This diagnostic preparation is not fresh compiler origin, a target runtime role,
+an authenticated model-client boundary, service failure authority, a native lease,
+or an OS hard deadline. Partial-create cleanup may address only the invocation's
+generated name/token/image identity. Reconstructed prepared handles refuse.
 
 Frozen services and guardians use the existing frozen Python command builder and
 snapshot seal. Their source reference comes from verified process-local bootstrap

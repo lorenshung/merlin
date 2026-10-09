@@ -19,7 +19,7 @@ code_refs:
 This design specifies information each phase needs to build and optimize a
 general compiler. Existing generators, objective bindings, CCA and calibrated
 provider APIs implement parts of it. Semantic scenario generation, automatic
-experiment selection and a qualified fresh campaign remain incomplete. No
+experiment execution and a qualified fresh campaign remain incomplete. No
 reference implementation or held-out model is admitted by this design.
 
 ## Phase responsibilities
@@ -128,8 +128,13 @@ already rejected hypotheses. Comparing against an obsolete baseline can make an
 improvement look competitive when it loses to the current legal baseline.
 
 Existing analytical providers require selected evidence and retain UNKNOWN.
-This design does not add an uncalibrated score or claim an active experiment
-selector is already integrated.
+The ordinary component broker now exposes the analytical provider's existing
+conservative experiment order. It replays the same complete costs and gate
+observations, using equal generated-family shares and equal member shares within
+each family. Saved feedback rechecks that roster, ordering and arithmetic. Failed
+or unknown gates retain refusal or unresolved status. This orders observed
+opportunities; automatic selection and execution of new distinguishing
+experiments remains incomplete.
 
 ## Roofline and calibration
 

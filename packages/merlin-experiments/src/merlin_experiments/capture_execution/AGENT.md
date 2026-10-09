@@ -18,3 +18,8 @@ revision is only an origin hint; copied package bytes remain execution authority
 independently selected, fully verified runtime CAS. It records a new byte
 identity and excludes stale editable origins explicitly; it never restores an
 old venv path or promotes historical capture evidence.
+Shared runtime hard links change inode ctime/link counts while preserving bytes.
+Inventory never accepts an unstable hash: a link-count-only transition permits
+at most two rehashes, and the final read must keep full device/inode/size/mtime/
+mode/owner/ctime identity stable. Content, mode or ownership changes still fail;
+selected tree SHA checks remain authoritative. Persistent link churn is unavailable.

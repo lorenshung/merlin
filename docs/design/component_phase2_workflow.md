@@ -6,6 +6,12 @@ owner: merlin-experiments
 last_verified: 2026-10-08
 related: [beam_cca_architecture]
 code_refs:
+  - src/merlin/perf/component_cost.py
+  - src/merlin/perf/component_screen.py
+  - src/merlin/perf/analytical_resources.py
+  - packages/merlin-experiments/src/merlin_experiments/phase2/component_analytical.py
+  - packages/merlin-experiments/src/merlin_experiments/phase2/component_screening.py
+  - packages/merlin-experiments/src/merlin_experiments/phase2/supervised_feedback.py
   - packages/merlin-experiments/src/merlin_experiments/phase2/component_workflow.py
   - packages/merlin-experiments/src/merlin_experiments/phase2/component_cca.py
   - packages/merlin-experiments/src/merlin_experiments/phase2/broker_policy.py
@@ -143,6 +149,15 @@ Resolved intervals require finite bounds and provenance. Missing costs remain
 unresolved with nonempty reasons. Analytical rows are estimates; this schema
 does not certify the callback's model accuracy or claim measured cycles.
 
+When the selected provider supplies complete-cost reports and screening, the
+broker also returns its conservative experiment ordering. `component_screening`
+replays savings, latency-weighted priorities, gate observations and family/regime
+diversity against the same exact public member roster. Importance uses equal
+generated-family shares, then equal shares within a family; no validation-model
+weights enter it. Unknowns, ties, regressions and refusals remain in the evidence.
+Legacy feedback without screening keeps its existing scope. This projection
+does not launch experiments, qualify a cost model or grant final acceptance.
+
 `component-rtl-feedback` accepts the existing `DevelopmentGsimFeedback` evaluator
 with its explicit host executor, exact frozen corpus, baseline compiler, target,
 RTL configuration and workload-equivalence certificate. These identities and
@@ -153,17 +168,63 @@ unmeasured status and null cycle fields. No fabricated measurements fill gaps.
 
 Neither tier requires a GSIM measurement on every iteration. Neither grants final
 accuracy, hardware parity or convergence acceptance. Spike functional evidence
-cannot be presented as RTL or FPGA timing. A provider must bound its own execution;
-the policy checks elapsed time on return but does not supervise an arbitrary
-in-process callback that hangs. A future isolated runner must own cancellation
-before this profile can support a bounded scientific campaign.
+cannot be presented as RTL or FPGA timing. Normal analytical and CCA actions run
+through `supervised_feedback.bounded_feedback`, which forks the selected trusted
+callback into a private worker and uses the existing portfolio process supervisor
+to kill its complete tree at the wall deadline. The worker stays alive after
+publishing its result until supervision enumerates its descendants, so nested tools
+that opened new sessions are also cancelled. This host deadline does not replace
+candidate sandbox admission or a separately qualified native worker service.
+
+The public `component_analytical.build_component_analytical_provider` binds the
+frozen baseline, exact corpus, descriptor, controlled calibration adapter,
+feature-provider source and declared dependencies. It gives the selected target
+feature provider one generated member at a time. The provider returns typed
+`ComponentFeatureObservation` values for the two compiler arms, including emitted
+executable, full dependencies, inputs and re-openable artifact identities.
+Instruction decoding and hardware facts remain target-owned. No model graph,
+protected complete-model observer or model sentinel enters this route.
+
+`ComponentCostScope` requires explicit timer, accuracy and input-policy identities.
+Both cold and warm observations cover preparation, allocation, packing, proof,
+device work, readout, reconstruction, replay, dispatch, publication and cleanup.
+Inactive stages require observed zero feature counts. Inclusive parents replace
+contained regions when composing the total; every region still appears in the
+report. Missing stages, unpriced features, unqualified feature domains and failed
+functional evidence keep totals UNKNOWN. Region composition reuses the historical
+analytical resource primitive with its explicit evidence-selected overlap operator;
+separate ordered regions are summed. Public report replay checks containment and
+total arithmetic without publishing private feature contexts or artifact paths.
+
+`component_screen.qualify_component_screen` preserves the historical empirical
+validator and adds a preregistered independent gate: 95% agreement on decided
+pairs, 100 decided pairs overall, 20 per slice in at least three slices, at least
+20 held predictions, at most 10% relative error and at least 95% interval coverage.
+Complete workload groups are held out together. A qualification file binds the
+controlled calibration and policy identities. Missing qualification leaves totals
+UNKNOWN. The gate authorizes screening only.
+
+Feature extraction uses a private immutable candidate copy. Parallel workers are
+capped by assigned CPUs, available memory, an explicit per-worker memory grant and
+shared engine capacity, with the existing host lease preventing overlapping
+campaigns. The call retains the 600-second development simulation ceiling. Private
+caches bind source, input, scope, calibration, qualification and dependency bytes;
+cache hits re-open the original artifacts. Private result records retain extraction
+cost, unresolved proposals, ties and regressions. Conservative saved complete cost
+per evaluation second determines opportunity order; equal shares per generated
+family and per member within family provide the stated independent corpus basis,
+with one representative per family/regime before additional opportunities.
 
 ## Complete structural CCA feedback
 
 The trusted host may explicitly supply a `ComponentCCAProvider` and select
-`component-cca-feedback` through the same broker registry. Its baseline is a
-separately pinned compiler tree; candidate metadata cannot select that tree or
-the provider. The callback must supply exactly one typed baseline/candidate
+`component-cca-feedback` through the same broker registry. Its experimental
+baseline must be the independently issued output of the fresh Phase 1 author
+session, subsequently qualified against the exact independent coverage domain.
+The handwritten compiler is only the private final golden: its code, schedules,
+CCA structure and measurement helpers cannot supply the Phase 1 or Phase 2
+compiler or baseline. Candidate metadata cannot select the baseline or provider.
+The callback must supply exactly one typed baseline/candidate
 `ComponentCCAObservation` pair for every frozen generated member. Each observation
 binds the actual emitted artifact bytes, compiler revision, generated member,
 corpus and target descriptor. Provider source, executing callable/code selection,
@@ -171,6 +232,11 @@ baseline tree, candidate tree, corpus and descriptor are rechecked around the
 call. Unknown callback dependencies or closure state still need separate trusted
 runtime admission. The callback is responsible for a faithful source-bound lift;
 matching hashes alone do not establish that the lift is scientifically correct.
+
+The v2 CCA report also reflects provider-supplied users, effects, representations,
+lifetimes, resource pressure, emitted choices, refusal reasons and editable
+compiler owners. Absent facts remain UNKNOWN, including facts missing in both
+arms. Historical v1 report replay retains its original field roster and meaning.
 
 `component_cca.complete_report` uses the core all-facet `cca_compare.compare`
 and `uncomparable_axes`. It reflects every facet field and refuses differing
@@ -216,6 +282,15 @@ must verify an approved minimal view, content-bound runtime isolation and a
 zero-history participant session, then create the explicit providers and broker.
 A library already developed by an implementation agent is not evidence of a
 fresh participant's convergence.
+
+The closed launch declaration is data, not an admission credential. Its former
+automatic target backend factory is quarantined: that route could select the
+handwritten companion's compiler helpers and runtime renderer. It now refuses
+before provider resolution, candidate qualification or paid client launch.
+Positive assembly requires independently issued fresh Phase 1 compiler origin
+and hardware-only runtime support derived from the selected RTL and minimal
+software contract. Installed or reference-selected backend code, source hashes,
+role flags and archived JSON receipts do not establish those authorities.
 
 ## Receipts and final validation
 

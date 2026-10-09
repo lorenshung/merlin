@@ -6,6 +6,12 @@ The performance layer: what a target's legal choices *cost*. Derives archetypes 
 performance contract whose terms carry provenance and a validity domain, composes a predicted cycle
 count with gap attribution, and classifies workloads by which lever has headroom.
 
+`component_applicability` holds pure frozen joint semantic cells for measured
+payload/resource, tile/tail, streaming, dependency, reuse and composition scope.
+Exact membership cannot imply range or repetition transfer. These declarations
+and complete-cost arithmetic do not issue hardware/timer authority; experiments
+owns source/runtime provenance, actual controls and held qualification.
+
 The namespace is shared without duplicate implementations: experiments owns
 the isolated/controlled/paired probe providers, host-region/physical-transition/lane-migration
 qualifiers, source contraction/convolution preparation, source-program-pair binding and execution,

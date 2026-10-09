@@ -10,7 +10,10 @@ code_refs:
   - src/merlin/targetgen/package_runtime.py
   - packages/merlin-experiments/src/merlin_experiments/phase2/component_experiment.py
   - packages/merlin-experiments/src/merlin_experiments/phase2/numerical_readback.py
+  - packages/merlin-experiments/src/merlin_experiments/phase2/component_final_policy.py
+  - packages/merlin-experiments/src/merlin_experiments/phase2/protected_final_evaluation.py
   - packages/merlin-experiments/src/merlin_experiments/phase0/resource_boundaries.py
+  - packages/merlin-experiments/src/merlin_experiments/phase0/component_semantic_basis.py
 ---
 
 # Component-driven compiler convergence
@@ -93,6 +96,227 @@ optimization actions. Frozen source coverage and numerical qualification are
 different obligations; a small coverage witness basis proves neither arithmetic
 nor a complete compiler.
 
+### Reviewed component obligation plans
+
+Keep the selected software spec minimal: semantic and numerical behavior plus
+operation support that the selected RTL cannot determine. Extract hardware
+capabilities, geometry and resource counts from the pinned RTL. Independently
+select and freeze any example training graph roster before authoring; inspect
+those source-pinned graphs for relevant semantics, separately from protected
+validation. A later validation audit cannot revise the frozen corpus. Layer
+frequencies, validation shapes and past timing never choose production rules or
+generation weights.
+
+Campaign `component_performance` objectives may be declared in the explicitly
+selected recipe; their exact source hash, reviewed operation links and selected
+hardware binding are recorded by normal generation. This keeps campaign metrics
+outside the minimal software spec. Legacy inline declarations remain readable;
+supplying both recipe and SW declarations is refused. Review status is a
+declaration, not independent review authority or measured performance evidence.
+
+The explicit recipe may also select
+`semantic_basis: {path: <reviewed roster>, sha256: <exact roster bytes>}`.
+`ComponentSemanticBasis` validates the closed
+`merlin.component_semantic_basis.v1` roster with `status: reviewed` and
+`provenance: {role: independent_training_example, visibility: public,
+selection: before_authoring}`. Each member declares `id`,
+`kind: model2mlir_frontend_trace`, `path`, `sha256`,
+`schema: m2m.frontend_trace.v1`, `operation_semantics` and `effect_semantics`.
+The original graph content digest, typed graph edges and actual call target
+roster must agree with the pinned bytes and reviewed operation list. Reviewed
+effects contain `id`, `kind`, `basis` and a nonempty subset of those operations.
+Source bytes marked with other provenance, unreviewed rosters, changed files and
+authored weights are refused. Source path spelling grants no authority.
+
+The existing private source freeze archives complete selected graph bytes before
+authoring, rechecks roster membership and content, and routes generation only to
+the archived files. Author-visible identity carries reviewed semantics and hashes;
+graph paths, shapes, counts and frequencies stay in private audit inputs. The
+coverage plan binds `semantic_basis_sha256`, and each obligation declares
+`semantic_basis: [{member: <example id>, operations: [{source: <original call
+target>, owner: <selected SW operation id>}], effects: [{source: <example effect
+id>, owner: <plan effect id>}]}]`. Every operation owner needs a reviewed source
+correspondence. Effect links must match kinds and still require concrete generated
+witnesses. These correspondences never infer production lowering rules or certify
+physical effects. Protected independent selection supplies review authority;
+an author's review or provenance label cannot grant it.
+
+The ordinary `generate_target` API accepts an external `component_coverage` path
+only with `component_only=True`. The Phase 0 CLI spells it `--component-coverage`;
+the experiment orchestrator spells it `--phase0-component-coverage` and freezes
+it with the other explicit inputs. The closed `ComponentCoveragePlan` schema
+binds exact selected hardware, software and numerical declarations. A declaration's
+`status: reviewed` does not grant review authority: the protected experiment owner
+must independently admit that exact source before authoring.
+
+```yaml
+schema: merlin.component_coverage_plan.v1
+status: reviewed
+hardware:
+  contract_sha256: <selected canonical contract SHA256>
+  raw_facts_sha256: <selected raw facts SHA256>
+software_spec_sha256: <selected software source SHA256>
+numerical_semantics_sha256: <canonical selected numerical semantics SHA256>
+effects: []
+budget: {max_members: 64, max_interaction_cells: 2000}
+obligations:
+  - id: rectangular_transfer
+    mandatory: true
+    cohort: functional_guard
+    operations: [movement] # IDs in the selected reviewed software declaration
+    effects: []
+    expectation: admitted_program
+    frontend: mlir
+    base: {op: movement, kind: isa}
+    axes:
+      M: {kind: extent, values: [tile, tile+1]}
+      N: {kind: extent, values: [tile+2, 2*tile+3]}
+    interactions: []
+```
+
+Axes are explicit positive extents, JSON choices, or resource declarations.
+Nested builder parameters use `{axis: NAME}` substitution. Every singleton and
+pair projection is covered deterministically; explicitly declared interacting
+axis groups receive exhaustive projection coverage. The algorithm extends
+missing projections without enumerating the full Cartesian domain. Exceeding
+either selected budget records missing coverage and fails mandatory obligations.
+Malformed declarations fail before generation. Missing mandatory facts, builders,
+effect witnesses or sealed capture runtimes leave an unavailable obligation.
+
+Development members remain normal `dev` performance members with reviewed
+objectives. Functional guard members and withheld transfer members are separate
+cohorts. Every generated member uses the normal builder, writer, concrete
+operation admission and independent full-output golden. An `unsupported_program`
+obligation needs an explicit concrete refusal from every possible selected lane;
+missing host support declarations are unknown, never an established refusal.
+The Phase 1 compiler must independently produce its own appropriate refusal.
+
+Normal MLIR builders and the closed builtin PyTorch programs are selectable;
+arbitrary model loaders, captures, application selectors and authored program
+imports are excluded. PyTorch generation requires the existing source-bound
+sealed Model2MLIR runtime. The generic `component_program` builder adds signed
+integer matmul, add, copy, transpose, logical alias and update DAGs. Its independent
+mathematical evaluator supplies exact modular-width outputs, including escaped
+intermediates and before/after epoch snapshots. Logical aliases are functionalized
+into SSA; physical aliasing, allocation lifetime, invocation epochs and
+synchronization still need separate execution witnesses. Existing integer golden
+functions retain their arithmetic and ordering.
+
+Private `_evidence/coverage/component-coverage.json` binds the selected declaration,
+generator and selected evidence sources, actual emitted programs, capsule bytes,
+concrete admission, independent golden source and complete output roster. Each
+obligation is `generated`, `verified_refusal` or `unavailable`. `verify_report`
+rechecks those bytes before admission; relocated freezes separately verify the
+archived source closure. The public projection exposes only hashes and cohort
+counts. Withheld shapes, graph selectors and source paths stay private. The v2
+functional guard link enumerates exact functional members without asserting that
+a compiler has passed them. Existing freeze and commit/reveal remain authoritative.
+
+`declared_resource_boundary` extends the existing allocation declaration with
+an explicit `resource` name for banks, accumulators, transfer segments, alignment
+or caches. `capacity_fact` and each reservation select byte counts relative to
+the selected refreshed facts body. It derives below/last-fitting/first-overflow
+and declared tail points from simultaneous typed allocations; row layout is
+applied only by the existing physical resident-store declaration below. Neither
+frontier establishes resource placement, cache behavior or target execution.
+
+### Numerical input palettes and connected programs
+
+An external obligation may select `input_palette` independently of its numerical
+engine. Patterns are deterministic, target agnostic, and derive format landmarks
+from the shared dtype registry and codecs. They select an actual tensor axis or
+row-major linear traversal, and reject values that would be rounded during input
+encoding or patterns whose axis cannot contain every declared value.
+
+```yaml
+input_palette:
+  schema: merlin.component_input_palette.v1
+  inputs:
+    - {name: Q, axis: -1, values: [cancellation_large, one, -cancellation_large], offset: 0}
+    - {name: K, axis: linear, values: [one], offset: 0}
+```
+
+Names select normal builder inputs; `arg0`, `arg1`, etc. select an input position,
+and `*` explicitly selects remaining inputs. Available floating landmarks include
+`zero`, `one`, `min_subnormal`, `min_normal`, `max_finite`, `half_ulp_one` and
+`cancellation_large`, with an optional negative sign. Signed integer storage adds
+`min_signed` and `max_signed`. Finite numeric constants must be exactly representable.
+Signed zero keeps its sign in narrow-format byte encoding. Infinity requires a
+format and existing codec that represent it losslessly; existing NaN input
+encoding remains refused. Block-scaled inputs need separately typed scale streams
+and are unavailable through this scalar palette path.
+
+The ordinary integer leaves, SIMT input synthesizer, SpecIR operand synthesizer,
+and closed builtin PyTorch loaders consume the selection. Existing golden
+arithmetic, reduction order and acceptance rules are unchanged. Explicit stress
+patterns may intentionally repeat values; ordinary addressing/stride corpus members
+retain their existing rigor checks. The private report checks full captured or
+independently synthesized input values, including the sign of zero, before
+crediting an input-effect obligation. `cancellation_input`, `rounding_tie_input`,
+`signed_zero_input`, `subnormal_input`, `signed_input`, `maximum_finite_input` and
+`nonfinite_input` describe source operand witnesses, not accepted transformations.
+FENV, arithmetic ordering and compiled numerical semantics remain Phase 1 obligations.
+
+The selected numerical declaration may explicitly add
+`input_domain: {nonfinite: forbid}` and/or `output_domain: {nonfinite: forbid}`;
+`allow` is the other supported declaration. The normal concrete-program screen
+then observes every source input and independent reference output. A forbidden
+nonfinite input or overflowed reference result establishes a source domain refusal;
+missing full observations are unknown. This changes neither candidate numerical
+comparison nor the meaning of a generation-time refusal. Absence preserves the
+historical numerical behavior.
+
+| Reviewed optimization family | Ordinary generated source | Concrete source mechanism and scenario axes |
+| --- | --- | --- |
+| Contraction/order/scale | MLIR matmul, attention QK, resident reuse; PyTorch reduce sum/embed scale | Rectangular M/K/N, reduction-axis cancellation/ties, explicit accumulator scales and immutable shared weights |
+| Attention and masks | PyTorch attention full / attention residual norm | Rectangular Q/K, scaled QK, rectangular causal mask, softmax, PV, residual and layer normalization |
+| Normalization/nonlinear/MLP | PyTorch layernorm/rmsnorm/geglu / MLP residual | Mean/variance or squared mean, epsilon, nonlinear hidden activation, two contractions, bias and residual publication |
+| Convolution/residual/pooling | MLIR conv/residual builders; PyTorch conv residual pool | Convolution with explicit input/kernel geometry, residual, ReLU and pooling; pool divisibility is validated |
+| Observation/ownership | MLIR component program DAG | Multiple consumers, escaped outputs, logical aliases and independently observable before/after update snapshots |
+| Shared products | MLIR component program DAG and resident reuse | Independently published products sharing an immutable weight or input, rectangular extents and separate consumers |
+| Quantizer observer | Closed PyTorch producer quantizer observer | Producer escape, nearest-even rounding, signed i8 clamp/cast, dequantization and consumer product; complete producer/code/decoded/consumer outputs |
+| Numerical domain refusal | The same ordinary source builders | Explicit selected finite input/output domains, nonfinite inputs or overflowed full reference outputs |
+
+Each reviewed matrix selects its own obligations, available normal frontends,
+interacting axis groups and finite budget from the pinned declarations. These
+families do not select production rules from a workload census or historical
+results. Normal PyTorch generation still requires source-bound sealed Model2MLIR
+conversion and concrete operation admission; Torch eager source execution alone
+does not qualify conversion, hardware or a submitted compiler.
+
+`producer_quantizer_observer` accepts explicit positive, exactly represented f32
+`producer_scale` and power-of-two `quant_scale`. Bounds are the shared signed i8
+format's range. Select input palettes with half-integers, values beyond those
+bounds and negative zero; the independent private source witness counts actual
+ties, clamps and negative-zero producer values. It rejects changed rounded codes
+or decoded values using exact rational nearest-even projection independently of
+Torch. Ordinary multiple-result publication binds every ABI result to the parsed
+program signature and its full golden tensor. The source observer never enables
+an arbitrary quantization recipe, loader, model import or unchecked scalar text.
+
+Its code observations are published as f32 values to retain the ordinary single
+homogeneous output policy. Exact source observations do not silently change
+candidate acceptance. Exact code/sign-zero qualification needs an independently
+reviewed zero-tolerance/sign policy or a reviewed per-output typed comparison;
+the latter is not supplied by this source builder. A palette of ones for the
+consumer weight can keep finite code sums exactly representable when a reviewed
+exact f32 comparison is selected.
+
+Convolution frontier tests generate actual rectangular source windows with
+stride, asymmetric padding and dilation, cross an explicitly selected byte
+capacity, and include aligned and tail extents under two synthetic geometries.
+Their full outputs are checked by direct independent source-window sums.
+Capacity inequalities establish declared demand, not physical allocation success.
+
+Persistent immutable invocation context, repeated-invocation input mutation,
+physical ownership/lifetime/alias epochs, and dynamic rounding-mode save/restore
+need executor interfaces that bind state across actual calls and observe its
+publication and FENV. These are not implemented by functional SSA alias/update
+nodes or by a Torch eager call. Mandatory obligations naming unsupported effects
+remain unavailable; compiler execution and repeated-call evidence belong to the
+protected Phase 1 owner. MX scale-stream palettes and NaN payload encoding also
+remain unavailable through the scalar palette interface.
+
 ### Declared resident size boundaries
 
 The normal Phase 0 sweep resolver accepts `resident_allocation_boundary` on an
@@ -148,6 +372,13 @@ constructor toggle is not evidence that the transformation reached LLVM/object
 code. Generated tests establish a bounded supported domain, not correctness for
 every future graph.
 
+Keep numerical execution bounded by work and storage. Large independently
+generated shapes need ordinary compilation through linking and independent
+static legality checks, while small synthetic graphs test composition and reuse.
+These are distinct evidence classes: compile-only success cannot count as a
+numerical execution pass. The proposed protocol and missing implementation
+extensions are in [scale generalization](component_scale_generalization.md).
+
 ## Phase 2 uses complete components
 
 Give authors separately reviewed shared-compiler and target-support edit
@@ -174,19 +405,21 @@ insufficient. Different configurations cannot share calibration silently.
 Freeze source, installed packages, runtime, toolchains and selected options
 before private full-workload compilation and final hardware evaluation. Match
 hardware, inputs, accuracy criteria and timer boundaries to the frozen reference.
-Every workload must independently stay within five percent of reference cycles;
-an aggregate improvement cannot hide one regressing member.
+The new final policy requires every workload to independently match or beat the
+frozen handwritten reference cycles. An aggregate improvement cannot hide one
+regressing member. Historical v1 receipts retain their original five-percent rule.
 
-The convergence objective is at least twenty times lower Phase 1 plus Phase 2
-wall time using a matched historical method. Report reasoning, compilation,
+Convergence time is reported separately using a matched historical method. It
+does not gate new final performance acceptance. Report reasoning, compilation,
 simulation, queue waits, token telemetry, candidate count and cache reuse.
 Report reusable setup/calibration separately and also report total cost including
 them. Missing historical records remain unknown. Fix seeds, budgets, stopping
 and measurement policy before authoring.
 
-`final_component_campaign_gate` checks this comparison arithmetic on already
-verified observations. It does not authenticate hardware flags, arbitrary
-receipt hashes or historical telemetry. The host-private
+`strict_final_component_campaign_gate` implements the new integer parity and
+separate-time arithmetic. The historical `final_component_campaign_gate` keeps
+its v1 five-percent/twenty-times semantics. Neither helper authenticates hardware
+flags, arbitrary receipt hashes or historical telemetry. The host-private
 `admit_protected_numerical_readback` reconstructs a `QualityObservation` from
 two full readbacks through existing V4 private ownership, typed build services,
 readback build receipts and the exact original frozen `QualityBudget`. Both
@@ -205,8 +438,15 @@ freeze, compiler invocations and emitted IR/objects/ELF to staged queue bytes,
 actual image/configuration, original inputs, timer boundaries, reference recipe
 and every campaign member. Existing queue logs alone do not establish these
 joins. Missing reference recipes and historical telemetry remain unknown.
-Independent final hardware admission and formal completion remain required;
-normal component authoring stays unavailable.
+`protected_final_evaluation.evaluate_protected_final_campaign` now joins the
+original private campaign roster and binding files, the independently selected
+execution verifier and full numerical reconstruction for both performance arms.
+Both arms use the original numerical oracle, avoiding tolerance doubling between
+two approximate outputs. It reopens all private selected bytes and never accepts
+precomputed success flags as lifecycle inputs. See
+[protected final evaluation](component_final_evaluation.md) for the ownership and
+qualification contract. Actual target verifier qualification and final hardware
+admission remain separate prerequisites; file pins do not establish them.
 
 Final holdout results are not tuning feedback within that campaign. Disclosing
 failures for repair ends the campaign; later work records the exposure and a new

@@ -35,10 +35,77 @@ claim model's capture before the Phase-1 freeze, and never write a capsule from 
 
 `component_only=True` is an explicit independent-input mode of the same generator.
 It accepts fresh shared dev sweeps and reviewed source-bound HW/SW objective
-declarations, never model/capture/hidden/history selectors. The existing writer,
-goldens and concrete program screen remain authoritative. Its global coverage,
-functional guard obligation and candidate numerical acceptance stay unestablished;
-recording a zero-MAC performance objective does not invent cost or certification.
+declarations. Optional external `ComponentCoveragePlan` adds bounded independent
+functional and private transfer cohorts; it never imports model/capture/history
+selectors. Ordinary MLIR builders and sealed builtin PyTorch programs use the
+same writer, independent goldens and concrete operation screen. Plan review status
+does not grant author-controlled review authority. Missing mandatory facts,
+builders or witnesses block coverage; unknown host admission cannot establish a
+refusal. The private report binds actual member/source bytes and exposes only
+hashes/counts publicly. Global domain completeness, candidate numerical acceptance,
+physical alias/lifetime/epoch/synchronization and timing stay unestablished;
+recording a zero-MAC objective does not invent cost or certification.
+Campaign `component_performance` objectives belong in the explicit recipe, whose
+selected bytes enter provenance; the minimal software spec needs only semantic,
+numeric and reviewed operation support declarations. Legacy inline SW objective
+declarations remain readable, but declaring both owners is refused. No objective
+weights are inferred from examples, validation graphs or historical timing.
+`rtl_intake` issues live structural authority from an actual fixed public
+FIRRTL-to-HW replay and generic census. It never imports a target compiler,
+support provider, ISA header or old fact table; protected campaign exclusions
+are checked before source bytes are read. Public facts must match the complete
+issued projection. Fresh generation binds the issued intake hash into the
+coverage receipt and refuses legacy support/transcription source roles.
+The intake does not establish historical elaboration origin, numeric ISA
+semantics, simulator/bitstream equivalence, runtime closure or performance;
+those stay unknown until their independent owners qualify them. Saved JSON
+cannot recreate live issuer authority. Full public-view admission additionally
+checks software semantics, corpus, generic library, runtime and isolation.
+`command_intake` binds a clean tracked hardware-source Git blob, actual CIRCT
+generic serialization and lossless structural readers to live authority. Source
+function declarations and parametric bundle layouts are not hardware legality or
+numeric behavior. Local HW input observations follow only exact extracts and
+contiguous concatenations; state and instances stop tracing. Numerical effects,
+complete ISA legality, forbidden-command policy and physical ABI stay unknown.
+An independently bound generation never invokes legacy support/readout hooks,
+header taxonomy or declared execution capability providers.
+`accessor_intake` runs fixed native public-header observers from protected simple
+type/member specifications. No supplied values, masks, expressions, instruction
+effects or schedules. Pin actual compiler, complete generated observer/artifacts,
+and every observed non-system dependency matched to clean tracked public source.
+Replay zero/single-bit/all-ones/mixed words before admitting field projections;
+decode requested words by actual accessor calls and retain full invocation bytes.
+This live authority certifies model/header observations only. Physical byte order,
+CPU/RTL equivalence, legality, effects, ownership, completion and timers stay
+unknown. Explicit software prohibitions resolve exact public declaration symbols;
+never infer roles from substrings or copy numeric encoding tables.
+`source_predicate_intake` binds exact public source predicates to the original
+live command declaration authority and same clean tracked checkout. Recognize
+only selected operand comparisons against admitted symbols and pure Boolean
+composition; unsupported syntax, aliases, constants, operands or ambiguous
+definitions refuse. Retain source expressions/spans and finite declared-domain
+membership. Software policy chooses forbidden symbols; this reader assigns no
+roles and does not certify historical elaboration or physical effects.
+`software_intake` requires protected source/review selection, closed raw minimal
+semantics and actual original independent-example replay with correspondences
+for every operation owner. Status/source hashes alone cannot grant authority.
+Refuse legacy extra fields before graph reads, including shapes/layouts,
+model/capture/history/profiling, backend code, evidence descriptions and schedules.
+Only generic independent numerical engines without source hooks are admitted by
+the current minimal schema. Pin exact review/source/graph/reader bytes, bind the
+live issued identity through generation and coverage, and verify the complete
+`contract/software_spec.json` projection. Authoring requires this exact authority;
+saved JSON or old reviewed specs do not suffice. Hardware numerical support,
+historical origin, whole-domain correctness and physical effects stay separate.
+`component_semantic_basis` owns explicit recipe-selected reviewed public example
+rosters. Validate each pinned original frontend graph and exact call target roster;
+only reviewed operation/effect semantics and hashes enter generation identity.
+Shapes, counts, frequencies and source paths stay outside the author projection.
+Freeze exact roster and complete graph bytes through the existing private source
+snapshot. Protected selection establishes authority; status/provenance labels alone
+do not. Obligations bind the selected roster hash and explicit source-to-owner
+correspondences for every operation owner; matching effect kinds still need actual
+generated witnesses. Refuse marked validation/private/history provenance or drift.
 The trusted Boolean mode reaches the writer explicitly. Independent generation
 must not look up, stat, read or stamp capture-derived shape census data; legacy
 default generation retains its existing census annotation. Performance metadata
@@ -49,3 +116,78 @@ allocations in one selected physical store. Reuse generic address-space row sizi
 capacity/reservation paths refer only to refreshed selected facts. Keep missing
 facts and missing below points explicit. Size inequalities do not prove placement,
 lifetime, cache behavior, profitable scheduling or target execution.
+
+`resource_frontiers` derives demand inequalities for explicitly selected byte-count
+bank/accumulator/segment/alignment/cache declarations without assuming resident
+row layouts. `component_program` source DAGs functionalize logical aliases and
+updates into SSA; `component_numerics` independently evaluates exact modular
+integer results. Original numerical engines and ordering remain unchanged.
+
+`component_coverage_plan` owns immutable reviewed declarations;
+`component_coverage_inputs` owns finite interactions and ordinary entry construction;
+`component_coverage` owns private receipts/verifiers and guard links. Consumers
+import their actual owners. `component_input_witnesses` checks full concrete
+numeric operands against selected input palettes. `numeric_domains` screens
+explicit allow/forbid nonfinite input/output declarations through normal admission;
+absence retains historical behavior. Neither owner changes oracle acceptance.
+`component_source_witnesses` independently checks actual full producer, RNE/clamp
+code and decoded output observations for the closed quantizer observer. Ties,
+clamps and preserved producer negative zeros require actual source values, not
+metadata. Its scalar source arithmetic is f32, and code observations are published
+as f32 values under the selected ordinary candidate comparison. Persistent
+invocation contexts, physical alias/lifetime/epoch effects and FENV still need
+explicit execution owners; declaring them without concrete witnesses blocks.
+
+`component_execution_budget` owns source-derived small reference admission for
+explicit v2 coverage plans. Freeze explicit per-member and total work, logical
+tensor payload and scalar-width limits before authoring. Derive supported costs
+without calling builders, capture, palettes or goldens; refuse unknown costs.
+Apply the policy to every generated member before source binding or staging.
+Keep denied mandatory obligations in the denominator; never convert them to
+compile-only passes. Bind the complete private admission roster to generation
+identity and rederive actual written source counts at receipt verification.
+Historical v1 remains readable but does not establish bounded execution.
+Logical reference counts are not process heap, compiler time or device timing.
+
+`component_integer_bounds` owns pure source interval admission for integer DAGs.
+Selected bounded_exact arithmetic requires every product, reduction prefix and
+node result to fit the source and any explicitly declared internal signed widths.
+Never approve an overflowing intermediate from a canceled/wrapped final output.
+Only an explicitly admitted modular contract may use modular reference results;
+unknown or unimplemented choices refuse before shaped data/reference allocation.
+Keep original oracle arithmetic/order and numerical gates. Replay exact proof
+and source/selected-semantic commitments before evaluating or admitting receipts.
+Declared/source widths and their interval proof are not observed hardware effects.
+
+`component_graph_variants` owns the closed independent bounded topology family:
+fixed generic contraction/fork/ordered-join stages, selected extents/depth/fanout,
+and complete logical-epoch/fresh-SSA pairs. Derive exact source costs from bounded
+prototypes before topology unrolling, then rederive the ordinary full DAG cost.
+Retain requested failures and half-pair gaps in coverage. `component_graph_relations`
+reopens exact source membership and every original independent output before
+issuing private full-output identity witnesses. Unknown arithmetic and overflowing
+bounded-exact intermediates refuse. No source topology, shape, schedule or policy
+comes from validation workloads or compiler references. Logical buffer epochs
+and source aliases remain distinct from physical ownership/completion proofs.
+
+`component_compile_plan` and `component_compile_sources` own separate independent
+original source-only rosters. Use exact live HW/minimal SW origin and descriptor;
+closed preauthor plans select integer rank-two copy/contraction sources and
+explicit literal or fresh memory-volume/depth boundary extents. Emit through
+the generic original source renderer and structurally reopen complete ordered
+ABI without capsule bindings, shaped inputs or goldens. Explicit metadata and
+aggregate source budgets apply to every requested guard and private member.
+Retain failed members and static UNKNOWN obligations in the original denominator;
+source readiness/refusal never grants numerical, candidate compile, address,
+resource, streaming, whole-domain or physical authority. Saved reports cannot
+recreate live issuance. Ordinary Phase1 owns actual candidate compile/link and
+instruction admission from this exact protected original roster.
+Source-only plan v2 adds complete logical-epoch/fresh-SSA graph pairs through
+the existing independent topology factory. Select every matmul/copy/add owner
+from the live minimal SW, check actual per-node source dtypes, and refuse missing
+owners or signature mismatch before full topology construction. Derive exact
+node/output counts from bounded factory prototypes; enforce explicit per-source
+and complete-roster metadata budgets before unroll. Preserve every original
+snapshot/escape/final ABI slot and requested pair member. Numerical v2 stays
+separate and unchanged. Source aliases/epochs are functionalized SSA, never
+physical reuse, timing, numerical equivalence or static target proof.

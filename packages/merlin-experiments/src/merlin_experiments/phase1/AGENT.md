@@ -135,3 +135,53 @@ agent's writable workspace. Only bwrap runs keep it (copy mode is a tool-free di
 live at `out/runs/<target>/phase1/<run-id>/`; a run that began under the legacy
 `capsule-bench/<arm>/` root resumes there and keeps no history. A failed commit is recorded in
 `oot_commits.jsonl` / `freeze.json`, never silent.
+
+`component_origin.py` owns experiment-only fresh OOT origin. Generate the inert
+scaffold inside the actual normal authoring lifecycle; never accept a supplied
+working compiler or mint origin from a receipt. Independently issued hardware
+and protected minimal software intakes, reviewed generic library and exact
+public runtime grants remain separate. The minimal software authority must share
+the exact live hardware origin, coverage software-intake binding and complete
+public software projection. Reviewed labels or historical source hashes cannot
+grant legacy software specifications access to a fresh author session.
+`component_generation_admission.py` requires actual budgeted Phase 0 coverage
+v2 and the normal reader's complete source-cost, membership and policy replay.
+Fresh input identity binds the exact budget and admission ledger commitments.
+Legacy v1 remains inspection-only for this bounded-generation claim; no JSON
+cost or resigned hash replaces actual replay. These logical reference bounds
+do not qualify compiler execution limits, large compile-only legality, process
+heap, physical runtime effects or timing.
+Phase 1 shared-tool preflight cannot require the initial inert candidate to work.
+`component_lineage.py` binds actual Phase 2 author transport and broker receipts
+to descendants of the exact qualified fresh baseline. Qualification consumes
+these issued objects before invoking candidate code.
+`component_compile_admission.py` requires the exact live original source-only
+roster, sharing the same hardware, software and descriptor selection, before a
+fresh public author grant. Guard and withheld transfer members are both required.
+`component_compile_roles.py` evaluates every original source through ordinary
+scoped package lowering, translation, object/link and whole-ELF instruction
+policy. No tensor/golden allocation, numerical execution or simplified compiler
+route is permitted. Keep compilation and all original static obligations in
+separate mandatory denominators. Reopen complete candidate/private clone,
+source/ABI, contract, actual transport products and invocation records. Static
+obligations remain UNKNOWN without independent proof producers; successful
+linking cannot discharge them or qualify the compiler. Functional qualification
+must consume this exact live evaluation and retain its unresolved obligations,
+including expected static refusals, even when small numerical execution passes.
+`component_pointer_storage` freezes an optional independently selected original
+software pointer policy, exact live source roster and public policy projection
+before authoring. `component_copy_proof` admits only the fixed core counted-copy
+checker with actual original lowering, stock translation, unchanged object/link
+and selected native layout joins. Reopening rederives every proved/refuted facet
+from the exact artifacts. Unsupported original members and resource/numerical,
+physical/lifetime/timing roles stay UNKNOWN in the full original denominator.
+Saved flags, compiler metadata and arbitrary proof callbacks supply no authority.
+`component_qualification_evidence.py` reopens the exact private compiler copy,
+complete actual invocation membership and every recorded dependency/product,
+including files outside the grade tree. Each mandatory member needs observed
+invocations. Replay the original complete stage, source, output and effect joins;
+unchanged result rows or grade-tree bytes cannot replace that check. Retain
+failed attempts as refused evidence, never mint authority from saved records.
+Neither origin nor lineage proves
+numeric correctness, target runtime independence or performance. The handwritten
+implementation and its adapter remain protected final reference inputs only.

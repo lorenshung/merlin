@@ -1,5 +1,66 @@
 # AGENT.md — packages/merlin-experiments/src/merlin_experiments/phase2
 
+`supervised_feedback` runs the callback worker and retains private
+transport/exit/refusal evidence. `feedback_protocol` accepts only bounded plain
+values and the selected existing interval/analytical value types, never pickle,
+import strings or arbitrary reconstruction. Check the absolute parent deadline
+before reception and throughout bounded decoding, then reject late results.
+Local decoding/OS calls are not interruptibly supervised. `feedback_guardian`
+forks a separate subreaper before starting the callback and uses kernel pidfds,
+actual waitpid reaping and ECHILD for its invocation descendants. The same
+`execution.owned_children` primitive serves the existing native guardian. Release
+a declared parent lease only after the exact guardian cleanup and parent reaping;
+its custodial descriptor protects cleanup after coordinator death. Missing evidence
+keeps ownership/release UNKNOWN and retains the lease. Delegated external services,
+namespace isolation and OS hard deadlines remain UNKNOWN. Normal workflow retains candidate SHA refusal and mutation
+evidence. Restoration requires separate exclusive ownership and qualified cleanup.
+
+`component_applicability.py` joins actual independently derived payload/resource,
+tiling/tail, dependency, streaming, reuse and composition coordinates to frozen
+joint semantic cells. Measurement qualification requires every held cell/group
+in each cold/warm stratum and the original full outputs and timer witnesses.
+Exact membership never implies a range, repetition or cross-product proof;
+absent producer semantics and unseen combinations remain UNKNOWN. The core
+declarations and statistical reports cannot issue physical measurement roles.
+
+`rtl_engine_protocol.py` and `rtl_engine_probe.py` own private source-pinned RTL
+support declarations and actual bounded minimal control execution. Bind exact
+argv/tools, original source bytes, full output rosters, generated product joins
+and retained failure evidence. Readiness is only for those original controls;
+no PASS JSON, tool build, wall time or engine step grants target correctness,
+ELF loading, physical equivalence or timer authority. Keep clock/reset, memory
+and grammar refusal explicit before candidate execution; never discover a
+simulator/target or rewrite RTL in this generic owner.
+
+`component_runtime_support.py` owns prepared private source/native control
+fixtures with explicit build and functional transport. Its independent
+`component_runtime_controls.py` compiler and `component_runtime_control_execution.py`
+executor are evaluator-only primitives, never an author scaffold or runtime
+qualification bypass. Preserve original source/output/numeric authority and
+actual native invocation records. Unsupported accelerator effects, physical
+ownership, synchronization, hardware equivalence and timing remain UNKNOWN;
+this context cannot issue a complete runtime witness or measurement roles.
+
+`component_instruction_policy.py` binds protected preauthor source-symbol
+prohibitions to live independently selected declarations and exact public source
+routing predicates. `component_instruction_audit.py` walks every declared linked
+ELF executable section using the actual native public length/field accessors,
+including variable instruction lengths. No handwritten numeric/length table or
+name-derived effect policy is admissible. Its concrete instruction check can
+accompany the prepared context and shared build service before execution. Static
+absence does not grant physical CPU equivalence, dynamic execution presence,
+effects, ownership/synchronization or timing. A rejected ELF is never executed.
+
+`component_runtime_fixture.py` constructs the original private source controls;
+its source must be pinned alongside the context. The evaluator-only
+`component_runtime_instruction_control.py` negative injects a word verified by
+the live native accessor into an executable assembly section, using its observed
+length and the selected assembler's byte order. The scoped build service retains
+that exact source and symbol. Attribute rejection only after the ordinary linked
+ELF audit returns a matching hit and the enclosing invocation completes; retain
+the ELF, source, policy and native proof. A build crash is not a policy refusal.
+The static positive still needs every separate physical runtime witness.
+
 `component_experiment.py` owns explicit minimal agent-view materialization and
 verification, strict networkless tool-policy construction, bounded probe refusal
 and final per-member comparison arithmetic. It does not admit Phase 0 generation,
@@ -47,6 +108,11 @@ providers. Host-selected calibrated estimates and unchanged certified component
 RTL feedback are separate optional actions; UNKNOWN estimates never become zero
 or measured cycles. Provider source, target configuration and corpus identities
 are rechecked. New receipts bind this profile; historical identities stay unchanged.
+`component_screening.py` returns the analytical provider's existing conservative
+experiment order through that broker. Replay the exact complete-cost member roster,
+correctness/legality gates, observed evaluation latency and equal generated-family
+shares with the core selector before publishing or accepting saved feedback.
+Preserve unresolved cases and refusals; ordering is screening, not qualification.
 `prepare_component_prompt_inputs` and `render_component_prompt` use a separate
 component declaration without selecting a model or exposing functional snapshots.
 The action profile and prompt are not fresh-session launch authority. Normal
@@ -402,3 +468,19 @@ declared machines, keyed by exact bytes, with the experiment's `prohibited_instr
 over each candidate's whole linked ELF before any machine time. It reuses this package's broker,
 edit-authority, transcript-audit and stage-input owners; it never imports a native controller, and it
 never names a target -- machines, builders and capsules are declared data.
+
+`component_execution.py` selects the fixed ordinary development executor and
+verifies the selected native build service. Its issuer binds evaluated independent
+qualification, frozen view/runtime/corpus, exact contract and certificate workload
+membership. No import string or callback descriptor supplies execution authority.
+Strict scoped package execution survives the legacy campaign wrapper; missing
+context in an inner worker refuses. Qualification reuse does not bootstrap missing
+stage/effect evaluations or warm timer scopes. Historical rates and run corpora
+are not fitting inputs for this independent route.
+# From-scratch experiment boundary
+
+Phase 2 starts from the independently issued, qualified output of a fresh Phase 1
+author session. The handwritten compiler is only a sealed private final golden;
+its compiler code, schedules, structural CCA answers and runtime/measurement
+helpers cannot implement or seed either authoring phase. Target execution support
+requires independent RTL and minimal software-contract provenance.

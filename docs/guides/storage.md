@@ -217,12 +217,17 @@ states the symptom its absence produces. Anything it cannot provide is named and
 non-zero, and it reports which checkout's `merlin` the worktree's python imports, with the
 `PYTHONPATH` that pins its own `src/`.
 
-The open-file check is `lsof` (one listing of this user's processes, queried by path prefix), or
+The open-file check is `lsof` (a listing of this user's processes, queried by path prefix), or
 `fuser` over the walked entries when `lsof` is absent. With neither installed the operation is
 refused rather than assumed safe; `--no-open-file-check` accepts that risk explicitly. Neither tool
 can see another account's processes without privilege, so the check guards against your own
 sessions, not against the whole host. `--deny PATH` (repeatable) names trees a command must not read
 or touch; it is empty unless you pass it.
+
+The census may reuse one listing. Moves capture a fresh listing after the verified copy,
+immediately before removing the original. Peer links and content-store adoption refresh at
+each replacement after hashing or copying; a late holder keeps the original name and the
+temporary staged link is removed. Injected live checkers retain the same holders interface.
 
 ## Retention
 
