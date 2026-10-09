@@ -557,6 +557,39 @@ def layer_inventory(model: Any) -> list[dict[str, Any]]:
     return layers
 
 
+def layer_state(model: Any) -> dict[str, tuple[type, type, Any]]:
+    """Each module's type and its weight's type and dtype, the facts :func:`transformed` compares."""
+    state = {}
+    for fqn, module in model.named_modules():
+        weight = getattr(module, "weight", None)
+        state[fqn] = (type(module), type(weight), getattr(weight, "dtype", None))
+    return state
+
+
+def transformed(before: Mapping[str, tuple[type, type, Any]], model: Any) -> set[str]:
+    """The modules of ``model`` a quantizing transform observably changed since ``before``.
+
+    ``before`` is :func:`layer_state` taken ahead of the transform. A module counts when its own
+    type changed (the transform swapped in a quantized module), when its weight became a tensor
+    subclass it was not before, or when its weight's dtype changed (float8 storage held in a plain
+    tensor or buffer). A framework may realize quantization in any of these ways; checking only
+    for a weight that stopped being a plain tensor missed a swapped module storing float8 in a
+    plain buffer. A module whose name disappeared shows no transformation and is not counted.
+    """
+    import torch
+
+    plain = (torch.Tensor, torch.nn.Parameter)
+    changed = set()
+    for fqn, (module_type, weight_type, dtype) in layer_state(model).items():
+        if fqn not in before:
+            continue
+        old_module, old_weight, old_dtype = before[fqn]
+        subclass = weight_type is not type(None) and weight_type not in plain and weight_type is not old_weight
+        if module_type is not old_module or subclass or (dtype is not None and dtype != old_dtype):
+            changed.add(fqn)
+    return changed
+
+
 def build_fqn_config(recipe: Mapping[str, Any], layer_plan: Mapping[str, Any]):
     """TorchAO's per-layer configuration for ``layer_plan``, as its own ``AOBaseConfig`` subclass.
 
@@ -734,32 +767,30 @@ def apply_recipe(
         # filter_fn=None is REQUIRED, not tidiness: quantize_ defaults it to "is this a Linear",
         # and TorchAO refuses to hold both that and a per-layer mapping. Which layers are
         # quantized is the plan's verdict, derived from the target; being a Linear is not a reason.
+        before = layer_state(model)
         quantize_(model, config, filter_fn=None)
         planned = [fqn for fqn, value in config.fqn_to_config.items() if value is not None]
-        # A layer counts as quantized only if quantize_ actually replaced its weight. TorchAO can
+        # A layer counts as quantized only if quantize_ observably transformed it. TorchAO can
         # decline a configured layer with a log line and no error (its float8 path skips a Linear
         # whose dimensions fail its kernel shape check), and counting the plan instead labelled an
         # unquantized fp32 capture with an fp8 scheme.
         modules = dict(model.named_modules())
-        untransformed = [
-            fqn
-            for fqn in planned
-            if type(getattr(modules.get(fqn), "weight", None)) in (torch.Tensor, torch.nn.Parameter)
-        ]
+        changed = transformed(before, model)
+        untransformed = [fqn for fqn in planned if fqn not in changed]
         if planned and len(untransformed) == len(planned):
             # The recipe asked for a quantized model and the framework produced the floating one. Writing
             # that capture would hand the compiler an fp32 graph under a quantized recipe's hash.
             raise RecipeError(
                 f"quantize_ transformed none of the {len(planned)} layers the plan assigned it "
-                f"({untransformed}); their weights are still plain tensors"
+                f"({untransformed}); none was swapped, given a tensor subclass or a new weight dtype"
             )
         for fqn in untransformed:
             notes.append(
                 {
                     "fqn": fqn,
-                    "kind": type(modules[fqn]).__name__,
+                    "kind": type(modules[fqn]).__name__ if fqn in modules else None,
                     "refusal": FRAMEWORK_CANNOT_EXPRESS,
-                    "why": "configured for quantize_, but its weight is still a plain tensor afterwards",
+                    "why": "configured for quantize_, but neither the module nor its weight changed afterwards",
                     "by": "framework",
                 }
             )
