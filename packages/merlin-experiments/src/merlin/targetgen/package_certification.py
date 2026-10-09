@@ -220,7 +220,8 @@ def certify(
     def invoke(name: str, input_path: Path, output_path: Path | None = None):
         verify_inputs()
         try:
-            return _runtime.run_entrypoint(pkg, name, input_path, output_path, timeout=timeout, write_bytecode=False)
+            return _runtime.run_entrypoint(pkg, name, input_path, output_path, timeout=timeout, write_bytecode=False,
+                                           invocation_directory=paths.generated)
         finally:
             verify_inputs()
 

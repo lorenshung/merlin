@@ -6,10 +6,13 @@ remain stable. Certification is provided lazily by the optional experiments dist
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import dataclasses
 import os
 import subprocess
 import sys
+import threading
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -27,6 +30,46 @@ if TYPE_CHECKING:
 
 DEFAULT_TARGET = "unknown"  # fallback only when a package manifest declares no ``target`` field
 CONTRACT_VERSION = "0.1"
+
+_EXECUTOR = contextvars.ContextVar("merlin_package_executor", default=None)
+_EXECUTOR_LOCK = threading.RLock()
+_EXECUTOR_SCOPES = 0
+
+
+@contextlib.contextmanager
+def scoped_package_executor(executor):
+    """Route actual package build/entrypoints through an explicit caller-owned executor.
+
+    No optional evaluator is discovered here. During a guarded scope, execution
+    arriving without its scoped owner refuses rather than falling through to a
+    host process (including a thread that did not inherit the context).
+    """
+    global _EXECUTOR_SCOPES
+    if (not callable(getattr(executor, "run_entrypoint", None))
+        or not callable(getattr(executor, "build_package", None))):
+        raise TypeError("package executor must own builds and entrypoint invocation")
+    token = _EXECUTOR.set(executor)
+    with _EXECUTOR_LOCK:
+        _EXECUTOR_SCOPES += 1
+    try:
+        yield
+    finally:
+        with _EXECUTOR_LOCK:
+            _EXECUTOR_SCOPES -= 1
+        _EXECUTOR.reset(token)
+
+
+def _scoped_executor():
+    selected = _EXECUTOR.get()
+    with _EXECUTOR_LOCK:
+        if selected is None and _EXECUTOR_SCOPES:
+            raise RuntimeError("package invocation escaped its scoped execution owner")
+    return selected
+
+
+def active_package_executor():
+    """The explicit execution owner for caller-selected observation options."""
+    return _EXECUTOR.get()
 
 
 def certification_suite(target: str) -> str:
@@ -387,6 +430,9 @@ def build_package(pkg: Package, *, timeout: int = 1800) -> None:
     copy — not only manifests that hard-code absolute {package}/{mlir_dir} placeholders. The grade copies
     the package WITHOUT the build/ tree, so a CLEAN configure must be possible (a `configure` step, or a
     self-configuring `command`). A step may be a list argv (preferred) or a shell string."""
+    executor = _scoped_executor()
+    if executor is not None:
+        return executor.build_package(pkg, timeout=timeout)
     build = pkg.manifest.get("build")
     if not build:
         return
@@ -656,6 +702,7 @@ def run_entrypoint(
     timeout: int = 600,
     write_bytecode: bool = False,
     artifact_profile: SelectedArtifactProfile | None = None,
+    invocation_directory: Path | None = None,
 ) -> subprocess.CompletedProcess:
     """Invoke one entrypoint as a subprocess (never imports the package).
 
@@ -680,6 +727,11 @@ def run_entrypoint(
     """
     input_mlir = Path(input_mlir).resolve()
     output_json = Path(output_json).resolve() if output_json is not None else None
+    executor = _scoped_executor()
+    if executor is not None:
+        return executor.run_entrypoint(pkg, name, input_mlir, output_json, timeout=timeout,
+                                       write_bytecode=write_bytecode, artifact_profile=artifact_profile,
+                                       invocation_directory=invocation_directory)
     argv = _resolve_argv(pkg, name, input_mlir, output_json, artifact_profile=artifact_profile)
     if _needs_interpreter(pkg, argv):
         argv = [sys.executable, *argv]
@@ -711,7 +763,22 @@ def run_entrypoint(
         env["PYTHONPATH"] = os.pathsep.join(
             str(Path(value or ".").resolve()) for value in env["PYTHONPATH"].split(os.pathsep)
         )
-    result = subprocess.run(argv, cwd=str(pkg.directory), env=env, capture_output=True, text=True, timeout=timeout)
+    if invocation_directory is None:
+        result = subprocess.run(argv, cwd=str(pkg.directory), env=env, capture_output=True, text=True, timeout=timeout)
+    else:
+        from merlin.common import invocation_record
+
+        if Path(invocation_directory).resolve().is_relative_to(pkg.directory.resolve()):
+            raise ValueError("invocation observation owner overlaps the invoked package")
+        # This parent owns the actual subprocess boundary. Package-written stage
+        # labels are not invocation authority; semantic stage lift stays target-owned.
+        result = invocation_record.run(
+            argv, directory=invocation_directory, stage=name, inputs=(input_mlir,),
+            outputs=(output_json,) if output_json is not None else (),
+            dependencies=(Path(__file__), *tuple(path for path in pkg.directory.rglob("*")
+                                                 if path.is_file() and "__pycache__" not in path.parts)),
+            cwd=str(pkg.directory), env=env, capture_output=True, text=True, timeout=timeout,
+        )
     _admit_artifact_protocol(pkg, artifact_profile)
     return result
 

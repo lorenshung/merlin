@@ -188,6 +188,7 @@ def build_receipt(
         "command_buffer_sha256": canonical_sha256(cb),
         "recipe": dict(recipe_record),
         "source_pins": source_pins,
+        "kernel_object_name": Path(object_path).name,
         "kernel_object_sha256": file_sha256(object_path),
         "harness_sha256": file_sha256(harness_path),
         "staged_codec_sha256": _staged_codec_sha256(harness_path, policy),
@@ -212,7 +213,7 @@ def require_build_receipt(
     target: str,
     recipe_record: Mapping[str, Any],
     source_pins: list[dict[str, str]],
-    object_path: Path,
+    object_path: Path | None,
     harness_path: Path,
     elf_path: Path,
 ) -> dict[str, Any]:
@@ -221,6 +222,17 @@ def require_build_receipt(
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("readback build receipt is malformed")
+    if object_path is None:
+        # Old receipts retain their fixed-name convention. New builds bind
+        # the actual selected object; never guess a transform suffix or replace
+        # an original compiler product to satisfy a reader's filename.
+        name = data.get("kernel_object_name", "kernel.o")
+        if (type(name) is not str or not name or name in {".", ".."}
+            or Path(name).name != name or any(ord(char) < 32 for char in name)):
+            raise ValueError("readback build receipt has an unsafe kernel object member")
+        object_path = path.parent / name
+        if object_path.is_symlink() or object_path.resolve() != object_path.absolute() or not object_path.is_file():
+            raise ValueError("readback selected kernel object is absent or indirect")
     identity = data.get("build_identity_sha256")
     body = {key: value for key, value in data.items() if key != "build_identity_sha256"}
     if (
@@ -231,6 +243,7 @@ def require_build_receipt(
         or body.get("command_buffer_sha256") != canonical_sha256(cb)
         or body.get("recipe") != dict(recipe_record)
         or body.get("source_pins") != source_pins
+        or body.get("kernel_object_name", Path(object_path).name) != Path(object_path).name
         or body.get("kernel_object_sha256") != file_sha256(object_path)
         or body.get("harness_sha256") != file_sha256(harness_path)
         or body.get("staged_codec_sha256") != _staged_codec_sha256(harness_path, policy)
@@ -305,7 +318,7 @@ def require_current_build_receipt(
         target=target,
         recipe_record=recipe_record,
         source_pins=source_pins,
-        object_path=workdir / "kernel.o",
+        object_path=None,
         harness_path=workdir / "harness.c",
         elf_path=elf_path,
     )

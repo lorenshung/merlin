@@ -24,6 +24,13 @@ class NativeModelExecutionError(ValueError):
         self.code = code
 
 
+def execute_independent_component(**arguments) -> dict:
+    """Delegate only the explicit diagnostic protocol; no backend discovery."""
+    from .native_component_execution import execute_component
+
+    return execute_component(**arguments)
+
+
 def _digest(path: Path) -> dict[str, Any]:
     digest = hashlib.sha256()
     with path.open("rb") as stream:

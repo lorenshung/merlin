@@ -221,6 +221,7 @@ MODULE_ACCESS = (
     _module("merlin.targetgen.trace_check", "grader"),
     _module("merlin.targetgen.capsule_grade", "grader"),
     _module("merlin.targetgen.native_model_execution", "grader"),
+    _module("merlin.targetgen.native_component_execution", "grader"),
     _module("merlin.targetgen.native_dispatch_accounting", "grader"),
     _module(
         "merlin.targetgen.capsule_golden",
