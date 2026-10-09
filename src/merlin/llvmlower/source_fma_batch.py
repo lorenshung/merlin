@@ -2,7 +2,8 @@
 
 The selected implementation keeps each lane's multiply, addend and single
 rounding. It may schedule independent lanes together under the supplied source
-effects contract. CPU instructions and register constraints belong to providers.
+effects contract. CPU instructions and register constraints belong to explicitly
+selected host implementations, shared in Merlin independently of accelerators.
 """
 
 from dataclasses import dataclass
