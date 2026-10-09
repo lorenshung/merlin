@@ -47,7 +47,10 @@ def inputs(tmp_path, monkeypatch):
         return 0, "same LLVM", "same buffer"
 
     monkeypatch.setattr(PAS.EA, "emit_pair", emit)
-    return SimpleNamespace(host_provenance=provenance), environment, frozen, observed
+    runtime = tmp_path / "selected-runtime"
+    runtime.write_text("independent selected runtime\n")
+    grants = (FI.FrozenGrant(str(runtime), runtime, runtime, hashlib.sha256(runtime.read_bytes()).hexdigest()),)
+    return SimpleNamespace(host_provenance=provenance, grants=grants), environment, frozen, observed
 
 
 def test_public_view_ignores_live_roots_hidden_and_tuning(inputs, tmp_path):
@@ -121,3 +124,47 @@ def test_missing_declared_interface_is_absence_of_proof(inputs, tmp_path):
     assert result["proved_unchanged"] == 0
     assert result["offenders"] == [{"capsule": "visible", "kind": "interface_missing"}]
     assert not observed
+
+
+@pytest.mark.parametrize(
+    "numeric,certification", [("pass", None), ("fail", None), ("pass", {"would_be_status": "incomplete"})]
+)
+def test_changed_runtime_with_identical_emission_regrades_every_output(
+    inputs, tmp_path, monkeypatch, numeric, certification
+):
+    from merlin.targetgen import capsule_grade, capsule_runner
+
+    frozen_inputs, _, frozen, observed = inputs
+    baseline, candidate = tmp_path / "baseline", tmp_path / "candidate"
+    baseline.mkdir()
+    candidate.mkdir()
+    (baseline / "runtime.py").write_text("publish_original_output()\n")
+    (candidate / "runtime.py").write_text("publish_altered_output()\n")
+    calls = []
+    monkeypatch.setattr(capsule_runner, "qa_checkpoint_adapters", lambda *a: {"selected": object()})
+
+    def grade(package, **kwargs):
+        calls.append((package, kwargs))
+        assert package != candidate  # normal build never mutates the sealed compiler
+        assert kwargs["capsules_root"] == frozen / "public"
+        return {"integrity_status": "clean", "per_capsule": [
+            {"capsule": "visible", "status": "pass", "numeric": numeric, "cert_verdict": certification}
+        ]}
+
+    monkeypatch.setattr(capsule_grade, "grade", grade)
+    result = PAS.functional_emission_guard(
+        baseline, candidate, SimpleNamespace(target="synthetic", sim_via="selected"), frozen_functional=frozen_inputs
+    )
+    assert len(calls) == 1 and len(observed) == 2
+    assert result["proved_unchanged"] == 0
+    assert result["execution_dependencies_unchanged"] is False
+    assert result["status"] == ("clean" if numeric == "pass" and certification is None else "offending")
+
+
+def test_missing_runtime_closure_never_reuses_emission(inputs, tmp_path):
+    frozen_inputs, _, _, _ = inputs
+    frozen_inputs.grants = ()
+    result = PAS.functional_emission_guard(tmp_path, tmp_path, object(), frozen_functional=frozen_inputs)
+    assert result["proved_unchanged"] == 0
+    assert result["status"] == "offending"
+    assert result["full_output_regrade"]["status"] == "unavailable"

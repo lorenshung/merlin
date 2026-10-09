@@ -422,6 +422,7 @@ def lower_interface(
     """
     import contextlib
     from concurrent.futures import ThreadPoolExecutor
+    from functools import partial
 
     from .package_runtime import (
         BackendDeclined,
@@ -430,9 +431,9 @@ def lower_interface(
         run_entrypoint,
     )
 
-    invoke = invoke or run_entrypoint
     generated = Path(generated)
     generated.mkdir(parents=True, exist_ok=True)
+    invoke = invoke or partial(run_entrypoint, invocation_directory=generated)
     inp = generated / "input.interface.mlir"
     interface_text = Path(interface).read_text(encoding="utf-8")
     inp.write_text(interface_text, encoding="utf-8")
