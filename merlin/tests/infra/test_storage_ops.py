@@ -139,6 +139,55 @@ def test_a_holder_appearing_during_the_copy_keeps_the_source(tmp_path):
     assert (tmp_path / "dest" / "a.bin").read_bytes() == b"a" * 5000
 
 
+@needs_rsync
+def test_post_copy_lsof_check_reopens_the_original_cached_listing(tmp_path, monkeypatch):
+    source = _tree(tmp_path / "data")
+    calls = []
+    real_run = subprocess.run
+
+    def listing(argv, **kwargs):
+        if argv[0] != "/owned/lsof-fixture":
+            return real_run(argv, **kwargs)
+        calls.append(tuple(argv))
+        opened = tmp_path / "unrelated" if len(calls) == 1 else source / "sub/b.txt"
+        return subprocess.CompletedProcess(argv, 0, f"p7\nn{opened}\n", "")
+
+    monkeypatch.setattr(SO.subprocess, "run", listing)
+    check = SO._LsofIndex("/owned/lsof-fixture")
+    result = SO.move(source, tmp_path / "dest", apply=True, checker=check)
+    assert len(calls) == 2
+    assert result["status"] == "failed" and "after the copy" in result["reasons"][0]
+    assert source.is_dir() and not source.is_symlink()
+    assert (tmp_path / "dest/sub/b.txt").read_bytes() == (source / "sub/b.txt").read_bytes()
+
+
+@needs_rsync
+def test_actual_process_opened_after_copy_is_seen_by_fresh_lsof(tmp_path, monkeypatch):
+    if shutil.which("lsof") is None:
+        pytest.skip("lsof is not installed on this host")
+    source = _tree(tmp_path / "data")
+    check = SO.open_file_checker(which=lambda name: shutil.which(name) if name == "lsof" else None)
+    verify = SO._rsync_verify
+    processes = []
+
+    def open_after_copy(*args):
+        difference = verify(*args)
+        with (source / "sub/b.txt").open("rb") as stream:
+            processes.append(subprocess.Popen(["sleep", "60"], stdin=stream))
+        return difference
+
+    monkeypatch.setattr(SO, "_rsync_verify", open_after_copy)
+    try:
+        result = SO.move(source, tmp_path / "dest", apply=True, checker=check)
+        assert result["status"] == "failed" and str(processes[0].pid) in result["reasons"][0]
+        assert source.is_dir() and not source.is_symlink()
+        assert (tmp_path / "dest/sub/b.txt").is_file()
+    finally:
+        for process in processes:
+            process.kill()
+            process.wait()
+
+
 def test_no_open_file_tool_means_refusal_unless_the_caller_opts_out(tmp_path, monkeypatch):
     source = _tree(tmp_path / "data")
     with pytest.raises(SO.OpenFileCheckUnavailable, match="no-open-file-check"):
@@ -228,6 +277,53 @@ def test_changed_content_and_held_files_are_skipped(tmp_path):
     assert result["linked"] == 0
     assert {why.split(" ")[0] for _, why in result["skipped"]} == {"content", "held"}
     assert len({p.stat().st_ino for p in (keep, changed, held)}) == 3
+
+
+def test_peer_link_refreshes_liveness_after_hashing_and_cleans_staged_link(tmp_path, monkeypatch):
+    keep, name = tmp_path / "keep", tmp_path / "name"
+    keep.write_bytes(b"contents")
+    name.write_bytes(keep.read_bytes())
+    check = _Holders()
+    digest = SO._digest
+
+    def acquire_after_hash(path):
+        result = digest(path)
+        if path == name:
+            check.held.append(name)
+        return result
+
+    monkeypatch.setattr(SO, "_digest", acquire_after_hash)
+    result = SO.link_duplicates(_groups(keep, name), apply=True, checker=check)
+    assert result["linked"] == 0 and "held open" in result["skipped"][0][1]
+    assert name.stat().st_ino != keep.stat().st_ino
+    assert keep.stat().st_mode & 0o200, "a refused swap must not change the kept inode's mode"
+    assert not list(tmp_path.glob(".*.link"))
+
+
+def test_store_adoption_rechecks_after_copy_and_preserves_original_name(tmp_path, monkeypatch):
+    from merlin.common import content_store as CS
+
+    path = tmp_path / "owned/name"
+    path.parent.mkdir()
+    path.write_bytes(b"original bytes")
+    store = tmp_path / "store"
+    check = _Holders()
+    original = path.stat().st_ino
+    object_for = CS.object_for
+
+    def acquire_after_object_copy(*args):
+        result = object_for(*args)
+        check.held.append(path)
+        return result
+
+    monkeypatch.setattr(CS, "object_for", acquire_after_object_copy)
+    monkeypatch.setattr(CS, "store_root", lambda: store)
+    monkeypatch.setattr(SC, "store_root", lambda: store)
+    monkeypatch.setattr(SC, "_holds_tracked_files", lambda _path: False)
+    with pytest.raises(SO.OpenFileCheckUnavailable, match="before store adoption"):
+        SC.dedup([(path.stat().st_size, [path])], checker=check)
+    assert path.stat().st_ino == original and path.read_bytes() == b"original bytes"
+    assert not list(path.parent.glob(".*.adopt"))
 
 
 def test_a_read_only_directory_gets_its_exact_mode_back(tmp_path):

@@ -922,7 +922,7 @@ def _writable_parents(paths: list[Path]) -> dict[Path, int]:
     return original
 
 
-def dedup(groups: list[tuple[int, list[Path]]]) -> dict:
+def dedup(groups: list[tuple[int, list[Path]]], *, checker=None) -> dict:
     """Re-point every name in each group at one store object.
 
     The reclaim is NOT the sum of what the names gave up. The first name in a group that the store
@@ -941,7 +941,15 @@ def dedup(groups: list[tuple[int, list[Path]]]) -> dict:
                     raise PermissionError(f"refusing to replace a symlink, tracked, or uninspectable file: {path}")
                 restore = _writable_parents([path])
                 try:
-                    gained = content_store.adopt(path, store)
+                    def before_replace():
+                        if checker is not None:
+                            holders = storage_ops.holders_now(checker, path)
+                            if holders:
+                                raise storage_ops.OpenFileCheckUnavailable(
+                                    f"held open by pid(s) {holders} before store adoption: {path}"
+                                )
+
+                    gained = content_store.adopt(path, store, before_replace=before_replace)
                     if gained:
                         released += gained
                         changed += 1
@@ -1224,8 +1232,8 @@ def _dedup(
     for name in held:
         print(f"  skipped {name}: held open", file=sys.stderr)
     try:
-        result = dedup(groups)
-    except OSError as exc:
+        result = dedup(groups, checker=check)
+    except (OSError, storage_ops.OpenFileCheckUnavailable) as exc:
         print(f"de-duplication stopped: {exc}", file=sys.stderr)
         return 1
     print(

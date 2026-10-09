@@ -40,6 +40,7 @@ __all__ = [
     "OpenFileCheckUnavailable",
     "checker_for",
     "denied",
+    "holders_now",
     "link_duplicates",
     "move",
     "open_file_checker",
@@ -76,6 +77,7 @@ class _LsofIndex:
     tool = "lsof"
 
     def __init__(self, executable: str) -> None:
+        self._executable = executable
         mine = ["-u", str(os.geteuid())] if os.geteuid() != 0 else []
         try:
             done = subprocess.run(
@@ -96,6 +98,10 @@ class _LsofIndex:
             raise OpenFileCheckUnavailable(f"lsof failed ({done.returncode}): {done.stderr.strip()[:200]}")
         self._names = sorted(rows)
         self._rows = rows
+
+    def fresh(self):
+        """Capture live processes again before a destructive boundary."""
+        return type(self)(self._executable)
 
     def holders(self, path: Path) -> list[int]:
         real = _real(path)
@@ -178,6 +184,12 @@ def checker_for(enabled: bool):
 
 def _checker(check_open: bool, checker):
     return checker if checker is not None else checker_for(check_open)
+
+
+def holders_now(checker, path: Path) -> list[int]:
+    """Refresh snapshot checkers; preserve live and explicitly injected checks."""
+    fresh = getattr(checker, "fresh", None)
+    return (fresh() if callable(fresh) else checker).holders(path)
 
 
 # --- walking and the deny-list ---------------------------------------------------------------------
@@ -348,7 +360,7 @@ def move(
         record["differing"] = differing[:20]
         return record
     try:
-        holders = check.holders(source)
+        holders = holders_now(check, source)
     except OpenFileCheckUnavailable as exc:
         record["reasons"].append(f"{exc}; source kept, verified copy at destination")
         return record
@@ -382,7 +394,7 @@ def _writable_parent(path: Path) -> int | None:
     return stat.S_IMODE(mode)
 
 
-def _replace_with_link(keep: Path, name: Path) -> None:
+def _replace_with_link(keep: Path, name: Path, *, before_replace: Callable[[], None] | None = None) -> None:
     """Make ``name`` another directory entry for ``keep``'s inode, atomically (stage, then rename)."""
     restore = _writable_parent(name)
     try:
@@ -392,10 +404,11 @@ def _replace_with_link(keep: Path, name: Path) -> None:
         try:
             link.unlink()
             os.link(keep, link)
+            if before_replace is not None:
+                before_replace()
             os.replace(link, name)
-        except OSError:
+        finally:
             link.unlink(missing_ok=True)
-            raise
     finally:
         if restore is not None:
             name.parent.chmod(restore)
@@ -450,6 +463,7 @@ def link_duplicates(
             if len(members) < 2:
                 continue
             keep, keep_st = members[0]
+            linked_here = 0
             try:
                 keep_digest = _digest(keep)
             except OSError as exc:
@@ -474,15 +488,26 @@ def link_duplicates(
                     out["skipped"].append((str(name), "content changed since the scan"))
                     continue
                 if apply:
+                    def before_replace():
+                        # Hashing/staging and previous swaps can outlive the
+                        # original host listing. Reopen both names at this swap.
+                        for selected in (keep, name):
+                            live = holders_now(check, selected)
+                            if live:
+                                raise OpenFileCheckUnavailable(
+                                    f"held open by pid(s) {live} before link replacement: {selected}"
+                                )
+
                     try:
-                        _replace_with_link(keep, name)
-                    except OSError as exc:
+                        _replace_with_link(keep, name, before_replace=before_replace)
+                    except (OSError, OpenFileCheckUnavailable) as exc:
                         out["skipped"].append((str(name), f"link failed: {exc}"))
                         continue
                 out["linked"] += 1
+                linked_here += 1
                 # Freed only when this name held the last link to its old inode.
                 out["released_bytes"] += size if st.st_nlink == 1 else 0
-            if apply:
+            if apply and linked_here:
                 mode = stat.S_IMODE(keep.lstat().st_mode)
                 if mode & 0o222:
                     keep.chmod(mode & ~0o222)

@@ -304,7 +304,7 @@ def orphans(root: Path | None = None) -> tuple[list[Path], int]:
     return found, total
 
 
-def adopt(path: Path, root: Path | None) -> int:
+def adopt(path: Path, root: Path | None, *, before_replace: Callable[[], None] | None = None) -> int:
     """Re-point ``path`` at the store object holding its bytes. Returns the bytes this freed.
 
     ``place_file`` gets the saving at the moment a tree is frozen. This gets it afterwards, for the
@@ -323,6 +323,8 @@ def adopt(path: Path, root: Path | None) -> int:
     integrity check reads the file mode, because chmod follows the inode and would reach into the
     other holders' trees. Returns 0 when nothing changed, including when ``path`` already IS the
     store's inode.
+    ``before_replace`` lets a storage owner recheck its current liveness/authority
+    after any potentially long object copy and immediately before replacing a name.
     """
     if root is None or path.is_symlink() or not path.is_file():
         return 0
@@ -348,10 +350,13 @@ def adopt(path: Path, root: Path | None) -> int:
     try:
         link.unlink()
         os.link(obj, link)
+        if before_replace is not None:
+            before_replace()
         os.replace(link, path)
     except OSError:
-        link.unlink(missing_ok=True)
         return 0
+    finally:
+        link.unlink(missing_ok=True)
     # Freed only if this name was the last one holding the old inode. When it was not, the bytes go
     # when the other names are adopted too, and counting them here would report the saving twice.
     return before.st_size if before.st_nlink == 1 else 0
