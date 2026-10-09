@@ -478,6 +478,10 @@ def golden(capsule: dict, capsule_dir: str | Path | None = None) -> dict[str, li
 
 def _recompute_golden(capsule: dict) -> dict[str, list]:
     """Compute the capsule's expected outputs on the integer Tensor engine (the integer-datapath path)."""
+    if capsule["operation"]["op"] == "component_program":
+        from merlin_experiments.phase0.component_numerics import evaluate
+
+        return evaluate(capsule)
     env = materialize_capsule_leaves(capsule)
     op = capsule["operation"]["op"]
     attrs = capsule["operation"].get("attributes", {})

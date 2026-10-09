@@ -29,7 +29,6 @@ import json
 import math
 import os
 import subprocess
-import sys
 import tempfile
 import tomllib
 import zipfile
@@ -40,7 +39,7 @@ from urllib.parse import unquote, urlparse
 from merlin.common.digest import is_sha256
 from merlin.common.paths import env as _env
 from merlin.common.paths import repo_root
-from merlin.targetgen import capture_cache
+from merlin.targetgen import capture_cache, component_sources
 from merlin.targetgen.golden_store import write_golden
 
 _MODEL_CAPTURE_ABI_VERSION = 6
@@ -457,7 +456,7 @@ class Model(nn.Module):
         if {causal}:
             t = q.shape[-2]
             neg = torch.finfo(s.dtype).min
-            mask = torch.triu(torch.full((t, t), neg, dtype=s.dtype), 1)
+            mask = torch.triu(torch.full((t, k.shape[-2]), neg, dtype=s.dtype), 1)
             s = s + mask
         return s.softmax(-1) @ v
 def get_model_and_inputs():
@@ -665,6 +664,8 @@ def get_model_and_inputs():
 """,
 }
 
+_OP_BODIES.update(component_sources.BODIES)
+
 
 def supported_ops() -> list[str]:
     return sorted(_OP_BODIES)
@@ -706,60 +707,14 @@ def get_model_and_inputs():
 
 
 def build_loader_src(spec: dict) -> str:
-    """Render the PyTorch loader source for an op spec. ``spec`` carries ``op`` + the shape fields the op
-    needs (M/K/N/Dv) + optional ``eps``/``causal``/``bias`` + ``seed``/``dtype``. Fail closed on an
-    unknown op (never silently emit a wrong program)."""
-    op = spec["op"]
-    if op != "int_matmul" and op not in _OP_BODIES:
-        raise KeyError(f"capsule_source has no PyTorch template for op {op!r} (have {supported_ops()})")
-    raw_shape = spec.get("shape")
-    if raw_shape is None:
-        raw_shape = [spec.get("M", 16), spec.get("K", 16)]
-    if (
-        not isinstance(raw_shape, (list, tuple))
-        or not raw_shape
-        or any(isinstance(d, bool) or not isinstance(d, int) or d < 1 for d in raw_shape)
-    ):
-        raise ValueError(f"capsule shape must be a non-empty sequence of positive integers, got {raw_shape!r}")
-    fields = {
-        "op": op,
-        "dtype": spec.get("dtype", "fp32"),
-        "seed": int(spec.get("seed", 0)),
-        "M": spec.get("M", 16),
-        "K": spec.get("K", 16),
-        "N": spec.get("N", 16),
-        "Dv": spec.get("Dv", spec.get("K", 16)),
-        "eps": spec.get("eps", 1e-5),
-        "causal": bool(spec.get("causal", False)),
-        "bias": bool(spec.get("bias", False)),
-        # extra shape/scalar fields for the composite ops (batch, soft-cap, conv geometry)
-        "B": spec.get("B", 2),
-        "cap": spec.get("cap", 50.0),
-        "Cin": spec.get("Cin", 1),
-        "Himg": spec.get("Himg", 8),
-        "Wimg": spec.get("Wimg", 8),
-        "P": spec.get("P", 2),
-        # Elementwise programs preserve the captured rank. Most synthetic probes use the historic
-        # MxK form; an application-derived probe may instead carry its exact static shape.
-        "shape_args": ", ".join(str(int(d)) for d in raw_shape),
-    }
-    if op == "int_matmul":
-        if spec.get("quant_scheme"):
-            raise ValueError("an isolated int_matmul has quantized operands; do not quantize it again")
-        return _PREAMBLE.format(**fields) + _INT_MATMUL.format(**fields)
-    # A QUANTIZED capture needs a weight PARAMETER for the scheme to bind to (see _PARAMETRIC_LINEAR).
-    # Only the contraction ops have a meaningful weight; asking for a quantized elementwise op is a
-    # request that cannot be honoured, and saying so beats emitting an unquantized program under a
-    # quantized name.
-    if spec.get("quant_scheme"):
-        if op not in ("linear", "matmul"):
-            raise ValueError(
-                f"quant_scheme is set for op {op!r}, but only a contraction carries a weight for a "
-                f"torchAO scheme to quantize; an unquantized program under a quantized name is worse "
-                f"than a refusal"
-            )
-        return _PREAMBLE.format(**fields) + _PARAMETRIC_LINEAR.format(**fields)
-    return _PREAMBLE.format(**fields) + _OP_BODIES[op].format(**fields)
+    """Render the selected builtin template through shared typed input validation."""
+    from .capsule_builtin_source import render_builtin_source
+
+    return render_builtin_source(
+        spec, preamble=_PREAMBLE, integer_matmul=_INT_MATMUL,
+        parametric_linear=_PARAMETRIC_LINEAR, bodies=_OP_BODIES,
+        input_names=_OP_INPUT_NAMES | _FUSED_OP_INPUT_NAMES,
+    )
 
 
 # ------------------------------------------------------------------------------------------------
@@ -900,7 +855,7 @@ class PytorchRefSource:
             integer_nonlinear=integer_nonlinear,
         )
 
-    def _launch_worker(self, cmd: list[str], *, env: dict, **_request) -> "subprocess.CompletedProcess[str]":
+    def _launch_worker(self, cmd: list[str], *, env: dict, **_request) -> subprocess.CompletedProcess[str]:
         """Run the capture worker; a sealed capture source runs the same request in a sandbox instead.
 
         ``_request`` carries the structured capture request (loader, dtype, recipe path, tolerance,
@@ -915,13 +870,13 @@ class PytorchRefSource:
         src: str,
         scheme: str | None,
         env: dict | None = None,
-        python: "Path | None" = None,
+        python: Path | None = None,
         recipe_sha256: str = "",
         already_quantized: bool = False,
         agreement_tolerance: tuple[float, float] | None = None,
         static_pt2e: bool = False,
         capabilities: tuple[str, ...] = (),
-    ) -> "Path | None":
+    ) -> Path | None:
         """Where a capture of exactly this input already lives, or ``None`` if caching is unavailable.
 
         Keyed on the declared request -- the loader's source, format, capture scheme and op role.
@@ -1025,7 +980,7 @@ class PytorchRefSource:
         src: str,
         scheme: str | None = None,
         env: dict | None = None,
-        python: "Path | None" = None,
+        python: Path | None = None,
         recipe: dict | None = None,
         already_quantized: bool = False,
         agreement_tolerance: tuple[float, float] | None = None,
@@ -1418,6 +1373,8 @@ _FUSED_OP_INPUT_NAMES = {
     "global_average": ["X"],
 }
 
+_FUSED_OP_INPUT_NAMES.update(component_sources.INPUT_NAMES)
+
 
 def _entry_seed(name: str) -> int:
     return sum((i + 1) * ord(c) for i, c in enumerate(name)) or 1
@@ -1494,7 +1451,6 @@ def _shape_of(nested) -> list[int]:
 
 def _flatten(nested) -> list:
     out: list = []
-    stack = [nested]
     if not (isinstance(nested, list) and nested and isinstance(nested[0], list)):
         return list(nested)
     for row in nested:
@@ -1509,8 +1465,8 @@ def _capture_spec(entry: dict, binding) -> dict:
     M = entry.get("M", entry.get("M_tiles", 1) * dim)
     K = entry.get("K", entry.get("K_tiles", 1) * dim)
     N = entry.get("N", entry.get("N_tiles", 1) * dim)
-    if op == "attention_qk":
-        N = M  # Q@K^T scores are [M,M]; K rows == M (matches the builder)
+    if op == "attention_qk" and "N" not in entry and "N_tiles" not in entry:
+        N = M  # Preserve the square default, while honoring explicit rectangular source geometry.
     spec = {
         "op": entry.get("capture_op", op),
         "dtype": entry.get("capture_dtype", binding.operand_dtype),
@@ -1530,7 +1486,21 @@ def _capture_spec(entry: dict, binding) -> dict:
     if op in ("rmsnorm", "gemma_4norm", "layernorm"):
         spec["eps"] = entry.get("eps", 1.0 / 65536.0)
     # optional per-op fields (batch / soft-cap / conv geometry) pass through verbatim when present
-    for f in ("B", "cap", "Cin", "Himg", "Wimg", "P", "Dv", "causal"):
+    for f in (
+        "B",
+        "cap",
+        "Cin",
+        "Himg",
+        "Wimg",
+        "P",
+        "Pool",
+        "Dv",
+        "causal",
+        "eps",
+        "input_palette",
+        "producer_scale",
+        "quant_scale",
+    ):
         if f in entry:
             spec[f] = entry[f]
     return spec
@@ -2663,7 +2633,7 @@ def _freeze_selected_m2m_tool(m2m_root: Path, directory: Path) -> dict:
     }
 
 
-def write_pytorch_capsule(entry: dict, binding, out_root, *, source: "PytorchRefSource | None" = None):
+def write_pytorch_capsule(entry: dict, binding, out_root, *, source: PytorchRefSource | None = None):
     """Materialize a full capsule dir from a PyTorch-defined op. For a merlin_iface-mapped op (matmul/
     linear/attention_qk/rmsnorm) the agent-facing interface + expected coverage are DERIVED-AND-VERIFIED
     from the captured linalg (``linalg_to_iface``: the lowering must actually contain the op + shapes) via
@@ -2721,6 +2691,22 @@ def write_pytorch_capsule(entry: dict, binding, out_root, *, source: "PytorchRef
         golden = _host_eager_golden(
             art, names, out_name, binding, interface="linalg_positional", arg_order=names + [out_name]
         )
+        if op == "producer_quantizer_observer" or len((art.meta or {}).get("output_abi") or []) > 1:
+            from .capsule_results import publication
+
+            try:
+                outputs = publication(art, entry)
+            except ValueError as exc:
+                raise M2MUnavailable(str(exc)) from exc
+            out_names = list(outputs)
+            cap["operation"]["attributes"].update(out=out_names[0], outs=out_names)
+            cap["numeric_policy"] = _model_output_numeric_policy(
+                art.meta["output_abi"], list(outputs.values()), binding
+            )
+            golden["outputs"] = outputs
+            golden["oracle_provenance"]["arg_order"] = names + out_names
+        if op == "producer_quantizer_observer":
+            cap["operation"]["attributes"].update(component_sources.parameters(spec))
         # the linalg module IS the interface the agent compiles
         (d / "capsule.interface.mlir").write_text(portable_linalg, encoding="utf-8")
     else:
@@ -2909,7 +2895,7 @@ def resolve_model_loader(entry: dict, m2m_dir: str | Path | None = None) -> Path
     return _workload_named(root, name) or exact
 
 
-def _workload_named(root: Path, name: str) -> "Path | None":
+def _workload_named(root: Path, name: str) -> Path | None:
     """The workload directory a ROSTER name denotes, when it is not spelled the same.
 
     A roster declares a model (``resnet50``); a workload directory carries the checkpoint revision
@@ -2938,7 +2924,7 @@ def _workload_named(root: Path, name: str) -> "Path | None":
     return None
 
 
-def resolve_model_workload(entry: dict, m2m_dir: str | Path | None = None) -> "str | None":
+def resolve_model_workload(entry: dict, m2m_dir: str | Path | None = None) -> str | None:
     """The model2MLIR WORKLOAD DIRECTORY behind this entry's loader, or ``None`` when it has none.
 
     The roster names a model (``resnet50``) and the workload directory carries the checkpoint revision
@@ -3010,7 +2996,7 @@ def model_capture_declaration_identity(workload: str | None, m2m_dir: str | Path
     }
 
 
-def model_capture_env(workload: "str | None", m2m_dir: str | Path | None = None) -> dict:
+def model_capture_env(workload: str | None, m2m_dir: str | Path | None = None) -> dict:
     """Read selected host locations and historical full-fidelity settings for this workload."""
     if not workload:
         return {}
@@ -3025,7 +3011,7 @@ def model_capture_env(workload: "str | None", m2m_dir: str | Path | None = None)
     return {**locations, **_bundle.full_env(workload)}
 
 
-def model_capture_python(workload: "str | None", m2m_dir: str | Path | None = None) -> "Path | None":
+def model_capture_python(workload: str | None, m2m_dir: str | Path | None = None) -> Path | None:
     """The selected workload's pinned interpreter; reject a missing declared pin."""
     if not workload:
         return None
@@ -3045,8 +3031,8 @@ def model_capture_python(workload: "str | None", m2m_dir: str | Path | None = No
 
 
 def freeze_model_loader_dependencies(
-    workload: "str | None", destination: Path, capture_meta: dict, m2m_dir: str | Path | None = None
-) -> "str | None":
+    workload: str | None, destination: Path, capture_meta: dict, m2m_dir: str | Path | None = None
+) -> str | None:
     """Copy loader-imported source declared by the workload into a capsule-local Python tree.
 
     A frozen loader that imports an upstream module is not frozen if it still relies on an absolute
@@ -3115,7 +3101,7 @@ _CORRECTNESS_ONLY_NOTE = (
 
 
 def input_provenance_record(
-    workload: "str | None", applied_env: dict, meta: dict, capture_declaration: dict | None = None
+    workload: str | None, applied_env: dict, meta: dict, capture_declaration: dict | None = None
 ) -> dict:
     """What the capsule records about WHERE ITS INPUTS CAME FROM, from the loader's own declaration.
 
@@ -3454,7 +3440,8 @@ def materialized_model_artifacts(selection: dict) -> CapsuleArtifacts:
     # Never silently certify a multi-result or integer-result ABI with that file.
     if len(output_abi) != 1 or output_abi[0].get("dtype") not in {"f32", "f16", "bf16"}:
         raise M2MUnavailable(
-            "materialized golden.npy needs one losslessly represented floating result; other ABIs need complete references"
+            "materialized golden.npy needs one losslessly represented floating result; "
+            "other ABIs need complete references"
         )
     with np.load(io.BytesIO(read_bound("inputs.npz")), allow_pickle=False) as archive:
         count = len(meta.get("input_abi") or [])
@@ -3526,7 +3513,7 @@ def write_model_capsule(
     binding,
     out_root,
     *,
-    source: "PytorchRefSource | None" = None,
+    source: PytorchRefSource | None = None,
     artifact: CapsuleArtifacts | None = None,
 ):
     """Materialize a whole-model capsule: the model is lowered end-to-end via model2MLIR (the linalg IS
@@ -4010,7 +3997,7 @@ def _decode_program_tensors(program: dict) -> dict:
 
 def _float_program_artifacts(
     gen: str, op: str, program: dict, cov: list, workload, program_emitter: dict[str, str]
-) -> "SpecArtifacts":
+) -> SpecArtifacts:
     """Normalize an fp8/simt program (an MXU sequence / a warp schedule) into SpecArtifacts:
     role-keyed decoded operands + the already-decoded golden + the program as grounding (float compare)."""
     return SpecArtifacts(
@@ -4172,7 +4159,7 @@ class SpecRefSource:
                 ) from exc
 
 
-def write_spec_capsule(entry: dict, binding, out_root, *, source: "SpecRefSource | None" = None):
+def write_spec_capsule(entry: dict, binding, out_root, *, source: SpecRefSource | None = None):
     """Materialize a capsule from a specir verification spec (``spec_ref: '<gen>:op.<name>'``): the agent
     compiles the merlin_iface interface for the op; the golden + the exact operands come from the spec's own
     command-buffer program (bit-exact refmodel, INDEPENDENT of the target RTL); the spec's command buffer +

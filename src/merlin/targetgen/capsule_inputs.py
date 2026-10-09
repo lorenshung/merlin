@@ -131,8 +131,18 @@ def materialize_capsule_leaves(capsule: dict) -> dict[str, Tensor]:
         return _exact_integer_leaves(capsule)
     lo, hi = _context().capsule_stimulus_range(capsule)
     env: dict[str, Tensor] = {}
-    for spec in capsule.get("inputs", []):
+    for index, spec in enumerate(capsule.get("inputs", [])):
         if spec.get("role") in ("input", "weight", "bias"):
+            palette = capsule.get("input_palette")
+            if palette is not None:
+                from merlin.targetgen.input_palette import realize
+
+                values = realize(
+                    palette, name=spec["name"], shape=tuple(spec["shape"]), dtype=spec.get("dtype", "i8"), index=index
+                )
+                if values is not None:
+                    env[spec["name"]] = _context().Tensor(tuple(spec["shape"]), values, spec.get("dtype", "i8"))
+                    continue
             env[spec["name"]] = _context().Tensor.deterministic(
                 spec["name"], tuple(spec["shape"]), spec.get("dtype", "i8"), lo, hi
             )

@@ -266,7 +266,13 @@ def float_to_codes(values, fmt: str) -> np.ndarray:
     if tie.any():
         even_hi = (codes[hi] & 1) == 0
         pick = np.where(tie, np.where(even_hi, hi, lo), pick)
-    return codes[pick]
+    result = codes[pick].copy()
+    zeros = a == 0
+    if zeros.any():
+        # The ordered grid contains both zero codes at the same numerical
+        # position. Preserve the input's sign explicitly for byte preloads.
+        result[zeros] = np.where(np.signbit(a[zeros]), 1 << (bits - 1), 0)
+    return result
 
 
 def encode_bytes(values, fmt: str) -> bytes:
