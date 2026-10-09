@@ -144,13 +144,14 @@ def functional_emission_guard(
     *,
     frozen_functional: FI.FrozenFunctionalInputs,
     timeout_s: int = 120,
+    grade_root: Path | None = None,
 ) -> dict[str, Any]:
-    """Prove which functional capsules the perf change CANNOT have affected, and scrutinise the rest.
+    """Reuse complete unchanged execution dependencies or regrade full outputs.
 
-    Phase 1 certified the BASELINE compiler on this corpus, and the perf stage never re-grades it. If
-    the candidate emits byte-identical code for a capsule, that capsule's behaviour is unchanged by
-    construction and no simulation can add information; only the capsules whose emission CHANGED carry
-    functional risk. That is what makes a cheap guard sound rather than merely fast.
+    Identical LLVM and command buffers alone cannot establish identical behavior:
+    runtime, packing, linking and publication code also contribute. Reuse requires
+    the entire package and every selected frozen execution grant to be unchanged.
+    Any remaining capsule goes through the ordinary numerical/certification engine.
 
     Trace findings are compared DIFFERENTIALLY, never absolutely. ``trace_check.check`` documents its
     violations as advisory diagnostics that deliberately do not decide pass/fail (the oracle does), so
@@ -187,6 +188,27 @@ def functional_emission_guard(
         raise StageGateError("functional frozen public corpus contains no capsules")
 
     base_pkg, cand_pkg = OR.load_package(Path(baseline)), OR.load_package(Path(candidate))
+    package_identity = (
+        CONTRACTS.exact_tree_record(Path(baseline))["sha256"],
+        CONTRACTS.exact_tree_record(Path(candidate))["sha256"],
+    )
+    dependencies_unchanged = package_identity[0] == package_identity[1]
+    grants = getattr(frozen_functional, "grants", ())
+    # An omitted closure is UNKNOWN, including an older synthetic/archive record.
+    dependencies_unchanged = dependencies_unchanged and bool(grants)
+    for grant in grants:
+        source, selected = Path(grant.source), Path(grant.destination)
+        identity = CONTRACTS.exact_tree_record if source.is_dir() else _sha256_file
+        frozen_identity = identity(source)
+        frozen_digest = frozen_identity["sha256"] if isinstance(frozen_identity, dict) else frozen_identity
+        if frozen_digest != grant.source_sha256:
+            raise StageGateError("functional execution dependency changed after admission")
+        if not selected.exists() or selected.is_symlink():
+            dependencies_unchanged = False
+            continue
+        selected_identity = CONTRACTS.exact_tree_record(selected) if selected.is_dir() else _sha256_file(selected)
+        selected_digest = selected_identity["sha256"] if isinstance(selected_identity, dict) else selected_identity
+        dependencies_unchanged = dependencies_unchanged and selected_digest == frozen_digest
     rows: list[dict[str, Any]] = []
     offenders: list[dict[str, Any]] = []
     for capsule_dir in capsules:
@@ -215,12 +237,17 @@ def functional_emission_guard(
                 {"capsule": name, "kind": "lowering_regressed", "baseline_rc": base_rc, "candidate_rc": cand_rc}
             )
             continue
-        if _sha256(base_llvm.encode("utf-8")) == _sha256(cand_llvm.encode("utf-8")) and _sha256(
+        emissions_equal = _sha256(base_llvm.encode("utf-8")) == _sha256(cand_llvm.encode("utf-8")) and _sha256(
             base_buffer.encode("utf-8")
-        ) == _sha256(cand_buffer.encode("utf-8")):
+        ) == _sha256(cand_buffer.encode("utf-8"))
+        if dependencies_unchanged and emissions_equal:
             rows.append({"capsule": name, "status": _GUARD_UNCHANGED})
             continue
         row: dict[str, Any] = {"capsule": name, "status": _GUARD_CHANGED}
+        if emissions_equal:
+            row["reason"] = "execution dependencies changed or are unavailable"
+            rows.append(row)
+            continue
         try:
             expected = descriptor.get("expected") or {}
             base_trace = RD.decode_text(base_llvm, source="baseline", target=target_experiment.target)
@@ -256,6 +283,52 @@ def functional_emission_guard(
             offenders.append({"capsule": name, "kind": "trace_not_decodable"})
         rows.append(row)
 
+    regrade = None
+    if any(row.get("status") == _GUARD_CHANGED for row in rows):
+        from merlin.targetgen import capsule_grade as CG  # noqa: PLC0415
+        from merlin.targetgen import capsule_runner as CR  # noqa: PLC0415
+
+        # Grade the complete admitted public cohort: a changed shared producer,
+        # runtime or host publication routine can affect consumers elsewhere.
+        with tempfile.TemporaryDirectory(prefix="functional-regrade-") as scratch:
+            output = Path(scratch) if grade_root is None else Path(grade_root)
+            if grade_root is not None:
+                if output.exists():
+                    raise StageGateError("functional regrade evidence destination is not fresh")
+                output.mkdir(parents=True)
+            try:
+                adapters = CR.qa_checkpoint_adapters(target_experiment.target, target_experiment.sim_via)
+                import shutil  # noqa: PLC0415
+
+                grading_candidate = output / "compiler"
+                shutil.copytree(candidate, grading_candidate)
+                score = CG.grade(
+                    grading_candidate, capsules_root=view.public, runs_root=output,
+                    model_snapshot_root=output / ".private_model_sources",
+                    labels={"public", "dev"}, contract=view.contract,
+                    oracle_adapters=adapters, timeout=timeout_s, target=target_experiment.target,
+                )
+                scored = score.get("per_capsule") or []
+                expected_names = {CONTRACTS.mapping_file(path / "capsule.yaml", yaml_file=True).get("name", path.name)
+                                  for path in capsules}
+                complete = (
+                    len(scored) == len(expected_names)
+                    and {row.get("capsule") for row in scored} == expected_names
+                    and all(row.get("status") == "pass" and row.get("numeric") == "pass"
+                            and not row.get("cert_verdict") for row in scored)
+                    and score.get("integrity_status") == "clean"
+                )
+                regrade = {"status": "pass" if complete else "fail", "score": score,
+                           "evidence_root": str(output) if grade_root is not None else None}
+                if not complete:
+                    offenders.append({"kind": "complete_functional_regrade_failed"})
+            except Exception as exc:  # noqa: BLE001 - missing execution remains a refusal
+                regrade = {"status": "unavailable", "error_type": type(exc).__name__}
+                offenders.append({"kind": "complete_functional_regrade_unavailable"})
+    if CONTRACTS.exact_tree_record(Path(candidate))["sha256"] != package_identity[1]:
+        offenders.append({"kind": "candidate_changed_during_functional_guard"})
+    FI._verify_private_functional_provenance(frozen_functional.host_provenance)
+
     unchanged = sum(1 for row in rows if row.get("status") == _GUARD_UNCHANGED)
     changed = sum(1 for row in rows if row.get("status") == _GUARD_CHANGED)
     return {
@@ -265,6 +338,8 @@ def functional_emission_guard(
         "changed": changed,
         "offenders": offenders,
         "rows": rows,
+        "execution_dependencies_unchanged": dependencies_unchanged,
+        "full_output_regrade": regrade,
     }
 
 
@@ -385,9 +460,16 @@ def _codex_round(
     return rc, transcript, policy
 
 
-def admit_authoring_workflow(workflow_id: str) -> None:
+def admit_authoring_workflow(workflow_id: str, *, component_launch=None) -> None:
     """Keep the broker action profile distinct from fresh-session launch authority."""
     if workflow_id == BP.COMPONENT_ONLY_V1:
+        if component_launch is not None:
+            from .component_launch import QualifiedComponentLaunch  # noqa: PLC0415
+
+            if type(component_launch) is not QualifiedComponentLaunch:
+                raise StageGateError("component authoring requires independently evaluated typed launch prerequisites")
+            component_launch.verify()
+            return
         raise StageGateError(
             "component-only authoring is unavailable: approved minimal view, verified runtime "
             "isolation and zero-history session transport are required; the broker profile "
@@ -427,9 +509,20 @@ def run_stage(
     telemetry_price_table: Path | None = None,
     waive_functional_gate: tuple[str, ...] = (),
     workflow_id: str = BP.CORPUS_FEEDBACK_V1,
+    component_launch=None,
 ) -> Path:
     """Run bounded authoring rounds and return the sealed candidate-record path."""
-    admit_authoring_workflow(workflow_id)
+    admit_authoring_workflow(workflow_id, component_launch=component_launch)
+    if workflow_id == BP.COMPONENT_ONLY_V1:
+        from .component_launch import run_component_stage  # noqa: PLC0415
+
+        if rounds != 1:
+            raise StageGateError(
+                "component authoring uses one fresh continuous session within the explicit wall budget"
+            )
+        return run_component_stage(component_launch, suite=suite, model=model, effort=effort,
+                                   wall_budget_seconds=wall_budget_seconds, max_tool_calls=max_tool_calls,
+                                   tool_timeout_seconds=tool_timeout_seconds)
     if not isinstance(sandbox_inputs, (PC.PackageSandboxInputs, PC.FrozenPackageSandboxInputs)):
         raise StageGateError("performance authoring requires an explicit sandbox input selection")
     sandbox_inputs = copy.deepcopy(sandbox_inputs)
@@ -919,12 +1012,12 @@ def run_stage(
     if not receipts_clean:
         refusal = refusal or "required host-owned broker receipt evidence is incomplete"
     # THE FUNCTIONAL GUARD. Phase 1 certified the baseline on the functional corpus and this stage
-    # never re-grades it, so without this a candidate could pass every performance cell while breaking
-    # capsules nothing here executes. It is cheap because it is a proof, not a sample: a capsule whose
-    # emitted code is byte-identical cannot have changed behaviour.
+    # Complete unchanged execution dependencies permit reuse; changed dependencies
+    # or emission require the ordinary full-output numerical certification.
     try:
         functional_guard = functional_emission_guard(
-            base, previous_submission, target_experiment, frozen_functional=frozen_functional
+            base, previous_submission, target_experiment, frozen_functional=frozen_functional,
+            grade_root=stage_root / "functional_guard_grade",
         )
     except Exception as exc:  # noqa: BLE001 - an unrunnable guard is absence of proof, not a pass
         functional_guard = {

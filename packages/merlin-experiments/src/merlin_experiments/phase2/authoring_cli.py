@@ -16,6 +16,49 @@ from merlin_experiments.phase2 import campaign as PC
 from merlin_experiments.phase2.contracts import StageGateError
 
 
+def _component_main(argv: list[str] | None, *, suite: str | None) -> int:
+    """The component declaration supplies explicit protected/public/runtime owners."""
+    from . import component_launch as CL
+    from .component_launch_inputs import load_component_launch_inputs
+
+    parser = argparse.ArgumentParser(description="Qualify and launch a fresh isolated generated-component author")
+    parser.add_argument("--workflow", choices=(BP.COMPONENT_ONLY_V1,), required=True)
+    parser.add_argument("--component-launch-inputs", type=Path, required=True)
+    parser.add_argument(
+        "--qualification-only", action="store_true", help="run unpaid actual domain/isolation/readiness probes"
+    )
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--effort", default="high")
+    parser.add_argument("--wall-budget-seconds", type=int)
+    parser.add_argument("--max-tool-calls", type=int, default=100)
+    parser.add_argument("--tool-timeout-seconds", type=int, default=600)
+    if suite is None:
+        parser.add_argument("--suite")
+    args = parser.parse_args(argv)
+    if not args.qualification_only and (args.wall_budget_seconds is None or suite is None and not args.suite):
+        parser.error("paid component authoring requires --wall-budget-seconds and --suite")
+    try:
+        inputs = load_component_launch_inputs(args.component_launch_inputs)
+        launch = CL.qualify_component_launch(inputs, model=args.model, effort=args.effort)
+        if args.qualification_only:
+            print(f"QUALIFIED: {launch.qualification_path}")
+            return 0
+        authoring.admit_authoring_workflow(BP.COMPONENT_ONLY_V1, component_launch=launch)
+        record = CL.run_component_stage(
+            launch, model=args.model, effort=args.effort, wall_budget_seconds=args.wall_budget_seconds,
+            max_tool_calls=args.max_tool_calls, tool_timeout_seconds=args.tool_timeout_seconds,
+            suite=suite if suite is not None else args.suite,
+        )
+        document = json.loads(record.read_bytes())
+        if document["admission"]["consumable"] is not True:
+            raise StageGateError(str(document["admission"]["refusal"]) + f"; record: {record}")
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(f"NO-GO: {exc}", file=sys.stderr)
+        return 2
+    print(f"SEALED: {record}")
+    return 0
+
+
 def main(
     argv: list[str] | None = None,
     *,
@@ -23,14 +66,16 @@ def main(
     suite: str | None = None,
     source_root: Path | None = None,
 ) -> int:
-    # The component profile has no qualified fresh isolated agent transport.
-    # Refuse before demanding legacy GSIM/model inputs or resolving tools.
-    # --help still displays the normal parser's complete contract.
+    # An unqualified component request refuses before any legacy model selection.
+    # The explicit declaration goes through actual independent prerequisites.
     profile_parser = argparse.ArgumentParser(add_help=False)
     profile_parser.add_argument(
         "--workflow", choices=(BP.CORPUS_FEEDBACK_V1, BP.COMPONENT_ONLY_V1), default=BP.CORPUS_FEEDBACK_V1
     )
+    profile_parser.add_argument("--component-launch-inputs", type=Path)
     profile, remaining = profile_parser.parse_known_args(argv)
+    if profile.workflow == BP.COMPONENT_ONLY_V1 and profile.component_launch_inputs is not None:
+        return _component_main(argv, suite=suite)
     if profile.workflow == BP.COMPONENT_ONLY_V1 and not {"-h", "--help"}.intersection(remaining):
         try:
             authoring.admit_authoring_workflow(profile.workflow)
