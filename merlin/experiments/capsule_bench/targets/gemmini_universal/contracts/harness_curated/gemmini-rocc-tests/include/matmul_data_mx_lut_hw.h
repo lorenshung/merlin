@@ -1,1 +1,0 @@
-../../../../../../../../../examples/gemmini/phase1/contracts/harness_curated/gemmini-rocc-tests/include/matmul_data_mx_lut_hw.h
