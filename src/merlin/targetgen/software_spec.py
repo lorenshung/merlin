@@ -97,6 +97,30 @@ def software_spec_path_for_recipe(recipe: str | Path, document: dict | None = No
     return Path(os.path.abspath(selected_path))
 
 
+def _validate_operand_domain(domain: object) -> None:
+    """Shape of an authored operand element domain; its width is checked against the format by its reader."""
+    label = "numerical_semantics.internal_arithmetic.operand_domain"
+    if not isinstance(domain, dict) or set(domain) - {"exponent_range", "signed_zero", "reserved_codes"}:
+        raise ValueError(f"{label} may declare only exponent_range, signed_zero and reserved_codes")
+    bounds = domain.get("exponent_range")
+    if bounds is not None and (
+        not isinstance(bounds, list)
+        or len(bounds) != 2
+        or any(type(value) is not int or value < 0 for value in bounds)
+        or bounds[0] > bounds[1]
+    ):
+        raise ValueError(f"{label}.exponent_range must be two ascending nonnegative exponent fields")
+    codes = domain.get("reserved_codes")
+    if codes is not None and (
+        not isinstance(codes, list)
+        or any(type(code) is not int or code < 0 for code in codes)
+        or len(set(codes)) != len(codes)
+    ):
+        raise ValueError(f"{label}.reserved_codes must be distinct nonnegative element codes")
+    if "signed_zero" in domain and type(domain["signed_zero"]) is not bool:
+        raise ValueError(f"{label}.signed_zero must be Boolean")
+
+
 def validate_numerical_semantics(document: dict) -> dict:
     """Validate the explicit engine selection without importing its implementation."""
     if not isinstance(document, dict):
@@ -151,6 +175,10 @@ def validate_numerical_semantics(document: dict) -> dict:
                 raise ValueError(f"mx_block_reference requires explicit {field}")
         if not isinstance(document.get("internal_arithmetic"), dict) or not document["internal_arithmetic"]:
             raise ValueError("mx_block_reference requires explicit internal arithmetic")
+    internal = document.get("internal_arithmetic")
+    domain = internal.get("operand_domain") if isinstance(internal, dict) else None
+    if domain is not None:
+        _validate_operand_domain(domain)
     if "source_root_env" in model and "source_root_path" in model:
         raise ValueError("model source_root_env and source_root_path are mutually exclusive")
     for field in ("source_root_env", "source_root_path"):

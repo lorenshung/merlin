@@ -108,6 +108,9 @@ def validate_quantization_declarations(spec: Mapping) -> list[dict]:
         for field in _BOOL_PARAMETERS:
             if field in row and not _unknown(row[field]) and type(row[field]) is not bool:
                 raise ValueError(f"{label}.{field} must be Boolean or unknown")
+        encoding = row.get("scale_encoding")
+        if encoding is not None and not _unknown(encoding) and not quant_formats.is_element_dtype(str(encoding)):
+            raise ValueError(f"{label}.scale_encoding must be unknown or a registered dtype, not {encoding!r}")
         for field in ("activation_mode", "weight_mode"):
             if field in row and not _unknown(row[field]) and row[field] not in {"static", "dynamic"}:
                 raise ValueError(f"{label}.{field} must be static, dynamic, or unknown")
