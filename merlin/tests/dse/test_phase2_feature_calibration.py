@@ -232,3 +232,21 @@ def test_validator_refuses_a_coefficient_not_derived_from_bound_points(tmp_path)
     assert result["status"] == "refused"
     assert result["feature"] is None
     assert any("does not equal" in row["reason"] for row in result["refusals"])
+
+
+def test_fixed_host_mechanism_uses_independent_cycle_pairs_and_revalidates(tmp_path):
+    target = _write(tmp_path / "target.json", "selected execution target")
+    pair = _pair(tmp_path, ident="host-allocation", target_sha=target["sha256"], feature_values=(1, 4),
+                 outcomes=({"cycles": _quantity(23, "cycle", "target_execution")},
+                           {"cycles": _quantity(53, "cycle", "target_execution")}))
+    request = _base_request(target, kind="compute", pairs=[pair])
+    request["feature"]["kind"] = "fixed"
+    request["feature"]["resource"] = "host-control"
+    prepared = calibration.prepare_feature_calibration(request)
+    assert prepared["status"] == "ready"
+    assert prepared["feature"]["kind"] == "fixed"
+    assert prepared["feature"]["cycles_per_unit"] == {"lo": 10.0, "hi": 10.0}
+    receipt = tmp_path / "fixed-receipt.json"
+    receipt.write_text(json.dumps(prepared["calibration"]))
+    validated = calibration.validate_feature_calibration(receipt, expected_target_sha256=target["sha256"])
+    assert validated["status"] == "ready"

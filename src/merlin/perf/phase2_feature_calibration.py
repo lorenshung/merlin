@@ -16,6 +16,7 @@ from collections.abc import Mapping, Sequence
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
+
 from merlin.common import digest as _mdigest
 from merlin.common import jsonio as _mjson
 
@@ -28,6 +29,9 @@ VALIDATION_SCHEMA = "phase2_analytical_feature_calibration_validation_v1"
 
 _REQUIRED_MEASUREMENTS = {
     "compute": {
+        "cycles_per_unit": ("cycle", "target_execution"),
+    },
+    "fixed": {
         "cycles_per_unit": ("cycle", "target_execution"),
     },
     "movement": {
@@ -175,7 +179,7 @@ def _feature_spec(raw: Any) -> dict[str, Any]:
     row = _mapping(raw)
     kind = str(row.get("kind") or "")
     if kind not in _REQUIRED_MEASUREMENTS:
-        raise _EvidenceError("feature.kind must be compute or movement", integrity=True)
+        raise _EvidenceError("feature.kind must be compute, movement or fixed", integrity=True)
     ident = str(row.get("id") or "")
     pointer = row.get("pointer")
     unit = str(row.get("unit") or "")
@@ -402,7 +406,7 @@ def _derive(
         "kind": feature["kind"],
         "effects": feature["effects"],
     }
-    if feature["kind"] == "compute":
+    if feature["kind"] in {"compute", "fixed"}:
         values = slope_sets["cycles_per_unit"]
         derived["cycles_per_unit"] = {"lo": float(min(values)), "hi": float(max(values))}
     else:

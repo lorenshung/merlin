@@ -22,8 +22,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from merlin.common import digest as _mdigest
+from merlin.common import jsonio as _mjson
+from merlin.perf.analytical_resources import compose_resource_times
 from merlin.perf.decompose import ResourceKind
-from merlin.perf.envelope import Basis, ResourceTime, compose
 from merlin.perf.headroom import Composition
 from merlin.xdsl_dialects.lowering.global_plan import CycleInterval
 
@@ -37,8 +39,6 @@ from .phase2_portfolio import (
     standard_four_model_quality_schema,
     unavailable_fast_evaluation,
 )
-from merlin.common import digest as _mdigest
-from merlin.common import jsonio as _mjson
 
 CALIBRATION_SCHEMA = "phase2_host_analytical_calibration_v1"
 PROVIDER_BINDING_SCHEMA = "host_fast_analytical_evaluator_binding_v1"
@@ -506,15 +506,10 @@ def _feature_cycles(feature: _Feature, count: float,
 
 
 def _compose(resources: Mapping[str, tuple[ResourceKind, float]], calibration: _Calibration) -> float:
-    times = tuple(ResourceTime(name, kind, value, "cycles", Basis.MOVED,
-                               evidence_kind="calibration_fit",
-                               provenance=("calibration sha256:"
-                                           + calibration.document_sha256))
-                  for name, (kind, value) in sorted(resources.items()))
-    result = compose(times, operator=calibration.composition, eta=calibration.composition_eta)
-    if not result.known:
-        raise ValueError("resource composition remained unresolved")
-    return float(result.cycles)
+    return compose_resource_times(
+        resources, operator=calibration.composition, eta=calibration.composition_eta,
+        provenance="calibration sha256:" + calibration.document_sha256,
+    )
 
 
 def _metrics(analysis: Mapping[str, Any], artifacts: Mapping[str, Any], arm: str,

@@ -21,11 +21,11 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from merlin.common import digest as _mdigest
+from merlin.common import jsonio as _mjson
 from merlin.perf import attribution as attribution_lib
 from merlin.perf import counter_harvest, headroom, hw_counters, movement_balance, phase2_feature_calibration
 from merlin.perf.decompose import ResourceKind, Unavailable
-from merlin.common import digest as _mdigest
-from merlin.common import jsonio as _mjson
 
 ADAPTER_SCHEMA = "phase2_host_analytical_calibration_adapter_v1"
 FEATURE_SCHEMA = phase2_feature_calibration.FEATURE_SCHEMA
@@ -351,7 +351,7 @@ def _feature_evidence(adapter: Mapping[str, Any], target_sha: str) -> tuple[
             path, receipt_sha = _verified_file(reference, field)
             document, _unused, _source = _load_json(path)
             kind = str(_mapping(document.get("feature")).get("kind") or "")
-            if kind in {"compute", "movement"}:
+            if kind in {"compute", "movement", "fixed"}:
                 validation = phase2_feature_calibration.validate_feature_calibration(
                     path, expected_target_sha256=target_sha)
                 for row in _sequence(validation.get("evidence_files")):
