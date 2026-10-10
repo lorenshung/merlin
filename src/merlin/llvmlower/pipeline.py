@@ -887,7 +887,7 @@ def build_rvv_pipeline(
 # act_poly runner called the PassManager directly, so every fork that also enabled
 # `vectorized_transcendental_activation` (the whole-model proposer enables it by default) got the
 # self-copy erase requested, reported as applied, and never run.
-from . import fusion_guard
+from . import fusion_guard, result_buffers
 from .alloca_scope_lower import RUNNER_PRELUDE as _ALLOCA_SCOPE_LOWER_PRELUDE
 from .broadcast_fold import RUNNER_PRELUDE as _BROADCAST_FOLD_PRELUDE
 from .concat_dps import RUNNER_PRELUDE as _CONCAT_DPS_PRELUDE
@@ -1438,7 +1438,6 @@ def _select_runner(
     from .ir_inspection import bind_inspection
     from .source_observation_stage import FEATURE as _SOURCE_OBSERVATION_FEATURE
     from .source_observation_stage import bind_runner as _bind_source_observation_runner
-    from .result_buffers import inject as guard_results
 
     if {"approximate_transcendental_activation", "vectorized_transcendental_activation"} & feats:
         source = _activation_poly_runner(emit, fused="fuse_activation_polynomial_fma" in feats)
@@ -1452,7 +1451,7 @@ def _select_runner(
     source = _bind_source_observation_runner(source, selected=_SOURCE_OBSERVATION_FEATURE in feats)
     # Every variant runs elementwise fusion under the broadcast control function (fusion_guard).
     return bind_inspection(
-        guard_results(fusion_guard.inject(source)),
+        result_buffers.inject(fusion_guard.inject(source)),
         inspection_dir,
         keep_exact=keep_exact,
         print_before=printing[0],
@@ -1665,15 +1664,9 @@ def lower_to_llvm_ir(
         source_observation_effects.validate()
     elif source_observation_effects is not None:
         raise PipelineError("source observation effects supplied without selected discovery feature")
-    from .llvm_loop_outline import (
-        FEATURE as _OUTLINE_LOOPS,
-    )
-    from .llvm_loop_outline import (
-        MERGE_FEATURE as _OUTLINE_MERGE_LOOPS,
-    )
-    from .llvm_loop_outline import (
-        outline_loops,
-    )
+    from .llvm_loop_outline import FEATURE as _OUTLINE_LOOPS
+    from .llvm_loop_outline import MERGE_FEATURE as _OUTLINE_MERGE_LOOPS
+    from .llvm_loop_outline import outline_loops
 
     if _OUTLINE_LOOPS in feats and _OUTLINE_MERGE_LOOPS in feats:
         raise PipelineError("Select one explicit LLVM loop outlining policy")
@@ -1744,9 +1737,7 @@ def lower_to_llvm_ir(
             pipeline = _parallel_pipeline(feats)  # multicore (OpenMP) scalar path — K1 big models
         else:
             pipeline = _upstream_pipeline(feats)
-    from .result_buffers import descriptor_results
-
-    pipeline = descriptor_results(pipeline, mlir_text)
+    pipeline = result_buffers.descriptor_results(pipeline, mlir_text)
     if index_bits is not None:
         if not data_layout:
             raise ValueError("explicit index width requires selected compiler data layout")
