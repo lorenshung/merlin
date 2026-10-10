@@ -32,7 +32,7 @@ from merlin.perf import lowering_coverage as _LOWERING_COVERAGE
 from . import capsule_runner as CR
 from . import coverage_report as CV
 from . import tier_integrity as _TIER_INTEGRITY
-from .capsule_common import NOT_MEASURED_STATUSES
+from .capsule_common import NOT_MEASURED_STATUSES, host_guards_pass, lane_entry_fields, readback_kw, score_lanes
 from .capsule_common import tier_field as _tier_field
 from .capsule_common import tier_status as _tier_status
 from .corpora import source_experiment_env
@@ -177,7 +177,7 @@ def candidate_native_model_check(result: dict, *, target: str, readback_policy=N
         native,
         target=target,
         entry_symbol=entry,
-        **({"readback_policy": readback_policy} if readback_policy is not None else {}),
+        **readback_kw(readback_policy),
     )
     numeric_status = (native.get("numeric") or {}).get("status") if isinstance(native, dict) else None
     if (
@@ -221,7 +221,7 @@ def candidate_native_model_check(result: dict, *, target: str, readback_policy=N
         target=target,
         entry_symbol=entry,
         completed_dispatch=dispatch,
-        **({"readback_policy": readback_policy} if readback_policy is not None else {}),
+        **readback_kw(readback_policy),
     )
     static_tiers = tier_check.get("tiers") or {}
     l2_mismatch = (
@@ -277,7 +277,7 @@ def candidate_native_model_check(result: dict, *, target: str, readback_policy=N
 
 
 def model_execution_check(
-    result: dict, capsule: dict | None = None, *, target: str | None = None, readback_policy=None,
+    result: dict, capsule: dict | None = None, *, target: str | None = None, readback_policy=None
 ) -> dict:
     """Return the model capsule's honest structural/effect evidence.
 
@@ -298,8 +298,9 @@ def model_execution_check(
         # model check. The old ledger cannot certify a different program.
         effective_target = target or (result.get("operation") or {}).get("target")
         candidate_check = candidate_native_model_check(
-            result, target=effective_target if isinstance(effective_target, str) else "",
-            **({"readback_policy": readback_policy} if readback_policy is not None else {}),
+            result,
+            target=effective_target if isinstance(effective_target, str) else "",
+            **readback_kw(readback_policy),
         )
         violations.extend(candidate_check["violations"])
         emitted_host_compute = candidate_check["emitted_host_compute"]
@@ -762,10 +763,7 @@ def enforce_model_execution_check(result: dict, capsule: dict | None, *, target:
     so those durable readers false-accepted it.  A wrong/missing required engine is ``incomplete`` (the
     requested evidence did not run), while malformed evidence from the requested engine is a real fail.
     """
-    check = model_execution_check(
-        result, capsule, target=target,
-        **({"readback_policy": readback_policy} if readback_policy is not None else {}),
-    )
+    check = model_execution_check(result, capsule, target=target, **readback_kw(readback_policy))
     result["model_execution_check"] = check
     if check.get("candidate_native_model_check") is not None:
         result["candidate_native_model_check"] = check["candidate_native_model_check"]
@@ -1328,8 +1326,7 @@ def grade(
             # child. Candidate result records cannot choose their own codec.
             readback_policy = CR._adapter_readback_policy(oracle_adapters or {})
             enforce_model_execution_check(
-                result, _caps_by_name.get(str(result.get("capsule"))), target=target,
-                **({"readback_policy": readback_policy} if readback_policy is not None else {}),
+                result, _caps_by_name.get(str(result.get("capsule"))), target=target, **readback_kw(readback_policy)
             )
             # The runner persisted the model result before this suite-level cross-record proof existed.
             # Keep the durable row in sync because QA/selfcheck/checkpoint consumers deliberately re-glob
@@ -1423,18 +1420,8 @@ def grade(
     ungraded = [r for r in results if r.get("status") == "not_graded"]
     deferred = [r for r in results if r.get("status") == "gated"]
     screened = [r for r in results if r.get("status") == "screened_only"]
-    graded = [r for r in results if r.get("status") not in NOT_MEASURED_STATUSES]
-    guards = [r for r in graded if r.get("scored") is False]
-    score["host_guard_total"] = len(guards)
-    score["host_guard_pass"] = sum(r["status"] == "pass" and r.get("lane") == "host" for r in guards)
-    graded = [r for r in graded if r.get("scored") is not False]
+    graded = score_lanes([r for r in results if r.get("status") not in NOT_MEASURED_STATUSES], score)
     n_pass = sum(1 for r in graded if r["status"] == "pass")
-    score["device_lane_scored_pass"] = sum(
-        r["status"] == "pass" and r.get("lane") == "device" and r.get("executed_instructions", 0) > 0 for r in graded
-    )
-    score["device_evidence_count"] = sum(
-        r.get("lane") == "device" and r.get("executed_instructions", 0) > 0 for r in graded
-    )
     score["n_capsules"] = len(graded)
     score["n_passed"] = n_pass
     score["n_not_graded_ineligible"] = len(ungraded)
@@ -1561,9 +1548,7 @@ def grade(
                 "generalizing over shape; `with_runtime_loop` is a statement about the pair."
             ),
         }
-    score["functional_pass"] = int(
-        n_pass == len(graded) and len(graded) > 0 and score["host_guard_pass"] == score["host_guard_total"]
-    )
+    score["functional_pass"] = int(n_pass == len(graded) and len(graded) > 0 and host_guards_pass(score))
     # Structure-only smoke bookkeeping (honest, never a numeric pass): a capsule is structurally clean
     # when it did not FAIL a structural tier — status `pass` OR `not_gradeable_no_oracle` (numeric verdict
     # withheld under --no-oracle). `gradeable` says whether this run had a numeric oracle at all.
@@ -1932,10 +1917,7 @@ def grade(
             for k in ("contract_obligations", "tiers_unexercised"):
                 if r.get(k):
                     entry[k] = r[k]
-        for key in ("lane", "executed_instructions", "cohort", "scored"):
-            if key in r:
-                entry[key] = r[key]
-        score["per_capsule"].append(entry)
+        score["per_capsule"].append({**entry, **lane_entry_fields(r)})
 
     # active-vs-waiting rollup: wall is the suite wall-clock (overlapped under parallelism); the sum of
     # active_sim across capsules can exceed wall (that ratio IS the parallel speedup). oracle_wait_s is

@@ -34,6 +34,7 @@ from merlin.common.artifacts import cache_dir  # noqa: E402 — purgeable work t
 from merlin.targetgen import capsule_grade as CG  # noqa: E402
 from merlin.targetgen import capsule_runner as CR  # noqa: E402
 from merlin.targetgen import tier_integrity as _TI  # noqa: E402
+from merlin.targetgen.capsule_common import host_guards_pass, lane_entry_fields  # noqa: E402
 from merlin_experiments.phase1.context import InvocationContext, add_context_arguments, readback_kwargs, resolve_context
 
 # Allowed (answer-free) numeric fields. Everything else in the numeric block is dropped.
@@ -875,9 +876,7 @@ def run(
                 "execution_digest": rich.get("execution_digest"),
             }
         )
-        for key in ("lane", "executed_instructions", "cohort", "scored"):
-            if key in pc:
-                per_capsule[-1][key] = pc[key]
+        per_capsule[-1].update(lane_entry_fields(pc))
         if rich.get("placement_coverage"):
             per_capsule[-1]["placement_coverage"] = rich["placement_coverage"]
         if rich.get("candidate_native_verification") is not None:
@@ -983,7 +982,8 @@ def run(
     for key in ("device_lane_scored_pass", "device_evidence_count", "host_guard_pass", "host_guard_total"):
         if key in score:
             verdict[key] = score[key]
-    if score.get("host_guard_pass", 0) < score.get("host_guard_total", 0):
+    # Guards are recorded only by a grade that saw them; a failed host guard fails the round.
+    if "host_guard_total" in score and not host_guards_pass(score):
         verdict["all_pass"] = False
     # AN INFRASTRUCTURE FAULT IS NOT A ROUND RESULT. `grade` already refuses to call such a run
     # gradeable, but this verdict is what gets ARCHIVED as qa_history/verdict_round_NN.json, fed to the

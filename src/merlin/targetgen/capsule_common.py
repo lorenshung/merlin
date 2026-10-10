@@ -569,3 +569,39 @@ def lower_interface(
 
         memo[memo_key] = (cb_path.read_text(encoding="utf-8"), copy.deepcopy(cb), _artifact)
     return cb, _artifact
+
+
+#: Per-capsule result fields recording which execution lane and cohort a verdict rests on.
+LANE_FIELDS = ("lane", "executed_instructions", "cohort", "scored")
+
+
+def score_lanes(graded: list[dict], score: dict) -> list[dict]:
+    """Split unscored host guards from scored rows and record lane evidence in ``score``.
+
+    A row marked ``scored: False`` is a host guard: it must pass on the host lane for the suite
+    to pass (:func:`host_guards_pass`), but never counts toward the scored capsule total. A device
+    lane count requires executed instructions as evidence, never the lane label alone.
+    """
+    guards = [r for r in graded if r.get("scored") is False]
+    score["host_guard_total"] = len(guards)
+    score["host_guard_pass"] = sum(r["status"] == "pass" and r.get("lane") == "host" for r in guards)
+    scored = [r for r in graded if r.get("scored") is not False]
+    device = [r for r in scored if r.get("lane") == "device" and r.get("executed_instructions", 0) > 0]
+    score["device_lane_scored_pass"] = sum(r["status"] == "pass" for r in device)
+    score["device_evidence_count"] = len(device)
+    return scored
+
+
+def host_guards_pass(score: dict) -> bool:
+    """Every host guard recorded by :func:`score_lanes` passed on the host lane."""
+    return score["host_guard_pass"] == score["host_guard_total"]
+
+
+def lane_entry_fields(result: dict) -> dict:
+    """The lane/cohort qualifiers a roll-up entry must carry with its verdict."""
+    return {key: result[key] for key in LANE_FIELDS if key in result}
+
+
+def readback_kw(readback_policy) -> dict:
+    """Forward a selected readback policy only; an absent one keeps the callee's own default."""
+    return {} if readback_policy is None else {"readback_policy": readback_policy}
