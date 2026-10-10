@@ -711,8 +711,11 @@ def build_loader_src(spec: dict) -> str:
     from .capsule_builtin_source import render_builtin_source
 
     return render_builtin_source(
-        spec, preamble=_PREAMBLE, integer_matmul=_INT_MATMUL,
-        parametric_linear=_PARAMETRIC_LINEAR, bodies=_OP_BODIES,
+        spec,
+        preamble=_PREAMBLE,
+        integer_matmul=_INT_MATMUL,
+        parametric_linear=_PARAMETRIC_LINEAR,
+        bodies=_OP_BODIES,
         input_names=_OP_INPUT_NAMES | _FUSED_OP_INPUT_NAMES,
     )
 
