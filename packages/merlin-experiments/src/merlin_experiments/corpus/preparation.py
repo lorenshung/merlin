@@ -38,7 +38,14 @@ def ordinary_tree(path: Path) -> None:
             raise SpecError("corpus release source contains symlinked or nonregular entries")
 
 
-def copy_input(source: Path, destination: Path, *, private: bool = False, expected_sha256: str | None = None) -> str:
+def copy_input(
+    source: Path,
+    destination: Path,
+    *,
+    private: bool = False,
+    expected_sha256: str | None = None,
+    preserve_permissions: bool = False,
+) -> str:
     from merlin.common import content_store
 
     from ..runner import fingerprint
@@ -51,11 +58,13 @@ def copy_input(source: Path, destination: Path, *, private: bool = False, expect
     # Private and public inputs may independently contain identical bytes. Do
     # not merge their storage identities: an inode alias is an answer surface,
     # while byte equality alone does not make a declared public input private.
+    # ``preserve_permissions`` keeps a host-only answer's owner-only access instead of the
+    # frozen 0444 default; it also drops write bits, so only final answer copies select it.
     store = None if private else content_store.store_root()
     if source.is_dir():
-        content_store.place_tree(source, destination, store)
+        content_store.place_tree(source, destination, store, preserve_permissions=preserve_permissions)
     else:
-        content_store.place_file(source, destination, store)
+        content_store.place_file(source, destination, store, preserve_permissions=preserve_permissions)
     if fingerprint(source) != before or fingerprint(destination) != before:
         raise SpecError("corpus release source changed while copying; prepare a new release")
     return before
@@ -694,7 +703,7 @@ def assemble(
         replacements.append({"member": key, "previous_sha256": previous_sha, "sha256": digest})
     answer_copies = {}
     for key, source in sorted(answer_sources.items()):
-        answer_copies[key] = copy_input(source, destination / "_private" / key, private=True)
+        answer_copies[key] = copy_input(source, destination / "_private" / key, private=True, preserve_permissions=True)
     if (generated_answers / "stage.json").is_file():
         copy_input(generated_answers / "stage.json", destination / "_private" / "stage.json", private=True)
     final_members = _members(destination)
