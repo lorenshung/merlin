@@ -432,12 +432,6 @@ def _encode(value: Any, *, values: bool = True) -> Any:
     raise TypeError(f"cannot encode Core ATen case value {type(value).__name__}")
 
 
-def encode_value(value: Any, *, values: bool = True) -> Any:
-    """Encode a runtime value with the corpus's portable JSON value schema."""
-
-    return _encode(value, values=values)
-
-
 def decode_value(document: Any) -> Any:
     """Reconstruct a corpus value without depending on Merlin or a compiler.
 
@@ -513,23 +507,6 @@ def decode_arguments(document: Mapping[str, Any]) -> Arguments:
     if not isinstance(args, tuple) or not isinstance(kwargs, dict):
         raise ValueError("invalid Core ATen argument document")
     return args, kwargs
-
-
-def validate_result(case: Mapping[str, Any], actual: Any) -> None:
-    """Validate a backend result using the comparison policy embedded in a case document."""
-
-    import torch
-
-    comparison = case["comparison"]
-    if comparison == "metadata":
-        observed = _encode(actual, values=False)
-        if observed != case["expected"]:
-            raise AssertionError(f"metadata mismatch: expected {case['expected']!r}, got {observed!r}")
-        return
-    if comparison != "torch_close":
-        raise ValueError(f"unknown Core ATen comparison policy: {comparison!r}")
-    parameters = case.get("comparison_parameters") or {}
-    torch.testing.assert_close(actual, decode_value(case["expected"]), **parameters)
 
 
 def invoke_case(case: CoreAtenCase) -> Any:

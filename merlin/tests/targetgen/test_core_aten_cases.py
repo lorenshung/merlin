@@ -9,18 +9,28 @@ from merlin.targetgen.core_aten_capture import loader_source
 from merlin.targetgen.core_aten_cases import (
     _aliases,
     _changed,
+    _encode,
     _tensor_snapshot,
     case_document,
     core_aten_cases,
     corpus_document,
     decode_arguments,
     decode_value,
-    encode_value,
     resolve_overload,
-    validate_result,
 )
 
 torch = pytest.importorskip("torch")
+
+
+def validate_result(case: dict, actual) -> None:
+    """Eager oracle check against the comparison policy embedded in a case document."""
+    comparison = case["comparison"]
+    if comparison == "metadata":
+        observed = _encode(actual, values=False)
+        assert observed == case["expected"], f"metadata mismatch: expected {case['expected']!r}, got {observed!r}"
+        return
+    assert comparison == "torch_close", f"unknown Core ATen comparison policy: {comparison!r}"
+    torch.testing.assert_close(actual, decode_value(case["expected"]), **(case.get("comparison_parameters") or {}))
 
 
 @pytest.fixture(scope="module")
@@ -75,7 +85,7 @@ def test_factories_return_fresh_mutable_arguments() -> None:
 def test_portable_tensor_round_trip_preserves_nonzero_storage_offset() -> None:
     tensor = torch.arange(12, dtype=torch.float32).reshape(3, 4)[1:, 1:]
     assert tensor.storage_offset() != 0
-    rebuilt = decode_value(encode_value(tensor))
+    rebuilt = decode_value(_encode(tensor))
     torch.testing.assert_close(rebuilt, tensor)
     assert rebuilt.shape == tensor.shape
     assert rebuilt.stride() == tensor.stride()
@@ -83,14 +93,14 @@ def test_portable_tensor_round_trip_preserves_nonzero_storage_offset() -> None:
 
 
 def test_nonfinite_complex_and_zero_stride_nan_round_trip_as_strict_json() -> None:
-    complex_document = encode_value(complex(float("nan"), float("inf")))
+    complex_document = _encode(complex(float("nan"), float("inf")))
     json.dumps(complex_document, allow_nan=False)
     rebuilt_complex = decode_value(complex_document)
     assert torch.isnan(torch.tensor(rebuilt_complex.real))
     assert rebuilt_complex.imag == float("inf")
 
     expanded = torch.tensor([float("nan")]).expand(3)
-    expanded_document = encode_value(expanded)
+    expanded_document = _encode(expanded)
     json.dumps(expanded_document, allow_nan=False)
     rebuilt_expanded = decode_value(expanded_document)
     assert rebuilt_expanded.stride() == (0,)
