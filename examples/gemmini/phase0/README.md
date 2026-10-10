@@ -38,6 +38,40 @@ derivation input.
 The small hand-authored g0–g2 interface samples in [reference/](reference/)
 exercise the historical OOT contract; they are not a generated Phase 0 release.
 Generated capsules, weights and goldens are artifacts, never committed examples.
+
+Compiler fixes have reviewed regression inputs in
+[`compiler-regression-selection.yaml`](compiler-regression-selection.yaml) and
+the shared [`compiler-regression-calls.yaml`](../../../experiments/reference-data/phase0/compiler-regression-calls.yaml).
+The shared [`compiler-regression-fixes.yaml`](../../../experiments/reference-data/phase0/compiler-regression-fixes.yaml)
+maps each fix to a call obligation or an infrastructure pytest. These are public
+development inputs, separate from default derived-only release membership.
+The device selection links the existing transposed-RHS sealed capsule rather
+than adding a duplicate. Input shapes and strides describe retained calls;
+they do not override extracted hardware geometry or instruction encodings.
+
+Generate the generic corpus with the controller environment and an explicitly
+selected Torch/model2MLIR interpreter:
+
+```sh
+python -m merlin_experiments.phase0.regression_capsules \
+  --spec experiments/reference-data/phase0/compiler-regression-calls.yaml \
+  --output "$REGRESSION_OUTPUT" --m2m-dir "$MODEL2MLIR_ROOT" \
+  --python "$CAPTURE_PYTHON"
+```
+
+Choose a fresh `REGRESSION_OUTPUT` beneath `merlin.common.paths.artifacts_dir()`.
+For the device inputs, use `--selection examples/gemmini/phase0/compiler-regression-selection.yaml`
+with explicit `--cases` and `--captures` owners from the retained public overlay.
+The existing writer packages the selected calls and keeps eager answers in a
+separate owner-only directory. Unavailable captures remain explicit in
+`packaging.json`; they cannot count as generated or passing capsules. Repeated
+generation preserves program/input bytes for the same selected tool and inputs;
+capture location receipts and private commitments remain run-specific.
+Promoting these calls into a release still requires an explicit reviewed
+retained-call cohort selection through `core_aten_stage`, followed by its
+receipt-bound derivation. Neither this command nor the regression seeds bypass
+`capsule_policy: derived_only` or certify numerical/device execution.
+
 Read [the shared specification guide](../../../docs/guides/phase0_specification.md)
 for what belongs in a SW spec versus extracted evidence.
 
