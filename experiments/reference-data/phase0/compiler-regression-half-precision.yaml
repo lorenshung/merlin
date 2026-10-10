@@ -1,5 +1,5 @@
 # Reviewed public half-precision call inputs; no stored answers or verdicts.
-# Uses the origin/fix-capsules convention, which is not merged into core-aten.
+# Uses the shared merlin.regression_calls.v1 input convention.
 schema: merlin.regression_calls.v1
 calls:
 - case_id: regression::bfloat16_scalar_opmath
