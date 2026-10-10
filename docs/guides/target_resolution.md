@@ -3,7 +3,7 @@ title: Selecting a target definition package
 kind: guide
 status: current
 owner: targetgen
-last_verified: 2026-10-08
+last_verified: 2026-10-10
 related: [adding_a_target, generated_target_repos, targetgen, target_publishing]
 code_refs: [src/merlin/targetgen/target_registry.py, src/merlin/targetgen/providers.py, src/merlin/targetgen/capability_manifests.py, build_tools/upstreams/target_support.json]
 ---

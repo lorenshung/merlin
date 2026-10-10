@@ -3,7 +3,7 @@ title: "Source-numerics probe findings: whole-model gates, accumulation order an
 kind: design
 status: current
 owner: core
-last_verified: 2026-10-08
+last_verified: 2026-10-10
 related: [ordered_fma_certificates, optional_passes, source_attention_bound_strategies]
 code_refs:
   - src/merlin/llvmlower/cpu_f32_matmul.py
