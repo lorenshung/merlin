@@ -52,3 +52,19 @@ def runner_options():
         "extlib": prefix / "lib" / "libgemmini.so",
         "path_prepend": [prefix.parent / "bin"],
     }
+
+
+def full_call_oracle(target):
+    """Use submitted source-bound device catalogs at the full-call L2 boundary."""
+    from merlin.targetgen.rtl.facts import ensure_facts
+    from merlin.targetgen.spike_full_call import full_call_adapter
+    from merlin.targetgen.target_experiment import load_capability_manifest
+
+    isa = load_capability_manifest(target).contract["isa"]["march"]
+    return full_call_adapter(
+        target,
+        isa=isa,
+        runner_options=runner_options(),
+        execution_provider=Path(__file__),
+        rtl_facts=ensure_facts(target),
+    )
