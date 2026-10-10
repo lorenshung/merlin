@@ -25,7 +25,9 @@ from merlin.targetgen.core_aten_overlay import (
     validate_overlay,
 )
 
-_ABI_HEADER = Path("examples/gemmini/phase1/contracts/harness_curated/gemmini-rocc-tests/include/gemmini_params.h")
+#: The ISA headers are not vendored here; they are read from the pinned checkout (hardware_pins.yaml).
+_ISA_HEADERS_PIN = "gemmini_isa_headers"
+_ABI_HEADER = "include/gemmini_params.h"
 _TARGET_CONTRACT = Path("examples/gemmini/target/contracts/target_contract.yaml")
 _CONFORMANCE = Path("experiments/reference-data/phase0/conformance/gemmini.yaml")
 
@@ -47,10 +49,20 @@ def _macro(text: str, name: str) -> int:
     raise RuntimeError(f"Gemmini ABI header does not define integer macro {name}")
 
 
-def gemmini_profile() -> dict[str, Any]:
-    """Read and validate the pinned Gemmini configuration used to derive the overlay."""
+def gemmini_profile(header_root: Path | None = None) -> dict[str, Any]:
+    """Read and validate the pinned Gemmini configuration used to derive the overlay.
 
-    header_path = repo_root() / _ABI_HEADER
+    The ABI header comes from the ``gemmini_isa_headers`` pin's checkout (or an explicitly selected
+    root), and must match the pinned bytes; an unselected or off-pin header refuses.
+    """
+    from merlin.common import provenance
+
+    pin = provenance.pin(_ISA_HEADERS_PIN)
+    root = Path(header_root) if header_root is not None else pin.checkout()
+    if root is None:
+        raise RuntimeError(f"{pin.root_env} is unset; select the pinned {_ISA_HEADERS_PIN} checkout")
+    provenance.require(_ISA_HEADERS_PIN, checkout=root, reads=[_ABI_HEADER])
+    header_path = root / _ABI_HEADER
     contract_path = repo_root() / _TARGET_CONTRACT
     conformance_path = repo_root() / _CONFORMANCE
     header = header_path.read_text(encoding="utf-8")
@@ -84,7 +96,7 @@ def gemmini_profile() -> dict[str, Any]:
         "hardware_config": "GemminiRocketConfig",
         "facts": facts,
         "sources": [
-            {"path": str(_ABI_HEADER), "sha256": _sha256(header_path)},
+            {"pin": _ISA_HEADERS_PIN, "commit": pin.commit, "path": _ABI_HEADER, "sha256": _sha256(header_path)},
             {"path": str(_TARGET_CONTRACT), "sha256": _sha256(contract_path)},
             {"path": str(_CONFORMANCE), "sha256": _sha256(conformance_path)},
         ],
