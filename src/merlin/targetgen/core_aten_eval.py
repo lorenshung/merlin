@@ -163,7 +163,9 @@ def _assert_document_close(expected: Any, observed: Any, *, rtol: float, atol: f
         raise AssertionError(f"value mismatch: expected {expected!r}, got {observed!r}")
 
 
-def _validate_observation(case: Mapping[str, Any], observation: Mapping[str, Any]) -> None:
+def _validate_observation(
+    case: Mapping[str, Any], observation: Mapping[str, Any], *, allow_unobserved_autograd: bool = False
+) -> None:
     required = {
         "status",
         "execution_kind",
@@ -177,6 +179,34 @@ def _validate_observation(case: Mapping[str, Any], observation: Mapping[str, Any
         raise AssertionError(f"observation is incomplete; missing {missing}")
     if observation["status"] != "executed":
         raise AssertionError(f"case was not executed: {observation['status']}")
+    scope = observation.get("semantic_scope", "full")
+    imposed = observation.get("imposed_by_harness", [])
+    if scope == "values+mutation+observed-metadata":
+        if not allow_unobserved_autograd or imposed != ["requires_grad"]:
+            raise AssertionError("unsupported unobserved boundary fields")
+        from merlin.targetgen.core_aten_semantics import tensor_paths
+
+        for key in ("output", "post_arguments"):
+            if any(doc.get("requires_grad") is not None for _, doc in tensor_paths(observation[key], "")):
+                raise AssertionError("autograd observation disagrees with scope marker")
+
+        def exclude_autograd(value):
+            if isinstance(value, dict):
+                return {
+                    key: None if key == "requires_grad" and value.get("kind") == "tensor" else exclude_autograd(item)
+                    for key, item in value.items()
+                }
+            if isinstance(value, list):
+                return [exclude_autograd(item) for item in value]
+            return value
+
+        case = {
+            **case,
+            "expected": exclude_autograd(case["expected"]),
+            "post_arguments": exclude_autograd(case["post_arguments"]),
+        }
+    elif scope != "full" or imposed:
+        raise AssertionError("unsupported semantic scope")
     parameters = case.get("comparison_parameters") or {}
     rtol = float(parameters.get("rtol", 0.0))
     atol = float(parameters.get("atol", 0.0))
@@ -571,6 +601,8 @@ def evaluate_bounded_core_aten_suite(
                 "reason": str(observation.get("reason") or "case did not execute"),
                 "overload": case["overload"],
                 "evidence": observation.get("evidence") or {},
+                "semantic_scope": observation.get("semantic_scope", "full"),
+                "imposed_by_harness": observation.get("imposed_by_harness", []),
             }
             continue
         if observation.get("execution_kind") != required_execution_kind:
@@ -579,23 +611,29 @@ def evaluate_bounded_core_aten_suite(
                 "reason": f"required {required_execution_kind!r}, observed {observation.get('execution_kind')!r}",
                 "overload": case["overload"],
                 "evidence": observation.get("evidence") or {},
+                "semantic_scope": observation.get("semantic_scope", "full"),
+                "imposed_by_harness": observation.get("imposed_by_harness", []),
             }
             continue
         try:
             _validate_execution_evidence(adapter, case, observation, required_execution_kind)
-            _validate_observation(case, observation)
+            _validate_observation(case, observation, allow_unobserved_autograd=True)
         except Exception as exc:  # noqa: BLE001 -- comparisons belong in the per-case ledger
             verdicts[identifier] = {
                 "status": "semantic_mismatch",
                 "reason": f"{type(exc).__name__}: {exc}",
                 "overload": case["overload"],
                 "evidence": observation.get("evidence") or {},
+                "semantic_scope": observation.get("semantic_scope", "full"),
+                "imposed_by_harness": observation.get("imposed_by_harness", []),
             }
         else:
             verdicts[identifier] = {
                 "status": "pass",
                 "overload": case["overload"],
                 "evidence": observation.get("evidence") or {},
+                "semantic_scope": observation.get("semantic_scope", "full"),
+                "imposed_by_harness": observation.get("imposed_by_harness", []),
             }
     counts: dict[str, int] = {}
     for verdict in verdicts.values():
