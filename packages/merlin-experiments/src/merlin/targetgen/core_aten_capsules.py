@@ -255,7 +255,7 @@ def runtime_bundle(capsule: dict, destination: Path) -> dict:
     return golden["batch_map"]
 
 
-def run_capsule(capsule, package_dir, *, paths, config, adapters, pkg, contract, timeout, no_oracle):
+def run_capsule(capsule, package_dir, paths, config, adapters, pkg, contract, timeout, no_oracle):
     """Compile through the standard package ABI; compare executed candidate boundary bytes.
 
     An adapter may implement ``run_full_call(bundle, llvm_mlir, target, timeout)`` for

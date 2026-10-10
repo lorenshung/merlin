@@ -18,6 +18,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from merlin.targetgen import oracle_policy as _oracle_policy
+
 DEFAULT_ARENA_MB = 256
 
 
@@ -188,6 +190,27 @@ def sim_adapters(target: str) -> dict:
     return {"L2": full_call_adapter(target, isa=_contract_isa(target))}
 
 
+def declared(target: str):
+    """The L2 full-call oracle a target's contract selects through ``runner.full_call_provider``.
+
+    The provider path is a declared contract fact (repo-relative or absolute) and the provider
+    module owns its ``full_call_oracle(target)``; None when the contract selects no provider.
+    """
+    from merlin.common.paths import repo_root
+    from merlin.targetgen.plugins import load_module
+    from merlin.targetgen.target_experiment import load_capability_manifest
+
+    runner = load_capability_manifest(target).contract.get("runner") or {}
+    provider_path = runner.get("full_call_provider")
+    if not provider_path:
+        return None
+    provider_path = Path(provider_path)
+    if not provider_path.is_absolute():
+        provider_path = repo_root() / provider_path
+    provider = load_module(provider_path.parent, provider_path.name, package_name="full_call_execution")
+    return provider.full_call_oracle(target)
+
+
 def sim_available(target: str) -> tuple[bool, str]:
     from merlin.runtime.backends.spike import spike_path
 
@@ -199,3 +222,7 @@ def sim_available(target: str) -> tuple[bool, str]:
     except Exception as exc:  # noqa: BLE001 -- unreadable contract means not gradeable
         return False, f"{target!r}: {exc}"
     return True, f"{target!r}: spike functional oracle available (isa {isa})"
+
+
+# The module that owns the plain-ISA adapters binds them; late lookup keeps monkeypatches effective.
+_oracle_policy.bind_sim_oracle_adapters("spike", lambda target: sim_adapters(target))

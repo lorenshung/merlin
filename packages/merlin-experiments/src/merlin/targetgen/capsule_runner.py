@@ -38,7 +38,9 @@ import yaml
 if TYPE_CHECKING:
     from aet.core.run_paths import RunPaths
 
+from . import core_aten_capsules as _full_call
 from . import oracle_policy as _oracle_policy
+from . import spike_full_call as _spike_oracles  # also binds the plain-ISA spike engine
 from . import tier_policy as _tier_policy
 from .oracle_policy import (  # noqa: F401 — stable public/legacy registry identity
     _SIM_ORACLES,
@@ -54,29 +56,13 @@ from .oracle_policy import (  # noqa: F401 — stable public/legacy registry ide
     register_sim_oracle,
     sim_oracle_caps,
 )
-from .runner_config import (  # noqa: F401 — shared config and stable legacy identities
-    CONVENTIONAL_RTL_TIERS as _RTL_TIERS,
-)
-from .runner_config import (
-    CONVENTIONAL_TIER_SIM as _TIER_SIM,  # noqa: F401 — stable legacy export
-)
-from .runner_config import (
-    _config_for_target,
-    _default_config,  # noqa: F401 — stable legacy export
-)
+from .runner_config import CONVENTIONAL_RTL_TIERS as _RTL_TIERS  # noqa: F401 — stable legacy identity
+from .runner_config import CONVENTIONAL_TIER_SIM as _TIER_SIM  # noqa: F401 — stable legacy export
+from .runner_config import _config_for_target, _default_config  # noqa: F401 — stable legacy export
 
 # Core owns metadata. This optional evaluator supplies concrete adapters through
 # injection; late lookup preserves existing monkeypatches of _sim_engine_adapters.
 _oracle_policy.bind_sim_oracle_adapters("chipyard", lambda target: _sim_engine_adapters("chipyard", target))
-
-
-def _spike_adapters(target: str) -> dict:
-    from . import spike_full_call
-
-    return spike_full_call.sim_adapters(target)
-
-
-_oracle_policy.bind_sim_oracle_adapters("spike", _spike_adapters)
 
 # Most capsules the suite will run SERIALLY to price the tier ladder before fanning out. Small:
 # the loop stops as soon as a capsule prices nothing new, and this only bounds the pathological
@@ -1126,19 +1112,7 @@ def _sim_engine_adapters(sim_via: str, target: str) -> dict[str, Callable]:
     tier still carries the grade). A new bespoke sim registers one branch here — the engine name is
     DERIVED from the target's contract, never assumed."""
     if sim_via == "chipyard":
-        adapters: dict[str, Callable] = {"L2": simulator_adapter("spike", target)}
-        from merlin.common.paths import repo_root
-        from merlin.targetgen.plugins import load_module
-        from merlin.targetgen.target_experiment import load_capability_manifest
-
-        runner = load_capability_manifest(target).contract.get("runner") or {}
-        provider_path = runner.get("full_call_provider")
-        if provider_path:
-            provider_path = Path(provider_path)
-            if not provider_path.is_absolute():
-                provider_path = repo_root() / provider_path
-            provider = load_module(provider_path.parent, provider_path.name, package_name="full_call_execution")
-            adapters["L2"] = provider.full_call_oracle(target)
+        adapters: dict[str, Callable] = {"L2": _spike_oracles.declared(target) or simulator_adapter("spike", target)}
         plan = _oracle_policy.chipyard_tier_plan(target)
         if plan.selection is None:
             # Reported, not substituted. A tier that cannot run must come back absent; resolving it to
@@ -3059,7 +3033,9 @@ def _grade_candidate_model_capsule_inline(
         # for diagnosis, but never feed that receipt to the pass gate.
         result.pop("candidate_native_execution", None)
     return enforce_model_execution_check(
-        result, capsule, target=target,
+        result,
+        capsule,
+        target=target,
         **({"readback_policy": readback_policy} if readback_policy is not None else {}),
     )
 
@@ -4949,21 +4925,8 @@ def run_capsule(
 
     paths = make_run_paths(runs_root, run_id, suite=cfg.suite, target=cfg.target, dtype=cfg.dtype, benchmark=name)
 
-    from . import core_aten_capsules
-
-    if core_aten_capsules.is_full_call(capsule):
-        return core_aten_capsules.run_capsule(
-            capsule,
-            package_dir,
-            paths=paths,
-            config=cfg,
-            adapters=adapters,
-            pkg=pkg,
-            contract=contract,
-            timeout=timeout,
-            no_oracle=no_oracle,
-        )
-
+    if _full_call.is_full_call(capsule):  # exported call boundary, graded by its own adapter ABI
+        return _full_call.run_capsule(capsule, package_dir, paths, cfg, adapters, pkg, contract, timeout, no_oracle)
     # Whole-model capsule: graded end to end by compiling the captured model through the merlin
     # whole-model flow (compile_rvv) and gating vs its golden — NOT the per-op tier ladder. Write the
     # same capsule_result.json shape so downstream reporting is uniform.
