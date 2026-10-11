@@ -206,6 +206,8 @@ def run_spike_bundle(
         with selected_facts(target, rtl_facts) if target else nullcontext(None) as facts:
             routing, reason, options = None, "scalar mode", {}
             if target:
+                provider = load_execution_provider(target, execution_provider)
+                selected_provider = Path(provider.__file__)
                 if numeric_policy == "spec_int8":
                     stage = "numeric_preparation"
                     from merlin.targetgen.core_aten_numeric import prepare_spec_int8
@@ -221,6 +223,8 @@ def run_spike_bundle(
                         facts=facts,
                         software_spec=Path(spec_path),
                         host_capabilities=Path(host_path),
+                        provider=provider,
+                        package=device_package,
                     )
                 if numeric_policy == "int8_w8a8":
                     stage = "numeric_preparation"
@@ -238,7 +242,7 @@ def run_spike_bundle(
                     preparation = prepare(directory, target=target, facts=facts)
                     report["source_preparation"] = preparation
                     bundled[0]["source_preparation"] = preparation
-                if numeric_policy == "spec_int8":
+                if numeric_policy == "spec_int8" and not report["numeric_preparation"]["quantized_contractions"]:
                     plan = report["numeric_preparation"]
                     reason = "; ".join(dict.fromkeys(reason for site in plan["sites"] for reason in site["reasons"]))
                     reason = reason or "no contraction in captured source; original host execution retained"

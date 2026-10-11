@@ -401,7 +401,7 @@ def classify(op) -> Stage | None:
         return Stage(ROUND)
     if kinds and kinds <= _CAST:
         return Stage(CAST)
-    return Stage(ELEMENTWISE, detail=" ".join(sorted(kinds)))
+    return Stage(RELU) if CC.is_compare_select_relu(op) else Stage(ELEMENTWISE, detail=" ".join(sorted(kinds)))
 
 
 def _broadcast_dims(value) -> tuple[int, ...] | None:

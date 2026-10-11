@@ -114,3 +114,109 @@ def contraction_partition(receipt: dict) -> dict[str, int]:
     if refused != preserved:
         raise ValueError("preserved-precision decisions and refusal inventory differ")
     return {"seen": seen, "integerized": integerized, "preserved": remaining}
+
+
+def combine_static_readout_scales(model):
+    """Realize one f32 product constant and one multiply after the i32 cast.
+
+    Only the canonical per-tensor readout emitted by the selected frontend is
+    accepted. This is a capture transform, before Model2MLIR conversion.
+    """
+    import math
+
+    import torch
+
+    graph = model.graph
+    products = []
+    processed_casts = set()
+    candidates = []
+    views = {
+        torch.ops.aten.reshape.default,
+        torch.ops.aten.permute.default,
+        torch.ops.aten.add.Tensor,
+        torch.ops.aten.clone.default,
+    }
+    for final in graph.nodes:
+        if "pt2e_integerized_from" not in final.meta:
+            continue
+        value = final
+        while value.target in views:
+            value = value.args[0]
+        candidates.append(value)
+    for second in candidates:
+        if second.target != torch.ops.aten.mul.Tensor or len(second.args) != 2:
+            continue
+        first, rhs = second.args
+        if not isinstance(first, torch.fx.Node) or first.target != torch.ops.aten.mul.Tensor:
+            continue
+        cast, lhs = first.args
+        if (
+            not isinstance(cast, torch.fx.Node)
+            or cast.target != torch.ops.aten._to_copy.default
+            or cast.kwargs.get("dtype") != torch.float32
+            or not isinstance(cast.args[0], torch.fx.Node)
+            or cast.args[0].target not in (torch.ops.aten._int_mm.default, torch.ops.aten.reshape.default)
+            or type(lhs) not in (int, float)
+            or type(rhs) not in (int, float)
+            or len(first.users) != 1
+        ):
+            continue
+        if cast in processed_casts:
+            continue
+        processed_casts.add(cast)
+        product = torch.tensor(
+            float(torch.tensor(lhs, dtype=torch.float32)) * float(torch.tensor(rhs, dtype=torch.float32)),
+            dtype=torch.float32,
+        ).item()
+        if not math.isfinite(product) or product < torch.finfo(torch.float32).tiny:
+            raise ValueError("static readout scale product must be finite normal f32")
+        second.args = (cast, product)
+        graph.erase_node(first)
+        products.append(product)
+    if not products:
+        raise ValueError("no canonical static per-tensor integer readout")
+    graph.lint()
+    model.recompile()
+    return products
+
+
+def integerize_static_pt2e(model, inputs):
+    """Reuse frontend integerization while preserving each source result layout.
+
+    The frontend's conv rewrite computes its i32 matrix in patch order and
+    exposes an NHWC-backed NCHW view. Materialize the source's own dense output
+    layout after the readout; its rank and arithmetic are unchanged.
+    """
+    import torch
+    from m2m.capture.pt2e_integerize import integerize_pt2e
+
+    layouts = {}
+    for node in model.graph.nodes:
+        value = node.meta.get("val")
+        if node.target == torch.ops.aten.conv2d.default and isinstance(value, torch.Tensor):
+            if value.is_contiguous():
+                layout = torch.contiguous_format
+            elif value.is_contiguous(memory_format=torch.channels_last):
+                layout = torch.channels_last
+            else:
+                raise ValueError("integer convolution source has no supported dense result layout")
+            layouts[node.name] = (layout, list(value.stride()))
+    model, receipt = integerize_pt2e(model, inputs)
+    restorations = []
+    graph = model.graph
+    for node in list(graph.nodes):
+        source = node.meta.get("pt2e_integerized_from")
+        if source not in layouts:
+            continue
+        layout, stride = layouts[source]
+        with graph.inserting_after(node):
+            restored = graph.call_function(torch.ops.aten.clone.default, args=(node,), kwargs={"memory_format": layout})
+        node.replace_all_uses_with(restored)
+        restored.args = (node,)
+        restored.meta = dict(node.meta)
+        node.meta.pop("pt2e_integerized_from")
+        restorations.append({"source": source, "stride": stride, "memory_format": str(layout)})
+    graph.lint()
+    model.recompile()
+    receipt["result_layout_restorations"] = restorations
+    return model, receipt

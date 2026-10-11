@@ -531,5 +531,10 @@ def test_stamp_reads_descriptor_and_runtime_sources(tmp_path, monkeypatch):
         for name in ("result_layout.py", "pipeline.py", "result_buffers.py", "c_runtime.py")
     ]
     expected += ["merlin/runtime/abi/mlir_runtime.c", "src/merlin/runtime/backends/spike_model.py"]
+    expected += [
+        "src/merlin/targetgen/" + name
+        for name in ("_recipe_quantizer.py", "_m2m_capture_worker.py", "quant_recipe.py", "capture_cache.py")
+    ]
+    expected.append("src/merlin/capture/integerization.py")
     assert all(tmp_path / path in stamp["sources"] for path in expected)
     assert args.execution_provider in stamp["sources"]

@@ -668,3 +668,32 @@ def test_a_row_sum_is_stated_as_a_window_mean_of_multiplier_one() -> None:
     assert entry["acc_scale"] == 1.0 and entry["epilogue"] == ["acc_scale"]
     oriented = GC.device_orientation(entry, {"stored_operand": None})
     assert (oriented["M"], oriented["K"], oriented["N"]) == (1, 16, 4)
+
+
+def test_frontend_compare_select_relu_retains_closed_sum_group():
+    source = """builtin.module {
+      func.func @forward(%x: tensor<2x3xf32>) -> tensor<2x3xf32> {
+        %e = tensor.empty() : tensor<2x3xf32>
+        %r = linalg.generic {
+          indexing_maps = [affine_map<(i,j)->(i,j)>, affine_map<(i,j)->(i,j)>],
+          iterator_types = ["parallel", "parallel"]
+        } ins(%x : tensor<2x3xf32>) outs(%e : tensor<2x3xf32>) {
+          ^bb0(%a: f32, %out: f32):
+            %zero = arith.constant 0 : i64
+            %fzero = arith.sitofp %zero : i64 to f32
+            %test = arith.cmpf olt, %a, %fzero : f32
+            %value = arith.select %test, %fzero, %a : f32
+            linalg.yield %value : f32
+        } -> tensor<2x3xf32>
+        func.return %r : tensor<2x3xf32>
+      }
+    }"""
+    for text, expected in (
+        (source, CG.RELU),
+        (source.replace("constant 0", "constant 1"), CG.ELEMENTWISE),
+        (source.replace("cmpf olt", "cmpf ogt"), CG.ELEMENTWISE),
+        (source.replace("select %test, %fzero, %a", "select %test, %a, %fzero"), CG.ELEMENTWISE),
+    ):
+        module = mq.parse(text)
+        operation = next(op for op in module.walk() if op.name == "linalg.generic")
+        assert CG.classify(operation).kind == expected

@@ -69,6 +69,7 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
     from xdsl.dialects.builtin import DenseIntOrFPElementsAttr, TensorType
     from xdsl.ir.affine import AffineDimExpr
 
+    selected = list(selected)
     dtypes = {
         "f16": torch.float16,
         "f32": torch.float32,
@@ -274,6 +275,152 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
     raise ValueError("source function lacks return")
 
 
+def run_pt2e_reference(model, inputs):
+    """Independent integer reference over the observed Q/DQ graph, before rewrite.
+
+    Explicit ascending-K int64 MACs prove every prefix fits i32. Conv patches
+    use the frontend's declared kh/kw/channel order; no emitted integer graph
+    or device code is evaluated to manufacture expected accumulators.
+    """
+    from types import SimpleNamespace
+
+    import torch
+    from torch.nn import functional as F
+
+    sites = []
+    counts = {"linear": 0, "conv2d": 0, "matmul": 0}
+    dequant = torch.ops.quantized_decomposed.dequantize_per_tensor.default
+    targets = {
+        torch.ops.aten.mm.default: "matmul",
+        torch.ops.aten.matmul.default: "matmul",
+        torch.ops.aten.bmm.default: "matmul",
+        torch.ops.aten.linear.default: "linear",
+        torch.ops.aten.conv2d.default: "conv2d",
+    }
+
+    class Reference(torch.fx.Interpreter):
+        def run_node(self, node):
+            kind = targets.get(node.target)
+            if node.op != "call_function" or kind is None:
+                return super().run_node(node)
+            operands = node.args[:2]
+            if not all(isinstance(n, torch.fx.Node) and n.target == dequant for n in operands):
+                return super().run_node(node)
+            q, scales, stats = [], [], []
+            for operand in operands:
+                raw, scale, zp, qmin, qmax, dtype = self.fetch_args_kwargs_from_env(operand)[0][:6]
+                if zp != 0 or (qmin, qmax, dtype) != (-128, 127, torch.int8):
+                    raise ValueError("PT2E reference requires symmetric full-range tensor int8")
+                q.append(raw.to(torch.int64))
+                scales.append(float(torch.tensor(scale, dtype=torch.float32)))
+                stats.append(dict(scale=scales[-1], quantized_max_abs=int(raw.to(torch.int32).abs().max())))
+            lhs, rhs = q
+            args, kwargs = self.fetch_args_kwargs_from_env(node)
+            if kind == "conv2d":
+                stride = args[3] if len(args) > 3 else kwargs.get("stride", [1, 1])
+                padding = args[4] if len(args) > 4 else kwargs.get("padding", [0, 0])
+                dilation = args[5] if len(args) > 5 else kwargs.get("dilation", [1, 1])
+                groups = args[6] if len(args) > 6 else kwargs.get("groups", 1)
+                if groups != 1:
+                    raise ValueError("reference requires ungrouped conv2d")
+                n, cin, h, w = lhs.shape
+                cout, _, kh, kw = rhs.shape
+                oh = (h + 2 * padding[0] - dilation[0] * (kh - 1) - 1) // stride[0] + 1
+                ow = (w + 2 * padding[1] - dilation[1] * (kw - 1) - 1) // stride[1] + 1
+                cols = F.unfold(lhs.to(torch.float32), (kh, kw), dilation=dilation, padding=padding, stride=stride)
+                lhs = (
+                    cols.reshape(n, cin, kh, kw, oh * ow)
+                    .permute(0, 4, 2, 3, 1)
+                    .reshape(n * oh * ow, -1)
+                    .to(torch.int64)
+                )
+                rhs = rhs.permute(2, 3, 1, 0).reshape(-1, cout)
+            elif kind == "linear":
+                lhs = lhs.reshape(-1, lhs.shape[-1])
+                rhs = rhs.transpose(-1, -2)
+            acc = torch.zeros((*lhs.shape[:-1], rhs.shape[-1]), dtype=torch.int64)
+            maximum = 0
+            for k in range(lhs.shape[-1]):
+                acc += lhs[..., :, k].unsqueeze(-1) * rhs[..., k, :].unsqueeze(-2)
+                maximum = max(maximum, int(acc.abs().max()))
+                if maximum > (1 << 31) - 1:
+                    raise ValueError("reference i32 prefix overflow")
+            acc = acc.to(torch.int32)
+            product = torch.tensor(scales[0] * scales[1], dtype=torch.float32)
+            if not torch.isfinite(product) or product < torch.finfo(torch.float32).tiny:
+                raise ValueError("reference product is not finite normal f32")
+            readout = acc.to(torch.float32) * product
+            sites.append(
+                dict(
+                    node=node.name,
+                    kind=kind,
+                    lhs=scales[0],
+                    rhs=scales[1],
+                    product=product.item(),
+                    operands=stats,
+                    accumulator=acc.tolist(),
+                    readout=readout.tolist(),
+                    accumulator_max_abs=int(acc.abs().max()),
+                    prefix_max_abs=maximum,
+                )
+            )
+            counts[kind] += 1
+            if kind == "conv2d":
+                out = readout.reshape(n, oh, ow, cout).permute(0, 3, 1, 2)
+                if args[2] is not None:
+                    out = out + args[2].reshape(1, -1, 1, 1)
+                return out
+            if kind == "linear":
+                out = readout.reshape(*args[0].shape[:-1], rhs.shape[-1])
+                return out + args[2] if len(args) > 2 and args[2] is not None else out
+            return readout
+
+    output = Reference(model, garbage_collect_values=False).run(*inputs)
+    return SimpleNamespace(
+        output=output,
+        sites=sites,
+        contraction_count=sum(counts.values()),
+        linear_count=counts["linear"],
+        conv2d_count=counts["conv2d"],
+        matmul_count=counts["matmul"],
+    )
+
+
+def selected_pt2e_reference(model, inputs, *, combined_scale):
+    """Select the independent reference and bind its actual implementation bytes."""
+    import hashlib
+    import sys
+    from pathlib import Path
+
+    from m2m.capture.pt2e_integer_reference import run_pt2e_integer_reference
+
+    run = run_pt2e_reference if combined_scale else run_pt2e_integer_reference
+    source = Path(sys.modules[run.__module__].__file__).resolve()
+    if not source.is_file():
+        raise RuntimeError("selected integer reference source is unavailable")
+    return run(model, inputs), {"path": str(source), "sha256": hashlib.sha256(source.read_bytes()).hexdigest()}
+
+
+def write_pt2e_reference(path, reference, leaves, source):
+    """Retain independent outputs and contraction observations beside capture."""
+    import json
+
+    from merlin.targetgen._capture_tensor_values import to_native
+
+    path.write_text(
+        json.dumps(
+            {
+                "engine": "independent_pt2e_ascending_k_integer_mac",
+                "outputs": [to_native(value) for value in leaves],
+                "scales": reference.sites,
+                "source": source,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+
+
 def main():
     import json
     import sys
@@ -284,7 +431,8 @@ def main():
     from merlin.frontends.linalg_mlir import parse_mlir_file
 
     directory = Path(sys.argv[1])
-    request = json.loads((directory / "w8a8-request.json").read_text())
+    prefix = "w8a8"
+    request = json.loads((directory / f"{prefix}-request.json").read_text())
     module = parse_mlir_file(directory / "model.before_w8a8.mlir")
     operations = list(module.walk())
     with np.load(directory / "inputs.npz") as archive:
@@ -304,8 +452,10 @@ def main():
         "accumulators": [s["accumulator"] for s in scales],
         "output_bytes": [v.contiguous().numpy().tobytes().hex() for v in values],
         "engine": "independent_pytorch_integer_einsum",
+        "calibration": "dynamic",
+        "calibration_graph": None,
     }
-    (directory / "w8a8-reference.json").write_text(json.dumps(document, indent=2) + "\n")
+    (directory / f"{prefix}-reference.json").write_text(json.dumps(document, indent=2) + "\n")
 
 
 if __name__ == "__main__":

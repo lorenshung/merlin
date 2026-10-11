@@ -167,3 +167,30 @@ def contraction_coverage(module: Any) -> CoverageReport:
             rep.lowered_macs += _product(out_shape) * int(k)
 
     return rep
+
+
+def is_compare_select_relu(op) -> bool:
+    """Recognize the closed ordered x<0 ? 0 : x frontend ReLU body."""
+    if not op.regions or len(op.regions[0].blocks) != 1 or len(op.operands) != 2:
+        return False
+    block = op.regions[0].blocks[0]
+    operations = list(block.ops)
+    if len(operations) != 5 or len(block.args) != 2:
+        return False
+    zero, cast, compare, select, yielded = operations
+    value = zero.properties.get("value")
+    return (
+        zero.name == "arith.constant"
+        and getattr(getattr(value, "value", None), "data", None) == 0
+        and cast.name == "arith.sitofp"
+        and tuple(cast.operands) == (zero.results[0],)
+        and cast.results[0].type == block.args[0].type
+        and compare.name == "arith.cmpf"
+        and compare.properties["predicate"].value.data == 4
+        and not compare.properties["fastmath"].data
+        and tuple(compare.operands) == (block.args[0], cast.results[0])
+        and select.name == "arith.select"
+        and tuple(select.operands) == (compare.results[0], cast.results[0], block.args[0])
+        and yielded.name == "linalg.yield"
+        and tuple(yielded.operands) == (select.results[0],)
+    )

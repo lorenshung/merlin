@@ -71,27 +71,69 @@ def _observer_name(tensor: Mapping[str, Any], *, is_weight: bool) -> str:
     return str(tensor.get("observer") or default)
 
 
+def _tensor_observer_class(tensor, *, is_weight):
+    """One observer choice shared by PT2E annotations and static case calibration."""
+    try:
+        from torchao.quantization.pt2e import HistogramObserver, MinMaxObserver
+    except ImportError:
+        from torch.ao.quantization.observer import HistogramObserver, MinMaxObserver
+    name = _observer_name(tensor, is_weight=is_weight)
+    if str(tensor.get("dtype", "")).startswith("fp8_") and name == "histogram":
+        raise RecipeError("FP8 histogram observation is unavailable in TorchAO PT2E; use minmax")
+    observer = {"minmax": MinMaxObserver, "histogram": HistogramObserver}.get(name)
+    if observer is None:
+        raise RecipeError(f"recipe observer {tensor.get('observer')!r} is not one this quantizer builds")
+    return observer
+
+
+def observe_static_tensor(value, tensor_spec, *, eps=DEFAULT_OBSERVER_EPSILON):
+    """Reuse the static recipe observer rule for an explicitly observed tensor input.
+
+    ATen contraction operands are both activations; neither is asserted to be a
+    stored model weight. PyTorch's observer classes implement the same PT2E rule
+    in capture environments without the optional TorchAO package.
+    """
+    import torch
+
+    if (
+        tensor_spec.get("mode") != "static"
+        or tensor_spec.get("granularity") != "tensor"
+        or not tensor_spec.get("symmetric")
+    ):
+        raise RecipeError("requires static symmetric per-tensor recipe")
+    if not torch.isfinite(value).all():
+        raise RecipeError("calibration input is nonfinite")
+    name = _observer_name(tensor_spec, is_weight=False)
+    observer_class = _tensor_observer_class(tensor_spec, is_weight=False)
+    observer = observer_class(
+        dtype=_torch_dtype(tensor_spec["dtype"]),
+        qscheme=torch.per_tensor_symmetric,
+        quant_min=tensor_spec["quant_min"],
+        quant_max=tensor_spec["quant_max"],
+        eps=eps,
+    )
+    observer(value)
+    scale, zero_point = observer.calculate_qparams()
+    if zero_point.item() != 0 or not torch.isfinite(scale).all() or scale.item() <= 0:
+        raise RecipeError("observer did not produce finite positive symmetric qparams")
+    return scale.to(torch.float32).reshape(()), name
+
+
 def _spec(tensor: Mapping[str, Any], *, is_weight: bool, eps: float):
     """One ``QuantizationSpec`` from one recipe tensor spec."""
     import torch
-    from torchao.quantization.pt2e import HistogramObserver, MinMaxObserver, PerChannelMinMaxObserver
+    from torchao.quantization.pt2e import PerChannelMinMaxObserver
     from torchao.quantization.pt2e.quantizer import QuantizationSpec
 
     granularity, symmetric = tensor.get("granularity"), bool(tensor.get("symmetric"))
     dtype = _torch_dtype(tensor.get("dtype"))
-    floating_format = str(tensor.get("dtype", "")).startswith("fp8_")
     if granularity == "tensor":
         qscheme = torch.per_tensor_symmetric if symmetric else torch.per_tensor_affine
         # A weight is observed once, so its range is its min and max; an activation is observed
         # over a calibration stream, where a histogram is robust to a rare outlier. TorchAO's
         # HistogramObserver uses torch.iinfo and cannot observe an FP8 dtype; its MinMaxObserver
         # explicitly supports float8. Never silently replace an explicitly requested observer.
-        observer_name = _observer_name(tensor, is_weight=is_weight)
-        if floating_format and observer_name == "histogram":
-            raise RecipeError("FP8 histogram observation is unavailable in TorchAO PT2E; use minmax")
-        observer = {"minmax": MinMaxObserver, "histogram": HistogramObserver}.get(observer_name)
-        if observer is None:
-            raise RecipeError(f"recipe observer {tensor.get('observer')!r} is not one this quantizer builds")
+        observer = _tensor_observer_class(tensor, is_weight=is_weight)
         axis = None
     elif granularity == "channel" and is_weight:
         qscheme = torch.per_channel_symmetric if symmetric else torch.per_channel_affine
@@ -134,6 +176,8 @@ def _recipe_operators(torch: Any) -> dict[str, tuple[Any, ...]]:
             torch.ops.aten.matmul.default,
             torch.ops.aten.mm.default,
             torch.ops.aten.bmm.default,
+            torch.ops.aten.addmm.default,
+            torch.ops.aten.convolution.default,
         ),
         "operand_sum": (torch.ops.aten.add.Tensor, torch.ops.aten.add_.Tensor),
         "window_mean": (
@@ -226,13 +270,18 @@ def build_quantizer(
     decisions = {str(d.get("fqn")): d for d in layer_plan.get("layers") or ()}
     software_decisions = []
 
+    def contraction_operands(node: Any):
+        start = 1 if node.target == torch.ops.aten.addmm.default else 0
+        return node.args[start : start + 2]
+
     def software_allows(node: Any, family: str) -> bool:
         selected = recipe.get("software_admission")
         if selected is None:
             return True  # Compatibility recipes retain their recorded policy.
         from merlin.targetgen.software_spec import admit_operation
 
-        value = node.args[0].meta.get("val") if node.args and isinstance(node.args[0], torch.fx.Node) else None
+        operands = contraction_operands(node) if family == "contraction" else node.args
+        value = operands[0].meta.get("val") if operands and isinstance(operands[0], torch.fx.Node) else None
         prospective = {
             "family": family,
             "operand_dtype": activation["dtype"],
@@ -281,19 +330,27 @@ def build_quantizer(
         if not software_allows(node, family):
             return False
         if family == "contraction":
-            if len(node.args) < 2 or not stored_floating_weight(node.args[1]):
-                return False
-            operand = node.args[0]
-            value = operand.meta.get("val") if isinstance(operand, torch.fx.Node) else None
-            if not isinstance(value, torch.Tensor) or not value.is_floating_point():
+            operands = contraction_operands(node)
+            if len(operands) != 2 or any(
+                not isinstance(operand, torch.fx.Node)
+                or not isinstance((value := operand.meta.get("val")), torch.Tensor)
+                or not value.is_floating_point()
+                for operand in operands
+            ):
                 return False
         path = owner(node)
         if path is None:
             return False
         if path:
             decision = decisions.get(path)
-            if source_layer_inventory is not None and family == "contraction":
-                if not _source_weight_geometry_matches(source_layer_inventory, path, stored_weight_shape(node.args[1])):
+            if (
+                source_layer_inventory is not None
+                and family == "contraction"
+                and stored_floating_weight(contraction_operands(node)[1])
+            ):
+                if not _source_weight_geometry_matches(
+                    source_layer_inventory, path, stored_weight_shape(contraction_operands(node)[1])
+                ):
                     return False
             if decision is not None:
                 return bool(decision.get("placement") == "device" and decision.get("family") == family)
@@ -302,12 +359,10 @@ def build_quantizer(
             # it is a container in this plan before using the root operation rule.
             if not any(fqn.startswith(path + ".") for fqn in decisions):
                 return False
-        # Root/container arithmetic has no leaf decision. Check the actual stored
-        # operand and its shape with the same rule as a module.
+        # Root/container arithmetic has no leaf decision. Check the actual
+        # operand geometry with the same functional placement rule.
         if family == "contraction":
-            kernel_node = node.args[1]
-            while kernel_node.op == "call_function":
-                kernel_node = kernel_node.args[0]
+            kernel_node = contraction_operands(node)[1]
             kernel = kernel_node.meta.get("val")
             shape = list(kernel.shape) if kernel is not None and hasattr(kernel, "shape") else None
         else:
@@ -395,6 +450,38 @@ def build_quantizer(
                 from m2m.capture.trace import attach_pt2e_conv_bn_folds
 
                 attach_pt2e_conv_bn_folds(graph_module, self.fold_candidates)
+            # Normalize eligible functional overloads to the existing Model2MLIR
+            # integerizer's canonical contractions before observer insertion.
+            graph = graph_module.graph
+            for node in list(graph.nodes):
+                if node.target not in (torch.ops.aten.addmm.default, torch.ops.aten.convolution.default):
+                    continue
+                if not eligible(node, "contraction"):
+                    continue
+                previous = set(graph.nodes)
+                with graph.inserting_before(node):
+                    if node.target == torch.ops.aten.convolution.default:
+                        if len(node.args) != 9 or node.args[6] or any(node.args[7]):
+                            continue  # Transposed/output-padding semantics lack this rewrite.
+                        value = graph.call_function(torch.ops.aten.conv2d.default, args=(*node.args[:6], node.args[8]))
+                    else:
+                        bias, lhs, rhs = node.args[:3]
+                        value = graph.call_function(torch.ops.aten.mm.default, args=(lhs, rhs))
+                        value.meta = dict(node.meta)
+                        alpha, beta = node.kwargs.get("alpha", 1), node.kwargs.get("beta", 1)
+                        if alpha != 1:
+                            value = graph.call_function(torch.ops.aten.mul.Tensor, args=(value, alpha))
+                        if beta != 0:
+                            if beta != 1:
+                                bias = graph.call_function(torch.ops.aten.mul.Tensor, args=(bias, beta))
+                            value = graph.call_function(torch.ops.aten.add.Tensor, args=(value, bias))
+                    # Every replacement carries the original call-site identity.
+                    for created in set(graph.nodes) - previous:
+                        created.meta = dict(node.meta)
+                node.replace_all_uses_with(value)
+                graph.erase_node(node)
+            graph.lint()
+            graph_module.recompile()
             return graph_module
 
         def annotate(self, graph_module: Any) -> Any:
@@ -432,12 +519,16 @@ def build_quantizer(
                     continue
                 if node.target not in targets or len(node.args) < 2:
                     continue
-                operand, kernel = node.args[:2]
+                operand, kernel = contraction_operands(node)
                 # Both inputs of the contraction; its result stays in floating point and the next
                 # contraction quantizes its own input edge. What follows a contraction is absorbed
                 # by the compiler's group formation, not assumed here.
                 node.meta["quantization_annotation"] = QuantizationAnnotation(
-                    input_qspec_map={operand: self.activation, kernel: self.weight}, _annotated=True
+                    input_qspec_map={
+                        operand: self.activation,
+                        kernel: self.weight if stored_floating_weight(kernel) else self.activation,
+                    },
+                    _annotated=True,
                 )
                 self.annotated += 1
             # Closed sum/mean candidates form a set. Its fixpoint can revisit a
@@ -669,7 +760,7 @@ def apply_recipe(
     # the operations covered by this recipe before skipping calibration. A graph with only integer
     # contractions (such as an authored integer seam) still needs no observer.
     tensors = [t for t in (example_inputs or ()) if isinstance(t, torch.Tensor)]
-    integral_inputs = bool(tensors) and not any(torch.is_floating_point(t) for t in tensors)
+    integral_inputs = bool(tensors) and not any(t.is_floating_point() or t.is_complex() for t in tensors)
 
     def skip_already_integer() -> Any:
         model._recipe_quantization_stats = {  # type: ignore[attr-defined]
@@ -839,6 +930,11 @@ def apply_recipe(
         except (ImportError, AttributeError):  # Older Torch/TorchAO versions.
             from torch.ao.quantization import allow_exported_model_train_eval
 
+        # Older selected frontends still import the public helper from Torch.
+        import torch.ao.quantization as legacy_pt2e
+
+        if not hasattr(legacy_pt2e, "allow_exported_model_train_eval"):
+            legacy_pt2e.allow_exported_model_train_eval = allow_exported_model_train_eval
         allow_exported_model_train_eval(quantized)
     except (ImportError, AttributeError):
         pass

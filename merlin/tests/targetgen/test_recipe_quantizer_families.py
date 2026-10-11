@@ -202,3 +202,78 @@ print(json.dumps({"token_api": token_stats.get("api"),
 
     result = json.loads(completed.stdout.strip().splitlines()[-1])
     assert result == {"token_api": "pt2e", "token_contractions": 1, "integer_applied": False}
+
+
+@pytest.mark.parametrize("operation", ["mm", "attention", "addmm", "convolution", "host_glue"])
+def test_functional_contractions_observe_both_activations(operation):
+    """External RHS inputs use activation observers through actual PT2E conversion."""
+    import os
+    import subprocess
+
+    python = os.environ.get("MERLIN_M2M_PYTHON")
+    if not python:
+        pytest.skip("TorchAO capture interpreter is not configured")
+    script = r"""
+import sys
+import torch
+from merlin.targetgen import _recipe_quantizer as quant
+from merlin.targetgen.core_aten_w8a8_reference import run_pt2e_reference
+from merlin.capture.integerization import combine_static_readout_scales
+from merlin.capture.integerization import integerize_static_pt2e
+recipe = {
+    "schema": "quant_recipe_v1", "status": "derived", "families": ["contraction"],
+    "weight": {"dtype": "int8", "granularity": "tensor", "symmetric": True,
+               "quant_min": -127, "quant_max": 127},
+    "activation": {"dtype": "int8", "granularity": "tensor", "symmetric": True,
+                   "quant_min": -128, "quant_max": 127, "mode": "static"},
+}
+operation = sys.argv[1]
+class Attention(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.relu = torch.nn.ReLU()
+    def forward(self, x, y):
+        return self.relu(x @ y) @ y
+class Model(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.attention = Attention()
+    def forward(self, x, y):
+        if operation == "convolution":
+            return torch.ops.aten.convolution.default(x, y, None, [1,1], [1,1], [1,1], False, [0,0], 1)
+        if operation == "addmm":
+            return torch.addmm(x, x, y, alpha=0.5, beta=2)
+        if operation == "attention":
+            return self.attention(x, y)
+        if operation == "host_glue":
+            host = y.to(torch.int32).reshape(4,4).to(torch.float32) * .5 * .3
+            return (x @ y) + host
+        return x @ y
+inputs = ((torch.randn(1,2,4,4), torch.randn(3,2,3,3))
+          if operation == "convolution" else (torch.randn(4,4), torch.randn(4,4)))
+model = Model().eval()
+graph = torch.export.export(model, inputs).module()
+q = quant.build_quantizer(recipe, layer_plan=quant._plan_layers(recipe, model),
+                          source_layer_inventory=quant.layer_inventory(model))
+graph = q.transform_for_annotation(graph)
+q.annotate(graph)
+annotations = [n.meta["quantization_annotation"] for n in graph.graph.nodes if "quantization_annotation" in n.meta]
+assert annotations
+for annotation in annotations:
+    assert all(spec is q.activation for spec in annotation.input_qspec_map.values())
+    assert all(spec.quant_min == -128 for spec in annotation.input_qspec_map.values())
+    assert all("HistogramObserver" in str(spec.observer_or_fake_quant_ctr)
+               for spec in annotation.input_qspec_map.values())
+converted = quant.apply_recipe(model, recipe, example_inputs=inputs,
+                               source_layer_inventory=quant.layer_inventory(model))
+reference = run_pt2e_reference(converted, inputs)
+integer, receipt = integerize_static_pt2e(converted, inputs)
+products = combine_static_readout_scales(integer)
+assert len(products) == reference.contraction_count == (2 if operation == "attention" else 1)
+actual = integer(*inputs)
+assert actual.dtype == reference.output.dtype == torch.float32
+assert actual.stride() == model(*inputs).stride()
+assert torch.equal(actual.contiguous().view(torch.int32), reference.output.contiguous().view(torch.int32))
+"""
+    result = subprocess.run([python, "-c", script, operation], capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr[-5000:]

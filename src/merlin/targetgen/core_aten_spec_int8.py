@@ -61,149 +61,261 @@ def select_spec(target: str, facts: dict, spec_path: Path, host_path: Path) -> d
             name: {"path": str(path.resolve()), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
             for name, path in (("software_spec", spec_path), ("host_capabilities", host_path))
         },
-        "product_derivation": {
-            "status": "declared"
-            if (spec["numerical_semantics"].get("readout") or {}).get("acc_scale_product_dtype")
-            else "unknown",
-            "reason": (
-                "resolve_spec derives hardware forms, not product arithmetic; scale carrier/ABI dtype is insufficient"
-            ),
-            "selected_source": facts.get("facts", {}).get("source"),
-            "selected_unknowns": facts.get("facts", {}).get("datapaths_undeterminable", []),
+        "host_scale_product": {
+            "arithmetic": "exact f64 product of f32 scales, rounded once to f32",
+            "admission": "finite normal f32 constant required",
+            "authority": "explicit static numeric policy; host multiply declaration independently screened",
         },
     }
 
 
-def pipeline_refusals(selection: dict) -> list[str]:
-    """All composition blockers, independently of any workload's dtype/geometry."""
-    spec = selection["spec"]
-    semantics = spec.get("numerical_semantics") or {}
-    readout = semantics.get("readout") or {}
-    reasons = []
-    if spec.get("status") != "reviewed" or selection["host"].get("status") != "reviewed":
-        reasons.append("software and host declarations must both be reviewed")
-    if readout.get("acc_scale_product_dtype") != "f32":
-        reasons.append("acc_scale_product_dtype is not declared or established by selected RTL facts/resolve_spec")
-    if readout.get("acc_scale_rounding") != "half_even":
-        reasons.append("declared acc_scale rounding is not supported half_even")
-    if readout.get("narrowing") != "saturate_to_declared_dtype":
-        reasons.append("declared readout does not establish saturating narrowing")
-    transfer = (spec.get("transfer_contracts") or {}).get("accumulator_readout") or {}
-    if (
-        transfer.get("from") != "accelerator"
-        or transfer.get("to") != "host"
-        or (transfer.get("copy") or {}).get("dtype") not in {"int8", "i8"}
-    ):
-        reasons.append("no declared i8 accelerator-to-host readout transfer (selected accumulator_readout is i32)")
-    return reasons
+def declaration_location(selection, authority, key):
+    """Bind a decision to the exact authored YAML node, including rank restrictions."""
+    import yaml
+
+    identity = selection.get("identities", {}).get("software_spec" if authority == "software" else "host_capabilities")
+    if not identity:
+        return {"declaration": key}
+    root = yaml.compose(Path(identity["path"]).read_text())
+
+    def field(node, name):
+        return next((v for k, v in node.value if k.value == name), None)
+
+    operations = field(root, "operations")
+    if authority == "software":
+        node = field(operations, key)
+    else:
+        node = next(n for n in operations.value if field(n, "id").value == key)
+    signature = field(node, "signature")
+    rank_node = field(signature or node, "ranks")
+    return {
+        **identity,
+        "declaration": key,
+        "line": node.start_mark.line + 1,
+        "restriction_line": (rank_node or signature or node).start_mark.line + 1,
+    }
 
 
-def admission_plan(module, selection: dict) -> dict:
-    """Inventory proposed typed operations; no source mutation or offload grant.
+def pipeline_refusals(selection):
+    return (
+        []
+        if selection["spec"].get("status") == selection["host"].get("status") == "reviewed"
+        else ["software and host declarations must both be reviewed"]
+    )
 
-    The proposed integer signatures are explicitly hypothetical until a complete
-    pipeline is admitted. They never route an f32 source op on hardware recognition.
-    """
+
+def admission_plan(module, selection, *, captured=False):
+    """Independently screen all six steps at each source contraction's actual ranks."""
     from merlin.kernels.shapes import observe_contractions, zero_initialised
     from merlin.llvmlower.contraction_quantization import closed_float_mac
     from merlin.targetgen.operation_numerics import integer_split_k_limit
 
     spec, host = selection["spec"], selection["host"]
-    parameters = {"zero_point": 0, "quant_min": -128, "quant_max": 127}
+    ordinals = {op: i for i, op in enumerate(module.walk())}
     sites = []
-    ordinals = {op: index for index, op in enumerate(module.walk())}
     for op, shape in observe_contractions(module):
         rank = len(op.results[0].type.get_shape())
-        signature = {
-            "family": "contraction",
-            "ordered_operand_dtypes": ["i8", "i8", "i32"],
-            "ordered_result_dtypes": ["i32"],
-            "operand_dtype": "i8",
-            "accum_dtype": "i32",
-            "readout_dtype": "i32",
-            "rank": rank,
-            "layout": "row_major_contiguous",
-            "tails": "zero_pad_valid_window",
-            "broadcasting": "independent_batches" if rank > 2 else "none",
-            "aliasing": "disjoint_inputs_outputs",
-        }
-        contraction = admit_operation(spec, "contraction", signature, "accelerator")
-        host_ops = []
-        for src in op.operands[:2]:
-            observed = host_signature(QUANTIZE, len(src.type.get_shape()), parameters)
-            host_ops.append(
-                {
-                    "op": QUANTIZE,
-                    "signature": observed,
-                    "software": admit_operation(spec, QUANTIZE, observed, "host"),
-                    "host": admit_operation(host, QUANTIZE, observed, "host"),
-                }
-            )
-        observed = host_signature(DEQUANTIZE, rank, {"zero_point": 0})
-        host_ops.append(
-            {
-                "op": DEQUANTIZE,
-                "signature": observed,
-                "software": admit_operation(spec, DEQUANTIZE, observed, "host"),
-                "host": admit_operation(host, DEQUANTIZE, observed, "host"),
-            }
-        )
-        reasons = []
-        if shape.dtypes != ("f32", "f32", "f32"):
-            reasons.append(f"host quantize requires exact f32 operands/results; source is {shape.dtypes}")
-        if not closed_float_mac(op):
-            reasons.append("source is not a closed unflagged floating multiply/add contraction")
-        if not zero_initialised(op):
-            reasons.append("source contraction initializer is not proven zero")
-        if contraction["status"] != "admitted":
-            reasons.append("post-quantization contraction signature refused: " + contraction["reason"])
-        for row in host_ops:
-            for authority in ("software", "host"):
-                if row[authority]["status"] != "admitted":
+        steps, reasons = [], pipeline_refusals(selection)
+
+        def screen(step, name, signature, placement="host"):
+            row = {"step": step, "op": name, "signature": signature}
+            for authority, document in (("software", spec), ("host", host)):
+                if placement == "accelerator" and authority == "host":
+                    continue
+                decision = admit_operation(document, name, signature, placement)
+                if decision.get("declaration"):
+                    decision["source"] = declaration_location(selection, authority, decision["declaration"])
+                row[authority] = decision
+                if decision["status"] != "admitted":
+                    where = decision.get("source", {})
                     reasons.append(
-                        f"{row['op']} rank {row['signature']['rank']} {authority}: {row[authority]['reason']}"
+                        f"step {step} {name} rank {signature['rank']} {authority}: "
+                        f"{where.get('path', '')}:{where.get('restriction_line', '')} "
+                        f"{decision.get('declaration', '')}: {decision['reason']}"
                     )
+            steps.append(row)
+
+        for src in op.operands[:2]:
+            screen(
+                1,
+                QUANTIZE,
+                host_signature(
+                    QUANTIZE, len(src.type.get_shape()), {"zero_point": 0, "quant_min": -128, "quant_max": 127}
+                ),
+            )
+        transfers = spec.get("transfer_contracts", {})
+        for step, key, source, destination, dtype, ranks in (
+            (2, "operand_load", "host", "accelerator", "int8", [len(v.type.get_shape()) for v in op.operands[:2]]),
+            (4, "accumulator_readout", "accelerator", "host", "i32", [rank]),
+        ):
+            from merlin.targetgen.transfer_contracts import screen_transfer_contract
+
+            transfer = next((r for r in transfers.get("declarations", []) if r["id"] == key), {})
+            decision = screen_transfer_contract(
+                spec,
+                source_placement=source,
+                destination_placement=destination,
+                operand_dtype=dtype,
+                result_dtype=dtype,
+                operand_layout="row_major_contiguous",
+                result_layout="row_major_contiguous",
+            )
+            admitted = decision["status"] == "admitted" and key in decision["matching_declarations"]
+            if step == 4:
+                admitted &= transfer.get("semantics", {}).get("valid_window") == "required"
+            row = {
+                "step": step,
+                "declaration": f"transfer_contracts.{key}",
+                "status": "admitted" if admitted else "refused",
+                "ranks": ranks,
+                "constraints": transfer,
+            }
+            identity = selection.get("identities", {}).get("software_spec")
+            if identity:
+                import yaml
+
+                root = yaml.compose(Path(identity["path"]).read_text())
+                node = next(v for k, v in root.value if k.value == "transfer_contracts")
+                node = next(v for k, v in node.value if k.value == key)
+                row["source"] = {**identity, "line": node.start_mark.line + 1}
+            steps.append(row)
+            if not admitted:
+                reasons.append(f"step {step} {row['declaration']} refused at {row.get('source')}")
+        signature = dict(
+            family="contraction",
+            ordered_operand_dtypes=["i8", "i8", "i32"],
+            ordered_result_dtypes=["i32"],
+            operand_dtype="i8",
+            accum_dtype="i32",
+            readout_dtype="i32",
+            rank=rank,
+            layout="row_major_contiguous",
+            tails="zero_pad_valid_window",
+            broadcasting="independent_batches" if rank > 2 else "none",
+            aliasing="disjoint_inputs_outputs",
+        )
+        screen(3, "contraction", signature, "accelerator")
+        screen(
+            5,
+            "aten._to_copy.default",
+            dict(
+                family="elementwise_map",
+                ordered_operand_dtypes=["i32", "f32"],
+                ordered_result_dtypes=["f32"],
+                operand_dtype="i32",
+                rank=rank,
+            ),
+        )
+        screen(
+            6,
+            "aten.mul.Tensor",
+            dict(
+                family="elementwise_map",
+                ordered_operand_dtypes=["f32", "f32", "f32"],
+                ordered_result_dtypes=["f32"],
+                operand_dtype="f32",
+                rank=rank,
+            ),
+        )
+        expected = ("i8", "i8", "i32") if captured else ("f32", "f32", "f32")
+        if shape.dtypes != expected:
+            reasons.append(f"source dtype {shape.dtypes} is not {expected}")
+        closed = closed_integer_mac(op) if captured else closed_float_mac(op)
+        if not closed or not zero_initialised(op):
+            reasons.append("source is not a closed unflagged from-zero float MAC")
         try:
-            # A one-element numerical bound, not a claim about the provider's
-            # actual dispatch geometry. No primitive executes under a refusal.
             bound = integer_split_k_limit(spec, tile_dim=1, full_k=shape.reduction[0])
             if bound is None:
                 reasons.append("no declared internal partial-sum arithmetic")
-        except (IndexError, ValueError) as exc:
+        except (ValueError, IndexError) as exc:
             bound = None
             reasons.append(str(exc))
-        reasons.extend(pipeline_refusals(selection))
-        # The selected provider currently offers only a raw-i32 catalog. Even a
-        # future spec declaration cannot silently switch that ABI to an i8 one.
-        reasons.append("no qualified full-call static-i8 readout provider/dispatch binding selected")
         sites.append(
-            {
-                "source_operation_ordinal": ordinals[op],
-                "source_operation": op.name,
-                "source_dtypes": list(shape.dtypes),
-                "result_rank": rank,
-                "proposed_signature": signature,
-                "signature_stage": "proposed_after_quantization",
-                "contraction_admission": contraction,
-                "host_operations": host_ops,
-                "partial_sum_obligation": bound,
-                "actual_dispatch": "none; refused before mutation",
-                "status": "refused",
-                "reasons": reasons,
-            }
+            dict(
+                source_operation_ordinal=ordinals[op],
+                source_operation=op.name,
+                source_dtypes=list(shape.dtypes),
+                result_rank=rank,
+                steps=sorted(steps, key=lambda s: s["step"]),
+                partial_sum_obligation=bound,
+                status="refused" if reasons else "admitted",
+                reasons=reasons,
+            )
         )
-    return {
-        "sites": sites,
-        "quantized_contractions": 0,
-        "scales": [],
-        "status": "refused" if sites else "not_applicable",
-        "fallback": "original_host_source",
-        "calibration": {
-            "mode": "static_per_tensor",
-            "source": "calibration-on-input",
-            "disclosure": "If admitted, calibration uses the evaluation case's own inputs, not held-out data.",
-            "performed": False,
-            "reason": "no complete declared int8 pipeline is admissible",
-        },
-        "integer_reference": {"status": "not_applicable", "reason": "no int8 device readout executes"},
-    }
+    quantizers = []
+    if captured:
+        from merlin.common import mlir_query as mq
+
+        for op in module.walk():
+            if mq.op_name(op) != "quant_ext.quantize_per_tensor":
+                continue
+            from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
+
+            parameters = {
+                "zero_point": _constant_of(op.operands[2]),
+                "quant_min": op.properties["quant_min"].value.data,
+                "quant_max": op.properties["quant_max"].value.data,
+            }
+            signature = host_signature(QUANTIZE, len(op.operands[0].type.get_shape()), parameters)
+            signature["ordered_operand_dtypes"] = [str(v.type.element_type) for v in op.operands]
+            signature["ordered_result_dtypes"] = [str(op.results[0].type.element_type)]
+            row = {"source_operation_ordinal": ordinals[op], "source_operation": mq.op_name(op), "signature": signature}
+            for authority, document in (("software", spec), ("host", host)):
+                decision = admit_operation(document, QUANTIZE, signature, "host")
+                if decision.get("declaration"):
+                    decision["source"] = declaration_location(selection, authority, decision["declaration"])
+                row[authority] = decision
+                if decision["status"] != "admitted":
+                    location = decision.get("source", {})
+                    for site in sites:
+                        site["status"] = "refused"
+                        site["reasons"].append(
+                            f"step 1 captured quantizer {authority}: {location.get('path', '')}:"
+                            f"{location.get('restriction_line', '')} {decision['reason']}"
+                        )
+            quantizers.append(row)
+    return dict(
+        sites=sites,
+        quantization_sites=quantizers,
+        quantized_contractions=0,
+        scales=[],
+        status="admitted"
+        if any(s["status"] == "admitted" for s in sites)
+        else "refused"
+        if sites
+        else "not_applicable",
+        calibration=dict(
+            mode="static_per_tensor",
+            source="calibration-on-evaluation-input",
+            disclosure="Scales are observed on this evaluation case's own inputs, not held-out calibration data.",
+            performed=False,
+        ),
+        integer_reference=dict(status="not_run"),
+    )
+
+
+def closed_integer_mac(op):
+    """Only signed i8 extensions and a closed, unflagged i32 multiply/add."""
+    from xdsl.dialects import arith
+    from xdsl.dialects.linalg.ops import YieldOp
+
+    if len(op.operands) != 3 or len(op.results) != 1 or not hasattr(op, "body"):
+        return False
+    block = op.body.block
+    if len(block.args) != 3 or len(block.ops) != 5:
+        return False
+    a, b, mul, add, yielded = list(block.ops)
+    return (
+        isinstance(a, arith.ExtSIOp)
+        and isinstance(b, arith.ExtSIOp)
+        and tuple(a.operands) == (block.args[0],)
+        and tuple(b.operands) == (block.args[1],)
+        and isinstance(mul, arith.MuliOp)
+        and not mul.overflow_flags.data
+        and tuple(mul.operands) == (a.result, b.result)
+        and isinstance(add, arith.AddiOp)
+        and not add.overflow_flags.data
+        and tuple(add.operands) in ((mul.result, block.args[2]), (block.args[2], mul.result))
+        and isinstance(yielded, YieldOp)
+        and tuple(yielded.operands) == (add.result,)
+    )

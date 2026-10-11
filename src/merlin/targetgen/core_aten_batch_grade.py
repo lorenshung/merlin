@@ -41,9 +41,15 @@ def numeric_policy_counts(verdicts):
         requested = verdict.get("numeric_policy", "fp32")
         policy = verdict.get("numeric_execution_policy", requested)
         if requested == "spec_int8":
-            # No qualified static-i8 full-call provider exists yet. Even a
-            # successful device-shaped record cannot establish that contract.
-            policy = "original_host" if lane == "host" else "unqualified_spec_int8"
+            # Only the grader's declaration, exact-reference and device-evidence
+            # checks can mark this execution policy as qualified.
+            policy = (
+                "original_host"
+                if lane == "host"
+                else "spec_int8"
+                if policy == "spec_int8" and verdict.get("status") == "pass"
+                else "unqualified_spec_int8"
+            )
         numeric.setdefault(lane, dict.fromkeys(policies, 0))
         passed.setdefault(lane, dict.fromkeys(policies, 0))
         numeric[lane][policy] = numeric[lane].get(policy, 0) + (verdict.get("numeric_status") == "pass")
@@ -261,6 +267,35 @@ def grade_core_aten_batch(
         elif verdict["numeric_policy"] == "spec_int8":
             verdict["numeric_admission"] = record.get("numeric_admission", {"status": "unknown"})
             verdict["numeric_selection"] = record.get("numeric_selection", {})
+            admission = record.get("numeric_admission", {})
+            verdict["calibration"] = admission.get(
+                "calibration", {"source": "calibration-on-evaluation-input", "performed": False}
+            )
+            reference = admission.get("integer_reference", {})
+            if reference.get("status") == "prepared" and output_bytes is not None and execution_error is None:
+                comparisons = []
+                for index, expected in reference["expected_output_bytes"].items():
+                    i = int(index)
+                    actual = output_bytes[i] if i < len(output_bytes) else b""
+                    comparisons.append(
+                        dict(
+                            output_index=i,
+                            status="pass" if actual.hex() == expected else "mismatch",
+                            comparison="exact_i32_or_f32_bits_signed_zero_distinct",
+                            actual_sha256=__import__("hashlib").sha256(actual).hexdigest(),
+                        )
+                    )
+                exact = all(row["status"] == "pass" for row in comparisons)
+                verdict["integer_reference"] = dict(
+                    status="pass" if exact else "mismatch", results=comparisons, engine=reference["engine"]
+                )
+                verdict["numeric_status"] = "pass" if exact else "mismatch"
+                if not exact:
+                    verdict["status"] = "mismatch"
+                    verdict["reason"] = "integer accumulator or final f32 bit-pattern mismatch"
+            else:
+                verdict["integer_reference"] = {k: v for k, v in reference.items() if k != "expected_output_bytes"}
+
         verdict["scales"] = record.get("scales", [])
         if record.get("reference_engine"):
             verdict["reference_engine"] = record["reference_engine"]
@@ -268,19 +303,20 @@ def grade_core_aten_batch(
             from merlin.targetgen.core_aten_numeric import fp32_error
 
             verdict["fp32_error"] = fp32_error(record, output_bytes)
-            from merlin.targetgen.core_aten_numeric import exact_w8a8_gate
+            if verdict["numeric_policy"] == "int8_w8a8":
+                from merlin.targetgen.core_aten_numeric import exact_w8a8_gate
 
-            gate = exact_w8a8_gate(record, output_bytes)
-            verdict["w8a8_policy"] = record["w8a8_policy"]
-            verdict["correctness_gate"] = gate
-            verdict["dispatch"] = record.get("w8a8_dispatch")
-            if not gate["passed"]:
-                verdict.update(
-                    status="mismatch",
-                    numeric_status="mismatch",
-                    values_mutation_status="mismatch",
-                    reason="raw i32 accumulator or final float storage bits differ from W8A8 reference",
-                )
+                gate = exact_w8a8_gate(record, output_bytes)
+                verdict["w8a8_policy"] = record["w8a8_policy"]
+                verdict["correctness_gate"] = gate
+                verdict["dispatch"] = record.get("w8a8_dispatch")
+                if not gate["passed"]:
+                    verdict.update(
+                        status="mismatch",
+                        numeric_status="mismatch",
+                        values_mutation_status="mismatch",
+                        reason="raw i32 accumulator or final float storage bits differ from W8A8 reference",
+                    )
         routing = dict(record.get("routing") or {"lane": "host", "routed": False, "reason": "scalar mode"})
         verdict.update(
             overload=record["overload"],
@@ -319,6 +355,18 @@ def grade_core_aten_batch(
                     reason=verdict.get("reason") or "device execution evidence missing or empty",
                     evidence_error="device execution evidence missing or empty",
                 )
+        if (
+            verdict["numeric_policy"] == "spec_int8"
+            and routing.get("lane") == "device"
+            and verdict["status"] == "pass"
+            and verdict.get("integer_reference", {}).get("status") == "pass"
+            and record.get("numeric_admission", {}).get("status") == "admitted"
+            and record["numeric_admission"].get("quantized_contractions", 0) > 0
+        ):
+            # Device evidence was independently verified above; host fallback
+            # retains its separate landing-fix accounting.
+            verdict["numeric_execution_policy"] = "spec_int8"
+            verdict["numeric_qualification"] = "declared capture-time spec-int8; exact integer/f32 gates passed"
     counts: dict[str, int] = {}
     for item in verdicts.values():
         counts[item["status"]] = counts.get(item["status"], 0) + 1

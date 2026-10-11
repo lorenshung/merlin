@@ -1146,7 +1146,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
         # an explicitly preserved non-FP32 floating Q/DQ operation. Preserving
         # precision is not accelerator/host admission. The independent reference
         # compares the complete output and counts only genuine integer work.
-        from m2m.capture.pt2e_integerize import integerize_pt2e
+        from merlin.capture.integerization import integerize_static_pt2e
 
         selected_engine = recipe.get("software_numerical_engine") if recipe is not None else None
         if selected_engine not in (None, "integer_reference"):
@@ -1158,13 +1158,11 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
         independent_source = None
         if selected_engine == "integer_reference":
             try:
-                from m2m.capture import pt2e_integer_reference as integer_reference
+                from merlin.targetgen.core_aten_w8a8_reference import selected_pt2e_reference
 
-                source = Path(integer_reference.__file__).resolve()
-                if not source.is_file():
-                    raise RuntimeError("selected integer reference source is unavailable")
-                independent_source = {"path": str(source), "sha256": hashlib.sha256(source.read_bytes()).hexdigest()}
-                independent = integer_reference.run_pt2e_integer_reference(mdl, tuple(inputs))
+                independent, independent_source = selected_pt2e_reference(
+                    mdl, tuple(inputs), combined_scale=recipe.get("host_scale_product") is not None
+                )
                 if not all(
                     hasattr(independent, field)
                     for field in ("contraction_count", "conv2d_count", "linear_count", "matmul_count")
@@ -1173,7 +1171,16 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
             except Exception as exc:  # noqa: BLE001 -- record a failed selected reference, never substitute portable
                 independent_error = f"{type(exc).__name__}: {exc}"[:2000]
                 independent = None
-        mdl, integerization_receipt = integerize_pt2e(mdl, tuple(inputs))
+        mdl, integerization_receipt = integerize_static_pt2e(mdl, tuple(inputs))
+        if recipe is not None and recipe.get("host_scale_product") is not None:
+            from merlin.capture.integerization import combine_static_readout_scales
+
+            integerization_receipt["combined_scale_products"] = combine_static_readout_scales(mdl)
+            if independent is not None:
+                leaves, _ = _output_abi(independent.output)
+                from merlin.targetgen.core_aten_w8a8_reference import write_pt2e_reference
+
+                write_pt2e_reference(out / "spec-int8-reference.json", independent, leaves, independent_source)
         from merlin.capture.integerization import contraction_partition
 
         try:

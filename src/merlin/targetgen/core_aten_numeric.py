@@ -12,21 +12,302 @@ import numpy as np
 
 
 def prepare_spec_int8(
-    directory: Path, report: dict, *, target: str, facts: dict, software_spec: Path, host_capabilities: Path
+    directory: Path,
+    report: dict,
+    *,
+    target: str,
+    facts: dict,
+    software_spec: Path,
+    host_capabilities: Path,
+    provider=None,
+    package=None,
 ):
-    """Retain original source when the complete declared pipeline cannot be admitted."""
+    """Emit admitted sites and preserve independently refused source contractions."""
+    import hashlib
+
     from merlin.frontends.linalg_mlir import parse_mlir_file
     from merlin.targetgen.core_aten_spec_int8 import admission_plan, select_spec
 
     selection = select_spec(target, facts, software_spec, host_capabilities)
-    import hashlib
+    original = (directory / "model.mlir").read_bytes()
+    module = parse_mlir_file(directory / "model.mlir")
+    plan = admission_plan(module, selection)
+    plan["source_sha256_before"] = hashlib.sha256(original).hexdigest()
+    selected = [site for site in plan["sites"] if site["status"] == "admitted"]
+    recipes = [
+        r
+        for r in selection["recipes"]
+        if r["activation"]
+        and r["activation"]["dtype"] == "int8"
+        and r["activation"]["mode"] == "static"
+        and r["activation"]["granularity"] == "tensor"
+        and r["activation"]["symmetric"]
+        and (r["activation"]["quant_min"], r["activation"]["quant_max"]) == (-128, 127)
+    ]
+    if selected and (len(recipes) != 1 or provider is None or not hasattr(provider, "admit_numeric_schedule")):
+        for site in selected:
+            site.update(
+                status="refused",
+                reasons=["static activation recipe or qualified provider schedule binding unavailable"],
+            )
+        selected = []
+    reference = None
+    if selected:
+        (directory / "model.before_spec_int8.mlir").write_bytes(original)
 
-    original_digest = hashlib.sha256((directory / "model.mlir").read_bytes()).hexdigest()
-    plan = admission_plan(parse_mlir_file(directory / "model.mlir"), selection)
-    plan["source_sha256_before"] = original_digest
+        def declaration_keys(site):
+            def key(step):
+                row = next(row for row in site["steps"] if row["step"] == step)
+                return json.dumps(
+                    {
+                        authority: row[authority]["declaration"]
+                        for authority in ("software", "host")
+                        if authority in row
+                    },
+                    sort_keys=True,
+                )
+
+            return dict(quantize=key(1), contraction=key(3), cast=key(5), mul=key(6))
+
+        from merlin.targetgen.capsule_source import M2MUnavailable, PytorchRefSource
+        from merlin.targetgen.core_aten_batch import build_core_aten_batch
+        from merlin.targetgen.core_aten_capture import case_capture_name, loader_source
+        from merlin.targetgen.quant_recipe import digest
+
+        records = [r for r in report["cases"] if r["status"] == "bundled"]
+        if len(records) != 1:
+            raise ValueError("static capture needs single-case attribution")
+        source_case = records[0]["case"]
+        capture_root = directory / "capture-int8"
+        capture_dir = capture_root / case_capture_name(source_case)
+        capture_dir.mkdir(parents=True, exist_ok=True)
+        loader = capture_dir / "capsule.pytorch.py"
+        loader.write_text(loader_source(source_case))
+        recipe = dict(
+            recipes[0],
+            accumulator_dtype=selection["readout_facets"][0]["accumulator_dtype"],
+            software_admission=selection["spec"],
+            software_numerical_engine="integer_reference",
+            host_scale_product=selection["host_scale_product"],
+        )
+        recipe["recipe_sha256"] = digest(recipe)
+        try:
+            artifact = PytorchRefSource().capture_loader(loader, "int8", recipe=recipe, workdir=capture_dir / "work")
+        except M2MUnavailable as exc:
+            # Only the proved absence of an eligible frontend operation grants
+            # unchanged host fallback. Other capture failures remain failures.
+            if "the model has no operator the recipe's families cover" not in str(exc):
+                raise
+            for site in selected:
+                site.update(
+                    status="refused",
+                    reasons=["no eligible contraction visible to PT2E; decomposition-only contractions stay on host"],
+                )
+            selected = []
+        if selected:
+            reference_path = Path(artifact.meta["weights_manifest"]).parent / "spec-int8-reference.json"
+            reference = json.loads(reference_path.read_text())
+            (directory / "spec-int8-reference.json").write_bytes(reference_path.read_bytes())
+            (capture_dir / "capsule.linalg.mlir").write_text(artifact.linalg_mlir)
+            (capture_dir / "inputs.json").write_text(json.dumps(artifact.inputs))
+            (capture_dir / "golden.json").write_text(json.dumps(artifact.golden))
+            (capture_dir / "capture.json").write_text(json.dumps({"capture_meta": artifact.meta}))
+            prepared_dir = directory / "capture-bundle"
+            prepared_report = build_core_aten_batch({"cases": [source_case]}, capture_root, prepared_dir)
+            prepared_module = parse_mlir_file(prepared_dir / "model.mlir")
+            captured_plan = admission_plan(prepared_module, selection, captured=True)
+            if any(site["status"] != "admitted" for site in captured_plan["sites"]):
+                # Refuse the complete capture before replacing the host source.
+                plan = captured_plan
+                selected = []
+                plan["source_sha256_before"] = hashlib.sha256(original).hexdigest()
+                plan["source_sha256_after"] = plan["source_sha256_before"]
+                document = {"selection": selection, **plan}
+                (directory / "spec-int8-admission.json").write_text(json.dumps(document, indent=2) + "\n")
+                records[0].update(numeric_admission=plan, numeric_selection=selection["identities"])
+                return document
+            selected = captured_plan["sites"]
+            if len(selected) != len(reference["scales"]):
+                raise ValueError("captured contractions and independent PT2E reference census differ")
+            module = prepared_module
+            plan = captured_plan
+            plan["source_sha256_before"] = hashlib.sha256(original).hexdigest()
+            plan["capture_recipe"] = recipe
+            plan["capture_meta"] = artifact.meta
+            observations = []
+            from xdsl.dialects.builtin import StringAttr
+
+            from merlin.kernels.shapes import observe_contractions
+
+            contractions = [op for op, _ in observe_contractions(module)]
+            for site, contraction in zip(selected, contractions, strict=True):
+                # Readout is a separate captured cast followed by one f32 mul.
+                casts = [
+                    u.operation
+                    for u in contraction.results[0].uses
+                    if any(o.name == "arith.sitofp" for o in u.operation.walk())
+                ]
+                if len(casts) != 1:
+                    raise ValueError("captured contraction lacks a unique host i32 cast")
+                cast = casts[0]
+                readouts = [
+                    u.operation for u in cast.results[0].uses if any(o.name == "arith.mulf" for o in u.operation.walk())
+                ]
+                if len(readouts) != 1:
+                    raise ValueError("captured host cast lacks a unique scale multiply")
+                readout = readouts[0]
+                keys = declaration_keys(site)
+                for op, key in ((contraction, "contraction"), (cast, "cast"), (readout, "mul")):
+                    op.attributes["prov.declarations"] = StringAttr(keys[key])
+                contraction.attributes["prov.region_id"] = StringAttr(
+                    f"spec_int8_contraction_{site['source_operation_ordinal']}"
+                )
+                contraction.attributes["prov.operand_load"] = StringAttr("transfer_contracts.operand_load")
+                contraction.attributes["prov.accumulator_readout"] = StringAttr(
+                    "transfer_contracts.accumulator_readout"
+                )
+                readout.attributes["prov.role"] = StringAttr("spec_int8_host_readout")
+                observations.append((contraction.results[0], readout.results[0]))
+            operations = list(module.walk())
+            for row in plan["quantization_sites"]:
+                keys = {authority: row[authority]["declaration"] for authority in ("software", "host")}
+                operations[row["source_operation_ordinal"]].attributes["prov.declarations"] = StringAttr(
+                    json.dumps(keys, sort_keys=True)
+                )
+            proof = provider.admit_numeric_schedule(str(module), package=package, numeric_policy=selection["spec"])
+            plan["schedule_proof"] = proof
+            plan["quantized_contractions"] = len(selected)
+            plan["calibration"].update(
+                performed=True,
+                recipe=recipe,
+                graph="TorchAO PT2E prepared floating graph",
+                scales_frozen_before_conversion=True,
+            )
+            # Keep the fresh capture's complete result ABI and boundary mapping.
+            fresh = prepared_report["cases"][0]
+            for index, value in zip(
+                fresh.get("semantic_boundary", {}).get("post_indices", []), artifact.inputs, strict=True
+            ):
+                if index != len(reference["outputs"]):
+                    raise ValueError("PT2E reference requires unmutated trailing input observations")
+                reference["outputs"].append(value)
+            records[0].update({k: v for k, v in fresh.items() if k not in ("routing", "capture_directory")})
+            for name in ("inputs.npz", "input_order.json", "weights.safetensors.manifest.json", "semantic_io.json"):
+                path = prepared_dir / name
+                if path.exists():
+                    (directory / name).write_bytes(path.read_bytes())
+            report["output_count"] = prepared_report["output_count"]
+        if not selected:
+            plan["status"] = "refused"
+        if selected:
+            records = [r for r in report["cases"] if r["status"] == "bundled"]
+            if len(records) != 1:
+                raise ValueError("static int8 needs single-case attribution")
+            record = records[0]
+            record["fp32_case"] = copy.deepcopy(record["case"])
+            record["reference_engine"] = reference["engine"]
+            # Keep the full original result structure, including complex components.
+            from merlin.targetgen.core_aten_batch import _tensor_documents
+
+            record["case"] = copy.deepcopy(record["case"])
+
+            def values(document, index):
+                value = reference["outputs"][index]
+                if document["dtype"] in {"complex64", "complex128"}:
+
+                    def encode(v):
+                        if len(v) == 2 and all(isinstance(x, (int, float)) for x in v):
+                            return dict(kind="complex", real=v[0], imag=v[1])
+                        return [encode(x) for x in v]
+
+                    value = encode(value)
+                document["values"] = value
+
+            for document, index in zip(
+                _tensor_documents(record["case"]["expected"]), record["output_indices"], strict=True
+            ):
+                values(document, index)
+            if record.get("semantic_boundary"):
+                for document, index in zip(
+                    _tensor_documents(record["case"]["post_arguments"]),
+                    record["semantic_boundary"]["post_indices"],
+                    strict=True,
+                ):
+                    values(document, index)
+            record["case"]["comparison_parameters"] = dict(rtol=0.0, atol=0.0, equal_nan=True)
+            function = next(op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward")
+            returned = next(op for op in function.body.block.ops if op.name == "func.return")
+            originals = list(returned.operands)
+            # Retain actual i32 and host readout buffers as additional grading outputs.
+            returned.operands = [*originals, *(v for pair in observations for v in pair)]
+            from xdsl.dialects.builtin import FunctionType
+
+            function.properties["function_type"] = FunctionType.from_lists(
+                [a.type for a in function.body.block.args], [v.type for v in returned.operands]
+            )
+            expected_bytes = {
+                str(i): np.asarray(v, dtype=np.float32).tobytes().hex()
+                for i, v in enumerate(reference["outputs"])
+                if str(originals[i].type.element_type) == "f32"
+            }
+            for i, (site, scale) in enumerate(zip(selected, reference["scales"], strict=True)):
+                acc_index = len(originals) + 2 * i
+                expected_bytes[str(acc_index)] = np.asarray(scale["accumulator"], np.int32).tobytes().hex()
+                expected_bytes[str(acc_index + 1)] = np.asarray(scale["readout"], np.float32).tobytes().hex()
+                binding = next(
+                    b
+                    for b in proof["bindings"]
+                    if b["region"] == f"spec_int8_contraction_{site['source_operation_ordinal']}"
+                )
+                schedule = next(k for k in proof["kernels"] if k["symbol"] == binding["symbol"])
+                actual_bound = (
+                    schedule["padded_primitive_k"]
+                    * scale["operands"][0]["quantized_max_abs"]
+                    * scale["operands"][1]["quantized_max_abs"]
+                )
+                site["accumulator_headroom"] = dict(
+                    mesh_uniform_bound=schedule["max_partial_sum_bound"],
+                    mesh_actual_operand_bound=actual_bound,
+                    mesh_positive_limit=schedule["mac_positive_limit"],
+                    uniform_headroom=schedule["headroom"],
+                    actual_operand_headroom=schedule["mac_positive_limit"] - actual_bound,
+                    full_i32_max_abs=scale["accumulator_max_abs"],
+                    full_i32_headroom=(1 << 31) - 1 - scale["accumulator_max_abs"],
+                    k_split=schedule["k_split"],
+                    padded_primitive_k=schedule["padded_primitive_k"],
+                )
+                site.update(
+                    accumulator_output_index=acc_index,
+                    readout_output_index=acc_index + 1,
+                    actual_dispatch="provider catalog with independently checked WS schedule",
+                    scales={k: v for k, v in scale.items() if k not in {"accumulator", "readout"}},
+                )
+            plan["integer_reference"] = dict(
+                status="prepared",
+                engine=reference["engine"],
+                expected_output_bytes=expected_bytes,
+                final_f32_comparison="exact bit patterns; signed zero distinct",
+                accumulator_comparison="exact i32",
+            )
+            plan["scales"] = [
+                {k: v for k, v in scale.items() if k not in {"accumulator", "readout"}} for scale in reference["scales"]
+            ]
+            record["scales"] = plan["scales"]
+            products = {scale["product"] for scale in plan["scales"]}
+            if len(products) == 1:
+                record["output_scale"] = next(iter(products))
+            report["output_count"] += 2 * len(observations)
+            from xdsl.dialects.builtin import StringAttr
+
+            from merlin.llvmlower.result_layout import ATTRIBUTE
+
+            if ATTRIBUTE in module.attributes:
+                layout = json.loads(module.attributes[ATTRIBUTE].data)
+                layout["results"].extend([None] * (2 * len(observations)))
+                module.attributes[ATTRIBUTE] = StringAttr(json.dumps(layout, sort_keys=True))
+            module.verify()
+            (directory / "model.mlir").write_text(str(module) + "\n")
     plan["source_sha256_after"] = hashlib.sha256((directory / "model.mlir").read_bytes()).hexdigest()
-    if plan["source_sha256_after"] != original_digest:
-        raise ValueError("refused numeric policy mutated original source")
     document = {"selection": selection, **plan}
     (directory / "spec-int8-admission.json").write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
     for case in report["cases"]:
@@ -349,6 +630,20 @@ def fp32_error(record, outputs) -> list[dict]:
                 output_lsb_error="not_applicable"
                 if not record.get("output_scale")
                 else float(np.max(difference, initial=0) / record["output_scale"]),
+                output_lsb_unit="contraction readout scale product; list gives each stage when no single scale exists",
+                contraction_output_lsb_errors=[
+                    dict(scale=scale["product"], max_error=float(np.max(difference, initial=0) / scale["product"]))
+                    for scale in record.get("scales", [])
+                    if "product" in scale
+                ],
+                output_f32_ulp_error=float(
+                    np.max(
+                        np.divide(difference, np.abs(np.spacing(golden.astype(np.float32))).astype(np.float64)),
+                        initial=0,
+                    )
+                )
+                if not complex_type
+                else "complex_components_reported_separately",
                 relative_error_at_zero=int(np.count_nonzero((golden == 0) & (difference != 0))),
             )
         )

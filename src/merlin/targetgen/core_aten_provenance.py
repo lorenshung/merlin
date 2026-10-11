@@ -43,6 +43,8 @@ def batch_provenance(
             "targetgen/core_aten_numeric.py",
             "targetgen/operation_numerics.py",
             "targetgen/core_aten_spec_int8.py",
+            "targetgen/_recipe_quantizer.py",
+            "targetgen/quant_recipe.py",
             "targetgen/core_aten_w8a8_reference.py",
             "llvmlower/contraction_quantization.py",
             "llvmlower/torchao_affine.py",
@@ -91,6 +93,9 @@ def batch_provenance(
             "w8a8-reference.json",
             "w8a8-dispatch.json",
             "spec-int8-admission.json",
+            "model.before_spec_int8.mlir",
+            "spec-int8-request.json",
+            "spec-int8-reference.json",
         ):
             path = directory / name
             if path.is_file():
