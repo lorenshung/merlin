@@ -126,15 +126,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--regrade-existing", action="store_true", help="reapply current comparison policy to retained raw output bytes"
     )
+    parser.add_argument("--numeric-policy", choices=("fp32", "int8_w8a8"), default="fp32")
     args = parser.parse_args(argv)
     if bool(args.target) != bool(args.device_package):
         parser.error("--target and --device-package must be supplied together")
+    if args.numeric_policy == "int8_w8a8" and not args.target:
+        parser.error("--numeric-policy int8_w8a8 requires --target")
     if args.target:
         if args.max_cases_per_shard not in (0, 1):
             parser.error("device mode requires exactly one case per shard for execution attribution")
         args.max_cases_per_shard = 1
     device_options = dict(
         target=args.target,
+        numeric_policy=args.numeric_policy,
         device_package=args.device_package,
         execution_provider=args.execution_provider,
         rtl_facts=args.rtl_facts,

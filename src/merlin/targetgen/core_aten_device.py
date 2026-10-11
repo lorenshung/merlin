@@ -160,15 +160,24 @@ def run_spike_bundle(
     device_package: Path | None = None,
     execution_provider: Path | None = None,
     rtl_facts: Path | None = None,
+    numeric_policy: str = "fp32",
 ) -> tuple[dict, dict]:
+    from merlin.llvmlower.contraction_quantization import POLICIES
     from merlin.llvmlower.device_offload import load_sidecar
     from merlin.runtime.backends import spike_model
     from merlin.targetgen.core_aten_batch_grade import grade_core_aten_batch
 
+    if numeric_policy not in POLICIES:
+        raise ValueError(f"unknown numeric policy {numeric_policy!r}")
+    report["numeric_policy"] = numeric_policy
+    for case in report["cases"]:
+        case["numeric_policy"] = numeric_policy
+        case["scales"] = []
     output_bytes = None
     output_shapes = None
     semantic_readback = None
     options = {}
+    stage = "routing"
     try:
         bundled = [case for case in report["cases"] if case["status"] == "bundled"]
         if target:
@@ -181,9 +190,20 @@ def run_spike_bundle(
                 }
         if target and (device_package is None or len(bundled) != 1):
             raise ValueError("device execution requires a package and exactly one case per shard")
+        if numeric_policy == "int8_w8a8" and not target:
+            raise ValueError("W8A8 requires a selected target capability manifest")
         with selected_facts(target, rtl_facts) if target else nullcontext(None) as facts:
             routing, reason, options = None, "scalar mode", {}
             if target:
+                if numeric_policy == "int8_w8a8":
+                    stage = "numeric_preparation"
+                    from merlin.system.offload import device_contraction_ranks, device_dtype_triples
+                    from merlin.targetgen.core_aten_numeric import prepare_w8a8
+
+                    report["numeric_preparation"] = prepare_w8a8(
+                        directory, report, triples=device_dtype_triples(target), ranks=device_contraction_ranks(target)
+                    )
+                stage = "routing"
                 provider = load_execution_provider(target, execution_provider)
                 prepare = getattr(provider, "prepare_bundle", None)
                 if prepare is not None:
@@ -199,6 +219,7 @@ def run_spike_bundle(
                     "reason": reason,
                     "target": target,
                 }
+            stage = "build"
             build = spike_model.build(
                 directory,
                 directory / "spike-build",
@@ -214,6 +235,7 @@ def run_spike_bundle(
             if routing is not None:
                 bundled[0]["routing"].update(routed=True, routed_operations=sidecar["routed"])
             trace = directory / "spike-trace.log" if routing is not None else None
+            stage = "execution"
             run = spike_model.run(
                 build["elf"],
                 mem_bytes=build["mem_bytes"],
@@ -256,7 +278,7 @@ def run_spike_bundle(
             "output_count": len(output_bytes),
         }
     except Exception as exc:  # each stage failure remains an explicit artifact
-        execution = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+        execution = {"status": "failed", "stage": stage, "error": f"{type(exc).__name__}: {exc}"}
         for case in report["cases"]:
             if case["status"] == "bundled":
                 case["routing"]["failure_reason"] = execution["error"]
@@ -280,6 +302,8 @@ def run_spike_bundle(
         if observation is not None:
             observation["evidence"].update(
                 target=target,
+                numeric_policy=numeric_policy,
+                scales=case_verdict["scales"],
                 lane=case_verdict["lane"],
                 receipt=execution.get("build_hash"),
                 elf=execution.get("elf"),

@@ -45,6 +45,11 @@ def stamp(args):
         "src/merlin/targetgen/core_aten_batch.py",
         "src/merlin/targetgen/core_aten_batch_grade.py",
         "src/merlin/targetgen/core_aten_semantics.py",
+        "src/merlin/targetgen/core_aten_eval.py",
+        "src/merlin/targetgen/core_aten_numeric.py",
+        "src/merlin/targetgen/core_aten_w8a8_reference.py",
+        "src/merlin/llvmlower/contraction_quantization.py",
+        "src/merlin/llvmlower/torchao_affine.py",
         "src/merlin/targetgen/core_aten_device.py",
         "src/merlin/runtime/semantic_readback.py",
         "src/merlin/llvmlower/semantic_io.py",
@@ -136,6 +141,7 @@ def execute(args, case, block):
                 arena_mb=args.arena_mb,
                 timeout=args.execution_timeout,
                 target=args.target,
+                numeric_policy=args.numeric_policy,
                 device_package=args.device_package,
                 rtl_facts=args.facts,
             )
@@ -147,8 +153,11 @@ def execute(args, case, block):
                 ]
                 shapes = json.loads((directory / "spike-output-shapes.json").read_text())
                 numeric = grade_portable_outputs(batch, outputs, output_shapes=shapes)["cases"][case["case_id"]]
-            if execution["status"] == "failed" and not (directory / "spike-build" / "model.elf").exists():
-                grade["status"] = "compile_lowering_failed"
+            if execution["status"] == "failed":
+                if execution.get("stage") == "numeric_preparation":
+                    grade["status"] = "numeric_policy_refused"
+                elif execution.get("stage") == "build" and not (directory / "spike-build" / "model.elf").exists():
+                    grade["status"] = "compile_lowering_failed"
             evidence = {
                 "lane": grade.get("lane", "host"),
                 "numeric_verdict": numeric,
@@ -164,6 +173,8 @@ def execute(args, case, block):
                 "reason": f"{type(exc).__name__}: {exc}",
                 "evidence": {"lane": "unassigned"},
             }
+    observation["numeric_policy"] = args.numeric_policy
+    observation["scales"] = observation.get("evidence", {}).get("numeric_verdict", {}).get("scales", [])
     # Existing runner writes verdict-bearing documents; stamp them before completion.
     for filename in ("core_aten_batch_map.json", "core_aten_batch_verdict.json", "spike-execution.json"):
         path = directory / filename
@@ -178,6 +189,7 @@ def execute(args, case, block):
             "case_sha256": case_digest(case),
             "observation": observation,
             "seconds": time.time() - started,
+            "numeric_policy": args.numeric_policy,
             "provenance": block,
         },
     )
@@ -190,8 +202,10 @@ def launch(args, phase, case, block):
     if completion.exists():
         saved = json.loads(completion.read_text())
         receipt = saved.get("provenance", {})
+        policy_matches = phase == "capture" or saved.get("numeric_policy", "fp32") == args.numeric_policy
         if (
             saved.get("case_sha256") == case_digest(case)
+            and policy_matches
             and receipt.get("source_digest") == block.get("source_digest")
             and receipt.get("merlin_diff_sha256") == block.get("merlin_diff_sha256")
             and receipt.get("model2mlir_commit") == block.get("model2mlir_commit")
@@ -211,7 +225,13 @@ def launch(args, phase, case, block):
             code = "timeout"
     if code != 0 or not completion.exists():
         reason = f"{phase} worker {code}; " + (directory / "worker.log").read_text(errors="replace")[-3000:]
-        record = {"case_id": case["case_id"], "case_sha256": case_digest(case), "provenance": block}
+        record = {
+            "case_id": case["case_id"],
+            "case_sha256": case_digest(case),
+            "provenance": block,
+            "numeric_policy": args.numeric_policy,
+            "scales": [],
+        }
         if phase == "capture":
             record.update(status="capture_failed", reason=reason)
         else:
@@ -396,7 +416,10 @@ def main():
     p.add_argument("--worker", choices=["capture", "execute"])
     p.add_argument("--case", type=Path)
     p.add_argument("--evaluate-only", action="store_true")
+    p.add_argument("--numeric-policy", choices=("fp32", "int8_w8a8"), default="fp32")
     args = p.parse_args()
+    if args.numeric_policy == "int8_w8a8" and not args.target:
+        p.error("--numeric-policy int8_w8a8 requires --target")
     if args.evaluate_only:
         try:
             __import__("torch")
@@ -483,6 +506,13 @@ def main():
         validate_solver_certificate=False,
     )
     report["provenance"] = block
+    report["numeric_policy"] = args.numeric_policy
+    for item in report["cases"].values():
+        numeric = item.get("evidence", {}).get("numeric_verdict", {})
+        item["numeric_policy"] = args.numeric_policy
+        item["scales"] = numeric.get("scales", [])
+        if "fp32_error" in numeric:
+            item["fp32_error"] = numeric["fp32_error"]
     report["campaign_complete"] = len(document["results"]) == len(corpus["selected_cases"]) and not any(
         item["status"] in {"not_run", "missing_result", "adapter_error"} for item in report["cases"].values()
     )

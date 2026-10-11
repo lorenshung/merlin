@@ -39,6 +39,11 @@ def batch_provenance(
         repo_root() / "src/merlin" / path
         for path in (
             "targetgen/core_aten_batch.py",
+            "targetgen/core_aten_numeric.py",
+            "targetgen/core_aten_w8a8_reference.py",
+            "llvmlower/contraction_quantization.py",
+            "llvmlower/torchao_affine.py",
+            "llvmlower/passes_xdsl.py",
             "targetgen/core_aten_semantics.py",
             "targetgen/_m2m_capture_worker.py",
             "targetgen/_capture_result_contract.py",
@@ -69,7 +74,15 @@ def batch_provenance(
         sources.append(facts)
         artifacts["rtl_facts"] = facts
     if directory:
-        for name in ("model.mlir", "inputs.npz", "semantic_io.json", "spike-build/model.elf"):
+        for name in (
+            "model.mlir",
+            "inputs.npz",
+            "semantic_io.json",
+            "spike-build/model.elf",
+            "model.before_w8a8.mlir",
+            "w8a8-request.json",
+            "w8a8-reference.json",
+        ):
             path = directory / name
             if path.is_file():
                 artifacts[name] = path
