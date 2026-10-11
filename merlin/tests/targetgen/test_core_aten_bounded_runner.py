@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from merlin.targetgen.core_aten_bounded_runner import (
     SavedResponseAdapter,
     atomic_json,
@@ -19,6 +21,47 @@ def test_numeric_success_does_not_claim_complete_semantics():
     assert observed["status"] == "ungradable"
     assert observed["evidence"] == evidence
     assert "aliases" in observed["reason"]
+
+
+@pytest.mark.parametrize("selection", ["software_spec", "host_capabilities"])
+def test_cache_stamp_binds_selected_policy_files_and_layout_sources(tmp_path, monkeypatch, selection):
+    import importlib.util
+    from argparse import Namespace
+
+    from merlin.common.paths import repo_root
+
+    script = repo_root() / "build_tools/scripts/run_bounded_core_aten_suite.py"
+    spec = importlib.util.spec_from_file_location("bounded_stamp_runner", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    simulator, suite = tmp_path / "simulator", tmp_path / "suite.json"
+    simulator.write_bytes(b"binary")
+    suite.write_text("{}")
+    software, host = tmp_path / "software.yaml", tmp_path / "host.yaml"
+    software.write_text("original software declaration")
+    host.write_text("original host declaration")
+    monkeypatch.setenv("MERLIN_SPIKE", str(simulator))
+    args = Namespace(
+        repo=repo_root(),
+        m2m_dir=repo_root(),
+        pin=[],
+        target=None,
+        device_package=None,
+        facts=None,
+        extension_library=None,
+        execution_provider=None,
+        suite=suite,
+        software_spec=software,
+        host_capabilities=host,
+    )
+    first = module.stamp(args)
+    getattr(args, selection).write_text("changed declaration")
+    second = module.stamp(args)
+    assert first != second
+    assert first[selection + "_sha256"] != second[selection + "_sha256"]
+    sources = second["sources"]
+    assert any(path.endswith("src/merlin/llvmlower/input_layout.py") for path in sources)
+    assert any(path.endswith("src/merlin/targetgen/core_aten_spec_int8.py") for path in sources)
 
 
 def test_failure_and_device_evidence_are_preserved():
@@ -439,6 +482,8 @@ def test_stamp_reads_descriptor_and_runtime_sources(tmp_path, monkeypatch):
         extension_library=None,
         facts=None,
         execution_provider=tmp_path / "provider.py",
+        software_spec=None,
+        host_capabilities=None,
         device_package=None,
         target=None,
     )

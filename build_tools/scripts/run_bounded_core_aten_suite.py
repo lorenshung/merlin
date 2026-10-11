@@ -48,12 +48,14 @@ def stamp(args):
         "src/merlin/targetgen/core_aten_eval.py",
         "src/merlin/targetgen/core_aten_numeric.py",
         "src/merlin/targetgen/core_aten_w8a8_reference.py",
+        "src/merlin/targetgen/core_aten_spec_int8.py",
         "src/merlin/llvmlower/contraction_quantization.py",
         "src/merlin/llvmlower/torchao_affine.py",
         "src/merlin/targetgen/core_aten_device.py",
         "src/merlin/runtime/semantic_readback.py",
         "src/merlin/llvmlower/semantic_io.py",
         "src/merlin/llvmlower/result_layout.py",
+        "src/merlin/llvmlower/input_layout.py",
         "src/merlin/llvmlower/pipeline.py",
         "src/merlin/llvmlower/result_buffers.py",
         "src/merlin/llvmlower/c_runtime.py",
@@ -65,6 +67,9 @@ def stamp(args):
         sources.append(args.facts)
     if args.execution_provider:
         sources.append(args.execution_provider)
+    for path in (args.software_spec, args.host_capabilities):
+        if path:
+            sources.append(path)
     pins = {name: provenance.verify(name) for name in args.pin}
     diff = subprocess.check_output(["git", "diff", "HEAD"], cwd=args.repo)
     untracked = subprocess.check_output(
@@ -89,6 +94,10 @@ def stamp(args):
             if args.execution_provider
             else None,
             "target": args.target,
+            "software_spec_sha256": provenance.file_digest(args.software_spec) if args.software_spec else None,
+            "host_capabilities_sha256": provenance.file_digest(args.host_capabilities)
+            if args.host_capabilities
+            else None,
             "execution_kind": "functional_simulator",
             "suite_sha256": hashlib.sha256(args.suite.read_bytes()).hexdigest(),
         },
