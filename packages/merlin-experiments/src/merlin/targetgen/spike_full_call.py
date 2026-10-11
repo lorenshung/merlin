@@ -199,9 +199,13 @@ def declared(target: str):
     from merlin.common.paths import repo_root
     from merlin.targetgen.plugins import load_module
     from merlin.targetgen.target_experiment import load_capability_manifest
+    from merlin.targetgen.target_registry import TargetContractMissing
 
-    runner = load_capability_manifest(target).contract.get("runner") or {}
-    provider_path = runner.get("full_call_provider")
+    try:
+        contract = load_capability_manifest(target).contract
+    except TargetContractMissing:
+        return None  # No capability contract, so nothing selects a full-call provider.
+    provider_path = (contract.get("runner") or {}).get("full_call_provider")
     if not provider_path:
         return None
     provider_path = Path(provider_path)

@@ -82,8 +82,13 @@ def _chipyard_adapters(target: str) -> dict:
 def chipyard_tier_plan(target: str) -> OracleTierPlan:
     """The concrete simulator contribution; ARC fallback is merged by routing."""
     from merlin.targetgen.target_experiment import load_capability_manifest
+    from merlin.targetgen.target_registry import TargetContractMissing
 
-    enabled = (load_capability_manifest(target).contract.get("runner") or {}).get("enabled_oracle_tiers")
+    try:
+        runner = load_capability_manifest(target).contract.get("runner") or {}
+    except TargetContractMissing:
+        runner = {}  # Without a contract nothing narrows the tiers; engine selection decides as before.
+    enabled = runner.get("enabled_oracle_tiers")
     if enabled == ["L2"]:
         return OracleTierPlan(
             ("L2",), unavailable_reason="RTL tier disabled by selected contract", requirements_inference_safe=True
