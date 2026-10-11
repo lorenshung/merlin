@@ -101,32 +101,7 @@ def _grade_output(raw: bytes, abi: Mapping[str, Any], expected: Any, case: Mappi
         if "values" not in expected:
             if case.get("comparison") != "metadata":
                 return {"status": "ungradable", "reason": "canonical case has no numeric expected values"}
-            stride = 1
-            contiguous_strides = [0] * len(shape)
-            for axis in reversed(range(len(shape))):
-                contiguous_strides[axis] = stride
-                stride *= shape[axis]
-            if list(expected.get("stride", ())) != contiguous_strides:
-                return {
-                    "status": "mismatch",
-                    "reason": "output stride differs from contiguous runtime descriptor",
-                    "actual_stride": contiguous_strides,
-                    "expected_stride": expected.get("stride"),
-                }
-            if expected.get("requires_grad") is not False:
-                return {"status": "mismatch", "reason": "bare-metal output has no autograd state"}
-            return {
-                "status": "pass",
-                "comparison": "metadata",
-                "evidence": {
-                    "dtype": _EXPECTED_DTYPES[dtype],
-                    "shape": list(shape),
-                    "stride": contiguous_strides,
-                    "requires_grad": False,
-                    "descriptor_layout": "row_major_contiguous",
-                    "values": "unspecified_by_case",
-                },
-            }
+            return {"status": "ungradable", "reason": "metadata-only result requires compiled descriptor observations"}
         expected_value = expected["values"]
     elif isinstance(expected, Mapping) and expected.get("kind") == "float":
         expected_value = float(expected["value"])
@@ -167,7 +142,8 @@ def grade_core_aten_batch(
     """Return a complete pass/mismatch/unavailable ledger, including noncaptured cases.
 
     Lossless bytes alone earn numeric-only passes. Exported boundary metadata,
-    pre-call snapshots and pointer alias frames additionally judge the full corpus contract.
+    pre-call snapshots and descriptor alias frames additionally judge observed semantics.
+    Fields absent from the compiled ABI are excluded and explicitly reported.
     """
     verdicts: dict[str, dict[str, Any]] = {}
     for record in batch_map["cases"]:
@@ -198,6 +174,11 @@ def grade_core_aten_batch(
                 if len(shape) != len(declared) or any(d >= 0 and d != s for d, s in zip(declared, shape)):
                     details.append({"status": "mismatch", "reason": "runtime shape differs from declared result"})
                     continue
+                if abi["dtype"].startswith("complex<"):
+                    if not shape or shape[-1] != 2:
+                        details.append({"status": "mismatch", "reason": "complex result lacks component axis"})
+                        continue
+                    shape = shape[:-1]
                 abi = {**abi, "shape": shape}
             elif any(d < 0 for d in abi.get("declared_shape", abi["shape"])):
                 details.append({"status": "ungradable", "reason": "dynamic result lacks runtime extent evidence"})
@@ -214,6 +195,7 @@ def grade_core_aten_batch(
             "results": details,
             "output_indices": indices,
             "semantic_scope": "numeric_only",
+            "numeric_status": status,
         }
         from merlin.targetgen.core_aten_semantics import validate_full
 
@@ -269,8 +251,14 @@ def grade_core_aten_batch(
         "full_semantic_passed_count": sum(
             v["status"] == "pass" and v.get("semantic_scope") == "full" for v in verdicts.values()
         ),
-        "numeric_only_passed_count": sum(
-            v["status"] == "pass" and v.get("semantic_scope") != "full" for v in verdicts.values()
+        "observed_semantic_passed_count": sum(
+            v["status"] == "pass" and v.get("semantic_scope") == "values+mutation+observed-metadata"
+            for v in verdicts.values()
         ),
-        "scope": "full exported call contract when boundary readback is present; otherwise numeric only",
+        "values_mutation_passed_count": sum(v.get("values_mutation_status") == "pass" for v in verdicts.values()),
+        "numeric_only_passed_count": sum(
+            v["status"] == "pass" and v.get("semantic_scope") == "numeric_only" for v in verdicts.values()
+        ),
+        "numeric_passed_count": sum(v.get("numeric_status") == "pass" for v in verdicts.values()),
+        "scope": "compiled values, mutation, memref metadata and aliases; imposed fields excluded",
     }

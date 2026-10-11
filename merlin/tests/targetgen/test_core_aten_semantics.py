@@ -176,3 +176,24 @@ def test_computed_post_result_is_not_relabelled_as_a_pass_through():
     }"""
     boundary = dict(outputs=[{}, dict(dtype="float32", shape=[4], stride=[2])])
     assert caller_boundary_layouts(source, boundary, [record]) == boundary
+
+
+def test_unobserved_autograd_excludes_only_that_field():
+    record, raw, readback = fixture()
+    for layout in readback["metadata"]:
+        layout.update(requires_grad=None, imposed_by_harness=["requires_grad"])
+    record["case"]["expected"]["requires_grad"] = True
+    verdict = validate_full(record, raw, readback)
+    assert verdict["status"] == "pass"
+    assert verdict["semantic_scope"] == "values+mutation+observed-metadata"
+    readback["metadata"][0]["storage_offset"] = 1
+    verdict = validate_full(record, raw, readback)
+    assert verdict["status"] == "mismatch"
+    assert verdict["values_mutation_status"] == "pass"
+
+
+def test_imposed_field_does_not_hide_other_tensor_observations():
+    record, raw, readback = fixture()
+    readback["metadata"][0].update(requires_grad=None, imposed_by_harness=["requires_grad"])
+    readback["metadata"][1]["requires_grad"] = True
+    assert validate_full(record, raw, readback)["status"] == "mismatch"

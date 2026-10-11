@@ -29,3 +29,21 @@ def test_repeated_borrowed_argument_is_not_an_allocation(tmp_path):
       }
     }"""
     assert "define void @forward" in lower_to_llvm_ir(source, workdir=tmp_path)
+
+
+def test_static_results_preserve_memrefs_when_observed(tmp_path):
+    if not m2m_python().is_file():
+        pytest.skip("native MLIR interpreter unavailable")
+    source = """builtin.module {
+      func.func @forward(%x: tensor<3xi64>) -> (tensor<3xi64>, tensor<3xi64>) {
+        func.return %x, %x : tensor<3xi64>, tensor<3xi64>
+      }
+    }"""
+    text = lower_to_llvm_ir(source, workdir=tmp_path, preserve_result_descriptors=True)
+    assert "define { { ptr, ptr, i64" in text
+    assert "@forward" in text
+    from merlin.llvmlower.result_buffers import descriptor_results
+
+    pipeline = descriptor_results("buffer-results-to-out-params,finalize-memref-to-llvm", source, preserve=True)
+    assert "buffer-results-to-out-params" not in pipeline
+    assert "convert-bufferization-to-memref" in pipeline

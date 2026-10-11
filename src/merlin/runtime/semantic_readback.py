@@ -25,14 +25,20 @@ def parse_semantic_readback(console: str, output_count: int):
                 if (
                     index != len(metadata)
                     or offset < 0
-                    or grad not in (0, 1)
+                    or grad not in (-1, 0, 1)
                     or rank < 0
                     or len(axes) != 2 * rank
                     or any(v < 0 for v in axes)
                 ):
                     raise ValueError("invalid metadata frame")
                 metadata.append(
-                    dict(storage_offset=offset, requires_grad=bool(grad), shape=axes[::2], stride=axes[1::2])
+                    dict(
+                        storage_offset=offset,
+                        requires_grad=None if grad == -1 else bool(grad),
+                        shape=axes[::2],
+                        stride=axes[1::2],
+                        **({"imposed_by_harness": ["requires_grad"]} if grad == -1 else {}),
+                    )
                 )
             elif parts[0] == "OUT_ALIAS":
                 index, *targets = values

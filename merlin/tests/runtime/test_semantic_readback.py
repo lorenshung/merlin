@@ -44,3 +44,9 @@ def test_semantic_frames_fail_closed(frame):
 def test_semantic_frames_after_completion_are_rejected():
     with pytest.raises(SpikeModelError):
         parse_console(console("OUT_META 0 0 0 0\nOUT_ALIAS 0") + "PRE_BYTES 0 0\n")
+
+
+def test_unobservable_autograd_state_is_marked_not_fabricated():
+    observed = parse_console(console("OUT_META 0 0 -1 1 1 1\nOUT_ALIAS 0"))["semantic_readback"]
+    assert observed["metadata"][0]["requires_grad"] is None
+    assert observed["metadata"][0]["imposed_by_harness"] == ["requires_grad"]

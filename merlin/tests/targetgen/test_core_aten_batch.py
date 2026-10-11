@@ -172,7 +172,7 @@ def test_batch_grader_uses_float_tolerance_and_keeps_all_case_failures():
     assert failed["status_counts"] == {"capture_unavailable": 1, "execution_failed": 2}
 
 
-def test_metadata_only_empty_result_uses_contiguous_descriptor_contract():
+def test_metadata_only_empty_result_requires_descriptor_observations():
     record = {
         "overload": "aten.empty.memory_format",
         "status": "bundled",
@@ -191,14 +191,9 @@ def test_metadata_only_empty_result_uses_contiguous_descriptor_contract():
         },
     }
     raw = np.zeros((2, 3), np.float32).tobytes()
-    passed = grade_core_aten_batch({"cases": [record]}, [raw])
-    assert passed["passed_count"] == 1
-    evidence = passed["cases"]["aten.empty.memory_format"]["results"][0]["evidence"]
-    assert evidence["stride"] == [3, 1]
-    assert evidence["values"] == "unspecified_by_case"
-    record["case"]["expected"]["stride"] = [1, 2]
-    failed = grade_core_aten_batch({"cases": [record]}, [raw])
-    assert failed["status_counts"] == {"mismatch": 1}
+    verdict = grade_core_aten_batch({"cases": [record]}, [raw])
+    assert verdict["status_counts"] == {"ungradable": 1}
+    assert "descriptor observations" in verdict["cases"]["aten.empty.memory_format"]["results"][0]["reason"]
 
 
 def test_identical_functional_results_have_unambiguous_single_user_value(tmp_path):
@@ -385,3 +380,22 @@ def test_generic_form_capture_refuses_missing_forward_or_return(source):
 
     with pytest.raises(ValueError):
         _function_parts(source)
+
+
+def test_complex_grading_interprets_observed_component_axis():
+    data = np.array([1 + 2j, 3 + 4j], dtype=np.complex64)
+    record = dict(
+        overload="fixture",
+        status="bundled",
+        output_indices=[0],
+        output_abi=[dict(dtype="complex<f32>", shape=[2], declared_shape=[2, 2])],
+        case=dict(
+            expected=dict(
+                kind="tensor",
+                dtype="complex64",
+                shape=[2],
+                values=[dict(kind="complex", real=1, imag=2), dict(kind="complex", real=3, imag=4)],
+            )
+        ),
+    )
+    assert grade_core_aten_batch({"cases": [record]}, [data.tobytes()], output_shapes=[[2, 2]])["passed_count"] == 1

@@ -1549,6 +1549,7 @@ def lower_to_llvm_ir(
     masked_contraction_effects=None,
     source_observation_effects=None,
     source_scalar_carrier=None,
+    preserve_result_descriptors: bool = False,
 ) -> str:
     """Lower upstream-MLIR text to LLVM IR text via the m2m venv. Returns .ll text.
 
@@ -1737,7 +1738,7 @@ def lower_to_llvm_ir(
             pipeline = _parallel_pipeline(feats)  # multicore (OpenMP) scalar path — K1 big models
         else:
             pipeline = _upstream_pipeline(feats)
-    pipeline = result_buffers.descriptor_results(pipeline, mlir_text)
+    pipeline = result_buffers.descriptor_results(pipeline, mlir_text, preserve=preserve_result_descriptors)
     if index_bits is not None:
         if not data_layout:
             raise ValueError("explicit index width requires selected compiler data layout")

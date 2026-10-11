@@ -41,9 +41,9 @@ def inject(source: str) -> str:
     return source.replace(marker, binding + marker)
 
 
-def descriptor_results(pipeline: str, mlir: str) -> str:
-    """Dynamic extents must return descriptors, rather than copy to static buffers."""
-    if "?" not in mlir or ("@forward(" not in mlir and 'sym_name = "forward"' not in mlir):
+def descriptor_results(pipeline: str, mlir: str, *, preserve: bool = False) -> str:
+    """Return actual memrefs for dynamic extents or explicit boundary observation."""
+    if not preserve and ("?" not in mlir or ("@forward(" not in mlir and 'sym_name = "forward"' not in mlir)):
         return pipeline  # No dynamic extent, or no @forward entry, so no forward result to return by descriptor.
     from merlin.common.mlir_query import forward_signature
 
@@ -53,7 +53,7 @@ def descriptor_results(pipeline: str, mlir: str) -> str:
         if str(exc).startswith("no func.func @forward"):
             return pipeline
         raise
-    if any(dim < 0 for shape, _ in results for dim in shape):
+    if preserve or any(dim < 0 for shape, _ in results for dim in shape):
         stages = [p for p in pipeline.split(",") if not p.startswith("buffer-results-to-out-params")]
         at = next(i for i, p in enumerate(stages) if p.startswith("finalize-memref-to-llvm"))
         stages.insert(at, "convert-bufferization-to-memref")
