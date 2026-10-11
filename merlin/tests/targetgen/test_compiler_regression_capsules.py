@@ -9,6 +9,7 @@ from merlin_experiments.phase0.regression_capsules import load_specs
 from merlin.common.paths import repo_root
 
 FIXES = {
+    "06d1a7fa",
     "6e6e37a60",
     "1bf1c4071",
     "cc71013ff",
@@ -50,7 +51,14 @@ def test_all_fix_commits_map_to_capsules_or_explicit_infrastructure_tests():
     assert len(identities) == len(set(identities))
 
 
-@pytest.mark.parametrize("spec", ["compiler-regression-calls.yaml", "compiler-regression-half-precision.yaml"])
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "compiler-regression-calls.yaml",
+        "compiler-regression-half-precision.yaml",
+        "compiler-regression-input-layout.yaml",
+    ],
+)
 def test_generic_specs_are_inputs_without_answer_surfaces(spec):
     document = load_specs(repo_root() / "experiments/reference-data/phase0" / spec)
     for row in document["calls"]:

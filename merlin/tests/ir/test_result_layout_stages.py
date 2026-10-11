@@ -27,6 +27,7 @@ def test_descriptor_split_runs_erase_and_mid_once(monkeypatch, rvv):
     namespace["_erase_self_copies"] = lambda module: events.append("erase") or 1
     monkeypatch.setattr(result_layout, "_fg_split", namespace["_fg_split"], raising=False)
     monkeypatch.setattr(result_layout, "_layout_original_stages", namespace["_run_stages"], raising=False)
+    monkeypatch.setattr(result_layout, "_apply_input_layout", lambda m, c: events.append("input-layout"), raising=False)
     monkeypatch.setattr(result_layout, "_apply_result_layout", lambda m, c: events.append("layout"))
     pipeline = (
         build_rvv_pipeline("schedule.mlir")
@@ -48,6 +49,8 @@ def test_descriptor_split_runs_erase_and_mid_once(monkeypatch, rvv):
 
     mid = [("regression", lambda ctx, m: events.append("mid") or 1)]
     result_layout._layout_stages(contextlib.nullcontext(), module, pipeline, True, mid)
+    assert events.count("input-layout") == 1
+    assert events.index("input-layout") < next(i for i, event in enumerate(events) if "one-shot-bufferize" in event)
     assert events.count("erase") == events.count("mid") == 1
     assert events.index("erase") < events.index("mid")
     llvm = next(i for i, event in enumerate(events) if "finalize-memref-to-llvm" in event)

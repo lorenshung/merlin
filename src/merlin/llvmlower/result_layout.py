@@ -297,6 +297,8 @@ def _layout_stages(ctx, module, pipeline, erase, mid=(), late=(), post_openmp=()
     if not buffers:
         return _layout_original_stages(ctx, module, pipeline, erase, mid, late, post_openmp, pre_generalize)
     contract = json.loads(ir.StringAttr(module.operation.attributes[key]).value)
+    with ctx:
+        _apply_input_layout(module, contract)
     del module.operation.attributes[key]
     # Ownership normalization may clone borrowed returns. Reconstruct the public
     # borrowed descriptors afterwards, and reclaim those discarded owned clones.
@@ -333,6 +335,14 @@ def _layout_stages(ctx, module, pipeline, erase, mid=(), late=(), post_openmp=()
 
 def inject(source: str) -> str:
     marker = "src_path, out_path, pipeline ="
-    binding = inspect.getsource(_apply_result_layout) + "\n" + inspect.getsource(_layout_stages)
+    from .input_layout import _apply_input_layout
+
+    binding = (
+        inspect.getsource(_apply_input_layout)
+        + "\n"
+        + inspect.getsource(_apply_result_layout)
+        + "\n"
+        + inspect.getsource(_layout_stages)
+    )
     binding += "\n_layout_original_stages = _run_stages\n_run_stages = _layout_stages\n"
     return source.replace(marker, binding + marker)

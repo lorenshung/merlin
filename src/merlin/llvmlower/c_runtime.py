@@ -190,6 +190,13 @@ def generate(
     guard_planned_pack(model_dir, out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     sig = parse_forward_signature(model_dir / "model.mlir")
+    from .input_layout import descriptor_lines, is_identity_layout, storage_array
+    from .result_layout import read_layout
+
+    input_layout = read_layout((model_dir / "model.mlir").read_text()) if dump_all_outputs else None
+    input_layouts = input_layout["inputs"] if input_layout else [None] * len(sig)
+    if len(input_layouts) != len(sig):
+        raise ValueError("captured input layout count differs from runtime ABI")
     man = json.loads((model_dir / "weights.safetensors.manifest.json").read_text())
     weights_path = model_dir / "weights.safetensors"
     if manifest_requires_weight_blob(man):
@@ -298,9 +305,10 @@ def generate(
         else:
             arr = np.ascontiguousarray(inputs[f"in{n_in}"])
             n_in += 1
-        io_decls.append(f"static {C_OF[dt]} merlin_in_{i}[] = {{{_embed_array(arr, dt)}}};")
+        physical = storage_array(arr.reshape(shape), input_layouts[i]) if input_layouts[i] else arr
+        io_decls.append(f"static {C_OF[dt]} merlin_in_{i}[] = {{{_embed_array(physical, dt)}}};")
         embedded_arrays[i] = (arr, dt)
-        static_io_bytes += _storage_nbytes(arr, dt)
+        static_io_bytes += _storage_nbytes(physical, dt)
         embedded.add(i)
         rows.append(("MERLIN_INPUT", i, len(shape), shape, elem, dt))
     # QUANT-INNER ARGUMENTS. A torchao subclass's int8 `int_data`/`scale` are not `@forward`
@@ -396,6 +404,12 @@ def generate(
                 )
             state_pairs.append((input_arg, output_index))
 
+    if any(not is_identity_layout(layout) for layout in input_layouts) and (state_pairs or session.get("streams")):
+        raise ValueError("captured strided input ABI does not support packed session updates")
+    if input_layout and any(
+        i not in embedded and not is_identity_layout(layout) for i, layout in enumerate(input_layouts)
+    ):
+        raise ValueError("captured input layouts require embedded runtime input storage")
     state_input_args = {pair[0] for pair in state_pairs}
     stream_specs: list[tuple[int, np.ndarray, str]] = []
     streams = session.get("streams", ()) or ()
@@ -712,6 +726,7 @@ def generate(
                 "return words[3+axis]; }",
                 f"extern void _mlir_ciface_{ciface_name}({','.join(['void*'] * (n_sig_args + 1))});",
                 f"void {invoke_name}(void **d) {{",
+                *descriptor_lines([input_layouts[i] if i < len(input_layouts) else None for i in runtime_indices]),
                 f"_mlir_ciface_{ciface_name}(&results{''.join(f',d[{i}]' for i in range(n_sig_args))});",
             ]
         )
@@ -760,7 +775,7 @@ def generate(
     if dump_all_outputs and semantic_path.is_file():
         from .semantic_io import generate_observer
 
-        generate_observer(semantic_path, out_dir / "semantic_io.h", out_specs, embedded_arrays, DT_BYTES)
+        generate_observer(semantic_path, out_dir / "semantic_io.h", out_specs, embedded_arrays, DT_BYTES, input_layouts)
     else:
         (out_dir / "semantic_io.h").unlink(missing_ok=True)
 
