@@ -170,7 +170,8 @@ def grade_core_aten_batch(
         for index, abi, item in zip(indices, abis, expected):
             if output_shapes is not None:
                 shape = list(output_shapes[index])
-                declared = abi.get("declared_shape", abi["shape"])
+                physical_shape = [*abi["shape"], 2] if abi["dtype"].startswith("complex<") else abi["shape"]
+                declared = abi.get("declared_shape", physical_shape)
                 if len(shape) != len(declared) or any(d >= 0 and d != s for d, s in zip(declared, shape)):
                     details.append({"status": "mismatch", "reason": "runtime shape differs from declared result"})
                     continue

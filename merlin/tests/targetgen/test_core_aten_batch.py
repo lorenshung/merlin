@@ -382,7 +382,8 @@ def test_generic_form_capture_refuses_missing_forward_or_return(source):
         _function_parts(source)
 
 
-def test_complex_grading_interprets_observed_component_axis():
+@pytest.mark.parametrize("declared", [False, True])
+def test_complex_grading_interprets_observed_component_axis(declared):
     data = np.array([1 + 2j, 3 + 4j], dtype=np.complex64)
     record = dict(
         overload="fixture",
@@ -398,4 +399,6 @@ def test_complex_grading_interprets_observed_component_axis():
             )
         ),
     )
+    if not declared:
+        del record["output_abi"][0]["declared_shape"]
     assert grade_core_aten_batch({"cases": [record]}, [data.tobytes()], output_shapes=[[2, 2]])["passed_count"] == 1
