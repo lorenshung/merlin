@@ -72,7 +72,7 @@ def _physical_abi(abi: dict[str, Any]) -> dict[str, Any]:
     return {"dtype": abi["dtype"], "shape": [*abi["shape"]]}
 
 
-def _matching_brace(source: str, start: int) -> int:
+def _matching_brace(source: str, start: int, opener: str = "{", closer: str = "}") -> int:
     depth = 0
     quoted = False
     escaped = False
@@ -87,18 +87,110 @@ def _matching_brace(source: str, start: int) -> int:
                 quoted = False
         elif char == '"':
             quoted = True
-        elif char == "{":
+        elif char == opener:
             depth += 1
-        elif char == "}":
+        elif char == closer:
             depth -= 1
             if depth == 0:
                 return pos
     raise ValueError("unbalanced function braces")
 
 
+def _split_top(text: str) -> list[str]:
+    """Split on commas outside (), <>, [] and {} nesting and outside quoted strings."""
+    items, depth, quoted, escaped, start = [], 0, False, False, 0
+    for pos, char in enumerate(text):
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char in "(<[{":
+            depth += 1
+        elif char in ")>]}":
+            depth -= 1
+        elif char == "," and depth == 0:
+            items.append(text[start:pos].strip())
+            start = pos + 1
+    tail = text[start:].strip()
+    return [*items, tail] if tail or items else []
+
+
+def _generic_function_parts(source: str) -> tuple[list[str], str, list[str], list[str], str]:
+    """The generic-form spelling of :func:`_function_parts` (``"func.func"() <{...}> ({...})``).
+
+    Every op keeps its exact bytes; only the entry block label and terminal return are read.
+    """
+    if not source.lstrip().startswith('"builtin.module"()'):
+        raise ValueError("generic capture must be one builtin.module")
+    module_open = source.index("({", source.index('"builtin.module"()')) + 1
+    module_close = _matching_brace(source, module_open)
+    forward = []
+    position = module_open
+    while True:
+        at = source.find('"func.func"() <{', position, module_close)
+        if at < 0:
+            break
+        props_open = at + len('"func.func"() <')
+        props_close = _matching_brace(source, props_open)
+        if 'sym_name = "forward"' in _split_top(source[props_open + 1 : props_close]):
+            forward.append((at, props_close))
+        position = props_close
+    if len(forward) != 1:
+        raise ValueError("capture must contain exactly one @forward function")
+    at, props_close = forward[0]
+    if not source.startswith("> ({", props_close + 1):
+        raise ValueError("missing @forward body")
+    body_start = props_close + len("> ({")
+    body_end = _matching_brace(source, body_start)
+    op_end = source.find("\n", body_end)
+    op_end = module_close if op_end < 0 or op_end > module_close else op_end
+    body = source[body_start + 1 : body_end]
+    names = []
+    first = body.lstrip("\n")
+    if first.lstrip().startswith("^"):
+        label, sep, rest = first.partition("\n")
+        label = label.strip()
+        if not label.endswith(":") or "(" not in label:
+            raise ValueError("unsupported @forward entry block")
+        for arg in _split_top(label[label.index("(") + 1 : label.rindex(")")]):
+            name, sep, _ = arg.partition(":")
+            if not sep or not name.strip().startswith("%"):
+                raise ValueError(f"unsupported @forward argument {arg!r}")
+            names.append(name.strip())
+        body = rest
+    marker = '"func.return"('
+    if body.count(marker) != 1:
+        raise ValueError("capture must have one terminal func.return")
+    return_at = body.rfind(marker)
+    terminal = body[return_at:].strip()
+    close = _matching_brace(terminal, len(marker) - 1, "(", ")")
+    values = _split_top(terminal[len(marker) : close])
+    signature = terminal[close + 1 :].strip()
+    if signature.startswith("{"):
+        signature = signature[_matching_brace(signature, 0) + 1 :].strip()
+    if "\n" in terminal or not signature.startswith(": (") or not signature.endswith("-> ()"):
+        raise ValueError("unsupported terminal func.return")
+    types = _split_top(signature[len(": (") : -len("-> ()")].strip()[:-1])
+    if not values or any(not value.startswith("%") for value in values) or len(types) != len(values):
+        raise ValueError("unsupported returned SSA values")
+    line_start = source.rfind("\n", module_open, at) + 1
+    declarations = source[module_open + 1 : line_start] + source[op_end + 1 : module_close]
+    return names, body[:return_at], values, types, declarations
+
+
 def _function_parts(source: str) -> tuple[list[str], str, list[str], list[str], str]:
-    """Extract the one forward body and terminal return from model2MLIR's module."""
+    """Extract the one forward body and terminal return from model2MLIR's module.
+
+    Accepts the custom form and the generic form model2MLIR prints for traced captures.
+    """
     mark = "func.func @forward("
+    if mark not in source and '"func.func"()' in source:
+        return _generic_function_parts(source)
     if source.count(mark) != 1:
         raise ValueError("capture must contain exactly one @forward function")
     start = source.index(mark) + len(mark)
@@ -188,6 +280,9 @@ def _rename_ssa(source: str, prefix: str, argument_names: dict[str, str]) -> str
             quoted = True
             out.append(char)
             pos += 1
+            if "".join(out[-12:-1]).endswith("sym_name = "):
+                # A generic-form symbol definition is a string; keep it paired with its @references.
+                out.append(prefix)
             continue
         if char not in ("%", "^", "@"):
             out.append(char)

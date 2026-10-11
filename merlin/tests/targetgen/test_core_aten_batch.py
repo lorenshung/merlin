@@ -329,3 +329,59 @@ def test_generic_reprinted_bundle_still_restores_caller_layouts(tmp_path, monkey
     assert '"func.func"()' in (tmp_path / "out" / "model.mlir").read_text()
     boundary = json.loads((tmp_path / "out" / "semantic_io.json").read_text())
     assert boundary["post_indices"] == [1]
+
+
+_CUSTOM_STATEFUL = """builtin.module {
+  ml_program.global private mutable @state(dense<0> : tensor<i64>) : tensor<i64>
+  func.func @forward(%x: tensor<2xf32>, %y: tensor<2xf32>) -> (tensor<2xf32>, tensor<i64>) {
+    %s = ml_program.global_load @state : tensor<i64>
+    func.return %x, %s : tensor<2xf32>, tensor<i64>
+  }
+}"""
+
+_GENERIC_STATEFUL = """"builtin.module"() ({
+  "ml_program.global"() {sym_name = "state", type = tensor<i64>, is_mutable, value = dense<0> : tensor<i64>, \
+sym_visibility = "private"} : () -> ()
+  "func.func"() <{sym_name = "forward", \
+function_type = (tensor<2xf32>, tensor<2xf32>) -> (tensor<2xf32>, tensor<i64>)}> ({
+  ^bb0(%x: tensor<2xf32>, %y: tensor<2xf32>):
+    %s = "ml_program.global_load"() <{global = @state}> {prov.aten = "aten.rand.default"} : () -> tensor<i64>
+    "func.return"(%x, %s) : (tensor<2xf32>, tensor<i64>) -> ()
+  }) : () -> ()
+}) : () -> ()
+"""
+
+
+def test_generic_form_capture_matches_custom_form_parts():
+    from merlin.targetgen.core_aten_batch import _function_parts
+
+    custom = _function_parts(_CUSTOM_STATEFUL)
+    generic = _function_parts(_GENERIC_STATEFUL)
+    assert (generic[0], generic[2], generic[3]) == (custom[0], custom[2], custom[3])
+    assert '"ml_program.global_load"() <{global = @state}>' in generic[1]
+    assert "func.return" not in generic[1] and "^bb0" not in generic[1]
+    assert 'sym_name = "state"' in generic[4] and "@forward" not in generic[4] and '"forward"' not in generic[4]
+
+
+def test_generic_symbol_definitions_rename_with_their_references():
+    from merlin.targetgen.core_aten_batch import _function_parts, _rename_ssa
+
+    _, body, _, _, declarations = _function_parts(_GENERIC_STATEFUL)
+    assert 'sym_name = "c0_state"' in _rename_ssa(declarations, "c0_", {})
+    assert "@c0_state" in _rename_ssa(body, "c0_", {})
+    assert 'sym_visibility = "private"' in _rename_ssa(declarations, "c0_", {})
+    assert '"aten.rand.default"' in _rename_ssa(body, "c0_", {})
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        _GENERIC_STATEFUL.replace('sym_name = "forward"', 'sym_name = "other"'),
+        _GENERIC_STATEFUL.replace('"func.return"(%x, %s) : (tensor<2xf32>, tensor<i64>) -> ()', ""),
+    ],
+)
+def test_generic_form_capture_refuses_missing_forward_or_return(source):
+    from merlin.targetgen.core_aten_batch import _function_parts
+
+    with pytest.raises(ValueError):
+        _function_parts(source)
