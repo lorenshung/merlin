@@ -240,10 +240,31 @@ def _layout_stages(ctx, module, pipeline, erase, mid=(), late=(), post_openmp=()
         i for i, p in enumerate(passes) if p in ("bufferization-lower-deallocations", "convert-bufferization-to-memref")
     ]
     cut = (dealloc[-1] if dealloc else buffers[-1]) + 1
-    _layout_original_stages(ctx, module, ",".join(passes[:cut]), 0, (), (), (), pre_generalize)
+    head, tail = passes[:cut], passes[cut:]
+    hoist_head = any("buffer-loop-hoisting" in p for p in head)
+    late_head = any("convert-scf-to-openmp" in p for p in head)
+    _layout_original_stages(
+        ctx,
+        module,
+        ",".join(head),
+        erase if hoist_head else 0,
+        mid if hoist_head else (),
+        late if late_head else (),
+        post_openmp if late_head else (),
+        pre_generalize,
+    )
     with ctx:
         _apply_result_layout(module, contract)
-    _layout_original_stages(ctx, module, ",".join(passes[cut:]), erase, mid, late, post_openmp, ())
+    _layout_original_stages(
+        ctx,
+        module,
+        ",".join(tail),
+        0 if hoist_head else erase,
+        () if hoist_head else mid,
+        () if late_head else late,
+        () if late_head else post_openmp,
+        (),
+    )
 
 
 def inject(source: str) -> str:
