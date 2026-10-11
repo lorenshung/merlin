@@ -1193,7 +1193,9 @@ def render_prompt(te, manifest, experiment: str = "full", arm: str = "raw_baseli
         enforced_workflow=enforced_workflow,
     )
 
-    instructions = (manifest.contract.get("runner") or {}).get("full_call_instructions")
+    # A manifest without a capability contract (independent compiler tasks) selects no full-call text.
+    contract = getattr(manifest, "contract", None)
+    instructions = ((contract or {}).get("runner") or {}).get("full_call_instructions")
     if instructions is not None:
         if not isinstance(instructions, str) or not instructions.strip():
             raise ValueError("runner.full_call_instructions must be nonempty text")
