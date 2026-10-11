@@ -123,6 +123,7 @@ def execute(args, case, block):
                 arena_mb=args.arena_mb,
                 timeout=args.execution_timeout,
                 target=args.target,
+                numeric_policy=args.numeric_policy,
                 device_package=args.device_package,
                 rtl_facts=args.facts,
             )
@@ -133,8 +134,11 @@ def execute(args, case, block):
                     bytes.fromhex(item) for item in json.loads((directory / "spike-output-bytes.json").read_text())
                 ]
                 grade = grade_portable_outputs(batch, outputs)["cases"][case["case_id"]]
-            if execution["status"] == "failed" and not (directory / "spike-build" / "model.elf").exists():
-                grade["status"] = "compile_lowering_failed"
+            if execution["status"] == "failed":
+                if execution.get("stage") == "numeric_preparation":
+                    grade["status"] = "numeric_policy_refused"
+                elif execution.get("stage") == "build" and not (directory / "spike-build" / "model.elf").exists():
+                    grade["status"] = "compile_lowering_failed"
             evidence = {
                 "lane": grade.get("lane", "host"),
                 "numeric_verdict": grade,
@@ -153,6 +157,8 @@ def execute(args, case, block):
                 "reason": f"{type(exc).__name__}: {exc}",
                 "evidence": {"lane": "unassigned"},
             }
+    observation["numeric_policy"] = args.numeric_policy
+    observation["scales"] = observation.get("evidence", {}).get("numeric_verdict", {}).get("scales", [])
     # Existing runner writes verdict-bearing documents; stamp them before completion.
     for filename in ("core_aten_batch_map.json", "core_aten_batch_verdict.json", "spike-execution.json"):
         path = directory / filename
@@ -167,6 +173,7 @@ def execute(args, case, block):
             "case_sha256": case_digest(case),
             "observation": observation,
             "seconds": time.time() - started,
+            "numeric_policy": args.numeric_policy,
             "provenance": block,
         },
     )
@@ -176,8 +183,11 @@ def launch(args, phase, case, block):
     key = case_capture_name(case)
     directory = args.output / "captures" / key if phase == "capture" else args.output / args.label / "shards" / key
     completion = directory / ("capture.json" if phase == "capture" else "result.json")
-    if completion.exists() and json.loads(completion.read_text()).get("case_sha256") == case_digest(case):
-        return "cached"
+    if completion.exists():
+        cached = json.loads(completion.read_text())
+        policy_matches = phase == "capture" or cached.get("numeric_policy", "fp32") == args.numeric_policy
+        if cached.get("case_sha256") == case_digest(case) and policy_matches:
+            return "cached"
     directory.mkdir(parents=True, exist_ok=True)
     request = directory / "request.json"
     atomic_json(request, case)
@@ -192,7 +202,13 @@ def launch(args, phase, case, block):
             code = "timeout"
     if code != 0 or not completion.exists():
         reason = f"{phase} worker {code}; " + (directory / "worker.log").read_text(errors="replace")[-3000:]
-        record = {"case_id": case["case_id"], "case_sha256": case_digest(case), "provenance": block}
+        record = {
+            "case_id": case["case_id"],
+            "case_sha256": case_digest(case),
+            "provenance": block,
+            "numeric_policy": args.numeric_policy,
+            "scales": [],
+        }
         if phase == "capture":
             record.update(status="capture_failed", reason=reason)
         else:
@@ -377,7 +393,10 @@ def main():
     p.add_argument("--worker", choices=["capture", "execute"])
     p.add_argument("--case", type=Path)
     p.add_argument("--evaluate-only", action="store_true")
+    p.add_argument("--numeric-policy", choices=("fp32", "int8_w8a8"), default="fp32")
     args = p.parse_args()
+    if args.numeric_policy == "int8_w8a8" and not args.target:
+        p.error("--numeric-policy int8_w8a8 requires --target")
     if not 1 <= args.workers <= 64:
         p.error("workers must be between 1 and 64")
     block_path = args.output / args.label / "provenance.json"
@@ -464,11 +483,19 @@ def main():
         validate_solver_certificate=False,
     )
     report["provenance"] = block
+    report["numeric_policy"] = args.numeric_policy
+    for item in report["cases"].values():
+        numeric = item.get("evidence", {}).get("numeric_verdict", {})
+        item["numeric_policy"] = args.numeric_policy
+        item["scales"] = numeric.get("scales", [])
+        if "fp32_error" in numeric:
+            item["fp32_error"] = numeric["fp32_error"]
     report["campaign_complete"] = len(document["results"]) == len(corpus["selected_cases"]) and not any(
         item["status"] in {"not_run", "missing_result", "adapter_error"} for item in report["cases"].values()
     )
     report["validation_policy"] = (
-        "sealed suite, case witnesses/schema/oracle digests checked; live denominator, eager reruns, solver reruns disabled"
+        "sealed suite, case witnesses/schema/oracle digests checked; "
+        "live denominator, eager reruns, solver reruns disabled"
     )
     atomic_json(args.output / args.label / "report.json", report)
     timings = json.loads((args.output / args.label / "timings.json").read_text())
@@ -481,5 +508,5 @@ def main():
 if __name__ == "__main__":
     # Torch is intentionally absent in the Merlin controller interpreter.
     if "--evaluate-only" in sys.argv:
-        import torch
+        import torch  # noqa: F401 — select the capture interpreter before evaluation
     main()

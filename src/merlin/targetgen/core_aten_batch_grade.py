@@ -223,6 +223,14 @@ def grade_core_aten_batch(
     for record in batch_map["cases"]:
         identifier = str(record.get("case_id") or record["overload"])
         verdict = verdicts[identifier]
+        verdict["numeric_policy"] = record.get("numeric_policy", "fp32")
+        verdict["scales"] = record.get("scales", [])
+        if record.get("reference_engine"):
+            verdict["reference_engine"] = record["reference_engine"]
+        if record.get("fp32_case") and output_bytes is not None and execution_error is None:
+            from merlin.targetgen.core_aten_numeric import fp32_error
+
+            verdict["fp32_error"] = fp32_error(record, output_bytes)
         routing = dict(record.get("routing") or {"lane": "host", "routed": False, "reason": "scalar mode"})
         verdict.update(
             overload=record["overload"],
@@ -249,7 +257,11 @@ def grade_core_aten_batch(
                 or evidence.get("target") != routing.get("target")
                 or not verify_execution_evidence(evidence)
             ):
-                verdict.update(status="execution_failed", reason="device execution evidence missing or empty")
+                verdict.update(
+                    status="execution_failed",
+                    reason=verdict.get("reason") or "device execution evidence missing or empty",
+                    evidence_error="device execution evidence missing or empty",
+                )
     counts: dict[str, int] = {}
     for item in verdicts.values():
         counts[item["status"]] = counts.get(item["status"], 0) + 1
