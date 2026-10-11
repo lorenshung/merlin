@@ -169,3 +169,70 @@ def test_fresh_alias_class_covers_later_full_storage(tmp_path):
     pointer[output.partial.offset] = -31
     assert ctypes.cast(output.partial.aligned, ctypes.POINTER(ctypes.c_float))[5] == -31
     ctypes.CDLL(None).free(ctypes.c_void_p(output.full.allocated))
+
+
+def apply_memref_layout(source, contract, *, operation_owners=False):
+    """Exercise the ownership rewrite in its native compiler interpreter."""
+    import json
+
+    code = """
+import json, sys
+from torch_mlir import ir
+from torch_mlir.dialects import arith, memref
+from merlin.llvmlower.result_layout import _apply_result_layout
+source, contract, operation_owners = json.load(sys.stdin)
+# Some compiler bindings expose bare Operation owners. Exercise that branch
+# alongside native OpView owners without changing the parsed IR or its values.
+if operation_owners:
+    ir.Operation = (ir.Operation, ir.OpView)
+with ir.Context() as ctx:
+    module = ir.Module.parse(source)
+    _apply_result_layout(module, contract)
+    print(module)
+"""
+    return subprocess.run(
+        [str(m2m_python()), "-c", code],
+        input=json.dumps([source, contract, operation_owners]),
+        text=True,
+        capture_output=True,
+    )
+
+
+@pytest.mark.parametrize("operation_owners", [False, True])
+@pytest.mark.parametrize("producer", ["transpose", "view", "alloc", "argument"])
+def test_discarded_alloc_is_retained_when_live_root_is_unknown(producer, operation_owners):
+    if producer == "view":
+        input_type = "memref<24xi8>"
+        live_type = "memref<2x3xf32>"
+        body = (
+            "%zero = arith.constant 0 : index\n%live = memref.view %owned[%zero][] : memref<24xi8> to memref<2x3xf32>"
+        )
+        input_shape, input_stride = [24], [1]
+    else:
+        input_type = "memref<2x3xf32>"
+        input_shape, input_stride = [2, 3], [3, 1]
+        if producer == "transpose":
+            live_type = "memref<3x2xf32, strided<[1, 3]>>"
+            body = "%live = memref.transpose %owned (d0, d1) -> (d1, d0) : memref<2x3xf32> to " + live_type
+        elif producer == "alloc":
+            live_type = input_type
+            body = "%live = memref.alloc() : " + live_type
+        else:
+            live_type = input_type
+            body = "%live = memref.cast %arg : memref<2x3xf32> to memref<2x3xf32>"
+    source = f"""module {{
+      func.func @forward(%arg: {input_type}) -> ({input_type}, {live_type}) {{
+        %owned = memref.alloc() : {input_type}
+        {body}
+        return %owned, %live : {input_type}, {live_type}
+      }}
+    }}"""
+    record = dict(shape=input_shape, stride=input_stride, storage_offset=0)
+    result = apply_memref_layout(
+        source, dict(inputs=[record], results=[dict(record, alias_inputs=[0]), None]), operation_owners=operation_owners
+    )
+    assert result.returncode == 0, result.stderr
+    assert ("memref.dealloc" in result.stdout) == (producer in {"alloc", "argument"})
+    # The original owned allocation remains the backing storage of the unknown view.
+    if producer in {"transpose", "view"}:
+        assert "memref.alloc" in result.stdout and "memref." + producer in result.stdout

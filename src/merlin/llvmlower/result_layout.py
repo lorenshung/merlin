@@ -64,15 +64,19 @@ def _apply_result_layout(module, contract):
             return 0
         return record["storage_offset"] + 1 + sum((n - 1) * s for n, s in zip(record["shape"], record["stride"]))
 
+    def owner_operation(value):
+        owner = value.owner
+        return owner.operation if isinstance(owner, ir.OpView) else owner
+
     def root(value):
-        while isinstance(value.owner, ir.Operation) and value.owner.name in (
+        while isinstance(owner_operation(value), ir.Operation) and owner_operation(value).name in (
             "memref.cast",
             "memref.reinterpret_cast",
             "memref.subview",
             "memref.expand_shape",
             "memref.collapse_shape",
         ):
-            value = value.owner.operands[0]
+            value = owner_operation(value).operands[0]
         return value
 
     rewritten = []
@@ -199,14 +203,22 @@ def _apply_result_layout(module, contract):
         # Discarded owned results no longer escape. Release each allocation once,
         # retaining any allocation still backing an unchanged/aliased result.
         live_roots = [root(v) for v in rewritten]
+        # Unknown view producers may still alias any discarded allocation. Without
+        # complete live-root provenance, no local ownership proof can authorize a free.
+        live_roots_known = all(
+            isinstance(v.owner, ir.Block)
+            or (isinstance(owner_operation(v), ir.Operation) and owner_operation(v).name == "memref.alloc")
+            for v in live_roots
+        )
         freed = []
         for value in old:
             allocation = root(value)
             if (
-                allocation not in live_roots
+                live_roots_known
+                and allocation not in live_roots
                 and allocation not in freed
-                and isinstance(allocation.owner, ir.Operation)
-                and allocation.owner.name == "memref.alloc"
+                and isinstance(owner_operation(allocation), ir.Operation)
+                and owner_operation(allocation).name == "memref.alloc"
             ):
                 memref.DeallocOp(allocation)
                 freed.append(allocation)
