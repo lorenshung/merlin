@@ -70,3 +70,28 @@ def test_requested_buffer_rewrites_refuse_missing_anchor(monkeypatch, pipeline, 
     exec(RUNNER_PRELUDE, namespace)
     with pytest.raises(RuntimeError, match="requested"):
         namespace["_run_stages"](None, None, pipeline, erase, mid)
+
+
+@pytest.mark.parametrize(
+    "pipeline,missing",
+    [
+        ("one-shot-bufferize,buffer-results-to-out-params,finalize-memref-to-llvm", "buffer-results-to-out-params"),
+        ("canonicalize,finalize-memref-to-llvm", "one-shot-bufferize"),
+    ],
+)
+def test_pipeline_cannot_skip_declared_input_layout(monkeypatch, pipeline, missing):
+    import contextlib
+    import json
+
+    events = []
+    contract = dict(inputs=[dict(shape=[2, 3], stride=[6, 2], storage_offset=1)], results=[])
+    module = SimpleNamespace(
+        operation=SimpleNamespace(attributes={"m2m.result_layout": SimpleNamespace(value=json.dumps(contract))})
+    )
+    monkeypatch.setitem(sys.modules, "torch_mlir", SimpleNamespace(ir=SimpleNamespace(StringAttr=lambda a: a)))
+    monkeypatch.setattr(result_layout, "_fg_split", lambda p: p.split(","), raising=False)
+    monkeypatch.setattr(result_layout, "_layout_original_stages", lambda *args: events.append(args), raising=False)
+    with pytest.raises(ValueError, match="cannot skip captured input-layout contract.*" + missing):
+        result_layout._layout_stages(contextlib.nullcontext(), module, pipeline, False)
+    assert not events
+    assert "m2m.result_layout" in module.operation.attributes

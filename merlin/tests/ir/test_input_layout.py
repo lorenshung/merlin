@@ -208,6 +208,19 @@ def test_nonzero_overlapping_strides_refuse_borrowed_return(tmp_path):
         lower_to_llvm_ir(str(converted.module), workdir=tmp_path, preserve_result_descriptors=True)
 
 
+@pytest.mark.parametrize("stride", [[3, 1], [6, 2]])
+def test_caller_cannot_skip_declared_input_layout(tmp_path, stride):
+    from merlin.llvmlower.result_layout import module_attribute
+
+    model = tmp_path / "model"
+    model.mkdir()
+    contract = dict(inputs=[dict(shape=[2, 3], stride=stride, storage_offset=0)], results=[])
+    source = "module" + module_attribute(contract) + " { func.func @forward(%a: tensor<2x3xf32>) { return } }"
+    (model / "model.mlir").write_text(source)
+    with pytest.raises(ValueError, match="input-layout contract requires dump_all_outputs=True"):
+        generate(model, tmp_path / "cgen", tmp_path / "inputs.npz")
+
+
 @pytest.mark.parametrize("stride,offset", [([-1, 1], 0), ([3, 1], -1), ([{"shape_axes": [1]}, 1], 0)])
 def test_unrepresentable_input_layout_refuses(stride, offset):
     with pytest.raises(ValueError, match="static nonnegative layout"):

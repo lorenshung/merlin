@@ -293,13 +293,18 @@ def _layout_stages(ctx, module, pipeline, erase, mid=(), late=(), post_openmp=()
     key = "m2m.result_layout"
     if key not in module.operation.attributes:
         return _layout_original_stages(ctx, module, pipeline, erase, mid, late, post_openmp, pre_generalize)
+    contract = json.loads(ir.StringAttr(module.operation.attributes[key]).value)
+    has_inputs = any(record is not None for record in contract.get("inputs", []))
     passes = _fg_split(pipeline)
     if any(p.startswith("buffer-results-to-out-params") for p in passes):
+        if has_inputs:
+            raise ValueError("cannot skip captured input-layout contract: pipeline uses buffer-results-to-out-params")
         return _layout_original_stages(ctx, module, pipeline, erase, mid, late, post_openmp, pre_generalize)
     buffers = [i for i, p in enumerate(passes) if p.startswith("one-shot-bufferize")]
     if not buffers:
+        if has_inputs:
+            raise ValueError("cannot skip captured input-layout contract: pipeline lacks one-shot-bufferize")
         return _layout_original_stages(ctx, module, pipeline, erase, mid, late, post_openmp, pre_generalize)
-    contract = json.loads(ir.StringAttr(module.operation.attributes[key]).value)
     refuse_overlapping_input_aliases(contract)
     with ctx:
         _apply_input_layout(module, contract)

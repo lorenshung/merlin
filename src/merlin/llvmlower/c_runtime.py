@@ -193,7 +193,9 @@ def generate(
     from .input_layout import descriptor_lines, is_identity_layout, storage_array
     from .result_layout import read_layout
 
-    input_layout = read_layout((model_dir / "model.mlir").read_text()) if dump_all_outputs else None
+    input_layout = read_layout((model_dir / "model.mlir").read_text())
+    if input_layout and any(record is not None for record in input_layout.get("inputs", [])) and not dump_all_outputs:
+        raise ValueError("captured input-layout contract requires dump_all_outputs=True")
     input_layouts = input_layout["inputs"] if input_layout else [None] * len(sig)
     if len(input_layouts) != len(sig):
         raise ValueError("captured input layout count differs from runtime ABI")
