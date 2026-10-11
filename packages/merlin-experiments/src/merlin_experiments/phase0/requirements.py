@@ -280,7 +280,8 @@ def derive(
     from .core_aten_stage import declaration as core_declaration
     from .core_aten_stage import derive as derive_core
 
-    if core_declaration(declaration.recipe) is not None:
+    recipe = getattr(declaration, "recipe", None)  # Only a declared recipe can select the retained stage.
+    if recipe is not None and core_declaration(recipe) is not None:
         if captures or native_qualifications or capture_preselections or quantization_policies:
             raise ValueError("Core ATen uses only recipe-declared case selections and retained captures")
         return derive_core(
