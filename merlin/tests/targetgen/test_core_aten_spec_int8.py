@@ -110,6 +110,36 @@ def test_dynamic_verdict_is_explicitly_diagnostic():
     assert verdict["numeric_qualification"] == "diagnostic, not spec-conformant"
 
 
+def test_spec_int8_host_pass_is_counted_only_as_original_host():
+    from merlin.targetgen.core_aten_batch_grade import grade_core_aten_batch
+
+    case = dict(expected=dict(kind="tensor", dtype="float32", shape=[1], values=[2.0]), comparison="torch_close")
+    report = dict(
+        provenance={},
+        cases=[
+            dict(
+                overload="aten.mm.default",
+                status="bundled",
+                case=case,
+                numeric_policy="spec_int8",
+                numeric_admission=dict(status="refused", quantized_contractions=0),
+                output_indices=[0],
+                output_abi=[dict(dtype="f32", shape=[1])],
+            )
+        ],
+    )
+    result = grade_core_aten_batch(report, [np.array([2.0], np.float32).tobytes()])
+    verdict = result["cases"]["aten.mm.default"]
+    assert verdict["status"] == verdict["numeric_status"] == "pass"
+    assert verdict["numeric_execution_policy"] == "original_host"
+    assert verdict["numeric_qualification"] == "original host fallback; no spec-int8 result"
+    assert result["numeric_passed_by_lane_and_policy"]["host"]["original_host"] == 1
+    assert result["numeric_passed_by_lane_and_policy"]["host"]["spec_int8"] == 0
+    assert result["numeric_passed_by_lane_and_policy"]["device"]["spec_int8"] == 0
+    assert result["spec_int8_passed_count"] == 0
+    assert result["spec_int8_host_fallback_passed_count"] == 1
+
+
 def test_fp32_metrics_distinguish_zero_golden_and_zero_error():
     from merlin.targetgen.core_aten_numeric import fp32_error
 

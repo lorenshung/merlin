@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from merlin.common import provenance
+from merlin.targetgen.core_aten_batch_grade import numeric_policy_counts
 from merlin.targetgen.core_aten_bounded_runner import (
     SavedResponseAdapter,
     atomic_json,
@@ -279,6 +280,7 @@ def summarize(args, corpus, report, block, timings):
     numeric = Counter()
     numeric_overloads = defaultdict(Counter)
     numeric_lanes = defaultdict(Counter)
+    policy_verdicts = []
     for case in corpus["selected_cases"]:
         item = report["cases"][case["case_id"]]
         status = item["status"]
@@ -286,6 +288,15 @@ def summarize(args, corpus, report, block, timings):
         by_overload[case["overload"]][status] += 1
         lanes[evidence.get("lane", "unassigned")][status] += 1
         grade = evidence.get("numeric_verdict", {})
+        policy_verdicts.append(
+            {
+                **evidence.get("semantic_verdict", {}),
+                "numeric_policy": item.get("numeric_policy", "fp32"),
+                "numeric_status": grade.get("status", "unavailable"),
+                "status": status,
+                "lane": evidence.get("lane", "unassigned"),
+            }
+        )
         numeric[grade.get("status", "unavailable")] += 1
         numeric_overloads[case["overload"]][grade.get("status", "unavailable")] += 1
         numeric_lanes[evidence.get("lane", "unassigned")][grade.get("status", "unavailable")] += 1
@@ -335,6 +346,7 @@ def summarize(args, corpus, report, block, timings):
         ),
         "numeric_only_passed_count": numeric.get("pass", 0),
         "numeric_count_policy": "secondary output-only matches, including full-contract passes",
+        **numeric_policy_counts(policy_verdicts),
         "delta_by_status": status_delta,
         "delta_by_family": family_delta,
         "device_lane_evidence": {
@@ -379,6 +391,11 @@ def summarize(args, corpus, report, block, timings):
         f"Lanes: {dict(lanes)}",
         "",
         f"Numeric results by lane: {dict(numeric_lanes)}",
+        "",
+        f"Executed numeric results by lane and policy: {summary['numeric_passed_by_lane_and_policy']}",
+        "",
+        f"Spec-int8 results: {summary['spec_int8_passed_count']}; original-host fallback matches under "
+        f"the requested spec-int8 policy: {summary['spec_int8_host_fallback_passed_count']}",
         "",
         "| Overload | Semantic pass | Numeric match | Total |",
         "| --- | ---: | ---: | ---: |",

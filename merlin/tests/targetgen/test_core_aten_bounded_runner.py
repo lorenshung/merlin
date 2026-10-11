@@ -301,6 +301,44 @@ def test_summary_handles_families_present_only_in_baseline(tmp_path):
     assert result["numeric_only_passed_count"] == 1
 
 
+def test_summary_and_shard_aggregation_separate_spec_int8_host_fallback(tmp_path):
+    import importlib.util
+    from argparse import Namespace
+
+    from merlin.common.paths import repo_root
+
+    module = _measurement_script()
+    current = dict(
+        case_count=1,
+        campaign_complete=True,
+        status_counts={"pass": 1},
+        cases={
+            "case": dict(
+                status="pass",
+                numeric_policy="spec_int8",
+                evidence=dict(lane="host", numeric_verdict=dict(status="pass")),
+            )
+        },
+    )
+    case = dict(case_id="case", overload="aten.mm.default", partition_assignment={})
+    args = Namespace(output=tmp_path, baseline=None, label="spec-int8")
+    module.summarize(args, {"selected_cases": [case]}, current, {}, {})
+    result = json.loads((tmp_path / args.label / "summary.json").read_text())
+    assert result["spec_int8_passed_count"] == 0
+    assert result["spec_int8_host_fallback_passed_count"] == 1
+    assert result["numeric_passed_by_lane_and_policy"]["host"]["original_host"] == 1
+    assert "Spec-int8 results: 0" in (tmp_path / args.label / "summary.md").read_text()
+    spec = importlib.util.spec_from_file_location(
+        "batch_policy_summary", repo_root() / "build_tools/scripts/build_core_aten_batch.py"
+    )
+    batch = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(batch)
+    verdict = dict(status="pass", numeric_status="pass", numeric_policy="spec_int8", lane="host")
+    counts = batch._semantic_counts(dict(cases={"case": verdict}, passed_count=1))
+    assert counts["spec_int8_passed_count"] == 0
+    assert counts["spec_int8_host_fallback_passed_count"] == 1
+
+
 def test_evaluate_only_refuses_missing_torch_without_reexecution(tmp_path, monkeypatch):
     import importlib.util
     import sys

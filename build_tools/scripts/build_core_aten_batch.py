@@ -9,7 +9,7 @@ from pathlib import Path
 
 from merlin.common.paths import artifacts_dir
 from merlin.targetgen.core_aten_batch import build_core_aten_batch
-from merlin.targetgen.core_aten_batch_grade import grade_core_aten_batch
+from merlin.targetgen.core_aten_batch_grade import grade_core_aten_batch, numeric_policy_counts
 from merlin.targetgen.core_aten_device import load_execution_provider
 from merlin.targetgen.core_aten_device import run_spike_bundle as _run_spike_bundle
 
@@ -24,7 +24,11 @@ def _passed_by_lane(verdict: dict) -> dict:
 def _semantic_counts(verdict: dict) -> dict:
     cases = verdict["cases"].values()
     full = sum(case["status"] == "pass" and case.get("semantic_scope") == "full" for case in cases)
-    return dict(full_semantic_passed_count=full, numeric_only_passed_count=verdict["passed_count"] - full)
+    return dict(
+        full_semantic_passed_count=full,
+        numeric_only_passed_count=verdict["passed_count"] - full,
+        **numeric_policy_counts(verdict["cases"].values()),
+    )
 
 
 def _write_json(path: Path, document: object) -> None:

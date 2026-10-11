@@ -31,6 +31,31 @@ _EXPECTED_DTYPES = {
 }
 
 
+def numeric_policy_counts(verdicts):
+    """Count executed result policies; a requested int8 policy grants no result."""
+    policies = ("fp32", "int8_w8a8", "spec_int8", "original_host", "unqualified_spec_int8")
+    numeric = {lane: dict.fromkeys(policies, 0) for lane in ("host", "device", "unassigned")}
+    passed = {lane: dict.fromkeys(policies, 0) for lane in numeric}
+    for verdict in verdicts:
+        lane = verdict.get("lane", "unassigned")
+        requested = verdict.get("numeric_policy", "fp32")
+        policy = verdict.get("numeric_execution_policy", requested)
+        if requested == "spec_int8":
+            # No qualified static-i8 full-call provider exists yet. Even a
+            # successful device-shaped record cannot establish that contract.
+            policy = "original_host" if lane == "host" else "unqualified_spec_int8"
+        numeric.setdefault(lane, dict.fromkeys(policies, 0))
+        passed.setdefault(lane, dict.fromkeys(policies, 0))
+        numeric[lane][policy] = numeric[lane].get(policy, 0) + (verdict.get("numeric_status") == "pass")
+        passed[lane][policy] = passed[lane].get(policy, 0) + (verdict.get("status") == "pass")
+    return {
+        "numeric_passed_by_lane_and_policy": numeric,
+        "passed_by_lane_and_policy": passed,
+        "spec_int8_passed_count": sum(counts["spec_int8"] for counts in numeric.values()),
+        "spec_int8_host_fallback_passed_count": numeric["host"]["original_host"],
+    }
+
+
 def _decode_storage(raw: bytes, dtype: str) -> np.ndarray:
     values = np.frombuffer(raw, dtype=_DTYPES[dtype])
     if dtype == "bf16":
@@ -234,9 +259,6 @@ def grade_core_aten_batch(
         if verdict["numeric_policy"] == "int8_w8a8":
             verdict["numeric_qualification"] = "diagnostic, not spec-conformant"
         elif verdict["numeric_policy"] == "spec_int8":
-            verdict["numeric_qualification"] = (
-                "declared-pipeline admission; refused sites retain original host execution"
-            )
             verdict["numeric_admission"] = record.get("numeric_admission", {"status": "unknown"})
             verdict["numeric_selection"] = record.get("numeric_selection", {})
         verdict["scales"] = record.get("scales", [])
@@ -266,6 +288,13 @@ def grade_core_aten_batch(
             routing_reason=routing.get("reason", ""),
             **{key: value for key, value in routing.items() if key != "reason"},
         )
+        verdict["numeric_execution_policy"] = verdict["numeric_policy"]
+        if verdict["numeric_policy"] == "spec_int8":
+            host = routing.get("lane") == "host"
+            verdict["numeric_execution_policy"] = "original_host" if host else "unqualified_spec_int8"
+            verdict["numeric_qualification"] = (
+                "original host fallback; no spec-int8 result" if host else "unqualified spec-int8 execution"
+            )
         if record.get("source_preparation"):
             verdict["source_preparation"] = record["source_preparation"]
         if routing.get("lane") == "device" and record["status"] == "bundled":
@@ -318,5 +347,6 @@ def grade_core_aten_batch(
             v["status"] == "pass" and v.get("semantic_scope") == "numeric_only" for v in verdicts.values()
         ),
         "numeric_passed_count": sum(v.get("numeric_status") == "pass" for v in verdicts.values()),
+        **numeric_policy_counts(verdicts.values()),
         "scope": "compiled values, mutation, memref metadata and aliases; imposed fields excluded",
     }
