@@ -55,7 +55,12 @@ def descriptor_results(pipeline: str, mlir: str, *, preserve: bool = False) -> s
         raise
     if preserve or any(dim < 0 for shape, _ in results for dim in shape):
         stages = [p for p in pipeline.split(",") if not p.startswith("buffer-results-to-out-params")]
-        at = next(i for i, p in enumerate(stages) if p.startswith("finalize-memref-to-llvm"))
+        bufferized = [
+            i
+            for i, p in enumerate(stages)
+            if p.startswith("one-shot-bufferize") or p == "bufferization-lower-deallocations"
+        ]
+        at = max(bufferized, default=-1) + 1
         stages.insert(at, "convert-bufferization-to-memref")
         return ",".join(stages)
     return pipeline

@@ -887,7 +887,7 @@ def build_rvv_pipeline(
 # act_poly runner called the PassManager directly, so every fork that also enabled
 # `vectorized_transcendental_activation` (the whole-model proposer enables it by default) got the
 # self-copy erase requested, reported as applied, and never run.
-from . import fusion_guard, result_buffers
+from . import fusion_guard, result_buffers, result_layout
 from .alloca_scope_lower import RUNNER_PRELUDE as _ALLOCA_SCOPE_LOWER_PRELUDE
 from .broadcast_fold import RUNNER_PRELUDE as _BROADCAST_FOLD_PRELUDE
 from .concat_dps import RUNNER_PRELUDE as _CONCAT_DPS_PRELUDE
@@ -1451,7 +1451,7 @@ def _select_runner(
     source = _bind_source_observation_runner(source, selected=_SOURCE_OBSERVATION_FEATURE in feats)
     # Every variant runs elementwise fusion under the broadcast control function (fusion_guard).
     return bind_inspection(
-        result_buffers.inject(fusion_guard.inject(source)),
+        result_layout.inject(result_buffers.inject(fusion_guard.inject(source))),
         inspection_dir,
         keep_exact=keep_exact,
         print_before=printing[0],

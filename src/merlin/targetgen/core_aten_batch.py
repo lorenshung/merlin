@@ -346,6 +346,8 @@ def build_core_aten_batch(
     semantic_outputs = []
     semantic_inputs = []
     semantic_posts = []
+    layout_inputs = []
+    layout_results = []
 
     for case in corpus["cases"]:
         overload = case["overload"]
@@ -384,6 +386,9 @@ def build_core_aten_batch(
             names, body, returned, local_result_types, local_declarations = _function_parts(
                 mlir_file.read_text(encoding="utf-8")
             )
+            from merlin.llvmlower.result_layout import read_layout
+
+            result_layout = read_layout(mlir_file.read_text(encoding="utf-8"))
             abi_in = meta["input_abi"]
             abi_out = meta["output_abi"]
             contract = meta.get("result_contract")
@@ -478,6 +483,25 @@ def build_core_aten_batch(
         renamed_body = _rename_ssa(body, prefix, argument_names)
         declarations.append(_rename_ssa(local_declarations, prefix, {}))
         renamed_returns = [_rename_ssa(name, prefix, argument_names) for name in returned]
+        if result_layout is not None:
+            layout_inputs.extend(result_layout["inputs"])
+            for item in result_layout["results"]:
+                entry = {
+                    **item,
+                    "alias_inputs": [first_input + j for j in item["alias_inputs"]],
+                    "alias_results": [first_output + j for j in item.get("alias_results", [])],
+                }
+                if "input_index" in entry:
+                    entry["input_index"] += first_input
+                layout_results.append(entry)
+            for name in returned[len(result_layout["results"]) :]:
+                j = names.index(name)
+                layout_results.append(
+                    {**result_layout["inputs"][j], "alias_inputs": [first_input + j], "role": "user_output"}
+                )
+        else:
+            layout_inputs.extend([None] * len(names))
+            layout_results.extend([None] * len(returned))
         body_lines.append(f"    // {overload}\n" + renamed_body.rstrip() + "\n")
         inputs.extend(local_inputs)
         arg_types.extend(local_types)
@@ -529,8 +553,17 @@ def build_core_aten_batch(
     outputs = result_types[0] if len(result_types) == 1 else "(" + ", ".join(result_types) + ")"
     returns = ", ".join(results)
     return_types = ", ".join(result_types)
+    from merlin.llvmlower.result_layout import module_attribute
+
+    layout_attr = (
+        module_attribute(dict(schema_version=1, inputs=layout_inputs, results=layout_results))
+        if any(item is not None for item in layout_results)
+        else ""
+    )
     module = (
-        "builtin.module {\n"
+        "builtin.module"
+        + layout_attr
+        + " {\n"
         + "".join(declarations)
         + f"  func.func @forward({arguments}) -> {outputs} {{\n"
         + "".join(body_lines)

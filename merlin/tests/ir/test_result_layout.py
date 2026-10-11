@@ -1,0 +1,171 @@
+"""Native result descriptors preserve frontend storage semantics."""
+
+import ctypes
+import subprocess
+
+import numpy as np
+import pytest
+
+from merlin.llvmlower.pipeline import lower_to_llvm_ir
+from merlin.llvmlower.result_layout import module_attribute
+from merlin.llvmlower.toolchain import clang, llvm_install, m2m_python
+
+
+class Descriptor(ctypes.Structure):
+    _fields_ = [
+        ("allocated", ctypes.c_void_p),
+        ("aligned", ctypes.c_void_p),
+        ("offset", ctypes.c_int64),
+        ("sizes", ctypes.c_int64 * 2),
+        ("strides", ctypes.c_int64 * 2),
+    ]
+
+
+def execute(tmp_path, result, *, dynamic=False, extent=4):
+    if not m2m_python().is_file():
+        pytest.skip("native MLIR interpreter unavailable")
+    import hashlib
+
+    tmp_path = tmp_path / hashlib.sha256(str((result, extent)).encode()).hexdigest()[:12]
+    tmp_path.mkdir()
+    contract = dict(inputs=[dict(shape=[extent, 5], stride=[5, 1], storage_offset=0)], results=[result])
+    shape = "?x5" if dynamic else "x".join(str(n) for n in result["shape"])
+    body = (
+        f"%b = tensor.cast %a : tensor<{extent}x5xf32> to tensor<?x5xf32>"
+        if dynamic
+        else f"%b = tensor.empty() : tensor<{shape}xf32>"
+    )
+    source = (
+        "builtin.module"
+        + module_attribute(contract)
+        + f""" {{
+      func.func @forward(%a: tensor<{extent}x5xf32>) -> tensor<{shape}xf32>
+          attributes {{llvm.emit_c_interface}} {{
+        {body}
+        func.return %b : tensor<{shape}xf32>
+      }}
+    }}"""
+    )
+    lowered = lower_to_llvm_ir(source, workdir=tmp_path, preserve_result_descriptors=True)
+    path, library = tmp_path / "model.ll", tmp_path / "model.so"
+    path.write_text(lowered)
+    lib = llvm_install() / "lib"
+    subprocess.run(
+        [
+            str(clang()),
+            "-shared",
+            "-fPIC",
+            "-O1",
+            "-Wl,-Bsymbolic",
+            str(path),
+            "-L" + str(lib),
+            "-lmlir_c_runner_utils",
+            "-Wl,-rpath," + str(lib),
+            "-o",
+            str(library),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    values = np.arange(extent * 5, dtype=np.float32).reshape(extent, 5)
+    arg = Descriptor(
+        values.ctypes.data, values.ctypes.data, 0, (ctypes.c_int64 * 2)(extent, 5), (ctypes.c_int64 * 2)(5, 1)
+    )
+    output = Descriptor()
+    entry = ctypes.CDLL(str(library))._mlir_ciface_forward
+    entry.argtypes = [ctypes.POINTER(Descriptor), ctypes.POINTER(Descriptor)]
+    entry(ctypes.byref(output), ctypes.byref(arg))
+    return values, output
+
+
+@pytest.mark.parametrize("shape,stride,offset", [([2, 3], [5, 1], 6), ([5, 4], [1, 5], 0), ([3, 5], [0, 1], 0)])
+def test_borrowed_native_view_shares_allocation(tmp_path, shape, stride, offset):
+    values, output = execute(
+        tmp_path, dict(shape=shape, stride=stride, storage_offset=offset, alias_inputs=[0], role="user_output")
+    )
+    assert output.allocated == values.ctypes.data
+    assert output.aligned == values.ctypes.data
+    assert output.offset == offset
+    assert list(output.sizes) == shape
+    assert list(output.strides) == stride
+    pointer = ctypes.cast(output.aligned, ctypes.POINTER(ctypes.c_float))
+    pointer[offset] = -17
+    assert values.ravel()[offset] == -17  # A write through the result reaches the input.
+
+
+@pytest.mark.parametrize("extent", [0, 1, 4])
+def test_dynamic_fresh_result_is_physically_column_major(tmp_path, extent):
+    values, output = execute(
+        tmp_path,
+        dict(shape=[-1, 5], stride=[1, {"shape_axes": [0]}], storage_offset=0, alias_inputs=[], role="user_output"),
+        dynamic=True,
+        extent=extent,
+    )
+    assert output.allocated != values.ctypes.data
+    assert list(output.sizes) == [extent, 5]
+    assert list(output.strides) == [1, extent]
+    pointer = ctypes.cast(output.aligned, ctypes.POINTER(ctypes.c_float))
+    actual = [[pointer[output.offset + i + extent * j] for j in range(5)] for i in range(extent)]
+    np.testing.assert_array_equal(np.asarray(actual).reshape(extent, 5), values)
+    ctypes.CDLL(None).free(ctypes.c_void_p(output.allocated))
+
+
+def test_fresh_alias_class_covers_later_full_storage(tmp_path):
+    if not m2m_python().is_file():
+        pytest.skip("native MLIR interpreter unavailable")
+
+    class Pair(ctypes.Structure):
+        _fields_ = [("partial", Descriptor), ("full", Descriptor)]
+
+    contract = dict(
+        inputs=[dict(shape=[4, 5], stride=[5, 1], storage_offset=0)],
+        results=[
+            dict(shape=[2, 5], stride=[5, 1], storage_offset=5, alias_inputs=[]),
+            dict(shape=[4, 5], stride=[5, 1], storage_offset=0, alias_inputs=[], alias_results=[0]),
+        ],
+    )
+    source = (
+        "builtin.module"
+        + module_attribute(contract)
+        + """ {
+      func.func @forward(%a: tensor<4x5xf32>) -> (tensor<2x5xf32>, tensor<4x5xf32>)
+          attributes {llvm.emit_c_interface} {
+        %b = tensor.extract_slice %a[1, 0] [2, 5] [1, 1] : tensor<4x5xf32> to tensor<2x5xf32>
+        func.return %b, %a : tensor<2x5xf32>, tensor<4x5xf32>
+      }
+    }"""
+    )
+    lowered = lower_to_llvm_ir(source, workdir=tmp_path, preserve_result_descriptors=True)
+    path, library = tmp_path / "pair.ll", tmp_path / "pair.so"
+    path.write_text(lowered)
+    lib = llvm_install() / "lib"
+    subprocess.run(
+        [
+            str(clang()),
+            "-shared",
+            "-fPIC",
+            "-O1",
+            "-Wl,-Bsymbolic",
+            str(path),
+            "-L" + str(lib),
+            "-lmlir_c_runner_utils",
+            "-Wl,-rpath," + str(lib),
+            "-o",
+            str(library),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    values = np.arange(20, dtype=np.float32)
+    arg = Descriptor(values.ctypes.data, values.ctypes.data, 0, (ctypes.c_int64 * 2)(4, 5), (ctypes.c_int64 * 2)(5, 1))
+    output = Pair()
+    entry = ctypes.CDLL(str(library))._mlir_ciface_forward
+    entry.argtypes = [ctypes.POINTER(Pair), ctypes.POINTER(Descriptor)]
+    entry(ctypes.byref(output), ctypes.byref(arg))
+    assert output.partial.allocated == output.full.allocated != values.ctypes.data
+    assert output.partial.offset == 5 and output.full.offset == 0
+    pointer = ctypes.cast(output.full.aligned, ctypes.POINTER(ctypes.c_float))
+    np.testing.assert_array_equal([pointer[i] for i in range(20)], values)
+    pointer[output.partial.offset] = -31
+    assert ctypes.cast(output.partial.aligned, ctypes.POINTER(ctypes.c_float))[5] == -31
+    ctypes.CDLL(None).free(ctypes.c_void_p(output.full.allocated))

@@ -402,3 +402,45 @@ def test_complex_grading_interprets_observed_component_axis(declared):
     if not declared:
         del record["output_abi"][0]["declared_shape"]
     assert grade_core_aten_batch({"cases": [record]}, [data.tobytes()], output_shapes=[[2, 2]])["passed_count"] == 1
+
+
+def test_frontend_layout_contract_is_rebased_with_batch_arguments(tmp_path):
+    from merlin.llvmlower.result_layout import module_attribute, read_layout
+
+    captures, bundle = tmp_path / "captures", tmp_path / "bundle"
+    cases = [{"overload": name, "expected": {"kind": "tensor"}} for name in ("left", "right")]
+    for case in cases:
+        directory = captures / case["overload"]
+        directory.mkdir(parents=True)
+        contract = dict(
+            inputs=[dict(shape=[3], stride=[1], storage_offset=0)],
+            results=[dict(shape=[3], stride=[1], storage_offset=0, alias_inputs=[0], alias_results=[])],
+        )
+        source = (
+            "builtin.module"
+            + module_attribute(contract)
+            + """ {
+          func.func @forward(%x: tensor<3xf32>) -> tensor<3xf32> {
+            func.return %x : tensor<3xf32>
+          }
+        }"""
+        )
+        (directory / "capsule.linalg.mlir").write_text(source)
+        (directory / "capture.json").write_text(
+            json.dumps(
+                dict(
+                    capture_meta=dict(
+                        ok=True,
+                        opaque=0,
+                        input_abi=[dict(shape=[3], dtype="f32")],
+                        output_abi=[dict(shape=[3], dtype="f32")],
+                    )
+                )
+            )
+        )
+        (directory / "inputs.json").write_text("[[1, 2, 3]]")
+        (directory / "golden.json").write_text("[1, 2, 3]")
+    report = build_core_aten_batch(dict(cases=cases), captures, bundle)
+    assert report["output_count"] == 2
+    layout = read_layout((bundle / "model.mlir").read_text())
+    assert [r["alias_inputs"] for r in layout["results"]] == [[0], [1]]

@@ -54,6 +54,7 @@ def batch_provenance(
             "targetgen/core_aten_device.py",
             "targetgen/core_aten_provenance.py",
             "llvmlower/result_buffers.py",
+            "llvmlower/result_layout.py",
             "llvmlower/pipeline.py",
             "llvmlower/c_runtime.py",
             "runtime/backends/spike_model.py",
