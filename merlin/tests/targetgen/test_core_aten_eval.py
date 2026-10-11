@@ -219,7 +219,8 @@ def test_default_api_rejects_a_declared_complete_subset() -> None:
         evaluate_core_aten_suite(EagerSuiteAdapter(), corpus=_corpus("aten.add.Tensor"))
 
 
-def test_one_call_bounded_evaluator_uses_case_ids() -> None:
+@pytest.fixture
+def bounded_unit_corpus():
     assignment = {
         "control:alpha": "2",
         "dtype": "float32",
@@ -237,7 +238,17 @@ def test_one_call_bounded_evaluator_uses_case_ids() -> None:
     }
     quotient, eqsat = quotient_observational_equivalents({case_id: case})
     case = quotient[case_id]
-    cover = exact_minimum_cover(obligations, {case_id: obligations}).to_dict()
+    # One candidate covers nonempty obligations, so both exact bounds are one.
+    cover = dict(
+        status="optimal",
+        selected_capsules=[case_id],
+        objective_value=1,
+        minimum_cardinality_lower_bound=1,
+        minimum_cardinality_upper_bound=1,
+        objective_bounds_closed=True,
+        solver="unit singleton proof",
+        solver_version="1",
+    )
     profile = BoundedCoverageProfile()
     corpus = {
         "schema_version": 1,
@@ -274,6 +285,12 @@ def test_one_call_bounded_evaluator_uses_case_ids() -> None:
         },
     }
     corpus["suite_sha256"] = bounded_suite_digest(corpus)
+    return corpus
+
+
+def test_one_call_bounded_evaluator_uses_case_ids(bounded_unit_corpus) -> None:
+    corpus = bounded_unit_corpus
+    case_id = corpus["selected_cases"][0]["case_id"]
     result = evaluate_bounded_core_aten_suite(
         BoundedEagerSuiteAdapter(),
         corpus,
@@ -314,3 +331,65 @@ def test_one_call_bounded_evaluator_uses_case_ids() -> None:
             required_execution_kind="host",
             validate_solver_certificate=False,
         )
+
+
+@pytest.mark.parametrize("allow", [False, True])
+@pytest.mark.parametrize("mixed", [False, True])
+def test_bounded_suite_requires_explicit_observed_scope(bounded_unit_corpus, allow, mixed):
+    from merlin.targetgen.core_aten_semantics import tensor_paths
+
+    corpus = bounded_unit_corpus
+    if mixed:
+        # Add a second independently sealed overload, keeping one full observation.
+        other = deepcopy(corpus["selected_cases"][0])
+        other.update(case_document(core_aten_cases()["aten.sub.Tensor"]))
+        assignment = other["partition_assignment"]
+        identifier = _case_id("aten.sub.Tensor", assignment)
+        other["case_id"] = identifier
+        other["covered_obligations"] = sorted(_obligations("aten.sub.Tensor", assignment))
+        quotient, eqsat = quotient_observational_equivalents({identifier: other})
+        other = quotient[identifier]
+        pool = deepcopy(corpus["overloads"]["aten.add.Tensor"])
+        pool.update(
+            selected_case_ids=[identifier],
+            witnessed_obligations=other["covered_obligations"],
+            candidates={identifier: other},
+            eqsat=eqsat,
+        )
+        pool["cover"]["selected_capsules"] = [identifier]
+        corpus["overloads"]["aten.sub.Tensor"] = pool
+        corpus["selected_cases"].append(other)
+        corpus["selected_cases"].sort(key=lambda c: c["case_id"])
+        obligations = sorted({o for c in corpus["selected_cases"] for o in c["covered_obligations"]})
+        corpus.update(
+            selected_count=2,
+            overload_count=2,
+            witnessed_obligations=obligations,
+            witnessed_obligation_count=len(obligations),
+            selected_union_sha256=overload_digest(obligations),
+        )
+        corpus["suite_sha256"] = bounded_suite_digest(corpus)
+
+    class ReducedAdapter:
+        name = "reduced test adapter"
+
+        def execute(self, suite):
+            results = BoundedEagerSuiteAdapter().execute(suite)
+            first = results[suite["selected_cases"][0]["case_id"]]
+            first.update(semantic_scope="values+mutation+observed-metadata", imposed_by_harness=["requires_grad"])
+            for key in ("output", "post_arguments"):
+                for _, doc in tensor_paths(first[key], ""):
+                    doc["requires_grad"] = None
+            return results
+
+    report = evaluate_bounded_core_aten_suite(
+        ReducedAdapter(),
+        corpus,
+        required_execution_kind="host",
+        validate_live_denominator=False,
+        validate_solver_certificate=False,
+        allow_unobserved_autograd=allow,
+    )
+    assert report["semantic_scope"] == ("values+mutation+observed-metadata" if allow else "full")
+    assert report["status"] == ("pass" if allow else "fail")
+    assert report["passed_count"] == (len(corpus["selected_cases"]) if allow else int(mixed))

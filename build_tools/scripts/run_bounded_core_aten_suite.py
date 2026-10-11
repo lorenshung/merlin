@@ -515,6 +515,7 @@ def main():
         validate_live_denominator=False,
         validate_eager_oracles=False,
         validate_solver_certificate=False,
+        allow_unobserved_autograd=True,
     )
     report["provenance"] = block
     report["numeric_policy"] = args.numeric_policy

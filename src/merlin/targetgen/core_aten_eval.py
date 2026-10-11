@@ -387,6 +387,7 @@ def evaluate_bounded_core_aten_suite(
     validate_live_denominator: bool = True,
     validate_eager_oracles: bool = True,
     validate_solver_certificate: bool = True,
+    allow_unobserved_autograd: bool = False,
 ) -> dict[str, Any]:
     """Execute and judge a generated bounded suite with one adapter call.
 
@@ -617,7 +618,7 @@ def evaluate_bounded_core_aten_suite(
             continue
         try:
             _validate_execution_evidence(adapter, case, observation, required_execution_kind)
-            _validate_observation(case, observation, allow_unobserved_autograd=True)
+            _validate_observation(case, observation, allow_unobserved_autograd=allow_unobserved_autograd)
         except Exception as exc:  # noqa: BLE001 -- comparisons belong in the per-case ledger
             verdicts[identifier] = {
                 "status": "semantic_mismatch",
@@ -639,14 +640,20 @@ def evaluate_bounded_core_aten_suite(
     for verdict in verdicts.values():
         counts[verdict["status"]] = counts.get(verdict["status"], 0) + 1
     passed = counts.get("pass", 0)
+    claimed_scope = "values+mutation+observed-metadata" if allow_unobserved_autograd else "full"
+    scope_complete = all(
+        v.get("semantic_scope") == "full" or (allow_unobserved_autograd and v.get("semantic_scope") == claimed_scope)
+        for v in verdicts.values()
+    )
     return {
         "schema_version": 1,
+        "semantic_scope": claimed_scope,
         "scope": corpus["scope"],
         "pytorch_version": corpus["pytorch_version"],
         "profile_sha256": corpus["profile_sha256"],
         "adapter": adapter.name,
         "required_execution_kind": required_execution_kind,
-        "status": "pass" if passed == len(cases) and not unexpected else "fail",
+        "status": "pass" if passed == len(cases) and not unexpected and scope_complete else "fail",
         "case_count": len(cases),
         "passed_count": passed,
         "failed_count": len(cases) - passed,
