@@ -10,6 +10,7 @@ from pathlib import Path
 from merlin.common.paths import artifacts_dir
 from merlin.targetgen.core_aten_batch import build_core_aten_batch
 from merlin.targetgen.core_aten_batch_grade import grade_core_aten_batch
+from merlin.targetgen.core_aten_device import load_execution_provider
 from merlin.targetgen.core_aten_device import run_spike_bundle as _run_spike_bundle
 
 
@@ -133,6 +134,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.numeric_policy == "int8_w8a8" and not args.target:
         parser.error("--numeric-policy int8_w8a8 requires --target")
     if args.target:
+        try:
+            load_execution_provider(args.target, args.execution_provider)
+        except ValueError as exc:
+            parser.error(str(exc))
         if args.max_cases_per_shard not in (0, 1):
             parser.error("device mode requires exactly one case per shard for execution attribution")
         args.max_cases_per_shard = 1

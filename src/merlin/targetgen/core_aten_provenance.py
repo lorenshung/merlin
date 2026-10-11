@@ -16,6 +16,7 @@ def batch_provenance(
     package: Path | None = None,
     runner_options: dict[str, Any] | None = None,
     rtl_facts: Path | None = None,
+    execution_provider: Path | None = None,
 ) -> dict[str, Any]:
     from merlin.integrations.model2mlir import root as m2m_root
     from merlin.runtime.backends.spike import spike_path
@@ -61,6 +62,8 @@ def batch_provenance(
         )
     ]
     sources.append(repo_root() / "merlin/runtime/baremetal/spike/model_main.c")
+    if execution_provider is not None:
+        sources.append(execution_provider)
     options = runner_options or {}
     artifacts = {}
     simulator = Path(options.get("spike_binary") or spike_path())

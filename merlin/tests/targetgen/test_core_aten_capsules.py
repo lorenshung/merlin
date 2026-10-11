@@ -2,6 +2,7 @@
 
 import copy
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -205,14 +206,19 @@ def test_source_bundle_scoring_requires_device_evidence_and_reports_guards(packa
 
 
 def test_two_snapshot_backends_grade_consecutively_in_one_process(packaged, tmp_path, monkeypatch):
-    from merlin.common.paths import repo_root
+    import os
+
     from merlin.llvmlower import toolchain
     from merlin.system import offload
     from merlin.targetgen.plugins import load_module
 
+    selected = os.environ.get("MERLIN_CORE_ATEN_EXECUTION_PROVIDER")
+    if not selected:
+        pytest.skip("requires an explicitly selected OOT Core ATen execution provider")
+    path = Path(selected)
     provider = load_module(
-        repo_root() / "examples" / "gemmini" / "phase0" / "core_aten",
-        "execution_provider.py",
+        path.parent,
+        path.name,
         package_name="test_snapshot_execution_provider",
     )
     monkeypatch.setattr(offload, "device_dtype_triples", lambda _: [("i8", "i8", "i32")])

@@ -61,7 +61,7 @@ launching, capsule grading, golden generation, sandboxing and certification. The
   minimum cover, bounded semantic/pairwise suite, evaluator and batch grading. Torch-dependent
   functions import it lazily and run in the capture interpreter; `core_aten_overlay.py` is the
   target-independent additive-overlay mechanism whose target facts come from a provider at the
-  target's own edge (see `examples/gemmini/phase0/core_aten/`).
+  target's explicitly selected OOT support package.
 - `group_capsule_entries.py` — deterministic capture-group restatement used by compiler diagnostics.
   Corpus writes, promotion, grading and measured capacity probes belong to experiments-owned
   `group_capsules` and `store_probe`, which keep their stable import names.

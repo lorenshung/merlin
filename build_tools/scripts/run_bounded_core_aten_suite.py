@@ -57,6 +57,8 @@ def stamp(args):
         sources.append(args.repo / relative)
     if args.facts:
         sources.append(args.facts)
+    if args.execution_provider:
+        sources.append(args.execution_provider)
     pins = {name: provenance.verify(name) for name in args.pin}
     diff = subprocess.check_output(["git", "diff", "HEAD"], cwd=args.repo)
     untracked = subprocess.check_output(
@@ -143,6 +145,7 @@ def execute(args, case, block):
                 target=args.target,
                 numeric_policy=args.numeric_policy,
                 device_package=args.device_package,
+                execution_provider=args.execution_provider,
                 rtl_facts=args.facts,
             )
             grade = grades["cases"][case["case_id"]]
@@ -403,7 +406,7 @@ def main():
         p.add_argument("--" + name, type=Path, required=True)
     p.add_argument("--label", required=True)
     p.add_argument("--target")
-    for name in ("device-package", "facts", "extension-library"):
+    for name in ("device-package", "execution-provider", "facts", "extension-library"):
         p.add_argument("--" + name, type=Path)
     p.add_argument("--pin", action="append", default=[])
     p.add_argument("--workers", type=int, default=48)
@@ -426,6 +429,14 @@ def main():
         except ModuleNotFoundError as exc:
             if exc.name != "torch":
                 raise
+    if args.target:
+        from merlin.targetgen.core_aten_device import load_execution_provider
+
+        try:
+            provider = load_execution_provider(args.target, args.execution_provider)
+        except ValueError as exc:
+            p.error(str(exc))
+        args.execution_provider = Path(provider.__file__)
     if not 1 <= args.workers <= 96:
         p.error("workers must be between 1 and 96")
     block_path = args.output / args.label / "provenance.json"

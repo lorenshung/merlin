@@ -9,7 +9,6 @@ from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
-from merlin.common.paths import repo_root
 from merlin.targetgen.plugins import load_module
 from merlin.targetgen.rtl.facts import ensure_facts, load_facts, observed_facts
 
@@ -18,8 +17,17 @@ def load_execution_provider(target: str, path: Path | None = None):
     """Select target-edge support explicitly; no compiler policy lives in this adapter."""
     if not target or Path(target).name != target or target in {".", ".."}:
         raise ValueError("target must be a single name")
-    selected = path or repo_root() / "examples" / target / "phase0" / "core_aten" / "execution_provider.py"
-    module = load_module(selected.parent, selected.name, package_name="core_aten_execution")
+    explicit = path or os.environ.get("MERLIN_CORE_ATEN_EXECUTION_PROVIDER")
+    if not explicit:
+        raise ValueError(
+            "Core ATen device execution requires an explicit target-owned execution provider; "
+            "pass --execution-provider or set MERLIN_CORE_ATEN_EXECUTION_PROVIDER"
+        )
+    selected = Path(explicit)
+    if not selected.is_file():
+        raise ValueError(f"selected Core ATen execution provider does not exist: {selected}")
+    identity = hashlib.sha256(str(selected.resolve()).encode()).hexdigest()
+    module = load_module(selected.parent, selected.name, package_name=f"core_aten_execution_{identity}")
     if getattr(module, "TARGET", None) != target:
         raise ValueError("execution provider does not declare the selected target")
     return module
@@ -178,6 +186,7 @@ def run_spike_bundle(
     semantic_readback = None
     options = {}
     stage = "routing"
+    selected_provider = None
     try:
         bundled = [case for case in report["cases"] if case["status"] == "bundled"]
         if target:
@@ -205,6 +214,7 @@ def run_spike_bundle(
                     )
                 stage = "routing"
                 provider = load_execution_provider(target, execution_provider)
+                selected_provider = Path(provider.__file__)
                 prepare = getattr(provider, "prepare_bundle", None)
                 if prepare is not None:
                     preparation = prepare(directory, target=target, facts=facts)
@@ -285,7 +295,12 @@ def run_spike_bundle(
     from merlin.targetgen.core_aten_provenance import batch_provenance
 
     report["provenance"] = batch_provenance(
-        directory, target=target, package=device_package, runner_options=options, rtl_facts=rtl_facts
+        directory,
+        target=target,
+        package=device_package,
+        runner_options=options,
+        rtl_facts=rtl_facts,
+        execution_provider=selected_provider,
     )
     execution["provenance"] = report["provenance"]
     _write_json(directory / "core_aten_batch_map.json", report)

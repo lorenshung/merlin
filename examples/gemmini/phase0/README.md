@@ -468,9 +468,9 @@ shapes as separate functional-model checks when their RTL cost exceeds the
 budget; neither result substitutes for the other's coverage obligation. This
 check does not qualify a complete model or the Phase 0 corpus.
 
-The [core_aten/](core_aten/) provider supplies Gemmini's pinned configuration and candidate
+The Gemmini OOT `merlin-support/core_aten/` provider supplies Gemmini's pinned configuration and candidate
 pool to the generic additive Core ATen overlay (`merlin.targetgen.core_aten_overlay`);
-`build_overlay.py` writes the overlay under the artifacts root. Its cases never replace portable
+Its `build_overlay.py` writes the overlay under the artifacts root. Its cases never replace portable
 Core ATen obligations.
 
 The overlay builder also writes `core_aten_overlay_cases.json`, which the generic capture and batch
@@ -481,12 +481,13 @@ explicit facts pin. For example, from this worktree with its interpreter:
 ```sh
 PY="$PWD/.venv/bin/python"
 OVERLAY_ROOT="$($PY -c 'from merlin.common.paths import artifacts_dir; print(artifacts_dir() / "verification" / "core-aten" / "gemmini-overlay")')"
-$PY examples/gemmini/phase0/core_aten/build_overlay.py --output-dir "$OVERLAY_ROOT"
+$PY "$GEMMINI_SUPPORT/core_aten/build_overlay.py" --output-dir "$OVERLAY_ROOT"
 $PY build_tools/scripts/capture_core_aten_cases.py \
   --corpus "$OVERLAY_ROOT/core_aten_overlay_cases.json" --output-dir "$OVERLAY_ROOT/captures"
 $PY build_tools/scripts/build_core_aten_batch.py \
   --corpus "$OVERLAY_ROOT/core_aten_overlay_cases.json" --captures "$OVERLAY_ROOT/captures" \
   --output-dir "$OVERLAY_ROOT/device-batch" --target gemmini \
+  --execution-provider "$GEMMINI_SUPPORT/core_aten/execution_provider.py" \
   --device-package "$DEVICE_PACKAGE" --rtl-facts "$RTL_FACTS_FILE" --run-spike
 ```
 
@@ -495,7 +496,9 @@ selects the hardware observation, also selectable through `MERLIN_RTL_FACTS`. Ca
 configured model2MLIR/PyTorch interpreter; overlay construction needs PyTorch and z3. The execution
 provider selects the extension library beside the selected `MERLIN_SPIKE` installation and prepends
 its enclosing environment's `bin` directory for dtc. Select a Spike build with that extension installed.
-An alternative target-owned provider can be supplied with `--execution-provider`.
+Provider selection is required through `--execution-provider` or
+`MERLIN_CORE_ATEN_EXECUTION_PROVIDER`; no in-tree provider is discovered.
+`GEMMINI_SUPPORT` names the OOT repository's `merlin-support/` directory.
 
 Device mode requires one case per shard. A closed wrapping int8 multiply/add contraction can be
 widened exactly to the facts-derived accumulator type and truncated back to its original result type

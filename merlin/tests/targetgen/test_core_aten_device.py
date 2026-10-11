@@ -228,7 +228,9 @@ def test_device_bundle_records_attribution_and_rejects_missing_trace(tmp_path, f
     report = {"cases": [record], "output_count": 1}
     selected = SimpleNamespace()
     monkeypatch.setattr(
-        D, "load_execution_provider", lambda *a: SimpleNamespace(runner_options=lambda: {"extension": "synthetic"})
+        D,
+        "load_execution_provider",
+        lambda *a: SimpleNamespace(__file__=str(facts), runner_options=lambda: {"extension": "synthetic"}),
     )
     monkeypatch.setattr(D, "routing_for_bundle", lambda *a: (selected, "source-bound provider"))
     monkeypatch.setattr(device_offload, "load_sidecar", lambda *a: {"routed": [{"source_region": "region-a"}]})
@@ -333,6 +335,9 @@ def test_cli_keeps_overlay_variants_separate_in_single_case_device_shards(tmp_pa
         calls.append(kwargs)
         return {"status": "ran"}, grade_core_aten_batch(report, [np.array([7], np.int32).tobytes()])
 
+    provider = tmp_path / "provider.py"
+    provider.write_text('TARGET = "synthetic_core_aten"\n')
+    monkeypatch.setenv("MERLIN_CORE_ATEN_EXECUTION_PROVIDER", str(provider))
     monkeypatch.setattr(cli, "build_core_aten_batch", bundle)
     monkeypatch.setattr(cli, "_run_spike_bundle", run)
     assert (
@@ -359,3 +364,23 @@ def test_cli_keeps_overlay_variants_separate_in_single_case_device_shards(tmp_pa
     assert len(calls) == 2 and all(call["target"] == "synthetic_core_aten" for call in calls)
     verdict = json.loads((output / "core_aten_batch_verdict.json").read_text())
     assert verdict["passed_count"] == 2 and set(verdict["cases"]) == {"fixture-a", "fixture-b"}
+
+
+def test_execution_provider_selection_refuses_legacy_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("MERLIN_CORE_ATEN_EXECUTION_PROVIDER", raising=False)
+    # Even a legacy-layout file is never rediscovered.
+    legacy = tmp_path / "examples/synthetic/phase0/core_aten/execution_provider.py"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text('TARGET = "synthetic"\n')
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match="explicit target-owned execution provider"):
+        D.load_execution_provider("synthetic")
+    with pytest.raises(ValueError, match="does not exist"):
+        D.load_execution_provider("synthetic", tmp_path / "missing.py")
+    monkeypatch.setenv("MERLIN_CORE_ATEN_EXECUTION_PROVIDER", str(legacy))
+    assert D.load_execution_provider("synthetic").TARGET == "synthetic"
+    other = tmp_path / "explicit.py"
+    other.write_text('TARGET = "other"\n')
+    assert D.load_execution_provider("other", other).TARGET == "other"
+    with pytest.raises(ValueError, match="selected target"):
+        D.load_execution_provider("synthetic", other)
