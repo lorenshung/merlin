@@ -834,7 +834,10 @@ def apply_recipe(
     except Exception:  # noqa: BLE001 -- an optional tidy-up; the graph is correct without it
         pass
     try:
-        from torch.ao.quantization import allow_exported_model_train_eval
+        try:
+            from torchao.quantization.pt2e import allow_exported_model_train_eval
+        except (ImportError, AttributeError):  # Older Torch/TorchAO versions.
+            from torch.ao.quantization import allow_exported_model_train_eval
 
         allow_exported_model_train_eval(quantized)
     except (ImportError, AttributeError):
