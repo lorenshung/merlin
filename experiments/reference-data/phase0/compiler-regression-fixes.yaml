@@ -11,77 +11,82 @@ fixes:
   6e6e37a60:
     classification: CAPSULE-ABLE
     bug: Half-precision ABI storage and scalar opmath require exact f16/bf16 execution.
-  1bf1c4071:
+  52eb603f:
+    predecessor: 1bf1c4071
     classification: CAPSULE-ABLE
     bug: Closed int8 reductions need wider device accumulation with wrapping host
       readout.
-  cc71013ff:
+  a9106b60:
+    predecessor: cc71013ff
     classification: CAPSULE-ABLE
     bug: Host preprocessing changed private callback symbol ABIs and broke mixed device
       linking.
-  c0487347f:
+  67fafa9d:
+    predecessor: c0487347f
     classification: CAPSULE-ABLE
     bug: Repeated result allocations crashed conversion and dynamic nonzero results
       lost actual extents.
-  02aedc5ce:
+  762e2ff8:
+    predecessor: 02aedc5ce
     classification: CAPSULE-ABLE
     bug: Batch extraction lost declarations and dynamic return types; complex and
       nested IEEE values were corrupted.
-  3fc463f57:
+  6f60202b:
+    predecessor: 3fc463f57
     classification: CAPSULE-ABLE
     bug: Capture reference calls mutated inputs and buffers before compiler launch;
       exported result roles were missing.
-  7789aa2b9:
+  88241b20:
+    predecessor: 7789aa2b9
     classification: CAPSULE-ABLE
     bug: Mutation results and view storage/layout were lost at the compiled full-call
       boundary.
-  ceff3bfd1:
+  28d7c59d:
+    predecessor: ceff3bfd1
     classification: CAPSULE-ABLE
     bug: Bounded admission unpacked an obsolete parser result and ignored exported
       mutation result cardinality.
-  5b13deb96:
+  e4b40d31:
+    predecessor: 5b13deb96
     classification: CAPSULE-ABLE
     bug: Bounded grading discarded full-call observations and classified numerical
       success as ungradable.
-  cc01910e3:
+  c7c4ea63:
+    predecessor: cc01910e3
     classification: CAPSULE-ABLE
     bug: Normalized placeholder metadata relabeled unchanged transposed caller inputs.
-  be91c7198:
+  7d94a537:
+    predecessor: be91c7198
     classification: INFRA-ONLY
     reason: Consecutive package imports shared module state; execution refusal reporting
       is a process/feedback boundary rather than a program input defect.
     tests:
     - merlin/tests/targetgen/test_core_aten_capsules.py
-  7a96788c9:
+  df06091e:
+    predecessor: 7a96788c9
     classification: INFRA-ONLY
     reason: Readiness wrongly required RTL discovery for the arm without RTL fact
       tools; no compiled program or numerical result changed.
     tests:
     - packages/merlin-experiments/tests/test_phase1_tooling_readiness.py
-  8a8ee9bc2:
+  abae247e:
+    predecessor: 8a8ee9bc2
     classification: INFRA-ONLY
     reason: Sandbox mounts omitted the selected venv external interpreter/library;
       this is a launch environment defect.
     tests:
     - merlin/tests/infra/test_sandbox_toolchain_paths.py
-  a480845ce:
+  f5e7c800:
+    predecessor: a480845ce
     classification: INFRA-ONLY
     reason: Scaffold import dependencies required withheld RTL tooling; this is source
       grant/import availability rather than compiled semantics.
     tests:
     - merlin/tests/targetgen/test_generate_namespaced_imports.py
-  06d1a7fa:
+  ba786b69:
+    predecessor: 06d1a7fa
     classification: CAPSULE-ABLE
     bug: Captured strided input ABI must preserve storage, views and mutation.
-  f8ed82443:
-    classification: CAPSULE-ABLE
-    bug: Model2MLIR numeric opmath, storage rounding and absent-edge semantics.
-  3d2613d:
-    classification: CAPSULE-ABLE
-    bug: Retained numeric boundaries and explicitly unresolved native scheduling differences.
-  '654987203':
-    classification: CAPSULE-ABLE
-    bug: Model2MLIR batch normalization must retain strided affine parameter semantics.
 external_audit:
   support_provider:
     subject: gemmini-worktrees/phase1-support-baseline
@@ -91,6 +96,17 @@ external_audit:
       7e7a883: INFRA-ONLY; retain plugin.backend in regenerated metadata; no numerical
         program implementation.
   model2mlir:
+    branch: core-aten-numeric
+    fixes:
+      3d2613d:
+        classification: CAPSULE-ABLE
+        bug: Exported result layouts and storage provenance.
+      f8ed82443:
+        classification: CAPSULE-ABLE
+        bug: Numeric opmath, storage rounding and absent-edge semantics.
+      "654987203":
+        classification: CAPSULE-ABLE
+        bug: Batch normalization must retain strided affine parameter semantics.
     subject: lorenshung/model2MLIR; local model2MLIR and m2m-worktrees/stage5
     capsule_obligations:
       c147b57: Same-conversion result ordinals, mutation/alias boundaries and complete

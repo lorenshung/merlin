@@ -2,7 +2,7 @@ schema_version: 1
 status: pending_fix_capsules_registry_integration
 reason: >-
   Registry and regression_capsules.py are absent on core-aten and on the locally
-  available origin/fix-capsules revision cc01910e3. Fetch was attempted, but
+  available origin/fix-capsules revision c7c4ea63. Fetch was attempted, but
   GitHub DNS is unavailable in this environment. These are authored capsule
   specifications for integration with that registry, not generated evidence.
 mechanism:

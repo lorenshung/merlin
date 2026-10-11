@@ -11,7 +11,7 @@ calls:
       - {dtype: int8, shape: [16, 32], stride: [32, 1], storage_offset: 0}
       - {dtype: int8, shape: [32, 16], stride: [1, 32], storage_offset: 0}
     result: {dtype: int8, shape: [16, 16]}
-    guards: [1bf1c4071, cc71013ff, cc01910e3]
+    guards: [52eb603f, a9106b60, c7c4ea63]
     boundary: >-
       Wrapping int8 matmul returns through a private device callback and a
       truncating host readout. Both caller tensors stay unchanged, including
@@ -24,7 +24,7 @@ calls:
       - {dtype: int8, shape: [16, 31], stride: [31, 1], storage_offset: 0}
       - {dtype: int8, shape: [31, 15], stride: [15, 1], storage_offset: 0}
     result: {dtype: int8, shape: [16, 15]}
-    guards: [1bf1c4071, cc71013ff]
+    guards: [52eb603f, a9106b60]
     boundary: >-
       Widen the closed reduction with zero initialization while preserving
       modulo-256 output bits and partial dimensions through the private ABI.
@@ -37,7 +37,7 @@ calls:
       - {dtype: int8, shape: [2, 4], stride: [4, 1], storage_offset: 0}
       - {dtype: int8, shape: [4, 4], stride: [4, 1], storage_offset: 0}
     result: {dtype: int8, shape: [2, 4]}
-    guards: [1bf1c4071, cc71013ff]
+    guards: [52eb603f, a9106b60]
     boundary: >-
       Sub-tile wrapping contraction retains the original int8 ABI after
       accumulator widening, with unchanged caller inputs and device execution.

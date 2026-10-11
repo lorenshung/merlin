@@ -26,8 +26,8 @@ calls:
       kind: tuple
     kwargs: {}
   guards:
-  - c0487347f
-  - 02aedc5ce
+  - 67fafa9d
+  - 762e2ff8
   boundary: Return a runtime-ranked descriptor with actual [4,2] extents, not a fixed
     maximum allocation.
   origin:
@@ -142,7 +142,7 @@ calls:
       kind: tuple
     kwargs: {}
   guards:
-  - c0487347f
+  - 67fafa9d
   boundary: Return both zero-length saved statistics without erasing their shared
     allocation twice.
   origin:
@@ -258,10 +258,10 @@ calls:
       kind: tuple
     kwargs: {}
   guards:
-  - 3fc463f57
-  - 7789aa2b9
-  - ceff3bfd1
-  - 5b13deb96
+  - 6f60202b
+  - 88241b20
+  - 28d7c59d
+  - e4b40d31
   boundary: Snapshot running mean/variance before the call; route exported mutation
     results into post-call arguments, preserving all three user results.
   origin:
@@ -314,8 +314,8 @@ calls:
       kind: tuple
     kwargs: {}
   guards:
-  - 7789aa2b9
-  - 5b13deb96
+  - 88241b20
+  - e4b40d31
   boundary: Restore output view strides and pointer alias to the unchanged caller
     input; preserve pre-call bytes.
   origin:
@@ -346,7 +346,7 @@ calls:
       - *id001
     kwargs: {}
   guards:
-  - 02aedc5ce
+  - 762e2ff8
   boundary: Preserve both real and imaginary storage components of inputs, output
     and post-call arguments.
   origin:
@@ -379,7 +379,7 @@ calls:
             value: '-0.0'
     kwargs: {}
   guards:
-  - 02aedc5ce
+  - 762e2ff8
   boundary: Decode nested IEEE documents for NaN, infinities and signed zero; retain
     f64 bytes.
   origin:

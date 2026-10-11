@@ -1,6 +1,7 @@
 """Every numerical fix has a reviewed call obligation; infrastructure keeps pytest."""
 
 import hashlib
+import subprocess
 
 import pytest
 import yaml
@@ -9,24 +10,21 @@ from merlin_experiments.phase0.regression_capsules import load_specs
 from merlin.common.paths import repo_root
 
 FIXES = {
-    "f8ed82443",
-    "3d2613d",
-    "654987203",
-    "06d1a7fa",
+    "ba786b69",
     "6e6e37a60",
-    "1bf1c4071",
-    "cc71013ff",
-    "c0487347f",
-    "02aedc5ce",
-    "3fc463f57",
-    "7789aa2b9",
-    "ceff3bfd1",
-    "5b13deb96",
-    "cc01910e3",
-    "be91c7198",
-    "7a96788c9",
-    "8a8ee9bc2",
-    "a480845ce",
+    "52eb603f",
+    "a9106b60",
+    "67fafa9d",
+    "762e2ff8",
+    "6f60202b",
+    "88241b20",
+    "28d7c59d",
+    "e4b40d31",
+    "c7c4ea63",
+    "7d94a537",
+    "df06091e",
+    "abae247e",
+    "f5e7c800",
 }
 
 
@@ -49,7 +47,12 @@ def test_all_fix_commits_map_to_capsules_or_explicit_infrastructure_tests():
             assert entry["classification"] == "INFRA-ONLY"
             assert entry["reason"] and entry["tests"]
             assert all((repo_root() / path).is_file() for path in entry["tests"])
-    assert {commit for row in calls for commit in row["guards"]} <= FIXES
+    external = index["external_audit"]["model2mlir"]
+    assert external["branch"] == "core-aten-numeric"
+    assert set(external["fixes"]) == {"3d2613d", "f8ed82443", "654987203"}
+    for commit in external["fixes"]:
+        assert any(commit in row["guards"] for row in calls)
+    assert {commit for row in calls for commit in row["guards"]} <= FIXES | set(external["fixes"])
     identities = [row["case_id"] for row in calls]
     assert len(identities) == len(set(identities))
 
@@ -77,7 +80,7 @@ def test_retained_device_ids_and_layouts_bind_existing_capsules():
     for row in device:
         assert row["capsule"] == "case_" + hashlib.sha256(row["case_id"].encode()).hexdigest()
         assert all(len(item["shape"]) == len(item["stride"]) for item in row["inputs"])
-    transposed = next(row for row in device if "cc01910e3" in row["guards"])
+    transposed = next(row for row in device if "c7c4ea63" in row["guards"])
     assert transposed["inputs"][1]["stride"] == [1, 32]
     assert transposed["sealed_release"] == "core-aten-seal-20261008-v2"
 
@@ -90,3 +93,14 @@ def test_answer_members_cannot_enter_a_regression_spec(tmp_path, answer):
     path.write_text(yaml.safe_dump(document))
     with pytest.raises(ValueError, match="inputs"):
         load_specs(path)
+
+
+@pytest.mark.parametrize("commit", sorted(FIXES))
+def test_merlin_fix_is_landed_on_current_trunk(commit):
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", commit, "HEAD"],
+        cwd=repo_root(),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"Merlin fix {commit} is not an ancestor of HEAD: {result.stderr}"
