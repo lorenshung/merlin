@@ -59,6 +59,17 @@ def selection(recipe: Path) -> tuple[list[dict], dict[str, str]]:
     paths: dict[str, str] = {}
     overlay = _path(recipe, block.get("overlay"))
     paths[str(overlay)] = _sha(overlay)
+    flow = block.get("numeric_flow")
+    if flow is not None:
+        if flow.get("policy") != "spec_int8":
+            raise ValueError("numeric_flow requires an explicitly supported conformant policy")
+        for key in ("software_spec", "host_capabilities", "execution_provider", "rtl_facts"):
+            source = _path(recipe, flow[key])
+            paths[str(source)] = _sha(source)
+        package = _path(recipe, flow["device_package"])
+        for source in sorted(package.rglob("*.py")):
+            if not any(part in {"out", "__pycache__", ".git"} for part in source.relative_to(package).parts):
+                paths[str(source)] = _sha(source)
     batches, identities = [], set()
     for cohort in COHORTS:
         rows = block["cohorts"][cohort]
@@ -117,6 +128,12 @@ def selection(recipe: Path) -> tuple[list[dict], dict[str, str]]:
     return batches, dict(sorted(paths.items()))
 
 
+def _selection_sha(recipe: Path, batches: list[dict]) -> str:
+    flow = declaration(recipe).get("numeric_flow")
+    payload = batches if flow is None else {"batches": batches, "numeric_flow": flow}
+    return hashlib.sha256(_json(payload)).hexdigest()
+
+
 def input_paths(recipe: Path) -> list[Path]:
     """Input inventory used by the existing run/resume receipt owner."""
     _, paths = selection(recipe)
@@ -169,7 +186,7 @@ def verify_synthesis(recipe: Path, requirement: dict, synthesis: dict) -> dict:
         "schema": SCHEMA,
         "target": requirement.get("target"),
         "inputs": paths,
-        "selection_sha256": hashlib.sha256(_json(batches)).hexdigest(),
+        "selection_sha256": _selection_sha(recipe, batches),
         "scope": "retained full-call packaging; no numerical or hardware verdict",
     }
     if receipt != expected or requirement != _requirement(batches, expected):
@@ -197,7 +214,7 @@ def derive(recipe: Path, output: Path, *, target: str, descriptor: Path) -> dict
         "schema": SCHEMA,
         "target": target,
         "inputs": paths,
-        "selection_sha256": hashlib.sha256(_json(batches)).hexdigest(),
+        "selection_sha256": _selection_sha(recipe, batches),
         "scope": "retained full-call packaging; no numerical or hardware verdict",
     }
     (output / "selection.json").write_bytes(_json(receipt))
@@ -268,7 +285,7 @@ def generate(
         "schema": SCHEMA,
         "target": target,
         "inputs": paths,
-        "selection_sha256": hashlib.sha256(_json(batches)).hexdigest(),
+        "selection_sha256": _selection_sha(recipe, batches),
         "scope": "retained full-call packaging; no numerical or hardware verdict",
     }:
         raise ValueError("Core ATen derivation selection changed; rerun corpus derive")
@@ -298,6 +315,11 @@ def generate(
                 stage / "_private" / cohort,
                 label="hidden" if cohort == "hidden" else "public",
                 tiers=("L2",),
+                **(
+                    {"numeric_flow": {**block["numeric_flow"], "target": target}}
+                    if cohort != "host_guard" and block.get("numeric_flow")
+                    else {}
+                ),
             )
             manifests.append(manifest)
             for row in manifest["capsules"]:

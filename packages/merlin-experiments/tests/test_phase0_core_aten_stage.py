@@ -255,3 +255,36 @@ def test_selected_synthesis_refuses_changed_selection(tmp_path, changed):
             recipe=derived["recipe"],
             descriptor=descriptor,
         )
+
+
+def test_numeric_selection_binds_policy_and_source_bytes(tmp_path):
+    recipe = fixture_recipe(tmp_path)
+    flow = {"policy": "spec_int8"}
+    for key in ("software_spec", "host_capabilities", "execution_provider", "rtl_facts"):
+        path = tmp_path / key
+        path.write_text(key)
+        flow[key] = str(path)
+    package = tmp_path / "provider"
+    package.mkdir()
+    (package / "catalog.py").write_text("schedule = 1")
+    flow["device_package"] = str(package)
+    document = yaml.safe_load(recipe.read_text())
+    document["core_aten"]["numeric_flow"] = flow
+    recipe.write_text(yaml.safe_dump(document))
+    first = stage.derive(
+        recipe, tmp_path / "derive-numeric1", target="synthetic", descriptor=tmp_path / "descriptor.yaml"
+    )
+    (package / "catalog.py").write_text("schedule = 2")
+    second = stage.derive(
+        recipe, tmp_path / "derive-numeric2", target="synthetic", descriptor=tmp_path / "descriptor.yaml"
+    )
+    assert (tmp_path / "derive-numeric1/selection.json").read_bytes() != (
+        tmp_path / "derive-numeric2/selection.json"
+    ).read_bytes()
+    assert first["selection_sha256"] == second["selection_sha256"]
+    document["core_aten"]["numeric_flow"]["rtl_facts"] = flow["software_spec"]
+    recipe.write_text(yaml.safe_dump(document))
+    third = stage.derive(
+        recipe, tmp_path / "derive-numeric3", target="synthetic", descriptor=tmp_path / "descriptor.yaml"
+    )
+    assert first["selection_sha256"] != third["selection_sha256"]

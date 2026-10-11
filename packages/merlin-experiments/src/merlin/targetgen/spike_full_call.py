@@ -90,7 +90,9 @@ def full_call_adapter(
                 provider = load_execution_provider(target, execution_provider)
                 with selected_facts(target, rtl_facts) as facts:
                     prepare = getattr(provider, "prepare_bundle", None)
-                    if prepare is not None:
+                    if prepare is not None and not (capsule or {}).get("operation", {}).get("attributes", {}).get(
+                        "numeric_flow"
+                    ):
                         prepare(bundle, target=target, facts=facts)
                     if (capsule or {}).get("scored", True):
                         if package_dir is None:
@@ -130,6 +132,17 @@ def full_call_adapter(
                     evidence = executed_device_instructions(trace, Path(build["elf"]), target)
                 result.update(
                     lane="device", executed_instructions=evidence["executed_instructions"], execution_evidence=evidence
+                )
+                from merlin.targetgen.core_aten_capsules import load_private
+
+                record = load_private(capsule)["batch_map"]["cases"][0]
+                evidence["case_id"] = str(record.get("case_id") or record["overload"])
+                result["routing"] = dict(
+                    lane="device",
+                    routed=True,
+                    target=target,
+                    routed_operations=load_sidecar(bundle / "spike-build")["routed"],
+                    execution_evidence=evidence,
                 )
                 if evidence["executed_instructions"] < 1:
                     raise ValueError("no target instruction executed for submitted device calls")

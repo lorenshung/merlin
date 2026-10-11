@@ -2,7 +2,6 @@
 
 import copy
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -392,3 +391,61 @@ def test_packaging_and_sealed_runtime_preserve_transposed_caller(tmp_path):
     assert verdict["passed_count"] == 1
     assert next(iter(verdict["cases"].values()))["semantic_scope"] == "full"
     assert legacy["semantic_io"]["outputs"][1]["stride"] == [2, 1]
+
+
+def test_selected_numeric_flow_requires_exact_reference(packaged, monkeypatch):
+    capsule, raw, readback, _, _ = packaged
+    golden = C.load_private(capsule)
+    record = golden["batch_map"]["cases"][0]
+    record["numeric_policy"] = "spec_int8"
+    record["numeric_admission"] = {
+        "integer_reference": {
+            "status": "prepared",
+            "engine": "independent-test-reference",
+            "expected_output_bytes": {"0": raw[0].hex()},
+        }
+    }
+    capsule["operation"]["attributes"]["numeric_flow"] = "spec_int8"
+    monkeypatch.setattr(C, "load_private", lambda *args: copy.deepcopy(golden))
+    routing = dict(
+        lane="device",
+        routed=True,
+        target="synthetic",
+        routed_operations=[{"source": "test"}],
+        execution_evidence=dict(
+            status="measured",
+            attribution="single_case_shard",
+            executed_instructions=10,
+            target="synthetic",
+            case_id=record["case_id"],
+        ),
+    )
+    monkeypatch.setattr("merlin.targetgen.core_aten_device.verify_execution_evidence", lambda evidence: True)
+    assert C.grade_readback(capsule, raw, semantic_readback=readback, routing=routing)["passed_count"] == 1
+    assert C.grade_readback(capsule, raw, semantic_readback=readback)["passed_count"] == 0
+    record["numeric_admission"]["integer_reference"]["expected_output_bytes"]["0"] = bytes(len(raw[0])).hex()
+    verdict = C.grade_readback(capsule, raw, semantic_readback=readback, routing=routing)
+    assert verdict["passed_count"] == 0
+    assert next(iter(verdict["cases"].values()))["integer_reference"]["status"] == "mismatch"
+    del record["numeric_admission"]["integer_reference"]
+    assert C.grade_readback(capsule, raw, semantic_readback=readback)["passed_count"] == 0
+
+
+def test_full_call_rejects_unattributed_device_execution(packaged, monkeypatch):
+    capsule, raw, readback, _, _ = packaged
+    routing = dict(
+        lane="device",
+        routed=True,
+        target="synthetic",
+        routed_operations=[{"source": "test"}],
+        execution_evidence=dict(
+            status="measured",
+            attribution="single_case_shard",
+            executed_instructions=10,
+            target="synthetic",
+            case_id="wrong-case",
+        ),
+    )
+    verdict = C.grade_readback(capsule, raw, semantic_readback=readback, routing=routing)
+    assert verdict["passed_count"] == 0
+    assert next(iter(verdict["cases"].values()))["evidence_error"]

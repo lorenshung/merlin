@@ -40,7 +40,9 @@ def is_full_call(capsule: dict) -> bool:
     return (capsule.get("operation", {}).get("attributes", {})).get("core_aten_contract") == CONTRACT
 
 
-def write_capsules(corpus: dict, captures: Path, public: Path, private: Path, *, label="public", tiers=("L2",)):
+def write_capsules(
+    corpus: dict, captures: Path, public: Path, private: Path, *, label="public", tiers=("L2",), numeric_flow=None
+):
     """Write one capsule per case, using precisely the round-2 result projection.
 
     ``private`` must be outside the compiler-input tree. No seal or hardware admission is
@@ -76,6 +78,8 @@ def write_capsules(corpus: dict, captures: Path, public: Path, private: Path, *,
                 raise ValueError(f"full-call capsule did not bundle: {name}: {report['cases']}")
             if case["overload"] not in _provenance_ops(bundle / "model.mlir"):
                 raise ValueError(f"full-call interface lacks exact overload provenance: {name}")
+            if numeric_flow is not None:
+                prepare_numeric_fixture(bundle, report, numeric_flow)
             destination.mkdir(mode=0o700 if label == "hidden" else 0o755)
             answers.mkdir(mode=0o700)
             shutil.copyfile(bundle / "model.mlir", destination / "capsule.interface.mlir")
@@ -141,6 +145,13 @@ def write_capsules(corpus: dict, captures: Path, public: Path, private: Path, *,
                 "required_oracle_tiers": list(tiers),
                 "full_call_golden": binding,
             }
+            if numeric_flow is not None:
+                declaration["operation"]["attributes"]["numeric_flow"] = numeric_flow["policy"]
+                declaration["numeric_policy"].update(
+                    compare="exact_int",
+                    rtol=0.0,
+                    atol=0.0,
+                )
             (destination / "capsule.yaml").write_text(yaml.safe_dump(declaration, sort_keys=False))
             load_capsule(destination)
             for path in answers.iterdir():
@@ -181,6 +192,32 @@ def write_capsules(corpus: dict, captures: Path, public: Path, private: Path, *,
     return manifest
 
 
+def prepare_numeric_fixture(bundle: Path, report: dict, flow: dict) -> None:
+    """Freeze a selected declared chain and independent reference, never candidate answers."""
+    from merlin.targetgen.core_aten_device import load_execution_provider, selected_facts
+    from merlin.targetgen.core_aten_numeric import prepare_spec_int8
+
+    if flow["policy"] != "spec_int8":
+        raise ValueError("unsupported full-call numeric fixture policy; explicit conformant preparation required")
+    provider = load_execution_provider(flow["target"], Path(flow["execution_provider"]))
+    with selected_facts(flow["target"], Path(flow["rtl_facts"])) as facts:
+        plan = prepare_spec_int8(
+            bundle,
+            report,
+            target=flow["target"],
+            facts=facts,
+            software_spec=Path(flow["software_spec"]),
+            host_capabilities=Path(flow["host_capabilities"]),
+            provider=provider,
+            package=Path(flow["device_package"]),
+        )
+    if not plan["quantized_contractions"] or plan["integer_reference"].get("status") != "prepared":
+        raise ValueError("scored capsule has no admitted contraction with an exact integer reference")
+    report["numeric_preparation"] = plan
+    for record in report["cases"]:
+        record["numeric_policy"] = flow["policy"]
+
+
 def load_private(capsule: dict, private_root: Path | None = None) -> dict:
     """Verify the answer commitment and every public compiler-input byte before grading."""
     root = Path(capsule["__dir__"]).resolve()
@@ -215,10 +252,14 @@ def grade_readback(
     execution_error=None,
     private_root=None,
     provenance=None,
+    routing=None,
 ) -> dict:
     """The same numeric and full-call semantic checker used by the round-2 campaign."""
     golden = load_private(capsule, private_root)
     report = golden["batch_map"]
+    if routing is not None:
+        for record in report["cases"]:
+            record["routing"] = routing
     if provenance is not None:
         report["provenance"] = provenance
     if output_bytes is not None and len(output_bytes) != report["output_count"]:
@@ -233,8 +274,16 @@ def grade_readback(
         execution_error=execution_error,
     )
     row = next(iter(verdict["cases"].values()))
-    # An absent boundary can never silently downgrade this capsule to numeric-only.
-    if row["status"] == "pass" and row.get("semantic_scope") != "full":
+    if capsule.get("operation", {}).get("attributes", {}).get("numeric_flow") and row["status"] != "execution_failed":
+        if routing is None or row.get("integer_reference", {}).get("status") != "pass":
+            row.update(
+                status="mismatch",
+                reason="mandatory exact integer reference or attributed execution evidence did not pass",
+            )
+            verdict["passed_count"] = 0
+            verdict["status_counts"] = {"mismatch": 1}
+    # An observed boundary retains its imposed-metadata limitation; numeric-only never passes.
+    if row["status"] == "pass" and row.get("semantic_scope") not in {"full", "values+mutation+observed-metadata"}:
         raise ValueError("full-call capsule cannot earn a numeric-only pass")
     return verdict
 
@@ -252,6 +301,9 @@ def runtime_bundle(capsule: dict, destination: Path) -> dict:
         (destination / "model.mlir").read_text(), golden["semantic_io"], golden["batch_map"]["cases"]
     )
     _json(destination / "semantic_io.json", semantic_io)
+    plan = golden["batch_map"].get("numeric_preparation")
+    if plan is not None:
+        _json(destination / "spec-int8-admission.json", plan)
     return golden["batch_map"]
 
 
@@ -341,6 +393,7 @@ def run_capsule(capsule, package_dir, paths, config, adapters, pkg, contract, ti
                 semantic_readback=run.get("semantic_readback"),
                 execution_error=run.get("execution_error"),
                 provenance=run["provenance"],
+                routing=run.get("routing"),
             )
             row = next(iter(verdict["cases"].values()))
             execution_failed = row["status"] == "execution_failed"
@@ -361,9 +414,11 @@ def run_capsule(capsule, package_dir, paths, config, adapters, pkg, contract, ti
                 if execution_failed
                 else None
                 if passed
-                else "compiled full-call boundary or execution lane differs from the call contract",
+                else row.get("reason", "compiled full-call boundary or execution lane differs from the call contract"),
             }
             result["numeric"] = {
+                "integer_reference": row.get("integer_reference", {}),
+                "selected_policy": row.get("numeric_policy", "fp32"),
                 "status": "skipped" if execution_failed else "pass" if passed else "fail",
                 "semantic_scope": row.get("semantic_scope"),
             }
