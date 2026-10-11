@@ -5,6 +5,7 @@ specs:
 - experiments/reference-data/phase0/compiler-regression-calls.yaml
 - examples/gemmini/phase0/compiler-regression-selection.yaml
 - experiments/reference-data/phase0/compiler-regression-half-precision.yaml
+- experiments/reference-data/phase0/compiler-regression-numeric.yaml
 fixes:
   6e6e37a60:
     classification: CAPSULE-ABLE
@@ -71,6 +72,15 @@ fixes:
   06d1a7fa:
     classification: CAPSULE-ABLE
     bug: Captured strided input ABI must preserve storage, views and mutation.
+  f8ed82443:
+    classification: CAPSULE-ABLE
+    bug: Model2MLIR numeric opmath, storage rounding and absent-edge semantics.
+  3d2613d:
+    classification: CAPSULE-ABLE
+    bug: Retained numeric boundaries and explicitly unresolved native scheduling differences.
+  '654987203':
+    classification: CAPSULE-ABLE
+    bug: Model2MLIR batch normalization must retain strided affine parameter semantics.
 external_audit:
   support_provider:
     subject: gemmini-worktrees/phase1-support-baseline

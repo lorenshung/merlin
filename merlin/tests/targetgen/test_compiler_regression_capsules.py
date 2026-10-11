@@ -9,6 +9,9 @@ from merlin_experiments.phase0.regression_capsules import load_specs
 from merlin.common.paths import repo_root
 
 FIXES = {
+    "f8ed82443",
+    "3d2613d",
+    "654987203",
     "06d1a7fa",
     "6e6e37a60",
     "1bf1c4071",
@@ -57,6 +60,7 @@ def test_all_fix_commits_map_to_capsules_or_explicit_infrastructure_tests():
         "compiler-regression-calls.yaml",
         "compiler-regression-half-precision.yaml",
         "compiler-regression-input-layout.yaml",
+        "compiler-regression-numeric.yaml",
     ],
 )
 def test_generic_specs_are_inputs_without_answer_surfaces(spec):
