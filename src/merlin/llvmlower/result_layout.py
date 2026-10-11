@@ -118,6 +118,10 @@ def _apply_result_layout(module, contract):
             source = None
             copy = False
             if aliases:
+                if record.get("role") != "user_input_mutation" and (
+                    span(record) is None or list(typ.shape) != record["shape"] or dynamic in typ.shape
+                ):
+                    raise ValueError("cannot prove returned view fits its input storage envelope")
                 base = aliases[0]
                 if not 0 <= base < len(block.arguments):
                     raise ValueError("invalid result base argument")
@@ -128,24 +132,72 @@ def _apply_result_layout(module, contract):
                     raise ValueError("captured input layout differs from the compiled input ABI")
                 if not mutations:
                     need, capacity = span(record), span(input_record)
-                    if need is not None and capacity is not None and need > capacity:
+                    if (
+                        need is None
+                        or capacity is None
+                        or list(typ.shape) != record["shape"]
+                        or list(base_type.shape) != input_record["shape"]
+                        or dynamic in typ.shape
+                        or dynamic in base_type.shape
+                    ):
+                        raise ValueError("cannot prove returned view fits its input storage envelope")
+                    if need > capacity:
                         raise ValueError("returned view exceeds its input storage envelope")
                     source = block.arguments[base]
                 elif record.get("role") == "user_input_mutation":
                     # Reuse caller storage only with a static capacity proof.
                     need, capacity = span(record), span(contract["inputs"][base])
-                    if need is not None and capacity is not None and need <= capacity:
+                    if (
+                        need is not None
+                        and capacity is not None
+                        and need <= capacity
+                        and list(typ.shape) == record["shape"]
+                        and list(base_type.shape) == input_record["shape"]
+                        and dynamic not in typ.shape
+                        and dynamic not in base_type.shape
+                    ):
                         source, copy = block.arguments[base], True
                 else:
                     mutation_index = records.index(mutations[0])
                     if mutation_index >= ordinal:
                         raise ValueError("mutation storage must precede its user views")
                     source = rewritten[mutation_index]
+                    # A view of a mutation result needs its own envelope proof too.
+                    backing = input_record if root(source) == block.arguments[base] else mutations[0]
+                    need, capacity = span(record), span(backing)
+                    backing_value = root(source) if root(source) == block.arguments[base] else source
+                    backing_type = ir.MemRefType(backing_value.type)
+                    if (
+                        need is None
+                        or capacity is None
+                        or list(backing_type.shape) != backing["shape"]
+                        or dynamic in backing_type.shape
+                    ):
+                        raise ValueError("cannot prove returned view fits its input storage envelope")
+                    if need > capacity:
+                        raise ValueError("returned view exceeds its input storage envelope")
             elif record.get("alias_results"):
                 leader = record["alias_results"][0]
                 if type(leader) is not int or not 0 <= leader < ordinal:
                     raise ValueError("invalid result storage predecessor")
                 source, copy = rewritten[leader], True
+                allocation = root(source)
+                if allocation in block.arguments:
+                    base = list(block.arguments).index(allocation)
+                    backing = contract["inputs"][base]
+                    backing_type = ir.MemRefType(allocation.type)
+                    need, capacity = span(record), span(backing)
+                    if (
+                        need is None
+                        or capacity is None
+                        or list(typ.shape) != record["shape"]
+                        or dynamic in typ.shape
+                        or list(backing_type.shape) != backing["shape"]
+                        or dynamic in backing_type.shape
+                    ):
+                        raise ValueError("cannot prove returned view fits its input storage envelope")
+                    if need > capacity:
+                        raise ValueError("returned view exceeds its input storage envelope")
             if source is None:
                 actual_strides, actual_offset = typ.get_strides_and_offset()
                 peers = [

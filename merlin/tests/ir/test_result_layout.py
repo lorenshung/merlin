@@ -236,3 +236,90 @@ def test_discarded_alloc_is_retained_when_live_root_is_unknown(producer, operati
     # The original owned allocation remains the backing storage of the unknown view.
     if producer in {"transpose", "view"}:
         assert "memref.alloc" in result.stdout and "memref." + producer in result.stdout
+
+
+@pytest.mark.parametrize("unknown", ["shape", "stride", "offset", "capacity", "compiled_result", "compiled_input"])
+def test_borrowed_view_refuses_unproven_span(unknown):
+    input_record = dict(shape=[2, 3], stride=[3, 1], storage_offset=0)
+    record = dict(shape=[2, 3], stride=[3, 1], storage_offset=0, alias_inputs=[0])
+    input_type = "memref<2x3xf32>"
+    result_type = "memref<2x3xf32>"
+    if unknown == "shape":
+        record["shape"] = [-1, 3]
+        result_type = "memref<?x3xf32>"
+    elif unknown == "stride":
+        record["stride"] = [{"shape_axes": [1]}, 1]
+    elif unknown == "offset":
+        record["storage_offset"] = {"shape_axes": [0]}
+    elif unknown == "capacity":
+        input_record["shape"] = [-1, 3]
+        input_type = "memref<?x3xf32>"
+    elif unknown == "compiled_result":
+        result_type = "memref<?x3xf32>"
+    else:
+        input_type = "memref<?x3xf32>"
+    source = f"""module {{
+      func.func @forward(%arg: {input_type}, %value: {result_type}) -> {result_type} {{
+        return %value : {result_type}
+      }}
+    }}"""
+    other_input = dict(shape=[2, 3], stride=[3, 1], storage_offset=0)
+    result = apply_memref_layout(source, dict(inputs=[input_record, other_input], results=[record]))
+    assert result.returncode != 0
+    assert "cannot prove returned view fits" in result.stderr
+
+
+def test_borrowed_view_refuses_static_out_of_bounds_span():
+    source = """module {
+      func.func @forward(%arg: memref<2x3xf32>, %value: memref<2x3xf32>) -> memref<2x3xf32> {
+        return %value : memref<2x3xf32>
+      }
+    }"""
+    inputs = [dict(shape=[2, 3], stride=[3, 1], storage_offset=0)] * 2
+    record = dict(shape=[2, 3], stride=[3, 1], storage_offset=1, alias_inputs=[0])
+    result = apply_memref_layout(source, dict(inputs=inputs, results=[record]))
+    assert result.returncode != 0
+    assert "exceeds its input storage envelope" in result.stderr
+
+
+@pytest.mark.parametrize("dynamic", [True, False])
+def test_view_of_mutation_result_requires_its_own_capacity_proof(dynamic):
+    shape, result_type = ([-1, 3], "memref<?x3xf32>") if dynamic else ([4, 3], "memref<4x3xf32>")
+    source = f"""module {{
+      func.func @forward(%arg: memref<2x3xf32>, %value: {result_type}) -> (memref<2x3xf32>, {result_type}) {{
+        return %arg, %value : memref<2x3xf32>, {result_type}
+      }}
+    }}"""
+    original = dict(shape=[2, 3], stride=[3, 1], storage_offset=0)
+    mutation = dict(original, alias_inputs=[0], role="user_input_mutation", input_index=0)
+    view = dict(shape=shape, stride=[3, 1], storage_offset=0, alias_inputs=[0], role="user_output")
+    result = apply_memref_layout(source, dict(inputs=[original, dict(original, shape=shape)], results=[mutation, view]))
+    assert result.returncode != 0
+    assert ("cannot prove returned view fits" if dynamic else "exceeds its input storage envelope") in result.stderr
+
+
+def test_dynamic_mutation_cannot_supply_an_unproven_borrowed_view():
+    source = """module {
+      func.func @forward(%arg: memref<2x3xf32>, %value: memref<?x3xf32>) -> (memref<?x3xf32>, memref<2x3xf32>) {
+        return %value, %arg : memref<?x3xf32>, memref<2x3xf32>
+      }
+    }"""
+    record = dict(shape=[2, 3], stride=[3, 1], storage_offset=0)
+    mutation = dict(record, alias_inputs=[0], role="user_input_mutation", input_index=0)
+    view = dict(record, alias_inputs=[0], role="user_output")
+    result = apply_memref_layout(source, dict(inputs=[record, record], results=[mutation, view]))
+    assert result.returncode != 0
+    assert "cannot prove returned view fits" in result.stderr
+
+
+def test_result_alias_cannot_bypass_borrowed_capacity_proof():
+    source = """module {
+      func.func @forward(%arg: memref<2x3xf32>, %value: memref<?x3xf32>) -> (memref<2x3xf32>, memref<?x3xf32>) {
+        return %arg, %value : memref<2x3xf32>, memref<?x3xf32>
+      }
+    }"""
+    record = dict(shape=[2, 3], stride=[3, 1], storage_offset=0)
+    view = dict(record, shape=[-1, 3], alias_results=[0])
+    result = apply_memref_layout(source, dict(inputs=[record, record], results=[dict(record, alias_inputs=[0]), view]))
+    assert result.returncode != 0
+    assert "cannot prove returned view fits" in result.stderr
