@@ -352,3 +352,99 @@ def test_observed_boundary_scope_keeps_real_layout_and_excludes_only_autograd():
     result["imposed_by_harness"].append("stride")
     with pytest.raises(AssertionError, match="unsupported"):
         _validate_observation(case, result, allow_unobserved_autograd=True)
+
+
+def _measurement_script():
+    import importlib.util
+
+    from merlin.common.paths import repo_root
+
+    script = repo_root() / "build_tools/scripts/run_bounded_core_aten_suite.py"
+    spec = importlib.util.spec_from_file_location("bounded_cache_runner", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_cache_compares_entire_provenance_stamp(tmp_path, monkeypatch):
+    from copy import deepcopy
+    from types import SimpleNamespace
+
+    from merlin.targetgen.core_aten_capture import case_capture_name
+
+    module = _measurement_script()
+    case = {"case_id": "test", "overload": "aten.alias.default"}
+    args = SimpleNamespace(
+        output=tmp_path, label="scalar", numeric_policy="fp32", repo=tmp_path, capture_timeout=1, worker_timeout=1
+    )
+    block = dict(
+        source_digest="same",
+        merlin_diff_sha256="same",
+        model2mlir_commit="m2m",
+        merlin_commit="merlin",
+        device_package_commit="oot",
+        execution_provider_sha256="provider",
+        artifact_digests={"spike": "binary", "extension_library": "extension"},
+        hardware_pins={"device": {"commit": "pin", "ok": True}},
+        target=None,
+        all_pins_ok=True,
+        sources=["source"],
+        merlin={"commit": "merlin", "dirty_files": 0},
+    )
+    launched = []
+    monkeypatch.setattr(
+        module.subprocess, "Popen", lambda *a, **k: launched.append(a) or SimpleNamespace(wait=lambda **_: 0)
+    )
+    for phase in ("capture", "execute"):
+        directory = (
+            tmp_path / "captures" if phase == "capture" else tmp_path / "scalar" / "shards"
+        ) / case_capture_name(case)
+        completion = directory / ("capture.json" if phase == "capture" else "result.json")
+        saved = dict(case_sha256=case_digest(case), numeric_policy="fp32", provenance=block)
+        atomic_json(completion, saved)
+        assert module.launch(args, phase, case, block) == "cached"
+        assert not launched
+        for key in block:
+            changed = deepcopy(block)
+            changed[key] = {"changed": True} if isinstance(changed[key], dict) else "changed"
+            assert module.launch(args, phase, case, changed) == "finished", key
+        assert len(launched) == len(block)
+        launched.clear()
+        # A legacy receipt without any current identity field cannot earn a hit.
+        for key in block:
+            legacy = deepcopy(saved)
+            del legacy["provenance"][key]
+            atomic_json(completion, legacy)
+            assert module.launch(args, phase, case, block) == "finished", key
+        launched.clear()
+
+
+def test_stamp_reads_descriptor_and_runtime_sources(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    module = _measurement_script()
+    monkeypatch.setenv("MERLIN_SPIKE", str(tmp_path / "spike"))
+    monkeypatch.setattr(module, "git", lambda *_: "commit")
+    monkeypatch.setattr(module.subprocess, "check_output", lambda argv, **_: "" if "ls-files" in argv else b"")
+    monkeypatch.setattr(module.provenance, "record", lambda **kwargs: kwargs)
+    suite = tmp_path / "suite.json"
+    suite.write_text("{}")
+    args = SimpleNamespace(
+        repo=tmp_path,
+        m2m_dir=tmp_path,
+        suite=suite,
+        pin=[],
+        extension_library=None,
+        facts=None,
+        execution_provider=tmp_path / "provider.py",
+        device_package=None,
+        target=None,
+    )
+    stamp = module.stamp(args)
+    expected = [
+        "src/merlin/llvmlower/" + name
+        for name in ("result_layout.py", "pipeline.py", "result_buffers.py", "c_runtime.py")
+    ]
+    expected += ["merlin/runtime/abi/mlir_runtime.c", "src/merlin/runtime/backends/spike_model.py"]
+    assert all(tmp_path / path in stamp["sources"] for path in expected)
+    assert args.execution_provider in stamp["sources"]

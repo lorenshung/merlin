@@ -53,6 +53,12 @@ def stamp(args):
         "src/merlin/targetgen/core_aten_device.py",
         "src/merlin/runtime/semantic_readback.py",
         "src/merlin/llvmlower/semantic_io.py",
+        "src/merlin/llvmlower/result_layout.py",
+        "src/merlin/llvmlower/pipeline.py",
+        "src/merlin/llvmlower/result_buffers.py",
+        "src/merlin/llvmlower/c_runtime.py",
+        "merlin/runtime/abi/mlir_runtime.c",
+        "src/merlin/runtime/backends/spike_model.py",
     ):
         sources.append(args.repo / relative)
     if args.facts:
@@ -79,6 +85,9 @@ def stamp(args):
             "merlin_diff_sha256": hashlib.sha256(diff).hexdigest(),
             "model2mlir_commit": git(args.m2m_dir, "rev-parse", "HEAD"),
             "device_package_commit": git(args.device_package, "rev-parse", "HEAD") if args.device_package else None,
+            "execution_provider_sha256": provenance.file_digest(args.execution_provider)
+            if args.execution_provider
+            else None,
             "target": args.target,
             "execution_kind": "functional_simulator",
             "suite_sha256": hashlib.sha256(args.suite.read_bytes()).hexdigest(),
@@ -206,13 +215,7 @@ def launch(args, phase, case, block):
         saved = json.loads(completion.read_text())
         receipt = saved.get("provenance", {})
         policy_matches = phase == "capture" or saved.get("numeric_policy", "fp32") == args.numeric_policy
-        if (
-            saved.get("case_sha256") == case_digest(case)
-            and policy_matches
-            and receipt.get("source_digest") == block.get("source_digest")
-            and receipt.get("merlin_diff_sha256") == block.get("merlin_diff_sha256")
-            and receipt.get("model2mlir_commit") == block.get("model2mlir_commit")
-        ):
+        if saved.get("case_sha256") == case_digest(case) and policy_matches and receipt == block:
             return "cached"
     directory.mkdir(parents=True, exist_ok=True)
     request = directory / "request.json"
@@ -442,12 +445,14 @@ def main():
     block_path = args.output / args.label / "provenance.json"
     if args.worker:
         block = json.loads(block_path.read_text())
-        block["worker_adapter_sources"] = provenance.record(
+        # Supplementary worker diagnostics are separate from the immutable cache stamp.
+        worker_sources = provenance.record(
             sources=[
                 Path(__file__),
                 Path(__import__("merlin.targetgen.core_aten_bounded_runner", fromlist=["x"]).__file__),
             ]
         )
+        atomic_json(args.case.parent / "worker-sources.json", worker_sources)
         case = json.loads(args.case.read_text())
         (capture if args.worker == "capture" else execute)(args, case, block)
         return
