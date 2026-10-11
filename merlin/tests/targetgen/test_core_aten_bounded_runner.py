@@ -104,10 +104,15 @@ def test_portable_nonfinite_oracle_uses_same_comparator_without_mutation():
 
 def test_bundle_refusal_reports_native_abi_reason():
     assert (
-        bundle_admission_reason({"capture_meta": {"input_abi": [{"dtype": "bf16", "shape": [2]}]}})
-        == "ValueError: unsupported batch ABI dtype 'bf16'"
+        bundle_admission_reason({"capture_meta": {"input_abi": [{"dtype": "f80", "shape": [2]}]}})
+        == "ValueError: unsupported batch ABI dtype 'f80'"
     )
     assert bundle_admission_reason({"capture_meta": {"output_abi": [{"dtype": "f32", "shape": [2]}]}}) is None
+
+
+def test_half_storage_abis_are_admitted():
+    for dtype in ("bf16", "f16"):
+        assert bundle_admission_reason({"capture_meta": {"input_abi": [{"dtype": dtype, "shape": [2]}]}}) is None
 
 
 def test_function_and_capture_abi_counts_must_agree():

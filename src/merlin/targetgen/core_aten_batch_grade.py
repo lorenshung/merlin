@@ -11,6 +11,7 @@ _DTYPES = {
     "f32": np.float32,
     "f64": np.float64,
     "f16": np.float16,
+    "bf16": np.uint16,
     "i64": np.int64,
     "i32": np.int32,
     "i16": np.int16,
@@ -21,12 +22,20 @@ _EXPECTED_DTYPES = {
     "f32": "float32",
     "f64": "float64",
     "f16": "float16",
+    "bf16": "bfloat16",
     "i64": "int64",
     "i32": "int32",
     "i16": "int16",
     "i8": "int8",
     "i1": "bool",
 }
+
+
+def _decode_storage(raw: bytes, dtype: str) -> np.ndarray:
+    values = np.frombuffer(raw, dtype=_DTYPES[dtype])
+    if dtype == "bf16":
+        return (values.astype(np.uint32) << np.uint32(16)).view(np.float32)
+    return values
 
 
 def _complex_values(value: Any) -> Any:
@@ -88,7 +97,7 @@ def _grade_output(raw: bytes, abi: Mapping[str, Any], expected: Any, case: Mappi
     if dtype not in _DTYPES:
         return {"status": "ungradable", "reason": f"unsupported result ABI dtype {dtype!r}"}
     count = int(np.prod(shape)) if shape else 1
-    actual = np.frombuffer(raw, dtype=_DTYPES[dtype])
+    actual = _decode_storage(raw, dtype)
     if len(actual) != count:
         return {
             "status": "mismatch",
@@ -108,11 +117,12 @@ def _grade_output(raw: bytes, abi: Mapping[str, Any], expected: Any, case: Mappi
     else:
         expected_value = expected
     try:
-        reference = np.asarray(_complex_values(expected_value), dtype=_DTYPES[dtype]).reshape(shape)
+        reference_dtype = np.float32 if dtype == "bf16" else _DTYPES[dtype]
+        reference = np.asarray(_complex_values(expected_value), dtype=reference_dtype).reshape(shape)
     except (TypeError, ValueError) as exc:
         return {"status": "ungradable", "reason": f"cannot decode canonical expected value: {exc}"}
     parameters = case.get("comparison_parameters") or {}
-    if dtype.startswith("f"):
+    if dtype.startswith("f") or dtype == "bf16":
         rtol = float(parameters.get("rtol", 0.0))
         atol = float(parameters.get("atol", 0.0))
         equal = np.isclose(actual, reference, rtol=rtol, atol=atol, equal_nan=bool(parameters.get("equal_nan", False)))

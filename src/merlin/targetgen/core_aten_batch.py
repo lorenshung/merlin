@@ -20,6 +20,8 @@ _DTYPES = {
     "f32": np.float32,
     "f64": np.float64,
     "f16": np.float16,
+    # NPZ carries widened values; c_runtime packs them into the declared bf16 storage.
+    "bf16": np.float32,
     "i64": np.int64,
     "i32": np.int32,
     "i16": np.int16,
@@ -391,6 +393,7 @@ def build_core_aten_batch(
                     raise ValueError("same-conversion result roles differ from emitted results")
                 dtype_map = {str(np.dtype(v)): k for k, v in _DTYPES.items()}
                 dtype_map.update(bool="i1", complex64="complex<f32>", complex128="complex<f64>")
+                dtype_map.update(float32="f32", bfloat16="bf16")
                 abi_out = [{"shape": r["shape"], "dtype": dtype_map[r["dtype"]]} for r in role_results]
                 user_ordinals = [i for i, r in enumerate(role_results) if r["role"] == "user_output"]
                 post_ordinals = []
@@ -458,7 +461,7 @@ def build_core_aten_batch(
                     logical = np.asarray(_complex_value(value), dtype=_COMPLEX_DTYPES[item["dtype"]])
                     array = np.stack((logical.real, logical.imag), axis=-1).astype(_DTYPES[physical["dtype"]])
                 else:
-                    array = np.asarray(value, dtype=_DTYPES[item["dtype"]])
+                    array = np.asarray(_complex_value(value), dtype=_DTYPES[item["dtype"]])
                 if list(array.shape) != physical["shape"]:
                     raise ValueError(f"input shape {list(array.shape)} differs from ABI {physical['shape']}")
                 local_inputs.append(array)

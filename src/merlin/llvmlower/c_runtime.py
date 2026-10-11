@@ -77,12 +77,15 @@ def _bf16_bits(f32: np.ndarray) -> np.ndarray:
     """Round float32 to bfloat16 (round-to-nearest-even) and return the raw uint16 bit patterns.
 
     numpy has no native bf16, so do it by hand: bf16 is the top 16 bits of the f32 encoding; RNE
-    adds the round bias 0x7FFF + (lsb of the kept mantissa) before truncating. NaNs are preserved
-    (their exponent is all-ones and mantissa nonzero, which survives the shift)."""
+    adds the round bias 0x7FFF + (lsb of the kept mantissa) before truncating.
+    Nonfinite encodings bypass that bias; NaNs retain a nonzero quiet payload."""
     u = f32.astype(np.float32).view(np.uint32)
     lsb = (u >> 16) & np.uint32(1)
     rounded = (u + np.uint32(0x7FFF) + lsb) >> np.uint32(16)
-    return rounded.astype(np.uint16)
+    nonfinite = (u & np.uint32(0x7F800000)) == np.uint32(0x7F800000)
+    nan = (u & np.uint32(0x007FFFFF)) != 0
+    special = (u >> np.uint32(16)) | np.where(nan, np.uint32(0x40), np.uint32(0))
+    return np.where(nonfinite, special, rounded).astype(np.uint16)
 
 
 def _embed_array(arr: np.ndarray, dt: str) -> str:

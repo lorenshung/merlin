@@ -7,7 +7,7 @@ from collections.abc import Mapping
 
 import numpy as np
 
-from merlin.targetgen.core_aten_batch_grade import _DTYPES, _EXPECTED_DTYPES
+from merlin.targetgen.core_aten_batch_grade import _DTYPES, _EXPECTED_DTYPES, _decode_storage
 
 
 def tensor_paths(value, path):
@@ -53,7 +53,9 @@ def full_observation(record, raw, readback):
             shape, stride, offset = shape[:-1], [s // 2 for s in stride[:-1]], offset // 2
         else:
             ndtype, logical = _DTYPES[dtype], _EXPECTED_DTYPES[dtype]
-        values = np.frombuffer(raw[index], ndtype).reshape(shape)
+        values = (
+            np.frombuffer(raw[index], ndtype) if dtype.startswith("complex<") else _decode_storage(raw[index], dtype)
+        ).reshape(shape)
         return dict(
             kind="tensor",
             dtype=logical,

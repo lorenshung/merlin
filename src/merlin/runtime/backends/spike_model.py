@@ -795,7 +795,7 @@ def build(
         model_cflags = compiler_plan["model_cflags"]
         selected_clang = index_observation["compiler_resolved"]
         clang = Path(selected_clang)
-        runtime_compiler = _mlir_runtime_compiler(clang, gcc, gcc_cflags)
+        runtime_compiler = _mlir_runtime_compiler(clang, gcc, model_cflags)
         res = lower_model_file(
             prepared_path,
             work / "lower",
