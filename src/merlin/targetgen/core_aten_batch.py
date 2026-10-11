@@ -450,7 +450,7 @@ def build_core_aten_batch(
         semantic_path.write_bytes(
             _json_bytes(
                 caller_boundary_layouts(
-                    (bundle_root / "model.mlir").read_text(),
+                    module,  # Before generic serialization of stateful declarations.
                     dict(
                         schema_version=1,
                         outputs=semantic_outputs,
