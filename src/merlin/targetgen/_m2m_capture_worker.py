@@ -31,6 +31,9 @@ import shutil
 import sys
 from pathlib import Path
 
+# The worker is also executed as a standalone script in the capture interpreter.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 # canonical dtype token -> (torchAO scheme | None, base-weight dtype cast | None). Mirrors
 # workloads/capture.py SCHEME + DTYPE_CAST so a capsule's precision matches how models are captured.
 _SCHEME = {
@@ -197,7 +200,6 @@ def _quant_for(dtype: str, override: str | None = None):
 
 
 def _to_native(t):
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
     from _capture_tensor_values import to_native
 
     return to_native(t)

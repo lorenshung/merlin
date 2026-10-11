@@ -67,9 +67,22 @@ def full_observation(record, raw, readback):
             return [replace(item, documents) for item in value]
         return value
 
-    post_docs = [document(index, abi) for index, abi in zip(boundary["post_indices"], boundary["post_abi"])]
-    post = replace(record["case"]["arguments"], iter(post_docs))
-    output_docs = [document(index, abi) for index, abi in zip(record["output_indices"], record["output_abi"])]
+    post_docs = [
+        document(index, abi) for index, abi in zip(boundary["post_indices"], boundary["post_abi"], strict=True)
+    ]
+
+    def consume_tree(builder, tree, docs):
+        documents = iter(docs)
+        result = builder(tree, documents)
+        sentinel = object()
+        if next(documents, sentinel) is not sentinel:
+            raise ValueError("boundary documents remain after reconstructing tree")
+        return result
+
+    post = consume_tree(replace, record["case"]["arguments"], post_docs)
+    output_docs = [
+        document(index, abi) for index, abi in zip(record["output_indices"], record["output_abi"], strict=True)
+    ]
 
     # Scalar return wrappers have one rank-zero tensor ABI. Preserve the source pytree kind.
     def output_tree(value, documents):
@@ -87,11 +100,11 @@ def full_observation(record, raw, readback):
             return int(number)
         return number
 
-    output = output_tree(record["case"]["expected"], iter(output_docs))
+    output = consume_tree(output_tree, record["case"]["expected"], output_docs)
     paths = tensor_paths(record["case"]["arguments"], "")
     mutated = []
     for (path, initial), observed, source_index, result_index in zip(
-        paths, post_docs, record["input_indices"], boundary["post_indices"]
+        paths, post_docs, record["input_indices"], boundary["post_indices"], strict=True
     ):
         # The corpus defines mutation by byte equality and dtype/shape/stride (not offset).
         if bytes.fromhex(before[str(source_index)]) != raw[result_index] or any(
@@ -100,8 +113,12 @@ def full_observation(record, raw, readback):
             mutated.append(path)
     output_paths = tensor_paths(output, "result")
     relationships = []
-    for (path, _), index in zip(output_paths, record["output_indices"]):
-        for (input_path, _), post_index in zip(paths, boundary["post_indices"]):
+    tensor_documents = {id(doc) for _, doc in output_paths}
+    tensor_indices = [
+        index for index, doc in zip(record["output_indices"], output_docs, strict=True) if id(doc) in tensor_documents
+    ]
+    for (path, _), index in zip(output_paths, tensor_indices, strict=True):
+        for (input_path, _), post_index in zip(paths, boundary["post_indices"], strict=True):
             if post_index in aliases[index]:
                 relationships.append(f"{path}->{input_path}")
     return dict(
@@ -140,7 +157,7 @@ def validate_full(record, raw, readback):
                     [doc for _, doc in tensor_paths(case["post_arguments"], "")],
                 ),
             ]:
-                for index, abi, doc in zip(indices, abis, expected):
+                for index, abi, doc in zip(indices, abis, expected, strict=True):
                     abi = {**abi, "shape": readback["metadata"][index]["shape"]}
                     verdict = _grade_output(raw[index], abi, doc, case)
                     if verdict["status"] != "pass":

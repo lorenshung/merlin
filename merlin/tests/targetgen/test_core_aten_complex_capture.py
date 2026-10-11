@@ -19,3 +19,14 @@ for dtype,spelling in [(torch.complex64,"complex<f32>"),(torch.complex128,"compl
  assert worker._to_native(value)==[[dict(kind="complex",real=1.,imag=2.),dict(kind="complex",real=-3.,imag=-4.)]]
 """
     subprocess.run([str(capture_python()), "-c", script], check=True)
+
+
+def test_native_conversion_does_not_grow_import_path():
+    import sys
+
+    from merlin.targetgen import _m2m_capture_worker as worker
+
+    before = list(sys.path)
+    for _ in range(10):
+        assert worker._to_native([[1], [2]]) == [[1], [2]]
+    assert sys.path == before

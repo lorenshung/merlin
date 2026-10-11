@@ -79,6 +79,36 @@ def test_absent_boundary_cannot_claim_full_semantics():
     assert validate_full(record, raw, readback) is None
 
 
+@pytest.mark.parametrize("field", ["post_indices", "post_abi", "input_indices", "output_abi", "output_indices"])
+@pytest.mark.parametrize("extra", [False, True])
+def test_boundary_count_mismatch_fails(field, extra):
+    record, raw, readback = fixture()
+    owner = record["semantic_boundary"] if field.startswith("post_") else record
+    items = owner[field]
+    if extra:
+        items.append(copy.deepcopy(items[0]))
+    else:
+        items.clear()
+    assert validate_full(record, raw, readback)["status"] != "pass"
+
+
+def test_leftover_post_documents_fail_even_when_abi_counts_agree():
+    record, raw, readback = fixture()
+    record["semantic_boundary"]["post_indices"].append(1)
+    record["semantic_boundary"]["post_abi"].append(dict(dtype="f32", shape=[4]))
+    assert validate_full(record, raw, readback)["status"] == "ungradable"
+
+
+def test_scalar_return_has_no_alias_path():
+    record, raw, readback = fixture()
+    record["case"]["expected"] = 1.0
+    record["case"]["output_input_aliases"] = []
+    record["output_abi"] = [dict(dtype="f32", shape=[])]
+    readback["metadata"][0].update(shape=[], stride=[])
+    raw[0] = np.array(1.0, np.float32).tobytes()
+    assert validate_full(record, raw, readback)["status"] == "pass"
+
+
 @pytest.mark.parametrize("mutation_result", [False, True])
 def test_transposed_input_to_nonmutating_call_preserves_caller_layout(mutation_result):
     from merlin.targetgen.core_aten_batch import caller_boundary_layouts
