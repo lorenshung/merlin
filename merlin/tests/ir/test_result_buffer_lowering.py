@@ -64,6 +64,18 @@ def test_early_bufferization_conversion_requires_a_layout_contract():
     assert layout.index("bufferization-lower-deallocations") + 1 == layout.index("convert-bufferization-to-memref")
 
 
+@pytest.mark.parametrize("layout", [False, True])
+@pytest.mark.parametrize("preserve", [False, True])
+def test_descriptor_results_name_missing_finalization_pass(layout, preserve):
+    from merlin.llvmlower.result_buffers import descriptor_results
+    from merlin.llvmlower.result_layout import module_attribute
+
+    body = " { func.func @forward(%x: tensor<?xf32>) -> tensor<?xf32> { return %x : tensor<?xf32> } }"
+    source = "module" + (module_attribute({}) if layout else "") + body
+    with pytest.raises(ValueError, match="requires finalize-memref-to-llvm in the pipeline"):
+        descriptor_results("one-shot-bufferize,buffer-results-to-out-params", source, preserve=preserve)
+
+
 @pytest.mark.parametrize("extent", [0, 7])
 def test_non_core_aten_dynamic_results_execute_with_original_pass_order(tmp_path, extent):
     import ctypes

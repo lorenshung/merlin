@@ -55,6 +55,9 @@ def descriptor_results(pipeline: str, mlir: str, *, preserve: bool = False) -> s
         raise
     if preserve or any(dim < 0 for shape, _ in results for dim in shape):
         stages = [p for p in pipeline.split(",") if not p.startswith("buffer-results-to-out-params")]
+        finalize = next((i for i, p in enumerate(stages) if p.startswith("finalize-memref-to-llvm")), None)
+        if finalize is None:
+            raise ValueError("descriptor result lowering requires finalize-memref-to-llvm in the pipeline")
         from merlin.llvmlower.result_layout import read_layout
 
         if read_layout(mlir) is not None:
@@ -67,7 +70,7 @@ def descriptor_results(pipeline: str, mlir: str, *, preserve: bool = False) -> s
             at = max(bufferized, default=-1) + 1
         else:
             # Preserve the ordinary dynamic-result pipeline's existing pass order.
-            at = next(i for i, p in enumerate(stages) if p.startswith("finalize-memref-to-llvm"))
+            at = finalize
         stages.insert(at, "convert-bufferization-to-memref")
         return ",".join(stages)
     return pipeline
