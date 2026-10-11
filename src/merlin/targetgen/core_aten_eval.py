@@ -131,7 +131,15 @@ def _assert_document_close(expected: Any, observed: Any, *, rtol: float, atol: f
                 raise AssertionError(
                     f"tensor {field} mismatch: expected {expected.get(field)!r}, got {observed.get(field)!r}"
                 )
-        torch.testing.assert_close(decode_value(observed), decode_value(expected), rtol=rtol, atol=atol, equal_nan=True)
+        actual, reference = decode_value(observed), decode_value(expected)
+        if reference.dtype == torch.bool:
+            if not torch.equal(actual, reference):
+                raise AssertionError("boolean tensor values mismatch")
+        else:
+            floating = reference.is_floating_point() or reference.is_complex()
+            torch.testing.assert_close(
+                actual, reference, rtol=rtol if floating else 0, atol=atol if floating else 0, equal_nan=True
+            )
         return
     if isinstance(expected, dict):
         if not isinstance(observed, dict) or set(observed) != set(expected):

@@ -27,6 +27,18 @@ from merlin.targetgen.core_aten_eval import (
 torch = pytest.importorskip("torch")
 
 
+@pytest.mark.parametrize("dtype,values,wrong", [("int64", [1000000], [1000001]), ("bool", [True], [False])])
+def test_nonfloating_tensor_values_are_exact(dtype, values, wrong):
+    from merlin.targetgen.core_aten_eval import _assert_document_close
+
+    expected = dict(
+        kind="tensor", dtype=dtype, shape=[1], stride=[1], storage_offset=0, requires_grad=False, values=values
+    )
+    _assert_document_close(expected, expected, rtol=1e-5, atol=1e-6)
+    with pytest.raises(AssertionError):
+        _assert_document_close(expected, {**expected, "values": wrong}, rtol=1e-5, atol=1e-6)
+
+
 def _corpus(*names: str) -> dict:
     cases = [case_document(core_aten_cases()[name]) for name in sorted(names)]
     return {
