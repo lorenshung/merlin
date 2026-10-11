@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 
-def integer_split_k_limit(numeric_policy: dict | None, *, tile_dim: int, full_k: int) -> dict | None:
+def integer_split_k_limit(
+    numeric_policy: dict | None, *, tile_dim: int, full_k: int, operand_range: tuple[int, int] | None = None
+) -> dict | None:
     """Derive the worst-case signed-integer primitive K from selected arithmetic.
 
     This is a target-neutral numerical obligation shared by capture selection and
@@ -33,7 +35,11 @@ def integer_split_k_limit(numeric_policy: dict | None, *, tile_dim: int, full_k:
         or full_k < 1
     ):
         raise ValueError("integer mesh has unsupported selected MAC/accumulator arithmetic")
-    maximum_operand = 1 << (operand_bits - 1)
+    storage_lo, storage_hi = -(1 << (operand_bits - 1)), (1 << (operand_bits - 1)) - 1
+    lo, hi = operand_range if operand_range is not None else (storage_lo, storage_hi)
+    if type(lo) is not int or type(hi) is not int or not storage_lo <= lo <= hi <= storage_hi:
+        raise ValueError("declared operand range exceeds selected signed storage")
+    maximum_operand = max(abs(lo), abs(hi))
     maximum_product = maximum_operand * maximum_operand
     full_bound = full_k * maximum_product
     if full_bound > (1 << 31) - 1:
@@ -48,6 +54,7 @@ def integer_split_k_limit(numeric_policy: dict | None, *, tile_dim: int, full_k:
         "mac_result_bits": mac_bits,
         "signed_operand_bits": operand_bits,
         "maximum_product": maximum_product,
+        "operand_range": [lo, hi],
         "aggregation": "exact_integer_sum_before_epilogue",
     }
 

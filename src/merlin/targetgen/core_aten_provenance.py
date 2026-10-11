@@ -41,6 +41,7 @@ def batch_provenance(
         for path in (
             "targetgen/core_aten_batch.py",
             "targetgen/core_aten_numeric.py",
+            "targetgen/operation_numerics.py",
             "targetgen/core_aten_w8a8_reference.py",
             "llvmlower/contraction_quantization.py",
             "llvmlower/torchao_affine.py",
@@ -87,10 +88,19 @@ def batch_provenance(
             "model.before_w8a8.mlir",
             "w8a8-request.json",
             "w8a8-reference.json",
+            "w8a8-dispatch.json",
         ):
             path = directory / name
             if path.is_file():
                 artifacts[name] = path
+    if directory and (directory / "w8a8-dispatch.json").is_file():
+        import json
+
+        dispatch = json.loads((directory / "w8a8-dispatch.json").read_text())
+        for i, site in enumerate(dispatch):
+            sources.append(Path(site["software_spec_path"]))
+            artifacts[f"w8a8_target_ir_{i}"] = Path(site["target_ir_path"])
+            artifacts[f"w8a8_device_object_{i}"] = Path(site["object_path"])
     return provenance.record(
         pins=pins,
         sources=sources,

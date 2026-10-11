@@ -9,7 +9,62 @@ from __future__ import annotations
 import itertools
 
 
-def evaluate(module, arrays, selected, *, quant_min, quant_max, eps):
+def quantize_codes(x, scale, *, quant_min, quant_max):
+    """The policy's f32 reciprocal-first RNE/clamp integer observation."""
+    import torch
+
+    rounded = torch.round(x * (1.0 / scale))
+    return torch.clamp(rounded, quant_min, quant_max).to(torch.int32)
+
+
+def quantize_operand(original, *, quant_min, quant_max, eps):
+    """Independent reciprocal-first f32 RNE oracle, including runtime NaN rule."""
+    import torch
+
+    x = original.float()
+    finite = torch.isfinite(x)
+    valid = bool(finite.all())
+    safe = torch.where(finite, x, torch.zeros_like(x))
+    amax = safe.abs().amax()
+    unclamped = amax / ((quant_max - quant_min) / 2.0)
+    scale = torch.clamp(unclamped, min=eps) if valid else torch.tensor(eps, dtype=torch.float32)
+    rounded = torch.round(safe * (1.0 / scale))
+    codes = quantize_codes(safe, scale, quant_min=quant_min, quant_max=quant_max)
+    metrics = dict(
+        scale=scale.item(),
+        amax=amax.item(),
+        eps_clamp_hit=bool(unclamped <= eps),
+        nonfinite_count=int((~finite).sum()),
+        saturation_rate=float(((rounded < quant_min) | (rounded > quant_max)).float().mean()),
+        round_to_zero_fraction=float((codes == 0).float().mean()),
+        code_histogram={str(k): int((codes == k).sum()) for k in range(quant_min, quant_max + 1)},
+    )
+    return codes, scale, valid, metrics
+
+
+def validate_dispatch(dispatch, *, full_k, quant_min, quant_max):
+    """Recompute the per-primitive obligation independently of compiler helpers."""
+    if not dispatch or dispatch.get("full_k") != full_k:
+        raise ValueError("W8A8 oracle requires actual source-bound K dispatch")
+    internal = dispatch["numerical_semantics"]["internal_arithmetic"]
+    bits, storage_bits = internal["mac_result_bits"], internal["signed_operand_bits"]
+    if (
+        internal["mac_result_overflow"] != f"wrap_to_{bits}_bits"
+        or internal["full_operation_overflow_policy"] != "bounded_exact_requires_each_partial_sum"
+        or not -(1 << (storage_bits - 1)) <= quant_min <= quant_max < (1 << (storage_bits - 1))
+    ):
+        raise ValueError("W8A8 oracle refuses unsupported internal arithmetic")
+    product_bound = max(abs(quant_min), abs(quant_max)) ** 2
+    limit = ((1 << (bits - 1)) - 1) // product_bound
+    ks = dispatch["primitive_ks"]
+    if not ks or any(type(k) is not int or not 0 < k <= limit for k in ks):
+        raise ValueError("W8A8 oracle refuses primitive K exceeding internal MAC bound")
+    if full_k * product_bound > (1 << 31) - 1:
+        raise ValueError("W8A8 oracle refuses inexact i32 aggregation")
+    return limit
+
+
+def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=None):
     import torch
     from xdsl.dialects.builtin import DenseIntOrFPElementsAttr, TensorType
     from xdsl.ir.affine import AffineDimExpr
@@ -26,6 +81,7 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps):
     env = {arg: torch.from_numpy(array.copy()) for arg, array in zip(function.body.block.args, arrays, strict=True)}
     scales = []
     selected = set(selected)
+    selected_order = {op: i for i, op in enumerate(op for op in module.walk() if op in selected)}
 
     def dtype(t):
         return dtypes[str(t.element_type if isinstance(t, TensorType) else t)]
@@ -68,14 +124,15 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps):
     def generic(op, xs):
         maps = [a.data for a in op.get_indexing_maps()]
         if op in selected:
-            q, ss = [], []
+            q, ss, valid, operands = [], [], [], []
             for original in xs[:2]:
-                x = original.float()
-                if not bool(torch.isfinite(x).all()):
-                    raise ValueError("W8A8 reference refuses nonfinite contraction input")
-                scale = torch.clamp(x.abs().amax() / ((quant_max - quant_min) / 2.0), min=eps)
-                q.append(torch.clamp(torch.round(x * (1.0 / scale)), quant_min, quant_max).to(torch.int32))
+                codes, scale, finite, metrics = quantize_operand(
+                    original, quant_min=quant_min, quant_max=quant_max, eps=eps
+                )
+                q.append(codes)
                 ss.append(scale)
+                valid.append(finite)
+                operands.append(metrics)
             labels = []
             for amap in maps:
                 if any(not isinstance(expr, AffineDimExpr) for expr in amap.results):
@@ -83,8 +140,76 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps):
                 labels.append("".join(chr(ord("a") + expr.position) for expr in amap.results))
             # PyTorch integer einsum uses integer mm/bmm; independently of emitted MAC loops.
             acc = torch.einsum(labels[0] + "," + labels[1] + "->" + labels[2], *q)
-            scales.append({"lhs": ss[0].item(), "rhs": ss[1].item(), "granularity": "per_tensor"})
-            return ((acc.to(torch.float32) * ss[0]) * ss[1]).to(xs[-1].dtype)
+            reduction = set(labels[0] + labels[1]) - set(labels[2])
+            if len(reduction) != 1:
+                raise ValueError("oracle requires a single reduction dimension")
+            reduction_label = next(iter(reduction))
+            full_k = q[0].shape[labels[0].index(reduction_label)]
+            schedule = dispatch[selected_order[op]] if dispatch is not None else None
+            limit = (
+                validate_dispatch(schedule, full_k=full_k, quant_min=quant_min, quant_max=quant_max)
+                if schedule
+                else None
+            )
+            if dispatch is not None and schedule is None:
+                raise ValueError("W8A8 oracle lacks dispatch for selected contraction")
+            partial_max = 0
+            if schedule:
+                # Each emitted primitive has a bounded K; independently measure
+                # reference partial sums with that same maximum tile extent.
+                tile = max(schedule["primitive_ks"])
+                for offset in range(0, full_k, tile):
+                    sliced = []
+                    for value, label in zip(q, labels[:2], strict=True):
+                        axes = [slice(None)] * value.ndim
+                        axes[label.index(reduction_label)] = slice(offset, offset + tile)
+                        sliced.append(value[tuple(axes)])
+                    for prefix in range(1, sliced[0].shape[labels[0].index(reduction_label)] + 1):
+                        prefixes = []
+                        for value, label in zip(sliced, labels[:2], strict=True):
+                            axes = [slice(None)] * value.ndim
+                            axes[label.index(reduction_label)] = slice(0, prefix)
+                            prefixes.append(value[tuple(axes)])
+                        partial = torch.einsum(labels[0] + "," + labels[1] + "->" + labels[2], *prefixes)
+                        partial_max = max(partial_max, int(partial.to(torch.int64).abs().max()))
+            maximum = int(acc.to(torch.int64).abs().max())
+            combined = ss[0].double() * ss[1].double()
+            result = (acc.float().double() * combined).float()
+            restored = result.to(xs[-1].dtype)
+            if all(valid):
+                if not bool(torch.isfinite(result).all() and torch.isfinite(restored).all()):
+                    raise ValueError("int8_w8a8 dequantized result is not representable")
+            else:
+                restored = torch.full_like(restored, float("nan"))
+            bits = schedule["numerical_semantics"]["internal_arithmetic"]["mac_result_bits"] if schedule else None
+            scales.append(
+                dict(
+                    lhs=ss[0].item(),
+                    rhs=ss[1].item(),
+                    granularity="per_tensor",
+                    output_lsb=combined.item(),
+                    operands=operands,
+                    accumulator=acc.tolist(),
+                    accumulator_metrics=dict(
+                        max_abs=maximum,
+                        i32_headroom=(1 << 31) - 1 - maximum,
+                        primitive_max_abs=partial_max if schedule else None,
+                        internal_headroom=((1 << (bits - 1)) - 1 - partial_max) if bits else None,
+                        internal_bound=((1 << (bits - 1)) - 1) if bits else None,
+                        primitive_worst_case_bound=max(schedule["primitive_ks"])
+                        * max(abs(quant_min), abs(quant_max)) ** 2
+                        if schedule
+                        else None,
+                    ),
+                    k_split=dict(
+                        full_k=full_k,
+                        primitive_ks=schedule["primitive_ks"] if schedule else None,
+                        max_legal_primitive_k=limit,
+                        split_required=full_k > limit if limit else None,
+                    ),
+                )
+            )
+            return restored
         extents = [None] * maps[0].num_dims
         for amap, x in zip(maps, xs, strict=True):
             for expr, size in zip(amap.results, x.shape, strict=True):
@@ -171,10 +296,13 @@ def main():
         quant_min=request["quant_min"],
         quant_max=request["quant_max"],
         eps=request["eps"],
+        dispatch=request["dispatch"],
     )
     document = {
         "outputs": [v.tolist() for v in values],
         "scales": scales,
+        "accumulators": [s["accumulator"] for s in scales],
+        "output_bytes": [v.contiguous().numpy().tobytes().hex() for v in values],
         "engine": "independent_pytorch_integer_einsum",
     }
     (directory / "w8a8-reference.json").write_text(json.dumps(document, indent=2) + "\n")

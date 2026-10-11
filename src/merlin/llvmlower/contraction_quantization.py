@@ -1,4 +1,11 @@
-"""Explicit per-tensor W8A8 preparation using the existing affine/quant_ext lowerings."""
+"""Explicit per-tensor W8A8 preparation using existing affine/quant_ext lowerings.
+
+Dequant order: cast i32 to f32, widen that value and both f32 scales to f64,
+combine the scales and multiply in f64, round once to f32, restore storage.
+Finite overflow refuses at runtime. Nonfinite promoted inputs are sanitized
+before integer conversion and produce canonical NaN over the contraction.
+Subnormal inputs quantize to zero under the unchanged epsilon scale floor.
+"""
 
 from __future__ import annotations
 
@@ -63,17 +70,21 @@ def selected_contractions(module, triples, ranks):
                 yield op
 
 
-def quantize_module(module, selected) -> int:
+def quantize_module(module, selected, *, accumulators=None) -> int:
     """Retain public float ABI and host epilogues; replace selected MACs with integer MACs."""
-    from xdsl.dialects import arith, tensor
+    from xdsl.dialects import arith, cf, math, tensor
     from xdsl.dialects.builtin import (
         AffineMapAttr,
         ArrayAttr,
+        FloatAttr,
+        FunctionType,
         IntegerAttr,
         StringAttr,
         TensorType,
         UnregisteredOp,
         f32,
+        f64,
+        i1,
         i8,
         i32,
     )
@@ -87,8 +98,9 @@ def quantize_module(module, selected) -> int:
 
     selected = list(selected)
     source_ordinals = {op: i for i, op in enumerate(module.walk())}
+    observed = []
     for op in selected:
-        emitted, quantized, scales = [], [], []
+        emitted, quantized, scales, invalids = [], [], [], []
         for src in op.operands[:2]:
             if src.type.element_type != f32:
                 promoted_type = TensorType(f32, src.type.get_shape())
@@ -111,6 +123,49 @@ def quantize_module(module, selected) -> int:
                 src = promote.results[0]
             ops, scale = emit_symmetric_qparams(src, TensorType(f32, []), SPEC)
             emitted.extend(ops)
+            # The original amax is NaN/Inf iff any promoted operand is nonfinite.
+            # Sanitize both scale and values before FPToSI: never cast NaN/Inf.
+            scalar_type = TensorType(f32, [])
+            flag_type = TensorType(i1, [])
+            safe_empty = tensor.EmptyOp([], scalar_type)
+            flag_empty = tensor.EmptyOp([], flag_type)
+            guard = Block(arg_types=[f32, f32, i1])
+            inf = arith.ConstantOp(FloatAttr(float("inf"), f32))
+            epsilon = arith.ConstantOp(FloatAttr(SPEC.eps, f32))
+            finite = arith.CmpfOp(guard.args[0], inf.result, "olt")
+            safe_scale = arith.SelectOp(finite.result, guard.args[0], epsilon.result)
+            guard.add_ops([inf, epsilon, finite, safe_scale, L.YieldOp(safe_scale.result, finite.result)])
+            smap = AffineMapAttr(AffineMap(0, 0, ()))
+            guarded = L.GenericOp(
+                inputs=[scale],
+                outputs=[safe_empty.tensor, flag_empty.tensor],
+                body=Region(guard),
+                indexing_maps=ArrayAttr([smap] * 3),
+                iterator_types=ArrayAttr([]),
+                result_types=[scalar_type, flag_type],
+            )
+            scale = guarded.results[0]
+            invalids.append(guarded.results[1])  # true means finite
+            safe_src_empty = tensor.EmptyOp([], src.type)
+            sanitization = Block(arg_types=[f32, f32])
+            magnitude = math.AbsFOp(sanitization.args[0])
+            inf_x = arith.ConstantOp(FloatAttr(float("inf"), f32))
+            zero_x = arith.ConstantOp(FloatAttr(0.0, f32))
+            finite_x = arith.CmpfOp(magnitude.result, inf_x.result, "olt")
+            safe_x = arith.SelectOp(finite_x.result, sanitization.args[0], zero_x.result)
+            sanitization.add_ops([magnitude, inf_x, zero_x, finite_x, safe_x, L.YieldOp(safe_x.result)])
+            rank = len(src.type.get_shape())
+            identity = AffineMapAttr(AffineMap.identity(rank))
+            sanitized = L.GenericOp(
+                inputs=[src],
+                outputs=[safe_src_empty.tensor],
+                body=Region(sanitization),
+                indexing_maps=ArrayAttr([identity, identity]),
+                iterator_types=ArrayAttr([L.IteratorTypeAttr(L.IteratorType.PARALLEL)] * rank),
+                result_types=[src.type],
+            )
+            emitted.extend([safe_empty, flag_empty, guarded, safe_src_empty, sanitized])
+            src = sanitized.results[0]
             zero = arith.ConstantOp(IntegerAttr(0, i32))
             zp = tensor.SplatOp(zero.result, [], TensorType(i32, []))
             quant = UnregisteredOp.with_name("quant_ext.quantize_per_tensor").create(
@@ -149,34 +204,75 @@ def quantize_module(module, selected) -> int:
             contraction.attributes["prov.source_region_id"] = region
         contraction.attributes["prov.region_id"] = StringAttr(f"w8a8_contraction_{source_ordinals[op]}")
         contraction.attributes["merlin.numeric_policy"] = StringAttr("int8_w8a8")
+        observed.append(contraction.results[0])
         empty = tensor.EmptyOp([], result_type)
         element = result_type.element_type
-        readout = Block(arg_types=[i32, f32, f32, element])
+        readout = Block(arg_types=[i32, f32, f32, i1, i1, element])
         cast = arith.SIToFPOp(readout.args[0], f32)
-        first = arith.MulfOp(cast.result, readout.args[1])
-        second = arith.MulfOp(first.result, readout.args[2])
-        readout.add_ops([cast, first, second])
-        result_value = second.result
+        acc64 = arith.ExtFOp(cast.result, f64)
+        lhs64 = arith.ExtFOp(readout.args[1], f64)
+        rhs64 = arith.ExtFOp(readout.args[2], f64)
+        combined = arith.MulfOp(lhs64.result, rhs64.result)
+        product = arith.MulfOp(acc64.result, combined.result)
+        rounded = arith.TruncFOp(product.result, f32)
+        finite_inputs = arith.AndIOp(readout.args[3], readout.args[4])
+        nan = arith.ConstantOp(FloatAttr(float("nan"), f32))
+        selected_value = arith.SelectOp(finite_inputs.result, rounded.result, nan.result)
+        readout.add_ops([cast, acc64, lhs64, rhs64, combined, product, rounded, finite_inputs, nan, selected_value])
+        result_value = selected_value.result
         if element != f32:
             cast_class = arith.ExtFOp if str(element) == "f64" else arith.TruncFOp
             restored = cast_class(result_value, element)
             readout.add_op(restored)
             result_value = restored.result
-        readout.add_op(L.YieldOp(result_value))
+        # Nonfinite inputs follow the declared NaN rule. Finite inputs must have
+        # representable f32 dequantization AND representable restored storage.
+        checks = []
+        for value in (rounded.result, result_value):
+            magnitude = math.AbsFOp(value)
+            infinity = arith.ConstantOp(FloatAttr(float("inf"), value.type))
+            finite_output = arith.CmpfOp(magnitude.result, infinity.result, "olt")
+            readout.add_ops([magnitude, infinity, finite_output])
+            checks.append(finite_output.result)
+        representable = arith.AndIOp(*checks)
+        true = arith.ConstantOp(IntegerAttr(1, i1))
+        invalid = arith.XOrIOp(finite_inputs.result, true.result)
+        allowed = arith.OrIOp(representable.result, invalid.result)
+        assertion = cf.AssertOp(allowed.result, "int8_w8a8 dequantized result is not representable")
+        readout.add_ops([representable, true, invalid, allowed, assertion, L.YieldOp(result_value)])
         rank = len(result_type.get_shape())
         identity = AffineMapAttr(AffineMap.identity(rank))
         scalar = AffineMapAttr(AffineMap(rank, 0, ()))
         result = L.GenericOp(
-            inputs=[contraction.results[0], *scales],
+            inputs=[contraction.results[0], *scales, *invalids],
             outputs=[empty.tensor],
             body=Region(readout),
-            indexing_maps=ArrayAttr([identity, scalar, scalar, identity]),
+            indexing_maps=ArrayAttr([identity, scalar, scalar, scalar, scalar, identity]),
             iterator_types=ArrayAttr([L.IteratorTypeAttr(L.IteratorType.PARALLEL)] * rank),
             result_types=[result_type],
         )
         result.attributes.update({k: v for k, v in op.attributes.items() if k.startswith("prov.")})
         result.attributes["prov.role"] = StringAttr("w8a8_host_dequantize")
         Rewriter.replace_op(op, [*emitted, zero, init, contraction, empty, result], [result.results[0]])
+    if accumulators is not None and observed:
+        # Diagnostic results are opt-in at the harness boundary; public lowering
+        # retains its float ABI unless the caller requests raw readout evidence.
+        function = next(op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward")
+        returned = next(op for op in function.body.block.ops if op.name == "func.return")
+        first = len(returned.operands)
+        returned.operands = (*returned.operands, *observed)
+        function.function_type = FunctionType.from_lists(
+            list(function.function_type.inputs), [v.type for v in returned.operands]
+        )
+        accumulators.extend(dict(index=first + i, shape=list(v.type.get_shape())) for i, v in enumerate(observed))
+        from merlin.llvmlower.result_layout import ATTRIBUTE
+
+        if ATTRIBUTE in module.attributes:
+            import json
+
+            layout = json.loads(module.attributes[ATTRIBUTE].data)
+            layout["results"].extend([None] * len(observed))
+            module.attributes[ATTRIBUTE] = StringAttr(json.dumps(layout))
     lower_quant_ext(module)
     if selected:
         module.verify()

@@ -60,6 +60,12 @@ def _leaves(document: Any) -> list[Any]:
     return [document]
 
 
+def _storage_equal(actual, reference):
+    left = np.ascontiguousarray(actual).view(np.uint8).reshape(-1, actual.dtype.itemsize)
+    right = np.ascontiguousarray(reference).view(np.uint8).reshape(-1, reference.dtype.itemsize)
+    return np.all(left == right, axis=1).reshape(actual.shape)
+
+
 def _grade_output(raw: bytes, abi: Mapping[str, Any], expected: Any, case: Mapping[str, Any]) -> dict[str, Any]:
     dtype = str(abi["dtype"])
     shape = tuple(int(dim) for dim in abi["shape"])
@@ -76,12 +82,16 @@ def _grade_output(raw: bytes, abi: Mapping[str, Any], expected: Any, case: Mappi
             return {"status": "mismatch", "reason": "output dtype or shape differs from canonical complex result"}
         reference = np.asarray(_complex_values(expected.get("values")), dtype=complex_dtype).reshape(shape)
         parameters = case.get("comparison_parameters") or {}
-        equal = np.isclose(
-            actual,
-            reference,
-            rtol=float(parameters.get("rtol", 0.0)),
-            atol=float(parameters.get("atol", 0.0)),
-            equal_nan=bool(parameters.get("equal_nan", False)),
+        equal = (
+            _storage_equal(actual, reference)
+            if parameters.get("storage_bits")
+            else np.isclose(
+                actual,
+                reference,
+                rtol=float(parameters.get("rtol", 0.0)),
+                atol=float(parameters.get("atol", 0.0)),
+                equal_nan=bool(parameters.get("equal_nan", False)),
+            )
         )
         if bool(np.all(equal)):
             return {"status": "pass", "elements": count}
@@ -125,7 +135,11 @@ def _grade_output(raw: bytes, abi: Mapping[str, Any], expected: Any, case: Mappi
     if dtype.startswith("f") or dtype == "bf16":
         rtol = float(parameters.get("rtol", 0.0))
         atol = float(parameters.get("atol", 0.0))
-        equal = np.isclose(actual, reference, rtol=rtol, atol=atol, equal_nan=bool(parameters.get("equal_nan", False)))
+        equal = (
+            _storage_equal(actual, reference)
+            if parameters.get("storage_bits")
+            else np.isclose(actual, reference, rtol=rtol, atol=atol, equal_nan=bool(parameters.get("equal_nan", False)))
+        )
     else:
         equal = np.equal(actual, reference)
     if bool(np.all(equal)):
@@ -224,6 +238,19 @@ def grade_core_aten_batch(
             from merlin.targetgen.core_aten_numeric import fp32_error
 
             verdict["fp32_error"] = fp32_error(record, output_bytes)
+            from merlin.targetgen.core_aten_numeric import exact_w8a8_gate
+
+            gate = exact_w8a8_gate(record, output_bytes)
+            verdict["w8a8_policy"] = record["w8a8_policy"]
+            verdict["correctness_gate"] = gate
+            verdict["dispatch"] = record.get("w8a8_dispatch")
+            if not gate["passed"]:
+                verdict.update(
+                    status="mismatch",
+                    numeric_status="mismatch",
+                    values_mutation_status="mismatch",
+                    reason="raw i32 accumulator or final float storage bits differ from W8A8 reference",
+                )
         routing = dict(record.get("routing") or {"lane": "host", "routed": False, "reason": "scalar mode"})
         verdict.update(
             overload=record["overload"],

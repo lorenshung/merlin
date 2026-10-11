@@ -221,6 +221,23 @@ def run_spike_bundle(
                     report["source_preparation"] = preparation
                     bundled[0]["source_preparation"] = preparation
                 routing, reason = routing_for_bundle(directory, target, device_package, provider, facts)
+                if report.get("numeric_preparation", {}).get("quantized_contractions"):
+                    from dataclasses import replace
+
+                    from merlin.targetgen.core_aten_numeric import checked_w8a8_builder
+
+                    if routing is None or routing.catalog_builder is None:
+                        raise ValueError("W8A8 requires source-bound provider primitive dispatch evidence")
+                    routing = replace(
+                        routing,
+                        catalog_builder=checked_w8a8_builder(
+                            routing.catalog_builder,
+                            target=target,
+                            package=device_package,
+                            directory=directory,
+                            report=report,
+                        ),
+                    )
                 options = provider.runner_options()
             for case in bundled:
                 case["routing"] = {

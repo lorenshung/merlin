@@ -14,6 +14,13 @@ numerical_semantics:
   subnormal_operand_flush: false
   overflow: wrap_internal_mac
   internal_arithmetic:
+    # Catalog target IR observation, bound by compilation.target_ir_sha256.
+    # These are semantic field names, not assumed geometry or instruction encodings.
+    primitive_k_observation:
+      dialect_module: mlir_oot.ir.gemmini_dialect
+      dialect_symbol: GEMMINI
+      operation: gemmini.compute
+      extent_attribute: a_cols
     signed_operand_bits: 8
     mac_result_bits: 20
     mac_result_overflow: wrap_to_20_bits
