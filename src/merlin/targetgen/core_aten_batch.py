@@ -450,7 +450,8 @@ def build_core_aten_batch(
         semantic_path.write_bytes(
             _json_bytes(
                 caller_boundary_layouts(
-                    (bundle_root / "model.mlir").read_text(),
+                    # The custom-form module: the written file may be re-printed generically.
+                    module,
                     dict(
                         schema_version=1,
                         outputs=semantic_outputs,

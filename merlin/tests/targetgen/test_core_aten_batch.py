@@ -262,3 +262,70 @@ def test_bundle_carries_independent_mutable_globals(tmp_path):
     llvm = lower_to_llvm_ir((bundle / "model.mlir").read_text(), workdir=tmp_path / "lower")
     assert "@c0_state" in llvm
     assert "@c1_state" in llvm
+
+
+def test_generic_reprinted_bundle_still_restores_caller_layouts(tmp_path, monkeypatch):
+    """A module with private declarations is re-printed generically; layouts use the custom form."""
+    from merlin.llvmlower import generic_form
+
+    def generic(path, *args, **kwargs):
+        out = tmp_path / "generic.mlir"
+        out.write_text(
+            '"builtin.module"() ({\n  "func.func"() <{sym_name = "forward"}> ({\n  }) : () -> ()\n}) : () -> ()\n'
+        )
+        return out
+
+    monkeypatch.setattr(generic_form, "to_generic_form", generic)
+    directory = tmp_path / "captures" / "aten__neg__default"
+    directory.mkdir(parents=True)
+    (directory / "capsule.linalg.mlir").write_text(
+        "builtin.module {\n"
+        "  func.func private @helper(f32) -> f32\n"
+        "  func.func @forward(%0: tensor<2xf32>) -> tensor<2xf32> {\n"
+        "    %1 = tensor.empty() : tensor<2xf32>\n"
+        "    %2 = linalg.generic {indexing_maps = [affine_map<(d0) -> (d0)>, "
+        'affine_map<(d0) -> (d0)>], iterator_types = ["parallel"]} '
+        "ins(%0 : tensor<2xf32>) outs(%1 : tensor<2xf32>) {\n"
+        "      ^bb0(%3: f32, %4: f32):\n"
+        "        %5 = arith.negf %3 : f32\n"
+        "        linalg.yield %5 : f32\n"
+        "    } -> tensor<2xf32>\n"
+        "    func.return %2 : tensor<2xf32>\n"
+        "  }\n}\n",
+        encoding="utf-8",
+    )
+    layout = {"dtype": "float32", "shape": [2], "stride": [1], "storage_offset": 0, "requires_grad": False}
+    (directory / "capture.json").write_text(
+        json.dumps(
+            {
+                "status": "captured_exact",
+                "capture_meta": {
+                    "ok": True,
+                    "opaque": 0,
+                    "input_abi": [{"dtype": "f32", "shape": [2]}],
+                    "output_abi": [{"dtype": "f32", "shape": [2]}],
+                    "result_contract": {
+                        "authority": "fixture",
+                        "results": [{**layout, "role": "user_output"}],
+                        "inputs": [layout],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (directory / "inputs.json").write_text(json.dumps([[1.0, 2.0]]), encoding="utf-8")
+    (directory / "golden.json").write_text(json.dumps([-1.0, -2.0]), encoding="utf-8")
+    tensor = {"kind": "tensor", **layout, "values": [1.0, 2.0]}
+    case = {
+        "overload": "aten.neg.default",
+        "arguments": {"args": {"kind": "tuple", "items": [tensor]}, "kwargs": {}},
+        "expected": {**tensor, "values": [-1.0, -2.0]},
+    }
+    report = build_core_aten_batch(
+        {"cases": [case], "denominator_sha256": "fixture"}, tmp_path / "captures", tmp_path / "out"
+    )
+    assert report["bundled_count"] == 1
+    assert '"func.func"()' in (tmp_path / "out" / "model.mlir").read_text()
+    boundary = json.loads((tmp_path / "out" / "semantic_io.json").read_text())
+    assert boundary["post_indices"] == [1]
