@@ -205,24 +205,36 @@ def test_source_bundle_scoring_requires_device_evidence_and_reports_guards(packa
     assert result["status"] == "pass" and result["cohort"] == "guard" and result["scored"] is False
 
 
-def test_two_snapshot_backends_grade_consecutively_in_one_process(packaged, tmp_path, monkeypatch):
-    import os
+@pytest.fixture
+def synthetic_execution_provider(tmp_path, monkeypatch):
+    from merlin.targetgen.core_aten_device import load_execution_provider
 
-    from merlin.llvmlower import toolchain
-    from merlin.system import offload
-    from merlin.targetgen.plugins import load_module
-
-    selected = os.environ.get("MERLIN_CORE_ATEN_EXECUTION_PROVIDER")
-    if not selected:
-        pytest.skip("requires an explicitly selected OOT Core ATen execution provider")
-    path = Path(selected)
-    provider = load_module(
-        path.parent,
-        path.name,
-        package_name="test_snapshot_execution_provider",
+    path = tmp_path / "provider.py"
+    path.write_text(
+        "import hashlib\n"
+        "from pathlib import Path\n"
+        "from types import SimpleNamespace\n"
+        "from merlin.targetgen.plugins import load_module\n"
+        "TARGET = 'test_target'\n"
+        "def routing(directory, *, target, package, **kwargs):\n"
+        "    identity = hashlib.sha256(str(Path(package).resolve()).encode()).hexdigest()\n"
+        "    backend = load_module(package, 'mlir_oot.golden_device_catalog',\n"
+        "                          package_name='test_snapshot_' + identity)\n"
+        "    _, inventory = backend.build_catalog((Path(directory) / 'model.mlir').read_text())\n"
+        "    assert inventory['covered_contractions']\n"
+        "    return SimpleNamespace(catalog_builder=backend.merlin_builder(None))\n"
     )
-    monkeypatch.setattr(offload, "device_dtype_triples", lambda _: [("i8", "i8", "i32")])
-    monkeypatch.setattr(toolchain, "llvm_install", lambda: tmp_path)
+    # Exercise explicit provider selection even when no external provider is installed.
+    monkeypatch.setenv("MERLIN_CORE_ATEN_EXECUTION_PROVIDER", str(path))
+    return load_execution_provider("test_target")
+
+
+def test_two_snapshot_backends_grade_consecutively_in_one_process(
+    packaged,
+    tmp_path,
+    synthetic_execution_provider,
+):
+    provider = synthetic_execution_provider
     capsule, raw, readback, _, _ = packaged
     packages = []
     for marker in ("first", "second"):
