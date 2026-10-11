@@ -10,6 +10,7 @@ from merlin.llvmlower import result_layout
 from merlin.llvmlower.fusion_guard import RUNNER_PRELUDE as FUSION_PRELUDE
 from merlin.llvmlower.pipeline import build_rvv_pipeline
 from merlin.llvmlower.result_buffers import descriptor_results
+from merlin.llvmlower.result_layout import module_attribute
 from merlin.llvmlower.selfcopy import RUNNER_PRELUDE
 
 
@@ -37,7 +38,9 @@ def test_descriptor_split_runs_erase_and_mid_once(monkeypatch, rvv):
     )
     pipeline = descriptor_results(
         pipeline,
-        "module { func.func @forward(%a: tensor<2xf32>) -> tensor<2xf32> { return %a : tensor<2xf32> } }",
+        "module"
+        + module_attribute({})
+        + " { func.func @forward(%a: tensor<2xf32>) -> tensor<2xf32> { return %a : tensor<2xf32> } }",
         preserve=True,
     )
     module = SimpleNamespace(operation=SimpleNamespace(attributes={"m2m.result_layout": SimpleNamespace(value="{}")}))

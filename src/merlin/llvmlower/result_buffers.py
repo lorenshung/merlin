@@ -55,12 +55,19 @@ def descriptor_results(pipeline: str, mlir: str, *, preserve: bool = False) -> s
         raise
     if preserve or any(dim < 0 for shape, _ in results for dim in shape):
         stages = [p for p in pipeline.split(",") if not p.startswith("buffer-results-to-out-params")]
-        bufferized = [
-            i
-            for i, p in enumerate(stages)
-            if p.startswith("one-shot-bufferize") or p == "bufferization-lower-deallocations"
-        ]
-        at = max(bufferized, default=-1) + 1
+        from merlin.llvmlower.result_layout import read_layout
+
+        if read_layout(mlir) is not None:
+            # Layout reconstruction needs ownership-normalized memrefs at its seam.
+            bufferized = [
+                i
+                for i, p in enumerate(stages)
+                if p.startswith("one-shot-bufferize") or p == "bufferization-lower-deallocations"
+            ]
+            at = max(bufferized, default=-1) + 1
+        else:
+            # Preserve the ordinary dynamic-result pipeline's existing pass order.
+            at = next(i for i, p in enumerate(stages) if p.startswith("finalize-memref-to-llvm"))
         stages.insert(at, "convert-bufferization-to-memref")
         return ",".join(stages)
     return pipeline
