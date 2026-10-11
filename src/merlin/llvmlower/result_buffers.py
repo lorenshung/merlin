@@ -43,6 +43,8 @@ def inject(source: str) -> str:
 
 def descriptor_results(pipeline: str, mlir: str) -> str:
     """Dynamic extents must return descriptors, rather than copy to static buffers."""
+    if "?" not in mlir or ("@forward(" not in mlir and 'sym_name = "forward"' not in mlir):
+        return pipeline  # No dynamic extent, or no @forward entry, so no forward result to return by descriptor.
     from merlin.common.mlir_query import forward_signature
 
     try:
