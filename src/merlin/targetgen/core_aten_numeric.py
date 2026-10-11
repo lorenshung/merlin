@@ -11,6 +11,31 @@ from pathlib import Path
 import numpy as np
 
 
+def prepare_spec_int8(
+    directory: Path, report: dict, *, target: str, facts: dict, software_spec: Path, host_capabilities: Path
+):
+    """Retain original source when the complete declared pipeline cannot be admitted."""
+    from merlin.frontends.linalg_mlir import parse_mlir_file
+    from merlin.targetgen.core_aten_spec_int8 import admission_plan, select_spec
+
+    selection = select_spec(target, facts, software_spec, host_capabilities)
+    import hashlib
+
+    original_digest = hashlib.sha256((directory / "model.mlir").read_bytes()).hexdigest()
+    plan = admission_plan(parse_mlir_file(directory / "model.mlir"), selection)
+    plan["source_sha256_before"] = original_digest
+    plan["source_sha256_after"] = hashlib.sha256((directory / "model.mlir").read_bytes()).hexdigest()
+    if plan["source_sha256_after"] != original_digest:
+        raise ValueError("refused numeric policy mutated original source")
+    document = {"selection": selection, **plan}
+    (directory / "spec-int8-admission.json").write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
+    for case in report["cases"]:
+        if case["status"] == "bundled":
+            case["numeric_admission"] = plan
+            case["numeric_selection"] = selection["identities"]
+    return document
+
+
 def prepare_w8a8(directory: Path, report: dict, *, triples, ranks) -> dict:
     from merlin.frontends.linalg_mlir import parse_mlir_file
     from merlin.llvmlower.contraction_quantization import SPEC, quantize_module, selected_contractions
@@ -299,7 +324,7 @@ def fp32_error(record, outputs) -> list[dict]:
         )
         # An output epilogue can combine several contraction sites. Report each
         # site's LSB explicitly; no invented single scale for composed outputs.
-        lsbs = [site.get("output_lsb", float(site["lhs"]) * float(site["rhs"])) for site in record["scales"]]
+        lsbs = [site.get("output_lsb", float(site["lhs"]) * float(site["rhs"])) for site in record.get("scales", [])]
         errors.append(
             dict(
                 max_abs=float(np.max(difference, initial=0)),
@@ -319,8 +344,12 @@ def fp32_error(record, outputs) -> list[dict]:
                         accumulator=site.get("accumulator_metrics"),
                         k_split=site.get("k_split"),
                     )
-                    for site in record["scales"]
+                    for site in record.get("scales", [])
                 ],
+                output_lsb_error="not_applicable"
+                if not record.get("output_scale")
+                else float(np.max(difference, initial=0) / record["output_scale"]),
+                relative_error_at_zero=int(np.count_nonzero((golden == 0) & (difference != 0))),
             )
         )
     return errors

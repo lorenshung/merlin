@@ -156,6 +156,8 @@ def execute(args, case, block):
                 device_package=args.device_package,
                 execution_provider=args.execution_provider,
                 rtl_facts=args.facts,
+                software_spec=args.software_spec,
+                host_capabilities=args.host_capabilities,
             )
             grade = grades["cases"][case["case_id"]]
             numeric = {"status": "unavailable"}
@@ -422,10 +424,12 @@ def main():
     p.add_argument("--worker", choices=["capture", "execute"])
     p.add_argument("--case", type=Path)
     p.add_argument("--evaluate-only", action="store_true")
-    p.add_argument("--numeric-policy", choices=("fp32", "int8_w8a8"), default="fp32")
+    p.add_argument("--numeric-policy", choices=("fp32", "int8_w8a8", "spec_int8"), default="fp32")
+    p.add_argument("--software-spec", type=Path)
+    p.add_argument("--host-capabilities", type=Path)
     args = p.parse_args()
-    if args.numeric_policy == "int8_w8a8" and not args.target:
-        p.error("--numeric-policy int8_w8a8 requires --target")
+    if args.numeric_policy != "fp32" and not args.target:
+        p.error("integer numeric policies require --target")
     if args.evaluate_only:
         try:
             __import__("torch")

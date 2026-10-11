@@ -169,6 +169,8 @@ def run_spike_bundle(
     execution_provider: Path | None = None,
     rtl_facts: Path | None = None,
     numeric_policy: str = "fp32",
+    software_spec: Path | None = None,
+    host_capabilities: Path | None = None,
 ) -> tuple[dict, dict]:
     from merlin.llvmlower.contraction_quantization import POLICIES
     from merlin.llvmlower.device_offload import load_sidecar
@@ -199,11 +201,27 @@ def run_spike_bundle(
                 }
         if target and (device_package is None or len(bundled) != 1):
             raise ValueError("device execution requires a package and exactly one case per shard")
-        if numeric_policy == "int8_w8a8" and not target:
-            raise ValueError("W8A8 requires a selected target capability manifest")
+        if numeric_policy != "fp32" and not target:
+            raise ValueError("integer numeric policies require a selected target capability manifest")
         with selected_facts(target, rtl_facts) if target else nullcontext(None) as facts:
             routing, reason, options = None, "scalar mode", {}
             if target:
+                if numeric_policy == "spec_int8":
+                    stage = "numeric_preparation"
+                    from merlin.targetgen.core_aten_numeric import prepare_spec_int8
+
+                    spec_path = software_spec or os.environ.get("MERLIN_CORE_ATEN_SOFTWARE_SPEC")
+                    host_path = host_capabilities or os.environ.get("MERLIN_CORE_ATEN_HOST_CAPABILITIES")
+                    if not spec_path or not host_path:
+                        raise ValueError("spec_int8 requires explicit software-spec and host-capabilities selection")
+                    report["numeric_preparation"] = prepare_spec_int8(
+                        directory,
+                        report,
+                        target=target,
+                        facts=facts,
+                        software_spec=Path(spec_path),
+                        host_capabilities=Path(host_path),
+                    )
                 if numeric_policy == "int8_w8a8":
                     stage = "numeric_preparation"
                     from merlin.system.offload import device_contraction_ranks, device_dtype_triples
@@ -216,28 +234,35 @@ def run_spike_bundle(
                 provider = load_execution_provider(target, execution_provider)
                 selected_provider = Path(provider.__file__)
                 prepare = getattr(provider, "prepare_bundle", None)
-                if prepare is not None:
+                if prepare is not None and numeric_policy != "spec_int8":
                     preparation = prepare(directory, target=target, facts=facts)
                     report["source_preparation"] = preparation
                     bundled[0]["source_preparation"] = preparation
-                routing, reason = routing_for_bundle(directory, target, device_package, provider, facts)
-                if report.get("numeric_preparation", {}).get("quantized_contractions"):
-                    from dataclasses import replace
+                if numeric_policy == "spec_int8":
+                    plan = report["numeric_preparation"]
+                    reason = "; ".join(dict.fromkeys(reason for site in plan["sites"] for reason in site["reasons"]))
+                    reason = reason or "no contraction in captured source; original host execution retained"
+                else:
+                    routing, reason = routing_for_bundle(directory, target, device_package, provider, facts)
+                    if numeric_policy == "int8_w8a8" and report.get("numeric_preparation", {}).get(
+                        "quantized_contractions"
+                    ):
+                        from dataclasses import replace
 
-                    from merlin.targetgen.core_aten_numeric import checked_w8a8_builder
+                        from merlin.targetgen.core_aten_numeric import checked_w8a8_builder
 
-                    if routing is None or routing.catalog_builder is None:
-                        raise ValueError("W8A8 requires source-bound provider primitive dispatch evidence")
-                    routing = replace(
-                        routing,
-                        catalog_builder=checked_w8a8_builder(
-                            routing.catalog_builder,
-                            target=target,
-                            package=device_package,
-                            directory=directory,
-                            report=report,
-                        ),
-                    )
+                        if routing is None or routing.catalog_builder is None:
+                            raise ValueError("W8A8 requires source-bound provider primitive dispatch evidence")
+                        routing = replace(
+                            routing,
+                            catalog_builder=checked_w8a8_builder(
+                                routing.catalog_builder,
+                                target=target,
+                                package=device_package,
+                                directory=directory,
+                                report=report,
+                            ),
+                        )
                 options = provider.runner_options()
             for case in bundled:
                 case["routing"] = {

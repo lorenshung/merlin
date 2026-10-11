@@ -231,6 +231,14 @@ def grade_core_aten_batch(
         identifier = str(record.get("case_id") or record["overload"])
         verdict = verdicts[identifier]
         verdict["numeric_policy"] = record.get("numeric_policy", "fp32")
+        if verdict["numeric_policy"] == "int8_w8a8":
+            verdict["numeric_qualification"] = "diagnostic, not spec-conformant"
+        elif verdict["numeric_policy"] == "spec_int8":
+            verdict["numeric_qualification"] = (
+                "declared-pipeline admission; refused sites retain original host execution"
+            )
+            verdict["numeric_admission"] = record.get("numeric_admission", {"status": "unknown"})
+            verdict["numeric_selection"] = record.get("numeric_selection", {})
         verdict["scales"] = record.get("scales", [])
         if record.get("reference_engine"):
             verdict["reference_engine"] = record["reference_engine"]

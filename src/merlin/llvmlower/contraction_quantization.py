@@ -16,7 +16,7 @@ from merlin.llvmlower.torchao_affine import ACTIVATION_QUANT
 # Numeric policy, independent of hardware: use the established symmetric reduced range,
 # epsilon and reciprocal-first ties-even arithmetic, with one block for the tensor.
 SPEC = replace(ACTIVATION_QUANT["int8_dyn_act_int8_weight"], granularity="per_tensor")
-POLICIES = ("fp32", "int8_w8a8")
+POLICIES = ("fp32", "int8_w8a8", "spec_int8")
 
 
 def closed_float_mac(op) -> bool:
