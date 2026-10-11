@@ -1,6 +1,7 @@
 # Maintained regression obligations, not execution verdicts.
 schema: merlin.regression_fixes.v1
 specs:
+- experiments/reference-data/phase0/compiler-regression-overlap.yaml
 - experiments/reference-data/phase0/compiler-regression-input-layout.yaml
 - experiments/reference-data/phase0/compiler-regression-calls.yaml
 - examples/gemmini/phase0/compiler-regression-selection.yaml

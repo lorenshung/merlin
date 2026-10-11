@@ -44,7 +44,11 @@ def test_descriptor_split_runs_erase_and_mid_once(monkeypatch, rvv):
         + " { func.func @forward(%a: tensor<2xf32>) -> tensor<2xf32> { return %a : tensor<2xf32> } }",
         preserve=True,
     )
-    module = SimpleNamespace(operation=SimpleNamespace(attributes={"m2m.result_layout": SimpleNamespace(value="{}")}))
+    module = SimpleNamespace(
+        operation=SimpleNamespace(
+            attributes={"m2m.result_layout": SimpleNamespace(value='{"inputs": [], "results": []}')}
+        )
+    )
     import contextlib
 
     mid = [("regression", lambda ctx, m: events.append("mid") or 1)]

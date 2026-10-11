@@ -7,9 +7,9 @@ import subprocess
 import numpy as np
 import pytest
 
-from merlin.common.paths import runtime_dir
+from merlin.common.paths import repo_root, runtime_dir
 from merlin.llvmlower.c_runtime import generate
-from merlin.llvmlower.input_layout import storage_array
+from merlin.llvmlower.input_layout import has_overlapping_elements, storage_array
 from merlin.llvmlower.pipeline import lower_to_llvm_ir
 from merlin.llvmlower.toolchain import clang, llvm_install
 
@@ -30,7 +30,7 @@ def _input(torch, layout):
 
 
 @pytest.mark.parametrize("layout", ["padded", "offset", "zero_stride", "channels_last"])
-@pytest.mark.parametrize("operation", ["elementwise", "reduction", "view", "mutation"])
+@pytest.mark.parametrize("operation", ["elementwise", "reduction", "view", "mutation", "partial_mutation"])
 def test_native_strided_input_contract(tmp_path, layout, operation):
     tmp_path = tmp_path / f"{operation}-{layout}"
     tmp_path.mkdir()
@@ -44,6 +44,8 @@ def test_native_strided_input_contract(tmp_path, layout, operation):
             return x.sum(dim=2)
         if operation == "view":
             return x.transpose(1, 3)
+        if operation == "partial_mutation":
+            return x[:, 0].add_(1)
         return x.fill_(3.25)
 
     class Model(torch.nn.Module):
@@ -72,6 +74,10 @@ def test_native_strided_input_contract(tmp_path, layout, operation):
     np.savez(model / "inputs.npz", in0=logical)
     generated = tmp_path / "cgen"
     generate(model, generated, model / "inputs.npz", dump_all_outputs=True)
+    if layout == "zero_stride":
+        with pytest.raises(RuntimeError, match="input 0 has overlapping logical elements"):
+            lower_to_llvm_ir(source, workdir=tmp_path / "lower", preserve_result_descriptors=True)
+        return
     lowered = lower_to_llvm_ir(source, workdir=tmp_path / "lower", preserve_result_descriptors=True)
     (tmp_path / "model.ll").write_text(lowered)
     driver = generated / "driver.c"
@@ -148,6 +154,58 @@ void *test_input(void) { return MERLIN_INPUT_PTR[0]; }
 def test_overlapping_input_values_refuse():
     with pytest.raises(ValueError, match="overlapping captured storage addresses"):
         storage_array(np.arange(6, dtype=np.float32).reshape(2, 3), dict(shape=[2, 3], stride=[0, 1], storage_offset=0))
+
+
+@pytest.mark.parametrize(
+    "shape,strides,overlap",
+    [
+        ([2, 3], [0, 1], True),
+        ([2, 3], [2, 1], True),
+        ([2, 3], [3, 2], False),
+        ([1, 3], [0, 1], False),
+        ([0, 3], [0, 0], False),
+        ([3, 2], [1, 3], False),
+    ],
+)
+def test_input_address_injectivity(shape, strides, overlap):
+    assert has_overlapping_elements(dict(shape=shape, stride=strides, storage_offset=7)) is overlap
+
+
+def test_probe_partial_mutation_capsule_refuses(tmp_path):
+    import m2m
+    import torch
+    import yaml
+
+    spec = yaml.safe_load(
+        (repo_root() / "experiments/reference-data/phase0/compiler-regression-overlap.yaml").read_text()
+    )
+    call = spec["calls"][0]
+    namespace = {"torch": torch}
+    exec(call["program"], namespace)
+    x = namespace["input_tensor"]()
+    expected, post = namespace["Model"]()(namespace["input_tensor"]())
+    torch.testing.assert_close(expected, post[:, 0])
+    converted = m2m.convert(namespace["Model"](), (x,), backend="fx_importer")
+    assert converted.ok, converted.diagnostics
+    with pytest.raises(
+        RuntimeError, match="caller-storage write-back and borrowed result aliasing require an injective"
+    ):
+        lower_to_llvm_ir(str(converted.module), workdir=tmp_path, preserve_result_descriptors=True)
+
+
+def test_nonzero_overlapping_strides_refuse_borrowed_return(tmp_path):
+    import m2m
+    import torch
+
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return x.transpose(0, 1)
+
+    x = torch.arange(5, dtype=torch.float32).as_strided((2, 3), (2, 1))
+    converted = m2m.convert(Model(), (x,), backend="fx_importer")
+    assert converted.ok, converted.diagnostics
+    with pytest.raises(RuntimeError, match="input 0 has overlapping logical elements"):
+        lower_to_llvm_ir(str(converted.module), workdir=tmp_path, preserve_result_descriptors=True)
 
 
 @pytest.mark.parametrize("stride,offset", [([-1, 1], 0), ([3, 1], -1), ([{"shape_axes": [1]}, 1], 0)])

@@ -3,6 +3,56 @@
 from __future__ import annotations
 
 
+def has_overlapping_elements(record):
+    """Decide injectivity of a static strided address map, ignoring empty axes."""
+    shape, strides = record["shape"], record["stride"]
+    if len(shape) != len(strides) or any(type(v) is not int or v < 0 for v in [*shape, *strides]):
+        raise ValueError("cannot prove input storage injectivity without static nonnegative shape and strides")
+    if 0 in shape:
+        return False
+    axes = sorted((s, n) for n, s in zip(shape, strides) if n > 1)
+    span = 0
+    for stride, size in axes:
+        if stride == 0:
+            return True
+        if stride <= span:
+            break
+        span += (size - 1) * stride
+    else:
+        return False
+    # Separated axis envelopes prove ordinary/padded/permuted layouts cheaply.
+    # Interleaved envelopes need an exact address proof, not a dense-layout guess.
+    addresses = {0}
+    for stride, size in axes:
+        expanded = set()
+        for i in range(size):
+            for address in addresses:
+                value = address + i * stride
+                if value in expanded:
+                    return True
+                expanded.add(value)
+        addresses = expanded
+    return False
+
+
+def refuse_overlapping_input_aliases(contract):
+    for result in contract["results"]:
+        if result is None:
+            continue
+        aliases = list(result.get("alias_inputs", []))
+        if result.get("role") == "user_input_mutation":
+            aliases.append(result["input_index"])
+        for index in set(aliases):
+            if not 0 <= index < len(contract["inputs"]):
+                raise ValueError("invalid result base argument")
+            record = contract["inputs"][index]
+            if record is not None and has_overlapping_elements(record):
+                raise ValueError(
+                    f"input {index} has overlapping logical elements: caller-storage write-back "
+                    "and borrowed result aliasing require an injective input layout"
+                )
+
+
 def _apply_input_layout(module, contract):
     from torch_mlir import ir
 

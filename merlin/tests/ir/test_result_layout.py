@@ -130,7 +130,9 @@ def test_fresh_alias_class_covers_later_full_storage(tmp_path):
         + """ {
       func.func @forward(%a: tensor<4x5xf32>) -> (tensor<2x5xf32>, tensor<4x5xf32>)
           attributes {llvm.emit_c_interface} {
-        %b = tensor.extract_slice %a[1, 0] [2, 5] [1, 1] : tensor<4x5xf32> to tensor<2x5xf32>
+        %b = "tensor.extract_slice"(%a) <{static_offsets = array<i64: 1, 0>,
+          static_sizes = array<i64: 2, 5>, static_strides = array<i64: 1, 1>,
+          operandSegmentSizes = array<i32: 1, 0, 0, 0>}> : (tensor<4x5xf32>) -> tensor<2x5xf32>
         func.return %b, %a : tensor<2x5xf32>, tensor<4x5xf32>
       }
     }"""
@@ -266,7 +268,8 @@ def test_borrowed_view_refuses_unproven_span(unknown):
     other_input = dict(shape=[2, 3], stride=[3, 1], storage_offset=0)
     result = apply_memref_layout(source, dict(inputs=[input_record, other_input], results=[record]))
     assert result.returncode != 0
-    assert "cannot prove returned view fits" in result.stderr
+    reason = "cannot prove input storage injectivity" if unknown == "capacity" else "cannot prove returned view fits"
+    assert reason in result.stderr
 
 
 def test_borrowed_view_refuses_static_out_of_bounds_span():

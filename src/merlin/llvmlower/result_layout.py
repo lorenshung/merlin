@@ -5,6 +5,8 @@ from __future__ import annotations
 import inspect
 import json
 
+from .input_layout import refuse_overlapping_input_aliases
+
 ATTRIBUTE = "m2m.result_layout"
 
 
@@ -34,6 +36,7 @@ def _apply_result_layout(module, contract):
     from torch_mlir import ir
     from torch_mlir.dialects import arith, memref
 
+    refuse_overlapping_input_aliases(contract)
     functions = [
         op
         for op in module.body.operations
@@ -297,6 +300,7 @@ def _layout_stages(ctx, module, pipeline, erase, mid=(), late=(), post_openmp=()
     if not buffers:
         return _layout_original_stages(ctx, module, pipeline, erase, mid, late, post_openmp, pre_generalize)
     contract = json.loads(ir.StringAttr(module.operation.attributes[key]).value)
+    refuse_overlapping_input_aliases(contract)
     with ctx:
         _apply_input_layout(module, contract)
     del module.operation.attributes[key]
@@ -335,10 +339,14 @@ def _layout_stages(ctx, module, pipeline, erase, mid=(), late=(), post_openmp=()
 
 def inject(source: str) -> str:
     marker = "src_path, out_path, pipeline ="
-    from .input_layout import _apply_input_layout
+    from .input_layout import _apply_input_layout, has_overlapping_elements, refuse_overlapping_input_aliases
 
     binding = (
-        inspect.getsource(_apply_input_layout)
+        inspect.getsource(has_overlapping_elements)
+        + "\n"
+        + inspect.getsource(refuse_overlapping_input_aliases)
+        + "\n"
+        + inspect.getsource(_apply_input_layout)
         + "\n"
         + inspect.getsource(_apply_result_layout)
         + "\n"
