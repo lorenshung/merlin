@@ -432,6 +432,7 @@ def main():
         except ModuleNotFoundError as exc:
             if exc.name != "torch":
                 raise
+            raise RuntimeError("--evaluate-only requires Torch in the selected interpreter") from exc
     if args.target:
         from merlin.targetgen.core_aten_device import load_execution_provider
 

@@ -258,7 +258,7 @@ def test_summary_handles_families_present_only_in_baseline(tmp_path):
     assert result["numeric_only_passed_count"] == 1
 
 
-def test_evaluate_only_forwards_from_controller_to_pinned_torch(tmp_path, monkeypatch):
+def test_evaluate_only_refuses_missing_torch_without_reexecution(tmp_path, monkeypatch):
     import importlib.util
     import sys
     from types import SimpleNamespace
@@ -299,10 +299,12 @@ def test_evaluate_only_forwards_from_controller_to_pinned_torch(tmp_path, monkey
     monkeypatch.setattr(module, "__import__", unavailable, raising=False)
     commands = []
     monkeypatch.setattr(module.subprocess, "run", lambda argv, **kwargs: commands.append(argv))
-    module.main()
-    assert len(commands) == 1
-    assert commands[0][0] == str(pinned)
-    assert "--evaluate-only" in commands[0]
+    import pytest
+
+    with pytest.raises(RuntimeError, match="--evaluate-only requires Torch"):
+        module.main()
+    assert commands == []
+    assert not (tmp_path / "output").exists()
 
 
 def test_observed_boundary_scope_keeps_real_layout_and_excludes_only_autograd():
