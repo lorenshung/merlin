@@ -391,3 +391,16 @@ else:
         [os.environ["MERLIN_M2M_PYTHON"], "-c", script], capture_output=True, text=True, timeout=120
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("k,admitted", [(1024, True), (1025, False)])
+def test_cast_selection_enforces_declared_exact_range(selection, k, admitted):
+    module = rank2_module()
+    source = str(module).replace("40", str(k))
+    module = Parser(make_context(), source).parse_module()
+    (site,) = admission_plan(module, selection)["sites"]
+    assert (site["status"] == "admitted") is admitted
+    assert site["cast_exact_range_obligation"]["max_abs_bound"] == k * 128 * 128
+    assert site["cast_exact_range_obligation"]["exact_limit"] == 2**24
+    if not admitted:
+        assert any("host-capabilities.yaml:65" in reason and "exact_range" in reason for reason in site["reasons"])

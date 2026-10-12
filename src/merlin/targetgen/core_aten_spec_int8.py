@@ -8,6 +8,7 @@ an admitted MAC does not grant a narrowing readout or a host transfer.
 from __future__ import annotations
 
 import hashlib
+import math
 from pathlib import Path
 
 from merlin.targetgen.software_spec import admit_operation, load_software_spec
@@ -74,6 +75,8 @@ def declaration_location(selection, authority, key, fields=()):
     root = yaml.compose(Path(identity["path"]).read_text())
 
     def field(node, name):
+        if not isinstance(node, yaml.MappingNode):
+            return None
         return next((v for k, v in node.value if k.value == name), None)
 
     operations = field(root, "operations")
@@ -229,6 +232,30 @@ def admission_plan(module, selection, *, captured=False):
                 rank=rank,
             ),
         )
+        cast_decision = steps[-1]["host"]
+        cast_key = cast_decision.get("declaration", "host_i32_to_f32_cast")
+        cast_declaration = next((r for r in host["operations"] if r["id"] == cast_key), {})
+        contract = cast_declaration.get("numerical_contract", {})
+        exact_range = contract.get("semantics", {}).get("exact_range", "")
+        location = declaration_location(selection, "host", cast_key, ("numerical_contract", "semantics", "exact_range"))
+        prefix, separator, exponent = exact_range.partition("|x| <= 2^")
+        exact_limit = 2 ** int(exponent) if separator and not prefix and exponent.isdecimal() else None
+        operand_ranges = [row["signature"]["quantization_parameters"] for row in steps if row["step"] == 1]
+        cast_bound = math.prod(shape.reduction) * math.prod(
+            max(abs(r["quant_min"]), abs(r["quant_max"])) for r in operand_ranges
+        )
+        cast_obligation = dict(
+            full_k=math.prod(shape.reduction),
+            operand_ranges=operand_ranges,
+            max_abs_bound=cast_bound,
+            exact_limit=exact_limit,
+            source=location,
+        )
+        if contract.get("status") != "reviewed" or exact_limit is None or cast_bound > exact_limit:
+            reasons.append(
+                f"step 5 {location.get('path', '')}:{location.get('line', '')} {cast_key}: "
+                f"accumulator bound {cast_bound} exceeds or lacks declared exact_range {exact_range!r}"
+            )
         screen(
             6,
             "aten.mul.Tensor",
@@ -274,6 +301,7 @@ def admission_plan(module, selection, *, captured=False):
                 result_rank=rank,
                 steps=sorted(steps, key=lambda s: s["step"]),
                 partial_sum_obligation=bound,
+                cast_exact_range_obligation=cast_obligation,
                 status="refused" if reasons else "admitted",
                 reasons=reasons,
             )
