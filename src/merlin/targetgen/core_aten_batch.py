@@ -230,6 +230,48 @@ def _function_parts(source: str) -> tuple[list[str], str, list[str], list[str], 
     return names, body[:return_at], values, types, declarations
 
 
+def caller_input_storage(source: str, records: list[dict]) -> str:
+    """Bind legacy normalized calls to original caller input storage at execution.
+
+    Input shapes, strides and offsets come only from original argument documents.
+    Directly forwarded input observations retain that input's storage layout.
+    Computed results remain natural compiler observations; no expected post-call
+    metadata or answers supply this contract. Existing capture contracts win.
+    """
+    from xdsl.dialects.builtin import StringAttr
+
+    from merlin.frontends.linalg_mlir import parse_mlir_text
+    from merlin.llvmlower.result_layout import ATTRIBUTE
+
+    module = parse_mlir_text(source)
+    if ATTRIBUTE in module.attributes:
+        return source
+    function = next(op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward")
+    arguments = list(function.body.block.args)
+    returned = next(op for op in function.body.block.ops if op.name == "func.return")
+    inputs = [None] * len(arguments)
+    results = [None] * len(returned.operands)
+    for record in records:
+        documents = _tensor_documents(record["case"]["arguments"])
+        if len(documents) != len(record["input_indices"]):
+            raise ValueError("caller tensor count differs from compiled input ABI")
+        for document, index, abi in zip(documents, record["input_indices"], record["input_abi"], strict=True):
+            shape = list(arguments[index].type.get_shape())
+            if shape != document["shape"] or str(arguments[index].type.element_type) != abi["dtype"]:
+                raise ValueError("legacy caller storage requires an unchanged tensor input ABI")
+            inputs[index] = {key: copy.deepcopy(document[key]) for key in ("shape", "stride", "storage_offset")}
+        posts = record["semantic_boundary"]["post_indices"]
+        for index, post in zip(record["input_indices"], posts, strict=True):
+            if returned.operands[post] is arguments[index]:
+                # This is an observation buffer, not an inferred original-result
+                # alias or a caller-storage write-back grant. Actual result aliases
+                # still have to agree with independent compiled descriptor readback.
+                results[post] = copy.deepcopy(inputs[index])
+    module.attributes[ATTRIBUTE] = StringAttr(json.dumps(dict(inputs=inputs, results=results)))
+    module.verify()
+    return str(module) + "\n"
+
+
 def caller_boundary_layouts(source: str, semantic_io: dict, records: list[dict]) -> dict:
     """Restore caller layouts for post results that directly forward input SSA values.
 

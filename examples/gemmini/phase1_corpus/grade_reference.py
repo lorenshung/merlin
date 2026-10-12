@@ -1,4 +1,4 @@
-"""Execute the public prepared cohort through an explicitly selected reference package."""
+"""Execute selected prepared cohorts through an explicitly selected reference package."""
 
 from __future__ import annotations
 
@@ -20,6 +20,8 @@ def main():
     parser.add_argument("--provider", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--cohorts", nargs="+", choices=("public", "hidden", "host_guard"), default=["public"])
+    parser.add_argument("--include-guards", action="store_true")
     args = parser.parse_args()
     args.output.mkdir(parents=True, mode=0o700)
     os.environ["MERLIN_TARGET_CONTRACT"] = str(args.release / "payload/experiment/contracts/target_contract.yaml")
@@ -27,9 +29,12 @@ def main():
     provider = load_execution_provider("gemmini", args.provider / "merlin-support/core_aten/execution_provider.py")
     # Use the same native full-call adapter and capsule runner as candidate grading.
     adapter = provider.full_call_oracle("gemmini")
-    public = args.release / "payload/corpus/public"
-    capsules = [load_capsule(p.parent) for p in public.rglob("capsule.yaml")]
-    scored = [c for c in capsules if c.get("scored", True)]
+    capsules = [
+        load_capsule(p.parent)
+        for cohort in args.cohorts
+        for p in sorted((args.release / "payload/corpus" / cohort).rglob("capsule.yaml"))
+    ]
+    scored = [c for c in capsules if args.include_guards or c.get("scored", True)]
 
     def execute(capsule):
         result = run_capsule(
@@ -45,6 +50,9 @@ def main():
         )
         result["source_reference"] = capsule["source_reference"]
         result["numeric_flow"] = capsule["operation"]["attributes"].get("numeric_flow")
+        result["visibility"] = capsule["label"]
+        result["cohort"] = Path(capsule["__dir__"]).parent.name
+        result["scored"] = capsule.get("scored", True)
         return result
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
@@ -58,7 +66,7 @@ def main():
         tally["passed"] += result["status"] == "pass"
         tally["executed_instructions"] += result["executed_instructions"]
     summary = dict(
-        scope="public scored cohort only; functional Spike/libgemmini, no RTL timing claim",
+        scope="selected prepared cohorts; functional Spike/libgemmini, no RTL timing claim",
         total=len(results),
         passed=sum(r["status"] == "pass" for r in results),
         statuses=dict(Counter(r["status"] for r in results)),
@@ -71,6 +79,7 @@ def main():
         results=results,
     )
     (args.output / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    (args.output / "summary.json").chmod(0o600)
     print(json.dumps({k: v for k, v in summary.items() if k != "results"}, indent=2))
 
 

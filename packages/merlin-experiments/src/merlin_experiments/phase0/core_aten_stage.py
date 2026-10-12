@@ -71,11 +71,46 @@ def selection(recipe: Path) -> tuple[list[dict], dict[str, str]]:
             if not any(part in {"out", "__pycache__", ".git"} for part in source.relative_to(package).parts):
                 paths[str(source)] = _sha(source)
     batches, identities = [], set()
+    retained_public, retained_private = [], []
     for cohort in COHORTS:
         rows = block["cohorts"][cohort]
         if not isinstance(rows, list) or not rows:
             raise ValueError("every Core ATen cohort must declare at least one case selection")
         for row in rows:
+            if "retained_corpus" in row:
+                from merlin.targetgen.capsule_common import load_capsule
+                from merlin.targetgen.core_aten_capsules import load_private
+
+                retained = _path(recipe, row["retained_corpus"])
+                if retained.name != cohort or set(row) != {"retained_corpus"}:
+                    raise ValueError("retained capsules must preserve their source category")
+                entries = []
+                for member in sorted(retained.glob("*/capsule.yaml")):
+                    capsule = load_capsule(member.parent)
+                    load_private(capsule)
+                    name = capsule["name"]
+                    if name in identities or capsule["label"] != ("hidden" if cohort == "hidden" else "public"):
+                        raise ValueError("retained capsule identity or visibility conflicts")
+                    identities.add(name)
+                    answers = retained.parent / "_private" / cohort / name
+                    (retained_private if cohort == "hidden" else retained_public).append(
+                        (str(member.parent), member.parent)
+                    )
+                    retained_private.append((str(answers), answers))
+                    for owner in (member.parent, answers):
+                        for source in sorted(owner.rglob("*")):
+                            if source.is_symlink() or not (source.is_file() or source.is_dir()):
+                                raise ValueError("retained capsule contains indirect or special entries")
+                            if source.is_file():
+                                paths[str(source)] = _sha(source)
+                    entries.append(dict(id=name, source=str(member.parent), answers=str(answers)))
+                if not entries:
+                    raise ValueError("retained corpus is empty")
+                batches.append(dict(cohort=cohort, retained=entries))
+                continue
+            lane = row.get("lane", "host-guard" if cohort == "host_guard" else "device")
+            if lane not in {"device", "host-guard"} or (cohort == "host_guard" and lane != "host-guard"):
+                raise ValueError("invalid selected capsule lane")
             cases_path = _path(recipe, row.get("cases"))
             captures = _path(recipe, row.get("captures"))
             if not captures.is_dir():
@@ -122,9 +157,13 @@ def selection(recipe: Path) -> tuple[list[dict], dict[str, str]]:
                     "cohort": cohort,
                     "corpus": {"cases": cases, "denominator_sha256": corpus.get("denominator_sha256")},
                     "captures": str(captures),
+                    **({"lane": lane} if "lane" in row else {}),
                 }
             )
-        del by_id, corpus  # Do not retain an unselected bounded suite while loading the next batch.
+    if retained_public or retained_private:
+        from merlin.targetgen.sandbox.bwrap import _validate_host_sources
+
+        _validate_host_sources(retained_public, retained_private)
     return batches, dict(sorted(paths.items()))
 
 
@@ -162,8 +201,18 @@ def _requirement(batches: list[dict], receipt: dict) -> dict:
         "selection_sha256": receipt["selection_sha256"],
         "cohorts": {
             cohort: {
-                "count": sum(len(b["corpus"]["cases"]) for b in batches if b["cohort"] == cohort),
+                "count": sum(_batch_count(b) for b in batches if b["cohort"] == cohort),
                 "scored": cohort != "host_guard",
+                **(
+                    {
+                        "unscored_count": sum(
+                            _batch_count(b) for b in batches if b["cohort"] == cohort and b.get("lane") == "host-guard"
+                        )
+                    }
+                    if cohort != "host_guard"
+                    and any(b["cohort"] == cohort and b.get("lane") == "host-guard" for b in batches)
+                    else {}
+                ),
             }
             for cohort in COHORTS
         },
@@ -175,6 +224,10 @@ def _requirement(batches: list[dict], receipt: dict) -> dict:
         ],
         "execution_coverage_status": "unverified",
     }
+
+
+def _batch_count(batch: dict) -> int:
+    return len(batch["retained"]) if "retained" in batch else len(batch["corpus"]["cases"])
 
 
 def verify_synthesis(recipe: Path, requirement: dict, synthesis: dict) -> dict:
@@ -225,7 +278,7 @@ def derive(recipe: Path, output: Path, *, target: str, descriptor: Path) -> dict
     block["overlay"] = str(_path(recipe, block["overlay"]))
     for rows in block["cohorts"].values():
         for row in rows:
-            for key in ("cases", "captures"):
+            for key in ("retained_corpus",) if "retained_corpus" in row else ("cases", "captures"):
                 row[key] = str(_path(recipe, row[key]))
     block["derivation"] = str(output / "selection.json")
     (output / "recipe.yaml").write_text(yaml.safe_dump(document, sort_keys=False))
@@ -261,9 +314,7 @@ def derive(recipe: Path, output: Path, *, target: str, descriptor: Path) -> dict
         "conformance_spec": str(requirement),
         "synth_profile": str(synthesis),
         "selection_sha256": receipt["selection_sha256"],
-        "counts": {
-            cohort: sum(len(b["corpus"]["cases"]) for b in batches if b["cohort"] == cohort) for cohort in COHORTS
-        },
+        "counts": {cohort: sum(_batch_count(b) for b in batches if b["cohort"] == cohort) for cohort in COHORTS},
     }
 
 
@@ -304,6 +355,22 @@ def generate(
         for batch in batches:
             cohort = batch["cohort"]
             category = stage / cohort
+            if "retained" in batch:
+                from ..corpus.preparation import copy_input
+
+                for row in batch["retained"]:
+                    member = category / row["id"]
+                    copy_input(Path(row["source"]), member, private=cohort == "hidden")
+                    copy_input(Path(row["answers"]), stage / "_private" / cohort / row["id"], private=True)
+                    call_digest = hashlib.sha256()
+                    for filename in ("capsule.interface.mlir", "inputs.npz", "capsule.pytorch.py", "call.json"):
+                        call_digest.update(filename.encode())
+                        call_digest.update((member / filename).read_bytes())
+                    program_sets[cohort].add(call_digest.hexdigest())
+                    members.append(member.relative_to(stage).as_posix())
+                manifests.append({"retained": batch["retained"]})
+                continue
+            device = batch.get("lane", "host-guard" if cohort == "host_guard" else "device") == "device"
             # Each batch uses its own writer manifest; aggregate only our actual members.
             writer_manifest = category / "manifest.json"
             if writer_manifest.exists():
@@ -317,7 +384,7 @@ def generate(
                 tiers=("L2",),
                 **(
                     {"numeric_flow": {**block["numeric_flow"], "target": target}}
-                    if cohort != "host_guard" and block.get("numeric_flow")
+                    if device and block.get("numeric_flow")
                     else {}
                 ),
             )
@@ -326,11 +393,11 @@ def generate(
                 member = category / row["id"]
                 declaration_path = member / "capsule.yaml"
                 capsule = yaml.safe_load(declaration_path.read_bytes())
-                capsule["cohort"] = "guard" if cohort == "host_guard" else cohort
-                capsule["scored"] = cohort != "host_guard"
-                capsule["lane_expectation"] = "host-guard" if cohort == "host_guard" else "device"
-                capsule["semantic"] = {"must_accelerate": cohort != "host_guard"}
-                capsule["lanes"] = {"forbid" if cohort == "host_guard" else "require": ["on_mesh"]}
+                capsule["cohort"] = cohort if device else "guard"
+                capsule["scored"] = device
+                capsule["lane_expectation"] = "device" if device else "host-guard"
+                capsule["semantic"] = {"must_accelerate": device}
+                capsule["lanes"] = {"require" if device else "forbid": ["on_mesh"]}
                 declaration_path.write_text(yaml.safe_dump(capsule, sort_keys=False))
                 row.setdefault("digests", {})["capsule.yaml"] = _sha(declaration_path)
                 call_digest = hashlib.sha256()
@@ -346,6 +413,10 @@ def generate(
         (private / "stage.json").write_bytes(_json({"receipt": receipt, "packaging": manifests}))
         for member in private.rglob("*"):
             member.chmod(0o700 if member.is_dir() else 0o600)
+        if (stage / "hidden").is_dir():
+            (stage / "hidden").chmod(0o700)
+            for member in (stage / "hidden").rglob("*"):
+                member.chmod(0o700 if member.is_dir() else 0o600)
         public_members = sorted(m for m in members if not m.startswith("hidden/"))
         manifest = {
             "generated_by": "merlin/contract/capsules/generate_corpus.py",

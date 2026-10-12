@@ -197,3 +197,32 @@ def test_imposed_field_does_not_hide_other_tensor_observations():
     readback["metadata"][0].update(requires_grad=None, imposed_by_harness=["requires_grad"])
     readback["metadata"][1]["requires_grad"] = True
     assert validate_full(record, raw, readback)["status"] == "mismatch"
+
+
+def test_legacy_input_storage_uses_arguments_without_prescribing_results():
+    from merlin.llvmlower.result_layout import read_layout
+    from merlin.targetgen.core_aten_batch import caller_input_storage
+
+    source = """builtin.module {
+      func.func @forward(%x: tensor<3x2xi8>) -> tensor<3x2xi8> {
+        func.return %x : tensor<3x2xi8>
+      }
+    }"""
+    tensor = dict(kind="tensor", shape=[3, 2], stride=[1, 6], storage_offset=4)
+    record = dict(
+        input_indices=[0],
+        input_abi=[dict(dtype="i8", shape=[3, 2])],
+        semantic_boundary=dict(post_indices=[0]),
+        case=dict(
+            arguments=dict(args=[tensor]), expected={"stride": [999, 999]}, post_arguments={"stride": [999, 999]}
+        ),
+    )
+    prepared = caller_input_storage(source, [record])
+    layout = read_layout(prepared)
+    expected = dict(shape=[3, 2], stride=[1, 6], storage_offset=4)
+    assert layout == dict(inputs=[expected], results=[expected])
+    assert caller_input_storage(prepared, []) == prepared
+    assert read_layout(source) is None
+    record["case"]["arguments"]["args"][0]["shape"] = [6]
+    with pytest.raises(ValueError, match="unchanged tensor input ABI"):
+        caller_input_storage(source, [record])

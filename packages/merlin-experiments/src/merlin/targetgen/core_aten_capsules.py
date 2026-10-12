@@ -18,7 +18,7 @@ from pathlib import Path
 import yaml
 
 from merlin.targetgen.capsule_common import load_capsule
-from merlin.targetgen.core_aten_batch import build_core_aten_batch, caller_boundary_layouts
+from merlin.targetgen.core_aten_batch import build_core_aten_batch, caller_boundary_layouts, caller_input_storage
 from merlin.targetgen.core_aten_batch_grade import grade_core_aten_batch
 from merlin.targetgen.core_aten_capture import case_capture_name
 from merlin.targetgen.core_aten_cover import _provenance_ops
@@ -292,7 +292,8 @@ def runtime_bundle(capsule: dict, destination: Path) -> dict:
     golden = load_private(capsule)
     root = Path(capsule["__dir__"])
     destination.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(root / "capsule.interface.mlir", destination / "model.mlir")
+    source = (root / "capsule.interface.mlir").read_text()
+    (destination / "model.mlir").write_text(caller_input_storage(source, golden["batch_map"]["cases"]))
     for filename in ("inputs.npz", "input_order.json", "weights.safetensors.manifest.json"):
         shutil.copyfile(root / filename, destination / filename)
     # Reconstruct caller layouts also for previously sealed normalized captures.

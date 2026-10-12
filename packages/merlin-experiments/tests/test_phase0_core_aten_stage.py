@@ -288,3 +288,60 @@ def test_numeric_selection_binds_policy_and_source_bytes(tmp_path):
         recipe, tmp_path / "derive-numeric3", target="synthetic", descriptor=tmp_path / "descriptor.yaml"
     )
     assert first["selection_sha256"] != third["selection_sha256"]
+
+
+def test_hidden_host_guard_never_gets_numeric_preparation_or_public_visibility(tmp_path, monkeypatch):
+    recipe = fixture_recipe(tmp_path)
+    document = yaml.safe_load(recipe.read_text())
+    document["core_aten"]["cohorts"]["hidden"][0]["lane"] = "host-guard"
+    recipe.write_text(yaml.safe_dump(document))
+    derived = stage.derive(recipe, tmp_path / "derived", target="synthetic", descriptor=tmp_path / "descriptor.yaml")
+    install_writer(monkeypatch)
+    output = tmp_path / "run/phase0/capsules"
+    stage.generate(Path(derived["recipe"]), output, target="synthetic")
+    capsule = yaml.safe_load((output / "hidden/hidden/capsule.yaml").read_text())
+    assert capsule["label"] == "hidden"
+    assert not capsule["scored"]
+    assert capsule["lanes"] == {"forbid": ["on_mesh"]}
+    assert capsule["lane_expectation"] == "host-guard"
+    assert (output / "hidden/hidden/inputs.npz").stat().st_mode & 0o077 == 0
+    requirement = yaml.safe_load(Path(derived["conformance_spec"]).read_text())
+    assert requirement["cohorts"]["hidden"]["unscored_count"] == 1
+    assert "hidden/hidden" not in (output / "MANIFEST.yaml").read_text()
+
+
+def test_retained_capsule_bytes_and_answers_are_preserved_and_bound(tmp_path, monkeypatch):
+    recipe = fixture_recipe(tmp_path)
+    derived = stage.derive(recipe, tmp_path / "derived", target="synthetic", descriptor=tmp_path / "descriptor.yaml")
+    install_writer(monkeypatch)
+    first = tmp_path / "first/phase0/capsules"
+    stage.generate(Path(derived["recipe"]), first, target="synthetic")
+    document = yaml.safe_load(recipe.read_text())
+    document["core_aten"]["cohorts"] = {c: [{"retained_corpus": str(first / c)}] for c in stage.COHORTS}
+    recipe.write_text(yaml.safe_dump(document))
+    from merlin.targetgen.capsule_common import load_capsule
+
+    monkeypatch.setitem(
+        sys.modules,
+        "merlin.targetgen.core_aten_capsules",
+        SimpleNamespace(
+            write_capsules=lambda *a, **kw: pytest.fail("retained calls must not be rewritten"),
+            load_private=lambda c: {},
+        ),
+    )
+    monkeypatch.setattr(
+        "merlin.targetgen.capsule_common.load_capsule", lambda p: yaml.safe_load((p / "capsule.yaml").read_text())
+    )
+    retained = stage.derive(recipe, tmp_path / "retained", target="synthetic", descriptor=tmp_path / "descriptor.yaml")
+    second = tmp_path / "second/phase0/capsules"
+    stage.generate(Path(retained["recipe"]), second, target="synthetic")
+    for c in stage.COHORTS:
+        for owner in (Path(c) / c, Path("_private") / c / c):
+            for source in (first / owner).iterdir():
+                copy = second / owner / source.name
+                assert copy.read_bytes() == source.read_bytes()
+                assert copy.stat().st_ino != source.stat().st_ino
+    (first / "_private/hidden/hidden/golden.yaml").write_text("different private answer")
+    with pytest.raises(ValueError, match="selection changed"):
+        stage.generate(Path(retained["recipe"]), tmp_path / "refused/phase0/capsules", target="synthetic")
+    monkeypatch.setattr("merlin.targetgen.capsule_common.load_capsule", load_capsule)
