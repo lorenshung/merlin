@@ -17,7 +17,7 @@ pins:
       shift and floor-division decompositions, PT2E integer-contraction capture, and literal
       quantization-parameter lowering; missing any of these leaves supported operations opaque.
     repo_canonical: https://github.com/ucb-bar/model2MLIR.git
-    commit: "8893a37480b4560f701089e5bf408644573a906f"
+    commit: "a70171e230449eb8f4dc16e09d9d9c9dbfdaae80"
     root_env: MERLIN_M2M_DIR
     requires_paths:
       - m2m/ir/decompositions.py
@@ -30,5 +30,5 @@ pins:
       - tests/test_integer_shift_floordiv.py
     content_check: true
     notes: >-
-      Published model2MLIR main, including signed-integer lowering, portable per-tensor
-      static quantization and preservation of registered-buffer dtypes in capture bundles.
+      Reviewed model2MLIR frontend, including signed-integer lowering, portable per-tensor
+      static quantization, caller layouts and exported full-call result storage contracts.

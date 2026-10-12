@@ -325,3 +325,12 @@ def test_gguf_capture_uses_framework_python_not_compiler(tmp_path, monkeypatch):
     assert result.root == tmp_path / "bundle"
     assert calls[0][:2] == [str(capture), "-c"]
     assert "m2m.frontends.gguf" in calls[0][2]
+
+
+def test_capture_registry_pins_reviewed_full_call_frontend():
+    from merlin.common import provenance
+
+    pin = provenance.load_pins(provenance.software_pins_path())[model2mlir.CAPTURE_PIN]
+    assert pin.commit == "a70171e230449eb8f4dc16e09d9d9c9dbfdaae80"
+    assert pin.content_check is True
+    assert "m2m/ir/decompositions.py" in pin.requires_paths
