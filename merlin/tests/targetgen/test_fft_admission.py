@@ -3,6 +3,8 @@
 from contextlib import nullcontext
 from types import SimpleNamespace
 
+import pytest
+
 from merlin.common.paths import repo_root
 from merlin.common.yaml import load_yaml
 from merlin.targetgen.fft_admission import screen_fft_candidates, screen_fft_component_dtype
@@ -87,7 +89,7 @@ def test_f64_component_refusal_names_exact_precision_lines():
     assert screen_fft_component_dtype("torch.complex64", 2, _selection()) == []
 
 
-def test_fft_refusal_stops_before_compilation(tmp_path, monkeypatch):
+def test_fft_refusal_preserves_original_host_execution(tmp_path, monkeypatch):
     from merlin.runtime.backends import spike_model
     from merlin.targetgen import core_aten_device, core_aten_numeric, core_aten_provenance
 
@@ -96,12 +98,27 @@ def test_fft_refusal_stops_before_compilation(tmp_path, monkeypatch):
     monkeypatch.setattr(
         core_aten_device,
         "load_execution_provider",
-        lambda *args: SimpleNamespace(__file__=str(tmp_path / "provider.py")),
+        lambda *args: SimpleNamespace(__file__=str(tmp_path / "provider.py"), runner_options=lambda: {}),
     )
-    monkeypatch.setattr(core_aten_numeric, "prepare_spec_int8", lambda *args, **kwargs: {"fft_refusals": [reason]})
-    monkeypatch.setattr(core_aten_provenance, "batch_provenance", lambda *args, **kwargs: {})
+    plan = {"fft_refusals": [reason], "refusal_code": "fft_admission_refused", "quantized_contractions": 0, "sites": []}
+    monkeypatch.setattr(core_aten_numeric, "prepare_spec_int8", lambda *args, **kwargs: plan)
+    monkeypatch.setattr(core_aten_provenance, "batch_provenance", lambda *args, **kwargs: {"artifact_digests": {}})
     calls = []
-    monkeypatch.setattr(spike_model, "build", lambda *args, **kwargs: calls.append("build"))
+
+    def build(*args, **kwargs):
+        calls.append(kwargs)
+        assert kwargs["device"] is None
+        return {"elf": tmp_path / "host.elf", "mem_bytes": 1024}
+
+    monkeypatch.setattr(spike_model, "build", build)
+    monkeypatch.setattr(spike_model, "run", lambda *args, **kwargs: {"output_bytes": [bytes(4)], "console": "DONE\n"})
+
+    def route(*args, **kwargs):
+        raise AssertionError("an undeclared FFT cannot enter device routing")
+
+    monkeypatch.setattr(core_aten_device, "routing_for_bundle", route)
+    original = "original unquantized FFT source"
+    (tmp_path / "model.mlir").write_text(original)
     report = {
         "output_count": 1,
         "cases": [
@@ -126,10 +143,14 @@ def test_fft_refusal_stops_before_compilation(tmp_path, monkeypatch):
         arena_mb=1,
         timeout=1,
     )
-    assert not calls
-    assert execution["stage"] == "numeric_admission"
-    assert reason in execution["error"]
-    assert verdict["passed_count"] == 0
+    assert len(calls) == 1
+    assert execution["status"] == "ran"
+    assert verdict["passed_by_lane"] == {"host": 1, "device": 0}
+    assert report["numeric_preparation"]["refusal_code"] == "fft_admission_refused"
+    assert report["cases"][0]["routing"]["lane"] == "host"
+    assert not report["cases"][0]["routing"]["routed"]
+    assert reason in report["cases"][0]["routing"]["reason"]
+    assert (tmp_path / "model.mlir").read_text() == original
 
 
 def test_fft_refusal_receipt_preserves_reason_and_code(tmp_path):
@@ -196,3 +217,45 @@ for mode, x, required in [
         [os.environ["MERLIN_M2M_PYTHON"], "-c", script], capture_output=True, text=True, timeout=120
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("recipe_count", [0, 2])
+def test_fft_without_unique_recipe_retains_host_source(tmp_path, monkeypatch, recipe_count):
+    from merlin.targetgen import core_aten_numeric, core_aten_spec_int8
+    from merlin.targetgen.capsule_source import PytorchRefSource
+
+    selection = _selection()
+    selection["recipes"] = [
+        {
+            "activation": dict(
+                dtype="int8", mode="static", granularity="tensor", symmetric=True, quant_min=-128, quant_max=127
+            )
+        }
+        for _ in range(recipe_count)
+    ]
+    monkeypatch.setattr(core_aten_spec_int8, "select_spec", lambda *args: selection)
+
+    def capture(*args, **kwargs):
+        raise AssertionError("ambiguous or absent recipes cannot recapture the source")
+
+    monkeypatch.setattr(PytorchRefSource, "capture_loader", capture)
+    original = "builtin.module {}\n"
+    (tmp_path / "model.mlir").write_text(original)
+    report = {"cases": [{"overload": "aten._fft_r2c.default", "status": "bundled"}]}
+    plan = core_aten_numeric.prepare_spec_int8(
+        tmp_path,
+        report,
+        target="selected",
+        facts={},
+        software_spec=tmp_path / "spec.yaml",
+        host_capabilities=tmp_path / "host.yaml",
+        provider=None,
+        package=tmp_path,
+    )
+    assert plan["quantized_contractions"] == 0
+    assert plan["refusal_code"] == "fft_admission_refused"
+    assert plan["refusal_details"]["matching_static_recipes"] == recipe_count
+    assert plan["fft_refusals"]
+    assert (tmp_path / "model.mlir").read_text() == original
+    assert plan["source_sha256_before"] == plan["source_sha256_after"]
+    assert report["cases"][0]["numeric_admission"]["refusal_code"] == "fft_admission_refused"

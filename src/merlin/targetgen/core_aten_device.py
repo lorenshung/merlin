@@ -226,9 +226,6 @@ def run_spike_bundle(
                         provider=provider,
                         package=device_package,
                     )
-                    if report["numeric_preparation"].get("fft_refusals"):
-                        stage = "numeric_admission"
-                        raise ValueError("; ".join(report["numeric_preparation"]["fft_refusals"]))
                 if numeric_policy == "int8_w8a8":
                     stage = "numeric_preparation"
                     from merlin.system.offload import device_contraction_ranks, device_dtype_triples

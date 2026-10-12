@@ -199,7 +199,13 @@ def prepare_spec_int8(
         if record["status"] == "bundled"
     )
     if needs_fft_preflight and len(recipes) != 1:
-        raise ValueError("FFT preflight needs one declared static activation recipe")
+        plan.update(
+            status="refused",
+            refusal_code="fft_admission_refused",
+            refusal_details={"matching_static_recipes": len(recipes)},
+            fft_refusals=["FFT preflight needs one declared static activation recipe"],
+        )
+        needs_fft_preflight = False
     if selected or needs_fft_preflight:
         (directory / "model.before_spec_int8.mlir").write_bytes(original)
 
