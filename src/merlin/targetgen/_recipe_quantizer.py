@@ -993,6 +993,8 @@ def agreement(reference: Any, candidate: Any, samples: Iterable[Any], *, limit: 
     per-tensor changes the numbers, and this is the receipt that says by how much. Reported per
     stream, not judged here; the consumer holds it to the workload's own bar.
     """
+    import copy
+
     import torch
 
     count = agree = 0
@@ -1003,8 +1005,8 @@ def agreement(reference: Any, candidate: Any, samples: Iterable[Any], *, limit: 
             if count >= limit:
                 break
             inputs = _as_tuple(sample)
-            expected = torch.utils._pytree.tree_flatten(reference(*inputs))[0][0].float().flatten()
-            actual = torch.utils._pytree.tree_flatten(candidate(*inputs))[0][0].float().flatten()
+            expected = torch.utils._pytree.tree_flatten(reference(*copy.deepcopy(inputs)))[0][0].float().flatten()
+            actual = torch.utils._pytree.tree_flatten(candidate(*copy.deepcopy(inputs)))[0][0].float().flatten()
             cosines.append(float(torch.nn.functional.cosine_similarity(expected, actual, dim=0)))
             worst = max(worst, float((expected - actual).abs().max()))
             agree += int(int(expected.argmax()) == int(actual.argmax()))

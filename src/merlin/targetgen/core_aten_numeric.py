@@ -11,6 +11,56 @@ from pathlib import Path
 import numpy as np
 
 
+def map_reference_boundary(fresh, reference, output_count):
+    """Project independent user outputs and observed post-call inputs onto exported roles."""
+    outputs = [None] * output_count
+    for indices, values in (
+        (fresh["output_indices"], reference["outputs"]),
+        (fresh["semantic_boundary"]["post_indices"], reference["post_inputs"]),
+    ):
+        for index, value in zip(indices, values, strict=True):
+            if outputs[index] is not None and not np.array_equal(outputs[index], value, equal_nan=True):
+                raise ValueError("aliased user/post reference observations disagree")
+            outputs[index] = value
+    if any(value is None for value in outputs):
+        raise ValueError("independent reference does not cover the complete exported boundary")
+    return outputs
+
+
+def restore_caller_layouts(module, original, fresh, semantic_path):
+    """Retain source caller storage for inputs and their actual exported post-call observations."""
+    from xdsl.dialects.builtin import StringAttr
+
+    from merlin.llvmlower.result_layout import ATTRIBUTE
+    from merlin.targetgen.core_aten_batch import _tensor_documents
+
+    layout = json.loads(module.attributes[ATTRIBUTE].data)
+    arguments = _tensor_documents(original["case"]["arguments"])
+    if len(arguments) != len(layout["inputs"]):
+        raise ValueError("caller layout count differs from recaptured inputs")
+    boundary = json.loads(semantic_path.read_text())
+    function = next(op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward")
+    returned = next(op for op in function.body.block.ops if op.name == "func.return")
+    for ordinal, document in enumerate(arguments):
+        caller = {
+            key: copy.deepcopy(document[key]) for key in ("dtype", "shape", "stride", "storage_offset", "requires_grad")
+        }
+        if any(caller[key] != layout["inputs"][ordinal][key] for key in ("dtype", "shape")):
+            raise ValueError("caller tensor type differs from recaptured input")
+        layout["inputs"][ordinal] = caller
+        index = fresh["semantic_boundary"]["post_indices"][ordinal]
+        entry = boundary["outputs"][index]
+        mutation = entry.get("role") == "user_input_mutation"
+        passthrough = returned.operands[index] is function.body.block.args[ordinal]
+        if mutation or passthrough:
+            if entry["shape"] != caller["shape"] or entry["dtype"] != caller["dtype"]:
+                raise ValueError("recaptured mutation changes the caller tensor type")
+            entry.update(caller)
+            layout["results"][index] = {**(layout["results"][index] or {}), **caller, "alias_inputs": [ordinal]}
+    module.attributes[ATTRIBUTE] = StringAttr(json.dumps(layout, sort_keys=True))
+    semantic_path.write_text(json.dumps(boundary, sort_keys=True) + "\n")
+
+
 def prepare_spec_int8(
     directory: Path,
     report: dict,
@@ -194,16 +244,23 @@ def prepare_spec_int8(
                 graph="TorchAO PT2E prepared floating graph",
                 scales_frozen_before_conversion=True,
             )
-            # Keep the fresh capture's complete result ABI and boundary mapping.
+            # Preserve caller-owned inputs; bind observed user and post-call
+            # values through the fresh conversion's actual output-role mapping.
             fresh = prepared_report["cases"][0]
-            for index, value in zip(
-                fresh.get("semantic_boundary", {}).get("post_indices", []), artifact.inputs, strict=True
-            ):
-                if index != len(reference["outputs"]):
-                    raise ValueError("PT2E reference requires unmutated trailing input observations")
-                reference["outputs"].append(value)
-            records[0].update({k: v for k, v in fresh.items() if k not in ("routing", "capture_directory")})
-            for name in ("inputs.npz", "input_order.json", "weights.safetensors.manifest.json", "semantic_io.json"):
+            reference["outputs"] = map_reference_boundary(fresh, reference, prepared_report["output_count"])
+            restore_caller_layouts(module, records[0], fresh, prepared_dir / "semantic_io.json")
+            caller_case = records[0]["case"]
+            records[0].update(
+                {
+                    k: v
+                    for k, v in fresh.items()
+                    if k not in ("routing", "capture_directory", "case", "input_indices", "input_abi")
+                }
+            )
+            records[0]["case"] = caller_case
+            if prepared_report["input_count"] != report["input_count"]:
+                raise ValueError("PT2E recapture changed the caller input ABI")
+            for name in ("weights.safetensors.manifest.json", "semantic_io.json"):
                 path = prepared_dir / name
                 if path.exists():
                     (directory / name).write_bytes(path.read_bytes())

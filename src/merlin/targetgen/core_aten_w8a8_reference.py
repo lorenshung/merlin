@@ -383,6 +383,7 @@ def run_pt2e_reference(model, inputs):
     output = Reference(model, garbage_collect_values=False).run(*inputs)
     return SimpleNamespace(
         output=output,
+        post_inputs=inputs,
         sites=sites,
         contraction_count=sum(counts.values()),
         linear_count=counts["linear"],
@@ -393,12 +394,14 @@ def run_pt2e_reference(model, inputs):
 
 def selected_pt2e_reference(model, inputs, *, declared_readout=False):
     """Select the independent reference and bind its actual implementation bytes."""
+    import copy
     import hashlib
     import sys
     from pathlib import Path
 
     from m2m.capture.pt2e_integer_reference import run_pt2e_integer_reference
 
+    inputs = copy.deepcopy(inputs)
     run = run_pt2e_reference if declared_readout else run_pt2e_integer_reference
     source = Path(sys.modules[run.__module__].__file__).resolve()
     if not source.is_file():
@@ -418,6 +421,7 @@ def write_pt2e_reference(path, reference, leaves, source):
                 "engine": "independent_pt2e_ascending_k_integer_mac",
                 "outputs": [to_native(value) for value in leaves],
                 "scales": reference.sites,
+                "post_inputs": [to_native(value) for value in reference.post_inputs],
                 "source": source,
             },
             indent=2,

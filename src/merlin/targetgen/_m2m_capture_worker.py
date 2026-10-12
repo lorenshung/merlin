@@ -1091,11 +1091,13 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
             import copy
 
             reference = copy.deepcopy(mdl)  # quantize_ mutates in place
+        import copy
+
         mdl = RQ.apply_recipe(
             mdl,
             recipe,
-            example_inputs=tuple(inputs),
-            calibration_inputs=calibration,
+            example_inputs=copy.deepcopy(tuple(inputs)),
+            calibration_inputs=copy.deepcopy(calibration),
             original_frontend_snapshot=original_snapshot if trace_supported else None,
             source_layer_inventory=source_layer_inventory,
         )
@@ -1152,7 +1154,9 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
         if selected_engine not in (None, "integer_reference"):
             raise ValueError(f"static int8 capture cannot realize numerical engine {selected_engine!r}")
         with torch.no_grad():
-            portable_output = mdl(*inputs)
+            import copy
+
+            portable_output = mdl(*copy.deepcopy(inputs))
         independent = None
         independent_error = None
         independent_source = None
@@ -1186,7 +1190,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
             integer_partition = None
             integerization_receipt["partition_error"] = str(exc)
         with torch.no_grad():
-            integer_output = mdl(*inputs)
+            integer_output = mdl(*copy.deepcopy(inputs))
         portable_agreement = _integerized_agreement(
             portable_output, integer_output, atol=a.agreement_atol, rtol=a.agreement_rtol
         )

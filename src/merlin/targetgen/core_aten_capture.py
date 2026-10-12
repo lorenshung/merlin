@@ -80,7 +80,14 @@ def _decode(value, inputs=()):
         return float(value["value"])
     if kind == "tensor":
         dtype = getattr(torch, value["dtype"])
-        return torch.tensor(_decode(value["values"]), dtype=dtype).reshape(value["shape"])
+        logical = torch.tensor(_decode(value["values"]), dtype=dtype).reshape(value["shape"])
+        shape, stride = value["shape"], value["stride"]
+        offset = value["storage_offset"]
+        span = offset + (1 + sum((n - 1) * s for n, s in zip(shape, stride)) if all(shape) else 0)
+        storage = torch.zeros(span, dtype=dtype)
+        tensor = storage.as_strided(shape, stride, offset)
+        tensor.copy_(logical)
+        return tensor.requires_grad_(value["requires_grad"])
     return {{key: _decode(child, inputs) for key, child in value.items()}}
 
 
