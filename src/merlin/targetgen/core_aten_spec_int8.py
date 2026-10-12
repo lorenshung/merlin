@@ -61,15 +61,10 @@ def select_spec(target: str, facts: dict, spec_path: Path, host_path: Path) -> d
             name: {"path": str(path.resolve()), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
             for name, path in (("software_spec", spec_path), ("host_capabilities", host_path))
         },
-        "host_scale_product": {
-            "arithmetic": "exact f64 product of f32 scales, rounded once to f32",
-            "admission": "finite normal f32 constant required",
-            "authority": "explicit static numeric policy; host multiply declaration independently screened",
-        },
     }
 
 
-def declaration_location(selection, authority, key):
+def declaration_location(selection, authority, key, fields=()):
     """Bind a decision to the exact authored YAML node, including rank restrictions."""
     import yaml
 
@@ -83,11 +78,15 @@ def declaration_location(selection, authority, key):
 
     operations = field(root, "operations")
     if authority == "software":
-        node = field(operations, key)
+        node = field(operations, key) or operations
     else:
-        node = next(n for n in operations.value if field(n, "id").value == key)
-    signature = field(node, "signature")
-    rank_node = field(signature or node, "ranks")
+        node = next((n for n in operations.value if field(n, "id").value == key), operations)
+    if fields:
+        for name in fields:
+            node = field(node, name) or node
+        return {**identity, "declaration": key, "line": node.start_mark.line + 1}
+    signature = field(node, "signature") if isinstance(node, yaml.MappingNode) else None
+    rank_node = field(signature or node, "ranks") if isinstance(signature or node, yaml.MappingNode) else None
     return {
         **identity,
         "declaration": key,
@@ -97,11 +96,35 @@ def declaration_location(selection, authority, key):
 
 
 def pipeline_refusals(selection):
-    return (
-        []
-        if selection["spec"].get("status") == selection["host"].get("status") == "reviewed"
-        else ["software and host declarations must both be reviewed"]
-    )
+    reasons = []
+    if selection["spec"].get("status") != "reviewed" or selection["host"].get("status") != "reviewed":
+        reasons.append("software and host declarations must both be reviewed")
+    for authority, document, key in (
+        ("software", selection["spec"], "host_f32_elementwise"),
+        ("host", selection["host"], "host_f32_elementwise_exact"),
+    ):
+        row = next((r for r in document["operations"] if r["id"] == key), {})
+        location = declaration_location(selection, authority, key)
+        if "aten.mul.Tensor" not in row.get("ops", []) or row.get("placement") != "host":
+            reasons.append(
+                f"{location.get('path', '')}:{location.get('line', '')} {key}: "
+                "required host aten.mul.Tensor declaration absent"
+            )
+        if authority == "host":
+            contract = row.get("numerical_contract", {})
+            semantics = contract.get("semantics", {})
+            for field, expected in (
+                ("arithmetic", "ieee754_binary32"),
+                ("rounding", "round_to_nearest_even"),
+                ("per_element", "correctly_rounded_single_operation"),
+            ):
+                if contract.get("status") != "reviewed" or semantics.get(field) != expected:
+                    where = declaration_location(selection, authority, key, ("numerical_contract", "semantics", field))
+                    reasons.append(
+                        f"{where.get('path', '')}:{where.get('line', '')} {key}: "
+                        f"required {field}={expected} declaration absent"
+                    )
+    return reasons
 
 
 def admission_plan(module, selection, *, captured=False):
@@ -217,6 +240,19 @@ def admission_plan(module, selection, *, captured=False):
                 rank=rank,
             ),
         )
+        steps[-1]["readout_multiply"] = 1
+        screen(
+            6,
+            "aten.mul.Tensor",
+            dict(
+                family="elementwise_map",
+                ordered_operand_dtypes=["f32", "f32", "f32"],
+                ordered_result_dtypes=["f32"],
+                operand_dtype="f32",
+                rank=rank,
+            ),
+        )
+        steps[-1]["readout_multiply"] = 2
         expected = ("i8", "i8", "i32") if captured else ("f32", "f32", "f32")
         if shape.dtypes != expected:
             reasons.append(f"source dtype {shape.dtypes} is not {expected}")

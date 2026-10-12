@@ -88,7 +88,7 @@ def prepare_spec_int8(
             accumulator_dtype=selection["readout_facets"][0]["accumulator_dtype"],
             software_admission=selection["spec"],
             software_numerical_engine="integer_reference",
-            host_scale_product=selection["host_scale_product"],
+            host_readout_declarations=declaration_keys(selected[0])["mul"],
         )
         recipe["recipe_sha256"] = digest(recipe)
         try:
@@ -141,7 +141,7 @@ def prepare_spec_int8(
 
             contractions = [op for op, _ in observe_contractions(module)]
             for site, contraction in zip(selected, contractions, strict=True):
-                # Readout is a separate captured cast followed by one f32 mul.
+                # Readout preserves two separately rounded frontend f32 multiplies.
                 casts = [
                     u.operation
                     for u in contraction.results[0].uses
@@ -155,9 +155,20 @@ def prepare_spec_int8(
                 ]
                 if len(readouts) != 1:
                     raise ValueError("captured host cast lacks a unique scale multiply")
+                first_readout = readouts[0]
+                readouts = [
+                    u.operation
+                    for u in first_readout.results[0].uses
+                    if any(o.name == "arith.mulf" for o in u.operation.walk())
+                ]
+                if len(readouts) != 1:
+                    raise ValueError("captured readout lacks the second frontend scale multiply")
                 readout = readouts[0]
+                site["host_readout_operation_ordinals"] = [
+                    list(module.walk()).index(o) for o in (first_readout, readout)
+                ]
                 keys = declaration_keys(site)
-                for op, key in ((contraction, "contraction"), (cast, "cast"), (readout, "mul")):
+                for op, key in ((contraction, "contraction"), (cast, "cast"), (first_readout, "mul"), (readout, "mul")):
                     op.attributes["prov.declarations"] = StringAttr(keys[key])
                 contraction.attributes["prov.region_id"] = StringAttr(
                     f"spec_int8_contraction_{site['source_operation_ordinal']}"

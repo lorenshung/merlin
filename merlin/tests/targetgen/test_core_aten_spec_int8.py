@@ -281,7 +281,6 @@ import torch
 import m2m
 from merlin.targetgen import _recipe_quantizer as quant
 from merlin.targetgen.core_aten_w8a8_reference import run_pt2e_reference
-from merlin.capture.integerization import combine_static_readout_scales
 from m2m.capture.pt2e_integerize import integerize_pt2e
 recipe = {
     "schema": "quant_recipe_v1", "status": "derived", "families": ["contraction"],
@@ -304,8 +303,6 @@ scale, observer = quant.observe_static_tensor(inputs[0] @ inputs[1], recipe["act
 assert reference.sites[1]["lhs"] == scale.item()
 assert observer == "histogram"
 integer, receipt = integerize_pt2e(converted, inputs)
-products = combine_static_readout_scales(integer)
-assert products == [site["product"] for site in reference.sites]
 assert torch.equal(integer(*inputs).view(torch.int32), reference.output.view(torch.int32))
 text = m2m.convert(integer, inputs, backend="fx_importer").mlir_text
 open(sys.argv[1], "w").write(text)
@@ -331,3 +328,66 @@ open(sys.argv[1], "w").write(text)
         assert [op.name for op in casts[0].body.block.ops] == ["arith.sitofp", "linalg.yield"]
         readout = next(iter(casts[0].results[0].uses)).operation
         assert [op.name for op in readout.body.block.ops] == ["arith.mulf", "linalg.yield"]
+        second = next(iter(readout.results[0].uses)).operation
+        assert [op.name for op in second.body.block.ops] == ["arith.mulf", "linalg.yield"]
+
+
+@pytest.mark.parametrize("authority,key", [("spec", "host_f32_elementwise"), ("host", "host_f32_elementwise_exact")])
+def test_readout_requires_authored_multiply_declaration(selection, authority, key):
+    from merlin.targetgen.core_aten_spec_int8 import declaration_location
+
+    changed = copy.deepcopy(selection)
+    row = next(r for r in changed[authority]["operations"] if r["id"] == key)
+    row["ops"].remove("aten.mul.Tensor")
+    location = declaration_location(selection, "software" if authority == "spec" else "host", key)
+    refusals = pipeline_refusals(changed)
+    assert any(f"{location['path']}:{location['line']}" in reason and key in reason for reason in refusals)
+    assert admission_plan(rank2_module(), changed)["sites"][0]["status"] == "refused"
+
+
+def test_readout_requires_declared_binary32_rounding(selection):
+    from merlin.targetgen.core_aten_spec_int8 import declaration_location
+
+    changed = copy.deepcopy(selection)
+    row = next(r for r in changed["host"]["operations"] if r["id"] == "host_f32_elementwise_exact")
+    row["numerical_contract"]["semantics"].pop("rounding")
+    location = declaration_location(selection, "host", row["id"], ("numerical_contract", "semantics", "rounding"))
+    assert any(f"{location['path']}:{location['line']}" in reason for reason in pipeline_refusals(changed))
+
+
+def test_reference_preserves_two_multiply_rounding_and_refuses_overflow():
+    import os
+    import subprocess
+
+    script = r"""
+import torch
+import torchao.quantization.pt2e
+from merlin.targetgen.core_aten_w8a8_reference import run_pt2e_reference
+
+def model(sa, sb):
+    graph = torch.fx.Graph()
+    a, b = graph.placeholder("a"), graph.placeholder("b")
+    dequant = torch.ops.quantized_decomposed.dequantize_per_tensor.default
+    x = graph.call_function(dequant, (a, sa, 0, -128, 127, torch.int8))
+    y = graph.call_function(dequant, (b, sb, 0, -128, 127, torch.int8))
+    result = graph.call_function(torch.ops.aten.mm.default, (x, y))
+    graph.output(result)
+    return torch.fx.GraphModule({}, graph)
+inputs = (torch.tensor([[3]], dtype=torch.int8), torch.tensor([[5]], dtype=torch.int8))
+sa, sb = 1.6571282148361206, 0.824306309223175
+reference = run_pt2e_reference(model(sa, sb), inputs)
+expected = (torch.tensor(15, dtype=torch.float32) * sa) * sb
+folded = torch.tensor(15, dtype=torch.float32) * torch.tensor(sa * sb, dtype=torch.float32)
+assert expected.item() != folded.item()
+assert reference.output.item() == expected.item()
+try:
+    run_pt2e_reference(model(1e38, 1e-38), inputs)
+except ValueError as exc:
+    assert "finite-input host f32 multiply 1 overflowed to inf" in str(exc)
+else:
+    raise AssertionError("overflow must refuse")
+"""
+    result = subprocess.run(
+        [os.environ["MERLIN_M2M_PYTHON"], "-c", script], capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

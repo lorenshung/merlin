@@ -1161,7 +1161,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
                 from merlin.targetgen.core_aten_w8a8_reference import selected_pt2e_reference
 
                 independent, independent_source = selected_pt2e_reference(
-                    mdl, tuple(inputs), combined_scale=recipe.get("host_scale_product") is not None
+                    mdl, tuple(inputs), declared_readout=recipe.get("host_readout_declarations") is not None
                 )
                 if not all(
                     hasattr(independent, field)
@@ -1172,10 +1172,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
                 independent_error = f"{type(exc).__name__}: {exc}"[:2000]
                 independent = None
         mdl, integerization_receipt = integerize_static_pt2e(mdl, tuple(inputs))
-        if recipe is not None and recipe.get("host_scale_product") is not None:
-            from merlin.capture.integerization import combine_static_readout_scales
-
-            integerization_receipt["combined_scale_products"] = combine_static_readout_scales(mdl)
+        if recipe is not None and recipe.get("host_readout_declarations") is not None:
             if independent is not None:
                 leaves, _ = _output_abi(independent.output)
                 from merlin.targetgen.core_aten_w8a8_reference import write_pt2e_reference

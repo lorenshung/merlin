@@ -7,6 +7,7 @@ Unsupported source operations refuse qualification rather than using compiled an
 from __future__ import annotations
 
 import itertools
+import math
 
 
 def quantize_codes(x, scale, *, quant_min, quant_max):
@@ -346,17 +347,21 @@ def run_pt2e_reference(model, inputs):
                 if maximum > (1 << 31) - 1:
                     raise ValueError("reference i32 prefix overflow")
             acc = acc.to(torch.int32)
-            product = torch.tensor(scales[0] * scales[1], dtype=torch.float32)
-            if not torch.isfinite(product) or product < torch.finfo(torch.float32).tiny:
-                raise ValueError("reference product is not finite normal f32")
-            readout = acc.to(torch.float32) * product
+            readout = acc.to(torch.float32)
+            for ordinal, scale in enumerate(scales, 1):
+                if not math.isfinite(scale):
+                    raise ValueError(f"host readout scale {ordinal} is nonfinite")
+                readout = readout * torch.tensor(scale, dtype=torch.float32)
+                if not torch.isfinite(readout).all():
+                    raise ValueError(f"finite-input host f32 multiply {ordinal} overflowed to inf")
             sites.append(
                 dict(
                     node=node.name,
                     kind=kind,
                     lhs=scales[0],
                     rhs=scales[1],
-                    product=product.item(),
+                    product=scales[0] * scales[1],
+                    readout_order="(f32(acc) * lhs_scale) * rhs_scale",
                     operands=stats,
                     accumulator=acc.tolist(),
                     readout=readout.tolist(),
@@ -386,7 +391,7 @@ def run_pt2e_reference(model, inputs):
     )
 
 
-def selected_pt2e_reference(model, inputs, *, combined_scale):
+def selected_pt2e_reference(model, inputs, *, declared_readout=False):
     """Select the independent reference and bind its actual implementation bytes."""
     import hashlib
     import sys
@@ -394,7 +399,7 @@ def selected_pt2e_reference(model, inputs, *, combined_scale):
 
     from m2m.capture.pt2e_integer_reference import run_pt2e_integer_reference
 
-    run = run_pt2e_reference if combined_scale else run_pt2e_integer_reference
+    run = run_pt2e_reference if declared_readout else run_pt2e_integer_reference
     source = Path(sys.modules[run.__module__].__file__).resolve()
     if not source.is_file():
         raise RuntimeError("selected integer reference source is unavailable")
