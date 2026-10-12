@@ -438,7 +438,8 @@ def rewrite_contractions_to_device(
         conversion_source = catalog_source_conversion(catalog_manifest_data, device)
     candidates = (
         catalog_source_contractions(module, device, conversion_source)
-        if conversion_source is not None else offloadable_contractions(module, device)
+        if conversion_source is not None
+        else offloadable_contractions(module, device)
     )
     if selected_ops is not None and not selected_ops.issubset({op for op, _shape in candidates}):
         raise ValueError("selected operation is not eligible on this device; host fallback must be explicit")
