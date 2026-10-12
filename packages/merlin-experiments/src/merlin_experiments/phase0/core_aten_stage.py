@@ -126,6 +126,8 @@ def selection(recipe: Path) -> tuple[list[dict], dict[str, str]]:
             if len(by_id) != len(corpus["cases"]) or set(wanted) - set(by_id):
                 raise ValueError("selected cases are missing or ambiguous")
             cases = [by_id[key] for key in sorted(wanted)]
+            denominator_sha256 = corpus.get("denominator_sha256")
+            del by_id, corpus
             for case in cases:
                 name = case_capture_name(case).replace("-", "_")
                 if name in identities:
@@ -155,7 +157,7 @@ def selection(recipe: Path) -> tuple[list[dict], dict[str, str]]:
             batches.append(
                 {
                     "cohort": cohort,
-                    "corpus": {"cases": cases, "denominator_sha256": corpus.get("denominator_sha256")},
+                    "corpus": {"cases": cases, "denominator_sha256": denominator_sha256},
                     "captures": str(captures),
                     **({"lane": lane} if "lane" in row else {}),
                 }
