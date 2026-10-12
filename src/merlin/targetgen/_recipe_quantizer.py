@@ -830,6 +830,28 @@ def apply_recipe(
         # node order or tensor shape after quantization.
         exported_program = tuple_selection_trace_program(exported_program)
     exported = exported_program.module()
+    fft_selection = recipe.get("fft_admission_selection")
+    if fft_selection is not None:
+        from m2m.capture.fft_pt2e import FFT_TARGETS, fft_candidates
+
+        from merlin.targetgen.fft_admission import screen_fft_candidates, screen_fft_component_dtype
+
+        for node in exported_program.graph.nodes:
+            if node.op == "call_function" and str(node.target) in FFT_TARGETS:
+                source = node.args[0].meta["val"]
+                reasons = screen_fft_component_dtype(str(source.dtype), source.ndim, fft_selection)
+                if reasons:
+                    raise RecipeError("FFT pre-PT2E admission refused: " + "; ".join(reasons))
+        try:
+            candidates = fft_candidates(exported_program)
+        except ValueError as exc:
+            raise RecipeError(f"FFT pre-PT2E admission refused: {exc}") from exc
+        if candidates:
+            sites = screen_fft_candidates(candidates, fft_selection)
+            reasons = [reason for site in sites for reason in site["reasons"]]
+            if not reasons:
+                reasons = ["candidate replacement and source lineage are not qualified"]
+            raise RecipeError("FFT pre-PT2E admission refused: " + "; ".join(dict.fromkeys(reasons)))
     # The selected frontend owns the semantic rewrite from string-padding
     # Conv2d to the numeric overload TorchAO observes. Apply it to the exact
     # exported graph before either the integral-input check or PT2E folding:

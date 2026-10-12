@@ -52,7 +52,12 @@ def prepare_spec_int8(
             )
         selected = []
     reference = None
-    if selected:
+    needs_fft_preflight = any(
+        record.get("overload") in {"aten._fft_r2c.default", "aten._fft_c2r.default", "aten._fft_c2c.default"}
+        for record in report["cases"]
+        if record["status"] == "bundled"
+    )
+    if selected or needs_fft_preflight:
         (directory / "model.before_spec_int8.mlir").write_bytes(original)
 
         def declaration_keys(site):
@@ -89,6 +94,7 @@ def prepare_spec_int8(
             software_admission=selection["spec"],
             software_numerical_engine="integer_reference",
             host_scale_product=selection["host_scale_product"],
+            fft_admission_selection={key: selection[key] for key in ("spec", "host", "identities")},
         )
         recipe["recipe_sha256"] = digest(recipe)
         try:
@@ -96,14 +102,22 @@ def prepare_spec_int8(
         except M2MUnavailable as exc:
             # Only the proved absence of an eligible frontend operation grants
             # unchanged host fallback. Other capture failures remain failures.
-            if "the model has no operator the recipe's families cover" not in str(exc):
+            fft_marker = "RecipeError: FFT pre-PT2E admission refused: "
+            fft_lines = [line.partition(fft_marker)[2] for line in str(exc).splitlines() if fft_marker in line]
+            fft_refusal = fft_lines[-1] if fft_lines else None
+            if not fft_refusal and "the model has no operator the recipe's families cover" not in str(exc):
                 raise
             for site in selected:
                 site.update(
                     status="refused",
-                    reasons=["no eligible contraction visible to PT2E; decomposition-only contractions stay on host"],
+                    reasons=[
+                        fft_refusal
+                        or "no eligible contraction visible to PT2E; decomposition-only contractions stay on host"
+                    ],
                 )
             selected = []
+            if fft_refusal:
+                plan["fft_refusals"] = [fft_refusal]
         if selected:
             reference_path = Path(artifact.meta["weights_manifest"]).parent / "spec-int8-reference.json"
             reference = json.loads(reference_path.read_text())
