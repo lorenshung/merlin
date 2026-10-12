@@ -91,6 +91,7 @@ def float_reference(mdl, inputs, torch, input_abi, output_abi, to_native) -> dic
     Every RNG this worker seeds is saved and restored around the forward, so a loader whose forward
     draws random numbers produces the same golden afterwards as it would have without this run.
     """
+    import itertools
     import random
 
     import numpy as np
@@ -110,7 +111,14 @@ def float_reference(mdl, inputs, torch, input_abi, output_abi, to_native) -> dic
         with torch.no_grad():
             for value, snapshot, shape, stride, offset in snapshots:
                 value.as_strided_(shape, stride, offset)
-                value.copy_(snapshot)
+                if torch._debug_has_internal_overlap(value) == 0:
+                    value.copy_(snapshot)
+                else:
+                    # The snapshot came from this original address map, so
+                    # repeated addresses carry identical saved scalar bytes.
+                    # Bulk copy refuses valid expanded/padded inputs.
+                    for index in itertools.product(*(range(extent) for extent in shape)):
+                        value[index].copy_(snapshot[index])
         random.setstate(states[0])
         np.random.set_state(states[1])
         torch.set_rng_state(states[2])

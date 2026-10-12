@@ -31,6 +31,7 @@ def restore_caller_layouts(module, original, fresh, semantic_path):
     """Retain source caller storage for inputs and their actual exported post-call observations."""
     from xdsl.dialects.builtin import StringAttr
 
+    from merlin.llvmlower.input_layout import has_overlapping_elements
     from merlin.llvmlower.result_layout import ATTRIBUTE
     from merlin.targetgen.core_aten_batch import _tensor_documents
 
@@ -56,7 +57,12 @@ def restore_caller_layouts(module, original, fresh, semantic_path):
             if entry["shape"] != caller["shape"] or entry["dtype"] != caller["dtype"]:
                 raise ValueError("recaptured mutation changes the caller tensor type")
             entry.update(caller)
-            layout["results"][index] = {**(layout["results"][index] or {}), **caller, "alias_inputs": [ordinal]}
+            # A separate post-call observation can copy an expanded input. Actual
+            # user-result aliases and mutation write-back still require injective
+            # caller storage and retain their ordinary lowering refusal.
+            observation = not mutation and index not in fresh["output_indices"]
+            aliases = [] if observation and has_overlapping_elements(caller) else [ordinal]
+            layout["results"][index] = {**(layout["results"][index] or {}), **caller, "alias_inputs": aliases}
     module.attributes[ATTRIBUTE] = StringAttr(json.dumps(layout, sort_keys=True))
     semantic_path.write_text(json.dumps(boundary, sort_keys=True) + "\n")
 

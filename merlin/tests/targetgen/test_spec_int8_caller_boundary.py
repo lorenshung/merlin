@@ -72,12 +72,14 @@ assert inputs[0].item() == 3
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_normalized_post_descriptor_recovers_caller_layout(tmp_path):
+@pytest.mark.parametrize("stride,offset", [([8, 2], 3), ([0, 1], 0)])
+def test_normalized_post_descriptor_recovers_caller_layout(tmp_path, stride, offset):
     import json
 
     from xdsl.parser import Parser
 
     from merlin.frontends.linalg_mlir import make_context
+    from merlin.llvmlower.input_layout import refuse_overlapping_input_aliases
     from merlin.llvmlower.result_layout import ATTRIBUTE, module_attribute
     from merlin.targetgen.core_aten_numeric import restore_caller_layouts
 
@@ -92,14 +94,28 @@ def test_normalized_post_descriptor_recovers_caller_layout(tmp_path):
     }"""
     )
     module = Parser(make_context(), source).parse_module()
-    caller = {**dense, "kind": "tensor", "stride": [8, 2], "storage_offset": 3}
+    caller = {**dense, "kind": "tensor", "stride": stride, "storage_offset": offset}
     original = dict(case=dict(arguments=dict(args=[caller], kwargs={})))
-    fresh = dict(semantic_boundary=dict(post_indices=[0]))
+    fresh = dict(output_indices=[], semantic_boundary=dict(post_indices=[0]))
     path = tmp_path / "semantic_io.json"
     path.write_text(json.dumps(dict(outputs=[{**dense, "role": "user_output"}])))
     restore_caller_layouts(module, original, fresh, path)
     layout = json.loads(module.attributes[ATTRIBUTE].data)
-    assert layout["inputs"][0]["stride"] == [8, 2]
-    assert layout["results"][0]["stride"] == [8, 2]
-    assert layout["results"][0]["storage_offset"] == 3
-    assert json.loads(path.read_text())["outputs"][0]["stride"] == [8, 2]
+    assert layout["inputs"][0]["stride"] == stride
+    assert layout["results"][0]["stride"] == stride
+    assert layout["results"][0]["storage_offset"] == offset
+    assert json.loads(path.read_text())["outputs"][0]["stride"] == stride
+    refuse_overlapping_input_aliases(layout)
+    if stride[0] == 0:
+        assert layout["results"][0]["alias_inputs"] == []
+        fresh["output_indices"] = [0]
+        restore_caller_layouts(module, original, fresh, path)
+        with pytest.raises(ValueError, match="overlapping logical elements"):
+            refuse_overlapping_input_aliases(json.loads(module.attributes[ATTRIBUTE].data))
+        fresh["output_indices"] = []
+        boundary = json.loads(path.read_text())
+        boundary["outputs"][0]["role"] = "user_input_mutation"
+        path.write_text(json.dumps(boundary))
+        restore_caller_layouts(module, original, fresh, path)
+        with pytest.raises(ValueError, match="overlapping logical elements"):
+            refuse_overlapping_input_aliases(json.loads(module.attributes[ATTRIBUTE].data))

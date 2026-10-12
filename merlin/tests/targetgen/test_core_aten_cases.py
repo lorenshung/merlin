@@ -159,3 +159,25 @@ def test_compiler_adapter_loader_is_self_contained_and_preserves_oracle(name: st
     model, inputs = namespace["get_model_and_inputs"]()
     torch.manual_seed(case["rng_seed"])
     validate_result(case, model(*inputs))
+
+
+@pytest.mark.parametrize("layout", ["transposed", "padded", "sliced_offset", "zero_stride"])
+def test_standalone_capture_loader_preserves_original_argument_storage(layout):
+    torch = pytest.importorskip("torch")
+    from merlin.targetgen.core_aten_cases import case_document_from_arguments
+
+    values = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    tensor = {
+        "transposed": values.T,
+        "padded": torch.arange(24, dtype=torch.float32).reshape(3, 8)[:, ::2],
+        "sliced_offset": torch.arange(28, dtype=torch.float32).reshape(7, 4)[1:4],
+        "zero_stride": values[:1].expand(3, 4),
+    }[layout]
+    case = case_document_from_arguments("aten.clone.default", (tensor,), {})
+    namespace = {}
+    exec(compile(loader_source(case), "<standalone storage loader>", "exec"), namespace)  # noqa: S102
+    model, (actual,) = namespace["get_model_and_inputs"]()
+    assert actual.stride() == tensor.stride()
+    assert actual.storage_offset() == tensor.storage_offset()
+    assert torch.equal(actual, tensor)
+    assert torch.equal(model(actual), tensor.clone())

@@ -257,9 +257,20 @@ def caller_input_storage(source: str, records: list[dict]) -> str:
             raise ValueError("caller tensor count differs from compiled input ABI")
         for document, index, abi in zip(documents, record["input_indices"], record["input_abi"], strict=True):
             shape = list(arguments[index].type.get_shape())
-            if shape != document["shape"] or str(arguments[index].type.element_type) != abi["dtype"]:
+            physical = _physical_abi(abi)
+            if (
+                abi["shape"] != document["shape"]
+                or shape != physical["shape"]
+                or str(arguments[index].type.element_type) != physical["dtype"]
+            ):
                 raise ValueError("legacy caller storage requires an unchanged tensor input ABI")
             inputs[index] = {key: copy.deepcopy(document[key]) for key in ("shape", "stride", "storage_offset")}
+            if abi["dtype"] in _COMPLEX_DTYPES:
+                inputs[index] = dict(
+                    shape=physical["shape"],
+                    stride=[2 * step for step in document["stride"]] + [1],
+                    storage_offset=2 * document["storage_offset"],
+                )
         posts = record["semantic_boundary"]["post_indices"]
         for index, post in zip(record["input_indices"], posts, strict=True):
             if returned.operands[post] is arguments[index]:
@@ -538,9 +549,14 @@ def build_core_aten_batch(
                 layout_results.append(entry)
             for name in returned[len(result_layout["results"]) :]:
                 j = names.index(name)
-                layout_results.append(
-                    {**result_layout["inputs"][j], "alias_inputs": [first_input + j], "role": "user_output"}
-                )
+                from merlin.llvmlower.input_layout import has_overlapping_elements
+
+                # A trailing input observation can copy its logical values into
+                # a matching storage layout. Keep the original borrowed-view
+                # refusal for overlapping inputs; this grants no write-back or
+                # original user-result alias on that storage.
+                aliases = [] if has_overlapping_elements(result_layout["inputs"][j]) else [first_input + j]
+                layout_results.append({**result_layout["inputs"][j], "alias_inputs": aliases, "role": "user_output"})
         else:
             layout_inputs.extend([None] * len(names))
             layout_results.extend([None] * len(returned))

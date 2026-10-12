@@ -53,6 +53,7 @@ def loader_source(case: dict[str, Any]) -> str:
         separators=(",", ":"),
     )
     return f'''"""Generated from the versioned Core ATen case corpus; do not hand-edit."""
+import itertools
 import json
 import torch
 from torch import nn
@@ -86,7 +87,22 @@ def _decode(value, inputs=()):
         span = offset + (1 + sum((n - 1) * s for n, s in zip(shape, stride)) if all(shape) else 0)
         storage = torch.zeros(span, dtype=dtype)
         tensor = storage.as_strided(shape, stride, offset)
-        tensor.copy_(logical)
+        if torch._debug_has_internal_overlap(tensor) == 0:
+            tensor.copy_(logical)
+        else:
+            # Expanded inputs require scalar writes. Repeated physical addresses
+            # must carry identical recorded bytes, including signed zero and NaN.
+            seen = {{}}
+            for index in itertools.product(*(range(extent) for extent in shape)):
+                address = offset + sum(i * step for i, step in zip(index, stride))
+                scalar = logical[index]
+                if address in seen:
+                    previous = seen[address].contiguous().reshape(-1).view(torch.uint8)
+                    current = scalar.contiguous().reshape(-1).view(torch.uint8)
+                    if not torch.equal(previous, current):
+                        raise ValueError("recorded logical values are inconsistent with overlapping strides")
+                seen[address] = scalar
+                storage[address] = scalar
         return tensor.requires_grad_(value["requires_grad"])
     return {{key: _decode(child, inputs) for key, child in value.items()}}
 

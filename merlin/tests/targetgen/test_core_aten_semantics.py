@@ -226,3 +226,24 @@ def test_legacy_input_storage_uses_arguments_without_prescribing_results():
     record["case"]["arguments"]["args"][0]["shape"] = [6]
     with pytest.raises(ValueError, match="unchanged tensor input ABI"):
         caller_input_storage(source, [record])
+
+
+def test_legacy_complex_input_storage_uses_real_imag_component_layout():
+    from merlin.llvmlower.result_layout import read_layout
+    from merlin.targetgen.core_aten_batch import caller_input_storage
+
+    source = """builtin.module {
+      func.func @forward(%x: tensor<3x2x2xf32>) -> tensor<3x2x2xf32> {
+        func.return %x : tensor<3x2x2xf32>
+      }
+    }"""
+    tensor = dict(kind="tensor", shape=[3, 2], stride=[1, 6], storage_offset=4)
+    record = dict(
+        input_indices=[0],
+        input_abi=[dict(dtype="complex<f32>", shape=[3, 2])],
+        semantic_boundary=dict(post_indices=[0]),
+        case=dict(arguments=dict(args=[tensor])),
+    )
+    layout = read_layout(caller_input_storage(source, [record]))
+    expected = dict(shape=[3, 2, 2], stride=[2, 12, 1], storage_offset=8)
+    assert layout == dict(inputs=[expected], results=[expected])

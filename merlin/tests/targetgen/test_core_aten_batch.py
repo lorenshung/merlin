@@ -444,3 +444,68 @@ def test_frontend_layout_contract_is_rebased_with_batch_arguments(tmp_path):
     assert report["output_count"] == 2
     layout = read_layout((bundle / "model.mlir").read_text())
     assert [r["alias_inputs"] for r in layout["results"]] == [[0], [1]]
+
+
+def test_overlapping_input_observation_does_not_grant_borrowed_user_alias(tmp_path):
+    from merlin.llvmlower.input_layout import refuse_overlapping_input_aliases
+    from merlin.llvmlower.result_layout import module_attribute, read_layout
+
+    directory = tmp_path / "captures/fixture"
+    directory.mkdir(parents=True)
+    input_layout = dict(shape=[2, 3], stride=[0, 1], storage_offset=0)
+    output_layout = dict(shape=[2, 3], stride=[3, 1], storage_offset=0, alias_inputs=[])
+    layout = dict(inputs=[input_layout], results=[output_layout])
+    source = (
+        "builtin.module"
+        + module_attribute(layout)
+        + """ {
+      func.func @forward(%x: tensor<2x3xf32>) -> tensor<2x3xf32> {
+        %zero = arith.constant 0.0 : f32
+        %out = tensor.splat %zero : tensor<2x3xf32>
+        func.return %out : tensor<2x3xf32>
+      }
+    }"""
+    )
+    abi = dict(shape=[2, 3], dtype="f32")
+    (directory / "capsule.linalg.mlir").write_text(source)
+    (directory / "capture.json").write_text(
+        json.dumps(
+            dict(
+                capture_meta=dict(
+                    ok=True,
+                    opaque=0,
+                    input_abi=[abi],
+                    output_abi=[abi],
+                    result_contract=dict(
+                        authority="same_conversion_exported_program",
+                        inputs=[dict(input_layout, dtype="float32", requires_grad=False)],
+                        results=[dict(output_layout, dtype="float32", requires_grad=False, role="user_output")],
+                    ),
+                )
+            )
+        )
+    )
+    (directory / "inputs.json").write_text("[[[1, 2, 3], [1, 2, 3]]]")
+    (directory / "golden.json").write_text("[[0, 0, 0], [0, 0, 0]]")
+    bundle = tmp_path / "bundle"
+    build_core_aten_batch(
+        dict(
+            cases=[
+                dict(
+                    overload="fixture",
+                    expected=dict(kind="tensor"),
+                    arguments=dict(args=[dict(input_layout, kind="tensor", dtype="float32", requires_grad=False)]),
+                )
+            ]
+        ),
+        directory.parent,
+        bundle,
+    )
+    actual = read_layout((bundle / "model.mlir").read_text())
+    assert actual["inputs"] == [input_layout]
+    assert actual["results"][1]["stride"] == [0, 1]
+    assert actual["results"][1]["alias_inputs"] == []
+    refuse_overlapping_input_aliases(actual)
+    actual["results"][0] = dict(output_layout, alias_inputs=[0])
+    with pytest.raises(ValueError, match="overlapping logical elements"):
+        refuse_overlapping_input_aliases(actual)
