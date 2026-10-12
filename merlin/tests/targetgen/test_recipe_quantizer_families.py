@@ -277,3 +277,29 @@ assert torch.equal(actual.contiguous().view(torch.int32), reference.output.conti
 """
     result = subprocess.run([python, "-c", script, operation], capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr[-5000:]
+
+
+def test_pt2e_helper_does_not_mutate_torch_globals():
+    python = os.environ["MERLIN_M2M_PYTHON"]
+    script = r"""
+import torch
+from merlin.targetgen._recipe_quantizer import apply_recipe
+legacy = torch.ao.quantization
+sentinel = object()
+before = getattr(legacy, "allow_exported_model_train_eval", sentinel)
+recipe = {
+    "schema": "quant_recipe_v1", "status": "derived", "families": ["contraction"],
+    "weight": {"dtype": "int8", "granularity": "tensor", "symmetric": True,
+               "quant_min": -127, "quant_max": 127},
+    "activation": {"dtype": "int8", "granularity": "tensor", "symmetric": True,
+                   "quant_min": -128, "quant_max": 127, "mode": "static"},
+}
+class Model(torch.nn.Module):
+    def forward(self, a, b):
+        return a @ b
+model = apply_recipe(Model().eval(), recipe, example_inputs=(torch.ones(2, 3), torch.ones(3, 2)))
+assert getattr(legacy, "allow_exported_model_train_eval", sentinel) is before
+model.eval()
+"""
+    result = subprocess.run([python, "-c", script], capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr

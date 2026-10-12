@@ -925,16 +925,8 @@ def apply_recipe(
     except Exception:  # noqa: BLE001 -- an optional tidy-up; the graph is correct without it
         pass
     try:
-        try:
-            from torchao.quantization.pt2e import allow_exported_model_train_eval
-        except (ImportError, AttributeError):  # Older Torch/TorchAO versions.
-            from torch.ao.quantization import allow_exported_model_train_eval
+        from m2m.capture.pt2e_compat import allow_exported_model_train_eval
 
-        # Older selected frontends still import the public helper from Torch.
-        import torch.ao.quantization as legacy_pt2e
-
-        if not hasattr(legacy_pt2e, "allow_exported_model_train_eval"):
-            legacy_pt2e.allow_exported_model_train_eval = allow_exported_model_train_eval
         allow_exported_model_train_eval(quantized)
     except (ImportError, AttributeError):
         pass
