@@ -86,7 +86,45 @@ def prepare_spec_int8(
 
     selection = select_spec(target, facts, software_spec, host_capabilities)
     original = (directory / "model.mlir").read_bytes()
+    preparation = provider.prepare_bundle(directory, target=target, facts=facts) if provider is not None else {}
     module = parse_mlir_file(directory / "model.mlir")
+    from merlin.kernels.shapes import observe_contractions
+
+    native = any(shape.dtypes == ("i8", "i8", "i32") for _, shape in observe_contractions(module))
+    if native:
+        plan = admission_plan(module, selection, native=True)
+        selected = [site for site in plan["sites"] if site["status"] == "admitted"]
+        plan["native_contractions"] = len(selected)
+        plan["source_preparation"] = preparation
+        if selected:
+            from xdsl.dialects.builtin import StringAttr
+
+            contractions = dict((list(module.walk()).index(op), op) for op, _ in observe_contractions(module))
+            for site in selected:
+                op = contractions[site["source_operation_ordinal"]]
+                step = next(row for row in site["steps"] if row["step"] == 3)
+                op.attributes["prov.declarations"] = StringAttr(json.dumps({"software": step["software"]["declaration"]}))
+                op.attributes["prov.region_id"] = StringAttr(f"native_int8_contraction_{site['source_operation_ordinal']}")
+                op.attributes["prov.operand_load"] = StringAttr("transfer_contracts.operand_load")
+                op.attributes["prov.accumulator_readout"] = StringAttr("transfer_contracts.accumulator_readout")
+            proof = provider.admit_numeric_schedule(str(module), package=package, numeric_policy=selection["spec"])
+            plan["schedule_proof"] = proof
+            from merlin.targetgen.core_aten_batch_grade import _DTYPES, _complex_values, _leaves
+
+            for record in report["cases"]:
+                if record["status"] != "bundled":
+                    continue
+                expected = {}
+                for index, abi, document in zip(record["output_indices"], record["output_abi"], _leaves(record["case"]["expected"]), strict=True):
+                    expected[str(index)] = np.asarray(_complex_values(document["values"]), dtype=_DTYPES[abi["dtype"]]).tobytes().hex()
+                plan["integer_reference"] = dict(status="prepared", engine="native ATen integer oracle; modular widening proof", expected_output_bytes=expected)
+                plan["host_int8_narrowing"] = any(abi["dtype"] == "i8" for abi in record["output_abi"])
+            (directory / "model.mlir").write_text(str(module) + "\n")
+        document = {"selection": selection, **plan}
+        (directory / "spec-int8-admission.json").write_text(json.dumps(document, indent=2) + "\n")
+        for record in report["cases"]:
+            record.update(numeric_admission=plan, numeric_selection=selection["identities"])
+        return document
     plan = admission_plan(module, selection)
     plan["source_sha256_before"] = hashlib.sha256(original).hexdigest()
     selected = [site for site in plan["sites"] if site["status"] == "admitted"]

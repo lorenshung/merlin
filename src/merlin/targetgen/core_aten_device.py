@@ -242,7 +242,7 @@ def run_spike_bundle(
                     preparation = prepare(directory, target=target, facts=facts)
                     report["source_preparation"] = preparation
                     bundled[0]["source_preparation"] = preparation
-                if numeric_policy == "spec_int8" and not report["numeric_preparation"]["quantized_contractions"]:
+                if numeric_policy == "spec_int8" and not (report["numeric_preparation"]["quantized_contractions"] or report["numeric_preparation"].get("native_contractions", 0)):
                     plan = report["numeric_preparation"]
                     reason = "; ".join(dict.fromkeys(reason for site in plan["sites"] for reason in site["reasons"]))
                     reason = reason or "no contraction in captured source; original host execution retained"

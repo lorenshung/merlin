@@ -130,7 +130,7 @@ def pipeline_refusals(selection):
     return reasons
 
 
-def admission_plan(module, selection, *, captured=False):
+def admission_plan(module, selection, *, captured=False, native=False):
     """Independently screen all six steps at each source contraction's actual ranks."""
     from merlin.kernels.shapes import observe_contractions, zero_initialised
     from merlin.llvmlower.contraction_quantization import closed_float_mac
@@ -141,7 +141,7 @@ def admission_plan(module, selection, *, captured=False):
     sites = []
     for op, shape in observe_contractions(module):
         rank = len(op.results[0].type.get_shape())
-        steps, reasons = [], pipeline_refusals(selection)
+        steps, reasons = [], pipeline_refusals(selection) if not native else []
 
         def screen(step, name, signature, placement="host"):
             row = {"step": step, "op": name, "signature": signature}
@@ -161,14 +161,15 @@ def admission_plan(module, selection, *, captured=False):
                     )
             steps.append(row)
 
-        for src in op.operands[:2]:
-            screen(
-                1,
-                QUANTIZE,
-                host_signature(
-                    QUANTIZE, len(src.type.get_shape()), {"zero_point": 0, "quant_min": -128, "quant_max": 127}
-                ),
-            )
+        if not native:
+            for src in op.operands[:2]:
+                screen(
+                    1,
+                    QUANTIZE,
+                    host_signature(
+                        QUANTIZE, len(src.type.get_shape()), {"zero_point": 0, "quant_min": -128, "quant_max": 127}
+                    ),
+                )
         transfers = spec.get("transfer_contracts", {})
         for step, key, source, destination, dtype, ranks in (
             (2, "operand_load", "host", "accelerator", "int8", [len(v.type.get_shape()) for v in op.operands[:2]]),
@@ -221,71 +222,73 @@ def admission_plan(module, selection, *, captured=False):
             aliasing="disjoint_inputs_outputs",
         )
         screen(3, "contraction", signature, "accelerator")
-        screen(
-            5,
-            "aten._to_copy.default",
-            dict(
-                family="elementwise_map",
-                ordered_operand_dtypes=["i32", "f32"],
-                ordered_result_dtypes=["f32"],
-                operand_dtype="i32",
-                rank=rank,
-            ),
-        )
-        cast_decision = steps[-1]["host"]
-        cast_key = cast_decision.get("declaration", "host_i32_to_f32_cast")
-        cast_declaration = next((r for r in host["operations"] if r["id"] == cast_key), {})
-        contract = cast_declaration.get("numerical_contract", {})
-        exact_range = contract.get("semantics", {}).get("exact_range", "")
-        location = declaration_location(selection, "host", cast_key, ("numerical_contract", "semantics", "exact_range"))
-        prefix, separator, exponent = exact_range.partition("|x| <= 2^")
-        exact_limit = 2 ** int(exponent) if separator and not prefix and exponent.isdecimal() else None
-        operand_ranges = [row["signature"]["quantization_parameters"] for row in steps if row["step"] == 1]
-        cast_bound = math.prod(shape.reduction) * math.prod(
-            max(abs(r["quant_min"]), abs(r["quant_max"])) for r in operand_ranges
-        )
-        cast_obligation = dict(
-            full_k=math.prod(shape.reduction),
-            operand_ranges=operand_ranges,
-            max_abs_bound=cast_bound,
-            exact_limit=exact_limit,
-            source=location,
-        )
-        if contract.get("status") != "reviewed" or exact_limit is None or cast_bound > exact_limit:
-            reasons.append(
-                f"step 5 {location.get('path', '')}:{location.get('line', '')} {cast_key}: "
-                f"accumulator bound {cast_bound} exceeds or lacks declared exact_range {exact_range!r}"
+        cast_obligation = None
+        if not native:
+            screen(
+                5,
+                "aten._to_copy.default",
+                dict(
+                    family="elementwise_map",
+                    ordered_operand_dtypes=["i32", "f32"],
+                    ordered_result_dtypes=["f32"],
+                    operand_dtype="i32",
+                    rank=rank,
+                ),
             )
-        screen(
-            6,
-            "aten.mul.Tensor",
-            dict(
-                family="elementwise_map",
-                ordered_operand_dtypes=["f32", "f32", "f32"],
-                ordered_result_dtypes=["f32"],
-                operand_dtype="f32",
-                rank=rank,
-            ),
-        )
-        steps[-1]["readout_multiply"] = 1
-        screen(
-            6,
-            "aten.mul.Tensor",
-            dict(
-                family="elementwise_map",
-                ordered_operand_dtypes=["f32", "f32", "f32"],
-                ordered_result_dtypes=["f32"],
-                operand_dtype="f32",
-                rank=rank,
-            ),
-        )
-        steps[-1]["readout_multiply"] = 2
-        expected = ("i8", "i8", "i32") if captured else ("f32", "f32", "f32")
+            cast_decision = steps[-1]["host"]
+            cast_key = cast_decision.get("declaration", "host_i32_to_f32_cast")
+            cast_declaration = next((r for r in host["operations"] if r["id"] == cast_key), {})
+            contract = cast_declaration.get("numerical_contract", {})
+            exact_range = contract.get("semantics", {}).get("exact_range", "")
+            location = declaration_location(selection, "host", cast_key, ("numerical_contract", "semantics", "exact_range"))
+            prefix, separator, exponent = exact_range.partition("|x| <= 2^")
+            exact_limit = 2 ** int(exponent) if separator and not prefix and exponent.isdecimal() else None
+            operand_ranges = [row["signature"]["quantization_parameters"] for row in steps if row["step"] == 1]
+            cast_bound = math.prod(shape.reduction) * math.prod(
+                max(abs(r["quant_min"]), abs(r["quant_max"])) for r in operand_ranges
+            )
+            cast_obligation = dict(
+                full_k=math.prod(shape.reduction),
+                operand_ranges=operand_ranges,
+                max_abs_bound=cast_bound,
+                exact_limit=exact_limit,
+                source=location,
+            )
+            if contract.get("status") != "reviewed" or exact_limit is None or cast_bound > exact_limit:
+                reasons.append(
+                    f"step 5 {location.get('path', '')}:{location.get('line', '')} {cast_key}: "
+                    f"accumulator bound {cast_bound} exceeds or lacks declared exact_range {exact_range!r}"
+                )
+            screen(
+                6,
+                "aten.mul.Tensor",
+                dict(
+                    family="elementwise_map",
+                    ordered_operand_dtypes=["f32", "f32", "f32"],
+                    ordered_result_dtypes=["f32"],
+                    operand_dtype="f32",
+                    rank=rank,
+                ),
+            )
+            steps[-1]["readout_multiply"] = 1
+            screen(
+                6,
+                "aten.mul.Tensor",
+                dict(
+                    family="elementwise_map",
+                    ordered_operand_dtypes=["f32", "f32", "f32"],
+                    ordered_result_dtypes=["f32"],
+                    operand_dtype="f32",
+                    rank=rank,
+                ),
+            )
+            steps[-1]["readout_multiply"] = 2
+        expected = ("i8", "i8", "i32") if captured or native else ("f32", "f32", "f32")
         if shape.dtypes != expected:
             reasons.append(f"source dtype {shape.dtypes} is not {expected}")
-        closed = closed_integer_mac(op) if captured else closed_float_mac(op)
+        closed = closed_integer_mac(op) if captured or native else closed_float_mac(op)
         if not closed or not zero_initialised(op):
-            reasons.append("source is not a closed unflagged from-zero float MAC")
+            reasons.append("source is not a closed unflagged from-zero MAC")
         try:
             bound = integer_split_k_limit(spec, tile_dim=1, full_k=shape.reduction[0])
             if bound is None:
