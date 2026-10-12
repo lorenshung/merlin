@@ -358,6 +358,41 @@ def admission_plan(module, selection, *, captured=False):
     )
 
 
+def host_readout_chain(contraction):
+    """Require direct SSA edges and closed cast/multiply bodies, with no intervening arithmetic/views."""
+    from xdsl.dialects import arith
+    from xdsl.dialects.linalg.ops import GenericOp, YieldOp
+
+    def reader(value, operation_type, arity):
+        candidates = []
+        for use in value.uses:
+            op = use.operation
+            if not isinstance(op, GenericOp) or len(op.results) != 1 or op.operands[0] is not value:
+                continue
+            block = op.body.block
+            if len(block.args) != arity + 1 or len(block.ops) != 2:
+                continue
+            math, yielded = list(block.ops)
+            if (
+                not isinstance(math, operation_type)
+                or tuple(math.operands) != tuple(block.args[:arity])
+                or not isinstance(yielded, YieldOp)
+                or tuple(yielded.operands) != (math.results[0],)
+            ):
+                continue
+            if isinstance(math, arith.MulfOp) and math.fastmath.data:
+                continue
+            candidates.append(op)
+        if len(candidates) != 1:
+            raise ValueError("integer readout requires a unique closed direct cast and two f32 multiplies")
+        return candidates[0]
+
+    cast = reader(contraction.results[0], arith.SIToFPOp, 1)
+    first = reader(cast.results[0], arith.MulfOp, 2)
+    second = reader(first.results[0], arith.MulfOp, 2)
+    return cast, first, second
+
+
 def closed_integer_mac(op):
     """Only signed i8 extensions and a closed, unflagged i32 multiply/add."""
     from xdsl.dialects import arith

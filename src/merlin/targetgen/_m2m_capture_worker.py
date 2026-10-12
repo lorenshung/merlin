@@ -1071,8 +1071,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
     )
     agreement = None
     if recipe is not None:
-        # THE TARGET'S OWN QUANTIZATION. The recipe was derived from what the hardware's readout
-        # holds; the quantizer that realises it is generic and lives beside this worker.
+        # Realize the target-derived recipe in the capture interpreter.
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import _recipe_quantizer as RQ
         from m2m.capture.torchao_pipeline import QuantizationConfig
@@ -1093,24 +1092,30 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
             reference = copy.deepcopy(mdl)  # quantize_ mutates in place
         import copy
 
-        mdl = RQ.apply_recipe(
-            mdl,
-            recipe,
-            example_inputs=copy.deepcopy(tuple(inputs)),
-            calibration_inputs=copy.deepcopy(calibration),
-            original_frontend_snapshot=original_snapshot if trace_supported else None,
-            source_layer_inventory=source_layer_inventory,
-        )
+        try:
+            mdl = RQ.apply_recipe(
+                mdl,
+                recipe,
+                example_inputs=copy.deepcopy(tuple(inputs)),
+                calibration_inputs=copy.deepcopy(calibration),
+                original_frontend_snapshot=original_snapshot if trace_supported else None,
+                source_layer_inventory=source_layer_inventory,
+            )
+        except RQ.NoEligibleRecipeOperations as exc:
+            (out / "refusal.json").write_text(
+                json.dumps(
+                    {"schema": "merlin.capture.refusal.v1", "code": "no_eligible_recipe_operations", "reason": str(exc)}
+                )
+                + "\n"
+            )
+            return 4
         quant_stats = getattr(mdl, "_recipe_quantization_stats", None)
         if fp32_staging is not None:
             fp32_staging["source_layer_plan_sha256"] = (
                 quant_stats.get("plan_sha256") if isinstance(quant_stats, dict) else None
             )
-        # The receipt: the recipe-quantized model against the floating-point one, on the
-        # calibration stream and the capture input. Recorded, not judged here.
+        # Diagnostic agreement on owned samples, independently of correctness.
         agreement = RQ.agreement(reference, mdl, [tuple(inputs), *(calibration or [])])
-        # The capture library is told which lowering family this graph is, and that the
-        # quantization is already applied; the numbers are the recipe's.
         formats = {str(recipe[part]["dtype"]) for part in ("activation", "weight")}
         if formats == {"int8"}:
             provenance_scheme = "int8_static_act_int8_weight" if static else "int8_dyn_act_int8_weight"
@@ -1144,10 +1149,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
         quant_stats = getattr(mdl, "_m2m_quantization_stats", None)
     integerization_receipt = None
     if q is not None and q.scheme == "int8_static_act_int8_weight" and not a.already_quantized:
-        # Account for every selected PT2E contraction: genuine integer work or
-        # an explicitly preserved non-FP32 floating Q/DQ operation. Preserving
-        # precision is not accelerator/host admission. The independent reference
-        # compares the complete output and counts only genuine integer work.
+        # Independently account for integer and preserved-float contractions.
         from merlin.capture.integerization import integerize_static_pt2e
 
         selected_engine = recipe.get("software_numerical_engine") if recipe is not None else None
@@ -1268,9 +1270,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
         act_census = AC.install(mdl)
     nl_census = None
     if a.integer_nonlinear:
-        # THE NONLINEAR LAYERS BETWEEN THE CONTRACTIONS, in integer arithmetic. Defined only on top of the
-        # int8 contractions (the softmax's int8 numerators are the next contraction's own operand), so it
-        # is refused without them rather than mixed into a floating-point program.
+        # Install the selected integer nonlinear layers over integer contractions.
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import _integer_nonlinear as NL
 

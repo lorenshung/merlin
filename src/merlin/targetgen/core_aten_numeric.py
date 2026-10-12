@@ -76,7 +76,7 @@ def prepare_spec_int8(
     import hashlib
 
     from merlin.frontends.linalg_mlir import parse_mlir_file
-    from merlin.targetgen.core_aten_spec_int8 import admission_plan, select_spec
+    from merlin.targetgen.core_aten_spec_int8 import admission_plan, host_readout_chain, select_spec
 
     selection = select_spec(target, facts, software_spec, host_capabilities)
     original = (directory / "model.mlir").read_bytes()
@@ -119,7 +119,7 @@ def prepare_spec_int8(
 
             return dict(quantize=key(1), contraction=key(3), cast=key(5), mul=key(6))
 
-        from merlin.targetgen.capsule_source import M2MUnavailable, PytorchRefSource
+        from merlin.targetgen.capsule_source import NoEligibleCaptureOperations, PytorchRefSource
         from merlin.targetgen.core_aten_batch import build_core_aten_batch
         from merlin.targetgen.core_aten_capture import case_capture_name, loader_source
         from merlin.targetgen.quant_recipe import digest
@@ -143,11 +143,8 @@ def prepare_spec_int8(
         recipe["recipe_sha256"] = digest(recipe)
         try:
             artifact = PytorchRefSource().capture_loader(loader, "int8", recipe=recipe, workdir=capture_dir / "work")
-        except M2MUnavailable as exc:
-            # Only the proved absence of an eligible frontend operation grants
-            # unchanged host fallback. Other capture failures remain failures.
-            if "the model has no operator the recipe's families cover" not in str(exc):
-                raise
+        except NoEligibleCaptureOperations:
+            # Only this frontend-proved refusal grants original host fallback.
             for site in selected:
                 site.update(
                     status="refused",
@@ -192,28 +189,7 @@ def prepare_spec_int8(
             contractions = [op for op, _ in observe_contractions(module)]
             for site, contraction in zip(selected, contractions, strict=True):
                 # Readout preserves two separately rounded frontend f32 multiplies.
-                casts = [
-                    u.operation
-                    for u in contraction.results[0].uses
-                    if any(o.name == "arith.sitofp" for o in u.operation.walk())
-                ]
-                if len(casts) != 1:
-                    raise ValueError("captured contraction lacks a unique host i32 cast")
-                cast = casts[0]
-                readouts = [
-                    u.operation for u in cast.results[0].uses if any(o.name == "arith.mulf" for o in u.operation.walk())
-                ]
-                if len(readouts) != 1:
-                    raise ValueError("captured host cast lacks a unique scale multiply")
-                first_readout = readouts[0]
-                readouts = [
-                    u.operation
-                    for u in first_readout.results[0].uses
-                    if any(o.name == "arith.mulf" for o in u.operation.walk())
-                ]
-                if len(readouts) != 1:
-                    raise ValueError("captured readout lacks the second frontend scale multiply")
-                readout = readouts[0]
+                cast, first_readout, readout = host_readout_chain(contraction)
                 site["host_readout_operation_ordinals"] = [
                     list(module.walk()).index(o) for o in (first_readout, readout)
                 ]

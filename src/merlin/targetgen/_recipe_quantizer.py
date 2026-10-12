@@ -44,6 +44,10 @@ class RecipeError(ValueError):
     """The recipe cannot be realised with this framework build; says which field and why."""
 
 
+class NoEligibleRecipeOperations(RecipeError):
+    """The frontend proved that no operation is eligible for this recipe."""
+
+
 def _require(recipe: Mapping[str, Any]) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
     if recipe.get("schema") != RECIPE_SCHEMA:
         raise RecipeError(f"unsupported recipe schema {recipe.get('schema')!r}")
@@ -574,7 +578,7 @@ def build_quantizer(
             # covers was refused with a message saying its families were not covered -- which was
             # false, and pointed a reader at the model rather than at this table.
             if self.annotated + self.annotated_sums + self.annotated_means == 0:
-                raise RecipeError(
+                raise NoEligibleRecipeOperations(
                     f"the model has no operator the recipe's families cover "
                     f"(families={list(listed)}; annotated contractions=0, sums=0, means=0)"
                 )

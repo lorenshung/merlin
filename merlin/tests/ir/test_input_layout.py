@@ -172,8 +172,8 @@ def test_input_address_injectivity(shape, strides, overlap):
 
 
 def test_probe_partial_mutation_capsule_refuses(tmp_path):
-    import m2m
-    import torch
+    torch = pytest.importorskip("torch", reason="Torch layout checks run under MERLIN_M2M_PYTHON")
+    m2m = pytest.importorskip("m2m", reason="Model2MLIR layout checks run under MERLIN_M2M_PYTHON")
     import yaml
 
     spec = yaml.safe_load(
@@ -194,8 +194,8 @@ def test_probe_partial_mutation_capsule_refuses(tmp_path):
 
 
 def test_nonzero_overlapping_strides_refuse_borrowed_return(tmp_path):
-    import m2m
-    import torch
+    torch = pytest.importorskip("torch", reason="Torch layout checks run under MERLIN_M2M_PYTHON")
+    m2m = pytest.importorskip("m2m", reason="Model2MLIR layout checks run under MERLIN_M2M_PYTHON")
 
     class Model(torch.nn.Module):
         def forward(self, x):

@@ -321,8 +321,12 @@ open(sys.argv[1], "w").write(text)
     )
     assert all(site["status"] == "admitted" for site in plan["sites"]), plan
     from merlin.kernels.shapes import observe_contractions
+    from merlin.targetgen.core_aten_spec_int8 import host_readout_chain
 
     for contraction, _ in observe_contractions(module):
+        cast, first, second = host_readout_chain(contraction)
+        assert first.operands[0] is cast.results[0]
+        assert second.operands[0] is first.results[0]
         casts = [use.operation for use in contraction.results[0].uses]
         assert len(casts) == 1
         assert [op.name for op in casts[0].body.block.ops] == ["arith.sitofp", "linalg.yield"]
@@ -330,6 +334,11 @@ open(sys.argv[1], "w").write(text)
         assert [op.name for op in readout.body.block.ops] == ["arith.mulf", "linalg.yield"]
         second = next(iter(readout.results[0].uses)).operation
         assert [op.name for op in second.body.block.ops] == ["arith.mulf", "linalg.yield"]
+
+    malformed = Parser(make_context(), path.read_text().replace("arith.mulf", "arith.addf")).parse_module()
+    for contraction, _ in observe_contractions(malformed):
+        with pytest.raises(ValueError, match="unique closed direct cast"):
+            host_readout_chain(contraction)
 
 
 @pytest.mark.parametrize("authority,key", [("spec", "host_f32_elementwise"), ("host", "host_f32_elementwise_exact")])

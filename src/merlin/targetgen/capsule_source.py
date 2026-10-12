@@ -126,6 +126,10 @@ class M2MUnavailable(RuntimeError):
     """The m2m venv (torch) or the model2MLIR repo could not be located/run — fail closed, never fake."""
 
 
+class NoEligibleCaptureOperations(M2MUnavailable):
+    """A typed frontend refusal permits preserving the original host graph."""
+
+
 def _require_integer_contraction(program: str, *, scheme: str | None, recipe: dict | None) -> None:
     """A W8A8 declaration is not evidence of an integer datapath.
 
@@ -1215,6 +1219,8 @@ class PytorchRefSource:
         # cannot inherit the previous attempt's success.
         meta_p = workdir / "meta.json"
         meta_p.unlink(missing_ok=True)
+        refusal_path = workdir / "refusal.json"
+        refusal_path.unlink(missing_ok=True)
         proc = self._launch_worker(
             cmd,
             env=env,
@@ -1229,16 +1235,16 @@ class PytorchRefSource:
             declared_env=declared_env,
             interpreter=interpreter,
         )
-        # ⚠️ A NON-ZERO RC IS NOT NECESSARILY A CRASH, and treating it as one threw away the
-        # diagnosis. The worker returns 3 for "ran fine, but the program is not clean" -- and it
-        # WRITES meta.json with `opaque` and `opaque_detail` before doing so. This branch fired first
-        # on rc=3 and dumped the stderr tail, which for a torch export is a wall of warnings, while
-        # the block just below already had the useful message. Measured on the lstmnetvit roster model
-        # at W8A8: the real answer is opaque ops from un-inlined torchAO quantization calls, and what
-        # got reported was an LSTM `_flat_weights` contiguity notice.
-        #
-        # So the stderr path is now for a worker that produced NO diagnosis at all; if meta.json
-        # exists the worker reached its own verdict and that verdict is what to report.
+        if proc.returncode == 4 and refusal_path.is_file():
+            refusal = json.loads(refusal_path.read_text())
+            if (
+                refusal.get("schema") == "merlin.capture.refusal.v1"
+                and refusal.get("code") == "no_eligible_recipe_operations"
+                and isinstance(refusal.get("reason"), str)
+            ):
+                raise NoEligibleCaptureOperations(refusal["reason"])
+        # A diagnosed capture failure can still write meta.json. Preserve that
+        # verdict; use stderr only when the worker produced no structured result.
         if not meta_p.exists():
             # ⚠️ REPORT THE CAUSE, NOT THE TAIL. This used to print `stderr[-1500:]`, and a capture
             # that emits warnings AFTER its traceback therefore reported the warnings. Measured on

@@ -93,7 +93,11 @@ class TestValidateCountsEveryFamilyItAnnotates:
             ast.unparse(node.test)
             for node in ast.walk(tree)
             if isinstance(node, ast.If)
-            and any(isinstance(raise_, ast.Raise) and "RecipeError" in ast.unparse(raise_) for raise_ in ast.walk(node))
+            and any(
+                isinstance(raise_, ast.Raise)
+                and any(name in ast.unparse(raise_) for name in ("RecipeError", "NoEligibleRecipeOperations"))
+                for raise_ in ast.walk(node)
+            )
             and "annotated" in ast.unparse(node.test)
         ]
         assert guards, "no RecipeError guard reading an annotation counter was found"
@@ -218,7 +222,6 @@ import sys
 import torch
 from merlin.targetgen import _recipe_quantizer as quant
 from merlin.targetgen.core_aten_w8a8_reference import run_pt2e_reference
-from merlin.capture.integerization import combine_static_readout_scales
 from merlin.capture.integerization import integerize_static_pt2e
 recipe = {
     "schema": "quant_recipe_v1", "status": "derived", "families": ["contraction"],
@@ -268,8 +271,8 @@ converted = quant.apply_recipe(model, recipe, example_inputs=inputs,
                                source_layer_inventory=quant.layer_inventory(model))
 reference = run_pt2e_reference(converted, inputs)
 integer, receipt = integerize_static_pt2e(converted, inputs)
-products = combine_static_readout_scales(integer)
-assert len(products) == reference.contraction_count == (2 if operation == "attention" else 1)
+expected_count = 2 if operation == "attention" else 1
+assert receipt["quantized_contractions_integerized"] == reference.contraction_count == expected_count
 actual = integer(*inputs)
 assert actual.dtype == reference.output.dtype == torch.float32
 assert actual.stride() == model(*inputs).stride()
