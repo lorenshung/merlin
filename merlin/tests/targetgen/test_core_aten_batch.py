@@ -446,7 +446,7 @@ def test_frontend_layout_contract_is_rebased_with_batch_arguments(tmp_path):
     assert [r["alias_inputs"] for r in layout["results"]] == [[0], [1]]
 
 
-def test_overlapping_input_observation_does_not_grant_borrowed_user_alias(tmp_path):
+def test_overlapping_input_observation_borrows_readonly_storage(tmp_path):
     from merlin.llvmlower.input_layout import refuse_overlapping_input_aliases
     from merlin.llvmlower.result_layout import module_attribute, read_layout
 
@@ -504,8 +504,10 @@ def test_overlapping_input_observation_does_not_grant_borrowed_user_alias(tmp_pa
     actual = read_layout((bundle / "model.mlir").read_text())
     assert actual["inputs"] == [input_layout]
     assert actual["results"][1]["stride"] == [0, 1]
-    assert actual["results"][1]["alias_inputs"] == []
+    assert actual["results"][1]["alias_inputs"] == [0]
     refuse_overlapping_input_aliases(actual)
     actual["results"][0] = dict(output_layout, alias_inputs=[0])
+    refuse_overlapping_input_aliases(actual)
+    actual["results"][0].update(role="user_input_mutation", input_index=0)
     with pytest.raises(ValueError, match="overlapping logical elements"):
         refuse_overlapping_input_aliases(actual)

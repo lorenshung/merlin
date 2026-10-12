@@ -78,6 +78,7 @@ def _apply_result_layout(module, contract):
             "memref.subview",
             "memref.expand_shape",
             "memref.collapse_shape",
+            "memref.transpose",
         ):
             value = owner_operation(value).operands[0]
         return value
@@ -208,7 +209,23 @@ def _apply_result_layout(module, contract):
                     for i, r in enumerate(records)
                     if r and not r.get("alias_inputs") and r.get("alias_results") and r["alias_results"][0] == ordinal
                 ]
-                if list(actual_strides) == strides and actual_offset == offset and not peers:
+                allocation = root(value)
+                # Bufferization may forward a value-semantic identity directly
+                # from an argument or coalesce equal results. A frontend result
+                # with no alias relationship still needs its own storage class.
+                prior_roots = [root(v) for v in rewritten]
+                known_roots = all(
+                    isinstance(v.owner, ir.Block)
+                    or (isinstance(owner_operation(v), ir.Operation) and owner_operation(v).name == "memref.alloc")
+                    for v in prior_roots
+                )
+                distinct = (
+                    isinstance(owner_operation(allocation), ir.Operation)
+                    and owner_operation(allocation).name == "memref.alloc"
+                    and known_roots
+                    and allocation not in prior_roots
+                )
+                if list(actual_strides) == strides and actual_offset == offset and not peers and distinct:
                     rewritten.append(value)
                     continue
                 # A fresh alias class needs the union of all returned address

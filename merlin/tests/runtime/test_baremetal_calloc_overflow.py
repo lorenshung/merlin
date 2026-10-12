@@ -53,8 +53,13 @@ int main(int argc,char **argv) {
   for(size_t i=0;i<14;i++)assert(p[i]==0);
   for(size_t i=14;i<sizeof(storage);i++)assert(storage[i]==0x3c);
   memcpy(before,storage,sizeof(storage));
-  assert(checked_calloc(0,SIZE_MAX)!=NULL);
-  assert(checked_calloc(SIZE_MAX,0)!=NULL);
+  void *empty0=checked_calloc(0,SIZE_MAX);
+  void *empty1=checked_calloc(SIZE_MAX,0);
+  void *empty2=checked_malloc(0);
+  void *empty3=checked_aligned_alloc(64,0);
+  void *next=checked_malloc(1);
+  assert(empty0 && empty1 && empty2 && empty3 && next);
+  assert(empty0!=empty1 && empty1!=empty2 && empty2!=empty3 && empty3!=next);
   assert(!memcmp(before,storage,sizeof(storage)));return 0;
  }
  volatile size_t count=mode==1?SIZE_MAX/2+1:SIZE_MAX;

@@ -21,7 +21,7 @@ class Descriptor(ctypes.Structure):
     ]
 
 
-def execute(tmp_path, result, *, dynamic=False, extent=4):
+def execute(tmp_path, result, *, dynamic=False, extent=4, passthrough=False):
     if not m2m_python().is_file():
         pytest.skip("native MLIR interpreter unavailable")
     import hashlib
@@ -35,6 +35,8 @@ def execute(tmp_path, result, *, dynamic=False, extent=4):
         if dynamic
         else f"%b = tensor.empty() : tensor<{shape}xf32>"
     )
+    if passthrough:
+        body = f"%b = tensor.cast %a : tensor<{extent}x5xf32> to tensor<{shape}xf32>"
     source = (
         "builtin.module"
         + module_attribute(contract)
@@ -107,6 +109,75 @@ def test_dynamic_fresh_result_is_physically_column_major(tmp_path, extent):
     pointer = ctypes.cast(output.aligned, ctypes.POINTER(ctypes.c_float))
     actual = [[pointer[output.offset + i + extent * j] for j in range(5)] for i in range(extent)]
     np.testing.assert_array_equal(np.asarray(actual).reshape(extent, 5), values)
+    ctypes.CDLL(None).free(ctypes.c_void_p(output.allocated))
+
+
+def test_fresh_identity_result_cannot_borrow_caller_storage(tmp_path):
+    values, output = execute(
+        tmp_path,
+        dict(shape=[4, 5], stride=[5, 1], storage_offset=0, alias_inputs=[], role="user_output"),
+        passthrough=True,
+    )
+    assert output.allocated != values.ctypes.data
+    pointer = ctypes.cast(output.aligned, ctypes.POINTER(ctypes.c_float))
+    np.testing.assert_array_equal(np.ctypeslib.as_array(pointer, shape=(20,)).reshape(4, 5), values)
+    pointer[0] = -17
+    assert values[0, 0] == 0
+    ctypes.CDLL(None).free(ctypes.c_void_p(output.allocated))
+
+
+def test_fresh_transpose_result_cannot_borrow_caller_storage(tmp_path):
+    source = """module {
+      func.func @forward(%a: memref<2x3xf32>) -> memref<3x2xf32, strided<[1, 3]>>
+          attributes {llvm.emit_c_interface} {
+        %v = memref.transpose %a (d0, d1) -> (d1, d0)
+          : memref<2x3xf32> to memref<3x2xf32, strided<[1, 3]>>
+        func.return %v : memref<3x2xf32, strided<[1, 3]>>
+      }
+    }"""
+    contract = dict(
+        inputs=[dict(shape=[2, 3], stride=[3, 1], storage_offset=0)],
+        results=[dict(shape=[3, 2], stride=[1, 3], storage_offset=0, alias_inputs=[])],
+    )
+    repaired = apply_memref_layout(source, contract)
+    assert repaired.returncode == 0, repaired.stderr
+    lowered = lower_to_llvm_ir(repaired.stdout, workdir=tmp_path, preserve_result_descriptors=True)
+    path, library = tmp_path / "transpose.ll", tmp_path / "transpose.so"
+    path.write_text(lowered)
+    lib = llvm_install() / "lib"
+    subprocess.run(
+        [
+            str(clang()),
+            "-shared",
+            "-fPIC",
+            "-O1",
+            "-Wl,-Bsymbolic",
+            str(path),
+            "-L" + str(lib),
+            "-lmlir_c_runner_utils",
+            "-Wl,-rpath," + str(lib),
+            "-o",
+            str(library),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    values = np.arange(6, dtype=np.float32).reshape(2, 3)
+    argument = Descriptor(
+        values.ctypes.data, values.ctypes.data, 0, (ctypes.c_int64 * 2)(2, 3), (ctypes.c_int64 * 2)(3, 1)
+    )
+    output = Descriptor()
+    entry = ctypes.CDLL(str(library))._mlir_ciface_forward
+    entry.argtypes = [ctypes.POINTER(Descriptor), ctypes.POINTER(Descriptor)]
+    entry(ctypes.byref(output), ctypes.byref(argument))
+    assert output.allocated != values.ctypes.data
+    assert list(output.sizes) == [3, 2]
+    assert list(output.strides) == [1, 3]
+    pointer = ctypes.cast(output.aligned, ctypes.POINTER(ctypes.c_float))
+    actual = np.array([[pointer[i + 3 * j] for j in range(2)] for i in range(3)])
+    np.testing.assert_array_equal(actual, values.T)
+    pointer[0] = -17
+    assert values[0, 0] == 0
     ctypes.CDLL(None).free(ctypes.c_void_p(output.allocated))
 
 
@@ -201,6 +272,52 @@ with ir.Context() as ctx:
 
 
 @pytest.mark.parametrize("operation_owners", [False, True])
+@pytest.mark.parametrize("producer", ["view", "call", "alloc", "prior_unknown", "prior_transpose"])
+def test_fresh_result_reuse_requires_known_disjoint_allocation(producer, operation_owners):
+    record = dict(shape=[2, 3], stride=[3, 1], storage_offset=0)
+    target = "memref<2x3xf32>"
+    declarations = f"""func.func private @alias(%x: {target}) -> {target} {{ return %x : {target} }}"""
+    results = [dict(record, alias_inputs=[])]
+    if producer == "view":
+        input_type = "memref<24xi8>"
+        inputs = [dict(shape=[24], stride=[1], storage_offset=0)]
+        body = f"%zero = arith.constant 0 : index\n%value = memref.view %arg[%zero][] : {input_type} to {target}"
+        returned, return_type = "%value", target
+    else:
+        input_type = target
+        inputs = [record]
+        if producer == "call":
+            body = f"%value = func.call @alias(%arg) : ({target}) -> {target}"
+            returned, return_type = "%value", target
+        else:
+            body = f"%owned = memref.alloc() : {target}"
+            if producer == "alloc":
+                returned, return_type = "%owned", target
+            else:
+                if producer == "prior_unknown":
+                    live_type = target
+                    body += f"\n%live = func.call @alias(%owned) : ({target}) -> {target}"
+                else:
+                    live_type = "memref<3x2xf32, strided<[1, 3]>>"
+                    body += f"\n%live = memref.transpose %owned (d0, d1) -> (d1, d0) : {target} to {live_type}"
+                returned, return_type = "%live, %owned", f"{live_type}, {target}"
+                results.insert(0, None)
+    source = f"""module {{
+      {declarations}
+      func.func @forward(%arg: {input_type}) -> ({return_type}) {{
+        {body}
+        return {returned} : {return_type}
+      }}
+    }}"""
+    result = apply_memref_layout(source, dict(inputs=inputs, results=results), operation_owners=operation_owners)
+    assert result.returncode == 0, result.stderr
+    assert ("memref.copy" in result.stdout) is (producer != "alloc")
+    if producer.startswith("prior_"):
+        assert result.stdout.count("memref.alloc(") == 2
+        assert "memref.dealloc" not in result.stdout
+
+
+@pytest.mark.parametrize("operation_owners", [False, True])
 @pytest.mark.parametrize("producer", ["transpose", "view", "alloc", "argument"])
 def test_discarded_alloc_is_retained_when_live_root_is_unknown(producer, operation_owners):
     if producer == "view":
@@ -268,8 +385,7 @@ def test_borrowed_view_refuses_unproven_span(unknown):
     other_input = dict(shape=[2, 3], stride=[3, 1], storage_offset=0)
     result = apply_memref_layout(source, dict(inputs=[input_record, other_input], results=[record]))
     assert result.returncode != 0
-    reason = "cannot prove input storage injectivity" if unknown == "capacity" else "cannot prove returned view fits"
-    assert reason in result.stderr
+    assert "cannot prove returned view fits" in result.stderr
 
 
 def test_borrowed_view_refuses_static_out_of_bounds_span():

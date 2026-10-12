@@ -36,21 +36,40 @@ def has_overlapping_elements(record):
 
 
 def refuse_overlapping_input_aliases(contract):
-    for result in contract["results"]:
+    """Borrow overlapping inputs only while their storage remains read-only.
+
+    Input-relative result views do not write their backing storage. Mutation
+    results and result-to-result copies do, even when their destination is a
+    borrowed predecessor rather than a direct input alias.
+    """
+    roots = []
+    writes = set()
+    for ordinal, result in enumerate(contract["results"]):
         if result is None:
+            roots.append(set())
             continue
-        aliases = list(result.get("alias_inputs", []))
+        aliases = set(result.get("alias_inputs", []))
+        predecessors = result.get("alias_results", [])
+        if not aliases and predecessors:
+            leader = predecessors[0]
+            if type(leader) is not int or not 0 <= leader < ordinal:
+                raise ValueError("invalid result storage predecessor")
+            aliases.update(roots[leader])
+            writes.update(aliases)
         if result.get("role") == "user_input_mutation":
-            aliases.append(result["input_index"])
-        for index in set(aliases):
+            aliases.add(result["input_index"])
+            writes.update(aliases)
+        for index in aliases:
             if not 0 <= index < len(contract["inputs"]):
                 raise ValueError("invalid result base argument")
-            record = contract["inputs"][index]
-            if record is not None and has_overlapping_elements(record):
-                raise ValueError(
-                    f"input {index} has overlapping logical elements: caller-storage write-back "
-                    "and borrowed result aliasing require an injective input layout"
-                )
+        roots.append(aliases)
+    for index in sorted(writes):
+        record = contract["inputs"][index]
+        if record is not None and has_overlapping_elements(record):
+            raise ValueError(
+                f"input {index} has overlapping logical elements: caller-storage write-back "
+                "requires an injective input layout"
+            )
 
 
 def _apply_input_layout(module, contract):

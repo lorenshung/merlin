@@ -549,14 +549,11 @@ def build_core_aten_batch(
                 layout_results.append(entry)
             for name in returned[len(result_layout["results"]) :]:
                 j = names.index(name)
-                from merlin.llvmlower.input_layout import has_overlapping_elements
-
-                # A trailing input observation can copy its logical values into
-                # a matching storage layout. Keep the original borrowed-view
-                # refusal for overlapping inputs; this grants no write-back or
-                # original user-result alias on that storage.
-                aliases = [] if has_overlapping_elements(result_layout["inputs"][j]) else [first_input + j]
-                layout_results.append({**result_layout["inputs"][j], "alias_inputs": aliases, "role": "user_output"})
+                # A direct post-call input observation borrows its storage without
+                # copying, including read-only expanded inputs.
+                layout_results.append(
+                    {**result_layout["inputs"][j], "alias_inputs": [first_input + j], "role": "user_output"}
+                )
         else:
             layout_inputs.extend([None] * len(names))
             layout_results.extend([None] * len(returned))

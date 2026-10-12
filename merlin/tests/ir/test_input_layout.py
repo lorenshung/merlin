@@ -74,7 +74,7 @@ def test_native_strided_input_contract(tmp_path, layout, operation):
     np.savez(model / "inputs.npz", in0=logical)
     generated = tmp_path / "cgen"
     generate(model, generated, model / "inputs.npz", dump_all_outputs=True)
-    if layout == "zero_stride":
+    if layout == "zero_stride" and operation in {"mutation", "partial_mutation"}:
         with pytest.raises(RuntimeError, match="input 0 has overlapping logical elements"):
             lower_to_llvm_ir(source, workdir=tmp_path / "lower", preserve_result_descriptors=True)
         return
@@ -187,13 +187,11 @@ def test_probe_partial_mutation_capsule_refuses(tmp_path):
     torch.testing.assert_close(expected, post[:, 0])
     converted = m2m.convert(namespace["Model"](), (x,), backend="fx_importer")
     assert converted.ok, converted.diagnostics
-    with pytest.raises(
-        RuntimeError, match="caller-storage write-back and borrowed result aliasing require an injective"
-    ):
+    with pytest.raises(RuntimeError, match="caller-storage write-back requires an injective"):
         lower_to_llvm_ir(str(converted.module), workdir=tmp_path, preserve_result_descriptors=True)
 
 
-def test_nonzero_overlapping_strides_refuse_borrowed_return(tmp_path):
+def test_nonzero_overlapping_strides_allow_readonly_borrowed_return(tmp_path):
     torch = pytest.importorskip("torch", reason="Torch layout checks run under MERLIN_M2M_PYTHON")
     m2m = pytest.importorskip("m2m", reason="Model2MLIR layout checks run under MERLIN_M2M_PYTHON")
 
@@ -204,8 +202,20 @@ def test_nonzero_overlapping_strides_refuse_borrowed_return(tmp_path):
     x = torch.arange(5, dtype=torch.float32).as_strided((2, 3), (2, 1))
     converted = m2m.convert(Model(), (x,), backend="fx_importer")
     assert converted.ok, converted.diagnostics
-    with pytest.raises(RuntimeError, match="input 0 has overlapping logical elements"):
-        lower_to_llvm_ir(str(converted.module), workdir=tmp_path, preserve_result_descriptors=True)
+    lowered = lower_to_llvm_ir(str(converted.module), workdir=tmp_path, preserve_result_descriptors=True)
+    assert "@forward" in lowered
+
+
+def test_overlapping_borrowed_predecessor_refuses_result_copy():
+    from merlin.llvmlower.input_layout import refuse_overlapping_input_aliases
+
+    input_layout = dict(shape=[2, 3], stride=[0, 1], storage_offset=0)
+    borrowed = dict(input_layout, alias_inputs=[0])
+    contract = dict(inputs=[input_layout], results=[borrowed])
+    refuse_overlapping_input_aliases(contract)
+    contract["results"].append(dict(input_layout, alias_inputs=[], alias_results=[0]))
+    with pytest.raises(ValueError, match="caller-storage write-back requires an injective"):
+        refuse_overlapping_input_aliases(contract)
 
 
 @pytest.mark.parametrize("stride", [[3, 1], [6, 2]])

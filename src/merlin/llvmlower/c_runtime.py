@@ -308,6 +308,10 @@ def generate(
             arr = np.ascontiguousarray(inputs[f"in{n_in}"])
             n_in += 1
         physical = storage_array(arr.reshape(shape), input_layouts[i]) if input_layouts[i] else arr
+        # Empty logical tensors still own distinct caller storage. Zero-length
+        # C arrays can share an address and falsely alias independent arguments.
+        if physical.size == 0:
+            physical = np.zeros(1, dtype=physical.dtype)
         io_decls.append(f"static {C_OF[dt]} merlin_in_{i}[] = {{{_embed_array(physical, dt)}}};")
         embedded_arrays[i] = (arr, dt)
         static_io_bytes += _storage_nbytes(physical, dt)

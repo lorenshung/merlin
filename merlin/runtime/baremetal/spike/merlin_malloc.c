@@ -74,6 +74,8 @@ static void arena_exhausted(const char *why, size_t n, uintptr_t align) {
  * console blamed a 320-byte request and reported 29.8 TB used, which is not a size any model asks for.
  * Rejecting the impossible request AT the call that makes it names the real one. */
 static void *bump(size_t n, uintptr_t align) {
+  /* Empty tensors retain distinct allocation identities for their lifetime. */
+  if (!n) n = 1;
   if (!brk) brk = arena_base();
   ++seq;
   if (n > (size_t)(uintptr_t)MERLIN_ARENA_SIZE_BYTES)
