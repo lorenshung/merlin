@@ -44,6 +44,7 @@ def read_refusal(path):
             "no_eligible_recipe_operations",
             "nonfinite_calibration",
             "complex_calibration",
+            "fft_admission_refused",
             "integerization_golden_disagreement",
         }
         or not isinstance(refusal.get("reason"), str)

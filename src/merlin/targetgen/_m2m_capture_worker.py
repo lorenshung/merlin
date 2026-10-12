@@ -1102,7 +1102,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
                 original_frontend_snapshot=original_snapshot if trace_supported else None,
                 source_layer_inventory=source_layer_inventory,
             )
-        except (RQ.NoEligibleRecipeOperations, RQ.CalibrationRefused) as exc:
+        except (RQ.NoEligibleRecipeOperations, RQ.CalibrationRefused, RQ.FFTAdmissionRefused) as exc:
             write_refusal(out, code=getattr(exc, "code", "no_eligible_recipe_operations"), reason=str(exc))
             return 4
         quant_stats = getattr(mdl, "_recipe_quantization_stats", None)

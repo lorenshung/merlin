@@ -193,7 +193,14 @@ def prepare_spec_int8(
             )
         selected = []
     reference = None
-    if selected:
+    needs_fft_preflight = any(
+        record.get("overload") in {"aten._fft_r2c.default", "aten._fft_c2r.default", "aten._fft_c2c.default"}
+        for record in report["cases"]
+        if record["status"] == "bundled"
+    )
+    if needs_fft_preflight and len(recipes) != 1:
+        raise ValueError("FFT preflight needs one declared static activation recipe")
+    if selected or needs_fft_preflight:
         (directory / "model.before_spec_int8.mlir").write_bytes(original)
 
         def declaration_keys(site):
@@ -229,7 +236,8 @@ def prepare_spec_int8(
             accumulator_dtype=selection["readout_facets"][0]["accumulator_dtype"],
             software_admission=selection["spec"],
             software_numerical_engine="integer_reference",
-            host_readout_declarations=declaration_keys(selected[0])["mul"],
+            **({"host_readout_declarations": declaration_keys(selected[0])["mul"]} if selected else {}),
+            fft_admission_selection={key: selection[key] for key in ("spec", "host", "identities")},
         )
         recipe["recipe_sha256"] = digest(recipe)
         try:
@@ -243,7 +251,7 @@ def prepare_spec_int8(
                     )
                 return isinstance(value, list) and any(complex_argument(item) for item in value)
 
-            if complex_argument(source_case["arguments"]):
+            if not needs_fft_preflight and complex_argument(source_case["arguments"]):
                 raise NumericCaptureRefused(
                     "static int8 recipe does not admit complex tensors or scalar arguments", code="complex_calibration"
                 )
@@ -258,6 +266,8 @@ def prepare_spec_int8(
                 )
             plan["refusal_code"] = exc.code
             plan["refusal_details"] = exc.details
+            if exc.code == "fft_admission_refused":
+                plan["fft_refusals"] = [str(exc)]
             selected = []
         if selected:
             reference_path = Path(artifact.meta["weights_manifest"]).parent / "spec-int8-reference.json"
