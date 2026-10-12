@@ -48,6 +48,34 @@ class NoEligibleRecipeOperations(RecipeError):
     """The frontend proved that no operation is eligible for this recipe."""
 
 
+class CalibrationRefused(RecipeError):
+    """The calibration sample cannot be observed by the declared static recipe."""
+
+    code = "nonfinite_calibration"
+
+
+def require_finite_calibration(value):
+    import torch
+
+    if isinstance(value, torch.Tensor):
+        if value.is_complex():
+            error = CalibrationRefused("static int8 calibration does not admit complex tensors")
+            error.code = "complex_calibration"
+            raise error
+        if value.is_floating_point() and not bool(torch.isfinite(value).all()):
+            raise CalibrationRefused("static int8 calibration input or observer value is nonfinite")
+    elif isinstance(value, Mapping):
+        for item in value.values():
+            require_finite_calibration(item)
+    elif isinstance(value, (tuple, list)):
+        for item in value:
+            require_finite_calibration(item)
+    elif isinstance(value, complex):
+        error = CalibrationRefused("static int8 calibration does not admit complex scalar arguments")
+        error.code = "complex_calibration"
+        raise error
+
+
 def _require(recipe: Mapping[str, Any]) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
     if recipe.get("schema") != RECIPE_SCHEMA:
         raise RecipeError(f"unsupported recipe schema {recipe.get('schema')!r}")
@@ -106,7 +134,7 @@ def observe_static_tensor(value, tensor_spec, *, eps=DEFAULT_OBSERVER_EPSILON):
     ):
         raise RecipeError("requires static symmetric per-tensor recipe")
     if not torch.isfinite(value).all():
-        raise RecipeError("calibration input is nonfinite")
+        raise CalibrationRefused("calibration input is nonfinite")
     name = _observer_name(tensor_spec, is_weight=False)
     observer_class = _tensor_observer_class(tensor_spec, is_weight=False)
     observer = observer_class(
@@ -930,14 +958,31 @@ def apply_recipe(
         fold_candidates=fold_candidates,
     )
     prepared = prepare_pt2e(exported, quantizer)
+    # Validate observer inputs before HistogramObserver/MinMaxObserver perform
+    # reductions, including nonfinite intermediates from finite caller inputs.
+    try:
+        from torchao.quantization.pt2e.observer import ObserverBase
+    except ImportError:
+        from torch.ao.quantization.observer import ObserverBase
+
+    observer_checks = [
+        observer.register_forward_pre_hook(lambda _module, args: require_finite_calibration(args))
+        for observer in prepared.modules()
+        if isinstance(observer, ObserverBase)
+    ]
     samples = calibration_inputs if calibration_inputs is not None else (tuple(example_inputs),)
     calibrated = 0
-    with torch.no_grad():
-        for sample in samples:
-            if calibrated >= calibration_samples:
-                break
-            prepared(*_as_tuple(sample))
-            calibrated += 1
+    try:
+        with torch.no_grad():
+            for sample in samples:
+                if calibrated >= calibration_samples:
+                    break
+                require_finite_calibration(sample)
+                prepared(*_as_tuple(sample))
+                calibrated += 1
+    finally:
+        for check in observer_checks:
+            check.remove()
     if calibrated == 0:
         raise RecipeError("static calibration saw no input sample")
     quantized = convert_pt2e(prepared, use_reference_representation=False, fold_quantize=True)

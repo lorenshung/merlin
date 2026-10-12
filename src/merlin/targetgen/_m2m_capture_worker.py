@@ -33,6 +33,7 @@ from pathlib import Path
 
 # The worker is also executed as a standalone script in the capture interpreter.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from capture_refusals import refuse_integerization, write_refusal  # noqa: E402
 
 # canonical dtype token -> (torchAO scheme | None, base-weight dtype cast | None). Mirrors
 # workloads/capture.py SCHEME + DTYPE_CAST so a capsule's precision matches how models are captured.
@@ -1101,13 +1102,8 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
                 original_frontend_snapshot=original_snapshot if trace_supported else None,
                 source_layer_inventory=source_layer_inventory,
             )
-        except RQ.NoEligibleRecipeOperations as exc:
-            (out / "refusal.json").write_text(
-                json.dumps(
-                    {"schema": "merlin.capture.refusal.v1", "code": "no_eligible_recipe_operations", "reason": str(exc)}
-                )
-                + "\n"
-            )
+        except (RQ.NoEligibleRecipeOperations, RQ.CalibrationRefused) as exc:
+            write_refusal(out, code=getattr(exc, "code", "no_eligible_recipe_operations"), reason=str(exc))
             return 4
         quant_stats = getattr(mdl, "_recipe_quantization_stats", None)
         if fp32_staging is not None:
@@ -1249,6 +1245,8 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
             integerization_receipt["golden_agreement"] = golden_agreement
         else:
             integerization_receipt["golden_agreement"] = portable_agreement
+        if refuse_integerization(out, integerization_receipt):
+            return 4
     act_census = None
     if a.quantize_activation_contractions:
         # THE CONTRACTIONS quantize_ CANNOT REACH. The scheme replaces Linear weights; a matmul of two

@@ -89,7 +89,7 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
         return dtypes[str(t.element_type if isinstance(t, TensorType) else t)]
 
     def attr(op, key):
-        return op.properties.get(key) or op.attributes[key]
+        return op.properties[key] if key in op.properties else op.attributes[key]
 
     def constant(op):
         value = attr(op, "value")
@@ -108,7 +108,7 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
                 return xs[0]
             if name == "arith.constant":
                 y = constant(inner)
-            elif name in {"arith.extf", "arith.truncf"}:
+            elif name in {"arith.extf", "arith.truncf", "arith.extsi", "arith.trunci"}:
                 y = xs[0].to(dtype(inner.results[0].type))
             elif name in {"arith.addf", "arith.addi"}:
                 y = xs[0] + xs[1]
@@ -310,8 +310,8 @@ def run_pt2e_reference(model, inputs):
             q, scales, stats = [], [], []
             for operand in operands:
                 raw, scale, zp, qmin, qmax, dtype = self.fetch_args_kwargs_from_env(operand)[0][:6]
-                if zp != 0 or (qmin, qmax, dtype) != (-128, 127, torch.int8):
-                    raise ValueError("PT2E reference requires symmetric full-range tensor int8")
+                if zp != 0 or dtype != torch.int8 or (qmin, qmax) not in {(-128, 127), (-127, 127)}:
+                    raise ValueError("PT2E reference requires symmetric tensor int8")
                 q.append(raw.to(torch.int64))
                 scales.append(float(torch.tensor(scale, dtype=torch.float32)))
                 stats.append(dict(scale=scales[-1], quantized_max_abs=int(raw.to(torch.int32).abs().max())))
@@ -440,9 +440,11 @@ def main():
     from merlin.frontends.linalg_mlir import parse_mlir_file
 
     directory = Path(sys.argv[1])
-    prefix = "w8a8"
+    prefix = "native-int8" if "--native" in sys.argv[2:] else "w8a8"
     request = json.loads((directory / f"{prefix}-request.json").read_text())
-    module = parse_mlir_file(directory / "model.before_w8a8.mlir")
+    module = parse_mlir_file(
+        directory / ("model.native_reference.mlir" if prefix == "native-int8" else "model.before_w8a8.mlir")
+    )
     operations = list(module.walk())
     with np.load(directory / "inputs.npz") as archive:
         arrays = [archive[f"in{i}"] for i in range(len(archive.files))]

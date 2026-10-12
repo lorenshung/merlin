@@ -207,6 +207,46 @@ def _validate_observation(
         }
     elif scope != "full" or imposed:
         raise AssertionError("unsupported semantic scope")
+
+    reference = observation.get("numeric_reference")
+    if reference is not None:
+        gate = reference.get("gate", {})
+        if (
+            reference.get("policy") != "spec_int8"
+            or reference.get("admission_status") != "admitted"
+            or gate.get("status") != "pass"
+            or not gate.get("results")
+            or any(row.get("status") != "pass" for row in gate["results"])
+        ):
+            raise AssertionError("declared numeric policy lacks a passed exact integer-reference gate")
+
+        def policy_values(original, integer):
+            # The policy changes values only. Eager still owns metadata, mutation
+            # classification and storage aliases, including all post-call inputs.
+            if isinstance(original, dict) and original.get("kind") == "tensor":
+                if _without_values(original) != _without_values(integer):
+                    raise AssertionError("numeric reference changes boundary metadata")
+                return {**original, "values": integer["values"]}
+            if isinstance(original, dict):
+                if not isinstance(integer, dict) or original.keys() != integer.keys():
+                    raise AssertionError("numeric reference changes boundary structure")
+                return {key: policy_values(value, integer[key]) for key, value in original.items()}
+            if isinstance(original, list):
+                if not isinstance(integer, list) or len(original) != len(integer):
+                    raise AssertionError("numeric reference changes boundary structure")
+                return [policy_values(a, b) for a, b in zip(original, integer, strict=True)]
+            return integer
+
+        expected = reference["expected"]
+        post = reference["post_arguments"]
+        if scope == "values+mutation+observed-metadata":
+            expected, post = exclude_autograd(expected), exclude_autograd(post)
+        case = {
+            **case,
+            "expected": policy_values(case["expected"], expected),
+            "post_arguments": policy_values(case["post_arguments"], post),
+            "comparison_parameters": {"rtol": 0.0, "atol": 0.0},
+        }
     parameters = case.get("comparison_parameters") or {}
     rtol = float(parameters.get("rtol", 0.0))
     atol = float(parameters.get("atol", 0.0))

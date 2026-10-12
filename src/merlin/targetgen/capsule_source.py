@@ -40,6 +40,14 @@ from merlin.common.digest import is_sha256
 from merlin.common.paths import env as _env
 from merlin.common.paths import repo_root
 from merlin.targetgen import capture_cache, component_sources
+from merlin.targetgen.capture_refusals import (
+    M2MUnavailable,
+    NumericCaptureRefused,
+    read_refusal,
+)
+from merlin.targetgen.capture_refusals import (
+    NoEligibleCaptureOperations as NoEligibleCaptureOperations,
+)
 from merlin.targetgen.golden_store import write_golden
 
 _MODEL_CAPTURE_ABI_VERSION = 7
@@ -120,14 +128,6 @@ def _stderr_cause(stderr: str, *, limit: int = 1800) -> str:
         + f"\n    ... {len(tb) - limit} characters of frames elided ...\n"
         + tb[-tail:]
     )
-
-
-class M2MUnavailable(RuntimeError):
-    """The m2m venv (torch) or the model2MLIR repo could not be located/run — fail closed, never fake."""
-
-
-class NoEligibleCaptureOperations(M2MUnavailable):
-    """A typed frontend refusal permits preserving the original host graph."""
 
 
 def _require_integer_contraction(program: str, *, scheme: str | None, recipe: dict | None) -> None:
@@ -264,7 +264,11 @@ def _require_pt2e_integerization_receipt(
     expected = (0.0, 0.0) if engine == "integer_reference" else agreement_tolerance or (_DEF_ATOL, _DEF_RTOL)
     agreement = receipt.get("golden_agreement")
     if not isinstance(agreement, dict) or agreement.get("status") != "passed":
-        raise M2MUnavailable("integerization receipt has no passed original-vs-rewrite golden agreement")
+        raise NumericCaptureRefused(
+            "integerization receipt has no passed original-vs-rewrite golden agreement",
+            code="integerization_golden_disagreement",
+            details={"integerization_receipt": receipt},
+        )
     if any(agreement.get(name) != tolerance for name, tolerance in zip(("atol", "rtol"), expected)):
         raise M2MUnavailable("integerization receipt golden agreement tolerance differs from the request")
     if count(agreement.get("samples"), "golden agreement samples") < 1:
@@ -1236,13 +1240,9 @@ class PytorchRefSource:
             interpreter=interpreter,
         )
         if proc.returncode == 4 and refusal_path.is_file():
-            refusal = json.loads(refusal_path.read_text())
-            if (
-                refusal.get("schema") == "merlin.capture.refusal.v1"
-                and refusal.get("code") == "no_eligible_recipe_operations"
-                and isinstance(refusal.get("reason"), str)
-            ):
-                raise NoEligibleCaptureOperations(refusal["reason"])
+            refusal = read_refusal(refusal_path)
+            if refusal is not None:
+                raise refusal
         # A diagnosed capture failure can still write meta.json. Preserve that
         # verdict; use stderr only when the worker produced no structured result.
         if not meta_p.exists():

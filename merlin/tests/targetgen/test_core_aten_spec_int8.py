@@ -343,15 +343,12 @@ open(sys.argv[1], "w").write(text)
 
 @pytest.mark.parametrize("authority,key", [("spec", "host_f32_elementwise"), ("host", "host_f32_elementwise_exact")])
 def test_readout_requires_authored_multiply_declaration(selection, authority, key):
-    from merlin.targetgen.core_aten_spec_int8 import declaration_location
-
     changed = copy.deepcopy(selection)
     row = next(r for r in changed[authority]["operations"] if r["id"] == key)
     row["ops"].remove("aten.mul.Tensor")
-    location = declaration_location(selection, "software" if authority == "spec" else "host", key)
-    refusals = pipeline_refusals(changed)
-    assert any(f"{location['path']}:{location['line']}" in reason and key in reason for reason in refusals)
-    assert admission_plan(rank2_module(), changed)["sites"][0]["status"] == "refused"
+    site = admission_plan(rank2_module(), changed)["sites"][0]
+    assert site["status"] == "refused"
+    assert any("step 6" in reason for reason in site["reasons"])
 
 
 def test_readout_requires_declared_binary32_rounding(selection):
@@ -361,7 +358,10 @@ def test_readout_requires_declared_binary32_rounding(selection):
     row = next(r for r in changed["host"]["operations"] if r["id"] == "host_f32_elementwise_exact")
     row["numerical_contract"]["semantics"].pop("rounding")
     location = declaration_location(selection, "host", row["id"], ("numerical_contract", "semantics", "rounding"))
-    assert any(f"{location['path']}:{location['line']}" in reason for reason in pipeline_refusals(changed))
+    assert any(
+        f"{location['path']}:{location['line']}" in reason
+        for reason in admission_plan(rank2_module(), changed)["sites"][0]["reasons"]
+    )
 
 
 def test_reference_preserves_two_multiply_rounding_and_refuses_overflow():
@@ -413,3 +413,16 @@ def test_cast_selection_enforces_declared_exact_range(selection, k, admitted):
     assert site["cast_exact_range_obligation"]["exact_limit"] == 2**24
     if not admitted:
         assert any("host-capabilities.yaml:65" in reason and "exact_range" in reason for reason in site["reasons"])
+
+
+def test_step6_checks_selected_declaration_instead_of_shadowed_exact_one(selection):
+    changed = copy.deepcopy(selection)
+    exact = next(r for r in changed["host"]["operations"] if r["id"] == "host_f32_elementwise_exact")
+    shadow = copy.deepcopy(exact)
+    shadow["id"] = "earlier_nonexact_multiply"
+    shadow["numerical_contract"]["semantics"].pop("rounding")
+    changed["host"]["operations"].insert(0, shadow)
+    (site,) = admission_plan(rank2_module(), changed)["sites"]
+    assert site["status"] == "refused"
+    assert any("earlier_nonexact_multiply" in reason and "rounding" in reason for reason in site["reasons"])
+    assert all(row["host"]["declaration"] == shadow["id"] for row in site["steps"] if row["step"] == 6)

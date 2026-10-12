@@ -54,6 +54,8 @@ def stamp(args):
         "src/merlin/targetgen/_m2m_capture_worker.py",
         "src/merlin/targetgen/quant_recipe.py",
         "src/merlin/targetgen/capture_cache.py",
+        "src/merlin/targetgen/capsule_source.py",
+        "src/merlin/targetgen/capture_refusals.py",
         "src/merlin/capture/integerization.py",
         "src/merlin/llvmlower/contraction_quantization.py",
         "src/merlin/llvmlower/torchao_affine.py",

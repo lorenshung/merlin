@@ -331,6 +331,6 @@ def test_capture_registry_pins_reviewed_full_call_frontend():
     from merlin.common import provenance
 
     pin = provenance.load_pins(provenance.software_pins_path())[model2mlir.CAPTURE_PIN]
-    assert pin.commit == "a70171e230449eb8f4dc16e09d9d9c9dbfdaae80"
+    assert pin.commit == "c87bda77f124cfe3cdcd6c0b63df2603f7634683"
     assert pin.content_check is True
     assert "m2m/ir/decompositions.py" in pin.requires_paths

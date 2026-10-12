@@ -31,7 +31,6 @@ def restore_caller_layouts(module, original, fresh, semantic_path):
     """Retain source caller storage for inputs and their actual exported post-call observations."""
     from xdsl.dialects.builtin import StringAttr
 
-    from merlin.llvmlower.input_layout import has_overlapping_elements
     from merlin.llvmlower.result_layout import ATTRIBUTE
     from merlin.targetgen.core_aten_batch import _tensor_documents
 
@@ -57,12 +56,11 @@ def restore_caller_layouts(module, original, fresh, semantic_path):
             if entry["shape"] != caller["shape"] or entry["dtype"] != caller["dtype"]:
                 raise ValueError("recaptured mutation changes the caller tensor type")
             entry.update(caller)
-            # A separate post-call observation can copy an expanded input. Actual
-            # user-result aliases and mutation write-back still require injective
-            # caller storage and retain their ordinary lowering refusal.
-            observation = not mutation and index not in fresh["output_indices"]
-            aliases = [] if observation and has_overlapping_elements(caller) else [ordinal]
-            layout["results"][index] = {**(layout["results"][index] or {}), **caller, "alias_inputs": aliases}
+            # Read-only observations borrow caller storage, including expanded views.
+            # Mutation write-back remains subject to the lowerer's overlap refusal.
+            layout["results"][index] = {**(layout["results"][index] or {}), **caller, "alias_inputs": [ordinal]}
+            if mutation:
+                layout["results"][index].update(role="user_input_mutation", input_index=ordinal)
     module.attributes[ATTRIBUTE] = StringAttr(json.dumps(layout, sort_keys=True))
     semantic_path.write_text(json.dumps(boundary, sort_keys=True) + "\n")
 
@@ -86,7 +84,94 @@ def prepare_spec_int8(
 
     selection = select_spec(target, facts, software_spec, host_capabilities)
     original = (directory / "model.mlir").read_bytes()
+    prepare = getattr(provider, "prepare_bundle", None)
+    preparation = prepare(directory, target=target, facts=facts) if prepare is not None else {}
     module = parse_mlir_file(directory / "model.mlir")
+    from merlin.kernels.shapes import observe_contractions
+
+    native = any(shape.dtypes == ("i8", "i8", "i32") for _, shape in observe_contractions(module))
+    if native:
+        plan = admission_plan(module, selection, native=True)
+        selected = [site for site in plan["sites"] if site["status"] == "admitted"]
+        plan["native_contractions"] = len(selected)
+        plan["source_preparation"] = preparation
+        if selected and (provider is None or not hasattr(provider, "admit_numeric_schedule")):
+            for site in selected:
+                site.update(status="refused", reasons=["qualified provider schedule binding unavailable"])
+            selected = []
+            plan.update(status="refused", native_contractions=0)
+        if selected:
+            from xdsl.dialects.builtin import StringAttr
+
+            contractions = dict((list(module.walk()).index(op), op) for op, _ in observe_contractions(module))
+            for site in selected:
+                op = contractions[site["source_operation_ordinal"]]
+                step = next(row for row in site["steps"] if row["step"] == 3)
+                op.attributes["prov.declarations"] = StringAttr(
+                    json.dumps({"software": step["software"]["declaration"]})
+                )
+                op.attributes["prov.region_id"] = StringAttr(
+                    f"native_int8_contraction_{site['source_operation_ordinal']}"
+                )
+                op.attributes["prov.operand_load"] = StringAttr("transfer_contracts.operand_load")
+                op.attributes["prov.accumulator_readout"] = StringAttr("transfer_contracts.accumulator_readout")
+            proof = provider.admit_numeric_schedule(str(module), package=package, numeric_policy=selection["spec"])
+            plan["schedule_proof"] = proof
+            # Expose raw accumulators as well as every user/post-call result. The
+            # oracle interprets source integer arithmetic, independently of lowering
+            # and simulator outputs; eager is retained for boundary semantics.
+            from xdsl.dialects.builtin import FunctionType
+
+            from merlin.llvmlower.result_layout import ATTRIBUTE
+
+            function = next(op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward")
+            returned = next(op for op in function.body.block.ops if op.name == "func.return")
+            accumulators = [contractions[site["source_operation_ordinal"]].results[0] for site in selected]
+            returned.operands = [*returned.operands, *accumulators]
+            function.properties["function_type"] = FunctionType.from_lists(
+                [arg.type for arg in function.body.block.args], [value.type for value in returned.operands]
+            )
+            if ATTRIBUTE in module.attributes:
+                layout = json.loads(module.attributes[ATTRIBUTE].data)
+                layout["results"].extend([None] * len(accumulators))
+                module.attributes[ATTRIBUTE] = StringAttr(json.dumps(layout, sort_keys=True))
+            module.verify()
+            (directory / "model.native_reference.mlir").write_text(str(module) + "\n")
+            (directory / "native-int8-request.json").write_text(
+                json.dumps(dict(selected_ordinals=[], quant_min=-128, quant_max=127, eps=2**-12, dispatch=[])) + "\n"
+            )
+            from merlin.llvmlower.toolchain import m2m_python
+            from merlin.targetgen import core_aten_w8a8_reference
+
+            process = subprocess.run(
+                [str(m2m_python()), "-m", core_aten_w8a8_reference.__name__, str(directory.resolve()), "--native"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if process.returncode:
+                raise RuntimeError("native int8 independent reference failed: " + process.stderr[-4000:])
+            reference = json.loads((directory / "native-int8-reference.json").read_text())
+            if len(reference["output_bytes"]) != report["output_count"] + len(accumulators):
+                raise ValueError("native integer reference does not cover the complete exported boundary")
+            plan["integer_reference"] = dict(
+                status="prepared",
+                engine="independent_pytorch_source_integer_interpreter",
+                expected_output_bytes={str(i): raw for i, raw in enumerate(reference["output_bytes"])},
+            )
+            plan["host_int8_narrowing"] = any(
+                abi["dtype"] == "i8"
+                for record in report["cases"]
+                if record["status"] == "bundled"
+                for abi in record["output_abi"]
+            )
+            report["output_count"] += len(accumulators)
+            (directory / "model.mlir").write_text(str(module) + "\n")
+        document = {"selection": selection, **plan}
+        (directory / "spec-int8-admission.json").write_text(json.dumps(document, indent=2) + "\n")
+        for record in report["cases"]:
+            record.update(numeric_admission=plan, numeric_selection=selection["identities"])
+        return document
     plan = admission_plan(module, selection)
     plan["source_sha256_before"] = hashlib.sha256(original).hexdigest()
     selected = [site for site in plan["sites"] if site["status"] == "admitted"]
@@ -125,7 +210,7 @@ def prepare_spec_int8(
 
             return dict(quantize=key(1), contraction=key(3), cast=key(5), mul=key(6))
 
-        from merlin.targetgen.capsule_source import NoEligibleCaptureOperations, PytorchRefSource
+        from merlin.targetgen.capsule_source import NumericCaptureRefused, PytorchRefSource
         from merlin.targetgen.core_aten_batch import build_core_aten_batch
         from merlin.targetgen.core_aten_capture import case_capture_name, loader_source
         from merlin.targetgen.quant_recipe import digest
@@ -148,14 +233,31 @@ def prepare_spec_int8(
         )
         recipe["recipe_sha256"] = digest(recipe)
         try:
+
+            def complex_argument(value):
+                if isinstance(value, dict):
+                    return (
+                        value.get("kind") == "complex"
+                        or str(value.get("dtype", "")).startswith("complex")
+                        or any(complex_argument(item) for item in value.values())
+                    )
+                return isinstance(value, list) and any(complex_argument(item) for item in value)
+
+            if complex_argument(source_case["arguments"]):
+                raise NumericCaptureRefused(
+                    "static int8 recipe does not admit complex tensors or scalar arguments", code="complex_calibration"
+                )
             artifact = PytorchRefSource().capture_loader(loader, "int8", recipe=recipe, workdir=capture_dir / "work")
-        except NoEligibleCaptureOperations:
-            # Only this frontend-proved refusal grants original host fallback.
+        except NumericCaptureRefused as exc:
+            # Only explicit frontend refusals grant original host fallback.
             for site in selected:
                 site.update(
                     status="refused",
-                    reasons=["no eligible contraction visible to PT2E; decomposition-only contractions stay on host"],
+                    refusal_code=exc.code,
+                    reasons=[str(exc)],
                 )
+            plan["refusal_code"] = exc.code
+            plan["refusal_details"] = exc.details
             selected = []
         if selected:
             reference_path = Path(artifact.meta["weights_manifest"]).parent / "spec-int8-reference.json"

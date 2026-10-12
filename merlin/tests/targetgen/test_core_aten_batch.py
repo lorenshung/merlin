@@ -404,6 +404,21 @@ def test_complex_grading_interprets_observed_component_axis(declared):
     assert grade_core_aten_batch({"cases": [record]}, [data.tobytes()], output_shapes=[[2, 2]])["passed_count"] == 1
 
 
+@pytest.mark.parametrize("dtype", ["complex64", "complex128"])
+def test_complex_metadata_only_grading_requires_descriptor_observations(dtype):
+    from merlin.targetgen.core_aten_batch_grade import _grade_output
+
+    data = np.zeros((3, 2), dtype=dtype)
+    abi = dict(dtype="complex<f32>" if dtype == "complex64" else "complex<f64>", shape=[3, 2])
+    expected = dict(kind="tensor", dtype=dtype, shape=[3, 2])
+    verdict = _grade_output(data.tobytes(), abi, expected, dict(comparison="metadata"))
+    assert verdict == dict(status="ungradable", reason="metadata-only result requires compiled descriptor observations")
+    expected["values"] = {"kind": "complex", "real": 0.0, "imag": 0.0}
+    verdict = _grade_output(data.tobytes(), abi, expected, dict(comparison="torch_close"))
+    assert verdict["status"] == "ungradable"
+    assert "cannot decode canonical expected value" in verdict["reason"]
+
+
 def test_frontend_layout_contract_is_rebased_with_batch_arguments(tmp_path):
     from merlin.llvmlower.result_layout import module_attribute, read_layout
 

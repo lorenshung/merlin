@@ -107,11 +107,10 @@ def test_normalized_post_descriptor_recovers_caller_layout(tmp_path, stride, off
     assert json.loads(path.read_text())["outputs"][0]["stride"] == stride
     refuse_overlapping_input_aliases(layout)
     if stride[0] == 0:
-        assert layout["results"][0]["alias_inputs"] == []
+        assert layout["results"][0]["alias_inputs"] == [0]
         fresh["output_indices"] = [0]
         restore_caller_layouts(module, original, fresh, path)
-        with pytest.raises(ValueError, match="overlapping logical elements"):
-            refuse_overlapping_input_aliases(json.loads(module.attributes[ATTRIBUTE].data))
+        refuse_overlapping_input_aliases(json.loads(module.attributes[ATTRIBUTE].data))
         fresh["output_indices"] = []
         boundary = json.loads(path.read_text())
         boundary["outputs"][0]["role"] = "user_input_mutation"

@@ -111,7 +111,14 @@ def _grade_output(raw: bytes, abi: Mapping[str, Any], expected: Any, case: Mappi
             return {"status": "ungradable", "reason": "complex result lacks a canonical tensor document"}
         if expected.get("dtype") != np.dtype(complex_dtype).name or tuple(expected.get("shape", ())) != shape:
             return {"status": "mismatch", "reason": "output dtype or shape differs from canonical complex result"}
-        reference = np.asarray(_complex_values(expected.get("values")), dtype=complex_dtype).reshape(shape)
+        if "values" not in expected:
+            if case.get("comparison") != "metadata":
+                return {"status": "ungradable", "reason": "canonical case has no numeric expected values"}
+            return {"status": "ungradable", "reason": "metadata-only result requires compiled descriptor observations"}
+        try:
+            reference = np.asarray(_complex_values(expected["values"]), dtype=complex_dtype).reshape(shape)
+        except (TypeError, ValueError) as exc:
+            return {"status": "ungradable", "reason": f"cannot decode canonical expected value: {exc}"}
         parameters = case.get("comparison_parameters") or {}
         equal = (
             _storage_equal(actual, reference)
@@ -361,12 +368,30 @@ def grade_core_aten_batch(
             and verdict["status"] == "pass"
             and verdict.get("integer_reference", {}).get("status") == "pass"
             and record.get("numeric_admission", {}).get("status") == "admitted"
-            and record["numeric_admission"].get("quantized_contractions", 0) > 0
+            and (
+                record["numeric_admission"].get("quantized_contractions", 0) > 0
+                or record["numeric_admission"].get("native_contractions", 0) > 0
+            )
         ):
             # Device evidence was independently verified above; host fallback
             # retains its separate landing-fix accounting.
             verdict["numeric_execution_policy"] = "spec_int8"
             verdict["numeric_qualification"] = "declared capture-time spec-int8; exact integer/f32 gates passed"
+            if record["numeric_admission"].get("native_contractions", 0):
+                verdict["numeric_qualification"] = (
+                    "device path conforms; host int8 narrowing not declared"
+                    if record["numeric_admission"].get("host_int8_narrowing")
+                    else "conforming"
+                )
+            if "observation" in verdict and record["numeric_admission"].get("quantized_contractions", 0):
+                verdict["observation"]["numeric_reference"] = {
+                    "policy": "spec_int8",
+                    "gate": verdict["integer_reference"],
+                    "admission_status": record["numeric_admission"]["status"],
+                    "expected": record["case"]["expected"],
+                    "post_arguments": record["case"]["post_arguments"],
+                }
+
     counts: dict[str, int] = {}
     for item in verdicts.values():
         counts[item["status"]] = counts.get(item["status"], 0) + 1
