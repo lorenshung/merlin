@@ -100,6 +100,27 @@ def test_loader_preserves_layout_and_seed():
     assert 'complex(_decode(value["real"]), _decode(value["imag"]))' in source
 
 
+def test_loader_seed_hook_and_complex_nonfinite_decoding():
+    import torch
+
+    case = dict(
+        overload="aten.scalar_tensor.default",
+        arguments=dict(
+            args=dict(kind="tuple", items=[dict(kind="complex", real=dict(kind="float", value="inf"), imag=2)]),
+            kwargs=dict(dtype=dict(kind="dtype", value="complex64")),
+        ),
+        expected=dict(kind="tensor"),
+        rng_seed=19,
+    )
+    namespace = {}
+    exec(compile(bounded_loader_source(case), "<bounded loader>", "exec"), namespace)
+    model, inputs = namespace["get_model_and_inputs"]()
+    result = model(*inputs)
+    assert torch.isinf(result.real)
+    assert result.imag.item() == 2
+    assert torch.initial_seed() == 19
+
+
 def test_atomic_response_and_case_identity(tmp_path):
     path = tmp_path / "nested" / "response.json"
     document = {"schema_version": 1, "results": {"case": {"status": "capture_unavailable"}}}

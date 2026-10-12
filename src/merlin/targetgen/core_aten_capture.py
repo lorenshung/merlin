@@ -27,7 +27,7 @@ def _split_tensor_documents(value: Any, tensors: list[dict[str, Any]]) -> Any:
     return value
 
 
-def loader_source(case: dict[str, Any]) -> str:
+def loader_source(case: dict[str, Any], *, rng_seed: int | None = None) -> str:
     """Render a self-contained PyTorch module for one portable case document.
 
     Every tensor argument, including tensors nested in lists and keyword ``out`` values, is an
@@ -35,6 +35,7 @@ def loader_source(case: dict[str, Any]) -> str:
     static schema arguments.  The generated loader imports neither Merlin nor model2MLIR.
     """
 
+    seed_statement = "" if rng_seed is None else f"torch.manual_seed({int(rng_seed)})"
     tensors: list[dict[str, Any]] = []
     arguments = _split_tensor_documents(case["arguments"], tensors)
     parameters = ", ".join(f"input_{index}" for index in range(len(tensors)))
@@ -76,7 +77,7 @@ def _decode(value, inputs=()):
     if kind == "device":
         return torch.device(value["value"])
     if kind == "complex":
-        return complex(value["real"], value["imag"])
+        return complex(_decode(value["real"]), _decode(value["imag"]))
     if kind == "float":
         return float(value["value"])
     if kind == "tensor":
@@ -116,6 +117,7 @@ def _op(name):
 class Model(nn.Module):
     def forward(self, {parameters}):
         inputs = ({inputs})
+        {seed_statement}
         arguments = _decode(_DOCUMENT["arguments"], inputs)
         result = _op(_DOCUMENT["overload"])(*arguments["args"], **arguments["kwargs"])
         {scalar_wrap}

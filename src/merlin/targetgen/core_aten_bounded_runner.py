@@ -44,33 +44,7 @@ def bundle_admission_reason(capture: dict, mlir_source: str | None = None) -> st
 
 def bounded_loader_source(case: dict) -> str:
     """Retain recorded input layouts and seed in the standalone capture loader."""
-    source = loader_source(case)
-    old = 'return torch.tensor(_decode(value["values"]), dtype=dtype).reshape(value["shape"])'
-    new = """logical = torch.tensor(_decode(value["values"]), dtype=dtype).reshape(value["shape"])
-        shape, stride = value["shape"], value["stride"]
-        offset = int(value.get("storage_offset", 0))
-        size = offset if any(n == 0 for n in shape) else offset + sum((n - 1) * s for n, s in zip(shape, stride)) + 1
-        storage = torch.empty(size, dtype=dtype)
-        tensor = storage.as_strided(shape, stride, offset)
-        if torch._debug_has_internal_overlap(tensor) == 0:
-            tensor.copy_(logical)
-        else:
-            import itertools
-            for index in itertools.product(*(range(n) for n in shape)):
-                storage[offset + sum(i * s for i, s in zip(index, stride))] = logical[index]
-        tensor.requires_grad_(bool(value.get("requires_grad", False)))
-        return tensor"""
-    if old not in source:
-        raise ValueError("capture loader tensor decoder changed")
-    source = source.replace(old, new)
-    source = source.replace(
-        'complex(value["real"], value["imag"])', 'complex(_decode(value["real"]), _decode(value["imag"]))'
-    )
-    source = source.replace(
-        'arguments = _decode(_DOCUMENT["arguments"], inputs)',
-        f'torch.manual_seed({int(case["rng_seed"])})\n        arguments = _decode(_DOCUMENT["arguments"], inputs)',
-    )
-    return source
+    return loader_source(case, rng_seed=int(case["rng_seed"]))
 
 
 def semantic_observation(verdict: dict, evidence: dict) -> dict:
