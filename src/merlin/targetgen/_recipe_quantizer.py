@@ -439,6 +439,7 @@ def build_quantizer(
             self.annotated_means = 0
             self.left_in_float = 0
             self.refused_by_placement: list[dict[str, str | None]] = []
+            self.refused_rewrites: list[dict[str, Any]] = []
             self.software_decisions = software_decisions
             self.fold_candidates = fold_candidates or []
 
@@ -461,6 +462,17 @@ def build_quantizer(
                 previous = set(graph.nodes)
                 with graph.inserting_before(node):
                     if node.target == torch.ops.aten.convolution.default:
+                        input_value = node.args[0].meta.get("val")
+                        if not isinstance(input_value, torch.Tensor) or input_value.dim() != 4:
+                            self.refused_rewrites.append(
+                                {
+                                    "node": node.name,
+                                    "operator": str(node.target),
+                                    "reason": "convolution to conv2d requires a rank-4 input",
+                                }
+                            )
+                            node.meta["quantization_refusal"] = self.refused_rewrites[-1]["reason"]
+                            continue
                         if len(node.args) != 9 or node.args[6] or any(node.args[7]):
                             continue  # Transposed/output-padding semantics lack this rewrite.
                         value = graph.call_function(torch.ops.aten.conv2d.default, args=(*node.args[:6], node.args[8]))
@@ -489,6 +501,8 @@ def build_quantizer(
             kept = closable(nodes)
             self.left_in_float = sum(1 for n in nodes if (n.target in sums or n.target in means) and n not in kept)
             for node in nodes:
+                if node.meta.get("quantization_refusal"):
+                    continue
                 family = family_of(node)
                 if family is not None and not eligible(node, family):
                     self.refused_by_placement.append(
@@ -936,6 +950,7 @@ def apply_recipe(
         "plan_sha256": layer_plan.get("plan_sha256"),
         "layers_on_host": [d for d in layer_plan.get("layers") or () if d.get("placement") == "host"],
         "operators_refused_by_placement": quantizer.refused_by_placement,
+        "rewrites_refused": quantizer.refused_rewrites,
         "annotated_contractions": quantizer.annotated,
         "annotated_sums": quantizer.annotated_sums,
         "annotated_means": quantizer.annotated_means,
