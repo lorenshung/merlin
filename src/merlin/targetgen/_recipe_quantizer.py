@@ -327,6 +327,8 @@ def build_quantizer(
         return list(tensor.shape) if isinstance(tensor, torch.Tensor) else None
 
     def eligible(node: Any, family: str) -> bool:
+        if family == "operand_sum" and node.meta.get("merlin_contraction_epilogue"):
+            return False
         if not software_allows(node, family):
             return False
         if family == "contraction":
@@ -487,9 +489,19 @@ def build_quantizer(
                             if beta != 1:
                                 bias = graph.call_function(torch.ops.aten.mul.Tensor, args=(bias, beta))
                             value = graph.call_function(torch.ops.aten.add.Tensor, args=(value, bias))
-                    # Every replacement carries the original call-site identity.
-                    for created in set(graph.nodes) - previous:
-                        created.meta = dict(node.meta)
+                    # Compute metadata from each operation's own operands. A
+                    # scaled bias keeps its broadcast shape and no module owner.
+                    for created in graph.nodes:
+                        if created in previous:
+                            continue
+                        if created.target in (torch.ops.aten.mm.default, torch.ops.aten.conv2d.default):
+                            created.meta = dict(node.meta)
+                        else:
+                            created.meta = {"merlin_contraction_epilogue": True}
+                        created.meta["merlin_normalized_from"] = node.name
+                        args = torch.fx.map_arg(created.args, lambda n: n.meta["val"])
+                        kwargs = torch.fx.map_arg(created.kwargs, lambda n: n.meta["val"])
+                        created.meta["val"] = created.target(*args, **kwargs)
                 node.replace_all_uses_with(value)
                 graph.erase_node(node)
             graph.lint()
