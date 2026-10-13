@@ -98,3 +98,9 @@ performance claim follows from this delivery; Spike evidence is functional only.
 - 2026-10-13: committed baseline2ba0d942/47943a4; paired193/10,160 validation pending.
 - 2026-10-13: corrected routing interpretation; three current device cases are not a hardware limit. Gemmini derivation remains joint work with Loren.
 - 2026-10-13: fork publication authorized, without AI coauthor trailers. Preserve upstream-ready2ba0d942 and unfinishedb5a7 archives; fork delivery selects lorenshung/model2MLIR in the content-checked pin.
+
+## BatchNorm follow-up
+
+The completed paired 10,160-case baseline at Merlin `3325d93d` / model2MLIR `47943a4` records 10,136 observed-semantic passes, 11 mismatches and 13 input-storage refusals per track. It repairs 83 prior failures but exposes five BatchNorm reduction-order regressions; nine earlier passes also become explicit missing-storage refusals. Two inherited trace-mapping gaps remain strict evidence limits. Gemmini has 48 verified device passes and 10,088 host passes. The original run receipts remain unchanged.
+
+This pin selects model2MLIR `587133ffd7befa88b2793140b9c2d06557ffd6ed`, which restricts spatial-then-batch mean reduction to the CPU strided fallback in both BatchNorm paths. The isolated native sweep passes all 94 sealed BatchNorm cases and 124 regression controls. Compiled replay, independent review and fresh paired validation are separate pending qualification; these native checks do not replace the completed full-suite result. Broader inherited dtype/geometry limitations remain recorded locally.
