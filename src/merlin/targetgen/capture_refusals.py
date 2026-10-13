@@ -7,6 +7,16 @@ class M2MUnavailable(RuntimeError):
     """The selected capture implementation could not produce a qualified artifact."""
 
 
+class InputStorageUnavailable(M2MUnavailable):
+    """The portable input payload does not record storage read by the CPU call."""
+
+    code = "input_storage_unavailable"
+
+    def __init__(self, reason, *, details):
+        super().__init__(reason)
+        self.details = details
+
+
 class NumericCaptureRefused(M2MUnavailable):
     """A frontend-proved refusal permits preserving the original host graph."""
 

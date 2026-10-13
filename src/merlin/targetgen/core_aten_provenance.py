@@ -40,6 +40,9 @@ def batch_provenance(
         repo_root() / "src/merlin" / path
         for path in (
             "targetgen/core_aten_batch.py",
+            "targetgen/core_aten_capture.py",
+            "targetgen/core_aten_input_storage.py",
+            "targetgen/capture_refusals.py",
             "targetgen/core_aten_numeric.py",
             "targetgen/operation_numerics.py",
             "targetgen/core_aten_spec_int8.py",

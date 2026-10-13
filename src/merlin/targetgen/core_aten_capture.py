@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import Any
 
 from merlin.targetgen.capsule_source import PytorchRefSource
+from merlin.targetgen.capture_refusals import InputStorageUnavailable
 from merlin.targetgen.core_aten_cover import _provenance_ops
+from merlin.targetgen.core_aten_input_storage import require_native_input_storage
 
 
 def _split_tensor_documents(value: Any, tensors: list[dict[str, Any]]) -> Any:
@@ -35,6 +37,7 @@ def loader_source(case: dict[str, Any], *, rng_seed: int | None = None) -> str:
     static schema arguments.  The generated loader imports neither Merlin nor model2MLIR.
     """
 
+    require_native_input_storage(case["overload"], case["arguments"])
     seed_statement = "" if rng_seed is None else f"torch.manual_seed({int(rng_seed)})"
     tensors: list[dict[str, Any]] = []
     arguments = _split_tensor_documents(case["arguments"], tensors)
@@ -185,9 +188,9 @@ def capture_case_corpus(
         destination = root / case_capture_name(case)
         destination.mkdir(parents=True, exist_ok=True)
         loader = destination / "capsule.pytorch.py"
-        loader.write_text(loader_source(case), encoding="utf-8")
         mlir = destination / "capsule.linalg.mlir"
         try:
+            loader.write_text(loader_source(case), encoding="utf-8")
             artifact = source.capture_loader(loader, "fp32", workdir=destination / "capture-work")
             mlir.write_text(artifact.linalg_mlir, encoding="utf-8")
             actual = sorted(_provenance_ops(mlir))
@@ -216,6 +219,8 @@ def capture_case_corpus(
                 "model2mlir_revision": _git_revision(source.m2m_dir),
                 "reason": f"{type(exc).__name__}: {exc}",
             }
+            if isinstance(exc, InputStorageUnavailable):
+                record.update(refusal_code=exc.code, refusal_details=exc.details)
         (destination / "capture.json").write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         results[identifier] = record
     counts: dict[str, int] = {}

@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from merlin.common import provenance
+from merlin.targetgen.capture_refusals import InputStorageUnavailable
 from merlin.targetgen.core_aten_batch_grade import numeric_policy_counts
 from merlin.targetgen.core_aten_bounded_runner import (
     SavedResponseAdapter,
@@ -43,6 +44,7 @@ def stamp(args):
         "src/merlin/targetgen/_m2m_capture_worker.py",
         "src/merlin/targetgen/_capture_result_contract.py",
         "src/merlin/targetgen/core_aten_capture.py",
+        "src/merlin/targetgen/core_aten_input_storage.py",
         "src/merlin/targetgen/core_aten_batch.py",
         "src/merlin/targetgen/core_aten_batch_grade.py",
         "src/merlin/targetgen/core_aten_semantics.py",
@@ -119,10 +121,10 @@ def capture(args, case, block):
     directory = args.output / "captures" / case_capture_name(case)
     directory.mkdir(parents=True, exist_ok=True)
     loader = directory / "capsule.pytorch.py"
-    loader.write_text(bounded_loader_source(case))
     source = PytorchRefSource(m2m_dir=args.m2m_dir, python=args.m2m_python, timeout=args.capture_timeout)
     os.environ["PYTHONPATH"] = str(args.m2m_dir)
     try:
+        loader.write_text(bounded_loader_source(case))
         artifact = source.capture_loader(loader, "fp32", workdir=directory / "capture-work")
         mlir = directory / "capsule.linalg.mlir"
         mlir.write_text(artifact.linalg_mlir)
@@ -137,6 +139,8 @@ def capture(args, case, block):
     except Exception as exc:
         (directory / "capsule.linalg.mlir").unlink(missing_ok=True)
         record = {"status": "capture_failed", "reason": f"{type(exc).__name__}: {exc}"}
+        if isinstance(exc, InputStorageUnavailable):
+            record.update(refusal_code=exc.code, refusal_details=exc.details)
     record.update(case_id=case["case_id"], overload=case["overload"], case_sha256=case_digest(case), provenance=block)
     atomic_json(directory / "capture.json", record)
 
@@ -150,10 +154,13 @@ def execute(args, case, block):
     captured = json.loads((args.output / "captures" / case_capture_name(case) / "capture.json").read_text())
     started = time.time()
     if captured["status"] == "capture_failed":
+        evidence = {"lane": "unassigned", "capture": captured["status"]}
+        if "refusal_code" in captured:
+            evidence.update(refusal_code=captured["refusal_code"], refusal_details=captured["refusal_details"])
         observation = {
             "status": "capture_unavailable",
             "reason": captured["reason"],
-            "evidence": {"lane": "unassigned", "capture": captured["status"]},
+            "evidence": evidence,
         }
     else:
         try:
