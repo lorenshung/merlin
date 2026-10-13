@@ -557,5 +557,8 @@ def test_overlapping_input_observation_borrows_readonly_storage(tmp_path):
     actual["results"][0] = dict(output_layout, alias_inputs=[0])
     refuse_overlapping_input_aliases(actual)
     actual["results"][0].update(role="user_input_mutation", input_index=0)
+    # This dense mutation outgrows the expanded caller and owns a new allocation.
+    refuse_overlapping_input_aliases(actual)
+    actual["results"][0].update(shape=[1, 3], stride=[3, 1])
     with pytest.raises(ValueError, match="overlapping logical elements"):
         refuse_overlapping_input_aliases(actual)

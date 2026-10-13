@@ -16,8 +16,8 @@ pins:
       The model2MLIR revision whole-model captures are made with. It carries exact signed integer
       shift and floor-division decompositions, PT2E integer-contraction capture, and literal
       quantization-parameter lowering; missing any of these leaves supported operations opaque.
-    repo_canonical: https://github.com/lorenshung/model2MLIR.git
-    commit: "e9e553c73dc52ebaf68f507df01e9c72a6a26518"
+    repo_canonical: https://github.com/ucb-bar/model2MLIR.git
+    commit: "47943a48af164e1ad079c7ba475200313418c198"
     root_env: MERLIN_M2M_DIR
     requires_paths:
       - m2m/ir/decompositions.py
@@ -28,16 +28,29 @@ pins:
       - m2m/capture/provenance.py
       - m2m/capture/torchao_pipeline.py
       - m2m/capture/fft_pt2e.py
+      - m2m/capture/fake_metadata.py
+      - m2m/ir/result_layout.py
+      - m2m/ir/structural.py
+      - m2m/ir/fft.py
       - m2m/capture/static_aten.py
       - m2m/capture/torch_export.py
       - m2m/capture/trace.py
       - m2m/ir/complex_factories.py
       - m2m/ir/torch_cpu_rng.py
       - tests/test_integer_shift_floordiv.py
+      - m2m/ir/embedding_bag_cpu.py
+      - m2m/ir/cpu_sum.py
+      - m2m/ir/cpu_group_norm.py
+      - m2m/ir/cpu_layer_norm_backward.py
+      - m2m/ir/half_layer_norm.py
+      - m2m/ir/grid_sample.py
+      - m2m/ir/torchmlir_decomps.py
+      - m2m/ir/storage_resize.py
     content_check: true
     notes: >-
       Reviewed model2MLIR frontend, including signed-integer lowering, portable per-tensor
       static quantization, caller layouts, exported full-call result storage contracts,
       pre-PT2E FFT candidates, upstream integer constant rounding fixes, and complete
-      direct/nested complex dropout result structures with complete traced tuple selection
-      and exact global CPU RNG provenance.
+      direct/nested complex dropout result structures, complete traced tuple selection,
+      exact global CPU RNG provenance, full real FFT spectra, shared native embedding
+      dispatch, and CPU storage rounding, statistics and traversal semantics.
