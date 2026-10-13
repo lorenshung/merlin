@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 
-from .input_layout import refuse_overlapping_input_aliases
+from .input_layout import refuse_overlapping_input_aliases, static_storage_span
 
 ATTRIBUTE = "m2m.result_layout"
 
@@ -61,11 +61,7 @@ def _apply_result_layout(module, contract):
         return arith.ConstantOp(index, ir.IntegerAttr.get(index, value)).result
 
     def span(record):
-        if any(type(v) is not int or v < 0 for v in [*record["shape"], *record["stride"], record["storage_offset"]]):
-            return None
-        if 0 in record["shape"]:
-            return 0
-        return record["storage_offset"] + 1 + sum((n - 1) * s for n, s in zip(record["shape"], record["stride"]))
+        return static_storage_span(record)
 
     def owner_operation(value):
         owner = value.owner
@@ -361,10 +357,17 @@ def _layout_stages(ctx, module, pipeline, erase, mid=(), late=(), post_openmp=()
 
 def inject(source: str) -> str:
     marker = "src_path, out_path, pipeline ="
-    from .input_layout import _apply_input_layout, has_overlapping_elements, refuse_overlapping_input_aliases
+    from .input_layout import (
+        _apply_input_layout,
+        has_overlapping_elements,
+        refuse_overlapping_input_aliases,
+        static_storage_span,
+    )
 
     binding = (
         inspect.getsource(has_overlapping_elements)
+        + "\n"
+        + inspect.getsource(static_storage_span)
         + "\n"
         + inspect.getsource(refuse_overlapping_input_aliases)
         + "\n"

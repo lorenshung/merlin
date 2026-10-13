@@ -218,6 +218,42 @@ def test_overlapping_borrowed_predecessor_refuses_result_copy():
         refuse_overlapping_input_aliases(contract)
 
 
+def test_expanded_mutation_growth_owns_storage_for_its_views_and_copies():
+    from merlin.llvmlower.input_layout import refuse_overlapping_input_aliases
+
+    original = dict(shape=[2, 3], stride=[0, 1], storage_offset=0)
+    grown = dict(shape=[3, 2], stride=[2, 1], storage_offset=0)
+    mutation = dict(grown, alias_inputs=[0], role="user_input_mutation", input_index=0)
+    view = dict(grown, alias_inputs=[0], alias_results=[0], role="user_output")
+    copy = dict(grown, alias_inputs=[], alias_results=[1], role="user_output")
+    refuse_overlapping_input_aliases(dict(inputs=[original], results=[mutation, view, copy]))
+
+
+@pytest.mark.parametrize("shape,stride", [([1, 3], [3, 1]), ([-1, 3], [3, 1]), ([3, 2], [{"shape_axes": [1]}, 1])])
+def test_expanded_mutation_without_fresh_storage_proof_still_refuses(shape, stride):
+    from merlin.llvmlower.input_layout import refuse_overlapping_input_aliases
+
+    original = dict(shape=[2, 3], stride=[0, 1], storage_offset=0)
+    mutation = dict(
+        shape=shape, stride=stride, storage_offset=0, alias_inputs=[0], role="user_input_mutation", input_index=0
+    )
+    with pytest.raises(ValueError, match="caller-storage write-back requires an injective"):
+        refuse_overlapping_input_aliases(dict(inputs=[original], results=[mutation]))
+
+
+def test_later_growth_does_not_hide_an_earlier_caller_write():
+    from merlin.llvmlower.input_layout import refuse_overlapping_input_aliases
+
+    original = dict(shape=[2, 3], stride=[0, 1], storage_offset=0)
+    borrowed = dict(original, alias_inputs=[0], role="user_output")
+    copy = dict(original, alias_inputs=[], alias_results=[0], role="user_output")
+    grown = dict(
+        shape=[3, 2], stride=[2, 1], storage_offset=0, alias_inputs=[0], role="user_input_mutation", input_index=0
+    )
+    with pytest.raises(ValueError, match="caller-storage write-back requires an injective"):
+        refuse_overlapping_input_aliases(dict(inputs=[original], results=[borrowed, copy, grown]))
+
+
 @pytest.mark.parametrize("stride", [[3, 1], [6, 2]])
 def test_caller_cannot_skip_declared_input_layout(tmp_path, stride):
     from merlin.llvmlower.result_layout import module_attribute

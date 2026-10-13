@@ -21,6 +21,66 @@ class Descriptor(ctypes.Structure):
     ]
 
 
+def test_expanded_growing_mutation_preserves_prefix_in_fresh_storage(tmp_path):
+    original = dict(shape=[2, 5], stride=[0, 1], storage_offset=0)
+    grown = dict(
+        shape=[3, 5], stride=[5, 1], storage_offset=0, alias_inputs=[0], role="user_input_mutation", input_index=0
+    )
+    source = (
+        "builtin.module"
+        + module_attribute(dict(inputs=[original], results=[grown]))
+        + """ {
+      func.func @forward(%a: tensor<2x5xf32>) -> tensor<3x5xf32>
+          attributes {llvm.emit_c_interface} {
+        %empty = tensor.empty() : tensor<3x5xf32>
+        %result = linalg.generic {
+          indexing_maps = [affine_map<(d0, d1) -> (0, d1)>, affine_map<(d0, d1) -> (d0, d1)>],
+          iterator_types = ["parallel", "parallel"]
+        } ins(%a : tensor<2x5xf32>) outs(%empty : tensor<3x5xf32>) {
+          ^bb0(%value: f32, %unused: f32):
+            linalg.yield %value : f32
+        } -> tensor<3x5xf32>
+        func.return %result : tensor<3x5xf32>
+      }
+    }"""
+    )
+    lowered = lower_to_llvm_ir(source, workdir=tmp_path, preserve_result_descriptors=True)
+    path, library = tmp_path / "model.ll", tmp_path / "model.so"
+    path.write_text(lowered)
+    lib = llvm_install() / "lib"
+    subprocess.run(
+        [
+            str(clang()),
+            "-shared",
+            "-fPIC",
+            "-O1",
+            "-Wl,-Bsymbolic",
+            str(path),
+            "-L" + str(lib),
+            "-lmlir_c_runner_utils",
+            "-Wl,-rpath," + str(lib),
+            "-o",
+            str(library),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    values = np.array([1.25, -2.5, 7.0, 8.5, -9.75], np.float32)
+    saved = values.copy()
+    arg = Descriptor(values.ctypes.data, values.ctypes.data, 0, (ctypes.c_int64 * 2)(2, 5), (ctypes.c_int64 * 2)(0, 1))
+    output = Descriptor()
+    entry = ctypes.CDLL(str(library))._mlir_ciface_forward
+    entry.argtypes = [ctypes.POINTER(Descriptor), ctypes.POINTER(Descriptor)]
+    entry(ctypes.byref(output), ctypes.byref(arg))
+    assert output.allocated != values.ctypes.data
+    assert list(output.sizes) == [3, 5] and list(output.strides) == [5, 1] and output.offset == 0
+    pointer = ctypes.cast(output.aligned, ctypes.POINTER(ctypes.c_float))
+    np.testing.assert_array_equal(np.ctypeslib.as_array(pointer, shape=(5,)), saved)
+    pointer[0] = -17.0
+    np.testing.assert_array_equal(values, saved)
+    ctypes.CDLL(None).free(ctypes.c_void_p(output.allocated))
+
+
 def execute(tmp_path, result, *, dynamic=False, extent=4, passthrough=False):
     if not m2m_python().is_file():
         pytest.skip("native MLIR interpreter unavailable")

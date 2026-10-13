@@ -35,6 +35,18 @@ def has_overlapping_elements(record):
     return False
 
 
+def static_storage_span(record):
+    """Return a proved static address envelope, or None for unknown layouts."""
+    if record is None:
+        return None
+    shape, strides, offset = record["shape"], record["stride"], record["storage_offset"]
+    if len(shape) != len(strides) or any(type(v) is not int or v < 0 for v in [*shape, *strides, offset]):
+        return None
+    if 0 in shape:
+        return 0
+    return offset + 1 + sum((n - 1) * s for n, s in zip(shape, strides))
+
+
 def refuse_overlapping_input_aliases(contract):
     """Borrow overlapping inputs only while their storage remains read-only.
 
@@ -43,25 +55,37 @@ def refuse_overlapping_input_aliases(contract):
     borrowed predecessor rather than a direct input alias.
     """
     roots = []
+    mutation_roots = {}
     writes = set()
     for ordinal, result in enumerate(contract["results"]):
         if result is None:
             roots.append(set())
             continue
-        aliases = set(result.get("alias_inputs", []))
+        declared = set(result.get("alias_inputs", []))
+        for index in declared:
+            if not 0 <= index < len(contract["inputs"]):
+                raise ValueError("invalid result base argument")
+        aliases = set().union(*(mutation_roots.get(index, {index}) for index in declared))
         predecessors = result.get("alias_results", [])
-        if not aliases and predecessors:
+        if not declared and predecessors:
             leader = predecessors[0]
             if type(leader) is not int or not 0 <= leader < ordinal:
                 raise ValueError("invalid result storage predecessor")
             aliases.update(roots[leader])
             writes.update(aliases)
         if result.get("role") == "user_input_mutation":
-            aliases.add(result["input_index"])
-            writes.update(aliases)
-        for index in aliases:
-            if not 0 <= index < len(contract["inputs"]):
+            base = result["input_index"]
+            if not 0 <= base < len(contract["inputs"]):
                 raise ValueError("invalid result base argument")
+            aliases.update(mutation_roots.get(base, {base}))
+            need, capacity = static_storage_span(result), static_storage_span(contract["inputs"][base])
+            # The result-layout lowering allocates fresh storage when a static
+            # mutation outgrows its caller allocation. Its returned views and
+            # later result copies therefore cannot write overlapping caller bytes.
+            if declared == {base} and need is not None and capacity is not None and need > capacity:
+                aliases.clear()
+            writes.update(aliases)
+            mutation_roots[base] = aliases.copy()
         roots.append(aliases)
     for index in sorted(writes):
         record = contract["inputs"][index]
