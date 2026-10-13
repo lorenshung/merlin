@@ -74,6 +74,100 @@ def test_writer_private_answers_and_schema_safe_additive_id(packaged):
     assert C.load_private(capsule)["batch_map"]["output_count"] == 2
 
 
+def test_legacy_view_recovers_committed_same_conversion_layout(packaged, tmp_path):
+    from merlin.llvmlower.result_layout import read_layout
+
+    capsule, _, _, public, _ = packaged
+    original = (public / capsule["name"] / "capsule.interface.mlir").read_bytes()
+    C.runtime_bundle(capsule, tmp_path / "runtime")
+    layout = read_layout((tmp_path / "runtime/model.mlir").read_text())
+    assert layout["results"][0]["alias_inputs"] == [0]
+    assert layout["results"][0]["stride"] == [1]
+    assert layout["results"][1]["alias_inputs"] == [0]
+    assert (public / capsule["name"] / "capsule.interface.mlir").read_bytes() == original
+
+
+@pytest.mark.parametrize("defect", ["authority", "alias", "shape", "abi", "overload", "count"])
+def test_legacy_view_rejects_unbound_capture_metadata(packaged, tmp_path, defect):
+    capsule, _, _, _, private = packaged
+    path = private / capsule["name"] / "capture.json"
+    capture = json.loads(path.read_text())
+    contract = capture["capture_meta"]["result_contract"]
+    if defect == "authority":
+        contract["authority"] = "eager_golden"
+    elif defect == "alias":
+        contract["results"][0]["alias_inputs"] = []
+    elif defect == "shape":
+        contract["results"][0]["shape"] = [1, 2]
+    elif defect == "abi":
+        capture["capture_meta"]["output_abi"][0]["dtype"] = "i32"
+    elif defect == "overload":
+        capture["overload"] = "aten.clone.default"
+    else:
+        contract["inputs"] = []
+    path.write_text(json.dumps(capture))
+    with pytest.raises(ValueError, match="legacy result contract"):
+        C.runtime_bundle(capsule, tmp_path / "runtime")
+
+
+@pytest.mark.parametrize("missing", ["capture", "contract"])
+def test_legacy_missing_capture_contract_does_not_invent_alias(packaged, tmp_path, missing):
+    from merlin.llvmlower.result_layout import read_layout
+
+    capsule, _, _, _, private = packaged
+    path = private / capsule["name"] / "capture.json"
+    if missing == "capture":
+        path.unlink()
+    else:
+        capture = json.loads(path.read_text())
+        del capture["capture_meta"]["result_contract"]
+        path.write_text(json.dumps(capture))
+    C.runtime_bundle(capsule, tmp_path / "runtime")
+    assert read_layout((tmp_path / "runtime/model.mlir").read_text())["results"][0] is None
+
+
+def test_legacy_result_contract_requires_public_source_binding(packaged, tmp_path):
+    capsule, _, _, public, _ = packaged
+    source = public / capsule["name"] / "capsule.interface.mlir"
+    source.write_text(source.read_text() + "\n")
+    with pytest.raises(ValueError, match="public full-call input changed"):
+        C.runtime_bundle(capsule, tmp_path / "runtime")
+
+
+def test_legacy_fresh_copy_keeps_natural_result_descriptor(packaged, tmp_path):
+    from merlin.llvmlower.result_layout import read_layout
+
+    capsule, _, _, public, _ = packaged
+    original = C.load_private(capsule)["batch_map"]["cases"][0]
+    case = copy.deepcopy(original["case"])
+    case.update(overload="aten.clone.default", case_id="fresh-copy", output_input_aliases=[])
+    capture = json.loads(
+        (public.parent / "captures" / case_capture_name(original["case"]) / "capture.json").read_text()
+    )
+    capture["overload"] = case["overload"]
+    capture["capture_meta"]["result_contract"]["results"][0]["alias_inputs"] = []
+    source = tmp_path / "fresh-captures" / case_capture_name(case)
+    source.mkdir(parents=True)
+    (source / "capture.json").write_text(json.dumps(capture))
+    (source / "inputs.json").write_text("[[1.0,2.0]]")
+    (source / "golden.json").write_text("[1.0,2.0]")
+    (source / "capsule.pytorch.py").write_text("# fresh clone fixture\n")
+    (source / "capsule.linalg.mlir").write_text("""builtin.module {
+      func.func @forward(%x: tensor<2xf32>) -> tensor<2xf32> {
+        %out = tensor.empty() : tensor<2xf32>
+        %copy = linalg.copy {prov.aten = "aten.clone.default"}
+          ins(%x : tensor<2xf32>) outs(%out : tensor<2xf32>) -> tensor<2xf32>
+        func.return %copy : tensor<2xf32>
+      }
+    }""")
+    manifest = C.write_capsules({"cases": [case]}, source.parent, tmp_path / "fresh-public", tmp_path / "fresh-private")
+    fresh = capsule_common.load_capsule(tmp_path / "fresh-public" / manifest["capsules"][0]["id"])
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("MERLIN_CORE_ATEN_PRIVATE_ROOT", str(tmp_path / "fresh-private"))
+        C.runtime_bundle(fresh, tmp_path / "fresh-runtime")
+    assert read_layout((tmp_path / "fresh-runtime/model.mlir").read_text())["results"][0] is None
+
+
 def test_writer_refuses_lost_exact_overload_provenance(packaged):
     capsule, _, _, public, _ = packaged
     case = C.load_private(capsule)["batch_map"]["cases"][0]["case"]
