@@ -1,106 +1,100 @@
-# Core ATen session delivery and Phase 1 journal
+# Core ATen integrated checkpoint
 
-This snapshot records the reviewed sources, evidence locations, and qualification
-still required before extending Phase 1. Paths beginning `out/` are
-relative to the workspace root and name ignored local evidence, not files shipped
-with the source repository. Detailed run artifacts remain local. Publication and experiment execution are separate
-actions; pushing reviewed source does not authorize a Phase 1 or FireSim launch.
+The primary development branches are `core-aten` in
+[ucb-bar/merlin](https://github.com/ucb-bar/merlin/tree/core-aten) and
+[ucb-bar/model2MLIR](https://github.com/ucb-bar/model2MLIR/tree/core-aten).
+Integrate current upstream `main` before publishing a checkpoint. Keep exploratory
+branches and worktrees on the contributor forks, then review changes before
+bringing them into these integrated branches. No AI coauthor trailers are added.
 
-## Preserve the source and handoff
+## What the two branches deliver
 
-The clean prepared baseline is Merlin
-`2ba0d942d7cb69fb5289953af54de6043f125472` and model2MLIR
-`47943a48af164e1ad079c7ba475200313418c198`. Preserve that Merlin baseline
-when updating the model2MLIR fork URL and preparing the delivery commit. The
-software pin must bind the selected commit and all required source bytes; a URL
-change alone establishes neither publication nor qualification. Target support
-remains an explicit OOT dependency, separate from these two source repositories.
+Merlin provides full-call capture and execution grading for the canonical 193
+operators and sealed 10,160-case suite. It preserves multiple outputs, complex
+scalar precision, mutation, observed strides/offsets and borrowed/fresh result
+storage. It supports proved readonly expanded inputs, safe resize growth and
+authenticated legacy ABI results. Missing raw LayerNorm-statistics backing bytes
+produce typed per-case refusals rather than unsafe replay or invented input data.
 
-Preserve the exact unfinished starting checkpoint
-`b5a7cd49f19ebadd473ce7f72be4a8f3bc8b60b6` on an archive reference.
-It is not a production ancestor and carries no validation claim; merging it would
-duplicate or supersede finished work. The original narrative is
-`out/artifacts/handoff/codex-handoff-20261012.md`. Commit inventories, lineage,
-exclusions and pin audits live under
-`out/artifacts/verification/core-aten/remaining-20261012/upstream-preparation/`.
+Its device path retains source/target pins, declared quantization and transfers,
+exact integer references, raw accumulator and ordered f32 readout checks, compiled
+artifact bindings and attributed device instructions. Host fallback is reported
+separately. Phase 0/1 tooling supports explicit case identities and full-call
+capsules; the older 38-case reference remains auxiliary evidence.
 
-Merlin delivers full-call capture and grading, strided inputs, borrowed/fresh
-storage identities, mutation and result-layout contracts, complex scalar precision,
-safe resize growth, authenticated legacy ABI recovery, typed capture refusals,
-integer device qualification and source/target provenance. Its storage guard refuses
-unrecorded raw LayerNorm statistics without consulting expected values, and capture
-continues with the next case. model2MLIR delivers upstream integration, static/traced
-tuple projection and RNG lineage, source-only metadata geometry, full-spectrum FFT,
-and reviewed CPU numeric/embedding dispatch repairs. Their detailed audits are
-`merlin-delivery-review.md`, `model2mlir-audit.md` and the companion JSON files there.
+model2MLIR supplies exact static/traced result structure, tuple projection and RNG
+lineage, source-only allocation/layout metadata, complete real-FFT spectra and
+reviewed CPU numerical lowering. Repairs cover storage rounding, normalization
+statistics and layout dispatch, pooling, half softmax/rsqrt, grid coordinates,
+Boolean padding and BF16 embedding eligibility. BatchNorm mean reduction now
+preserves the distinct dense and strided CPU paths. The integrated revision also
+includes upstream's Transformers static-cache compatibility and post-export eager
+execution fix. Merlin's software pin selects the exact integrated revision and
+byte-checks every declared required source path.
 
-## Read qualification at its actual source revision
+## Completed baseline evidence
 
-The fully audited pair is Merlin `007900f69f8b9111bca7f3a364e44db224c767cf`
-and model2MLIR `e9e553c73dc52ebaf68f507df01e9c72a6a26518`:
+The complete audited baseline is Merlin
+`5a2be400530dc49ba7a8c0e29d610e2b4a4b632d` and model2MLIR
+`587133ffd7befa88b2793140b9c2d06557ffd6ed`:
 
-| Corpus | Scalar track | Gemmini track |
+| Corpus | Scalar | Gemmini |
 | --- | --- | --- |
 | Canonical 193 | 193 observed-semantic passes, all host | 193 passes: 3 device, 190 host |
-| Bounded 10,160 | 10,067 observed-semantic passes | 10,067 passes: 48 device, 10,019 host |
+| Sealed 10,160 | 10,141 observed-semantic passes, all host | 10,141 passes: 48 device, 10,093 host |
 
-Each bounded track retains 93 nonpasses: 71 mismatches, ten compile/lowering
-failures, eight capture-unavailable cases and four ungradable cases. Observed
-semantics covers checked values, mutation and metadata; it is not an unrestricted
-full-semantics claim. The 193 frontend traces include 188 complete traces and five
-preexisting diagnostics, while all 193 prepared-to-MLIR mappings resolve. See
-`out/artifacts/verification/core-aten/final1/integrated-core193/final-campaign-audit.json`
-and `out/artifacts/verification/core-aten/final1/integrated-final-report.txt`.
+Each full track retains six known contraction mismatches and 13 typed
+input-storage refusals. All five BatchNorm regressions from the preceding
+`3325/479` checkpoint are repaired, with zero regressions against that checkpoint.
+The earlier `007900/e9e` continuation has 83 repaired failures and nine historical
+PASS-to-storage-refusal transitions; those transitions remain explicit, and its
+original reports and denominator are unchanged.
 
-The prepared 2ba0d942/47943a4 line has 591 model2MLIR tests, 89 native layout
-tests, and 132 Merlin tests passing (two skipped, one deselected), plus one
-Torch-enabled loader test. Evidence is under
-`out/artifacts/verification/core-aten/remaining-20261012/integration/` and
-`out/artifacts/verification/core-aten/remaining-20261012/storage-growth/`.
-These focused repairs do not establish a new 193 or 10,160 total. Normal gates
-retain exactly the independently checked 17 inherited wiring diagnostics; keep
-that exception explicit. The experimental compensated-addmm commit `a86ec0d`
-is excluded: independent review found four new eager-equivalence regressions.
+Source/runtime/device bindings pass. Strict overall qualification remains BLOCK:
+nine historical passes lack authenticated physical backing bytes, and two
+inherited prepared-to-MLIR trace identities remain unresolved per track. Passing
+semantics covers checked values, mutation and observed metadata; it does not
+establish unrestricted full semantics. The 193 set has 190 numerical passes and
+three metadata-only cases. Secondary output-only counts overlap and are not added
+to observed-semantic totals. Spike results establish functional execution only.
 
-## Keep placement and quantization claims precise
+Evidence remains local under
+`out/artifacts/verification/core-aten/remaining-20261012/integration/batchnorm-correction/`,
+including `core193/final-campaign-audit.json` and
+`full-recheck-independent/final/{independent-final-report.md,completed-audit.json}`.
+These full results belong to the exact baseline pair above. Qualification of the
+upstream-integrated delivery is recorded separately; the old run is not relabeled.
 
-The unchanged software spec admits the existing TorchAO/PT2E W8A8 flow with
-int8 device operands and i32 accumulation. Device qualification checks an
-independent integer reference, raw accumulators and declared f32 readout; error
-against the original float result is separate. Host preprocessing and fallback
-are allowed and counted separately. Of the 48 bounded device passes, 25 use
-capture quantization and 23 retain the qualification **“device path conforms;
-host int8 narrowing not declared.”** No specification amendment is implied.
+## Placement, quantization and remaining work
 
-The canonical three-device count measures the current selector, not hardware
-capability: 187 calls have no selected contraction, one BMM is blocked by a rank2
-host-cast declaration, and two FFTs need undeclared complex boundary operations.
-Broader elementwise, pooling and movement opportunities require source-derived
-selection and qualification. See `integration/baseline193-routing-audit.md`
-under the remaining-work evidence root. model2MLIR catalogs 22 TorchAO schemes;
-that catalog does not certify INT4, FP8 or MX execution on this target.
+The unchanged reviewed software spec permits the existing TorchAO/PT2E W8A8 flow:
+int8 operands and i32 accumulation. Exact device gates are separate from error
+against the original float result. Of the 48 device passes, 25 use capture
+quantization and 23 retain “device path conforms; host int8 narrowing not declared.”
+The frontend's 22 TorchAO scheme descriptors do not certify INT4, FP8 or MX device
+execution. The rejected compensated-addmm experiment remains excluded.
 
-## Resume Phase 1 only after joint review
+Three device calls in the 193 set measure current routing, not hardware capacity.
+BMM readout is blocked by a rank-2 host-cast declaration; pooling, operand sums,
+fused readout and movement need explicit source-derived admission proofs. Derive
+Gemmini coverage and the minimum gap set jointly with Loren under the existing
+spec. Correct host fallback is fair game; count verified device coverage separately.
+An optional-device Phase 1 protocol is a fork exploration pending review, not part
+of this checkpoint or a launched experiment.
 
-The first two entries in `out/artifacts/handoff/phase1-journal.md` record the
-clean 2ba0d942/47943a4 baseline and correct the three-device routing interpretation.
-The retained old38 reference has 28 device cases and ten host guards; it does not
-define the maximum eligible corpus. The next plan is to validate the committed compiler pair, run Phase1 on193
-then10,160 cases, and derive the Gemmini coverage set and minimum gap set
-together with Loren under the unchanged software spec, keeping host placement
-visible. That derivation and all agent launches are held pending joint review.
-Preserve private grading isolation, corpus denominators, original answers and
-receipt bindings. No Phase 1 agent, new quantization method, FireSim/AWS job or
-performance claim follows from this delivery; Spike evidence is functional only.
+Next: review legal routing representations, prepare a fresh source-bound release,
+qualify its reference/seal/private-answer isolation and launch Phase 1 on 193 then
+10,160 cases. FireSim awaits AWS approval. The concise live journal is
+`out/artifacts/handoff/phase1-journal.md`; no new Phase 1 or FireSim session follows
+from publishing source.
 
-## Journal snapshot
+## Preserved lineage
 
-- 2026-10-13: committed baseline2ba0d942/47943a4; paired193/10,160 validation pending.
-- 2026-10-13: corrected routing interpretation; three current device cases are not a hardware limit. Gemmini derivation remains joint work with Loren.
-- 2026-10-13: fork publication authorized, without AI coauthor trailers. Preserve upstream-ready2ba0d942 and unfinishedb5a7 archives; fork delivery selects lorenshung/model2MLIR in the content-checked pin.
-
-## BatchNorm follow-up
-
-The completed paired 10,160-case baseline at Merlin `3325d93d` / model2MLIR `47943a4` records 10,136 observed-semantic passes, 11 mismatches and 13 input-storage refusals per track. It repairs 83 prior failures but exposes five BatchNorm reduction-order regressions; nine earlier passes also become explicit missing-storage refusals. Two inherited trace-mapping gaps remain strict evidence limits. Gemmini has 48 verified device passes and 10,088 host passes. The original run receipts remain unchanged.
-
-This pin selects model2MLIR `587133ffd7befa88b2793140b9c2d06557ffd6ed`, which restricts spatial-then-batch mean reduction to the CPU strided fallback in both BatchNorm paths. The isolated native sweep passes all 94 sealed BatchNorm cases and 124 regression controls. Compiled replay, independent review and fresh paired validation are separate pending qualification; these native checks do not replace the completed full-suite result. Broader inherited dtype/geometry limitations remain recorded locally.
+The original handoff is `out/artifacts/handoff/codex-handoff-20261012.md`.
+Fork archive refs preserve the unfinished starting checkpoint
+`b5a7cd49f19ebadd473ce7f72be4a8f3bc8b60b6`, reviewed baselines and blocked experiments.
+That unfinished checkpoint is not a production ancestor and is not merged into
+the integrated line. Detailed commit inventories and branch reviews live under
+`out/artifacts/verification/core-aten/remaining-20261012/upstream-preparation/`.
+Normal Merlin gates retain only the exact independently checked 17 inherited
+wiring diagnostics; all other required gates must pass.
