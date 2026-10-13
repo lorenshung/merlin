@@ -229,6 +229,20 @@ def test_expanded_mutation_growth_owns_storage_for_its_views_and_copies():
     refuse_overlapping_input_aliases(dict(inputs=[original], results=[mutation, view, copy]))
 
 
+@pytest.mark.parametrize("overlap", [False, True])
+def test_duplicate_mutation_results_refuse_after_growth(overlap):
+    from merlin.llvmlower.input_layout import refuse_overlapping_input_aliases
+
+    original = dict(shape=[2, 3], stride=[0, 1] if overlap else [3, 1], storage_offset=0)
+    grown = dict(shape=[4, 3], stride=[3, 1], storage_offset=0)
+    mutation = dict(grown, alias_inputs=[0], role="user_input_mutation", input_index=0)
+    shrink = dict(
+        shape=[1, 3], stride=[3, 1], storage_offset=0, alias_inputs=[0], role="user_input_mutation", input_index=0
+    )
+    with pytest.raises(ValueError, match="duplicate mutation result"):
+        refuse_overlapping_input_aliases(dict(inputs=[original], results=[mutation, shrink]))
+
+
 @pytest.mark.parametrize("shape,stride", [([1, 3], [3, 1]), ([-1, 3], [3, 1]), ([3, 2], [{"shape_axes": [1]}, 1])])
 def test_expanded_mutation_without_fresh_storage_proof_still_refuses(shape, stride):
     from merlin.llvmlower.input_layout import refuse_overlapping_input_aliases

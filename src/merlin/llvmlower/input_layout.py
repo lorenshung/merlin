@@ -77,6 +77,8 @@ def refuse_overlapping_input_aliases(contract):
             base = result["input_index"]
             if not 0 <= base < len(contract["inputs"]):
                 raise ValueError("invalid result base argument")
+            if base in mutation_roots:
+                raise ValueError("duplicate mutation result for one input")
             aliases.update(mutation_roots.get(base, {base}))
             need, capacity = static_storage_span(result), static_storage_span(contract["inputs"][base])
             # The result-layout lowering allocates fresh storage when a static
