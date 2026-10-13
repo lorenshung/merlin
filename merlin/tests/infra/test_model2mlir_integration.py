@@ -333,7 +333,7 @@ def test_capture_registry_pins_reviewed_full_call_frontend():
     pin = provenance.load_pins(provenance.software_pins_path())[model2mlir.CAPTURE_PIN]
     assert pin.commit == "47943a48af164e1ad079c7ba475200313418c198"
     assert pin.content_check is True
-    assert pin.repo_canonical == "https://github.com/ucb-bar/model2MLIR.git"
+    assert pin.repo_canonical == "https://github.com/lorenshung/model2MLIR.git"
     assert {
         "m2m/ir/decompositions.py",
         "m2m/capture/static_aten.py",

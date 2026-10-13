@@ -16,7 +16,7 @@ pins:
       The model2MLIR revision whole-model captures are made with. It carries exact signed integer
       shift and floor-division decompositions, PT2E integer-contraction capture, and literal
       quantization-parameter lowering; missing any of these leaves supported operations opaque.
-    repo_canonical: https://github.com/ucb-bar/model2MLIR.git
+    repo_canonical: https://github.com/lorenshung/model2MLIR.git
     commit: "47943a48af164e1ad079c7ba475200313418c198"
     root_env: MERLIN_M2M_DIR
     requires_paths:
