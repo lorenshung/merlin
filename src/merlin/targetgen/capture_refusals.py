@@ -35,6 +35,16 @@ def write_refusal(directory, *, code, reason, **details):
     )
 
 
+def write_exception_refusal(directory, refusal, *, fallback_code):
+    """Preserve a typed worker refusal's structured details in its receipt."""
+    write_refusal(
+        directory,
+        code=getattr(refusal, "code", fallback_code),
+        reason=str(refusal),
+        **getattr(refusal, "details", {}),
+    )
+
+
 def read_refusal(path):
     refusal = json.loads(path.read_text())
     if (

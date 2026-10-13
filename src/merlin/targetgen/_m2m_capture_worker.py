@@ -33,7 +33,7 @@ from pathlib import Path
 
 # The worker is also executed as a standalone script in the capture interpreter.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from capture_refusals import refuse_integerization, write_refusal  # noqa: E402
+from capture_refusals import refuse_integerization, write_exception_refusal, write_refusal  # noqa: E402
 
 # canonical dtype token -> (torchAO scheme | None, base-weight dtype cast | None). Mirrors
 # workloads/capture.py SCHEME + DTYPE_CAST so a capsule's precision matches how models are captured.
@@ -1103,12 +1103,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
                 source_layer_inventory=source_layer_inventory,
             )
         except (RQ.NoEligibleRecipeOperations, RQ.CalibrationRefused, RQ.FFTAdmissionRefused) as exc:
-            write_refusal(
-                out,
-                code=getattr(exc, "code", "no_eligible_recipe_operations"),
-                reason=str(exc),
-                **getattr(exc, "details", {}),
-            )
+            write_exception_refusal(out, exc, fallback_code="no_eligible_recipe_operations")
             return 4
         quant_stats = getattr(mdl, "_recipe_quantization_stats", None)
         if fp32_staging is not None:

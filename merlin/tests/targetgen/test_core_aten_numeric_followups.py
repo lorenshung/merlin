@@ -222,3 +222,36 @@ except CalibrationRefused as exc:
 else:
     raise AssertionError("finite endpoints with overflowing histogram range must refuse")
 """)
+
+
+def test_standalone_worker_refusal_preserves_details_and_fallback(tmp_path):
+    import sys
+    from pathlib import Path
+
+    from merlin.targetgen import capture_refusals
+
+    script = r"""
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from capture_refusals import read_refusal, write_exception_refusal
+out = Path(sys.argv[2])
+refusal = RuntimeError("actual observer range overflow")
+refusal.code = "nonfinite_calibration"
+refusal.details = {"observer_path": "activation_post_process_0", "calibration_sample": 2}
+write_exception_refusal(out, refusal, fallback_code="no_eligible_recipe_operations")
+receipt = read_refusal(out / "refusal.json")
+assert receipt.code == refusal.code
+assert str(receipt) == str(refusal)
+assert receipt.details["observer_path"] == refusal.details["observer_path"]
+assert receipt.details["calibration_sample"] == 2
+write_exception_refusal(out, RuntimeError("no eligible contraction"),
+                        fallback_code="no_eligible_recipe_operations")
+receipt = read_refusal(out / "refusal.json")
+assert receipt.code == "no_eligible_recipe_operations"
+assert str(receipt) == "no eligible contraction"
+"""
+    subprocess.run(
+        [sys.executable, "-I", "-S", "-c", script, str(Path(capture_refusals.__file__).parent), str(tmp_path)],
+        check=True,
+    )
