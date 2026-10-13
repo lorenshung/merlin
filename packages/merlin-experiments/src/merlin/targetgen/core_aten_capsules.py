@@ -293,7 +293,8 @@ def runtime_bundle(capsule: dict, destination: Path) -> dict:
     root = Path(capsule["__dir__"])
     destination.mkdir(parents=True, exist_ok=True)
     source = (root / "capsule.interface.mlir").read_text()
-    (destination / "model.mlir").write_text(caller_input_storage(source, golden["batch_map"]["cases"]))
+    prepared = caller_input_storage(source, golden["batch_map"]["cases"])
+    (destination / "model.mlir").write_text(_legacy_view_storage(capsule, golden, source, prepared))
     for filename in ("inputs.npz", "input_order.json", "weights.safetensors.manifest.json"):
         shutil.copyfile(root / filename, destination / filename)
     # Reconstruct caller layouts also for previously sealed normalized captures.
@@ -306,6 +307,123 @@ def runtime_bundle(capsule: dict, destination: Path) -> dict:
     if plan is not None:
         _json(destination / "spec-int8-admission.json", plan)
     return golden["batch_map"]
+
+
+def _legacy_view_storage(capsule: dict, golden: dict, source: str, prepared: str) -> str:
+    """Recover a bound same-conversion view contract, never eager answer metadata.
+
+    The copied capture.json is not independently committed. Its boundary may be
+    used only when it agrees with the compiler boundary in the bound golden
+    document, which also commits the exact public interface bytes. Eager
+    expected/post-call observations are not consulted. Missing or unsupported
+    contracts leave computed descriptors unknown; inconsistent contracts refuse.
+    """
+    from xdsl.dialects.builtin import StringAttr
+
+    from merlin.frontends.linalg_mlir import parse_mlir_text
+    from merlin.llvmlower.result_layout import ATTRIBUTE, read_layout
+    from merlin.targetgen.core_aten_batch import _tensor_type
+
+    if read_layout(source) is not None:
+        return prepared
+    root = Path(capsule["__dir__"]).resolve()
+    selected = os.environ.get("MERLIN_CORE_ATEN_PRIVATE_ROOT")
+    answers = (Path(selected) if selected else root.parent.parent / "_private" / root.parent.name) / capsule["name"]
+    path = answers / "capture.json"
+    if not path.exists():
+        return prepared
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("legacy result contract capture is indirect")
+    capture = json.loads(path.read_text())
+    contract = capture.get("capture_meta", {}).get("result_contract")
+    if contract is None:
+        return prepared
+    record = golden["batch_map"]["cases"][0]
+    boundary = golden["semantic_io"]
+    metadata = capture["capture_meta"]
+    if (
+        contract.get("authority") != "same_conversion_exported_program"
+        or record["semantic_boundary"].get("authority") != contract["authority"]
+        or capture.get("overload") != record["overload"]
+        or not metadata.get("ok")
+        or metadata.get("opaque") != 0
+        or metadata.get("input_abi") != record["input_abi"]
+        or metadata.get("output_abi") != record["output_abi"]
+        or golden["public_files"].get("capsule.interface.mlir") != hashlib.sha256(source.encode()).hexdigest()
+    ):
+        raise ValueError("legacy result contract is not bound to the compiled call")
+    # Only the old single unmutated user-result projection is recoverable here.
+    # Complex component ABIs and mutation/result projections keep their existing
+    # lowering path rather than borrowing an inferred storage identity.
+    results = contract.get("results", [])
+    if len(results) != 1 or results[0].get("role") != "user_output":
+        return prepared
+    if any(abi["dtype"].startswith("complex<") for abi in record["input_abi"] + record["output_abi"]):
+        return prepared
+    module = parse_mlir_text(prepared)
+    function = next(op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward")
+    arguments = list(function.body.block.args)
+    returned = next(op for op in function.body.block.ops if op.name == "func.return")
+    posts = record["semantic_boundary"]["post_indices"]
+    users = record["output_indices"]
+    if (
+        record["input_indices"] != list(range(len(arguments)))
+        or len(contract.get("inputs", [])) != len(arguments)
+        or len(posts) != len(arguments)
+        or len(users) != 1
+        or len(returned.operands) != len(boundary["outputs"])
+        or boundary["input_indices"] != record["input_indices"]
+        or boundary["post_indices"] != posts
+    ):
+        raise ValueError("legacy result contract projection differs from source ABI")
+    keys = ("dtype", "shape", "stride", "storage_offset", "requires_grad")
+    result, ordinal = results[0], users[0]
+    committed = boundary["outputs"][ordinal]
+    aliases = result.get("alias_inputs", [])
+    dtypes = {
+        "i1": "bool",
+        "i8": "int8",
+        "i16": "int16",
+        "i32": "int32",
+        "i64": "int64",
+        "f16": "float16",
+        "bf16": "bfloat16",
+        "f32": "float32",
+        "f64": "float64",
+    }
+    if (
+        any(result.get(key) != committed.get(key) for key in (*keys, "role", "alias_inputs"))
+        or str(returned.operands[ordinal].type) != _tensor_type(record["output_abi"][0])
+        or result["shape"] != record["output_abi"][0]["shape"]
+        or result["dtype"] != dtypes.get(record["output_abi"][0]["dtype"])
+        or any(type(i) is not int or not 0 <= i < len(arguments) for i in aliases)
+        or len(set(aliases)) != len(aliases)
+        or committed.get("alias_outputs", []) != [posts[i] for i in aliases]
+    ):
+        raise ValueError("legacy result contract differs from the committed compiler boundary")
+    if not aliases:
+        return prepared  # A fresh computed result must remain a natural descriptor.
+    for argument, abi, entry, post in zip(arguments, record["input_abi"], contract["inputs"], posts):
+        if (
+            str(argument.type) != _tensor_type(abi)
+            or entry["shape"] != abi["shape"]
+            or entry["dtype"] != dtypes.get(abi["dtype"])
+            or returned.operands[post] is not argument
+            or any(entry.get(key) != boundary["outputs"][post].get(key) for key in keys)
+        ):
+            raise ValueError("legacy result contract input is not the bound forwarded argument")
+    layout = read_layout(prepared)
+    for i in aliases:
+        if any(contract["inputs"][i][key] != layout["inputs"][i][key] for key in ("shape", "stride", "storage_offset")):
+            raise ValueError("legacy view contract differs from original caller storage")
+        # The independently forwarded post-input descriptor must name the same
+        # caller storage as the recovered view. Leaving it in a fresh alias class
+        # would make the observed view/post relationship false despite good strides.
+        layout["results"][posts[i]] = {**layout["inputs"][i], "alias_inputs": [i], "role": "user_output"}
+    layout["results"][ordinal] = dict(result)
+    module.attributes[ATTRIBUTE] = StringAttr(json.dumps(layout))
+    module.verify()
+    return str(module) + "\n"
 
 
 def run_capsule(capsule, package_dir, paths, config, adapters, pkg, contract, timeout, no_oracle):
