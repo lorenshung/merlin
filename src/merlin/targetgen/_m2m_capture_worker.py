@@ -1103,7 +1103,12 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
                 source_layer_inventory=source_layer_inventory,
             )
         except (RQ.NoEligibleRecipeOperations, RQ.CalibrationRefused, RQ.FFTAdmissionRefused) as exc:
-            write_refusal(out, code=getattr(exc, "code", "no_eligible_recipe_operations"), reason=str(exc))
+            write_refusal(
+                out,
+                code=getattr(exc, "code", "no_eligible_recipe_operations"),
+                reason=str(exc),
+                **getattr(exc, "details", {}),
+            )
             return 4
         quant_stats = getattr(mdl, "_recipe_quantization_stats", None)
         if fp32_staging is not None:

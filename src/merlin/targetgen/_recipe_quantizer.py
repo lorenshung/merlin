@@ -59,6 +59,37 @@ class CalibrationRefused(RecipeError):
 
     code = "nonfinite_calibration"
 
+    def __init__(self, reason, *, details=None):
+        super().__init__(reason)
+        self.details = details or {}
+
+
+def require_finite_observer_state(model, observer_base, histogram_observer, *, calibration_sample):
+    """Reject nonfinite statistics produced internally from finite observer inputs."""
+    import torch
+
+    for path, observer in model.named_modules():
+        if not isinstance(observer, observer_base):
+            continue
+        buffers = list(observer.named_buffers(recurse=False))
+        if isinstance(observer, histogram_observer):
+            # HistogramObserver searches over an affine range in the buffers'
+            # own precision. Finite endpoints can still overflow that span.
+            buffers.append(("max_val-min_val", observer.max_val - observer.min_val))
+        for name, buffer in buffers:
+            if buffer.is_floating_point() and not bool(torch.isfinite(buffer).all()):
+                location = path or "<root>"
+                raise CalibrationRefused(
+                    f"static int8 calibration observer {location} buffer {name} is nonfinite",
+                    details=dict(
+                        observer_path=location,
+                        observer_type=type(observer).__qualname__,
+                        observer_buffer=name,
+                        calibration_sample=calibration_sample,
+                        nonfinite_count=int((~torch.isfinite(buffer)).sum()),
+                    ),
+                )
+
 
 def require_finite_calibration(value):
     import torch
@@ -989,9 +1020,9 @@ def apply_recipe(
     # Validate observer inputs before HistogramObserver/MinMaxObserver perform
     # reductions, including nonfinite intermediates from finite caller inputs.
     try:
-        from torchao.quantization.pt2e.observer import ObserverBase
+        from torchao.quantization.pt2e.observer import HistogramObserver, ObserverBase
     except ImportError:
-        from torch.ao.quantization.observer import ObserverBase
+        from torch.ao.quantization.observer import HistogramObserver, ObserverBase
 
     observer_checks = [
         observer.register_forward_pre_hook(lambda _module, args: require_finite_calibration(args))
@@ -1008,6 +1039,7 @@ def apply_recipe(
                 require_finite_calibration(sample)
                 prepared(*_as_tuple(sample))
                 calibrated += 1
+                require_finite_observer_state(prepared, ObserverBase, HistogramObserver, calibration_sample=calibrated)
     finally:
         for check in observer_checks:
             check.remove()

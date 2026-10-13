@@ -174,3 +174,51 @@ def test_structured_numeric_refusal_roundtrip_and_unknown_code_fails_closed(tmp_
     assert refused.code == code
     write_refusal(tmp_path, code="unexpected_runtime_failure", reason="not a policy refusal")
     assert read_refusal(tmp_path / "refusal.json") is None
+
+
+def test_finite_calibration_refuses_internal_histogram_range_overflow():
+    run_torch(r"""
+import torch
+import torchao.quantization.pt2e.quantize_pt2e as pt2e
+from torchao.quantization.pt2e import HistogramObserver, MinMaxObserver
+from torchao.quantization.pt2e.observer import ObserverBase
+from merlin.targetgen._recipe_quantizer import apply_recipe, CalibrationRefused, require_finite_observer_state
+
+maximum = torch.finfo(torch.float32).max
+source = torch.tensor([[-maximum, -1.], [0., maximum]])
+assert torch.isfinite(source).all()
+observer = HistogramObserver(dtype=torch.int8, qscheme=torch.per_tensor_symmetric,
+                             quant_min=-128, quant_max=127)
+observer(source)
+assert all(torch.isfinite(buffer).all() for buffer in observer.buffers())
+assert not torch.isfinite(observer.max_val - observer.min_val)
+minimum_maximum = MinMaxObserver(dtype=torch.int8, qscheme=torch.per_tensor_symmetric,
+                               quant_min=-128, quant_max=127)
+minimum_maximum(source)
+assert torch.isfinite(minimum_maximum.calculate_qparams()[0]).all()
+require_finite_observer_state(torch.nn.Sequential(minimum_maximum), ObserverBase, HistogramObserver,
+                              calibration_sample=1)
+
+recipe = {
+    "schema":"quant_recipe_v1", "status":"derived", "families":["contraction"],
+    "weight":dict(dtype="int8",granularity="tensor",symmetric=True,quant_min=-127,quant_max=127),
+    "activation":dict(dtype="int8",granularity="tensor",symmetric=True,quant_min=-128,quant_max=127,mode="static"),
+}
+class Model(torch.nn.Module):
+    def forward(self, a, b):
+        return a @ b
+
+def forbidden(*args, **kwargs):
+    raise AssertionError("invalid histogram state must refuse before convert_pt2e")
+pt2e.convert_pt2e = forbidden
+try:
+    apply_recipe(Model(), recipe, example_inputs=(source, torch.full((2, 2), .125)))
+except CalibrationRefused as exc:
+    assert exc.code == "nonfinite_calibration"
+    assert exc.details["observer_path"].startswith("activation_post_process_")
+    assert exc.details["observer_buffer"] == "max_val-min_val"
+    assert exc.details["calibration_sample"] == 1
+    assert exc.details["nonfinite_count"] == 1
+else:
+    raise AssertionError("finite endpoints with overflowing histogram range must refuse")
+""")
