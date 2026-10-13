@@ -16,8 +16,8 @@ pins:
       The model2MLIR revision whole-model captures are made with. It carries exact signed integer
       shift and floor-division decompositions, PT2E integer-contraction capture, and literal
       quantization-parameter lowering; missing any of these leaves supported operations opaque.
-    repo_canonical: https://github.com/ucb-bar/model2MLIR.git
-    commit: "2957f9ed91454d0172791745693b55298b3185fc"
+    repo_canonical: https://github.com/lorenshung/model2MLIR.git
+    commit: "8189a61a8c9195660ee0378259dce5775e74aea8"
     root_env: MERLIN_M2M_DIR
     requires_paths:
       - m2m/ir/decompositions.py
@@ -28,9 +28,13 @@ pins:
       - m2m/capture/provenance.py
       - m2m/capture/torchao_pipeline.py
       - m2m/capture/fft_pt2e.py
+      - m2m/capture/static_aten.py
+      - m2m/ir/complex_factories.py
+      - m2m/ir/torch_cpu_rng.py
       - tests/test_integer_shift_floordiv.py
     content_check: true
     notes: >-
       Reviewed model2MLIR frontend, including signed-integer lowering, portable per-tensor
       static quantization, caller layouts, exported full-call result storage contracts,
-      pre-PT2E FFT candidates and upstream integer constant rounding fixes.
+      pre-PT2E FFT candidates, upstream integer constant rounding fixes, and complete
+      direct/nested complex dropout result structures.
