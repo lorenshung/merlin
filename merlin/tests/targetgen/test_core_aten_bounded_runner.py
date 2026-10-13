@@ -62,6 +62,7 @@ def test_cache_stamp_binds_selected_policy_files_and_layout_sources(tmp_path, mo
     sources = second["sources"]
     assert any(path.endswith("src/merlin/llvmlower/input_layout.py") for path in sources)
     assert any(path.endswith("src/merlin/targetgen/core_aten_spec_int8.py") for path in sources)
+    assert any(path.endswith("src/merlin/targetgen/core_aten_input_storage.py") for path in sources)
 
 
 def test_failure_and_device_evidence_are_preserved():
