@@ -83,7 +83,7 @@ def _leaves(document: Any) -> list[Any]:
     if isinstance(document, Mapping):
         if document.get("kind") == "tuple":
             return [leaf for item in document["items"] for leaf in _leaves(item)]
-        if document.get("kind") in ("tensor", "float"):
+        if document.get("kind") in ("tensor", "float", "complex"):
             return [document]
         return [leaf for _, item in sorted(document.items()) for leaf in _leaves(item)]
     if isinstance(document, list):
@@ -107,17 +107,26 @@ def _grade_output(raw: bytes, abi: Mapping[str, Any], expected: Any, case: Mappi
         if len(raw) != nbytes:
             return {"status": "mismatch", "reason": f"complex result has {len(raw)} bytes; expected {nbytes}"}
         actual = np.frombuffer(raw, dtype=complex_dtype).reshape(shape)
-        if not isinstance(expected, Mapping) or expected.get("kind") != "tensor":
-            return {"status": "ungradable", "reason": "complex result lacks a canonical tensor document"}
-        if expected.get("dtype") != np.dtype(complex_dtype).name or tuple(expected.get("shape", ())) != shape:
-            return {"status": "mismatch", "reason": "output dtype or shape differs from canonical complex result"}
-        if "values" not in expected:
-            if case.get("comparison") != "metadata":
-                return {"status": "ungradable", "reason": "canonical case has no numeric expected values"}
-            return {"status": "ungradable", "reason": "metadata-only result requires compiled descriptor observations"}
+        if isinstance(expected, Mapping) and expected.get("kind") == "complex":
+            if shape:
+                return {"status": "mismatch", "reason": "canonical complex scalar requires a rank-zero result"}
+            expected_value = expected
+        else:
+            if not isinstance(expected, Mapping) or expected.get("kind") != "tensor":
+                return {"status": "ungradable", "reason": "complex result lacks a canonical tensor or scalar document"}
+            if expected.get("dtype") != np.dtype(complex_dtype).name or tuple(expected.get("shape", ())) != shape:
+                return {"status": "mismatch", "reason": "output dtype or shape differs from canonical complex result"}
+            if "values" not in expected:
+                if case.get("comparison") != "metadata":
+                    return {"status": "ungradable", "reason": "canonical case has no numeric expected values"}
+                return {
+                    "status": "ungradable",
+                    "reason": "metadata-only result requires compiled descriptor observations",
+                }
+            expected_value = expected["values"]
         try:
-            reference = np.asarray(_complex_values(expected["values"]), dtype=complex_dtype).reshape(shape)
-        except (TypeError, ValueError) as exc:
+            reference = np.asarray(_complex_values(expected_value), dtype=complex_dtype).reshape(shape)
+        except (KeyError, TypeError, ValueError) as exc:
             return {"status": "ungradable", "reason": f"cannot decode canonical expected value: {exc}"}
         parameters = case.get("comparison_parameters") or {}
         equal = (

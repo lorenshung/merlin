@@ -31,6 +31,39 @@ def test_nested_nonfinite_documents_preserve_ieee_values():
     )
 
 
+@pytest.mark.parametrize("dtype", ["complex64", "complex128"])
+@pytest.mark.parametrize("real", [2.5, "nan", "-inf", "-0.0"])
+def test_complex_scalar_is_one_output_and_uses_declared_comparison(dtype, real):
+    from merlin.targetgen.core_aten_batch_grade import _grade_output, _leaves
+
+    expected = dict(kind="complex", real=dict(kind="float", value=real) if isinstance(real, str) else real, imag=0.0)
+    data = np.array(complex(float(real), 0.0), dtype=dtype)
+    abi = dict(dtype="complex<f32>" if dtype == "complex64" else "complex<f64>", shape=[])
+    policy = dict(comparison_parameters=dict(equal_nan=True, rtol=1e-5, atol=1e-6))
+    assert _leaves(dict(kind="tuple", items=[expected, 7])) == [expected, 7]
+    assert _grade_output(data.tobytes(), abi, expected, policy)["status"] == "pass"
+    assert _grade_output(data.tobytes(), {**abi, "shape": [1]}, expected, policy)["status"] == "mismatch"
+    wrong = np.array(9 + 8j, dtype=dtype)
+    assert _grade_output(wrong.tobytes(), abi, expected, policy)["status"] == "mismatch"
+    if real == "-0.0":
+        exact = dict(comparison_parameters=dict(storage_bits=True))
+        assert _grade_output(data.tobytes(), abi, expected, exact)["status"] == "pass"
+        positive_zero = np.array(complex(0.0, 0.0), dtype=dtype)
+        assert _grade_output(positive_zero.tobytes(), abi, expected, exact)["status"] == "mismatch"
+
+
+def test_malformed_complex_scalar_is_ungradable():
+    from merlin.targetgen.core_aten_batch_grade import _grade_output
+
+    verdict = _grade_output(
+        np.array(1 + 2j, np.complex64).tobytes(),
+        dict(dtype="complex<f32>", shape=[]),
+        dict(kind="complex", real=1.0),
+        {},
+    )
+    assert verdict["status"] == "ungradable"
+
+
 def test_module_symbols_are_namespaced_and_dynamic_return_is_preserved():
     from merlin.targetgen.core_aten_batch import _function_parts, _rename_ssa
 
