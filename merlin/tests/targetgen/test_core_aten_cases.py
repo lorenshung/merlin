@@ -181,3 +181,19 @@ def test_standalone_capture_loader_preserves_original_argument_storage(layout):
     assert actual.storage_offset() == tensor.storage_offset()
     assert torch.equal(actual, tensor)
     assert torch.equal(model(actual), tensor.clone())
+
+
+@pytest.mark.parametrize("dtype", [torch.complex64, torch.complex128])
+@pytest.mark.parametrize("value", [2.123456789 + 4.987654321j, complex(-0.0, -0.0), complex(float("nan"), 3.0)])
+def test_standalone_scalar_loader_preserves_complex_components(dtype, value):
+    from merlin.targetgen.core_aten_cases import case_document_from_arguments
+
+    tensor = torch.tensor(value, dtype=dtype)
+    case = case_document_from_arguments("aten._local_scalar_dense.default", (tensor,), {})
+    namespace = {}
+    exec(compile(loader_source(case), "<complex scalar loader>", "exec"), namespace)  # noqa: S102
+    model, inputs = namespace["get_model_and_inputs"]()
+    actual = model(*inputs)
+    assert actual.dtype == dtype and actual.shape == torch.Size([])
+    torch.testing.assert_close(actual, tensor, rtol=0, atol=0, equal_nan=True)
+    assert torch.equal(torch.signbit(torch.view_as_real(actual)), torch.signbit(torch.view_as_real(tensor)))

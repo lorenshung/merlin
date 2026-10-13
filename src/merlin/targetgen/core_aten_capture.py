@@ -48,6 +48,13 @@ def loader_source(case: dict[str, Any], *, rng_seed: int | None = None) -> str:
     )
     scalar_result = not structured_result
     scalar_wrap = "result = torch.ops.aten.scalar_tensor.default(result)" if scalar_result else ""
+    if isinstance(expected, dict) and expected.get("kind") == "complex":
+        # scalar_tensor defaults to float32 even for a Python complex value.
+        # Preserve the source component precision in this tensor ABI wrapper.
+        dtypes = {tensor["dtype"] for tensor in tensors if tensor["dtype"] in {"complex64", "complex128"}}
+        if len(dtypes) != 1:
+            raise ValueError("complex scalar capture requires unambiguous source component precision")
+        scalar_wrap = f"result = torch.ops.aten.scalar_tensor.default(result, dtype=torch.{dtypes.pop()})"
     document = json.dumps(
         {"overload": case["overload"], "arguments": arguments, "tensor_inputs": tensors},
         sort_keys=True,
