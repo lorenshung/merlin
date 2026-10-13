@@ -331,12 +331,15 @@ def test_capture_registry_pins_reviewed_full_call_frontend():
     from merlin.common import provenance
 
     pin = provenance.load_pins(provenance.software_pins_path())[model2mlir.CAPTURE_PIN]
-    assert pin.commit == "8189a61a8c9195660ee0378259dce5775e74aea8"
+    assert pin.commit == "e9e553c73dc52ebaf68f507df01e9c72a6a26518"
     assert pin.content_check is True
     assert pin.repo_canonical == "https://github.com/lorenshung/model2MLIR.git"
     assert {
         "m2m/ir/decompositions.py",
         "m2m/capture/static_aten.py",
+        "m2m/capture/torch_export.py",
+        "m2m/capture/trace.py",
+        "m2m/ir/import_fx.py",
         "m2m/ir/complex_factories.py",
         "m2m/ir/torch_cpu_rng.py",
     }.issubset(pin.requires_paths)
