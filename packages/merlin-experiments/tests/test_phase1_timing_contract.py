@@ -89,3 +89,62 @@ def test_non_chipyard_simulator_keeps_legacy_timeout_without_chipyard_claim(tmp_
     assert certification._verilator_per_capsule_timeout(context, timing_file=selected) == 3000
     monkeypatch.setattr(simjob, "_cert_budget_s", lambda target: (None, "no fit"))
     assert simjob._per_capsule_timeout(0, context=context, timing_file=selected)[0] == 3000
+
+
+@pytest.fixture
+def functional_corpus(tmp_path, monkeypatch):
+    import merlin.targetgen.target_experiment as experiments
+
+    public = tmp_path / "corpus/public"
+    public.mkdir(parents=True)
+    (public / "capsule.yaml").write_text("required_oracle_tiers: [L2]\n")
+    selected = SimpleNamespace(sim_via="chipyard", capsule_corpus=public, graded_roots=lambda: [public])
+    monkeypatch.setattr(experiments, "load_target_experiment", lambda path: selected)
+    return tmp_path / "descriptor.yaml", public
+
+
+def test_functional_corpus_does_not_require_an_unexecuted_rtl_measurement(functional_corpus):
+    descriptor, public = functional_corpus
+    assert not timing.requires_chipyard_timing(descriptor)
+    (public / "capsule.yaml").write_text("required_oracle_tiers: [L0, L1, L2]\n")
+    assert not timing.requires_chipyard_timing(descriptor)
+
+
+@pytest.mark.parametrize("location", ["public", "hidden", "override"])
+def test_rtl_requirement_anywhere_retains_measured_timing_gate(functional_corpus, location):
+    descriptor, public = functional_corpus
+    root = public if location == "public" else public.parent / location
+    root.mkdir(exist_ok=True)
+    (root / "capsule.yaml").write_text("required_oracle_tiers: [L2, L3]\n")
+    kwargs = {"public_root": root} if location == "override" else {}
+    assert timing.requires_chipyard_timing(descriptor, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        "{}",
+        "[]",
+        "required_oracle_tiers: []",
+        "required_oracle_tiers: L2",
+        "required_oracle_tiers: [unknown]",
+        "required_oracle_tiers: [true]",
+        "broken: [",
+    ],
+)
+def test_unknown_or_malformed_corpus_still_requires_timing(functional_corpus, document):
+    descriptor, public = functional_corpus
+    (public / "capsule.yaml").write_text(document)
+    assert timing.requires_chipyard_timing(descriptor)
+
+
+def test_absent_or_indirect_corpus_retains_timing_requirement(functional_corpus):
+    descriptor, public = functional_corpus
+    capsule = public / "capsule.yaml"
+    contents = capsule.read_text()
+    capsule.unlink()
+    assert timing.requires_chipyard_timing(descriptor)
+    alternate = public.parent / "external.yaml"
+    alternate.write_text(contents)
+    capsule.symlink_to(alternate)
+    assert timing.requires_chipyard_timing(descriptor)

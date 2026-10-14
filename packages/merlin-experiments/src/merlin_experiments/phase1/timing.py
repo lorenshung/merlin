@@ -17,15 +17,52 @@ def timing_path(resources: Path, target: str) -> Path:
     return Path(resources) / f".oracle_timing.{target}.json"
 
 
-def requires_chipyard_timing(descriptor: Path | None) -> bool:
-    """Require byte-bound timing for Chipyard or an unclassifiable descriptor (fail closed)."""
+def requires_chipyard_timing(descriptor: Path | None, *, public_root: Path | None = None) -> bool:
+    """Require RTL timing when the selected Chipyard corpus requests an RTL tier.
+
+    Functional-only capsules need no elaborated-RTL calibration. Missing or
+    malformed corpus declarations retain the historical fail-closed requirement.
+    Hidden requirements and an explicit public override participate equally.
+    """
     if descriptor is None:
         return True
     from merlin.targetgen.target_experiment import load_target_experiment
 
     try:
-        return load_target_experiment(descriptor).sim_via == "chipyard"
-    except (OSError, ValueError):
+        selected = load_target_experiment(descriptor)
+        if selected.sim_via != "chipyard":
+            return False
+        roots = selected.graded_roots()
+        hidden = selected.capsule_corpus.parent / "hidden"
+        if hidden.exists() or hidden.is_symlink():
+            roots.append(hidden)
+        if public_root is not None:
+            roots.append(Path(public_root))
+        if not roots or any(not root.is_dir() or root.is_symlink() for root in roots):
+            return True
+        files = {path for root in roots for path in root.rglob("capsule.yaml")}
+        if not files:
+            return True
+        import yaml
+
+        for path in files:
+            if any(p.is_symlink() for p in (path, *path.parents)):
+                return True
+            try:
+                capsule = yaml.safe_load(path.read_text())
+            except yaml.YAMLError:
+                return True
+            if not isinstance(capsule, dict):
+                return True
+            tiers = capsule.get("required_oracle_tiers")
+            if (
+                not isinstance(tiers, list)
+                or not tiers
+                or any(not isinstance(tier, str) or tier not in {"L0", "L1", "L2"} for tier in tiers)
+            ):
+                return True
+        return False
+    except (OSError, ValueError, AttributeError, TypeError):
         return True
 
 
@@ -75,9 +112,9 @@ def read_verified_timing(path: Path, *, descriptor: Path, target: str) -> dict:
         _, contract_path, agreement = declared_vs_resolved_contract(selected)
         if agreement != "agree" or contract_path is None:
             raise ValueError(f"selected target contract is not agreed and resolvable: {agreement}")
-        config = (
-            load_capability_manifest(target, contract_path=contract_path).contract.get("runtime") or {}
-        ).get("rtl_sim_config")
+        config = (load_capability_manifest(target, contract_path=contract_path).contract.get("runtime") or {}).get(
+            "rtl_sim_config"
+        )
         if not isinstance(config, str) or record["config"] != config:
             raise ValueError("oracle timing config differs from the selected target contract")
         simulator = ext_path("chipyard") / "sims" / "verilator" / f"simulator-chipyard.harness-{config}"

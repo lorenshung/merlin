@@ -77,7 +77,7 @@ def run(
         from .timing import read_verified_timing, requires_chipyard_timing
 
         try:
-            if requires_chipyard_timing(context.descriptor):
+            if requires_chipyard_timing(context.descriptor, public_root=public_root):
                 read_verified_timing(oracle_timing, descriptor=context.descriptor, target=context.target)
         except ValueError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)

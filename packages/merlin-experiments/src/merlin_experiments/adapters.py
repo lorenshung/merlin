@@ -450,6 +450,7 @@ ADAPTERS = {
             "public_object_build_budget_s": _POSITIVE,
             "readback_policy": Option(choices=READBACK_TRANSPORTS),
             "candidate_policy": _INPUT,
+            "seed_submission": _INPUT,
             "sim_max_jobs": _POSITIVE,
             "model_budget_s": _POSITIVE,
             "plateau_rounds": _POSITIVE,
