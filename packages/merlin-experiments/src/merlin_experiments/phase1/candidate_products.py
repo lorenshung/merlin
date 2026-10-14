@@ -354,7 +354,9 @@ class CandidateProductTransport:
         dependencies = [Path(__file__), self.bwrap_binary, *file_members(clone).values()]
         snapshot = BW.bundle_snapshot_root(frozen.root / frozen.record["workspace"])
         dependencies.extend(file_members(snapshot).values())
-        dependencies.extend((prepared, *file_members(package).values()))
+        # Host lowering may subsequently rewrite its prepared source. The
+        # recorded compiler input is the immutable copy admitted below.
+        dependencies.extend(file_members(package).values())
         retained = {p.relative_path: destination / p.relative_path for p in products}
         with invocation_record.observe(
             destination,

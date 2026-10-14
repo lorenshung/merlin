@@ -314,6 +314,26 @@ def test_actual_retained_product_drift_invalidates_invocation(selected):
         invocation_record.verify(Path(receipt["invocation_record"]["path"]))
 
 
+def test_actual_later_host_lowering_preserves_compiler_input_identity(selected):
+    require_namespace()
+    _, _, prepared, _, _ = selected
+    receipt = invoke(
+        selected,
+        "import sys;from pathlib import Path;"
+        "Path(sys.argv[2],'product.bin').write_bytes(Path(sys.argv[1]).read_bytes())",
+    )
+    record = Path(receipt["invocation_record"]["path"])
+    original = prepared.read_bytes()
+    prepared.write_text("module { /* later host lowering */ }\n")
+    observed = invocation_record.verify(record)
+    retained_input = Path(observed["inputs"][0]["path"])
+    assert retained_input != prepared and retained_input.read_bytes() == original
+    retained_input.chmod(0o600)
+    retained_input.write_text("module { /* forged compiler input */ }\n")
+    with pytest.raises(ValueError, match="changed"):
+        invocation_record.verify(record)
+
+
 def test_actual_candidate_preserves_empty_directory_and_execution_modes(selected):
     require_namespace()
     _, candidate, _, _, _ = selected
