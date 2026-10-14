@@ -401,6 +401,73 @@ def test_generic_symbol_definitions_rename_with_their_references():
     assert '"aten.rand.default"' in _rename_ssa(body, "c0_", {})
 
 
+@pytest.mark.parametrize("argument_types", ["()", "(tensor<2xf32>, tensor<2xf32>)"])
+def test_generic_function_type_before_symbol_keeps_arrow_and_nested_commas(argument_types):
+    from merlin.targetgen.core_aten_batch import _function_parts
+
+    old = 'sym_name = "forward", function_type = (tensor<2xf32>, tensor<2xf32>) -> (tensor<2xf32>, tensor<i64>)'
+    reordered = f'function_type = {argument_types} -> (tensor<2xf32>, tensor<i64>), sym_name = "forward"'
+    source = _GENERIC_STATEFUL.replace(old, reordered)
+    assert source != _GENERIC_STATEFUL
+    if argument_types == "()":
+        source = source.replace("  ^bb0(%x: tensor<2xf32>, %y: tensor<2xf32>):\n", "")
+    args, body, values, types, declarations = _function_parts(source)
+    assert args == ([] if argument_types == "()" else ["%x", "%y"])
+    assert values == ["%x", "%s"]
+    assert types == ["tensor<2xf32>", "tensor<i64>"]
+    assert '"ml_program.global_load"() <{global = @state}>' in body
+    assert 'sym_name = "state"' in declarations
+
+
+def test_function_type_first_still_refuses_multiple_forward_definitions():
+    from merlin.targetgen.core_aten_batch import _function_parts
+
+    function_start = _GENERIC_STATEFUL.index('  "func.func"()')
+    function_end = _GENERIC_STATEFUL.rindex("}) : () -> ()")
+    function = _GENERIC_STATEFUL[function_start:function_end]
+    source = _GENERIC_STATEFUL[:function_end] + function + _GENERIC_STATEFUL[function_end:]
+    with pytest.raises(ValueError, match="exactly one @forward"):
+        _function_parts(source)
+
+
+@pytest.mark.parametrize("generic", [False, True])
+def test_caller_layouts_accept_alias_preamble_and_preserve_computed_outputs(generic):
+    from merlin.targetgen.core_aten_batch import caller_boundary_layouts
+
+    alias = "#map = affine_map<(d0) -> (d0)>\n"
+    if generic:
+        source = (
+            alias
+            + """"builtin.module"() ({
+  "func.func"() <{function_type = (tensor<2xf32>) -> (tensor<2xf32>, tensor<2xf32>), sym_name = "forward"}> ({
+  ^bb0(%x: tensor<2xf32>):
+    %y = "arith.addf"(%x, %x) : (tensor<2xf32>, tensor<2xf32>) -> tensor<2xf32>
+    "func.return"(%x, %y) : (tensor<2xf32>, tensor<2xf32>) -> ()
+  }) : () -> ()
+}) : () -> ()
+"""
+        )
+    else:
+        source = (
+            alias
+            + """builtin.module {
+  func.func @forward(%x: tensor<2xf32>) -> (tensor<2xf32>, tensor<2xf32>) {
+    %y = arith.addf %x, %x : tensor<2xf32>
+    func.return %x, %y : tensor<2xf32>, tensor<2xf32>
+  }
+}
+"""
+        )
+    layout = dict(dtype="f32", shape=[2], stride=[1], storage_offset=0, requires_grad=False)
+    document = dict(kind="tensor", **{**layout, "stride": [3], "storage_offset": 4})
+    boundary = dict(outputs=[dict(layout), dict(layout)])
+    records = [dict(case=dict(arguments=[document]), input_indices=[0], semantic_boundary=dict(post_indices=[0]))]
+    observed = caller_boundary_layouts(source, boundary, records)
+    assert observed["outputs"][0] == {**layout, "stride": [3], "storage_offset": 4}
+    assert observed["outputs"][1] == layout
+    assert boundary["outputs"] == [layout, layout]
+
+
 @pytest.mark.parametrize(
     "source",
     [

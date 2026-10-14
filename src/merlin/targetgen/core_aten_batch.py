@@ -113,6 +113,8 @@ def _split_top(text: str) -> list[str]:
             quoted = True
         elif char in "(<[{":
             depth += 1
+        elif char == ">" and pos > 0 and text[pos - 1] == "-":
+            pass  # A function-type arrow does not close an angle-delimited type.
         elif char in ")>]}":
             depth -= 1
         elif char == "," and depth == 0:
@@ -291,7 +293,17 @@ def caller_boundary_layouts(source: str, semantic_io: dict, records: list[dict])
     tensor ABI. Mutation results retain their same-conversion exported metadata.
     Only source argument metadata is used here, never expected post-call observations.
     """
-    names, _, returned, _, _ = _function_parts(source)
+    from merlin.frontends.linalg_mlir import parse_mlir_text
+
+    module = parse_mlir_text(source)
+    functions = [op for op in module.body.block.ops if op.name == "func.func" and op.sym_name.data == "forward"]
+    if len(functions) != 1:
+        raise ValueError("capture must contain exactly one @forward function")
+    block = functions[0].body.block
+    returns = [op for op in block.ops if op.name == "func.return"]
+    if len(returns) != 1 or returns[0] is not block.last_op:
+        raise ValueError("capture must have one terminal func.return")
+    names, returned = block.args, returns[0].operands
     boundary = copy.deepcopy(semantic_io)
     for record in records:
         arguments = _tensor_documents(record["case"]["arguments"])
@@ -303,7 +315,7 @@ def caller_boundary_layouts(source: str, semantic_io: dict, records: list[dict])
             entry = boundary["outputs"][post_index]
             if entry.get("role") == "user_input_mutation":
                 continue
-            if returned[post_index] != names[input_index]:
+            if returned[post_index] is not names[input_index]:
                 continue
             for key in ("dtype", "shape"):
                 if entry[key] != document[key]:
