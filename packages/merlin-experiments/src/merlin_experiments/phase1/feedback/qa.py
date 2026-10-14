@@ -35,7 +35,7 @@ from merlin.targetgen import capsule_grade as CG  # noqa: E402
 from merlin.targetgen import capsule_runner as CR  # noqa: E402
 from merlin.targetgen import tier_integrity as _TI  # noqa: E402
 from merlin.targetgen.capsule_common import host_guards_pass, lane_entry_fields  # noqa: E402
-from merlin_experiments.phase1.context import InvocationContext, add_context_arguments, readback_kwargs, resolve_context
+from merlin_experiments.phase1.context import InvocationContext, add_context_arguments, oracle_kwargs, resolve_context
 
 # Allowed (answer-free) numeric fields. Everything else in the numeric block is dropped.
 _SAFE_NUMERIC = {"status", "policy", "mismatch_count"}
@@ -797,6 +797,8 @@ def run(
     contract: Path | None = None,
     additional_forbidden: tuple[str, ...] = (),
 ) -> dict:
+    if no_oracle and getattr(context, "candidate_policy", None) is not None:
+        raise ValueError("candidate compilation selection requires oracle evaluation")
     # Loop gate = L0+L1+trace + the target's full reachable oracle ladder, screened cheapest-first. The
     # adapters are resolved from the descriptor's target+sim_via via the shared factory, so a non-chipyard
     # target (arc/cyclotron) grades on its own RTL-derived tier with NO target-specific path.
@@ -823,7 +825,7 @@ def run(
     # Grading the round on the screen alone is unsound in exactly one direction, and it was measured:
     # one submission passed the cheap functional tier on 20 of 20 capsules while the RTL tier passed 1.
     # A screen may eliminate; it may never certify (see merlin.targetgen.tier_policy).
-    _loop_adapters = {} if no_oracle else CR.qa_checkpoint_adapters(_target, _sim_via, **readback_kwargs(context))
+    _loop_adapters = {} if no_oracle else CR.qa_checkpoint_adapters(_target, _sim_via, **oracle_kwargs(context))
     # Refuse ONLY when the endpoint exposes tiers but none of them is declared — substituting one there is
     # the defect. An endpoint that reaches nothing at all is an honestly ABSENT oracle: leave the adapter
     # set empty and let each capsule report its missing tier as unavailable, exactly as before.

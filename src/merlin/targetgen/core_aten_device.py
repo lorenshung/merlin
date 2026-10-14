@@ -50,7 +50,7 @@ def selected_facts(target: str, explicit: Path | None):
             os.environ["MERLIN_RTL_FACTS"] = previous
 
 
-def routing_for_bundle(directory: Path, target: str, package: Path, provider, facts: dict):
+def routing_for_bundle(directory: Path, target: str, package: Path, provider, facts: dict, *, compile_products=None):
     """Report structural refusals, then ask the provider to bind supported source operations."""
     from merlin.frontends.linalg_mlir import parse_mlir_file
     from merlin.kernels.shapes import observe_contractions, zero_initialised
@@ -69,7 +69,12 @@ def routing_for_bundle(directory: Path, target: str, package: Path, provider, fa
             eligible.append((op, shape))
     if not eligible:
         return None, "; ".join(declined) or "no eligible contraction in captured source"
-    routing = provider.routing(directory, target=target, package=package, facts=facts, eligible=eligible)
+    if compile_products is None:
+        routing = provider.routing(directory, target=target, package=package, facts=facts, eligible=eligible)
+    else:
+        routing = provider.routing_candidate_products(
+            directory, target=target, package=package, facts=facts, eligible=eligible, compile_products=compile_products
+        )
     if routing is None:
         return None, "provider declines captured contraction semantics"
     if routing.device != target or Path(routing.package_dir).resolve() != package.resolve():

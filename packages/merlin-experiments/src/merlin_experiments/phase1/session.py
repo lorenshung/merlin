@@ -29,6 +29,8 @@ from . import oot_history as _oot_history
 from . import run_inputs as RI
 from . import source_inputs as SI
 from . import treatments as T
+from .candidate_execution import selection_record as candidate_selection_record
+from .candidate_execution import verify_selection as verify_candidate_selection
 from .context import InvocationContext, readback_record, verify_readback_record
 from .options import RunOptions, validate_objective
 from .workspaces import select_workspace_root
@@ -194,6 +196,7 @@ class PreparedRun:
 
     def verify_inputs(self) -> None:
         verify_readback_record(self.request.context, self.environment.get("readback_policy"))
+        verify_candidate_selection(self.request.context, self.environment.get("candidate_compilation"))
         _verify_public_build_budget(self.request.options, self.environment)
         _verify_objective(self.request.options, self.environment)
         if self.environment.get("public_object_build_selection") != _public_build_selection(
@@ -402,6 +405,8 @@ def prepare(
     preparation or the later continuation raises. No child or paid agent starts here.
     """
     a, context, treatment = request.options, request.context, request.treatment
+    if a.no_oracle and getattr(context, "candidate_policy", None) is not None:
+        raise ValueError("candidate compilation selection requires oracle evaluation")
     refusal = validate_options(a)
     if refusal is not None:
         return refusal
@@ -436,6 +441,7 @@ def prepare(
         if not isinstance(_environment_record, dict):
             raise RuntimeError("resume refused: environment record is not a mapping")
         verify_readback_record(context, _environment_record.get("readback_policy"))
+        verify_candidate_selection(context, _environment_record.get("candidate_compilation"))
         _verify_public_build_budget(a, _environment_record)
         _verify_objective(a, _environment_record)
         _implementation_sources = _environment_record.get("implementation_sources")
@@ -768,6 +774,11 @@ def prepare(
                 else {}
             ),
             **({"readback_policy": readback_record(context)} if context.readback_policy is not None else {}),
+            **(
+                {"candidate_compilation": candidate_selection_record(context)}
+                if getattr(context, "candidate_policy", None) is not None
+                else {}
+            ),
             "task_scope": _task_scope_record,
             **({"model_python_selection": _model_python_selection} if _model_python_selection is not None else {}),
             "workspace_path": str(ws),

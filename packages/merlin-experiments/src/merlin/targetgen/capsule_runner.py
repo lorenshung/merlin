@@ -42,6 +42,11 @@ from . import core_aten_capsules as _full_call
 from . import oracle_policy as _oracle_policy
 from . import spike_full_call as _spike_oracles  # also binds the plain-ISA spike engine
 from . import tier_policy as _tier_policy
+from .candidate_scope import adapter_options as _adapter_options
+from .candidate_scope import checkpoint_adapters as _checkpoint_adapters
+from .candidate_scope import require_candidate_product_scope
+from .candidate_scope import with_candidate_transport as _with_candidate_transport
+from .candidate_scope import with_readback_policy as _with_readback_policy
 from .oracle_policy import (  # noqa: F401 — stable public/legacy registry identity
     _SIM_ORACLES,
     _bespoke_sim_via,
@@ -580,24 +585,6 @@ def simulator_adapter(sim: str, target: str, selection: dict | None = None, *, r
     return run
 
 
-def _with_readback_policy(adapters: dict[str, Callable], readback_policy) -> dict[str, Callable]:
-    """Retarget only declared native simulator adapters; never silently ignore policy."""
-    from merlin.targetgen.contract.readback_policy import selected
-
-    policy = selected(readback_policy)
-    if policy is None:
-        return adapters
-    if not adapters:
-        raise NotImplementedError("no oracle can consume explicit full-value readback policy")
-    bound = {}
-    for tier, adapter in adapters.items():
-        factory = getattr(adapter, "_merlin_with_readback_policy", None)
-        if not callable(factory):
-            raise NotImplementedError(f"{tier} oracle cannot consume explicit full-value readback policy")
-        bound[tier] = factory(policy)
-    return bound
-
-
 def _adapter_readback_policy(adapters: dict[str, Callable]):
     """A model child may inherit only one unanimous, constructed adapter choice."""
     from merlin.targetgen.contract.readback_policy import selected
@@ -1131,7 +1118,9 @@ def _sim_engine_adapters(sim_via: str, target: str) -> dict[str, Callable]:
     return {}
 
 
-def oracle_adapters(target: str, sim_via: str | None = None, *, readback_policy=None) -> dict[str, Callable]:
+def oracle_adapters(
+    target: str, sim_via: str | None = None, *, readback_policy=None, candidate_transport=None
+) -> dict[str, Callable]:
     """The oracle adapters per tier for a target. The mlc ARC model is the DEFAULT RTL tier (works for
     ANY mlc target, no bespoke sim); a target that DECLARES a bespoke sim (``sim_via``) additionally gets
     its higher-fidelity sim tiers (chipyard -> spike L2 / verilator L3), preserving that declared sim's path.
@@ -1154,7 +1143,9 @@ def oracle_adapters(target: str, sim_via: str | None = None, *, readback_policy=
         sim_via = _bespoke_sim_via(target)
     so = _SIM_ORACLES.get(sim_via)
     if so is not None and so.exclusive:  # self-hosted SIMT: replaces arc/program default
-        return _with_readback_policy(so.adapters(target), readback_policy)
+        return _with_candidate_transport(
+            _with_readback_policy(so.adapters(target), readback_policy), candidate_transport
+        )
     endpoint_kind, model_ext = _endpoint_of(target)
     if endpoint_kind == "external_backend":
         # Self-hosted-ISA program oracle. ``model_ext`` (the model project that lays out operands + owns
@@ -1180,11 +1171,11 @@ def oracle_adapters(target: str, sim_via: str | None = None, *, readback_policy=
         if "L3" in plan.tiers:
             rtl = program_verilator_adapter(target, model_ext=model_ext, selection=plan.selection)
             adapters["L3"] = rtl
-        return _with_readback_policy(adapters, readback_policy)
+        return _with_candidate_transport(_with_readback_policy(adapters, readback_policy), candidate_transport)
     adapters: dict[str, Callable] = {"L3": mlc_arc_adapter(target)}  # arc default (RTL-derived)
     if so is not None:  # optional ADDITIVE bespoke sim (chipyard)
         adapters.update(so.adapters(target))
-    return _with_readback_policy(adapters, readback_policy)
+    return _with_candidate_transport(_with_readback_policy(adapters, readback_policy), candidate_transport)
 
 
 def oracle_available(target: str, sim_via: str | None = None) -> tuple[bool, str]:
@@ -1376,6 +1367,7 @@ def qa_loop_adapters(
     *,
     declared_tiers: set[str] | None = None,
     readback_policy=None,
+    candidate_transport=None,
 ) -> dict[str, Callable]:
     """The FAST per-round QA-loop oracle set for ``target`` — resolved from :func:`oracle_adapters`, never
     hardwired. It keeps ONE tier (the fastest) and reserves the slower cycle-accurate tiers for the bounded
@@ -1392,11 +1384,7 @@ def qa_loop_adapters(
 
     Omitting ``declared_tiers`` keeps the legacy "fastest available tier" behavior for callers that have
     no corpus in hand."""
-    full = (
-        oracle_adapters(target, sim_via)
-        if readback_policy is None
-        else oracle_adapters(target, sim_via, readback_policy=readback_policy)
-    )
+    full = oracle_adapters(target, sim_via, **_adapter_options(readback_policy, candidate_transport))
     if not full:
         return {}
     if declared_tiers:
@@ -1408,14 +1396,14 @@ def qa_loop_adapters(
     return {lowest: full[lowest]}
 
 
-def qa_checkpoint_adapters(target: str, sim_via: str | None = None, *, readback_policy=None) -> dict[str, Callable]:
+def qa_checkpoint_adapters(
+    target: str, sim_via: str | None = None, *, readback_policy=None, candidate_transport=None
+) -> dict[str, Callable]:
     """The cycle-accurate QA CHECKPOINT oracle set for ``target`` = its full oracle ladder from
     :func:`oracle_adapters` (chipyard: spike L2 + verilator L3; arc/mlc: the RTL-derived arc model). This
     is the higher-fidelity barrier run once the fast loop (:func:`qa_loop_adapters`) has converged — not
     every round. Kept as a named seam so the loop driver never re-hardwires ``{L2: spike, L3: verilator}``."""
-    if readback_policy is None:
-        return oracle_adapters(target, sim_via)
-    return oracle_adapters(target, sim_via, readback_policy=readback_policy)
+    return _checkpoint_adapters(oracle_adapters, target, sim_via, readback_policy, candidate_transport)
 
 
 def _exact_match(a: dict, b: dict) -> bool:
@@ -4919,6 +4907,7 @@ def run_capsule(
     # An unrouted grade (oracle_adapters=None) resolves to the TARGET'S OWN endpoint oracle from the
     # contract — never a fixed experiment's simulator pair. `{}` stays honest no-oracle (L0/L1/trace only).
     adapters = oracle_adapters if oracle_adapters is not None else _resolve_oracle_adapters(eff_target)
+    require_candidate_product_scope(pkg, adapters, capsule=capsule, package_dir=package_dir, contract=contract)
     if set(adapter_managed_tiers) - set(adapters or {}):
         raise ValueError("adapter-managed tiers require supplied oracle adapters")
     required = set(capsule.get("required_oracle_tiers", []))
@@ -6521,6 +6510,7 @@ def _run_suite(
         contract = str(Path(contract).resolve())
     pkg = load_package(package_dir, contract=contract)
     integrity_scan(pkg)
+    require_candidate_product_scope(pkg, oracle_adapters)
     build_package(pkg)
 
     # Pass evidence is opt-in through MERLIN_PASS_LOG. When enabled, install before any capsule work and

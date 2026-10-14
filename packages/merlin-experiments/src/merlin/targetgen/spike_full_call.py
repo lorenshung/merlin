@@ -365,6 +365,7 @@ def full_call_adapter(
     engine: str = "spike",
     execution_provider: Path | None = None,
     rtl_facts: Path | None = None,
+    candidate_transport=None,
 ):
     """Build an oracle callable exposing ``run_full_call`` for one plain Spike target.
 
@@ -372,6 +373,11 @@ def full_call_adapter(
     ``runner_options`` may select ``spike_binary``, ``extension``, ``extlib`` and ``path_prepend``.
     """
     options = dict(runner_options or {})
+    if candidate_transport is not None:
+        from merlin_experiments.phase1.candidate_products import CandidateProductTransport
+
+        if type(candidate_transport) is not CandidateProductTransport:
+            raise TypeError("full-call compilation requires the selected candidate product transport")
 
     def run_full_call(
         *,
@@ -409,18 +415,51 @@ def full_call_adapter(
                     ):
                         prepare(bundle, target=target, facts=facts)
                     lane = (capsule or {}).get("lane_expectation")
+                    compile_products = None
+                    if candidate_transport is not None:
+                        from merlin_experiments.phase1.candidate_products import ProductSpec
+
+                        tools = candidate_transport.tool_substitutions()
+
+                        def compile_products(prepared, destination, *, inventory_only):
+                            names = provider.candidate_catalog_products(inventory_only=inventory_only)
+                            return candidate_transport.compile(
+                                Path(package_dir),
+                                Path(prepared),
+                                argv=provider.candidate_catalog_command(
+                                    python=tools["python"], inventory_only=inventory_only
+                                ),
+                                products=tuple(ProductSpec(name, 32 * 1024 * 1024) for name in names),
+                                destination=Path(destination),
+                                timeout_s=timeout,
+                                substitutions=tools,
+                                private_paths=(bundle,),
+                            )
+
                     if lane == "any":
-                        validate = getattr(provider, "validate_package", None)
+                        validate = getattr(
+                            provider,
+                            "validate_package_candidate_products"
+                            if compile_products is not None
+                            else "validate_package",
+                            None,
+                        )
                         if not callable(validate) or package_dir is None:
                             raise ValueError(
                                 "optional-device fallback requires independent provider package validation"
                             )
-                        if validate(bundle, target=target, package=Path(package_dir), facts=facts) is not None:
+                        validation = dict(target=target, package=Path(package_dir), facts=facts)
+                        if compile_products is not None:
+                            validation["compile_products"] = compile_products
+                        if validate(bundle, **validation) is not None:
                             raise ValueError("provider package validation must return None or raise")
                     if (capsule or {}).get("scored", True) or lane == "any":
                         if package_dir is None:
                             raise ValueError("source-bound execution requires the submitted package")
-                        routing, reason = routing_for_bundle(bundle, target, Path(package_dir), provider, facts)
+                        routing_options = {} if compile_products is None else {"compile_products": compile_products}
+                        routing, reason = routing_for_bundle(
+                            bundle, target, Path(package_dir), provider, facts, **routing_options
+                        )
                         # Only an ordinary structural/provider decline may fall
                         # back. Exceptions from source/catalog/binding checks
                         # remain execution errors; never catch and mask them.
@@ -527,6 +566,19 @@ def full_call_adapter(
 
     run.qualify_full_call = qualify_full_call
     run.compiles_source_bundle = execution_provider is not None
+    if candidate_transport is not None:
+        run._merlin_candidate_transport = candidate_transport
+    if execution_provider is not None:
+        run._merlin_with_candidate_transport = lambda transport: full_call_adapter(
+            target,
+            isa=isa,
+            backend=backend,
+            runner_options=options,
+            engine=engine,
+            execution_provider=execution_provider,
+            rtl_facts=rtl_facts,
+            candidate_transport=transport,
+        )
     run._merlin_simulator_engine = engine
     return run
 

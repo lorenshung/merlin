@@ -1250,6 +1250,7 @@ def grade(
         score["integrity_exempt"] = pkg.integrity_exempt
         integrity_scan(pkg, **({"additional_forbidden": additional_forbidden} if additional_forbidden else {}))
         score["integrity_status"] = "clean" if not pkg.integrity_exempt else "exempt"
+        CR.require_candidate_product_scope(pkg, oracle_adapters)
         build_package(pkg)
     except CertFailure as cf:
         score["integrity_status"] = f"FAIL[{cf.plane}]: {cf.detail[:200]}"

@@ -22,7 +22,7 @@ from merlin.targetgen import capsule_runner as CR
 from merlin_experiments.phase1.context import (
     InvocationContext,
     add_context_arguments,
-    readback_kwargs,
+    oracle_kwargs,
     resolve_context,
     verify_readback_record,
 )
@@ -343,11 +343,13 @@ def _roots(spec: str) -> list[str]:
 def _score(
     pkg, capsules, runs_root, labels, no_oracle, *, context: InvocationContext, contract=None, step_timeout_s=900
 ):
+    if no_oracle and getattr(context, "candidate_policy", None) is not None:
+        raise ValueError("candidate compilation selection requires oracle evaluation")
     # Resolve the TARGET'S OWN oracle ladder from its contract (external_backend->program_oracle,
     # chipyard->spike/verilator, else arc) — never pass None here, which historically fell back to the
     # gemmini spike/verilator MLIR-lowering oracle and mis-graded atlas (torch-mlir run_lowering.py crash).
     # `{}` = honest no-oracle (L0/L1/trace only). sim_via is self-resolved from the contract.
-    adapters = {} if no_oracle else CR.oracle_adapters(context.target, **readback_kwargs(context))
+    adapters = {} if no_oracle else CR.oracle_adapters(context.target, **oracle_kwargs(context))
     return CG.grade(
         pkg,
         capsules_root=_roots(capsules),
@@ -378,16 +380,20 @@ def _cost_phrase(proc: dict) -> str:
 
 def _verify_formal_readback_policy(run_dir: Path, context: InvocationContext) -> None:
     """Formal grading cannot select a different transport from the admitted run."""
+    from merlin_experiments.phase1.candidate_execution import verify_selection
+
     path = run_dir / "environment.yaml"
     if path.is_symlink():
         raise RuntimeError("formal run environment must not be indirect")
     if not path.is_file():
         verify_readback_record(context, None)
+        verify_selection(context, None)
         return
     record = yaml.safe_load(path.read_bytes())
     if not isinstance(record, dict):
         raise RuntimeError("formal run environment is malformed")
     verify_readback_record(context, record.get("readback_policy"))
+    verify_selection(context, record.get("candidate_compilation"))
 
 
 def main(argv: list[str] | None = None, *, context: InvocationContext | None = None) -> int:

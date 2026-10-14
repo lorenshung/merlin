@@ -35,11 +35,12 @@ from pathlib import Path
 
 from merlin.targetgen import capsule_grade as CG  # build+run+compare
 from merlin.targetgen import capsule_runner as CR  # tier adapters
+from merlin.targetgen.candidate_scope import functional_selfcheck
 from merlin_experiments.phase1.context import (
     InvocationContext,
     add_context_arguments,
     context_argv,
-    readback_kwargs,
+    oracle_kwargs,
     resolve_context,
 )
 from merlin_experiments.phase1.feedback import qa as _qc
@@ -115,8 +116,6 @@ def _candidate_selfcheck_row(result: dict, closed: dict | None, *, name: str, ba
     return row, certified
 
 
-# Restored during branch integration: the merge took this file whole from the other side, which
-# dropped select_tiers and left the six tests that pin it failing on a missing attribute.
 def select_tiers(full: dict, default: dict, requested: str) -> tuple[dict, str | None]:
     """Which tiers this self-check runs: the target's cheap LOOP ladder by default, or exactly the tiers
     ``--tiers`` names, validated against everything the endpoint can REACH.
@@ -699,7 +698,7 @@ def _model_layers(
                 if member.is_file():
                     (narrowed / name / member.name).symlink_to(member.resolve())
         root = narrowed
-    adapters = CR.oracle_adapters(context.target, experiment.sim_via, **readback_kwargs(context)) or {}
+    adapters = CR.oracle_adapters(context.target, experiment.sim_via, **oracle_kwargs(context)) or {}
     # The functional tier only: an elaborated-RTL simulator spends about twenty minutes on ONE such
     # layer. Every row names the tiers withheld, so a pass here reads as the screen it is.
     ladder = tier_policy.tier_depth_order(adapters)
@@ -967,7 +966,9 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
 
     _tgt, _sim_via = _target_sim_via(context)
     try:
-        adapters, sim = _adapters(a.sim, _tgt, _sim_via, **readback_kwargs(context))
+        adapters, sim = functional_selfcheck(
+            _adapters, CR.qa_loop_adapters, a.sim, _tgt, _sim_via, **oracle_kwargs(context)
+        )
     except ValueError as exc:
         out = {"error": str(exc), "all_pass": False, "sim": a.sim, "required_rtl_engine": _required_rtl_engine()}
         txt = json.dumps(out, indent=2)
@@ -980,7 +981,7 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
         # Validate the REQUEST against everything the endpoint can reach, not against the cheap loop
         # ladder -- that conflation is exactly what select_tiers documents, and it is why a cert tier
         # (derived as oracle_adapters - qa_loop_adapters) could never be asked for.
-        _full = dict(CR.oracle_adapters(_tgt, _sim_via, **readback_kwargs(context)))
+        _full = dict(CR.oracle_adapters(_tgt, _sim_via, **oracle_kwargs(context)))
         _full.update(adapters)  # a --sim-selected tier is reachable by definition
         adapters, _tier_err = select_tiers(_full, adapters, a.tiers)
         if _tier_err:

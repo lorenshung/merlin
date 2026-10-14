@@ -466,6 +466,9 @@ def run_capsule(capsule, package_dir, paths, config, adapters, pkg, contract, ti
     }
     qualifications = []
     try:
+        from merlin.targetgen.candidate_scope import require_candidate_product_scope
+
+        require_candidate_product_scope(pkg, adapters, capsule=capsule, package_dir=package_dir, contract=contract)
         source_adapters = [a for a in (adapters or {}).values() if getattr(a, "compiles_source_bundle", False)]
         if source_adapters:
             cb, emission = None, ""

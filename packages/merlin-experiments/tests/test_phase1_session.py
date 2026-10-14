@@ -393,6 +393,49 @@ def test_readback_selection_is_frozen_across_real_admission_and_resume(project, 
         _run(_request(project, resume=True), lambda _: pytest.fail("resume dropped frozen output transport"))
 
 
+def test_candidate_selection_is_frozen_across_real_admission_and_resume(project, monkeypatch, tmp_path):
+    import hashlib
+
+    from merlin_experiments.phase1.candidate_execution import selection_record
+    from merlin_experiments.phase2 import qualification_policy
+
+    _external_substitutes(monkeypatch)
+    frozen, workers = tmp_path / "compiler-runtime", tmp_path / "compiler-workers"
+    frozen.mkdir()
+    workers.mkdir()
+    binary = tmp_path / "selected-bwrap"
+    binary.write_bytes(b"synthetic executable identity; this admission fixture never executes it")
+    policy = {"sha256": "c" * 64}
+    monkeypatch.setattr(qualification_policy, "restore", lambda root, record: SimpleNamespace(record=policy))
+    selection = tmp_path / "compiler-selection.json"
+    selection.write_text(
+        json.dumps(
+            dict(
+                root=str(frozen),
+                policy=policy,
+                workspace_root=str(workers),
+                bwrap=dict(path=str(binary), sha256=hashlib.sha256(binary.read_bytes()).hexdigest()),
+            )
+        )
+    )
+    base = _request(project)
+    request = dataclasses.replace(base, context=dataclasses.replace(base.context, candidate_policy=selection))
+
+    def admitted(prepared):
+        prepared.verify_inputs()
+        assert prepared.environment["candidate_compilation"] == selection_record(request.context)
+        return 0
+
+    assert _run(request, admitted) == 0
+    resumed = dataclasses.replace(request, options=dataclasses.replace(request.options, resume=True))
+    assert _run(resumed, admitted) == 0
+    with pytest.raises(RuntimeError, match="candidate compilation selection"):
+        _run(_request(project, resume=True), lambda _: pytest.fail("resume dropped frozen compiler transport"))
+    selection.write_text(selection.read_text() + "\n")
+    with pytest.raises(RuntimeError, match="candidate compilation selection"):
+        _run(resumed, lambda _: pytest.fail("resume reused changed compiler selection"))
+
+
 def test_public_object_build_selection_is_frozen_and_cannot_be_enabled_on_resume(project, monkeypatch):
     _external_substitutes(monkeypatch)
     selection = {"trusted_source_pins_sha256": "a" * 64, "clang": {"sha256": "b" * 64}}

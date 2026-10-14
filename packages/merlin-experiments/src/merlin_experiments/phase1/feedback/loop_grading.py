@@ -22,7 +22,7 @@ from merlin.targetgen.target_experiment import load_target_experiment
 from merlin_experiments.phase1 import oot_history as OH
 from merlin_experiments.phase1 import run_inputs as RI
 from merlin_experiments.phase1 import treatments as T
-from merlin_experiments.phase1.context import InvocationContext, readback_kwargs
+from merlin_experiments.phase1.context import InvocationContext, oracle_kwargs
 from merlin_experiments.phase1.feedback import lifecycle as FL
 
 
@@ -86,9 +86,9 @@ def cert_tiers_beyond_loop(
 
     try:
         te = load_target_experiment(context.descriptor)
-        ck = _CR.qa_checkpoint_adapters(te.target, te.sim_via, **readback_kwargs(context))
+        ck = _CR.qa_checkpoint_adapters(te.target, te.sim_via, **oracle_kwargs(context))
         loop = _CR.qa_loop_adapters(
-            te.target, te.sim_via, declared_tiers=declared_loop_tiers(policy_roots), **readback_kwargs(context)
+            te.target, te.sim_via, declared_tiers=declared_loop_tiers(policy_roots), **oracle_kwargs(context)
         )
     except Exception:  # noqa: BLE001 — no resolvable checkpoint oracle -> nothing to gate on
         if context.readback_policy is not None:
@@ -428,7 +428,7 @@ def fast_grade(
         te.target,
         te.sim_via,
         declared_tiers=declared_loop_tiers(inputs.policy_roots),
-        **readback_kwargs(inputs.context),
+        **oracle_kwargs(inputs.context),
     )
     _, _withheld = cert_tiers_beyond_loop(
         context=inputs.context,

@@ -61,6 +61,7 @@ class RunOptions:
     readback_policy: str = ""
     public_object_build_budget_s: int = 0
     objective: str = "correctness"
+    candidate_policy: str = ""
 
     def __post_init__(self) -> None:
         validate_objective(self)
@@ -109,6 +110,7 @@ def build_parser(
         "(the selected bundle and treatment distinguish EL3 from EL4; default EL1)",
     )
     ap.add_argument("--run-id", required=True)
+    ap.add_argument("--candidate-policy", default="", help="operator-owned frozen compiler sandbox selection")
     ap.add_argument("--model", default="claude-opus-4-8")
     ap.add_argument("--effort", default="high")
     # AGENT DRIVER (Claude-Code-like interfaces). auto (default) preserves today's behavior: route by model

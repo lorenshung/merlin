@@ -55,6 +55,17 @@ def run(
         if context.readback_policy is not None and context.readback_policy != options.readback_policy:
             raise ValueError("context and invocation readback policies differ")
         context = replace(context, readback_policy=options.readback_policy)
+    if getattr(options, "candidate_policy", ""):
+        selected = Path(options.candidate_policy).absolute()
+        if context.candidate_policy is not None and context.candidate_policy != selected:
+            raise ValueError("context and invocation candidate compilation selections differ")
+        context = replace(context, candidate_policy=selected)
+    if context.candidate_policy is not None:
+        if options.no_oracle:
+            raise ValueError("candidate compilation selection requires oracle evaluation")
+        from .candidate_execution import selection_record
+
+        selection_record(context)
 
     from . import authoring, runtime_environment, session, task_staging, treatments
 
