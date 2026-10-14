@@ -30,7 +30,7 @@ from . import run_inputs as RI
 from . import source_inputs as SI
 from . import treatments as T
 from .context import InvocationContext, readback_record, verify_readback_record
-from .options import RunOptions
+from .options import RunOptions, validate_objective
 from .workspaces import select_workspace_root
 
 _MODEL_HOST_SNAPSHOT_ROOT_ENV = "MERLIN_MODEL_HOST_LANE_SNAPSHOT_ROOT"
@@ -52,6 +52,13 @@ def _verify_public_build_budget(options: RunOptions, environment: dict) -> None:
     prior = recorded.get("public_object_build_budget_s", 0) if type(recorded) is dict else None
     if type(prior) is not int or prior != options.public_object_build_budget_s:
         raise RuntimeError("resume refused: public object-build advisory selection changed")
+
+
+def _verify_objective(options: RunOptions, environment: dict) -> None:
+    recorded = environment.get("run_config") or {}
+    prior = recorded.get("objective", "correctness") if type(recorded) is dict else None
+    if prior != getattr(options, "objective", "correctness"):
+        raise RuntimeError("resume refused: authoring objective changed")
 
 
 def _verify_phase0_handoff(corpus_review: dict | None, workload_coverage: dict | None) -> None:
@@ -113,6 +120,7 @@ class RunRequest:
             "grade_interval_s": a.grade_interval,
             "selfcheck_protocol": 3,
             "launcher_argv": list(self.launcher_argv),
+            **({"objective": a.objective} if getattr(a, "objective", "correctness") != "correctness" else {}),
             **(
                 {"public_object_build_budget_s": a.public_object_build_budget_s}
                 if a.public_object_build_budget_s
@@ -187,6 +195,7 @@ class PreparedRun:
     def verify_inputs(self) -> None:
         verify_readback_record(self.request.context, self.environment.get("readback_policy"))
         _verify_public_build_budget(self.request.options, self.environment)
+        _verify_objective(self.request.options, self.environment)
         if self.environment.get("public_object_build_selection") != _public_build_selection(
             self.request.context.target, self.request.options.public_object_build_budget_s
         ):
@@ -344,6 +353,7 @@ def phase_run_dir(context, arm: str, run_id: str, *, resume: bool) -> Path:
 
 def validate_options(a: RunOptions) -> int | None:
     """Pre-initialization refusals shared by native and installed admission."""
+    validate_objective(a)
     if a.qualify_submission:
         if a.resume or a.seed_submission or a.seal_current or a.continuous:
             raise RuntimeError("unpaid qualification requires a fresh run and one selected submission")
@@ -427,6 +437,7 @@ def prepare(
             raise RuntimeError("resume refused: environment record is not a mapping")
         verify_readback_record(context, _environment_record.get("readback_policy"))
         _verify_public_build_budget(a, _environment_record)
+        _verify_objective(a, _environment_record)
         _implementation_sources = _environment_record.get("implementation_sources")
         SI.verify(_implementation_sources, **_source_context)
     else:

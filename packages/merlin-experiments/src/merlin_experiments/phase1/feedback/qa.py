@@ -979,7 +979,13 @@ def run(
                 )
             ),
         }
-    for key in ("device_lane_scored_pass", "device_evidence_count", "host_guard_pass", "host_guard_total"):
+    for key in (
+        "device_lane_scored_pass",
+        "device_evidence_count",
+        "host_lane_scored_pass",
+        "host_guard_pass",
+        "host_guard_total",
+    ):
         if key in score:
             verdict[key] = score[key]
     # Guards are recorded only by a grade that saw them; a failed host guard fails the round.

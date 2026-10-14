@@ -128,10 +128,11 @@ def test_callbacks_are_actual_inventoried_source_functions(tmp_path):
 
 @pytest.mark.parametrize("experiment", ["realistic", "full"])
 @pytest.mark.parametrize("arm", ["raw_baseline", "merlin_assisted"])
-def test_generated_task_composition_keeps_starter_and_addendum_rules(tmp_path, monkeypatch, experiment, arm):
+@pytest.mark.parametrize("objective", ["correctness", "device-coverage"])
+def test_generated_task_composition_keeps_starter_and_addendum_rules(tmp_path, monkeypatch, experiment, arm, objective):
     from merlin.targetgen import capsule_runner, generate_prompt
 
-    conf = replace(config(tmp_path / "operator"), experiment=experiment)
+    conf = replace(config(tmp_path / "operator"), experiment=experiment, objective=objective)
     calls = []
 
     def render(te, manifest, mode, selected_arm, granted_tools):
@@ -161,6 +162,49 @@ def test_generated_task_composition_keeps_starter_and_addendum_rules(tmp_path, m
     assert "must not duplicate" not in text
     assert ("selected addendum" in text) == (arm == "merlin_assisted")
     assert ("## Grading tiers" in text) == (experiment == "full")
+    assert ("does not certify software-spec numerical qualification" in text) == (objective == "device-coverage")
     if experiment == "full":
         assert "fast RTL oracle tier (L1)" in text
         assert "checkpoint (L2)" in text
+
+
+def test_coverage_objective_is_in_actual_archived_task_only_when_selected(tmp_path):
+    for objective in ("correctness", "device-coverage"):
+        conf = replace(config(tmp_path / objective), objective=objective)
+        (conf.context.experiment / "task").mkdir()
+        (conf.context.experiment / "task/TASK_realistic.md").write_text("operator task\n")
+        text = (stage(conf) / "TASK.md").read_text()
+        assert ("Device coverage objective" in text) == (objective == "device-coverage")
+        if objective == "device-coverage":
+            assert "all-host correctness and READY do not end this run early" in text
+            assert "requires source-bound" in text and "grants no additional device routes" in text
+
+
+def test_coverage_task_states_host_lowering_and_final_package_authority(tmp_path):
+    conf = replace(config(tmp_path / "scope"), objective="device-coverage")
+    (conf.context.experiment / "task").mkdir()
+    (conf.context.experiment / "task/TASK_realistic.md").write_text("operator task\n")
+    text = (stage(conf) / "TASK.md").read_text()
+    assert "host fallback uses trusted Merlin host lowering" in text
+    assert "submitted host LLVM text is not executed or qualified" in text
+    assert "without selecting or restoring an earlier best snapshot" in text
+    assert "Retain your best fully correct" in text
+    assert "selected contract's declared internal MAC precision and partial-sum bounds" in text
+    assert "If the selected numeric policy is spec_int8:" in text
+    assert "exact raw i32 accumulator and readout references" in text
+    assert "host fallback does not waive them" in text
+    assert "host int8 narrowing is not declared" in text
+
+
+def test_shared_coverage_prompt_uses_selected_contract_for_other_targets(tmp_path):
+    conf = replace(config(tmp_path / "other", target="other_accelerator"), objective="device-coverage")
+    (conf.context.experiment / "task").mkdir()
+    (conf.context.experiment / "task/TASK_realistic.md").write_text("operator task\n")
+    text = (stage(conf) / "TASK.md").read_text()
+    block = TS.task_objective_block(conf)
+    assert block in text and "20-bit" not in block and "Gemmini" not in block
+    generic, separator, conditional = block.partition("If the selected numeric policy is spec_int8:")
+    assert separator and "i32" not in generic and "int8" not in generic
+    assert "selected contract's declared internal MAC precision" in generic
+    assert "exact raw i32 accumulator" in conditional
+    assert "If the selected numeric policy is int8_w8a8:" in conditional

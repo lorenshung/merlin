@@ -80,6 +80,8 @@ def full_call_adapter(
         routing = None
         result.update(lane="host", executed_instructions=0)
         try:
+            if (capsule or {}).get("lane_expectation") == "any" and (capsule or {}).get("scored") is False:
+                raise ValueError("optional-device capsules must retain scored full-call correctness")
             if execution_provider is not None:
                 from merlin.targetgen.core_aten_device import (
                     load_execution_provider,
@@ -94,12 +96,26 @@ def full_call_adapter(
                         "numeric_flow"
                     ):
                         prepare(bundle, target=target, facts=facts)
-                    if (capsule or {}).get("scored", True):
+                    lane = (capsule or {}).get("lane_expectation")
+                    if lane == "any":
+                        validate = getattr(provider, "validate_package", None)
+                        if not callable(validate) or package_dir is None:
+                            raise ValueError(
+                                "optional-device fallback requires independent provider package validation"
+                            )
+                        if validate(bundle, target=target, package=Path(package_dir), facts=facts) is not None:
+                            raise ValueError("provider package validation must return None or raise")
+                    if (capsule or {}).get("scored", True) or lane == "any":
                         if package_dir is None:
                             raise ValueError("source-bound execution requires the submitted package")
                         routing, reason = routing_for_bundle(bundle, target, Path(package_dir), provider, facts)
-                        if routing is None:
+                        # Only an ordinary structural/provider decline may fall
+                        # back. Exceptions from source/catalog/binding checks
+                        # remain execution errors; never catch and mask them.
+                        if routing is None and lane != "any":
                             raise ValueError("submitted backend did not route this capsule: " + reason)
+                        if routing is None:
+                            result["routing"] = {"lane": "host", "routed": False, "reason": reason}
             build = spike_model.build(
                 bundle,
                 bundle / "spike-build",

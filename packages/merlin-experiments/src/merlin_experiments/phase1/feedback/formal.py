@@ -294,6 +294,17 @@ def _phase_manifest(score: Mapping, *, required_tier: str) -> dict:
         "functional_pass": score.get("functional_pass"),
         "n_passed": score.get("n_passed"),
         "n_capsules": score.get("n_capsules"),
+        **{
+            key: score[key]
+            for key in (
+                "device_lane_scored_pass",
+                "device_evidence_count",
+                "host_lane_scored_pass",
+                "host_guard_pass",
+                "host_guard_total",
+            )
+            if key in score
+        },
         "gradeable": score.get("gradeable"),
         "integrity_status": score.get("integrity_status"),
         "numeric_all_exact": score.get("numeric_all_exact"),

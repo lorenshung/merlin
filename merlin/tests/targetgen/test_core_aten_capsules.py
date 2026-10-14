@@ -487,8 +487,10 @@ def test_packaging_and_sealed_runtime_preserve_transposed_caller(tmp_path):
     assert legacy["semantic_io"]["outputs"][1]["stride"] == [2, 1]
 
 
-def test_selected_numeric_flow_requires_exact_reference(packaged, monkeypatch):
+@pytest.mark.parametrize("lane", ["device", "any"])
+def test_selected_numeric_flow_requires_exact_reference(packaged, monkeypatch, lane):
     capsule, raw, readback, _, _ = packaged
+    capsule["lane_expectation"] = lane
     golden = C.load_private(capsule)
     record = golden["batch_map"]["cases"][0]
     record["numeric_policy"] = "spec_int8"

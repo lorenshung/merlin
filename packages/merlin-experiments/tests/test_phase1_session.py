@@ -910,3 +910,25 @@ with MonkeyPatch.context() as patch:
             timeout=40,
         )
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_coverage_objective_is_frozen_across_real_admission_and_resume(project, monkeypatch):
+    _external_substitutes(monkeypatch)
+    base = _request(project)
+    selected = dataclasses.replace(
+        base,
+        options=dataclasses.replace(
+            base.options, objective="device-coverage", schedule="continuous", max_wall_s=30, plateau_rounds=0
+        ),
+    )
+
+    def admitted(prepared):
+        prepared.verify_inputs()
+        assert prepared.environment["run_config"]["objective"] == "device-coverage"
+        return 0
+
+    assert _run(selected, admitted) == 0
+    resumed = dataclasses.replace(selected, options=dataclasses.replace(selected.options, resume=True))
+    assert _run(resumed, admitted) == 0
+    with pytest.raises(RuntimeError, match="objective changed"):
+        _run(_request(project, resume=True), lambda _: pytest.fail("resume dropped coverage objective"))

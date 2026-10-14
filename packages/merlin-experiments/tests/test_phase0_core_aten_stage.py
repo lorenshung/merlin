@@ -345,3 +345,70 @@ def test_retained_capsule_bytes_and_answers_are_preserved_and_bound(tmp_path, mo
     with pytest.raises(ValueError, match="selection changed"):
         stage.generate(Path(retained["recipe"]), tmp_path / "refused/phase0/capsules", target="synthetic")
     monkeypatch.setattr("merlin.targetgen.capsule_common.load_capsule", load_capsule)
+
+
+def test_optional_device_rows_preserve_correctness_and_private_cohorts(tmp_path, monkeypatch):
+    recipe = fixture_recipe(tmp_path)
+    document = yaml.safe_load(recipe.read_bytes())
+    for cohort in ("public", "hidden"):
+        document["core_aten"]["cohorts"][cohort][0]["lane"] = "any"
+    document["core_aten"]["cohorts"]["host_guard"] = []
+    recipe.write_text(yaml.safe_dump(document))
+    with pytest.raises(ValueError, match="at least one"):
+        stage.selection(recipe)
+    document["core_aten"]["allow_empty_host_guards"] = True
+    recipe.write_text(yaml.safe_dump(document))
+    result = stage.derive(recipe, tmp_path / "derive", target="synthetic", descriptor=tmp_path / "descriptor.yaml")
+    install_writer(monkeypatch)
+    output = tmp_path / "run/phase0/capsules"
+    stage.generate(Path(result["recipe"]), output, target="synthetic")
+    for cohort in ("public", "hidden"):
+        capsule = yaml.safe_load((output / cohort / cohort / "capsule.yaml").read_bytes())
+        assert capsule["scored"] is True and capsule["lane_expectation"] == "any"
+        assert capsule["semantic"] == {"must_accelerate": False}
+        assert "forbid_lanes" not in capsule and "require_lanes" not in capsule
+        assert capsule["label"] == ("hidden" if cohort == "hidden" else "public")
+        assert (output / "_private" / cohort / cohort / "golden.yaml").stat().st_mode & 0o077 == 0
+    assert "hidden/hidden" not in (output / "MANIFEST.yaml").read_text()
+    assert result["counts"] == {"public": 1, "hidden": 1, "host_guard": 0}
+
+
+@pytest.mark.parametrize("lane,prepare", [("invalid", False), ("device", True), ("any", "yes"), ("any", True)])
+def test_optional_device_selection_rejects_ambiguous_preparation(tmp_path, lane, prepare):
+    recipe = fixture_recipe(tmp_path)
+    document = yaml.safe_load(recipe.read_bytes())
+    row = document["core_aten"]["cohorts"]["public"][0]
+    row.update(lane=lane, prepare_numeric=prepare)
+    recipe.write_text(yaml.safe_dump(document))
+    with pytest.raises(ValueError):
+        stage.selection(recipe)
+
+
+@pytest.mark.parametrize("prepare", [False, True])
+def test_optional_numeric_preparation_requires_per_row_opt_in(tmp_path, monkeypatch, prepare):
+    recipe = fixture_recipe(tmp_path)
+    document = yaml.safe_load(recipe.read_bytes())
+    flow = {"policy": "spec_int8"}
+    for key in ("software_spec", "host_capabilities", "execution_provider", "rtl_facts"):
+        path = tmp_path / key
+        path.write_text(key)
+        flow[key] = str(path)
+    package = tmp_path / "provider"
+    package.mkdir()
+    (package / "catalog.py").write_text("schedule = 1")
+    flow["device_package"] = str(package)
+    document["core_aten"]["numeric_flow"] = flow
+    for cohort in ("public", "hidden"):
+        document["core_aten"]["cohorts"][cohort][0].update(lane="any", prepare_numeric=prepare)
+    recipe.write_text(yaml.safe_dump(document))
+    result = stage.derive(recipe, tmp_path / "derive", target="synthetic", descriptor=tmp_path / "descriptor.yaml")
+    calls = []
+
+    def writer(*args, numeric_flow=None, **kwargs):
+        calls.append(numeric_flow)
+        return fake_writer(*args, **kwargs)
+
+    install_writer(monkeypatch, writer)
+    stage.generate(Path(result["recipe"]), tmp_path / "run/phase0/capsules", target="synthetic")
+    assert calls[:2] == ([{**flow, "target": "synthetic"}] * 2 if prepare else [None, None])
+    assert calls[2] is None

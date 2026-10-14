@@ -36,6 +36,38 @@ class TaskStagingConfig:
     language: str = ""
     add_tools: tuple[str, ...] = ()
     drop_tools: tuple[str, ...] = ()
+    objective: str = "correctness"
+
+
+def task_objective_block(config: TaskStagingConfig) -> str:
+    if config.objective == "correctness":
+        return ""
+    if config.objective != "device-coverage":
+        raise ValueError("unknown authoring objective")
+    return (
+        "\n\n## Device coverage objective\n\n"
+        "Full-call correctness remains required for every scored capsule. Capsules explicitly admitting either lane "
+        "may pass through correct host fallback. Device coverage is counted separately and requires source-bound "
+        "admitted calls and actual executed instruction evidence. Maximize that verified coverage within the fixed "
+        "wall budget; all-host correctness and READY do not end this run early. Functional pass remains a correctness "
+        "result, not a claim of maximal device coverage. Preserve the frozen software specification, numeric policy, "
+        "and oracle; this objective grants no additional device routes or formats.\n"
+        "In source-bound provider mode, host fallback uses trusted Merlin host lowering; submitted host LLVM text "
+        "is not executed or qualified. The submitted device catalog remains source-bound. The harness grades the "
+        "final current workspace package, without selecting or restoring an earlier best snapshot. Retain your "
+        "best fully correct device-coverage implementation in the final workspace.\n"
+        "The device_lane_scored_pass counter measures ordinary full-call correctness plus executed device evidence; "
+        "it does not certify software-spec numerical qualification. A spec-tied release must separately require "
+        "source-selected numeric admission, the checked emitted schedule, the selected contract's declared internal "
+        "MAC precision and partial-sum bounds, accumulator bounds, and contract-required intermediate/readout "
+        "references. A wrapping widening/truncation proof preserves final modulo bytes but does not discharge "
+        "those internal arithmetic/readout obligations.\n"
+        "If the selected numeric policy is spec_int8: require its existing exact raw i32 accumulator and readout "
+        "references; for native contractions retain the caveat when host int8 narrowing is not declared. "
+        "If the selected numeric policy is int8_w8a8: that existing path remains diagnostic. "
+        "Explicitly numeric-prepared capsules retain their mandatory reference/device gates; host fallback does "
+        "not waive them. This objective alone supplies no spec-qualified score or launch readiness.\n"
+    )
 
 
 @dataclass(frozen=True)
@@ -324,6 +356,7 @@ def build_task(
             body += "\n\n---\n\n# Starter plan / approach for THIS arm (read this)\n\n" + starter
         body += task_runtime_scope_block(_te(), sandbox, context=context, scope=task_scope)
         body += task_tool_inventory_block(config)
+        body += task_objective_block(config)
         body = append_general_compiler_contract(body)
         if arm == "merlin_assisted":
             add = (bdir / "TASK_ADDENDUM.md").read_text() if (bdir / "TASK_ADDENDUM.md").exists() else ""
@@ -391,6 +424,7 @@ def build_task(
     _ckpt = max(CR.qa_checkpoint_adapters(_te().target, _te().sim_via) or {"L3": 1})
     pilot += task_runtime_scope_block(_te(), sandbox, context=context, scope=task_scope)
     pilot += task_tool_inventory_block(config)
+    pilot += task_objective_block(config)
     pilot = append_general_compiler_contract(pilot)
     pilot += (
         "\n\n## Grading tiers (READ THIS)\n"

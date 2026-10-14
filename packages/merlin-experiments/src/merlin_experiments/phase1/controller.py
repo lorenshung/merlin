@@ -84,6 +84,7 @@ def run(
             language=language,
             add_tools=tuple(options.with_tool),
             drop_tools=tuple(options.without_tool),
+            objective=getattr(options, "objective", "correctness"),
         )
     )
     if options.with_tool or options.without_tool:

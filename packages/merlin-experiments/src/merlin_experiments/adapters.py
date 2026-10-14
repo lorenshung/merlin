@@ -452,6 +452,7 @@ ADAPTERS = {
             "sim_max_jobs": _POSITIVE,
             "model_budget_s": _POSITIVE,
             "plateau_rounds": _POSITIVE,
+            "objective": Option(choices=("correctness", "device-coverage")),
             "bundle": _TEXT,
             "bundle_manifest": _INPUT,
             "oracle_timing": _INPUT,

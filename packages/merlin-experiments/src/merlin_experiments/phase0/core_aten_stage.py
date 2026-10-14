@@ -74,6 +74,8 @@ def selection(recipe: Path) -> tuple[list[dict], dict[str, str]]:
     retained_public, retained_private = [], []
     for cohort in COHORTS:
         rows = block["cohorts"][cohort]
+        if cohort == "host_guard" and rows == [] and block.get("allow_empty_host_guards") is True:
+            continue
         if not isinstance(rows, list) or not rows:
             raise ValueError("every Core ATen cohort must declare at least one case selection")
         for row in rows:
@@ -109,8 +111,13 @@ def selection(recipe: Path) -> tuple[list[dict], dict[str, str]]:
                 batches.append(dict(cohort=cohort, retained=entries))
                 continue
             lane = row.get("lane", "host-guard" if cohort == "host_guard" else "device")
-            if lane not in {"device", "host-guard"} or (cohort == "host_guard" and lane != "host-guard"):
+            if lane not in {"device", "host-guard", "any"} or (cohort == "host_guard" and lane != "host-guard"):
                 raise ValueError("invalid selected capsule lane")
+            prepare_numeric = row.get("prepare_numeric", False)
+            if "prepare_numeric" in row and (lane != "any" or type(prepare_numeric) is not bool):
+                raise ValueError("prepare_numeric is an explicit boolean for optional-device rows only")
+            if prepare_numeric and flow is None:
+                raise ValueError("optional numeric preparation requires the existing numeric_flow")
             cases_path = _path(recipe, row.get("cases"))
             captures = _path(recipe, row.get("captures"))
             if not captures.is_dir():
@@ -160,6 +167,7 @@ def selection(recipe: Path) -> tuple[list[dict], dict[str, str]]:
                     "corpus": {"cases": cases, "denominator_sha256": denominator_sha256},
                     "captures": str(captures),
                     **({"lane": lane} if "lane" in row else {}),
+                    **({"prepare_numeric": prepare_numeric} if "prepare_numeric" in row else {}),
                 }
             )
     if retained_public or retained_private:
@@ -372,7 +380,8 @@ def generate(
                     members.append(member.relative_to(stage).as_posix())
                 manifests.append({"retained": batch["retained"]})
                 continue
-            device = batch.get("lane", "host-guard" if cohort == "host_guard" else "device") == "device"
+            lane = batch.get("lane", "host-guard" if cohort == "host_guard" else "device")
+            device, scored = lane == "device", lane != "host-guard"
             # Each batch uses its own writer manifest; aggregate only our actual members.
             writer_manifest = category / "manifest.json"
             if writer_manifest.exists():
@@ -386,7 +395,7 @@ def generate(
                 tiers=("L2",),
                 **(
                     {"numeric_flow": {**block["numeric_flow"], "target": target}}
-                    if device and block.get("numeric_flow")
+                    if (device or batch.get("prepare_numeric")) and block.get("numeric_flow")
                     else {}
                 ),
             )
@@ -395,11 +404,14 @@ def generate(
                 member = category / row["id"]
                 declaration_path = member / "capsule.yaml"
                 capsule = yaml.safe_load(declaration_path.read_bytes())
-                capsule["cohort"] = cohort if device else "guard"
-                capsule["scored"] = device
-                capsule["lane_expectation"] = "device" if device else "host-guard"
+                capsule["cohort"] = cohort if scored else "guard"
+                capsule["scored"] = scored
+                capsule["lane_expectation"] = lane
                 capsule["semantic"] = {"must_accelerate": device}
-                capsule["lanes"] = {"require" if device else "forbid": ["on_mesh"]}
+                if lane == "any":
+                    capsule.pop("lanes", None)
+                else:
+                    capsule["lanes"] = {"require" if device else "forbid": ["on_mesh"]}
                 declaration_path.write_text(yaml.safe_dump(capsule, sort_keys=False))
                 row.setdefault("digests", {})["capsule.yaml"] = _sha(declaration_path)
                 call_digest = hashlib.sha256()

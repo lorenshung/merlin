@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from .options import RunOptions, build_parser
+from .options import RunOptions, build_parser, validate_objective
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -26,7 +26,12 @@ def main(argv: list[str] | None = None) -> int:
         help="readable experiment level; derives the legacy --arm and --treatment keys",
     )
     arguments = list(sys.argv[1:] if argv is None else argv)
-    values = vars(parser.parse_args(arguments))
+    parsed = parser.parse_args(arguments)
+    try:
+        validate_objective(parsed)
+    except ValueError as exc:
+        parser.error(str(exc))
+    values = vars(parsed)
     if not values["bundle"]:
         parser.error("installed execution requires --bundle (the authored bundle identity)")
     selected_level = values.pop("level")
@@ -63,7 +68,10 @@ def main(argv: list[str] | None = None) -> int:
     language = values.pop("language")
     if not manifest.is_file():
         parser.error(f"bundle manifest is not a readable file: {manifest}")
-    options = RunOptions(**values)
+    try:
+        options = RunOptions(**values)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     # Context must precede environment-sensitive execution imports. No native
     # launcher, checkout discovery or machine-specific library default is used.

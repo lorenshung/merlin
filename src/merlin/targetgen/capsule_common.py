@@ -589,6 +589,7 @@ def score_lanes(graded: list[dict], score: dict) -> list[dict]:
     device = [r for r in scored if r.get("lane") == "device" and r.get("executed_instructions", 0) > 0]
     score["device_lane_scored_pass"] = sum(r["status"] == "pass" for r in device)
     score["device_evidence_count"] = len(device)
+    score["host_lane_scored_pass"] = sum(r["status"] == "pass" and r.get("lane") == "host" for r in scored)
     return scored
 
 
