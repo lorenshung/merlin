@@ -73,7 +73,7 @@ def test_raw_i32_chain_does_not_require_narrowing_product_semantics(selection):
     assert pipeline_refusals(proposed)
 
 
-def test_rank3_refusal_retains_float_source_and_numerical_bound(selection):
+def test_rank3_plan_requires_flat_captured_readout_and_retains_mac_geometry(selection):
     source = """builtin.module {
       func.func @forward(%a: tensor<2x3x40xf32>, %b: tensor<2x40x4xf32>) -> tensor<2x3x4xf32> {
         %c = arith.constant 0.0 : f32
@@ -104,11 +104,13 @@ def test_rank3_refusal_retains_float_source_and_numerical_bound(selection):
     assert contraction["software"]["status"] == "admitted"
     assert contraction["signature"]["ordered_operand_dtypes"] == ["i8", "i8", "i32"]
     assert site["source_dtypes"] == ["f32", "f32", "f32"]
-    assert site["status"] == "refused"
+    assert site["status"] == "admitted"
     assert site["partial_sum_obligation"]["max_true_k"] == 31
-    assert len(site["reasons"]) == 1
-    assert "rank 3 not in [2]" in site["reasons"][0]
-    assert "host-capabilities.yaml:62" in site["reasons"][0]
+    assert site["reasons"] == []
+    assert contraction["signature"]["rank"] == 3
+    assert next(row for row in site["steps"] if row["step"] == 5)["signature"]["rank"] == 2
+    assert site["host_readout_bridge"]["status"] == "planned_static_geometry_requires_capture_proof"
+    assert site["host_readout_bridge"]["flat_shape"] == [6, 4]
 
 
 def test_dynamic_verdict_is_explicitly_diagnostic():

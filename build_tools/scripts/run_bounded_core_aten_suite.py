@@ -52,6 +52,8 @@ def stamp(args):
         "src/merlin/targetgen/core_aten_numeric.py",
         "src/merlin/targetgen/core_aten_w8a8_reference.py",
         "src/merlin/targetgen/core_aten_spec_int8.py",
+        "src/merlin/targetgen/software_spec.py",
+        "src/merlin/targetgen/core_aten_readout.py",
         "src/merlin/targetgen/_recipe_quantizer.py",
         "src/merlin/targetgen/_m2m_capture_worker.py",
         "src/merlin/targetgen/quant_recipe.py",

@@ -138,6 +138,7 @@ def admission_plan(module, selection, *, captured=False, native=False):
     """Independently screen all six steps at each source contraction's actual ranks."""
     from merlin.kernels.shapes import observe_contractions, zero_initialised
     from merlin.llvmlower.contraction_quantization import closed_float_mac
+    from merlin.targetgen.core_aten_readout import host_readout_bridge, planned_readout_geometry
     from merlin.targetgen.operation_numerics import integer_split_k_limit
 
     spec, host = selection["spec"], selection["host"]
@@ -146,13 +147,37 @@ def admission_plan(module, selection, *, captured=False, native=False):
     for op, shape in observe_contractions(module):
         rank = len(op.results[0].type.get_shape())
         steps, reasons = [], pipeline_refusals(selection)
+        geometry = planned_readout_geometry(op) if not native else None
+        readout_proof = None
+        readout_rank = rank
+        if geometry is not None:
+            if captured:
+                try:
+                    _, _, readout_proof = host_readout_bridge(op)
+                    readout_rank = readout_proof["cast_rank"]
+                except ValueError as exc:
+                    reasons.append(str(exc))
+            else:
+                readout_rank = len(geometry["flat_shape"])
+                readout_proof = {
+                    "status": "planned_static_geometry_requires_capture_proof",
+                    "cast_rank": readout_rank,
+                    **geometry,
+                }
 
         def screen(step, name, signature, placement="host"):
             row = {"step": step, "op": name, "signature": signature}
             for authority, document in (("software", spec), ("host", host)):
                 if placement == "accelerator" and authority == "host":
                     continue
-                decision = admit_operation(document, name, signature, placement)
+                if name == "contraction":
+                    from merlin.targetgen.software_spec import admit_contraction_operation
+
+                    source = getattr(op.attributes.get("prov.aten"), "data", name)
+                    decision = admit_contraction_operation(document, source, signature, placement)
+                    row["source_operator"] = source
+                else:
+                    decision = admit_operation(document, name, signature, placement)
                 if decision.get("declaration"):
                     decision["source"] = declaration_location(selection, authority, decision["declaration"])
                 row[authority] = decision
@@ -236,7 +261,7 @@ def admission_plan(module, selection, *, captured=False, native=False):
                     ordered_operand_dtypes=["i32", "f32"],
                     ordered_result_dtypes=["f32"],
                     operand_dtype="i32",
-                    rank=rank,
+                    rank=readout_rank,
                 ),
             )
             cast_decision = steps[-1]["host"]
@@ -273,7 +298,7 @@ def admission_plan(module, selection, *, captured=False, native=False):
                     ordered_operand_dtypes=["f32", "f32", "f32"],
                     ordered_result_dtypes=["f32"],
                     operand_dtype="f32",
-                    rank=rank,
+                    rank=readout_rank,
                 ),
             )
             steps[-1]["readout_multiply"] = 1
@@ -287,7 +312,7 @@ def admission_plan(module, selection, *, captured=False, native=False):
                     ordered_operand_dtypes=["f32", "f32", "f32"],
                     ordered_result_dtypes=["f32"],
                     operand_dtype="f32",
-                    rank=rank,
+                    rank=readout_rank,
                 ),
             )
             steps[-1]["readout_multiply"] = 2
@@ -312,6 +337,7 @@ def admission_plan(module, selection, *, captured=False, native=False):
                 source_operation=op.name,
                 source_dtypes=list(shape.dtypes),
                 result_rank=rank,
+                host_readout_bridge=readout_proof,
                 steps=sorted(steps, key=lambda s: s["step"]),
                 partial_sum_obligation=bound,
                 cast_exact_range_obligation=cast_obligation,
@@ -371,39 +397,32 @@ def admission_plan(module, selection, *, captured=False, native=False):
     )
 
 
-def host_readout_chain(contraction):
-    """Require direct SSA edges and closed cast/multiply bodies, with no intervening arithmetic/views."""
-    from xdsl.dialects import arith
-    from xdsl.dialects.linalg.ops import GenericOp, YieldOp
+def host_readout_chain(contraction, *, with_bridge=False):
+    """Require the exact captured cast/readout chain, including any proved views."""
+    from merlin.targetgen.core_aten_readout import host_readout_bridge
 
-    def reader(value, operation_type, arity):
-        candidates = []
-        for use in value.uses:
-            op = use.operation
-            if not isinstance(op, GenericOp) or len(op.results) != 1 or op.operands[0] is not value:
-                continue
-            block = op.body.block
-            if len(block.args) != arity + 1 or len(block.ops) != 2:
-                continue
-            math, yielded = list(block.ops)
-            if (
-                not isinstance(math, operation_type)
-                or tuple(math.operands) != tuple(block.args[:arity])
-                or not isinstance(yielded, YieldOp)
-                or tuple(yielded.operands) != (math.results[0],)
-            ):
-                continue
-            if isinstance(math, arith.MulfOp) and math.fastmath.data:
-                continue
-            candidates.append(op)
-        if len(candidates) != 1:
-            raise ValueError("integer readout requires a unique closed direct cast and two f32 multiplies")
-        return candidates[0]
+    bridge = host_readout_bridge(contraction)
+    return bridge if with_bridge else bridge[0]
 
-    cast = reader(contraction.results[0], arith.SIToFPOp, 1)
-    first = reader(cast.results[0], arith.MulfOp, 2)
-    second = reader(first.results[0], arith.MulfOp, 2)
-    return cast, first, second
+
+def source_declaration_continuity(initial, captured):
+    """Refuse loss of exact frontend obligations through an overload rewrite."""
+    from collections import Counter
+
+    initial_steps = [step for site in initial["sites"] for step in site["steps"] if step["step"] == 3]
+    required = Counter(
+        step["source_operator"] for step in initial_steps if step["software"].get("applicable_exact_source_declaration")
+    )
+    observed = Counter(
+        step.get("source_operator") for site in captured["sites"] for step in site["steps"] if step["step"] == 3
+    )
+    missing = required - observed
+    return {
+        "status": "refused" if missing else "preserved",
+        "initial_source_admissions": initial_steps,
+        "captured_source_operator_counts": dict(observed),
+        "unpreserved_exact_source_operators": dict(missing),
+    }
 
 
 def closed_integer_mac(op):

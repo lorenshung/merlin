@@ -287,7 +287,18 @@ def prepare_spec_int8(
             prepared_report = build_core_aten_batch({"cases": [source_case]}, capture_root, prepared_dir)
             prepared_module = parse_mlir_file(prepared_dir / "model.mlir")
             captured_plan = admission_plan(prepared_module, selection, captured=True)
-            if any(site["status"] != "admitted" for site in captured_plan["sites"]):
+            from merlin.targetgen.core_aten_spec_int8 import source_declaration_continuity
+
+            continuity = source_declaration_continuity(plan, captured_plan)
+            captured_plan["source_declaration_continuity"] = continuity
+            if continuity["status"] != "preserved":
+                for site in captured_plan["sites"]:
+                    site["status"] = "refused"
+                    site["reasons"].append("exact source operator declaration was not preserved through integerization")
+                captured_plan["status"] = "refused"
+            if continuity["status"] != "preserved" or any(
+                site["status"] != "admitted" for site in captured_plan["sites"]
+            ):
                 # Refuse the complete capture before replacing the host source.
                 plan = captured_plan
                 selected = []
@@ -313,7 +324,10 @@ def prepare_spec_int8(
             contractions = [op for op, _ in observe_contractions(module)]
             for site, contraction in zip(selected, contractions, strict=True):
                 # Readout preserves two separately rounded frontend f32 multiplies.
-                cast, first_readout, readout = host_readout_chain(contraction)
+                (cast, first_readout, readout), restored_readout, bridge = host_readout_chain(
+                    contraction, with_bridge=True
+                )
+                site["host_readout_bridge"] = bridge
                 site["host_readout_operation_ordinals"] = [
                     list(module.walk()).index(o) for o in (first_readout, readout)
                 ]
@@ -328,7 +342,7 @@ def prepare_spec_int8(
                     "transfer_contracts.accumulator_readout"
                 )
                 readout.attributes["prov.role"] = StringAttr("spec_int8_host_readout")
-                observations.append((contraction.results[0], readout.results[0]))
+                observations.append((contraction.results[0], restored_readout))
             operations = list(module.walk())
             for row in plan["quantization_sites"]:
                 keys = {authority: row[authority]["declaration"] for authority in ("software", "host")}

@@ -588,3 +588,55 @@ def admit_operation(spec: dict, op: str, signature: dict, placement: str) -> dic
         (row for row in decisions if row["status"] == "admitted"),
         next((row for row in decisions if row["status"] == "unknown"), decisions[0]),
     )
+
+
+def admit_contraction_operation(spec: dict, op: str, signature: dict, placement: str) -> dict:
+    """Retain exact source-op priority for a separately typed integer MAC.
+
+    Only an explicitly host f32/f32/f32->f32 source declaration is disjoint
+    from a proven i8/i8/i32->i32 signature. Unknown or matching host precision,
+    and every accelerator/source-op restriction, retain their normal priority.
+    This is a pure screening view; the authored specification is unchanged.
+    """
+    from merlin.common.quant_formats import get as quant_format
+
+    def precision(value):
+        try:
+            return quant_format(value).name
+        except (KeyError, ValueError, TypeError):
+            return None
+
+    def ordered(values):
+        return [precision(value) for value in values] if isinstance(values, list) else None
+
+    def direct(row):
+        return op in row.get("ops", []) or (not row.get("ops") and row.get("id") == op)
+
+    integer = ordered(signature.get("ordered_operand_dtypes")) == ["int8", "int8", "int32"] and ordered(
+        signature.get("ordered_result_dtypes")
+    ) == ["int32"]
+    retained, ignored = [], []
+    for row in spec.get("operations", []):
+        declared = row.get("signature", {})
+        if (
+            integer
+            and direct(row)
+            and row.get("placement") == "host"
+            and spec.get("status") == "reviewed"
+            and row.get("status", "reviewed") == "reviewed"
+            and "hardware" not in row
+            and not (set(declared) - _SIGNATURE_FIELDS)
+            and not ({"restriction", "semantics"} & set(declared))
+            and ordered(declared.get("ordered_operand_dtypes")) == ["fp32", "fp32", "fp32"]
+            and ordered(declared.get("ordered_result_dtypes")) == ["fp32"]
+            and ("accumulator_dtype" not in declared or precision(declared["accumulator_dtype"]) == "fp32")
+        ):
+            ignored.append(row["id"])
+        else:
+            retained.append(row)
+    decision = admit_operation({**spec, "operations": retained}, op, signature, placement)
+    return {
+        **decision,
+        "ignored_disjoint_host_precision_declarations": ignored,
+        "applicable_exact_source_declaration": op != signature.get("family") and any(direct(row) for row in retained),
+    }

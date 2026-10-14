@@ -347,7 +347,7 @@ def build_quantizer(
         selected = recipe.get("software_admission")
         if selected is None:
             return True  # Compatibility recipes retain their recorded policy.
-        from merlin.targetgen.software_spec import admit_operation
+        from merlin.targetgen.software_spec import admit_contraction_operation, admit_operation
 
         operands = contraction_operands(node) if family == "contraction" else node.args
         value = operands[0].meta.get("val") if operands and isinstance(operands[0], torch.fx.Node) else None
@@ -359,14 +359,31 @@ def build_quantizer(
             "layout": "row_major_contiguous" if isinstance(value, torch.Tensor) and value.is_contiguous() else None,
             "scale_granularity": activation["granularity"],
         }
-        decision = admit_operation(selected, str(node.target), prospective, "accelerator")
+        if family == "contraction":
+            prospective.update(
+                ordered_operand_dtypes=[
+                    activation["dtype"],
+                    weight["dtype"] if stored_floating_weight(operands[1]) else activation["dtype"],
+                    recipe["accumulator_dtype"],
+                ],
+                ordered_result_dtypes=[recipe["accumulator_dtype"]],
+                readout_dtype=recipe["accumulator_dtype"],
+            )
+            decision = admit_contraction_operation(selected, str(node.target), prospective, "accelerator")
+        else:
+            decision = admit_operation(selected, str(node.target), prospective, "accelerator")
         software_decisions.append(
             {
                 "node": node.name,
+                "source_operator": str(node.target),
+                "prospective_operator": str(node.target),
+                "prospective_signature": prospective,
                 **decision,
                 "scope": "prospective quantization screen; not realized precision or target admission",
             }
         )
+        if decision.get("applicable_exact_source_declaration"):
+            return decision["status"] == "admitted"
         return decision["status"] != "unsupported"
 
     def owner(node: Any) -> str | None:
