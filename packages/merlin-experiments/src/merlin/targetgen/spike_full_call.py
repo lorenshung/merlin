@@ -36,6 +36,9 @@ SPEC_QUALIFICATION_CHECKS = (
     "device_binding",
 )
 SPEC_EXECUTION_IDENTITY = ("case_sha256", "source_sha256", "elf_sha256", "trace_sha256")
+# Python caches imported provider/dependency modules by namespace. Refuse changed
+# owners in this process rather than executing old code against new source bytes.
+_FULL_CALL_SOURCE_IDENTITIES: dict[Path, str] = {}
 
 
 def unqualified_spec_device(reason: str, *, policy: str = "unknown") -> dict:
@@ -544,28 +547,107 @@ def sim_adapters(target: str) -> dict:
 
 
 def declared(target: str):
-    """The L2 full-call oracle a target's contract selects through ``runner.full_call_provider``.
+    """Load an explicitly selected support-owned complete-call oracle.
 
-    The provider path is a declared contract fact (repo-relative or absolute) and the provider
-    module owns its ``full_call_oracle(target)``; None when the contract selects no provider.
+    Capability overlays cannot select executable code. Missing declarations keep
+    the generic adapter; malformed declared factories refuse rather than fallback.
     """
-    from merlin.common.paths import repo_root
-    from merlin.targetgen.plugins import load_module
-    from merlin.targetgen.target_experiment import load_capability_manifest
-    from merlin.targetgen.target_registry import TargetContractMissing
+    import inspect
+
+    from merlin.common.source_membership import file_members
+    from merlin.targetgen.plugins import load_module, resolve_support
+    from merlin.targetgen.providers import support_source_dependencies
+    from merlin.targetgen.target_registry import TargetContractMissing, resolve
 
     try:
-        contract = load_capability_manifest(target).contract
+        info = resolve(target)
+        contract = info._load_provider_contract()
     except TargetContractMissing:
-        return None  # No capability contract, so nothing selects a full-call provider.
-    provider_path = (contract.get("runner") or {}).get("full_call_provider")
-    if not provider_path:
         return None
-    provider_path = Path(provider_path)
-    if not provider_path.is_absolute():
-        provider_path = repo_root() / provider_path
-    provider = load_module(provider_path.parent, provider_path.name, package_name="full_call_execution")
-    return provider.full_call_oracle(target)
+    if not isinstance(contract, dict):
+        raise ValueError("full-call support contract is malformed")
+    runner = contract.get("runner")
+    if runner is None:
+        return None
+    if not isinstance(runner, dict):
+        raise ValueError("full-call runner declaration is malformed")
+    if "full_call_provider" not in runner:
+        return None
+    selected = resolve_support(target)
+    if (
+        selected.base.resolve() != info.base.resolve()
+        or selected.contract_path.resolve() != info.contract_path.resolve()
+    ):
+        raise ValueError("full-call support selection changed during resolution")
+    reference = runner["full_call_provider"]
+    if type(reference) is not str or not reference or "\\" in reference:
+        raise ValueError("full-call provider must name an ordinary owned Python file")
+    root = selected.base.resolve()
+    relative = Path(reference)
+    provider_path = relative if relative.is_absolute() else root / relative
+    if (
+        ".." in relative.parts
+        or provider_path.suffix != ".py"
+        or not provider_path.is_file()
+        or not provider_path.is_relative_to(root)
+        or any(path.is_symlink() for path in (provider_path, *provider_path.parents))
+        or provider_path.resolve(strict=True) != provider_path
+    ):
+        raise ValueError("full-call provider must name an ordinary contained Python file")
+    owners = (root, *support_source_dependencies(root).values())
+
+    def source_identities():
+        try:
+            return {
+                owner: hashlib.sha256(
+                    json.dumps(
+                        [
+                            (name, hashlib.sha256(path.read_bytes()).hexdigest())
+                            for name, path in file_members(owner).items()
+                        ]
+                    ).encode()
+                ).hexdigest()
+                for owner in owners
+            }
+        except (OSError, ValueError):
+            raise ValueError("full-call provider source inventory is unavailable") from None
+
+    identities = source_identities()
+    if any(_FULL_CALL_SOURCE_IDENTITIES.get(owner, digest) != digest for owner, digest in identities.items()):
+        raise ValueError("full-call provider source changed after process-local loading")
+    # Pin before importing: even a failed factory can leave imported helpers cached.
+    _FULL_CALL_SOURCE_IDENTITIES.update(identities)
+
+    def owned_function(value):
+        if not inspect.isfunction(value):
+            return False
+        filename = inspect.getsourcefile(value)
+        if filename is None:
+            return False
+        source = Path(filename)
+        return (
+            source.is_file()
+            and source.resolve() == source
+            and not any(path.is_symlink() for path in (source, *source.parents))
+            and (source == Path(__file__).resolve() or any(source.is_relative_to(owner) for owner in owners))
+        )
+
+    namespace = "full_call_execution_" + hashlib.sha256((str(root) + ":" + str(provider_path)).encode()).hexdigest()
+    try:
+        provider = load_module(root, provider_path.relative_to(root).as_posix(), package_name=namespace)
+        factory = getattr(provider, "full_call_oracle", None)
+        if not owned_function(factory) or Path(inspect.getsourcefile(factory)).resolve() != provider_path:
+            raise ValueError("invalid factory owner")
+        adapter = factory(target)
+    except Exception:  # noqa: BLE001 -- declared failures never become fallback or private diagnostic payloads
+        raise ValueError("declared full-call oracle could not be constructed") from None
+    if not owned_function(adapter) or not all(
+        owned_function(getattr(adapter, name, None)) for name in ("run_full_call", "qualify_full_call")
+    ):
+        raise ValueError("declared full-call oracle lacks owned execution and qualification callbacks")
+    if source_identities() != identities:
+        raise ValueError("full-call provider source changed during factory construction")
+    return adapter
 
 
 def sim_available(target: str) -> tuple[bool, str]:
