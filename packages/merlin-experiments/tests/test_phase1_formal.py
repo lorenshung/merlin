@@ -347,10 +347,13 @@ def test_phase_manifest_keeps_host_correctness_and_verified_device_coverage_dist
         "host_lane_scored_pass": 1,
         "device_lane_scored_pass": 1,
         "device_evidence_count": 1,
+        "spec_qualified_device_pass": 0,
+        "device_unqualified_pass": 1,
         "host_guard_pass": 0,
         "host_guard_total": 0,
     }
     manifest = formal._phase_manifest(score, required_tier="L3")
     assert manifest["functional_pass"] is True and manifest["n_passed"] == 2
     assert manifest["host_lane_scored_pass"] == 1 and manifest["device_lane_scored_pass"] == 1
+    assert manifest["spec_qualified_device_pass"] == 0 and manifest["device_unqualified_pass"] == 1
     assert manifest["formal_complete"] is False

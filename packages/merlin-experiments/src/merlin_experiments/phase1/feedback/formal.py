@@ -299,6 +299,8 @@ def _phase_manifest(score: Mapping, *, required_tier: str) -> dict:
             for key in (
                 "device_lane_scored_pass",
                 "device_evidence_count",
+                "spec_qualified_device_pass",
+                "device_unqualified_pass",
                 "host_lane_scored_pass",
                 "host_guard_pass",
                 "host_guard_total",

@@ -435,6 +435,11 @@ def run_capsule(capsule, package_dir, paths, config, adapters, pkg, contract, ti
     """
     from merlin.common import provenance
     from merlin.targetgen.capsule_common import run_entrypoints
+    from merlin.targetgen.spike_full_call import (
+        SPEC_EXECUTION_IDENTITY,
+        full_call_execution_identity,
+        unqualified_spec_device,
+    )
     from merlin.targetgen.tier_policy import tier_depth_order
 
     paths.run_path.mkdir(parents=True, exist_ok=True)
@@ -452,11 +457,14 @@ def run_capsule(capsule, package_dir, paths, config, adapters, pkg, contract, ti
         "numeric": {"status": "skipped"},
         "trace_check": {"status": "skipped", "violations": []},
         "failure": None,
+        "spec_qualified_device": unqualified_spec_device("mandatory_tiers_not_qualified"),
+        "full_call_execution_identity": {},
         "provenance": provenance.record(
             sources=[Path(__file__), Path(capsule["__dir__"]) / "capsule.yaml"],
             extra={"target": config.target, "executions": {}},
         ),
     }
+    qualifications = []
     try:
         source_adapters = [a for a in (adapters or {}).values() if getattr(a, "compiles_source_bundle", False)]
         if source_adapters:
@@ -515,6 +523,31 @@ def run_capsule(capsule, package_dir, paths, config, adapters, pkg, contract, ti
                 routing=run.get("routing"),
             )
             row = next(iter(verdict["cases"].values()))
+            # Only the selected trusted oracle's closed producer may issue this
+            # receipt. Candidate result dictionaries never supply either field.
+            try:
+                identity = full_call_execution_identity(capsule, bundle, run)
+            except Exception:  # noqa: BLE001 -- unavailable additive credit does not alter functional grading
+                identity = {}
+            qualifier = getattr(adapter, "qualify_full_call", None)
+            qualification = unqualified_spec_device("trusted_qualifier_unavailable")
+            if callable(qualifier):
+                try:
+                    qualification = qualifier(
+                        capsule, bundle=bundle, execution=run, verdict=verdict, package_dir=package_dir, timeout=timeout
+                    )
+                    if (
+                        not isinstance(qualification, dict)
+                        or set(identity) != set(SPEC_EXECUTION_IDENTITY)
+                        or any(
+                            qualification.get("bindings", {}).get(key) != identity[key]
+                            for key in SPEC_EXECUTION_IDENTITY
+                        )
+                    ):
+                        qualification = unqualified_spec_device("qualification_identity_differs")
+                except Exception:  # noqa: BLE001 -- qualification cannot replace ordinary grading
+                    qualification = unqualified_spec_device("qualification_evidence_invalid")
+            qualifications.append((qualification, identity))
             execution_failed = row["status"] == "execution_failed"
             passed = row["status"] == "pass"
             if capsule.get("lane_expectation") == "device":
@@ -529,6 +562,8 @@ def run_capsule(capsule, package_dir, paths, config, adapters, pkg, contract, ti
                 "engine": run.get("engine"),
                 "semantic_scope": row.get("semantic_scope"),
                 "provenance": run["provenance"],
+                "spec_qualified_device": qualification,
+                "full_call_execution_identity": identity,
                 "reason": row["reason"]
                 if execution_failed
                 else None
@@ -562,6 +597,8 @@ def run_capsule(capsule, package_dir, paths, config, adapters, pkg, contract, ti
                 break
         else:
             result["status"] = "pass"
+            if qualifications and all(q.get("status") == "qualified" for q, _ in qualifications):
+                result["spec_qualified_device"], result["full_call_execution_identity"] = qualifications[-1]
     except Exception as exc:  # noqa: BLE001 -- every capsule gets a durable refusing verdict
         result["status"] = "fail"
         result["failure"] = {"plane": "compile", "category": "PROTOCOL_VIOLATION", "detail": str(exc)[:1000]}

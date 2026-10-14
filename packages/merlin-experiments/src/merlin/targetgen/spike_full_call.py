@@ -1,8 +1,7 @@
 """Spike functional oracle for the Core ATen full-call capsule contract.
 
-The adapter executes the *submitted* LLVM-dialect emission, never a trusted lowering: the
-candidate text is translated to LLVM IR and replaces the lowered module inside the normal
-bare-metal image build (``host_llvm_transform``).  The bundle supplies the call boundary
+The plain host adapter executes submitted LLVM-dialect emission. Provider mode uses the
+submitted source-bound device catalog with trusted host lowering. The bundle supplies the call boundary
 (``semantic_io.json``, ``inputs.npz``); the return value carries lossless output bytes and the
 semantic readback for the round-2 full-call grader.
 
@@ -13,7 +12,9 @@ the provider), not from this module, so any plain-ISA Spike target can share it.
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,314 @@ from typing import Any
 from merlin.targetgen import oracle_policy as _oracle_policy
 
 DEFAULT_ARENA_MB = 256
+SPEC_QUALIFICATION_SCHEMA = "merlin.spec_qualified_device.v1"
+SPEC_QUALIFICATION_CHECKS = (
+    "private_answers",
+    "selected_policy",
+    "admission",
+    "source",
+    "schedule",
+    "partial_sums",
+    "raw_i32",
+    "ordered_f32",
+    "full_call",
+    "device_binding",
+)
+SPEC_EXECUTION_IDENTITY = ("case_sha256", "source_sha256", "elf_sha256", "trace_sha256")
+
+
+def unqualified_spec_device(reason: str, *, policy: str = "unknown") -> dict:
+    """Answer-free absence of a selected-software-spec device qualification."""
+    policy = (
+        policy if isinstance(policy, str) and policy in {"unknown", "fp32", "spec_int8", "int8_w8a8"} else "unknown"
+    )
+    return dict(
+        schema=SPEC_QUALIFICATION_SCHEMA,
+        status="unqualified",
+        policy=policy,
+        scope="selected_software_spec",
+        reasons=[reason],
+        bindings={},
+        checks=dict.fromkeys(SPEC_QUALIFICATION_CHECKS, False),
+    )
+
+
+def _digest(value) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
+def full_call_execution_identity(capsule: dict, bundle: Path, execution: dict) -> dict:
+    """Join a reopened private commitment to the actual model and verified execution."""
+    from merlin.targetgen.core_aten_capsules import load_private
+    from merlin.targetgen.core_aten_device import verify_execution_evidence
+
+    load_private(capsule)
+    evidence = (execution.get("routing") or {}).get("execution_evidence")
+    if not isinstance(evidence, dict) or not verify_execution_evidence(evidence):
+        return {}
+    top = execution.get("execution_evidence")
+    if top is not None and (
+        not isinstance(top, dict) or any(top.get(k) != evidence.get(k) for k in ("elf_sha256", "trace_sha256"))
+    ):
+        return {}
+    identity = dict(
+        case_sha256=capsule["full_call_golden"]["golden.yaml"],
+        source_sha256=hashlib.sha256((bundle / "model.mlir").read_bytes()).hexdigest(),
+        elf_sha256=evidence.get("elf_sha256"),
+        trace_sha256=evidence.get("trace_sha256"),
+    )
+    return identity if all(_digest(v) for v in identity.values()) else {}
+
+
+class _Unqualified(ValueError):
+    pass
+
+
+def _require(condition, reason):
+    if not condition:
+        raise _Unqualified(reason)
+
+
+def _join_catalog_source(bundle: Path, catalog_digest: str, prepared_digest: str) -> None:
+    """Reproduce the ordinary trusted normalization before joining catalog bytes.
+
+    A device catalog sees the normalized source, whereas the capsule commits
+    the prepared frontend source. Different digests require complete byte
+    equality with this fixed trusted normalization, never a candidate claim.
+    """
+    if catalog_digest == prepared_digest:
+        return
+    from merlin.runtime.backends.zephyr_model import _prepare_model_mlir
+
+    signatures = json.loads((bundle / "spike-build/device_signatures.json").read_text())
+    catalog_path = Path(signatures["catalog_manifest"])
+    build = (bundle / "spike-build").resolve()
+    _require(
+        catalog_path.is_file() and catalog_path == catalog_path.resolve() and catalog_path.is_relative_to(build),
+        "catalog_source_owner_invalid",
+    )
+    catalog = json.loads(catalog_path.read_text())
+    source = Path(catalog["source_snapshot"])
+    _require(
+        source.is_file() and source == source.resolve() and source.is_relative_to(build),
+        "catalog_source_owner_invalid",
+    )
+    _require(hashlib.sha256(source.read_bytes()).hexdigest() == catalog_digest, "catalog_source_identity_changed")
+    work = Path(tempfile.mkdtemp(prefix="spec-source-normalization-", dir=bundle))
+    expected = _prepare_model_mlir(bundle / "model.mlir", work, bundle_dir=bundle)
+    _require(expected.read_bytes() == source.read_bytes(), "catalog_source_normalization_differs")
+
+
+def _private_numeric_boundary(capsule, bundle, execution, verdict, selection):
+    """Reuse private grading and captured admission; verify nonvacuous observation links."""
+    from xdsl.dialects.builtin import FunctionType, StringAttr
+
+    from merlin.frontends.linalg_mlir import parse_mlir_file
+    from merlin.kernels.shapes import observe_contractions
+    from merlin.llvmlower.result_layout import ATTRIBUTE
+    from merlin.targetgen import core_aten_capsules as C
+    from merlin.targetgen.core_aten_spec_int8 import admission_plan, host_readout_chain, source_declaration_continuity
+
+    golden = C.load_private(capsule)
+    report = golden["batch_map"]
+    _require(len(report["cases"]) == 1, "single_case_required")
+    record = report["cases"][0]
+    plan = report.get("numeric_preparation")
+    _require(isinstance(plan, dict) and plan.get("status") == "admitted", "private_admission_missing")
+    _require(
+        record.get("numeric_admission") == {k: v for k, v in plan.items() if k != "selection"},
+        "private_admission_records_differ",
+    )
+    _require(record.get("numeric_policy") == "spec_int8", "private_policy_not_spec_int8")
+    _require(
+        not plan.get("host_int8_narrowing") and not record.get("numeric_admission", {}).get("host_int8_narrowing"),
+        "native_narrowing_undeclared",
+    )
+    count = plan.get("quantized_contractions")
+    _require(
+        type(count) is int and count > 0 and not plan.get("native_contractions"), "prepared_quantized_rows_required"
+    )
+    sites = plan.get("sites")
+    _require(
+        isinstance(sites, list) and len(sites) == count and all(s.get("status") == "admitted" for s in sites),
+        "private_site_roster_invalid",
+    )
+    _require(plan.get("quantization_sites"), "private_quantizer_roster_empty")
+    _require(json.loads((bundle / "spec-int8-admission.json").read_text()) == plan, "runtime_admission_changed")
+    if selection["spec"] != plan["selection"]["spec"] or selection["host"] != plan["selection"]["host"]:
+        # Retain diagnostic inputs only in the operator-private runtime.
+        (bundle / "selected-contract-recheck.json").write_text(
+            json.dumps({"actual": selection, "frozen": plan["selection"]}, indent=2) + "\n"
+        )
+        raise _Unqualified("selected_contract_changed")
+    reference = plan.get("integer_reference", {})
+    expected = reference.get("expected_output_bytes")
+    _require(
+        reference.get("status") == "prepared" and isinstance(expected, dict) and expected, "private_reference_empty"
+    )
+    _require(len(verdict["cases"]) == 1, "graded_case_roster_invalid")
+    row = next(iter(verdict["cases"].values()))
+    _require(
+        row.get("status") == "pass" and row.get("semantic_scope") in {"full", "values+mutation+observed-metadata"},
+        "full_call_did_not_pass",
+    )
+    _require(
+        row.get("numeric_execution_policy") == "spec_int8" and row.get("integer_reference", {}).get("status") == "pass",
+        "exact_spec_reference_did_not_pass",
+    )
+    comparisons = row["integer_reference"].get("results")
+    _require(
+        isinstance(comparisons, list) and comparisons and all(r.get("status") == "pass" for r in comparisons),
+        "exact_comparisons_empty",
+    )
+    _require({str(r["output_index"]) for r in comparisons} == set(expected), "exact_comparison_roster_differs")
+    source = (Path(capsule["__dir__"]) / "capsule.interface.mlir").read_text()
+    bound = C.caller_input_storage(source, report["cases"])
+    bound = C._legacy_view_storage(capsule, golden, source, bound)
+    _require((bundle / "model.mlir").read_text() == bound, "runtime_source_changed")
+    module = parse_mlir_file(bundle / "model.mlir")
+    function = next(op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward")
+    returned = next(op for op in function.body.block.ops if op.name == "func.return")
+    outputs = tuple(returned.operands)
+    _require(len(outputs) == report["output_count"] == len(execution["output_bytes"]), "output_roster_differs")
+    indices = []
+    for site in sites:
+        for key, dtype in (("accumulator_output_index", "i32"), ("readout_output_index", "f32")):
+            index = site.get(key)
+            _require(type(index) is int and 0 <= index < len(outputs), "observation_index_invalid")
+            _require(
+                str(outputs[index].type.element_type) == dtype and str(index) in expected,
+                "observation_precision_or_reference_missing",
+            )
+            _require(
+                isinstance(expected[str(index)], str) and bool(expected[str(index)]), "observation_reference_empty"
+            )
+            indices.append(index)
+    _require(len(set(indices)) == 2 * count, "observation_indices_ambiguous")
+    # Additional grading observations are removed only from this private parsed copy.
+    # The actual emitted module and its immutable public commitment remain untouched.
+    returned.operands = [v for i, v in enumerate(outputs) if i not in indices]
+    function.properties["function_type"] = FunctionType.from_lists(
+        [arg.type for arg in function.body.block.args], [v.type for v in returned.operands]
+    )
+    if ATTRIBUTE in module.attributes:
+        layout = json.loads(module.attributes[ATTRIBUTE].data)
+        layout["results"] = [v for i, v in enumerate(layout["results"]) if i not in indices]
+        module.attributes[ATTRIBUTE] = StringAttr(json.dumps(layout, sort_keys=True))
+    module.verify()
+    fresh = admission_plan(module, selection, captured=True)
+    _require(
+        len(fresh["sites"]) == count and all(s["status"] == "admitted" for s in fresh["sites"]),
+        "captured_admission_did_not_pass",
+    )
+    _require(
+        fresh["quantization_sites"] and len(fresh["quantization_sites"]) == len(plan["quantization_sites"]),
+        "captured_quantizer_roster_differs",
+    )
+    initial_steps = plan.get("source_declaration_continuity", {}).get("initial_source_admissions")
+    _require(isinstance(initial_steps, list) and initial_steps, "source_continuity_missing")
+    continuity = source_declaration_continuity({"sites": [{"steps": initial_steps}]}, fresh)
+    _require(continuity["status"] == "preserved", "exact_source_obligation_lost")
+    contractions = list(observe_contractions(module))
+    for site, (operation, _) in zip(sites, contractions, strict=True):
+        _, restored, _ = host_readout_chain(operation, with_bridge=True)
+        _require(
+            outputs[site["accumulator_output_index"]] is operation.results[0]
+            and outputs[site["readout_output_index"]] is restored,
+            "observation_not_linked_to_mac",
+        )
+    return plan
+
+
+def _qualify_full_call(
+    capsule, *, bundle, execution, verdict, package_dir, target, execution_provider, rtl_facts, timeout
+):
+    """Issue credit from trusted private grading and independently checked actual artifacts."""
+    flow = capsule.get("operation", {}).get("attributes", {}).get("numeric_flow")
+    policy = flow if isinstance(flow, str) else "unknown"
+    receipt = unqualified_spec_device("qualification_not_run", policy=policy)
+    try:
+        from merlin.llvmlower import toolchain
+        from merlin.targetgen.core_aten_capsules import load_private
+        from merlin.targetgen.core_aten_device import load_execution_provider, selected_facts
+        from merlin.targetgen.core_aten_spec_int8 import select_spec
+
+        _require(policy == "spec_int8", "explicit_prepared_spec_int8_required")
+        _require(
+            execution.get("execution_error") is None and execution.get("lane") == "device", "verified_device_required"
+        )
+        identity = full_call_execution_identity(capsule, bundle, execution)
+        _require(set(identity) == set(SPEC_EXECUTION_IDENTITY), "execution_identity_missing")
+        _require(execution_provider is not None and package_dir is not None, "trusted_provider_required")
+        _require(
+            execution.get("provenance", {}).get("execution_provider_sha256")
+            == hashlib.sha256(execution_provider.read_bytes()).hexdigest(),
+            "execution_provider_changed",
+        )
+        plan = load_private(capsule)["batch_map"].get("numeric_preparation", {})
+        selected = plan.get("selection", {})
+        identities = selected.get("identities", {})
+        paths = {}
+        for key in ("software_spec", "host_capabilities"):
+            record = identities.get(key, {})
+            path = Path(record["path"])
+            _require(
+                _digest(record.get("sha256")) and hashlib.sha256(path.read_bytes()).hexdigest() == record["sha256"],
+                "selected_contract_binding_changed",
+            )
+            paths[key] = path
+        provider = load_execution_provider(target, execution_provider)
+        verifier = getattr(provider, "verify_numeric_execution_artifacts", None)
+        _require(callable(verifier), "actual_numeric_artifact_verifier_unavailable")
+        with selected_facts(target, rtl_facts) as facts:
+            selection = select_spec(target, facts, paths["software_spec"], paths["host_capabilities"])
+            _private_numeric_boundary(capsule, bundle, execution, verdict, selection)
+            proof = verifier(
+                bundle,
+                target=target,
+                facts=facts,
+                numeric_policy=selection["spec"],
+                llvm_bin=toolchain.llvm_install() / "bin",
+                workdir=Path(tempfile.mkdtemp(prefix="spec-qualification-", dir=bundle)) / "proof",
+                execution_evidence=execution["routing"]["execution_evidence"],
+                timeout=timeout,
+            )
+        _require(
+            isinstance(proof, dict)
+            and proof.get("schema") == "merlin.numeric_execution_artifacts.v1"
+            and proof.get("status") == "verified",
+            "actual_numeric_artifacts_not_verified",
+        )
+        bindings = proof.get("bindings", {})
+        keys = {"source_sha256", "catalog_sha256", "target_ir_sha256", "object_sha256", "elf_sha256", "trace_sha256"}
+        _require(set(bindings) == keys and all(_digest(v) for v in bindings.values()), "artifact_bindings_invalid")
+        _join_catalog_source(bundle, bindings["source_sha256"], identity["source_sha256"])
+        _require(
+            all(bindings[k] == identity[k] for k in ("elf_sha256", "trace_sha256")),
+            "artifact_execution_identity_differs",
+        )
+        _require(
+            set(proof.get("checks", {})) == {"schedule", "partial_sums", "device_binding"}
+            and all(v is True for v in proof["checks"].values()),
+            "artifact_checks_not_verified",
+        )
+        receipt.update(
+            status="qualified",
+            reasons=[],
+            bindings={
+                **bindings,
+                "source_sha256": identity["source_sha256"],
+                "case_sha256": identity["case_sha256"],
+                "software_spec_sha256": identities["software_spec"]["sha256"],
+                "host_capabilities_sha256": identities["host_capabilities"]["sha256"],
+            },
+            checks=dict.fromkeys(SPEC_QUALIFICATION_CHECKS, True),
+        )
+    except _Unqualified as exc:
+        receipt["reasons"] = [str(exc)]
+    except Exception:  # noqa: BLE001 -- missing/malformed qualification never earns device credit
+        receipt["reasons"] = ["qualification_evidence_invalid"]
+    return receipt
 
 
 def _translate_candidate(llvm_mlir: str):
@@ -199,6 +508,21 @@ def full_call_adapter(
         raise OracleUnavailable("this oracle executes the full-call boundary only (run_full_call)")
 
     run.run_full_call = run_full_call
+
+    def qualify_full_call(capsule, *, bundle, execution, verdict, package_dir, timeout):
+        return _qualify_full_call(
+            capsule,
+            bundle=Path(bundle),
+            execution=execution,
+            verdict=verdict,
+            package_dir=package_dir,
+            target=target,
+            execution_provider=execution_provider,
+            rtl_facts=rtl_facts,
+            timeout=timeout,
+        )
+
+    run.qualify_full_call = qualify_full_call
     run.compiles_source_bundle = execution_provider is not None
     run._merlin_simulator_engine = engine
     return run

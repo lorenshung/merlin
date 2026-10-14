@@ -48,7 +48,7 @@ def task_objective_block(config: TaskStagingConfig) -> str:
         "\n\n## Device coverage objective\n\n"
         "Full-call correctness remains required for every scored capsule. Capsules explicitly admitting either lane "
         "may pass through correct host fallback. Device coverage is counted separately and requires source-bound "
-        "admitted calls and actual executed instruction evidence. Maximize that verified coverage within the fixed "
+        "admitted calls and actual executed instruction evidence. Maximize spec_qualified_device_pass within the fixed "
         "wall budget; all-host correctness and READY do not end this run early. Functional pass remains a correctness "
         "result, not a claim of maximal device coverage. Preserve the frozen software specification, numeric policy, "
         "and oracle; this objective grants no additional device routes or formats.\n"
@@ -57,7 +57,9 @@ def task_objective_block(config: TaskStagingConfig) -> str:
         "final current workspace package, without selecting or restoring an earlier best snapshot. Retain your "
         "best fully correct device-coverage implementation in the final workspace.\n"
         "The device_lane_scored_pass counter measures ordinary full-call correctness plus executed device evidence; "
-        "it does not certify software-spec numerical qualification. A spec-tied release must separately require "
+        "it does not certify software-spec numerical qualification. The separate spec_qualified_device_pass counter "
+        "counts only trusted, source-bound selected-policy qualification; device_unqualified_pass records correct "
+        "device executions without that qualification. Missing proof earns no qualified credit. Qualification requires "
         "source-selected numeric admission, the checked emitted schedule, the selected contract's declared internal "
         "MAC precision and partial-sum bounds, accumulator bounds, and contract-required intermediate/readout "
         "references. A wrapping widening/truncation proof preserves final modulo bytes but does not discharge "
@@ -65,8 +67,11 @@ def task_objective_block(config: TaskStagingConfig) -> str:
         "If the selected numeric policy is spec_int8: require its existing exact raw i32 accumulator and readout "
         "references; for native contractions retain the caveat when host int8 narrowing is not declared. "
         "If the selected numeric policy is int8_w8a8: that existing path remains diagnostic. "
-        "Explicitly numeric-prepared capsules retain their mandatory reference/device gates; host fallback does "
-        "not waive them. This objective alone supplies no spec-qualified score or launch readiness.\n"
+        "Explicitly numeric-prepared capsules retain their mandatory reference checks; "
+        "host fallback does not waive them. Correct host fallback cannot supply attributed device evidence "
+        "or qualified device credit. Selected-policy qualification "
+        "is not original-FP32 equivalence, full-operation "
+        "qualification of undeclared host narrowing, or launch readiness.\n"
     )
 
 

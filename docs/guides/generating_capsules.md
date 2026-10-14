@@ -267,8 +267,9 @@ and hidden cohorts remain required and retain their private-oracle isolation.
 
 An optional row does not receive numeric preparation merely because a global
 `numeric_flow` exists. Select `prepare_numeric: true` on that row to use the
-existing frozen flow. This preserves its exact integer-reference and attributed
-device evidence obligations; a host-only result cannot discharge those obligations.
+existing frozen flow. This preserves its exact integer-reference and readout
+checks. Correct host fallback may satisfy the selected numerical contract, but
+cannot supply attributed device evidence or qualified device credit.
 There is no new numeric policy or expansion of the software specification.
 
 Before optional fallback, the selected execution provider must implement
@@ -288,13 +289,25 @@ source-selected numeric admission against the pinned software/host/facts contrac
 the checked emitted schedule and partial-sum/full-i32 bounds, and exact raw i32
 accumulator and readout references through the existing `spec_int8` path.
 
+`spec_qualified_device_pass` counts the subset whose trusted grader verifies those
+selected-policy obligations against the actual candidate and executed build.
+`device_unqualified_pass` records ordinary correct device executions without that
+qualification. Missing, malformed or incomplete proof earns no qualified credit;
+candidate-provided flags cannot issue the trusted qualification. The counter does
+not establish agreement with the original FP32 output or qualify a new format.
+The initial supported domain is prepared, quantized `spec_int8` calls with complete
+raw-i32 and ordered-f32 observations. The selected provider's verifier checks a
+closed source-derived emitted schedule, independently reproduces its object bytes,
+and joins them to the executed ELF and trace. Other proof forms remain unqualified
+until an independently reviewed checker supports them.
+
 Wrapping-i8 widening and host truncation preserve final modulo bytes; that proof
 does not establish bounds on the 20-bit internal partial sums or exact raw i32
 readout. Explicit native `spec_int8` adds those obligations but retains the standing
 qualification caveat when host int8 narrowing is not declared. Keep that caveat
 when describing the mixed pipeline. The existing `int8_w8a8` path remains diagnostic
-and does not confer spec conformity. The ordinary counter and objective alone
-create neither a spec-qualified score nor release/launch readiness. These distinctions
+and does not confer spec conformity. Neither ordinary device success nor the
+qualified subset establishes release/launch readiness. These distinctions
 preserve the existing spec, numerical gates and prepared-host-fallback limit above.
 
 For continued device-coverage optimization, explicitly choose

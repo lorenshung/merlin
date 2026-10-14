@@ -574,6 +574,76 @@ def lower_interface(
 #: Per-capsule result fields recording which execution lane and cohort a verdict rests on.
 LANE_FIELDS = ("lane", "executed_instructions", "cohort", "scored")
 
+_SPEC_DEVICE_SCHEMA = "merlin.spec_qualified_device.v1"
+_SPEC_DEVICE_BINDINGS = (
+    "case_sha256",
+    "source_sha256",
+    "software_spec_sha256",
+    "host_capabilities_sha256",
+    "catalog_sha256",
+    "target_ir_sha256",
+    "object_sha256",
+    "elf_sha256",
+    "trace_sha256",
+)
+_SPEC_DEVICE_CHECKS = (
+    "private_answers",
+    "selected_policy",
+    "admission",
+    "source",
+    "schedule",
+    "partial_sums",
+    "raw_i32",
+    "ordered_f32",
+    "full_call",
+    "device_binding",
+)
+_EXECUTION_IDENTITY = ("case_sha256", "source_sha256", "elf_sha256", "trace_sha256")
+
+
+def _sha256_identity(value) -> bool:
+    return type(value) is str and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
+def spec_qualified_device_entry(result: dict) -> bool:
+    """Recognize a supported receipt on an already trusted, graded result.
+
+    This is a metadata join, not a proof verifier for arbitrary JSON. The private
+    evaluator issues both the receipt and execution identity after independently
+    checking the actual candidate, references and execution. Candidate claims
+    cannot supply either field at that boundary.
+    """
+    count = result.get("executed_instructions")
+    if result.get("status") != "pass" or result.get("lane") != "device" or type(count) is not int or count <= 0:
+        return False
+    receipt = result.get("spec_qualified_device")
+    identity = result.get("full_call_execution_identity")
+    if not isinstance(receipt, dict) or not isinstance(identity, dict):
+        return False
+    if set(receipt) != {"schema", "status", "policy", "scope", "reasons", "bindings", "checks"}:
+        return False
+    if (
+        receipt["schema"] != _SPEC_DEVICE_SCHEMA
+        or receipt["status"] != "qualified"
+        or receipt["policy"] != "spec_int8"
+        or receipt["scope"] != "selected_software_spec"
+        or type(receipt["reasons"]) is not list
+        or receipt["reasons"]
+    ):
+        return False
+    bindings, checks = receipt["bindings"], receipt["checks"]
+    if not isinstance(bindings, dict) or set(bindings) != set(_SPEC_DEVICE_BINDINGS):
+        return False
+    if not all(_sha256_identity(value) for value in bindings.values()):
+        return False
+    if not isinstance(checks, dict) or set(checks) != set(_SPEC_DEVICE_CHECKS):
+        return False
+    if not all(value is True for value in checks.values()):
+        return False
+    return set(identity) == set(_EXECUTION_IDENTITY) and all(
+        _sha256_identity(identity[key]) and identity[key] == bindings[key] for key in _EXECUTION_IDENTITY
+    )
+
 
 def score_lanes(graded: list[dict], score: dict) -> list[dict]:
     """Split unscored host guards from scored rows and record lane evidence in ``score``.
@@ -589,6 +659,8 @@ def score_lanes(graded: list[dict], score: dict) -> list[dict]:
     device = [r for r in scored if r.get("lane") == "device" and r.get("executed_instructions", 0) > 0]
     score["device_lane_scored_pass"] = sum(r["status"] == "pass" for r in device)
     score["device_evidence_count"] = len(device)
+    score["spec_qualified_device_pass"] = sum(spec_qualified_device_entry(r) for r in device)
+    score["device_unqualified_pass"] = score["device_lane_scored_pass"] - score["spec_qualified_device_pass"]
     score["host_lane_scored_pass"] = sum(r["status"] == "pass" and r.get("lane") == "host" for r in scored)
     return scored
 
@@ -600,7 +672,41 @@ def host_guards_pass(score: dict) -> bool:
 
 def lane_entry_fields(result: dict) -> dict:
     """The lane/cohort qualifiers a roll-up entry must carry with its verdict."""
-    return {key: result[key] for key in LANE_FIELDS if key in result}
+    fields = {key: result[key] for key in LANE_FIELDS if key in result}
+    receipt = result.get("spec_qualified_device")
+    if isinstance(receipt, dict):
+        qualified = spec_qualified_device_entry(result)
+        policy = receipt.get("policy")
+        safe_policy = (
+            policy if type(policy) is str and policy in {"spec_int8", "int8_w8a8", "fp32", "original_host"} else None
+        )
+        fields["spec_qualified_device"] = {
+            "schema": _SPEC_DEVICE_SCHEMA,
+            "status": "qualified" if qualified else "unqualified",
+            "policy": safe_policy,
+            "scope": "selected_software_spec",
+            "reasons": []
+            if qualified
+            else [
+                "qualification_unavailable"
+                if receipt.get("status") == "unqualified"
+                else "invalid_qualification_receipt"
+            ],
+        }
+        for key, allowed in (("bindings", _SPEC_DEVICE_BINDINGS), ("checks", _SPEC_DEVICE_CHECKS)):
+            block = receipt.get(key)
+            if isinstance(block, dict):
+                fields["spec_qualified_device"][key] = {
+                    name: value
+                    for name, value in block.items()
+                    if name in allowed and (_sha256_identity(value) if key == "bindings" else type(value) is bool)
+                }
+    identity = result.get("full_call_execution_identity")
+    if isinstance(identity, dict):
+        fields["full_call_execution_identity"] = {
+            key: value for key, value in identity.items() if key in _EXECUTION_IDENTITY and _sha256_identity(value)
+        }
+    return fields
 
 
 def readback_kw(readback_policy) -> dict:
