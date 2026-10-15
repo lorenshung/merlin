@@ -401,7 +401,15 @@ def build_quantizer(
             return isinstance(tensor, torch.Tensor) and tensor.is_floating_point()
         return bool(
             value.op == "call_function"
-            and value.target in weight_views
+            and (
+                value.target in weight_views
+                or (
+                    value.target == torch.ops.aten.select.int
+                    and len(value.args) == 3
+                    and all(type(index) is int for index in value.args[1:])
+                    and not value.kwargs
+                )
+            )
             and value.args
             and stored_floating_weight(value.args[0])
         )
