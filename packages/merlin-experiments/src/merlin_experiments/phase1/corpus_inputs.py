@@ -214,8 +214,9 @@ def prepare_bundle(
     return PreparedBundle(document, record, authored_sha, effective_sha, private_record)
 
 
-def _resources(capsules: list[dict]) -> None:
+def _resources(capsules: list[dict], *, preserve_missing_weights: bool = False) -> list[dict]:
     """Require declared file resources to travel with their capsule, without rewriting refs."""
+    missing = []
     for capsule in capsules:
         directory = Path(capsule["__dir__"]).resolve()
         attributes = (capsule.get("operation") or {}).get("attributes") or {}
@@ -232,12 +233,34 @@ def _resources(capsules: list[dict]) -> None:
             if relative.is_absolute() or ".." in relative.parts:
                 raise ValueError(f"run corpus cannot freeze non-capsule-local resource: {field}")
             member = directory / relative
+            if (
+                preserve_missing_weights
+                and capsule.get("kind") == "model"
+                and field in {"weights", "weights_manifest"}
+                and not member.exists()
+                and not member.is_symlink()
+            ):
+                missing.append({"capsule": capsule["name"], "field": field, "resource": str(relative)})
+                continue
             if not member.exists() or member.is_symlink() or not member.resolve().is_relative_to(directory):
                 raise ValueError(f"run corpus has an absent or indirect resource: {field}")
+    return missing
+
+
+def _preserved_release(te) -> bool:
+    seal = os.environ.get("MERLIN_CORPUS_SEAL", "").strip()
+    if not seal:
+        return False
+    from ..corpus import release
+
+    review = release.verify(Path(seal), te.path)
+    prepared = release._read(Path(review["release"]) / "private/preparation.json")
+    return prepared.get("source_kind") == "preserved_corpus"
 
 
 def stage(run_dir: Path, te, bundle: dict, *, contract: Path, capsules_root: Path | None = None) -> tuple[dict, dict]:
     """Prepare a fresh private input from either the descriptor or one explicit corpus."""
+    preserve_missing_weights = _preserved_release(te)
     stage_root = Path(run_dir).absolute() / "private_corpus_input"
     stage_root.mkdir(mode=0o700, exist_ok=False)
     schema_source = Path(contract).absolute() / "schemas"
@@ -272,14 +295,17 @@ def stage(run_dir: Path, te, bundle: dict, *, contract: Path, capsules_root: Pat
         commitments.append({"original": str(Path(source).absolute()), "staged": f"policy/{index}", "role": "corpus"})
     if source_root is None and list(te.graded_roots()) != sources:
         raise RuntimeError("descriptor corpus root membership changed during preparation")
-    _resources(discover_capsules(staged_sources, labels={"public", "dev"}, contract=contract))
+    _resources(
+        discover_capsules(staged_sources, labels={"public", "dev"}, contract=contract),
+        preserve_missing_weights=preserve_missing_weights,
+    )
     public = stage_root / "public"
     if capsules_root is None:
         public_capsules_for(te, corpus_roots=staged_sources, destination=public)
         mode = "descriptor_cohort"
     else:
         selected = discover_capsules(staged_sources, labels={"public", "dev"}, contract=contract)
-        _resources(selected)
+        _resources(selected, preserve_missing_weights=preserve_missing_weights)
         if not selected:
             raise ValueError("public/dev override contains no capsules")
         public.mkdir(mode=0o700)
@@ -331,7 +357,14 @@ def stage(run_dir: Path, te, bundle: dict, *, contract: Path, capsules_root: Pat
                 "role": "full_call_answers",
             }
         )
-    _resources(discover_capsules(public, labels={"public", "dev"}, contract=contract))
+    missing = _resources(
+        discover_capsules(public, labels={"public", "dev"}, contract=contract),
+        preserve_missing_weights=preserve_missing_weights,
+    )
+    if missing:
+        private_json(
+            stage_root / "missing-model-resources.json", {"resources": missing, "policy": "retain_in_denominator"}
+        )
     from ..phase0.coverage_commitment import (
         INPUT_PATH,
         _digest,

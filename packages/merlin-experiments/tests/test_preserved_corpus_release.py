@@ -48,3 +48,25 @@ def test_codex_service_tier_keeps_auth_out_of_isolated_home(tmp_path, monkeypatc
     assert report["auth_present"] and report["auth_copied"] is False
     assert not (isolated / "auth.json").exists()
     assert "must-never-be-copied" not in (isolated / "config.toml").read_text()
+
+
+def test_preserved_missing_weights_stay_negative_without_allowing_indirection(tmp_path):
+    from merlin_experiments.phase1.corpus_inputs import _resources
+
+    capsule = {
+        "name": "deferred",
+        "kind": "model",
+        "__dir__": str(tmp_path),
+        "operation": {"attributes": {"weights": "weights.safetensors"}},
+    }
+    with pytest.raises(ValueError, match="absent or indirect"):
+        _resources([capsule])
+    assert _resources([capsule], preserve_missing_weights=True) == [
+        {"capsule": "deferred", "field": "weights", "resource": "weights.safetensors"}
+    ]
+    (tmp_path / "weights.safetensors").symlink_to(tmp_path / "missing")
+    with pytest.raises(ValueError, match="absent or indirect"):
+        _resources([capsule], preserve_missing_weights=True)
+    capsule["operation"]["attributes"]["weights"] = "../outside"
+    with pytest.raises(ValueError, match="non-capsule-local"):
+        _resources([capsule], preserve_missing_weights=True)
