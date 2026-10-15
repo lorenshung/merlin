@@ -393,31 +393,26 @@ def build_quantizer(
         paths = [entry[0] for entry in stack.values() if isinstance(entry, (tuple, list)) and entry]
         return str(paths[-1]) if paths else None
 
-    def stored_floating_weight(value: Any) -> bool:
-        if not isinstance(value, torch.fx.Node):
-            return False
-        if value.op == "get_attr":
-            tensor = value.meta.get("val")
-            return isinstance(tensor, torch.Tensor) and tensor.is_floating_point()
-        return bool(
-            value.op == "call_function"
-            and (
-                value.target in weight_views
-                or (
-                    value.target == torch.ops.aten.select.int
-                    and len(value.args) == 3
-                    and all(type(index) is int for index in value.args[1:])
-                    and not value.kwargs
-                )
-            )
-            and value.args
-            and stored_floating_weight(value.args[0])
+    def stored_weight_view(node: Any) -> bool:
+        return node.target in weight_views or (
+            node.target == torch.ops.aten.select.int
+            and len(node.args) == 3
+            and all(type(index) is int for index in node.args[1:])
+            and not node.kwargs
         )
 
-    def stored_weight_shape(value: Any) -> list[int] | None:
-        while isinstance(value, torch.fx.Node) and value.op == "call_function" and value.target in weight_views:
+    def stored_weight_tensor(value: Any):
+        while isinstance(value, torch.fx.Node) and value.op == "call_function" and stored_weight_view(value):
             value = value.args[0] if value.args else None
         tensor = value.meta.get("val") if isinstance(value, torch.fx.Node) and value.op == "get_attr" else None
+        return tensor if isinstance(tensor, torch.Tensor) else None
+
+    def stored_floating_weight(value: Any) -> bool:
+        tensor = stored_weight_tensor(value)
+        return tensor is not None and tensor.is_floating_point()
+
+    def stored_weight_shape(value: Any) -> list[int] | None:
+        tensor = stored_weight_tensor(value)
         return list(tensor.shape) if isinstance(tensor, torch.Tensor) else None
 
     def eligible(node: Any, family: str) -> bool:
