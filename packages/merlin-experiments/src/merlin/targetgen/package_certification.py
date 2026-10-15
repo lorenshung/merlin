@@ -38,6 +38,22 @@ def _run_certificate_oracle(backend: Any, cb: dict, llvm: str, **options) -> dic
     )
 
 
+def _certificate_oracle_record(result: dict, simulator: str, passed: bool) -> dict:
+    """Retain selected-product evidence when projecting a numerical verdict."""
+    record = {
+        **result["oracle"],
+        "kind": result["oracle"].get("kind"),
+        "engine": simulator,
+        "derived_from_rtl": result["oracle"].get("derived_from_rtl", False),
+        "cycle_accurate": simulator in _runtime._CYCLE_ACCURATE_SIMULATORS and passed,
+        "result": "pass" if passed else "fail",
+        "cycles": result.get("cycles"),
+    }
+    if "timing" in result:
+        record["timing"] = result["timing"]
+    return record
+
+
 def _qualifying_pointer_abi(command_buffer: dict, backend: Any) -> dict[str, Any]:
     """Bind the compiler's pointer order to the selected runner before numerical grading.
 
@@ -463,14 +479,7 @@ def certify(
                 ) from e
             ok = outputs_match(res["outputs"], ref) and outputs_match(res["outputs"], sim)
             oracle_outputs = res["outputs"]  # what the mesh actually produced (bit-exact == ref when ok)
-            oracle = {
-                "kind": res["oracle"].get("kind"),
-                "engine": simulator,
-                "derived_from_rtl": res["oracle"].get("derived_from_rtl", False),
-                "cycle_accurate": simulator in _runtime._CYCLE_ACCURATE_SIMULATORS and ok,
-                "result": "pass" if ok else "fail",
-                "cycles": res.get("cycles"),
-            }
+            oracle = _certificate_oracle_record(res, simulator, ok)
             if res.get("console") is not None:
                 cpath = paths.artifacts_dir / "console.log"
                 cpath.write_text(res["console"], encoding="utf-8")

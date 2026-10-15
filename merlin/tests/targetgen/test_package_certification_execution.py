@@ -32,7 +32,11 @@ def test_certification_checks_selected_product_inside_shared_slot(monkeypatch, p
         assert 0 < options["timeout"] <= 17
         assert options["inputs"] == {"Activation": [[3]]}
         events.append("executed")
-        return {"outputs": {"Result": [[6]]}, "oracle": {"kind": "elaborated_rtl"}}
+        return {
+            "outputs": {"Result": [[6]]},
+            "oracle": {"kind": "elaborated_rtl", "derived_from_rtl": True},
+            "timing": {"sim_active_s": 2},
+        }
 
     monkeypatch.setattr(rtl_simulator_execution, "verilator_slot", slot)
     monkeypatch.setattr(rtl_simulator_execution, "verify_selected", verify)
@@ -46,6 +50,11 @@ def test_certification_checks_selected_product_inside_shared_slot(monkeypatch, p
     if pin_state == "stable":
         result = certify()
         assert result["oracle"]["provenance"]["execution_identity"] == "selected"
+        published = package_certification._certificate_oracle_record(result, "verilator", True)
+        assert published["provenance"] == result["oracle"]["provenance"]
+        assert published["derived_from_rtl"] is True
+        assert published["timing"]["sim_active_s"] == 2
+        assert published["result"] == "pass"
         assert events == ["admitted", "verified", "executed", "verified", "released"]
     else:
         with pytest.raises((ValueError, RuntimeError), match="changed"):
