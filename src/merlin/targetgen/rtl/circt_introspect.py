@@ -38,7 +38,7 @@ from .port_geometry import extract_accumulator, memories_from_port_geometry
 
 _REPO = repo_root()  # the repo root (contains merlin/)
 
-GENERATOR_VERSION = "rtl-introspect-v11-selected-source-receipts"
+GENERATOR_VERSION = "rtl-introspect-v12-selected-memory-views"
 # RISC-V ISA STANDARD custom-N major opcodes — fixed by the base ISA for EVERY RISC-V chip, NOT a
 # per-target fact. WHICH custom slot a RoCC accelerator is wired to IS target-specific; it is resolved
 # from the target's own reviewed encoding (contract ``encoding.rocc_custom_slot``) — never a baked
@@ -1063,6 +1063,24 @@ def build_facts(
     return record
 
 
+def _add_selected_address_space(facts: dict, memory: dict, *, source: str) -> None:
+    """Retain a logical role view without replacing or summing the physical census."""
+    if not isinstance(memory.get("bytes"), int) or memory["bytes"] <= 0:
+        return
+    view = {
+        **memory,
+        "source": source,
+        "view_kind": "address_space",
+        "physical_aliases_status": "unknown",
+        "accounting_note": "logical address-space view; do not sum with physical census stores",
+    }
+    views = facts.setdefault("memory_address_spaces", [])
+    if any(row["name"] == view["name"] for row in views):
+        raise ValueError(f"duplicate selected memory address space {view['name']!r}")
+    views.append(view)
+    facts.setdefault("memories", []).append(view)
+
+
 def _build_facts(
     hw_path: Path | str | None = None,
     isa_path: Path | str | None = None,
@@ -1133,6 +1151,8 @@ def _build_facts(
             for field in ("arrays", "datapaths", "interfaces"):
                 if probes.get(field):
                     v1[field] = probes[field]
+            for memory in probes.get("memories", []):
+                _add_selected_address_space(v1, memory, source="selected_firrtl_role_probe")
         v1["source"] = {
             "kind": "explicit_source_bundle",
             "config": selected["config"],
@@ -1147,18 +1167,7 @@ def _build_facts(
         if layout is not None:
             address_space = extract_accumulator(hw_path.read_text(), layout=layout)
             if address_space is not None:
-                address_space.update(
-                    {
-                        "source": "selected_hw_port_geometry",
-                        "view_kind": "address_space",
-                        "physical_aliases_status": "unknown",
-                        "accounting_note": "logical address-space view; do not sum with physical census stores",
-                    }
-                )
-                v1["memory_address_spaces"] = [address_space]
-                # Preserve the named compatibility view consumed by profiles,
-                # alongside the physical inventory with an explicit view tag.
-                v1.setdefault("memories", []).append(address_space)
+                _add_selected_address_space(v1, address_space, source="selected_hw_port_geometry")
     elif isa_path.is_file():  # a chipyard target with a Chisel ISA source -> legacy FIRRTL grep + HW-port
         accumulator_layout = _accumulator_layout(target)
         try:
