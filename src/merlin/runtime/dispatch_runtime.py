@@ -602,6 +602,7 @@ def execute(
     mesh_package: str | None = None,
     counters: dict | None = None,
     numeric_policy: dict | None = None,
+    mesh_timeout: int = 900,
 ) -> list[np.ndarray]:
     """Run the outlined model on bound arguments; return the driver's result arrays.
 
@@ -955,6 +956,7 @@ def execute(
                     package=mesh_package,
                     observed=_obs,
                     numeric_policy=numeric_policy,
+                    timeout=mesh_timeout,
                 )
                 _cf = _obs.get("capacity_fit")
                 if _cf is not None:
@@ -1303,6 +1305,7 @@ def run_model(
     mesh_package: str | None = None,
     numeric_policy: dict | None = None,
     transform_audit: bool | str | None = None,
+    mesh_timeout: int = 900,
 ) -> dict[str, Any]:
     """Outline + bind + execute a captured model; gate against ``golden.npy``.
 
@@ -1434,6 +1437,7 @@ def run_model(
         mesh_package=mesh_package,
         numeric_policy=numeric_policy,
         counters=_mesh_counts,
+        **({"mesh_timeout": mesh_timeout} if kernel_backend == "mesh" else {}),
     )
     if len(results) != len(out_types):
         raise DispatchRuntimeError(f"whole-model execution returned {len(results)} values for {len(out_types)} results")
