@@ -957,9 +957,9 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
     # self-check would lie. EXCLUDE build/ exactly like the driver grade (a copied CMakeCache has absolute
     # paths to the original location and would break) -> a from-scratch build, same as the grade (fast: the
     # LLVM/MLIR is prebuilt, the OOT project is small).
-    import tempfile as _tf2
+    import tempfile
 
-    _isodir = Path(_tf2.mkdtemp(prefix="selfcheck_iso_"))
+    _isodir = Path(tempfile.mkdtemp(prefix="selfcheck_iso_"))
     shutil.copytree(sub, _isodir / "submission", ignore=shutil.ignore_patterns("build", "__pycache__", ".git"))
     sub = _isodir / "submission"
     _strip_build_state(sub)  # every grade builds from scratch in its OWN path — see helper
@@ -1013,22 +1013,22 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
             return 2
     else:
         want = None if a.capsules == "all" else set(s.strip() for s in a.capsules.split(",") if s.strip())
-    import tempfile
-
     runs_root = Path(tempfile.mkdtemp(prefix="selfcheck_"))
 
-    # Subset filtering that ACTUALLY limits the grade: CG.grade runs EVERY capsule under capsules_root, so
-    # the `want` output-filter below alone would still grade all 20 (a "1-capsule verilator" check = ~1hr).
-    # Build a temp capsules_root symlinking only the requested capsule dirs -> grade runs just the subset.
+    # Grade the selected original roots, not relocated copies: full-call capsules bind private answers
+    # through their original sibling layout. The grader's root-list API limits discovery without
+    # copying private data or changing that binding.
     caps_root = capsules_root
     if want:
-        caps_root = Path(tempfile.mkdtemp(prefix="selfcheck_caps_"))
-        missing = [n for n in sorted(want) if not (capsules_root / n / "capsule.yaml").exists()]
+        missing = [
+            n
+            for n in sorted(want)
+            if n in {".", ".."} or Path(n).name != n or not (capsules_root / n / "capsule.yaml").is_file()
+        ]
         if missing:
             print(json.dumps({"error": f"unknown capsule(s): {missing}"}))
             return 2
-        for n in sorted(want):  # copy (not symlink): rglob won't recurse symlinked dirs
-            shutil.copytree(capsules_root / n, caps_root / n)
+        caps_root = [capsules_root / n for n in sorted(want)]
 
     # build + run + compare (parallel); CG.grade handles the agent's 4 entrypoints + the tier ladder.
     # Publish completed rows independently of the final verdict: a few cycle-cap cases must not hide all
@@ -1052,7 +1052,7 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
     try:
         _score = CG.grade(
             str(sub),
-            capsules_root=str(caps_root),
+            capsules_root=caps_root,
             runs_root=str(runs_root),
             labels={"public", "dev"},
             contract=str(contract if contract is not None else context.repo / "merlin/contract"),
