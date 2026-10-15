@@ -28,6 +28,38 @@ def _open_slot(path: Path) -> int:
     return fd
 
 
+def _try_reserve(root: Path) -> int | None:
+    for index in range(capsule_worker_cap("verilator")):
+        opened = _open_slot(root / f"slot_{index}.lock")
+        try:
+            fcntl.flock(opened, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(opened)
+            continue
+        except BaseException:
+            os.close(opened)
+            raise
+        return opened
+    return None
+
+
+def _wait_for_slot(root: Path, deadline: float) -> tuple[int, float]:
+    fd = None
+    try:
+        while fd is None:
+            fd = _try_reserve(root)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Verilator slot wait exhausted the capsule deadline")
+            if fd is None:
+                time.sleep(min(0.1, remaining))
+        return fd, remaining
+    except BaseException:
+        if fd is not None:
+            os.close(fd)
+        raise
+
+
 @contextmanager
 def verilator_slot(*, timeout: float, root: Path | None = None):
     """Reserve one of the same user's shared slots; release on exit or process death.
@@ -39,28 +71,9 @@ def verilator_slot(*, timeout: float, root: Path | None = None):
     root = root or Path("/tmp") / f"merlin_verilator_slots_{os.getuid()}"
     _private_directory(root)
     deadline = time.monotonic() + timeout
-    fd = None
+    fd, remaining = _wait_for_slot(root, deadline)
     try:
-        while fd is None:
-            for index in range(capsule_worker_cap("verilator")):
-                opened = _open_slot(root / f"slot_{index}.lock")
-                try:
-                    fcntl.flock(opened, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    os.close(opened)
-                    continue
-                except BaseException:
-                    os.close(opened)
-                    raise
-                fd = opened
-                break
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError("Verilator slot wait exhausted the capsule deadline")
-            if fd is None:
-                time.sleep(min(0.1, remaining))
         yield remaining
     finally:
-        if fd is not None:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)

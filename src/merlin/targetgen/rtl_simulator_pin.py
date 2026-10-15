@@ -39,6 +39,20 @@ def _verify_facts(pin, target: str, checkout: Path) -> tuple[Path, Path]:
     return Path(find_facts(target)), Path(inputs["source_bundle_path"])
 
 
+def _selected_product(backend, engine: str, pin) -> tuple[Path, Path]:
+    resolver = getattr(backend, f"{engine}_path", None)
+    if not callable(resolver):
+        raise ValueError(f"backend cannot resolve its {engine!r} executable for byte verification")
+    executable = Path(resolver()).resolve(strict=True)
+    checkout = pin.checkout()
+    if checkout is None:
+        raise ValueError(f"RTL simulator pin {pin.name!r} has no checkout")
+    relative = executable.relative_to(checkout.resolve()).as_posix()
+    if relative not in dict(pin.build_products):
+        raise ValueError(f"selected executable is not a build product of RTL simulator pin {pin.name!r}")
+    return executable, checkout
+
+
 def verify_selected(backend, engine: str, target: str) -> dict | None:
     """Require the actual backend executable to be an unconditionally checked product.
 
@@ -53,16 +67,7 @@ def verify_selected(backend, engine: str, target: str) -> dict | None:
     pin = provenance.load_pins()[name]
     if target not in pin.targets:
         raise ValueError(f"RTL simulator pin {name!r} does not declare target {target!r}")
-    resolver = getattr(backend, f"{engine}_path", None)
-    if not callable(resolver):
-        raise ValueError(f"backend cannot resolve its {engine!r} executable for byte verification")
-    executable = Path(resolver()).resolve(strict=True)
-    checkout = pin.checkout()
-    if checkout is None:
-        raise ValueError(f"RTL simulator pin {name!r} has no checkout")
-    relative = executable.relative_to(checkout.resolve()).as_posix()
-    if relative not in dict(pin.build_products):
-        raise ValueError(f"selected executable is not a build product of RTL simulator pin {name!r}")
+    executable, checkout = _selected_product(backend, engine, pin)
     # Do not reuse a grade's observation cache: build products can be replaced
     # between selection and execution even when the source commit is unchanged.
     checked = provenance.require(name)
