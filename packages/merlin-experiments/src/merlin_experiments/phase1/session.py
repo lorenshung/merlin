@@ -29,6 +29,7 @@ from . import oot_history as _oot_history
 from . import run_inputs as RI
 from . import source_inputs as SI
 from . import treatments as T
+from .candidate_execution import functional_codegen_scope
 from .candidate_execution import selection_record as candidate_selection_record
 from .candidate_execution import verify_selection as verify_candidate_selection
 from .context import InvocationContext, readback_record, verify_readback_record
@@ -919,12 +920,29 @@ def prepare(
     print(f"[preflight] tooling readiness: {_tooling['status']}")
 
     # Oracle availability and code production are separate admission evidence. The
-    # selected backend owns its production probe; resource paths never select it.
+    # selected backend owns its production probe. The source-product full-call
+    # path does not use the legacy command-buffer ABI; its functional roster is
+    # checked against the actual frozen public AND hidden grading inputs.
     # An absent optional probe returns None (not run), not a successful qualification.
     # Explicit selection failures and failed probes refuse before authoring spends tokens.
     if not a.no_oracle:
         _cg_backend = _te_pf.preflight_codegen_backend
-        if _cg_backend is None:
+        _cg_scope = (
+            functional_codegen_scope(context, public_root=_policy_root, hidden_root=_hidden_dir)
+            if _cg_backend is None
+            else None
+        )
+        if _cg_scope is not None:
+            if _cg_scope["candidate_compilation"] != _environment_record.get("candidate_compilation"):
+                raise RuntimeError("candidate compilation selection changed during codegen admission")
+            _cg_ok, _cg_why = (
+                None,
+                (
+                    "legacy command-buffer production smoke not run: selected full-call source-product path "
+                    "declares functional tiers only; per-candidate production grading remains required"
+                ),
+            )
+        elif _cg_backend is None:
             _cg_ok, _cg_why = _CRpf.codegen_smoke(_te_pf.target)
         else:
             _cg_ok, _cg_why = _CRpf.codegen_smoke(_te_pf.target, backend_target=_cg_backend)
@@ -935,6 +953,7 @@ def prepare(
                     "backend_target": _cg_backend,
                     "codegen_ok": _cg_ok,
                     "reason": _cg_why,
+                    **({"scope": _cg_scope} if _cg_scope is not None else {}),
                 },
                 sort_keys=False,
             )

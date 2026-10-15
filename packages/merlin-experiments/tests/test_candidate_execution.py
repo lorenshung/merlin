@@ -127,3 +127,68 @@ def test_oracle_free_qa_and_formal_refuse_before_candidate_execution(selection):
         qa.run("candidate", "corpus", Path("runs"), {"public"}, True, 1, context=context)
     with pytest.raises(ValueError, match="requires oracle evaluation"):
         formal._score("candidate", "corpus", "runs", {"hidden"}, True, context=context)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        None,
+        "unselected",
+        "missing",
+        "empty",
+        "symlink",
+        "malformed",
+        "non_full_call",
+        "tiers_missing",
+        "L3",
+        "unknown",
+        "no_L2",
+    ],
+)
+def test_functional_codegen_scope_requires_verified_selection_and_both_complete_roots(selection, tmp_path, change):
+    import yaml
+
+    context, _, observed = selection
+    public, hidden = tmp_path / "public", tmp_path / "hidden"
+    capsule = {
+        "operation": {"attributes": {"core_aten_contract": "full_call_v1"}},
+        "required_oracle_tiers": ["L0", "L2"],
+    }
+    for root in (public, hidden):
+        (root / "case").mkdir(parents=True)
+        (root / "case/capsule.yaml").write_text(yaml.safe_dump(capsule))
+    member = hidden / "case/capsule.yaml"
+    if change == "unselected":
+        context = replace(context, candidate_policy=None)
+    elif change == "missing":
+        hidden = None
+    elif change == "empty":
+        member.unlink()
+    elif change == "symlink":
+        member.unlink()
+        member.symlink_to(public / "case/capsule.yaml")
+    elif change == "malformed":
+        member.write_text("operation: [")
+    elif change == "non_full_call":
+        capsule["operation"] = {"attributes": {}}
+    elif change == "tiers_missing":
+        del capsule["required_oracle_tiers"]
+    elif change in {"L3", "unknown"}:
+        capsule["required_oracle_tiers"] = ["L2", change]
+    elif change == "no_L2":
+        for path in (public / "case/capsule.yaml", member):
+            path.write_text(yaml.safe_dump({**capsule, "required_oracle_tiers": ["L0"]}))
+    if change in {"non_full_call", "tiers_missing", "L3", "unknown"}:
+        member.write_text(yaml.safe_dump(capsule))
+    scope = E.functional_codegen_scope(context, public_root=public, hidden_root=hidden)
+    if change is not None:
+        assert scope is None
+    else:
+        assert scope["status"] == "legacy_not_run"
+        assert scope["selected_path"] == "source_product_full_call"
+        assert scope["candidate_compilation"] == E.selection_record(context)
+        assert scope["required_oracle_tiers"] == ["L0", "L2"]
+        assert scope["n_capsules"] == 2
+        assert len(scope["capsule_bytes_sha256"]) == 64
+        assert str(hidden) not in json.dumps(scope)
+    assert bool(observed) is (change != "unselected")

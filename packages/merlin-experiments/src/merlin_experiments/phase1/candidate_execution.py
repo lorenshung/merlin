@@ -72,6 +72,58 @@ def verify_selection(context, expected) -> None:
         raise RuntimeError("frozen invocation candidate compilation selection changed or is absent")
 
 
+def functional_codegen_scope(context, *, public_root: Path | None, hidden_root: Path | None) -> dict | None:
+    """Identify a selected functional source-product roster, never certify codegen.
+
+    The command-buffer production smoke covers a different ABI. Missing or
+    ambiguous declarations retain that legacy gate instead of earning an exemption.
+    Callers supply the already verified frozen grading roots, not live inputs.
+    """
+    identity = selection_record(context)
+    if identity is None or public_root is None or hidden_root is None:
+        return None
+    import yaml
+
+    from merlin.targetgen.core_aten_capsules import is_full_call
+
+    hashes, declared = [], set()
+    try:
+        for root in (Path(public_root), Path(hidden_root)):
+            if not root.is_dir() or any(p.is_symlink() for p in (root, *root.parents)):
+                return None
+            files = sorted(root.rglob("capsule.yaml"))
+            if not files:
+                return None
+            for path in files:
+                if not path.is_file() or any(p.is_symlink() for p in (path, *path.parents)):
+                    return None
+                payload = path.read_bytes()
+                capsule = yaml.safe_load(payload)
+                if not isinstance(capsule, dict) or not is_full_call(capsule):
+                    return None
+                tiers = capsule.get("required_oracle_tiers")
+                if (
+                    not isinstance(tiers, list)
+                    or not tiers
+                    or any(not isinstance(tier, str) or tier not in {"L0", "L1", "L2"} for tier in tiers)
+                ):
+                    return None
+                declared.update(tiers)
+                hashes.append(hashlib.sha256(payload).hexdigest())
+    except (OSError, ValueError, AttributeError, TypeError, yaml.YAMLError):
+        return None
+    if "L2" not in declared:
+        return None
+    return {
+        "status": "legacy_not_run",
+        "selected_path": "source_product_full_call",
+        "candidate_compilation": identity,
+        "required_oracle_tiers": sorted(declared),
+        "n_capsules": len(hashes),
+        "capsule_bytes_sha256": hashlib.sha256(json.dumps(sorted(hashes)).encode()).hexdigest(),
+    }
+
+
 def transport(context):
     """Construct the selected transport; no compiler or probe is executed here."""
     from merlin.targetgen.target_experiment import load_target_experiment
