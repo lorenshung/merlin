@@ -51,7 +51,12 @@ else:
  assert all(row['ignored_disjoint_host_precision_declarations']==['host_f32_bmm'] for row in rows)
  reference=run_pt2e_reference(converted,inputs)
  integer,receipt=integerize_static_pt2e(converted,inputs)
- assert receipt['integer_bmm_emitted']==1
+ if 'integer_bmm_emitted' in receipt:
+  assert receipt['integer_bmm_emitted']==1
+ else:
+  # Older v1 frontends lower each batch to a separate rank-2 integer matmul.
+  matrices=[node for node in integer.graph.nodes if node.target==torch.ops.aten._int_mm.default]
+  assert receipt['integer_mm_emitted']==len(matrices)==inputs[0].shape[0]
  assert torch.equal(integer(*inputs).view(torch.int32),reference.output.view(torch.int32))
 """
     result = subprocess.run([python, "-c", script, mode], capture_output=True, text=True, timeout=120)

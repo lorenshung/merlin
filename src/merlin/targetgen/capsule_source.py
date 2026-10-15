@@ -206,7 +206,7 @@ def _require_pt2e_integerization_receipt(
     Finding *one* integer matmul in the MLIR proves only an existential fact.
     This receipt additionally binds complete Q/DQ-fed linear/conv/matmul census,
     safe accumulation and a selected numerical comparison to the captured
-    program. Missing fields are never treated as zero or as success.
+    program. Batch counters added to v1 default to zero; other missing fields refuse.
     """
     receipt = meta.get("integerization_receipt")
     if not isinstance(receipt, dict) or receipt.get("schema") != "m2m.pt2e-integerize.v1":
@@ -328,35 +328,9 @@ def _require_pt2e_integerization_receipt(
     emitted_bmm = count(receipt.get("integer_bmm_emitted", 0), "emitted integer batched matmul count")
     if emitted + emitted_bmm < rewritten:
         raise M2MUnavailable("integerization receipt emitted fewer integer matmuls than rewritten regions")
-    from merlin.common import mlir_query as query
+    from merlin.targetgen.integerization_export import exported_integer_counts
 
-    try:
-        module = query.parse(program)
-        forward = next(
-            (
-                op
-                for op in query.walk(module, "func.func")
-                if getattr(getattr(op, "sym_name", None), "data", None) == "forward"
-            ),
-            None,
-        )
-        if forward is None:
-            raise ValueError("no @forward function")
-        structural = 0
-        structural_bmm = 0
-        for op in query.walk(forward, "linalg.matmul", "linalg.generic"):
-            if query.op_name(op) == "linalg.generic" and query.attr_str(op, "prov.op") != "int_matmul":
-                continue
-            if len(op.operands) < 2 or not op.results:
-                continue
-            lhs, rhs = (query.type_shape_dtype(value.type)[1] for value in op.operands[:2])
-            result = query.type_shape_dtype(op.results[0].type)[1]
-            if (lhs, rhs, result) == ("i8", "i8", "i32"):
-                rank = len(query.type_shape_dtype(op.results[0].type)[0])
-                structural += rank == 2
-                structural_bmm += rank > 2
-    except Exception as exc:
-        raise M2MUnavailable(f"cannot verify integerized model export: {exc}") from exc
+    structural, structural_bmm = exported_integer_counts(program)
     if structural < emitted:
         raise M2MUnavailable(
             f"integerization receipt claims {emitted} integer matmuls, but export contains only {structural}"

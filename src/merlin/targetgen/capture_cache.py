@@ -28,6 +28,7 @@ def implementation_identity() -> dict:
         "merlin.targetgen.capsule_source",
         "merlin.targetgen.capture_refusals",
         "merlin.targetgen.capture_cache",
+        "merlin.targetgen.integerization_export",
         "merlin.targetgen._m2m_capture_worker",
         "merlin.targetgen._capture_tensor_values",
         "merlin.targetgen._capture_result_contract",

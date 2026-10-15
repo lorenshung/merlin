@@ -1293,14 +1293,10 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
     if integerization_receipt is not None:
         integerization_receipt["exported_integer_mm_count"] = _exported_integer_mm_count(res.module)
         integerization_receipt["exported_integer_bmm_count"] = _exported_integer_mm_count(res.module, batched=True)
-    integerization_ok = integerization_receipt is None or (
-        integer_partition is not None
-        and integerization_receipt.get("accumulator_bound_checked") is True
-        and integerization_receipt["exported_integer_mm_count"] + integerization_receipt["exported_integer_bmm_count"]
-        > 0
-        and integerization_receipt["integer_mm_emitted"] == integerization_receipt["exported_integer_mm_count"]
-        and integerization_receipt["integer_bmm_emitted"] == integerization_receipt["exported_integer_bmm_count"]
-        and integerization_receipt["golden_agreement"]["status"] == "passed"
+    from merlin.targetgen.integerization_export import receipt_export_complete
+
+    integerization_ok = integerization_receipt is None or receipt_export_complete(
+        integerization_receipt, integer_partition
     )
     # A recipe requests a format; only the applied transform and its emitted
     # arithmetic establish the captured scheme. In particular, an already-
