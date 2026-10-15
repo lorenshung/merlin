@@ -1961,3 +1961,43 @@ def test_the_gemmini_descriptor_derives_its_model_policy():
     bound = descriptor["grading"]["resource_bound"]
     assert bound["derive"] == "phase0_qualified_models_v1"
     assert "required_admitted_models" not in bound and "exclude_capsules" not in bound
+
+
+def test_selected_capability_preserves_typed_yaml_maps(monkeypatch, tmp_path):
+    from merlin_experiments.phase0 import evidence
+
+    bundle = tmp_path / "phase0"
+    member = bundle / "software/contract.yaml"
+    member.parent.mkdir(parents=True)
+    contract = {
+        "name": "fixture-device",
+        "encoding": {"classes": {0: "CONFIG", 7: "FLUSH"}},
+        "literal_strings": {"12": "keep string"},
+    }
+    raw = yaml.safe_dump(contract, sort_keys=False).encode()
+    member.write_bytes(raw)
+    views = json.dumps({"contract": contract}).encode()
+    selection = evidence.EvidenceSelection("fixture-device", (), views, None, contract_yaml=raw)
+    assert selection.contract == contract
+    selection.contract["encoding"]["classes"].clear()
+    assert selection.contract == contract
+    monkeypatch.setattr(
+        evidence,
+        "load_exported_evidence",
+        lambda _: SimpleNamespace(
+            archived_artifacts=(
+                ("software/contract.json", json.dumps(contract).encode()),
+                ("software/contract.yaml", raw),
+            )
+        ),
+    )
+    selected = corpus_release._selected_capability_contract(
+        {"phase0_evidence_bundle": str(bundle), "target": "fixture-device"}, tmp_path / "generated"
+    )
+    assert selected == (member, fingerprint(member))
+    assert yaml.safe_load(selected[0].read_bytes()) == contract
+    member.write_text("name: fixture-device\n")
+    with pytest.raises(SpecError, match="capability contract.*verified evidence"):
+        corpus_release._selected_capability_contract(
+            {"phase0_evidence_bundle": str(bundle), "target": "fixture-device"}, tmp_path / "generated"
+        )

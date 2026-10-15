@@ -312,6 +312,8 @@ def _selected_capability_contract(plan: dict, generated: Path) -> tuple[Path, st
     location = plan.get("phase0_evidence_bundle")
     relative = Path("software/contract.json")
     if location is None:
+        if (generated / "software/contract.yaml").exists():
+            relative = Path("software/contract.yaml")
         legacy = generated / relative
         if not legacy.exists():
             if plan["phases"]["0"]["inputs"].get("capability_contract"):
@@ -325,14 +327,17 @@ def _selected_capability_contract(plan: dict, generated: Path) -> tuple[Path, st
 
         bundle = Path(location).expanduser().absolute()
         evidence = load_exported_evidence(bundle)
-        raw = dict(evidence.archived_artifacts).get(relative.as_posix())
+        archived = dict(evidence.archived_artifacts)
+        if "software/contract.yaml" in archived:
+            relative = Path("software/contract.yaml")
+        raw = archived.get(relative.as_posix())
         path = bundle / relative
         if raw is None or path.is_symlink() or not path.is_file() or path.read_bytes() != raw:
             raise SpecError("selected Phase 0 capability contract is absent or differs from verified evidence")
     try:
-        document = json.loads(raw)
+        document = read_yaml(path)
     except (TypeError, ValueError) as error:
-        raise SpecError("selected Phase 0 capability contract is not JSON") from error
+        raise SpecError("selected Phase 0 capability contract is not a mapping") from error
     if not isinstance(document, dict) or document.get("name") != plan["target"]:
         raise SpecError("selected Phase 0 capability contract names a different target")
     return path, hashlib.sha256(raw).hexdigest()
