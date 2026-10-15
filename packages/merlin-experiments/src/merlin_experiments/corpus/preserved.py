@@ -53,6 +53,28 @@ def _select_sources(descriptor: Path, output: Path | None):
     return te, root, roots, sources
 
 
+def _stage_preserved(te, root: Path, roots: list[Path], *, rtl_facts: Path | None) -> dict:
+    from ..runner import fingerprint
+
+    contract = te.declared_contract_path() if te.declared_contract else None
+    root.mkdir(parents=True, mode=0o700)
+    private = root / "private"
+    private.mkdir(mode=0o700)
+    corpus = root / "payload/corpus"
+    corpus.mkdir(parents=True, mode=0o700)
+    for source in roots:
+        copy_input(source, corpus / source.name, private=source in te.hidden_roots())
+    copy_input(te.capsule_corpus.parent / "MANIFEST.yaml", corpus / "MANIFEST.yaml")
+    return scaffold(
+        te,
+        corpus,
+        root / "payload/experiment",
+        private=private,
+        selected_facts=rtl_facts,
+        selected_contract=(contract, fingerprint(contract)) if contract else None,
+    )
+
+
 def prepare_preserved(descriptor: Path, output: Path | None, *, rtl_facts: Path | None) -> dict:
     from merlin.common.storage_lifecycle import lease
 
@@ -61,24 +83,9 @@ def prepare_preserved(descriptor: Path, output: Path | None, *, rtl_facts: Path 
 
     te, root, roots, sources = _select_sources(descriptor, output)
     selected = [{"path": str(path), "sha256": fingerprint(path)} for path in sources]
-    contract = te.declared_contract_path() if te.declared_contract else None
     with lease(root, owner="preserved-corpus-preparation"):
-        root.mkdir(parents=True, mode=0o700)
+        scaffolding = _stage_preserved(te, root, roots, rtl_facts=rtl_facts)
         private = root / "private"
-        private.mkdir(mode=0o700)
-        corpus = root / "payload/corpus"
-        corpus.mkdir(parents=True, mode=0o700)
-        for source in roots:
-            copy_input(source, corpus / source.name, private=source in te.hidden_roots())
-        copy_input(sources[-1], corpus / "MANIFEST.yaml")
-        scaffolding = scaffold(
-            te,
-            corpus,
-            root / "payload/experiment",
-            private=private,
-            selected_facts=rtl_facts,
-            selected_contract=(contract, fingerprint(contract)) if contract else None,
-        )
         checked = admission(
             root / "payload/experiment/target_experiment.yaml", coverage_output=private / "workload-coverage.json"
         )
