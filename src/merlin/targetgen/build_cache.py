@@ -76,6 +76,7 @@ import os
 import shutil
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -84,6 +85,7 @@ __all__ = [
     "RECORD_VERSION",
     "KEY_MARKER",
     "DEFAULT_MAX_ENTRIES",
+    "BuildProducts",
     "disabled",
     "cache_root",
     "build_path",
@@ -592,7 +594,11 @@ def reuse(workdir: "str | Path", key: "str | None", elf_name: "str | None" = Non
         # asks the record instead (below), which is the whole reason elf_name is optional.
         try:
             elf = work / elf_name
-            if elf.is_file() and marker.is_file() and marker.read_text(encoding="utf-8").strip() == _marker_identity(key):
+            if (
+                elf.is_file()
+                and marker.is_file()
+                and marker.read_text(encoding="utf-8").strip() == _marker_identity(key)
+            ):
                 return elf
         except OSError:
             pass
@@ -642,22 +648,31 @@ def reuse(workdir: "str | Path", key: "str | None", elf_name: "str | None" = Non
     return work / record["elf"]
 
 
+@dataclass(frozen=True)
+class BuildProducts:
+    """The executable and declared product roster published by a build."""
+
+    elf_name: str
+    products: tuple[str, ...] | None = None
+
+
 def store(
     key: "str | None",
     workdir: "str | Path",
-    elf_name: str,
-    metadata: "Mapping | None" = None,
-    *,
-    products: "tuple[str, ...] | None" = None,
+    elf_name: str | BuildProducts,
+    metadata: Mapping | None = None,
 ) -> None:
     """Keep the explicitly declared build products under ``key``. Never raises.
 
     The entry is assembled in a temporary directory and moved into place, so a concurrent worker
     building the same capsule either wins the rename or discards its copy -- a reader never sees a
-    half-written entry.
+    half-written entry. Pass BuildProducts to declare intermediates; a plain ELF name
+    retains the executable-only default for existing support providers.
     """
     if not key:
         return
+    build = elf_name if isinstance(elf_name, BuildProducts) else BuildProducts(elf_name)
+    elf_name = build.elf_name
     work = Path(workdir)
     elf = work / elf_name
     if not elf.is_file():
@@ -674,7 +689,7 @@ def store(
         return
     tmp = None
     try:
-        produced = list(products or (elf_name,))
+        produced = list(build.products or (elf_name,))
         if elf_name not in produced:
             produced.append(elf_name)
         entry.parent.mkdir(parents=True, exist_ok=True)

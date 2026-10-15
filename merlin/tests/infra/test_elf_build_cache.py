@@ -100,7 +100,7 @@ def key_of(recipe, monkeypatch, store, lowering):
 
 
 def _store(key, work, elf, metadata=None):
-    BC.store(key, work, elf, metadata, products=tuple(BC.contents(work)))
+    BC.store(key, work, BC.BuildProducts(elf, products=tuple(BC.contents(work))), metadata)
 
 
 def _build(work: Path, text: str = "elf-bytes") -> Path:
@@ -467,7 +467,7 @@ def test_default_store_does_not_replace_caller_inputs_or_invocations(key_of, tmp
 def test_store_refuses_nonproduct_members(key_of, tmp_path, product):
     first = tmp_path / "donor"
     _build(first)
-    BC.store(key_of(), first, ELF, products=(product,))
+    BC.store(key_of(), first, BC.BuildProducts(ELF, products=(product,)))
     assert BC.reuse(tmp_path / "receiver", key_of(), ELF) is None
 
 

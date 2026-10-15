@@ -970,7 +970,7 @@ def compile_lowered_to_elf(
     before = _bc.product_snapshot(work)
     obj = llvm_mlir_to_object(lowered_mlir_text, work, target=target)
     elf = link_elf(cb, obj, work, target=target, inputs=inputs)
-    _bc.store(key, work, PACKAGE_ELF_NAME, products=_bc.changed_products(work, before))
+    _bc.store(key, work, _bc.BuildProducts(PACKAGE_ELF_NAME, products=_bc.changed_products(work, before)))
     return elf
 
 
