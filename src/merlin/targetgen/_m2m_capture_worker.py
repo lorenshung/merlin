@@ -451,8 +451,8 @@ def _fp32_stage_observation(
     }
 
 
-def _exported_integer_mm_count(module) -> int:
-    """Count proven i8×i8→i32 contractions in the emitted, unnormalized MLIR."""
+def _exported_integer_mm_count(module, *, batched: bool = False) -> int:
+    """Count integer contractions, separating matrix and batched matrix forms."""
     from xdsl.dialects.builtin import IntegerType, TensorType
 
     def width(value) -> int | None:
@@ -472,6 +472,7 @@ def _exported_integer_mm_count(module) -> int:
             str(getattr(prov, "data", "")) == "int_matmul"
             and [width(value) for value in op.operands[:2]] == [8, 8]
             and width(op.results[0]) == 32
+            and (len(op.results[0].type.get_shape()) > 2) == batched
         ):
             count += 1
     return count
@@ -1291,11 +1292,14 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
     n_opaque = sum(opaque.values())
     if integerization_receipt is not None:
         integerization_receipt["exported_integer_mm_count"] = _exported_integer_mm_count(res.module)
+        integerization_receipt["exported_integer_bmm_count"] = _exported_integer_mm_count(res.module, batched=True)
     integerization_ok = integerization_receipt is None or (
         integer_partition is not None
         and integerization_receipt.get("accumulator_bound_checked") is True
-        and integerization_receipt["exported_integer_mm_count"] > 0
-        and integerization_receipt["integer_mm_emitted"] <= integerization_receipt["exported_integer_mm_count"]
+        and integerization_receipt["exported_integer_mm_count"] + integerization_receipt["exported_integer_bmm_count"]
+        > 0
+        and integerization_receipt["integer_mm_emitted"] == integerization_receipt["exported_integer_mm_count"]
+        and integerization_receipt["integer_bmm_emitted"] == integerization_receipt["exported_integer_bmm_count"]
         and integerization_receipt["golden_agreement"]["status"] == "passed"
     )
     # A recipe requests a format; only the applied transform and its emitted

@@ -33,19 +33,16 @@ _INT_MM_BODY = ["arith.extsi", "arith.extsi", "arith.muli", "arith.addi", "linal
 def exact_int_mm_generic_operation(op) -> bool:
     """Recognize the actual signed i8×i8→i32 reduction body, not a generic-op label."""
     from merlin.common import mlir_query as query
+    from merlin.kernels.shapes import zero_initialised
 
     if query.op_name(op) != "linalg.generic" or query.attr_str(op, "prov.op") != "int_matmul":
         return False
-    maps = op.properties.get("indexing_maps")
-    iterators = op.properties.get("iterator_types")
     if (
-        maps is None
-        or [str(value) for value in maps] != _INT_MM_MAPS
-        or iterators is None
-        or [str(value) for value in iterators] != _INT_MM_ITERATORS
-        or [query.op_name(child) for child in op.walk()][1:] != _INT_MM_BODY
-        or len(op.operands) != 3
+        len(op.operands) != 3
         or len(op.results) != 1
+        or [query.op_name(child) for child in op.walk()][1:] != _INT_MM_BODY
+        or not _independent_batch_matmul_maps(op)
+        or not zero_initialised(op)
     ):
         return False
     operands = [query.type_shape_dtype(value.type) for value in op.operands]
@@ -79,11 +76,44 @@ def exact_int_mm_generic_operation(op) -> bool:
     a, weight, out = (shape for shape, _dtype in operands)
     result = results[0][0]
     return (
-        len(a) == len(weight) == len(out) == len(result) == 2
+        len(a) == len(weight) == len(out) == len(result)
         and all(dim > 0 for shape in (a, weight, out, result) for dim in shape)
-        and a[1] == weight[0]
-        and out == result == [a[0], weight[1]]
+        and a[:-2] == weight[:-2]
+        and a[-1] == weight[-2]
+        and out == result == [*a[:-2], a[-2], weight[-1]]
     )
+
+
+def _independent_batch_matmul_maps(op) -> bool:
+    """Prove (batch..., M, K) × (batch..., K, N) without broadcasting.
+
+    Each batch dimension must index both inputs and the output identically.
+    Extents and the number of batch axes come from the operation itself.
+    """
+    from xdsl.dialects.builtin import AffineMapAttr, TensorType
+    from xdsl.ir.affine import AffineExpr, AffineMap
+
+    maps = op.properties.get("indexing_maps")
+    iterators = op.properties.get("iterator_types")
+    output_type = op.results[0].type
+    if not isinstance(output_type, TensorType):
+        return False
+    rank = len(output_type.get_shape())
+    if rank < 2 or maps is None or iterators is None:
+        return False
+    if [str(value) for value in iterators] != [
+        *["#linalg.iterator_type<parallel>"] * rank,
+        "#linalg.iterator_type<reduction>",
+    ]:
+        return False
+    dims = tuple(AffineExpr.dimension(axis) for axis in range(rank + 1))
+    batch, m, n, k = dims[:-3], *dims[-3:]
+    expected = [
+        AffineMapAttr(AffineMap(rank + 1, 0, (*batch, m, k))),
+        AffineMapAttr(AffineMap(rank + 1, 0, (*batch, k, n))),
+        AffineMapAttr(AffineMap(rank + 1, 0, (*batch, m, n))),
+    ]
+    return list(maps) == expected
 
 
 def verify_capture_receipt(path: str | Path) -> dict:
@@ -282,6 +312,10 @@ def verified_static_integerization(projection: dict | None, *, receipt_sha256: s
     if not isinstance(receipt, dict) or receipt.get("schema") != "m2m.pt2e-integerize.v1":
         return False
     count = receipt.get("quantized_contractions_seen")
+    emitted_bmm = receipt.get("integer_bmm_emitted", 0)
+    exported_bmm = receipt.get("exported_integer_bmm_count", 0)
+    if type(emitted_bmm) is not int or type(exported_bmm) is not int or emitted_bmm < 0 or emitted_bmm != exported_bmm:
+        return False
     if (
         type(count) is not int
         or count <= 0
@@ -292,7 +326,8 @@ def verified_static_integerization(projection: dict | None, *, receipt_sha256: s
         or receipt.get("accumulator_bound_checked") is not True
         or receipt.get("refusals") != []
         or type(receipt.get("exported_integer_mm_count")) is not int
-        or receipt["exported_integer_mm_count"] <= 0
+        or receipt["exported_integer_mm_count"] < 0
+        or receipt["exported_integer_mm_count"] + exported_bmm <= 0
         or type(receipt.get("integer_mm_emitted")) is not int
         or receipt.get("integer_mm_emitted") != receipt["exported_integer_mm_count"]
     ):

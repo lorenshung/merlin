@@ -325,7 +325,8 @@ def _require_pt2e_integerization_receipt(
             raise M2MUnavailable("independent integer reference artifact does not match its digest")
 
     emitted = count(receipt.get("integer_mm_emitted"), "emitted integer matmul count")
-    if emitted < rewritten:
+    emitted_bmm = count(receipt.get("integer_bmm_emitted", 0), "emitted integer batched matmul count")
+    if emitted + emitted_bmm < rewritten:
         raise M2MUnavailable("integerization receipt emitted fewer integer matmuls than rewritten regions")
     from merlin.common import mlir_query as query
 
@@ -342,6 +343,7 @@ def _require_pt2e_integerization_receipt(
         if forward is None:
             raise ValueError("no @forward function")
         structural = 0
+        structural_bmm = 0
         for op in query.walk(forward, "linalg.matmul", "linalg.generic"):
             if query.op_name(op) == "linalg.generic" and query.attr_str(op, "prov.op") != "int_matmul":
                 continue
@@ -349,7 +351,10 @@ def _require_pt2e_integerization_receipt(
                 continue
             lhs, rhs = (query.type_shape_dtype(value.type)[1] for value in op.operands[:2])
             result = query.type_shape_dtype(op.results[0].type)[1]
-            structural += (lhs, rhs, result) == ("i8", "i8", "i32")
+            if (lhs, rhs, result) == ("i8", "i8", "i32"):
+                rank = len(query.type_shape_dtype(op.results[0].type)[0])
+                structural += rank == 2
+                structural_bmm += rank > 2
     except Exception as exc:
         raise M2MUnavailable(f"cannot verify integerized model export: {exc}") from exc
     if structural < emitted:
@@ -360,6 +365,12 @@ def _require_pt2e_integerization_receipt(
     if reported_export != structural:
         raise M2MUnavailable(
             f"integerization receipt export count {reported_export} disagrees with parsed program {structural}"
+        )
+    reported_bmm = count(receipt.get("exported_integer_bmm_count", 0), "exported integer batched matmul count")
+    if emitted_bmm != structural_bmm or reported_bmm != structural_bmm:
+        raise M2MUnavailable(
+            f"integerization receipt batched export counts {emitted_bmm}/{reported_bmm} "
+            f"disagree with parsed program {structural_bmm}"
         )
 
 
