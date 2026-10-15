@@ -206,7 +206,14 @@ def chipyard_l3_selection(target: str) -> dict:
         selected = _pol.select(target, {required: probes[required]})
         selected["required_engine"] = required
         selected["selection_constraint"] = "MERLIN_REQUIRED_RTL_ENGINE"
+        from .rtl_simulator_pin import verify_selected
+
+        binding = verify_selected(backend, required, target)
+        if binding is not None:
+            selected["provenance"] = binding
         return selected
+    if os.environ.get("MERLIN_RTL_SIM_PIN", "").strip():
+        raise ValueError("MERLIN_RTL_SIM_PIN requires MERLIN_REQUIRED_RTL_ENGINE")
     return _pol.select(target, probes)
 
 

@@ -530,11 +530,7 @@ def _readout_epilogue_capabilities(target: str):
 
 
 def simulator_adapter(sim: str, target: str, selection: dict | None = None, *, readback_policy=None) -> Callable:
-    """Adapter for one declared chipyard sim engine. ``selection`` is the engine-policy record that
-    CHOSE this engine — carried into the result so the tier can record not just which simulator answered
-    but what it was chosen over and why. The choice was previously made, printed once to a log nobody
-    keeps, and then discarded; a cert that ran on the slow engine because the fast one was missing looked
-    exactly like one that ran on the slow engine because it was the only one."""
+    """Adapt a declared Chipyard engine and retain the policy's selection evidence."""
 
     from merlin.targetgen.contract.readback_policy import MEMORY_TRANSPORTS, selected
 
@@ -572,8 +568,17 @@ def simulator_adapter(sim: str, target: str, selection: dict | None = None, *, r
 
             policy_kwargs["memory_readback"] = NativeMemoryReadback(facts_path=facts_path, policy=readback_policy)
             policy_kwargs["oracle_revalidate"] = revalidate_memory_engine
-        res = oot_compile.run_on_oracle(
-            cb, llvm_text, simulator=sim, target=target, workdir=workdir, timeout=timeout, **policy_kwargs
+        from .rtl_simulator_execution import run_verified
+
+        res = run_verified(
+            backend,
+            sim,
+            target,
+            timeout,
+            lambda remaining: oot_compile.run_on_oracle(
+                cb, llvm_text, simulator=sim, target=target, workdir=workdir, timeout=remaining, **policy_kwargs
+            ),
+            unavailable=OracleUnavailable,
         )
         if selection and isinstance(res.get("oracle"), dict):
             res["oracle"]["selection"] = dict(selection)
