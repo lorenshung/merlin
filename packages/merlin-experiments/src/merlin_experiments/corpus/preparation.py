@@ -858,6 +858,12 @@ def scaffold(
     from merlin.targetgen.sandbox.bwrap import resolve_grant
     from merlin.targetgen.target_experiment import load_target_experiment, observed_experiment_contract
 
+    primary = corpus / te.capsule_corpus.name
+    if primary.is_symlink() or (primary.exists() and not primary.is_dir()):
+        raise SpecError("release primary corpus category must be an ordinary directory")
+    # Generated-only corpora may put every case in a sibling category. The
+    # descriptor and bundle still declare this primary root as a grading input.
+    primary.mkdir(exist_ok=True)
     experiment.mkdir(parents=True)
     inputs = {}
     for relative in ("task",):

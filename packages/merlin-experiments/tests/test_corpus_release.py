@@ -16,7 +16,7 @@ from merlin_experiments.adapters import ADAPTERS
 from merlin_experiments.cli import main
 from merlin_experiments.corpus import release as corpus_release
 from merlin_experiments.corpus.coverage import _public_category_roots
-from merlin_experiments.corpus.preparation import assemble, generation_lineage
+from merlin_experiments.corpus.preparation import assemble, generation_lineage, scaffold
 from merlin_experiments.runner import fingerprint
 from merlin_experiments.spec import SpecError
 
@@ -685,6 +685,76 @@ def test_generated_only_release_cli_ignores_removed_legacy_public_corpus(release
     )
     assert (view.public / "generated_member/capsule.yaml").is_file()
     assert (view.policy / "0/generated_member/capsule.yaml").is_file()
+
+
+def test_generated_sibling_release_materializes_empty_primary_root(release_fixture, capsys):
+    from merlin_experiments.corpus.preparation import source_run
+    from merlin_experiments.phase1.timing import requires_chipyard_timing
+
+    from merlin.targetgen.target_experiment import load_target_experiment
+
+    fixture = release_fixture
+    descriptor = fixture["root"] / "source-experiment/target_experiment.yaml"
+    document = yaml.safe_load(descriptor.read_text())
+    document["grading"]["expected_cohort"] = {"source_capsules": 1, "admitted_capsules": 1}
+    document["toolchain"] = {"sim_via": "chipyard"}
+    descriptor.write_text(yaml.safe_dump(document))
+    for capsule in fixture["baseline"].rglob("capsule.yaml"):
+        definition = yaml.safe_load(capsule.read_text())
+        definition["required_oracle_tiers"] = ["L2"]
+        capsule.write_text(yaml.safe_dump(definition))
+    derivation = fixture["root"] / "derive.py"
+    derivation.write_text(
+        derivation.read_text()
+        .replace("output/'isa/", "output/'public/")
+        .replace("'generated':['isa/generated_member']", "'generated':['public/generated_member']")
+    )
+    assert main(["run", str(fixture["definition"]), "--phase", "0", "--run-dir", str(fixture["run"])]) == 0
+    capsys.readouterr()
+    # Use the completed run's recorded output rather than assuming a native layout.
+    _, _, generated = source_run(fixture["run"])
+    public_before = fingerprint(generated / "public/generated_member")
+    hidden_before = fingerprint(fixture["baseline"] / "hidden/private_member_identity")
+    assert (
+        main(
+            [
+                "corpus",
+                "prepare",
+                str(fixture["run"]),
+                "--output",
+                str(fixture["release"]),
+                "--generated-only",
+                "--private-baseline",
+                str(fixture["baseline"] / "hidden"),
+            ]
+        )
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)
+    selected = load_target_experiment(Path(report["descriptor"]))
+    assert selected.capsule_corpus.is_dir() and not selected.capsule_corpus.is_symlink()
+    assert list(selected.capsule_corpus.iterdir()) == []
+    assert {p.name for p in selected.graded_roots()} == {"isa", "public"}
+    assert fingerprint(selected.capsule_corpus.parent / "public/generated_member") == public_before
+    assert fingerprint(selected.capsule_corpus.parent / "hidden/private_member_identity") == hidden_before
+    assert not requires_chipyard_timing(selected.path)
+    assert report["counts"]["public_source"] == report["counts"]["hidden_source"] == 1
+
+
+@pytest.mark.parametrize("kind", ["file", "symlink"])
+def test_scaffold_refuses_nonordinary_primary_category(release_fixture, tmp_path, kind):
+    from merlin.targetgen.target_experiment import load_target_experiment
+
+    te = load_target_experiment(release_fixture["root"] / "source-experiment/target_experiment.yaml")
+    corpus = tmp_path / "staged-corpus"
+    corpus.mkdir()
+    primary = corpus / te.capsule_corpus.name
+    if kind == "file":
+        primary.write_text("not a category\n")
+    else:
+        primary.symlink_to(te.capsule_corpus, target_is_directory=True)
+    with pytest.raises(SpecError, match="ordinary directory"):
+        scaffold(te, corpus, tmp_path / "staged-experiment", private=tmp_path / "private")
 
 
 def test_generated_only_release_refuses_implicit_legacy_hidden_corpus(release_fixture, capsys):
