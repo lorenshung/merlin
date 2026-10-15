@@ -487,6 +487,50 @@ def test_certification_attempts_have_separate_stores(tmp_path, monkeypatch):
     assert BC.cache_root() == ambient
 
 
+def test_certification_rebuilds_previous_attempt_in_same_workdir(tmp_path, store):
+    work = tmp_path / "generated"
+    _build(work, "ambient")
+    BC.store("key", work, ELF)
+    builds = []
+
+    @BC.certification_cache
+    def grade(*, runs_root):
+        assert BC.reuse(work, "key", ELF) is None
+        builds.append(len(builds))
+        _build(work, str(builds[-1]))
+        BC.store("key", work, ELF)
+        assert BC.reuse(work, "key", ELF) == work / ELF
+
+    grade(runs_root=tmp_path / "grade")
+    grade(runs_root=tmp_path / "grade")
+    assert builds == [0, 1]
+    assert (work / ELF).read_text() == "1"
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_certification_removes_attempt_store_on_exit(tmp_path, store, fails):
+    roots = []
+
+    @BC.certification_cache
+    def grade(*, runs_root):
+        roots.append(BC.cache_root())
+        work = tmp_path / "generated"
+        _build(work)
+        BC.store("key", work, ELF)
+        assert list(roots[-1].rglob("record.json"))
+        if fails:
+            raise RuntimeError("failed attempt")
+
+    if fails:
+        with pytest.raises(RuntimeError, match="failed attempt"):
+            grade(runs_root=tmp_path / "grade")
+    else:
+        grade(runs_root=tmp_path / "grade")
+    assert not roots[0].exists()
+    assert BC.cache_root() == store
+    assert not list((tmp_path / "grade" / ".elf-build-cache").iterdir())
+
+
 def test_same_named_support_sources_both_change_identity(recipe, key_of, tmp_path):
     first, second = tmp_path / "one/crt.S", tmp_path / "two/crt.S"
     first.parent.mkdir()

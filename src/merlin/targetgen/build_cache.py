@@ -59,6 +59,7 @@ workdir, so a capsule reaching the cert tier used to compile a byte-identical EL
 (:data:`KEY_MARKER`) left in the build directory makes the second call free without consulting the
 store at all. ``capsule_runner._clear_stale_executable`` removes it along with the executable, so the
 marker can never speak for a previous grade.
+Certification scopes both the store and marker to one attempt and removes the temporary store on exit.
 
 Switch off with ``MERLIN_ELF_BUILD_CACHE=0``; point it elsewhere by setting that variable to a
 directory. The store is a regenerable cache under ``out/artifacts/cache/elf-builds/`` and is safe to
@@ -147,12 +148,12 @@ def certification_cache(function):
     def scoped(*args, **kwargs):
         parent = Path(kwargs["runs_root"]).resolve() / ".elf-build-cache"
         parent.mkdir(parents=True, exist_ok=True)
-        root = Path(tempfile.mkdtemp(prefix="attempt-", dir=parent))
-        token = _ATTEMPT_ROOT.set(root)
-        try:
-            return function(*args, **kwargs)
-        finally:
-            _ATTEMPT_ROOT.reset(token)
+        with tempfile.TemporaryDirectory(prefix="attempt-", dir=parent) as root:
+            token = _ATTEMPT_ROOT.set(Path(root))
+            try:
+                return function(*args, **kwargs)
+            finally:
+                _ATTEMPT_ROOT.reset(token)
 
     return scoped
 
@@ -568,6 +569,12 @@ def _already_there(dst: Path, meta: Mapping) -> bool:
     return _file_sha(dst) == meta.get("sha256")
 
 
+def _marker_identity(key: str) -> str:
+    """Bind local reuse to the same certification attempt as the store."""
+    attempt = _ATTEMPT_ROOT.get()
+    return key if attempt is None else f"{key}\n{attempt}"
+
+
 def reuse(workdir: "str | Path", key: "str | None", elf_name: "str | None" = None) -> "Path | None":
     """The executable for ``key`` already present or restorable into ``workdir``, or ``None``.
 
@@ -585,7 +592,7 @@ def reuse(workdir: "str | Path", key: "str | None", elf_name: "str | None" = Non
         # asks the record instead (below), which is the whole reason elf_name is optional.
         try:
             elf = work / elf_name
-            if elf.is_file() and marker.is_file() and marker.read_text(encoding="utf-8").strip() == key:
+            if elf.is_file() and marker.is_file() and marker.read_text(encoding="utf-8").strip() == _marker_identity(key):
                 return elf
         except OSError:
             pass
@@ -621,7 +628,7 @@ def reuse(workdir: "str | Path", key: "str | None", elf_name: "str | None" = Non
             mode = meta.get("mode")
             if isinstance(mode, int):
                 os.chmod(dst, mode)
-        marker.write_text(key, encoding="utf-8")
+        marker.write_text(_marker_identity(key), encoding="utf-8")
     except OSError:  # a restore we could not finish must not look like a build
         try:
             (work / record["elf"]).unlink()
@@ -661,7 +668,7 @@ def store(
     entry = _entry(root, key)
     if (entry / "record.json").is_file():
         try:
-            (work / KEY_MARKER).write_text(key, encoding="utf-8")
+            (work / KEY_MARKER).write_text(_marker_identity(key), encoding="utf-8")
         except OSError:
             pass
         return
@@ -713,7 +720,7 @@ def store(
             tmp = None
         except OSError:  # another worker stored the same build first: theirs is identical
             pass
-        (work / KEY_MARKER).write_text(key, encoding="utf-8")
+        (work / KEY_MARKER).write_text(_marker_identity(key), encoding="utf-8")
         _prune(root)
     except Exception:  # noqa: BLE001 -- a cache that cannot write is not a build failure
         pass
