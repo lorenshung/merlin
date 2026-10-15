@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -37,6 +38,76 @@ def cli_inputs(tmp_path):
         str(manifest),
         "--oracle-timing",
         str(tmp_path / "timing.json"),
+    ]
+
+
+@pytest.mark.parametrize("selected", [False, True])
+@pytest.mark.parametrize("readback", [None, "out_bin_v1"])
+def test_installed_entrypoint_binds_candidate_transport_before_treatment_capture(
+    tmp_path, monkeypatch, selected, readback
+):
+    from merlin_experiments.phase1 import candidate_execution
+    from merlin_experiments.phase1.feedback import qa, rtlchecks
+
+    class FactoryBoundary(BaseException):
+        pass
+
+    policy = tmp_path / "candidate-policy.json"
+    transport = object()
+    loaded = []
+
+    def load(descriptor, *, repo, **kwargs):
+        loaded.append(kwargs)
+        kwargs = dict(kwargs)
+        if "candidate_policy" in kwargs:
+            kwargs["candidate_policy"] = Path(kwargs["candidate_policy"]).absolute()
+        return context.InvocationContext(repo, descriptor, repo, "synthetic", repo, repo, repo, (), **kwargs)
+
+    monkeypatch.setattr(context, "load_context", load)
+    monkeypatch.setattr(rtlchecks, "prepare_arguments", lambda args, **kwargs: args)
+    monkeypatch.setattr(qa, "_loop_target_sim_via", lambda ctx: (ctx.target, "chipyard"))
+    capsules = tmp_path / "public"
+    (capsules / "one").mkdir(parents=True)
+    (capsules / "one/capsule.yaml").write_text("required_oracle_tiers: [L2]\n")
+
+    def selected_transport(ctx):
+        assert ctx.candidate_policy == policy
+        return transport
+
+    monkeypatch.setattr(candidate_execution, "transport", selected_transport)
+
+    def factory(target, sim_via, **kwargs):
+        assert target == "synthetic" and sim_via == "chipyard"
+        assert kwargs.get("candidate_transport") is (transport if selected else None)
+        assert ("candidate_transport" in kwargs) == selected
+        if readback:
+            assert kwargs["readback_policy"].record()["transport"] == readback
+        else:
+            assert "readback_policy" not in kwargs
+        raise FactoryBoundary
+
+    monkeypatch.setattr(qa.CR, "qa_checkpoint_adapters", factory)
+
+    def admit(ctx, options, *, treatment, **kwargs):
+        assert ctx.candidate_policy == (policy if selected else None)
+        # Execute the real treatment callback and real normal QA path, rather than the initial
+        # fast-grade path which uses the controller's separately replaced context.
+        treatment.qa_runner("submission", str(capsules), tmp_path / "runs", {"public"}, False, 900)
+        pytest.fail("normal QA did not reach the selected oracle factory")
+
+    monkeypatch.setattr(controller, "run", admit)
+    command = cli_inputs(tmp_path) + ["--treatment", "rtlchecks"]
+    if selected:
+        command += ["--candidate-policy", str(policy)]
+    if readback:
+        command += ["--readback-policy", readback]
+    with pytest.raises(FactoryBoundary):
+        entrypoint.main(command)
+    assert loaded == [
+        {
+            **({"readback_policy": readback} if readback else {}),
+            **({"candidate_policy": str(policy)} if selected else {}),
+        }
     ]
 
 

@@ -78,6 +78,8 @@ def main(argv: list[str] | None = None) -> int:
     from .context import load_context
 
     context_kwargs = {"readback_policy": options.readback_policy} if options.readback_policy else {}
+    if options.candidate_policy:
+        context_kwargs["candidate_policy"] = options.candidate_policy
     context = load_context(descriptor, repo=repo, **context_kwargs)
     from .controller import run
 
