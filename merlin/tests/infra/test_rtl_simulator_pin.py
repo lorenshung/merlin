@@ -11,8 +11,7 @@ from merlin.targetgen import rtl_simulator_pin
 from merlin.targetgen.rtl_simulator_pin import verify_selected
 
 
-@pytest.fixture
-def selected(tmp_path, monkeypatch):
+def _committed_source(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     (source / "config").write_text("design")
@@ -25,27 +24,28 @@ def selected(tmp_path, monkeypatch):
     }
     for args in (("init", "-q"), ("add", "config"), ("commit", "-qm", "initial")):
         subprocess.run(["git", "-C", str(source), *args], env=env, check=True)
-    revision = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+    return source, subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+
+
+def _write_registry(registry, revision, binary):
+    pin = {
+        "commit": revision,
+        "root_env": "TEST_RTL_SOURCE",
+        "targets": ["example"],
+        "content_check": True,
+        "requires_paths": ["config"],
+        "build_products": {"simulator": provenance.file_digest(binary)},
+    }
+    registry.write_text(yaml.safe_dump({"version": 1, "pins": {"selected": pin}}))
+
+
+@pytest.fixture
+def selected(tmp_path, monkeypatch):
+    source, revision = _committed_source(tmp_path)
     binary = source / "simulator"
     binary.write_bytes(b"compiled design")
     registry = tmp_path / "pins.yaml"
-    registry.write_text(
-        yaml.safe_dump(
-            {
-                "version": 1,
-                "pins": {
-                    "selected": {
-                        "commit": revision,
-                        "root_env": "TEST_RTL_SOURCE",
-                        "targets": ["example"],
-                        "content_check": True,
-                        "requires_paths": ["config"],
-                        "build_products": {"simulator": provenance.file_digest(binary)},
-                    }
-                },
-            }
-        )
-    )
+    _write_registry(registry, revision, binary)
     monkeypatch.setattr(provenance, "pins_path", lambda: registry)
     monkeypatch.setenv("TEST_RTL_SOURCE", str(source))
     monkeypatch.setenv("MERLIN_RTL_SIM_PIN", "selected")
@@ -104,7 +104,8 @@ def test_unbound_facts_are_refused(selected, monkeypatch):
         verify_selected(backend, "verilator", "example")
 
 
-def test_facts_must_bind_the_pinned_firrtl_and_runtime(tmp_path, monkeypatch):
+@pytest.fixture
+def pinned_facts(tmp_path, monkeypatch):
     from merlin.targetgen import target_experiment
     from merlin.targetgen.rtl import facts, source_selection
 
@@ -116,17 +117,12 @@ def test_facts_must_bind_the_pinned_firrtl_and_runtime(tmp_path, monkeypatch):
         "config": "ExampleConfig",
         "sources": {"firrtl": {"path": str(firrtl), "sha256": digest}},
     }
-    monkeypatch.setattr(
-        facts,
-        "load_facts",
-        lambda _: {
-            "inputs": {
-                "source_bundle_path": "bundle.json",
-                "source_bundle_sha256": "bundle-digest",
-                "fir_sha256": digest,
-            }
-        },
-    )
+    inputs = {
+        "source_bundle_path": "bundle.json",
+        "source_bundle_sha256": "bundle-digest",
+        "fir_sha256": digest,
+    }
+    monkeypatch.setattr(facts, "load_facts", lambda _: {"inputs": inputs})
     monkeypatch.setattr(source_selection, "load_selection", lambda *args, **kwargs: selected)
     monkeypatch.setattr(source_selection, "production_consistency", lambda _: {"status": "verified"})
     monkeypatch.setattr(
@@ -136,6 +132,11 @@ def test_facts_must_bind_the_pinned_firrtl_and_runtime(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(facts, "find_facts", lambda _: firrtl)
     pin = SimpleNamespace(build_products=((firrtl.name, digest),))
+    return pin, selected
+
+
+def test_facts_must_bind_the_pinned_firrtl_and_runtime(tmp_path, pinned_facts):
+    pin, selected = pinned_facts
     rtl_simulator_pin._verify_facts(pin, "example", tmp_path)
     selected["config"] = "DifferentConfig"
     with pytest.raises(ValueError, match="configuration differs"):
