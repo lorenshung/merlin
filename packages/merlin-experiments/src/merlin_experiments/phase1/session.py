@@ -614,7 +614,12 @@ def prepare(
             )
         _hidden_dir = RI.hidden_snapshot_dir(_snapshot_root, _te_setup, context.repo)
         _hidden_snapshot_record = RI.subtree_snapshot_record(_hidden_dir)
-        if _hidden_snapshot_record["n_capsules"] <= 0:
+        _public_only = (
+            _te_setup.hidden_expected_source_capsules == 0
+            and _te_setup.hidden_expected_admitted_capsules == 0
+            and a.skip_hidden
+        )
+        if _hidden_snapshot_record["n_capsules"] <= 0 and not _public_only:
             raise RuntimeError(f"hidden capsule snapshot contains no capsules: {_hidden_snapshot_record['path']}")
         if _te_setup.host_lane is not None:
             _, _model_host_lane_snapshot = _te_setup.resolve_host_lane(root=_snapshot_root / "repo")

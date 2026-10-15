@@ -405,8 +405,18 @@ def prepare(
     retirements: Path | None = None,
     generated_only: bool = False,
     phase1_policy_descriptor: Path | None = None,
+    preserved_corpus: bool = False,
+    rtl_facts: Path | None = None,
 ) -> dict:
     """Assemble a fresh complete source pool; neither canonical inputs nor approval change."""
+    if preserved_corpus:
+        from .preserved import prepare_preserved
+
+        if private_baseline or retirements or generated_only or phase1_policy_descriptor:
+            raise SpecError("preserved corpus preparation cannot select generated corpus options")
+        return prepare_preserved(run_dir, output, rtl_facts=rtl_facts)
+    if rtl_facts is not None:
+        raise SpecError("--rtl-facts requires --preserved-corpus")
     from merlin.common.paths import out_dir
     from merlin.common.storage_lifecycle import lease
     from merlin.targetgen.target_experiment import load_target_experiment
@@ -539,8 +549,15 @@ def seal(path: Path, *, expected_digest: str, reviewed_by: str, review_note: str
         # input fingerprint before these selected bytes are interpreted.
         from ..runner import _phase0_synthesis_status
 
-        plan, _, generated = source_run(Path(prepared["source_run"]))
-        if generation_lineage(plan, generated) != prepared.get("generation_lineage"):
+        if prepared.get("source_kind") == "preserved_corpus":
+            from .preserved import verify_preserved
+
+            verify_preserved(root, prepared)
+            plan = {"phases": {"0": {"inputs": {}}}}
+            generated = None
+        else:
+            plan, _, generated = source_run(Path(prepared["source_run"]))
+        if generated is not None and generation_lineage(plan, generated) != prepared.get("generation_lineage"):
             raise SpecError("Phase-0 generation lineage differs from the operator-reviewed preparation")
         phase = plan["phases"]["0"]
         if phase.get("phase0_evidence"):

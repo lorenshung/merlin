@@ -1082,7 +1082,8 @@ def _admission(te, *, coverage_output: Path | None) -> dict:
     excluded = {row["capsule"] for row in withheld}
     count = len(hidden)
     admitted = sum(cap["name"] not in excluded for cap in hidden)
-    if public["n_admitted_capsules"] <= 0 or count <= 0 or admitted <= 0:
+    public_only = te.hidden_expected_source_capsules == 0 and te.hidden_expected_admitted_capsules == 0
+    if public["n_admitted_capsules"] <= 0 or (not public_only and (count <= 0 or admitted <= 0)):
         raise SpecError("reviewable corpus must have nonempty public and hidden grading cohorts")
     if (te.hidden_expected_source_capsules is not None and count != te.hidden_expected_source_capsules) or (
         te.hidden_expected_admitted_capsules is not None and admitted != te.hidden_expected_admitted_capsules

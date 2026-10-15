@@ -295,6 +295,12 @@ def main(argv: list[str] | None = None) -> int:
     prepare = operations.add_parser("prepare")
     prepare.add_argument("run_dir", type=Path)
     prepare.add_argument(
+        "--preserved-corpus",
+        action="store_true",
+        help="prepare an existing descriptor/corpus without Phase 0 derivation; run_dir names its descriptor",
+    )
+    prepare.add_argument("--rtl-facts", type=Path, help="selected facts for --preserved-corpus")
+    prepare.add_argument(
         "--output",
         type=Path,
         help="fresh release root; defaults to out/artifacts/protocols/<target>/phase0-<TS>-<sha7>",
@@ -417,6 +423,8 @@ def main(argv: list[str] | None = None) -> int:
                     retirements=args.retirements,
                     generated_only=args.generated_only,
                     phase1_policy_descriptor=args.phase1_policy_descriptor,
+                    preserved_corpus=args.preserved_corpus,
+                    rtl_facts=args.rtl_facts,
                 )
             elif args.operation == "inspect":
                 result = corpus_release.inspect_release(args.release)
