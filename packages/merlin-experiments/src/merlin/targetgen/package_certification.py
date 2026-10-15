@@ -25,6 +25,19 @@ from . import package_runtime as _runtime
 from .package_records import payload_inventory
 
 
+def _run_certificate_oracle(backend: Any, cb: dict, llvm: str, **options) -> dict:
+    """Use the same selected-product and simulator-slot boundary as capsule tiers."""
+    from .rtl_simulator_execution import run_verified
+
+    return run_verified(
+        backend,
+        options["simulator"],
+        options["target"],
+        options["timeout"],
+        lambda remaining: _runtime.oot_compile.run_on_oracle(cb, llvm, **{**options, "timeout": remaining}),
+    )
+
+
 def _qualifying_pointer_abi(command_buffer: dict, backend: Any) -> dict[str, Any]:
     """Bind the compiler's pointer order to the selected runner before numerical grading.
 
@@ -432,7 +445,8 @@ def certify(
                 # device materialized every leaf from its name while K5 above compared reference and
                 # simulate over the INJECTED values, so any caller injecting real operands failed the
                 # three-way gate by construction -- and the failure was attributed to the target.
-                res = _runtime.oot_compile.run_on_oracle(
+                res = _run_certificate_oracle(
+                    gem,
                     cb,
                     p.stdout,
                     simulator=simulator,
