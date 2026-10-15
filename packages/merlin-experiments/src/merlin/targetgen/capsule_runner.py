@@ -568,17 +568,13 @@ def simulator_adapter(sim: str, target: str, selection: dict | None = None, *, r
 
             policy_kwargs["memory_readback"] = NativeMemoryReadback(facts_path=facts_path, policy=readback_policy)
             policy_kwargs["oracle_revalidate"] = revalidate_memory_engine
-        from .rtl_simulator_execution import run_verified
+        from .rtl_simulator_execution import SimulatorExecution, run_verified
 
         res = run_verified(
-            backend,
-            sim,
-            target,
-            timeout,
+            SimulatorExecution(backend, sim, target, timeout, unavailable=OracleUnavailable),
             lambda remaining: oot_compile.run_on_oracle(
                 cb, llvm_text, simulator=sim, target=target, workdir=workdir, timeout=remaining, **policy_kwargs
             ),
-            unavailable=OracleUnavailable,
         )
         if selection and isinstance(res.get("oracle"), dict):
             res["oracle"]["selection"] = dict(selection)

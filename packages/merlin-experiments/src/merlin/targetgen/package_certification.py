@@ -27,13 +27,10 @@ from .package_records import payload_inventory
 
 def _run_certificate_oracle(backend: Any, cb: dict, llvm: str, **options) -> dict:
     """Use the same selected-product and simulator-slot boundary as capsule tiers."""
-    from .rtl_simulator_execution import run_verified
+    from .rtl_simulator_execution import SimulatorExecution, run_verified
 
     return run_verified(
-        backend,
-        options["simulator"],
-        options["target"],
-        options["timeout"],
+        SimulatorExecution(backend, options["simulator"], options["target"], options["timeout"]),
         lambda remaining: _runtime.oot_compile.run_on_oracle(cb, llvm, **{**options, "timeout": remaining}),
     )
 

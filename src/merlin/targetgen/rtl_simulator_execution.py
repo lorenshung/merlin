@@ -4,14 +4,29 @@ from __future__ import annotations
 
 import time
 from contextlib import nullcontext
+from dataclasses import dataclass
+from typing import Any
 
 from .rtl_simulator_pin import verify_selected
 from .rtl_simulator_slot import verilator_slot
 
 
-def run_verified(backend, engine, target, timeout, operation, *, unavailable=RuntimeError):
+@dataclass(frozen=True)
+class SimulatorExecution:
+    """The selected backend and execution policy for one oracle call."""
+
+    backend: Any
+    engine: str
+    target: str
+    timeout: float
+    unavailable: type[Exception] = RuntimeError
+
+
+def run_verified(execution: SimulatorExecution, operation):
     """Reopen an optional hardware pin around an operation using the remaining budget."""
     started = time.monotonic()
+    backend, engine, target = execution.backend, execution.engine, execution.target
+    timeout, unavailable = execution.timeout, execution.unavailable
     slot = verilator_slot(timeout=timeout) if engine == "verilator" else nullcontext(timeout)
     with slot as remaining:
         admitted = time.monotonic()
