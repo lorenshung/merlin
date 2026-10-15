@@ -853,6 +853,31 @@ def _no_batch_norm_fold_needed(original_snapshot: Any, exported: Any) -> bool:
     return True
 
 
+def _normalize_conv_padding(exported, padding_operator) -> list[dict]:
+    """Require the frontend's optional rewrite only for a graph that needs it."""
+    if not any(node.op == "call_function" and node.target == padding_operator for node in exported.graph.nodes):
+        return []
+    try:
+        from m2m.capture.pt2e_padding import normalize_conv2d_padding
+    except ModuleNotFoundError as exc:
+        if exc.name != "m2m.capture.pt2e_padding":
+            raise
+        raise RecipeError("selected frontend cannot normalize Conv2d string padding") from exc
+    return normalize_conv2d_padding(exported)
+
+
+def _allow_exported_model_train_eval(quantized) -> None:
+    """Use the public framework helper when the selected frontend predates its shim."""
+    try:
+        from m2m.capture.pt2e_compat import allow_exported_model_train_eval
+    except (ImportError, AttributeError):
+        try:
+            from torchao.quantization.pt2e import allow_exported_model_train_eval
+        except (ImportError, AttributeError):
+            from torch.ao.quantization import allow_exported_model_train_eval
+    allow_exported_model_train_eval(quantized)
+
+
 def apply_recipe(
     model: Any,
     recipe: Mapping[str, Any],
@@ -969,9 +994,7 @@ def apply_recipe(
     # exported graph before either the integral-input check or PT2E folding:
     # the recipe's operator table must never misread an unnormalized floating
     # Conv as absent. This does not rewrite the source model or its recipe.
-    from m2m.capture.pt2e_padding import normalize_conv2d_padding
-
-    padding_normalizations = normalize_conv2d_padding(exported)
+    padding_normalizations = _normalize_conv_padding(exported, torch.ops.aten.conv2d.padding)
     if original_frontend_snapshot is not None:
         source_nodes = {row["id"]: row for row in original_frontend_snapshot.get("nodes", ())}
         source_padding_schema = torch.ops.aten.conv2d.padding._schema.arguments
@@ -1076,12 +1099,7 @@ def apply_recipe(
         pruned = _drop_unused_graph_state(quantized)
     except Exception:  # noqa: BLE001 -- an optional tidy-up; the graph is correct without it
         pass
-    try:
-        from m2m.capture.pt2e_compat import allow_exported_model_train_eval
-
-        allow_exported_model_train_eval(quantized)
-    except (ImportError, AttributeError):
-        pass
+    _allow_exported_model_train_eval(quantized)
     quantized._recipe_quantization_stats = {  # type: ignore[attr-defined]
         "api": "pt2e",
         "recipe_sha256": recipe.get("recipe_sha256"),
