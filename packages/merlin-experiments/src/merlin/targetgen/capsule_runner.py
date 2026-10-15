@@ -35,6 +35,8 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from merlin.targetgen.build_cache import certification_cache
+
 if TYPE_CHECKING:
     from aet.core.run_paths import RunPaths
 
@@ -4845,6 +4847,7 @@ def _finalize_capsule_result(
     return result
 
 
+@certification_cache
 def run_capsule(
     capsule: dict,
     package_dir: str | Path,

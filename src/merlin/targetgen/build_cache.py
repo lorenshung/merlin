@@ -48,10 +48,10 @@ Deliberately absent: merlin's commit (an edit that leaves all of the above ident
 output), the simulator, the grading path, and the RTL revision. None of them is an input to a compile;
 the tier cache keys on them because it carries a VERDICT, and this does not.
 
-**What is stored is the whole build, not just the ELF.** The generated directory is an artifact the
+**Only declared build products are stored.** The generated directory is an artifact the
 agent reads -- its ``kernel.ll``, its ``harness.c`` -- and restoring only the executable would silently
-empty it. :func:`store` keeps every file in the directory, so a hit reproduces what the build would
-have produced. Files are verified against their recorded digests on the way out; a store that has been
+empty it. :func:`store` accepts an explicit product roster, defaulting to the ELF alone. Caller inputs
+and invocation receipts must never be restored from another execution. Files are verified against their recorded digests on the way out; a store that has been
 corrupted or truncated is a miss, never a partial restore.
 
 **Within one grade the ladder builds once.** Every tier's adapter calls the compile path with the same
@@ -67,6 +67,8 @@ delete at any time; it self-prunes to ``MERLIN_ELF_BUILD_CACHE_ENTRIES`` (defaul
 
 from __future__ import annotations
 
+import contextvars
+import functools
 import hashlib
 import json
 import os
@@ -97,10 +99,10 @@ __all__ = [
 
 #: Version of the payload :func:`build_identity` hashes. Bumping it invalidates every stored build,
 #: which is the correct effect of changing what "the same inputs" means.
-BUILD_IDENTITY_VERSION = 1
+BUILD_IDENTITY_VERSION = 2
 
 #: Version of the on-disk record shape. A record written by another version is not read.
-RECORD_VERSION = 1
+RECORD_VERSION = 2
 
 #: Written into a build directory, naming the key its contents were produced from. Lets a second tier
 #: in the same ladder skip the build without touching the store.
@@ -108,6 +110,8 @@ KEY_MARKER = ".merlin_build_key"
 
 #: Store entries kept before oldest-first pruning. A bound on a regenerable cache, not a fact.
 DEFAULT_MAX_ENTRIES = 4000
+
+_ATTEMPT_ROOT: contextvars.ContextVar[Path | None] = contextvars.ContextVar("elf_build_attempt_root", default=None)
 
 _CACHE_ENV = "MERLIN_ELF_BUILD_CACHE"
 _ENTRIES_ENV = "MERLIN_ELF_BUILD_CACHE_ENTRIES"
@@ -131,6 +135,28 @@ _BUILD_MODULES = (
 )
 
 
+def certification_cache(function):
+    """Keep certification builds inside this invocation's output owner.
+
+    Install the scope in the actual grading worker, so concurrent threads never
+    share a process-wide environment mutation or restore another attempt's files.
+    The operator's explicit cache-off switch still takes precedence.
+    """
+
+    @functools.wraps(function)
+    def scoped(*args, **kwargs):
+        parent = Path(kwargs["runs_root"]).resolve() / ".elf-build-cache"
+        parent.mkdir(parents=True, exist_ok=True)
+        root = Path(tempfile.mkdtemp(prefix="attempt-", dir=parent))
+        token = _ATTEMPT_ROOT.set(root)
+        try:
+            return function(*args, **kwargs)
+        finally:
+            _ATTEMPT_ROOT.reset(token)
+
+    return scoped
+
+
 def disabled() -> bool:
     """Whether the operator has switched the cache off."""
     return (os.environ.get(_CACHE_ENV, "") or "").strip().lower() in _OFF
@@ -142,8 +168,9 @@ def cache_root() -> "Path | None":
         return None
     raw = (os.environ.get(_CACHE_ENV, "") or "").strip()
     try:
-        if raw:
-            d = Path(raw)
+        attempt = _ATTEMPT_ROOT.get()
+        if attempt is not None or raw:
+            d = attempt if attempt is not None else Path(raw)
             d.mkdir(parents=True, exist_ok=True)
             return d
         from merlin.common.artifacts import cache_dir
@@ -313,7 +340,7 @@ def recipe_token(recipe: Any) -> "dict | None":
             sha = _file_sha(src)
             if sha is None:  # a support source we cannot read is a build we cannot key
                 return None
-            sources[src.name] = sha
+            sources[str(src)] = sha
         record["sources"] = sources
         headers = getattr(recipe, "header_dependencies", ())
         if headers:
@@ -387,6 +414,28 @@ def _build_path_digest(files) -> str:
     return digest
 
 
+def interface_text(work: Path) -> str | None:
+    """The caller interface is a build input, including its absence."""
+    path = work / "input.interface.mlir"
+    return path.read_text(encoding="utf-8") if path.exists() else None
+
+
+def product_snapshot(work: Path) -> dict:
+    """Observe files before compilation without treating them as products."""
+    return {name: _file_sha(work / name) for name in contents(work)}
+
+
+def changed_products(work: Path, before: Mapping) -> tuple[str, ...]:
+    """Select newly written build files; caller input and receipts stay local."""
+    return tuple(
+        name
+        for name in contents(work)
+        if "invocations" not in Path(name).parts
+        and name != "input.interface.mlir"
+        and before.get(name) != _file_sha(work / name)
+    )
+
+
 def artifact_identity(
     *, kind: str, target: str, inputs: "Mapping", source_files, toolchain: "str | None"
 ) -> "str | None":
@@ -423,7 +472,13 @@ def artifact_identity(
 
 
 def build_identity(
-    *, target: str, lowered_mlir_text: str, cb: Mapping, inputs: "Mapping | None", recipe: Any
+    *,
+    target: str,
+    lowered_mlir_text: str,
+    cb: Mapping,
+    inputs: "Mapping | None",
+    recipe: Any,
+    interface_mlir_text: str | None = None,
 ) -> "str | None":
     """Content identity for exactly what one compile would produce, or ``None`` to build normally.
 
@@ -447,6 +502,11 @@ def build_identity(
             "version": BUILD_IDENTITY_VERSION,
             "target": target,
             "program_sha256": hashlib.sha256(lowered_mlir_text.encode("utf-8")).hexdigest(),
+            "interface_sha256": (
+                hashlib.sha256(interface_mlir_text.encode("utf-8")).hexdigest()
+                if interface_mlir_text is not None
+                else None
+            ),
             "command_buffer": _digest_of(cb),
             "inputs": _digest_of(inputs) if inputs is not None else "",
             "recipe": recipe_rec,
@@ -575,8 +635,15 @@ def reuse(workdir: "str | Path", key: "str | None", elf_name: "str | None" = Non
     return work / record["elf"]
 
 
-def store(key: "str | None", workdir: "str | Path", elf_name: str, metadata: "Mapping | None" = None) -> None:
-    """Keep every file this build created or changed, under ``key``. Never raises.
+def store(
+    key: "str | None",
+    workdir: "str | Path",
+    elf_name: str,
+    metadata: "Mapping | None" = None,
+    *,
+    products: "tuple[str, ...] | None" = None,
+) -> None:
+    """Keep the explicitly declared build products under ``key``. Never raises.
 
     The entry is assembled in a temporary directory and moved into place, so a concurrent worker
     building the same capsule either wins the rename or discards its copy -- a reader never sees a
@@ -600,13 +667,18 @@ def store(key: "str | None", workdir: "str | Path", elf_name: str, metadata: "Ma
         return
     tmp = None
     try:
-        produced = contents(work)
+        produced = list(products or (elf_name,))
         if elf_name not in produced:
             produced.append(elf_name)
         entry.parent.mkdir(parents=True, exist_ok=True)
         tmp = Path(tempfile.mkdtemp(prefix=".staging_", dir=entry.parent))
         files: dict = {}
         for rel in produced:
+            member = Path(rel)
+            if member.is_absolute() or ".." in member.parts or "invocations" in member.parts:
+                raise ValueError("cache products must be local build outputs")
+            if member.name == "input.interface.mlir":
+                raise ValueError("cache must not publish the caller interface")
             src = work / rel
             if not src.is_file():
                 continue
