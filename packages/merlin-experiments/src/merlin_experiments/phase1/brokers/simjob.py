@@ -442,7 +442,7 @@ def main(
     ap.add_argument("--ws", required=True)
     ap.add_argument("--rtl-facts", type=Path, help="Selected facts in the verified frozen input snapshot")
     ap.add_argument("--max-jobs", type=int, default=4)
-    ap.add_argument("--veril-slots", type=int, default=2)
+    ap.add_argument("--veril-slots", type=int, default=int(os.environ.get("MERLIN_VERILATOR_SLOTS", "2")))
     ap.add_argument("--poll", type=float, default=0.5)
     ap.add_argument(
         "--per-capsule-timeout", type=int, default=0, help="0=derive from the cert engine's own measured cost law"
