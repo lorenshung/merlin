@@ -15,7 +15,7 @@ from collections import Counter
 from collections.abc import Mapping
 
 from merlin.common.digest import is_sha256
-from merlin.targetgen.software_spec import admit_operation
+from merlin.targetgen.software_spec import admit_operation, exact_declarations
 
 SCHEMA = "merlin.phase0.operation_accounting.v1"
 _DISPOSITIONS = frozenset(
@@ -169,11 +169,9 @@ def _software_admissions(spec: dict | None, row: dict, signature: dict) -> list[
     if spec is None:
         return []
     declarations = spec.get("operations") or []
-    direct = [
-        entry
-        for entry in declarations
-        if row["operation"] in entry.get("ops", []) or (not entry.get("ops") and entry.get("id") == row["operation"])
-    ]
+    # The same exact-roster rule as admit_operation: a reviewed host row for a provably different
+    # typed instance of the operation does not hide the family declarations.
+    direct, _ = exact_declarations(spec, row["operation"], signature)
     decisions = []
     for declaration in direct or declarations:
         placement = declaration["placement"]
