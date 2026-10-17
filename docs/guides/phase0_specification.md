@@ -3,7 +3,7 @@ title: Defining and inspecting Phase 0 inputs
 kind: guide
 status: current
 owner: targetgen
-last_verified: 2026-10-10
+last_verified: 2026-10-17
 related: [generating_capsules, adding_a_target, integrations]
 code_refs:
   - src/merlin/targetgen/software_spec.py
@@ -386,7 +386,15 @@ When a row names nonempty `ops`, only those exact frontend operations can match 
 `families` do not add other operations. Put an observed-family constraint in
 `signature.family` when needed. Rows without an explicit `ops` roster can match
 by semantic family. A direct operation match that fails its signature constraints
-does not fall back to a broader family row.
+does not fall back to a broader family row, with one exception: a reviewed, fully
+executable **host** row whose declared operand/result types provably exclude the observed
+ones (an f32 host row for an operation observed at int8) declares a different typed
+instance of the operation, so it is set aside and the family rows decide. The decision
+lists such rows as `ignored_disjoint_declarations`. An accelerator restriction, an
+unreviewed or prose-qualified row, or a row whose precision was not observed always keeps
+its priority. A row whose id is a family name is a family row, never an exact match.
+`admit_operation`, `admit_contraction_operation` and Phase-0 operation accounting share
+this one rule (`software_spec.exact_declarations`).
 A standalone declaration admits only that standalone use: it does not admit the same
 family composed into another operation (`composed_with`) or, for an elementwise map,
 applied as a fused epilogue. Declare and review such a composition explicitly.
