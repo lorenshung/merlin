@@ -253,9 +253,54 @@ def _recipe_operators(torch: Any) -> dict[str, tuple[Any, ...]]:
             torch.ops.aten.adaptive_avg_pool2d.default,
             torch.ops.aten.avg_pool2d.default,
             torch.ops.aten.mean.dim,
+            torch.ops.aten.avg_pool1d.default,
+            torch.ops.aten.avg_pool3d.default,
+            torch.ops.aten.adaptive_avg_pool1d.default,
+            torch.ops.aten.adaptive_avg_pool3d.default,
+            torch.ops.aten._adaptive_avg_pool2d.default,
+            torch.ops.aten._adaptive_avg_pool3d.default,
+        ),
+        # An affine map of one or two int8 tensors: integer weights and an int32 constant applied in
+        # the accumulator, then ONE readout (merlin.targetgen.recipe_numerics). Its result has its
+        # own scale, so its output edge is quantized here.
+        "affine_map": (
+            torch.ops.aten.add.Scalar,
+            torch.ops.aten.sub.Scalar,
+            torch.ops.aten.mul.Scalar,
+            torch.ops.aten.div.Scalar,
+            torch.ops.aten.neg.default,
+            torch.ops.aten.sub.Tensor,
+            torch.ops.aten.relu.default,
+            # Export keeps a python scalar operand on the .Tensor overload until decomposition.
+            torch.ops.aten.add.Tensor,
+            torch.ops.aten.mul.Tensor,
+            torch.ops.aten.div.Tensor,
+        ),
+        # Data motion: no arithmetic, so (by default) its output shares its input's quantization
+        # parameters; a fill writes a constant code on its own output grid.
+        "movement": (
+            torch.ops.aten.clone.default,
+            torch.ops.aten.permute.default,
+            torch.ops.aten.cat.default,
+            torch.ops.aten.repeat.default,
+            torch.ops.aten.constant_pad_nd.default,
+            torch.ops.aten.pad.default,
+            torch.ops.aten.reflection_pad1d.default,
+            torch.ops.aten.reflection_pad2d.default,
+            torch.ops.aten.reflection_pad3d.default,
+            torch.ops.aten.replication_pad2d.default,
+            torch.ops.aten.replication_pad3d.default,
+            torch.ops.aten.slice_scatter.default,
+            torch.ops.aten.select_scatter.default,
+            torch.ops.aten.full_like.default,
+            torch.ops.aten.fill.Scalar,
         ),
     }
     return operators
+
+
+#: Movement operators whose output is a constant, not a copy of an input.
+_CONSTANT_MOVEMENT = ("full_like.default", "fill.Scalar")
 
 
 def _has_floating_recipe_work(exported: Any, recipe: Mapping[str, Any]) -> bool:
@@ -309,6 +354,17 @@ def build_quantizer(
     targets = {op for family in listed if family == "contraction" for op in operators.get(family, ())}
     sums = set(operators["operand_sum"]) if "operand_sum" in listed else set()
     means = set(operators["window_mean"]) if "window_mean" in listed else set()
+    affine = set(operators["affine_map"]) if "affine_map" in listed else set()
+    moves = set(operators["movement"]) if "movement" in listed else set()
+    #: shared (default): a movement's output and every input share one scale, as PT2E does for cat;
+    #: independent: each input keeps its own scale and the output gets its own (one load rounding each).
+    movement_qparams = recipe.get("movement_qparams", "shared")
+    if movement_qparams not in {"shared", "independent"}:
+        raise RecipeError(f"movement_qparams must be shared or independent, got {movement_qparams!r}")
+    #: narrow: the input edge of a negation uses [-qmax, qmax] so -(-128) never occurs.
+    negation_range = recipe.get("negation_input_range", "full")
+    if negation_range not in {"full", "narrow"}:
+        raise RecipeError(f"negation_input_range must be full or narrow, got {negation_range!r}")
     if not targets:
         raise RecipeError(f"the recipe quantizes {recipe.get('families')}, none of which this quantizer can annotate")
     #: What a value may pass through on its way to a reader without ceasing to be the same integers:
@@ -468,11 +524,54 @@ def build_quantizer(
     def family_of(node: Any) -> str | None:
         if node.target in targets:
             return "contraction"
-        if node.target in sums:
+        if node.target in sums and len(tensor_operands(node)) == 2:
             return "operand_sum"
         if node.target in means:
             return "window_mean"
+        if node.target in affine and affine_operands_ok(node):
+            return "affine_map"
+        if node.target in moves:
+            return "movement"
         return None
+
+    def tensor_operands(node: Any) -> list[Any]:
+        return [a for a in node.args[:2] if isinstance(a, torch.fx.Node) and a.op != "get_attr"]
+
+    def affine_operands_ok(node: Any) -> bool:
+        """One tensor and a python scalar, or (a difference) two tensors; a stored operand is not."""
+        tensors, scalars = tensor_operands(node), [a for a in node.args[1:2] if isinstance(a, (int, float))]
+        if node.target in (torch.ops.aten.neg.default, torch.ops.aten.relu.default):
+            return len(tensors) == 1
+        if node.target == torch.ops.aten.sub.Tensor and len(tensors) == 2:
+            return True
+        return len(tensors) == 1 and len(scalars) == 1
+
+    def tensor_inputs(node: Any) -> list[Any]:
+        """The activation tensors an affine map or movement reads, in argument order."""
+        if node.target == torch.ops.aten.cat.default:
+            values = list(node.args[0]) if node.args else []
+        elif str(node.target).endswith(_CONSTANT_MOVEMENT):
+            return []
+        elif node.target in (torch.ops.aten.slice_scatter.default, torch.ops.aten.select_scatter.default):
+            values = list(node.args[:2])
+        elif node.target == torch.ops.aten.sub.Tensor:
+            values = list(node.args[:2])
+        else:
+            values = list(node.args[:1])
+        return [
+            value
+            for value in values
+            if isinstance(value, torch.fx.Node)
+            and value.op != "get_attr"
+            and isinstance(value.meta.get("val"), torch.Tensor)
+            and value.meta["val"].is_floating_point()
+        ]
+
+    def fused_behind_contraction(node: Any) -> bool:
+        """An epilogue of a contraction is group formation's to absorb, not a standalone site."""
+        if node.meta.get("merlin_contraction_epilogue"):
+            return True
+        return any(isinstance(a, torch.fx.Node) and a.target in targets for a in node.args)
 
     def closable(nodes: Any) -> set[Any]:
         """The sums and means whose result only quantized readers ever see.
@@ -528,6 +627,17 @@ def build_quantizer(
             self.annotated = 0
             self.annotated_sums = 0
             self.annotated_means = 0
+            self.annotated_maps = 0
+            self.annotated_moves = 0
+            if negation_range == "narrow":
+                from merlin.targetgen.recipe_numerics import narrow_range
+
+                low, high = narrow_range(int(activation["quant_max"]))
+                self.negation_input = _spec(
+                    {**activation, "quant_min": low, "quant_max": high}, is_weight=False, eps=eps
+                )
+            else:
+                self.negation_input = self.activation
             self.left_in_float = 0
             self.refused_by_placement: list[dict[str, str | None]] = []
             self.refused_rewrites: list[dict[str, Any]] = []
@@ -630,7 +740,11 @@ def build_quantizer(
                         node.meta["quantization_annotation"] = QuantizationAnnotation(
                             input_qspec_map={node.args[0]: self.activation}, _annotated=True
                         )
+                        node.meta["merlin_recipe_family"] = "window_mean"
                         self.annotated_means += 1
+                    continue
+                if family in {"affine_map", "movement"}:
+                    self._annotate_map(node, family)
                     continue
                 if node.target not in targets or len(node.args) < 2:
                     continue
@@ -656,19 +770,172 @@ def build_quantizer(
             )
             return graph_module
 
+        def _annotate_map(self, node: Any, family: str) -> None:
+            """Input and output edges of a standalone affine map or movement."""
+            from torchao.quantization.pt2e.quantizer import SharedQuantizationSpec
+
+            if fused_behind_contraction(node):
+                return
+            inputs = tensor_inputs(node)
+            constant = family == "movement" and str(node.target).endswith(_CONSTANT_MOVEMENT)
+            if not inputs and not constant:
+                return
+            value = node.meta.get("val")
+            if not isinstance(value, torch.Tensor) or not value.is_floating_point():
+                return
+            if family == "affine_map":
+                spec = self.negation_input if node.target == torch.ops.aten.neg.default else self.activation
+                input_map = {operand: spec for operand in inputs}
+                output = self.activation
+            elif constant:
+                input_map, output = {}, self.activation
+            elif movement_qparams == "independent":
+                input_map = {operand: self.activation for operand in inputs}
+                output = self.activation
+            else:
+                first = inputs[0]
+                input_map = {first: self.activation}
+                input_map.update({operand: SharedQuantizationSpec((first, node)) for operand in inputs[1:]})
+                output = SharedQuantizationSpec((first, node))
+            node.meta["quantization_annotation"] = QuantizationAnnotation(
+                input_qspec_map=input_map, output_qspec=output, _annotated=True
+            )
+            node.meta["merlin_recipe_family"] = family
+            if family == "affine_map":
+                self.annotated_maps += 1
+            else:
+                self.annotated_moves += 1
+
         def validate(self, graph_module: Any) -> None:
             del graph_module
             # COUNT EVERY FAMILY THE RECIPE LISTS, not just contractions. Three counters are kept and
             # this read one, so a model carrying only the operand sums or window means a recipe also
             # covers was refused with a message saying its families were not covered -- which was
             # false, and pointed a reader at the model rather than at this table.
-            if self.annotated + self.annotated_sums + self.annotated_means == 0:
+            if (
+                self.annotated + self.annotated_sums + self.annotated_means + self.annotated_maps + self.annotated_moves
+                == 0
+            ):
                 raise NoEligibleRecipeOperations(
                     f"the model has no operator the recipe's families cover "
-                    f"(families={list(listed)}; annotated contractions=0, sums=0, means=0)"
+                    f"(families={list(listed)}; annotated contractions=0, sums=0, means=0, maps=0, moves=0)"
                 )
 
     return CapabilityQuantizer()
+
+
+def _per_tensor_scale(node: Any, operator: str) -> float | None:
+    """The literal per-tensor scale of a folded quantize/dequantize node, or None."""
+    if getattr(node, "op", None) != "call_function" or not str(node.target).startswith(operator):
+        return None
+    scale = node.args[1] if len(node.args) > 1 else None
+    return float(scale) if isinstance(scale, (int, float)) else None
+
+
+def _window_divisor(node: Any) -> int | None:
+    """The one element count a mean or unpadded average pool divides by, or None if it varies."""
+    source = node.args[0].meta.get("val") if node.args and hasattr(node.args[0], "meta") else None
+    result = node.meta.get("val")
+    if source is None or result is None or not hasattr(source, "shape"):
+        return None
+    name = str(node.target)
+    shape = [int(extent) for extent in source.shape]
+    if name.startswith("aten.mean.dim"):
+        dims = node.args[1] if len(node.args) > 1 else None
+        dims = [dims] if isinstance(dims, int) else list(dims or range(len(shape)))
+        return math.prod(shape[dim % len(shape)] for dim in dims) or None
+    if "adaptive_avg_pool" in name:
+        out = [int(extent) for extent in result.shape]
+        rank = len(node.args[1]) if len(node.args) > 1 else 0
+        if not rank or any(i % o for i, o in zip(shape[-rank:], out[-rank:], strict=True)):
+            return None  # windows of different sizes
+        return math.prod(i // o for i, o in zip(shape[-rank:], out[-rank:], strict=True))
+    if "avg_pool" in name:
+        kernel = node.args[1] if len(node.args) > 1 else None
+        padding = node.args[3] if len(node.args) > 3 else 0
+        override = node.args[6] if len(node.args) > 6 else None
+        if len(node.args) > 4 and node.args[4]:
+            return None  # ceil_mode: a partial last window divides by fewer elements
+        if isinstance(override, int) and override > 0:
+            return override
+        if any(int(p) for p in (padding if isinstance(padding, (list, tuple)) else [padding])):
+            return None  # padded border windows divide by a different count
+        return math.prod(int(k) for k in (kernel if isinstance(kernel, (list, tuple)) else [kernel]))
+    return None
+
+
+def integer_recipes(graph_module: Any) -> list[dict[str, Any]]:
+    """Integer recipe parameters for each converted affine map and movement, keyed by node name.
+
+    Reads the scales PT2E calibrated on the node's own dequantize inputs and quantize output, and
+    states the operation in the form :mod:`merlin.targetgen.recipe_numerics` defines: integer weights
+    and an int32 constant into the accumulator, then one readout. A node whose scales are not literal
+    per-tensor constants, or whose form the numerics refuse, is recorded with the reason.
+    """
+    from merlin.targetgen import recipe_numerics as RN
+
+    rows = []
+    for node in graph_module.graph.nodes:
+        family = node.meta.get("merlin_recipe_family")
+        if family is None:
+            continue
+        name = str(node.target)
+        inputs = [
+            _per_tensor_scale(arg, "quantized_decomposed.dequantize_per_tensor")
+            for arg in (node.args[0] if name.startswith("aten.cat") else node.args)
+            if hasattr(arg, "op")
+        ]
+        outputs = [_per_tensor_scale(user, "quantized_decomposed.quantize_per_tensor") for user in node.users]
+        s_out = next((scale for scale in outputs if scale is not None), None)
+        row: dict[str, Any] = {"node": node.name, "operator": name, "family": family, "input_scales": inputs}
+        try:
+            if s_out is None or (family == "affine_map" and None in inputs):
+                raise RN.RecipeNumericsError("the node's quantization scales are not literal per-tensor constants")
+            row["output_scale"] = s_out
+            scalar = node.args[1] if len(node.args) > 1 and isinstance(node.args[1], (int, float)) else None
+            alpha = float(node.kwargs.get("alpha", 1))
+            if name.startswith("aten.sub.Tensor") and scalar is None:
+                recipe = RN.linear_combination(inputs[0], alpha * inputs[1], s_out, sign_b=-1)
+            elif name.startswith(("aten.add.", "aten.sub.")) and scalar is not None:
+                sign = -1.0 if name.startswith("aten.sub") else 1.0
+                recipe = RN.affine(inputs[0], s_out, offset=sign * alpha * float(scalar))
+            elif name.startswith("aten.mul.") and scalar is not None:
+                recipe = RN.affine(inputs[0], s_out, gain=float(scalar))
+            elif name.startswith("aten.div.") and scalar is not None:
+                recipe = RN.affine(inputs[0], s_out, gain=1.0 / float(scalar))
+            elif name.startswith("aten.neg"):
+                recipe = RN.affine(inputs[0], s_out, gain=-1.0)
+            elif name.startswith("aten.relu"):
+                recipe = RN.affine(inputs[0], s_out, activation="relu")
+            else:
+                recipe = None
+            if family == "window_mean":
+                divisor = _window_divisor(node)
+                if divisor is None:
+                    raise RN.RecipeNumericsError("the window's element count varies or is not static")
+                row["readout_scale"] = RN.window_mean_readout(inputs[0], divisor, s_out)
+                row["divisor"] = divisor
+            if recipe is not None:
+                row["integer_recipe"] = recipe.to_dict()
+            elif family == "movement":
+                value = (
+                    node.args[1]
+                    if name.startswith(("aten.fill", "aten.full_like"))
+                    else node.args[2]
+                    if name.startswith("aten.constant_pad_nd") and len(node.args) > 2
+                    else node.args[3]
+                    if name.startswith("aten.pad") and len(node.args) > 3
+                    else 0.0
+                    if name.startswith(("aten.constant_pad_nd", "aten.pad"))
+                    else None
+                )
+                if isinstance(value, (int, float)):
+                    row["constant_code"] = RN.constant_code(float(value), s_out)
+                row["inputs"] = [RN.requantize(scale, s_out) if scale is not None else None for scale in inputs]
+        except (RN.RecipeNumericsError, TypeError, ValueError, ZeroDivisionError) as exc:
+            row["refused"] = str(exc)
+        rows.append(row)
+    return rows
 
 
 def quantize_config(recipe: Mapping[str, Any]):
@@ -1113,6 +1380,10 @@ def apply_recipe(
         "annotated_contractions": quantizer.annotated,
         "annotated_sums": quantizer.annotated_sums,
         "annotated_means": quantizer.annotated_means,
+        "annotated_affine_maps": quantizer.annotated_maps,
+        "annotated_movements": quantizer.annotated_moves,
+        # The exact integer form of every quantized affine map and movement, from its observed scales.
+        "integer_recipes": integer_recipes(quantized),
         # Sums and means the recipe's families cover and the graph does not requantize: left alone.
         "sums_and_means_left_in_float": quantizer.left_in_float,
         "calibration_samples": calibrated,
