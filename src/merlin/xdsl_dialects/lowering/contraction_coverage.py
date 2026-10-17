@@ -104,6 +104,31 @@ def classify_generic(op) -> str:
     return "elementwise"
 
 
+def reduction_kind(op) -> str | None:
+    """The reduction kind (sum / max / absmax / other) of a reducing ``linalg`` op, by its body.
+
+    Applies to a reducing ``linalg.generic`` and to ``linalg.reduce`` (which has no iterator types);
+    None for anything that does not reduce, so a caller cannot read a kind into a map or a copy.
+    A contraction is not a reduction kind: its body multiplies before it adds.
+    """
+    name = getattr(op, "name", "")
+    if name == "linalg.generic":
+        if "reduction" not in _iterator_text(op):
+            return None
+    elif name != "linalg.reduce":
+        return None
+    body = _body_op_names(op)
+    if body & _MUL and body & _ADD:
+        return None
+    if body & _MAX and body & _ABS:
+        return "absmax"
+    if body & _MAX:
+        return "max"
+    if body & _ADD:
+        return "sum"
+    return "other"
+
+
 def loop_extents(op) -> dict[int, int] | None:
     """Iteration-dim index -> extent, read off the operands through their indexing maps.
 

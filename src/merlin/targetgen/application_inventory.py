@@ -625,6 +625,7 @@ def _application_operation_inventory(
         support = name == "arith.constant" or name.startswith(("tensor.", "memref.", "scf."))
         family: str | None = None
         family_basis = "unknown"
+        reduction_kind = cc.reduction_kind(op) if name in {"linalg.generic", "linalg.reduce"} else None
         if name == "linalg.generic":
             try:
                 generic_kind = cc.classify_generic(op)
@@ -735,6 +736,7 @@ def _application_operation_inventory(
                     n=n,
                     rank=rank,
                     form=sf.operation_form(source_op or frontend or name.rpartition(".")[2], carrier_op=name),
+                    kind=reduction_kind if family == "reduction" else None,
                 ),
                 cap_map,
             )
@@ -762,6 +764,8 @@ def _application_operation_inventory(
             "callee": callee,
             "semantic_family": family,
             "family_basis": family_basis,
+            # The sum/max distinction classify_generic draws, kept so a sum-only capability can tell.
+            **({"reduction_kind": reduction_kind} if family == "reduction" and reduction_kind else {}),
             "operand_dtypes": operand_dtypes,
             "ordered_operand_types": structure["ordered_operand_types"],
             "operand_format": input_format,

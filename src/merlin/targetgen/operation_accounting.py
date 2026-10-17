@@ -116,6 +116,8 @@ def _observed_signature(row: dict) -> dict:
     from merlin.targetgen.semantic_families import operation_form
 
     observed = {"family": row.get("semantic_family")}
+    if row.get("reduction_kind") is not None:
+        observed["kind"] = row["reduction_kind"]
     carrier = row.get("mlir_operation") or ""
     form = operation_form(carrier.rpartition(".")[2], carrier_op=carrier)
     if form is not None:
@@ -241,6 +243,7 @@ def _hardware_admission(row: dict, signature: dict, contract: dict | None, capab
             ),
             rank=signature.get("rank"),
             form=signature.get("form"),
+            kind=signature.get("kind"),
             layout=signature.get("layout"),
             m=dimensions.get("M"),
             k=dimensions.get("K"),

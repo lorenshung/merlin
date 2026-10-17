@@ -45,6 +45,7 @@ _SIGNATURE_FIELDS = frozenset(
         "ordered_result_dtypes",
         "compute_dtypes",
         "quantization_parameters",
+        "kinds",
     }
 )
 
@@ -284,6 +285,17 @@ def validate_software_spec(document: dict, target: str | None = None, *, source:
                 or any(not isinstance(value, str) or not value for value in signature[field])
             ):
                 raise ValueError(f"{source}: operation {row['id']!r} {field} must be a string list")
+        if "kinds" in signature:
+            from merlin.targetgen.compute_units import REDUCTION_KINDS
+
+            if (
+                not isinstance(signature["kinds"], list)
+                or not signature["kinds"]
+                or any(kind not in REDUCTION_KINDS for kind in signature["kinds"])
+            ):
+                raise ValueError(
+                    f"{source}: operation {row['id']!r} kinds must be reduction kinds from {sorted(REDUCTION_KINDS)}"
+                )
         if "ranks" in signature and (
             not isinstance(signature["ranks"], list)
             or any(type(value) is not int or value < 1 for value in signature["ranks"])
@@ -581,6 +593,7 @@ def admit_operation(spec: dict, op: str, signature: dict, placement: str) -> dic
             ("broadcasting", "broadcasting"),
             ("aliasing", "aliasing"),
             ("scale_granularity", "scale_granularity"),
+            ("kinds", "kind"),
         ):
             if key not in constraints:
                 continue
