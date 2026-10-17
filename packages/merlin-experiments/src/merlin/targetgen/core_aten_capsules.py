@@ -211,7 +211,11 @@ def prepare_numeric_fixture(bundle: Path, report: dict, flow: dict) -> None:
             provider=provider,
             package=Path(flow["device_package"]),
         )
-    if not plan["quantized_contractions"] or plan["integer_reference"].get("status") != "prepared":
+    # A captured W8A8 graph is quantized at preparation (quantized_contractions); a capture that is
+    # already i8 x i8 -> i32 is admitted as is (native_contractions). Either is an admitted
+    # contraction, and both need the independent exact integer reference.
+    admitted = (plan.get("quantized_contractions") or 0) + (plan.get("native_contractions") or 0)
+    if not admitted or (plan.get("integer_reference") or {}).get("status") != "prepared":
         raise ValueError("scored capsule has no admitted contraction with an exact integer reference")
     report["numeric_preparation"] = plan
     for record in report["cases"]:
