@@ -171,7 +171,7 @@ def _software_admissions(spec: dict | None, row: dict, signature: dict) -> list[
     declarations = spec.get("operations") or []
     # The same exact-roster rule as admit_operation: a reviewed host row for a provably different
     # typed instance of the operation does not hide the family declarations.
-    direct, _ = exact_declarations(spec, row["operation"], signature)
+    direct = exact_declarations(spec, row["operation"], signature)[0] if declarations else []
     decisions = []
     for declaration in direct or declarations:
         placement = declaration["placement"]
