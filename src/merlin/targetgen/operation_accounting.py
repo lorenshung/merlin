@@ -119,7 +119,12 @@ def _observed_signature(row: dict) -> dict:
     if row.get("reduction_kind") is not None:
         observed["kind"] = row["reduction_kind"]
     carrier = row.get("mlir_operation") or ""
-    form = operation_form(carrier.rpartition(".")[2], carrier_op=carrier)
+    form = row.get("movement_form") or operation_form(
+        carrier.rpartition(".")[2],
+        carrier_op=carrier,
+        indexing_maps=row.get("indexing_maps"),
+        body_operations=row.get("body_operations"),
+    )
     if form is not None:
         observed["form"] = form
     for source, key in (

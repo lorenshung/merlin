@@ -626,6 +626,10 @@ def _application_operation_inventory(
         family: str | None = None
         family_basis = "unknown"
         reduction_kind = cc.reduction_kind(op) if name in {"linalg.generic", "linalg.reduce"} else None
+        # The movement form comes from the carrier and its indexing maps, never a provenance label.
+        movement_form = sf.carrier_form(op) or sf.operation_form(
+            source_op or frontend or name.rpartition(".")[2], carrier_op=name
+        )
         if name == "linalg.generic":
             try:
                 generic_kind = cc.classify_generic(op)
@@ -735,7 +739,7 @@ def _application_operation_inventory(
                     k=k,
                     n=n,
                     rank=rank,
-                    form=sf.operation_form(source_op or frontend or name.rpartition(".")[2], carrier_op=name),
+                    form=movement_form,
                     kind=reduction_kind if family == "reduction" else None,
                 ),
                 cap_map,
@@ -766,6 +770,7 @@ def _application_operation_inventory(
             "family_basis": family_basis,
             # The sum/max distinction classify_generic draws, kept so a sum-only capability can tell.
             **({"reduction_kind": reduction_kind} if family == "reduction" and reduction_kind else {}),
+            **({"movement_form": movement_form} if family == "movement" and movement_form else {}),
             "operand_dtypes": operand_dtypes,
             "ordered_operand_types": structure["ordered_operand_types"],
             "operand_format": input_format,

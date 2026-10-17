@@ -375,7 +375,7 @@ def is_eligible(
                     f"{region.kind} reduction not in {c.family} supported kinds {list(c.kinds)}",
                     refusal="reduction_kind",
                 )
-        if c.forms and region.form not in c.forms:
+        if c.forms and not sf.form_admitted(region.form, c.forms):
             return EligibilityVerdict(
                 False,
                 family,
