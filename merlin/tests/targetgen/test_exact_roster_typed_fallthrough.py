@@ -18,60 +18,20 @@ from __future__ import annotations
 import copy
 
 import pytest
+from phase0_fixture_selection import fixture_resolved, real_selection
 
 from merlin.common.paths import repo_root
-from merlin.common.yaml import load_yaml
-from merlin.targetgen import spec_fact_drift as D
 from merlin.targetgen.operation_accounting import admit_operation_row
-from merlin.targetgen.software_spec import admit_contraction_operation, admit_operation, load_software_spec
+from merlin.targetgen.software_spec import admit_contraction_operation, admit_operation
 
 pytestmark = pytest.mark.target("gemmini")
 
 _BASE = repo_root() / "examples/gemmini/target"
-_RAW = {
-    "facts": {
-        "arrays": [{"name": "mesh", "rows": 16, "cols": 16, "corroborated": True, "mac_idiom": {"muls": 1, "adds": 1}}],
-        "datapaths": [{"name": "input", "dtype": "i8"}, {"name": "accumulator", "dtype": "i32"}],
-        "interfaces": [{"name": "mesh_dma"}],
-        "storage_datapaths": [{"name": "input", "dtype": "i8"}, {"name": "accumulator", "dtype": "i32"}],
-    }
-}
-_FACETS = [
-    {
-        "unit": "systolic_mesh",
-        "accumulator_dtype": "i32",
-        "readouts": [
-            {"selector": "i8", "applies": ["acc_scale", "relu", "maxpool"], "evidence": "fixture"},
-            {"selector": "i32", "applies": [], "evidence": "fixture"},
-        ],
-        "operand_sum": {"operands": 2},
-        "unknown": {},
-        "scale": {"granularities": ["tensor"], "granularities_complete": True, "carriers": []},
-    }
-]
-_QUANT = [
-    {
-        "status": "derived",
-        "unit": "systolic_mesh",
-        "format": "int8",
-        "recipe": {"families": ["contraction", "operand_sum", "window_mean"]},
-    }
-]
 
 
 @pytest.fixture(scope="module")
 def resolved():
-    contract = load_yaml(_BASE / "contracts/target_contract.yaml")
-    facts = D.fact_capabilities(
-        target="gemmini",
-        contract=contract,
-        raw_facts=_RAW,
-        readout_facets=_FACETS,
-        quantization_candidates=_QUANT,
-        taxonomy={},
-    )
-    spec, _ = D.resolve_spec(load_software_spec(_BASE / "software-spec.yaml", target="gemmini"), facts)
-    return spec
+    return fixture_resolved(_BASE, "gemmini")
 
 
 def _int8(family: str, **extra) -> dict:
@@ -242,3 +202,26 @@ def test_phase0_accounting_uses_the_same_rule(resolved):
     host["ordered_result_types"] = [dict(t, dtype="f32") for t in row["ordered_result_types"]]
     result = admit_operation_row(host, software_spec=resolved, capability_contract=None)
     assert result["matching_declarations"] == ["host_f32_elementwise"]
+
+
+_SHADOWED = [
+    ("aten.add.Tensor", "elementwise_map", {}),
+    ("aten.sub.Tensor", "elementwise_map", {}),
+    ("aten.relu.default", "elementwise_map", {}),
+    ("aten.neg.default", "elementwise_map", {}),
+    ("aten._to_copy.default", "elementwise_map", {"ordered_operand_dtypes": ["int8", "int32"]}),
+]
+
+
+def test_the_same_fall_through_holds_against_a_selected_real_facts_bundle():
+    """Run only when MERLIN_RTL_FACTS names a real bundle; then the production select_spec resolves it."""
+    try:
+        selection = real_selection(_BASE, "gemmini")
+    except (KeyError, LookupError, ValueError) as exc:
+        pytest.skip(f"the selected bundle cannot be resolved here: {exc}")
+    if selection is None:
+        pytest.skip("MERLIN_RTL_FACTS names no facts bundle")
+    for op, family, extra in _SHADOWED:
+        decision = admit_operation(selection["spec"], op, _int8(family, **extra), "accelerator")
+        assert decision["status"] == "admitted", (op, decision)
+        assert decision["ignored_disjoint_declarations"]
