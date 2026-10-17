@@ -951,9 +951,12 @@ def epilogue_capability(facet: ReadoutFacet, *, name: str | None = None):
         )
     applied = {stage for readout in facet.readouts for stage in readout.get("applies") or ()}
     has_bias, has_relu = bool(applied & set(BIAS_STAGES)), "relu" in applied
+    # The readout applies the activation to the int32 accumulator BEFORE the scale, rounding and
+    # saturation (the accumulator-scale stage order). The two orders are the same function only for
+    # a positive scale, so the template states the hardware order rather than the commuted one.
     core = ("scale_f32", "round_to_nearest_even", "clamp")
     templates = tuple(
-        (("bias_i32",) if bias else ()) + core + (("relu",) if relu else ())
+        (("bias_i32",) if bias else ()) + (("relu",) if relu else ()) + core
         for bias in ((False, True) if has_bias else (False,))
         for relu in ((False, True) if has_relu else (False,))
     )

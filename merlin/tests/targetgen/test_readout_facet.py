@@ -134,7 +134,7 @@ def test_the_epilogue_capability_is_built_from_derived_limits_or_not_at_all() ->
     capability = RF.epilogue_capability(facet)
     assert capability.scale_granularities == ("per_tensor",)
     assert capability.saturations == ((-128, 127),) and capability.output_dtypes == ("i8",)
-    assert ("bias_i32", "scale_f32", "round_to_nearest_even", "clamp", "relu") in (capability.ordered_stage_templates)
+    assert ("bias_i32", "relu", "scale_f32", "round_to_nearest_even", "clamp") in (capability.ordered_stage_templates)
     # No header-verified rounding: nothing licenses one, so no capability exists to plan against.
     with pytest.raises(ValueError, match="rounding"):
         RF.epilogue_capability(RF.derive("t", facts=_facts(), readouts=_READOUTS))
@@ -283,3 +283,18 @@ def test_a_multiplier_above_one_needs_a_readout_scale_to_carry_it() -> None:
     bare = RF.ReadoutFacet(target="t", unit="u", accumulator_kind="addressable", operand_sum=dict(_SUM))
     assert "exceed one" in bare.operand_sum_refusal((1.5, 0.5))
     assert bare.operand_sum_refusal((1.0, 0.5)) is None
+
+
+def test_the_readout_applies_relu_before_the_scale() -> None:
+    """The accumulator-scale stage runs the activation on the int32 accumulator, then scales and saturates.
+
+    The template used to put ReLU after the clamp. That is the same function only for a positive
+    scale, and the hardware order is what a backend emits and what an oracle must model.
+    """
+    facet = RF.derive("t", facts=_facts(), unit={"name": "u"}, scalar_abi=_ABI, readouts=_READOUTS)
+    templates = RF.epilogue_capability(facet).ordered_stage_templates
+    with_relu = [template for template in templates if "relu" in template]
+    assert with_relu
+    for template in with_relu:
+        assert template.index("relu") < template.index("scale_f32") < template.index("clamp")
+    assert not any(template[-1] == "relu" for template in templates)
