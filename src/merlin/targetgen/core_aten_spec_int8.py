@@ -54,6 +54,8 @@ def select_spec(target: str, facts: dict, spec_path: Path, host_path: Path) -> d
     return {
         "spec": resolved,
         "host": host,
+        # The selected hardware capability declaration, for the HW screen of non-contraction sites.
+        "capability_contract": contract,
         "resolution": resolution,
         "recipes": recipes,
         "quantization_candidates": candidates,
@@ -379,6 +381,9 @@ def admission_plan(module, selection, *, captured=False, native=False):
             quantizers.append(row)
     return dict(
         sites=sites,
+        # Elementwise, reduction and movement sites, screened by the same authorities; informational
+        # for the contraction pipeline above, whose status they do not change.
+        non_contraction_sites=non_contraction_sites(module, selection, contract=selection.get("capability_contract")),
         quantization_sites=quantizers,
         quantized_contractions=0,
         scales=[],
@@ -450,3 +455,218 @@ def closed_integer_mac(op):
         and isinstance(yielded, YieldOp)
         and tuple(yielded.operands) == (add.result,)
     )
+
+
+#: Carriers that are views or scalar plumbing, not independent device work (C52: views stay host
+#: metadata and are never materialised), so they are not screened as sites.
+_NON_SITE_CARRIERS = frozenset(
+    {
+        "tensor.empty",
+        "tensor.extract_slice",
+        "tensor.collapse_shape",
+        "tensor.expand_shape",
+        "tensor.reshape",
+        "tensor.cast",
+        "tensor.dim",
+        "tensor.extract",
+        "tensor.yield",
+        "linalg.yield",
+        "linalg.index",
+    }
+)
+#: Tensor-dialect carriers whose work is data motion.
+_TENSOR_MOVEMENT = frozenset({"tensor.concat", "tensor.insert_slice", "tensor.pad", "tensor.splat"})
+
+
+def _site_family(op) -> str | None:
+    """The semantic family of a top-level non-contraction site, structurally; None when not a site."""
+    from merlin.common import mlir_query as mq
+    from merlin.targetgen import semantic_families as sf
+    from merlin.xdsl_dialects.lowering import contraction_coverage as cc
+
+    name = mq.op_name(op)
+    if name in _NON_SITE_CARRIERS:
+        return None
+    if name == "linalg.generic":
+        return {
+            "sum-reduction": "reduction",
+            "max-reduction": "reduction",
+            "absmax": "reduction",
+            "other-reduction": "reduction",
+            "movement": "movement",
+            "elementwise": "elementwise_map",
+        }.get(cc.classify_generic(op))
+    if name == "linalg.reduce":
+        return "reduction"
+    if name in _TENSOR_MOVEMENT:
+        return "movement"
+    if name.startswith("linalg."):
+        family = sf.from_op(name.rpartition(".")[2])
+        return family if family in {"movement", "elementwise_map", "reduction"} else None
+    return None
+
+
+def non_contraction_sites(module, selection, *, contract=None):
+    """Screen every top-level non-contraction site of an integer program for device placement.
+
+    A site is one elementwise, reduction or movement operation outside the contractions
+    :func:`admission_plan` screens. Each passes through the same authorities a contraction does: the
+    operand-load and readout transfer contracts, SW :func:`admit_operation` (standalone, and fused
+    behind a contraction producer when one feeds it) and, given the selected capability contract,
+    HW :func:`eligibility.is_eligible`. Nothing here selects a backend or a lowering: an admitted site
+    is a placement candidate only. A float site is screened like any other and refused by precision,
+    which is the honest answer until a recipe quantizes it.
+    """
+    from merlin.common import mlir_query as mq
+    from merlin.kernels.shapes import observe_contractions
+    from merlin.targetgen import access_observations
+    from merlin.targetgen import semantic_families as sf
+    from merlin.targetgen.eligibility import (
+        RegionDescriptor,
+        capability_map_from_contract,
+        is_eligible,
+        undetermined_families_from_contract,
+    )
+    from merlin.targetgen.transfer_contracts import screen_transfer_contract
+    from merlin.xdsl_dialects.lowering import contraction_coverage as cc
+
+    spec = selection["spec"]
+    capability_map = capability_map_from_contract(contract) if contract is not None else None
+    undetermined = undetermined_families_from_contract(contract) if contract is not None else None
+    contractions = {id(op) for op, _shape in observe_contractions(module)}
+    ordinals = {id(op): i for i, op in enumerate(module.walk())}
+
+    def precision(value) -> str | None:
+        dtype = mq.type_shape_dtype(value.type)[1]
+        return dtype or None
+
+    def nested(op) -> bool:
+        parent = op.parent_op()
+        while parent is not None:
+            if mq.op_name(parent).startswith("linalg."):
+                return True
+            parent = parent.parent_op()
+        return False
+
+    def produced_by_contraction(op) -> bool:
+        return any(id(getattr(value, "owner", None)) in contractions for value in op.operands)
+
+    sites = []
+    for op in module.walk():
+        if id(op) in contractions or nested(op):
+            continue
+        family = _site_family(op)
+        if family is None:
+            continue
+        name = mq.op_name(op)
+        tensors = [value for value in op.operands if hasattr(value.type, "get_shape")]
+        results = list(op.results)
+        operand_dtypes = [precision(value) for value in op.operands]
+        result_dtypes = [precision(value) for value in results]
+        rank = len(results[0].type.get_shape()) if results and hasattr(results[0].type, "get_shape") else None
+        source = mq.attr_str(op, "prov.aten") or name
+        observations = access_observations.observe(op, family)
+        form = sf.carrier_form(op) if family == "movement" else None
+        kind = cc.reduction_kind(op) if family == "reduction" else None
+        in_dtype = precision(tensors[0]) if tensors else (operand_dtypes[0] if operand_dtypes else None)
+        out_dtype = result_dtypes[0] if result_dtypes else None
+        signature = {
+            "family": family,
+            "operand_dtype": in_dtype,
+            "ordered_operand_dtypes": operand_dtypes,
+            "ordered_result_dtypes": result_dtypes,
+            "rank": rank,
+            # The pipeline's own calibration policy is static per-tensor (admission_plan).
+            "scale_granularity": "tensor",
+            **{key: value for key, value in observations.items() if value is not None},
+        }
+        if form is not None:
+            signature["form"] = form
+        if kind is not None:
+            signature["kind"] = kind
+        steps, reasons = [], list(pipeline_refusals(selection))
+        for step, key, origin, destination, dtype in (
+            (2, "operand_load", "host", "accelerator", in_dtype),
+            (4, "readout", "accelerator", "host", out_dtype),
+        ):
+            decision = screen_transfer_contract(
+                spec,
+                source_placement=origin,
+                destination_placement=destination,
+                operand_dtype=dtype,
+                result_dtype=dtype,
+                operand_layout="row_major_contiguous",
+                result_layout="row_major_contiguous",
+            )
+            steps.append({"step": step, "transfer": key, "dtype": dtype, **decision})
+        placements = [("accelerator", signature)]
+        if produced_by_contraction(op) and family == "elementwise_map":
+            placements.append(("fused_accelerator", {**signature, "composed_with": ["contraction"]}))
+        software = [admit_operation(spec, source, observed, placement) for placement, observed in placements]
+        index = next(
+            (i for i, d in enumerate(software) if d["status"] == "admitted"),
+            next((i for i, d in enumerate(software) if d["status"] == "unknown"), 0),
+        )
+        chosen = software[index]
+        fused = ("contraction",) if placements[index][0] == "fused_accelerator" else None
+        if chosen.get("declaration"):
+            chosen = {**chosen, "source": declaration_location(selection, "software", chosen["declaration"])}
+        steps.append({"step": 3, "software": chosen, "placement": placements[index][0]})
+        hardware = None
+        if capability_map is not None:
+            verdict = is_eligible(
+                RegionDescriptor(
+                    op=name.rpartition(".")[2],
+                    family=family,
+                    in_dtype=in_dtype,
+                    out_dtype=out_dtype,
+                    rank=rank,
+                    layout=signature.get("layout"),
+                    form=form,
+                    kind=kind,
+                    scale_granularity=None,
+                ),
+                capability_map,
+                undetermined=undetermined,
+                fused_with=fused,
+            )
+            hardware = {
+                "status": "admitted" if verdict.eligible else "unknown" if verdict.undetermined else "unsupported",
+                "reason": verdict.reason,
+                "refusal": verdict.refusal,
+            }
+            steps.append({"step": 3, "hardware": hardware})
+        statuses = [row["status"] for row in steps if "transfer" in row] + [chosen["status"]]
+        statuses.append(hardware["status"] if hardware is not None else "unknown")
+        for row in steps:
+            if "transfer" in row and row["status"] not in {"admitted", "not_applicable"}:
+                reasons.append(
+                    f"step {row['step']} {row['transfer']} {row['dtype']}: {row.get('reason', row['status'])}"
+                )
+        if chosen["status"] != "admitted":
+            reasons.append(f"step 3 {source} software {chosen.get('declaration', '')}: {chosen['reason']}")
+        if hardware is None:
+            reasons.append("step 3 hardware: no selected capability contract")
+        elif hardware["status"] != "admitted":
+            reasons.append(f"step 3 hardware: {hardware['reason']}")
+        status = (
+            "admitted"
+            if not reasons
+            else "refused"
+            if any(value == "unsupported" for value in statuses) or pipeline_refusals(selection)
+            else "unknown"
+        )
+        sites.append(
+            {
+                "source_operation_ordinal": ordinals[id(op)],
+                "source_operation": name,
+                "source_operator": source,
+                "family": family,
+                "signature": signature,
+                "steps": steps,
+                "status": status,
+                "reasons": reasons,
+                "scope": "placement screen only; no backend, lowering or numerics is selected here",
+            }
+        )
+    return sites

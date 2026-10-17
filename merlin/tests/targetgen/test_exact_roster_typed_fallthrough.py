@@ -73,10 +73,12 @@ def test_mean_dim_reaches_its_accelerator_families(resolved):
     decision = admit_operation(resolved, "aten.mean.dim", window_mean, "accelerator")
     assert decision["status"] == "admitted" and decision["declaration"] == "contraction"
     assert decision["ignored_disjoint_declarations"] == ["host_f32_reduction_ops"]
-    # The standalone sum-reduction row is authored `status: unreviewed`: it is now reached, and it
-    # answers unknown (operator review pending), not a host-row refusal.
-    standalone = admit_operation(resolved, "aten.mean.dim", _int8("reduction"), "accelerator")
-    assert standalone["status"] == "unknown" and standalone["declaration"] == "reduction_standalone"
+    # The standalone sum-reduction row is now reached instead of the host row: admitted once the
+    # operator has reviewed it, unknown (review pending) before that -- never a host-row refusal.
+    row = next(r for r in resolved["operations"] if r["id"] == "reduction_standalone")
+    standalone = admit_operation(resolved, "aten.mean.dim", _int8("reduction", kind="sum"), "accelerator")
+    expected = "admitted" if row.get("status", "reviewed") == "reviewed" else "unknown"
+    assert standalone["status"] == expected and standalone["declaration"] == "reduction_standalone"
 
 
 @pytest.mark.parametrize(
