@@ -111,7 +111,7 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
 
     def scalar_body(
         block, operands, point=(), operand_taints=None, operand_nan_only=None,
-        captured=None, captured_taints=None, captured_nan_only=None,
+        captured=None, captured_taints=None, captured_nan_only=None, single_operation=False,
     ):
         from merlin.targetgen.source_scalar import fused_multiply_add, logical_shift, unsigned_to_float
 
@@ -254,26 +254,10 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
                 if predicate not in range(6):
                     raise ValueError("unsupported source integer predicate")
                 y = (left == right, left != right, left < right, left <= right, left > right, left >= right)[predicate]
-            elif name in {
-                "arith.divui",
-                "arith.remui",
-                "arith.andi",
-                "arith.ori",
-                "arith.xori",
-                "arith.shli",
-                "arith.shrui",
-            }:
-                if name in {"arith.divui", "arith.remui"} and any(bool((v < 0).any()) for v in xs):
+            elif name in {"arith.divui", "arith.remui"}:
+                if any(bool((v < 0).any()) for v in xs):
                     raise ValueError("source index division requires nonnegative operands")
-                y = {
-                    "arith.divui": lambda: torch.div(xs[0], xs[1], rounding_mode="floor"),
-                    "arith.remui": lambda: xs[0] % xs[1],
-                    "arith.andi": lambda: xs[0] & xs[1],
-                    "arith.ori": lambda: xs[0] | xs[1],
-                    "arith.xori": lambda: xs[0] ^ xs[1],
-                    "arith.shli": lambda: xs[0] << xs[1],
-                    "arith.shrui": lambda: logical_shift(xs[0], xs[1], getattr(getattr(inner.operands[0].type, "width", None), "data", 64)),
-                }[name]()
+                y = (torch.div(xs[0], xs[1], rounding_mode="floor") if name == "arith.divui" else xs[0] % xs[1])
                 y = y.to(dtype(inner.results[0].type))
             elif name == "arith.cmpf":
                 predicate = inner.predicate.value.data
@@ -303,6 +287,8 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
             local[inner.results[0]] = y
             local_taints[inner.results[0]] = uncertain.expand(y.shape)
             nan_only[inner.results[0]] = payload_only.expand(y.shape)
+        if single_operation:
+            return y, local_taints[inner.results[0]], nan_only[inner.results[0]]
         raise ValueError("source region lacks yield")
 
     def generic(op, xs, ts, ns):
@@ -440,10 +426,10 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
             return xs, scales
         if name == "arith.constant":
             y = constant(op)
-        elif name in {"arith.extf", "arith.truncf", "arith.extsi", "arith.trunci", "arith.sitofp"}:
-            y = xs[0].to(dtype(op.results[0].type))
-        elif name == "arith.bitcast":
-            y = xs[0].contiguous().reshape(-1).view(dtype(op.results[0].type)).reshape(xs[0].shape)
+        elif name.startswith(("arith.", "math.")):
+            from types import SimpleNamespace
+
+            y, uncertain, payload_only = scalar_body(SimpleNamespace(args=(), ops=(op,)), [], single_operation=True)
         elif name == "tensor.empty":
             y = torch.empty(op.results[0].type.get_shape(), dtype=dtype(op.results[0].type))
         elif name in {"tensor.expand_shape", "tensor.collapse_shape", "tensor.reshape"}:

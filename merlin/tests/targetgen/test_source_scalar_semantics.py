@@ -183,3 +183,34 @@ def test_nan_payload_audit_follows_masks_across_tensor_regions():
     result = run(module, words, audit)
     assert audit["ambiguous_nan_payload"] is False
     assert result.view(__import__("torch").int32).item() == 0x7FC00001
+
+
+def test_scalar_coefficients_outside_tensor_regions_use_the_same_semantics():
+    module = parse_mlir_text("""module {
+      func.func @forward() -> tensor<1xf16> {
+        %integer=arith.constant -9223371487098961919 : i64
+        %fp=arith.uitofp %integer : i64 to f32
+        %one=arith.constant 1.0 : f32
+        %minus=arith.constant -1.0 : f32
+        %combined=math.fma %one,%one,%minus : f32
+        %half=arith.truncf %combined : f32 to f16
+        %out=tensor.splat %half : tensor<1xf16>
+        return %out : tensor<1xf16>
+      }}""")
+    # Keep the unsigned conversion live as a second output, so neither scalar
+    # conversion is silently skipped by source interpretation.
+    from xdsl.dialects import func
+    from xdsl.dialects.builtin import FunctionType, TensorType, f32
+    from xdsl.dialects.tensor import SplatOp
+    from xdsl.rewriter import Rewriter
+
+    function = next(op for op in module.walk() if op.name == "func.func")
+    converted = next(op for op in module.walk() if op.name == "arith.uitofp").results[0]
+    splat = SplatOp(converted, [], TensorType(f32, [1]))
+    original = function.body.block.last_op.operands[0]
+    Rewriter.replace_op(function.body.block.last_op, [splat, func.ReturnOp(original, splat.result)])
+    function.properties["function_type"] = FunctionType.from_lists([], [original.type, splat.result.type])
+    pytest.importorskip("torch")
+    values, _ = evaluate(module, [], [], quant_min=-128, quant_max=127, eps=2**-12)
+    assert values[0].item() == 0.0
+    assert values[1].item() == float((1 << 63) + (1 << 40))
