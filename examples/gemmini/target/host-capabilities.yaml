@@ -42,12 +42,12 @@ operations:
     ops: [aten.mul.Tensor, aten.add.Tensor, aten.add.Scalar, aten.div.Tensor, aten.relu.default]
     families: [elementwise_map]
     placement: host
-    signature: {dtypes: [f32], ordered_result_dtypes: [f32], ranks: [2, 3, 4]}
+    signature: {dtypes: [f32], ordered_result_dtypes: [f32], ranks: [0, 1, 2, 3, 4, 5]}
     numerical_contract:
       status: reviewed
       semantics: {arithmetic: ieee754_binary32, rounding: round_to_nearest_even, subnormals: preserved,
                   per_element: correctly_rounded_single_operation, nan: riscv_canonical_nan}
-      evidence: {reviewed_by: "operator decision 2026-10-01 via coordinating session, approving W1_DECLARATIONS_DRAFT.md", basis: "observed f32 signatures and arith.mulf/addf/divf/maximumf bodies in the captured graph; emitted scalar-package execution remains an obligation"}
+      evidence: {review_status: "authored, pending operator review", rank_extension: "rank-independent scalar IEEE primitives; widened to ranks 0 through 5", reviewed_by: "operator decision 2026-10-01 via coordinating session, approving W1_DECLARATIONS_DRAFT.md", basis: "observed f32 signatures and arith.mulf/addf/divf/maximumf bodies in the captured graph; emitted scalar-package execution remains an obligation"}
   - id: host_f32_elementwise_transcendental
     ops: [aten.rsqrt.default, aten.pow.Tensor_Scalar, aten.sigmoid.default]
     families: [elementwise_map]
@@ -62,12 +62,12 @@ operations:
     ops: [aten.native_layer_norm.default, aten._softmax.default, aten.mean.dim]
     families: [reduction, elementwise_map]
     placement: host
-    signature: {dtypes: [f32], ordered_result_dtypes: [f32], ranks: [1, 2, 3, 4]}
+    signature: {dtypes: [f32], ordered_result_dtypes: [f32], ranks: [0, 1, 2, 3, 4, 5]}
     numerical_contract:
       status: reviewed
       semantics: {arithmetic: ieee754_binary32, rounding: round_to_nearest_even, subnormals: preserved,
                   accumulator: f32, reduction_order: selected_lowering, epsilon: graph_parameter}
-      evidence: {reviewed_by: "operator decision 2026-10-01 via coordinating session, approving W1_DECLARATIONS_DRAFT.md", basis: "observed f32 linalg.reduce/linalg.generic signatures (addf, divf, maximumf, subf, exp, rsqrt bodies); emitted scalar-package execution remains an obligation"}
+      evidence: {review_status: "authored, pending operator review", rank_extension: "rank-independent host reduction signature; numerical qualification remains mandatory", reviewed_by: "operator decision 2026-10-01 via coordinating session, approving W1_DECLARATIONS_DRAFT.md", basis: "observed f32 linalg.reduce/linalg.generic signatures (addf, divf, maximumf, subf, exp, rsqrt bodies); emitted scalar-package execution remains an obligation"}
   - id: host_review_prepared_f32_maximum
     status: reviewed
     ops: [aten.amax.default]

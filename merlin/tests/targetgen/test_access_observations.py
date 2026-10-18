@@ -154,3 +154,22 @@ def test_named_broadcast_observes_row_replay(dimensions, source, result, expecte
         if mq.op_name(op) == "linalg.broadcast"
     )
     assert AO.primitive_signature(op)["broadcasting"] == expected
+
+
+def test_rank_zero_pointwise_has_no_broadcast_dimensions():
+    from merlin.frontends.linalg_mlir import parse_mlir_text
+    from merlin.targetgen.access_observations import primitive_signature
+
+    source = parse_mlir_text("""module {
+      func.func @forward(%x: tensor<f32>) -> tensor<f32> {
+        %e = tensor.empty() : tensor<f32>
+        %r = linalg.generic {indexing_maps=[affine_map<()->()>,affine_map<()->()>], iterator_types=[]}
+          ins(%x : tensor<f32>) outs(%e : tensor<f32>) {
+        ^bb0(%a:f32,%b:f32):
+          %v = arith.negf %a : f32
+          linalg.yield %v : f32
+        } -> tensor<f32>
+        return %r : tensor<f32>
+      }}""")
+    op = next(op for op in source.walk() if op.name == "linalg.generic")
+    assert primitive_signature(op)["broadcasting"] == "none"

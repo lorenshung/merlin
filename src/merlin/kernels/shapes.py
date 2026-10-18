@@ -175,7 +175,7 @@ def _iterator_types(op) -> "list[str] | None":
             inner = getattr(entry, "data", entry)
             name = getattr(inner, "data", inner)
             out.append(str(name))
-        return out or None
+        return out
     return None
 
 
