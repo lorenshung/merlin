@@ -1374,6 +1374,14 @@ def apply_recipe(
     if calibrated == 0:
         raise RecipeError("static calibration saw no input sample")
     quantized = convert_pt2e(prepared, use_reference_representation=False, fold_quantize=True)
+    scale_changes = []
+    if recipe["activation"]["dtype"] in {"int8", "uint8"}:
+        # References and integerization must observe the same canonical graph.
+        # The frontend's idempotent owner retains every changed scale in its
+        # ledger, before either the independent oracle or recipe extraction.
+        from m2m.capture.quant_scales import canonicalize_pt2e_scales
+
+        scale_changes = canonicalize_pt2e_scales(quantized)
     restore_floating_readout_widths(quantized)
     if original_frontend_snapshot is not None:
         from m2m.capture.trace import attach_quantization_boundaries
@@ -1405,6 +1413,7 @@ def apply_recipe(
         "floating_readout_widths": quantizer.readout_widths,
         # The exact integer form of every quantized affine map and movement, from its observed scales.
         "integer_recipes": integer_recipes(quantized),
+        "scale_canonicalization": {"dtype": "float32", "changes": scale_changes},
         # Sums and means the recipe's families cover and the graph does not requantize: left alone.
         "sums_and_means_left_in_float": quantizer.left_in_float,
         "calibration_samples": calibrated,
