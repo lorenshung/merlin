@@ -9,9 +9,10 @@ from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.targetgen.core_aten_components import prepare_integer_components
 
 
+@pytest.mark.parametrize("inactive", [False, True])
 @pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("word_map", ["negate", "literal_clamp"])
-def test_native_f32_is_explicit_and_keeps_the_independent_bit_gate(tmp_path, monkeypatch, native, word_map):
+def test_native_f32_is_explicit_and_keeps_the_independent_bit_gate(tmp_path, monkeypatch, native, word_map, inactive):
     monkeypatch.setattr(
         "merlin.targetgen.transfer_contracts.screen_transfer_contract", lambda *args, **kwargs: dict(status="admitted")
     )
@@ -66,9 +67,13 @@ def test_native_f32_is_explicit_and_keeps_the_independent_bit_gate(tmp_path, mon
             assert "test.limb" in source
             return dict(status="declined", reason="test deliberately does not grant a device proof")
 
+    records = [record]
+    unrelated = dict(status="not_in_shard", input_abi=[dict(dtype="bf16")])
+    if inactive:
+        records = [unrelated, record, dict(status="not_selected")]
     decision = prepare_integer_components(
         tmp_path,
-        dict(cases=[record]),
+        dict(cases=records),
         dict(spec={}, host={}),
         Provider(),
         None,
@@ -76,6 +81,7 @@ def test_native_f32_is_explicit_and_keeps_the_independent_bit_gate(tmp_path, mon
         limb_attribute="test.limb",
         native_f32=native,
     )
+    assert unrelated == dict(status="not_in_shard", input_abi=[dict(dtype="bf16")])
     assert decision is None
     assert bool(called) == native
     if native:

@@ -109,7 +109,8 @@ def prepare_integer_components(
     functions = [op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward"]
     if not functions:
         return None
-    native_types = [abi["dtype"] for record in report["cases"] for abi in record.get("input_abi", [])]
+    records = [record for record in report["cases"] if record.get("status") in {None, "bundled"}]
+    native_types = [abi["dtype"] for record in records for abi in record.get("input_abi", [])]
     ieee_policy = selection.get("host", {}).get("native_ieee_special_values", {})
     ieee_enabled = (
         ieee_policy.get("schema") == "merlin.native_ieee_special_values.v1" and ieee_policy.get("enabled") is True
@@ -177,7 +178,7 @@ def prepare_integer_components(
     if closure_required:
         from merlin.targetgen.core_aten_host_floor import native_boundary_has_nan
 
-        if native_boundary_has_nan(report):
+        if native_boundary_has_nan({**report, "cases": records}):
             (directory / "exact-dtype-refusal.json").write_text(
                 json.dumps(
                     dict(
@@ -239,7 +240,7 @@ def prepare_integer_components(
             else:
                 compare = grade_native_bits
             comparisons = [
-                compare(record, [bytes.fromhex(raw) for raw in closure["output_bytes"]]) for record in report["cases"]
+                compare(record, [bytes.fromhex(raw) for raw in closure["output_bytes"]]) for record in records
             ]
             if any(row["status"] != "pass" for row in comparisons):
                 (directory / "exact-dtype-refusal.json").write_text(
@@ -300,8 +301,10 @@ def prepare_integer_components(
     mixed_finite_arithmetic = not has_special_inputs and any(
         op.name in {"arith.addf", "arith.subf", "arith.mulf", "arith.divf", "math.fma"} for op in module.walk()
     )
-    if unquantizable_float_words or (native_f32 and "f32" in native_types) or any(
-        dtype in {"i8", "i16", "i32", "i64", "f16", "bf16", "f64", "complex<f32>"} for dtype in native_types
+    if (
+        unquantizable_float_words
+        or (native_f32 and "f32" in native_types)
+        or any(dtype in {"i8", "i16", "i32", "i64", "f16", "bf16", "f64", "complex<f32>"} for dtype in native_types)
     ):
         from merlin.llvmlower.native_sign_components import rewrite_native_sign_components
 
@@ -433,7 +436,7 @@ def prepare_integer_components(
         from merlin.targetgen.native_rational_reference import rational_outputs
 
         try:
-            for record in report["cases"]:
+            for record in records:
                 rational_outputs(record["case"], finite_subproblem=ieee_pointwise)
         except (ValueError, TypeError, OverflowError, ZeroDivisionError) as exc:
             (directory / "exact-dtype-refusal.json").write_text(
@@ -581,6 +584,6 @@ def prepare_integer_components(
     document = dict(selection=selection, **plan)
     (directory / "model.mlir").write_text(str(module) + "\n")
     (directory / "spec-int8-admission.json").write_text(json.dumps(document, indent=2) + "\n")
-    for record in report["cases"]:
+    for record in records:
         record.update(numeric_admission=plan, numeric_selection=selection["identities"])
     return document
