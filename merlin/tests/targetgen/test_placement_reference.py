@@ -136,3 +136,41 @@ def test_selectable_policy_records_both_verdicts(tmp_path, monkeypatch, policy):
     stored = json.loads((tmp_path / "spec-int8-admission.json").read_text())
     assert stored["placement_cost"] == cost
     assert report["cases"][0]["numeric_admission"]["placement_cost"] == cost
+
+
+def test_no_numeric_candidate_has_explicit_not_applicable_strict_evidence(tmp_path):
+    import yaml
+
+    from merlin.targetgen.core_aten_profitability import prepare
+
+    declaration, facts = inputs()
+    (tmp_path / "model.mlir").write_text(str(source(6)))
+    spec = tmp_path / "software.yaml"
+    spec.write_text(yaml.safe_dump(dict(placement_cost_model=declaration)))
+    report = dict(cases=[dict(status="bundled")])
+    plan = prepare(
+        tmp_path,
+        report,
+        lambda *a, **k: dict(status="host", refusal_code="independent_numeric_refusal"),
+        software_spec=spec,
+        facts=facts,
+    )
+    assert plan["placement_cost"]["strict_policy"] == dict(
+        policy="strict_per_shape", status="not_applicable", reason_code="independent_numeric_refusal"
+    )
+    assert report["cases"][0]["numeric_admission"] is plan
+
+
+def test_unknown_policy_is_not_silently_replaced(tmp_path, monkeypatch):
+    import yaml
+
+    from merlin.targetgen.core_aten_profitability import prepare
+
+    declaration, facts = inputs()
+    spec = tmp_path / "software.yaml"
+    spec.write_text(yaml.safe_dump(dict(placement_cost_model=declaration)))
+    monkeypatch.setenv("MERLIN_PLACEMENT_POLICY", "undefined")
+    with pytest.raises(ValueError, match="unknown placement profitability policy"):
+        prepare(
+            tmp_path, dict(cases=[]), lambda *a, **k: pytest.fail("must not prepare"), software_spec=spec, facts=facts
+        )
