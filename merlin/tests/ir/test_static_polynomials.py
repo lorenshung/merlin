@@ -95,3 +95,23 @@ def test_projected_bilinear_domain_keeps_seed_and_output_permutation():
                 for key, coefficient in rows[y * 3 + x].items()
             )
             assert actual == 7 + sum(arrays[0][k][x] * arrays[1][k][y] for k in range(2))
+
+
+def test_wide_polynomial_gathers_retain_full_fixed_point_width():
+    from merlin.llvmlower.fixed_point_ir import finite_grid
+    from merlin.llvmlower.floating_components import rewrite_floating_components
+    from merlin.llvmlower.integer_components import rewrite_integer_components
+
+    op = source("%p=arith.mulf %af,%bf : f32")
+    module = op
+    while module.parent_op() is not None:
+        module = module.parent_op()
+    module = parse_mlir_text(str(module).replace("f16", "bf16"))
+    grid = finite_grid([2.0**-133, -(2.0**127), 0.0])
+    bounds, proofs = rewrite_floating_components(module, [grid, grid], allow_reassociation=True)
+    assert proofs and proofs[0]["reconstruction"] == "bounded_i1024"
+    plans = rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[0, 0], known_bounds=bounds)
+    assert plans
+    marked = [op for op in module.walk() if "test.limb" in op.attributes]
+    assert any(any(it.data.value == "reduction" for it in op.get_iterator_types()) for op in marked)
+    module.verify()

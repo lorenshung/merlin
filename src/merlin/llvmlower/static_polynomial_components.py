@@ -5,14 +5,17 @@ from math import prod
 from merlin.llvmlower.static_polynomials import PolynomialRefusal, analyze_static_polynomial
 
 
-def lift_static_polynomial(op, grid, pack, bounds):
-    """Build an exact i128 contraction, or refuse before changing the source."""
+def lift_static_polynomial(op, grid, pack, bounds, *, operand_type=None, result_type=None):
+    """Build a width-proved exact contraction, or refuse before changing source."""
     from xdsl.dialects import arith, tensor
     from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, IndexType, IntegerAttr, TensorType, i64, i128
     from xdsl.dialects.linalg import ops as L
     from xdsl.ir import Block, Region
     from xdsl.ir.affine import AffineDimExpr, AffineMap
 
+    i64, i128 = operand_type or i64, result_type or i128
+    operand_limit = i64.width.data - 2
+    reconstruction_limit = i128.width.data - 8
     atoms, rows = analyze_static_polynomial(op)
     sources = list(dict.fromkeys(source for source, _ in atoms))
     grids = {source: grid(source) for source in sources}
@@ -38,13 +41,13 @@ def lift_static_polynomial(op, grid, pack, bounds):
         ),
         default=0,
     )
-    if bound.bit_length() >= 120:
-        raise PolynomialRefusal("polynomial reconstruction exceeds signed i128 proof")
+    if bound.bit_length() >= reconstruction_limit:
+        raise PolynomialRefusal("polynomial reconstruction exceeds declared signed-width proof")
     operations, packed = [], {}
     for source in sources:
         value, _ = pack(source, grids[source][0], operations)
         if value.type.element_type != i64:
-            raise PolynomialRefusal("polynomial gather currently requires signed i64 components")
+            raise PolynomialRefusal("polynomial gather operand width differs from its packing proof")
         packed[source] = value
     index_constants = {}
 
@@ -81,8 +84,8 @@ def lift_static_polynomial(op, grid, pack, bounds):
             b = atom_values[key[1]] if len(key) == 2 else integer(1)
             ab = grids[atoms[key[0]][0]][1] if key else 1
             bb = grids[atoms[key[1]][0]][1] if len(key) == 2 else 1
-            if (abs(weight) * bb).bit_length() > 62 or ab.bit_length() > 62:
-                raise PolynomialRefusal("polynomial gather coefficient exceeds signed i64 proof")
+            if (abs(weight) * bb).bit_length() > operand_limit or ab.bit_length() > operand_limit:
+                raise PolynomialRefusal("polynomial gather coefficient exceeds declared signed-width proof")
             product = arith.MuliOp(b, integer(weight))
             operations.append(product)
             li = tensor.InsertOp(a, left, [index(row_index), index(0), index(term_index)])

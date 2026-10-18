@@ -251,7 +251,6 @@ def rewrite_floating_components(
                             continue
         if (
             allow_reassociation
-            and not wide_packing
             and op.name == "linalg.generic"
             and len(op.results) == 1
             and floating(op.results[0])
@@ -265,7 +264,9 @@ def rewrite_floating_components(
             from merlin.llvmlower.static_polynomials import PolynomialRefusal
 
             try:
-                operations, integer, exponent, bound = lift_static_polynomial(op, grid, pack, bounds)
+                operations, integer, exponent, bound = lift_static_polynomial(
+                    op, grid, pack, bounds, operand_type=i64, result_type=i128
+                )
             except (PolynomialRefusal, ValueError):
                 pass
             else:
