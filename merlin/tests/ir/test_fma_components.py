@@ -51,3 +51,43 @@ def test_fma_has_full_integer_producers_and_one_final_rounding(grids):
     assert plans
     assert not unlowered_data_reductions(module, "test.limb")
     module.verify()
+
+
+@pytest.mark.parametrize("token", ["f16", "bf16"])
+@pytest.mark.parametrize("coefficient", [0, 257])
+def test_reduced_storage_scalar_coefficients_keep_their_finite_grid(token, coefficient):
+    from merlin.llvmlower.integer_float_boundaries import rewrite_integer_float_boundaries
+
+    module = parse_mlir_text(f"""module {{
+      func.func @forward(%x:tensor<1x{token}>) -> tensor<1x{token}> {{
+        %one=arith.constant 1.0 : f32
+        %raw=arith.truncf %one : f32 to {token}
+        %nanword=arith.constant 32767 : i16
+        %nan=arith.bitcast %nanword : i16 to {token}
+        %missing=arith.cmpf uno,%one,%one : f32
+        %literal=arith.select %missing,%nan,%raw : {token}
+        %other=tensor.splat %literal : tensor<1x{token}>
+        %e=tensor.empty() : tensor<1x{token}>
+        %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,
+          affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
+          ins(%x,%other:tensor<1x{token}>,tensor<1x{token}>) outs(%e:tensor<1x{token}>) {{
+          ^bb0(%a:{token},%b:{token},%unused:{token}):
+            %integer=arith.constant {coefficient} : i64
+            %fp=arith.sitofp %integer : i64 to f32
+            %alpha=arith.truncf %fp : f32 to {token}
+            %aa=arith.extf %a : {token} to f32
+            %bb=arith.extf %b : {token} to f32
+            %cc=arith.extf %alpha : {token} to f32
+            %v=math.fma %bb,%cc,%aa : f32
+            %out=arith.truncf %v : f32 to {token}
+            linalg.yield %out : {token}
+        }} -> tensor<1x{token}>
+        return %r : tensor<1x{token}>
+      }} }}""")
+    grids = {}
+    _, count = rewrite_integer_float_boundaries(module, [None], output_grids=grids)
+    assert count == 1 and list(grids.values()) == [(0, 2 * coefficient)]
+    _, proofs = rewrite_floating_components(module, [(0, 1)], known_grids=grids)
+    assert any(p["source_data_arithmetic"] for p in proofs)
+    assert not any(o.name == "math.fma" for o in module.walk())
+    module.verify()

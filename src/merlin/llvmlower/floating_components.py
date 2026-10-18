@@ -108,6 +108,41 @@ def rewrite_floating_components(
 
     product_component, linear_component = component_taggers(components, complex_sources)
 
+    def scalar_constant(value):
+        """Interpret closed scalar coefficient conversions at their typed RNE boundaries."""
+        from merlin.targetgen.exact_arithmetic import round_binary
+
+        owner = value.owner
+        name = getattr(owner, "name", None)
+        if name == "arith.constant":
+            attribute = owner.properties.get("value", owner.attributes.get("value"))
+            return attribute.value.data if isinstance(attribute, (FloatAttr, IntegerAttr)) else None
+        if name == "arith.select":
+            condition = scalar_constant(owner.operands[0])
+            return scalar_constant(owner.operands[1 if condition else 2]) if condition is not None else None
+        if name == "arith.cmpf" and owner.predicate.value.data in (7, 14):
+            from math import isnan
+
+            values = [scalar_constant(operand) for operand in owner.operands]
+            if any(value is None for value in values):
+                return None
+            unordered = any(isnan(value) for value in values)
+            return unordered if owner.predicate.value.data == 14 else not unordered
+        if name not in {"arith.extf", "arith.truncf", "arith.sitofp", "arith.uitofp"}:
+            return None
+        original = scalar_constant(owner.operands[0])
+        if original is None or str(value.type) not in FORMAT:
+            return None
+        if name == "arith.uitofp":
+            original = int(original) & ((1 << owner.operands[0].type.width.data) - 1)
+        if str(value.type) == "bf16":
+            # The frontend expresses the CPU reduced-storage bridge explicitly.
+            # xDSL's bf16 encoder rounds an already-binary32 value correctly.
+            if str(owner.operands[0].type) != "f32":
+                return None
+            return value.type.unpack(value.type.pack([float(original)]), 1)[0]
+        return round_binary(original, {"f16": 16, "f32": 32, "f64": 64}[str(value.type)])
+
     def grid(value):
         if allow_reassociation and value in raw_forms and raw_forms[value][3] == 1:
             return raw_forms[value][1:3]
@@ -119,6 +154,12 @@ def rewrite_floating_components(
             values = list(attr.get_values()) if hasattr(attr, "get_values") else [attr.value.data]
             try:
                 return finite_grid(finite_values(values) if ieee_pointwise else values)
+            except (ValueError, OverflowError):
+                return None
+        if not hasattr(value.type, "element_type"):
+            try:
+                literal = scalar_constant(value)
+                return finite_grid([literal]) if literal is not None else None
             except (ValueError, OverflowError):
                 return None
         carriers = {

@@ -69,6 +69,12 @@ def rewrite_integer_float_boundaries(module, input_bounds, *, output_grids=None)
             continue
         magnitude = bounds.get(source)
         if magnitude is None:
+            from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
+
+            literal = _constant_of(source)
+            if type(literal) is int:
+                magnitude = abs(literal)
+        if magnitude is None:
             magnitude = 1 << (source.type.element_type.width.data - 1)
         shape = op.results[0].type.get_shape()
         integer_type = TensorType(i128, shape)

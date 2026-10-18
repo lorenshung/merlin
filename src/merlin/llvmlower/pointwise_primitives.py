@@ -50,6 +50,25 @@ def expose_pointwise_primitives(module):
         if any(it.data != L.IteratorType.PARALLEL for it in op.get_iterator_types()):
             continue
         body = op.body.block
+        if not any(
+            child.name
+            in {
+                "arith.addf",
+                "arith.subf",
+                "arith.mulf",
+                "arith.divf",
+                "arith.negf",
+                "arith.extf",
+                "arith.truncf",
+                "arith.sitofp",
+                "arith.uitofp",
+                "math.fma",
+            }
+            for child in body.ops
+        ):
+            # Keep generated integer RNE/bit plumbing intact, including its
+            # SSA-bound finite grid. Only source floating boundaries split.
+            continue
         if any(child.name not in allowed for child in body.ops):
             continue
         arithmetic = [child for child in body.ops if child.name not in {"arith.constant", "linalg.yield"}]
