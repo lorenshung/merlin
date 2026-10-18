@@ -353,6 +353,9 @@ def run_spike_bundle(
                     "target": target,
                 }
             stage = "build"
+            from merlin.targetgen.core_aten_components import require_component_identity
+
+            require_component_identity(directory, report.get("numeric_preparation", {}))
             build = spike_model.build(
                 directory,
                 directory / "spike-build",
@@ -378,6 +381,7 @@ def run_spike_bundle(
                 bundled[0]["routing"].update(routed=True, routed_operations=sidecar["routed"])
             trace = directory / "spike-trace.log" if routing is not None else None
             stage = "execution"
+            require_component_identity(directory, report.get("numeric_preparation", {}))
             run = spike_model.run(
                 build["elf"],
                 mem_bytes=build["mem_bytes"],

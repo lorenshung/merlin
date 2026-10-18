@@ -158,3 +158,23 @@ def test_empty_boundary_decision_precedes_provider_and_quantized_capture(tmp_pat
     )
     assert plan["refusal_code"] == "empty_tensor_no_device_work"
     assert record["numeric_admission"]["status"] == "host"
+
+
+def test_data_specialized_bounds_reject_changed_input_or_source(tmp_path):
+    from merlin.targetgen.core_aten_components import require_component_identity
+
+    source = "builtin.module {}"
+    (tmp_path / "model.mlir").write_text(source + "\n")
+    (tmp_path / "inputs.npz").write_bytes(b"complete recorded payload")
+    plan = dict(
+        exact_dtype_sites=1,
+        schedule_proof=dict(source_sha256=hashlib.sha256(source.encode()).hexdigest()),
+        input_bound_proof=dict(input_sha256=hashlib.sha256(b"complete recorded payload").hexdigest()),
+    )
+    require_component_identity(tmp_path, plan)
+    (tmp_path / "inputs.npz").write_bytes(b"different payload")
+    with pytest.raises(ValueError, match="input bytes changed"):
+        require_component_identity(tmp_path, plan)
+    (tmp_path / "model.mlir").write_text(source + " // changed\n")
+    with pytest.raises(ValueError, match="source changed"):
+        require_component_identity(tmp_path, plan)

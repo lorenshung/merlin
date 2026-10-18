@@ -4,6 +4,19 @@ import hashlib
 import json
 
 
+def require_component_identity(directory, plan):
+    """Data-specialized bounds apply only to the bound source and input bytes."""
+    if not plan.get("exact_dtype_sites"):
+        return
+    source = (directory / "model.mlir").read_text().rstrip("\n")
+    proof = plan.get("schedule_proof") or plan.get("provider_catalog") or {}
+    if hashlib.sha256(source.encode()).hexdigest() != proof.get("source_sha256"):
+        raise ValueError("exact dtype source changed after its provider proof")
+    expected = plan.get("input_bound_proof", {}).get("input_sha256")
+    if expected is not None and hashlib.sha256((directory / "inputs.npz").read_bytes()).hexdigest() != expected:
+        raise ValueError("exact component input bytes changed after the bound proof")
+
+
 def prepare_integer_components(directory, report, selection, provider, package, module, *, limb_attribute):
     import numpy as np
 
@@ -27,6 +40,7 @@ def prepare_integer_components(directory, report, selection, provider, package, 
     functions = [op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward"]
     if not functions:
         return None
+    native_types = [abi["dtype"] for record in report["cases"] for abi in record.get("input_abi", [])]
     from merlin.llvmlower.boolean_components import rewrite_boolean_components
 
     native_arithmetic = any(
@@ -53,9 +67,30 @@ def prepare_integer_components(directory, report, selection, provider, package, 
 
     conversion_bounds, conversion_count = rewrite_integer_float_boundaries(module, bounds)
     known_bounds.update(conversion_bounds)
+    sign_proofs = []
+    if any(dtype in {"f16", "bf16", "f64", "complex<f32>"} for dtype in native_types):
+        from merlin.llvmlower.native_sign_components import rewrite_native_sign_components
+
+        sign_bounds, sign_proofs = rewrite_native_sign_components(module)
+        known_bounds.update(sign_bounds)
     floating_proofs = []
-    if any(b is None for b in bounds):
-        native_types = [abi["dtype"] for record in report["cases"] for abi in record.get("input_abi", [])]
+    remaining_float_arithmetic = any(
+        op.name
+        in {
+            "arith.addf",
+            "arith.subf",
+            "arith.mulf",
+            "arith.divf",
+            "arith.negf",
+            "linalg.matmul",
+            "linalg.batch_matmul",
+        }
+        for op in module.walk()
+    )
+    if any(b is None for b in bounds) and sign_proofs and not remaining_float_arithmetic:
+        # Raw IEEE words need no finite numerical grid, even for signaling NaNs.
+        bounds = [0 if b is None else b for b in bounds]
+    elif any(b is None for b in bounds):
         if not any(dtype in {"f16", "bf16", "f64", "complex<f32>"} for dtype in native_types):
             return None
         from merlin.llvmlower.fixed_point_ir import finite_grid
@@ -172,6 +207,7 @@ def prepare_integer_components(directory, report, selection, provider, package, 
         schedule_proof=proof,
         limb_plans=plans,
         floating_representation_proofs=floating_proofs,
+        native_sign_proofs=sign_proofs,
         boolean_semantics={"source": "closed_boolean_or_and", "integer_components": boolean_count},
         integer_float_boundaries={"count": conversion_count, "rounding": "source_sitofp_before_host_epilogue"},
         input_bound_proof=dict(

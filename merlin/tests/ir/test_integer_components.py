@@ -46,7 +46,7 @@ def evaluate(module, arrays):
         name = op.name
         if name == "arith.constant":
             result = op.value.value.data
-        elif name in {"arith.extsi", "arith.trunci"}:
+        elif name in {"arith.extsi", "arith.trunci", "arith.bitcast"}:
             result = a[0]
         elif name == "arith.extui":
             result = a[0] % (1 << op.operands[0].type.width.data)
@@ -140,3 +140,36 @@ def test_widening_keeps_the_carry_above_the_original_storage_width():
     plans = rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[1 << 63, 0])
     assert len(plans) == 9
     assert evaluate(source, [values, [0] * 4]) == values
+
+
+def test_native_sign_transform_keeps_all_ieee_payload_bits_in_integer_literals():
+    from merlin.llvmlower.native_sign_components import rewrite_native_sign_components
+
+    source = parse_mlir_text("""builtin.module {
+      func.func @forward(%x: tensor<4xf16>) -> tensor<4xf16> {
+        %e = tensor.empty() : tensor<4xf16>
+        %r = linalg.generic {
+          indexing_maps = [affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
+          iterator_types = ["parallel"]
+        } ins(%x : tensor<4xf16>) outs(%e : tensor<4xf16>) {
+        ^bb0(%a: f16, %b: f16):
+          %v = arith.negf %a : f16
+          linalg.yield %v : f16
+        } -> tensor<4xf16>
+        func.return %r : tensor<4xf16>
+      }}""")
+    bounds, proofs = rewrite_native_sign_components(source)
+    assert proofs == [
+        dict(
+            source="arith.negf",
+            representation="ieee_storage_bits",
+            width=16,
+            arithmetic="sign_bit_offset_modulo_storage_width",
+            nan_payload="preserved",
+        )
+    ]
+    assert not any(op.name == "arith.negf" for op in source.walk())
+    assert rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[0], known_bounds=bounds)
+    source.verify()
+    for words in [[0, 0x8000, 0x7C00, 0xFC00], [0x7E01, 0xFE7F, 0x7C01, 0xFC01], [0x0001, 0x8001, 0x3C00, 0xBC00]]:
+        assert [value & 0xFFFF for value in evaluate(source, [words])] == [word ^ 0x8000 for word in words]

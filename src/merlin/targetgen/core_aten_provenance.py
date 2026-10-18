@@ -51,6 +51,7 @@ def batch_provenance(
             "targetgen/native_rational_reference.py",
             "llvmlower/integer_components.py",
             "llvmlower/integer_float_boundaries.py",
+            "llvmlower/native_sign_components.py",
             "llvmlower/additive_regions.py",
             "llvmlower/fixed_point_ir.py",
             "llvmlower/floating_components.py",
