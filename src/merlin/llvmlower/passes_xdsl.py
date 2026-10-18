@@ -196,6 +196,9 @@ def lower_quant_ext(module, *, on_rewrite: Callable[[Any, tuple[Any, ...], Any],
 
         elem = out_t.element_type
         scale_elem = scale.type.element_type
+        storage = getattr(op.attributes.get("prov.quant.storage_dtype"), "data", None)
+        declared_input = getattr(op.properties.get("input_dtype", op.attributes.get("input_dtype")), "data", None)
+        unsigned_codes = storage == "uint8" or declared_input in {"u8", "uint8"}
         # A half-width readout needs one rounding of the exact dyadic product.
         # For byte codes, a bounded centered integer times a <=24-bit scale is
         # exactly representable in binary64 (including all f32 subnormals).
@@ -206,7 +209,9 @@ def lower_quant_ext(module, *, on_rewrite: Callable[[Any, tuple[Any, ...], Any],
             zero_point = _constant_of(zp)
             zero_width = zp.type.element_type.width.data
             centered_bound = (
-                128 + abs(int(zero_point)) if isinstance(zero_point, int) else 128 + (1 << (zero_width - 1))
+                (255 if unsigned_codes else 128) + abs(int(zero_point))
+                if isinstance(zero_point, int)
+                else (255 if unsigned_codes else 128) + (1 << (zero_width - 1))
             )
             scale_precision = {"f16": 11, "bf16": 8, "f32": 24}.get(str(scale_elem))
             if (
@@ -224,7 +229,7 @@ def lower_quant_ext(module, *, on_rewrite: Callable[[Any, tuple[Any, ...], Any],
             compute_elem = f32
         body = Block(arg_types=[w.type.element_type, scale.type.element_type, zp.type.element_type, elem])
         wv, sv, zv, _ = body.args
-        wf = arith.SIToFPOp(wv, compute_elem)
+        wf = (arith.UIToFPOp if unsigned_codes else arith.SIToFPOp)(wv, compute_elem)
         zf = arith.SIToFPOp(zv, compute_elem)
         sub = arith.SubfOp(wf.result, zf.result)
         scale_cast = arith.ExtFOp(sv, compute_elem) if scale_elem != compute_elem else None

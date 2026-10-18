@@ -13,7 +13,7 @@ from merlin.targetgen.exact_arithmetic import quantize
 @pytest.mark.parametrize(
     "scale", [Fraction(1, 2), Fraction(0.03), Fraction(0.009796262718737125), Fraction(2) ** -149, Fraction(2) ** 120]
 )
-@pytest.mark.parametrize("zp,low,high", [(0, -128, 127), (-13, -127, 127)])
+@pytest.mark.parametrize("zp,low,high", [(0, -128, 127), (-13, -127, 127), (131, 0, 255), (7, 0, 15), (-2, -8, 7)])
 def test_all_transitions_and_random_float_codes_against_exact_oracle(scale, zp, low, high):
     table = thresholds(scale, zp, low, high)
     rng = random.Random(9241)

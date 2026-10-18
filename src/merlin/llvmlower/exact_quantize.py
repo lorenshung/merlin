@@ -17,8 +17,8 @@ def ordered_float(key):
 
 def thresholds(scale, zero_point, low, high):
     scale = Fraction(scale)
-    if scale <= 0 or not -128 <= low < high <= 127 or not low <= zero_point <= high:
-        raise ValueError("exact quantization requires positive scale and signed-byte bounds")
+    if scale <= 0 or not ((-128 <= low < high <= 127) or (0 <= low < high <= 255)) or not low <= zero_point <= high:
+        raise ValueError("exact quantization requires positive scale and signed or unsigned byte bounds")
     result = []
     for code in range(low, high):
         midpoint = Fraction(2 * (code - zero_point) + 1, 2) * scale
@@ -75,8 +75,10 @@ def lower(op):
     for key, expected in (("zero_point", zp), ("quant_min", low), ("quant_max", high)):
         if attrs[f"prov.quant.{key}"].value.data != expected:
             raise ValueError("exact quantization parameters differ from provenance")
-    if getattr(attrs.get("prov.quant.storage_dtype"), "data", None) != "int8":
-        raise ValueError("exact quantization requires signed-byte storage")
+    storage = getattr(attrs.get("prov.quant.storage_dtype"), "data", None)
+    limits = {"int8": (-128, 127), "uint8": (0, 255)}.get(storage)
+    if limits is None or not limits[0] <= low < high <= limits[1]:
+        raise ValueError("exact quantization range differs from its byte storage contract")
     table = thresholds(scale, zp, low, high)
     table_type = TensorType(i32, [len(table)])
     data = arith.ConstantOp(DenseIntOrFPElementsAttr.from_list(table_type, table))

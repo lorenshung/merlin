@@ -33,6 +33,14 @@ numerical_semantics:
     requant_rounding: half_up
     hardware_integer_shift_rounding: rne
     shift: operation_parameter
+quantization_contract:
+  storage: [int8, uint8]
+  ranges: declared_byte_subranges
+  zero_points: retained_exact_integer_centering
+  weight_scales: [tensor, output_channel]
+  admission: selected_provider_exact_centering_and_full_i32_coverage
+  requantization: retained_source_exact_rational_host_rne
+  evidence: {review_status: "authored, pending operator review"}
 operations:
   contraction:
     # Authored, not derived: the exact-offload outline admits contractions against these authored
@@ -210,7 +218,6 @@ operations:
     placement: host
     ordered_operand_dtypes: [f32, f64, i64]
     ordered_result_dtypes: [i8]
-    quantization_parameters: {zero_point: 0, quant_min: -128, quant_max: 127}
   # Exact host dequantization is independent of rank. Phase 1 still owns
   # lowering, execution and numerical qualification of the emitted compiler.
   host_dequantize_per_tensor:
@@ -223,7 +230,6 @@ operations:
     ordered_operand_dtypes: [i8, f32, i64]
     ordered_result_dtypes: [f32]
     ranks: [0, 1, 2, 3, 4, 5]
-    quantization_parameters: {zero_point: 0}
   host_embedding:
     ops: [aten.embedding.default]
     placement: host

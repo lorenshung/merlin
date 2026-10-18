@@ -29,14 +29,15 @@ def _per_tensor_scale(node: Any, operator: str) -> float | None:
         return None
     import torch
 
-    # Integer recipes currently implement centered signed-i8 codes only. A
-    # scale alone cannot erase a zero point, unsigned range or channel axis.
+    if len(node.args) < 6:
+        return None
+    _, _, zero, low, high, dtype = node.args[:6]
+    limits = {torch.int8: (-128, 127), torch.uint8: (0, 255)}.get(dtype)
     if (
-        len(node.args) < 6
-        or node.args[2] != 0
-        or node.args[3] not in (-128, -127)
-        or node.args[4] != 127
-        or node.args[5] != torch.int8
+        limits is None
+        or any(type(v) is not int for v in (zero, low, high))
+        or not limits[0] <= low < high <= limits[1]
+        or not low <= zero <= high
     ):
         return None
     scale = node.args[1] if len(node.args) > 1 else None
@@ -115,7 +116,7 @@ def integer_recipes(graph_module: Any) -> list[dict[str, Any]]:
         try:
             if s_out is None or None in inputs:
                 raise RN.RecipeNumericsError(
-                    "the node's quantization scales/ranges require literal symmetric signed-int8 per-tensor qparams"
+                    "the node's quantization scales/ranges require literal valid byte per-tensor qparams"
                 )
             output_nodes = [
                 user
@@ -126,6 +127,46 @@ def integer_recipes(graph_module: Any) -> list[dict[str, Any]]:
                 raise RN.RecipeNumericsError("multiple output quantizers require different exact recipes")
             bounds = {"qmin": output_nodes[0].args[3], "qmax": output_nodes[0].args[4]}
             row["output_scale"] = s_out
+            input_nodes = [arg for arg in data_arguments(node) if hasattr(arg, "op")]
+            parameter_nodes = [*input_nodes, *output_nodes]
+            if any(
+                arg.args[2] != 0
+                or str(arg.args[5]) != "torch.int8"
+                or arg.args[3] not in (-128, -127)
+                or arg.args[4] != 127
+                for arg in parameter_nodes
+            ):
+                # The source Q/DQ expression retains all centering, boundary
+                # predicates and one final RNE. These parameters do not grant
+                # a device schedule: integerization, independent exact oracle
+                # and selected provider coverage still qualify the full source.
+                row.update(
+                    readout="full_i32",
+                    requantization="retained_source_exact_integer",
+                    input_qparams=[
+                        dict(
+                            scale=arg.args[1],
+                            zero_point=arg.args[2],
+                            quant_min=arg.args[3],
+                            quant_max=arg.args[4],
+                            dtype=str(arg.args[5]),
+                        )
+                        for arg in input_nodes
+                    ],
+                    output_qparams=dict(
+                        scale=s_out, zero_point=output_nodes[0].args[2], **bounds, dtype=str(output_nodes[0].args[5])
+                    ),
+                    integer_recipe=dict(
+                        form="retained_affine_qdq",
+                        centering="retained_source_integer",
+                        readout="full_i32",
+                        rounding="half_to_even",
+                    ),
+                )
+                if family not in {"affine_map", "movement", "window_mean", "operand_sum"}:
+                    raise RN.RecipeNumericsError("unproved byte Q/DQ family")
+                rows.append(row)
+                continue
             scalar = node.args[1] if len(node.args) > 1 and isinstance(node.args[1], (int, float)) else None
             alpha = rational(
                 node.args[2]

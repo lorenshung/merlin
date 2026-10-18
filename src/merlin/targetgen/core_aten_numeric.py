@@ -321,11 +321,14 @@ def prepare_spec_int8(
         r
         for r in selection["recipes"]
         if r["activation"]
-        and r["activation"]["dtype"] == "int8"
+        and r["activation"]["dtype"] in {"int8", "uint8"}
         and r["activation"]["mode"] == "static"
         and r["activation"]["granularity"] == "tensor"
-        and r["activation"]["symmetric"]
-        and (r["activation"]["quant_min"], r["activation"]["quant_max"]) == (-128, 127)
+        and (
+            -128 <= r["activation"]["quant_min"] < r["activation"]["quant_max"] <= 127
+            if r["activation"]["dtype"] == "int8"
+            else 0 <= r["activation"]["quant_min"] < r["activation"]["quant_max"] <= 255
+        )
     ]
     if non_contraction and len(recipes) != 1:
         non_contraction = False

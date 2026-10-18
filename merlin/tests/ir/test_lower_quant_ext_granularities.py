@@ -244,11 +244,23 @@ def test_f32_product_rounding_can_change_a_half_tie():
 
     # q=3 and this canonical f32 scale straddle a half midpoint: f32
     # multiplication rounds to the midpoint before the old second rounding.
-    scale = struct.unpack('<f', struct.pack('<f', 0.3338215947151184))[0]
+    scale = struct.unpack("<f", struct.pack("<f", 0.3338215947151184))[0]
     exact = Fraction.from_float(scale) * 3
     midpoint = Fraction(1) + Fraction(3, 2048)
     assert exact < midpoint
-    intermediate = struct.unpack('<f', struct.pack('<f', float(exact)))[0]
+    intermediate = struct.unpack("<f", struct.pack("<f", float(exact)))[0]
     assert Fraction.from_float(intermediate) == midpoint
-    assert struct.unpack('<H', struct.pack('<e', float(exact)))[0] == 0x3C01
-    assert struct.unpack('<H', struct.pack('<e', intermediate))[0] == 0x3C02
+    assert struct.unpack("<H", struct.pack("<e", float(exact)))[0] == 0x3C01
+    assert struct.unpack("<H", struct.pack("<e", intermediate))[0] == 0x3C02
+
+
+def test_unsigned_dequantization_reads_byte_codes_without_sign_extension():
+    module = _mod(
+        "per_tensor", 'input_dtype = "uint8"', "tensor<256xi8>", "tensor<f32>", "tensor<i16>", "tensor<256xf16>"
+    )
+    lower_quant_ext(module)
+    module.verify()
+    body = next(op for op in module.walk() if op.name == "linalg.generic").body.block
+    assert list(body.ops)[0].name == "arith.uitofp"
+    assert list(body.ops)[1].name == "arith.sitofp"
+    assert all(str(v.type) == "f64" for op in body.ops if op.name == "arith.mulf" for v in op.operands)
