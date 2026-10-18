@@ -224,3 +224,30 @@ def test_standalone_maximum_is_refused_by_sum_only_declaration(selection):
     decision = admit_operation(only_sum, "aten.amax.default", maximum["signature"], "accelerator")
     assert decision["status"] != "admitted"
     assert "kind" in decision["reason"] or decision["status"] == "unknown"
+
+
+@pytest.mark.parametrize(
+    "declaration,operands,results",
+    [
+        ("host_quantize_exact", ["f32", "f64", "i64"], ["i8"]),
+        ("host_dequantize_per_tensor", ["i8", "f32", "i64"], ["f32"]),
+    ],
+)
+@pytest.mark.parametrize("rank", range(6))
+def test_exact_host_quantization_boundaries_admit_rank_five(selection, declaration, operands, results, rank):
+    from merlin.targetgen.software_spec import admit_operation
+
+    row = next(row for row in selection["host"]["operations"] if row["id"] == declaration)
+    decision = admit_operation(
+        {**selection["host"], "operations": [row]},
+        row["ops"][0],
+        dict(
+            family="elementwise_map",
+            ordered_operand_dtypes=operands,
+            ordered_result_dtypes=results,
+            rank=rank,
+            quantization_parameters=dict(zero_point=0, quant_min=-128, quant_max=127),
+        ),
+        "host",
+    )
+    assert decision["status"] == "admitted", decision

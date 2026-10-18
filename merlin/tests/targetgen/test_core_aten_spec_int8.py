@@ -40,7 +40,7 @@ def selection():
     )
 
 
-@pytest.mark.parametrize("rank,expected", [(2, "unsupported"), (3, "admitted"), (4, "admitted"), (5, "unsupported")])
+@pytest.mark.parametrize("rank,expected", [(rank, "admitted") for rank in range(6)] + [(6, "unsupported")])
 def test_exact_dequantize_rank_and_dtype(selection, rank, expected):
     signature = host_signature(DEQUANTIZE, rank, dict(zero_point=0))
     for authority in ("spec", "host"):
@@ -439,3 +439,13 @@ def test_channel_scale_error_metrics_remain_informational():
     (metrics,) = fp32_error(record, [np.array([[1.0, 2.0]], dtype=np.float32).tobytes()])
     assert metrics["max_abs"] == 0
     assert metrics["error_in_output_lsbs"] == [dict(site=0, lsb=[0.125, 0.25], max_abs=None, rmse=None)]
+
+
+@pytest.mark.parametrize("rank", [-1, True, 1.5])
+def test_software_rank_constraints_refuse_non_ranks(rank):
+    from merlin.targetgen.software_spec import validate_software_spec
+
+    document = load_yaml(repo_root() / "examples/gemmini/target/software-spec.yaml")
+    document["operations"]["host_dequantize_per_tensor"]["ranks"] = [rank]
+    with pytest.raises(ValueError, match="nonnegative integers"):
+        validate_software_spec(document)

@@ -84,7 +84,7 @@ operations:
     ops: [quantized_decomposed.quantize_per_tensor.default]
     families: [elementwise_map]
     placement: host
-    signature: {ordered_operand_dtypes: [f32, f64, i64], ordered_result_dtypes: [i8], ranks: [0, 1, 2, 3, 4], quantization_parameters: {zero_point: 0, quant_min: -128, quant_max: 127}}
+    signature: {ordered_operand_dtypes: [f32, f64, i64], ordered_result_dtypes: [i8], ranks: [0, 1, 2, 3, 4, 5], quantization_parameters: {zero_point: 0, quant_min: -128, quant_max: 127}}
     numerical_contract:
       status: reviewed
       semantics: {formula: "clamp(RNE(exact(x) / exact(scale)) + zero_point, quant_min, quant_max)", rounding: round_half_to_even, scale_dtype: f64}
@@ -94,7 +94,7 @@ operations:
     ops: [quantized_decomposed.dequantize_per_tensor.default]
     families: [elementwise_map]
     placement: host
-    signature: {ordered_operand_dtypes: [i8, f32, i64], ordered_result_dtypes: [f32], ranks: [3, 4], quantization_parameters: {zero_point: 0}}
+    signature: {ordered_operand_dtypes: [i8, f32, i64], ordered_result_dtypes: [f32], ranks: [0, 1, 2, 3, 4, 5], quantization_parameters: {zero_point: 0}}
     numerical_contract:
       status: reviewed
       semantics: {formula: "f32(i8 - zero_point) * scale", scale_granularity: tensor, zero_point: 0}

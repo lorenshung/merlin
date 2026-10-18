@@ -310,9 +310,9 @@ def validate_software_spec(document: dict, target: str | None = None, *, source:
             raise ValueError(f"{source}: expressions must list supported expression classes (affine)")
         if "ranks" in signature and (
             not isinstance(signature["ranks"], list)
-            or any(type(value) is not int or value < 1 for value in signature["ranks"])
+            or any(type(value) is not int or value < 0 for value in signature["ranks"])
         ):
-            raise ValueError(f"{source}: operation {row['id']!r} ranks must be positive integers")
+            raise ValueError(f"{source}: operation {row['id']!r} ranks must be nonnegative integers")
         if "quantization_parameters" in signature:
             validate_quantization_parameters(
                 signature["quantization_parameters"], source=f"{source}: operation {row['id']!r}"
