@@ -6,7 +6,7 @@ from math import prod
 from merlin.llvmlower.fixed_point_ir import FORMAT, encode_fixed_integer, finite_grid
 
 
-def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow_reassociation=False):
+def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow_reassociation=False, known_grids=None):
     """Return new integer bounds and closed finite representation proofs.
 
     Source packing uses exact power-of-two scaling in binary64, bounded to
@@ -21,6 +21,7 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow
         DenseIntOrFPElementsAttr,
         FloatAttr,
         IntegerAttr,
+        IntegerType,
         TensorType,
         f64,
         i64,
@@ -31,11 +32,20 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow
     from xdsl.ir.affine import AffineDimExpr, AffineMap
     from xdsl.rewriter import Rewriter
 
+    from merlin.llvmlower.additive_regions import expose_reduce_domains
     from merlin.llvmlower.pointwise_primitives import expose_pointwise_primitives
 
+    expose_reduce_domains(module)
     expose_pointwise_primitives(module)
     function = next(op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward")
     grids = dict(zip(function.body.block.args, input_grids))
+    grids.update(known_grids or {})
+    wide_packing = any(g is not None and g[1].bit_length() > 52 for g in input_grids)
+    if wide_packing:
+        i64, i128 = IntegerType(512), IntegerType(1024)
+    packing_limit = 511 if wide_packing else 52
+    reconstruction_limit = i128.width.data - 8
+
     complex_sources = {function.body.block.args[i] for i in complex_inputs}
     components = {}
     bounds = {}
@@ -51,7 +61,7 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow
             return None
         exponent = min((e for e, b in items if b), default=0)
         bound = max((b * (1 << (e - exponent)) for e, b in items if b), default=0)
-        return (exponent, bound) if bound.bit_length() <= 52 else None
+        return (exponent, bound) if bound.bit_length() <= packing_limit else None
 
     def component(value):
         if value in components:
@@ -149,7 +159,7 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow
             if divisor != 1 or exponent > source_exponent:
                 raise ValueError("raw rational component cannot be packed as an integer")
             aligned = bound << (source_exponent - exponent)
-            if aligned.bit_length() > 62:
+            if aligned.bit_length() >= i64.width.data - 1:
                 raise ValueError("raw exact component exceeds the signed-i64 operand representation")
 
             def scalar(values, emit):
@@ -169,18 +179,49 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow
         if bound and e < exponent:
             raise ValueError("packing would round a source dyadic coefficient")
         aligned = bound * (1 << (e - exponent)) if bound else 0
-        if aligned.bit_length() > 52:
+        if aligned.bit_length() > packing_limit:
             raise ValueError("aligned fixed-point coefficient exceeds the exact binary64 packing bound")
-        if not -1023 <= exponent <= 1074:
+        if not wide_packing and not -1023 <= exponent <= 1074:
             raise ValueError("exact binary64 packing scale is outside its representable exponent range")
 
         def scalar(args, emit):
             value = args[0]
-            if value.type != f64:
-                value = emit(arith.ExtFOp(value, f64))
-            scale = emit(arith.ConstantOp(FloatAttr(float(Fraction(2) ** (-exponent)), f64)))
-            scaled = emit(arith.MulfOp(value, scale))
-            return emit(arith.FPToSIOp(scaled, i64))
+            if not wide_packing:
+                if value.type != f64:
+                    value = emit(arith.ExtFOp(value, f64))
+                scale = emit(arith.ConstantOp(FloatAttr(float(Fraction(2) ** (-exponent)), f64)))
+                scaled = emit(arith.MulfOp(value, scale))
+                return emit(arith.FPToSIOp(scaled, i64))
+            fraction_bits, exponent_bits, bias = FORMAT[str(value.type)]
+            storage = IntegerType(1 + fraction_bits + exponent_bits)
+            raw = emit(arith.BitcastOp(value, storage))
+            raw = emit(arith.ExtUIOp(raw, i64))
+
+            def constant(v):
+                return emit(arith.ConstantOp(IntegerAttr(v, i64)))
+
+            def binary(cls, a, b):
+                return emit(cls(a, b))
+
+            field = binary(
+                arith.AndIOp, binary(arith.ShRUIOp, raw, constant(fraction_bits)), constant((1 << exponent_bits) - 1)
+            )
+            normal = emit(arith.CmpiOp(field, constant(0), "ne"))
+            significand = binary(arith.AndIOp, raw, constant((1 << fraction_bits) - 1))
+            implicit = emit(arith.SelectOp(normal, constant(1 << fraction_bits), constant(0)))
+            significand = binary(arith.OrIOp, significand, implicit)
+            effective = emit(arith.SelectOp(normal, field, constant(1)))
+            shift = binary(arith.SubiOp, effective, constant(bias + fraction_bits + exponent))
+            nonnegative = emit(arith.CmpiOp(shift, constant(0), "sge"))
+            left = emit(arith.SelectOp(nonnegative, shift, constant(0)))
+            right = emit(arith.SelectOp(nonnegative, constant(0), binary(arith.SubiOp, constant(0), shift)))
+            magnitude = binary(arith.ShRUIOp, binary(arith.ShLIOp, significand, left), right)
+            negative = emit(
+                arith.CmpiOp(
+                    binary(arith.AndIOp, raw, constant(1 << (fraction_bits + exponent_bits))), constant(0), "ne"
+                )
+            )
+            return emit(arith.SelectOp(negative, binary(arith.SubiOp, constant(0), magnitude), magnitude))
 
         result = point([value], TensorType(i64, value.type.get_shape()), scalar, operations)
         bounds[result] = aligned
@@ -194,7 +235,9 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow
         return seed.result
 
     def reshape(value, shape, operations):
-        literal = arith.ConstantOp(DenseIntOrFPElementsAttr.from_list(TensorType(i64, [len(shape)]), list(shape)))
+        literal = arith.ConstantOp(
+            DenseIntOrFPElementsAttr.from_list(TensorType(IntegerType(64), [len(shape)]), list(shape))
+        )
         changed = tensor.ReshapeOp(value, literal.result, TensorType(value.type.element_type, shape))
         operations.extend([literal, changed])
         if value in bounds:
@@ -292,7 +335,7 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow
         grids[result] = (
             (exponent, 2 * integer_bound)
             if denominator == 1
-            and (2 * integer_bound).bit_length() <= 52
+            and (2 * integer_bound).bit_length() <= packing_limit
             and max_exponent < FORMAT[str(output_type)][2]
             else None
         )
@@ -309,8 +352,8 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow
                 ),
                 common_exponent=exponent,
                 integer_absolute_bound=integer_bound,
-                reconstruction="bounded_i128",
-                packing="exact_binary64_power_of_two",
+                reconstruction=f"bounded_i{i128.width.data}",
+                packing="exact_ieee_bit_fields" if wide_packing else "exact_binary64_power_of_two",
                 rounding="integer_quotient_remainder_rne",
                 exact_zero_sign="source_ieee_sign_bits",
             )
@@ -362,12 +405,31 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow
                             digits += 1
                             capacity = 256 * capacity + 127
                         bound = (1 << 31) * sum(1 << (8 * j) for j in range(digits))
-                        if bound.bit_length() < 120:
+                        if bound.bit_length() < reconstruction_limit:
                             integer.attributes["merlin.exact_additive"] = StringAttr("closed_zero_seed_sum")
                             operations.extend(additive_ops)
                             bounds[integer.results[0]] = bound
                             publish(op, integer.results[0], exponent, bound, operations)
                             continue
+        if (
+            allow_reassociation
+            and not wide_packing
+            and op.name == "linalg.generic"
+            and len(op.results) == 1
+            and floating(op.results[0])
+            and any(child.name == "scf.for" for child in op.body.walk())
+        ):
+            from merlin.llvmlower.static_polynomial_components import lift_static_polynomial
+            from merlin.llvmlower.static_polynomials import PolynomialRefusal
+
+            try:
+                operations, integer, exponent, bound = lift_static_polynomial(op, grid, pack, bounds)
+            except (PolynomialRefusal, ValueError):
+                pass
+            else:
+                result = reshape(integer, op.results[0].type.get_shape(), operations)
+                publish(op, result, exponent, bound, operations)
+                continue
         if op in contractions and len(op.operands) == 3 and all(floating(v) for v in op.operands):
             from merlin.llvmlower.additive_regions import positive_zero_seed
 
@@ -388,7 +450,7 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow
             except ValueError:
                 continue
             bound = prod(contractions[op].reduction) * prod(b for value, b in packed)
-            if bound.bit_length() >= 120:
+            if bound.bit_length() >= reconstruction_limit:
                 continue
             seed = zero(op.results[0].type.get_shape(), operations)
             body = Block(arg_types=[i64, i64, i128])
@@ -490,7 +552,7 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow
         integer_bound = (
             prod(b for value, b in packed) if arithmetic.name == "arith.mulf" else sum(b for value, b in packed)
         )
-        if integer_bound.bit_length() >= 120:
+        if integer_bound.bit_length() >= reconstruction_limit:
             continue
         seed = zero(shape, operations)
         if arithmetic.name == "arith.mulf":
@@ -581,8 +643,13 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow
         operations.append(integer)
         bounds[integer.results[0]] = integer_bound
         publish(
-            op, integer.results[0], exponent, integer_bound, operations,
-            arithmetic.results[0].type, denominator=denominator,
+            op,
+            integer.results[0],
+            exponent,
+            integer_bound,
+            operations,
+            arithmetic.results[0].type,
+            denominator=denominator,
         )
     module.verify()
     return bounds, proofs
