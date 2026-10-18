@@ -37,3 +37,30 @@ def test_extreme_bfloat_payload_has_full_integer_producers():
     plans = rewrite_integer_components(module, limb_attribute="test.limb", known_bounds=bounds, input_bounds=[0])
     assert plans and max(entry["index"] for plan in plans for entry in plan["inputs"]) > 6
     module.verify()
+
+
+def test_exact_widening_keeps_extreme_finite_grids_for_following_arithmetic():
+    values = [2.0**-133, -(2.0**127), 0.0]
+    module = parse_mlir_text("""module {
+      func.func @forward(%x: tensor<3xbf16>) -> tensor<3xf32> {
+        %e=tensor.empty() : tensor<3xf32>
+        %a=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+          ins(%x:tensor<3xbf16>) outs(%e:tensor<3xf32>) {
+        ^bb0(%v:bf16,%out:f32):
+          %w=arith.extf %v : bf16 to f32
+          linalg.yield %w : f32
+        } -> tensor<3xf32>
+        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+          ins(%a:tensor<3xf32>) outs(%e:tensor<3xf32>) {
+        ^bb1(%v:f32,%out:f32):
+          %w=arith.addf %v,%v : f32
+          linalg.yield %w : f32
+        } -> tensor<3xf32>
+        return %r : tensor<3xf32>
+      }}""")
+    bounds, proofs = rewrite_floating_components(module, [finite_grid(values)])
+    assert any(proof["source_data_arithmetic"] for proof in proofs)
+    assert not any(op.name == "arith.addf" for op in module.walk())
+    plans = rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[0], known_bounds=bounds)
+    assert plans
+    module.verify()

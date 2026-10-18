@@ -125,6 +125,11 @@ def component_readout(
             and max_exponent < FORMAT[str(output_type)][2]
             else None
         )
+        if len(scalar_ops) == 1 and scalar_ops[0].name == "arith.extf":
+            # Widening is exact even at the source format's largest finite value.
+            # An artificial rounding margin can cross the destination's finite
+            # bound and incorrectly erase this proved common-exponent grid.
+            grids[result] = (exponent, integer_bound)
         raw_forms[result] = (integer, exponent, integer_bound, denominator)
         tag = getattr(integer.owner.attributes.get("merlin.exact_component"), "data", None)
         if tag:
