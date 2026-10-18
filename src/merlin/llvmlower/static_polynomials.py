@@ -1,0 +1,184 @@
+"""Closed static scalar regions as bounded degree-two rational polynomials.
+
+Only static index/control expressions are evaluated. Tensor payloads remain SSA
+atoms; no observed output, host floating execution, or provenance selects terms.
+The caller must separately authorize reassociation and prove finite packing.
+"""
+
+from fractions import Fraction
+from math import prod
+
+
+class PolynomialRefusal(ValueError):
+    pass
+
+
+def analyze_static_polynomial(op, *, work_limit=1_000_000):
+    from xdsl.dialects.builtin import FloatAttr, IntegerAttr
+    from xdsl.ir.affine import AffineMap
+
+    if op.name != "linalg.generic" or len(op.results) != 1:
+        raise PolynomialRefusal("one generic result required")
+    if any(it.data.value != "parallel" for it in op.get_iterator_types()):
+        raise PolynomialRefusal("explicit static loops required")
+    shape = op.results[0].type.get_shape()
+    maps = list(op.get_indexing_maps())
+    if maps[-1].data != AffineMap.identity(len(shape)) or prod(shape) > 4096:
+        raise PolynomialRefusal("bounded identity output map required")
+    atoms, atom_ids, work = [], {}, 0
+
+    def atom(source, index):
+        key = source, tuple(index)
+        if key not in atom_ids:
+            atom_ids[key] = len(atoms)
+            atoms.append(key)
+        return {(atom_ids[key],): Fraction(1)}
+
+    def literal(value):
+        owner = value.owner
+        if getattr(owner, "name", None) != "arith.constant":
+            raise PolynomialRefusal("unbound scalar capture")
+        attr = owner.properties.get("value", owner.attributes.get("value"))
+        if isinstance(attr, FloatAttr):
+            try:
+                return {(): Fraction.from_float(float(attr.value.data))} if attr.value.data else {}
+            except (ValueError, OverflowError) as exc:
+                raise PolynomialRefusal("nonfinite literal") from exc
+        if isinstance(attr, IntegerAttr):
+            return int(attr.value.data)
+        raise PolynomialRefusal("unsupported literal")
+
+    def add(a, b, sign=1):
+        if not isinstance(a, dict) or not isinstance(b, dict):
+            raise PolynomialRefusal("data/control type mismatch")
+        result = a.copy()
+        for key, coefficient in b.items():
+            result[key] = result.get(key, Fraction(0)) + sign * coefficient
+        return {key: value for key, value in result.items() if value}
+
+    def multiply(a, b):
+        result = {}
+        for ka, ca in a.items():
+            for kb, cb in b.items():
+                key = tuple(sorted((*ka, *kb)))
+                if len(key) > 2:
+                    raise PolynomialRefusal("polynomial degree exceeds two")
+                result[key] = result.get(key, Fraction(0)) + ca * cb
+        return {key: value for key, value in result.items() if value}
+
+    def block(region_block, arguments, environment, point):
+        nonlocal work
+        env = dict(environment)
+        env.update(zip(region_block.args, arguments, strict=True))
+
+        def get(value):
+            return env[value] if value in env else literal(value)
+
+        for child in region_block.ops:
+            work += 1
+            if work > work_limit:
+                raise PolynomialRefusal("static polynomial work budget exceeded")
+            name = child.name
+            if name in {"scf.yield", "linalg.yield"}:
+                return tuple(get(v) for v in child.operands)
+            args = [] if name in {"tensor.extract", "scf.for", "scf.if"} else [get(v) for v in child.operands]
+            if name == "arith.constant":
+                result = literal(child.results[0])
+            elif name == "linalg.index":
+                result = point[child.dim.value.data]
+            elif name == "tensor.extract":
+                source = child.operands[0]
+                index = tuple(get(v) for v in child.operands[1:])
+                if any(
+                    type(i) is not int or not 0 <= i < n for i, n in zip(index, source.type.get_shape(), strict=True)
+                ):
+                    raise PolynomialRefusal("unproved tensor address")
+                result = atom(source, index)
+            elif name == "scf.for":
+                lower, upper, step = [get(v) for v in child.operands[:3]]
+                if any(type(v) is not int for v in (lower, upper, step)) or step <= 0:
+                    raise PolynomialRefusal("loop bounds must be static positive-step integers")
+                carried = tuple(get(v) for v in child.operands[3:])
+                for index in range(lower, upper, step):
+                    carried = block(child.body.block, (index, *carried), env, point)
+                env.update(zip(child.results, carried, strict=True))
+                continue
+            elif name == "scf.if":
+                condition = get(child.operands[0])
+                if type(condition) is not int:
+                    raise PolynomialRefusal("data-dependent branch")
+                results = block(child.regions[0 if condition else 1].block, (), env, point)
+                env.update(zip(child.results, results, strict=True))
+                continue
+            elif name in {"arith.addf", "arith.subf"}:
+                result = add(*args, sign=-1 if name == "arith.subf" else 1)
+            elif name == "arith.mulf":
+                result = multiply(*args)
+            elif name == "arith.extf":
+                result = args[0]
+            elif name == "arith.negf":
+                result = {key: -value for key, value in args[0].items()}
+            elif name == "arith.cmpi":
+                if any(type(v) is not int for v in args):
+                    raise PolynomialRefusal("data-dependent predicate")
+                a, b = args
+                if child.predicate.value.data >= 6:
+                    # Unsigned order places all negative index values after
+                    # nonnegative values, independently of the index width.
+                    # Same-sign ordering agrees with mathematical integers.
+                    if (a < 0) != (b < 0):
+                        a, b = int(a < 0), int(b < 0)
+                result = int(
+                    [a == b, a != b, a < b, a <= b, a > b, a >= b, a < b, a <= b, a > b, a >= b][
+                        child.predicate.value.data
+                    ]
+                )
+            elif name == "arith.select":
+                if type(args[0]) is not int:
+                    raise PolynomialRefusal("data-dependent select")
+                result = args[1] if args[0] else args[2]
+            elif name in {
+                "arith.addi",
+                "arith.subi",
+                "arith.muli",
+                "arith.divui",
+                "arith.remui",
+                "arith.andi",
+                "arith.ori",
+            }:
+                if any(type(v) is not int for v in args):
+                    raise PolynomialRefusal("non-index integer expression")
+                a, b = args
+                result = {
+                    "arith.addi": lambda: a + b,
+                    "arith.subi": lambda: a - b,
+                    "arith.muli": lambda: a * b,
+                    "arith.divui": lambda: a // b,
+                    "arith.remui": lambda: a % b,
+                    "arith.andi": lambda: a & b,
+                    "arith.ori": lambda: a | b,
+                }[name]()
+            else:
+                raise PolynomialRefusal("unsupported static polynomial operation " + name)
+            if len(child.results) != 1:
+                raise PolynomialRefusal("one scalar result required")
+            env[child.results[0]] = result
+        raise PolynomialRefusal("missing region terminator")
+
+    from itertools import product
+
+    rows = []
+    for point in product(*(range(n) for n in shape)):
+        arguments = []
+        for i, (value, amap) in enumerate(zip(op.operands, maps, strict=True)):
+            if not op.body.block.args[i].uses:
+                arguments.append({})
+            else:
+                arguments.append(atom(value, amap.data.eval(point, ())))
+        (result,) = block(op.body.block, arguments, {}, point)
+        if not isinstance(result, dict):
+            raise PolynomialRefusal("floating polynomial required")
+        rows.append(result)
+    if not any(len(key) == 2 for row in rows for key in row):
+        raise PolynomialRefusal("no bilinear data producer")
+    return atoms, rows
