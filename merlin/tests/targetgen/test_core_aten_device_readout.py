@@ -28,7 +28,13 @@ def source_text(tmp_path_factory, request):
         pytest.skip("MERLIN_M2M_PYTHON is required for real model2mlir readout capture")
     path = tmp_path_factory.mktemp("device-readout") / "source.mlir"
     script = "import sys,torch,m2m\nfrom m2m.capture import integer_readout\nclass Model(torch.nn.Module):\n def forward(self,a,b,bias):\n  acc=torch.ops.m2m_q.int_mm_seeded.default(a,b,bias)\n  return torch.ops.m2m_q.requantize.default(acc,[0.5],0,-128,127,True)\ninputs=(torch.ones(4,8,dtype=torch.int8),torch.ones(8,16,dtype=torch.int8),torch.arange(16,dtype=torch.int32))\nresult=m2m.convert(Model(),inputs,backend='fx_importer')\nassert result.ok,result\nopen(sys.argv[1],'w').write(result.mlir_text)\n"
-    script = script.replace("[0.5]", repr([getattr(request, "param", 0.5)]))
+    coefficient = getattr(request, "param", 0.5)
+    if coefficient < 0:
+        script = script.replace(
+            "torch.ops.m2m_q.requantize.default(acc,[0.5],0,-128,127,True)",
+            "torch.ops.m2m_q.exact_readout.default(acc,1.0,[0.5],alpha=-1.0,output_scale=1.0,relu=True)",
+        )
+    script = script.replace("result=m2m.convert", "Model()(*inputs)\nresult=m2m.convert")
     result = subprocess.run([python, "-c", script, str(path)], capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
     return path.read_text()
@@ -158,6 +164,34 @@ def test_a_retained_host_relu_can_follow_a_negative_coefficient(selection, sourc
     host = next(row for row in site["steps"] if row.get("op") == "exact_rational_host_readout")
     assert host["device_readout"]["relu"] is True
     assert host["device_readout"]["scale_ratios"] == [{"numerator": "-1", "denominator": "2"}]
+
+
+def test_negative_readout_relu_follows_scaling_with_a_nonzero_zero_point():
+    import os
+    import subprocess
+
+    from merlin.common.paths import python_import_roots
+
+    script = '''
+import torch
+from m2m.capture import integer_readout
+from merlin.runtime.exact_readout import requantize_int32
+acc=torch.tensor([[-7,-3,-1,0,1,3,7]],dtype=torch.int32)
+actual=torch.ops.m2m_q.exact_readout.default(acc,1.0,[0.5],alpha=-1.0,output_scale=1.0,
+                                          zero_point=3,relu=True)
+assert actual.tolist() == [[7,5,3,3,3,3,3]]
+host=requantize_int32(acc.numpy(),scale_numerator=-1,scale_denominator=2,
+                     zero_point=3,quant_min=3,quant_max=127)
+assert actual.tolist() == host.tolist()
+'''
+    result = subprocess.run(
+        [os.environ["MERLIN_M2M_PYTHON"], "-c", script],
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(str(p) for p in python_import_roots())},
+        text=True,
+        capture_output=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_unknown_readout_numerics_are_refused_before_any_frontend_import():
