@@ -1,4 +1,4 @@
-"""Source-only coverage checks for raw CPU reads of portable tensor payloads."""
+"""Deterministic backing storage for native CPU reads of portable inputs."""
 
 from math import prod
 
@@ -43,16 +43,16 @@ def _raw_coverage(tensor, rows):
     }
 
 
-def require_native_input_storage(overload, arguments):
-    """Require every raw mean/rstd row read to have a recorded logical address.
+def native_input_storage_plan(overload, arguments):
+    """Describe zero-initialized backing spans required by native CPU reads.
 
-    The portable loader constructs CPU tensors, including when unconsumed device
-    metadata is present. CPU native_layer_norm_backward reads statistics from
-    data_ptr[row], ignoring their logical strides. Padding bytes and storage
-    outside the recorded logical addresses have no canonical payload authority.
+    The portable host ABI defines every unrecorded backing byte as zero. Raw
+    pointer reads extend the allocation, never the logical shape or strides.
+    CPU layer-norm backward reads one statistic per row from data_ptr[row],
+    independently of the logical statistics strides.
     """
     if overload != "aten.native_layer_norm_backward.default":
-        return
+        return None
 
     def argument(index, name):
         return positional[index] if index < len(positional) else arguments["kwargs"][name]
@@ -72,25 +72,116 @@ def require_native_input_storage(overload, arguments):
         ):
             raise ValueError("raw statistic row count requires a matching positive normalized shape")
         rows = prod(shape) // prod(normalized)
-        unavailable = []
+        tensors = []
+
+        def collect(value):
+            if isinstance(value, dict):
+                if value.get("kind") == "tensor":
+                    tensors.append(value)
+                else:
+                    for child in value.values():
+                        collect(child)
+            elif isinstance(value, list):
+                for child in value:
+                    collect(child)
+
+        collect(arguments)
+        reads = []
         for index, name in ((3, "mean"), (4, "rstd")):
-            missing = _raw_coverage(argument(index, name), rows)
-            if missing is not None:
-                unavailable.append({"argument": name, "argument_index": index, **missing})
-    except (KeyError, TypeError, ValueError) as exc:
+            document = argument(index, name)
+            _, _, offset = _geometry(document)
+            reads.append({
+                "argument": name,
+                "argument_index": index,
+                "input_index": next(i for i, tensor in enumerate(tensors) if tensor is document),
+                "access": "contiguous_elements_from_data_pointer",
+                "element_count": rows,
+                "minimum_storage_elements": offset + rows,
+                "previously_unrecorded": _raw_coverage(document, rows),
+            })
+    except (KeyError, TypeError, ValueError, StopIteration) as exc:
         raise InputStorageUnavailable(
             str(exc), details={"overload": overload, "cause": "unrepresentable_input_storage"}
         ) from exc
-    if unavailable:
-        raise InputStorageUnavailable(
-            "CPU layer-norm backward raw statistic reads lack recorded input storage",
-            details={
-                "overload": overload,
-                "classification": "suite_defect",
-                "reason_code": "recorded_inputs_do_not_define_cpu_reads",
-                "placement": "host",
-                "execution": "refused",
-                "row_count": rows,
-                "unavailable": unavailable,
-            },
+    return {
+        "schema": "merlin.host_input_storage.v1",
+        "unrecorded_bytes": "zero",
+        "allocation": "union_of_logical_and_native_read_spans",
+        "authority": "documented_native_cpu_access_pattern",
+        "source_adaptation": "logical_gather_with_zero_for_unrecorded_addresses",
+        "raw_reads": reads,
+    }
+
+
+def require_native_input_storage(overload, arguments):
+    """Validate source geometry under the deterministic zero-storage convention."""
+    return native_input_storage_plan(overload, arguments)
+
+
+def apply_native_input_storage(source, case):
+    """Carry the native backing span to the compiled caller input allocator."""
+    plan = native_input_storage_plan(case["overload"], case["arguments"])
+    if plan is None:
+        return source
+    import json
+
+    from xdsl.dialects.builtin import StringAttr
+
+    from merlin.frontends.linalg_mlir import parse_mlir_text
+    from merlin.llvmlower.result_layout import ATTRIBUTE
+
+    module = parse_mlir_text(source)
+    if ATTRIBUTE not in module.attributes:
+        raise InputStorageUnavailable("native raw reads require a captured input storage layout")
+    layout = json.loads(module.attributes[ATTRIBUTE].data)
+    for read in plan["raw_reads"]:
+        record = layout["inputs"][read["input_index"]]
+        record["minimum_storage_elements"] = max(
+            record.get("minimum_storage_elements", 0), read["minimum_storage_elements"]
         )
+    module.attributes[ATTRIBUTE] = StringAttr(json.dumps(layout, sort_keys=True))
+    return str(module) + "\n"
+
+
+def native_argument_projection(plan, tensors):
+    """Render the logical gather equivalent of the documented raw pointer reads.
+
+    This avoids asking a frontend FakeTensor to retain spare backing capacity.
+    Original caller tensors stay inputs and post-call observations; only the
+    native kernel's read-only statistic arguments use the zero-completed view.
+    """
+    import itertools
+
+    if plan is None:
+        return ""
+    statements = []
+    for read in plan["raw_reads"]:
+        i = read["input_index"]
+        document = tensors[i]
+        shape, strides, offset = _geometry(document)
+        addresses = {}
+        for coordinate in itertools.product(*(range(n) for n in shape)):
+            address = offset + sum(c * s for c, s in zip(coordinate, strides))
+            addresses.setdefault(address, coordinate)
+        if prod(shape) < read["element_count"]:
+            raise InputStorageUnavailable("native statistic shape has fewer elements than its row reads")
+        if prod(shape) == 0:
+            continue
+        elements = []
+        for index in range(prod(shape)):
+            coordinate = addresses.get(offset + index)
+            elements.append(
+                f"input_{i}.reshape(-1)[{sum(c * prod(shape[j + 1:]) for j, c in enumerate(coordinate))}:"
+                f"{1 + sum(c * prod(shape[j + 1:]) for j, c in enumerate(coordinate))}]" if coordinate is not None
+                else f"torch.zeros((1,), dtype=input_{i}.dtype)"
+            )
+        expression = f"torch.cat([{', '.join(elements)}]).reshape({tuple(shape)!r})"
+        # The static loader decoder constructs tuple positional arguments.
+        slot, name = read["argument_index"], read["argument"]
+        statements.append(
+            f"arguments['args'] = tuple({expression} if j == {slot} else value "
+            f"for j, value in enumerate(arguments['args'])) if len(arguments['args']) > {slot} "
+            f"else arguments['args']"
+        )
+        statements.append(f"if len(arguments['args']) <= {slot}: arguments['kwargs'][{name!r}] = {expression}")
+    return "\n        ".join(statements)

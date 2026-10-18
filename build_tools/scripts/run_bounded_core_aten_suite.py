@@ -132,6 +132,7 @@ def stamp(args):
 def capture(args, case, block):
     from merlin.targetgen.capsule_source import PytorchRefSource
     from merlin.targetgen.core_aten_cover import _provenance_ops
+    from merlin.targetgen.core_aten_input_storage import apply_native_input_storage, native_input_storage_plan
 
     directory = args.output / "captures" / case_capture_name(case)
     directory.mkdir(parents=True, exist_ok=True)
@@ -142,11 +143,12 @@ def capture(args, case, block):
         loader.write_text(bounded_loader_source(case))
         artifact = source.capture_loader(loader, "fp32", workdir=directory / "capture-work")
         mlir = directory / "capsule.linalg.mlir"
-        mlir.write_text(artifact.linalg_mlir)
+        mlir.write_text(apply_native_input_storage(artifact.linalg_mlir, case))
         actual = sorted(_provenance_ops(mlir))
         record = {
             "status": "captured_exact" if case["overload"] in actual else "captured_lost_exact_provenance",
             "capture_meta": artifact.meta,
+            "input_storage_convention": native_input_storage_plan(case["overload"], case["arguments"]),
             "captured_overloads": actual,
         }
         atomic_json(directory / "inputs.json", artifact.inputs)

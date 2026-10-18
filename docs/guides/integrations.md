@@ -137,6 +137,17 @@ If another model2MLIR checkout is already imported, start a fresh process to sel
 checkout; Merlin does not unload framework modules. Missing optional quant support still falls
 back to the existing unregistered parsing path, not invented quantization semantics.
 
+Portable Core ATen host inputs use zero-initialized backing storage. Recorded
+logical elements overwrite that storage without changing their shape, strides,
+offset or bytes. Allocation covers both the logical address envelope and any
+native kernel pointer-read span. For CPU layer-norm backward, mean/rstd have one
+contiguous pointer read per input row, even when their declared strides contain
+holes or overlaps. The loader expresses these reads as a logical gather with
+zeros at unrecorded addresses so tracing does not depend on spare FakeTensor
+storage. Original inputs remain the caller's post-call observations. Capture
+records retain `input_storage_convention` with the access rule and required span;
+invalid or unknown geometry still refuses rather than reading unallocated bytes.
+
 ## Chia and AET
 
 Chia owns workflow scheduling, Ray task results, profiling and folding its LLM-call usage.

@@ -14,7 +14,11 @@ from typing import Any
 from merlin.targetgen.capsule_source import PytorchRefSource
 from merlin.targetgen.capture_refusals import InputStorageUnavailable
 from merlin.targetgen.core_aten_cover import _provenance_ops
-from merlin.targetgen.core_aten_input_storage import require_native_input_storage
+from merlin.targetgen.core_aten_input_storage import (
+    apply_native_input_storage,
+    native_argument_projection,
+    native_input_storage_plan,
+)
 
 
 def _split_tensor_documents(value: Any, tensors: list[dict[str, Any]]) -> Any:
@@ -37,13 +41,18 @@ def loader_source(case: dict[str, Any], *, rng_seed: int | None = None) -> str:
     static schema arguments.  The generated loader imports neither Merlin nor model2MLIR.
     """
 
-    require_native_input_storage(case["overload"], case["arguments"])
+    storage_plan = native_input_storage_plan(case["overload"], case["arguments"])
     from merlin.capture.static_metadata import STATIC_METADATA_QUERIES
 
     static_metadata_only = case["overload"] in STATIC_METADATA_QUERIES
     seed_statement = "" if rng_seed is None else f"torch.manual_seed({int(rng_seed)})"
     tensors: list[dict[str, Any]] = []
     arguments = _split_tensor_documents(case["arguments"], tensors)
+    if storage_plan is not None:
+        tensors = [dict(tensor) for tensor in tensors]
+        for read in storage_plan["raw_reads"]:
+            tensors[read["input_index"]]["minimum_storage_elements"] = read["minimum_storage_elements"]
+    argument_projection = native_argument_projection(storage_plan, tensors)
     parameters = ", ".join(f"input_{index}" for index in range(len(tensors)))
     inputs = ", ".join(f"input_{index}" for index in range(len(tensors)))
     if len(tensors) == 1:
@@ -62,7 +71,8 @@ def loader_source(case: dict[str, Any], *, rng_seed: int | None = None) -> str:
             raise ValueError("complex scalar capture requires unambiguous source component precision")
         scalar_wrap = f"result = torch.ops.aten.scalar_tensor.default(result, dtype=torch.{dtypes.pop()})"
     document = json.dumps(
-        {"overload": case["overload"], "arguments": arguments, "tensor_inputs": tensors},
+        {"overload": case["overload"], "arguments": arguments, "tensor_inputs": tensors,
+         "input_storage_convention": storage_plan},
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -100,7 +110,7 @@ def _decode(value, inputs=()):
         shape, stride = value["shape"], value["stride"]
         offset = value["storage_offset"]
         span = offset + (1 + sum((n - 1) * s for n, s in zip(shape, stride)) if all(shape) else 0)
-        storage = torch.zeros(span, dtype=dtype)
+        storage = torch.zeros(max(span, value.get("minimum_storage_elements", 0)), dtype=dtype)
         tensor = storage.as_strided(shape, stride, offset)
         if torch._debug_has_internal_overlap(tensor) == 0:
             tensor.copy_(logical)
@@ -133,6 +143,7 @@ class Model(nn.Module):
         inputs = ({inputs})
         {seed_statement}
         arguments = _decode(_DOCUMENT["arguments"], inputs)
+        {argument_projection}
         result = _op(_DOCUMENT["overload"])(*arguments["args"], **arguments["kwargs"])
         {scalar_wrap}
         return result
@@ -196,7 +207,7 @@ def capture_case_corpus(
         try:
             loader.write_text(loader_source(case), encoding="utf-8")
             artifact = source.capture_loader(loader, "fp32", workdir=destination / "capture-work")
-            mlir.write_text(artifact.linalg_mlir, encoding="utf-8")
+            mlir.write_text(apply_native_input_storage(artifact.linalg_mlir, case), encoding="utf-8")
             actual = sorted(_provenance_ops(mlir))
             exact = overload in actual
             record = {
@@ -208,6 +219,7 @@ def capture_case_corpus(
                 "pytorch_version": artifact.meta.get("torch_version"),
                 "model2mlir_revision": _git_revision(source.m2m_dir),
                 "capture_meta": artifact.meta,
+                "input_storage_convention": native_input_storage_plan(overload, case["arguments"]),
             }
             (destination / "inputs.json").write_text(json.dumps(artifact.inputs, indent=2) + "\n", encoding="utf-8")
             (destination / "golden.json").write_text(json.dumps(artifact.golden, indent=2) + "\n", encoding="utf-8")

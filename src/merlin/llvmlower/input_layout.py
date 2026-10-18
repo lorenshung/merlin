@@ -152,10 +152,13 @@ def storage_array(logical, record):
         raise ValueError("runtime input shape differs from captured input ABI")
     if any(type(v) is not int or v < 0 for v in [*shape, *strides, offset]):
         raise ValueError("runtime input ABI requires static nonnegative layout")
-    if is_identity_layout(record):
+    if is_identity_layout(record) and record.get("minimum_storage_elements", 0) <= logical.size:
         return logical
     capacity = offset if 0 in shape else offset + 1 + sum((n - 1) * s for n, s in zip(shape, strides))
-    physical = np.zeros(max(1, capacity), dtype=logical.dtype)
+    minimum = record.get("minimum_storage_elements", 0)
+    if type(minimum) is not int or minimum < 0:
+        raise ValueError("runtime input minimum backing span must be a nonnegative integer")
+    physical = np.zeros(max(1, capacity, minimum), dtype=logical.dtype)
     seen = {}
     for coordinate in np.ndindex(*shape):
         address = offset + sum(i * s for i, s in zip(coordinate, strides))
