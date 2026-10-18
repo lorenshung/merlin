@@ -51,11 +51,14 @@ def _path(recipe: Path, value: object) -> Path:
 
 def selection(recipe: Path) -> tuple[list[dict], dict[str, str]]:
     """Read only explicitly selected cases/captures, never discover another cohort."""
-    from merlin.targetgen.core_aten_capture import case_capture_name
+    from merlin.targetgen.core_aten_capture import case_capture_name, descriptor_specialization_matches
 
     block = declaration(recipe)
     if block is None or set(block.get("cohorts", {})) != set(COHORTS):
         raise ValueError("Core ATen stage requires public, hidden and host_guard declarations")
+    workers = block.get("workers", 1)
+    if type(workers) is not int or not 1 <= workers <= 8:
+        raise ValueError("Core ATen workers must be an integer in 1..8")
     paths: dict[str, str] = {}
     overlay = _path(recipe, block.get("overlay"))
     paths[str(overlay)] = _sha(overlay)
@@ -145,7 +148,13 @@ def selection(recipe: Path) -> tuple[list[dict], dict[str, str]]:
                     raise ValueError("selected capture is missing or indirect")
                 capture = json.loads((source / "capture.json").read_bytes())
                 if (
-                    capture.get("status") != "captured_exact"
+                    not (
+                        capture.get("status") == "captured_exact"
+                        or (
+                            capture.get("status") == "captured_lost_exact_provenance"
+                            and descriptor_specialization_matches(case, capture)
+                        )
+                    )
                     or capture.get("overload") != case["overload"]
                     or capture.get("capture_meta", {}).get("opaque") != 0
                     or not capture.get("capture_meta", {}).get("result_contract")
@@ -195,6 +204,7 @@ def input_paths(recipe: Path) -> list[Path]:
     for module in (
         "merlin.targetgen.core_aten_capsules",
         "merlin.targetgen.core_aten_batch",
+        "merlin.targetgen.core_aten_capture",
         "merlin.targetgen.core_aten_cases",
         "merlin.targetgen.golden_store",
     ):
@@ -360,7 +370,7 @@ def generate(
     output.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".core-aten-", dir=output.parent))
     try:
-        members, manifests = [], []
+        members, manifests, failures = [], [], []
         program_sets = {cohort: set() for cohort in COHORTS}
         for batch in batches:
             cohort = batch["cohort"]
@@ -386,19 +396,26 @@ def generate(
             writer_manifest = category / "manifest.json"
             if writer_manifest.exists():
                 writer_manifest.unlink()
-            manifest = write_capsules(
-                batch["corpus"],
-                Path(batch["captures"]),
-                category,
-                stage / "_private" / cohort,
-                label="hidden" if cohort == "hidden" else "public",
-                tiers=("L2",),
-                **(
-                    {"numeric_flow": {**block["numeric_flow"], "target": target}}
-                    if (device or batch.get("prepare_numeric")) and block.get("numeric_flow")
-                    else {}
-                ),
-            )
+            try:
+                manifest = write_capsules(
+                    batch["corpus"],
+                    Path(batch["captures"]),
+                    category,
+                    stage / "_private" / cohort,
+                    label="hidden" if cohort == "hidden" else "public",
+                    tiers=("L2",),
+                    **({"workers": block["workers"]} if block.get("workers", 1) != 1 else {}),
+                    **(
+                        {"numeric_flow": {**block["numeric_flow"], "target": target}}
+                        if (device or batch.get("prepare_numeric")) and block.get("numeric_flow")
+                        else {}
+                    ),
+                )
+            except ValueError as exc:
+                if not getattr(exc, "failures", None):
+                    raise
+                failures.extend({"cohort": cohort, **row} for row in exc.failures)
+                continue
             manifests.append(manifest)
             for row in manifest["capsules"]:
                 member = category / row["id"]
@@ -421,6 +438,11 @@ def generate(
                 program_sets[cohort].add(call_digest.hexdigest())
                 members.append(member.relative_to(stage).as_posix())
             writer_manifest.unlink()  # Per-batch evidence belongs to the private ledger.
+        if failures:
+            failure_path = output.parent / "core-aten-failures.json"
+            failure_path.write_bytes(_json({"selection_sha256": receipt["selection_sha256"], "failures": failures}))
+            failure_path.chmod(0o600)
+            raise ValueError(f"{len(failures)} capsule(s) refused; see {failure_path}")
         if program_sets["public"] & program_sets["hidden"]:
             raise ValueError("hidden and public selected program/input pairs overlap")
         private = stage / "_private"

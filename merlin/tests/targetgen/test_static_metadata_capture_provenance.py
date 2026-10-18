@@ -49,3 +49,26 @@ def test_constant_capture_requires_descriptor_specialization_proof(tmp_path, mon
     )
     result = capture.capture_case_corpus(corpus, tmp_path)
     assert result["results"]["aten.sym_numel.default"]["status"] == expected
+
+
+def test_descriptor_specialization_binding_refuses_changed_input_or_operator():
+    import copy
+
+    case = {
+        "overload": "aten.sym_numel.default",
+        "arguments": {"args": [{"kind": "tensor", "shape": [2, 3], "stride": [3, 1], "storage_offset": 0}]},
+    }
+    proof = {
+        "authority": "static_capture_input_descriptors",
+        "inputs": [{"shape": [2, 3], "stride": [3, 1], "storage_offset": 0}],
+        "queries": [{"operator": "aten.sym_numel.default", "value": 6}],
+    }
+    receipt = {"capture_meta": {"static_metadata_specialization": proof}}
+    assert capture.descriptor_specialization_matches(case, receipt)
+    for key, value in (("shape", [3, 2]), ("stride", [6, 2]), ("storage_offset", 1)):
+        changed = copy.deepcopy(case)
+        changed["arguments"]["args"][0][key] = value
+        assert not capture.descriptor_specialization_matches(changed, receipt)
+    assert not capture.descriptor_specialization_matches(dict(case, overload="aten.clone.default"), receipt)
+    proof["authority"] = "unknown"
+    assert not capture.descriptor_specialization_matches(case, receipt)

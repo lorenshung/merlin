@@ -412,3 +412,30 @@ def test_optional_numeric_preparation_requires_per_row_opt_in(tmp_path, monkeypa
     stage.generate(Path(result["recipe"]), tmp_path / "run/phase0/capsules", target="synthetic")
     assert calls[:2] == ([{**flow, "target": "synthetic"}] * 2 if prepare else [None, None])
     assert calls[2] is None
+
+
+def test_parallel_failure_receipt_never_promotes_and_continues_other_cohorts(tmp_path, monkeypatch):
+    recipe = fixture_recipe(tmp_path)
+    document = yaml.safe_load(recipe.read_bytes())
+    document["core_aten"]["workers"] = 2
+    recipe.write_text(yaml.safe_dump(document))
+    derived = stage.derive(recipe, tmp_path / "derive", target="synthetic", descriptor=tmp_path / "descriptor.yaml")
+    from merlin.targetgen.core_aten_capsules import CapsuleBuildError
+
+    called = []
+
+    def writer(*args, **kwargs):
+        assert kwargs.pop("workers") == 2
+        called.append(args[2].name)
+        raise CapsuleBuildError([{"case_id": args[0]["cases"][0]["case_id"], "error": "deliberate refusal"}])
+
+    install_writer(monkeypatch, writer)
+    output = tmp_path / "run/phase0/capsules"
+    with pytest.raises(ValueError, match="3 capsule.*refused"):
+        stage.generate(Path(derived["recipe"]), output, target="synthetic")
+    assert called == list(stage.COHORTS)
+    failure = output.parent / "core-aten-failures.json"
+    assert len(json.loads(failure.read_bytes())["failures"]) == 3
+    assert failure.stat().st_mode & 0o077 == 0
+    assert not output.exists()
+    assert not list(output.parent.glob(".core-aten-*"))

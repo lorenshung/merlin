@@ -545,3 +545,127 @@ def test_full_call_rejects_unattributed_device_execution(packaged, monkeypatch):
     verdict = C.grade_readback(capsule, raw, semantic_readback=readback, routing=routing)
     assert verdict["passed_count"] == 0
     assert next(iter(verdict["cases"].values()))["evidence_error"]
+
+
+def test_parallel_writer_preserves_bytes_order_and_private_permissions(packaged, tmp_path):
+    """Real spawned workers produce the same commitments as the serial writer."""
+    capsule, _, _, public, private = packaged
+    source_root = tmp_path / "captures"
+    case = C.load_private(capsule)["batch_map"]["cases"][0]["case"]
+    # Deliberately reverse identifier order: workers must retain declaration order.
+    cases = [dict(case, case_id=name) for name in ("z-last", "a-first")]
+    import shutil
+
+    for item in cases:
+        shutil.copytree(source_root / case_capture_name(case), source_root / case_capture_name(item))
+    roots = []
+    manifests = []
+    for workers in (1, 2):
+        root = tmp_path / f"workers-{workers}"
+        manifests.append(
+            C.write_capsules(
+                {"cases": cases},
+                source_root,
+                root / "hidden",
+                root / "_private/hidden",
+                label="hidden",
+                workers=workers,
+            )
+        )
+        roots.append(root)
+    assert manifests[0] == manifests[1]
+    assert [row["case_id"] for row in manifests[1]["capsules"]] == [case["case_id"] for case in cases]
+    trees = [{p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()} for root in roots]
+    assert trees[0] == trees[1]
+    for owner in (roots[1] / "hidden", roots[1] / "_private/hidden"):
+        for path in owner.rglob("*"):
+            assert path.stat().st_mode & 0o077 == 0
+
+
+def test_parallel_writer_collects_every_refusal_without_a_manifest(packaged, tmp_path):
+    capsule, _, _, _, _ = packaged
+    case = C.load_private(capsule)["batch_map"]["cases"][0]["case"]
+    cases = [dict(case, case_id=str(n)) for n in range(5)]
+    with pytest.raises(C.CapsuleBuildError) as caught:
+        C.write_capsules(
+            {"cases": cases},
+            tmp_path / "captures",
+            tmp_path / "failed/public",
+            tmp_path / "failed/_private/public",
+            workers=2,
+        )
+    assert [row["case_id"] for row in caught.value.failures] == [str(n) for n in range(5)]
+    assert not (tmp_path / "failed/public/manifest.json").exists()
+
+
+@pytest.mark.parametrize("workers", [0, 9, True, 1.5])
+def test_writer_worker_budget_is_explicit(tmp_path, workers):
+    with pytest.raises(ValueError, match="workers"):
+        C.write_capsules(
+            {"cases": []}, tmp_path / "captures", tmp_path / "public", tmp_path / "private", workers=workers
+        )
+
+
+def test_native_numeric_capsule_requires_complete_admission_and_independent_bits(packaged, monkeypatch):
+    capsule, raw, readback, _, _ = packaged
+    golden = C.load_private(capsule)
+    record = golden["batch_map"]["cases"][0]
+    record["numeric_policy"] = "spec_int8"
+    plan = dict(
+        numerical_family="F1",
+        status="admitted",
+        exact_dtype_sites=1,
+        host_floor=dict(status="required", comparison="native_eager_bits_every_boundary_result"),
+        sites=[dict(status="admitted")],
+    )
+    golden["batch_map"]["numeric_preparation"] = plan
+    record["numeric_admission"] = plan
+    record["native_eager_boundary"] = dict(
+        authority="untransformed_native_cpu_eager", output_bytes=[raw[0].hex()], post_input_bytes=[raw[1].hex()]
+    )
+    capsule["operation"]["attributes"]["numeric_flow"] = "spec_int8"
+    monkeypatch.setattr(C, "load_private", lambda *args: copy.deepcopy(golden))
+    routing = dict(
+        lane="device",
+        routed=True,
+        target="synthetic",
+        routed_operations=[{"source": "test"}],
+        execution_evidence=dict(
+            status="measured",
+            attribution="single_case_shard",
+            executed_instructions=10,
+            target="synthetic",
+            case_id=record["case_id"],
+        ),
+    )
+    monkeypatch.setattr("merlin.targetgen.core_aten_device.verify_execution_evidence", lambda evidence: True)
+    verdict = C.grade_readback(capsule, raw, semantic_readback=readback, routing=routing)
+    row = next(iter(verdict["cases"].values()))
+    assert row["host_floor"]["status"] == "pass"
+    assert row["integer_reference"] == {}
+    assert verdict["passed_count"] == 1
+    assert C.grade_readback(capsule, raw, semantic_readback=readback)["passed_count"] == 0
+    record["native_eager_boundary"]["output_bytes"] = [bytes(len(raw[0])).hex()]
+    assert C.grade_readback(capsule, raw, semantic_readback=readback, routing=routing)["passed_count"] == 0
+    record["native_eager_boundary"]["output_bytes"] = [raw[0].hex()]
+    for key, value in (("numerical_family", "F3"), ("status", "refused"), ("exact_dtype_sites", 2)):
+        previous = plan[key]
+        plan[key] = value
+        assert C.grade_readback(capsule, raw, semantic_readback=readback, routing=routing)["passed_count"] == 0
+        plan[key] = previous
+
+
+def test_numeric_refusal_diagnostic_omits_repeated_inputs_and_expected_bytes():
+    plan = dict(
+        status="host",
+        refusal_code="not_profitable",
+        selection={"spec": "large shared contract"},
+        provider_catalog={"assembly": "large catalog"},
+        integer_reference=dict(status="prepared", expected_output_bytes={"0": "private-answer"}),
+    )
+    error = C.NumericFixtureError("declined", plan)
+    assert error.plan["refusal_code"] == "not_profitable"
+    assert error.plan["integer_reference"] == {"status": "prepared"}
+    assert "selection" not in error.plan and "provider_catalog" not in error.plan
+    assert "private-answer" not in str(error)
+    assert plan["integer_reference"]["expected_output_bytes"] == {"0": "private-answer"}

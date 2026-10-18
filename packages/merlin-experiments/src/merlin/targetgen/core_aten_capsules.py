@@ -13,6 +13,8 @@ import json
 import os
 import shutil
 import tempfile
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import get_context
 from pathlib import Path
 
 import yaml
@@ -28,6 +30,30 @@ from merlin.targetgen.package_runtime import CONTRACT_VERSION
 CONTRACT = "full_call_v1"
 
 
+class CapsuleBuildError(ValueError):
+    """All case-local refusals from a bounded parallel build; no corpus is promoted."""
+
+    def __init__(self, failures):
+        self.failures = failures
+        first = failures[0]
+        super().__init__(f"{len(failures)} capsule(s) refused; first: {first['case_id']}: {first['error']}")
+
+
+class NumericFixtureError(ValueError):
+    """Retain private admission decisions without printing reference answers."""
+
+    def __init__(self, message, plan):
+        # The stage receipt already binds shared specs/facts. Repeating their
+        # complete selection and provider catalogs per refused case is costly
+        # at corpus scale, and expected bytes are unnecessary for diagnosis.
+        self.plan = {key: value for key, value in plan.items() if key not in {"selection", "provider_catalog"}}
+        if isinstance(self.plan.get("integer_reference"), dict):
+            self.plan["integer_reference"] = {
+                key: value for key, value in self.plan["integer_reference"].items() if key != "expected_output_bytes"
+            }
+        super().__init__(message)
+
+
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -41,13 +67,23 @@ def is_full_call(capsule: dict) -> bool:
 
 
 def write_capsules(
-    corpus: dict, captures: Path, public: Path, private: Path, *, label="public", tiers=("L2",), numeric_flow=None
+    corpus: dict,
+    captures: Path,
+    public: Path,
+    private: Path,
+    *,
+    label="public",
+    tiers=("L2",),
+    numeric_flow=None,
+    workers=1,
 ):
     """Write one capsule per case, using precisely the round-2 result projection.
 
     ``private`` must be outside the compiler-input tree. No seal or hardware admission is
     implied. Additive bounded case IDs retain the capture tool's content-derived names.
     """
+    if type(workers) is not int or not 1 <= workers <= 8:
+        raise ValueError("capsule workers must be an integer in 1..8")
     public, private, captures = public.resolve(), private.resolve(), captures.resolve()
     if private.is_relative_to(public) or public.is_relative_to(private):
         raise ValueError("public inputs and private answers require disjoint roots")
@@ -60,122 +96,26 @@ def write_capsules(
     public.mkdir(parents=True, exist_ok=True)
     private.mkdir(parents=True, exist_ok=True, mode=0o700)
     private.chmod(0o700)
-    rows = []
-    for case, name, capture_name in zip(corpus["cases"], names, capture_names):
-        source = captures / capture_name
-        destination, answers = public / name, private / name
-        if destination.exists() or answers.exists():
-            raise ValueError(f"refusing to overwrite capsule {name}")
-        capture = json.loads((source / "capture.json").read_text())
-        if capture.get("overload") != case["overload"]:
-            raise ValueError(f"capture overload differs from case: {name}")
-        if not capture["capture_meta"].get("result_contract"):
-            raise ValueError(f"full-call capsule lacks same-conversion boundary: {name}")
-        with tempfile.TemporaryDirectory(prefix="capsule-", dir=private) as scratch:
-            bundle = Path(scratch)
-            report = build_core_aten_batch({**corpus, "cases": [case]}, captures, bundle)
-            if report["bundled_count"] != 1 or not (bundle / "semantic_io.json").is_file():
-                raise ValueError(f"full-call capsule did not bundle: {name}: {report['cases']}")
-            if case["overload"] not in _provenance_ops(bundle / "model.mlir"):
-                raise ValueError(f"full-call interface lacks exact overload provenance: {name}")
-            if numeric_flow is not None:
-                prepare_numeric_fixture(bundle, report, numeric_flow)
-            destination.mkdir(mode=0o700 if label == "hidden" else 0o755)
-            answers.mkdir(mode=0o700)
-            shutil.copyfile(bundle / "model.mlir", destination / "capsule.interface.mlir")
-            for filename in ("inputs.npz", "input_order.json", "weights.safetensors.manifest.json"):
-                shutil.copyfile(bundle / filename, destination / filename)
-            shutil.copyfile(source / "capsule.pytorch.py", destination / "capsule.pytorch.py")
-            # The public ABI contains no expected results, mutation observations or answers.
-            record = report["cases"][0]
-            _json(
-                destination / "call.json",
-                {
-                    "schema_version": 1,
-                    "overload": case["overload"],
-                    "input_abi": record["input_abi"],
-                    "output_abi": record["output_abi"],
-                    "output_indices": record["output_indices"],
-                    "post_indices": record["semantic_boundary"]["post_indices"],
-                    "comparison": case["comparison"],
-                    "comparison_parameters": case.get("comparison_parameters", {}),
-                    "output_count": report["output_count"],
-                },
-            )
-            public_files = {p.name: _sha(p) for p in sorted(destination.iterdir())}
-            # Retain original evidence host-side, without copying capture-work trees.
-            _json(answers / "capture.json", capture)
-            write_golden(
-                answers,
-                {
-                    "schema": "merlin.core_aten_capsule.v1",
-                    "batch_map": report,
-                    "semantic_io": json.loads((bundle / "semantic_io.json").read_text()),
-                    "public_files": public_files,
-                },
-            )
-            binding = {filename: _sha(answers / filename) for filename in FILES if (answers / filename).is_file()}
-            parameters = case.get("comparison_parameters") or {}
-            dtypes = [item["dtype"] for item in record["output_abi"]]
-            floating = any(dtype.startswith(("f", "complex<")) for dtype in dtypes)
-            policy_dtype = next((dtype for dtype in dtypes if dtype.startswith(("f", "complex<"))), dtypes[0])
-            if policy_dtype.startswith("complex<"):
-                policy_dtype = policy_dtype.removeprefix("complex<").removesuffix(">")
-            declaration = {
-                "name": name,
-                "kind": "model_slice",
-                "source_role": "pytorch_model_slice",
-                "label": label,
-                "source_reference": case["overload"],
-                "interface_mlir": "capsule.interface.mlir",
-                "operation": {
-                    "op": "model",
-                    "attributes": {
-                        "core_aten_contract": CONTRACT,
-                        "overload": case["overload"],
-                    },
-                },
-                "numeric_policy": {
-                    "compare": "tolerance_float" if floating else "exact_int",
-                    "dtype": policy_dtype,
-                    "rtol": float(parameters.get("rtol", 0)),
-                    "atol": float(parameters.get("atol", 0)),
-                },
-                "expected": {"instruction_classes": []},
-                "required_oracle_tiers": list(tiers),
-                "full_call_golden": binding,
-            }
-            if numeric_flow is not None:
-                declaration["operation"]["attributes"]["numeric_flow"] = numeric_flow["policy"]
-                declaration["numeric_policy"].update(
-                    compare="exact_int",
-                    rtol=0.0,
-                    atol=0.0,
-                )
-            (destination / "capsule.yaml").write_text(yaml.safe_dump(declaration, sort_keys=False))
-            load_capsule(destination)
-            for path in answers.iterdir():
-                path.chmod(0o600)
-            if label == "hidden":
-                for path in destination.iterdir():
-                    path.chmod(0o600)
-            rows.append(
-                {
-                    "id": name,
-                    "overload": case["overload"],
-                    "case_id": case.get("case_id", case["overload"]),
-                    "digests": {**public_files, "capsule.yaml": _sha(destination / "capsule.yaml")},
-                    "golden_binding": binding,
-                    "provenance": {
-                        "capture_sha256": _sha(source / "capture.json"),
-                        "capture_source_sha256": _sha(source / "capsule.linalg.mlir"),
-                        "model2mlir_revision": capture.get("model2mlir_revision"),
-                        "captured_overloads": capture.get("captured_overloads"),
-                        "capture_abi_version": capture["capture_meta"].get("capture_abi_version"),
-                        "retained_capture_provenance": capture.get("provenance"),
-                    },
-                }
-            )
+    # Spawn isolates numeric preparation's provider/environment state. Submit only a
+    # small window of single-case documents; a full-suite copy per task is quadratic.
+    metadata = {key: value for key, value in corpus.items() if key not in {"cases", "selected_cases"}}
+    tasks = (
+        ({**metadata, "cases": [case]}, captures, public, private, label, tiers, numeric_flow)
+        for case in corpus["cases"]
+    )
+    if workers == 1:
+        rows = [_write_case(task) for task in tasks]
+    else:
+        rows = []
+        with ProcessPoolExecutor(max_workers=workers, mp_context=get_context("spawn")) as pool:
+            # Keep futures and pickled documents bounded, preserving declaration order.
+            from itertools import islice
+
+            while window := list(islice(tasks, workers * 2)):
+                rows.extend(pool.map(_try_write_case, window))
+        failures = [row for row in rows if "error" in row]
+        if failures:
+            raise CapsuleBuildError(failures)
     manifest = {
         "schema": "merlin.core_aten_capsules.v1",
         "label": label,
@@ -190,6 +130,154 @@ def write_capsules(
     if label == "hidden":
         (public / "manifest.json").chmod(0o600)
     return manifest
+
+
+def _try_write_case(task):
+    try:
+        return _write_case(task)
+    except Exception as exc:  # noqa: BLE001 -- a case refusal must not hide other cases
+        case = task[0]["cases"][0]
+        return {
+            "case_id": case.get("case_id", case["overload"]),
+            "error": f"{type(exc).__name__}: {exc}",
+            **({"numeric_preparation": exc.plan} if isinstance(exc, NumericFixtureError) else {}),
+        }
+
+
+def _write_case(task):
+    corpus, captures, public, private, label, tiers, numeric_flow = task
+    case = corpus["cases"][0]
+    capture_name = case_capture_name(case)
+    name = capture_name.replace("-", "_")
+    source = captures / capture_name
+    destination, answers = public / name, private / name
+    if destination.exists() or answers.exists():
+        raise ValueError(f"refusing to overwrite capsule {name}")
+    capture = json.loads((source / "capture.json").read_text())
+    if capture.get("overload") != case["overload"]:
+        raise ValueError(f"capture overload differs from case: {name}")
+    if not capture["capture_meta"].get("result_contract"):
+        raise ValueError(f"full-call capsule lacks same-conversion boundary: {name}")
+    with tempfile.TemporaryDirectory(prefix="capsule-", dir=private) as scratch:
+        bundle = Path(scratch)
+        report = build_core_aten_batch({**corpus, "cases": [case]}, captures, bundle)
+        if report["bundled_count"] != 1 or not (bundle / "semantic_io.json").is_file():
+            raise ValueError(f"full-call capsule did not bundle: {name}: {report['cases']}")
+        from merlin.targetgen.core_aten_capture import descriptor_specialization_matches
+
+        if case["overload"] not in _provenance_ops(bundle / "model.mlir") and not descriptor_specialization_matches(
+            case, capture
+        ):
+            raise ValueError(f"full-call interface lacks exact overload provenance: {name}")
+        if numeric_flow is not None:
+            prepare_numeric_fixture(bundle, report, numeric_flow)
+        destination.mkdir(mode=0o700 if label == "hidden" else 0o755)
+        answers.mkdir(mode=0o700)
+        shutil.copyfile(bundle / "model.mlir", destination / "capsule.interface.mlir")
+        for filename in ("inputs.npz", "input_order.json", "weights.safetensors.manifest.json"):
+            shutil.copyfile(bundle / filename, destination / filename)
+        shutil.copyfile(source / "capsule.pytorch.py", destination / "capsule.pytorch.py")
+        # The public ABI contains no expected results, mutation observations or answers.
+        record = report["cases"][0]
+        _json(
+            destination / "call.json",
+            {
+                "schema_version": 1,
+                "overload": case["overload"],
+                "input_abi": record["input_abi"],
+                "output_abi": record["output_abi"],
+                "output_indices": record["output_indices"],
+                "post_indices": record["semantic_boundary"]["post_indices"],
+                "comparison": case["comparison"],
+                "comparison_parameters": case.get("comparison_parameters", {}),
+                "output_count": report["output_count"],
+            },
+        )
+        public_files = {p.name: _sha(p) for p in sorted(destination.iterdir())}
+        # Retain original evidence host-side, without copying capture-work trees.
+        _json(answers / "capture.json", capture)
+        write_golden(
+            answers,
+            {
+                "schema": "merlin.core_aten_capsule.v1",
+                "batch_map": report,
+                "semantic_io": json.loads((bundle / "semantic_io.json").read_text()),
+                "public_files": public_files,
+            },
+        )
+        binding = {filename: _sha(answers / filename) for filename in FILES if (answers / filename).is_file()}
+        parameters = case.get("comparison_parameters") or {}
+        dtypes = [item["dtype"] for item in record["output_abi"]]
+        floating = any(dtype.startswith(("f", "complex<")) for dtype in dtypes)
+        policy_dtype = next((dtype for dtype in dtypes if dtype.startswith(("f", "complex<"))), dtypes[0])
+        if policy_dtype.startswith("complex<"):
+            policy_dtype = policy_dtype.removeprefix("complex<").removesuffix(">")
+        declaration = {
+            "name": name,
+            "kind": "model_slice",
+            "source_role": "pytorch_model_slice",
+            "label": label,
+            "source_reference": case["overload"],
+            "interface_mlir": "capsule.interface.mlir",
+            "operation": {
+                "op": "model",
+                "attributes": {
+                    "core_aten_contract": CONTRACT,
+                    "overload": case["overload"],
+                },
+            },
+            "numeric_policy": {
+                "compare": "tolerance_float" if floating else "exact_int",
+                "dtype": policy_dtype,
+                "rtol": float(parameters.get("rtol", 0)),
+                "atol": float(parameters.get("atol", 0)),
+            },
+            "expected": {"instruction_classes": []},
+            "required_oracle_tiers": list(tiers),
+            "full_call_golden": binding,
+        }
+        if numeric_flow is not None:
+            declaration["operation"]["attributes"]["numeric_flow"] = numeric_flow["policy"]
+            declaration["numeric_policy"].update(
+                compare="exact_int",
+                rtol=0.0,
+                atol=0.0,
+            )
+        (destination / "capsule.yaml").write_text(yaml.safe_dump(declaration, sort_keys=False))
+        load_capsule(destination)
+        for path in answers.iterdir():
+            path.chmod(0o600)
+        if label == "hidden":
+            for path in destination.iterdir():
+                path.chmod(0o600)
+        return {
+            "id": name,
+            "overload": case["overload"],
+            "case_id": case.get("case_id", case["overload"]),
+            "digests": {**public_files, "capsule.yaml": _sha(destination / "capsule.yaml")},
+            "golden_binding": binding,
+            "provenance": {
+                "capture_sha256": _sha(source / "capture.json"),
+                "capture_source_sha256": _sha(source / "capsule.linalg.mlir"),
+                "model2mlir_revision": capture.get("model2mlir_revision"),
+                "captured_overloads": capture.get("captured_overloads"),
+                "capture_abi_version": capture["capture_meta"].get("capture_abi_version"),
+                "retained_capture_provenance": capture.get("provenance"),
+            },
+        }
+
+
+def _native_fixture(plan: dict) -> bool:
+    """The same complete native proof required at preparation and readback."""
+    return (
+        plan.get("numerical_family") in {"F1", "F2", "F4", "F5"}
+        and plan.get("status") == "admitted"
+        and plan.get("exact_dtype_sites", 0) > 0
+        and (plan.get("host_floor") or {}).get("status") == "required"
+        and (plan.get("host_floor") or {}).get("comparison") == "native_eager_bits_every_boundary_result"
+        and all(site.get("status") == "admitted" for site in plan.get("sites", []))
+        and len(plan.get("sites", [])) == plan.get("exact_dtype_sites")
+    )
 
 
 def prepare_numeric_fixture(bundle: Path, report: dict, flow: dict) -> None:
@@ -220,25 +308,18 @@ def prepare_numeric_fixture(bundle: Path, report: dict, flow: dict) -> None:
         + (plan.get("native_contractions") or 0)
         + (plan.get("quantized_non_contraction_sites") or 0)
     )
-    native = (
-        plan.get("numerical_family") in {"F1", "F2", "F4", "F5"}
-        and plan.get("status") == "admitted"
-        and plan.get("exact_dtype_sites", 0) > 0
-        and (plan.get("host_floor") or {}).get("status") == "required"
-        and (plan.get("host_floor") or {}).get("comparison") == "native_eager_bits_every_boundary_result"
-        and all(site.get("status") == "admitted" for site in plan.get("sites", []))
-        and len(plan.get("sites", [])) == plan.get("exact_dtype_sites")
-    )
+    native = _native_fixture(plan)
     if (
         plan.get("placement_cost", {}).get("status") == "host"
         and plan["placement_cost"].get("reason_code") != "no_admitted_device_candidate"
     ):
-        raise ValueError(
+        raise NumericFixtureError(
             "scored capsule requires device placement but the cost model retained host execution: "
-            + plan["placement_cost"]["reason_code"]
+            + plan["placement_cost"]["reason_code"],
+            plan,
         )
     if not native and (not admitted or (plan.get("integer_reference") or {}).get("status") != "prepared"):
-        raise ValueError(
+        raise NumericFixtureError(
             "scored capsule has no admitted contraction with an exact integer reference: "
             + str(
                 [
@@ -252,7 +333,8 @@ def prepare_numeric_fixture(bundle: Path, report: dict, flow: dict) -> None:
                 plan.get("refusal_code")
                 or plan.get("refusal_details")
                 or [s.get("reasons") for key in ("sites", "non_contraction_sites") for s in plan.get(key, [])]
-            )
+            ),
+            plan,
         )
     report["numeric_preparation"] = plan
     for record in report["cases"]:
@@ -316,10 +398,16 @@ def grade_readback(
     )
     row = next(iter(verdict["cases"].values()))
     if capsule.get("operation", {}).get("attributes", {}).get("numeric_flow") and row["status"] != "execution_failed":
-        if routing is None or row.get("integer_reference", {}).get("status") != "pass":
+        plan = report.get("numeric_preparation", {})
+        reference_passed = row.get("integer_reference", {}).get("status") == "pass" or (
+            _native_fixture(plan)
+            and plan.get("placement_cost", {}).get("status") != "host"
+            and row.get("host_floor", {}).get("status") == "pass"
+        )
+        if routing is None or not reference_passed:
             row.update(
                 status="mismatch",
-                reason="mandatory exact integer reference or attributed execution evidence did not pass",
+                reason="mandatory exact numeric reference or attributed execution evidence did not pass",
             )
             verdict["passed_count"] = 0
             verdict["status_counts"] = {"mismatch": 1}
