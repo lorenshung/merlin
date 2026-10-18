@@ -15,10 +15,10 @@ def specialize_static_metadata(model, inputs):
     graph so normal boundary observations and alias checks still apply. Mixed
     data/metadata programs retain the ordinary frontend path.
     """
+    import copy
+
     import torch
     from torch.fx.node import map_arg
-
-    import copy
 
     queries = {getattr(getattr(torch.ops.aten, name.split(".")[1]), name.split(".")[2])
                for name in STATIC_METADATA_QUERIES}

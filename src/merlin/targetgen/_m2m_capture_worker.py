@@ -1072,14 +1072,6 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
             write_exception_refusal(out, exc, fallback_code="no_eligible_recipe_operations")
             return 4
         quant_stats = getattr(mdl, "_recipe_quantization_stats", None)
-        if static and not isinstance(mdl, torch.fx.GraphModule):
-            write_refusal(
-                out,
-                code="no_eligible_recipe_operations",
-                reason="static recipe did not produce a converted PT2E FX graph",
-                quantization_stats=quant_stats,
-            )
-            return 4
         if fp32_staging is not None:
             fp32_staging["source_layer_plan_sha256"] = (
                 quant_stats.get("plan_sha256") if isinstance(quant_stats, dict) else None
@@ -1119,6 +1111,18 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
         quant_stats = getattr(mdl, "_m2m_quantization_stats", None)
     integerization_receipt = None
     if q is not None and q.scheme == "int8_static_act_int8_weight" and not a.already_quantized:
+        if (
+            not isinstance(mdl, torch.fx.GraphModule)
+            or not isinstance(quant_stats, dict)
+            or quant_stats.get("api") != "pt2e"
+        ):
+            write_refusal(
+                out,
+                code="no_eligible_recipe_operations",
+                reason="static integer recipe did not produce a converted PT2E FX graph",
+                quantization_stats=quant_stats,
+            )
+            return 4
         # Independently account for integer and preserved-float contractions.
         from merlin.capture.integerization import (
             INTEGER_REFERENCE,

@@ -10,8 +10,8 @@ from merlin.targetgen import core_aten_numeric
 
 @pytest.mark.parametrize("arguments", [(), ("--native",)])
 def test_source_reference_uses_declared_capture_python(tmp_path, monkeypatch, arguments):
-    from merlin.integrations import model2mlir
     from merlin.common.paths import python_import_roots
+    from merlin.integrations import model2mlir
 
     python = tmp_path / "capture-python"
     monkeypatch.setattr(model2mlir, "capture_python", lambda: python)
