@@ -46,6 +46,7 @@ else:
  stats=converted._recipe_quantization_stats
  assert stats['annotated_contractions']==1
  rows=[row for row in stats['software_admission'] if row['source_operator']=='aten.bmm.default']
+ assert all(row['prospective_signature']['numerical_family']=='F3' for row in rows)
  assert rows and all(row['prospective_operator']=='aten.bmm.default' and row['declaration']=='contraction'
                      and row['status']!='unsupported' for row in rows)
  assert all(row['ignored_disjoint_host_precision_declarations']==['host_f32_bmm'] for row in rows)

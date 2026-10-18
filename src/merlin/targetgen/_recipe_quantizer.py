@@ -526,6 +526,7 @@ def build_quantizer(
         value = operands[0].meta.get("val") if operands and isinstance(operands[0], torch.fx.Node) else None
         prospective = {
             "family": family,
+            "numerical_family": "F3",
             "operand_dtype": activation["dtype"],
             "accum_dtype": recipe["accumulator_dtype"],
             "rank": len(value.shape) if isinstance(value, torch.Tensor) else None,
