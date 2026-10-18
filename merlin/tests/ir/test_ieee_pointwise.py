@@ -128,18 +128,22 @@ def test_explicit_special_words_match_native_cpu(typ, operation):
 
 
 def test_special_readout_does_not_taint_an_unread_shape_operand():
-    from types import SimpleNamespace
+    from merlin.llvmlower.ieee_pointwise import dependence_proof, overlay
 
-    from xdsl.dialects import arith
-    from xdsl.dialects.linalg import ops as L
-    from xdsl.ir import Region
-
-    from merlin.llvmlower.ieee_pointwise import overlay
-
-    scalar = Block(arg_types=[f32] * 4)
-    addition = arith.AddfOp(scalar.args[0], scalar.args[1])
-    scalar.add_ops([addition, L.YieldOp(addition.result)])
-    source = SimpleNamespace(body=Region(scalar), inputs=[None] * 3)
+    module = parse_mlir_text('''module {
+      func.func @forward(%x: tensor<2xf32>, %y: tensor<2xf32>, %shape: tensor<2xf32>) -> tensor<2xf32> {
+        %e=tensor.empty() : tensor<2xf32>
+        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+          ins(%x,%y,%shape : tensor<2xf32>,tensor<2xf32>,tensor<2xf32>) outs(%e : tensor<2xf32>) {
+        ^bb0(%a:f32,%b:f32,%unread:f32,%unused:f32):
+          %v=arith.addf %a,%b : f32
+          linalg.yield %v : f32
+        } -> tensor<2xf32>
+        return %r : tensor<2xf32>
+      }}''')
+    source = next(op for op in module.walk() if op.name == "linalg.generic")
+    proof = dependence_proof(source)
+    assert [d["operand"] for d in proof["input_dependencies"]] == [0, 1]
     readout = Block(arg_types=[f32] * 4)
 
     def emit(op):

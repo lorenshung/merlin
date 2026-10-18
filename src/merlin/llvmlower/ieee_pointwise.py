@@ -32,6 +32,55 @@ def finite_or_zero(value, emit):
     return emit(arith.SelectOp(flag, zero, value))
 
 
+def dependence_proof(op):
+    """Prove the exact element dependence set from a closed scalar/index DAG."""
+    from xdsl.ir.affine import AffineMap
+
+    maps = [a.data for a in op.get_indexing_maps()]
+    if (
+        op.name != "linalg.generic"
+        or any(it.data.value != "parallel" for it in op.get_iterator_types())
+        or maps[-1] != AffineMap.identity(len(op.results[0].type.get_shape()))
+        or any(amap.num_symbols for amap in maps)
+    ):
+        raise ValueError("special readout requires a closed parallel output index map")
+    arguments = op.body.block.args
+    dependencies = set()
+    allowed = {
+        "arith.addf",
+        "arith.subf",
+        "arith.mulf",
+        "arith.divf",
+        "arith.negf",
+        "arith.extf",
+        "arith.truncf",
+        "arith.constant",
+    }
+
+    def visit(value):
+        if value in arguments:
+            index = arguments.index(value)
+            if index >= len(op.inputs):
+                raise ValueError("special readout cannot depend on an unproved output seed")
+            dependencies.add(index)
+            return
+        owner = value.owner
+        if getattr(owner, "name", None) not in allowed or owner.parent_block() is not op.body.block:
+            raise ValueError("special readout has an unproved scalar dependence")
+        for operand in owner.operands:
+            visit(operand)
+
+    visit(op.body.block.last_op.operands[0])
+    return dict(
+        method="closed_parallel_scalar_DAG_and_affine_input_maps",
+        output_shape=list(op.results[0].type.get_shape()),
+        output_index_map=str(maps[-1]),
+        input_dependencies=[dict(operand=i, index_map=str(maps[i])) for i in sorted(dependencies)],
+        affected_predicate="OR(is_nonfinite(input[operand][index_map(output_index)]))",
+        finite_dependence_outputs="retain_exact_device_integer_readout_without_overlay",
+    )
+
+
 def overlay(op, inputs, fallback, emit):
     """Evaluate the original scalar source only on an affected output element.
 
@@ -44,10 +93,12 @@ def overlay(op, inputs, fallback, emit):
 
     from merlin.llvmlower.fixed_point_ir import FORMAT
 
+    proof = dependence_proof(op)
+    dependencies = {row["operand"] for row in proof["input_dependencies"]}
     flags = [
         special(value, emit)
-        for argument, value in zip(op.body.block.args[: len(op.inputs)], inputs, strict=True)
-        if argument.uses and str(value.type) in FORMAT
+        for index, value in enumerate(inputs)
+        if index in dependencies and str(value.type) in FORMAT
     ]
     if not flags:
         return fallback
@@ -73,6 +124,7 @@ def overlay(op, inputs, fallback, emit):
         else:
             copied = child.clone(value_mapper=mapping)
             selected.add_op(copied)
+            mapping.update(zip(child.results, copied.results, strict=True))
     yielded = op.body.block.last_op.operands[0]
     selected.add_op(scf.YieldOp(mapping[yielded]))
     retained = Block([scf.YieldOp(fallback)])

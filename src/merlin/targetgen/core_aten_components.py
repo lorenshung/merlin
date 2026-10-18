@@ -29,6 +29,13 @@ def unlowered_data_reductions(module, limb_attribute):
         if op.name.startswith("math."):
             result.append(ordinal)
             continue
+        if op.name in {"arith.addf", "arith.subf", "arith.mulf", "arith.divf", "arith.negf"}:
+            parent = op.parent_op()
+            while parent is not None and "merlin.exact_host_arithmetic" not in parent.attributes:
+                parent = parent.parent_op()
+            if parent is None:
+                result.append(ordinal)
+            continue
         if op.name not in {"linalg.generic", "linalg.reduce", "scf.for"} or limb_attribute in op.attributes:
             continue
         children = list(op.walk())[1:]
@@ -354,9 +361,7 @@ def prepare_integer_components(directory, report, selection, provider, package, 
             json.dumps(
                 dict(
                     family="F2",
-                    reason=(
-                        "native arithmetic remains in host source; partial preludes do not place the operation"
-                    ),
+                    reason=("native arithmetic remains in host source; partial preludes do not place the operation"),
                     source_operation_ordinals=remaining_products,
                 )
             )
@@ -485,6 +490,13 @@ def prepare_integer_components(directory, report, selection, provider, package, 
                 invalid_nan="x86_negative_quiet_bfloat16_positive_canonical",
             )
             if zero_division_count
+            else dict(
+                kind="closed_pointwise_index_dependence",
+                producer="complete_exact_finite_integer_numerator",
+                dependence_proofs=[p["ieee_dependence_proof"] for p in floating_proofs if "ieee_dependence_proof" in p],
+                output_floor="native_eager_bits_including_nan_payload_and_signed_zero",
+            )
+            if ieee_pointwise
             else None
         ),
         boolean_semantics={"source": "closed_boolean_or_and", "integer_components": boolean_count},

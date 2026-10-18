@@ -8,6 +8,7 @@ from xdsl.ir.affine import AffineMap
 from xdsl.rewriter import Rewriter
 
 from merlin.llvmlower.fixed_point_ir import FORMAT, encode_fixed_integer
+from merlin.llvmlower.ieee_pointwise import dependence_proof
 
 
 def component_readout(
@@ -148,6 +149,7 @@ def component_readout(
                 rounding="integer_quotient_remainder_rne",
                 exact_zero_sign="source_ieee_sign_bits",
                 ieee_special_readout="affected_elements_only" if ieee_pointwise else "none",
+                **({"ieee_dependence_proof": dependence_proof(op)} if ieee_pointwise else {}),
             )
         )
         Rewriter.replace_op(op, operations, [result])
