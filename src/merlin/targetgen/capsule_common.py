@@ -376,6 +376,26 @@ def run_entrypoints(
     return pkg, cb, artifact
 
 
+def unfenced_memory_reads(cb: dict) -> list[dict]:
+    """Memory-chained commands with no FENCE between them, when the buffer's target obliges one.
+
+    Read from the target's selected capability contract (``hazard_resolution: explicit`` with
+    ``must_fence_dram_read_after_write``); a target whose contract is not selectable here obliges
+    nothing this check can state, and its buffers are left to the target's own oracle.
+    """
+    from merlin.runtime.fences import fence_violations, requires_fences
+    from merlin.targetgen.target_registry import load_contract
+
+    target = cb.get("target") if isinstance(cb, dict) else None
+    if not isinstance(target, str) or not target:
+        return []
+    try:
+        capability = load_contract(target)
+    except (KeyError, LookupError, FileNotFoundError, ValueError):
+        return []  # no selected capability contract: no obligation is stated to enforce
+    return fence_violations(cb) if requires_fences(capability) else []
+
+
 def lower_interface(
     pkg,
     interface: str | Path,
@@ -522,6 +542,17 @@ def lower_interface(
         raise CertFailure(
             "command_buffer_schema", _cat("PROTOCOL_VIOLATION"), f"command_buffer.json invalid: {e}"
         ) from e
+    unfenced = unfenced_memory_reads(cb)
+    if unfenced:
+        first = unfenced[0]
+        raise CertFailure(
+            "command_buffer_schema",
+            _cat("PROTOCOL_VIOLATION"),
+            f"{len(unfenced)} command(s) read a tensor an earlier command of the same buffer wrote with no "
+            f"FENCE between them (first: command {first['reader_index']} {first['reader']} reads "
+            f"{first['tensor']!r} written by command {first['writer_index']} {first['writer']}); the "
+            "target's contract obliges must_fence_dram_read_after_write",
+        )
 
     # AN EXPLICIT DECLINE, READ BEFORE ANYTHING IS RUN. A backend states here that it does not handle
     # this capsule; the alternative it used to have was to emit a program that writes nothing, which

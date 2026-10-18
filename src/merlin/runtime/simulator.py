@@ -18,6 +18,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from . import integer_ops
 from .commandbuffer import (
     BIAS_STAGES,
     apply_pool_stage,
@@ -575,7 +576,13 @@ def simulate(cb: dict[str, Any], inputs: dict[str, Any] | None = None) -> dict[s
                 raise SimulationError("MOVEMENT needs operands src/dst")
             src, dst = ops["src"], ops["dst"]
             t = env[src]
-            moved = Tensor(t.shape, list(t.data), str(attrs.get("output_dtype", t.dtype)))
+            if attrs.get("form", "identity") != "identity" or "scale" in attrs:
+                try:
+                    moved = integer_ops.move(t, attrs, integer_ops.declared_shape(cb, dst), op=f"MOVEMENT {dst!r}")
+                except integer_ops.IntegerOpError as e:
+                    raise SimulationError(str(e)) from e
+            else:
+                moved = Tensor(t.shape, list(t.data), str(attrs.get("output_dtype", t.dtype)))
             env[dst] = moved
             outputs[dst] = moved.to_list()
             metrics.bytes_read += t.nbytes
@@ -594,6 +601,29 @@ def simulate(cb: dict[str, Any], inputs: dict[str, Any] | None = None) -> dict[s
             metrics.bytes_read += src.nbytes
             metrics.cycles += len(src.data)
             trace.append({"name": "vector_reduce", "object": dst, "count": len(src.data)})
+
+        elif op in ("AFFINE_MAP", "CONCAT", "INSERT_SLICE", "FILL"):
+            # Defined once (runtime.integer_ops) and shared with the reference and the golden, so the
+            # engines cannot disagree on where the one rounding happens. Costed as one pass over the
+            # result plus the bytes each operand moves.
+            dst = ops["dst"]
+            sources = [env[name] for key, name in ops.items() if key != "dst"]
+            try:
+                t = integer_ops.execute(op, ops, attrs, env, integer_ops.declared_shape(cb, dst))
+            except integer_ops.IntegerOpError as e:
+                raise SimulationError(str(e)) from e
+            env[dst] = t
+            outputs[dst] = t.to_list()
+            read = sum(source.nbytes for source in sources)
+            metrics.bytes_read += read
+            metrics.bytes_written += t.nbytes
+            metrics.bytes_moved += read + t.nbytes
+            metrics.cycles += len(t.data)
+            trace.append({"name": op.lower(), "object": dst, "count": len(t.data)})
+
+        elif op == "FENCE":
+            # A completion barrier: no value changes. Counted, so a schedule's fences are visible.
+            trace.append({"name": "fence", "object": None, "count": 1})
 
         else:
             raise SimulationError(f"unknown opcode '{op}'")

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from . import integer_ops
 from .commandbuffer import (
     BIAS_STAGES,
     apply_pool_stage,
@@ -44,6 +45,10 @@ MODELED_OPCODES = frozenset(
         "CONV2D",
         "MOVEMENT",
         "BATCHED_MATMUL",
+        "AFFINE_MAP",
+        "CONCAT",
+        "INSERT_SLICE",
+        "FILL",
     }
 )
 
@@ -51,7 +56,7 @@ MODELED_OPCODES = frozenset(
 #: frees a resident-store handle and counts an eviction — residency is a performance optimization that by
 #: definition does not change results, and this naive path keeps no resident store to free. Listing them
 #: explicitly is what lets an opcode the engine genuinely cannot evaluate raise instead of being dropped.
-NO_NUMERIC_EFFECT = frozenset({"EVICT"})
+NO_NUMERIC_EFFECT = frozenset({"EVICT", "FENCE"})
 
 
 class UnmodeledOp(ValueError):
@@ -450,9 +455,19 @@ def reference_outputs(cb: dict[str, Any], inputs: dict[str, Any] | None = None) 
                 raise ValueError("MOVEMENT needs operands src/dst")
             src, dst = ops["src"], ops["dst"]
             value = env[src]
-            moved = Tensor(value.shape, list(value.data), str(attrs.get("output_dtype", value.dtype)))
+            if attrs.get("form", "identity") != "identity" or "scale" in attrs:
+                # The movement forms are defined once (runtime.integer_ops) for every engine.
+                moved = integer_ops.move(value, attrs, integer_ops.declared_shape(cb, dst), op=f"MOVEMENT {dst!r}")
+            else:
+                moved = Tensor(value.shape, list(value.data), str(attrs.get("output_dtype", value.dtype)))
             env[dst] = moved
             outputs[dst] = moved.to_list()
+        elif op in ("AFFINE_MAP", "CONCAT", "INSERT_SLICE", "FILL"):
+            dst = ops["dst"]
+            env[dst] = integer_ops.execute(op, ops, attrs, env, integer_ops.declared_shape(cb, dst))
+            outputs[dst] = env[dst].to_list()
+        elif op == "FENCE":
+            pass  # a completion barrier orders memory effects; it changes no value
     for name, spec in cb.get("tensors", {}).items():
         if spec.get("role") == "output" and name in env and name not in outputs:
             outputs[name] = env[name].to_list()

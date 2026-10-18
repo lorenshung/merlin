@@ -46,6 +46,8 @@ _OPCODE_TO_OP = {
     "MATMUL_RESIDENT": "matmul",
     "COMMIT": "commit",
     "EVICT": "evict",
+    # A completion barrier between commands (no operands, no result): see command_buffer_abi FENCE.
+    "FENCE": "fence",
 }
 _OP_TO_OPCODE = {v: k for k, v in _OPCODE_TO_OP.items()}
 
@@ -90,6 +92,15 @@ _NAMED_OP_OPERAND_KEYS = {
     # sum is rounded once, and `bound_lsb` declares how far a target may lie from that reference.
     # Without the op a residual connection has no command at all, so it can only ever be host work.
     "residual_add": ["lhs", "rhs"],
+    # An affine map of one or two int8 tensors in its exact integer form: integer weights and an int32
+    # constant in the accumulator, ReLU on the accumulator, then ONE readout (runtime.integer_ops). A key
+    # ending in "?" is an optional trailing operand: a scalar map reads one tensor, a sum/difference two.
+    "affine_map": ["x", "y?"],
+    # Data movement with more than one source (cat; up to eight sources), into a slice of a larger
+    # tensor (slice/select scatter), and from no source at all (a fill writes one quantized code).
+    "concat": ["src0", "src1", *[f"src{i}?" for i in range(2, 8)]],
+    "insert_slice": ["dest", "src"],
+    "fill": [],
 }
 # Most mnemonics map to their upper-case opcode; a few need an explicit target opcode because the emitter /
 # harness / simulator spell it differently (``matmul_batched`` -> the ``BATCHED_MATMUL`` those consume, not
@@ -213,6 +224,8 @@ def emit_interface_mlir(cb: dict[str, Any]) -> str:
         elif op == "EVICT":
             h = ops["handle"]
             lines.append(f"  merlin_iface.evict %{h} : (!merlin_iface.resident) -> ()")
+        elif op == "FENCE":
+            lines.append("  merlin_iface.fence : () -> ()")
         else:  # pragma: no cover - defensive
             raise ValueError(f"unsupported opcode {op!r} for interface grammar v{GRAMMAR_VERSION}")
 
@@ -663,12 +676,14 @@ def parse_interface_mlir(text: str) -> dict[str, Any]:
             )
         elif mnem in _NAMED_OP_OPERAND_KEYS:
             keys = _NAMED_OP_OPERAND_KEYS[mnem]
-            if len(srcs) != len(keys):
+            required = [key for key in keys if not key.endswith("?")]
+            if not len(required) <= len(srcs) <= len(keys):
+                arity = f"exactly {len(keys)}" if len(required) == len(keys) else f"{len(required)} to {len(keys)}"
                 raise InterfaceGrammarError(
-                    f"merlin_iface.{mnem} needs exactly {len(keys)} operand(s) "
+                    f"merlin_iface.{mnem} needs {arity} operand(s) "
                     f"{keys}, got {len(srcs)} {srcs}; truncating either side would change its ABI"
                 )
-            operands = {k: s for k, s in zip(keys, srcs)}
+            operands = {k.rstrip("?"): s for k, s in zip(keys, srcs)}
             dst = attrs.pop("name", result)
             operands["dst"] = dst
             declare_named_result(dst, op)
@@ -678,6 +693,10 @@ def parse_interface_mlir(text: str) -> dict[str, Any]:
             cb["commands"].append({"opcode": "COMMIT", "operands": {"src": srcs[0], "dst": dst}, "attributes": attrs})
         elif mnem == "evict":
             cb["commands"].append({"opcode": "EVICT", "operands": {"handle": srcs[0]}})
+        elif mnem == "fence":
+            if srcs or result:
+                raise InterfaceGrammarError("merlin_iface.fence takes no operands and produces no result")
+            cb["commands"].append({"opcode": "FENCE", "operands": {}})
 
     # FAIL CLOSED ON A MODULE THAT IS NOT THIS GRAMMAR AT ALL -- the same rule as the undefined-mnemonic
     # guard above, applied to the case that guard cannot see. It rejects `merlin_iface` ops v0.1 does

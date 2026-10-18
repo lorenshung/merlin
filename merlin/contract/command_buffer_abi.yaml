@@ -91,10 +91,73 @@ opcodes:
     attributes:
       output_dtype: "the container dtype the values land in (operand dtype in, accumulate dtype out)"
       semantic: "string; the movement form being exercised (e.g. mvin_mvout)"
+      form: >-
+        "identity (default) | permute | slice | pad | broadcast | repeat". Absent, the op is the identity
+        round-trip below. Each other form names its own REQUIRED attributes and no default is applied:
+        permute {perm}; slice {offsets, sizes, strides}; pad {low, high, mode: constant|reflect|replicate,
+        value_code (constant only: the already-quantized pad code)}; broadcast {} (to dst's declared
+        shape, LEADING dims only -- a stride-0 load replays whole rows); repeat {repeats}
+      scale: >-
+        "f32, optional on every form: each moved element becomes clamp(round_half_even(f32(x) *
+        f32(scale)), quant_min, quant_max) -- one load-path rounding. Absent, the codes move unchanged"
     semantics: >-
       identity load->store round-trip through the accelerator: dst holds src's values UNCHANGED,
       only the container dtype widens. No clamp, no requantize -- the point of the capsule is that
-      the data survives the trip bit-for-bit.
+      the data survives the trip bit-for-bit. A `form` restates WHICH elements move where
+      (torch permute / extract_slice / pad / broadcast / repeat semantics, defined once in
+      merlin.runtime.integer_ops.move), still with no arithmetic unless `scale` is stated.
+  CONCAT:
+    operands: {src0: tensor, src1: tensor, "src2..src7": "tensor (optional)", dst: output_tensor}
+    attributes:
+      axis: "int -- REQUIRED, no default"
+      output_dtype: "the destination container dtype"
+      scales: "[f32, ...] -- optional, one per source: each source is requantized once (see MOVEMENT scale); absent, sources share qparams and move unchanged"
+    semantics: >-
+      dst = cat([requant(src_i, scales[i]) for i], axis): torch.cat over sources of equal rank whose
+      shapes agree off the axis. Defined in merlin.runtime.integer_ops.concat.
+  INSERT_SLICE:
+    operands: {dest: tensor, src: tensor, dst: output_tensor}
+    attributes:
+      offsets: "[int] -- REQUIRED, one per dim"
+      strides: "[int >= 1] -- REQUIRED, one per dim"
+      output_dtype: "the destination container dtype"
+    semantics: >-
+      dst = dest with dst[offsets[d] + i*strides[d] for each d] = src[i] -- slice_scatter, and
+      select_scatter with the selected dim kept at size 1 (src rank equals dest rank). The slice must lie
+      inside dest. Defined in merlin.runtime.integer_ops.insert_slice.
+  FILL:
+    operands: {dst: output_tensor}
+    attributes:
+      value_code: "int -- REQUIRED; the ALREADY-quantized code, sat(RNE(v / s_out)) (merlin.targetgen.recipe_numerics.constant_code)"
+      output_dtype: "an integer dtype -- REQUIRED"
+    semantics: >-
+      every element of dst's declared shape is value_code: fill, full, full_like, and zero_fill
+      (value_code 0). Defined in merlin.runtime.integer_ops.fill.
+  AFFINE_MAP:
+    operands: {x: tensor, y: "tensor (optional)", dst: output_tensor}
+    attributes:
+      weights: "[int] -- REQUIRED, one per operand, |w| <= 381; applied in the int32 accumulator, never on an int8 load path"
+      constant: "int -- REQUIRED (0 for none); the int32 accumulator seed"
+      activation: "none | relu -- REQUIRED; relu acts on the ACCUMULATOR, before the scale"
+      readout_scale: "f32 -- REQUIRED; may be negative (a negation), never negative with relu"
+      output_dtype: "i8 (one readout rounding) | i32 (no readout: readout_scale must be 1.0) -- REQUIRED"
+      quant_min: "int, optional; default the dtype minimum"
+      quant_max: "int, optional; default the dtype maximum"
+    semantics: >-
+      acc = weights[0]*x + weights[1]*y + constant (exact integers; |acc| < 2^24 is required);
+      acc = max(acc, 0) iff activation is relu; dst = clamp(round_half_even(f32(acc) * f32(readout_scale)),
+      quant_min, quant_max) for an i8 result, dst = acc for an i32 result. y has x's shape or broadcasts
+      along LEADING dims only. This is the exact single-rounding form of add/sub.Tensor (signed rational
+      integer weights), add/sub.Scalar (integer gain and int32 constant), mul/div.Scalar and neg
+      (readout scale, negative for neg), standalone relu and int8 -> int32 widening; parameters come from
+      merlin.targetgen.recipe_numerics and the definition is merlin.runtime.integer_ops.affine_map.
+  FENCE:
+    operands: {}
+    semantics: >-
+      A completion barrier: every earlier command's loads, stores and computes are complete and their
+      memory effects visible before any later command issues. No numeric effect in any engine. A command
+      that reads a tensor an EARLIER command of the same buffer wrote needs a FENCE between them on a
+      target whose contract obliges must_fence_dram_read_after_write (merlin.runtime.fences).
   ATTENTION_QK:
     operands: {q: tensor, k: tensor, dst: output_tensor}
     attributes:
