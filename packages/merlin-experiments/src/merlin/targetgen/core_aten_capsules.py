@@ -229,6 +229,11 @@ def prepare_numeric_fixture(bundle: Path, report: dict, flow: dict) -> None:
         and all(site.get("status") == "admitted" for site in plan.get("sites", []))
         and len(plan.get("sites", [])) == plan.get("exact_dtype_sites")
     )
+    if plan.get("placement_cost", {}).get("status") == "host":
+        raise ValueError(
+            "scored capsule requires device placement but the cost model retained host execution: "
+            + plan["placement_cost"]["reason_code"]
+        )
     if not native and (not admitted or (plan.get("integer_reference") or {}).get("status") != "prepared"):
         raise ValueError("scored capsule has no admitted contraction with an exact integer reference")
     report["numeric_preparation"] = plan
