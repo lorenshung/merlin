@@ -98,3 +98,46 @@ def test_native_policy_keeps_sealed_metadata_aliases_and_mutation():
         changed[field] = [0]
         with pytest.raises(AssertionError):
             _validate_observation(case, changed)
+
+
+def test_complex_addmm_coefficients_broadcast_as_exact_gaussian_scalars():
+    from fractions import Fraction
+
+    def z(real, imag):
+        return dict(kind="complex", real=real, imag=imag)
+
+    def tensor(values, shape):
+        return dict(kind="tensor", dtype="complex64", values=values, shape=shape)
+
+    case = dict(
+        overload="aten.addmm.default",
+        arguments=dict(
+            args=dict(
+                kind="tuple",
+                items=[
+                    tensor([[z(2, -1)]], [1, 1]),
+                    tensor([[z(1, 1), z(2, -1)]], [1, 2]),
+                    tensor([[z(3, -1)], [z(1, 2)]], [2, 1]),
+                ],
+            ),
+            kwargs=dict(alpha=z(0.5, -1), beta=z(1, 1)),
+        ),
+    )
+    assert rational_outputs(case)[0].item() == Gaussian(Fraction(12), Fraction(-9, 2))
+
+
+def test_empty_mean_dimension_list_reduces_all_axes():
+    from fractions import Fraction
+
+    case = dict(
+        overload="aten.mean.dim",
+        arguments=dict(
+            args=dict(
+                kind="tuple",
+                items=[dict(kind="tensor", dtype="float32", shape=[2, 3], values=[[1, 2, 3], [4, 5, 6]]), [], False],
+            ),
+            kwargs={},
+        ),
+    )
+    result = rational_outputs(case)[0]
+    assert result.shape == () and result.item() == Fraction(7, 2)

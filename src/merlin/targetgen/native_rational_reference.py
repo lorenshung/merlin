@@ -88,13 +88,16 @@ def rational_outputs(case):
     if op in {"mm", "bmm", "matmul"}:
         result = np.matmul(a[0], a[1])
     elif op == "addmm":
-        result = kwargs.get("beta", 1) * a[0] + kwargs.get("alpha", 1) * np.matmul(a[1], a[2])
+        # Keep arrays on the left so NumPy broadcasts Gaussian scalars through
+        # individual exact elements instead of coercing a whole array to Fraction.
+        result = a[0] * kwargs.get("beta", 1) + np.matmul(a[1], a[2]) * kwargs.get("alpha", 1)
     elif op == "convolution":
         if a[6] or any(a[7]):
             raise ValueError("native rational oracle refuses transposed convolution")
         result = _convolution(a[0], a[1], a[2], a[3], a[4], a[5], a[8])
     elif op == "mean":
-        axis = tuple(a[1]) if isinstance(a[1], (list, tuple)) else a[1]
+        axes = a[1] if len(a) > 1 else kwargs.get("dim")
+        axis = None if axes is None or axes == [] else tuple(axes) if isinstance(axes, (list, tuple)) else axes
         result = np.mean(a[0], axis=axis, keepdims=a[2] if len(a) > 2 else kwargs.get("keepdim", False))
     elif op.startswith(("avg_pool", "adaptive_avg_pool", "_adaptive_avg_pool")) and "backward" not in op:
         result = _pool(a[0], name, a, kwargs)
