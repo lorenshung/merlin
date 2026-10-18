@@ -153,13 +153,28 @@ def prepare_integer_components(directory, report, selection, provider, package, 
         )
         if decision["status"] != "admitted":
             return None
-    proof = provider.admit_numeric_schedule(str(module), package=package, numeric_policy=selection["spec"])
+    try:
+        proof = provider.admit_numeric_schedule(str(module), package=package, numeric_policy=selection["spec"])
+    except ValueError as exc:
+        (directory / "exact-dtype-refusal.json").write_text(
+            json.dumps(
+                dict(
+                    family="F2",
+                    reason="selected provider refuses exact components: " + str(exc),
+                    source_sha256=hashlib.sha256(str(module).encode()).hexdigest(),
+                )
+            )
+            + "\n"
+        )
+        return None
     if (
         proof.get("status") != "proven"
         or proof.get("source_sha256") != hashlib.sha256(str(module).encode()).hexdigest()
     ):
         reason = proof.get("reason", "component provider proof unavailable")
-        (directory / "exact-dtype-refusal.json").write_text(json.dumps(dict(family="F2", reason=reason)) + "\n")
+        (directory / "exact-dtype-refusal.json").write_text(
+            json.dumps(dict(family="F2", reason=reason, provider_proof=proof)) + "\n"
+        )
         return None
     sites = []
     for ordinal, op in enumerate(module.walk()):
