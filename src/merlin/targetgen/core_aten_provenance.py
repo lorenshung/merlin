@@ -64,6 +64,7 @@ def batch_provenance(
             "targetgen/_recipe_quantizer.py",
             "targetgen/quant_recipe.py",
             "targetgen/core_aten_w8a8_reference.py",
+            "targetgen/source_scalar.py",
             "targetgen/exact_arithmetic.py",
             "runtime/exact_readout.py",
             "targetgen/exact_quantized_reference.py",

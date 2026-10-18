@@ -89,6 +89,7 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
         arg: torch.from_numpy(array.copy()).to(dtypes[str(arg.type.element_type)]).reshape(arg.type.get_shape())
         for arg, array in zip(function.body.block.args, arrays, strict=True)
     }
+    taints = {arg: torch.zeros_like(value, dtype=torch.bool) for arg, value in env.items()}
     scales = []
     selected = set(selected)
     selected_order = {op: i for i, op in enumerate(op for op in module.walk() if op in selected)}
@@ -107,38 +108,68 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
             )
         return torch.tensor(value.value.data, dtype=dtype(op.results[0].type))
 
-    def logical_shift(value, count, width):
-        count = int(count)
-        if not 0 <= count < width:
-            raise ValueError("source unsigned shift is outside its integer width")
-        return value if count == 0 else (value >> count) & ((1 << (width - count)) - 1)
+    def scalar_body(block, operands, point=(), operand_taints=None, captured=None, captured_taints=None):
+        from merlin.targetgen.source_scalar import fused_multiply_add, logical_shift, unsigned_to_float
 
-    def scalar_body(block, operands, point=(), captured=None):
         local = dict(captured or {})
         local.update(zip(block.args, operands, strict=True))
+        local_taints = dict(captured_taints or {})
+        local_taints.update(
+            zip(block.args, operand_taints or [torch.zeros_like(x, dtype=torch.bool) for x in operands], strict=True)
+        )
+        # Only payload variation is invisible to cmpf. Integer manipulation can
+        # turn those words into different numeric classes, so a generic taint
+        # must not be discarded by a floating predicate.
+        nan_only = {arg: torch.zeros_like(value, dtype=torch.bool) for arg, value in local.items()}
         for inner in block.ops:
             name = inner.name
             xs = [local[v] if v in local else env[v] for v in inner.operands]
-            if ieee_audit is not None and name in {"arith.addf", "arith.subf", "arith.mulf", "arith.divf"}:
-                if bool(torch.isnan(xs[0]).any() and torch.isnan(xs[1]).any()):
-                    left = xs[0].contiguous().reshape(-1).view(torch.uint8)
-                    right = xs[1].contiguous().reshape(-1).view(torch.uint8)
-                    if not torch.equal(left, right):
-                        ieee_audit["ambiguous_nan_payload"] = True
-            if name in {"linalg.yield", "scf.yield"}:
-                return xs[0] if name == "linalg.yield" else tuple(xs)
+            ts = [local_taints[v] if v in local_taints else taints[v] for v in inner.operands]
+            ns = [nan_only.get(v, torch.zeros_like(t)) for v, t in zip(inner.operands, ts, strict=True)]
+            uncertain = torch.tensor(False)
+            payload_only = torch.tensor(False)
+            for t in ts:
+                uncertain = uncertain | t
+            if name in {"arith.addf", "arith.subf", "arith.mulf", "arith.divf", "math.fma"}:
+                for i, left in enumerate(xs):
+                    for right in xs[i + 1 :]:
+                        integer = {
+                            torch.float16: torch.int16,
+                            torch.bfloat16: torch.int16,
+                            torch.float32: torch.int32,
+                            torch.float64: torch.int64,
+                        }[left.dtype]
+                        uncertain = uncertain | (
+                            torch.isnan(left) & torch.isnan(right) & (left.view(integer) != right.view(integer))
+                        )
+                payload_only = uncertain.clone()
+                for t, n in zip(ts, ns, strict=True):
+                    payload_only = payload_only & (~t | n)
+            if name == "linalg.yield":
+                return xs[0], ts[0]
+            if name == "scf.yield":
+                return tuple(xs), tuple(ts)
             if name == "arith.constant":
                 y = constant(inner)
+            elif name == "arith.bitcast":
+                target = dtype(inner.results[0].type)
+                if xs[0].element_size() != torch.empty((), dtype=target).element_size():
+                    raise ValueError("source bitcast must preserve storage width")
+                y = xs[0].contiguous().view(target)
+                payload_only = ns[0]
             elif name in {"arith.uitofp", "arith.extui"}:
-                width = getattr(getattr(inner.operands[0].type, "width", None), "data", None)
-                if width is None or width > 32:
-                    raise ValueError("source IEEE reference lacks a native unsigned-width conversion proof")
-                unsigned = xs[0].to(torch.int64) & ((1 << width) - 1)
-                y = unsigned.to(dtype(inner.results[0].type))
+                width = xs[0].element_size() * 8 if xs[0].dtype != torch.bool else 1
+                target = dtype(inner.results[0].type)
+                if name == "arith.uitofp":
+                    y = unsigned_to_float(xs[0], width, target)
+                else:
+                    if width >= 64:
+                        raise ValueError("source unsigned extension has no wider supported integer storage")
+                    y = (xs[0].to(torch.int64) & ((1 << width) - 1)).to(target)
             elif name in {"arith.extf", "arith.truncf", "arith.extsi", "arith.trunci", "arith.sitofp"}:
                 y = xs[0].to(dtype(inner.results[0].type))
-            elif name == "arith.bitcast":
-                y = xs[0].contiguous().reshape(-1).view(dtype(inner.results[0].type)).reshape(xs[0].shape)
+                if name in {"arith.extf", "arith.truncf"}:
+                    payload_only = ns[0]
             elif name in {"arith.addf", "arith.addi"}:
                 y = xs[0] + xs[1]
             elif name in {"arith.mulf", "arith.muli"}:
@@ -149,35 +180,63 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
                 y = xs[0] / xs[1]
             elif name == "arith.negf":
                 y = -xs[0]
+            elif name == "math.fma":
+                y = fused_multiply_add(*xs)
+            elif name in {"arith.andi", "arith.ori", "arith.xori"}:
+                y = {"arith.andi": torch.bitwise_and, "arith.ori": torch.bitwise_or, "arith.xori": torch.bitwise_xor}[
+                    name
+                ](*xs)
+                if name == "arith.andi":
+                    uncertain = (ts[0] & (xs[1] != 0)) | (ts[1] & (xs[0] != 0))
+                elif name == "arith.ori":
+                    uncertain = (ts[0] & (xs[1] != -1)) | (ts[1] & (xs[0] != -1))
+            elif name in {"arith.shrui", "arith.shli"}:
+                width = xs[0].element_size() * 8 if xs[0].dtype != torch.bool else 1
+                y = logical_shift(*xs, width, left=name == "arith.shli")
             elif name == "math.absf":
                 y = torch.abs(xs[0])
             elif name == "linalg.index":
                 y = torch.tensor(point[inner.dim.value.data], dtype=torch.int64)
             elif name == "tensor.extract":
-                y = xs[0][tuple(int(v) for v in xs[1:])]
+                index = tuple(int(v) for v in xs[1:])
+                y = xs[0][index]
+                uncertain = ts[0][index]
+                for t in ts[1:]:
+                    uncertain = uncertain | t
             elif name == "scf.for":
                 lower, upper, step = map(int, xs[:3])
                 if step <= 0 or len(range(lower, upper, step)) > 1_000_000:
                     raise ValueError("source IEEE loop exceeds the closed static work budget")
-                carried = tuple(xs[3:])
+                carried, carried_taints = tuple(xs[3:]), tuple(ts[3:])
+                control_taint = ts[0] | ts[1] | ts[2]
                 for index in range(lower, upper, step):
-                    carried = scalar_body(inner.body.block, (torch.tensor(index), *carried), point, local)
+                    carried, carried_taints = scalar_body(
+                        inner.body.block, (torch.tensor(index), *carried), point,
+                        (control_taint, *carried_taints), local, local_taints,
+                    )
                 local.update(zip(inner.results, carried, strict=True))
+                local_taints.update(
+                    (v, t | control_taint) for v, t in zip(inner.results, carried_taints, strict=True)
+                )
                 continue
             elif name == "scf.if":
                 region = inner.regions[0 if bool(xs[0]) else 1]
-                results = scalar_body(region.block, (), point, local)
+                results, result_taints = scalar_body(region.block, (), point, (), local, local_taints)
                 local.update(zip(inner.results, results, strict=True))
+                local_taints.update((v, t | ts[0]) for v, t in zip(inner.results, result_taints, strict=True))
                 continue
             elif name == "arith.cmpi":
                 predicate = inner.predicate.value.data
                 left, right = xs
-                if predicate >= 6:
-                    # Index values use the host's signed i64 representation;
-                    # unsigned comparisons order negative values after positive.
-                    if bool((left < 0) != (right < 0)):
-                        left, right = (left < 0).long(), (right < 0).long()
+                if predicate in (6, 7, 8, 9):
+                    # Flipping the sign bit maps unsigned order to signed order,
+                    # without a narrowing cast or a binary64 bridge for i64.
+                    if left.dtype != torch.bool:
+                        sign = -(1 << (left.element_size() * 8 - 1))
+                        left, right = left ^ sign, right ^ sign
                     predicate -= 4
+                if predicate not in range(6):
+                    raise ValueError("unsupported source integer predicate")
                 y = (left == right, left != right, left < right, left <= right, left > right, left >= right)[predicate]
             elif name in {
                 "arith.divui",
@@ -197,30 +256,40 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
                     "arith.ori": lambda: xs[0] | xs[1],
                     "arith.xori": lambda: xs[0] ^ xs[1],
                     "arith.shli": lambda: xs[0] << xs[1],
-                    "arith.shrui": lambda: logical_shift(xs[0], xs[1], inner.operands[0].type.width.data),
+                    "arith.shrui": lambda: logical_shift(xs[0], xs[1], getattr(getattr(inner.operands[0].type, "width", None), "data", 64)),
                 }[name]()
                 y = y.to(dtype(inner.results[0].type))
             elif name == "arith.cmpf":
                 predicate = inner.predicate.value.data
                 left, right = xs
-                ordered = ~torch.isnan(left) & ~torch.isnan(right)
+                unordered = torch.isnan(left) | torch.isnan(right)
                 comparisons = (left == right, left > right, left >= right, left < right, left <= right, left != right)
-                if 1 <= predicate <= 6:
-                    y = comparisons[predicate - 1] & ordered
-                elif 8 <= predicate <= 13:
-                    y = comparisons[predicate - 8] | ~ordered
+                if predicate in range(1, 7):
+                    y = comparisons[predicate - 1] & ~unordered
+                elif predicate in range(8, 14):
+                    y = comparisons[predicate - 8] | unordered
                 elif predicate in (0, 7, 14, 15):
-                    y = {0: ordered & False, 7: ordered, 14: ~ordered, 15: ordered | True}[predicate]
+                    y = {0: torch.zeros_like(unordered), 7: ~unordered, 14: unordered, 15: torch.ones_like(unordered)}[
+                        predicate
+                    ]
                 else:
-                    raise ValueError("invalid source IEEE comparison predicate")
+                    raise ValueError("unsupported source floating predicate")
+                # Only known NaN-payload alternatives leave cmpf invariant.
+                uncertain = (ts[0] & ~ns[0]) | (ts[1] & ~ns[1])
+                if predicate in (0, 15):
+                    uncertain = torch.zeros_like(y)
             elif name == "arith.select":
                 y = torch.where(xs[0], xs[1], xs[2])
+                uncertain = ts[0] | torch.where(xs[0], ts[1], ts[2])
+                payload_only = ~ts[0] & torch.where(xs[0], ns[1], ns[2])
             else:
                 raise ValueError(f"W8A8 reference refuses scalar op {name}")
             local[inner.results[0]] = y
+            local_taints[inner.results[0]] = uncertain.expand(y.shape)
+            nan_only[inner.results[0]] = payload_only.expand(y.shape)
         raise ValueError("source region lacks yield")
 
-    def generic(op, xs):
+    def generic(op, xs, ts):
         maps = [a.data for a in op.get_indexing_maps()]
         if op in selected:
             q, ss, valid, operands = [], [], [], []
@@ -314,7 +383,7 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
                     ),
                 )
             )
-            return restored
+            return restored, torch.zeros_like(restored, dtype=torch.bool)
         extents = [None] * maps[0].num_dims
         for amap, x in zip(maps, xs, strict=True):
             for expr, size in zip(amap.results, x.shape, strict=True):
@@ -326,17 +395,26 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
         if any(x is None for x in extents):
             raise ValueError("source loop extent is underivable")
         result = xs[-1].clone()
+        result_taint = ts[-1].clone()
         for point in itertools.product(*(range(n) for n in extents)):
             indices = [amap.eval(point, ()) for amap in maps]
             values = [x[index] for x, index in zip(xs[:-1], indices[:-1], strict=True)]
             values.append(result[indices[-1]])
-            result[indices[-1]] = scalar_body(op.body.block, values, point)
-        return result
+            value_taints = [t[index] for t, index in zip(ts[:-1], indices[:-1], strict=True)]
+            value_taints.append(result_taint[indices[-1]])
+            value, uncertain = scalar_body(op.body.block, values, point, value_taints)
+            result[indices[-1]] = value
+            result_taint[indices[-1]] = uncertain
+        return result, result_taint
 
     for op in function.body.block.ops:
         xs = [env[v] for v in op.operands]
+        ts = [taints[v] for v in op.operands]
+        uncertain = None
         name = op.name
         if name == "func.return":
+            if ieee_audit is not None:
+                ieee_audit["ambiguous_nan_payload"] = any(bool(t.any()) for t in ts)
             return xs, scales
         if name == "arith.constant":
             y = constant(op)
@@ -348,12 +426,16 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
             y = torch.empty(op.results[0].type.get_shape(), dtype=dtype(op.results[0].type))
         elif name in {"tensor.expand_shape", "tensor.collapse_shape", "tensor.reshape"}:
             y = xs[0].reshape(op.results[0].type.get_shape())
+            uncertain = ts[0].reshape(y.shape)
         elif name == "tensor.splat":
             y = xs[0].expand(op.results[0].type.get_shape()).clone()
+            uncertain = ts[0].expand(y.shape).clone()
         elif name == "linalg.fill":
             y = xs[0].expand(xs[1].shape).clone()
+            uncertain = ts[0].expand(y.shape).clone()
         elif name == "linalg.transpose":
             y = xs[0].permute(tuple(attr(op, "permutation").get_values())).contiguous()
+            uncertain = ts[0].permute(tuple(attr(op, "permutation").get_values())).contiguous()
         elif name in {"tensor.extract_slice", "tensor.insert_slice"}:
             offsets, sizes, strides = [
                 list(attr(op, k).get_values()) for k in ("static_offsets", "static_sizes", "static_strides")
@@ -363,23 +445,31 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
             indices = tuple(slice(o, o + n * s, s) for o, n, s in zip(offsets, sizes, strides, strict=True))
             if name == "tensor.extract_slice":
                 y = xs[0][indices].reshape(op.results[0].type.get_shape())
+                uncertain = ts[0][indices].reshape(y.shape)
             else:
                 y = xs[1].clone()
                 y[indices] = xs[0].reshape(y[indices].shape)
+                uncertain = ts[1].clone()
+                uncertain[indices] = ts[0].reshape(uncertain[indices].shape)
         elif name in {"linalg.generic", "linalg.matmul", "linalg.batch_matmul"}:
-            y = generic(op, xs)
+            y, uncertain = generic(op, xs, ts)
         elif name == "linalg.reduce":
             # Keep source reduction order, instead of Torch's tree-sum order.
             dimensions = tuple(attr(op, "dimensions").get_values())
             y = xs[1].clone()
+            uncertain = ts[1].clone()
             for point in itertools.product(*(range(n) for n in xs[0].shape)):
                 index = tuple(v for i, v in enumerate(point) if i not in dimensions)
-                y[index] = scalar_body(op.regions[0].block, [xs[0][point], y[index]])
+                value, value_taint = scalar_body(
+                    op.regions[0].block, [xs[0][point], y[index]], operand_taints=[ts[0][point], uncertain[index]]
+                )
+                y[index], uncertain[index] = value, value_taint
         else:
             raise ValueError(f"W8A8 reference refuses source op {name}")
         if len(op.results) != 1:
             raise ValueError("reference requires single-result source operations")
         env[op.results[0]] = y
+        taints[op.results[0]] = uncertain if uncertain is not None else torch.zeros_like(y, dtype=torch.bool)
     raise ValueError("source function lacks return")
 
 
