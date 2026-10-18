@@ -117,8 +117,7 @@ _NAMED_OPCODE_TO_OP = {v: k for k, v in _NAMED_OP_TO_OPCODE.items()}
 
 
 def _tensor_type(spec: dict[str, Any]) -> str:
-    shape = "x".join(str(d) for d in spec["shape"])
-    return f"tensor<{shape}x{spec.get('dtype', 'i8')}>"
+    return "tensor<" + "x".join([*(str(d) for d in spec["shape"]), spec.get("dtype", "i8")]) + ">"
 
 
 # float output dtype -> the float accumulate dtype its datapath commits in (a float MXU accumulates in
@@ -157,7 +156,9 @@ def _fmt_attrs(attrs: dict[str, Any]) -> str:
             # (``pool_size = [2, 2]``) into ``["2", "2"]``, which the parser reads back as STRINGS --
             # so a round-tripped pooling command lost its window to a typing mismatch reported far from
             # the spelling that caused it. String stages (``epilogue = ["relu"]``) are unchanged.
-            inner = ", ".join(f'"{x}"' if isinstance(x, str) else str(x) for x in v)
+            inner = ", ".join(
+                f'"{x}"' if isinstance(x, str) else str(x).lower() if isinstance(x, bool) else str(x) for x in v
+            )
             parts.append(f"{k} = [{inner}]")
         else:  # pragma: no cover - defensive
             raise TypeError(f"unsupported attribute type for {k!r}: {type(v)}")
@@ -229,6 +230,30 @@ def emit_interface_mlir(cb: dict[str, Any]) -> str:
             lines.append(f"  merlin_iface.evict %{h} : (!merlin_iface.resident) -> ()")
         elif op == "FENCE":
             lines.append("  merlin_iface.fence : () -> ()")
+        elif op in _NAMED_OPCODE_TO_OP:
+            mnemonic = _NAMED_OPCODE_TO_OP[op]
+            keys = _NAMED_OP_OPERAND_KEYS[mnemonic]
+            required = {key for key in keys if not key.endswith("?")} | {"dst"}
+            allowed = {key.rstrip("?") for key in keys} | {"dst"}
+            if not required <= set(ops) <= allowed:
+                raise InterfaceGrammarError(
+                    f"{op} operand keys must include {sorted(required)} within {sorted(allowed)}"
+                )
+            sources = [ops[key.rstrip("?")] for key in keys if key.rstrip("?") in ops]
+            # Optional operands are positional; a hole would change the parsed key binding.
+            if set(ops) - {"dst"} != {key.rstrip("?") for key in keys[: len(sources)]}:
+                raise InterfaceGrammarError(f"{op} optional operands must be consecutive")
+            dst = ops["dst"]
+            if dst not in tensors:
+                raise InterfaceGrammarError(f"{op} needs a declared result tensor {dst!r}")
+            result_type = _tensor_type(tensors[dst])
+            arguments = ", ".join(f"%{src}" for src in sources)
+            argument_types = ", ".join(val_type[src] for src in sources)
+            lines.append(
+                f"  %{dst} = merlin_iface.{mnemonic} {arguments} {_fmt_attrs({'name': dst, **attrs})} : "
+                f"({argument_types}) -> {result_type}"
+            )
+            val_type[dst] = result_type
         else:  # pragma: no cover - defensive
             raise ValueError(f"unsupported opcode {op!r} for interface grammar v{GRAMMAR_VERSION}")
 
@@ -347,7 +372,10 @@ def _op_line(line: str) -> dict | None:
             break
     else:
         rest = ""
-    operands = _split_operands(rest.split("{")[0].split(":")[0])
+    operand_text = rest.split("{")[0].split(":")[0].strip()
+    if operand_text.startswith('"('):
+        operand_text = operand_text[2:].removesuffix(")")
+    operands = _split_operands(operand_text)
     attrs_body, after = _braced(rest)
     tail = rest[after:] if after != -1 else rest
     _, _, tail = tail.partition(":")
@@ -422,6 +450,8 @@ def _parse_attr_block(s: str) -> dict[str, Any]:
 
 def _parse_value(v: str) -> Any:
     v = v.strip()
+    if v in {"true", "false"}:
+        return v == "true"
     if v.startswith("[") and v.endswith("]"):
         body = v[1:-1].strip()
         if not body:
@@ -455,8 +485,6 @@ def _shape_dtype(ttype: str) -> tuple[list[int], str]:
         raise ValueError(f"unparseable tensor type {ttype!r}")
     body = s[lb + 1 : rb].split(",", 1)[0].strip()  # drop any trailing layout/encoding attribute
     parts = body.split("x")
-    if len(parts) < 2:
-        raise ValueError(f"unparseable tensor type {ttype!r} (need at least one dim and an element type)")
     *dim_toks, dtype = parts
     try:
         dims = [int(d) for d in dim_toks]
