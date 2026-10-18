@@ -28,7 +28,7 @@ import yaml
 from merlin.common.paths import artifacts_dir, build_dir, checkout_root, rtl_facts_path, targets_dir
 from merlin.common.yaml import safe_load_text
 
-from .providers import Provider, ProviderRole, read_provider
+from .providers import Provider, ProviderError, ProviderRole, read_provider
 
 # ─────────────────────────────────────────────────────────────────────────────────────────────────
 # Target-package RESOLUTION — how Merlin picks WHICH definition package to use for a target name.
@@ -114,7 +114,9 @@ class TargetInfo:
 
     def load_contract(self) -> dict[str, Any]:
         if self.name in _OBSERVED_CONTRACTS.get():
-            return copy.deepcopy(_OBSERVED_CONTRACTS.get()[self.name])
+            selected = copy.deepcopy(_OBSERVED_CONTRACTS.get()[self.name])
+            self.require_matching_contract(selected)
+            return selected
         # An experiment may select a capability contract alongside an OOT support provider.
         # Keep executable plugin ownership at the provider's own contract (below), but make all
         # capability consumers read the same explicitly selected view as RTL extraction.
@@ -127,8 +129,25 @@ class TargetInfo:
                 raise ValueError(f"{path}: selected capability contract must be a mapping")
             if selected.get("name") != self.name:
                 raise ValueError(f"{path}: selected capability contract names a different target")
+            self.require_matching_contract(selected)
             return selected
         return self._load_provider_contract()
+
+    def require_matching_contract(self, selected: dict[str, Any]) -> None:
+        """Executable support must implement the selected semantic contract.
+
+        Plugin locations are provider packaging, not target semantics. Every other
+        contract field must agree structurally, independent of YAML formatting.
+        """
+        provider = self.provider
+        if provider is None or self.external_root is None:
+            return
+        actual = self._load_provider_contract()
+        expected = {key: value for key, value in selected.items() if key != "plugin"}
+        supplied = {key: value for key, value in actual.items() if key != "plugin"}
+        if supplied != expected:
+            fields = sorted(key for key in supplied.keys() | expected.keys() if supplied.get(key) != expected.get(key))
+            raise ProviderError(f"{self.name}: provider contract drifts from selected target contract: {fields}")
 
     def _load_provider_contract(self) -> dict[str, Any]:
         """Read support-owned metadata, independently of an observed capability view."""
@@ -155,6 +174,7 @@ class TargetInfo:
         """
         # Capability observations must never remove or inject executable plugin
         # references. Provider resolution and support-code ownership stay fixed.
+        self.load_contract()
         block = dict(self._load_provider_contract().get("plugin", {}))
         if self.external_root is not None:
             block.setdefault("path", str(self.external_root))
