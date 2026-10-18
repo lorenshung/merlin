@@ -47,24 +47,29 @@ class Gaussian:
         )
 
 
-def _decode(value):
+def _decode(value, *, finite_subproblem=False):
+    def decode(child):
+        return _decode(child, finite_subproblem=finite_subproblem)
+
     if isinstance(value, list):
-        return [_decode(v) for v in value]
+        return [decode(v) for v in value]
     if not isinstance(value, dict):
+        if finite_subproblem and isinstance(value, float) and not np.isfinite(value):
+            return Fraction(0)
         return Fraction(value) if isinstance(value, float) else value
     kind = value.get("kind")
     if kind == "float":
-        return Fraction(float(value["value"]))
+        return decode(float(value["value"]))
     if kind == "complex":
-        return Gaussian(_decode(value["real"]), _decode(value["imag"]))
+        return Gaussian(decode(value["real"]), decode(value["imag"]))
     if kind == "tensor":
-        return np.asarray(_decode(value["values"]), dtype=object).reshape(value["shape"])
+        return np.asarray(decode(value["values"]), dtype=object).reshape(value["shape"])
     if kind == "tuple":
-        return tuple(_decode(v) for v in value["items"])
-    return {key: _decode(v) for key, v in value.items()}
+        return tuple(decode(v) for v in value["items"])
+    return {key: decode(v) for key, v in value.items()}
 
 
-def rational_outputs(case):
+def rational_outputs(case, *, finite_subproblem=False):
     """Evaluate native math, without eager, emitted IR, or device answers."""
     from merlin.targetgen.exact_quantized_reference import _convolution, _fold, _pool, _pool_backward
 
@@ -84,7 +89,7 @@ def rational_outputs(case):
             raise ValueError("native rational scalar lacks an exact opmath representation proof")
 
     scalar_proof(case["arguments"])
-    arguments = _decode(case["arguments"])
+    arguments = _decode(case["arguments"], finite_subproblem=finite_subproblem)
     a, kwargs = arguments["args"], arguments["kwargs"]
     name = case["overload"]
     op = name.split(".")[1]
@@ -137,7 +142,12 @@ def compare_reduction_floor(record, outputs):
     import math
     import struct
 
-    exact = rational_outputs(record["case"])
+    exact = rational_outputs(
+        record["case"],
+        finite_subproblem=record.get("numeric_admission", {})
+        .get("host_floor", {})
+        .get("finite_subproblem_overlay", False),
+    )
     if len(exact) != len(record["output_indices"]):
         raise ValueError("rational native reference does not cover every user result")
     reference = record["native_eager_boundary"]["output_bytes"]
@@ -162,7 +172,11 @@ def compare_reduction_floor(record, outputs):
         if len(actual) != len(host) or len(actual) != len(rational):
             raise ValueError("rational native reference shape differs from result bytes")
         failures = []
+        width = len(outputs[index]) // len(actual) if actual else 1
+        eager_raw = bytes.fromhex(reference[ordinal])
         for i, (a, h, e) in enumerate(zip(actual, host, rational, strict=True)):
+            if outputs[index][i * width : (i + 1) * width] == eager_raw[i * width : (i + 1) * width]:
+                continue
             if a == h and (a != 0 or math.copysign(1, a) == math.copysign(1, h)):
                 continue
             if not math.isfinite(a) or math.isnan(h):

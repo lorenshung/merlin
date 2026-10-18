@@ -746,13 +746,15 @@ def _prepare_spec_int8(
                 module.attributes[ATTRIBUTE] = StringAttr(json.dumps(layout, sort_keys=True))
             module.verify()
             (directory / "model.mlir").write_text(str(module) + "\n")
-    if plan.get("refusal_code") == "nonfinite_calibration" and (directory / "model.mlir").read_bytes() == original:
-        # A finite observer range can overflow in its own f32 subtraction.
-        # Native fixed-point components avoid calibration entirely; every
-        # result still requires the independent native bit/error-floor gate.
-        with np.load(directory / "inputs.npz") as inputs:
-            finite = all(np.isfinite(value).all() for value in inputs.values())
-        if finite:
+    if (
+        not plan.get("quantized_contractions", 0)
+        and not plan.get("quantized_non_contraction_sites", 0)
+        and (directory / "model.mlir").read_bytes() == original
+    ):
+        # A failed prospective int8 declaration or calibration does not rule
+        # out a complete native integer component program. Its own typed
+        # family, transfer, source-bit and provider proofs are still required.
+        if any(abi["dtype"] == "f32" for record in report["cases"] for abi in record.get("input_abi", [])):
             components = prepare_integer_components(
                 directory,
                 report,
@@ -765,7 +767,8 @@ def _prepare_spec_int8(
             )
             if components is not None:
                 components["quantization_fallback"] = dict(
-                    refusal_code=plan["refusal_code"], method="native_exact_components_without_calibration"
+                    refusal_code=plan.get("refusal_code", "int8_family_not_admitted"),
+                    method="native_exact_components_without_calibration",
                 )
                 (directory / "spec-int8-admission.json").write_text(json.dumps(components, indent=2) + "\n")
                 return components

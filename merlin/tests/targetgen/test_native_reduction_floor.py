@@ -42,6 +42,20 @@ def test_better_exact_result_passes_but_larger_error_and_changed_posts_fail():
     assert grade_native_bits(r, [struct.pack("<f", 1.0), b"\xa5"])["status"] == "mismatch"
 
 
+def test_overlay_floor_preserves_nan_payload_while_grading_finite_outputs_exactly():
+    r = record()
+    source = r["case"]["arguments"]["args"][0]
+    source.update(shape=[2, 3], values=[[float("nan"), 0.0, 0.0], source["values"][0]])
+    r["output_abi"][0]["shape"] = [2, 1]
+    nan = (0x7FC00123).to_bytes(4, "little")
+    r["native_eager_boundary"]["output_bytes"] = [(nan + struct.pack("<f", 0.0)).hex()]
+    r["numeric_admission"]["host_floor"]["finite_subproblem_overlay"] = True
+    assert grade_native_bits(r, [nan + struct.pack("<f", 1.0), b"\xa5"])["status"] == "pass"
+    assert grade_native_bits(r, [nan + struct.pack("<f", 3.0), b"\xa5"])["status"] == "mismatch"
+    changed = (0x7FC00124).to_bytes(4, "little")
+    assert grade_native_bits(r, [changed + struct.pack("<f", 1.0), b"\xa5"])["status"] == "mismatch"
+
+
 def test_gaussian_arithmetic_keeps_real_and_imaginary_errors_separate():
     a, b = Gaussian.of(2) + Gaussian(0, 3), Gaussian(4, -5)
     assert a * b == Gaussian(23, 2)

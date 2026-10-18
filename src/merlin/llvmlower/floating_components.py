@@ -50,7 +50,24 @@ def rewrite_floating_components(
     function = next(op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward")
     grids = dict(zip(function.body.block.args, input_grids))
     grids.update(known_grids or {})
-    wide_packing = any(g is not None and g[1].bit_length() > 52 for g in grids.values())
+    packing_grids = [g for g in grids.values() if g is not None and g[1]]
+    for op in function.walk():
+        if op.name != "arith.constant":
+            continue
+        typ = op.results[0].type
+        if str(getattr(typ, "element_type", typ)) not in FORMAT:
+            continue
+        attr = op.properties.get("value", op.attributes.get("value"))
+        values = list(attr.get_values()) if hasattr(attr, "get_values") else [attr.value.data]
+        constant_grid = finite_grid(finite_values(values) if ieee_pointwise else values)
+        if constant_grid[1]:
+            packing_grids.append(constant_grid)
+    common_exponent = min((e for e, b in packing_grids), default=0)
+    # A division can introduce the output format's smallest dyadic quantum,
+    # even when the input itself has a short integral representation.
+    wide_packing = any((b << (e - common_exponent)).bit_length() > 52 for e, b in packing_grids) or any(
+        op.name == "arith.divf" and str(op.results[0].type) in {"bf16", "f32", "f64"} for op in function.walk()
+    )
     if wide_packing:
         i64, i128 = IntegerType(512), IntegerType(1024)
     packing_limit = 511 if wide_packing else 52
@@ -101,6 +118,7 @@ def rewrite_floating_components(
             "tensor.collapse_shape",
             "tensor.expand_shape",
             "tensor.cast",
+            "tensor.reshape",
             "linalg.copy",
             "linalg.broadcast",
             "linalg.transpose",
@@ -201,6 +219,7 @@ def rewrite_floating_components(
         proofs=proofs,
         packing_limit=packing_limit,
         wide_packing=wide_packing,
+        source_grid=grid,
         ieee_pointwise=ieee_pointwise,
     )
     for op in list(function.body.block.ops):

@@ -80,6 +80,7 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
         "f32": torch.float32,
         "f64": torch.float64,
         "i8": torch.int8,
+        "i16": torch.int16,
         "i32": torch.int32,
         "i64": torch.int64,
     }
@@ -106,8 +107,15 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
             )
         return torch.tensor(value.value.data, dtype=dtype(op.results[0].type))
 
-    def scalar_body(block, operands, point=()):
-        local = dict(zip(block.args, operands, strict=True))
+    def logical_shift(value, count, width):
+        count = int(count)
+        if not 0 <= count < width:
+            raise ValueError("source unsigned shift is outside its integer width")
+        return value if count == 0 else (value >> count) & ((1 << (width - count)) - 1)
+
+    def scalar_body(block, operands, point=(), captured=None):
+        local = dict(captured or {})
+        local.update(zip(block.args, operands, strict=True))
         for inner in block.ops:
             name = inner.name
             xs = [local[v] if v in local else env[v] for v in inner.operands]
@@ -117,8 +125,8 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
                     right = xs[1].contiguous().reshape(-1).view(torch.uint8)
                     if not torch.equal(left, right):
                         ieee_audit["ambiguous_nan_payload"] = True
-            if name == "linalg.yield":
-                return xs[0]
+            if name in {"linalg.yield", "scf.yield"}:
+                return xs[0] if name == "linalg.yield" else tuple(xs)
             if name == "arith.constant":
                 y = constant(inner)
             elif name in {"arith.uitofp", "arith.extui"}:
@@ -129,6 +137,8 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
                 y = unsigned.to(dtype(inner.results[0].type))
             elif name in {"arith.extf", "arith.truncf", "arith.extsi", "arith.trunci", "arith.sitofp"}:
                 y = xs[0].to(dtype(inner.results[0].type))
+            elif name == "arith.bitcast":
+                y = xs[0].contiguous().reshape(-1).view(dtype(inner.results[0].type)).reshape(xs[0].shape)
             elif name in {"arith.addf", "arith.addi"}:
                 y = xs[0] + xs[1]
             elif name in {"arith.mulf", "arith.muli"}:
@@ -143,21 +153,66 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
                 y = torch.abs(xs[0])
             elif name == "linalg.index":
                 y = torch.tensor(point[inner.dim.value.data], dtype=torch.int64)
+            elif name == "tensor.extract":
+                y = xs[0][tuple(int(v) for v in xs[1:])]
+            elif name == "scf.for":
+                lower, upper, step = map(int, xs[:3])
+                if step <= 0 or len(range(lower, upper, step)) > 1_000_000:
+                    raise ValueError("source IEEE loop exceeds the closed static work budget")
+                carried = tuple(xs[3:])
+                for index in range(lower, upper, step):
+                    carried = scalar_body(inner.body.block, (torch.tensor(index), *carried), point, local)
+                local.update(zip(inner.results, carried, strict=True))
+                continue
+            elif name == "scf.if":
+                region = inner.regions[0 if bool(xs[0]) else 1]
+                results = scalar_body(region.block, (), point, local)
+                local.update(zip(inner.results, results, strict=True))
+                continue
             elif name == "arith.cmpi":
                 predicate = inner.predicate.value.data
-                if predicate not in (0, 1, 2, 3, 4, 5):
-                    raise ValueError("source IEEE reference has no unsigned predicate proof")
                 left, right = xs
+                if predicate >= 6:
+                    # Index values use the host's signed i64 representation;
+                    # unsigned comparisons order negative values after positive.
+                    if bool((left < 0) != (right < 0)):
+                        left, right = (left < 0).long(), (right < 0).long()
+                    predicate -= 4
                 y = (left == right, left != right, left < right, left <= right, left > right, left >= right)[predicate]
+            elif name in {
+                "arith.divui",
+                "arith.remui",
+                "arith.andi",
+                "arith.ori",
+                "arith.xori",
+                "arith.shli",
+                "arith.shrui",
+            }:
+                if name in {"arith.divui", "arith.remui"} and any(bool((v < 0).any()) for v in xs):
+                    raise ValueError("source index division requires nonnegative operands")
+                y = {
+                    "arith.divui": lambda: torch.div(xs[0], xs[1], rounding_mode="floor"),
+                    "arith.remui": lambda: xs[0] % xs[1],
+                    "arith.andi": lambda: xs[0] & xs[1],
+                    "arith.ori": lambda: xs[0] | xs[1],
+                    "arith.xori": lambda: xs[0] ^ xs[1],
+                    "arith.shli": lambda: xs[0] << xs[1],
+                    "arith.shrui": lambda: logical_shift(xs[0], xs[1], inner.operands[0].type.width.data),
+                }[name]()
+                y = y.to(dtype(inner.results[0].type))
             elif name == "arith.cmpf":
                 predicate = inner.predicate.value.data
-                if predicate not in (1, 2, 3, 4, 5, 6):
-                    raise ValueError("source IEEE reference has no floating predicate proof")
                 left, right = xs
-                y = (left == right, left > right, left >= right, left < right, left <= right, left != right)[
-                    predicate - 1
-                ]
-                y = y & ~torch.isnan(left) & ~torch.isnan(right)
+                ordered = ~torch.isnan(left) & ~torch.isnan(right)
+                comparisons = (left == right, left > right, left >= right, left < right, left <= right, left != right)
+                if 1 <= predicate <= 6:
+                    y = comparisons[predicate - 1] & ordered
+                elif 8 <= predicate <= 13:
+                    y = comparisons[predicate - 8] | ~ordered
+                elif predicate in (0, 7, 14, 15):
+                    y = {0: ordered & False, 7: ordered, 14: ~ordered, 15: ordered | True}[predicate]
+                else:
+                    raise ValueError("invalid source IEEE comparison predicate")
             elif name == "arith.select":
                 y = torch.where(xs[0], xs[1], xs[2])
             else:
@@ -285,9 +340,13 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
             return xs, scales
         if name == "arith.constant":
             y = constant(op)
+        elif name in {"arith.extf", "arith.truncf", "arith.extsi", "arith.trunci", "arith.sitofp"}:
+            y = xs[0].to(dtype(op.results[0].type))
+        elif name == "arith.bitcast":
+            y = xs[0].contiguous().reshape(-1).view(dtype(op.results[0].type)).reshape(xs[0].shape)
         elif name == "tensor.empty":
             y = torch.empty(op.results[0].type.get_shape(), dtype=dtype(op.results[0].type))
-        elif name in {"tensor.expand_shape", "tensor.collapse_shape"}:
+        elif name in {"tensor.expand_shape", "tensor.collapse_shape", "tensor.reshape"}:
             y = xs[0].reshape(op.results[0].type.get_shape())
         elif name == "tensor.splat":
             y = xs[0].expand(op.results[0].type.get_shape()).clone()

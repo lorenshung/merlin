@@ -91,3 +91,76 @@ def test_integer_promotion_grids_participate_in_the_packing_width_proof():
     assert proofs[0]["reconstruction"] == "bounded_i1024"
     assert rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[0], known_bounds=bounds)
     module.verify()
+
+
+def test_alignment_between_individually_short_grids_selects_wide_packing():
+    module = parse_mlir_text("""module {
+      func.func @forward(%x:tensor<1xf32>,%y:tensor<1xf32>) -> tensor<1xf32> {
+        %e=tensor.empty() : tensor<1xf32>
+        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+          ins(%x,%y:tensor<1xf32>,tensor<1xf32>) outs(%e:tensor<1xf32>) {
+        ^bb0(%a:f32,%b:f32,%out:f32):
+          %w=arith.addf %a,%b : f32
+          linalg.yield %w : f32
+        } -> tensor<1xf32>
+        return %r : tensor<1xf32>
+      }}""")
+    bounds, proofs = rewrite_floating_components(module, [finite_grid([2.0**-120]), finite_grid([2.0**100])])
+    assert len(proofs) == 1 and proofs[0]["packing"] == "exact_ieee_bit_fields"
+    assert not any(op.name == "arith.addf" for op in module.walk())
+    assert rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[0, 0], known_bounds=bounds)
+    module.verify()
+
+
+def test_odd_division_retains_a_rounded_dyadic_grid_through_a_reshape():
+    module = parse_mlir_text("""module {
+      func.func @forward(%x:tensor<2xbf16>) -> tensor<2xbf16> {
+        %three=arith.constant 3.0 : bf16
+        %divisor=tensor.splat %three : tensor<2xbf16>
+        %e=tensor.empty() : tensor<2xbf16>
+        %v=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+          ins(%x,%divisor:tensor<2xbf16>,tensor<2xbf16>) outs(%e:tensor<2xbf16>) {
+        ^bb0(%a:bf16,%b:bf16,%out:bf16):
+          %w=arith.divf %a,%b : bf16
+          linalg.yield %w : bf16
+        } -> tensor<2xbf16>
+        %shape=arith.constant dense<[2]> : tensor<1xi64>
+        %reshaped=tensor.reshape %v(%shape) : (tensor<2xbf16>,tensor<1xi64>) -> tensor<2xbf16>
+        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+          ins(%reshaped:tensor<2xbf16>) outs(%e:tensor<2xbf16>) {
+        ^bb1(%a:bf16,%out:bf16):
+          %w=arith.addf %a,%a : bf16
+          linalg.yield %w : bf16
+        } -> tensor<2xbf16>
+        return %r : tensor<2xbf16>
+      }}""")
+    bounds, proofs = rewrite_floating_components(module, [finite_grid([1.0, 2.0])])
+    assert len(proofs) == 2 and all(p["source_data_arithmetic"] for p in proofs)
+    assert not any(op.name in {"arith.addf", "arith.divf"} for op in module.walk())
+    assert rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[0], known_bounds=bounds)
+    module.verify()
+
+
+def test_ieee_bit_epilogue_does_not_hide_the_complete_arithmetic_producer():
+    from merlin.targetgen.core_aten_components import unlowered_data_reductions
+
+    module = parse_mlir_text("""module {
+      func.func @forward(%x:tensor<2xf32>,%y:tensor<2xf32>) -> tensor<2xf32> {
+        %e=tensor.empty() : tensor<2xf32>
+        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+          ins(%x,%y:tensor<2xf32>,tensor<2xf32>) outs(%e:tensor<2xf32>) {
+        ^bb0(%a:f32,%b:f32,%out:f32):
+          %sum=arith.addf %a,%b : f32
+          %bits=arith.bitcast %sum : f32 to i32
+          %mask=arith.constant 2147483647 : i32
+          %magnitude=arith.andi %bits,%mask : i32
+          %v=arith.bitcast %magnitude : i32 to f32
+          linalg.yield %v : f32
+        } -> tensor<2xf32>
+        return %r : tensor<2xf32>
+      }}""")
+    bounds, proofs = rewrite_floating_components(module, [(0, 2), (0, 2)])
+    assert any(p["source_data_arithmetic"] for p in proofs)
+    assert rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[0, 0], known_bounds=bounds)
+    assert not unlowered_data_reductions(module, "test.limb")
+    module.verify()

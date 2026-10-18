@@ -1,5 +1,7 @@
 """Exact rational RNE and IEEE signed-zero epilogues over full integer readout."""
 
+from fractions import Fraction
+
 from xdsl.dialects import arith, tensor
 from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, FloatAttr, IntegerAttr, UnitAttr
 from xdsl.dialects.linalg import ops as L
@@ -22,6 +24,7 @@ def component_readout(
     proofs,
     packing_limit,
     wide_packing,
+    source_grid,
     ieee_pointwise=False,
 ):
     """Bind one program's numerical proof state; return its exact readout emitter."""
@@ -30,6 +33,19 @@ def component_readout(
     def publish(op, integer, exponent, integer_bound, operations, compute_type=None, denominator=1):
         compute_type = compute_type or op.results[0].type.element_type
         output_type = op.results[0].type.element_type
+        aggregate = (
+            op in contractions
+            or any(it.data == L.IteratorType.REDUCTION for it in op.get_iterator_types())
+            or any(child.name == "scf.for" for child in op.body.walk())
+        )
+        propagation, special_proof = None, None
+        if ieee_pointwise:
+            if aggregate:
+                from merlin.llvmlower.ieee_aggregate import propagation_source
+
+                propagation, special_proof = propagation_source(op, source_grid)
+            else:
+                special_proof = dependence_proof(op)
 
         def convert(values, emit):
             rounded = encode_fixed_integer(values[0], exponent, compute_type, emit, denominator=denominator)
@@ -95,18 +111,18 @@ def component_readout(
         integer_zero = emit(arith.ConstantOp(IntegerAttr(0, i128)))
         exact_zero = emit(arith.CmpiOp(block.args[1], integer_zero, "eq"))
         selected = emit(arith.SelectOp(exact_zero, signed_zero, block.args[0]))
-        if ieee_pointwise:
+        if ieee_pointwise and not aggregate:
             from merlin.llvmlower.ieee_pointwise import overlay
 
             selected = overlay(op, block.args[2 : 2 + len(op.inputs)], selected, emit)
         block.add_op(L.YieldOp(selected))
-        if (
-            op in contractions
-            or any(it.data == L.IteratorType.REDUCTION for it in op.get_iterator_types())
-            or any(child.name == "scf.for" for child in op.body.walk())
-        ):
+        if aggregate:
             # A positive-zero seeded contraction rounds exact cancellation to +0.
             result = converted
+            if propagation is not None:
+                from merlin.llvmlower.ieee_aggregate import aggregate_overlay
+
+                result = aggregate_overlay(propagation, result, operations)
         else:
             final = L.GenericOp(
                 inputs=[converted, integer, *op.inputs],
@@ -132,6 +148,24 @@ def component_readout(
             # An artificial rounding margin can cross the destination's finite
             # bound and incorrectly erase this proved common-exponent grid.
             grids[result] = (exponent, integer_bound)
+        if grids[result] is None and integer_bound:
+            # RNE produces a dyadic value even for an odd rational divisor.
+            # Bound the *rounded* value, including the carry, rather than
+            # incorrectly treating a rational numerator as an unusable grid.
+            f, _, bias = FORMAT[str(output_type)]
+            quantum = max(1 - bias - f, exponent - denominator.bit_length() - f - 1)
+            scaled = Fraction(integer_bound, denominator) * Fraction(2) ** (exponent - quantum)
+            bound = (scaled.numerator + scaled.denominator - 1) // scaled.denominator + 1
+            largest = Fraction((1 << (f + 1)) - 1) * Fraction(2) ** (bias - f - quantum)
+            if bound <= largest and bound.bit_length() <= packing_limit:
+                grids[result] = (quantum, bound)
+            elif ieee_pointwise:
+                # Later packing sanitizes these special words before any
+                # integer conversion; the original words feed the overlay.
+                quantum = 1 - bias - f
+                largest = ((1 << (f + 1)) - 1) << (2 * bias - 1)
+                if largest.bit_length() <= packing_limit:
+                    grids[result] = (quantum, largest)
         raw_forms[result] = (integer, exponent, integer_bound, denominator)
         tag = getattr(integer.owner.attributes.get("merlin.exact_component"), "data", None)
         if tag:
@@ -150,7 +184,7 @@ def component_readout(
                 rounding="integer_quotient_remainder_rne",
                 exact_zero_sign="source_ieee_sign_bits",
                 ieee_special_readout="affected_elements_only" if ieee_pointwise else "none",
-                **({"ieee_dependence_proof": dependence_proof(op)} if ieee_pointwise else {}),
+                **({"ieee_dependence_proof": special_proof} if special_proof is not None else {}),
             )
         )
         Rewriter.replace_op(op, operations, [result])

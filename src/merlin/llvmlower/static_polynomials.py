@@ -13,7 +13,7 @@ class PolynomialRefusal(ValueError):
     pass
 
 
-def analyze_static_polynomial(op, *, work_limit=1_000_000, require_bilinear=True):
+def analyze_static_polynomial(op, *, work_limit=1_000_000, require_bilinear=True, statistics=None):
     from xdsl.dialects.builtin import FloatAttr, IntegerAttr
     from xdsl.ir.affine import AffineDimExpr
 
@@ -39,7 +39,7 @@ def analyze_static_polynomial(op, *, work_limit=1_000_000, require_bilinear=True
                 extents[position] = extent
     if any(n is None or n <= 0 for n in extents) or prod(extents) > work_limit:
         raise PolynomialRefusal("unproved or over-budget static iteration domain")
-    atoms, atom_ids, work = [], {}, 0
+    atoms, atom_ids, work, floating_work = [], {}, 0, 0
 
     def atom(source, index):
         from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
@@ -87,7 +87,7 @@ def analyze_static_polynomial(op, *, work_limit=1_000_000, require_bilinear=True
         return {key: value for key, value in result.items() if value}
 
     def block(region_block, arguments, environment, point):
-        nonlocal work
+        nonlocal work, floating_work
         env = dict(environment)
         env.update(zip(region_block.args, arguments, strict=True))
 
@@ -99,6 +99,7 @@ def analyze_static_polynomial(op, *, work_limit=1_000_000, require_bilinear=True
             if work > work_limit:
                 raise PolynomialRefusal("static polynomial work budget exceeded")
             name = child.name
+            floating_work += name in {"arith.addf", "arith.subf", "arith.mulf", "arith.divf"}
             if getattr(child.properties.get("fastmath"), "data", frozenset()):
                 raise PolynomialRefusal("exact static polynomials refuse floating fastmath flags")
             if name in {"scf.yield", "linalg.yield"}:
@@ -221,4 +222,6 @@ def analyze_static_polynomial(op, *, work_limit=1_000_000, require_bilinear=True
     rows = [rows_by_index[point] for point in output_points]
     if require_bilinear and not any(len(key) == 2 for row in rows for key in row):
         raise PolynomialRefusal("no bilinear data producer")
+    if statistics is not None:
+        statistics.update(static_work=work, floating_work=floating_work)
     return atoms, rows

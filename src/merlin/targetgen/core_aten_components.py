@@ -114,6 +114,13 @@ def prepare_integer_components(
     ieee_enabled = (
         ieee_policy.get("schema") == "merlin.native_ieee_special_values.v1" and ieee_policy.get("enabled") is True
     )
+    from merlin.llvmlower.integer_float_boundaries import has_literal_zero_divisor
+
+    if not ieee_enabled and has_literal_zero_divisor(module):
+        (directory / "exact-dtype-refusal.json").write_text(
+            json.dumps(dict(family="F2", reason="native zero-divisor readout lacks a CPU NaN-payload policy")) + "\n"
+        )
+        return None
 
     if (
         not ieee_enabled
@@ -156,9 +163,8 @@ def prepare_integer_components(
         and selection["host"]["native_ieee_special_values"].get("pointwise_nonfinite")
         == "affected_elements_source_ieee_only"
         and has_special_inputs
-        and not order_dependent
     )
-    source_agreement_required = not order_dependent and (native_dtype_request(report) or ieee_pointwise or native_f32)
+    source_agreement_required = ieee_pointwise or (not order_dependent and (native_dtype_request(report) or native_f32))
     closure_required = (
         order_dependent
         and any(
@@ -225,11 +231,16 @@ def prepare_integer_components(
         if source_agreement_required and "output_bytes" in closure:
             from merlin.targetgen.core_aten_host_floor import grade_native_bits
 
+            if order_dependent:
+                from merlin.targetgen.core_aten_host_floor import grade_special_bits
+
+                compare = grade_special_bits
+            else:
+                compare = grade_native_bits
             comparisons = [
-                grade_native_bits(record, [bytes.fromhex(raw) for raw in closure["output_bytes"]])
-                for record in report["cases"]
+                compare(record, [bytes.fromhex(raw) for raw in closure["output_bytes"]]) for record in report["cases"]
             ]
-            if any(row["status"] == "mismatch" for row in comparisons):
+            if any(row["status"] != "pass" for row in comparisons):
                 (directory / "exact-dtype-refusal.json").write_text(
                     json.dumps(
                         dict(
@@ -258,7 +269,7 @@ def prepare_integer_components(
             )
             return None
     known_bounds, boolean_count = rewrite_boolean_components(module)
-    from merlin.llvmlower.integer_float_boundaries import has_literal_zero_divisor, rewrite_integer_float_boundaries
+    from merlin.llvmlower.integer_float_boundaries import rewrite_integer_float_boundaries
 
     conversion_grids = {}
     conversion_bounds, conversion_count = rewrite_integer_float_boundaries(
@@ -270,7 +281,14 @@ def prepare_integer_components(
     zero_division_count = rewrite_zero_division(module) if ieee_enabled else 0
     if has_literal_zero_divisor(module):
         (directory / "exact-dtype-refusal.json").write_text(
-            json.dumps(dict(family="F2", reason="zero-divisor source is outside the closed IEEE pointwise family"))
+            json.dumps(
+                dict(
+                    family="F2",
+                    reason="zero-divisor source is outside the closed IEEE pointwise family"
+                    if ieee_enabled
+                    else "native zero-divisor readout lacks a CPU NaN-payload policy",
+                )
+            )
             + "\n"
         )
         return None
@@ -339,8 +357,6 @@ def prepare_integer_components(
                 ieee_pointwise=ieee_pointwise,
             )
         except ValueError as exc:
-            if str(exc) != "nonfinite source data require an explicit IEEE component policy":
-                raise
             (directory / "exact-dtype-refusal.json").write_text(
                 json.dumps(dict(family="F2", code="ieee_source_policy_unproved", reason=str(exc))) + "\n"
             )
@@ -411,7 +427,7 @@ def prepare_integer_components(
 
         try:
             for record in report["cases"]:
-                rational_outputs(record["case"])
+                rational_outputs(record["case"], finite_subproblem=ieee_pointwise)
         except (ValueError, TypeError, OverflowError, ZeroDivisionError) as exc:
             (directory / "exact-dtype-refusal.json").write_text(
                 json.dumps(dict(family="F2", reason="independent native reduction reference unavailable: " + str(exc)))
@@ -529,7 +545,7 @@ def prepare_integer_components(
             )
             if zero_division_count
             else dict(
-                kind="closed_pointwise_index_dependence",
+                kind="closed_source_index_dependence",
                 producer="complete_exact_finite_integer_numerator",
                 dependence_proofs=[p["ieee_dependence_proof"] for p in floating_proofs if "ieee_dependence_proof" in p],
                 output_floor="native_eager_bits_including_nan_payload_and_signed_zero",
@@ -552,6 +568,7 @@ def prepare_integer_components(
             status="required",
             comparison="native_eager_bits_every_boundary_result",
             order_dependent_reduction=order_dependent and bool(floating_proofs),
+            finite_subproblem_overlay=ieee_pointwise,
         ),
     )
     document = dict(selection=selection, **plan)

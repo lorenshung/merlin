@@ -115,3 +115,31 @@ def test_zero_divisor_overlay_depends_on_the_computed_numerator(token, divisor):
         assert scalar_bits(producers[-1].body.block, [numerator, zero_sign, 0]) == inf | (
             (numerator ^ zero_sign) & sign
         )
+
+
+@pytest.mark.parametrize("token", ["f16", "bf16", "f32", "f64"])
+def test_aggregate_propagation_keeps_special_words_and_discards_finite_terms(token):
+    from merlin.llvmlower.ieee_aggregate import propagation_source
+
+    source = module(token, "addf")
+    op = next(op for op in source.walk() if op.name == "linalg.generic")
+    propagation, proof = propagation_source(op, lambda value: (0, 2))
+    assert proof["finite_dependence_outputs"] == "retain_exact_device_integer_readout_without_overlay"
+    assert not any(op.name in {"arith.addf", "arith.mulf"} for op in propagation.walk())
+    f, e, bias = FORMAT[token]
+    inf, sign = ((1 << e) - 1) << f, 1 << (f + e)
+    one, nan = bias << f, inf | 1 << (f - 1)
+    invalid = nan | (0 if token == "bf16" else sign)
+    assert scalar_bits(propagation.body.block, [one, one, 0]) == 0
+    assert scalar_bits(propagation.body.block, [inf, one, 0]) == inf
+    assert scalar_bits(propagation.body.block, [inf, inf | sign, 0]) == invalid
+    assert scalar_bits(propagation.body.block, [nan, one, 0]) == nan
+
+
+def test_aggregate_finite_overflow_requires_host_instruction_order():
+    from merlin.llvmlower.ieee_aggregate import propagation_source
+
+    source = module("f32", "addf")
+    op = next(op for op in source.walk() if op.name == "linalg.generic")
+    with pytest.raises(ValueError, match="host instruction order"):
+        propagation_source(op, lambda value: (127, (1 << 24) - 1))

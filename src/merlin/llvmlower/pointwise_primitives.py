@@ -20,6 +20,17 @@ def expose_pointwise_primitives(module):
         "arith.truncf",
         "arith.sitofp",
         "arith.uitofp",
+        "arith.bitcast",
+        "arith.cmpf",
+        "arith.cmpi",
+        "arith.select",
+        "arith.andi",
+        "arith.ori",
+        "arith.xori",
+        "arith.shli",
+        "arith.shrui",
+        "arith.extui",
+        "arith.trunci",
         "linalg.yield",
     }
     changed = 0
