@@ -126,6 +126,11 @@ def prepare_integer_components(directory, report, selection, provider, package, 
             )
             return None
         bounds = [0 if b is None else b for b in bounds]
+    if order_dependent and conversion_count and not (floating_proofs or boolean_count or sign_proofs):
+        (directory / "exact-dtype-refusal.json").write_text(
+            json.dumps(dict(family="F2", reason="integer conversion alone is not a device reduction")) + "\n"
+        )
+        return None
     plans = rewrite_integer_components(
         module, limb_attribute=limb_attribute, input_bounds=bounds, known_bounds=known_bounds
     )
