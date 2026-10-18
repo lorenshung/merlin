@@ -19,8 +19,8 @@ def encode_fixed_integer(value, exponent, result_type, emit, *, denominator=1):
         raise ValueError("unsupported exact IEEE boundary")
     fraction_bits, exponent_bits, bias = FORMAT[str(result_type)]
     wide = value.type
-    if not isinstance(wide, IntegerType) or wide.width.data not in (128, 1024):
-        raise ValueError("exact IEEE conversion requires a bounded i128 or i1024 numerator")
+    if not isinstance(wide, IntegerType) or wide.width.data < 128 or wide.width.data & (wide.width.data - 1):
+        raise ValueError("exact IEEE conversion requires a bounded power-of-two integer width of at least 128")
     width = wide.width.data
     bits = IntegerType(1 + fraction_bits + exponent_bits)
 

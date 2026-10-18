@@ -3,6 +3,8 @@
 
 from fractions import Fraction
 
+import pytest
+
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.fixed_point_ir import finite_grid
 from merlin.llvmlower.floating_components import rewrite_floating_components
@@ -112,7 +114,8 @@ def test_alignment_between_individually_short_grids_selects_wide_packing():
     module.verify()
 
 
-def test_odd_division_retains_a_rounded_dyadic_grid_through_a_reshape():
+@pytest.mark.parametrize("reassociate", [False, True])
+def test_odd_division_retains_a_rounded_dyadic_grid_through_a_reshape(reassociate):
     module = parse_mlir_text("""module {
       func.func @forward(%x:tensor<2xbf16>) -> tensor<2xbf16> {
         %three=arith.constant 3.0 : bf16
@@ -134,10 +137,52 @@ def test_odd_division_retains_a_rounded_dyadic_grid_through_a_reshape():
         } -> tensor<2xbf16>
         return %r : tensor<2xbf16>
       }}""")
-    bounds, proofs = rewrite_floating_components(module, [finite_grid([1.0, 2.0])])
+    bounds, proofs = rewrite_floating_components(module, [finite_grid([1.0, 2.0])], allow_reassociation=reassociate)
     assert len(proofs) == 2 and all(p["source_data_arithmetic"] for p in proofs)
     assert not any(op.name in {"arith.addf", "arith.divf"} for op in module.walk())
     assert rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[0], known_bounds=bounds)
+    module.verify()
+
+
+@pytest.mark.parametrize("values", [[0.0, 0.0], [2.0**-133, 2.0**127]])
+def test_bilinear_numerator_survives_reshape_and_following_scalar_arithmetic(values):
+    from merlin.llvmlower.entry_weight_projection import _pure_dce
+    from merlin.targetgen.core_aten_components import unlowered_data_reductions
+
+    module = parse_mlir_text("""module {
+      func.func @forward(%x:tensor<1x2xf32>,%y:tensor<2x1xf32>) -> tensor<1xf32> {
+        %z=arith.constant 0.0 : f32
+        %seed=tensor.splat %z : tensor<1x1xf32>
+        %dot=linalg.matmul ins(%x,%y:tensor<1x2xf32>,tensor<2x1xf32>) outs(%seed:tensor<1x1xf32>) -> tensor<1x1xf32>
+        %shape=arith.constant dense<[1]> : tensor<1xi64>
+        %flat=tensor.reshape %dot(%shape) : (tensor<1x1xf32>,tensor<1xi64>) -> tensor<1xf32>
+        %one=arith.constant 1.5 : f32
+        %weight=tensor.splat %one : tensor<1xf32>
+        %e=tensor.empty() : tensor<1xf32>
+        %scaled=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+          ins(%flat,%weight:tensor<1xf32>,tensor<1xf32>) outs(%e:tensor<1xf32>) {
+        ^bb0(%a:f32,%b:f32,%out:f32):
+          %v=arith.mulf %a,%b : f32
+          linalg.yield %v : f32
+        } -> tensor<1xf32>
+        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+          ins(%scaled,%scaled:tensor<1xf32>,tensor<1xf32>) outs(%e:tensor<1xf32>) {
+        ^bb1(%a:f32,%b:f32,%out:f32):
+          %v=arith.addf %a,%b : f32
+          linalg.yield %v : f32
+        } -> tensor<1xf32>
+        return %r : tensor<1xf32>
+      }}""")
+    bounds, proofs = rewrite_floating_components(module, [finite_grid(values)] * 2, allow_reassociation=True)
+    assert len(proofs) == 3
+    if any(values):
+        assert all(p["reconstruction"] == "bounded_i2048" for p in proofs)
+    plans = rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[0, 0], known_bounds=bounds)
+    assert plans
+    function = next(op for op in module.walk() if op.name == "func.func")
+    _pure_dce(function)
+    assert not unlowered_data_reductions(module, "test.limb")
+    assert any(op.name == "tensor.reshape" and str(op.results[0].type.element_type).startswith("i") for op in module.walk())
     module.verify()
 
 

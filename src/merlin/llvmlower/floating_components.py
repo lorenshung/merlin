@@ -65,12 +65,20 @@ def rewrite_floating_components(
     common_exponent = min((e for e, b in packing_grids), default=0)
     # A division can introduce the output format's smallest dyadic quantum,
     # even when the input itself has a short integral representation.
-    wide_packing = any((b << (e - common_exponent)).bit_length() > 52 for e, b in packing_grids) or any(
+    aligned_bits = max(((b << (e - common_exponent)).bit_length() for e, b in packing_grids), default=0)
+    wide_packing = aligned_bits > 52 or any(
         op.name == "arith.divf" and str(op.results[0].type) in {"bf16", "f32", "f64"} for op in function.walk()
     )
     if wide_packing:
-        i64, i128 = IntegerType(512), IntegerType(1024)
-    packing_limit = 511 if wide_packing else 52
+        # A bilinear result may become a later linear producer's operand.
+        # Size that operand representation for both significands and carries,
+        # rather than proving the first GEMM and stranding its epilogue.
+        required_bits = aligned_bits + 2
+        if any(op.name == "arith.mulf" for op in function.walk()):
+            required_bits = max(required_bits, 2 * aligned_bits + 32)
+        packing_width = 1 << (max(512, required_bits) - 1).bit_length()
+        i64, i128 = IntegerType(packing_width), IntegerType(2 * packing_width)
+    packing_limit = i64.width.data - 1 if wide_packing else 52
     reconstruction_limit = i128.width.data - 8
 
     complex_sources = {function.body.block.args[i] for i in complex_inputs}
@@ -139,17 +147,17 @@ def rewrite_floating_components(
         return None
 
     def pack(value, exponent, operations):
-        if allow_reassociation and value in raw_forms:
+        if allow_reassociation and value in raw_forms and raw_forms[value][3] == 1:
             integer, source_exponent, bound, divisor = raw_forms[value]
-            if divisor != 1 or exponent > source_exponent:
+            if divisor != 1 or (bound and exponent > source_exponent):
                 raise ValueError("raw rational component cannot be packed as an integer")
-            aligned = bound << (source_exponent - exponent)
+            aligned = bound << (source_exponent - exponent) if bound else 0
             if aligned.bit_length() >= i64.width.data - 1:
                 raise ValueError("raw exact component exceeds the signed-i64 operand representation")
 
             def scalar(values, emit):
                 result = values[0]
-                if source_exponent != exponent:
+                if bound and source_exponent != exponent:
                     shift = emit(arith.ConstantOp(IntegerAttr(source_exponent - exponent, i128)))
                     result = emit(arith.ShLIOp(result, shift))
                 return emit(arith.TruncIOp(result, i64))
@@ -168,6 +176,22 @@ def rewrite_floating_components(
             raise ValueError("aligned fixed-point coefficient exceeds the exact binary64 packing bound")
         if not wide_packing and not -1023 <= exponent <= 1074:
             raise ValueError("exact binary64 packing scale is outside its representable exponent range")
+
+        from merlin.llvmlower.component_carriers import carry, data_operand_indices
+
+        def contains_raw(source):
+            if source in raw_forms:
+                return raw_forms[source][3] == 1
+            owner = source.owner
+            indices = data_operand_indices(owner) if hasattr(owner, "name") else []
+            return any(contains_raw(owner.operands[i]) for i in indices)
+
+        indices = data_operand_indices(value.owner) if hasattr(value.owner, "name") else []
+        if allow_reassociation and indices and contains_raw(value):
+            packed = [pack(value.owner.operands[i], exponent, operations)[0] for i in indices]
+            result = carry(value, packed, i64, operations)
+            bounds[result] = aligned
+            return result, aligned
 
         def scalar(args, emit):
             value = args[0]

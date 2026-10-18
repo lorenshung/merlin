@@ -45,13 +45,17 @@ def data_sources(op, element_predicate):
 def retype_additive(op, replacements, element, *, floating):
     """Clone a checked additive generic; attach captured tensors as real inputs."""
     from xdsl.dialects import arith, tensor
-    from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, IntegerAttr, TensorType
+    from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, IntegerAttr, IntegerType, TensorType
     from xdsl.dialects.linalg import ops as L
     from xdsl.ir.affine import AffineConstantExpr, AffineMap
     from xdsl.rewriter import Rewriter
 
     def data_type(typ):
-        return str(typ) in ({"f16", "bf16", "f32", "f64"} if floating else {"i128", "i1024"})
+        return (
+            str(typ) in {"f16", "bf16", "f32", "f64"}
+            if floating
+            else isinstance(typ, IntegerType) and typ.width.data >= 128
+        )
 
     allowed = {"arith.addf", "arith.subf", "arith.extf"} if floating else {"arith.addi", "arith.subi", "arith.extsi"}
     data_ops = 0
@@ -69,7 +73,7 @@ def retype_additive(op, replacements, element, *, floating):
         return None
     if op.body.block.args[-1].uses and not positive_zero_seed(op.outputs[0]):
         return None
-    if not all(str(v.type.element_type) in {"f16", "bf16", "f32", "f64", "i128", "i1024"} for v in op.outputs):
+    if not all(data_type(v.type.element_type) for v in op.outputs):
         return None
     operations = []
     mapper = dict(replacements)

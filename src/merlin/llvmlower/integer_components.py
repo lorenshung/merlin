@@ -61,6 +61,10 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
                 return max((abs(int(v)) for v in attr.get_values()), default=0)
         return 1 << (width(value) - 1) if width(value) else None
 
+    def component_width(value):
+        bits = width(value)
+        return bits == 1 or (bits >= 8 and bits & (bits - 1) == 0)
+
     def count(value, *, mathematical=False):
         bits = width(value)
         magnitude = absolute(value)
@@ -216,7 +220,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
     def bilinear(op):
         if op not in contractions or len(op.operands) != 3:
             return False
-        if any(width(value) not in (1, 8, 16, 32, 64, 128, 512, 1024) for value in op.operands[:2]):
+        if any(not component_width(value) for value in op.operands[:2]):
             return False
         body = op.body.block
         if any(child.name not in {"arith.extsi", "arith.muli", "arith.addi", "linalg.yield"} for child in body.ops):
@@ -302,7 +306,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
         # Window dimensions may be supplied by unused shape-only operands.
         # Their maps determine the iteration domain but their values are unread.
         source, seed = op.inputs[source_index], op.outputs[0]
-        if width(source) not in (1, 8, 16, 32, 64, 128, 512, 1024):
+        if not component_width(source):
             return False
         bits = width(op.results[0])
         digits = count(source, mathematical=bits > width(source))
@@ -348,7 +352,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
 
     original = list(module.walk())
     for op in original:
-        if len(op.results) != 1 or width(op.results[0]) not in (1, 8, 16, 32, 64, 128, 512, 1024):
+        if len(op.results) != 1 or not component_width(op.results[0]):
             continue
         if "merlin.exact_host_arithmetic" in op.attributes or any(
             k.startswith("prov.quant.") or k == limb_attribute for k in op.attributes
@@ -357,7 +361,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
         if "merlin.exact_additive" in op.attributes:
             from merlin.llvmlower.additive_regions import data_sources, retype_additive
 
-            sources = data_sources(op, lambda typ: str(typ) in {"i128", "i1024"})
+            sources = data_sources(op, lambda typ: isinstance(typ, IntegerType) and typ.width.data >= 128)
             if not sources:
                 continue
             digits = max(count(value, mathematical=True) for value in sources)
@@ -398,7 +402,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
         if expression is None:
             continue
         terms, bias = expression
-        if not terms or any(width(op.inputs[i]) not in (1, 8, 16, 32, 64, 128, 512, 1024) for i in terms):
+        if not terms or any(not component_width(op.inputs[i]) for i in terms):
             continue
         typ = op.results[0].type
         bits = width(op.results[0])
