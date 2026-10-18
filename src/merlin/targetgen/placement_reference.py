@@ -70,7 +70,18 @@ def estimate_reference(original, plan, declaration, facts):
         if not outputs:
             result.update(reason_code="no_materialized_output_work")
             return result
-        shapes = [v.type.get_shape() for v in outputs if hasattr(v.type, "get_shape")]
+        # A reduction to one scalar can still read a large tensor. Follow
+        # source dependencies rather than mistaking its result extent for work.
+        dependencies = set(outputs)
+        pending = list(outputs)
+        while pending:
+            value = pending.pop()
+            owner = value.owner
+            for operand in getattr(owner, "operands", ()):
+                if operand not in dependencies:
+                    dependencies.add(operand)
+                    pending.append(operand)
+        shapes = [v.type.get_shape() for v in dependencies if hasattr(v.type, "get_shape")]
         if not shapes or any(any(d < 0 for d in shape) for shape in shapes):
             raise ValueError("static materialized output extent unavailable")
         if all(math.prod(shape) <= reference["scalar_max_elements"] for shape in shapes):

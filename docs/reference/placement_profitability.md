@@ -24,7 +24,9 @@ sizes, element/row widths, throughput rates, and the scalar-work cutoff. These
 are authored assumptions pending operator review, not timing measurements or
 numerical proofs. Workloads use contraction depth, reduction-window work,
 pointwise streams, or materialized movement bytes. They contain no overload list.
-A one-element result remains host according to the declared scalar cutoff;
+A source whose reachable tensor data work has at most one element remains host
+according to the declared scalar cutoff; a reduction of multiple elements to one
+scalar still qualifies its arithmetic family.
 empty boundaries retain `empty_tensor_no_device_work`.
 
 Movement inspects typed index maps and slice strides. Contiguous selectors use

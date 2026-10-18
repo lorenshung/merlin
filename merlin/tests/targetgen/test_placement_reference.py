@@ -264,3 +264,22 @@ def test_shape_literal_does_not_turn_a_row_copy_into_scalar_fill_work():
     function.body.block.insert_op_before(shape, function.body.block.first_op)
     after = estimate_reference(module, candidate(module, "movement", "F1"), declaration, facts)
     assert after == before
+
+
+@pytest.mark.parametrize("extent,status", [(1, "host"), (11, "device")])
+def test_scalar_output_reduction_is_not_confused_with_scalar_work(extent, status):
+    module = parse_mlir_text(f"""module {{
+      func.func @forward(%x: tensor<{extent}xf32>,%seed: tensor<f32>) -> tensor<f32> {{
+        %r=linalg.reduce ins(%x : tensor<{extent}xf32>) outs(%seed : tensor<f32>) dimensions=[0]
+          (%a: f32,%b: f32) {{
+            %v=arith.addf %a,%b : f32
+            linalg.yield %v : f32
+          }}
+        func.return %r : tensor<f32>
+      }} }}""")
+    plan = dict(numerical_family="F2", sites=[dict(status="admitted", family="reduction")])
+    declaration, facts = inputs()
+    result = estimate_reference(module, plan, declaration, facts)
+    assert result["status"] == status
+    if status == "device":
+        assert result["family"] == "reduction"
