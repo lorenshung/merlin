@@ -99,10 +99,8 @@ class QuantRecipe:
     activation: TensorSpec | None = None
     bias_domain: str | None = None  # "accumulator" when the readout adds an integer bias
     families: tuple[str, ...] = (CONTRACTION,)
-    #: How the capture reads a contraction out: "float_readout" (two f32 multiplies on the host, the
-    #: frontend default) or "integer_readout" (an int32 bias seed and ONE RNE requantization, which is
-    #: what a readout that scales and saturates to the integer element format executes).
-    readout_numerics: str = "float_readout"
+    #: Accelerator capture keeps exact integer semantics and full-width int32 device readout.
+    readout_numerics: str = "integer_readout"
     unquantized: dict[str, str] = field(default_factory=dict)  # family -> why it stays float
     why: dict[str, str] = field(default_factory=dict)  # field -> the derivation behind it
     underivable: dict[str, str] = field(default_factory=dict)  # field -> why not
@@ -121,9 +119,7 @@ class QuantRecipe:
             "why": dict(sorted(self.why.items())),
             "underivable": dict(sorted(self.underivable.items())),
         }
-        if self.readout_numerics != "float_readout":
-            # Only a non-default readout is part of the identity, so every existing recipe keeps its digest.
-            body["readout_numerics"] = self.readout_numerics
+        body["readout_numerics"] = self.readout_numerics
         body["recipe_sha256"] = digest(body)
         return body
 
@@ -357,25 +353,12 @@ def derive(
 
 
 def _readout_numerics(recipe: QuantRecipe, facet: Any) -> None:
-    """``integer_readout`` where the unit's readout scales and saturates to the integer element format.
-
-    That readout is one f32 multiply, round half to even and saturation on the accumulator -- the
-    frontend's ``integer_readout`` exactly -- so the capture should emit it, with the bias as an int32
-    accumulator seed, instead of a host cast and two f32 multiplies the device never performs.
-    """
-    if recipe.status != DERIVED or recipe.activation is None:
-        return
-    element = _format_of(facet.element_dtype)
-    if element is None or element.kind != "int_affine" or recipe.activation.granularity != "tensor":
-        return
-    for readout in facet.readouts:
-        if "acc_scale" in (readout.get("applies") or ()) and _format_of(readout.get("selector")) == element:
-            recipe.readout_numerics = "integer_readout"
-            recipe.why["readout_numerics"] = (
-                f"the {readout.get('selector')!r} readout applies acc_scale (one rounding, saturated), so the "
-                "capture reads each contraction out as one requantization with an int32 bias seed"
-            )
-            return
+    """Capture semantics do not depend on a device's optional narrowing scale."""
+    if recipe.status == DERIVED:
+        recipe.readout_numerics = "integer_readout"
+        recipe.why["readout_numerics"] = (
+            "exact integer capture; full int32 device readout followed by exact rational host quantization"
+        )
 
 
 def _operand_sum(recipe: QuantRecipe, facet: Any, *, activation_granularity: str, mode: str) -> None:

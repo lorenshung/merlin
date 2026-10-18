@@ -167,7 +167,15 @@ def contraction_partition(receipt: dict) -> dict[str, int]:
 READOUT_NUMERICS = ("float_readout", "integer_readout")
 
 
-def integerize_static_pt2e(model, inputs, *, numerics: str = "float_readout"):
+def accelerator_readout_numerics(recipe=None):
+    """Exact integer semantics are mandatory for accelerator capture."""
+    numerics = (recipe or {}).get("readout_numerics", "integer_readout")
+    if numerics != "integer_readout":
+        raise ValueError("accelerator capture requires integer_readout; float_readout is host-only")
+    return numerics
+
+
+def integerize_static_pt2e(model, inputs, *, numerics: str = "integer_readout"):
     """Reuse frontend integerization while preserving each source result layout.
 
     The frontend's conv rewrite computes its i32 matrix in patch order and

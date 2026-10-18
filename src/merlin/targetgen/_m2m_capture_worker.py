@@ -1107,12 +1107,11 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
     integerization_receipt = None
     if q is not None and q.scheme == "int8_static_act_int8_weight" and not a.already_quantized:
         # Independently account for integer and preserved-float contractions.
-        from merlin.capture.integerization import integerize_static_pt2e
+        from merlin.capture.integerization import accelerator_readout_numerics, integerize_static_pt2e
 
         selected_engine = (recipe or {}).get("software_numerical_engine", "integer_reference")
-        # The recipe states which readout the target executes (quant_recipe.readout_numerics); the
-        # frontend default stays the portable float readout.
-        readout_numerics = (recipe or {}).get("readout_numerics", "float_readout")
+        # Accelerator captures retain exact integer math and one rational quantize boundary.
+        readout_numerics = accelerator_readout_numerics(recipe)
         from merlin.capture.integerization import non_contraction_annotations
 
         contraction_free = (
@@ -1128,7 +1127,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
         declared_graph = recipe is not None and (
             recipe.get("host_readout_declarations") is not None
             or contraction_free
-            or (recipe.get("software_admission") is not None and readout_numerics == "float_readout")
+            or recipe.get("software_admission") is not None
         )
         if selected_engine not in (None, "integer_reference"):
             raise ValueError(f"static int8 capture cannot realize numerical engine {selected_engine!r}")
@@ -1150,7 +1149,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
                     mdl,
                     tuple(inputs),
                     declared_readout=declared_graph,
-                    numerics="float_readout" if contraction_free else readout_numerics,
+                    numerics=readout_numerics,
                 )
                 if not all(
                     hasattr(independent, field)

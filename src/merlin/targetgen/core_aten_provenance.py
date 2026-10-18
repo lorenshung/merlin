@@ -52,8 +52,12 @@ def batch_provenance(
             "targetgen/quant_recipe.py",
             "targetgen/core_aten_w8a8_reference.py",
             "targetgen/exact_arithmetic.py",
+            "runtime/exact_readout.py",
             "targetgen/exact_quantized_reference.py",
             "targetgen/recipe_numerics.py",
+            "targetgen/readout_facet.py",
+            "xdsl_dialects/lowering/compute_groups.py",
+            "xdsl_dialects/lowering/window_sum.py",
             "targetgen/_recipe_integer.py",
             "targetgen/_capture_integer_agreement.py",
             "llvmlower/contraction_quantization.py",
@@ -77,6 +81,9 @@ def batch_provenance(
         )
     ]
     sources.append(repo_root() / "merlin/runtime/baremetal/spike/model_main.c")
+    from merlin.common.paths import contract_dir
+
+    sources.extend(contract_dir() / name for name in ("quant_schema.json", "quant_schema_source.json"))
     if execution_provider is not None:
         sources.append(execution_provider)
     options = runner_options or {}
