@@ -132,10 +132,12 @@ def _aliasing(op) -> str | None:
 
 
 def primitive_signature(op) -> dict[str, Any]:
-    """Observe operand arity, affine scalar dependence and outer-only broadcast.
+    """Observe operand arity, affine scalar dependence and row-preserving broadcast.
 
     Output/init operands are destinations, never inputs. Missing or nonprojected
-    indexing maps cannot prove a broadcast restriction.
+    indexing maps cannot prove a broadcast restriction. ``outer`` permits omission
+    of any dimensions except the innermost contiguous dimension, including
+    interleaved dimensions; each source row is replayed whole.
     """
     from merlin.common import mlir_query as mq
 
@@ -143,13 +145,29 @@ def primitive_signature(op) -> dict[str, Any]:
     count = sum(hasattr(value.type, "get_shape") for value in op.operands[:n_in])
     broadcasting = None
     positions, kinds = _maps(op)
+    if mq.op_name(op) == "linalg.broadcast" and n_in == 1 and len(op.results) == 1:
+        source = op.operands[0].type
+        result_type = op.results[0].type
+        dimensions = getattr(op, "dimensions", None)
+        if dimensions is None:
+            dimensions = op.properties.get("dimensions", op.attributes.get("dimensions"))
+        if hasattr(source, "get_shape") and hasattr(result_type, "get_shape") and hasattr(dimensions, "get_values"):
+            shape, result_shape = source.get_shape(), result_type.get_shape()
+            omitted = list(dimensions.get_values())
+            kept = [i for i in range(len(result_shape)) if i not in omitted]
+            if (
+                len(set(omitted)) == len(omitted)
+                and all(0 <= i < len(result_shape) for i in omitted)
+                and tuple(result_shape[i] for i in kept) == tuple(shape)
+            ):
+                broadcasting = "none" if not omitted else "inner" if len(result_shape) - 1 in omitted else "outer"
     if positions is not None and len(positions) > n_in and all(kind == "parallel" for kind in kinds):
         result = positions[-1]
         if result == list(range(len(kinds))):
             inputs = positions[:n_in]
             if all(dims == result for dims in inputs):
                 broadcasting = "none"
-            elif all(dims == result[len(result) - len(dims) :] if dims else True for dims in inputs):
+            elif all(not dims or (dims == sorted(set(dims)) and dims[-1] == result[-1]) for dims in inputs):
                 broadcasting = "outer"
             else:
                 broadcasting = "inner"

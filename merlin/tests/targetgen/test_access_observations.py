@@ -25,7 +25,8 @@ def _program(tmp_path, *, maps, iters, a, b, c, body, init="%e", acc="i32"):
   "func.func"() <{{function_type = ({a}, {b}) -> {c}, sym_name = "forward"}}> ({{
   ^bb0(%x: {a}, %w: {b}):
     %e = "tensor.empty"() : () -> {c}
-    %r = "linalg.generic"(%x, %w, {init}) <{{indexing_maps = {maps}, iterator_types = [{iters}], operandSegmentSizes = array<i32: 2, 1>}}> ({{
+    %r = "linalg.generic"(%x, %w, {init}) <{{indexing_maps = {maps},
+      iterator_types = [{iters}], operandSegmentSizes = array<i32: 2, 1>}}> ({{
     ^bb1(%p: i8, %q: i8, %s: {acc}):
 {body}
     }}) : ({a}, {b}, {c}) -> {c}
@@ -126,3 +127,30 @@ def test_the_screen_admits_only_from_observed_values():
     row = {"semantic_family": "contraction", "layout": "row_major_contiguous", "tails": None}
     observed = _observed_signature(row)
     assert observed["layout"] == "row_major_contiguous" and "tails" not in observed
+
+
+@pytest.mark.parametrize(
+    "dimensions,source,result,expected",
+    [
+        ([0, 2], "2x3", "4x2x5x3", "outer"),
+        ([1], "2x3", "2x5x3", "outer"),
+        ([2], "2x3", "2x3x5", "inner"),
+        ([], "2x3", "2x3", "none"),
+    ],
+)
+def test_named_broadcast_observes_row_replay(dimensions, source, result, expected):
+    dims = ", ".join(map(str, dimensions))
+    op = next(
+        op
+        for op in mq.walk(
+            mq.parse(f"""module {{
+      func.func @forward(%x: tensor<{source}xi8>) -> tensor<{result}xi8> {{
+        %e = tensor.empty() : tensor<{result}xi8>
+        %r = linalg.broadcast ins(%x : tensor<{source}xi8>) outs(%e : tensor<{result}xi8>) dimensions = [{dims}]
+        func.return %r : tensor<{result}xi8>
+      }}
+    }}""")
+        )
+        if mq.op_name(op) == "linalg.broadcast"
+    )
+    assert AO.primitive_signature(op)["broadcasting"] == expected
