@@ -419,6 +419,9 @@ def prepare_integer_components(
 
     for function in functions:
         _pure_dce(function)
+    from merlin.llvmlower.component_nan_readout import qualify_nan_readout
+
+    nan_readouts = qualify_nan_readout(module, floating_proofs)
     remaining_products = unlowered_data_reductions(module, limb_attribute)
     if remaining_products:
         (directory / "exact-dtype-refusal.json").write_text(
@@ -540,6 +543,7 @@ def prepare_integer_components(
         schedule_proof=proof,
         limb_plans=plans,
         floating_representation_proofs=floating_proofs,
+        ieee_classification_readouts=nan_readouts,
         zero_limb_omission_proof=dict(
             method="complete_recorded_input_dyadic_coefficients",
             producer_count=len(zero_limbs),

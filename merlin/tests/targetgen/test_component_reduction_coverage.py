@@ -159,3 +159,78 @@ def test_address_predicates_do_not_claim_remaining_numerical_arithmetic():
         return %r : i1
       }}""")
     assert unlowered_data_reductions(module, "test.limb") == []
+
+
+@pytest.mark.parametrize("predicate,qualified", [("uno", True), ("ord", True), ("olt", False)])
+def test_fused_components_retain_only_self_nan_classification(tmp_path, monkeypatch, predicate, qualified):
+    monkeypatch.setattr(
+        "merlin.targetgen.transfer_contracts.screen_transfer_contract", lambda *args, **kwargs: dict(status="admitted")
+    )
+    right = "%a" if qualified else "%b"
+    choices = "%fma, %a" if predicate == "ord" else "%a, %fma"
+    module = parse_mlir_text(f"""module {{
+      func.func @forward(%x:tensor<2xf32>,%y:tensor<2xf32>,%z:tensor<2xf32>)
+        -> (tensor<2xf32>,tensor<2xf32>,tensor<2xf32>,tensor<2xf32>) {{
+        %e=tensor.empty() : tensor<2xf32>
+        %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,
+          affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
+          ins(%x,%y,%z:tensor<2xf32>,tensor<2xf32>,tensor<2xf32>) outs(%e:tensor<2xf32>) {{
+          ^bb0(%a:f32,%b:f32,%c:f32,%unused:f32):
+            %fma=math.fma %a,%b,%c : f32
+            %nan=arith.cmpf {predicate},%a,{right} : f32
+            %v=arith.select %nan,{choices} : f32
+            linalg.yield %v : f32
+        }} -> tensor<2xf32>
+        return %r,%x,%y,%z : tensor<2xf32>,tensor<2xf32>,tensor<2xf32>,tensor<2xf32>
+      }} }}""")
+    (tmp_path / "model.mlir").write_text(str(module) + "\n")
+    values = [np.array(v, np.float32) for v in ([1, 2], [3, 4], [5, 6])]
+    np.savez(tmp_path / "inputs.npz", **{f"in{i}": value for i, value in enumerate(values)})
+    expected = values[0] * values[1] + values[2] if qualified else values[0]
+    record = dict(
+        status="bundled",
+        input_abi=[dict(dtype="f32")] * 3,
+        output_indices=[0],
+        semantic_boundary=dict(post_indices=[1, 2, 3]),
+        native_eager_boundary=dict(
+            authority="untransformed_native_cpu_eager",
+            output_bytes=[expected.tobytes().hex()],
+            post_input_bytes=[v.tobytes().hex() for v in values],
+        ),
+    )
+    called = []
+
+    class Provider:
+        def admit_numeric_schedule(self, source, **kwargs):
+            called.append(source)
+            return dict(status="declined", reason="test grants no device implementation")
+
+    decision = prepare_integer_components(
+        tmp_path,
+        dict(cases=[record]),
+        dict(spec={}, host={}),
+        Provider(),
+        None,
+        module,
+        limb_attribute="test.limb",
+        native_f32=True,
+    )
+    assert decision is None  # The provider deliberately withholds its proof.
+    assert bool(called) is qualified
+    if qualified:
+        assert "test.limb" in called[0]
+    else:
+        assert "partial preludes" in (tmp_path / "exact-dtype-refusal.json").read_text()
+
+
+def test_nan_classification_after_conversion_has_no_arithmetic_witness():
+    from merlin.llvmlower.component_nan_readout import qualify_nan_readout
+
+    module = parse_mlir_text("""module {
+      func.func @forward(%x:i64) -> i1 {
+        %f=arith.sitofp %x : i64 to f32
+        %nan=arith.cmpf uno,%f,%f : f32
+        return %nan : i1
+      }}""")
+    assert qualify_nan_readout(module, [{"source_data_arithmetic": False}]) == []
+    assert unlowered_data_reductions(module, "test.limb")

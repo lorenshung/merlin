@@ -78,6 +78,7 @@ def expose_pointwise_primitives(module):
         # In particular, literal casts belong to that predicate, not its data path.
         dependent = set(body.args)
         numeric = {
+            "math.fma",
             "arith.addf",
             "arith.subf",
             "arith.mulf",
