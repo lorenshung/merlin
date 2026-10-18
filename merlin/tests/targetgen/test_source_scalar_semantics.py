@@ -279,3 +279,30 @@ def test_ieee_conversion_keeps_zero_sign(token):
     )
     value = np.array([-0.0 if token != "f64" else 0.0], np.float64)
     assert torch.signbit(run(module, [value])).item() is True
+
+
+@pytest.mark.parametrize("take_loop,ambiguous", [(True, True), (False, False)])
+def test_nested_static_control_preserves_observable_nan_payload_scope(take_loop, ambiguous):
+    module = source(
+        ["f32", "f32"],
+        "f32",
+        f"""%lo = arith.constant 0 : index
+        %hi = arith.constant 1 : index
+        %loop = scf.for %i = %lo to %hi step %hi iter_args(%acc = %a0) -> (f32) {{
+          %sum = arith.addf %acc, %a1 : f32
+          scf.yield %sum : f32
+        }}
+        %condition = arith.constant {int(take_loop)} : i1
+        %v = scf.if %condition -> (f32) {{
+          scf.yield %loop : f32
+        }} else {{
+          scf.yield %a0 : f32
+        }}""",
+    )
+    left = np.array([0x7FC00001], dtype=np.uint32).view(np.float32)
+    right = np.array([0x7FC00002], dtype=np.uint32).view(np.float32)
+    audit = {}
+    actual = run(module, [left, right], audit)
+    assert audit["ambiguous_nan_payload"] is ambiguous
+    if not take_loop:
+        assert actual.numpy().tobytes() == left.tobytes()

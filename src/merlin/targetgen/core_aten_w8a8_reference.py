@@ -110,8 +110,15 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
         return torch.tensor(value.value.data, dtype=dtype(op.results[0].type))
 
     def scalar_body(
-        block, operands, point=(), operand_taints=None, operand_nan_only=None,
-        captured=None, captured_taints=None, captured_nan_only=None, single_operation=False,
+        block,
+        operands,
+        point=(),
+        operand_taints=None,
+        operand_nan_only=None,
+        captured=None,
+        captured_taints=None,
+        captured_nan_only=None,
+        single_operation=False,
     ):
         from merlin.targetgen.source_scalar import (
             convert_to_float,
@@ -235,17 +242,18 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
                 control_taint = ts[0] | ts[1] | ts[2]
                 for index in range(lower, upper, step):
                     carried, carried_taints, carried_nan = scalar_body(
-                        inner.body.block, (torch.tensor(index), *carried), point,
-                        (control_taint, *carried_taints), (torch.zeros_like(control_taint), *carried_nan),
-                        local, local_taints, nan_only,
+                        inner.body.block,
+                        (torch.tensor(index), *carried),
+                        point,
+                        (control_taint, *carried_taints),
+                        (torch.zeros_like(control_taint), *carried_nan),
+                        local,
+                        local_taints,
+                        nan_only,
                     )
                 local.update(zip(inner.results, carried, strict=True))
-                local_taints.update(
-                    (v, t | control_taint) for v, t in zip(inner.results, carried_taints, strict=True)
-                )
-                nan_only.update(
-                    (v, n & ~control_taint) for v, n in zip(inner.results, carried_nan, strict=True)
-                )
+                local_taints.update((v, t | control_taint) for v, t in zip(inner.results, carried_taints, strict=True))
+                nan_only.update((v, n & ~control_taint) for v, n in zip(inner.results, carried_nan, strict=True))
                 continue
             elif name == "scf.if":
                 region = inner.regions[0 if bool(xs[0]) else 1]
@@ -274,7 +282,7 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
             elif name in {"arith.divui", "arith.remui"}:
                 if any(bool((v < 0).any()) for v in xs):
                     raise ValueError("source index division requires nonnegative operands")
-                y = (torch.div(xs[0], xs[1], rounding_mode="floor") if name == "arith.divui" else xs[0] % xs[1])
+                y = torch.div(xs[0], xs[1], rounding_mode="floor") if name == "arith.divui" else xs[0] % xs[1]
                 y = y.to(dtype(inner.results[0].type))
             elif name == "arith.cmpf":
                 predicate = inner.predicate.value.data
