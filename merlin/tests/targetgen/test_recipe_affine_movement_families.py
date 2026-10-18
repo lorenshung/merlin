@@ -210,3 +210,65 @@ def test_capability_rows_reach_the_recipe_from_the_contract():
     contract = load_yaml(repo_root() / "examples/gemmini/target/contracts/target_contract.yaml")
     families = {cap.family for unit in cu.compute_units(contract) for cap in unit.semantic_capabilities}
     assert {"contraction", "movement"} <= families
+
+
+def test_backward_and_constant_ops_are_named():
+    table = _operator_table()
+    assert "convolution_backward" in " ".join(table["contraction"])
+    for op in ("avg_pool2d_backward", "_adaptive_avg_pool2d_backward", "col2im"):
+        assert op in " ".join(table["window_mean"]), op
+    assert "aten.full.default" in " ".join(table["movement"])
+    assert "add.Tensor" in " ".join(table["affine_map"])
+
+
+_STANDALONE = r"""
+import json
+import torch
+from merlin.targetgen import _recipe_quantizer as quant
+recipe = {
+    "schema": "quant_recipe_v1", "status": "derived",
+    "families": ["contraction", "window_mean", "affine_map", "movement"],
+    "weight": {"dtype": "int8", "granularity": "tensor", "symmetric": True, "quant_min": -127, "quant_max": 127},
+    "activation": {"dtype": "int8", "granularity": "tensor", "symmetric": True,
+                   "quant_min": -128, "quant_max": 127, "mode": "static"},
+}
+class Sum(torch.nn.Module):
+    def forward(self, x, y):
+        return torch.add(x, y)
+class Mean(torch.nn.Module):
+    def forward(self, x):
+        return x.mean(dim=-1, keepdim=True)
+class Full(torch.nn.Module):
+    def forward(self):
+        return torch.full((4, 8), 1.25)
+torch.manual_seed(0)
+report = {}
+for name, model, inputs in (("sum", Sum(), (torch.randn(8, 16), torch.randn(8, 16))),
+                            ("mean", Mean(), (torch.randn(8, 16),)),
+                            ("full", Full(), ())):
+    converted = quant.apply_recipe(model.eval(), recipe, example_inputs=inputs,
+                                   source_layer_inventory=quant.layer_inventory(model))
+    stats = converted._recipe_quantization_stats
+    report[name] = {key: stats[key] for key in ("annotated_sums", "annotated_means", "annotated_affine_maps",
+                                                "annotated_movements")}
+    report[name]["recipes"] = sorted(row["operator"] for row in stats["integer_recipes"] if "refused" not in row)
+print(json.dumps(report))
+"""
+
+
+def test_a_sum_a_mean_and_a_constant_read_themselves_out():
+    """No quantized reader closes them, so where a standalone readout is licensed their output is quantized."""
+    python = os.environ.get("MERLIN_M2M_PYTHON")
+    if not python or not Path(python).is_file():
+        pytest.skip("TorchAO capture interpreter is not configured")
+    root = repo_root()
+    paths = [root / "src", root / "src/merlin/targetgen", *sorted((root / "packages").glob("*/src"))]
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(str(path) for path in paths)}
+    result = subprocess.run([python, "-c", _STANDALONE], capture_output=True, text=True, timeout=300, env=env)
+    assert result.returncode == 0, result.stdout + result.stderr[-5000:]
+    import json
+
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+    assert report["sum"]["annotated_affine_maps"] == 1 and report["sum"]["recipes"] == ["aten.add.Tensor"]
+    assert report["mean"]["annotated_means"] == 1 and report["mean"]["recipes"] == ["aten.mean.dim"]
+    assert report["full"]["annotated_movements"] == 1 and report["full"]["recipes"] == ["aten.full.default"]

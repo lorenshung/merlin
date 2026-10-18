@@ -247,6 +247,9 @@ def _recipe_operators(torch: Any) -> dict[str, tuple[Any, ...]]:
             torch.ops.aten.bmm.default,
             torch.ops.aten.addmm.default,
             torch.ops.aten.convolution.default,
+            # The backward of a convolution is three contractions over the same three int8 tensors
+            # (grad_input, grad_weight and the grad_bias sum); the frontend integerizes it as such.
+            torch.ops.aten.convolution_backward.default,
         ),
         "operand_sum": (torch.ops.aten.add.Tensor, torch.ops.aten.add_.Tensor),
         "window_mean": (
@@ -259,6 +262,11 @@ def _recipe_operators(torch: Any) -> dict[str, tuple[Any, ...]]:
             torch.ops.aten.adaptive_avg_pool3d.default,
             torch.ops.aten._adaptive_avg_pool2d.default,
             torch.ops.aten._adaptive_avg_pool3d.default,
+            # Their transposes spread each window's (or patch's) value over the positions it covers:
+            # the same sums, read out once (runtime.integer_ops.window_sum).
+            torch.ops.aten.avg_pool2d_backward.default,
+            torch.ops.aten._adaptive_avg_pool2d_backward.default,
+            torch.ops.aten.col2im.default,
         ),
         # An affine map of one or two int8 tensors: integer weights and an int32 constant applied in
         # the accumulator, then ONE readout (merlin.targetgen.recipe_numerics). Its result has its
@@ -294,13 +302,14 @@ def _recipe_operators(torch: Any) -> dict[str, tuple[Any, ...]]:
             torch.ops.aten.select_scatter.default,
             torch.ops.aten.full_like.default,
             torch.ops.aten.fill.Scalar,
+            torch.ops.aten.full.default,
         ),
     }
     return operators
 
 
 #: Movement operators whose output is a constant, not a copy of an input.
-_CONSTANT_MOVEMENT = ("full_like.default", "fill.Scalar")
+_CONSTANT_MOVEMENT = ("full_like.default", "fill.Scalar", "full.default")
 
 
 def _has_floating_recipe_work(exported: Any, recipe: Mapping[str, Any]) -> bool:
@@ -396,6 +405,8 @@ def build_quantizer(
     software_decisions = []
 
     def contraction_operands(node: Any):
+        if node.target == torch.ops.aten.convolution_backward.default:
+            return node.args[:3]  # grad_output, input, weight
         start = 1 if node.target == torch.ops.aten.addmm.default else 0
         return node.args[start : start + 2]
 
@@ -419,7 +430,7 @@ def build_quantizer(
             prospective.update(
                 ordered_operand_dtypes=[
                     activation["dtype"],
-                    weight["dtype"] if stored_floating_weight(operands[1]) else activation["dtype"],
+                    weight["dtype"] if stored_floating_weight(operands[-1]) else activation["dtype"],
                     recipe["accumulator_dtype"],
                 ],
                 ordered_result_dtypes=[recipe["accumulator_dtype"]],
@@ -478,7 +489,7 @@ def build_quantizer(
             return False
         if family == "contraction":
             operands = contraction_operands(node)
-            if len(operands) != 2 or any(
+            if len(operands) not in (2, 3) or any(
                 not isinstance(operand, torch.fx.Node)
                 or not isinstance((value := operand.meta.get("val")), torch.Tensor)
                 or not value.is_floating_point()
@@ -493,10 +504,10 @@ def build_quantizer(
             if (
                 source_layer_inventory is not None
                 and family == "contraction"
-                and stored_floating_weight(contraction_operands(node)[1])
+                and stored_floating_weight(contraction_operands(node)[-1])
             ):
                 if not _source_weight_geometry_matches(
-                    source_layer_inventory, path, stored_weight_shape(contraction_operands(node)[1])
+                    source_layer_inventory, path, stored_weight_shape(contraction_operands(node)[-1])
                 ):
                     return False
             if decision is not None:
@@ -509,7 +520,7 @@ def build_quantizer(
         # Root/container arithmetic has no leaf decision. Check the actual
         # operand geometry with the same functional placement rule.
         if family == "contraction":
-            kernel_node = contraction_operands(node)[1]
+            kernel_node = contraction_operands(node)[-1]
             kernel = kernel_node.meta.get("val")
             shape = list(kernel.shape) if kernel is not None and hasattr(kernel, "shape") else None
         else:
@@ -542,7 +553,9 @@ def build_quantizer(
         tensors, scalars = tensor_operands(node), [a for a in node.args[1:2] if isinstance(a, (int, float))]
         if node.target in (torch.ops.aten.neg.default, torch.ops.aten.relu.default):
             return len(tensors) == 1
-        if node.target == torch.ops.aten.sub.Tensor and len(tensors) == 2:
+        if node.target in (torch.ops.aten.sub.Tensor, torch.ops.aten.add.Tensor) and len(tensors) == 2:
+            # A two-tensor sum or difference in its exact form: signed rational integer weights in the
+            # accumulator and one readout (recipe_numerics.linear_combination).
             return True
         return len(tensors) == 1 and len(scalars) == 1
 
@@ -554,7 +567,7 @@ def build_quantizer(
             return []
         elif node.target in (torch.ops.aten.slice_scatter.default, torch.ops.aten.select_scatter.default):
             values = list(node.args[:2])
-        elif node.target == torch.ops.aten.sub.Tensor:
+        elif node.target in (torch.ops.aten.sub.Tensor, torch.ops.aten.add.Tensor):
             values = list(node.args[:2])
         else:
             values = list(node.args[:1])
@@ -721,6 +734,10 @@ def build_quantizer(
                     )
                     continue
                 if (node.target in sums or node.target in means) and node not in kept:
+                    # No quantized reader closes it. Where the recipe licenses a standalone readout
+                    # (affine_map), the sum or mean reads itself out: its output edge is quantized.
+                    if "affine_map" in listed:
+                        self._annotate_standalone(node, "operand_sum" if node.target in sums else "window_mean")
                     continue
                 if node.target in sums:
                     # A sum of two TENSORS, both operands on the recipe's activation grid. A scalar
@@ -748,13 +765,13 @@ def build_quantizer(
                     continue
                 if node.target not in targets or len(node.args) < 2:
                     continue
-                operand, kernel = contraction_operands(node)
+                *operands, kernel = contraction_operands(node)
                 # Both inputs of the contraction; its result stays in floating point and the next
                 # contraction quantizes its own input edge. What follows a contraction is absorbed
                 # by the compiler's group formation, not assumed here.
                 node.meta["quantization_annotation"] = QuantizationAnnotation(
                     input_qspec_map={
-                        operand: self.activation,
+                        **{operand: self.activation for operand in operands},
                         kernel: self.weight if stored_floating_weight(kernel) else self.activation,
                     },
                     _annotated=True,
@@ -770,6 +787,28 @@ def build_quantizer(
             )
             return graph_module
 
+        def _annotate_standalone(self, node: Any, family: str) -> None:
+            """A sum or mean that reads itself out: its tensor inputs and its own output scale."""
+            if family == "operand_sum":
+                operands = [a for a in node.args[:2] if isinstance(a, torch.fx.Node) and a.op != "get_attr"]
+                if len(operands) != 2:
+                    return
+            else:
+                operands = [node.args[0]] if node.args and isinstance(node.args[0], torch.fx.Node) else []
+                if not operands:
+                    return
+            node.meta["quantization_annotation"] = QuantizationAnnotation(
+                input_qspec_map={operand: self.activation for operand in operands},
+                output_qspec=self.activation,
+                _annotated=True,
+            )
+            node.meta["merlin_recipe_family"] = family
+            if family == "operand_sum":
+                self.annotated_sums += 1
+            else:
+                self.annotated_means += 1
+            self.left_in_float -= 1
+
         def _annotate_map(self, node: Any, family: str) -> None:
             """Input and output edges of a standalone affine map or movement."""
             from torchao.quantization.pt2e.quantizer import SharedQuantizationSpec
@@ -781,7 +820,8 @@ def build_quantizer(
             if not inputs and not constant:
                 return
             value = node.meta.get("val")
-            if not isinstance(value, torch.Tensor) or not value.is_floating_point():
+            if not isinstance(value, torch.Tensor) or value.dtype != torch.float32:
+                # PT2E quantizes float32 edges only; a float64 (or integer) result stays as declared.
                 return
             if family == "affine_map":
                 spec = self.negation_input if node.target == torch.ops.aten.neg.default else self.activation
@@ -834,11 +874,19 @@ def _per_tensor_scale(node: Any, operator: str) -> float | None:
 
 def _window_divisor(node: Any) -> int | None:
     """The one element count a mean or unpadded average pool divides by, or None if it varies."""
-    source = node.args[0].meta.get("val") if node.args and hasattr(node.args[0], "meta") else None
+    argument = node.args[0] if node.args and hasattr(node.args[0], "meta") else None
+    source = argument.meta.get("val") if argument is not None else None
+    # Converted quantize/dequantize nodes often carry no value metadata; walk the Q/DQ chain to the
+    # first value that does (they all have the same shape).
+    while source is None and argument is not None and argument.args and hasattr(argument.args[0], "meta"):
+        argument = argument.args[0]
+        source = argument.meta.get("val")
     result = node.meta.get("val")
     if source is None or result is None or not hasattr(source, "shape"):
         return None
     name = str(node.target)
+    if "backward" in name or name.startswith("aten.col2im"):
+        return None  # a transpose spreads each window over many outputs: no single divisor per output
     shape = [int(extent) for extent in source.shape]
     if name.startswith("aten.mean.dim"):
         dims = node.args[1] if len(node.args) > 1 else None
@@ -894,8 +942,9 @@ def integer_recipes(graph_module: Any) -> list[dict[str, Any]]:
             row["output_scale"] = s_out
             scalar = node.args[1] if len(node.args) > 1 and isinstance(node.args[1], (int, float)) else None
             alpha = float(node.kwargs.get("alpha", 1))
-            if name.startswith("aten.sub.Tensor") and scalar is None:
-                recipe = RN.linear_combination(inputs[0], alpha * inputs[1], s_out, sign_b=-1)
+            if name.startswith(("aten.sub.Tensor", "aten.add.Tensor")) and scalar is None and len(inputs) == 2:
+                sign = -1 if name.startswith("aten.sub") else 1
+                recipe = RN.linear_combination(inputs[0], alpha * inputs[1], s_out, sign_b=sign)
             elif name.startswith(("aten.add.", "aten.sub.")) and scalar is not None:
                 sign = -1.0 if name.startswith("aten.sub") else 1.0
                 recipe = RN.affine(inputs[0], s_out, offset=sign * alpha * float(scalar))
@@ -920,7 +969,7 @@ def integer_recipes(graph_module: Any) -> list[dict[str, Any]]:
             elif family == "movement":
                 value = (
                     node.args[1]
-                    if name.startswith(("aten.fill", "aten.full_like"))
+                    if name.startswith(("aten.fill", "aten.full"))
                     else node.args[2]
                     if name.startswith("aten.constant_pad_nd") and len(node.args) > 2
                     else node.args[3]
@@ -1216,7 +1265,8 @@ def apply_recipe(
 
     from torchao.quantization.pt2e.quantize_pt2e import convert_pt2e, prepare_pt2e
 
-    if not example_inputs:
+    if example_inputs is None:
+        # An empty tuple is a model with no inputs (a constant fill): it exports and calibrates.
         raise RecipeError("a static recipe needs example inputs to export the model")
     # An ExportedProgram.module() GraphModule may return None from eval(); the
     # owned module, not that method's return value, remains the export input.
