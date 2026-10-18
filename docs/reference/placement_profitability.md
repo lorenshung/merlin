@@ -40,6 +40,9 @@ stride congruence, and base/update selection. Reversed innermost selectors can
 therefore lose while a row copy or a different indexed merge wins. Outer-axis
 nonunit slice strides are conservatively treated as gathers as well. Unsupported
 or unavailable cost evidence retains host execution with a precise reason.
+An index expression is a constant fold only when its returned tensor has no
+live tensor-data argument dependency. Index-based component interleaving still
+selects input data and is classified as movement.
 
 `strict_per_shape` estimates the actual candidate dimensions, traffic, integer
 producer count, emitted F1 commands/fences, and full retained host work. It is

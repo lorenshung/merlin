@@ -260,6 +260,28 @@ def test_static_index_arithmetic_is_not_device_computation():
     assert result["reason_code"] == "index_generated_constant_host"
 
 
+def test_index_selected_tensor_data_is_not_a_constant_table():
+    module = parse_mlir_text("""module {
+      func.func @forward(%x: tensor<7xi64>, %y: tensor<7xi64>) -> tensor<7xi64> {
+        %e=tensor.empty() : tensor<7xi64>
+        %r=linalg.generic {
+          indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
+          iterator_types=["parallel"]
+        } ins(%x,%y : tensor<7xi64>,tensor<7xi64>) outs(%e : tensor<7xi64>) {
+          ^bb0(%a:i64,%b:i64,%unused:i64):
+            %i=linalg.index 0 : index
+            %zero=arith.constant 0 : index
+            %first=arith.cmpi eq, %i,%zero : index
+            %v=arith.select %first,%a,%b : i64
+            linalg.yield %v : i64
+          } -> tensor<7xi64>
+        func.return %r : tensor<7xi64>
+      }}""")
+    declaration, facts = inputs()
+    result = estimate_reference(module, candidate(module, "movement", "F1"), declaration, facts)
+    assert result["reason_code"] == "profitable_reference_family"
+
+
 def test_component_k_one_packaging_does_not_change_pointwise_reference_family():
     declaration, facts = inputs()
     module = source(7)

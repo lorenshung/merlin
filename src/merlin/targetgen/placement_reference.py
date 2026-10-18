@@ -142,6 +142,10 @@ def estimate_reference(original, plan, declaration, facts, *, logical_boundary_s
             family == "movement"
             and any(op.name == "linalg.index" for op in original.walk())
             and not any(op.name == "tensor.extract" for op in original.walk())
+            and not any(
+                hasattr(value.type, "get_shape") and not hasattr(value.owner, "name")
+                for value in dependencies
+            )
         ):
             # Static index-generated values were evaluated into a literal table
             # by the byte-selector provider. Moving that table does none of the
