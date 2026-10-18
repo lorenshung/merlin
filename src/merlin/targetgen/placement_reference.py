@@ -72,7 +72,11 @@ def estimate_reference(original, plan, declaration, facts):
         families = {s.get("family") for s in sites}
         if not families:
             raise ValueError("no admitted semantic producer family")
-        if any(op.name in {"linalg.matmul", "linalg.batch_matmul"} for op in original.walk()):
+        if (
+            plan.get("quantized_contractions")
+            or plan.get("native_contractions")
+            or any(op.name in {"linalg.matmul", "linalg.batch_matmul"} for op in original.walk())
+        ):
             families.add("contraction")
         if any(op.name == "linalg.reduce" for op in original.walk()):
             families.add("reduction")
