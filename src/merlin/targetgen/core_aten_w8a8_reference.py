@@ -74,6 +74,8 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
     selected = list(selected)
     dtypes = {
         "f16": torch.float16,
+        "bf16": torch.bfloat16,
+        "i1": torch.bool,
         "f32": torch.float32,
         "f64": torch.float64,
         "i8": torch.int8,
@@ -81,7 +83,10 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
         "i64": torch.int64,
     }
     function = next(op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward")
-    env = {arg: torch.from_numpy(array.copy()) for arg, array in zip(function.body.block.args, arrays, strict=True)}
+    env = {
+        arg: torch.from_numpy(array.copy()).to(dtypes[str(arg.type.element_type)])
+        for arg, array in zip(function.body.block.args, arrays, strict=True)
+    }
     scales = []
     selected = set(selected)
     selected_order = {op: i for i, op in enumerate(op for op in module.walk() if op in selected)}
@@ -361,6 +366,26 @@ def main():
     from merlin.frontends.linalg_mlir import parse_mlir_file
 
     directory = Path(sys.argv[1])
+    if "--ieee-closure" in sys.argv[2:]:
+        import hashlib
+
+        source = directory / "model.mlir"
+        module = parse_mlir_file(source)
+        with np.load(directory / "inputs.npz") as archive:
+            arrays = [archive[f"in{i}"] for i in range(len(archive.files))]
+        try:
+            values, _ = evaluate(module, arrays, [], quant_min=-128, quant_max=127, eps=2**-12)
+            has_nan = any(bool(value.is_floating_point() and value.isnan().any()) for value in values)
+            result = dict(status="source_nan" if has_nan else "no_source_nan")
+        except (ValueError, KeyError, TypeError, NotImplementedError) as exc:
+            result = dict(status="unknown", reason=str(exc))
+        result.update(
+            source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+            input_sha256=hashlib.sha256((directory / "inputs.npz").read_bytes()).hexdigest(),
+            scope="typed_source_ieee_nan_closure_only_no_finite_numerical_qualification",
+        )
+        (directory / "source-ieee-closure.json").write_text(json.dumps(result, sort_keys=True) + "\n")
+        return
     prefix = "native-int8" if "--native" in sys.argv[2:] else "w8a8"
     request = json.loads((directory / f"{prefix}-request.json").read_text())
     module = parse_mlir_file(

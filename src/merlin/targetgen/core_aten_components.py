@@ -17,8 +17,8 @@ def require_component_identity(directory, plan):
         raise ValueError("exact component input bytes changed after the bound proof")
 
 
-def unlowered_data_products(module, limb_attribute):
-    """A device prelude cannot stand in for a source bilinear reduction."""
+def unlowered_data_reductions(module, limb_attribute):
+    """A device prelude cannot stand in for any retained floating data reduction."""
     from xdsl.dialects.builtin import IntegerType
 
     result = []
@@ -34,7 +34,11 @@ def unlowered_data_products(module, limb_attribute):
         if not reduction:
             continue
         for child in children:
-            if child.name not in {"arith.mulf", "arith.muli"}:
+            if child.name in {"arith.addf", "arith.subf", "arith.mulf", "arith.divf"}:
+                if any(getattr(value.owner, "name", None) != "arith.constant" for value in child.operands):
+                    result.append(ordinal)
+                    break
+            if child.name != "arith.muli":
                 continue
             typ = child.results[0].type
             if not isinstance(typ, IntegerType) and str(typ) not in {"f16", "bf16", "f32", "f64"}:
@@ -118,13 +122,17 @@ def prepare_integer_components(directory, report, selection, provider, package, 
         and any(dtype in {"f16", "bf16", "f64", "complex<f32>"} for dtype in native_types)
         and all(np.isfinite(value).all() for value in arrays)
     ):
-        from merlin.targetgen.core_aten_w8a8_reference import evaluate
+        from merlin.targetgen.core_aten_numeric import _source_reference
 
-        try:
-            observed, _ = evaluate(module, arrays, [], quant_min=-128, quant_max=127, eps=2**-12)
-            source_nan = any(bool(value.is_floating_point() and value.isnan().any()) for value in observed)
-        except (ValueError, KeyError, TypeError, NotImplementedError):
-            source_nan = False
+        observed = _source_reference(directory, "--ieee-closure")
+        closure_path = directory / "source-ieee-closure.json"
+        closure = json.loads(closure_path.read_text()) if observed.returncode == 0 and closure_path.exists() else {}
+        if closure and (
+            closure.get("source_sha256") != hashlib.sha256((directory / "model.mlir").read_bytes()).hexdigest()
+            or closure.get("input_sha256") != hashlib.sha256((directory / "inputs.npz").read_bytes()).hexdigest()
+        ):
+            raise ValueError("source IEEE closure observation does not bind the current source and inputs")
+        source_nan = closure.get("status") == "source_nan"
         if source_nan:
             (directory / "exact-dtype-refusal.json").write_text(
                 json.dumps(
@@ -249,14 +257,14 @@ def prepare_integer_components(directory, report, selection, provider, package, 
 
     for function in functions:
         _pure_dce(function)
-    remaining_products = unlowered_data_products(module, limb_attribute)
+    remaining_products = unlowered_data_reductions(module, limb_attribute)
     if remaining_products:
         (directory / "exact-dtype-refusal.json").write_text(
             json.dumps(
                 dict(
                     family="F2",
                     reason=(
-                        "native bilinear reduction remains in host source; partial preludes do not place the operation"
+                        "native data reduction remains in host source; partial preludes do not place the operation"
                     ),
                     source_operation_ordinals=remaining_products,
                 )
