@@ -817,10 +817,12 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
 
     if a.m2m_dir and a.m2m_dir not in sys.path:
         sys.path.insert(0, a.m2m_dir)
-    # Shared software admission belongs to the selected worker's own Merlin
-    # package, in both source and wheel layouts, never another editable checkout.
-    if a.recipe:
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    # Shared software admission and the integerization export check belong to the selected worker's
+    # own Merlin package, in both source and wheel layouts, never another editable checkout. Every
+    # capture reads the export check (receipt_export_complete), not only a recipe capture, so the
+    # worker's own package is always on the path: in a capture interpreter without Merlin installed
+    # an fp32 capture otherwise died with ModuleNotFoundError: merlin.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
     import m2m
     import torch
