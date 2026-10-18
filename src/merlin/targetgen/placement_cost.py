@@ -36,6 +36,11 @@ def iterations(op):
         if any(size < 0 for size in sizes):
             raise ValueError("dynamic iteration cost unavailable")
         return math.prod(sizes)
+    if op.name == "linalg.reduce":
+        shape = op.operands[0].type.get_shape()
+        if any(size < 0 for size in shape):
+            raise ValueError("dynamic reduction cost unavailable")
+        return math.prod(shape)
     if op.name == "scf.for":
 
         def literal(value):
@@ -87,7 +92,12 @@ def host_work(module, rates, excluded=()):
         count = iterations(op)
         named_compute = hasattr(op, "get_static_loop_ranges") and not op.regions
         own = count * rates["host_arithmetic_cycles"] if named_compute else scalar_cost(op, rates)
-        if op.name == "linalg.generic":
+        if op.name.startswith("linalg.") and op.name not in {
+            "linalg.copy",
+            "linalg.fill",
+            "linalg.yield",
+            "linalg.index",
+        }:
             # A yield-only materialization still reads/writes storage. Index
             # descriptors and empty allocations alone do not pay that traffic.
             own += transfer_bytes(op) * rates["host_copy_cycles_per_byte"]

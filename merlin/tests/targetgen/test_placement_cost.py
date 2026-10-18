@@ -149,3 +149,30 @@ def test_yield_only_materialization_has_host_memory_cost():
     negation = next(op for op in module.walk() if op.name == "arith.negf")
     Rewriter.replace_op(negation, [], [negation.operands[0]])
     assert host_work(module, RATES) == 256  # Two f32 streams at 1/8 cycle per byte.
+
+
+def test_named_broadcast_materialization_includes_its_memory_traffic():
+    module = parse_mlir_text("""module {
+      func.func @forward(%x: tensor<3xf32>) -> tensor<2x3xf32> {
+        %e=tensor.empty() : tensor<2x3xf32>
+        %v=linalg.broadcast ins(%x : tensor<3xf32>) outs(%e : tensor<2x3xf32>) dimensions=[0]
+        func.return %v : tensor<2x3xf32>
+      }}""")
+    assert host_work(module, RATES) >= (3 + 6) * 4 * RATES["host_copy_cycles_per_byte"]
+
+
+def test_named_reduction_charges_every_input_iteration():
+    from merlin.targetgen.placement_cost import iterations
+
+    module = parse_mlir_text("""module {
+      func.func @forward(%x: tensor<2x3xf32>,%seed: tensor<2xf32>) -> tensor<2xf32> {
+        %r=linalg.reduce ins(%x : tensor<2x3xf32>) outs(%seed : tensor<2xf32>) dimensions=[1]
+          (%a: f32,%b: f32) {
+            %v=arith.addf %a,%b : f32
+            linalg.yield %v : f32
+          }
+        func.return %r : tensor<2xf32>
+      }}""")
+    reduction = next(op for op in module.walk() if op.name == "linalg.reduce")
+    assert iterations(reduction) == 6
+    assert host_work(module, RATES) > 6 * RATES["host_arithmetic_cycles"]
