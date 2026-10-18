@@ -197,13 +197,13 @@ def prepare_integer_components(
         observed = _source_reference(directory, "--native-source" if source_agreement_required else "--ieee-closure")
         closure_path = directory / "source-ieee-closure.json"
         closure = json.loads(closure_path.read_text()) if observed.returncode == 0 and closure_path.exists() else {}
-        if native_f32 and source_agreement_required and "output_bytes" not in closure:
+        if source_agreement_required and "output_bytes" not in closure:
             (directory / "exact-dtype-refusal.json").write_text(
                 json.dumps(
                     dict(
                         family="F2",
                         code="native_source_observation_unavailable",
-                        reason="native f32 fallback requires complete independent source bit observations",
+                        reason="native component qualification requires complete independent source bit observations",
                     )
                 )
                 + "\n"

@@ -175,3 +175,56 @@ def test_special_audit_refuses_competing_nan_signs(tmp_path, right_word, ambiguo
     assert result.returncode == 0, result.stderr[-2000:]
     receipt = json.loads((tmp_path / "source-ieee-closure.json").read_text())
     assert receipt["ieee_special_audit"]["ambiguous_nan_payload"] is ambiguous
+
+
+def test_native_reduced_storage_requires_complete_source_observation(tmp_path):
+    if not os.environ.get("MERLIN_M2M_PYTHON"):
+        pytest.skip("declared capture interpreter unavailable")
+    from merlin.frontends.linalg_mlir import parse_mlir_text
+    from merlin.targetgen.core_aten_components import prepare_integer_components
+
+    source = """module {
+      func.func @forward(%x:tensor<1xf16>,%y:tensor<1xf16>,%z:tensor<1xf16>) -> tensor<1xf16> {
+        %e=tensor.empty() : tensor<1xf16>
+        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,
+          affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+          ins(%x,%y,%z:tensor<1xf16>,tensor<1xf16>,tensor<1xf16>) outs(%e:tensor<1xf16>) {
+          ^bb0(%a:f16,%b:f16,%c:f16,%unused:f16):
+            %v=math.fma %a,%b,%c : f16
+            linalg.yield %v : f16
+        } -> tensor<1xf16>
+        return %r : tensor<1xf16>
+      }}"""
+    (tmp_path / "model.mlir").write_text(source)
+    np.savez(tmp_path / "inputs.npz", **{f"in{i}": np.array([1], np.float16) for i in range(3)})
+
+    class Provider:
+        def admit_numeric_schedule(self, *args, **kwargs):
+            raise AssertionError("unknown source bits cannot request device qualification")
+
+    record = dict(
+        status="bundled",
+        input_abi=[dict(dtype="f16")] * 3,
+        output_indices=[0],
+        semantic_boundary=dict(post_indices=[]),
+        native_eager_boundary=dict(
+            authority="untransformed_native_cpu_eager",
+            output_bytes=[np.array([2], np.float16).tobytes().hex()],
+            post_input_bytes=[],
+        ),
+    )
+    assert (
+        prepare_integer_components(
+            tmp_path,
+            dict(cases=[record]),
+            dict(spec={}, host={}),
+            Provider(),
+            None,
+            parse_mlir_text(source),
+            limb_attribute="test.limb",
+        )
+        is None
+    )
+    refusal = json.loads((tmp_path / "exact-dtype-refusal.json").read_text())
+    assert refusal["code"] == "native_source_observation_unavailable"
+    assert (tmp_path / "model.mlir").read_text() == source
