@@ -24,7 +24,7 @@ placement_cost_model:
     dispatch_cycles: 64
   evidence:
     review_status: "authored, pending operator review"
-    provenance: "Static cycle model: scalar one word per cycle, memcpy eight bytes per cycle, DMA sixteen bytes per cycle; tile latency, issue, synchronization and dispatch are provisional engineering estimates, not calibrated measurements"
+    provenance: "Static cycle model: scalar one word per cycle, host memory eight transferred bytes per cycle, DMA sixteen bytes per cycle; tile latency, issue, synchronization and dispatch are provisional estimates, not calibrated measurements. F1 instruction/fence counts come from the source-bound provider catalog and padded byte traffic from the selected memory row fact; other producer counts are geometric estimates."
 # Scope: accelerator contraction and exact-op host declarations below. The
 # dequantization declaration is limited to its stated operand/result types and
 # ranks; it does not declare device execution or arbitrary shapes.
