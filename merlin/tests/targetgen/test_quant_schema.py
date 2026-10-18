@@ -8,8 +8,14 @@ import warnings
 
 import pytest
 
-from merlin.common.paths import contract_dir
+from merlin.common.paths import contract_dir, repo_root
 from merlin.targetgen.core_aten_spec_int8 import quantization_schema
+
+
+def test_exactness_fixture_selects_the_current_capture_revision():
+    fixture = json.loads((repo_root() / "merlin/tests/data/exactness/bounded_final_gate.json").read_text())
+    pin = json.loads((contract_dir() / "quant_schema_source.json").read_text())
+    assert fixture["model2mlir_revision"] == pin["revision"]
 
 
 def test_quant_schema_matches_pinned_frontend_and_live_export():
