@@ -1,20 +1,9 @@
 #!/usr/bin/env python3
-"""model2MLIR capture worker — runs INSIDE the m2m venv (the only interpreter with torch), never inside
-the merlin venv. :mod:`merlin.targetgen.capsule_source` invokes it as a subprocess with the m2m venv's
-python and ingests the artifacts it writes.
+"""Capture worker invoked by capsule_source in the declared m2m interpreter.
 
-Given a request JSON on argv (a loader ``.py`` exposing ``get_model_and_inputs()``, a canonical dtype
-token, and an output dir) it:
-  1. builds the model + example inputs from the loader;
-  2. casts / torchAO-quantizes per the dtype token (the SAME scheme table ``workloads/capture.py`` uses);
-  3. lowers to linalg-on-tensors via ``m2m.convert`` (fx_importer backend), externalizing weights;
-  4. asserts 0 opaque ops (a capsule whose program still has opaque ops is not a valid input program);
-  5. runs the model EAGER on host CPU to produce the reference (golden) output;
-  6. writes ``linalg.mlir``, ``weights.safetensors`` and its argument manifest,
-     ``inputs.json``, ``golden.json``, ``meta.json``.
-
-This file carries no target-name dispatch. Scoped quantization recipes use the
-selected worker package's shared Merlin admission screen inside the m2m/torch process.
+Load inputs, apply the selected precision recipe, require a clean linalg capture,
+and write its bundle, independent reference and provenance. Recipe screening uses
+shared Merlin admission inside the m2m process without target-name dispatch.
 """
 
 from __future__ import annotations
@@ -1140,11 +1129,8 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
             and isinstance(quant_stats, dict)
             and not quant_stats.get("annotated_contractions")
         )
-        # A core-aten spec_int8 capture (the recipe carries its software admission) always gets its
-        # independent reference file. Its contractions may not have been selected before the capture
-        # (a convolution_backward is generic loops at f32 and becomes GEMMs only when integerized), so
-        # there is no host-readout declaration; under the float readout the declared Q/DQ graph is
-        # still the reference, interpreted with the readout the integerizer emits.
+        # Software-admitted graphs require an independent declared-graph reference,
+        # including contractions discovered only after integerization.
         declared_graph = recipe is not None and (
             recipe.get("host_readout_declarations") is not None
             or contraction_free

@@ -42,5 +42,3 @@ class Mixed(torch.nn.Module):
 original=Mixed()
 assert specialize_static_metadata(original,(sources[0],)) == (original,None)
 ''')
-
-
