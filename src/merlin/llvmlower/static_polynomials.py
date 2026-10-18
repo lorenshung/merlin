@@ -15,19 +15,39 @@ class PolynomialRefusal(ValueError):
 
 def analyze_static_polynomial(op, *, work_limit=1_000_000, require_bilinear=True):
     from xdsl.dialects.builtin import FloatAttr, IntegerAttr
-    from xdsl.ir.affine import AffineMap
+    from xdsl.ir.affine import AffineDimExpr
 
     if op.name != "linalg.generic" or len(op.results) != 1:
         raise PolynomialRefusal("one generic result required")
-    if any(it.data.value != "parallel" for it in op.get_iterator_types()):
-        raise PolynomialRefusal("explicit static loops required")
     shape = op.results[0].type.get_shape()
     maps = list(op.get_indexing_maps())
-    if maps[-1].data != AffineMap.identity(len(shape)) or prod(shape) > 4096:
-        raise PolynomialRefusal("bounded identity output map required")
+    kinds = [it.data.value for it in op.get_iterator_types()]
+    output_dimensions = maps[-1].data.results
+    if (
+        prod(shape) > 4096
+        or any(not isinstance(e, AffineDimExpr) for e in output_dimensions)
+        or sorted(e.position for e in output_dimensions) != [i for i, k in enumerate(kinds) if k == "parallel"]
+    ):
+        raise PolynomialRefusal("bounded projected output map required")
+    extents = [None] * len(kinds)
+    for value, amap in zip(op.operands, maps, strict=True):
+        for expression, extent in zip(amap.data.results, value.type.get_shape(), strict=True):
+            if isinstance(expression, AffineDimExpr):
+                position = expression.position
+                if extents[position] not in (None, extent):
+                    raise PolynomialRefusal("inconsistent static iteration dimension")
+                extents[position] = extent
+    if any(n is None or n <= 0 for n in extents) or prod(extents) > work_limit:
+        raise PolynomialRefusal("unproved or over-budget static iteration domain")
     atoms, atom_ids, work = [], {}, 0
 
     def atom(source, index):
+        from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
+
+        uniform = _constant_of(source)
+        if uniform is not None:
+            value = Fraction.from_float(float(uniform))
+            return {(): value} if value else {}
         key = source, tuple(index)
         if key not in atom_ids:
             atom_ids[key] = len(atoms)
@@ -174,18 +194,31 @@ def analyze_static_polynomial(op, *, work_limit=1_000_000, require_bilinear=True
 
     from itertools import product
 
-    rows = []
-    for point in product(*(range(n) for n in shape)):
+    output_points = list(product(*(range(n) for n in shape)))
+    rows_by_index = {
+        point: atom(op.outputs[0], point) if op.body.block.args[-1].uses else {} for point in output_points
+    }
+    for point in product(*(range(n) for n in extents)):
+        output_index = maps[-1].data.eval(point, ())
         arguments = []
         for i, (value, amap) in enumerate(zip(op.operands, maps, strict=True)):
-            if not op.body.block.args[i].uses:
+            if i == len(op.inputs):
+                arguments.append(rows_by_index[output_index])
+            elif not op.body.block.args[i].uses:
                 arguments.append({})
             else:
-                arguments.append(atom(value, amap.data.eval(point, ())))
+                coordinates = amap.data.eval(point, ())
+                if any(
+                    not 0 <= coordinate < extent
+                    for coordinate, extent in zip(coordinates, value.type.get_shape(), strict=True)
+                ):
+                    raise PolynomialRefusal("static operand address exceeds its tensor shape")
+                arguments.append(atom(value, coordinates))
         (result,) = block(op.body.block, arguments, {}, point)
         if not isinstance(result, dict):
             raise PolynomialRefusal("floating polynomial required")
-        rows.append(result)
+        rows_by_index[output_index] = result
+    rows = [rows_by_index[point] for point in output_points]
     if require_bilinear and not any(len(key) == 2 for row in rows for key in row):
         raise PolynomialRefusal("no bilinear data producer")
     return atoms, rows

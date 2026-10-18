@@ -62,3 +62,36 @@ def test_linear_rational_coefficients_remain_exact():
     op = source("%two=arith.constant 2.0 : f32\n%p=arith.divf %af,%two : f32")
     _, rows = analyze_static_polynomial(op, require_bilinear=False)
     assert len(rows[0]) == 3 and set(rows[0].values()) == {Fraction(1, 2)}
+
+
+def test_projected_bilinear_domain_keeps_seed_and_output_permutation():
+    module = parse_mlir_text("""module {
+      func.func @forward(%a:tensor<2x3xf32>,%b:tensor<2x4xf32>) -> tensor<4x3xf32> {
+        %c=arith.constant 7.0 : f32
+        %seed=tensor.splat %c : tensor<4x3xf32>
+        %r=linalg.generic {
+          indexing_maps=[affine_map<(d0,d1,d2)->(d2,d0)>,affine_map<(d0,d1,d2)->(d2,d1)>,affine_map<(d0,d1,d2)->(d1,d0)>],
+          iterator_types=["parallel","parallel","reduction"]
+        } ins(%a,%b : tensor<2x3xf32>,tensor<2x4xf32>) outs(%seed:tensor<4x3xf32>) {
+        ^bb0(%x:f32,%y:f32,%acc:f32):
+          %p=arith.mulf %x,%y : f32
+          %s=arith.addf %acc,%p : f32
+          linalg.yield %s : f32
+        } -> tensor<4x3xf32>
+        return %r : tensor<4x3xf32>
+      }}""")
+    op = next(op for op in module.walk() if op.name == "linalg.generic")
+    atoms, rows = analyze_static_polynomial(op)
+    order = list(dict.fromkeys(value for value, _ in atoms))
+    arrays = [
+        [[Fraction(1 + i * 3 + j, 4) for j in range(3)] for i in range(2)],
+        [[Fraction(2 + i * 4 + j, 3) for j in range(4)] for i in range(2)],
+    ]
+    values = [arrays[order.index(value)][index[0]][index[1]] for value, index in atoms]
+    for y in range(4):
+        for x in range(3):
+            actual = sum(
+                coefficient * __import__("math").prod(values[i] for i in key)
+                for key, coefficient in rows[y * 3 + x].items()
+            )
+            assert actual == 7 + sum(arrays[0][k][x] * arrays[1][k][y] for k in range(2))
