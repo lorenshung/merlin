@@ -139,8 +139,7 @@ def prepare_integer_components(directory, report, selection, provider, package, 
                         family="F2",
                         code="ieee_intermediate_nonfinite_policy_unproved",
                         reason=(
-                            "finite native inputs produce CPU NaN; "
-                            "no rational error floor or closed overflow policy"
+                            "finite native inputs produce CPU NaN; no rational error floor or closed overflow policy"
                         ),
                     )
                 )
@@ -328,6 +327,9 @@ def prepare_integer_components(directory, report, selection, provider, package, 
     )
     if not plans:
         return None
+    from merlin.llvmlower.literal_zero_components import fold_literal_zero_components
+
+    folded_zero_producers = fold_literal_zero_components(module, limb_attribute)
     from merlin.llvmlower.entry_weight_projection import _pure_dce
 
     for function in functions:
@@ -446,6 +448,7 @@ def prepare_integer_components(directory, report, selection, provider, package, 
     plan = dict(
         status="admitted",
         numerical_family="F5" if boolean_count else "F4" if any(p["family"] == "F4" for p in plans) else "F2",
+        literal_zero_producers_folded=folded_zero_producers,
         quantized_contractions=0,
         native_contractions=0,
         quantized_non_contraction_sites=0,
