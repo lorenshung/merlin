@@ -746,6 +746,29 @@ def _prepare_spec_int8(
                 module.attributes[ATTRIBUTE] = StringAttr(json.dumps(layout, sort_keys=True))
             module.verify()
             (directory / "model.mlir").write_text(str(module) + "\n")
+    if plan.get("refusal_code") == "nonfinite_calibration" and (directory / "model.mlir").read_bytes() == original:
+        # A finite observer range can overflow in its own f32 subtraction.
+        # Native fixed-point components avoid calibration entirely; every
+        # result still requires the independent native bit/error-floor gate.
+        with np.load(directory / "inputs.npz") as inputs:
+            finite = all(np.isfinite(value).all() for value in inputs.values())
+        if finite:
+            components = prepare_integer_components(
+                directory,
+                report,
+                selection,
+                provider,
+                package,
+                parse_mlir_file(directory / "model.mlir"),
+                limb_attribute=f"{target}.limb",
+                native_f32=True,
+            )
+            if components is not None:
+                components["quantization_fallback"] = dict(
+                    refusal_code=plan["refusal_code"], method="native_exact_components_without_calibration"
+                )
+                (directory / "spec-int8-admission.json").write_text(json.dumps(components, indent=2) + "\n")
+                return components
     plan["source_sha256_after"] = hashlib.sha256((directory / "model.mlir").read_bytes()).hexdigest()
     document = {"selection": selection, **plan}
     (directory / "spec-int8-admission.json").write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")

@@ -62,7 +62,9 @@ def unlowered_data_reductions(module, limb_attribute):
     return result
 
 
-def prepare_integer_components(directory, report, selection, provider, package, module, *, limb_attribute):
+def prepare_integer_components(
+    directory, report, selection, provider, package, module, *, limb_attribute, native_f32=False
+):
     import numpy as np
 
     from merlin.kernels.shapes import observe_contractions
@@ -136,10 +138,13 @@ def prepare_integer_components(directory, report, selection, provider, package, 
         and has_special_inputs
         and not order_dependent
     )
-    source_agreement_required = not order_dependent and (native_dtype_request(report) or ieee_pointwise)
+    source_agreement_required = not order_dependent and (native_dtype_request(report) or ieee_pointwise or native_f32)
     closure_required = (
         order_dependent
-        and any(dtype in {"f16", "bf16", "f64", "complex<f32>"} for dtype in native_types)
+        and any(
+            dtype in ({"f16", "bf16", "f64", "complex<f32>"} | ({"f32"} if native_f32 else set()))
+            for dtype in native_types
+        )
         and all(np.isfinite(value).all() for value in arrays)
     )
     if closure_required:
@@ -165,6 +170,18 @@ def prepare_integer_components(directory, report, selection, provider, package, 
         observed = _source_reference(directory, "--native-source" if source_agreement_required else "--ieee-closure")
         closure_path = directory / "source-ieee-closure.json"
         closure = json.loads(closure_path.read_text()) if observed.returncode == 0 and closure_path.exists() else {}
+        if native_f32 and source_agreement_required and "output_bytes" not in closure:
+            (directory / "exact-dtype-refusal.json").write_text(
+                json.dumps(
+                    dict(
+                        family="F2",
+                        code="native_source_observation_unavailable",
+                        reason="native f32 fallback requires complete independent source bit observations",
+                    )
+                )
+                + "\n"
+            )
+            return None
         if closure and (
             closure.get("source_sha256") != hashlib.sha256((directory / "model.mlir").read_bytes()).hexdigest()
             or closure.get("input_sha256") != hashlib.sha256((directory / "inputs.npz").read_bytes()).hexdigest()
@@ -270,6 +287,7 @@ def prepare_integer_components(directory, report, selection, provider, package, 
         widening = any(op.name == "arith.extf" and str(op.result.type) == "f64" for op in module.walk())
         if (
             not conversion_count
+            and not native_f32
             and not ieee_pointwise
             and not widening
             and not any(dtype in {"f16", "bf16", "f64", "complex<f32>"} for dtype in native_types)
