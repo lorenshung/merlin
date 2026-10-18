@@ -1,6 +1,6 @@
 {
   "schema": "merlin.exactness_final_gate.v1",
-  "model2mlir_revision": "ce3eec29399e3c0097cecd309db67d8f77cc2829",
+  "model2mlir_revision": "e05e614790ad80f24790255d2303b0365c3881a5",
   "gemmini_mlir_revision": "4e84356172646921ab6eaf031063681cc780ed65",
   "selected_cases": [
     {
