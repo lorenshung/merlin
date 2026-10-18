@@ -17,6 +17,34 @@ def require_component_identity(directory, plan):
         raise ValueError("exact component input bytes changed after the bound proof")
 
 
+def unlowered_data_products(module, limb_attribute):
+    """A device prelude cannot stand in for a source bilinear reduction."""
+    from xdsl.dialects.builtin import IntegerType
+
+    result = []
+    for ordinal, op in enumerate(module.walk()):
+        if op.name not in {"linalg.generic", "linalg.reduce", "scf.for"} or limb_attribute in op.attributes:
+            continue
+        children = list(op.walk())[1:]
+        reduction = (
+            op.name in {"linalg.reduce", "scf.for"}
+            or any(it.data.value == "reduction" for it in op.get_iterator_types())
+            or any(child.name == "scf.for" for child in children)
+        )
+        if not reduction:
+            continue
+        for child in children:
+            if child.name not in {"arith.mulf", "arith.muli"}:
+                continue
+            typ = child.results[0].type
+            if not isinstance(typ, IntegerType) and str(typ) not in {"f16", "bf16", "f32", "f64"}:
+                continue
+            if all(getattr(value.owner, "name", None) != "arith.constant" for value in child.operands):
+                result.append(ordinal)
+                break
+    return result
+
+
 def prepare_integer_components(directory, report, selection, provider, package, module, *, limb_attribute):
     import numpy as np
 
@@ -135,6 +163,19 @@ def prepare_integer_components(directory, report, selection, provider, package, 
         module, limb_attribute=limb_attribute, input_bounds=bounds, known_bounds=known_bounds
     )
     if not plans:
+        return None
+    remaining_products = unlowered_data_products(module, limb_attribute)
+    if remaining_products:
+        (directory / "exact-dtype-refusal.json").write_text(
+            json.dumps(
+                dict(
+                    family="F2",
+                    reason="native bilinear reduction remains in host source; partial preludes do not place the operation",
+                    source_operation_ordinals=remaining_products,
+                )
+            )
+            + "\n"
+        )
         return None
     if order_dependent and floating_proofs:
         from merlin.targetgen.native_rational_reference import rational_outputs
