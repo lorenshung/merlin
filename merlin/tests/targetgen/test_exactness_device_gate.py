@@ -52,9 +52,9 @@ model=apply_recipe(Model(),recipe,example_inputs=inputs)
 assert any(n.target==torch.ops.aten.addmm.default for n in model.graph.nodes),model.code
 expected=run(model,inputs).output
 actual,receipt=integerize_static_pt2e(copy.deepcopy(model),inputs)
-if {alpha} <= 0:
- # The pinned frontend explicitly declines these forms. They may never be
- # decomposed into a prematurely rounded MAC and reported as exact device work.
+if {alpha} == 0:
+ # A zero coefficient has no contraction to offload. The frontend declines
+ # this rewrite instead of introducing a prematurely rounded MAC.
  assert receipt['quantized_contractions_integerized']==0,receipt
  assert receipt['refusals'],receipt
 else:
