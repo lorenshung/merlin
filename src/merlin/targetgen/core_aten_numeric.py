@@ -11,6 +11,28 @@ from pathlib import Path
 import numpy as np
 
 
+def _source_reference(directory, *arguments):
+    """Run the source interpreter in the declared capture environment.
+
+    Source evaluation needs PyTorch and model2MLIR's xDSL interpreter, while the
+    compiler environment deliberately declares only its lowering dependencies.
+    Merlin's source import roots are explicit for non-editable installations too.
+    """
+    from merlin.common.paths import python_import_roots
+    from merlin.integrations.model2mlir import capture_python
+    from merlin.targetgen import core_aten_w8a8_reference
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(str(p) for p in python_import_roots())
+    return subprocess.run(
+        [str(capture_python()), "-m", core_aten_w8a8_reference.__name__, str(directory.resolve()), *arguments],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
 def map_reference_boundary(fresh, reference, output_count):
     """Project independent user outputs and observed post-call inputs onto exported roles."""
     outputs = [None] * output_count
@@ -194,15 +216,7 @@ def prepare_spec_int8(
             (directory / "native-int8-request.json").write_text(
                 json.dumps(dict(selected_ordinals=[], quant_min=-128, quant_max=127, eps=2**-12, dispatch=[])) + "\n"
             )
-            from merlin.llvmlower.toolchain import m2m_python
-            from merlin.targetgen import core_aten_w8a8_reference
-
-            process = subprocess.run(
-                [str(m2m_python()), "-m", core_aten_w8a8_reference.__name__, str(directory.resolve()), "--native"],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
+            process = _source_reference(directory, "--native")
             if process.returncode:
                 for site in selected:
                     site.update(
@@ -703,24 +717,13 @@ def prepare_w8a8(directory: Path, report: dict, *, triples, ranks) -> dict:
 
 def complete_w8a8_reference(directory, report, dispatch):
     """Qualify only after source-bound provider selection exposes actual primitives."""
-    from merlin.common.paths import python_import_roots
-    from merlin.llvmlower.toolchain import m2m_python
-    from merlin.targetgen import core_aten_w8a8_reference
     from merlin.targetgen.core_aten_batch import _tensor_documents
 
     request_path = directory / "w8a8-request.json"
     request = json.loads(request_path.read_text())
     request["dispatch"] = dispatch
     request_path.write_text(json.dumps(request, indent=2) + "\n")
-    env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(str(p) for p in python_import_roots())
-    process = subprocess.run(
-        [str(m2m_python()), "-m", core_aten_w8a8_reference.__name__, str(directory.resolve())],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    process = _source_reference(directory)
     (directory / "w8a8-reference.log").write_text(process.stdout + process.stderr)
     if process.returncode:
         raise ValueError(f"independent W8A8 reference failed: {process.stderr[-2000:]}")
