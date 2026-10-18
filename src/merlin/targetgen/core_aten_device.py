@@ -84,6 +84,19 @@ def routing_for_bundle(directory: Path, target: str, package: Path, provider, fa
     return routing, "provider selected source-bound contractions"
 
 
+def region_routing_for_bundle(target: str, package: Path, region_offload):
+    """A DeviceRouting that hands the prepared program to the provider's own region offload."""
+    from merlin.llvmlower import toolchain
+    from merlin.llvmlower.device_build import DeviceRouting
+
+    def offload(prepared: Path, workdir: Path):
+        return region_offload(prepared, workdir, package=package, llvm_bin=toolchain.llvm_install() / "bin")
+
+    return DeviceRouting(
+        device=target, package_dir=package, operand_dtype="i8", accum_dtype="i32", region_offload=offload
+    )
+
+
 def executed_device_instructions(trace: Path, elf: Path, target: str) -> dict[str, Any]:
     """Count retired-log instruction words in executable ELF ranges; static presence is insufficient."""
     from merlin.perf.isa_prohibition import MAJOR_OPCODE_MASK
@@ -247,7 +260,20 @@ def run_spike_bundle(
                     preparation = prepare(directory, target=target, facts=facts)
                     report["source_preparation"] = preparation
                     bundled[0]["source_preparation"] = preparation
-                if numeric_policy == "spec_int8" and not (
+                region_offload = getattr(provider, "core_aten_offload", None)
+                if (
+                    numeric_policy == "spec_int8"
+                    and not (
+                        report["numeric_preparation"]["quantized_contractions"]
+                        or report["numeric_preparation"].get("native_contractions", 0)
+                    )
+                    and report["numeric_preparation"].get("quantized_non_contraction_sites", 0)
+                    and callable(region_offload)
+                ):
+                    # Admitted int8 non-contraction sites: the provider binds and lowers its own regions.
+                    routing = region_routing_for_bundle(target, device_package, region_offload)
+                    reason = "provider region offload of admitted int8 non-contraction sites"
+                elif numeric_policy == "spec_int8" and not (
                     report["numeric_preparation"]["quantized_contractions"]
                     or report["numeric_preparation"].get("native_contractions", 0)
                 ):
@@ -294,7 +320,13 @@ def run_spike_bundle(
                 backend="scalar",
                 device=routing,
             )
-            sidecar = load_sidecar(directory / "spike-build") if routing is not None else {}
+            from merlin.llvmlower.device_build import load_region_offload
+
+            sidecar = (
+                (load_region_offload(directory / "spike-build") or load_sidecar(directory / "spike-build"))
+                if routing is not None
+                else {}
+            )
             if routing is not None and not sidecar.get("routed"):
                 raise RuntimeError("selected device routing emitted no source-bound calls")
             if routing is not None:

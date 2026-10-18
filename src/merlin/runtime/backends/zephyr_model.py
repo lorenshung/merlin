@@ -1133,7 +1133,15 @@ def prepare_for_lowering(
     # below must be derived from the IR that REMAINS. Inert unless a routing was supplied, and inert
     # again unless that routing carries a selector or source-bound catalog. The placement decision
     # is made elsewhere (merlin.system.place or the catalog's exact source binding), never here.
-    if device is not None and (
+    if device is not None and getattr(device, "region_offload", None) is not None:
+        # A provider-owned region offload: the provider binds and rewrites its regions itself and the
+        # link step adds its shim and object (llvmlower.device_build.apply_region_offload). A build that
+        # already applied it to the captured program is not offloaded twice.
+        from ...llvmlower.device_build import REGION_OFFLOAD_SIDECAR, apply_region_offload
+
+        if not (Path(work) / REGION_OFFLOAD_SIDECAR).is_file():
+            prepared = apply_region_offload(device, Path(prepared), Path(work))
+    elif device is not None and (
         getattr(device, "select", None) is not None
         or getattr(device, "exact_selection", None) is not None
         or getattr(device, "catalog_manifest", None) is not None

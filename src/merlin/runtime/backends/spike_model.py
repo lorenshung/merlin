@@ -688,6 +688,12 @@ def build(
     h, rt = _harness_dir(), _c_runtime_dir()
     arena_bytes = arena_mb * 1024 * 1024
     prepared_path = model_dir / "model.mlir"
+    if device is not None and getattr(device, "region_offload", None) is not None:
+        # The provider binds its regions on the CAPTURED program (the quantization sandwiches it
+        # matches), before any host preparation rewrites them; the rewritten model is what lowers.
+        from ...llvmlower.device_build import apply_region_offload
+
+        prepared_path = apply_region_offload(device, prepared_path, work)
     if backend not in {"rvv", "scalar"}:
         raise SpikeModelError(f"unknown whole-model backend {backend!r}")
     if backend == "scalar" and rvv_schedule is not None:
@@ -993,6 +999,40 @@ def build(
             f" {_dev_build.object_dedup.get('unique_artifacts')} distinct compiled artifact(s))"
             + (f"; declined: {[w for _s, w in _dev_build.skipped]}" if _dev_build.skipped else "")
         )
+
+    from ...llvmlower.device_build import load_region_offload
+
+    region = load_region_offload(work)
+    if (device is not None and getattr(device, "region_offload", None) is not None) != bool(region):
+        raise RuntimeError("region offload was requested but bound nothing, or bound without a request")
+    if region:
+        if region["device"] != device.device:
+            raise RuntimeError("region offload sidecar does not match selected device")
+        # The shim is hosted C (it may include the C library headers), so it is built by the GCC that
+        # owns this bare-metal environment. Its one host hook, ca_abort, reports and exits through the
+        # harness console: a shape mismatch at a kernel boundary must stop the run, not be skipped.
+        abort_source = work / "region_offload_abort.c"
+        abort_source.write_text(
+            '#include "htif.h"\n'
+            "void ca_abort(const char *why) {\n"
+            '  htif_puts("FATAL: region offload: ");\n'
+            "  htif_puts(why);\n"
+            '  htif_puts("\\n");\n'
+            "  htif_exit(0x902);\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        region_objects = []
+        for source, obj in ((Path(region["shim"]), "region_offload_shim.o"), (abort_source, "region_offload_abort.o")):
+            compilation.run(
+                [gcc, *gcc_cflags, f"-I{h}", "-c", source, "-o", work / obj],
+                runner=_run,
+                inputs=[source],
+                output=work / obj,
+            )
+            region_objects.append(work / obj)
+        supplemental_objects.extend([*region_objects, Path(region["object"])])
+        print(f"[device] linked region offload for {device.device}: {len(region['routed'])} binding(s)")
 
     matrix_build = None
     from .zephyr_model import load_matrix_signatures
