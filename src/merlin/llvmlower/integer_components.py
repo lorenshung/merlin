@@ -98,12 +98,14 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
         wide = IntegerType(max(16, 2 * width(source)))
 
         def scalar(args, emit):
-            remaining = emit(arith.ExtSIOp(args[0], wide))
-            for _ in range(index):
-                low = emit(arith.TruncIOp(remaining, i8))
-                signed = emit(arith.ExtSIOp(low, wide))
-                remaining = emit(arith.SubiOp(remaining, signed))
-                shift = emit(arith.ConstantOp(IntegerAttr(8, wide)))
+            remaining = emit((arith.ExtUIOp if width(source) == 1 else arith.ExtSIOp)(args[0], wide))
+            if index:
+                # Balanced radix carries below this digit are the geometric
+                # offset 128*(1+256+...+256**(index-1)). Widening before the
+                # addition preserves the carry above the source storage width.
+                offset = emit(arith.ConstantOp(IntegerAttr(128 * ((1 << (8 * index)) - 1) // 255, wide)))
+                remaining = emit(arith.AddiOp(remaining, offset))
+                shift = emit(arith.ConstantOp(IntegerAttr(8 * index, wide)))
                 remaining = emit(arith.ShRSIOp(remaining, shift))
             return emit(arith.TruncIOp(remaining, i8))
 
@@ -158,7 +160,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
                     return None
                 expressions[child.results[0]] = ({}, attr.value.data)
                 continue
-            if child.name in {"arith.extsi", "arith.trunci"}:
+            if child.name in {"arith.extsi", "arith.extui", "arith.trunci"}:
                 # Intermediate narrowing is allowed only at the final source width.
                 if child.name == "arith.trunci" and child.results[0].type != op.results[0].type.element_type:
                     return None
@@ -192,7 +194,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
     def bilinear(op):
         if op not in contractions or len(op.operands) != 3:
             return False
-        if any(width(value) not in (8, 16, 32, 64) for value in op.operands[:2]):
+        if any(width(value) not in (1, 8, 16, 32, 64, 128, 512, 1024) for value in op.operands[:2]):
             return False
         body = op.body.block
         if any(child.name not in {"arith.extsi", "arith.muli", "arith.addi", "linalg.yield"} for child in body.ops):
@@ -278,9 +280,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
         # Window dimensions may be supplied by unused shape-only operands.
         # Their maps determine the iteration domain but their values are unread.
         source, seed = op.inputs[source_index], op.outputs[0]
-        maps = list(op.get_indexing_maps())
-        selected_maps = ArrayAttr([maps[source_index], maps[-1]])
-        if width(source) not in (8, 16, 32, 64):
+        if width(source) not in (1, 8, 16, 32, 64, 128, 512, 1024):
             return False
         bits = width(op.results[0])
         digits = count(source, mathematical=bits > width(source))
@@ -292,21 +292,29 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
             operations.extend(split_ops)
             seed_ops, zero = init(result.type.get_shape(), i32)
             operations.extend(seed_ops)
-            body = Block(arg_types=[i8, i32])
-            extended = arith.ExtSIOp(body.args[0], i32)
-            addition = arith.AddiOp(extended.result, body.args[1])
+            inputs = []
+            for j, original_input in enumerate(op.inputs):
+                if j == source_index:
+                    inputs.append(limb)
+                else:
+                    shape_ops, shape_only = init(original_input.type.get_shape(), i8)
+                    operations.extend(shape_ops)
+                    inputs.append(shape_only)
+            body = Block(arg_types=[i8] * len(inputs) + [i32])
+            extended = arith.ExtSIOp(body.args[source_index], i32)
+            addition = arith.AddiOp(extended.result, body.args[-1])
             body.add_ops([extended, addition, L.YieldOp(addition.result)])
             producer = L.GenericOp(
-                inputs=[limb],
+                inputs=inputs,
                 outputs=[zero],
                 body=Region(body),
-                indexing_maps=selected_maps,
+                indexing_maps=op.get_indexing_maps(),
                 iterator_types=op.get_iterator_types(),
                 result_types=[zero.type],
             )
             mark(
                 producer,
-                [dict(operand=0, index=index, count=digits, exponent=0)],
+                [dict(operand=source_index, index=index, count=digits, exponent=0)],
                 getattr(op.attributes.get("merlin.exact_component"), "data", None),
             )
             operations.append(producer)
@@ -318,14 +326,14 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
 
     original = list(module.walk())
     for op in original:
-        if len(op.results) != 1 or width(op.results[0]) not in (8, 16, 32, 64, 128):
+        if len(op.results) != 1 or width(op.results[0]) not in (1, 8, 16, 32, 64, 128, 512, 1024):
             continue
         if any(k.startswith("prov.quant.") or k == limb_attribute for k in op.attributes):
             continue
         if "merlin.exact_additive" in op.attributes:
             from merlin.llvmlower.additive_regions import data_sources, retype_additive
 
-            sources = data_sources(op, lambda typ: str(typ) == "i128")
+            sources = data_sources(op, lambda typ: str(typ) in {"i128", "i1024"})
             if not sources:
                 continue
             digits = max(count(value, mathematical=True) for value in sources)
@@ -366,7 +374,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
         if expression is None:
             continue
         terms, bias = expression
-        if not terms or any(width(op.inputs[i]) not in (8, 16, 32, 64) for i in terms):
+        if not terms or any(width(op.inputs[i]) not in (1, 8, 16, 32, 64, 128, 512, 1024) for i in terms):
             continue
         typ = op.results[0].type
         bits = width(op.results[0])

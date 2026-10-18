@@ -247,5 +247,6 @@ def test_window_reduction_ignores_unread_shape_operand():
     source.verify()
     for op in source.walk():
         if "test.limb" in op.attributes:
-            assert len(op.inputs) == 1
-            assert len(op.get_indexing_maps()) == 2
+            assert len(op.inputs) == 2
+            assert len(op.get_indexing_maps()) == 3
+            assert not op.body.block.args[1].uses
