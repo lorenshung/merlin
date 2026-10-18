@@ -51,7 +51,7 @@ def retype_additive(op, replacements, element, *, floating):
     from xdsl.rewriter import Rewriter
 
     def data_type(typ):
-        return str(typ) in ({"f16", "bf16", "f32", "f64"} if floating else {"i128"})
+        return str(typ) in ({"f16", "bf16", "f32", "f64"} if floating else {"i128", "i1024"})
 
     allowed = {"arith.addf", "arith.subf", "arith.extf"} if floating else {"arith.addi", "arith.subi", "arith.extsi"}
     data_ops = 0
@@ -69,7 +69,7 @@ def retype_additive(op, replacements, element, *, floating):
         return None
     if op.body.block.args[-1].uses and not positive_zero_seed(op.outputs[0]):
         return None
-    if not all(str(v.type.element_type) in {"f16", "bf16", "f32", "f64", "i128"} for v in op.outputs):
+    if not all(str(v.type.element_type) in {"f16", "bf16", "f32", "f64", "i128", "i1024"} for v in op.outputs):
         return None
     operations = []
     mapper = dict(replacements)
@@ -130,3 +130,42 @@ def retype_additive(op, replacements, element, *, floating):
     )
     operations.append(result)
     return operations, result
+
+
+def expose_reduce_domains(module):
+    """Spell a named reduction with its complete static iteration maps."""
+    from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr
+    from xdsl.dialects.linalg import ops as L
+    from xdsl.ir.affine import AffineDimExpr, AffineMap
+    from xdsl.rewriter import Rewriter
+
+    for op in list(module.walk()):
+        if op.name != "linalg.reduce" or len(op.operands) != 2 or len(op.results) != 1:
+            continue
+        rank = len(op.operands[0].type.get_shape())
+        dimensions = set(op.dimensions.get_values())
+        if not dimensions <= set(range(rank)):
+            continue
+        clone = op.clone()
+        generic = L.GenericOp(
+            inputs=[op.operands[0]],
+            outputs=[op.operands[1]],
+            body=clone.detach_region(0),
+            indexing_maps=ArrayAttr(
+                [
+                    AffineMapAttr(AffineMap.identity(rank)),
+                    AffineMapAttr(
+                        AffineMap(rank, 0, tuple(AffineDimExpr(d) for d in range(rank) if d not in dimensions))
+                    ),
+                ]
+            ),
+            iterator_types=ArrayAttr(
+                [
+                    L.IteratorTypeAttr(L.IteratorType.REDUCTION if d in dimensions else L.IteratorType.PARALLEL)
+                    for d in range(rank)
+                ]
+            ),
+            result_types=[op.results[0].type],
+        )
+        generic.attributes.update(op.attributes)
+        Rewriter.replace_op(op, generic)
