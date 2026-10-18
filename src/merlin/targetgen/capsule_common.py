@@ -391,7 +391,7 @@ def unfenced_memory_reads(cb: dict) -> list[dict]:
         return []
     try:
         capability = load_contract(target)
-    except (KeyError, LookupError, FileNotFoundError, ValueError):
+    except (KeyError, LookupError, FileNotFoundError):
         return []  # no selected capability contract: no obligation is stated to enforce
     return fence_violations(cb) if requires_fences(capability) else []
 

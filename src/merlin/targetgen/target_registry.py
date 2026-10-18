@@ -110,7 +110,10 @@ class TargetInfo:
         if observed is not None:
             return Path(observed)
         override = os.environ.get("MERLIN_TARGET_CONTRACT")
-        return Path(override).expanduser() if override else self.contract_path
+        if override:
+            return Path(override).expanduser()
+        reference = reference_targets().get(self.name) if self.external_root is not None else None
+        return reference / "contracts/target_contract.yaml" if reference else self.contract_path
 
     def load_contract(self) -> dict[str, Any]:
         if self.name in _OBSERVED_CONTRACTS.get():
@@ -569,8 +572,6 @@ def all_targets() -> list[str]:
 
 
 def load_contract(name: str) -> dict[str, Any]:
-    if name in _OBSERVED_CONTRACTS.get():
-        return copy.deepcopy(_OBSERVED_CONTRACTS.get()[name])
     return resolve(name).load_contract()
 
 
