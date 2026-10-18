@@ -5,7 +5,7 @@ WHY THIS EXISTS. PT2E quantizes float32 edges only, so ``x.to(torch.float64)`` a
 the quantizer skipped any non-float32 result. On the int8 grid a value is a code and a scale, and its
 floating width is chosen only when it is dequantized: the conversion is a copy of codes and the fill
 is a constant fill of codes. ``_recipe_quantizer.read_out_floating_widths`` spells each at float32 (a
-``clone``, a ``dtype=float32`` fill) followed by one ``_to_copy`` to the requested width, so the work
+``clone``, a ``dtype=float32`` fill) and restores the requested width on the final dequantization, so the work
 is quantized like any movement and the width becomes a property of the readout. The prospective
 core-aten screen reads such a site as the int8 work the recipe makes of it, so the lane recaptures it.
 """
@@ -132,14 +132,13 @@ for name, model, sample in (("to_copy", ToCopy(), x), ("core_to_copy", CoreToCop
     if name in ("to_copy", "core_to_copy"):
         scale = recipes[0]["output_scale"]
         codes = torch.clamp(torch.round(sample * (1.0 / scale)), -128, 127)
-        expected = (codes * torch.tensor(scale, dtype=torch.float32)).to(torch.float64)
+        expected = codes.to(torch.float64) * scale
         row["exact"] = bool(torch.equal(out, expected))
     if name == "full_like":
         scale = recipes[0]["output_scale"]
         code = recipes[0]["constant_code"]
         value = code["code"] if isinstance(code, dict) else code
-        row["exact"] = bool(torch.equal(out, torch.full((2, 3), float(torch.tensor(value * scale,
-                                                                                   dtype=torch.float32)),
+        row["exact"] = bool(torch.equal(out, torch.full((2, 3), value * scale,
                                                        dtype=torch.float64)))
     report[name] = row
 print(json.dumps(report))

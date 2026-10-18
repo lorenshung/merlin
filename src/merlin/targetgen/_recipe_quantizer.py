@@ -327,9 +327,8 @@ def read_out_floating_widths(graph_module: Any, moves: set[Any]) -> list[dict[st
     domain, a copy of the codes, and a ``full``/``full_like`` of a float64 constant is a constant fill
     of codes on its output grid. PT2E quantizes float32 edges only, so each such operation is spelt
     at float32 here -- a conversion as a ``clone`` (the copy it is on codes), a fill with
-    ``dtype=float32`` -- followed by one ``_to_copy`` to the
-    requested width that reads the dequantized result out. That widening is exact (float32 is a
-    subset of float64); a narrowing rounds once, exactly where eager rounds after the same value.
+    ``dtype=float32``. After PT2E conversion, the requested width is put on the final
+    dequantization itself; a float32 dequantization followed by widening would lose bits.
 
     Only operations the recipe's movement family covers move, and only when every tensor input is
     float32 (a float64 INPUT cannot be quantized). Returns one record per rewritten node, which the
@@ -388,6 +387,35 @@ def read_out_floating_widths(graph_module: Any, moves: set[Any]) -> list[dict[st
         graph.lint()
         graph_module.recompile()
     return rewritten
+
+
+def restore_floating_readout_widths(graph_module: Any) -> None:
+    """Dequantize directly at a requested result width, without an intermediate f32 rounding.
+
+    Clone the boundary for this reader: other users may still require the f32 grid.
+    This applies only to readout conversions introduced by this recipe.
+    """
+    import torch
+
+    graph = graph_module.graph
+    for node in list(graph.nodes):
+        if not node.meta.get("merlin_readout_width"):
+            continue
+        source = node.args[0]
+        if not isinstance(source, torch.fx.Node) or not str(source.target).startswith(
+            "quantized_decomposed.dequantize_per_"
+        ):
+            raise RecipeError("floating readout width requires a direct dequantization boundary")
+        kwargs = {**source.kwargs, "out_dtype": node.kwargs["dtype"]}
+        with graph.inserting_before(node):
+            readout = graph.call_function(source.target, args=source.args, kwargs=kwargs)
+        readout.meta = {**node.meta}
+        readout.meta.pop("tensor_meta", None)
+        node.replace_all_uses_with(readout)
+        graph.erase_node(node)
+    graph.eliminate_dead_code()
+    graph.lint()
+    graph_module.recompile()
 
 
 def _has_floating_recipe_work(exported: Any, recipe: Mapping[str, Any]) -> bool:
@@ -1346,6 +1374,7 @@ def apply_recipe(
     if calibrated == 0:
         raise RecipeError("static calibration saw no input sample")
     quantized = convert_pt2e(prepared, use_reference_representation=False, fold_quantize=True)
+    restore_floating_readout_widths(quantized)
     if original_frontend_snapshot is not None:
         from m2m.capture.trace import attach_quantization_boundaries
 
