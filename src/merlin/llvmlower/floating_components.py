@@ -50,7 +50,7 @@ def rewrite_floating_components(
     function = next(op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward")
     grids = dict(zip(function.body.block.args, input_grids))
     grids.update(known_grids or {})
-    wide_packing = any(g is not None and g[1].bit_length() > 52 for g in input_grids)
+    wide_packing = any(g is not None and g[1].bit_length() > 52 for g in grids.values())
     if wide_packing:
         i64, i128 = IntegerType(512), IntegerType(1024)
     packing_limit = 511 if wide_packing else 52

@@ -1,3 +1,4 @@
+# ruff: noqa: E501 -- static MLIR fixtures retain one operation per line
 """Finite IEEE exponent spans use exact bit-field packing, never float scaling."""
 
 from fractions import Fraction
@@ -63,4 +64,30 @@ def test_exact_widening_keeps_extreme_finite_grids_for_following_arithmetic():
     assert not any(op.name == "arith.addf" for op in module.walk())
     plans = rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[0], known_bounds=bounds)
     assert plans
+    module.verify()
+
+
+def test_integer_promotion_grids_participate_in_the_packing_width_proof():
+    module = parse_mlir_text("""module {
+      func.func @forward(%x: tensor<5xf32>) -> tensor<5xf32> {
+        %two=arith.constant -2.0 : f32
+        %y=tensor.splat %two : tensor<5xf32>
+        %e=tensor.empty() : tensor<5xf32>
+        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+          ins(%x,%y:tensor<5xf32>,tensor<5xf32>) outs(%e:tensor<5xf32>) {
+        ^bb0(%a:f32,%b:f32,%out:f32):
+          %w=arith.divf %a,%b : f32
+          linalg.yield %w : f32
+        } -> tensor<5xf32>
+        return %r : tensor<5xf32>
+      }}""")
+    function = next(op for op in module.walk() if op.name == "func.func")
+    # A preceding exact native integer->f32 boundary supplies this integral grid.
+    bounds, proofs = rewrite_floating_components(
+        module, [None], known_grids={function.body.block.args[0]: (0, 1 << 64)}
+    )
+    assert proofs and proofs[0]["source_data_arithmetic"]
+    assert proofs[0]["packing"] == "exact_ieee_bit_fields"
+    assert proofs[0]["reconstruction"] == "bounded_i1024"
+    assert rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[0], known_bounds=bounds)
     module.verify()
