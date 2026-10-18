@@ -48,7 +48,7 @@ assert not any(n.target == torch.ops.aten.conv2d.default for n in model.graph.no
 """)
 
 
-def test_addmm_epilogue_metadata_and_operand_sum_admission():
+def test_addmm_retains_its_boundary_and_is_not_an_operand_sum():
     run_torch(r"""
 class Model(torch.nn.Module):
     def forward(self, bias, a, b, c):
@@ -57,17 +57,14 @@ inputs = (torch.ones(4), torch.ones(2, 3), torch.ones(3, 4), torch.ones(4, 5))
 model = torch.export.export(Model(), inputs).module()
 expected = model(*inputs)
 quantizer.transform_for_annotation(model)
-torch.testing.assert_close(model(*inputs), expected)
+assert torch.equal(model(*inputs).view(torch.uint8), expected.view(torch.uint8))
 quantizer.annotate(model)
-epilogues = [n for n in model.graph.nodes if n.meta.get("merlin_contraction_epilogue")]
-assert len(epilogues) == 3
-bias_mul = next(n for n in epilogues if n.args[1] == 3)
-assert tuple(bias_mul.meta["val"].shape) == (4,)
-assert "nn_module_stack" not in bias_mul.meta
-add = next(n for n in epilogues if n.target == torch.ops.aten.add.Tensor)
-assert tuple(add.meta["val"].shape) == (2, 4)
-assert "nn_module_stack" not in add.meta
-assert "quantization_annotation" not in add.meta
+addmm = next(n for n in model.graph.nodes if n.target == torch.ops.aten.addmm.default)
+assert addmm.kwargs == {"alpha": 2, "beta": 3}
+assert tuple(addmm.args[0].meta["val"].shape) == (4,)
+assert tuple(addmm.meta["val"].shape) == (2, 4)
+assert not any(n.meta.get("merlin_contraction_epilogue") for n in model.graph.nodes)
+assert not any(n.target == torch.ops.aten.add.Tensor for n in model.graph.nodes)
 assert quantizer.annotated_sums == 0
 assert quantizer.annotated == 2
 """)

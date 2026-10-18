@@ -746,11 +746,12 @@ def build_quantizer(
                 attach_pt2e_conv_bn_folds(graph_module, self.fold_candidates)
             if moves:
                 self.readout_widths = read_out_floating_widths(graph_module, moves)
-            # Normalize eligible functional overloads to the existing Model2MLIR
-            # integerizer's canonical contractions before observer insertion.
+            # Preserve addmm as one exact readout boundary: decomposing its alpha/beta
+            # epilogue would round the MAC and scaled bias before their final sum.
+            # Normalize only the convolution spelling required by the frontend.
             graph = graph_module.graph
             for node in list(graph.nodes):
-                if node.target not in (torch.ops.aten.addmm.default, torch.ops.aten.convolution.default):
+                if node.target != torch.ops.aten.convolution.default:
                     continue
                 if not eligible(node, "contraction"):
                     continue
@@ -771,17 +772,6 @@ def build_quantizer(
                         if len(node.args) != 9 or node.args[6] or any(node.args[7]):
                             continue  # Transposed/output-padding semantics lack this rewrite.
                         value = graph.call_function(torch.ops.aten.conv2d.default, args=(*node.args[:6], node.args[8]))
-                    else:
-                        bias, lhs, rhs = node.args[:3]
-                        value = graph.call_function(torch.ops.aten.mm.default, args=(lhs, rhs))
-                        value.meta = dict(node.meta)
-                        alpha, beta = node.kwargs.get("alpha", 1), node.kwargs.get("beta", 1)
-                        if alpha != 1:
-                            value = graph.call_function(torch.ops.aten.mul.Tensor, args=(value, alpha))
-                        if beta != 0:
-                            if beta != 1:
-                                bias = graph.call_function(torch.ops.aten.mul.Tensor, args=(bias, beta))
-                            value = graph.call_function(torch.ops.aten.add.Tensor, args=(value, bias))
                     # Compute metadata from each operation's own operands. A
                     # scaled bias keeps its broadcast shape and no module owner.
                     for created in graph.nodes:
@@ -943,7 +933,6 @@ def build_quantizer(
                 )
 
     return CapabilityQuantizer()
-
 
 
 def quantize_config(recipe: Mapping[str, Any]):
