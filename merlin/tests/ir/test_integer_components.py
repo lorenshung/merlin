@@ -56,6 +56,8 @@ def evaluate(module, arrays):
             result = a[0] + a[1]
         elif name == "arith.subi":
             result = a[0] - a[1]
+        elif name == "arith.andi":
+            result = a[0] & a[1]
         elif name == "arith.muli":
             result = a[0] * a[1]
         elif name == "arith.shrsi":
@@ -65,8 +67,14 @@ def evaluate(module, arrays):
             result = a[0] << a[1]
         elif name == "arith.cmpi":
             predicate = op.predicate.value.data
-            assert predicate in (1, 2)
-            result = int(a[0] != a[1] if predicate == 1 else a[0] < a[1])
+            assert predicate in (1, 2, 8)
+            result = int(
+                a[0] != a[1]
+                if predicate == 1
+                else a[0] < a[1]
+                if predicate == 2
+                else a[0] % (1 << op.operands[0].type.width.data) > a[1] % (1 << op.operands[1].type.width.data)
+            )
         elif name == "arith.cmpf":
             import struct
 
@@ -250,3 +258,39 @@ def test_window_reduction_ignores_unread_shape_operand():
             assert len(op.inputs) == 2
             assert len(op.get_indexing_maps()) == 3
             assert not op.body.block.args[1].uses
+
+
+def test_proved_zero_digits_can_be_omitted_without_changing_exact_values():
+    source = module("i64", "%v = arith.addi %a, %b : i64")
+    function = next(op for op in source.walk() if op.name == "func.func")
+    values = [1 << 48, -(1 << 48), 0, 1]
+    plans = rewrite_integer_components(
+        source,
+        limb_attribute="test.limb",
+        input_bounds=[1 << 48, 0],
+        known_zero_limbs={function.body.block.args[0]: set(range(1, 6))},
+    )
+    assert len(plans) == 3
+    assert evaluate(source, [values, [0] * 4]) == values
+
+
+def test_declared_bfloat_nan_negation_uses_device_words_then_cpu_canonicalization():
+    from merlin.llvmlower.native_sign_components import rewrite_native_sign_components
+
+    source = parse_mlir_text("""module {
+      func.func @forward(%x: tensor<4xbf16>) -> tensor<4xbf16> {
+        %e=tensor.empty() : tensor<4xbf16>
+        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+          ins(%x : tensor<4xbf16>) outs(%e : tensor<4xbf16>) {
+        ^bb0(%a:bf16,%b:bf16):
+          %v=arith.negf %a : bf16
+          linalg.yield %v : bf16
+        } -> tensor<4xbf16>
+        return %r : tensor<4xbf16>
+      }}""")
+    bounds, proofs = rewrite_native_sign_components(source, canonical_bf16_nan=True)
+    assert proofs[0]["nan_payload"] == "canonical_positive_quiet"
+    assert rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[0], known_bounds=bounds)
+    for payload in range(1, 128):
+        words = [0x7F80 | payload, 0xFF80 | payload, 0, 0x8000]
+        assert [value & 0xFFFF for value in evaluate(source, [words])] == [0x7FC0, 0x7FC0, 0x8000, 0]

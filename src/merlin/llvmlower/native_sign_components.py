@@ -6,7 +6,7 @@ explicit modular host recombination. No floating conversion is involved.
 """
 
 
-def rewrite_native_sign_components(module):
+def rewrite_native_sign_components(module, *, canonical_bf16_nan=False):
     from xdsl.dialects import arith, tensor
     from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, IntegerAttr, IntegerType, TensorType
     from xdsl.dialects.linalg import ops as L
@@ -82,7 +82,17 @@ def rewrite_native_sign_components(module):
         out = tensor.EmptyOp([], TensorType(source.type.element_type, shape))
         block = Block(arg_types=[element, source.type.element_type])
         if floating:
-            cast = arith.BitcastOp(block.args[0], source.type.element_type)
+            raw = block.args[0]
+            if negate and canonical_bf16_nan and str(source.type.element_type) == "bf16":
+                mask = arith.ConstantOp(IntegerAttr(0x7FFF, element))
+                infinity = arith.ConstantOp(IntegerAttr(0x7F80, element))
+                canonical = arith.ConstantOp(IntegerAttr(0x7FC0, element))
+                magnitude = arith.AndIOp(raw, mask.result)
+                nan = arith.CmpiOp(magnitude.result, infinity.result, "ugt")
+                selected = arith.SelectOp(nan.result, canonical.result, raw)
+                block.add_ops([mask, infinity, canonical, magnitude, nan, selected])
+                raw = selected.result
+            cast = arith.BitcastOp(raw, source.type.element_type)
             block.add_ops([cast, L.YieldOp(cast.result)])
         else:
             block.add_op(L.YieldOp(block.args[0]))
@@ -107,7 +117,13 @@ def rewrite_native_sign_components(module):
                 representation="ieee_storage_bits" if floating else "native_signed_integer",
                 width=bits,
                 arithmetic="sign_bit_offset_modulo_storage_width" if negate else "source_compare_select_retained_host",
-                nan_payload="preserved" if negate else "source_predicate_semantics",
+                nan_payload=(
+                    "canonical_positive_quiet"
+                    if negate and canonical_bf16_nan and str(source.type.element_type) == "bf16"
+                    else "preserved"
+                    if negate
+                    else "source_predicate_semantics"
+                ),
             )
         )
     module.verify()
